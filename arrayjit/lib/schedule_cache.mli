@@ -154,6 +154,15 @@ val numerics_tag : unit -> string
     replaying a tf32-tuned tensorized winner measured 5.9x slower than not tuning at all, its mma
     rendering degraded to the scalar fallback). Hence it enters {!cache_key} and {!entry}. *)
 
+val codegen_tag : ?backend_tag:string -> unit -> string
+(** A filename-safe short digest of the codegen configuration (gh-ocannl-572): the settings a
+    backend consults when it {e renders and compiles} a kernel, which happens after the lowered code
+    that {!digest} names — so, exactly like {!numerics_tag}, they are invisible to the digest while
+    changing the kernel, and a winner crowned under one such regime must not replay under another.
+    Covers the backend-independent ones itself (the index and pool-slot width [large_models], the
+    routine-logging emission); [backend_tag] is the compiling backend's own contribution,
+    {!Ir.Backend_intf.hardware_limits.codegen_tag}. *)
+
 type entry = {
   version : int;
   backend : string;
@@ -161,6 +170,10 @@ type entry = {
       (** {!numerics_tag} of the policy the search ran under; redundant with the key, which carries
           the same tag, so it is a self-description of the file and a guard for a hand-moved
           entry. *)
+  codegen : string option; [@sexp.option]
+      (** {!codegen_tag} of the codegen configuration the search ran under (gh-ocannl-572): the
+          same self-description as [numerics]. Optional so entries written before this field
+          existed stay readable. *)
   source_digest : string;
   saved : saved_schedule;
   segments : (string * saved_schedule) list option; [@sexp.option]
@@ -194,12 +207,23 @@ val entry_version : int
 (** Bumped when the canonical rendering or the saved-schedule format changes; stale entries are
     ignored by {!lookup}. *)
 
-val cache_key : ?pool_tag:string -> canonical -> backend:string -> string
-(** Filename-safe cache key: the digest, the backend name, {!numerics_tag} of the current
-    numerics policy, and — when given — the worker-pool signature
-    ([hardware_limits.worker_pool_tag], gh-ocannl-530: CPU crowns do not transfer across pools).
-    Callers time kernels on a concrete device, so include anything else that distinguishes
-    performance environments in [backend] (e.g. a device id) if needed. *)
+val key_components : string list
+(** The named components a {!cache_key} is built from, in order: ["digest"], ["backend"],
+    ["numerics"], ["codegen"], ["pool"]. The list drives {!cache_key} rather than describing it, so
+    it is a complete and current enumeration of the cache's identity — which is what the
+    digest-completeness registry classifies configuration keys against (gh-ocannl-572,
+    [test/operations/digest_completeness]). *)
+
+val cache_key : limits:Backend_intf.hardware_limits -> canonical -> backend:string -> string
+(** Filename-safe cache key: the digest, the backend name, {!numerics_tag} of the current numerics
+    policy, {!codegen_tag} of the codegen configuration (including [limits.codegen_tag], the
+    compiling backend's own contribution), and the worker-pool signature
+    ([limits.worker_pool_tag], gh-ocannl-530: CPU crowns do not transfer across pools). The
+    backend-supplied components arrive as the whole [limits] record rather than one optional
+    argument each, so a component added there reaches every call site instead of defaulting to
+    absent at the ones that were not updated (gh-ocannl-572). Callers time kernels on a concrete
+    device, so include anything else that distinguishes performance environments in [backend] (e.g.
+    a device id) if needed. *)
 
 val store : dir:string -> key:string -> entry -> unit
 (** Writes the entry to [dir]/[key].sexp, creating [dir] (and parents) if missing. Tolerates

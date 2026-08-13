@@ -144,15 +144,14 @@ let () =
         List.map tuples ~f:(fun (_, _, _, post) -> post))
       fctx chain_comp Ir.Indexing.Empty
   in
+  let blimits = Context.hardware_limits bctx in
   SC.store ~dir:cache_dir
-    ~key:
-      (SC.cache_key
-         ?pool_tag:(Context.hardware_limits bctx).Ir.Backend_intf.worker_pool_tag base_canon
-         ~backend:(Context.backend_name bctx))
+    ~key:(SC.cache_key ~limits:blimits base_canon ~backend:(Context.backend_name bctx))
     {
       SC.version = SC.entry_version;
       backend = Context.backend_name bctx;
       numerics = SC.numerics_tag ();
+      codegen = Some (SC.codegen_tag ?backend_tag:blimits.Ir.Backend_intf.codegen_tag ());
       source_digest = SC.digest base_canon;
       saved = [];
       segments = Some !segments_assoc;
@@ -214,8 +213,7 @@ let () =
      Simulated by rewriting the stored entry's fingerprint: the entry still hits — the winner
      replay is config-independent — but the config-relative default reference is dropped. *)
   let key2 =
-    SC.cache_key ?pool_tag:(Context.hardware_limits bctx).Ir.Backend_intf.worker_pool_tag
-      base_canon ~backend:(Context.backend_name bctx)
+    SC.cache_key ~limits:blimits base_canon ~backend:(Context.backend_name bctx)
   in
   (match SC.lookup ~dir:cache_dir2 ~key:key2 with
   | Some entry ->

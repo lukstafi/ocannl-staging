@@ -152,6 +152,15 @@ type hardware_limits = {
           disk-cache key the way the numerics tag does: schedules crowned on one pool do not
           transfer to another, so a policy flip or a different external pinning must re-tune
           rather than replay. [None] (GPU backends) leaves the cache key unchanged. *)
+  codegen_tag : string option;
+      (** Compact signature of this backend's {e codegen} configuration: the settings the backend
+          consults when rendering and compiling a kernel, which are therefore invisible to the
+          canonical digest of the lowered code (gh-ocannl-572). Same contract as
+          {!field-worker_pool_tag} — it enters the autotune disk-cache key, so a knob flip re-tunes
+          instead of replaying a winner crowned in another codegen regime, which is the hazard
+          gh-ocannl-568 measured at 5.9x. Fill it from resolved values, not raw settings: what
+          ["auto"] resolves to is a per-machine fact, and crowns do not transfer across machines
+          either. [None] where the backend has no such knobs. *)
 }
 [@@deriving sexp, compare, equal]
 
@@ -165,6 +174,7 @@ let no_hardware_limits =
     peak_memory_bandwidth = None;
     native_fp16_arithmetic = false;
     worker_pool_tag = None;
+    codegen_tag = None;
   }
 
 (** The backend slab allocator, replacing the per-tnode [Alloc_buffer] interface. The shared

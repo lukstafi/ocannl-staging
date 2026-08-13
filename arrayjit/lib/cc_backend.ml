@@ -490,6 +490,42 @@ let parallel_grid_chunks_setting () =
      pinning, silently mis-sizing the grid decomposition of a pinned run. *)
   | _ -> 4 * effective_pool_width ()
 
+(* gh-ocannl-572: the codegen knobs of this backend, as one signature for the autotune disk-cache
+   key. They are consulted when a kernel is rendered and compiled -- after the lowered code the
+   canonical digest names -- so two processes differing only in them digest identically while
+   emitting different kernels, which is precisely the shape gh-ocannl-568 measured at 5.9x when a
+   tf32-tuned winner replayed under default numerics. [cc_vector_bytes=0] degrades a [Vectorized]
+   winner to serial lanes, [cc_parallel_grid=none] a Grid-parallel one to a serial loop, and the
+   compiler flags decide what the emitted C becomes; a schedule crowned under one such regime is a
+   measurement from another machine's worth of evidence.
+
+   Resolved values, not raw settings: "auto" means a different thing per machine, and the resolvers
+   are already forced by any compile that reaches here (the pool tag alone forces the parallel-grid
+   probe). The pool signature itself is a separate key component and is not repeated here. *)
+let codegen_tag () =
+  let parts =
+    [
+      compiler_command ();
+      Int.to_string (optimization_level ());
+      Bool.to_string (fast_math_enabled ());
+      Option.value (fp_contract_flag ()) ~default:"fp-contract-default";
+      arch_flags ();
+      simd_flags ();
+      Int.to_string (vector_bytes_setting ());
+      (match fp16_arithmetic_support () with
+      | `None -> "fp16-none"
+      | `Promoted -> "fp16-promoted"
+      | `Native -> "fp16-native");
+      (match parallel_grid_syntax_setting () with
+      | `Dispatch -> "grid-dispatch"
+      | `Openmp -> "grid-openmp"
+      | `None -> "grid-none");
+      Int.to_string (parallel_grid_chunks_setting ());
+      Int.to_string (Lazy.force C_syntax.per_chunk_private_bytes_cap);
+    ]
+  in
+  String.prefix (Stdlib.Digest.to_hex (Stdlib.Digest.string (String.concat ~sep:"\000" parts))) 8
+
 module Tn = Tnode
 
 type library = { lib : (Dl.library[@sexp.opaque]); libname : string } [@@deriving sexp_of]

@@ -143,14 +143,14 @@ let () =
       ctx tune_comp Ir.Indexing.Empty
   in
   let canon = Option.value_exn ~here:[%here] !canon in
+  let limits = Context.hardware_limits ctx in
   SC.store ~dir:cache_dir
-    ~key:
-      (SC.cache_key ?pool_tag:(Context.hardware_limits ctx).Ir.Backend_intf.worker_pool_tag canon
-         ~backend)
+    ~key:(SC.cache_key ~limits canon ~backend)
     {
       SC.version = SC.entry_version;
       backend;
       numerics = SC.numerics_tag ();
+      codegen = Some (SC.codegen_tag ?backend_tag:limits.Ir.Backend_intf.codegen_tag ());
       source_digest = SC.digest canon;
       saved = [];
       segments = None;

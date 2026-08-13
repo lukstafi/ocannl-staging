@@ -428,6 +428,25 @@ let numerics_tag () =
     (Stdlib.Digest.to_hex (Stdlib.Digest.string (Numerics.fingerprint (Numerics.get ()))))
     8
 
+(* gh-ocannl-572: the same argument as the numerics tag, for the rest of the settings a backend
+   consults when it renders and compiles a kernel. They come in two layers: the backend-independent
+   ones handled here (the index/pool-slot width, and the routine-logging emission — which also
+   suppresses the default schedule), and the backend's own, which it reports through
+   [hardware_limits.codegen_tag] because only it knows which of its knobs reach its codegen. Neither
+   layer is a property of the lowered code, so neither can reach {!digest}. *)
+let codegen_tag ?backend_tag () =
+  let parts =
+    [
+      (if Utils.settings.large_models then "wide-index" else "narrow-index");
+      (if Utils.settings.debug_log_from_routines then "routine-logs" else "no-routine-logs");
+      (if Utils.get_global_flag ~default:false ~arg_name:"debug_log_to_stream_files" then
+         "stream-logs"
+       else "inline-logs");
+      Option.value backend_tag ~default:"";
+    ]
+  in
+  String.prefix (Stdlib.Digest.to_hex (Stdlib.Digest.string (String.concat ~sep:"\000" parts))) 8
+
 type entry = {
   version : int;
   backend : string;
@@ -435,6 +454,10 @@ type entry = {
       (** {!numerics_tag} of the policy the search ran under (gh-ocannl-568). Redundant with the
           key, which carries the same tag — a self-description of the file, and a guard for a
           hand-moved or hand-written entry. *)
+  codegen : string option; [@sexp.option]
+      (** {!codegen_tag} of the codegen configuration the search ran under (gh-ocannl-572), the
+          same self-description as [numerics] and with the same belt-and-braces role. Optional so
+          that entries written before this field existed stay readable. *)
   source_digest : string;
   saved : saved_schedule;
   segments : (string * saved_schedule) list option; [@sexp.option]
@@ -462,11 +485,27 @@ let sanitize name =
   String.map name ~f:(fun c ->
       if Char.is_alphanum c || Char.equal c '-' || Char.equal c '_' then c else '_')
 
-let cache_key ?pool_tag canonical ~backend =
-  canonical.digest ^ "-" ^ sanitize backend ^ "-n" ^ numerics_tag ()
-  ^ (* The worker-pool signature (gh-ocannl-530): CPU crowns do not transfer across pools, so a
-       pool change re-tunes instead of replaying. [None] (GPU backends) leaves keys unchanged. *)
-  match pool_tag with None -> "" | Some tag -> "-p" ^ sanitize tag
+(* The named components of a cache key, in the order they are concatenated. This list DRIVES
+   {!cache_key} (each name dispatches to an arm below, and an unknown name raises), so the
+   enumeration cannot go stale against the implementation — which is what makes it usable as the
+   thing the digest-completeness registry classifies config keys against (gh-ocannl-572). *)
+let key_components = [ "digest"; "backend"; "numerics"; "codegen"; "pool" ]
+
+let cache_key ~(limits : Backend_intf.hardware_limits) canonical ~backend =
+  let component = function
+    | "digest" -> canonical.digest
+    | "backend" -> sanitize backend
+    | "numerics" -> "n" ^ numerics_tag ()
+    | "codegen" -> "c" ^ codegen_tag ?backend_tag:limits.codegen_tag ()
+    (* The worker-pool signature (gh-ocannl-530): CPU crowns do not transfer across pools, so a
+       pool change re-tunes instead of replaying. [None] (GPU backends) contributes nothing. *)
+    | "pool" -> (
+        match limits.worker_pool_tag with None -> "" | Some tag -> "p" ^ sanitize tag)
+    | other -> invalid_arg ("Schedule_cache.cache_key: unhandled key component " ^ other)
+  in
+  String.concat ~sep:"-"
+    (List.filter_map key_components ~f:(fun name ->
+         match component name with "" -> None | part -> Some part))
 
 let rec ensure_dir dir =
   if String.is_empty dir || String.equal dir "." || String.equal dir "/" then ()

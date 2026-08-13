@@ -1905,6 +1905,10 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
            simd_vector_bytes = 0;
            native_fp16_arithmetic = false;
            worker_pool_tag = None;
+           (* gh-ocannl-572: no codegen knob of this backend is configurable — the kernel source
+              is a function of the lowered code, the device capabilities, and the numerics policy,
+              all of which the cache key already covers. *)
+           codegen_tag = None;
            (* Advisory roofline envelope (gh-ocannl-491): documented rough constants for the
               RDNA3-class targets this backend is exercised on (dGPU/APU: ~10 fp32 TFLOP/s, ~250
               GB/s — Strix-Halo-class LPDDR5X). Per-device queries are calibration follow-up work;

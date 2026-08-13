@@ -276,7 +276,16 @@ the retained procedural analyses alongside the affine engine and raises on diver
   tf32-tuned tensorized winner and replay it through the scalar fallback — measured at 5.9x
   slower than not tuning at all (gh-ocannl-568). Policies therefore keep separate entries and can
   share a cache directory. Cached schedules rebind their symbols onto the fresh
-  lowering at each compile; a digest guard rejects stale entries. **Schedule identity pins
+  lowering at each compile; a digest guard rejects stale entries.
+  **Completeness is an invariant, not a habit** (gh-ocannl-572): everything else read *after*
+  lowering shares that hazard, so the key carries a codegen tag as well — the backend-independent
+  emission gates (`large_models`, routine logging) plus the compiling backend's own knobs, which
+  it reports as `hardware_limits.codegen_tag` (for `cc`: the compiler command and flags,
+  `cc_vector_bytes`, `cc_fp16_arithmetic`, `cc_parallel_grid`/`cc_parallel_chunks`,
+  `cc_grid_private_bytes_cap`) — and the CPU worker-pool signature (gh-ocannl-530). Backends hand
+  their components to `cache_key` as the whole `hardware_limits` record, so a component added
+  there reaches every call site.
+  **Schedule identity pins
   numerics** (gh-ocannl-484): a reduction-reassociating op (`Split_reduce`, `Swap`/`Vectorized`
   over accumulations, `Tensorize`) makes the computed values a function of the schedule — e.g.
   `Split_reduce`'s combine tree is fixed by `num_blocks` — so results are bitwise-reproducible
