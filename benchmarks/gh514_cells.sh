@@ -13,6 +13,12 @@
 set -u
 BK=$1; PREC=$2; ROOT=$3; shift 3
 PIN=("$@")
+# Hermetic against ambient configuration, categorically: every OCANNL_* environment variable is
+# unset (each cell pins its treatment on the command line, which out-ranks all other sources),
+# and the cells run from benchmarks/, whose checked-in ocannl_config is the NEAREST file on the
+# upward config search (Utils.config_file_args find_up) — so neither exported variables nor
+# personal ancestor config files can reshape any cell, for any current or future key.
+while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(OCANNL_[A-Z0-9_]*\)=.*/\1/p')
 DPREC=$PREC
 [ "$PREC" = f16 ] && DPREC=f32
 FAILED=""
@@ -49,6 +55,8 @@ mlp() {
     --ocannl_narrow_compute_f32=false --ocannl_autotune_split_reduce_max_sites=8 \
     --ocannl_schedule_fission=true --ocannl_virtualize_max_visits=1 \
     --ocannl_automatic_gpu_schedule=true --ocannl_gpu_graph_capture=true \
+    --ocannl_default_prec=single --ocannl_autotune_beam_width=2 \
+    --ocannl_debug_log_from_routines=false --ocannl_large_models=false \
     --ocannl_autotune_cache_dir="$(mktemp -d)" "$@" \
     > "$OUT/$name.out" 2> "$OUT/$name.err"
   st=$?
@@ -64,7 +72,8 @@ gpt() {
     --ocannl_tf32_matmuls=false --ocannl_fp16_arithmetic=false \
     --ocannl_narrow_compute_f32=false --ocannl_schedule_fission=true \
     --ocannl_virtualize_max_visits=1 --ocannl_automatic_gpu_schedule=true \
-    --ocannl_gpu_graph_capture=true "$@" \
+    --ocannl_gpu_graph_capture=true --ocannl_default_prec=single \
+    --ocannl_debug_log_from_routines=false --ocannl_large_models=false "$@" \
     > "$OUT/$name.out" 2> "$OUT/$name.err"
   st=$?
   echo "=== cell $name exit $st $(date +%T) ==="
