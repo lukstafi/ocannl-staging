@@ -228,13 +228,15 @@ loss-scale-gated (`Host_gated`/`Device_gated`), and those arms of
 through it (bf16 keeps `Plain_step`, so hip is unaffected). The f16 D cells therefore measured
 nothing about the model (their variants are identical executions; metal's late-campaign f16
 "D" cells also drifted thermally), and the metal/cuda untuned comparisons above are f32
-reruns. The gap is now closed — `compile_train_step` routes every leg's work-carrying untuned
-compile (the `Host_gated` gradient routine and the `Device_gated` fused routine, as well as
-`Plain_step`) through `Autotune.model_default`; only `Host_gated`'s tiny optimizer routine stays
-plainly compiled. The driver's D cells accordingly run at the requested precision instead of
-dropping to f32 (see Reproduction — a `f16:f32` precision argument restores the workaround). The f32 reruns
-reported above stand as measured; f16 model-vs-default cells are measurable from here on
-without it.
+reruns. The gap is now closed — `compile_train_step` routes *every* untuned compile of a step
+through `Autotune.model_default`, the `Host_gated` gradient and optimizer routines and the
+`Device_gated` fused routine alongside `Plain_step`'s. That the optimizer routine is in scope
+matters for reading a future f16 D cell: the leg's step time is both routines, so both compiles'
+model-selected schedules are part of the treatment (only the *tuned* arm keeps that routine on a
+plain compile, since timing it is not what the leg measures). The driver's D cells accordingly
+run at the requested precision instead of dropping to f32 (see Reproduction — a `f16:f32`
+precision argument restores the workaround). The f32 reruns reported above stand as measured;
+f16 model-vs-default cells are measurable from here on without it.
 
 ## Where the beam remains competitive
 
