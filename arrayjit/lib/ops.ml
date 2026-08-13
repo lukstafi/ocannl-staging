@@ -512,8 +512,8 @@ type op = Ternop of ternop | Binop of binop | Unop of unop [@@deriving sexp, com
 
     They drifted apart three times in one review because each restated the same case analysis. Both
     classifiers below are matched exhaustively (no wildcard arm), so adding an operator to {!binop}
-    or {!ternop} forces the decision here, and every consumer inherits it. The renderers are the
-    ground truth this describes, so they do not consult it. *)
+    or {!ternop} forces the decision here, and every consumer inherits it. The renderers are checked
+    against it rather than consulting it — see {!C_syntax.operand_conditionality_violations}. *)
 
 type binop_conditionality =
   | Both_operands  (** Both operands are always evaluated. *)

@@ -52,3 +52,30 @@
   floor: flops=0 bytes=0 inexact
   upper: flops=0 bytes=16
   floor <= upper: true
+
+== operand conditionality ==
+  fst                          Only_first
+  snd                          Only_second
+  add                          Both_operands
+  sub                          Both_operands
+  mul                          Both_operands
+  div                          Both_operands
+  pow                          Both_operands
+  relu_gate                    Gated_second
+  sat01_gate                   Gated_second
+  max                          Both_operands
+  min                          Both_operands
+  mod_                         Both_operands
+  lt                           Both_operands
+  le                           Both_operands
+  eq                           Both_operands
+  ne                           Both_operands
+  or_                          Gated_second
+  and_                         Gated_second
+  threefry4x32_crypto          Both_operands
+  threefry4x32_light           Both_operands
+  uint4x32_to_prec_uniform_lane Both_operands
+  where                        Cond_and_one_arm
+  fma                          All_three
+  mul3                         All_three
+  plain-C renderings agree: true

@@ -131,7 +131,13 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   its `floor_uncertainty` pre-pass (floor), and `C_syntax.pp_scalar` / `debug_float` (a projection
   emits its selected operand alone). Before the classifier existed the same case analysis was
   restated in each, and one phase-3 review re-aligned them three times running — `Where`, then
-  `And`/`Or` and the projections, then `Relu_gate`/`Satur01_gate`.
+  `And`/`Or` and the projections, then `Relu_gate`/`Satur01_gate`. The *renderers* do not consult
+  it; they are checked against it by `C_syntax.operand_conditionality_violations`, run once per
+  `C_syntax` functor application (i.e. per compile, on whatever hardware the backend has — the GPU
+  syntax configs are sealed inside their `Impl` and unreachable from tests), which renders every
+  (precision, operator) pair over placeholders and looks for the only C-family constructs that skip
+  an operand: `?:`, `&&`, `||`. This is what forbids spelling `Where` as MSL's `select` or `Max` as
+  `(a > b ? a : b)`.
 - The upper cost walk charges every operand that is *rendered*, which is more than can *execute*:
   a `Where` arm's (or a gated operand's) `Local_scope` renders as statements hoisted OUT of the
   conditional expression — `C_syntax.pp_scalar` returns its definitions separately — so both arms'
