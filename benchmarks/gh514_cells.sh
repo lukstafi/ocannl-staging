@@ -4,15 +4,20 @@
 #
 # <precision> applies to every cell, the untuned mlp D cells included: since the model_default
 # gate reaches the loss-scale-gated step shapes too, an f16 D comparison measures the model
-# against the default rather than two identical executions. The form <tuned>:<untuned> runs the
-# D cells at a different precision than the tuned cells — `f16:f32` reproduces the D rows as
-# tabulated in report-gh514-eval.md, which were measured before that gate was extended, and
-# labels its results directory accordingly. It is a positional treatment, not an environment
-# variable, so a split precision is visible in the invocation that produced the numbers and
-# cannot be inherited by the next run. Control cells pin their
-# experimental gates (and the tuned cells their search enables) to the treatment's values
-# explicitly: command-line settings out-rank every other config source, so an ambient profile or
-# config file cannot contaminate the matrix.
+# against the default rather than two identical executions.
+#
+# The form <tuned>:<untuned> runs the D cells at a different precision than the tuned cells, and
+# labels its results directory accordingly. `f16:f32` reruns the f32 D cells of
+# report-gh514-eval.md, which were measured that way before the gate was extended — but NOT
+# under their envelope, since a split precision also withholds the fitted peaks from the D cells
+# (the DPEAKS note below). It is a rerun under the class advisories, not a reproduction of the
+# tabulated numbers. It is a positional treatment rather than an environment variable, so a
+# split precision is visible in the invocation that produced the numbers and cannot be inherited
+# by the next run.
+#
+# Control cells pin their experimental gates (and the tuned cells their search enables) to the
+# treatment's values explicitly: command-line settings out-rank every other config source, so an
+# ambient profile or config file cannot contaminate the matrix.
 set -u
 BK=$1; PRECARG=$2; ROOT=$3; shift 3
 PIN=("$@")
