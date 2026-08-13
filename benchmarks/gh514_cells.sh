@@ -19,6 +19,9 @@ PIN=("$@")
 # upward config search (Utils.config_file_args find_up) — so neither exported variables nor
 # personal ancestor config files can reshape any cell, for any current or future key.
 while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(OCANNL_[A-Z0-9_]*\)=.*/\1/p')
+# The BENCH_* family symmetrically: the helpers set every variable a cell consumes, so ambient
+# diagnostic modes (BENCH_SR_SITES and kin) cannot leak into a labeled treatment either.
+while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(BENCH_[A-Z0-9_]*\)=.*/\1/p')
 DPREC=$PREC
 [ "$PREC" = f16 ] && DPREC=f32
 FAILED=""
