@@ -258,7 +258,7 @@ cd benchmarks && BENCH_FIXTURE=fixtures/mlp_wide.safetensors BENCH_TUNE=1 BENCH_
 with `--ocannl_tune_flip_ordering=cost` as the baseline arm, and the untuned cells as
 
 ```bash
-cd benchmarks && BENCH_FIXTURE=fixtures/mlp_wide.safetensors BENCH_TUNE=0 BENCH_PRECISION=bf16 BENCH_MATERIALIZE=0 BENCH_DEBUG=0 ../_build/default/benchmarks/runners/ocannl/bench_mlp.exe --ocannl_backend=hip --ocannl_autotune_log=true --ocannl_model_peak_flops=1.485901e+12 --ocannl_model_default_schedule=true --ocannl_model_default_placements=5
+cd benchmarks && BENCH_FIXTURE=fixtures/mlp_wide.safetensors BENCH_TUNE=0 BENCH_PRECISION=bf16 BENCH_MATERIALIZE=0 BENCH_DEBUG=0 ../_build/default/benchmarks/runners/ocannl/bench_mlp.exe --ocannl_backend=hip --ocannl_autotune_log=true --ocannl_model_peak_flops=1.485901e+12 --ocannl_model_default_schedule=true --ocannl_model_default_placements=5 --ocannl_model_default_geometry_lattice=false --ocannl_tune_flip_ordering=enablement
 ```
 
 Runs behind this report: per box, 8 tuned cells (A, the two B arms of the pruning A/B, five

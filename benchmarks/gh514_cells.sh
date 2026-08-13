@@ -42,7 +42,7 @@ mlp() {
   echo "=== cell $name start $(date +%T) ==="
   BENCH_FIXTURE=fixtures/mlp_wide.safetensors BENCH_TUNE=$tune BENCH_TUNE_REPORT=1 \
     BENCH_PRECISION=$prec BENCH_STATIC_SCALE=0 BENCH_GATE_INTERVAL=0 BENCH_MATERIALIZE=0 \
-    BENCH_DEBUG=0 BENCH_TWIN_PLACEMENT=auto BENCH_PRESEED_TWINS=0 \
+    BENCH_DEBUG=0 BENCH_TWIN_PLACEMENT=auto BENCH_PRESEED_TWINS=0 BENCH_LOSS_SCALE= \
     ${PIN[@]+"${PIN[@]}"} "$EXE" --ocannl_backend="$BK" --ocannl_autotune_log=true \
     --ocannl_tf32_matmuls=false --ocannl_fp16_arithmetic=false \
     --ocannl_narrow_compute_f32=false --ocannl_autotune_split_reduce_max_sites=8 \
