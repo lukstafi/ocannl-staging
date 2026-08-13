@@ -246,20 +246,19 @@ reachable on these cells, and this report records that rather than sampling arou
 
 ## Reproduction
 
-One driver per box (`benchmarks/gh514_cells.sh <backend> <precision> <repo-root> [pin...]`,
-e.g. `gh514_cells.sh hip bf16 ~/ocannl-staging taskset -c 0-15`) — the driver is the canonical,
-fully-pinned reproduction (it also generates missing fixtures via `gen_fixtures.py`); the hip
-headline cell alone:
+One driver per box, and the driver is the reproduction — it pins every benchmark-mode
+variable, tuner knob, numerics-policy key, and pipeline gate the cells depend on (ambient
+configuration cannot change a treatment), generates missing fixtures, and fails loudly on any
+cell:
 
 ```bash
-cd benchmarks && BENCH_FIXTURE=fixtures/mlp_wide.safetensors BENCH_TUNE=1 BENCH_TUNE_REPORT=1 BENCH_PRECISION=bf16 BENCH_MATERIALIZE=0 BENCH_DEBUG=0 taskset -c 0-15 ../_build/default/benchmarks/runners/ocannl/bench_mlp.exe --ocannl_backend=hip --ocannl_autotune_log=true --ocannl_autotune_cache_dir=$(mktemp -d) --ocannl_autotune_search=true --ocannl_autotune_keep_fraction=1 --ocannl_autotune_repeats=3 --ocannl_autotune_bound_pruning=false --ocannl_model_peak_flops=1.485901e+12 --ocannl_tune_inline_flips=5 --ocannl_tune_flip_ordering=enablement
+benchmarks/gh514_cells.sh hip bf16 ~/ocannl-staging taskset -c 0-15
 ```
 
-with `--ocannl_tune_flip_ordering=cost` as the baseline arm, and the untuned cells as
-
-```bash
-cd benchmarks && BENCH_FIXTURE=fixtures/mlp_wide.safetensors BENCH_TUNE=0 BENCH_PRECISION=bf16 BENCH_MATERIALIZE=0 BENCH_DEBUG=0 ../_build/default/benchmarks/runners/ocannl/bench_mlp.exe --ocannl_backend=hip --ocannl_autotune_log=true --ocannl_model_peak_flops=1.485901e+12 --ocannl_model_default_schedule=true --ocannl_model_default_placements=5 --ocannl_model_default_geometry_lattice=false --ocannl_tune_flip_ordering=enablement
-```
+(`cuda f16` and `metal f16` analogously; results land in `~/gh514-eval-results-<backend>-<precision>/`.)
+To reproduce a single cell — say the hip budget-5 enablement headline — run the driver and read
+that cell's `.out`/`.err`, or lift the cell's exact, fully-pinned argv from the script: the
+cells are the commands, and the script is deliberately the single place they are maintained.
 
 Runs behind this report: per box, 8 tuned cells (A, the two B arms of the pruning A/B, five
 budget-5 chains) — counted in the implementation's unit that is **41 `Autotune.tune` searches
