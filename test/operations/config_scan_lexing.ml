@@ -89,6 +89,9 @@ let x = get ~arg_name:"kappa" ~default:""|ocaml},
     ( "a typed optional default is still a literal default",
       {ocaml|let get_style ?(arg_name : string = "typed_default") () = arg_name|ocaml},
       [ "typed_default" ] );
+    ( "an empty literal names no key, so no key is read",
+      {ocaml|let x = get ~arg_name:"" ~default:""|ocaml},
+      [] );
     ( "a call site quoted inside a string literal is not a read",
       {ocaml|let doc = "pass ~arg_name:\"phantom\" here" let x = get ~arg_name:"tau" ~default:""|ocaml},
       [ "tau" ] );
@@ -100,6 +103,9 @@ let x = get ~arg_name:"kappa" ~default:""|ocaml},
 let non_literal_cases =
   [
     ("labelled variable", {ocaml|let f name = get ~arg_name:name ~default:""|ocaml}, 1);
+    (* An empty literal is a literal: it is NOT reported here, which is why the consistency test
+       reports it separately rather than trusting the census to notice its absence. *)
+    ("empty literal is still a literal", {ocaml|let x = get ~arg_name:"" ~default:""|ocaml}, 0);
     ("punned label", {ocaml|let f ~arg_name = get ~arg_name ~default:""|ocaml}, 2);
     ("optional application of an expression", {ocaml|let f name = g ?arg_name:(Some name)|ocaml}, 1);
     ("punned optional", {ocaml|let f ?arg_name () = g ?arg_name ()|ocaml}, 2);

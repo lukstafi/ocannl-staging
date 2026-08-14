@@ -213,6 +213,13 @@ let () =
       let enclosing offset = Config_key_scan.definition_at definitions offset in
       List.iter (Config_key_scan.label_uses original) ~f:(fun use ->
           match use.Config_key_scan.key with
+          (* A literal, so the convention holds -- but no setting is named by the empty string, and
+             the censuses drop it as not a key. Dropping and reporting are different things, and
+             this is the one that reports (Codex P2, round 12). *)
+          | Some "" ->
+              fail
+              @@ Printf.sprintf "%s names the empty string as a config key: %s" base
+                   (line_at original use.Config_key_scan.offset)
           | Some _ -> ()
           | None -> (
               let offset = use.Config_key_scan.offset in

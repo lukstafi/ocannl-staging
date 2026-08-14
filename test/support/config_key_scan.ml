@@ -205,6 +205,9 @@ let definition_at definitions offset =
     of named functions that implement the lookup. *)
 let keys_in_source content =
   List.filter_map (label_uses content) ~f:(fun use -> use.key)
+  (* The empty string names no setting, so it is not a key and does not enter a census. It does not
+     get to pass unnoticed either: [test_config_consistency] reports it from {!label_uses}, where a
+     literal is still visible as a literal. *)
   |> List.filter ~f:(fun key -> not (String.is_empty key))
 
 (** [keys_in_source] over each file, as a set. Call sites only — this is what
