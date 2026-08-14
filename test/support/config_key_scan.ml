@@ -7,15 +7,105 @@
 
 open Base
 
+(** [content] with the bodies of comments — and, with [~strings:true], of string literals —
+    replaced by spaces, every offset and newline preserved so positions still line up.
+
+    These scans read text, but they mean to describe {e code}. Prose that spells a marker is not a
+    use of it: a comment writing the call-site form produced a phantom key called "literal" on
+    staging PR #337, and a comment writing the label alone would report a configuration read that
+    does not exist. Blanking is what makes "a comment is not a call site" true rather than merely
+    intended. String bodies are left alone by default because that is where the keys live; the
+    non-literal check blanks them too, since it cares only about the delimiters.
+
+    Nested comments, string literals inside comments, character literals (['"'] would otherwise
+    open a string) and quoted-string literals ([{|…|}], [{tag|…|tag}]) are all tracked, because a
+    desynchronised scan fails silently rather than loudly. *)
+let blank_bodies ?(strings = false) content =
+  let n = String.length content in
+  let buf = Bytes.of_string content in
+  let blank i = if not (Char.equal content.[i] '\n') then Bytes.set buf i ' ' in
+  let at i s = i + String.length s <= n && String.is_substring_at content ~pos:i ~substring:s in
+  (* A character literal, not the start of a string: ['a'], ['\n'], ['\\'], ['"']. A type variable
+     (['a t]) has no closing quote and must not be skipped. *)
+  let char_literal_len i =
+    if i + 2 < n && Char.equal content.[i + 1] '\\' then
+      let rec close j = if j < n && j <= i + 6 then if Char.equal content.[j] '\'' then Some (j - i + 1) else close (j + 1) else None in
+      close (i + 2)
+    else if i + 2 < n && Char.equal content.[i + 2] '\'' then Some 3
+    else None
+  in
+  (* [{tag|…|tag}]: the tag is a (possibly empty) lowercase identifier. *)
+  let quoted_string_end i =
+    let rec tag j =
+      if j < n && (Char.is_lowercase content.[j] || Char.equal content.[j] '_') then tag (j + 1)
+      else if j < n && Char.equal content.[j] '|' then Some (String.sub content ~pos:(i + 1) ~len:(j - i - 1))
+      else None
+    in
+    match tag (i + 1) with
+    | None -> None
+    | Some tg -> (
+        let closing = "|" ^ tg ^ "}" in
+        let body_start = i + 1 + String.length tg + 1 in
+        match String.substr_index content ~pos:body_start ~pattern:closing with
+        | None -> None
+        | Some j -> Some (body_start, j, j + String.length closing))
+  in
+  (* [depth] is the comment nesting level; 0 is code. Inside a comment everything is blanked. *)
+  let rec walk i depth =
+    if i >= n then ()
+    else if at i "(*" then (
+      blank i;
+      blank (i + 1);
+      walk (i + 2) (depth + 1))
+    else if depth > 0 && at i "*)" then (
+      blank i;
+      blank (i + 1);
+      walk (i + 2) (depth - 1))
+    else if Char.equal content.[i] '"' then (
+      if depth > 0 then blank i;
+      in_string (i + 1) depth)
+    else if depth > 0 then (
+      blank i;
+      walk (i + 1) depth)
+    else
+      match char_literal_len i with
+      | Some len when Char.equal content.[i] '\'' -> walk (i + len) depth
+      | _ -> (
+          match if Char.equal content.[i] '{' then quoted_string_end i else None with
+          | Some (body_start, body_end, after) ->
+              if strings then
+                for j = body_start to body_end - 1 do
+                  blank j
+                done;
+              walk after depth
+          | None -> walk (i + 1) depth)
+  and in_string i depth =
+    if i >= n then ()
+    else if Char.equal content.[i] '\\' && i + 1 < n then (
+      if depth > 0 || strings then (
+        blank i;
+        blank (i + 1));
+      in_string (i + 2) depth)
+    else if Char.equal content.[i] '"' then (
+      if depth > 0 then blank i;
+      walk (i + 1) depth)
+    else (
+      if depth > 0 || strings then blank i;
+      in_string (i + 1) depth)
+  in
+  walk 0 0;
+  Bytes.to_string buf
+
 (** The [arg_name] literals of the [get_global_arg] / [get_global_flag] calls in [content]. Two
     forms appear in the codebase: [~arg_name:"key"] (direct call sites) and [?(arg_name = "key")]
     (optional parameter defaults, e.g. [get_style] in tnode.ml).
 
     A key that reaches the lookup any other way — through a helper taking the name as a
     parameter — is invisible to this scan, and hence to both tests built on it. That is why
-    [test_config_consistency] separately fails any scanned file that hands the label a non-literal,
-    exempting only utils.ml (the lookup plumbing) and tnode.ml ([get_style]). *)
+    [test_config_consistency] separately fails any non-literal use of the label outside the handful
+    of named functions that implement the lookup. *)
 let keys_in_source content =
+  let content = blank_bodies content in
   let find_all marker =
     let mlen = String.length marker in
     let n = String.length content in
@@ -51,6 +141,7 @@ let keys_in_files files =
     [Utils.settings.large_models] in the codegen, so a future misclassification of it could pass
     unchallenged (Codex P2 on PR #337). *)
 let settings_keys_in_source content =
+  let content = blank_bodies content in
   let ident_at pos =
     let n = String.length content in
     let stop =

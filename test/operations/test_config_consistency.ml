@@ -136,63 +136,138 @@ let () =
      (Test_utils.Config_key_scan). That convention is load-bearing: a helper that takes the key as a
      parameter hides every key routed through it from BOTH scanners -- on staging PR #337 one such
      helper hid three real keys, and a deliberately unregistered fake key stayed green until the
-     helper was removed. So the label must carry a literal everywhere except the two places that
-     legitimately move a key around:
-     - utils.ml, where get_global_arg / get_global_flag / get_global_arg_with_source forward the
-       name to each other -- that IS the lookup plumbing;
-     - tnode.ml, whose get_style takes the key as an optional parameter defaulting to a literal,
-       re-passed by its callers with literals of their own.
-     Only the labelled-argument spellings count; a comment mentioning the label is not a call
-     site. *)
-  let plumbing_files = Set.of_list (module String) [ "utils.ml"; "tnode.ml" ] in
+     helper was removed. So the label must carry a literal everywhere except in the functions that
+     legitimately move a key around, named one by one below:
+     - in utils.ml, the lookup plumbing itself, which forwards the name between get_global_arg,
+       get_global_flag and get_global_arg_with_source and on into the boolean parser;
+     - in tnode.ml, get_style, which takes the key as an optional parameter defaulting to a
+       literal, re-passed by its callers with literals of their own.
+     Naming the functions rather than exempting their files is the difference between "this
+     forwarding is known" and "nothing in this file is ever checked" (Codex P2, round 1): utils.ml
+     and tnode.ml go on reading configuration in the ordinary way everywhere else, and a new
+     forwarding helper in either of them fails like anywhere else.
+     Only the labelled-argument spellings count, and only in code: comment and string bodies are
+     blanked first, so prose about the convention -- including this comment's neighbours in the
+     scanned files -- is not a call site. *)
+  let forwarding_sites =
+    Map.of_alist_exn
+      (module String)
+      [
+        ( "utils.ml",
+          Set.of_list
+            (module String)
+            [
+              "bool_of_config_string";
+              "resolve_config_value";
+              "get_global_arg_with_source";
+              "get_global_arg";
+              "get_global_flag";
+            ] );
+        ("tnode.ml", Set.of_list (module String) [ "get_style" ]);
+      ]
+  in
   let label = "arg_name" in
-  let non_literal_uses content =
+  (* The top-level definition an offset sits in: the nearest preceding line that starts a binding
+     in column 0. That is what the exemption is keyed on. *)
+  let enclosing_definition content pos =
+    let is_ident_char c = Char.is_alphanum c || Char.equal c '_' || Char.equal c '\'' in
     let n = String.length content in
+    let name_after i =
+      let stop =
+        Option.value
+          (String.lfindi content ~pos:i ~f:(fun _ c -> not (is_ident_char c)))
+          ~default:n
+      in
+      String.sub content ~pos:i ~len:(stop - i)
+    in
+    let rec back i =
+      if i < 0 then None
+      else if i = 0 || Char.equal content.[i - 1] '\n' then
+        match
+          List.find [ "let rec "; "let "; "and " ] ~f:(fun kw ->
+              i + String.length kw <= n && String.is_substring_at content ~pos:i ~substring:kw)
+        with
+        | Some kw -> Some (name_after (i + String.length kw))
+        | None -> back (i - 1)
+      else back (i - 1)
+    in
+    back pos
+  in
+  (* [code] is the blanked text, which decides; [original] supplies the line to quote, at the same
+     offsets -- blanking preserves them. *)
+  let non_literal_uses ~code ~original =
+    let n = String.length code in
     let label_len = String.length label in
     let is_ident_char c = Char.is_alphanum c || Char.equal c '_' || Char.equal c '\'' in
     let enclosing_line i j =
       let line_start =
-        match String.rfindi content ~pos:i ~f:(fun _ c -> Char.equal c '\n') with
+        match String.rfindi original ~pos:i ~f:(fun _ c -> Char.equal c '\n') with
         | Some k -> k + 1
         | None -> 0
       in
       let line_end =
-        match String.lfindi content ~pos:j ~f:(fun _ c -> Char.equal c '\n') with
+        match String.lfindi original ~pos:j ~f:(fun _ c -> Char.equal c '\n') with
         | Some k -> k
-        | None -> n
+        | None -> String.length original
       in
-      String.strip (String.sub content ~pos:line_start ~len:(line_end - line_start))
+      String.strip (String.sub original ~pos:line_start ~len:(line_end - line_start))
     in
     let rec loop pos acc =
-      match String.substr_index content ~pos ~pattern:label with
+      match String.substr_index code ~pos ~pattern:label with
       | None -> List.rev acc
       | Some i ->
           let after = i + label_len in
           let is_argument =
-            (i >= 1 && Char.equal content.[i - 1] '~')
-            || (i >= 2 && Char.equal content.[i - 1] '(' && Char.equal content.[i - 2] '?')
+            (i >= 1 && Char.equal code.[i - 1] '~')
+            || (i >= 2 && Char.equal code.[i - 1] '(' && Char.equal code.[i - 2] '?')
           in
-          let whole_word = after >= n || not (is_ident_char content.[after]) in
+          let whole_word = after >= n || not (is_ident_char code.[after]) in
           let is_literal =
-            String.is_substring_at content ~pos:after ~substring:{|:"|}
-            || String.is_substring_at content ~pos:after ~substring:{| = "|}
+            String.is_substring_at code ~pos:after ~substring:{|:"|}
+            || String.is_substring_at code ~pos:after ~substring:{| = "|}
           in
           let acc =
-            if is_argument && whole_word && not is_literal then enclosing_line i after :: acc
+            if is_argument && whole_word && not is_literal then
+              (enclosing_definition code i, enclosing_line i after) :: acc
             else acc
           in
           loop after acc
     in
     loop 0 []
   in
-  let scanned = ref 0 in
+  let forwarding_hit = ref (Set.empty (module String)) in
   List.iter source_files ~f:(fun fname ->
       let base = Stdlib.Filename.basename fname in
-      if not (Set.mem plumbing_files base) then (
-        Int.incr scanned;
-        List.iter (non_literal_uses (In_channel.read_all fname)) ~f:(fun text ->
-            fail
-            @@ Printf.sprintf "%s does not spell the config key as a string literal: %s" base text)));
+      let known =
+        Option.value (Map.find forwarding_sites base) ~default:(Set.empty (module String))
+      in
+      let original = In_channel.read_all fname in
+      let code = Config_key_scan.blank_bodies ~strings:true original in
+      List.iter (non_literal_uses ~code ~original) ~f:(fun (definition, text) ->
+          match definition with
+          | Some d when Set.mem known d ->
+              forwarding_hit := Set.add !forwarding_hit (base ^ ":" ^ d)
+          | _ ->
+              fail
+              @@ Printf.sprintf "%s does not spell the config key as a string literal, in %s: %s"
+                   base
+                   (Option.value definition ~default:"<no enclosing definition>")
+                   text));
+  (* An exemption is a claim that a named function forwards a key; a claim that stops being true
+     is stale, not a free pass, so each one has to earn its place on every run. *)
+  let exempted_sites =
+    Map.to_alist forwarding_sites
+    |> List.concat_map ~f:(fun (base, fns) ->
+           List.map (Set.to_list fns) ~f:(fun fn -> base ^ ":" ^ fn))
+    |> Set.of_list (module String)
+  in
+  let stale = Set.diff exempted_sites !forwarding_hit in
+  if not (Set.is_empty stale) then
+    fail
+      (Printf.sprintf
+         "exempted functions that no longer forward a config key -- drop them from the exemption \
+          list: %s"
+         (String.concat ~sep:", " @@ Set.to_list stale));
   if !ok then (
     printf
       "OK: %d call-site keys, all in reference file and registry; registry and reference agree on \
@@ -203,6 +278,8 @@ let () =
       (String.concat ~sep:", "
       @@ List.map payload_keys ~f:(fun (name, keys) ->
              Printf.sprintf "%s (%d keys)" name (Set.length keys)));
-    printf "OK: %d files spell every config key as a string literal; %s exempt as plumbing.\n"
-      !scanned
-      (String.concat ~sep:", " @@ Set.to_list plumbing_files))
+    printf
+      "OK: %d files spell every config key as a string literal, outside %d forwarding functions: \
+       %s.\n"
+      (List.length source_files) (Set.length exempted_sites)
+      (String.concat ~sep:", " @@ Set.to_list exempted_sites))
