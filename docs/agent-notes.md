@@ -878,16 +878,18 @@ that they earn a lookup rather than always-loaded space.
 - The same protection makes `gh pr merge --delete-branch` misleading from a worktree: the merge
   LANDS and only the cleanup fails ("fatal: 'master' is already used by worktree"), so the command
   exits nonzero over an already-merged PR — check the PR's state before reacting to that status.
-  Merge without the flag and clean up from the MAIN checkout, in this order, each step being the
-  next one's precondition: `git -C <main> fetch --prune origin`; `git -C <main> merge --ff-only
-  origin/master`; `git -C <main> worktree remove <path>`; `git -C <main> branch -d <branch>` (`-D`
-  after a squash or rebase merge, whose commits are not ancestors of `master`); `git push origin
-  --delete <branch>` for the remote half. Two of those orderings are load-bearing, both verified in
-  a scratch repo. `worktree remove` run from INSIDE the worktree succeeds and deletes the current
-  directory, so the next command dies with "fatal: Unable to read current working directory". And
-  `-d` accepts a branch merged into its upstream OR into HEAD, so once the remote branch is gone —
-  the upstream with it — the stale local `master` is all it can check against, and it refuses "not
-  fully merged" until the fast-forward: the merge commit existing on `origin` is not enough.
+  Merge without the flag and clean up in this order, every command anchored with `git -C <main>` so
+  that none of them depends on the current directory: `push origin --delete <branch>`; `fetch
+  --prune origin`; `merge --ff-only origin/master`; `worktree remove <path>`; `branch -d <branch>`
+  (`-D` after a squash or rebase merge, whose commits are not ancestors of `master`). The sequence
+  runs green from inside the worktree it deletes, verified end to end in a scratch repo, and both
+  ordering constraints are load-bearing. `-d` tests the branch's UPSTREAM, falling back to HEAD only
+  when there is none, so deleting the remote branch FIRST is what makes it a real "merged into
+  master" check instead of a tautology about `origin/<branch>` — left in place, it deletes an
+  unmerged topic with only a warning. With the upstream gone the check lands on the main checkout's
+  `master`, which the merge commit on `origin` does not advance, hence the fast-forward before it.
+  Anchoring matters because `worktree remove` deletes the current directory when run from inside it,
+  and any later unanchored command dies with "fatal: Unable to read current working directory".
 - A backend-gated leg must never print a bare `p "<claim>" true` on the backend that cannot run it:
   the golden line is then byte-identical to a verified run's, so neither the transcript nor a
   reviewer can tell the claim was never evaluated (this is how a `Tensorize` leg came to "cover" the
