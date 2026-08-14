@@ -144,6 +144,23 @@ let f () =
   let module M = struct let get_global_arg name = get ~arg_name:name end in
   M.get_global_arg|ocaml},
       Some "M.get_global_arg" );
+    ( "a binding inside open struct is not bare",
+      {ocaml|let real x = x
+open struct
+  let get_global_arg name = get ~arg_name:name
+end|ocaml},
+      Some "_.get_global_arg" );
+    ( "a binding inside include struct is not bare",
+      {ocaml|let real x = x
+include struct
+  let get_global_arg name = get ~arg_name:name
+end|ocaml},
+      Some "_.get_global_arg" );
+    ( "a binding inside a structure-level extension is not bare",
+      {ocaml|let real x = x
+[%%ext
+let get_global_arg name = get ~arg_name:name]|ocaml},
+      Some "_.get_global_arg" );
     ( "siblings of a let-and group are told apart",
       {ocaml|let get_global_arg x = x
 and other name = get ~arg_name:name|ocaml},

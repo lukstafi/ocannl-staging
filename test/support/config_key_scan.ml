@@ -131,8 +131,15 @@ let definitions content =
               within
                 (Option.value name ~default:"_")
                 (fun () -> Ast_iterator.default_iterator.structure_item self item)
-          | Pstr_recmodule _ ->
-              (* One prefix for the group: the point is only that nothing inside is bare. *)
+          (* Anonymous nesting: [open struct … end], [include struct … end] and a structure-level
+             extension payload all carry bindings that no module name introduces (Codex P2, round
+             8). A prefix is what keeps them out of the exemption list: an exemption names a
+             hand-audited top-level function, so anything defined through an anonymous structure has
+             to re-earn it. If the plumbing is ever refactored that way the staleness check turns
+             the suite red, which is the loud failure this trades for a silent one. The same prefix
+             covers a recursive-module group, where the point is likewise only that nothing inside
+             is bare. *)
+          | Pstr_recmodule _ | Pstr_open _ | Pstr_include _ | Pstr_extension _ ->
               within "_" (fun () -> Ast_iterator.default_iterator.structure_item self item)
           (* A local [let module M = … in …] needs no case of its own: this compiler represents it
              as a structure item inside the expression (Pexp_struct_item), so it arrives here and
