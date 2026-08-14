@@ -878,14 +878,16 @@ that they earn a lookup rather than always-loaded space.
 - The same protection makes `gh pr merge --delete-branch` misleading from a worktree: the merge
   LANDS and only the cleanup fails ("fatal: 'master' is already used by worktree"), so the command
   exits nonzero over an already-merged PR — check the PR's state before reacting to that status.
-  Merge without the flag, then clean up in the three steps it bundled, all driven from the MAIN
-  checkout rather than from the worktree being deleted: `git push origin --delete <branch>` (remote
-  only), `git -C <main> worktree remove <path>`, `git -C <main> branch -d <branch>`. Running the
-  last two from inside that worktree does not work: `worktree remove` succeeds and deletes the
-  current directory, then the next command dies with "fatal: Unable to read current working
-  directory". Use `-D` in place of `-d` when the PR was squash- or rebase-merged, since the topic
-  commits are then not ancestors of `master` and `-d` refuses as "not fully merged"; after a
-  merge-commit merge (this repo's convention, to preserve the series) `-d` is the safer check.
+  Merge without the flag and clean up from the MAIN checkout, in this order, each step being the
+  next one's precondition: `git -C <main> fetch --prune origin`; `git -C <main> merge --ff-only
+  origin/master`; `git -C <main> worktree remove <path>`; `git -C <main> branch -d <branch>` (`-D`
+  after a squash or rebase merge, whose commits are not ancestors of `master`); `git push origin
+  --delete <branch>` for the remote half. Two of those orderings are load-bearing, both verified in
+  a scratch repo. `worktree remove` run from INSIDE the worktree succeeds and deletes the current
+  directory, so the next command dies with "fatal: Unable to read current working directory". And
+  `-d` accepts a branch merged into its upstream OR into HEAD, so once the remote branch is gone —
+  the upstream with it — the stale local `master` is all it can check against, and it refuses "not
+  fully merged" until the fast-forward: the merge commit existing on `origin` is not enough.
 - A backend-gated leg must never print a bare `p "<claim>" true` on the backend that cannot run it:
   the golden line is then byte-identical to a verified run's, so neither the transcript nor a
   reviewer can tell the claim was never evaluated (this is how a `Tensorize` leg came to "cover" the
