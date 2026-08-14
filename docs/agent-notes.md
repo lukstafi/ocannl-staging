@@ -878,8 +878,14 @@ that they earn a lookup rather than always-loaded space.
 - The same protection makes `gh pr merge --delete-branch` misleading from a worktree: the merge
   LANDS and only the cleanup fails ("fatal: 'master' is already used by worktree"), so the command
   exits nonzero over an already-merged PR — check the PR's state before reacting to that status.
-  Merge without the flag, then clean up in the three steps the flag bundled: `git push origin
-  --delete <branch>` (remote only), `git worktree remove <path>`, `git branch -d <branch>`.
+  Merge without the flag, then clean up in the three steps it bundled, all driven from the MAIN
+  checkout rather than from the worktree being deleted: `git push origin --delete <branch>` (remote
+  only), `git -C <main> worktree remove <path>`, `git -C <main> branch -d <branch>`. Running the
+  last two from inside that worktree does not work: `worktree remove` succeeds and deletes the
+  current directory, then the next command dies with "fatal: Unable to read current working
+  directory". Use `-D` in place of `-d` when the PR was squash- or rebase-merged, since the topic
+  commits are then not ancestors of `master` and `-d` refuses as "not fully merged"; after a
+  merge-commit merge (this repo's convention, to preserve the series) `-d` is the safer check.
 - A backend-gated leg must never print a bare `p "<claim>" true` on the backend that cannot run it:
   the golden line is then byte-identical to a verified run's, so neither the transcript nor a
   reviewer can tell the claim was never evaluated (this is how a `Tensorize` leg came to "cover" the
