@@ -166,7 +166,6 @@ let () =
         ("tnode.ml", Set.of_list (module String) [ "get_style" ]);
       ]
   in
-  let label = "arg_name" in
   (* The top-level definition an offset sits in: the nearest preceding line that starts a binding
      in column 0. That is what the exemption is keyed on. *)
   let enclosing_definition content pos =
@@ -193,47 +192,30 @@ let () =
     in
     back pos
   in
-  (* [code] is the blanked text, which decides; [original] supplies the line to quote, at the same
-     offsets -- blanking preserves them. *)
+  (* Which uses of the label are not literals is the lexer's answer, not a pattern's
+     (Config_key_scan.label_uses): it covers every spelling OCaml accepts, including the optional
+     forms ?arg_name:expr and the punned ?arg_name that a textual matcher missed (Codex P2, round
+     3). Only the line quoted back to the reader is textual, sliced from the original source at the
+     offset the lexer reported. *)
   let non_literal_uses ~code ~original =
-    let n = String.length code in
-    let label_len = String.length label in
-    let is_ident_char c = Char.is_alphanum c || Char.equal c '_' || Char.equal c '\'' in
-    let enclosing_line i j =
+    let line_at i =
       let line_start =
         match String.rfindi original ~pos:i ~f:(fun _ c -> Char.equal c '\n') with
         | Some k -> k + 1
         | None -> 0
       in
       let line_end =
-        match String.lfindi original ~pos:j ~f:(fun _ c -> Char.equal c '\n') with
+        match String.lfindi original ~pos:i ~f:(fun _ c -> Char.equal c '\n') with
         | Some k -> k
         | None -> String.length original
       in
       String.strip (String.sub original ~pos:line_start ~len:(line_end - line_start))
     in
-    let rec loop pos acc =
-      match String.substr_index code ~pos ~pattern:label with
-      | None -> List.rev acc
-      | Some i ->
-          let after = i + label_len in
-          let is_argument =
-            (i >= 1 && Char.equal code.[i - 1] '~')
-            || (i >= 2 && Char.equal code.[i - 1] '(' && Char.equal code.[i - 2] '?')
-          in
-          let whole_word = after >= n || not (is_ident_char code.[after]) in
-          let is_literal =
-            String.is_substring_at code ~pos:after ~substring:{|:"|}
-            || String.is_substring_at code ~pos:after ~substring:{| = "|}
-          in
-          let acc =
-            if is_argument && whole_word && not is_literal then
-              (enclosing_definition code i, enclosing_line i after) :: acc
-            else acc
-          in
-          loop after acc
-    in
-    loop 0 []
+    List.filter_map (Config_key_scan.label_uses original) ~f:(fun use ->
+        match use.Config_key_scan.key with
+        | Some _ -> None
+        | None ->
+            Some (enclosing_definition code use.Config_key_scan.offset, line_at use.Config_key_scan.offset))
   in
   let forwarding_hit = ref (Set.empty (module String)) in
   List.iter source_files ~f:(fun fname ->

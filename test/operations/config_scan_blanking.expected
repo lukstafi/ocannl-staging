@@ -10,4 +10,17 @@ ok: an escaped quote inside a string does not end it
 ok: a backslash-backslash char literal does not eat the closing quote
 ok: a type variable is not a character literal
 ok: a record literal is not a quoted string
+ok: a character literal inside a comment does not open a string
+ok: an extension quoted string inside a comment
+ok: a digit tag is not a quoted-string delimiter
+ok: optional application with a literal is a read
+ok: optional application of a variable reads no literal key
+ok: a punned optional argument reads no literal key
+ok: a call site quoted inside a string literal is not a read
+ok: non-literal uses -- labelled variable
+ok: non-literal uses -- punned label
+ok: non-literal uses -- optional application of an expression
+ok: non-literal uses -- punned optional
+ok: non-literal uses -- literals are not reported
+ok: non-literal uses -- prose is not reported
 ok: offsets and line counts preserved

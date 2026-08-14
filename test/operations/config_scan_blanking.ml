@@ -52,6 +52,47 @@ let cases =
     ( "a record literal is not a quoted string",
       {ocaml|let r = { field } let x = get ~arg_name:"mu" ~default:""|ocaml},
       [ "mu" ] );
+    (* Round 3. The first two are forms the compiler accepts that a textual scan mis-read; the
+       third is one the review proposed which OCaml does not actually accept as a delimiter --
+       `{foo2|` lexes as `{`, `foo2`, `|`, so the tag rule is lowercase and underscore only. *)
+    ( "a character literal inside a comment does not open a string",
+      {ocaml|(* the quote character is '"' *) let x = get ~arg_name:"nu" ~default:""|ocaml},
+      [ "nu" ] );
+    ( "an extension quoted string inside a comment",
+      {ocaml|(* example: {%ext| (* text |} *) let x = get ~arg_name:"xi" ~default:""|ocaml},
+      [ "xi" ] );
+    ( "a digit tag is not a quoted-string delimiter",
+      {ocaml|let s = {foo2|hi|foo2} let x = get ~arg_name:"omicron" ~default:""|ocaml},
+      [ "omicron" ] );
+    (* Optional-argument application, in every spelling: with a literal it IS a read, punned or
+       applied to an expression it is not. *)
+    ( "optional application with a literal is a read",
+      {ocaml|let x = get_style ?arg_name:"pi" ()|ocaml},
+      [ "pi" ] );
+    ( "optional application of a variable reads no literal key",
+      {ocaml|let g name = get_style ?arg_name:(Some name) () let x = get ~arg_name:"rho" ~default:""|ocaml},
+      [ "rho" ] );
+    ( "a punned optional argument reads no literal key",
+      {ocaml|let g ?arg_name () = get_style ?arg_name () let x = get ~arg_name:"sigma" ~default:""|ocaml},
+      [ "sigma" ] );
+    (* A call site spelled inside a STRING is not a call site either -- the token stream never
+       looks inside a literal, where the old textual scan happily found a phantom key. *)
+    ( "a call site quoted inside a string literal is not a read",
+      {ocaml|let doc = "pass ~arg_name:\"phantom\" here" let x = get ~arg_name:"tau" ~default:""|ocaml},
+      [ "tau" ] );
+  ]
+
+(* The other half of what the check needs from the lexer: which uses are NOT literals. A helper
+   forwarding the key -- in any spelling -- must show up here, or it hides every key routed
+   through it. *)
+let non_literal_cases =
+  [
+    ("labelled variable", {ocaml|let f name = get ~arg_name:name ~default:""|ocaml}, 1);
+    ("punned label", {ocaml|let f ~arg_name = get ~arg_name ~default:""|ocaml}, 2);
+    ("optional application of an expression", {ocaml|let f name = g ?arg_name:(Some name)|ocaml}, 1);
+    ("punned optional", {ocaml|let f ?arg_name () = g ?arg_name ()|ocaml}, 2);
+    ("literals are not reported", {ocaml|let x = get ~arg_name:"k" ~default:""|ocaml}, 0);
+    ("prose is not reported", {ocaml|(* ~arg_name and ?arg_name *) let x = 1|ocaml}, 0);
   ]
 
 (* The other half of the contract: offsets survive blanking, so a scanner can report the ORIGINAL
@@ -75,6 +116,14 @@ let () =
         printf "FAIL: %s -- expected [%s], found [%s]\n" name
           (String.concat ~sep:"; " expected)
           (String.concat ~sep:"; " found)));
+  List.iter non_literal_cases ~f:(fun (name, source, expected) ->
+      let found =
+        List.count (Scan.label_uses source) ~f:(fun u -> Option.is_none u.Scan.key)
+      in
+      if found = expected then printf "ok: non-literal uses -- %s\n" name
+      else (
+        ok := false;
+        printf "FAIL: non-literal uses -- %s: expected %d, found %d\n" name expected found));
   (* Blanking a body must not shorten the text, or every reported line number drifts. *)
   if offsets_preserved then printf "ok: offsets and line counts preserved\n"
   else (

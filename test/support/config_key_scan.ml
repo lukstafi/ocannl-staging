@@ -7,133 +7,144 @@
 
 open Base
 
-(** [content] with the bodies of comments — and, with [~strings:true], of string literals —
-    replaced by spaces, every offset and newline preserved so positions still line up.
+(** {1 Reading these sources as OCaml, not as text}
 
-    These scans read text, but they mean to describe {e code}. Prose that spells a marker is not a
-    use of it: a comment writing the call-site form produced a phantom key called "literal" on
-    staging PR #337, and a comment writing the label alone would report a configuration read that
-    does not exist. Blanking is what makes "a comment is not a call site" true rather than merely
-    intended. String bodies are left alone by default because that is where the keys live; the
-    non-literal check blanks them too, since it cares only about the delimiters.
+    Everything below rests on one pass of the compiler's own lexer. Three rounds of review on
+    PR #340 found the same class of defect in a hand-rolled scanner -- prose read as a call site, a
+    quoted string inside a comment read as a nested comment, a character literal inside a comment
+    opening a string -- and each fix left the next divergence from OCaml's real lexing rules
+    waiting. Every one of them is silent by construction: a desynchronised scan blanks live code,
+    and keys that vanish look exactly like keys that were never read.
 
-    Nested comments, string literals inside comments, character literals (['"'] would otherwise
-    open a string) and quoted-string literals ([{|…|}], [{tag|…|tag}]) are all tracked, because a
-    desynchronised scan fails silently rather than loudly. *)
+    So the approximation is gone. [Lexer.token] decides what is a comment, a string, a character
+    literal and a quoted string, because it is the same code that decides it for the compiler. *)
+
+(** The tokens of [content], each with the source range it covers. Raises if the text does not lex:
+    a scan that cannot read its input must say so rather than report an empty census. *)
+let tokens content =
+  let lexbuf = Lexing.from_string content in
+  Lexer.init ();
+  let rec loop acc =
+    match Lexer.token lexbuf with
+    | Parser.EOF -> List.rev acc
+    | tok -> loop ((tok, Lexing.lexeme_start lexbuf, Lexing.lexeme_end lexbuf) :: acc)
+  in
+  loop []
+
+(** The text a [STRING] token stands for, sliced out of the source rather than taken from the
+    token's payload, whose shape has changed across compiler releases. Handles both spellings:
+    ["key"] and the quoted forms ([{|key|}], [{tag|key|tag}]). *)
+let string_literal_value content start stop =
+  if start >= stop || not (Char.equal content.[start] '{') then
+    if stop - start >= 2 then String.sub content ~pos:(start + 1) ~len:(stop - start - 2) else ""
+  else
+    match String.index_from content (start + 1) '|' with
+    | None -> ""
+    | Some open_bar -> (
+        match String.rindex_from content (stop - 2) '|' with
+        | Some close_bar when close_bar > open_bar ->
+            String.sub content ~pos:(open_bar + 1) ~len:(close_bar - open_bar - 1)
+        | _ -> "")
+
+(** [content] with everything that is not a token replaced by spaces — comments, in other words —
+    and with [~strings:true] the bodies of string literals too, delimiters kept. Every offset and
+    newline is preserved, so a position found here still indexes the original text.
+
+    Used by the scans that remain textual by nature: a [Utils.settings] field read, and finding the
+    top-level definition an offset sits in. *)
 let blank_bodies ?(strings = false) content =
-  let n = String.length content in
-  let buf = Bytes.of_string content in
-  let blank i = if not (Char.equal content.[i] '\n') then Bytes.set buf i ' ' in
-  let at i s = i + String.length s <= n && String.is_substring_at content ~pos:i ~substring:s in
-  (* A character literal, not the start of a string: ['a'], ['\n'], ['\\'], ['"']. A type variable
-     (['a t]) has no closing quote and must not be skipped. *)
-  let char_literal_len i =
-    if i + 2 < n && Char.equal content.[i + 1] '\\' then
-      let rec close j = if j < n && j <= i + 6 then if Char.equal content.[j] '\'' then Some (j - i + 1) else close (j + 1) else None in
-      close (i + 2)
-    else if i + 2 < n && Char.equal content.[i + 2] '\'' then Some 3
-    else None
+  let buf = Bytes.make (String.length content) ' ' in
+  String.iteri content ~f:(fun i c -> if Char.equal c '\n' then Bytes.set buf i '\n');
+  let copy start stop =
+    for i = start to min stop (String.length content) - 1 do
+      Bytes.set buf i content.[i]
+    done
   in
-  (* [{tag|…|tag}]: the tag is a (possibly empty) lowercase identifier. *)
-  let quoted_string_end i =
-    let rec tag j =
-      if j < n && (Char.is_lowercase content.[j] || Char.equal content.[j] '_') then tag (j + 1)
-      else if j < n && Char.equal content.[j] '|' then Some (String.sub content ~pos:(i + 1) ~len:(j - i - 1))
-      else None
-    in
-    match tag (i + 1) with
-    | None -> None
-    | Some tg -> (
-        let closing = "|" ^ tg ^ "}" in
-        let body_start = i + 1 + String.length tg + 1 in
-        match String.substr_index content ~pos:body_start ~pattern:closing with
-        | None -> None
-        | Some j -> Some (body_start, j, j + String.length closing))
-  in
-  (* [depth] is the comment nesting level; 0 is code. Inside a comment everything is blanked. *)
-  let rec walk i depth =
-    if i >= n then ()
-    else if at i "(*" then (
-      blank i;
-      blank (i + 1);
-      walk (i + 2) (depth + 1))
-    else if depth > 0 && at i "*)" then (
-      blank i;
-      blank (i + 1);
-      walk (i + 2) (depth - 1))
-    else if Char.equal content.[i] '"' then (
-      if depth > 0 then blank i;
-      in_string (i + 1) depth)
-    else
-      (* Quoted strings are lexed INSIDE comments too, exactly as OCaml lexes them (Codex P2, round
-         2): in [(* {| (* |} *)] the inner opener belongs to the quoted string, and taking it for a
-         nested comment would leave the walk one level deep for the rest of the file -- blanking
-         live code, and dropping its keys from every scan without a word. *)
-      match if Char.equal content.[i] '{' then quoted_string_end i else None with
-      | Some (body_start, body_end, after) ->
-          if depth > 0 then
-            for j = i to after - 1 do
-              blank j
-            done
-          else if strings then
-            for j = body_start to body_end - 1 do
-              blank j
-            done;
-          walk after depth
-      | None ->
-          if depth > 0 then (
-            blank i;
-            walk (i + 1) depth)
-          else (
-            match char_literal_len i with
-            | Some len when Char.equal content.[i] '\'' -> walk (i + len) depth
-            | _ -> walk (i + 1) depth)
-  and in_string i depth =
-    if i >= n then ()
-    else if Char.equal content.[i] '\\' && i + 1 < n then (
-      if depth > 0 || strings then (
-        blank i;
-        blank (i + 1));
-      in_string (i + 2) depth)
-    else if Char.equal content.[i] '"' then (
-      if depth > 0 then blank i;
-      walk (i + 1) depth)
-    else (
-      if depth > 0 || strings then blank i;
-      in_string (i + 1) depth)
-  in
-  walk 0 0;
+  List.iter (tokens content) ~f:(fun (tok, start, stop) ->
+      match tok with
+      | Parser.STRING _ when strings ->
+          (* Keep the delimiters, drop the body: a scanner may still need to see that a literal is
+             there without seeing what is in it. *)
+          let opening =
+            if Char.equal content.[start] '{' then
+              match String.index_from content (start + 1) '|' with
+              | Some bar -> bar + 1 - start
+              | None -> 1
+            else 1
+          in
+          let closing =
+            if Char.equal content.[start] '{' then
+              match String.rindex_from content (stop - 2) '|' with
+              | Some bar when bar > start -> stop - bar
+              | _ -> 1
+            else 1
+          in
+          copy start (start + opening);
+          copy (stop - closing) stop
+      | _ -> copy start stop);
   Bytes.to_string buf
 
-(** The [arg_name] literals of the [get_global_arg] / [get_global_flag] calls in [content]. Two
-    forms appear in the codebase: [~arg_name:"key"] (direct call sites) and [?(arg_name = "key")]
-    (optional parameter defaults, e.g. [get_style] in tnode.ml).
+(** Every place the [arg_name] label names a configuration key, and what it names it with. [key] is
+    [Some k] when the argument is a string literal — the convention both consistency tests rely on
+    to find a read — and [None] when it is anything else: a variable, a punned parameter, an
+    expression. [offset] is where the label starts, for a caller that wants to report the line.
+
+    All the spellings OCaml accepts are covered, because the lexer supplies them rather than a
+    pattern guessing at them: [~arg_name:"key"] and [?arg_name:"key"] (a [LABEL] / [OPTLABEL] token
+    followed by a [STRING]), the punned [~arg_name] and [?arg_name] (never a literal), and the
+    optional-parameter default [?(arg_name = "key")]. *)
+type label_use = { key : string option; offset : int }
+
+let label = "arg_name"
+
+let label_uses content =
+  let toks = Array.of_list (tokens content) in
+  let literal_at i =
+    if i < Array.length toks then
+      match toks.(i) with
+      | Parser.STRING _, start, stop -> Some (string_literal_value content start stop)
+      | _ -> None
+    else None
+  in
+  let is_named i =
+    i < Array.length toks
+    && match toks.(i) with Parser.LIDENT id, _, _ -> String.equal id label | _ -> false
+  in
+  let rec walk i acc =
+    if i >= Array.length toks then List.rev acc
+    else
+      match toks.(i) with
+      (* [~arg_name:…] and [?arg_name:…]: the label and its colon are one token, so whatever
+         follows IS the argument. *)
+      | (Parser.LABEL id | Parser.OPTLABEL id), offset, _ when String.equal id label ->
+          walk (i + 1) ({ key = literal_at (i + 1); offset } :: acc)
+      (* [?(arg_name = "key")], the optional-parameter default. *)
+      | Parser.QUESTION, offset, _
+        when i + 3 < Array.length toks
+             && (match toks.(i + 1) with Parser.LPAREN, _, _ -> true | _ -> false)
+             && is_named (i + 2) ->
+          let key =
+            match toks.(i + 3) with
+            | Parser.EQUAL, _, _ -> literal_at (i + 4)
+            | _ -> None
+          in
+          walk (i + 4) ({ key; offset } :: acc)
+      (* Punned: [~arg_name] / [?arg_name], in an application or a parameter list. Never a
+         literal — this is the shape that hides keys. *)
+      | (Parser.TILDE | Parser.QUESTION), offset, _ when is_named (i + 1) ->
+          walk (i + 2) ({ key = None; offset } :: acc)
+      | _ -> walk (i + 1) acc
+  in
+  walk 0 []
+
+(** The [arg_name] literals of the [get_global_arg] / [get_global_flag] calls in [content].
 
     A key that reaches the lookup any other way — through a helper taking the name as a
     parameter — is invisible to this scan, and hence to both tests built on it. That is why
     [test_config_consistency] separately fails any non-literal use of the label outside the handful
     of named functions that implement the lookup. *)
 let keys_in_source content =
-  let content = blank_bodies content in
-  let find_all marker =
-    let mlen = String.length marker in
-    let n = String.length content in
-    let rec loop i acc =
-      match String.substr_index ~pos:i content ~pattern:marker with
-      | None -> acc
-      | Some start ->
-          let key_start = start + mlen in
-          let key_end =
-            match String.lfindi content ~pos:key_start ~f:(fun _ c -> Char.equal c '"') with
-            | None -> n
-            | Some j -> j
-          in
-          let key = String.sub content ~pos:key_start ~len:(key_end - key_start) in
-          loop (key_end + 1) (key :: acc)
-    in
-    loop 0 []
-  in
-  find_all {|arg_name:"|} @ find_all {|arg_name = "|}
+  List.filter_map (label_uses content) ~f:(fun u -> u.key)
   |> List.filter ~f:(fun s -> (not (String.is_empty s)) && not (String.contains s '\n'))
 
 (** [keys_in_source] over each file, as a set. Call sites only — this is what
