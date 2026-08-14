@@ -166,56 +166,24 @@ let () =
         ("tnode.ml", Set.of_list (module String) [ "get_style" ]);
       ]
   in
-  (* The top-level definition an offset sits in: the nearest preceding line that starts a binding
-     in column 0. That is what the exemption is keyed on. *)
-  let enclosing_definition content pos =
-    let is_ident_char c = Char.is_alphanum c || Char.equal c '_' || Char.equal c '\'' in
-    let n = String.length content in
-    let name_after i =
-      let stop =
-        Option.value
-          (String.lfindi content ~pos:i ~f:(fun _ c -> not (is_ident_char c)))
-          ~default:n
-      in
-      String.sub content ~pos:i ~len:(stop - i)
+  (* Both halves of this check are the lexer's answer rather than a pattern's
+     (Config_key_scan): which uses of the label are not literals -- covering every spelling OCaml
+     accepts, including the optional forms a textual matcher missed (Codex P2, round 3) -- and
+     which top-level definition an offset sits in, so that a documentation comment quoting a
+     column-zero `let get_global_arg` cannot lend an exempt name to unrelated code (round 4). Only
+     the line quoted back to the reader is sliced from the text, at the offset the lexer reported. *)
+  let line_at original i =
+    let line_start =
+      match String.rfindi original ~pos:i ~f:(fun _ c -> Char.equal c '\n') with
+      | Some k -> k + 1
+      | None -> 0
     in
-    let rec back i =
-      if i < 0 then None
-      else if i = 0 || Char.equal content.[i - 1] '\n' then
-        match
-          List.find [ "let rec "; "let "; "and " ] ~f:(fun kw ->
-              i + String.length kw <= n && String.is_substring_at content ~pos:i ~substring:kw)
-        with
-        | Some kw -> Some (name_after (i + String.length kw))
-        | None -> back (i - 1)
-      else back (i - 1)
+    let line_end =
+      match String.lfindi original ~pos:i ~f:(fun _ c -> Char.equal c '\n') with
+      | Some k -> k
+      | None -> String.length original
     in
-    back pos
-  in
-  (* Which uses of the label are not literals is the lexer's answer, not a pattern's
-     (Config_key_scan.label_uses): it covers every spelling OCaml accepts, including the optional
-     forms ?arg_name:expr and the punned ?arg_name that a textual matcher missed (Codex P2, round
-     3). Only the line quoted back to the reader is textual, sliced from the original source at the
-     offset the lexer reported. *)
-  let non_literal_uses ~code ~original =
-    let line_at i =
-      let line_start =
-        match String.rfindi original ~pos:i ~f:(fun _ c -> Char.equal c '\n') with
-        | Some k -> k + 1
-        | None -> 0
-      in
-      let line_end =
-        match String.lfindi original ~pos:i ~f:(fun _ c -> Char.equal c '\n') with
-        | Some k -> k
-        | None -> String.length original
-      in
-      String.strip (String.sub original ~pos:line_start ~len:(line_end - line_start))
-    in
-    List.filter_map (Config_key_scan.label_uses original) ~f:(fun use ->
-        match use.Config_key_scan.key with
-        | Some _ -> None
-        | None ->
-            Some (enclosing_definition code use.Config_key_scan.offset, line_at use.Config_key_scan.offset))
+    String.strip (String.sub original ~pos:line_start ~len:(line_end - line_start))
   in
   let forwarding_hit = ref (Set.empty (module String)) in
   List.iter source_files ~f:(fun fname ->
@@ -224,17 +192,25 @@ let () =
         Option.value (Map.find forwarding_sites base) ~default:(Set.empty (module String))
       in
       let original = In_channel.read_all fname in
-      let code = Config_key_scan.blank_bodies ~strings:true original in
-      List.iter (non_literal_uses ~code ~original) ~f:(fun (definition, text) ->
-          match definition with
-          | Some d when Set.mem known d ->
-              forwarding_hit := Set.add !forwarding_hit (base ^ ":" ^ d)
-          | _ ->
-              fail
-              @@ Printf.sprintf "%s does not spell the config key as a string literal, in %s: %s"
-                   base
-                   (Option.value definition ~default:"<no enclosing definition>")
-                   text));
+      let definitions = Config_key_scan.definitions original in
+      let enclosing offset =
+        List.fold definitions ~init:None ~f:(fun acc (start, name) ->
+            if start <= offset then Some name else acc)
+      in
+      List.iter (Config_key_scan.label_uses original) ~f:(fun use ->
+          match use.Config_key_scan.key with
+          | Some _ -> ()
+          | None -> (
+              let offset = use.Config_key_scan.offset in
+              match enclosing offset with
+              | Some d when Set.mem known d ->
+                  forwarding_hit := Set.add !forwarding_hit (base ^ ":" ^ d)
+              | definition ->
+                  fail
+                  @@ Printf.sprintf "%s does not spell the config key as a string literal, in %s: %s"
+                       base
+                       (Option.value definition ~default:"<no enclosing definition>")
+                       (line_at original offset))));
   (* An exemption is a claim that a named function forwards a key; a claim that stops being true
      is stale, not a free pass, so each one has to earn its place on every run. *)
   let exempted_sites =

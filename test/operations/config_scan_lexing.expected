@@ -16,6 +16,8 @@ ok: a digit tag is not a quoted-string delimiter
 ok: optional application with a literal is a read
 ok: optional application of a variable reads no literal key
 ok: a punned optional argument reads no literal key
+ok: an escaped-newline continuation decodes to the real key
+ok: an escape sequence decodes to the real key
 ok: a call site quoted inside a string literal is not a read
 ok: non-literal uses -- labelled variable
 ok: non-literal uses -- punned label
@@ -23,4 +25,12 @@ ok: non-literal uses -- optional application of an expression
 ok: non-literal uses -- punned optional
 ok: non-literal uses -- literals are not reported
 ok: non-literal uses -- prose is not reported
-ok: offsets and line counts preserved
+ok: enclosing definition -- a plain definition
+ok: enclosing definition -- a rec definition
+ok: enclosing definition -- a doc comment quoting a column-zero binding is not a definition
+ok: enclosing definition -- an ordinary comment quoting a binding is not a definition
+ok: settings read -- a field read
+ok: settings read -- a field named in a doc comment is not a read
+ok: settings read -- an unqualified record of the same shape is not a read
+ok: settings read -- a predicate call folds in its threshold
+ok: settings read -- a predicate merely mentioned in prose is not a call

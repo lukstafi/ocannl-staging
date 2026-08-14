@@ -19,6 +19,8 @@ open Base
     So the approximation is gone. [Lexer.token] decides what is a comment, a string, a character
     literal and a quoted string, because it is the same code that decides it for the compiler. *)
 
+let fst3 (a, _, _) = a
+
 (** The tokens of [content], each with the source range it covers. Raises if the text does not lex:
     a scan that cannot read its input must say so rather than report an empty census. *)
 let tokens content =
@@ -31,58 +33,27 @@ let tokens content =
   in
   loop []
 
-(** The text a [STRING] token stands for, sliced out of the source rather than taken from the
-    token's payload, whose shape has changed across compiler releases. Handles both spellings:
-    ["key"] and the quoted forms ([{|key|}], [{tag|key|tag}]). *)
-let string_literal_value content start stop =
-  if start >= stop || not (Char.equal content.[start] '{') then
-    if stop - start >= 2 then String.sub content ~pos:(start + 1) ~len:(stop - start - 2) else ""
-  else
-    match String.index_from content (start + 1) '|' with
-    | None -> ""
-    | Some open_bar -> (
-        match String.rindex_from content (stop - 2) '|' with
-        | Some close_bar when close_bar > open_bar ->
-            String.sub content ~pos:(open_bar + 1) ~len:(close_bar - open_bar - 1)
-        | _ -> "")
+(** Every top-level definition in [content], as (offset where its [let] or [and] begins, name),
+    in source order.
 
-(** [content] with everything that is not a token replaced by spaces — comments, in other words —
-    and with [~strings:true] the bodies of string literals too, delimiters kept. Every offset and
-    newline is preserved, so a position found here still indexes the original text.
-
-    Used by the scans that remain textual by nature: a [Utils.settings] field read, and finding the
-    top-level definition an offset sits in. *)
-let blank_bodies ?(strings = false) content =
-  let buf = Bytes.make (String.length content) ' ' in
-  String.iteri content ~f:(fun i c -> if Char.equal c '\n' then Bytes.set buf i '\n');
-  let copy start stop =
-    for i = start to min stop (String.length content) - 1 do
-      Bytes.set buf i content.[i]
-    done
+    Read from the token stream rather than the text, so nothing that merely looks like a definition
+    can pass for one: a documentation comment quoting a column-zero [let get_global_arg] is not a
+    token at all, and cannot lend its name to the code that follows it (Codex P2, round 4). The
+    same argument covers whatever else a comment might contain, without enumerating the cases. *)
+let definitions content =
+  let at_line_start start = start = 0 || Char.equal content.[start - 1] '\n' in
+  let rec scan toks acc =
+    match toks with
+    | [] -> List.rev acc
+    | ((Parser.LET | Parser.AND), start, _) :: rest when at_line_start start -> name rest start acc
+    | _ :: rest -> scan rest acc
+  and name toks start acc =
+    match toks with
+    | (Parser.REC, _, _) :: rest -> name rest start acc
+    | (Parser.LIDENT id, _, _) :: rest -> scan rest ((start, id) :: acc)
+    | _ -> scan toks acc
   in
-  List.iter (tokens content) ~f:(fun (tok, start, stop) ->
-      match tok with
-      | Parser.STRING _ when strings ->
-          (* Keep the delimiters, drop the body: a scanner may still need to see that a literal is
-             there without seeing what is in it. *)
-          let opening =
-            if Char.equal content.[start] '{' then
-              match String.index_from content (start + 1) '|' with
-              | Some bar -> bar + 1 - start
-              | None -> 1
-            else 1
-          in
-          let closing =
-            if Char.equal content.[start] '{' then
-              match String.rindex_from content (stop - 2) '|' with
-              | Some bar when bar > start -> stop - bar
-              | _ -> 1
-            else 1
-          in
-          copy start (start + opening);
-          copy (stop - closing) stop
-      | _ -> copy start stop);
-  Bytes.to_string buf
+  scan (tokens content) []
 
 (** Every place the [arg_name] label names a configuration key, and what it names it with. [key] is
     [Some k] when the argument is a string literal — the convention both consistency tests rely on
@@ -99,10 +70,11 @@ let label = "arg_name"
 
 let label_uses content =
   let toks = Array.of_list (tokens content) in
+  ignore content;
   let literal_at i =
     if i < Array.length toks then
       match toks.(i) with
-      | Parser.STRING _, start, stop -> Some (string_literal_value content start stop)
+      | Parser.STRING (value, _, _), _, _ -> Some value
       | _ -> None
     else None
   in
@@ -145,7 +117,7 @@ let label_uses content =
     of named functions that implement the lookup. *)
 let keys_in_source content =
   List.filter_map (label_uses content) ~f:(fun u -> u.key)
-  |> List.filter ~f:(fun s -> (not (String.is_empty s)) && not (String.contains s '\n'))
+  |> List.filter ~f:(fun s -> not (String.is_empty s))
 
 (** [keys_in_source] over each file, as a set. Call sites only — this is what
     [test_config_consistency] means by "every key a source file asks for is documented and
@@ -161,38 +133,38 @@ let keys_in_files files =
     [Utils.settings.large_models] in the codegen, so a future misclassification of it could pass
     unchallenged (Codex P2 on PR #337). *)
 let settings_keys_in_source content =
-  let content = blank_bodies content in
-  let ident_at pos =
-    let n = String.length content in
-    let stop =
-      Option.value
-        (String.lfindi content ~pos ~f:(fun _ c ->
-             not (Char.is_alphanum c || Char.equal c '_')))
-        ~default:n
-    in
-    String.sub content ~pos ~len:(stop - pos)
+  let toks = Array.of_list (tokens content) in
+  let tok i = if i < Array.length toks then Some (fst3 toks.(i)) else None in
+  let is_lident i name =
+    match tok i with Some (Parser.LIDENT id) -> String.equal id name | _ -> false
   in
-  (* Qualified: [Low_level.virtualize_settings] and friends are records of the same shape whose
-     field names are NOT config keys ([max_visits] against [virtualize_max_visits]), so an
-     unqualified match would attribute reads to keys that do not exist. *)
-  let marker = "Utils.settings." in
-  let rec fields i acc =
-    match String.substr_index ~pos:i content ~pattern:marker with
-    | None -> acc
-    | Some start ->
-        let field = ident_at (start + String.length marker) in
-        fields (start + 1) (if String.is_empty field then acc else field :: acc)
+  let rec walk i acc =
+    if i >= Array.length toks then acc
+    else
+      match tok i with
+      (* Qualified: [Low_level.virtualize_settings] and friends are records of the same shape whose
+         field names are NOT config keys ([max_visits] against [virtualize_max_visits]), so an
+         unqualified match would attribute reads to keys that do not exist. *)
+      | Some (Parser.UIDENT "Utils")
+        when (match tok (i + 1) with Some Parser.DOT -> true | _ -> false)
+             && is_lident (i + 2) "settings"
+             && (match tok (i + 3) with Some Parser.DOT -> true | _ -> false) -> (
+          match tok (i + 4) with
+          | Some (Parser.LIDENT field) -> walk (i + 5) (field :: acc)
+          | _ -> walk (i + 1) acc)
+      (* The two predicates that fold the [log_level > 1] threshold into a flag. A call, not a
+         mention: [LPAREN RPAREN] must follow. *)
+      | Some (Parser.LIDENT name)
+        when (match tok (i + 1) with Some Parser.LPAREN -> true | _ -> false)
+             && (match tok (i + 2) with Some Parser.RPAREN -> true | _ -> false) -> (
+          match name with
+          | "debug_log_from_routines" -> walk (i + 3) ("log_level" :: name :: acc)
+          | "with_runtime_debug" ->
+              walk (i + 3) ("log_level" :: "output_debug_files_in_build_directory" :: acc)
+          | _ -> walk (i + 1) acc)
+      | _ -> walk (i + 1) acc
   in
-  let predicates =
-    List.concat_map
-      [
-        ("debug_log_from_routines ()", [ "debug_log_from_routines"; "log_level" ]);
-        ("with_runtime_debug ()", [ "output_debug_files_in_build_directory"; "log_level" ]);
-      ]
-      ~f:(fun (call, keys) ->
-        if Option.is_some (String.substr_index content ~pattern:call) then keys else [])
-  in
-  fields 0 [] @ predicates
+  walk 0 []
 
 (** Every configuration read of a file — [arg_name] call sites and {!settings_keys_in_source} —
     keyed by file basename, for tests that care {e where} a key is read. Field names that are not

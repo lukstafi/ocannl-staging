@@ -1,14 +1,14 @@
-(** The blanking pass that both configuration scanners rest on, exercised directly.
+(** How both configuration scanners read a source file, exercised directly.
 
-    [Config_key_scan.blank_bodies] decides what counts as code, so every one of its mistakes is
-    silent by construction: a desynchronised walk blanks live source, and keys that vanish from a
-    scan look exactly like keys that were never read. Two such bugs reached review on PR #340 --
-    prose read as a call site, then a quoted string inside a comment read as a nested comment --
-    which is the argument for testing the walker on hostile input rather than only on the library
-    sources that happen to exist today.
+    [Config_key_scan] decides what counts as code, so every one of its mistakes is silent by
+    construction: keys that vanish from a scan look exactly like keys that were never read. Four
+    rounds of review on PR #340 found such bugs one at a time -- prose read as a call site, a
+    quoted string inside a comment read as a nested comment, a character literal opening a string,
+    an escaped literal losing its value -- which is the argument for testing on hostile input
+    rather than on the library sources that happen to exist today.
 
-    The cases below are that hostile input: OCaml the compiler accepts and the walker must agree
-    with. *)
+    The scanner now runs the compiler's own lexer, so most of these are regression cases rather
+    than live hazards. They are kept because that is the point: they are what says so. *)
 
 open Base
 open Stdio
@@ -77,6 +77,15 @@ let cases =
       [ "sigma" ] );
     (* A call site spelled inside a STRING is not a call site either -- the token stream never
        looks inside a literal, where the old textual scan happily found a phantom key. *)
+    (* Round 4. The lexer's decoded value, not the source slice: a continuation line makes the two
+       differ, and the slice would be dropped as malformed while the check still saw a literal --
+       an unregistered key slipping past both scanners. *)
+    ( "an escaped-newline continuation decodes to the real key",
+      "let x = get ~arg_name:\"undocu\\\n   mented\" ~default:\"\"",
+      [ "undocumented" ] );
+    ( "an escape sequence decodes to the real key",
+      {ocaml|let x = get ~arg_name:"tab	here" ~default:""|ocaml},
+      [ "tab	here" ] );
     ( "a call site quoted inside a string literal is not a read",
       {ocaml|let doc = "pass ~arg_name:\"phantom\" here" let x = get ~arg_name:"tau" ~default:""|ocaml},
       [ "tau" ] );
@@ -95,15 +104,46 @@ let non_literal_cases =
     ("prose is not reported", {ocaml|(* ~arg_name and ?arg_name *) let x = 1|ocaml}, 0);
   ]
 
-(* The other half of the contract: offsets survive blanking, so a scanner can report the ORIGINAL
-   line for a position it found in the blanked text. *)
-let offsets_preserved =
-  List.for_all cases ~f:(fun (_, source, _) ->
-      let blanked = Scan.blank_bodies source in
-      let blanked_strings = Scan.blank_bodies ~strings:true source in
-      String.length blanked = String.length source
-      && String.length blanked_strings = String.length source
-      && String.count blanked ~f:(Char.equal '\n') = String.count source ~f:(Char.equal '\n'))
+(* Where a use sits, which is what decides whether an exemption covers it. A documentation
+   comment is not a definition, however much its text looks like one. *)
+let definition_cases =
+  [
+    ("a plain definition", {ocaml|let get_global_arg x = x
+let other y = get ~arg_name:y|ocaml}, Some "other");
+    ("a rec definition", {ocaml|let rec loop x = loop x
+let other y = get ~arg_name:y|ocaml}, Some "other");
+    ( "a doc comment quoting a column-zero binding is not a definition",
+      {ocaml|let real x = x
+(** an example:
+let get_global_arg
+    is only prose *)
+let other y = get ~arg_name:y|ocaml},
+      Some "other" );
+    ( "an ordinary comment quoting a binding is not a definition",
+      {ocaml|let real x = x
+(* let get_global_arg *)
+let other y = get ~arg_name:y|ocaml},
+      Some "other" );
+  ]
+
+(* The other spelling of a read: a field of the resolved settings record. Prose naming one is not
+   a read of it. *)
+let settings_cases =
+  [
+    ("a field read", {ocaml|let x = Utils.settings.large_models|ocaml}, [ "large_models" ]);
+    ( "a field named in a doc comment is not a read",
+      {ocaml|(** see Utils.settings.large_models *) let x = 1|ocaml},
+      [] );
+    ( "an unqualified record of the same shape is not a read",
+      {ocaml|let x = Low_level.virtualize_settings.max_visits|ocaml},
+      [] );
+    ( "a predicate call folds in its threshold",
+      {ocaml|let x = Utils.debug_log_from_routines ()|ocaml},
+      [ "debug_log_from_routines"; "log_level" ] );
+    ( "a predicate merely mentioned in prose is not a call",
+      {ocaml|(* debug_log_from_routines () decides *) let x = 1|ocaml},
+      [] );
+  ]
 
 let () =
   let ok = ref true in
@@ -124,9 +164,27 @@ let () =
       else (
         ok := false;
         printf "FAIL: non-literal uses -- %s: expected %d, found %d\n" name expected found));
-  (* Blanking a body must not shorten the text, or every reported line number drifts. *)
-  if offsets_preserved then printf "ok: offsets and line counts preserved\n"
-  else (
-    ok := false;
-    printf "FAIL: blanking changed the length or the line count of a snippet\n");
+  List.iter definition_cases ~f:(fun (name, source, expected) ->
+      let definitions = Scan.definitions source in
+      let found =
+        List.filter_map (Scan.label_uses source) ~f:(fun u ->
+            List.fold definitions ~init:None ~f:(fun acc (start, d) ->
+                if start <= u.Scan.offset then Some d else acc))
+        |> List.hd
+      in
+      if Option.equal String.equal found expected then printf "ok: enclosing definition -- %s\n" name
+      else (
+        ok := false;
+        printf "FAIL: enclosing definition -- %s: expected %s, found %s\n" name
+          (Option.value expected ~default:"<none>")
+          (Option.value found ~default:"<none>")));
+  List.iter settings_cases ~f:(fun (name, source, expected) ->
+      let found = List.sort ~compare:String.compare (Scan.settings_keys_in_source source) in
+      let expected = List.sort ~compare:String.compare expected in
+      if List.equal String.equal found expected then printf "ok: settings read -- %s\n" name
+      else (
+        ok := false;
+        printf "FAIL: settings read -- %s: expected [%s], found [%s]\n" name
+          (String.concat ~sep:"; " expected)
+          (String.concat ~sep:"; " found)));
   if not !ok then Stdlib.exit 1
