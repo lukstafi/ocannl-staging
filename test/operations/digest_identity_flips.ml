@@ -94,13 +94,22 @@ let () =
   p "and separates the key exactly on the backend that reads it"
     (Bool.equal is_cc (not (String.equal key0 key_c)));
 
-  (* Search-shaping and execution-neutral: neither touches the identity. *)
-  set_config "autotune_beam_width" "7";
-  set_config "print_decimals_precision" "9";
+  (* Search-shaping and execution-neutral: neither touches the identity. Each flip has to be one
+     that is actually RESOLVED per lookup (Codex P2 on PR #337): [print_decimals_precision] is
+     copied into [Utils.settings] at startup, so poking the config file would have flipped nothing
+     and left an assertion that cannot go red — worse than no assertion. So the settings-borne one
+     is mutated in the record, and the config-borne ones are keys a compile really reads:
+     [cpu_schedule_min_parallel] shapes the untuned default pipeline, and [ll_ident_style] renames
+     identifiers in the emitted code, which the canonical rendering alpha-renames away. *)
+  set_config "cpu_schedule_min_parallel" "1";
+  set_config "ll_ident_style" "name_only";
+  let precision0 = Utils.settings.print_decimals_precision in
+  Utils.settings.print_decimals_precision <- precision0 + 7;
   let digest_n, key_n = identity_of ctx in
-  unset_config "autotune_beam_width";
-  unset_config "print_decimals_precision";
-  p "a search-shaping and an execution-neutral knob leave the identity untouched"
+  Utils.settings.print_decimals_precision <- precision0;
+  unset_config "cpu_schedule_min_parallel";
+  unset_config "ll_ident_style";
+  p "search-shaping and execution-neutral knobs leave the identity untouched"
     (String.equal digest0 digest_n && String.equal key0 key_n);
 
   (* The debug gates bite only at log_level > 1, so the codegen component hashes the EFFECTIVE
