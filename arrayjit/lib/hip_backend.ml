@@ -1905,6 +1905,10 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
            simd_vector_bytes = 0;
            native_fp16_arithmetic = false;
            worker_pool_tag = None;
+           (* Filled fresh by the accessor below, not here: both inputs are process-mutable
+              ([Train.CDSL.enable_all_debugs] flips the debug settings at any point), and this
+              record is memoized (Codex P1 on PR #337). *)
+           codegen_tag = None;
            (* Advisory roofline envelope (gh-ocannl-491): documented rough constants for the
               RDNA3-class targets this backend is exercised on (dGPU/APU: ~10 fp32 TFLOP/s, ~250
               GB/s — Strix-Halo-class LPDDR5X). Per-device queries are calibration follow-up work;
@@ -1913,7 +1917,23 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
            peak_memory_bandwidth = Some 2.5e11;
          })
     in
-    fun () -> Lazy.force limits
+    (* gh-ocannl-572: the kernel source is a function of the lowered code, the device capabilities
+       and the numerics policy, all covered by the record itself — but two dispatch- and
+       compilation-mechanics regimes are not. Graph capture fires only for multi-segment routines
+       and only without routine logging, so it changes a fissioned candidate's launch overhead
+       relative to a whole-routine one, and a crown from one regime is not evidence about the other;
+       runtime debug switches this compiler to debug compilation, which no other backend's does.
+       Both are the EFFECTIVE predicates and both are recomputed per call, since the settings behind
+       them are mutable within a process (Codex P1/P2 on PR #337). *)
+    let codegen_tag () =
+      (if
+         Utils.get_global_flag ~default:true ~arg_name:"gpu_graph_capture"
+         && not (Utils.debug_log_from_routines ())
+       then "graph-capture"
+       else "no-graph-capture")
+      ^ if Utils.with_runtime_debug () then "/device-debug" else "/no-device-debug"
+    in
+    fun () -> { (Lazy.force limits) with Backend_intf.codegen_tag = Some (codegen_tag ()) }
 
   let get_debug_info (device : device) =
     let tot, unr, unf = H.Stream.total_unreleased_unfinished_delimited_events device.runner in

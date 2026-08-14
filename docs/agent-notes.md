@@ -182,6 +182,21 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   phantom "accessible" nodes (this is how the cache was caught); (2) on a hit, still re-run
   `pin_device_written_bounds` — its raising writer-after-settled-reader guard must fire regardless
   of caching.
+- **A knob read after lowering cannot reach a digest over lowered code** — it must be carried by a
+  cache-key component or the cache replays across regimes (gh-ocannl-568: 5.9x). So every config
+  key is classified in `Utils.config_key_classification` as code-borne / `Keyed <component>` /
+  search-shaping / execution-neutral, with the reason, and `test/operations/digest_completeness`
+  fails on an unclassified key, on a claimed component that does not exist in
+  `Schedule_cache.key_components` (that list DRIVES `cache_key`, so it cannot go stale), and on a
+  key read in a codegen-stage module yet classified code-borne. When adding a config key, classify
+  it; when adding a backend knob consulted at codegen, put it in the backend's
+  `hardware_limits.codegen_tag` — `cache_key` takes the whole limits record precisely so a new
+  component reaches every call site. `digest_identity_flips` calibrates one representative per
+  class against a real compile; when picking a code-borne representative note that many optimizer
+  keys (`virtualize_max_visits` and its neighbors) are read ONCE into `Low_level.virtualize_settings`
+  at module init, so poking `Utils.config_file_args` at runtime does not move them. Caches with an
+  identity of their own still state their own extra inputs (the analysis cache's
+  `inline_complex_computations`, the cc probe cache's compiler/arch/simd settings).
 - `Affine.access.a_path` components are TYPED (`Affine.path_comp`, gh-ocannl-561): `Stmt` indices
   interleaved with `Cond`/`Body` (`If`) and `Rhs`/`Write` (`Set` family), constructor order =
   execution order, so lexicographic comparison is program order within a statement too. Every

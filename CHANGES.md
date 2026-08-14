@@ -13,6 +13,15 @@
   Mapping is on by default except on Windows, where a mapped view holds the file open and would
   make a later save over the same path fail (`checkpoint_load_mmap`, or the `?mmap` argument).
 
+- **Cache identity is complete by construction, not by vigilance** (gh-ocannl-572): every
+  configuration key is classified in `Utils.config_key_classification` — code-borne (it reaches the
+  canonical digest through the lowered code), keyed to a named cache-key component, search-shaping,
+  or execution-neutral — with the reason recorded, and `test/operations/digest_completeness` fails
+  on a key that is not classified, on a claimed component that does not exist, and on a key read at
+  codegen yet classified code-borne. Generalizes gh-ocannl-568, where the numerics policy's absence
+  from the schedule-cache key let a default-flags run replay a tf32-tuned winner at 5.9x slower than
+  not tuning at all.
+
 - **Hand-built lowered code can be executed, not only analyzed** (gh-ocannl-562): `Context.compile`
   and backend `compile` take `?prelowered:Ir.Low_level.optimized`, which replaces the compile's own
   lowering of the comp. Unlike `?lowered_transform`, which substitutes the codegen input only, the
@@ -22,6 +31,31 @@
   doctrine reach regressions whose subject is the analysis layer on IR shapes the `Assignments`
   pipeline never emits; `test/operations/prelowered_seam` pins the sibling-`Local_scope`
   read-before-write case that motivated it.
+
+### Changed
+
+- The autotuner's schedule disk-cache key gained a **codegen component** (gh-ocannl-572): the
+  backend-independent emission gates (`large_models`, `buffer_aliasing`, the effective
+  routine-logging predicate — folding in `log_level > 1` so a verbosity bump alone never churns keys
+  — and the logging-only settings once it holds, `prefer_backend_uniformity` and the stream-log
+  routing) and the compiling backend's own codegen knobs, which it reports as
+  `hardware_limits.codegen_tag` — for `cc`, the compiler command and its flags, the OpenMP team,
+  `cc_vector_bytes`, `cc_fp16_arithmetic`, `cc_parallel_grid` / `cc_parallel_chunks`,
+  `cc_grid_private_bytes_cap`; for CUDA and HIP, the graph-capture regime and debug compilation. The component also
+  hashes the whole `hardware_limits` record (the cache key otherwise named only the backend, so two
+  GPUs of one backend shared every key) and, on `cc`, a fingerprint of the toolchain's predefined
+  macros under the configured flags (`-mcpu=native` is a spelling, not a target). These are read after the lowered code the
+  digest names, so a winner crowned under one of them used to replay under another — the shape of
+  gh-ocannl-568. Existing cache entries miss once and are re-tuned. `Schedule_cache.cache_key` now
+  takes the whole `hardware_limits` record instead of one optional tag per component.
+- The cc backend quotes the paths it interpolates into compiler command lines — a build or temp
+  directory containing whitespace previously failed every kernel compile with a "this is a bug in
+  OCANNL" report against a command the shell never saw whole, and silently failed the toolchain
+  probes.
+- The cc backend's on-disk probe cache keys on `cc_backend_simd_flags` and on the identity (path,
+  size, mtime) of the compiler executable the probes will run: the fp16 probe compiles under those
+  flags, and an in-place toolchain upgrade leaves command, flags and `PATH` unchanged — so either
+  could be served another configuration's, or an older compiler's, answer.
 
 ## [1.0] -- 2026-08-13
 

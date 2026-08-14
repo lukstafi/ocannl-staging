@@ -276,7 +276,31 @@ the retained procedural analyses alongside the affine engine and raises on diver
   tf32-tuned tensorized winner and replay it through the scalar fallback — measured at 5.9x
   slower than not tuning at all (gh-ocannl-568). Policies therefore keep separate entries and can
   share a cache directory. Cached schedules rebind their symbols onto the fresh
-  lowering at each compile; a digest guard rejects stale entries. **Schedule identity pins
+  lowering at each compile; a digest guard rejects stale entries.
+  **Completeness is an invariant, not a habit** (gh-ocannl-572): everything else read *after*
+  lowering shares that hazard, so the key carries a codegen tag as well — the backend-independent
+  emission gates (`large_models`, `buffer_aliasing`'s `restrict` suppression, the *effective*
+  routine-logging predicate — folding in `log_level > 1` so a verbosity bump alone never churns
+  keys — and, only once logging reaches the kernel, `prefer_backend_uniformity`'s logging spelling
+  and the stream-log routing) plus the compiling backend's own knobs, which it reports as
+  `hardware_limits.codegen_tag` (for `cc`: the compiler command and flags, the OpenMP team,
+  `cc_vector_bytes`, `cc_fp16_arithmetic`, `cc_parallel_grid`/`cc_parallel_chunks`,
+  `cc_grid_private_bytes_cap`; for CUDA and HIP the graph-capture regime, which moves a fissioned
+  candidate's launch overhead relative to a whole-routine one, and debug compilation, which only
+  their compilers read) — and the CPU worker-pool signature (gh-ocannl-530). The tag also hashes the
+  whole `hardware_limits` record, since `backend` is a backend *name*: two GPUs of one backend
+  differ in compute capability, mma formats and memory limits, which is what candidate generation
+  and rendering read. On `cc` the toolchain is fingerprinted by its own predefined macros under
+  the configured flags (`-dM -E`), because `-mcpu=native` is a flag *spelling* — two machines
+  targeting different microarchitectures, or one target through two compiler versions, would
+  otherwise share a key. Backends hand
+  their components to `cache_key` as the whole `hardware_limits` record, so a component added
+  there reaches every call site. Every config key is classified against these components in
+  `Utils.config_key_classification` — code-borne (it reaches the digest through the code), keyed
+  (it must be carried), search-shaping, or execution-neutral, each with its reason —
+  and `test/operations/digest_completeness` fails on a key that is not classified, with
+  `digest_identity_flips` calibrating one representative of each class against a real compile.
+  **Schedule identity pins
   numerics** (gh-ocannl-484): a reduction-reassociating op (`Split_reduce`, `Swap`/`Vectorized`
   over accumulations, `Tensorize`) makes the computed values a function of the schedule — e.g.
   `Split_reduce`'s combine tree is fixed by `num_blocks` — so results are bitwise-reproducible

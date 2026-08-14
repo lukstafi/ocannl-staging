@@ -69,27 +69,125 @@ let probe_cache_dir =
        Option.some_if ours dir
      with _ -> None)
 
+(* Forward reference to [compiler_command] below: resolving the command is itself a cached probe,
+   so the key of the probes that RUN the compiler is built from it, not the other way round. *)
+let compiler_command_ref : (unit -> string) ref = ref (fun () -> "")
+
+(* Whitespace-separated tokens, honoring quotes: the command is spelled for a shell, so a path
+   containing spaces arrives quoted and splitting on the first space would fingerprint a fragment. *)
+let shell_tokens command =
+  let tokens = ref [] and current = Buffer.create 32 and quote = ref None in
+  let flush () =
+    if Buffer.length current > 0 then (
+      tokens := Buffer.contents current :: !tokens;
+      Buffer.clear current)
+  in
+  String.iter command ~f:(fun c ->
+      match (!quote, c) with
+      | Some q, _ when Char.equal q c -> quote := None
+      | Some _, _ -> Buffer.add_char current c
+      | None, ('"' | '\'') -> quote := Some c
+      | None, (' ' | '\t') -> flush ()
+      | None, _ -> Buffer.add_char current c);
+  flush ();
+  List.rev !tokens
+
+let resolve_executable token =
+  let candidates =
+    if String.is_empty token then []
+    else if String.exists token ~f:(fun c -> Char.equal c '/' || Char.equal c '\\') then [ token ]
+    else
+      let path = Option.value (Stdlib.Sys.getenv_opt "PATH") ~default:"" in
+      let dirs = String.split path ~on:(if Sys.win32 then ';' else ':') in
+      let exts = if Sys.win32 then [ ""; ".exe"; ".bat"; ".cmd" ] else [ "" ] in
+      List.concat_map dirs ~f:(fun dir ->
+          List.map exts ~f:(fun ext -> Stdlib.Filename.concat dir (token ^ ext)))
+  in
+  (* Executable, not merely present (Codex P1 on PR #337): a PATH search skips a non-executable
+     file of the right name and runs a later one, so accepting the first regular file would key on
+     a file the compile never runs -- and then an upgrade of the one it does run would go unnoticed.
+     [X_OK] is meaningless on Windows, where OCaml's [access] does not implement it and the
+     extension list above carries the same information. *)
+  let is_executable path =
+    Sys.win32 || (try Unix.access path [ Unix.X_OK ]; true with _ -> false)
+  in
+  List.find_map candidates ~f:(fun path ->
+      match try Some (Unix.stat path) with _ -> None with
+      | Some ({ Unix.st_kind = Unix.S_REG; _ } as st) when is_executable path ->
+          (* [stat], not [lstat]: /usr/bin/cc is a symlink, and it is the TARGET whose size and
+             mtime move when the toolchain is upgraded. *)
+          Some (Printf.sprintf "%s:%d:%.0f" path st.Unix.st_size st.Unix.st_mtime)
+      | _ -> None)
+
+(* The identity of the compiler EXECUTABLE, for the probe-cache key below (Codex P1 on PR #337). An
+   in-place toolchain upgrade leaves the command name, the flags and PATH unchanged, so keyed on
+   those alone every cached probe would keep answering for the old compiler indefinitely — the
+   target fingerprint most absurdly of all, since noticing exactly this is its job. Resolved by
+   walking PATH in process: asking anything would spend the subprocess the cache exists to save.
+   Size and mtime, not a version string, for the same reason; an unresolvable command degrades to
+   its spelling, which is what the key held before. *)
+
+(* EVERY token that names an executable, not just the first (Codex P1 on PR #337): the command can
+   be a wrapper — [ccache clang] — where the first token is the one that never changes, and flags
+   simply do not resolve. The residual is a wrapper that names no compiler on its command line (a
+   shell script calling one internally): its own file is fingerprinted, but not what it invokes,
+   which nothing short of running it could see — [cc_backend_probe_cache=false] is the escape hatch
+   there. *)
+let compiler_executable_identity command =
+  match List.filter_map (shell_tokens command) ~f:resolve_executable with
+  | [] -> "unresolved:" ^ String.strip command
+  | identities -> String.concat ~sep:"|" identities
+
 let probe_cache_path =
   let key_digest =
     lazy
       (* Raw settings, not resolved values: [arch_flags] is itself one of the probes cached here, so
          keying on its result would both invert the dependency and spend the probes the key exists
          to avoid. Nothing is lost -- what it resolves to is a function of the compiler and the
-         target, and both are already pinned by the entries below. *)
+         target, and both are already pinned by the entries below.
+
+         Every setting a cached probe CONSULTS has to be here (gh-ocannl-572, the same completeness
+         rule as the schedule cache's): the fp16 probe compiles under [arch_flags () ^ simd_flags
+         ()], so an explicit [cc_backend_simd_flags] can change its answer -- a target whose
+         [_Float16] vector arithmetic only appears under the added flags -- and without the setting
+         in the key the first run's answer would be served to the other configuration. *)
       (let key =
          String.concat ~sep:"\000"
            [
              Utils.get_global_arg ~default:"" ~arg_name:"cc_backend_compiler_command";
              Utils.get_global_arg ~default:"auto" ~arg_name:"cc_backend_arch_flags";
+             Utils.get_global_arg ~default:"auto" ~arg_name:"cc_backend_simd_flags";
              Option.value (Stdlib.Sys.getenv_opt "PATH") ~default:"";
+             (* The identity of [ocamlc] itself: with the command setting unset, the "compiler"
+                probe caches what [ocamlc -config] reports, so an OCaml installation upgraded in
+                place would keep naming the previous [c_compiler] -- or one that no longer exists
+                (Codex P1 on PR #337). This is the base key's own executable, the one exemption the
+                two-stage scheme leaves; downstream probes additionally key on the C compiler. *)
+             compiler_executable_identity "ocamlc";
+           ]
+       in
+       String.prefix (Stdlib.Digest.to_hex (Stdlib.Digest.string key)) 16)
+  in
+  (* Two stages, because the compiler command is itself one of the probes: with the setting unset it
+     comes from [ocamlc -config], so a key that named the executable could not be built before that
+     probe answered. The "compiler" probe keeps the settings-only key; every probe that RUNS the
+     compiler keys on the executable it will run. *)
+  let full_digest =
+    lazy
+      (let key =
+         String.concat ~sep:"\000"
+           [
+             Lazy.force key_digest; compiler_executable_identity (compiler_command_ref.contents ());
            ]
        in
        String.prefix (Stdlib.Digest.to_hex (Stdlib.Digest.string key)) 16)
   in
   fun ~name ->
     Option.map (Lazy.force probe_cache_dir) ~f:(fun dir ->
-        Stdlib.Filename.concat dir
-          (Printf.sprintf "ocannl_cc_probe_%s_%s.txt" name (Lazy.force key_digest)))
+        let digest =
+          if String.equal name "compiler" then Lazy.force key_digest else Lazy.force full_digest
+        in
+        Stdlib.Filename.concat dir (Printf.sprintf "ocannl_cc_probe_%s_%s.txt" name digest))
 
 (* [compute] must be deterministic given the key above: its result is what every later process on
    this machine will use. [validate] rejects a cached value the caller cannot interpret, so that a
@@ -162,6 +260,8 @@ let compiler_command =
     | "" -> Lazy.force resolved
     | command -> command
 
+let () = compiler_command_ref := compiler_command
+
 (* gh-ocannl-164: explicit SIMD flags appended to the compiler invocation. The "auto" default
    probes in two stages (once per process, and once per machine via [cached_probe]). Stage 1
    test-compiles a translation unit that #errors
@@ -184,9 +284,13 @@ let probe_compiles ?(mode = `Compile) ~flags ~data () =
     try
       Stdio.Out_channel.write_all src ~data;
       let compile_only = match mode with `Compile -> "-c " | `Link -> "" in
+      (* Quoted: [temp_file] inherits the system temp directory, which can contain whitespace (a
+         custom TMPDIR, and routinely on Windows), and an unquoted path would split into arguments
+         and fail the probe -- silently, since a failed probe is indistinguishable from a negative
+         answer here (Codex P1 on PR #337). *)
       let cmd =
-        Printf.sprintf "%s %s %s%s -o %s > %s 2>&1" (compiler_command ()) flags compile_only src out
-          log
+        Printf.sprintf "%s %s %s%s -o %s > %s 2>&1" (compiler_command ()) flags compile_only
+          (Stdlib.Filename.quote src) (Stdlib.Filename.quote out) (Stdlib.Filename.quote log)
       in
       Stdlib.Sys.command cmd = 0
     with _ -> false
@@ -490,6 +594,124 @@ let parallel_grid_chunks_setting () =
      pinning, silently mis-sizing the grid decomposition of a pinned run. *)
   | _ -> 4 * effective_pool_width ()
 
+(* gh-ocannl-572: the codegen knobs of this backend, as one signature for the autotune disk-cache
+   key. They are consulted when a kernel is rendered and compiled -- after the lowered code the
+   canonical digest names -- so two processes differing only in them digest identically while
+   emitting different kernels, which is precisely the shape gh-ocannl-568 measured at 5.9x when a
+   tf32-tuned winner replayed under default numerics. [cc_vector_bytes=0] degrades a [Vectorized]
+   winner to serial lanes, [cc_parallel_grid=none] a Grid-parallel one to a serial loop, and the
+   compiler flags decide what the emitted C becomes; a schedule crowned under one such regime is a
+   measurement from another machine's worth of evidence.
+
+   Resolved values, not raw settings: "auto" means a different thing per machine, and the resolvers
+   are already forced by any compile that reaches here (the pool tag alone forces the parallel-grid
+   probe). The pool signature itself is a separate key component and is not repeated here. *)
+(* The flags say what was ASKED for; this says what the toolchain will actually do with it (Codex
+   P1 on PR #337). [cc_backend_arch_flags=auto] resolves to the spelling [-mcpu=native], and
+   [compiler_command ()] usually to the word [cc] -- so two machines sharing a cache directory can
+   hold identical keys while targeting different microarchitectures, or the same one through
+   different compiler versions, and one machine's winner poisons the other's measurements. The
+   compiler's own predefined macros under the configured flags fingerprint both at once
+   ([__clang_major__], [__AVX2__], [__ARM_FEATURE_FP16_VECTOR_ARITHMETIC], ...): one subprocess,
+   cached per machine like every other probe. A toolchain that cannot dump them degrades to the
+   flag spelling, which is what the tag had before. *)
+let target_fingerprint =
+  lazy
+    (cached_probe ~name:"target"
+       ~compute:(fun () ->
+         let src = Stdlib.Filename.temp_file "ocannl_cc_probe_" ".c" in
+         let out = Stdlib.Filename.temp_file "ocannl_cc_probe_" ".txt" in
+         let log = Stdlib.Filename.temp_file "ocannl_cc_probe_" ".log" in
+         let flags = String.strip (arch_flags () ^ " " ^ simd_flags ()) in
+         let dumped =
+           try
+             Stdio.Out_channel.write_all src ~data:"";
+             let cmd =
+               Printf.sprintf "%s %s -dM -E %s > %s 2> %s" (compiler_command ()) flags
+                 (Stdlib.Filename.quote src) (Stdlib.Filename.quote out)
+                 (Stdlib.Filename.quote log)
+             in
+             Stdlib.Sys.command cmd = 0
+           with _ -> false
+         in
+         let fingerprint =
+           if not dumped then None
+           else
+             try
+               let data = Stdio.In_channel.read_all out in
+               (* An empty dump is a compiler that accepted the flags and printed nothing: no
+                  fingerprint, not a fingerprint of nothing. *)
+               if String.is_empty (String.strip data) then None
+               else Some (String.prefix (Stdlib.Digest.to_hex (Stdlib.Digest.string data)) 16)
+             with _ -> None
+         in
+         List.iter [ src; out; log ] ~f:(fun f -> try Stdlib.Sys.remove f with _ -> ());
+         Option.value fingerprint ~default:"no-target-fingerprint")
+       ())
+
+let codegen_tag () =
+  let parts =
+    [
+      compiler_command ();
+      Lazy.force target_fingerprint;
+      Int.to_string (optimization_level ());
+      Bool.to_string (fast_math_enabled ());
+      Option.value (fp_contract_flag ()) ~default:"fp-contract-default";
+      arch_flags ();
+      simd_flags ();
+      Int.to_string (vector_bytes_setting ());
+      (match fp16_arithmetic_support () with
+      | `None -> "fp16-none"
+      | `Promoted -> "fp16-promoted"
+      | `Native -> "fp16-native");
+    ]
+    (* The pool-parallel Grid rendering, and only when there IS one: with the grid syntax resolved
+       to [`None], [C_syntax.collect_parallel_grid] returns before the chunk count or the
+       privatization cap can reach the emitted code, so hashing them would retune identical serial
+       kernels (Codex P2 on PR #337). *)
+    @
+    match parallel_grid_syntax_setting () with
+    | `None -> [ "grid-none" ]
+    | (`Dispatch | `Openmp) as mode ->
+        let runtime_controls =
+          match mode with
+          | `Dispatch -> []
+          | `Openmp ->
+              (* The OpenMP runtime's own controls decide the team every Grid loop executes on, and
+                 they move nothing the pool tag is derived from -- that is process affinity (Codex
+                 P1 on PR #337). OMP_NUM_THREADS=1 against 16 is the difference between a serial and
+                 a parallel machine, which is the whole ranking; OMP_STACKSIZE bounds what a
+                 privatized candidate may put on a worker's stack, so a winner crowned under a
+                 raised stack must not replay under the default one; the wait policy decides whether
+                 idle workers spin, which is most of a small kernel's repeat cost; and the runtimes'
+                 own affinity variables place the team on cores the process mask does not name. Read
+                 only here: libdispatch reads none of them.
+
+                 A complete list is not on offer -- an OpenMP runtime has dozens of variables, and
+                 vendor ones keep arriving -- so this covers the standard team, stack, wait and
+                 affinity controls plus libgomp's and the Intel runtime's common equivalents
+                 (including [GOMP_STACKSIZE], which libgomp honors when [OMP_STACKSIZE] is unset:
+                 Codex P1 on PR #337). An unlisted variable degrades to what everything did before
+                 this component existed: a shared key across two timing regimes. What is
+                 deliberately absent is [OMP_SCHEDULE]: the emitted pragma is
+                 [schedule(static)], which the variable cannot reach, so keying on it would only
+                 retune identical loops. *)
+              List.map
+                [ "OMP_NUM_THREADS"; "OMP_DYNAMIC"; "OMP_THREAD_LIMIT"; "OMP_PROC_BIND";
+                  "OMP_PLACES"; "OMP_MAX_ACTIVE_LEVELS"; "OMP_STACKSIZE"; "OMP_WAIT_POLICY";
+                  "GOMP_STACKSIZE"; "GOMP_CPU_AFFINITY"; "GOMP_SPINCOUNT"; "KMP_AFFINITY";
+                  "KMP_BLOCKTIME" ]
+                ~f:(fun var -> var ^ "=" ^ Option.value (Stdlib.Sys.getenv_opt var) ~default:"")
+        in
+        ((match mode with `Dispatch -> "grid-dispatch" | `Openmp -> "grid-openmp")
+        :: runtime_controls)
+        @ [
+            Int.to_string (parallel_grid_chunks_setting ());
+            Int.to_string (Lazy.force C_syntax.per_chunk_private_bytes_cap);
+          ]
+  in
+  String.prefix (Stdlib.Digest.to_hex (Stdlib.Digest.string (String.concat ~sep:"\000" parts))) 8
+
 module Tn = Tnode
 
 type library = { lib : (Dl.library[@sexp.opaque]); libname : string } [@@deriving sexp_of]
@@ -560,8 +782,14 @@ let%track7_sexp c_compile_and_load ~f_path =
     |> List.filter_opt |> String.concat ~sep:" "
   in
   let cmdline : string =
-    Printf.sprintf "%s %s %s -o %s %s > %s 2>&1" (compiler_command ()) f_path compiler_flags libname
-      kernel_link_flags temp_log
+    (* Quoted for the same reason as the probes': these paths sit under the build or the system temp
+       directory, either of which can contain whitespace, and an unquoted one splits into arguments
+       and fails every compile with a "this is a bug in OCANNL" report against a command the shell
+       never saw whole. *)
+    Printf.sprintf "%s %s %s -o %s %s > %s 2>&1" (compiler_command ())
+      (Stdlib.Filename.quote f_path) compiler_flags (Stdlib.Filename.quote libname)
+      kernel_link_flags
+      (Stdlib.Filename.quote temp_log)
   in
   (* Debug: log the command if debugging is enabled *)
   [%log3 "command", cmdline];

@@ -239,14 +239,14 @@ let () =
   in
   p "the hand-crafted entry has a prelude and per-segment schedules"
     ((not (List.is_empty !prelude_saved)) && List.length !segments_assoc >= 2);
+  let slimits = Context.hardware_limits sctx in
   SC.store ~dir:cache_dir
-    ~key:
-      (SC.cache_key ?pool_tag:(Context.hardware_limits sctx).Ir.Backend_intf.worker_pool_tag
-         base_canon ~backend:backend_name)
+    ~key:(SC.cache_key ~limits:slimits base_canon ~backend:backend_name)
     {
       SC.version = SC.entry_version;
       backend = backend_name;
       numerics = SC.numerics_tag ();
+      codegen = Some (SC.codegen_tag ~limits:slimits ());
       source_digest = SC.digest base_canon;
       saved = !prelude_saved;
       segments = Some !segments_assoc;

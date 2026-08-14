@@ -1,0 +1,154 @@
+Cache-key components (Schedule_cache.key_components): digest, backend, numerics, codegen, pool
+Keys read at codegen (c_syntax.ml, cc_backend.ml, cuda_backend.ml, hip_backend.ml, metal_backend.ml, schedule_cache.ml): 29
+
+aggregate -- picks the values other keys take; each of those carries its own classification
+  no_config_file
+  profile
+
+code-borne (digest) -- an optimizer decision: it changes the code that comes out of lowering
+  enable_device_only
+  inline_complex_computations
+  inline_scalar_constexprs
+  inline_simple_computations
+  memory_budget
+  virtualize_max_inline_reduction
+  virtualize_max_visits
+
+code-borne (digest) -- it changes the assignments the front end builds, hence the code they lower to
+  default_prec
+  default_prng_variant
+  limit_constant_fill_size
+
+code-borne (digest) -- it decides a tensor node's placement class, which the canonical digest carries: identical code over [Local] scratch and over an [On_device] buffer generates different kernels
+  stack_threshold_in_bytes
+
+keyed: backend -- it decides which backend compiles, and the backend name is that component
+  backend [read at codegen]
+
+keyed: numerics -- the numerics policy is consulted at codegen and by the autotune tile-shape choice, never in the lowered code (gh-ocannl-568)
+  fp16_arithmetic
+  narrow_compute_f32
+  tf32_matmuls
+
+keyed: pool -- it decides the worker pool timings execute on, and CPU crowns do not transfer across pools (gh-ocannl-530)
+  cc_pool_core_class [read at codegen]
+
+keyed: codegen -- a cc-backend codegen knob: rendering or compiling a kernel reads it, after the lowered code the digest names
+  cc_backend_arch_flags [read at codegen]
+  cc_backend_compiler_command [read at codegen]
+  cc_backend_fast_math [read at codegen]
+  cc_backend_fp_contract [read at codegen]
+  cc_backend_optimization_level [read at codegen]
+  cc_backend_simd_flags [read at codegen]
+  cc_fp16_arithmetic [read at codegen]
+  cc_grid_private_bytes_cap [read at codegen]
+  cc_parallel_chunks [read at codegen]
+  cc_parallel_grid [read at codegen]
+  cc_vector_bytes [read at codegen]
+
+keyed: codegen -- a codegen knob whose effect is not a property of the lowered code. The two debug gates bite only at log_level > 1, so what the tag hashes is the effective predicates -- [Utils.debug_log_from_routines], which rewrites the kernel and disables the parallel-grid, vectorized and mma renderings, for every backend; [Utils.with_runtime_debug], which switches the CUDA and HIP compilers to debug compilation, in those two backends' own tags, since no other compiler reads it. That is also why log_level belongs here, without an ordinary verbosity bump churning cache keys. prefer_backend_uniformity does not pick a backend: it picks how the C-family backends spell their logging expressions, so it is hashed only once logging actually reaches the kernel
+  big_models
+  debug_log_from_routines [read at codegen]
+  debug_log_to_stream_files [read at codegen]
+  large_models [read at codegen]
+  log_level [read at codegen]
+  output_debug_files_in_build_directory [read at codegen]
+  prefer_backend_uniformity [read at codegen]
+
+keyed: codegen -- it changes the emitted code or the mechanics a search measures in, without being a property of the lowered code: an aliasing candidate's kernel parameter drops its [restrict] qualifier (the liveness planner may overlap its bytes, gh-ocannl-489), and GPU graph capture fires only for multi-segment routines, so it moves a fissioned candidate's launch overhead relative to a whole-routine one
+  buffer_aliasing [read at codegen]
+  gpu_graph_capture [read at codegen]
+
+search-shaping -- it defines the untuned default pipeline, which a search seeds from and reports against; a cached winner carries its own ops and replays without consulting it ([Schedule.default_schedule_fingerprint] records these for the [default_ms] diagnostic)
+  automatic_cpu_schedule
+  automatic_gpu_schedule
+  cpu_schedule_min_parallel
+  gpu_schedule_block_size
+  gpu_schedule_min_parallel
+  schedule_fission
+
+search-shaping -- it steers the search: how wide, how long, what is proposed, what is pruned, how candidates are ranked, and when a candidate's failure ends the search
+  autotune_beam_width
+  autotune_bound_pruning
+  autotune_calibration_file
+  autotune_keep_fraction
+  autotune_repeats
+  autotune_rounds
+  autotune_search
+  autotune_split_reduce_max_sites
+  model_default_geometry_lattice
+  model_default_placements
+  model_default_schedule
+  model_peak_flops
+  model_peak_memory_bandwidth
+  strict_failure_classification
+
+search-shaping -- it makes the tuner try alternative inlining decisions; each alternative is a different program and keys on its own digest
+  tune_flip_ordering
+  tune_inline_flips
+
+execution-neutral -- startup and configuration-sourcing chatter
+  log_config_sourcing
+  never_capture_stdout
+  suppress_welcome_message
+
+execution-neutral -- debug artifacts and where they go: the files are written beside the run, the kernels are what they would have been
+  autotune_cache_dir
+  autotune_log
+  build_files_prefix
+  clean_up_build_files_on_startup
+  clean_up_log_files_on_startup
+  log_buffer_aliasing
+  log_memory_budget
+  output_dlls_in_build_directory [read at codegen]
+  output_prec_in_ll_files
+  schedule_log_declines [read at codegen]
+  schedule_log_launches
+
+execution-neutral -- ppx_minidebug logging of the library's own execution
+  debug_backend
+  debug_highlight_pcre
+  debug_highlights
+  debug_log_prune_upto
+  debug_log_truncate_children
+  debug_scope_id_pairs
+  diff_ignore_pattern_pcre
+  diff_max_distance_factor
+  elapsed_times
+  hyperlink_prefix
+  location_format
+  log_file_stem
+  log_main_domain_to_stdout
+  logs_print_scope_ids
+  logs_verbose_scope_ids
+  prev_run_prefix
+  snapshot_every_sec
+  time_tagged
+  toc_entry_minimal_depth
+  toc_entry_minimal_size
+  toc_entry_minimal_span
+
+execution-neutral -- a check that can refuse or report, but never changes what is emitted
+  cc_backend_post_compile_timeout [read at codegen]
+  cc_backend_verify_codesign [read at codegen]
+  check_half_prec_constants_cutoff
+  hip_scratch_validation [read at codegen]
+  legality_crosscheck
+  max_shape_error_origins
+
+execution-neutral -- identifier spelling in generated code and in printouts
+  cd_ident_style
+  ll_ident_style
+  print_decimals_precision
+
+execution-neutral -- host-side execution mechanics: where buffers sit, how many devices a scheduler opens, how launches are issued, how initialization is seeded, how checkpoint payloads reach host memory. The kernels are unchanged, and every candidate of a search meets the same mechanics as every other
+  checkpoint_load_mmap
+  cuda_printf_fifo_size [read at codegen]
+  fixed_state_for_init
+  hip_printf_fifo_size [read at codegen]
+  multidev_num_devices
+
+execution-neutral -- memoization of toolchain probes: it changes how long resolving a setting takes, not what it resolves to -- and the resolved values are what the codegen tag records
+  cc_backend_probe_cache [read at codegen]
+
+OK: 110 config keys classified against 5 cache-key components.

@@ -428,6 +428,59 @@ let numerics_tag () =
     (Stdlib.Digest.to_hex (Stdlib.Digest.string (Numerics.fingerprint (Numerics.get ()))))
     8
 
+(* gh-ocannl-572: the same argument as the numerics tag, for the rest of the settings a backend
+   consults when it renders, compiles or dispatches a kernel. They come in two layers: the
+   backend-independent ones handled here, and the backend's own, which it reports through
+   [hardware_limits.codegen_tag] because only it knows which of its knobs reach its codegen. Neither
+   layer is a property of the lowered code, so neither can reach {!digest}. *)
+let codegen_tag ~(limits : Backend_intf.hardware_limits) () =
+  (* Every key is spelled out at its call site, as an explicit [arg_name] string literal, rather
+     than passed through a helper: that literal IS how the consistency tests find a configuration
+     read ([Test_utils.Config_key_scan]), so a wrapper taking the name as an argument would hide
+     these keys from both the registration check and the classification check -- which a negative
+     control on this very function confirmed while addressing Codex's scan-list finding on
+     PR #337. (For the same reason, prose here avoids spelling the marker the scanner looks for.) *)
+  let gate name value = if value then name else "no-" ^ name in
+  let parts =
+    [
+      (* The whole limits record, not just the backend's [codegen_tag] field (Codex P1 on PR #337):
+         [backend] is the backend NAME, so without this two GPUs of one backend -- differing in
+         compute capability, mma formats, shared-memory capacity, thread limits -- share every key
+         while generating, rendering and timing candidates differently. The record is exactly the
+         device description schedule construction already consults, so hashing it keeps the key as
+         discriminating as the decisions it stands for, and a device's own [codegen_tag] rides
+         along in it. *)
+      Sexp.to_string (Backend_intf.sexp_of_hardware_limits limits);
+      (if Utils.settings.large_models then "wide-index" else "narrow-index");
+      (* The EFFECTIVE predicate, not the raw flag (Codex P1 on PR #337): the gate additionally
+         requires [log_level > 1], so hashing the flag alone would give the logged and the unlogged
+         regime one key — and hashing [log_level] itself would churn keys on an ordinary verbosity
+         bump that changes no kernel. Routine logging rewrites the kernel and disables the
+         parallel-grid, vectorized and mma renderings. Its sibling [Utils.with_runtime_debug] lives
+         in the CUDA and HIP tags instead: only their compilers read it ([--device-debug] / [-g]),
+         so hashing it here would re-tune cc and Metal for nothing (Codex P2). *)
+      gate "routine-logs" (Utils.debug_log_from_routines ());
+      (* Where routine logs go matters only when there are routine logs: with the gate off, nothing
+         generated or timed depends on it, and hashing it would re-tune for nothing (Codex P2 on
+         PR #337). *)
+      gate "stream-logs"
+        (Utils.debug_log_from_routines ()
+        && Utils.get_global_flag ~default:false ~arg_name:"debug_log_to_stream_files");
+      (* Not which backend runs — how the C-family backends spell their logging expressions
+         ([full_printf_support]: [%g] vs scaled integers). Reaches emitted code only through the
+         logging statements, hence the same gate as the stream-log routing above. *)
+      gate "uniform-logs"
+        (Utils.debug_log_from_routines ()
+        && Utils.get_global_flag ~default:false ~arg_name:"prefer_backend_uniformity");
+      (* An aliasing candidate's kernel parameter drops its [restrict] qualifier, since the
+         link-time liveness planner may overlap it with another parameter's bytes (gh-ocannl-489):
+         a real change to the emitted C, and to what the C compiler may then assume. Codex P1 on
+         PR #337. *)
+      gate "buffer-aliasing" (Utils.get_global_flag ~default:false ~arg_name:"buffer_aliasing");
+    ]
+  in
+  String.prefix (Stdlib.Digest.to_hex (Stdlib.Digest.string (String.concat ~sep:"\000" parts))) 8
+
 type entry = {
   version : int;
   backend : string;
@@ -435,6 +488,10 @@ type entry = {
       (** {!numerics_tag} of the policy the search ran under (gh-ocannl-568). Redundant with the
           key, which carries the same tag — a self-description of the file, and a guard for a
           hand-moved or hand-written entry. *)
+  codegen : string option; [@sexp.option]
+      (** {!codegen_tag} of the codegen configuration the search ran under (gh-ocannl-572), the
+          same self-description as [numerics] and with the same belt-and-braces role. Optional so
+          that entries written before this field existed stay readable. *)
   source_digest : string;
   saved : saved_schedule;
   segments : (string * saved_schedule) list option; [@sexp.option]
@@ -462,11 +519,27 @@ let sanitize name =
   String.map name ~f:(fun c ->
       if Char.is_alphanum c || Char.equal c '-' || Char.equal c '_' then c else '_')
 
-let cache_key ?pool_tag canonical ~backend =
-  canonical.digest ^ "-" ^ sanitize backend ^ "-n" ^ numerics_tag ()
-  ^ (* The worker-pool signature (gh-ocannl-530): CPU crowns do not transfer across pools, so a
-       pool change re-tunes instead of replaying. [None] (GPU backends) leaves keys unchanged. *)
-  match pool_tag with None -> "" | Some tag -> "-p" ^ sanitize tag
+(* The named components of a cache key, in the order they are concatenated. This list DRIVES
+   {!cache_key} (each name dispatches to an arm below, and an unknown name raises), so the
+   enumeration cannot go stale against the implementation — which is what makes it usable as the
+   thing the digest-completeness registry classifies config keys against (gh-ocannl-572). *)
+let key_components = [ "digest"; "backend"; "numerics"; "codegen"; "pool" ]
+
+let cache_key ~(limits : Backend_intf.hardware_limits) canonical ~backend =
+  let component = function
+    | "digest" -> canonical.digest
+    | "backend" -> sanitize backend
+    | "numerics" -> "n" ^ numerics_tag ()
+    | "codegen" -> "c" ^ codegen_tag ~limits ()
+    (* The worker-pool signature (gh-ocannl-530): CPU crowns do not transfer across pools, so a
+       pool change re-tunes instead of replaying. [None] (GPU backends) contributes nothing. *)
+    | "pool" -> (
+        match limits.worker_pool_tag with None -> "" | Some tag -> "p" ^ sanitize tag)
+    | other -> invalid_arg ("Schedule_cache.cache_key: unhandled key component " ^ other)
+  in
+  String.concat ~sep:"-"
+    (List.filter_map key_components ~f:(fun name ->
+         match component name with "" -> None | part -> Some part))
 
 let rec ensure_dir dir =
   if String.is_empty dir || String.equal dir "." || String.equal dir "/" then ()

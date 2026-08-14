@@ -34,6 +34,24 @@ let pool_slot_msl_typ () = if pool_slot_is_64 () then "ulong" else "uint"
    docs/proposals/tensorize-mma.md's unverified-T3 episode). *)
 let log_declines = lazy (Utils.get_global_flag ~default:false ~arg_name:"schedule_log_declines")
 
+(* Per-chunk private tiles live on the pool workers' stacks; libdispatch workers get 512KB by
+   default, so cap their combined footprint per Grid loop (declining just keeps the loop serial).
+   Config [cc_grid_private_bytes_cap] (gh-ocannl-474): raise it when the pool's worker stacks are
+   known larger (e.g. under [OMP_STACKSIZE]) — for instance to let a grid-outermost packed GEMM
+   privatize a whole B~ panel per chunk (gh-ocannl-475). At the top level, not inside {!C_syntax},
+   because it is also one of the codegen knobs the cc backend's cache-identity tag covers
+   (gh-ocannl-572) — the resolved cap must be one value, not two spellings of a default. *)
+let per_chunk_private_bytes_cap =
+  lazy
+    (match
+       Int.of_string
+         (String.strip
+            (Utils.get_global_arg ~arg_name:"cc_grid_private_bytes_cap" ~default:"262144"))
+     with
+    | n when n > 0 -> n
+    | _ -> 256 * 1024
+    | exception _ -> 256 * 1024)
+
 (* Census of [Tile_mma] statement renderings, collected during codegen while [mma_census_enabled]
    (gh-ocannl-479): [Autotune] flips it around candidate compiles, because "the tensorized candidate
    lost" and "the tensorized candidate never ran tensorized" must be distinguishable in tuning logs.
@@ -1504,22 +1522,6 @@ module C_syntax (B : C_syntax_config) = struct
         if Lazy.force log_declines then
           Stdlib.Printf.eprintf "declined: %s: %s\n%!" !current_kernel_name s)
       fmt
-
-  (* Per-chunk private tiles live on the pool workers' stacks; libdispatch workers get 512KB by
-     default, so cap their combined footprint per Grid loop (declining just keeps the loop serial).
-     Config [cc_grid_private_bytes_cap] (gh-ocannl-474): raise it when the pool's worker stacks are
-     known larger (e.g. under [OMP_STACKSIZE]) — for instance to let a grid-outermost packed GEMM
-     privatize a whole B~ panel per chunk (gh-ocannl-475). *)
-  let per_chunk_private_bytes_cap =
-    lazy
-      (match
-         Int.of_string
-           (String.strip
-              (Utils.get_global_arg ~arg_name:"cc_grid_private_bytes_cap" ~default:"262144"))
-       with
-      | n when n > 0 -> n
-      | _ -> 256 * 1024
-      | exception _ -> 256 * 1024)
 
   (* Shared traversal for the pool-parallel Grid analyses below: fires [access] for every
      tensor-node access event in program order (a [Set]'s right-hand side fires before its write).

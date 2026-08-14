@@ -2321,7 +2321,8 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
   release_baseline_hook := release_baseline;
   let base_digest = SC.digest canon in
   let use_cache = (not (String.is_empty cache_dir)) && SC.complete canon in
-  let key = SC.cache_key ?pool_tag:limits.Ir.Backend_intf.worker_pool_tag canon ~backend in
+  let codegen_tag = SC.codegen_tag ~limits () in
+  let key = SC.cache_key ~limits canon ~backend in
   let compile_spec =
     compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu
       ~provenance:Outcome.Candidate search_ctx comp bindings
@@ -2377,13 +2378,16 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
   let cached =
     if use_cache then
       match SC.lookup ~dir:cache_dir ~key with
-      (* The numerics check is belt-and-braces: [key] already carries the same tag (gh-ocannl-568),
-         so a policy-mismatched entry normally lives in a different file and is never looked up.
-         It catches a hand-moved or hand-written entry, which is the shape of the misdirection this
-         guards against — a tf32-vs-default A/B whose cache directories got crossed. *)
+      (* The numerics and codegen checks are belt-and-braces: [key] already carries both tags
+         (gh-ocannl-568, gh-ocannl-572), so a regime-mismatched entry normally lives in a different
+         file and is never looked up. They catch a hand-moved or hand-written entry, which is the
+         shape of the misdirection this guards against — a tf32-vs-default A/B whose cache
+         directories got crossed. An entry from before the codegen field existed carries no claim
+         about its regime, so it is not rejected on that ground. *)
       | Some entry
         when String.equal entry.SC.source_digest base_digest
-             && String.equal entry.SC.numerics (SC.numerics_tag ()) -> (
+             && String.equal entry.SC.numerics (SC.numerics_tag ())
+             && Option.value_map entry.SC.codegen ~default:true ~f:(String.equal codegen_tag) -> (
           let spec =
             match entry.SC.segments with
             (* A fissioned entry with a non-empty [saved] is a split-reduce winner: [saved] is the
@@ -3333,6 +3337,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                SC.version = SC.entry_version;
                backend;
                numerics = SC.numerics_tag ();
+               codegen = Some codegen_tag;
                source_digest = base_digest;
                saved;
                segments;

@@ -82,7 +82,7 @@ let () =
   let canon = Option.value_exn ~here:[%here] !canon in
   let key_of policy =
     Numerics.set_policy policy;
-    SC.cache_key canon ~backend
+    SC.cache_key ~limits:(Context.hardware_limits ctx) canon ~backend
   in
   let policy_a = { base with Numerics.tf32_matmuls = false } in
   let policy_b = { base with Numerics.tf32_matmuls = true } in
