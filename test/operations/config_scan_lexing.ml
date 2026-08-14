@@ -125,42 +125,52 @@ let other y = get ~arg_name:y|ocaml},
     ( "a pattern binding is its own definition, with no name to exempt",
       {ocaml|let get_global_arg x = x
 let () = ignore (get ~arg_name:name)|ocaml},
-      None );
+      Some "<unnamed>" );
     ( "a binding inside a module is qualified, so it cannot borrow an exemption",
       {ocaml|let get_global_arg x = x
 module M = struct
   let inner () = get ~arg_name:name
 end|ocaml},
-      Some "M.inner" );
+      Some "M.inner (nested)" );
     ( "a nested binding reusing an exempt name stays qualified",
       {ocaml|let real x = x
 module Sneaky = struct
   let get_global_arg name = get ~arg_name:name
 end|ocaml},
-      Some "Sneaky.get_global_arg" );
+      Some "Sneaky.get_global_arg (nested)" );
     ( "a local module is qualified too",
       {ocaml|let real x = x
 let f () =
   let module M = struct let get_global_arg name = get ~arg_name:name end in
   M.get_global_arg|ocaml},
-      Some "M.get_global_arg" );
+      Some "M.get_global_arg (nested)" );
     ( "a binding inside open struct is not bare",
       {ocaml|let real x = x
 open struct
   let get_global_arg name = get ~arg_name:name
 end|ocaml},
-      Some "_.get_global_arg" );
+      Some "_.get_global_arg (nested)" );
     ( "a binding inside include struct is not bare",
       {ocaml|let real x = x
 include struct
   let get_global_arg name = get ~arg_name:name
 end|ocaml},
-      Some "_.get_global_arg" );
+      Some "_.get_global_arg (nested)" );
     ( "a binding inside a structure-level extension is not bare",
       {ocaml|let real x = x
 [%%ext
 let get_global_arg name = get ~arg_name:name]|ocaml},
-      Some "_.get_global_arg" );
+      Some "_.get_global_arg (nested)" );
+    (* The name here is NOT prefixed -- a packed module is not one of the forms the path machinery
+       knows -- and that is the point: the exemption reads `top_level`, which is false because this
+       binding is not one of the root structure's own. A form the reader-facing path misses still
+       cannot widen an exemption. *)
+    ( "a binding inside a first-class module expression is not bare",
+      {ocaml|let real x = x
+let m = (module struct
+  let get_global_arg name = get ~arg_name:name
+end : S)|ocaml},
+      Some "get_global_arg (nested)" );
     ( "siblings of a let-and group are told apart",
       {ocaml|let get_global_arg x = x
 and other name = get ~arg_name:name|ocaml},
@@ -221,9 +231,13 @@ let () =
         printf "FAIL: non-literal uses -- %s: expected %d, found %d\n" name expected found));
   List.iter definition_cases ~f:(fun (name, source, expected) ->
       let definitions = Scan.definitions source in
+      let render (d : Scan.definition) =
+        Option.value d.Scan.name ~default:"<unnamed>"
+        ^ if d.Scan.top_level then "" else " (nested)"
+      in
       let found =
         List.filter_map (Scan.label_uses source) ~f:(fun u ->
-            Scan.definition_at definitions u.Scan.offset)
+            Option.map (Scan.definition_at definitions u.Scan.offset) ~f:render)
         |> List.hd
       in
       if Option.equal String.equal found expected then printf "ok: enclosing definition -- %s\n" name

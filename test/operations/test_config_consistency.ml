@@ -199,15 +199,29 @@ let () =
           | Some _ -> ()
           | None -> (
               let offset = use.Config_key_scan.offset in
-              match enclosing offset with
-              | Some d when Set.mem known d ->
-                  forwarding_hit := Set.add !forwarding_hit (base ^ ":" ^ d)
-              | definition ->
+              let definition = enclosing offset in
+              (* An exemption reaches a TOP-LEVEL binding of the file and nothing else: whatever
+                 nesting a same-named binding hides in, it has to earn its own exemption. *)
+              let exempt_name =
+                match definition with
+                | Some { Config_key_scan.name = Some name; top_level = true; _ }
+                  when Set.mem known name ->
+                    Some name
+                | _ -> None
+              in
+              match exempt_name with
+              | Some name -> forwarding_hit := Set.add !forwarding_hit (base ^ ":" ^ name)
+              | None ->
+                  let where =
+                    match definition with
+                    | None -> "<no enclosing definition>"
+                    | Some { Config_key_scan.name; top_level; _ } ->
+                        Option.value name ~default:"<unnamed binding>"
+                        ^ if top_level then "" else " (nested)"
+                  in
                   fail
                   @@ Printf.sprintf "%s does not spell the config key as a string literal, in %s: %s"
-                       base
-                       (Option.value definition ~default:"<no enclosing definition>")
-                       (line_at original offset))));
+                       base where (line_at original offset))));
   (* An exemption is a claim that a named function forwards a key; a claim that stops being true
      is stale, not a free pass, so each one has to earn its place on every run. *)
   let exempted_sites =

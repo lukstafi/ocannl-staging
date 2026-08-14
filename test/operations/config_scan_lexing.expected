@@ -35,6 +35,7 @@ ok: enclosing definition -- a local module is qualified too
 ok: enclosing definition -- a binding inside open struct is not bare
 ok: enclosing definition -- a binding inside include struct is not bare
 ok: enclosing definition -- a binding inside a structure-level extension is not bare
+ok: enclosing definition -- a binding inside a first-class module expression is not bare
 ok: enclosing definition -- siblings of a let-and group are told apart
 ok: enclosing definition -- an ordinary comment quoting a binding is not a definition
 ok: settings read -- a field read

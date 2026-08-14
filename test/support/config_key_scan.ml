@@ -86,19 +86,35 @@ let label_uses content =
   iterator.structure iterator (structure_of content);
   List.rev !uses
 
-(** Every value binding, as (where it starts, where it ends, its name if it has a simple one).
+(** Every value binding: the source range it covers, its name if it has a simple one, and whether
+    it is top-level.
 
-    Two things this has to get right for exemptions to mean anything (Codex P2, round 6):
+    [top_level] is what an exemption may rely on, and it is decided by membership: a binding is
+    top-level exactly when it is one of the root structure's own bindings. That is a closed
+    question. The alternative -- asking whether a binding sits inside any construct that nests --
+    is an open one, and three review rounds spent answering it were three answers short: modules,
+    then [open struct] / [include struct] / extension payloads, then a structure packed inside a
+    first-class module expression. There is no reason to think that list had stopped.
 
-    - each binding carries its OWN range, not its structure item's, or the siblings of a
-      [let … and …] group become indistinguishable and a use in one is read as a use in another;
-    - a binding nested in a module carries its qualified name, so that a [Sneaky.get_global_arg]
-      cannot collect the exemption written for the top-level [get_global_arg]. Bare names are
-      therefore exactly the top-level ones, which is what an exemption list means to name.
+    [name] keeps its module path where one is known, because a report naming [Sneaky.get_global_arg]
+    is worth more than one naming [get_global_arg]. It is for the reader only: a nesting form this
+    misses still yields [top_level = false], so it cannot widen an exemption.
 
-    Pattern bindings ([let () = …]) are included with no name: a use inside one belongs to it, and
-    it has nothing an exemption could match. *)
+    Each binding carries its OWN range, not its structure item's, or the siblings of a
+    [let … and …] group become indistinguishable. Pattern bindings ([let () = …]) are included with
+    no name: a use inside one belongs to it, and it has nothing an exemption could match. *)
+type definition = { start : int; stop : int; name : string option; top_level : bool }
+
 let definitions content =
+  let ast = structure_of content in
+  let root_bindings =
+    List.concat_map ast ~f:(fun item ->
+        match item.pstr_desc with
+        | Pstr_value (_, bindings) ->
+            List.map bindings ~f:(fun binding -> binding.pvb_loc.loc_start.pos_cnum)
+        | _ -> [])
+    |> Set.of_list (module Int)
+  in
   let items = ref [] in
   let path = ref [] in
   let qualify name = String.concat ~sep:"." (List.rev (name :: !path)) in
@@ -123,40 +139,36 @@ let definitions content =
                         Some (qualify txt)
                     | _ -> None
                   in
+                  let start = binding.pvb_loc.loc_start.pos_cnum in
                   items :=
-                    (binding.pvb_loc.loc_start.pos_cnum, binding.pvb_loc.loc_end.pos_cnum, name)
+                    {
+                      start;
+                      stop = binding.pvb_loc.loc_end.pos_cnum;
+                      name;
+                      top_level = Set.mem root_bindings start;
+                    }
                     :: !items);
               Ast_iterator.default_iterator.structure_item self item
           | Pstr_module { pmb_name = { txt = name; _ }; _ } ->
               within
                 (Option.value name ~default:"_")
                 (fun () -> Ast_iterator.default_iterator.structure_item self item)
-          (* Anonymous nesting: [open struct … end], [include struct … end] and a structure-level
-             extension payload all carry bindings that no module name introduces (Codex P2, round
-             8). A prefix is what keeps them out of the exemption list: an exemption names a
-             hand-audited top-level function, so anything defined through an anonymous structure has
-             to re-earn it. If the plumbing is ever refactored that way the staleness check turns
-             the suite red, which is the loud failure this trades for a silent one. The same prefix
-             covers a recursive-module group, where the point is likewise only that nothing inside
-             is bare. *)
+          (* Anonymous nesting -- [open struct … end], [include struct … end], an extension payload,
+             a recursive-module group -- has no name to borrow, so the reader gets a placeholder.
+             Correctness does not ride on this list being complete; [top_level] does that. *)
           | Pstr_recmodule _ | Pstr_open _ | Pstr_include _ | Pstr_extension _ ->
               within "_" (fun () -> Ast_iterator.default_iterator.structure_item self item)
-          (* A local [let module M = … in …] needs no case of its own: this compiler represents it
-             as a structure item inside the expression (Pexp_struct_item), so it arrives here and
-             takes its prefix like any other module. *)
           | _ -> Ast_iterator.default_iterator.structure_item self item);
     }
   in
-  iterator.structure iterator (structure_of content);
+  iterator.structure iterator ast;
   List.rev !items
 
 (** The definition an offset sits in: the smallest one containing it, so an inner binding wins over
     an outer one. *)
 let definition_at definitions offset =
-  List.filter definitions ~f:(fun (start, stop, _) -> start <= offset && offset < stop)
-  |> List.min_elt ~compare:(fun (a_start, a_stop, _) (b_start, b_stop, _) ->
-         Int.compare (a_stop - a_start) (b_stop - b_start))
-  |> Option.bind ~f:(fun (_, _, name) -> name)
+  List.filter definitions ~f:(fun d -> d.start <= offset && offset < d.stop)
+  |> List.min_elt ~compare:(fun a b -> Int.compare (a.stop - a.start) (b.stop - b.start))
 
 (** The keys [content] reads through the label.
 
