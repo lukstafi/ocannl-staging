@@ -56,11 +56,15 @@ let settings_keys_in_source content =
     in
     String.sub content ~pos ~len:(stop - pos)
   in
+  (* Qualified: [Low_level.virtualize_settings] and friends are records of the same shape whose
+     field names are NOT config keys ([max_visits] against [virtualize_max_visits]), so an
+     unqualified match would attribute reads to keys that do not exist. *)
+  let marker = "Utils.settings." in
   let rec fields i acc =
-    match String.substr_index ~pos:i content ~pattern:"settings." with
+    match String.substr_index ~pos:i content ~pattern:marker with
     | None -> acc
     | Some start ->
-        let field = ident_at (start + String.length "settings.") in
+        let field = ident_at (start + String.length marker) in
         fields (start + 1) (if String.is_empty field then acc else field :: acc)
   in
   let predicates =

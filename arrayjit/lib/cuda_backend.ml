@@ -2358,20 +2358,10 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
            simd_vector_bytes = 0;
            native_fp16_arithmetic = false;
            worker_pool_tag = None;
-           (* gh-ocannl-572: the kernel source is a function of the lowered code, the device
-              capabilities and the numerics policy, all already covered — but graph capture is a
-              dispatch-mechanics regime the search measures in (Codex P1 on PR #337): it fires only
-              for multi-segment routines, so it changes the launch overhead of a fissioned
-              candidate relative to a whole-routine one, and a crown from one regime is not
-              evidence about the other. *)
-           codegen_tag =
-             Some
-               ((if Utils.get_global_flag ~default:true ~arg_name:"gpu_graph_capture" then
-                   "graph-capture"
-                 else "no-graph-capture")
-               (* [--device-debug] / [-g]: this compiler is the only one that reads the predicate,
-                  so it is keyed here rather than for every backend (Codex P2 on PR #337). *)
-               ^ if Utils.with_runtime_debug () then "/device-debug" else "/no-device-debug");
+           (* Filled fresh by the accessor below, not here: both inputs are process-mutable
+              ([Train.CDSL.enable_all_debugs] flips the debug settings at any point), and this
+              record is memoized (Codex P1 on PR #337). *)
+           codegen_tag = None;
            (* Advisory roofline envelope (gh-ocannl-491): documented rough constants for the sm_70+
               discrete-GPU class (RTX-30/40 mid-range: ~15 fp32 TFLOP/s, ~450 GB/s). Per-device
               queries (SM count x clock, memory clock x bus width) are calibration follow-up work;
@@ -2380,7 +2370,23 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
            peak_memory_bandwidth = Some 4.5e11;
          })
     in
-    fun () -> Lazy.force limits
+    (* gh-ocannl-572: the kernel source is a function of the lowered code, the device capabilities
+       and the numerics policy, all covered by the record itself — but two dispatch- and
+       compilation-mechanics regimes are not. Graph capture fires only for multi-segment routines
+       and only without routine logging, so it changes a fissioned candidate's launch overhead
+       relative to a whole-routine one, and a crown from one regime is not evidence about the other;
+       runtime debug switches this compiler to debug compilation, which no other backend's does.
+       Both are the EFFECTIVE predicates and both are recomputed per call, since the settings behind
+       them are mutable within a process (Codex P1/P2 on PR #337). *)
+    let codegen_tag () =
+      (if
+         Utils.get_global_flag ~default:true ~arg_name:"gpu_graph_capture"
+         && not (Utils.debug_log_from_routines ())
+       then "graph-capture"
+       else "no-graph-capture")
+      ^ if Utils.with_runtime_debug () then "/device-debug" else "/no-device-debug"
+    in
+    fun () -> { (Lazy.force limits) with Backend_intf.codegen_tag = Some (codegen_tag ()) }
 
   (* {2 Failure classification (gh-ocannl-536)}
 

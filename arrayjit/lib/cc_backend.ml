@@ -150,6 +150,12 @@ let probe_cache_path =
              Utils.get_global_arg ~default:"auto" ~arg_name:"cc_backend_arch_flags";
              Utils.get_global_arg ~default:"auto" ~arg_name:"cc_backend_simd_flags";
              Option.value (Stdlib.Sys.getenv_opt "PATH") ~default:"";
+             (* The identity of [ocamlc] itself: with the command setting unset, the "compiler"
+                probe caches what [ocamlc -config] reports, so an OCaml installation upgraded in
+                place would keep naming the previous [c_compiler] -- or one that no longer exists
+                (Codex P1 on PR #337). This is the base key's own executable, the one exemption the
+                two-stage scheme leaves; downstream probes additionally key on the C compiler. *)
+             compiler_executable_identity "ocamlc";
            ]
        in
        String.prefix (Stdlib.Digest.to_hex (Stdlib.Digest.string key)) 16)
