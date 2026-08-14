@@ -1,0 +1,52 @@
+ok: plain call site
+ok: optional-parameter default
+ok: prose in a comment is not a call site
+ok: nested comments close in the right order
+ok: a string inside a comment does not swallow the file
+ok: a quoted string inside a comment is not a nested comment
+ok: a tagged quoted string inside a comment
+ok: a double quote as a character literal does not open a string
+ok: an escaped quote inside a string does not end it
+ok: a backslash-backslash char literal does not eat the closing quote
+ok: a type variable is not a character literal
+ok: a record literal is not a quoted string
+ok: a character literal inside a comment does not open a string
+ok: an extension quoted string inside a comment
+ok: optional application with a literal is a read
+ok: optional application of a variable reads no literal key
+ok: a punned optional argument reads no literal key
+ok: an escaped-newline continuation decodes to the real key
+ok: an escape sequence decodes to the real key
+ok: a typed optional default is still a literal default
+ok: an empty literal names no key, so no key is read
+ok: a call site quoted inside a string literal is not a read
+ok: non-literal uses -- labelled variable
+ok: non-literal uses -- empty literal is still a literal
+ok: non-literal uses -- punned label
+ok: non-literal uses -- optional application of an expression
+ok: non-literal uses -- punned optional
+ok: non-literal uses -- literals are not reported
+ok: non-literal uses -- prose is not reported
+ok: enclosing definition -- a plain definition
+ok: enclosing definition -- a rec definition
+ok: enclosing definition -- a doc comment quoting a column-zero binding is not a definition
+ok: enclosing definition -- a nameless binding lends no name, so nothing can be exempt in it
+ok: enclosing definition -- a named local helper is its own definition, not its host
+ok: enclosing definition -- an aliased local helper is still a helper
+ok: enclosing definition -- an inline anonymous function can be exempt nowhere
+ok: enclosing definition -- a nameless local binding is transparent, so its host keeps the use
+ok: enclosing definition -- a binding inside a module is qualified, so it cannot borrow an exemption
+ok: enclosing definition -- a nested binding reusing an exempt name stays qualified
+ok: enclosing definition -- a local module is qualified too
+ok: enclosing definition -- a binding inside open struct is not bare
+ok: enclosing definition -- a binding inside include struct is not bare
+ok: enclosing definition -- a binding inside a structure-level extension is not bare
+ok: enclosing definition -- a binding inside a first-class module expression is not bare
+ok: enclosing definition -- siblings of a let-and group are told apart
+ok: enclosing definition -- an ordinary comment quoting a binding is not a definition
+ok: settings read -- a field read
+ok: settings read -- a field named in a doc comment is not a read
+ok: settings read -- a module-qualified field label names the same read
+ok: settings read -- an unqualified record of the same shape is not a read
+ok: settings read -- a predicate call folds in its threshold
+ok: settings read -- a predicate merely mentioned in prose is not a call

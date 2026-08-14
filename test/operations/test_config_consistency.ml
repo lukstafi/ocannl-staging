@@ -131,6 +131,136 @@ let () =
           fail
             (Printf.sprintf "%s has no '%s' … '%s' block" reference_file (marker "BEGIN")
                (marker "END")));
+  (* 6. Both consistency tests (this one and digest_completeness) find a configuration read by
+     scanning sources for the key spelled as a string literal at the call site
+     (Test_utils.Config_key_scan). That convention is load-bearing: a helper that takes the key as a
+     parameter hides every key routed through it from BOTH scanners -- on staging PR #337 one such
+     helper hid three real keys, and a deliberately unregistered fake key stayed green until the
+     helper was removed. So the label must carry a literal everywhere except in the functions that
+     legitimately move a key around, named one by one below:
+     - in utils.ml, the lookup plumbing itself, which forwards the name between get_global_arg,
+       get_global_flag and get_global_arg_with_source and on into the boolean parser;
+     - in tnode.ml, get_style, which takes the key as an optional parameter defaulting to a
+       literal, re-passed by its callers with literals of their own.
+     Naming the functions rather than exempting their files is the difference between "this
+     forwarding is known" and "nothing in this file is ever checked" (Codex P2, round 1): utils.ml
+     and tnode.ml go on reading configuration in the ordinary way everywhere else, and a new
+     forwarding helper in either of them fails like anywhere else.
+     What counts as a use, and which function it sits in, are the parse tree's answers rather than a
+     pattern's (Config_key_scan): every spelling of the label that OCaml accepts is one node, and
+     prose about the convention -- including this comment's neighbours in the scanned files -- is
+     not code at all. An exemption reaches a named TOP-LEVEL function and nothing nested inside it,
+     so a local helper, however it is introduced, forwards keys on its own account. *)
+  let forwarding_sites =
+    Map.of_alist_exn
+      (module String)
+      [
+        ( "utils.ml",
+          Set.of_list
+            (module String)
+            [
+              "bool_of_config_string";
+              "resolve_config_value";
+              "get_global_arg_with_source";
+              "get_global_arg";
+              "get_global_flag";
+            ] );
+        ("tnode.ml", Set.of_list (module String) [ "get_style" ]);
+      ]
+  in
+  (* Both halves of this check are the lexer's answer rather than a pattern's
+     (Config_key_scan): which uses of the label are not literals -- covering every spelling OCaml
+     accepts, including the optional forms a textual matcher missed (Codex P2, round 3) -- and
+     which top-level definition an offset sits in, so that a documentation comment quoting a
+     column-zero `let get_global_arg` cannot lend an exempt name to unrelated code (round 4). Only
+     the line quoted back to the reader is sliced from the text, at the offset the lexer reported. *)
+  (* Keying the exemptions by basename reads well and is what this list is written as -- but it is
+     unambiguous only while no two scanned files share a name. Rather than let a future
+     `tensor/utils.ml` inherit `arrayjit/lib/utils.ml`'s exemptions in silence (Codex P2, round 10),
+     the ambiguity fails here, where the fix is either a rename or a switch to paths. *)
+  let duplicate_basenames =
+    List.map source_files ~f:Stdlib.Filename.basename
+    |> List.sort_and_group ~compare:String.compare
+    |> List.filter_map ~f:(function name :: _ :: _ -> Some name | _ -> None)
+  in
+  if not (List.is_empty duplicate_basenames) then
+    fail
+      (Printf.sprintf
+         "scanned files share a basename, which the exemption list is keyed by -- rename one or \
+          key the list by path: %s"
+         (String.concat ~sep:", " duplicate_basenames));
+  let line_at original i =
+    let line_start =
+      match String.rfindi original ~pos:i ~f:(fun _ c -> Char.equal c '\n') with
+      | Some k -> k + 1
+      | None -> 0
+    in
+    let line_end =
+      match String.lfindi original ~pos:i ~f:(fun _ c -> Char.equal c '\n') with
+      | Some k -> k
+      | None -> String.length original
+    in
+    String.strip (String.sub original ~pos:line_start ~len:(line_end - line_start))
+  in
+  let forwarding_hit = ref (Set.empty (module String)) in
+  List.iter source_files ~f:(fun fname ->
+      let base = Stdlib.Filename.basename fname in
+      let known =
+        Option.value (Map.find forwarding_sites base) ~default:(Set.empty (module String))
+      in
+      let original = In_channel.read_all fname in
+      let definitions = Config_key_scan.definitions original in
+      let enclosing offset = Config_key_scan.definition_at definitions offset in
+      List.iter (Config_key_scan.label_uses original) ~f:(fun use ->
+          match use.Config_key_scan.key with
+          (* A literal, so the convention holds -- but no setting is named by the empty string, and
+             the censuses drop it as not a key. Dropping and reporting are different things, and
+             this is the one that reports (Codex P2, round 12). *)
+          | Some "" ->
+              fail
+              @@ Printf.sprintf "%s names the empty string as a config key: %s" base
+                   (line_at original use.Config_key_scan.offset)
+          | Some _ -> ()
+          | None -> (
+              let offset = use.Config_key_scan.offset in
+              let definition = enclosing offset in
+              (* An exemption reaches a TOP-LEVEL binding of the file and nothing else: whatever
+                 nesting a same-named binding hides in, it has to earn its own exemption. *)
+              let exempt_name =
+                match definition with
+                | Some { Config_key_scan.name = Some name; top_level = true; _ }
+                  when Set.mem known name ->
+                    Some name
+                | _ -> None
+              in
+              match exempt_name with
+              | Some name -> forwarding_hit := Set.add !forwarding_hit (base ^ ":" ^ name)
+              | None ->
+                  let where =
+                    match definition with
+                    | None -> "<no enclosing definition>"
+                    | Some { Config_key_scan.name; top_level; _ } ->
+                        Option.value name ~default:"<anonymous function>"
+                        ^ if top_level then "" else " (nested)"
+                  in
+                  fail
+                  @@ Printf.sprintf "%s does not spell the config key as a string literal, in %s: %s"
+                       base where (line_at original offset))));
+  (* An exemption is a claim that a named function forwards a key; a claim that stops being true
+     is stale, not a free pass, so each one has to earn its place on every run. *)
+  let exempted_sites =
+    Map.to_alist forwarding_sites
+    |> List.concat_map ~f:(fun (base, fns) ->
+           List.map (Set.to_list fns) ~f:(fun fn -> base ^ ":" ^ fn))
+    |> Set.of_list (module String)
+  in
+  let stale = Set.diff exempted_sites !forwarding_hit in
+  if not (Set.is_empty stale) then
+    fail
+      (Printf.sprintf
+         "exempted functions that no longer forward a config key -- drop them from the exemption \
+          list: %s"
+         (String.concat ~sep:", " @@ Set.to_list stale));
   if !ok then (
     printf
       "OK: %d call-site keys, all in reference file and registry; registry and reference agree on \
@@ -140,4 +270,9 @@ let () =
       (List.length payload_keys)
       (String.concat ~sep:", "
       @@ List.map payload_keys ~f:(fun (name, keys) ->
-             Printf.sprintf "%s (%d keys)" name (Set.length keys))))
+             Printf.sprintf "%s (%d keys)" name (Set.length keys)));
+    printf
+      "OK: %d files spell every config key as a string literal, outside %d forwarding functions: \
+       %s.\n"
+      (List.length source_files) (Set.length exempted_sites)
+      (String.concat ~sep:", " @@ Set.to_list exempted_sites))

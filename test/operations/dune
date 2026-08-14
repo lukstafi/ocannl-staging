@@ -1118,6 +1118,15 @@
  (action
   (diff test_config_consistency.expected test_config_consistency.actual)))
 
+; How both consistency scanners read a source file, exercised on hostile input rather than only
+; on whatever the library sources happen to contain today.
+
+(test
+ (name config_scan_lexing)
+ (package neural_nets_lib)
+ (modules config_scan_lexing)
+ (libraries base stdio test_utils))
+
 (executable
  (name digest_completeness)
  (modules digest_completeness)
