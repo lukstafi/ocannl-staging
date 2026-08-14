@@ -1110,6 +1110,15 @@
  (action
   (diff test_config_consistency.expected test_config_consistency.actual)))
 
+; The blanking pass both consistency scanners rest on, exercised on hostile input rather than only
+; on whatever the library sources happen to contain today.
+
+(test
+ (name config_scan_blanking)
+ (package neural_nets_lib)
+ (modules config_scan_blanking)
+ (libraries base stdio test_utils))
+
 (executable
  (name digest_completeness)
  (modules digest_completeness)

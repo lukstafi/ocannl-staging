@@ -64,21 +64,30 @@ let blank_bodies ?(strings = false) content =
     else if Char.equal content.[i] '"' then (
       if depth > 0 then blank i;
       in_string (i + 1) depth)
-    else if depth > 0 then (
-      blank i;
-      walk (i + 1) depth)
     else
-      match char_literal_len i with
-      | Some len when Char.equal content.[i] '\'' -> walk (i + len) depth
-      | _ -> (
-          match if Char.equal content.[i] '{' then quoted_string_end i else None with
-          | Some (body_start, body_end, after) ->
-              if strings then
-                for j = body_start to body_end - 1 do
-                  blank j
-                done;
-              walk after depth
-          | None -> walk (i + 1) depth)
+      (* Quoted strings are lexed INSIDE comments too, exactly as OCaml lexes them (Codex P2, round
+         2): in [(* {| (* |} *)] the inner opener belongs to the quoted string, and taking it for a
+         nested comment would leave the walk one level deep for the rest of the file -- blanking
+         live code, and dropping its keys from every scan without a word. *)
+      match if Char.equal content.[i] '{' then quoted_string_end i else None with
+      | Some (body_start, body_end, after) ->
+          if depth > 0 then
+            for j = i to after - 1 do
+              blank j
+            done
+          else if strings then
+            for j = body_start to body_end - 1 do
+              blank j
+            done;
+          walk after depth
+      | None ->
+          if depth > 0 then (
+            blank i;
+            walk (i + 1) depth)
+          else (
+            match char_literal_len i with
+            | Some len when Char.equal content.[i] '\'' -> walk (i + len) depth
+            | _ -> walk (i + 1) depth)
   and in_string i depth =
     if i >= n then ()
     else if Char.equal content.[i] '\\' && i + 1 < n then (

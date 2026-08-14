@@ -1,0 +1,13 @@
+ok: plain call site
+ok: optional-parameter default
+ok: prose in a comment is not a call site
+ok: nested comments close in the right order
+ok: a string inside a comment does not swallow the file
+ok: a quoted string inside a comment is not a nested comment
+ok: a tagged quoted string inside a comment
+ok: a double quote as a character literal does not open a string
+ok: an escaped quote inside a string does not end it
+ok: a backslash-backslash char literal does not eat the closing quote
+ok: a type variable is not a character literal
+ok: a record literal is not a quoted string
+ok: offsets and line counts preserved
