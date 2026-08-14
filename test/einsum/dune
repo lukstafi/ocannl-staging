@@ -204,6 +204,7 @@
 (test
  (name test_einsum_parser)
  (package neural_nets_lib)
+ (deps ocannl_config)
  (modules test_einsum_parser)
  (libraries base ocannl stdio einsum_parser))
 
