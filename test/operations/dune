@@ -108,6 +108,9 @@
 (test
  (name test_param_shape_error)
  (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
  (modules test_param_shape_error)
  (libraries base ocannl stdio)
  (preprocess
@@ -149,6 +152,7 @@
 (test
  (name row_beg_dims_regression)
  (package neural_nets_lib)
+ (deps ocannl_config)
  (modules row_beg_dims_regression)
  (libraries base ocannl stdio)
  (preprocess
@@ -157,6 +161,7 @@
 (test
  (name test_concat_dim_solver)
  (package neural_nets_lib)
+ (deps ocannl_config)
  (modules test_concat_dim_solver)
  (libraries base ocannl stdio)
  (preprocess
@@ -946,9 +951,12 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
+; Builds its contexts with an explicit [Context.cpu ()], so OCANNL_BACKEND is not a dependency.
+
 (test
  (name test_tensor_persistence)
  (package neural_nets_lib)
+ (deps ocannl_config)
  (modules test_tensor_persistence)
  (libraries base ocannl sexplib stdio)
  (preprocess
@@ -1997,11 +2005,13 @@
   (pps ppx_here ppx_ocannl)))
 
 ; gh-ocannl-563: the canonical-rendering walk shared by the analysis-cache key and the
-; schedule-cache identity. Pure IR rendering — no backend, hence no config dependency.
+; schedule-cache identity. Pure IR rendering, no backend — but it still needs the test config
+; (gh-ocannl-586): without the dep it runs under whatever happens to be in the build directory.
 
 (test
  (name canonical_render)
  (package neural_nets_lib)
+ (deps ocannl_config)
  (modules canonical_render)
  (libraries base ocannl stdio)
  (preprocess
@@ -2185,7 +2195,7 @@
  (name test_cpu_topology)
  (package neural_nets_lib)
  (modules test_cpu_topology)
- (deps test_cpu_topology.expected)
+ (deps ocannl_config test_cpu_topology.expected)
  (libraries base arrayjit.utils stdio)
  (preprocess
   (pps ppx_sexp_conv)))
