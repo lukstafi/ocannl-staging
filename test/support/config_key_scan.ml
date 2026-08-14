@@ -37,11 +37,19 @@ let string_literal expr =
   | Pexp_constant { pconst_desc = Pconst_string (value, _, _); _ } -> Some value
   | _ -> None
 
-(* [Ldot] carries a located prefix in this compiler; [.txt] drops the location. *)
-let rec flatten_longident = function
-  | Longident.Lident name -> [ name ]
-  | Longident.Ldot (prefix, name) -> flatten_longident prefix.Location.txt @ [ name.Location.txt ]
-  | Longident.Lapply (f, x) -> flatten_longident f.Location.txt @ flatten_longident x.Location.txt
+(* The library's own function rather than a match on the constructors: [Ldot] carries located
+   components in 5.5 and bare ones in 5.3, and this scanner has to build across the whole floor the
+   opam files declare -- the scheduled 5.3 job caught exactly that.
+
+   [Longident.flatten] fatal-errors on a functor application, and it is worth recording why that
+   cannot arise here rather than guarding against it (Codex P2 on PR #342, whose premise this
+   is): in EXPRESSION position OCaml gives no [Pexp_ident] an applied path. [Set.Make(String).empty]
+   and [F(X).Utils.settings.large_models] both parse as [Pexp_field] over a constructor
+   application, with a qualified label -- checked against the parser, not assumed. Since
+   {!longident_of} runs on [Pexp_ident] alone, and a record-field label is never an application,
+   every path reaching here is [Lident] or [Ldot]. A future parser that changed this would take the
+   test down loudly, which beats a fallback silently dropping a read. *)
+let flatten_longident = Longident.flatten
 
 let longident_of expr =
   match expr.pexp_desc with Pexp_ident { txt; _ } -> Some (flatten_longident txt) | _ -> None

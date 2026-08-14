@@ -220,6 +220,17 @@ let settings_cases =
     ( "a module-qualified field label names the same read",
       {ocaml|let x = Utils.settings.Utils.large_models|ocaml},
       [ "large_models" ] );
+    ( "a functor-application elsewhere does not crash the scan",
+      {ocaml|let e = Set.Make(String).empty
+let x = Utils.settings.large_models|ocaml},
+      [ "large_models" ] );
+    (* An applied path in expression position is NOT a settings read, for the parser's reason
+       rather than the scanner's: OCaml reads `F(X)` as a constructor application, so this is a
+       field access over an expression and its receiver is no identifier at all. Pinned because a
+       review round asked the scanner to preserve a shape the language does not produce. *)
+    ( "an applied path in expression position is not an identifier, so not a read",
+      {ocaml|let x = F(X).Utils.settings.large_models|ocaml},
+      [] );
     ( "an unqualified record of the same shape is not a read",
       {ocaml|let x = Low_level.virtualize_settings.max_visits|ocaml},
       [] );
