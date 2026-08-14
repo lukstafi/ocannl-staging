@@ -877,6 +877,38 @@ that they earn a lookup rather than always-loaded space.
   suppression flags. Keep new library-side reporting on stderr.
 - Prefer the minimal targeted fix over speculative hardening: offer hardening separately as an
   option with its costs, don't fold it into the fix.
+- Git refuses to check out or update a branch that ANOTHER worktree has checked out. This is
+  checked-out-branch protection, not `git worktree lock` (which is about pruning and moving a
+  worktree, so `git worktree unlock` does nothing for these refusals). While the main checkout holds
+  `master`, a linked worktree cannot `git checkout master` ("'master' is already used by worktree
+  at …"), `git branch -f master …` ("cannot force update the branch"), or `git fetch origin
+  master:master` ("refusing to fetch into branch"). It CAN write the remote ref, which is untouched
+  by any of this: `git push origin HEAD:master` — after `git fetch origin && git rebase
+  origin/master`, since the push has to fast-forward — lands a commit straight on master from a
+  worktree. What that leaves behind is local: the main checkout's `master` is now stale, and only
+  that checkout can advance it (`git -C <main> merge --ff-only origin/master`). Either do so, or
+  give every later branch an EXPLICIT start point — `git worktree add -b next <path> origin/master`,
+  `git checkout -b next origin/master` — because an omitted start point takes the current HEAD, and
+  from a stale main checkout that silently drops the commits just landed.
+- The same protection makes `gh pr merge --delete-branch` misleading from a worktree: the merge
+  LANDS and only the cleanup fails ("fatal: 'master' is already used by worktree"), so the command
+  exits nonzero over an already-merged PR — check the PR's state (`gh pr view <n> --json state`)
+  before reacting to that status, and again before any cleanup: `gh pr merge` also returns WITHOUT
+  merging when the base has required checks or a merge queue, enabling auto-merge instead, and the
+  steps below would then tear down a PR still waiting to land. This repo has neither, so here the
+  flag's own cleanup failure is the only way that command misleads.
+  Merge without the flag and clean up in this order, every command anchored with `git -C <main>` so
+  that none of them depends on the current directory: `push origin --delete <branch>`; `fetch
+  --prune origin`; `merge --ff-only origin/master`; `worktree remove <path>`; `branch -d <branch>`
+  (`-D` after a squash or rebase merge, whose commits are not ancestors of `master`). The sequence
+  runs green from inside the worktree it deletes, verified end to end in a scratch repo, and both
+  ordering constraints are load-bearing. `-d` tests the branch's UPSTREAM, falling back to HEAD only
+  when there is none, so deleting the remote branch FIRST is what makes it a real "merged into
+  master" check instead of a tautology about `origin/<branch>` — left in place, it deletes an
+  unmerged topic with only a warning. With the upstream gone the check lands on the main checkout's
+  `master`, which the merge commit on `origin` does not advance, hence the fast-forward before it.
+  Anchoring matters because `worktree remove` deletes the current directory when run from inside it,
+  and any later unanchored command dies with "fatal: Unable to read current working directory".
 - A backend-gated leg must never print a bare `p "<claim>" true` on the backend that cannot run it:
   the golden line is then byte-identical to a verified run's, so neither the transcript nor a
   reviewer can tell the claim was never evaluated (this is how a `Tensorize` leg came to "cover" the
