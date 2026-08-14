@@ -1,5 +1,5 @@
 Cache-key components (Schedule_cache.key_components): digest, backend, numerics, codegen, pool
-Keys read at codegen (c_syntax.ml, cc_backend.ml, cuda_backend.ml, hip_backend.ml, metal_backend.ml): 28
+Keys read at codegen (c_syntax.ml, cc_backend.ml, cuda_backend.ml, hip_backend.ml, metal_backend.ml, schedule_cache.ml): 29
 
 aggregate -- picks the values other keys take; each of those carries its own classification
   no_config_file
@@ -56,7 +56,7 @@ keyed: codegen -- a codegen knob whose effect is not a property of the lowered c
   prefer_backend_uniformity [read at codegen]
 
 keyed: codegen -- it changes the emitted code or the mechanics a search measures in, without being a property of the lowered code: an aliasing candidate's kernel parameter drops its [restrict] qualifier (the liveness planner may overlap its bytes, gh-ocannl-489), and GPU graph capture fires only for multi-segment routines, so it moves a fissioned candidate's launch overhead relative to a whole-routine one
-  buffer_aliasing
+  buffer_aliasing [read at codegen]
   gpu_graph_capture [read at codegen]
 
 search-shaping -- it defines the untuned default pipeline, which a search seeds from and reports against; a cached winner carries its own ops and replays without consulting it ([Schedule.default_schedule_fingerprint] records these for the [default_ms] diagnostic)

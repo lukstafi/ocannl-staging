@@ -27,10 +27,17 @@ open Stdio
 module SC = Ir.Schedule_cache
 module Config_key_scan = Test_utils.Config_key_scan
 
-(* Modules that run AFTER lowering: rendering a kernel, compiling it, dispatching it. A key whose
-   only reads are here is invisible to the canonical digest by construction. *)
+(* Modules that run AFTER lowering: rendering a kernel, compiling it, dispatching it, and building
+   the cache identity itself. A key whose only reads are here is invisible to the canonical digest
+   by construction. [schedule_cache.ml] belongs in the list for the same reason as the backends
+   (Codex P2 on PR #337): it reads its keys while assembling the codegen component, downstream of
+   the code the digest names, so a [Code_borne] classification of one of them would be wrong in
+   exactly the way check 3 exists to catch. *)
 let codegen_stage_modules =
-  [ "c_syntax.ml"; "cc_backend.ml"; "cuda_backend.ml"; "hip_backend.ml"; "metal_backend.ml" ]
+  [
+    "c_syntax.ml"; "cc_backend.ml"; "cuda_backend.ml"; "hip_backend.ml"; "metal_backend.ml";
+    "schedule_cache.ml";
+  ]
 
 let class_name : Utils.config_key_class -> string = function
   | Utils.Aggregate -> "aggregate"

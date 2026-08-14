@@ -668,11 +668,21 @@ let codegen_tag () =
                  P1 on PR #337). OMP_NUM_THREADS=1 against 16 is the difference between a serial and
                  a parallel machine, which is the whole ranking; OMP_STACKSIZE bounds what a
                  privatized candidate may put on a worker's stack, so a winner crowned under a
-                 raised stack must not replay under the default one. Read only here: libdispatch
-                 reads none of them. *)
+                 raised stack must not replay under the default one; the wait policy decides whether
+                 idle workers spin, which is most of a small kernel's repeat cost; and the runtimes'
+                 own affinity variables place the team on cores the process mask does not name. Read
+                 only here: libdispatch reads none of them.
+
+                 A complete list is not on offer -- an OpenMP runtime has dozens of variables, and
+                 vendor ones keep arriving -- so this covers the standard team, stack, wait and
+                 affinity controls plus libgomp's and the Intel runtime's common equivalents. An
+                 unlisted variable degrades to what everything did before this component existed:
+                 a shared key across two timing regimes. *)
               List.map
                 [ "OMP_NUM_THREADS"; "OMP_DYNAMIC"; "OMP_THREAD_LIMIT"; "OMP_PROC_BIND";
-                  "OMP_PLACES"; "OMP_MAX_ACTIVE_LEVELS"; "OMP_STACKSIZE" ]
+                  "OMP_PLACES"; "OMP_MAX_ACTIVE_LEVELS"; "OMP_STACKSIZE"; "OMP_WAIT_POLICY";
+                  "OMP_SCHEDULE"; "GOMP_CPU_AFFINITY"; "GOMP_SPINCOUNT"; "KMP_AFFINITY";
+                  "KMP_BLOCKTIME" ]
                 ~f:(fun var -> var ^ "=" ^ Option.value (Stdlib.Sys.getenv_opt var) ~default:"")
         in
         ((match mode with `Dispatch -> "grid-dispatch" | `Openmp -> "grid-openmp")
