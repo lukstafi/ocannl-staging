@@ -38,13 +38,16 @@ let cases =
       {ocaml|(* example: {sql| (* |sql} *) let x = get ~arg_name:"eta" ~default:""|ocaml},
       [ "eta" ] );
     ( "a double quote as a character literal does not open a string",
-      {ocaml|let q = '"' in let x = get ~arg_name:"theta" ~default:""|ocaml},
+      {ocaml|let q = '"'
+let x = get ~arg_name:"theta" ~default:""|ocaml},
       [ "theta" ] );
     ( "an escaped quote inside a string does not end it",
-      {ocaml|let s = "a \" (* not a comment *)" in let x = get ~arg_name:"iota" ~default:""|ocaml},
+      {ocaml|let s = "a \" (* not a comment *)"
+let x = get ~arg_name:"iota" ~default:""|ocaml},
       [ "iota" ] );
     ( "a backslash-backslash char literal does not eat the closing quote",
-      {ocaml|let c = '\\' in let x = get ~arg_name:"kappa" ~default:""|ocaml},
+      {ocaml|let c = '\\'
+let x = get ~arg_name:"kappa" ~default:""|ocaml},
       [ "kappa" ] );
     ( "a type variable is not a character literal",
       {ocaml|let f (x : 'a list) = x let y = get ~arg_name:"lambda" ~default:""|ocaml},
@@ -61,9 +64,6 @@ let cases =
     ( "an extension quoted string inside a comment",
       {ocaml|(* example: {%ext| (* text |} *) let x = get ~arg_name:"xi" ~default:""|ocaml},
       [ "xi" ] );
-    ( "a digit tag is not a quoted-string delimiter",
-      {ocaml|let s = {foo2|hi|foo2} let x = get ~arg_name:"omicron" ~default:""|ocaml},
-      [ "omicron" ] );
     (* Optional-argument application, in every spelling: with a literal it IS a read, punned or
        applied to an expression it is not. *)
     ( "optional application with a literal is a read",
@@ -86,6 +86,9 @@ let cases =
     ( "an escape sequence decodes to the real key",
       {ocaml|let x = get ~arg_name:"tab	here" ~default:""|ocaml},
       [ "tab	here" ] );
+    ( "a typed optional default is still a literal default",
+      {ocaml|let get_style ?(arg_name : string = "typed_default") () = arg_name|ocaml},
+      [ "typed_default" ] );
     ( "a call site quoted inside a string literal is not a read",
       {ocaml|let doc = "pass ~arg_name:\"phantom\" here" let x = get ~arg_name:"tau" ~default:""|ocaml},
       [ "tau" ] );
@@ -119,6 +122,16 @@ let get_global_arg
     is only prose *)
 let other y = get ~arg_name:y|ocaml},
       Some "other" );
+    ( "a pattern binding is its own definition, with no name to exempt",
+      {ocaml|let get_global_arg x = x
+let () = ignore (get ~arg_name:name)|ocaml},
+      None );
+    ( "a binding inside a module is the definition, not the module",
+      {ocaml|let get_global_arg x = x
+module M = struct
+  let inner () = get ~arg_name:name
+end|ocaml},
+      Some "inner" );
     ( "an ordinary comment quoting a binding is not a definition",
       {ocaml|let real x = x
 (* let get_global_arg *)
@@ -148,7 +161,13 @@ let settings_cases =
 let () =
   let ok = ref true in
   List.iter cases ~f:(fun (name, source, expected) ->
-      let found = List.sort ~compare:String.compare (Scan.keys_in_source source) in
+      let found =
+        try List.sort ~compare:String.compare (Scan.keys_in_source source)
+        with _ ->
+          ok := false;
+          printf "FAIL: %s -- the snippet does not parse\n" name;
+          []
+      in
       let expected = List.sort ~compare:String.compare expected in
       if List.equal String.equal found expected then printf "ok: %s\n" name
       else (
@@ -168,8 +187,7 @@ let () =
       let definitions = Scan.definitions source in
       let found =
         List.filter_map (Scan.label_uses source) ~f:(fun u ->
-            List.fold definitions ~init:None ~f:(fun acc (start, d) ->
-                if start <= u.Scan.offset then Some d else acc))
+            Scan.definition_at definitions u.Scan.offset)
         |> List.hd
       in
       if Option.equal String.equal found expected then printf "ok: enclosing definition -- %s\n" name

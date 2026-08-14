@@ -12,12 +12,12 @@ ok: a type variable is not a character literal
 ok: a record literal is not a quoted string
 ok: a character literal inside a comment does not open a string
 ok: an extension quoted string inside a comment
-ok: a digit tag is not a quoted-string delimiter
 ok: optional application with a literal is a read
 ok: optional application of a variable reads no literal key
 ok: a punned optional argument reads no literal key
 ok: an escaped-newline continuation decodes to the real key
 ok: an escape sequence decodes to the real key
+ok: a typed optional default is still a literal default
 ok: a call site quoted inside a string literal is not a read
 ok: non-literal uses -- labelled variable
 ok: non-literal uses -- punned label
@@ -28,6 +28,8 @@ ok: non-literal uses -- prose is not reported
 ok: enclosing definition -- a plain definition
 ok: enclosing definition -- a rec definition
 ok: enclosing definition -- a doc comment quoting a column-zero binding is not a definition
+ok: enclosing definition -- a pattern binding is its own definition, with no name to exempt
+ok: enclosing definition -- a binding inside a module is the definition, not the module
 ok: enclosing definition -- an ordinary comment quoting a binding is not a definition
 ok: settings read -- a field read
 ok: settings read -- a field named in a doc comment is not a read

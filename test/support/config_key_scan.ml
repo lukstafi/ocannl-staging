@@ -3,121 +3,136 @@
     Shared by the two consistency tests that hold the configuration honest:
     [test_config_consistency] (every key documented and registered) and [digest_completeness] (every
     key classified against the cache identity, gh-ocannl-572). Both need the same fact — which keys
-    a source file reads — so they read it the same way. *)
+    a source file reads — so they read it the same way.
+
+    {1 Reading these sources as OCaml}
+
+    This module parses. It does not match text, and it does not match token shapes.
+
+    That is the conclusion of five review rounds on PR #340, each finding the same kind of defect
+    one level down: prose read as a call site, a quoted string inside a comment read as a nested
+    comment, a character literal opening a string, an escaped literal losing its value, and finally
+    [let () = …] not counting as a definition while [?(arg_name : string = "k")] did not count as a
+    literal. Every one was silent by construction — keys that vanish from a scan look exactly like
+    keys that were never read — and every fix left the next unhandled spelling waiting.
+
+    An approximation of OCaml has no natural stopping point; the grammar does. On the parse tree a
+    labelled argument is one node however it was spelled, a string literal carries its decoded value
+    whatever escapes produced it, and a structure item covers exactly the source it covers. *)
 
 open Base
+open Parsetree
 
-(** {1 Reading these sources as OCaml, not as text}
+(** The label whose argument names a configuration key. *)
+let label = "arg_name"
 
-    Everything below rests on one pass of the compiler's own lexer. Three rounds of review on
-    PR #340 found the same class of defect in a hand-rolled scanner -- prose read as a call site, a
-    quoted string inside a comment read as a nested comment, a character literal inside a comment
-    opening a string -- and each fix left the next divergence from OCaml's real lexing rules
-    waiting. Every one of them is silent by construction: a desynchronised scan blanks live code,
-    and keys that vanish look exactly like keys that were never read.
+let is_our_label = function
+  | Asttypes.Labelled name | Asttypes.Optional name -> String.equal name label
+  | Asttypes.Nolabel -> false
 
-    So the approximation is gone. [Lexer.token] decides what is a comment, a string, a character
-    literal and a quoted string, because it is the same code that decides it for the compiler. *)
+(** The value of a string literal as the parser resolved it: [{|k|}], ["k"] and a continuation
+    spelled over two lines all arrive here decoded. *)
+let string_literal expr =
+  match expr.pexp_desc with
+  | Pexp_constant { pconst_desc = Pconst_string (value, _, _); _ } -> Some value
+  | _ -> None
 
-let fst3 (a, _, _) = a
+(* [Ldot] carries a located prefix in this compiler; [.txt] drops the location. *)
+let rec flatten_longident = function
+  | Longident.Lident name -> [ name ]
+  | Longident.Ldot (prefix, name) -> flatten_longident prefix.Location.txt @ [ name.Location.txt ]
+  | Longident.Lapply (f, x) -> flatten_longident f.Location.txt @ flatten_longident x.Location.txt
 
-(** The tokens of [content], each with the source range it covers. Raises if the text does not lex:
-    a scan that cannot read its input must say so rather than report an empty census. *)
-let tokens content =
-  let lexbuf = Lexing.from_string content in
-  Lexer.init ();
-  let rec loop acc =
-    match Lexer.token lexbuf with
-    | Parser.EOF -> List.rev acc
-    | tok -> loop ((tok, Lexing.lexeme_start lexbuf, Lexing.lexeme_end lexbuf) :: acc)
-  in
-  loop []
+let longident_of expr =
+  match expr.pexp_desc with Pexp_ident { txt; _ } -> Some (flatten_longident txt) | _ -> None
 
-(** Every top-level definition in [content], as (offset where its [let] or [and] begins, name),
-    in source order.
-
-    Read from the token stream rather than the text, so nothing that merely looks like a definition
-    can pass for one: a documentation comment quoting a column-zero [let get_global_arg] is not a
-    token at all, and cannot lend its name to the code that follows it (Codex P2, round 4). The
-    same argument covers whatever else a comment might contain, without enumerating the cases. *)
-let definitions content =
-  let at_line_start start = start = 0 || Char.equal content.[start - 1] '\n' in
-  let rec scan toks acc =
-    match toks with
-    | [] -> List.rev acc
-    | ((Parser.LET | Parser.AND), start, _) :: rest when at_line_start start -> name rest start acc
-    | _ :: rest -> scan rest acc
-  and name toks start acc =
-    match toks with
-    | (Parser.REC, _, _) :: rest -> name rest start acc
-    | (Parser.LIDENT id, _, _) :: rest -> scan rest ((start, id) :: acc)
-    | _ -> scan toks acc
-  in
-  scan (tokens content) []
+(** Raises if [content] does not parse: a scan that cannot read its input must say so rather than
+    report an empty census. *)
+let structure_of content = Parse.implementation (Lexing.from_string content)
 
 (** Every place the [arg_name] label names a configuration key, and what it names it with. [key] is
     [Some k] when the argument is a string literal — the convention both consistency tests rely on
     to find a read — and [None] when it is anything else: a variable, a punned parameter, an
-    expression. [offset] is where the label starts, for a caller that wants to report the line.
+    expression. [offset] is where the argument sits, for a caller that wants to report the line.
 
-    All the spellings OCaml accepts are covered, because the lexer supplies them rather than a
-    pattern guessing at them: [~arg_name:"key"] and [?arg_name:"key"] (a [LABEL] / [OPTLABEL] token
-    followed by a [STRING]), the punned [~arg_name] and [?arg_name] (never a literal), and the
-    optional-parameter default [?(arg_name = "key")]. *)
+    Both positions count, because both name keys: an argument at an application site
+    ([~arg_name:"key"], [?arg_name:"key"]) and a parameter's default ([?(arg_name = "key")], with or
+    without a type annotation). A label in a {e type} is not a use of anything and does not
+    appear. *)
 type label_use = { key : string option; offset : int }
 
-let label = "arg_name"
-
 let label_uses content =
-  let toks = Array.of_list (tokens content) in
-  ignore content;
-  let literal_at i =
-    if i < Array.length toks then
-      match toks.(i) with
-      | Parser.STRING (value, _, _), _, _ -> Some value
-      | _ -> None
-    else None
+  let uses = ref [] in
+  let record key (loc : Location.t) = uses := { key; offset = loc.loc_start.pos_cnum } :: !uses in
+  let iterator =
+    {
+      Ast_iterator.default_iterator with
+      expr =
+        (fun self expr ->
+          (match expr.pexp_desc with
+          | Pexp_apply (_, args) ->
+              List.iter args ~f:(fun (lbl, arg) ->
+                  if is_our_label lbl then record (string_literal arg) arg.pexp_loc)
+          | Pexp_function (params, _, _) ->
+              List.iter params ~f:(fun param ->
+                  match param.pparam_desc with
+                  | Pparam_val (lbl, default, _) when is_our_label lbl ->
+                      record (Option.bind default ~f:string_literal) param.pparam_loc
+                  | _ -> ())
+          | _ -> ());
+          Ast_iterator.default_iterator.expr self expr);
+    }
   in
-  let is_named i =
-    i < Array.length toks
-    && match toks.(i) with Parser.LIDENT id, _, _ -> String.equal id label | _ -> false
-  in
-  let rec walk i acc =
-    if i >= Array.length toks then List.rev acc
-    else
-      match toks.(i) with
-      (* [~arg_name:…] and [?arg_name:…]: the label and its colon are one token, so whatever
-         follows IS the argument. *)
-      | (Parser.LABEL id | Parser.OPTLABEL id), offset, _ when String.equal id label ->
-          walk (i + 1) ({ key = literal_at (i + 1); offset } :: acc)
-      (* [?(arg_name = "key")], the optional-parameter default. *)
-      | Parser.QUESTION, offset, _
-        when i + 3 < Array.length toks
-             && (match toks.(i + 1) with Parser.LPAREN, _, _ -> true | _ -> false)
-             && is_named (i + 2) ->
-          let key =
-            match toks.(i + 3) with
-            | Parser.EQUAL, _, _ -> literal_at (i + 4)
-            | _ -> None
-          in
-          walk (i + 4) ({ key; offset } :: acc)
-      (* Punned: [~arg_name] / [?arg_name], in an application or a parameter list. Never a
-         literal — this is the shape that hides keys. *)
-      | (Parser.TILDE | Parser.QUESTION), offset, _ when is_named (i + 1) ->
-          walk (i + 2) ({ key = None; offset } :: acc)
-      | _ -> walk (i + 1) acc
-  in
-  walk 0 []
+  iterator.structure iterator (structure_of content);
+  List.rev !uses
 
-(** The [arg_name] literals of the [get_global_arg] / [get_global_flag] calls in [content].
+(** Every top-level definition, as (where it starts, where it ends, its name if it has a simple
+    one). Bindings inside modules are included; [let () = …] and other pattern bindings are included
+    too, with no name — a use inside one belongs to it, not to whatever preceded it (Codex P2, round
+    5). *)
+let definitions content =
+  let items = ref [] in
+  let iterator =
+    {
+      Ast_iterator.default_iterator with
+      structure_item =
+        (fun self item ->
+          (match item.pstr_desc with
+          | Pstr_value (_, bindings) ->
+              List.iter bindings ~f:(fun binding ->
+                  let name =
+                    match binding.pvb_pat.ppat_desc with
+                    | Ppat_var { txt; _ } -> Some txt
+                    | Ppat_constraint ({ ppat_desc = Ppat_var { txt; _ }; _ }, _) -> Some txt
+                    | _ -> None
+                  in
+                  items :=
+                    (item.pstr_loc.loc_start.pos_cnum, item.pstr_loc.loc_end.pos_cnum, name)
+                    :: !items)
+          | _ -> ());
+          Ast_iterator.default_iterator.structure_item self item);
+    }
+  in
+  iterator.structure iterator (structure_of content);
+  List.rev !items
+
+(** The definition an offset sits in: the smallest one containing it, so a binding nested in a
+    module wins over the module around it. *)
+let definition_at definitions offset =
+  List.filter definitions ~f:(fun (start, stop, _) -> start <= offset && offset < stop)
+  |> List.min_elt ~compare:(fun (a_start, a_stop, _) (b_start, b_stop, _) ->
+         Int.compare (a_stop - a_start) (b_stop - b_start))
+  |> Option.bind ~f:(fun (_, _, name) -> name)
+
+(** The keys [content] reads through the label.
 
     A key that reaches the lookup any other way — through a helper taking the name as a
     parameter — is invisible to this scan, and hence to both tests built on it. That is why
     [test_config_consistency] separately fails any non-literal use of the label outside the handful
     of named functions that implement the lookup. *)
 let keys_in_source content =
-  List.filter_map (label_uses content) ~f:(fun u -> u.key)
-  |> List.filter ~f:(fun s -> not (String.is_empty s))
+  List.filter_map (label_uses content) ~f:(fun use -> use.key)
+  |> List.filter ~f:(fun key -> not (String.is_empty key))
 
 (** [keys_in_source] over each file, as a set. Call sites only — this is what
     [test_config_consistency] means by "every key a source file asks for is documented and
@@ -131,40 +146,47 @@ let keys_in_files files =
     the [log_level > 1] threshold ([debug_log_from_routines], [with_runtime_debug]). A census built
     from [arg_name] literals alone would miss every one of these — [large_models] is read as
     [Utils.settings.large_models] in the codegen, so a future misclassification of it could pass
-    unchallenged (Codex P2 on PR #337). *)
+    unchallenged (Codex P2 on PR #337).
+
+    A field {e read} and a predicate {e call}: naming either in prose is not a use of it. *)
 let settings_keys_in_source content =
-  let toks = Array.of_list (tokens content) in
-  let tok i = if i < Array.length toks then Some (fst3 toks.(i)) else None in
-  let is_lident i name =
-    match tok i with Some (Parser.LIDENT id) -> String.equal id name | _ -> false
+  let keys = ref [] in
+  let ends_with path suffix =
+    let extra = List.length path - List.length suffix in
+    extra >= 0 && List.equal String.equal (List.drop path extra) suffix
   in
-  let rec walk i acc =
-    if i >= Array.length toks then acc
-    else
-      match tok i with
-      (* Qualified: [Low_level.virtualize_settings] and friends are records of the same shape whose
-         field names are NOT config keys ([max_visits] against [virtualize_max_visits]), so an
-         unqualified match would attribute reads to keys that do not exist. *)
-      | Some (Parser.UIDENT "Utils")
-        when (match tok (i + 1) with Some Parser.DOT -> true | _ -> false)
-             && is_lident (i + 2) "settings"
-             && (match tok (i + 3) with Some Parser.DOT -> true | _ -> false) -> (
-          match tok (i + 4) with
-          | Some (Parser.LIDENT field) -> walk (i + 5) (field :: acc)
-          | _ -> walk (i + 1) acc)
-      (* The two predicates that fold the [log_level > 1] threshold into a flag. A call, not a
-         mention: [LPAREN RPAREN] must follow. *)
-      | Some (Parser.LIDENT name)
-        when (match tok (i + 1) with Some Parser.LPAREN -> true | _ -> false)
-             && (match tok (i + 2) with Some Parser.RPAREN -> true | _ -> false) -> (
-          match name with
-          | "debug_log_from_routines" -> walk (i + 3) ("log_level" :: name :: acc)
-          | "with_runtime_debug" ->
-              walk (i + 3) ("log_level" :: "output_debug_files_in_build_directory" :: acc)
-          | _ -> walk (i + 1) acc)
-      | _ -> walk (i + 1) acc
+  let is_unit expr =
+    match expr.pexp_desc with
+    | Pexp_construct ({ txt = Longident.Lident "()"; _ }, None) -> true
+    | _ -> false
   in
-  walk 0 []
+  let iterator =
+    {
+      Ast_iterator.default_iterator with
+      expr =
+        (fun self expr ->
+          (match expr.pexp_desc with
+          (* Qualified: [Low_level.virtualize_settings] and friends are records of the same shape
+             whose field names are NOT config keys ([max_visits] against [virtualize_max_visits]),
+             so an unqualified match would attribute reads to keys that do not exist. *)
+          | Pexp_field (record, { txt = field; _ }) -> (
+              match (longident_of record, flatten_longident field) with
+              | Some path, [ field ] when ends_with path [ "Utils"; "settings" ] ->
+                  keys := field :: !keys
+              | _ -> ())
+          | Pexp_apply (f, [ (Asttypes.Nolabel, arg) ]) when is_unit arg -> (
+              match longident_of f with
+              | Some path when ends_with path [ "debug_log_from_routines" ] ->
+                  keys := "log_level" :: "debug_log_from_routines" :: !keys
+              | Some path when ends_with path [ "with_runtime_debug" ] ->
+                  keys := "log_level" :: "output_debug_files_in_build_directory" :: !keys
+              | _ -> ())
+          | _ -> ());
+          Ast_iterator.default_iterator.expr self expr);
+    }
+  in
+  iterator.structure iterator (structure_of content);
+  List.rev !keys
 
 (** Every configuration read of a file — [arg_name] call sites and {!settings_keys_in_source} —
     keyed by file basename, for tests that care {e where} a key is read. Field names that are not

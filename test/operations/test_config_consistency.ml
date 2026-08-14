@@ -193,10 +193,7 @@ let () =
       in
       let original = In_channel.read_all fname in
       let definitions = Config_key_scan.definitions original in
-      let enclosing offset =
-        List.fold definitions ~init:None ~f:(fun acc (start, name) ->
-            if start <= offset then Some name else acc)
-      in
+      let enclosing offset = Config_key_scan.definition_at definitions offset in
       List.iter (Config_key_scan.label_uses original) ~f:(fun use ->
           match use.Config_key_scan.key with
           | Some _ -> ()
