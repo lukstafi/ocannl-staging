@@ -163,6 +163,9 @@ let settings_cases =
     ( "a field named in a doc comment is not a read",
       {ocaml|(** see Utils.settings.large_models *) let x = 1|ocaml},
       [] );
+    ( "a module-qualified field label names the same read",
+      {ocaml|let x = Utils.settings.Utils.large_models|ocaml},
+      [ "large_models" ] );
     ( "an unqualified record of the same shape is not a read",
       {ocaml|let x = Low_level.virtualize_settings.max_visits|ocaml},
       [] );

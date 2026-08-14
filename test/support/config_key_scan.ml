@@ -196,10 +196,15 @@ let settings_keys_in_source content =
           (* Qualified: [Low_level.virtualize_settings] and friends are records of the same shape
              whose field names are NOT config keys ([max_visits] against [virtualize_max_visits]),
              so an unqualified match would attribute reads to keys that do not exist. *)
+          (* The field label may itself be module-qualified -- [r.Utils.large_models] is how one
+             disambiguates a field name -- so the read is named by its LAST component, not by the
+             whole label (Codex P2, round 7). The receiver check stays as it is. *)
           | Pexp_field (record, { txt = field; _ }) -> (
-              match (longident_of record, flatten_longident field) with
-              | Some path, [ field ] when ends_with path [ "Utils"; "settings" ] ->
-                  keys := field :: !keys
+              match longident_of record with
+              | Some path when ends_with path [ "Utils"; "settings" ] -> (
+                  match List.last (flatten_longident field) with
+                  | Some field -> keys := field :: !keys
+                  | None -> ())
               | _ -> ())
           | Pexp_apply (f, [ (Asttypes.Nolabel, arg) ]) when is_unit arg -> (
               match longident_of f with
