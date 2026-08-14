@@ -862,6 +862,19 @@ that they earn a lookup rather than always-loaded space.
   suppression flags. Keep new library-side reporting on stderr.
 - Prefer the minimal targeted fix over speculative hardening: offer hardening separately as an
   option with its costs, don't fold it into the fix.
+- Git's worktree lock guards LOCAL refs only, which decides what is possible from a linked worktree
+  while the main checkout holds `master`. Refused there: `git checkout master` ("'master' is already
+  used by worktree at …"), `git branch -f master …` ("cannot force update the branch"), and
+  `git fetch origin master:master` ("refusing to fetch into branch"). Allowed, because it writes the
+  REMOTE ref and touches no local branch: `git push origin HEAD:master` (after `git fetch origin &&
+  git rebase origin/master`, since it must fast-forward) — the way to land a commit straight on
+  master from a worktree. The local `master` then stays behind and cannot be advanced from the
+  worktree either; fast-forward it in the main checkout (`git -C <main> merge --ff-only
+  origin/master`) or ignore it, since branching for the next task starts from `origin/master`
+  anyway. The same lock makes `gh pr merge --delete-branch` misleading from a worktree: the merge
+  LANDS and only the cleanup fails, so the command exits nonzero over an already-merged PR and
+  leaves the branch behind. Merge without that flag and drop the branch separately
+  (`git push origin --delete <branch>`).
 - A backend-gated leg must never print a bare `p "<claim>" true` on the backend that cannot run it:
   the golden line is then byte-identical to a verified run's, so neither the transcript nor a
   reviewer can tell the claim was never evaluated (this is how a `Tensorize` leg came to "cover" the
