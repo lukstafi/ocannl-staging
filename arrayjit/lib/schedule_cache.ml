@@ -434,8 +434,13 @@ let numerics_tag () =
    [hardware_limits.codegen_tag] because only it knows which of its knobs reach its codegen. Neither
    layer is a property of the lowered code, so neither can reach {!digest}. *)
 let codegen_tag ~(limits : Backend_intf.hardware_limits) () =
+  (* Every key is spelled out at its call site, as an explicit [arg_name] string literal, rather
+     than passed through a helper: that literal IS how the consistency tests find a configuration
+     read ([Test_utils.Config_key_scan]), so a wrapper taking the name as an argument would hide
+     these keys from both the registration check and the classification check -- which a negative
+     control on this very function confirmed while addressing Codex's scan-list finding on
+     PR #337. (For the same reason, prose here avoids spelling the marker the scanner looks for.) *)
   let gate name value = if value then name else "no-" ^ name in
-  let config name = gate name (Utils.get_global_flag ~default:false ~arg_name:name) in
   let parts =
     [
       (* The whole limits record, not just the backend's [codegen_tag] field (Codex P1 on PR #337):
@@ -471,7 +476,7 @@ let codegen_tag ~(limits : Backend_intf.hardware_limits) () =
          link-time liveness planner may overlap it with another parameter's bytes (gh-ocannl-489):
          a real change to the emitted C, and to what the C compiler may then assume. Codex P1 on
          PR #337. *)
-      config "buffer_aliasing";
+      gate "buffer-aliasing" (Utils.get_global_flag ~default:false ~arg_name:"buffer_aliasing");
     ]
   in
   String.prefix (Stdlib.Digest.to_hex (Stdlib.Digest.string (String.concat ~sep:"\000" parts))) 8

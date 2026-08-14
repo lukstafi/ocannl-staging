@@ -1092,6 +1092,7 @@
     %{dep:../../arrayjit/lib/metal_backend.ml}
     %{dep:../../arrayjit/lib/low_level.ml}
     %{dep:../../arrayjit/lib/schedule.ml}
+    %{dep:../../arrayjit/lib/schedule_cache.ml}
     %{dep:../../arrayjit/lib/schedule_outcome.ml}
     %{dep:../../arrayjit/lib/schedulers.ml}
     %{dep:../../arrayjit/lib/autotune.ml}
@@ -1135,6 +1136,7 @@
     %{dep:../../arrayjit/lib/metal_backend.ml}
     %{dep:../../arrayjit/lib/low_level.ml}
     %{dep:../../arrayjit/lib/schedule.ml}
+    %{dep:../../arrayjit/lib/schedule_cache.ml}
     %{dep:../../arrayjit/lib/schedule_outcome.ml}
     %{dep:../../arrayjit/lib/schedulers.ml}
     %{dep:../../arrayjit/lib/autotune.ml}

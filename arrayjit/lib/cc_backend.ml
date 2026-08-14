@@ -650,25 +650,37 @@ let codegen_tag () =
       | `None -> "fp16-none"
       | `Promoted -> "fp16-promoted"
       | `Native -> "fp16-native");
-      (match parallel_grid_syntax_setting () with
-      | `Dispatch -> "grid-dispatch"
-      | `Openmp ->
-          (* The OpenMP runtime's own controls decide the team every Grid loop executes on, and
-             they move nothing the pool tag is derived from -- that is process affinity (Codex P1 on
-             PR #337). OMP_NUM_THREADS=1 against 16 is the difference between a serial and a
-             parallel machine, which is the whole ranking. Recorded only under [`Openmp], where they
-             mean something: libdispatch reads none of them. *)
-          String.concat ~sep:","
-            ("grid-openmp"
-            :: List.map
-                 [ "OMP_NUM_THREADS"; "OMP_DYNAMIC"; "OMP_THREAD_LIMIT"; "OMP_PROC_BIND";
-                   "OMP_PLACES"; "OMP_MAX_ACTIVE_LEVELS" ]
-                 ~f:(fun var ->
-                   var ^ "=" ^ Option.value (Stdlib.Sys.getenv_opt var) ~default:""))
-      | `None -> "grid-none");
-      Int.to_string (parallel_grid_chunks_setting ());
-      Int.to_string (Lazy.force C_syntax.per_chunk_private_bytes_cap);
     ]
+    (* The pool-parallel Grid rendering, and only when there IS one: with the grid syntax resolved
+       to [`None], [C_syntax.collect_parallel_grid] returns before the chunk count or the
+       privatization cap can reach the emitted code, so hashing them would retune identical serial
+       kernels (Codex P2 on PR #337). *)
+    @
+    match parallel_grid_syntax_setting () with
+    | `None -> [ "grid-none" ]
+    | (`Dispatch | `Openmp) as mode ->
+        let runtime_controls =
+          match mode with
+          | `Dispatch -> []
+          | `Openmp ->
+              (* The OpenMP runtime's own controls decide the team every Grid loop executes on, and
+                 they move nothing the pool tag is derived from -- that is process affinity (Codex
+                 P1 on PR #337). OMP_NUM_THREADS=1 against 16 is the difference between a serial and
+                 a parallel machine, which is the whole ranking; OMP_STACKSIZE bounds what a
+                 privatized candidate may put on a worker's stack, so a winner crowned under a
+                 raised stack must not replay under the default one. Read only here: libdispatch
+                 reads none of them. *)
+              List.map
+                [ "OMP_NUM_THREADS"; "OMP_DYNAMIC"; "OMP_THREAD_LIMIT"; "OMP_PROC_BIND";
+                  "OMP_PLACES"; "OMP_MAX_ACTIVE_LEVELS"; "OMP_STACKSIZE" ]
+                ~f:(fun var -> var ^ "=" ^ Option.value (Stdlib.Sys.getenv_opt var) ~default:"")
+        in
+        ((match mode with `Dispatch -> "grid-dispatch" | `Openmp -> "grid-openmp")
+        :: runtime_controls)
+        @ [
+            Int.to_string (parallel_grid_chunks_setting ());
+            Int.to_string (Lazy.force C_syntax.per_chunk_private_bytes_cap);
+          ]
   in
   String.prefix (Stdlib.Digest.to_hex (Stdlib.Digest.string (String.concat ~sep:"\000" parts))) 8
 
