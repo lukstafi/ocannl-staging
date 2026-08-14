@@ -257,13 +257,15 @@ let config_key_classification : (config_key_class * string * string list) list =
         "cc_grid_private_bytes_cap";
       ] );
     ( Keyed "codegen",
-      "a backend-independent codegen knob: every backend's emission reads it. The two debug gates \
-       bite only at log_level > 1, so the tag hashes the effective predicates \
-       ([Utils.debug_log_from_routines] rewrites the kernel and disables the parallel-grid, \
-       vectorized and mma renderings; [Utils.with_runtime_debug] switches the GPU backends to \
-       debug compilation) -- which is also why log_level itself belongs here, without an ordinary \
+      "a codegen knob whose effect is not a property of the lowered code. The two debug gates bite \
+       only at log_level > 1, so what the tag hashes is the effective predicates -- \
+       [Utils.debug_log_from_routines], which rewrites the kernel and disables the parallel-grid, \
+       vectorized and mma renderings, for every backend; [Utils.with_runtime_debug], which switches \
+       the CUDA and HIP compilers to debug compilation, in those two backends' own tags, since no \
+       other compiler reads it. That is also why log_level belongs here, without an ordinary \
        verbosity bump churning cache keys. prefer_backend_uniformity does not pick a backend: it \
-       picks how the C-family backends spell their logging expressions",
+       picks how the C-family backends spell their logging expressions, so it is hashed only once \
+       logging actually reaches the kernel",
       [
         "large_models";
         "big_models";

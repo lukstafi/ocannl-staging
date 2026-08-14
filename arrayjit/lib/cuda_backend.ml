@@ -2366,9 +2366,12 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
               evidence about the other. *)
            codegen_tag =
              Some
-               (if Utils.get_global_flag ~default:true ~arg_name:"gpu_graph_capture" then
-                  "graph-capture"
-                else "no-graph-capture");
+               ((if Utils.get_global_flag ~default:true ~arg_name:"gpu_graph_capture" then
+                   "graph-capture"
+                 else "no-graph-capture")
+               (* [--device-debug] / [-g]: this compiler is the only one that reads the predicate,
+                  so it is keyed here rather than for every backend (Codex P2 on PR #337). *)
+               ^ if Utils.with_runtime_debug () then "/device-debug" else "/no-device-debug");
            (* Advisory roofline envelope (gh-ocannl-491): documented rough constants for the sm_70+
               discrete-GPU class (RTX-30/40 mid-range: ~15 fp32 TFLOP/s, ~450 GB/s). Per-device
               queries (SM count x clock, memory clock x bus width) are calibration follow-up work;

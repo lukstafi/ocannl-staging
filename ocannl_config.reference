@@ -349,10 +349,11 @@
 # optimized code, the backend name, a digest of the numerics policy (tf32_matmuls,
 # narrow_compute_f32, fp16_arithmetic -- gh-ocannl-568: the policy is not part of the code, so
 # without it a default-flags run would replay a tf32-tuned winner it cannot render), a digest of
-# the codegen configuration (large_models, buffer_aliasing, prefer_backend_uniformity, the
-# effective routine-logging and runtime-debug predicates, and the compiling backend's own knobs --
-# for cc the compiler command and flags, cc_vector_bytes, cc_fp16_arithmetic,
-# cc_parallel_grid/chunks, cc_grid_private_bytes_cap; for CUDA and HIP the graph-capture regime:
+# the codegen configuration (large_models, buffer_aliasing, the effective routine-logging
+# predicate, the logging-only settings once it holds, and the compiling backend's own knobs --
+# for cc the compiler command and flags, the OpenMP team, cc_vector_bytes, cc_fp16_arithmetic,
+# cc_parallel_grid/chunks, cc_grid_private_bytes_cap; for CUDA and HIP the graph-capture regime
+# and debug compilation:
 # all read AFTER lowering, so they are likewise invisible to the digest, gh-ocannl-572, together
 # with the device's hardware limits and, on cc, a fingerprint of the toolchain's predefined macros
 # under the configured flags -- so entries do not transfer between unlike devices or toolchains),

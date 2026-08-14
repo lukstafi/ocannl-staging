@@ -447,14 +447,14 @@ let codegen_tag ~(limits : Backend_intf.hardware_limits) () =
          along in it. *)
       Sexp.to_string (Backend_intf.sexp_of_hardware_limits limits);
       (if Utils.settings.large_models then "wide-index" else "narrow-index");
-      (* The EFFECTIVE predicates, not the raw flags (Codex P1 on PR #337): both gates additionally
-         require [log_level > 1], so hashing the flags alone would give the logged and the unlogged
+      (* The EFFECTIVE predicate, not the raw flag (Codex P1 on PR #337): the gate additionally
+         requires [log_level > 1], so hashing the flag alone would give the logged and the unlogged
          regime one key — and hashing [log_level] itself would churn keys on an ordinary verbosity
          bump that changes no kernel. Routine logging rewrites the kernel and disables the
-         parallel-grid, vectorized and mma renderings; runtime debug switches the GPU backends to
-         debug compilation ([--device-debug] / [-g]). *)
+         parallel-grid, vectorized and mma renderings. Its sibling [Utils.with_runtime_debug] lives
+         in the CUDA and HIP tags instead: only their compilers read it ([--device-debug] / [-g]),
+         so hashing it here would re-tune cc and Metal for nothing (Codex P2). *)
       gate "routine-logs" (Utils.debug_log_from_routines ());
-      gate "debug-compile" (Utils.with_runtime_debug ());
       (* Where routine logs go matters only when there are routine logs: with the gate off, nothing
          generated or timed depends on it, and hashing it would re-tune for nothing (Codex P2 on
          PR #337). *)
@@ -462,8 +462,11 @@ let codegen_tag ~(limits : Backend_intf.hardware_limits) () =
         (Utils.debug_log_from_routines ()
         && Utils.get_global_flag ~default:false ~arg_name:"debug_log_to_stream_files");
       (* Not which backend runs — how the C-family backends spell their logging expressions
-         ([full_printf_support]: [%g] vs scaled integers). Codex P2 on PR #337. *)
-      config "prefer_backend_uniformity";
+         ([full_printf_support]: [%g] vs scaled integers). Reaches emitted code only through the
+         logging statements, hence the same gate as the stream-log routing above. *)
+      gate "uniform-logs"
+        (Utils.debug_log_from_routines ()
+        && Utils.get_global_flag ~default:false ~arg_name:"prefer_backend_uniformity");
       (* An aliasing candidate's kernel parameter drops its [restrict] qualifier, since the
          link-time liveness planner may overlap it with another parameter's bytes (gh-ocannl-489):
          a real change to the emitted C, and to what the C compiler may then assume. Codex P1 on

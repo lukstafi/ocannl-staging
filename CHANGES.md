@@ -35,12 +35,13 @@
 ### Changed
 
 - The autotuner's schedule disk-cache key gained a **codegen component** (gh-ocannl-572): the
-  backend-independent emission gates (`large_models`, `buffer_aliasing`, `prefer_backend_uniformity`,
-  and the effective routine-logging and runtime-debug predicates, which fold in `log_level > 1` so a
-  verbosity bump alone never churns keys) and the compiling backend's own codegen knobs, which it
-  reports as `hardware_limits.codegen_tag` — for `cc`, the compiler command and its flags,
+  backend-independent emission gates (`large_models`, `buffer_aliasing`, the effective
+  routine-logging predicate — folding in `log_level > 1` so a verbosity bump alone never churns keys
+  — and the logging-only settings once it holds, `prefer_backend_uniformity` and the stream-log
+  routing) and the compiling backend's own codegen knobs, which it reports as
+  `hardware_limits.codegen_tag` — for `cc`, the compiler command and its flags, the OpenMP team,
   `cc_vector_bytes`, `cc_fp16_arithmetic`, `cc_parallel_grid` / `cc_parallel_chunks`,
-  `cc_grid_private_bytes_cap`; for CUDA and HIP, the graph-capture regime. The component also
+  `cc_grid_private_bytes_cap`; for CUDA and HIP, the graph-capture regime and debug compilation. The component also
   hashes the whole `hardware_limits` record (the cache key otherwise named only the backend, so two
   GPUs of one backend shared every key) and, on `cc`, a fingerprint of the toolchain's predefined
   macros under the configured flags (`-mcpu=native` is a spelling, not a target). These are read after the lowered code the

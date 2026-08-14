@@ -160,9 +160,10 @@ val codegen_tag : limits:Backend_intf.hardware_limits -> unit -> string
     {!digest} names — so, exactly like {!numerics_tag}, these are invisible to the digest while
     changing the kernel or what a timing measures, and a winner crowned under one such regime must
     not replay under another. Three layers: the process-wide gates (the index and pool-slot width
-    [large_models], [buffer_aliasing]'s [restrict] suppression, [prefer_backend_uniformity]'s
-    logging spelling, and the {e effective} routine-logging and runtime-debug predicates, which
-    include the [log_level > 1] threshold so a verbosity bump alone never churns keys); the whole
+    [large_models], [buffer_aliasing]'s [restrict] suppression, and the {e effective} routine-logging
+    predicate — which includes the [log_level > 1] threshold, so a verbosity bump alone never churns
+    keys — together with the settings that only matter once logging reaches the kernel
+    ([prefer_backend_uniformity]'s logging spelling, the stream-log routing); the whole
     [limits] record, which describes the device candidates are generated, rendered and timed
     against; and, inside it, the backend's own
     {!Ir.Backend_intf.hardware_limits.codegen_tag}. *)

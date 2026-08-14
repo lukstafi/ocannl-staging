@@ -279,14 +279,15 @@ the retained procedural analyses alongside the affine engine and raises on diver
   lowering at each compile; a digest guard rejects stale entries.
   **Completeness is an invariant, not a habit** (gh-ocannl-572): everything else read *after*
   lowering shares that hazard, so the key carries a codegen tag as well — the backend-independent
-  emission gates (`large_models`, `buffer_aliasing`'s `restrict` suppression,
-  `prefer_backend_uniformity`'s logging spelling, and the *effective* routine-logging and
-  runtime-debug predicates, which fold in `log_level > 1` so a verbosity bump alone never churns
-  keys) plus the compiling backend's own knobs, which it reports as `hardware_limits.codegen_tag`
-  (for `cc`: the compiler command and flags, `cc_vector_bytes`, `cc_fp16_arithmetic`,
-  `cc_parallel_grid`/`cc_parallel_chunks`, `cc_grid_private_bytes_cap`; for CUDA and HIP the
-  graph-capture regime, which moves a fissioned candidate's launch overhead relative to a
-  whole-routine one) — and the CPU worker-pool signature (gh-ocannl-530). The tag also hashes the
+  emission gates (`large_models`, `buffer_aliasing`'s `restrict` suppression, the *effective*
+  routine-logging predicate — folding in `log_level > 1` so a verbosity bump alone never churns
+  keys — and, only once logging reaches the kernel, `prefer_backend_uniformity`'s logging spelling
+  and the stream-log routing) plus the compiling backend's own knobs, which it reports as
+  `hardware_limits.codegen_tag` (for `cc`: the compiler command and flags, the OpenMP team,
+  `cc_vector_bytes`, `cc_fp16_arithmetic`, `cc_parallel_grid`/`cc_parallel_chunks`,
+  `cc_grid_private_bytes_cap`; for CUDA and HIP the graph-capture regime, which moves a fissioned
+  candidate's launch overhead relative to a whole-routine one, and debug compilation, which only
+  their compilers read) — and the CPU worker-pool signature (gh-ocannl-530). The tag also hashes the
   whole `hardware_limits` record, since `backend` is a backend *name*: two GPUs of one backend
   differ in compute capability, mma formats and memory limits, which is what candidate generation
   and rendering read. On `cc` the toolchain is fingerprinted by its own predefined macros under
