@@ -877,7 +877,11 @@ that they earn a lookup rather than always-loaded space.
   from a stale main checkout that silently drops the commits just landed.
 - The same protection makes `gh pr merge --delete-branch` misleading from a worktree: the merge
   LANDS and only the cleanup fails ("fatal: 'master' is already used by worktree"), so the command
-  exits nonzero over an already-merged PR — check the PR's state before reacting to that status.
+  exits nonzero over an already-merged PR — check the PR's state (`gh pr view <n> --json state`)
+  before reacting to that status, and again before any cleanup: `gh pr merge` also returns WITHOUT
+  merging when the base has required checks or a merge queue, enabling auto-merge instead, and the
+  steps below would then tear down a PR still waiting to land. This repo has neither, so here the
+  flag's own cleanup failure is the only way that command misleads.
   Merge without the flag and clean up in this order, every command anchored with `git -C <main>` so
   that none of them depends on the current directory: `push origin --delete <branch>`; `fetch
   --prune origin`; `merge --ff-only origin/master`; `worktree remove <path>`; `branch -d <branch>`
