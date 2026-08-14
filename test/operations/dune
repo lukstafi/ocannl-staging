@@ -114,7 +114,7 @@
  (modules test_param_shape_error)
  (libraries base ocannl stdio)
  (preprocess
-  (pps ppx_here ppx_ocannl ppx_expect)))
+  (pps ppx_here ppx_ocannl)))
 
 (test
  (name test_composite_param_init)
@@ -773,7 +773,7 @@
  (modules test_extend_dsls)
  (libraries base ocannl stdio)
  (preprocess
-  (pps ppx_here ppx_ocannl ppx_expect)))
+  (pps ppx_here ppx_ocannl)))
 
 (test
  (name hello_world_dim1x1)
@@ -784,7 +784,7 @@
  (modules hello_world_dim1x1)
  (libraries base ocannl stdio)
  (preprocess
-  (pps ppx_here ppx_ocannl ppx_expect)))
+  (pps ppx_here ppx_ocannl)))
 
 (test
  (name small_literal_tensor)
@@ -795,7 +795,7 @@
  (modules small_literal_tensor)
  (libraries base ocannl stdio)
  (preprocess
-  (pps ppx_here ppx_ocannl ppx_expect)))
+  (pps ppx_here ppx_ocannl)))
 
 (test
  (name zero2hero_1of7_exec)
@@ -806,7 +806,7 @@
  (modules zero2hero_1of7_exec)
  (libraries base ocannl stdio)
  (preprocess
-  (pps ppx_here ppx_ocannl ppx_expect)))
+  (pps ppx_here ppx_ocannl)))
 
 (test
  (name check_slice_shapes)
