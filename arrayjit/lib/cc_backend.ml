@@ -103,9 +103,17 @@ let resolve_executable token =
       List.concat_map dirs ~f:(fun dir ->
           List.map exts ~f:(fun ext -> Stdlib.Filename.concat dir (token ^ ext)))
   in
+  (* Executable, not merely present (Codex P1 on PR #337): a PATH search skips a non-executable
+     file of the right name and runs a later one, so accepting the first regular file would key on
+     a file the compile never runs -- and then an upgrade of the one it does run would go unnoticed.
+     [X_OK] is meaningless on Windows, where OCaml's [access] does not implement it and the
+     extension list above carries the same information. *)
+  let is_executable path =
+    Sys.win32 || (try Unix.access path [ Unix.X_OK ]; true with _ -> false)
+  in
   List.find_map candidates ~f:(fun path ->
       match try Some (Unix.stat path) with _ -> None with
-      | Some ({ Unix.st_kind = Unix.S_REG; _ } as st) ->
+      | Some ({ Unix.st_kind = Unix.S_REG; _ } as st) when is_executable path ->
           (* [stat], not [lstat]: /usr/bin/cc is a symlink, and it is the TARGET whose size and
              mtime move when the toolchain is upgraded. *)
           Some (Printf.sprintf "%s:%d:%.0f" path st.Unix.st_size st.Unix.st_mtime)
@@ -681,13 +689,17 @@ let codegen_tag () =
 
                  A complete list is not on offer -- an OpenMP runtime has dozens of variables, and
                  vendor ones keep arriving -- so this covers the standard team, stack, wait and
-                 affinity controls plus libgomp's and the Intel runtime's common equivalents. An
-                 unlisted variable degrades to what everything did before this component existed:
-                 a shared key across two timing regimes. *)
+                 affinity controls plus libgomp's and the Intel runtime's common equivalents
+                 (including [GOMP_STACKSIZE], which libgomp honors when [OMP_STACKSIZE] is unset:
+                 Codex P1 on PR #337). An unlisted variable degrades to what everything did before
+                 this component existed: a shared key across two timing regimes. What is
+                 deliberately absent is [OMP_SCHEDULE]: the emitted pragma is
+                 [schedule(static)], which the variable cannot reach, so keying on it would only
+                 retune identical loops. *)
               List.map
                 [ "OMP_NUM_THREADS"; "OMP_DYNAMIC"; "OMP_THREAD_LIMIT"; "OMP_PROC_BIND";
                   "OMP_PLACES"; "OMP_MAX_ACTIVE_LEVELS"; "OMP_STACKSIZE"; "OMP_WAIT_POLICY";
-                  "OMP_SCHEDULE"; "GOMP_CPU_AFFINITY"; "GOMP_SPINCOUNT"; "KMP_AFFINITY";
+                  "GOMP_STACKSIZE"; "GOMP_CPU_AFFINITY"; "GOMP_SPINCOUNT"; "KMP_AFFINITY";
                   "KMP_BLOCKTIME" ]
                 ~f:(fun var -> var ^ "=" ^ Option.value (Stdlib.Sys.getenv_opt var) ~default:"")
         in
