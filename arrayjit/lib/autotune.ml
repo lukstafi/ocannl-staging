@@ -154,13 +154,12 @@ let decline_summaries declines =
 let failed_count declines =
   Hashtbl.fold declines ~init:0 ~f:(fun ~key:_ ~data:acc count -> count + acc.da_count)
 
-let int_arg ~arg_name ~default =
-  let s = Utils.get_global_arg ~arg_name ~default:(Int.to_string default) in
-  try Int.of_string (String.strip s) with _ -> default
-
-let float_arg ~arg_name ~default =
-  let s = Utils.get_global_arg ~arg_name ~default:(Float.to_string default) in
-  try Float.of_string (String.strip s) with _ -> default
+(* These parse a setting the caller has already read, rather than reading it themselves: the key
+   has to be a string literal at the [Utils.get_global_arg] call site, because that literal is how
+   the consistency tests find a configuration read (test/support/config_key_scan.ml). A reader
+   helper taking the key as a parameter would hide every key routed through it. *)
+let int_setting ~default s = try Int.of_string (String.strip s) with _ -> default
+let float_setting ~default s = try Float.of_string (String.strip s) with _ -> default
 
 (* A candidate round-improvement below this fraction of the incumbent ends the search. *)
 let min_progress = 0.01
@@ -615,9 +614,11 @@ let scratch_of (opt : LL.optimized) =
 (* Per-machine calibrated envelope constants from the config beat the backend's class-level advisory
    constants ([Backend_intf.hardware_limits]'s [peak_flops] / [peak_memory_bandwidth]) — fitting
    them from [autotune_calibration_file] data is the intended workflow. *)
-let peak_override ~arg_name =
+(* Takes the read as a thunk, both to keep it lazy and to keep the key a literal at its call
+   site -- see [int_setting]. *)
+let peak_override read =
   lazy
-    (let s = String.strip (Utils.get_global_arg ~arg_name ~default:"") in
+    (let s = String.strip (read ()) in
      if String.is_empty s then None
      else
        match Float.of_string s with
@@ -625,8 +626,11 @@ let peak_override ~arg_name =
        | _ -> None
        | exception _ -> None)
 
-let peak_flops_override = peak_override ~arg_name:"model_peak_flops"
-let peak_bandwidth_override = peak_override ~arg_name:"model_peak_memory_bandwidth"
+let peak_flops_override =
+  peak_override (fun () -> Utils.get_global_arg ~arg_name:"model_peak_flops" ~default:"")
+
+let peak_bandwidth_override =
+  peak_override (fun () -> Utils.get_global_arg ~arg_name:"model_peak_memory_bandwidth" ~default:"")
 
 let envelope ~(limits : Ir.Backend_intf.hardware_limits) =
   ( Option.first_some (Lazy.force peak_flops_override) limits.Ir.Backend_intf.peak_flops,
@@ -2098,14 +2102,28 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
     Option.value search ~default:(Utils.get_global_flag ~arg_name:"autotune_search" ~default:true)
   in
   let beam_width =
-    max 1 (Option.value beam_width ~default:(int_arg ~arg_name:"autotune_beam_width" ~default:2))
+    max 1
+      (Option.value beam_width
+         ~default:
+           (int_setting ~default:2
+           @@ Utils.get_global_arg ~arg_name:"autotune_beam_width" ~default:"2"))
   in
-  let rounds = Option.value rounds ~default:(int_arg ~arg_name:"autotune_rounds" ~default:2) in
-  let repeats = Option.value repeats ~default:(int_arg ~arg_name:"autotune_repeats" ~default:3) in
+  let rounds =
+    Option.value rounds
+      ~default:
+        (int_setting ~default:2 @@ Utils.get_global_arg ~arg_name:"autotune_rounds" ~default:"2")
+  in
+  let repeats =
+    Option.value repeats
+      ~default:
+        (int_setting ~default:3 @@ Utils.get_global_arg ~arg_name:"autotune_repeats" ~default:"3")
+  in
   let max_split_reduce_sites =
     max 0
       (Option.value max_split_reduce_sites
-         ~default:(int_arg ~arg_name:"autotune_split_reduce_max_sites" ~default:8))
+         ~default:
+           (int_setting ~default:8
+           @@ Utils.get_global_arg ~arg_name:"autotune_split_reduce_max_sites" ~default:"8"))
   in
   let seed_block_sizes = Option.value seed_block_sizes ~default:[ 64; 128; 256; 512 ] in
   (* Whether the cache directory was CHOSEN, as opposed to being the built-in default: passed by the
@@ -2128,7 +2146,10 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
   (* A search-less [tune] replays only a cache someone asked for. *)
   let cache_dir = if search || cache_dir_chosen then cache_dir else "" in
   let keep_fraction =
-    Option.value keep_fraction ~default:(float_arg ~arg_name:"autotune_keep_fraction" ~default:1.)
+    Option.value keep_fraction
+      ~default:
+        (float_setting ~default:1.
+        @@ Utils.get_global_arg ~arg_name:"autotune_keep_fraction" ~default:"1.")
   in
   let static_indices = Idx.bound_symbols bindings in
   let backend = Context.backend_name ctx in
