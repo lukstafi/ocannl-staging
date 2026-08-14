@@ -172,6 +172,21 @@ let () =
      which top-level definition an offset sits in, so that a documentation comment quoting a
      column-zero `let get_global_arg` cannot lend an exempt name to unrelated code (round 4). Only
      the line quoted back to the reader is sliced from the text, at the offset the lexer reported. *)
+  (* Keying the exemptions by basename reads well and is what this list is written as -- but it is
+     unambiguous only while no two scanned files share a name. Rather than let a future
+     `tensor/utils.ml` inherit `arrayjit/lib/utils.ml`'s exemptions in silence (Codex P2, round 10),
+     the ambiguity fails here, where the fix is either a rename or a switch to paths. *)
+  let duplicate_basenames =
+    List.map source_files ~f:Stdlib.Filename.basename
+    |> List.sort_and_group ~compare:String.compare
+    |> List.filter_map ~f:(function name :: _ :: _ -> Some name | _ -> None)
+  in
+  if not (List.is_empty duplicate_basenames) then
+    fail
+      (Printf.sprintf
+         "scanned files share a basename, which the exemption list is keyed by -- rename one or \
+          key the list by path: %s"
+         (String.concat ~sep:", " duplicate_basenames));
   let line_at original i =
     let line_start =
       match String.rfindi original ~pos:i ~f:(fun _ c -> Char.equal c '\n') with

@@ -122,10 +122,20 @@ let get_global_arg
     is only prose *)
 let other y = get ~arg_name:y|ocaml},
       Some "other" );
-    ( "a pattern binding is its own definition, with no name to exempt",
+    ( "a nameless binding lends no name, so nothing can be exempt in it",
       {ocaml|let get_global_arg x = x
 let () = ignore (get ~arg_name:name)|ocaml},
-      Some "<unnamed>" );
+      None );
+    ( "a named local helper is its own definition, not its host",
+      {ocaml|let get_global_arg x =
+  let hidden name = get ~arg_name:name in
+  hidden x|ocaml},
+      Some "hidden (nested)" );
+    ( "a nameless local binding is transparent, so its host keeps the use",
+      {ocaml|let get_global_arg x =
+  let a, b = get ~arg_name:x in
+  (a, b)|ocaml},
+      Some "get_global_arg" );
     ( "a binding inside a module is qualified, so it cannot borrow an exemption",
       {ocaml|let get_global_arg x = x
 module M = struct

@@ -130,25 +130,6 @@ let definitions content =
       structure_item =
         (fun self item ->
           match item.pstr_desc with
-          | Pstr_value (_, bindings) ->
-              List.iter bindings ~f:(fun binding ->
-                  let name =
-                    match binding.pvb_pat.ppat_desc with
-                    | Ppat_var { txt; _ } -> Some (qualify txt)
-                    | Ppat_constraint ({ ppat_desc = Ppat_var { txt; _ }; _ }, _) ->
-                        Some (qualify txt)
-                    | _ -> None
-                  in
-                  let start = binding.pvb_loc.loc_start.pos_cnum in
-                  items :=
-                    {
-                      start;
-                      stop = binding.pvb_loc.loc_end.pos_cnum;
-                      name;
-                      top_level = Set.mem root_bindings start;
-                    }
-                    :: !items);
-              Ast_iterator.default_iterator.structure_item self item
           | Pstr_module { pmb_name = { txt = name; _ }; _ } ->
               within
                 (Option.value name ~default:"_")
@@ -159,15 +140,43 @@ let definitions content =
           | Pstr_recmodule _ | Pstr_open _ | Pstr_include _ | Pstr_extension _ ->
               within "_" (fun () -> Ast_iterator.default_iterator.structure_item self item)
           | _ -> Ast_iterator.default_iterator.structure_item self item);
+      (* EVERY value binding, including the expression-local [let … in] ones: a helper defined
+         inside an exempt function is not that function, and a use in it must not inherit the
+         exemption (Codex P2, round 10). Structure-level and local bindings both arrive here. *)
+      value_binding =
+        (fun self binding ->
+          let name =
+            match binding.pvb_pat.ppat_desc with
+            | Ppat_var { txt; _ } -> Some (qualify txt)
+            | Ppat_constraint ({ ppat_desc = Ppat_var { txt; _ }; _ }, _) -> Some (qualify txt)
+            | _ -> None
+          in
+          let start = binding.pvb_loc.loc_start.pos_cnum in
+          items :=
+            {
+              start;
+              stop = binding.pvb_loc.loc_end.pos_cnum;
+              name;
+              top_level = Set.mem root_bindings start;
+            }
+            :: !items;
+          Ast_iterator.default_iterator.value_binding self binding);
     }
   in
   iterator.structure iterator ast;
   List.rev !items
 
-(** The definition an offset sits in: the smallest one containing it, so an inner binding wins over
-    an outer one. *)
+(** The definition an offset sits in: the smallest NAMED one containing it, so an inner binding
+    wins over an outer one.
+
+    Nameless bindings are transparent rather than opaque, and the real plumbing is why:
+    [get_global_arg_with_source] forwards its key from inside a [let result, source = … in], and
+    treating that tuple binding as the answer would refuse the very function the exemption is
+    written for. A binding with no name is not a place an exemption could be spent; a NAMED local
+    helper is, which is exactly the case this distinction keeps out. *)
 let definition_at definitions offset =
-  List.filter definitions ~f:(fun d -> d.start <= offset && offset < d.stop)
+  List.filter definitions ~f:(fun d ->
+      d.start <= offset && offset < d.stop && Option.is_some d.name)
   |> List.min_elt ~compare:(fun a b -> Int.compare (a.stop - a.start) (b.stop - b.start))
 
 (** The keys [content] reads through the label.
