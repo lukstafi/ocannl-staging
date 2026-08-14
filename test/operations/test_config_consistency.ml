@@ -146,9 +146,11 @@ let () =
      forwarding is known" and "nothing in this file is ever checked" (Codex P2, round 1): utils.ml
      and tnode.ml go on reading configuration in the ordinary way everywhere else, and a new
      forwarding helper in either of them fails like anywhere else.
-     Only the labelled-argument spellings count, and only in code: comment and string bodies are
-     blanked first, so prose about the convention -- including this comment's neighbours in the
-     scanned files -- is not a call site. *)
+     What counts as a use, and which function it sits in, are the parse tree's answers rather than a
+     pattern's (Config_key_scan): every spelling of the label that OCaml accepts is one node, and
+     prose about the convention -- including this comment's neighbours in the scanned files -- is
+     not code at all. An exemption reaches a named TOP-LEVEL function and nothing nested inside it,
+     so a local helper, however it is introduced, forwards keys on its own account. *)
   let forwarding_sites =
     Map.of_alist_exn
       (module String)
@@ -231,7 +233,7 @@ let () =
                     match definition with
                     | None -> "<no enclosing definition>"
                     | Some { Config_key_scan.name; top_level; _ } ->
-                        Option.value name ~default:"<unnamed binding>"
+                        Option.value name ~default:"<anonymous function>"
                         ^ if top_level then "" else " (nested)"
                   in
                   fail

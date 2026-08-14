@@ -86,24 +86,39 @@ let label_uses content =
   iterator.structure iterator (structure_of content);
   List.rev !uses
 
-(** Every value binding: the source range it covers, its name if it has a simple one, and whether
-    it is top-level.
+(** Every function in the file: the source range it covers, the name of the binding it is the body
+    of (if any), and whether that binding is top-level.
 
-    [top_level] is what an exemption may rely on, and it is decided by membership: a binding is
-    top-level exactly when it is one of the root structure's own bindings. That is a closed
-    question. The alternative -- asking whether a binding sits inside any construct that nests --
-    is an open one, and three review rounds spent answering it were three answers short: modules,
-    then [open struct] / [include struct] / extension payloads, then a structure packed inside a
-    first-class module expression. There is no reason to think that list had stopped.
+    {2 Why functions and not bindings}
 
-    [name] keeps its module path where one is known, because a report naming [Sneaky.get_global_arg]
-    is worth more than one naming [get_global_arg]. It is for the reader only: a nesting form this
-    misses still yields [top_level = false], so it cannot widen an exemption.
+    An exemption says a named top-level function is trusted plumbing. The question is therefore
+    which function a use sits in, and the answer is the innermost enclosing {e lambda} — not the
+    innermost enclosing binding, which is a different thing that merely correlates with it.
 
-    Each binding carries its OWN range, not its structure item's, or the siblings of a
-    [let … and …] group become indistinguishable. Pattern bindings ([let () = …]) are included with
-    no name: a use inside one belongs to it, and it has nothing an exemption could match. *)
+    Three rounds of review found the correlation breaking, each in a new spelling: a local
+    [let hidden name = …], then a nameless [let result, source = …] that had to stay transparent
+    because the real plumbing forwards its key from inside one, then [let (hidden as alias) = fun
+    name -> …], whose pattern yields no simple name. Keying on the lambda answers all three at once
+    and does not care how the helper was introduced:
+
+    - the plumbing's own [let result, source = resolve_config_value … ~arg_name:n in …] is no
+      lambda at all, so the use stays with the host function, as it must;
+    - a local helper is a lambda, so the use is its own, whatever pattern binds it;
+    - an inline [(fun name -> … ~arg_name:name)] is a lambda with no binding at all, so it has no
+      name and can be exempt nowhere — a hole that was open until this round and that no list of
+      binding forms would have closed.
+
+    [name] is best-effort and fails safe: a pattern this does not recognise yields no name, and a
+    nameless function is refused rather than exempted. The module path is kept for the reader, as
+    [top_level] is what an exemption may rely on. *)
 type definition = { start : int; stop : int; name : string option; top_level : bool }
+
+(* The simple name a pattern binds, where it has one. Best-effort by design: see above. *)
+let rec pattern_name pattern =
+  match pattern.ppat_desc with
+  | Ppat_var { txt; _ } -> Some txt
+  | Ppat_constraint (inner, _) | Ppat_alias (inner, _) -> pattern_name inner
+  | _ -> None
 
 let definitions content =
   let ast = structure_of content in
@@ -115,7 +130,8 @@ let definitions content =
         | _ -> [])
     |> Set.of_list (module Int)
   in
-  let items = ref [] in
+  (* Which functions are the body of a named binding, and whether that binding is top-level. *)
+  let named = Hashtbl.create (module Int) in
   let path = ref [] in
   let qualify name = String.concat ~sep:"." (List.rev (name :: !path)) in
   let within name f =
@@ -124,7 +140,7 @@ let definitions content =
     f ();
     path := saved
   in
-  let iterator =
+  let naming =
     {
       Ast_iterator.default_iterator with
       structure_item =
@@ -134,49 +150,51 @@ let definitions content =
               within
                 (Option.value name ~default:"_")
                 (fun () -> Ast_iterator.default_iterator.structure_item self item)
-          (* Anonymous nesting -- [open struct … end], [include struct … end], an extension payload,
-             a recursive-module group -- has no name to borrow, so the reader gets a placeholder.
-             Correctness does not ride on this list being complete; [top_level] does that. *)
+          (* Anonymous nesting has no name to borrow; the reader gets a placeholder. Correctness
+             does not ride on this list being complete -- [top_level] does that. *)
           | Pstr_recmodule _ | Pstr_open _ | Pstr_include _ | Pstr_extension _ ->
               within "_" (fun () -> Ast_iterator.default_iterator.structure_item self item)
           | _ -> Ast_iterator.default_iterator.structure_item self item);
-      (* EVERY value binding, including the expression-local [let … in] ones: a helper defined
-         inside an exempt function is not that function, and a use in it must not inherit the
-         exemption (Codex P2, round 10). Structure-level and local bindings both arrive here. *)
       value_binding =
         (fun self binding ->
-          let name =
-            match binding.pvb_pat.ppat_desc with
-            | Ppat_var { txt; _ } -> Some (qualify txt)
-            | Ppat_constraint ({ ppat_desc = Ppat_var { txt; _ }; _ }, _) -> Some (qualify txt)
-            | _ -> None
-          in
-          let start = binding.pvb_loc.loc_start.pos_cnum in
-          items :=
-            {
-              start;
-              stop = binding.pvb_loc.loc_end.pos_cnum;
-              name;
-              top_level = Set.mem root_bindings start;
-            }
-            :: !items;
+          (match (pattern_name binding.pvb_pat, binding.pvb_expr.pexp_desc) with
+          | Some name, Pexp_function _ ->
+              Hashtbl.set named
+                ~key:binding.pvb_expr.pexp_loc.loc_start.pos_cnum
+                ~data:
+                  ( qualify name,
+                    Set.mem root_bindings binding.pvb_loc.loc_start.pos_cnum )
+          | _ -> ());
           Ast_iterator.default_iterator.value_binding self binding);
     }
   in
-  iterator.structure iterator ast;
+  naming.structure naming ast;
+  let items = ref [] in
+  let collecting =
+    {
+      Ast_iterator.default_iterator with
+      expr =
+        (fun self expr ->
+          (match expr.pexp_desc with
+          | Pexp_function _ ->
+              let start = expr.pexp_loc.loc_start.pos_cnum in
+              let name, top_level =
+                match Hashtbl.find named start with
+                | Some (name, top_level) -> (Some name, top_level)
+                | None -> (None, false)
+              in
+              items := { start; stop = expr.pexp_loc.loc_end.pos_cnum; name; top_level } :: !items
+          | _ -> ());
+          Ast_iterator.default_iterator.expr self expr);
+    }
+  in
+  collecting.structure collecting ast;
   List.rev !items
 
-(** The definition an offset sits in: the smallest NAMED one containing it, so an inner binding
-    wins over an outer one.
-
-    Nameless bindings are transparent rather than opaque, and the real plumbing is why:
-    [get_global_arg_with_source] forwards its key from inside a [let result, source = … in], and
-    treating that tuple binding as the answer would refuse the very function the exemption is
-    written for. A binding with no name is not a place an exemption could be spent; a NAMED local
-    helper is, which is exactly the case this distinction keeps out. *)
+(** The function an offset sits in: the smallest one containing it, so a local helper wins over the
+    function that defines it. *)
 let definition_at definitions offset =
-  List.filter definitions ~f:(fun d ->
-      d.start <= offset && offset < d.stop && Option.is_some d.name)
+  List.filter definitions ~f:(fun d -> d.start <= offset && offset < d.stop)
   |> List.min_elt ~compare:(fun a b -> Int.compare (a.stop - a.start) (b.stop - b.start))
 
 (** The keys [content] reads through the label.

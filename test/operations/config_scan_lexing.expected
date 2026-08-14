@@ -30,6 +30,8 @@ ok: enclosing definition -- a rec definition
 ok: enclosing definition -- a doc comment quoting a column-zero binding is not a definition
 ok: enclosing definition -- a nameless binding lends no name, so nothing can be exempt in it
 ok: enclosing definition -- a named local helper is its own definition, not its host
+ok: enclosing definition -- an aliased local helper is still a helper
+ok: enclosing definition -- an inline anonymous function can be exempt nowhere
 ok: enclosing definition -- a nameless local binding is transparent, so its host keeps the use
 ok: enclosing definition -- a binding inside a module is qualified, so it cannot borrow an exemption
 ok: enclosing definition -- a nested binding reusing an exempt name stays qualified

@@ -131,6 +131,17 @@ let () = ignore (get ~arg_name:name)|ocaml},
   let hidden name = get ~arg_name:name in
   hidden x|ocaml},
       Some "hidden (nested)" );
+    ( "an aliased local helper is still a helper",
+      {ocaml|let get_global_arg x =
+  let (hidden as alias) = fun name -> get ~arg_name:name in
+  ignore alias;
+  hidden x|ocaml},
+      Some "hidden (nested)" );
+    (* No binding at all, so no name, so exempt nowhere. Keying on the lambda is what makes this
+       case exist; a rule about binding forms could not have reached it. *)
+    ( "an inline anonymous function can be exempt nowhere",
+      {ocaml|let get_global_arg x = List.map (fun name -> get ~arg_name:name) x|ocaml},
+      Some "<anonymous function> (nested)" );
     ( "a nameless local binding is transparent, so its host keeps the use",
       {ocaml|let get_global_arg x =
   let a, b = get ~arg_name:x in
@@ -242,7 +253,7 @@ let () =
   List.iter definition_cases ~f:(fun (name, source, expected) ->
       let definitions = Scan.definitions source in
       let render (d : Scan.definition) =
-        Option.value d.Scan.name ~default:"<unnamed>"
+        Option.value d.Scan.name ~default:"<anonymous function>"
         ^ if d.Scan.top_level then "" else " (nested)"
       in
       let found =
