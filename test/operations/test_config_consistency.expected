@@ -1,2 +1,3 @@
 OK: 107 call-site keys, all in reference file and registry; registry and reference agree on 110 keys.
 OK: 2 profile payloads, documented and quoted verbatim: reproducible (11 keys), performance (7 keys).
+OK: 21 files spell every config key as a string literal; tnode.ml, utils.ml exempt as plumbing.

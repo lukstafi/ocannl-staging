@@ -9,7 +9,12 @@ open Base
 
 (** The [arg_name] literals of the [get_global_arg] / [get_global_flag] calls in [content]. Two
     forms appear in the codebase: [~arg_name:"key"] (direct call sites) and [?(arg_name = "key")]
-    (optional parameter defaults, e.g. [get_style] in tnode.ml). *)
+    (optional parameter defaults, e.g. [get_style] in tnode.ml).
+
+    A key that reaches the lookup any other way — through a helper taking the name as a
+    parameter — is invisible to this scan, and hence to both tests built on it. That is why
+    [test_config_consistency] separately fails any scanned file that hands the label a non-literal,
+    exempting only utils.ml (the lookup plumbing) and tnode.ml ([get_style]). *)
 let keys_in_source content =
   let find_all marker =
     let mlen = String.length marker in

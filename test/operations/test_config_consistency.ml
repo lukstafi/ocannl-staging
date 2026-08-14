@@ -131,6 +131,68 @@ let () =
           fail
             (Printf.sprintf "%s has no '%s' … '%s' block" reference_file (marker "BEGIN")
                (marker "END")));
+  (* 6. Both consistency tests (this one and digest_completeness) find a configuration read by
+     scanning sources for the key spelled as a string literal at the call site
+     (Test_utils.Config_key_scan). That convention is load-bearing: a helper that takes the key as a
+     parameter hides every key routed through it from BOTH scanners -- on staging PR #337 one such
+     helper hid three real keys, and a deliberately unregistered fake key stayed green until the
+     helper was removed. So the label must carry a literal everywhere except the two places that
+     legitimately move a key around:
+     - utils.ml, where get_global_arg / get_global_flag / get_global_arg_with_source forward the
+       name to each other -- that IS the lookup plumbing;
+     - tnode.ml, whose get_style takes the key as an optional parameter defaulting to a literal,
+       re-passed by its callers with literals of their own.
+     Only the labelled-argument spellings count; a comment mentioning the label is not a call
+     site. *)
+  let plumbing_files = Set.of_list (module String) [ "utils.ml"; "tnode.ml" ] in
+  let label = "arg_name" in
+  let non_literal_uses content =
+    let n = String.length content in
+    let label_len = String.length label in
+    let is_ident_char c = Char.is_alphanum c || Char.equal c '_' || Char.equal c '\'' in
+    let enclosing_line i j =
+      let line_start =
+        match String.rfindi content ~pos:i ~f:(fun _ c -> Char.equal c '\n') with
+        | Some k -> k + 1
+        | None -> 0
+      in
+      let line_end =
+        match String.lfindi content ~pos:j ~f:(fun _ c -> Char.equal c '\n') with
+        | Some k -> k
+        | None -> n
+      in
+      String.strip (String.sub content ~pos:line_start ~len:(line_end - line_start))
+    in
+    let rec loop pos acc =
+      match String.substr_index content ~pos ~pattern:label with
+      | None -> List.rev acc
+      | Some i ->
+          let after = i + label_len in
+          let is_argument =
+            (i >= 1 && Char.equal content.[i - 1] '~')
+            || (i >= 2 && Char.equal content.[i - 1] '(' && Char.equal content.[i - 2] '?')
+          in
+          let whole_word = after >= n || not (is_ident_char content.[after]) in
+          let is_literal =
+            String.is_substring_at content ~pos:after ~substring:{|:"|}
+            || String.is_substring_at content ~pos:after ~substring:{| = "|}
+          in
+          let acc =
+            if is_argument && whole_word && not is_literal then enclosing_line i after :: acc
+            else acc
+          in
+          loop after acc
+    in
+    loop 0 []
+  in
+  let scanned = ref 0 in
+  List.iter source_files ~f:(fun fname ->
+      let base = Stdlib.Filename.basename fname in
+      if not (Set.mem plumbing_files base) then (
+        Int.incr scanned;
+        List.iter (non_literal_uses (In_channel.read_all fname)) ~f:(fun text ->
+            fail
+            @@ Printf.sprintf "%s does not spell the config key as a string literal: %s" base text)));
   if !ok then (
     printf
       "OK: %d call-site keys, all in reference file and registry; registry and reference agree on \
@@ -140,4 +202,7 @@ let () =
       (List.length payload_keys)
       (String.concat ~sep:", "
       @@ List.map payload_keys ~f:(fun (name, keys) ->
-             Printf.sprintf "%s (%d keys)" name (Set.length keys))))
+             Printf.sprintf "%s (%d keys)" name (Set.length keys)));
+    printf "OK: %d files spell every config key as a string literal; %s exempt as plumbing.\n"
+      !scanned
+      (String.concat ~sep:", " @@ Set.to_list plumbing_files))
