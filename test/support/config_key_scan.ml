@@ -86,38 +86,65 @@ let label_uses content =
   iterator.structure iterator (structure_of content);
   List.rev !uses
 
-(** Every top-level definition, as (where it starts, where it ends, its name if it has a simple
-    one). Bindings inside modules are included; [let () = …] and other pattern bindings are included
-    too, with no name — a use inside one belongs to it, not to whatever preceded it (Codex P2, round
-    5). *)
+(** Every value binding, as (where it starts, where it ends, its name if it has a simple one).
+
+    Two things this has to get right for exemptions to mean anything (Codex P2, round 6):
+
+    - each binding carries its OWN range, not its structure item's, or the siblings of a
+      [let … and …] group become indistinguishable and a use in one is read as a use in another;
+    - a binding nested in a module carries its qualified name, so that a [Sneaky.get_global_arg]
+      cannot collect the exemption written for the top-level [get_global_arg]. Bare names are
+      therefore exactly the top-level ones, which is what an exemption list means to name.
+
+    Pattern bindings ([let () = …]) are included with no name: a use inside one belongs to it, and
+    it has nothing an exemption could match. *)
 let definitions content =
   let items = ref [] in
+  let path = ref [] in
+  let qualify name = String.concat ~sep:"." (List.rev (name :: !path)) in
+  let within name f =
+    let saved = !path in
+    path := name :: !path;
+    f ();
+    path := saved
+  in
   let iterator =
     {
       Ast_iterator.default_iterator with
       structure_item =
         (fun self item ->
-          (match item.pstr_desc with
+          match item.pstr_desc with
           | Pstr_value (_, bindings) ->
               List.iter bindings ~f:(fun binding ->
                   let name =
                     match binding.pvb_pat.ppat_desc with
-                    | Ppat_var { txt; _ } -> Some txt
-                    | Ppat_constraint ({ ppat_desc = Ppat_var { txt; _ }; _ }, _) -> Some txt
+                    | Ppat_var { txt; _ } -> Some (qualify txt)
+                    | Ppat_constraint ({ ppat_desc = Ppat_var { txt; _ }; _ }, _) ->
+                        Some (qualify txt)
                     | _ -> None
                   in
                   items :=
-                    (item.pstr_loc.loc_start.pos_cnum, item.pstr_loc.loc_end.pos_cnum, name)
-                    :: !items)
-          | _ -> ());
-          Ast_iterator.default_iterator.structure_item self item);
+                    (binding.pvb_loc.loc_start.pos_cnum, binding.pvb_loc.loc_end.pos_cnum, name)
+                    :: !items);
+              Ast_iterator.default_iterator.structure_item self item
+          | Pstr_module { pmb_name = { txt = name; _ }; _ } ->
+              within
+                (Option.value name ~default:"_")
+                (fun () -> Ast_iterator.default_iterator.structure_item self item)
+          | Pstr_recmodule _ ->
+              (* One prefix for the group: the point is only that nothing inside is bare. *)
+              within "_" (fun () -> Ast_iterator.default_iterator.structure_item self item)
+          (* A local [let module M = … in …] needs no case of its own: this compiler represents it
+             as a structure item inside the expression (Pexp_struct_item), so it arrives here and
+             takes its prefix like any other module. *)
+          | _ -> Ast_iterator.default_iterator.structure_item self item);
     }
   in
   iterator.structure iterator (structure_of content);
   List.rev !items
 
-(** The definition an offset sits in: the smallest one containing it, so a binding nested in a
-    module wins over the module around it. *)
+(** The definition an offset sits in: the smallest one containing it, so an inner binding wins over
+    an outer one. *)
 let definition_at definitions offset =
   List.filter definitions ~f:(fun (start, stop, _) -> start <= offset && offset < stop)
   |> List.min_elt ~compare:(fun (a_start, a_stop, _) (b_start, b_stop, _) ->

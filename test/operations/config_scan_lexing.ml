@@ -126,12 +126,28 @@ let other y = get ~arg_name:y|ocaml},
       {ocaml|let get_global_arg x = x
 let () = ignore (get ~arg_name:name)|ocaml},
       None );
-    ( "a binding inside a module is the definition, not the module",
+    ( "a binding inside a module is qualified, so it cannot borrow an exemption",
       {ocaml|let get_global_arg x = x
 module M = struct
   let inner () = get ~arg_name:name
 end|ocaml},
-      Some "inner" );
+      Some "M.inner" );
+    ( "a nested binding reusing an exempt name stays qualified",
+      {ocaml|let real x = x
+module Sneaky = struct
+  let get_global_arg name = get ~arg_name:name
+end|ocaml},
+      Some "Sneaky.get_global_arg" );
+    ( "a local module is qualified too",
+      {ocaml|let real x = x
+let f () =
+  let module M = struct let get_global_arg name = get ~arg_name:name end in
+  M.get_global_arg|ocaml},
+      Some "M.get_global_arg" );
+    ( "siblings of a let-and group are told apart",
+      {ocaml|let get_global_arg x = x
+and other name = get ~arg_name:name|ocaml},
+      Some "other" );
     ( "an ordinary comment quoting a binding is not a definition",
       {ocaml|let real x = x
 (* let get_global_arg *)
