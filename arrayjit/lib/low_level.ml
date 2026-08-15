@@ -2625,6 +2625,10 @@ let simplify_llc static_indices llc =
            constant. *)
         let v', vprec' = loop_scalar (v, vprec) in
         (Get_dynamic { tn; idcs; dyn_axis; dyn_value = (v', vprec') }, Lazy.force tn.Tn.storage_prec)
+    (* Collapsing a single-assignment scope into the enclosing expression demotes its hoisted reads
+       to in-expression reads, i.e. moves them relative to any sibling scope body's effects. That is
+       unconditionally sound under scope purity (gh-ocannl-584, {!validate_scope_bodies}): sibling
+       bodies touch only their own locals, so no read can observe where it was placed. *)
     | Local_scope { id; body = Set_local (id2, v); _ } when equal_scope_id id id2 ->
         ignore (Lazy.force id.tn.Tn.dims);
         loop_scalar (v, Lazy.force id.tn.Tn.storage_prec)
@@ -3337,6 +3341,76 @@ let has_accumulation (llc : t) : bool =
         false
   in
   loop llc
+
+(** gh-ocannl-584: the scope-purity contract. A [Local_scope] body is a PURE sub-computation of the
+    enclosing statement — it may write scope-local state ([Set_local], [Declare_local]) and nothing
+    else. Raises [Invalid_argument] on a tensor-node write ([Set], [Set_from_vec], [Set_dynamic],
+    [Zero_out], [Tile_mma]) inside a scope body, at any nesting depth.
+
+    The rule exists because a scope body does not execute where it is written: [C_syntax.pp_scalar]
+    returns it as a local definition, which [pp_local_defs] emits ahead of the enclosing statement,
+    ordered by [scope_id] rather than by the operand's syntactic position. A body write would
+    therefore land before the enclosing statement's other reads regardless of where the scope sits
+    in the expression, and a sibling reader's own ordering would depend on whether [simplify_llc]
+    collapsed its single-assignment scope into the expression. Ruling the write out instead makes
+    the emission order of a statement's scope bodies unobservable, which is what
+    {!Affine.path_before} already assumes when it declines to order sibling [Arg] positions, and
+    what makes that collapse unconditionally sound.
+
+    The optimizer satisfies the contract by construction: [inline_computation] drops the inlined
+    computation's [Set]s and [Zero_out]s, rewriting only the setters of the node being inlined, and
+    into [Set_local]. So this validates hand-built and future-pass IR; enforced at codegen
+    ([C_syntax.compile_proc]), the one place every executed routine passes through. *)
+let validate_scope_bodies (llc : t) : unit =
+  let reject scope construct tn =
+    invalid_arg
+      ("Low_level.validate_scope_bodies: " ^ construct ^ " writes the tensor node "
+     ^ Tn.debug_name tn ^ " inside the body of local scope v" ^ Int.to_string scope.scope_id ^ "_"
+     ^ Tn.debug_name scope.tn
+     ^ " -- a scope body is hoisted ahead of its enclosing statement, so it may write only scope \
+        locals (gh-ocannl-584)")
+  in
+  let written scope construct tn = Option.iter scope ~f:(fun s -> reject s construct tn) in
+  let rec proc ~scope (llc : t) : unit =
+    match llc with
+    | Seq (a, b) ->
+        proc ~scope a;
+        proc ~scope b
+    | For_loop { body; _ } -> proc ~scope body
+    | If { cond = c, _; body } ->
+        scalar ~scope c;
+        proc ~scope body
+    | Zero_out tn -> written scope "Zero_out" tn
+    | Set { tn; llsc; _ } ->
+        written scope "Set" tn;
+        scalar ~scope llsc
+    | Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
+        written scope "Set_dynamic" tn;
+        scalar ~scope v;
+        scalar ~scope llsc
+    | Set_from_vec { tn; arg = a, _; _ } ->
+        written scope "Set_from_vec" tn;
+        scalar ~scope a
+    | Tile_mma { d = d_tn, _; fallback; _ } ->
+        written scope "Tile_mma" d_tn;
+        proc ~scope fallback
+    | Set_local (_, llsc) -> scalar ~scope llsc
+    | Declare_local _ | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier -> ()
+  and scalar ~scope (llsc : scalar_t) : unit =
+    match llsc with
+    | Local_scope { id; body; _ } -> proc ~scope:(Some id) body
+    | Get_dynamic { dyn_value = v, _; _ } -> scalar ~scope v
+    | Ternop (_, (s1, _), (s2, _), (s3, _)) ->
+        scalar ~scope s1;
+        scalar ~scope s2;
+        scalar ~scope s3
+    | Binop (_, (s1, _), (s2, _)) ->
+        scalar ~scope s1;
+        scalar ~scope s2
+    | Unop (_, (s, _)) -> scalar ~scope s
+    | Get_local _ | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> ()
+  in
+  proc ~scope:None llc
 
 (** {2 Hardware axis analyses}
 

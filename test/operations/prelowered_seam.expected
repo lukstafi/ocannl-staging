@@ -4,6 +4,8 @@ phase1: executed values match the hand-built formula: true
 phase2: X is classified read-before-write: true
 phase2: X is a routine input: true
 phase2: X is also a routine output: true
-phase2: Y = 2*X_in + 10 (the scope reads preserved the input): true
-phase2: X was overwritten by the sibling scope: true
+phase2: Y = 5*X_in (both scope operands read the input): true
+phase2: X was overwritten by the following statement: true
+phase3: the validator rejects a tensor-node write in a scope body: true
+phase3: compiling the out-of-contract routine is rejected: true
 prelowered seam: PASS

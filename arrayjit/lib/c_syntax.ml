@@ -4363,6 +4363,10 @@ module C_syntax (B : C_syntax_config) = struct
              "C_syntax.compile_proc: workgroup-shared placement not supported by this backend");
     current_kernel_name := name;
     current_placements := Some optimize_ctx.Low_level.placements;
+    (* gh-ocannl-584: scope purity, checked ahead of the schedule validation and NOT transported as
+       an [Illegal_schedule] — a scope body writing a tensor node is malformed IR that no schedule
+       choice can rescue, so declining candidates around it would only hide the defect. *)
+    Low_level.validate_scope_bodies llc;
     Low_level.validate_parallel_classified optimize_ctx.Low_level.placements llc;
     (* Launch-extent guards (construct-then-fold, axis-types proposal §2), only for kinds this
        backend binds in hardware -- the serial fallback iterates the true extent. *)

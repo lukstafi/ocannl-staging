@@ -136,6 +136,16 @@ type t =
 
 and scalar_t =
   | Local_scope of { id : scope_id; body : t; orig_indices : Indexing.axis_index array }
+      (** An inlined sub-computation whose value is [body]'s final [Set_local] of [id].
+
+          {b Scope purity} (gh-ocannl-584): [body] may write scope-local state ([Set_local],
+          [Declare_local]) and nothing else — never a tensor node. A scope body does not execute
+          where it is written: codegen hoists it ahead of the enclosing statement, ordered by
+          [scope_id] rather than by the operand's syntactic position (and [simplify_llc] collapses a
+          single-assignment scope into the expression, moving its reads the other way). Purity is
+          what makes that emission order unobservable — the same assumption {!Affine.path_before}
+          makes when it declines to order sibling [Arg] positions. Enforced by
+          {!validate_scope_bodies}; the optimization pipeline satisfies it by construction. *)
   | Get_local of scope_id
   | Get of Tnode.t * Indexing.axis_index array
   | Get_dynamic of {
@@ -248,6 +258,13 @@ val hardware_axes : t -> hardware_axis_info list
 
 val launch_dims : t -> launch_dims
 (** Per-slot maximum extents over the kernel's annotated loops. *)
+
+val validate_scope_bodies : t -> unit
+(** gh-ocannl-584: enforces the scope-purity contract stated at {!scalar_t.Local_scope} — a scope
+    body may write scope-local state and nothing else. Raises [Invalid_argument] on a tensor-node
+    write ([Set], [Set_from_vec], [Set_dynamic], [Zero_out], [Tile_mma]) inside a [Local_scope] body
+    at any nesting depth. Applied by [C_syntax.compile_proc] to every routine reaching codegen; the
+    optimization pipeline satisfies it by construction. *)
 
 val validate_parallel : Tnode.Placements.t -> t -> unit
 (** Backend-independent well-formedness of hardware annotations (axis-types proposal §2); a no-op

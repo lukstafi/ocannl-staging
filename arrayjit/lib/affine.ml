@@ -505,7 +505,9 @@ type path_comp =
           operand's [Stmt] sorted before an earlier operand's [Rhs]). Sibling positions are
           deliberately {e incomparable} in the visibility rule ([path_before]): evaluation order
           among one statement's operands is not modeled, so no cross-operand ordering is claimed.
-      *)
+          Codegen does order them (hoisted, by [scope_id]), but that order is unobservable under the
+          scope-purity contract — a body writes only scope locals ([Low_level.Local_scope],
+          gh-ocannl-584) — so the two views agree rather than merely erring apart. *)
   | Cond  (** Inside an [If] statement's condition. *)
   | Body  (** Inside an [If] statement's guarded body. *)
   | Rhs  (** Inside a [Set]-family statement's right-hand side (or a [Set_local]'s). *)
@@ -709,12 +711,14 @@ let read_covered_before ?(thread = fun _ -> false) ?(static_range = fun _ -> Non
     (* Lexicographic order over {!path_comp} is program order (gh-561): intra-statement components
        order an [If] condition before its guarded body and a statement's rhs (including
        [Local_scope] bodies inlined there) before its own write — the case that used to need a
-       prefix-exclusion hack, since an enclosing write's bare statement position was a prefix of
-       its rhs body's positions. A write's path can no longer be a proper prefix of a read's
-       (every write path ends in [Write], which nothing extends). The one non-lexicographic rule:
-       paths diverging at sibling [Arg] positions are incomparable — evaluation order among one
-       statement's inlined scope bodies is not modeled, so a write there proves nothing about
-       reads in a sibling operand. *)
+       prefix-exclusion hack, since an enclosing write's bare statement position was a prefix of its
+       rhs body's positions. A write's path can no longer be a proper prefix of a read's (every
+       write path ends in [Write], which nothing extends). The one non-lexicographic rule: paths
+       diverging at sibling [Arg] positions are incomparable — evaluation order among one
+       statement's inlined scope bodies is not modeled, so a write there proves nothing about reads
+       in a sibling operand. Scope purity (gh-ocannl-584) is what keeps that free of cost: a body
+       writes only scope locals, so the incomparable case carries no tensor write to decline in the
+       first place. *)
     let rec before p q =
       match (p, q) with
       | [], [] | _ :: _, [] -> false

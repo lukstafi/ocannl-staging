@@ -234,8 +234,20 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   `Context.compile ?prelowered` with `~name` and `Ir.Assignments.empty_comp` (gh-ocannl-562).
   It replaces the compile's lowering wholesale, so the analysis layer and the kernels see one IR;
   add `~lowered_transform:(fun o -> o)` to keep the default schedule annotator off hand-built code.
-  See `test/operations/prelowered_seam.ml`, and mind that scope bodies hoist ahead of the enclosing
-  statement while single-assignment scopes collapse into it (gh-ocannl-584).
+  See `test/operations/prelowered_seam.ml`, and mind the scope-purity contract below.
+- A `Local_scope` body is a PURE sub-computation: it may write `Set_local`/`Declare_local` state and
+  never a tensor node (gh-ocannl-584). The reason is that a body does not execute where it is
+  written — `C_syntax.pp_scalar` returns it as a local definition, `pp_local_defs` emits it ahead of
+  the enclosing statement ordered by `scope_id`, and `simplify_llc` collapses a single-assignment
+  scope into the expression, moving its reads the other way. Purity makes that emission order
+  unobservable, which is exactly what `Affine.path_before` assumes when it refuses to order sibling
+  `Arg` positions; the two would otherwise disagree. `Low_level.validate_scope_bodies` enforces it
+  at codegen (`C_syntax.compile_proc`, ahead of `validate_parallel_classified` and NOT transported
+  as an `Illegal_schedule` — no schedule choice can rescue malformed IR). The pipeline complies by
+  construction: `inline_computation` drops the inlined computation's `Set`s and `Zero_out`s. So this
+  binds hand-built IR (`?prelowered`) and future passes. Analysis-level probes of the out-of-contract
+  shape are fine and deliberate (`test/operations/affine_extraction.ml` checks that the coverage
+  query stays conservative on IR it must never trust); only codegen is closed off.
 - A node-level "what happened at first touch" flag (`zero_initialized_by_code` and friends) cannot
   soundly drive a PER-OCCURRENCE codegen decision, because nothing clears it across the traversal: a
   guard keyed on it alone collapses `Zero_out; Set; Zero_out` to one zero and drops a `Zero_out`
