@@ -14,8 +14,12 @@
    stays materialized (existing safety mechanism); - cleanup keeps non-virtual residual setters
    instead of dropping the whole loop.
 
-   End-to-end numeric correctness of virtual inlining is covered by the existing suite that still
-   passes (test_cse, test_block_tensor, test_concat_graph, primitive_ops). *)
+   Structural pins say what the optimizer BUILT; virtualization rewrites what value a cell holds, so
+   every case also has an EXECUTED leg (gh-ocannl-589): the very same [optimized] record is compiled
+   through the [?prelowered] seam (gh-ocannl-562, worked out in [prelowered_seam.ml]), seeded, run,
+   and its outputs checked against an OCaml reference. Where the case has a virtualization
+   candidate, a second arm re-specializes the same code with that candidate's placement pre-decided
+   [On_device] — the materialized reading of the same program — and the two arms must agree. *)
 
 open Base
 module LL = Ir.Low_level
@@ -32,7 +36,12 @@ let mk ?(dims = [| 3 |]) label =
     ~padding:(lazy None)
     ()
 
-let materialize tn = Tn.update_memory_mode tn Tn.On_device 99
+(* Materialized nodes are also the ones the executed legs seed and read back, so they are marked
+   observable: the buffer-aliasing planner may not hand their bytes to another node. Both facts are
+   declared intent, settled before optimization, so neither perturbs the structural pins. *)
+let materialize tn =
+  Tn.update_memory_mode tn Tn.On_device 99;
+  Tn.set_observable tn
 
 (* --- low-level builders --- *)
 let sym () = Ir.Indexing.get_symbol ()
@@ -48,9 +57,39 @@ let loop s body : LL.t =
 
 let seq a b : LL.t = LL.Seq (a, b)
 
-let optimize llc : LL.optimized =
+(* [materialized] pre-decides those nodes' placement in the lineage, exactly as
+   [Context.decide_materialized] does for the [Assignments] pipeline: it is what gives each case a
+   materialized arm to compare its inlined values against. *)
+let optimize ?(materialized = []) llc : LL.optimized =
   let ctx : LL.optimize_ctx = LL.empty_optimize_ctx () in
+  List.iter materialized ~f:(fun tn -> Tn.Placements.update ctx.LL.placements tn Tn.On_device 589);
   LL.optimize ctx ~unoptim_ll_source:None ~ll_source:None ~name:"shared_loop" [] llc
+
+(* --- the executed leg --- Hand-built code is compiled AS WRITTEN: the identity
+   [lowered_transform] takes the place of the default schedule annotator, which would otherwise
+   parallelize or fission the loop nest. *)
+let base_ctx = lazy (Context.auto ())
+
+let execute ~name (o : LL.optimized) ~(seed : (Tn.t * float array) list) ~(read : Tn.t list) =
+  let ctx = Lazy.force base_ctx in
+  let ctx, routine =
+    Context.compile ~name ~prelowered:o
+      ~lowered_transform:(fun x -> x)
+      ctx Ir.Assignments.empty_comp Ir.Indexing.Empty
+  in
+  let ctx = List.fold seed ~init:ctx ~f:(fun ctx (tn, vs) -> Context.set_values ctx tn vs) in
+  let ctx = Context.run ctx routine in
+  List.map read ~f:(Context.get_values ctx)
+
+(* Cells no writer covers keep this sentinel, so "wrote the wrong cells" fails the value check
+   instead of reading whatever the buffer happened to hold. *)
+let blank n = Array.create ~len:n (-1.)
+
+let close values expected =
+  Array.length values = Array.length expected
+  && Array.for_alli values ~f:(fun i v -> Float.(abs (v -. expected.(i)) <= 1e-5))
+
+let same got expected = List.for_all2_exn got expected ~f:close
 
 (* Post-optimization placement probes: decisions live on the optimize_ctx's placements
    (context-scoped memory modes), not on the tnode (which now holds only declared intent). *)
@@ -126,13 +165,20 @@ let case_independent () =
   let shared = loop i (seq (set i a (c 2.)) (set i b (c 3.))) in
   let use_a = loop j (set j oa (get j a)) in
   let use_b = loop k (set k ob (get k b)) in
-  let o = optimize (seq shared (seq use_a use_b)) in
+  let llc = seq shared (seq use_a use_b) in
+  let o = optimize llc in
   p "independent siblings both virtual" (known_virtual o a && known_virtual o b);
   p "independent siblings setters dropped" (count_set o a = 0 && count_set o b = 0);
   p "independent siblings inlined at use sites (no array reads survive)"
     (count_get o a = 0 && count_get o b = 0);
   (* Sharing symbol [i] alone must not make either sibling complex. *)
-  p "is_complex from sharing alone" (is_complex o a || is_complex o b)
+  p "is_complex from sharing alone" (is_complex o a || is_complex o b);
+  let seed = [ (oa, blank 3); (ob, blank 3) ] and read = [ oa; ob ] in
+  let virt = execute ~name:"vsl_independent" o ~seed ~read in
+  let mat = execute ~name:"vsl_independent_mat" (optimize ~materialized:[ a; b ] llc) ~seed ~read in
+  p "independent siblings: each use site got its own sibling's value"
+    (same virt [ [| 2.; 2.; 2. |]; [| 3.; 3.; 3. |] ]);
+  p "independent siblings: virtual and materialized arms agree" (same virt mat)
 
 (* === Case 2: mixed loop -- one sibling virtual, one materialized === *)
 let case_mixed () =
@@ -142,10 +188,17 @@ let case_mixed () =
   let i = sym () and j = sym () in
   let shared = loop i (seq (set i a (c 2.)) (set i b (c 3.))) in
   let use_a = loop j (set j oa (get j a)) in
-  let o = optimize (seq shared use_a) in
+  let llc = seq shared use_a in
+  let o = optimize llc in
   p "mixed cleanup keeps b setter" (count_set o b = 1);
   p "mixed drops virtual a setter" (count_set o a = 0);
-  p "mixed a virtual, b non-virtual" (known_virtual o a && known_non_virtual o b)
+  p "mixed a virtual, b non-virtual" (known_virtual o a && known_non_virtual o b);
+  let seed = [ (b, blank 3); (oa, blank 3) ] and read = [ b; oa ] in
+  let virt = execute ~name:"vsl_mixed" o ~seed ~read in
+  let mat = execute ~name:"vsl_mixed_mat" (optimize ~materialized:[ a ] llc) ~seed ~read in
+  p "mixed: the surviving setter still stores, the virtual sibling still reaches its use"
+    (same virt [ [| 3.; 3.; 3. |]; [| 2.; 2.; 2. |] ]);
+  p "mixed: virtual and materialized arms agree" (same virt mat)
 
 (* === Case 3: forward sibling provider inlined into a surviving materialized reader === *)
 let case_forward_provider () =
@@ -156,7 +209,13 @@ let case_forward_provider () =
   let shared = loop i (seq (set i a (c 2.)) (set i b (add (get i a) (c 1.)))) in
   let o = optimize shared in
   p "forward provider inlined into materialized reader"
-    (known_virtual o a && count_set o a = 0 && count_get o a = 0 && count_set o b = 1)
+    (known_virtual o a && count_set o a = 0 && count_get o a = 0 && count_set o b = 1);
+  let seed = [ (b, blank 3) ] and read = [ b ] in
+  let virt = execute ~name:"vsl_forward" o ~seed ~read in
+  let mat = execute ~name:"vsl_forward_mat" (optimize ~materialized:[ a ] shared) ~seed ~read in
+  p "forward provider: the reader stored the provider's value, not a stale cell"
+    (same virt [ [| 3.; 3.; 3. |] ]);
+  p "forward provider: virtual and materialized arms agree" (same virt mat)
 
 (* === Case 4: forward virtual->virtual chain consumed downstream === *)
 let case_chain () =
@@ -166,14 +225,20 @@ let case_chain () =
   (* a = f; b = g(a); both virtual. out = h(b), materialized, read downstream. *)
   let shared = loop i (seq (set i a (c 2.)) (set i b (add (get i a) (c 1.)))) in
   let use_b = loop j (set j out (mul (get j b) (c 2.))) in
-  let o = optimize (seq shared use_b) in
+  let llc = seq shared use_b in
+  let o = optimize llc in
   p "forward virtual-to-virtual chain both virtual" (known_virtual o a && known_virtual o b);
   p "forward virtual-to-virtual chain fully inlined"
     (count_set o a = 0
     && count_set o b = 0
     && count_get o a = 0
     && count_get o b = 0
-    && known_non_virtual o out)
+    && known_non_virtual o out);
+  let seed = [ (out, blank 3) ] and read = [ out ] in
+  let virt = execute ~name:"vsl_chain" o ~seed ~read in
+  let mat = execute ~name:"vsl_chain_mat" (optimize ~materialized:[ a; b ] llc) ~seed ~read in
+  p "forward chain: the doubly-inlined value is (2 + 1) * 2" (same virt [ [| 6.; 6.; 6. |] ]);
+  p "forward chain: virtual and materialized arms agree" (same virt mat)
 
 (* === Case 5: loop-carried / read-before-write sibling read stays materialized === [a] is written
    at [i] but read at [i+1] in the same loop, so the read of [a[i+1]] precedes its write in trace
@@ -181,14 +246,23 @@ let case_chain () =
    forces [a] materialized; the later writer must NOT be used to rewrite the earlier read. This is
    the safety mechanism the proposal relies on (#134). *)
 let case_reverse () =
-  let a = mk "a" and b = mk "b" in
+  (* [a] is one cell wider than the loop so that the read-ahead of the last iteration stays in
+     bounds: the executed leg reads this array for real. *)
+  let a = mk ~dims:[| 4 |] "a" and b = mk "b" in
   materialize b;
   let i = sym () in
   let read_ahead = LL.Get (a, [| Ir.Indexing.Affine { symbols = [ (1, i) ]; offset = 1 } |]) in
   let shared = loop i (seq (set i a (c 2.)) (set i b (add read_ahead (c 1.)))) in
   let o = optimize shared in
   p "loop-carried provider kept materialized" (known_non_virtual o a);
-  p "loop-carried provider read NOT rewritten (array read preserved)" (count_get o a >= 1)
+  p "loop-carried provider read NOT rewritten (array read preserved)" (count_get o a >= 1);
+  (* The values make the safety mechanism observable: each [b.(i)] must come from the INCOMING
+     [a.(i+1)], never from the [2.] the same loop stores one iteration later (which would give
+     [3.] throughout). *)
+  let seed = [ (a, [| 10.; 20.; 30.; 40. |]); (b, blank 3) ] and read = [ b; a ] in
+  let got = execute ~name:"vsl_reverse" o ~seed ~read in
+  p "loop-carried: reads saw the incoming values, writes landed"
+    (same got [ [| 21.; 31.; 41. |]; [| 2.; 2.; 2.; 40. |] ])
 
 (* === Case 6: is_complex still set by a genuine complex scalar computation === *)
 let case_complex () =
@@ -199,7 +273,13 @@ let case_complex () =
   let i = sym () in
   let l = loop i (set i z (mul (get i x) (get i y))) in
   let o = optimize l in
-  p "is_complex from genuine complex scalar" (is_complex o z)
+  p "is_complex from genuine complex scalar" (is_complex o z);
+  let got =
+    execute ~name:"vsl_complex" o
+      ~seed:[ (x, [| 1.; 2.; 3. |]); (y, [| 4.; 5.; 6. |]); (z, blank 3) ]
+      ~read:[ z ]
+  in
+  p "genuine complex scalar: executed elementwise product" (same got [ [| 4.; 10.; 18. |] ])
 
 (* === Case 7: two virtual providers + an in-loop materialized consumer (Codex P1) === c
    (materialized) reads BOTH a and b in the same loop. The storage pass for the first candidate (a)
@@ -217,7 +297,12 @@ let case_inloop_consumer () =
   p "in-loop consumer: both providers virtual" (known_virtual o a && known_virtual o b);
   p "in-loop consumer: providers inlined (no array reads survive)"
     (count_get o a = 0 && count_get o b = 0);
-  p "in-loop consumer: consumer setter kept" (count_set o cons = 1)
+  p "in-loop consumer: consumer setter kept" (count_set o cons = 1);
+  let seed = [ (cons, blank 3) ] and read = [ cons ] in
+  let virt = execute ~name:"vsl_inloop" o ~seed ~read in
+  let mat = execute ~name:"vsl_inloop_mat" (optimize ~materialized:[ a; b ] shared) ~seed ~read in
+  p "in-loop consumer: both inlined providers reached the sum" (same virt [ [| 5.; 5.; 5. |] ]);
+  p "in-loop consumer: virtual and materialized arms agree" (same virt mat)
 
 (* === Case 9: a write under a dead loop ([to_ < from_]) never executes === The retired tracer
    never enumerated dead loops; the structural facts pass and the metric views must likewise record
@@ -236,7 +321,15 @@ let case_dead_loop () =
   p "dead loop: node stays read-only" traced.LL.read_only;
   let (inputs, outputs), _merge = LL.input_and_output_nodes o in
   p "dead loop: node is a routine input, not an output"
-    (Set.mem inputs d && not (Set.mem outputs d))
+    (Set.mem inputs d && not (Set.mem outputs d));
+  (* Had the dead loop run, the consumer would have copied [7.] instead of the seeded values. *)
+  let got =
+    execute ~name:"vsl_dead_loop" o
+      ~seed:[ (d, [| 11.; 12.; 13. |]); (out, blank 3) ]
+      ~read:[ out; d ]
+  in
+  p "dead loop: the consumer read the seeded values and the dead write never happened"
+    (same got [ [| 11.; 12.; 13. |]; [| 11.; 12.; 13. |] ])
 
 (* === Case 9b: a dead write supplies no coverage === The coverage-side companion of case 9: the
    dead write is dropped from the metric views, so the fixed-position read is read-before-write and
@@ -255,7 +348,14 @@ let case_dead_non_traced () =
   let traced = Base.Hashtbl.find_exn o.LL.traced_store d in
   p "dead-write coverage: read_before_write set" traced.LL.read_before_write;
   let (inputs, _outputs), _merge = LL.input_and_output_nodes o in
-  p "dead-write coverage: node is a routine input" (Set.mem inputs d)
+  p "dead-write coverage: node is a routine input" (Set.mem inputs d);
+  let got =
+    execute ~name:"vsl_dead_coverage" o
+      ~seed:[ (d, [| 11.; 12.; 13. |]); (out, blank 3) ]
+      ~read:[ out ]
+  in
+  p "dead-write coverage: the fixed-position read served the seeded cell"
+    (same got [ [| 11.; 11.; 11. |] ])
 
 (* === Case 10: an If condition's read is not a read-modify-write self-read === The condition reads
    [a] at the same position the guarded body writes it, and shares the body's program path; the
@@ -276,7 +376,11 @@ let case_if_cond_read () =
   let traced = Base.Hashtbl.find_exn o.LL.traced_store a in
   p "if-cond read: read_before_write set" traced.LL.read_before_write;
   let (inputs, _outputs), _merge = LL.input_and_output_nodes o in
-  p "if-cond read: node is a routine input" (Set.mem inputs a)
+  p "if-cond read: node is a routine input" (Set.mem inputs a);
+  (* Only the cells whose incoming value is below 1 are clamped; the rest keep what was seeded, so
+     the executed leg fails if the input contents were not preserved. *)
+  let got = execute ~name:"vsl_if_cond" o ~seed:[ (a, [| 0.5; 2.; -1. |]) ] ~read:[ a ] in
+  p "if-cond read: only the cells failing the guard were updated" (same got [ [| 1.; 2.; 1. |] ])
 
 let () =
   case_independent ();
