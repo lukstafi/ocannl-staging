@@ -104,16 +104,21 @@ let () =
       let dir = Stdlib.Filename.dirname dune_file in
       let content = In_channel.read_all on_disk in
       let sites = Scan.sites content in
-      let has_config = Set.mem config_dirs dir || Scan.copies_config content in
-      if (not (List.is_empty sites)) && not has_config then
-        fail
-          (Printf.sprintf
-             "%s runs test executables but the directory has no %s to depend on -- add \
-              `(copy_files ../config/%s)`"
-             dune_file Scan.config_file Scan.config_file);
+      (* A `(subdir …)` stanza runs elsewhere, so it is that directory's config it reaches for. *)
+      let copies = Set.of_list (module String) (Scan.config_copy_dirs content) in
+      let directory_of site = Scan.in_subdir dir site.Scan.subdir in
+      List.map sites ~f:(fun site -> (site.Scan.subdir, directory_of site))
+      |> List.dedup_and_sort ~compare:Poly.compare
+      |> List.iter ~f:(fun (subdir, directory) ->
+             if not (Set.mem config_dirs directory || Set.mem copies subdir) then
+               fail
+                 (Printf.sprintf
+                    "%s runs test executables in %s, which has no %s to depend on -- add \
+                     `(copy_files ../config/%s)`"
+                    dune_file directory Scan.config_file Scan.config_file));
       let described =
-        List.map sites ~f:(fun { Scan.kind; name; declares_config } ->
-            let key = dir ^ ":" ^ name in
+        List.map sites ~f:(fun ({ Scan.kind; name; declares_config; subdir = _ } as site) ->
+            let key = directory_of site ^ ":" ^ name in
             (* An exemption is spent only where the dep is actually absent, so declaring it anyway
                makes the entry stale and the list gets pruned rather than growing quietly. *)
             let exempt =

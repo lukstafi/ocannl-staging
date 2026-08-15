@@ -12,7 +12,9 @@ open Stdio
 module Scan = Test_utils.Dune_stanza_scan
 
 let render (site : Scan.site) =
-  Printf.sprintf "%s %s%s" (Scan.kind_name site.Scan.kind) site.Scan.name
+  Printf.sprintf "%s%s %s%s"
+    (if String.is_empty site.Scan.subdir then "" else "in " ^ site.Scan.subdir ^ ": ")
+    (Scan.kind_name site.Scan.kind) site.Scan.name
     (if site.Scan.declares_config then " [declares]" else "")
 
 (* Each case pairs a dune-file body with the sites the scan should report, in order. *)
@@ -83,6 +85,22 @@ let cases =
  ; unlike bench.exe, this one only diffs
  (action (diff a.expected a.actual)))|dune},
       [] );
+    (* A `(subdir …)` wrapper configures another directory from this dune file, and
+       test/operations/dune runs two rules in test/operations/config that way. The stanzas inside
+       are subject to the same rules, and the directory they name is the one whose config they
+       need. *)
+    ( "a subdir's stanzas are the same kinds of site",
+      {dune|(subdir config
+ (rule (deps ocannl_config) (action (run %{dep:reader.exe})))
+ (test (name inner)))|dune},
+      [ "in config: rule running reader.exe [declares]"; "in config: test inner" ] );
+    ( "a nested subdir names the path it applies to",
+      {dune|(subdir a (subdir b (test (name t) (deps ocannl_config))))|dune},
+      [ "in a/b: test t [declares]" ] );
+    ( "stanzas outside the subdir keep the dune file's own directory",
+      {dune|(subdir config (test (name inner) (deps ocannl_config)))
+(test (name outer) (deps ocannl_config))|dune},
+      [ "in config: test inner [declares]"; "test outer [declares]" ] );
     ( "stanzas are reported in file order",
       {dune|(test (name a) (deps ocannl_config))
 (executable (name e))
@@ -91,13 +109,16 @@ let cases =
       [ "test a [declares]"; "rule running e.exe [declares]"; "test b" ] );
   ]
 
-(* Which directories materialize a config for themselves. *)
+(* Which directories the file materializes a config into: "." stands for its own. *)
 let copy_cases =
   [
-    ("a copy_files stanza", {dune|(copy_files (files ../config/ocannl_config))|dune}, true);
-    ("the short spelling", {dune|(copy_files ../config/ocannl_config)|dune}, true);
-    ("copying something else", {dune|(copy_files (files ../data/*.csv))|dune}, false);
-    ("no copy_files at all", {dune|(test (name t) (deps ocannl_config))|dune}, false);
+    ("a copy_files stanza", {dune|(copy_files (files ../config/ocannl_config))|dune}, [ "." ]);
+    ("the short spelling", {dune|(copy_files ../config/ocannl_config)|dune}, [ "." ]);
+    ( "a copy_files inside a subdir names that directory",
+      {dune|(subdir config (copy_files (files ../../config/ocannl_config)))|dune},
+      [ "config" ] );
+    ("copying something else", {dune|(copy_files (files ../data/*.csv))|dune}, []);
+    ("no copy_files at all", {dune|(test (name t) (deps ocannl_config))|dune}, []);
   ]
 
 (* The two sequences sexplib reads as comments and dune does not. Reading such a file would drop
@@ -130,11 +151,11 @@ let () =
       in
       check name expected found);
   List.iter copy_cases ~f:(fun (name, source, expected) ->
-      let found = Scan.copies_config source in
-      if Bool.equal found expected then printf "ok: copies the config -- %s\n" name
-      else (
-        ok := false;
-        printf "FAIL: copies the config -- %s: expected %b, found %b\n" name expected found));
+      let found =
+        List.map (Scan.config_copy_dirs source) ~f:(fun dir ->
+            if String.is_empty dir then "." else dir)
+      in
+      check ("copies the config -- " ^ name) expected found);
   List.iter refused_cases ~f:(fun (name, source) ->
       match Scan.sites source with
       | exception _ -> printf "ok: refused -- %s\n" name

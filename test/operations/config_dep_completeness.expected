@@ -8,7 +8,7 @@ tensor/dune: nothing that runs a test executable
 test/einsum/dune: 29 tests, 1 inline-test library, 2 exe-running rules
 test/gpt2/dune: 1 test, 1 exe-running rule
 test/operations/config/dune: nothing that runs a test executable
-test/operations/dune: 153 tests, 1 inline-test library, 17 exe-running rules
+test/operations/dune: 153 tests, 1 inline-test library, 19 exe-running rules
 test/operations/profiles/dune: 6 exe-running rules
 test/ppx/dune: 2 tests, 3 exempt rules (pp.exe)
 test/support/dune: nothing that runs a test executable
@@ -18,4 +18,4 @@ tools/dune: nothing that runs a test executable
 Exempt from the dependency, running an executable that reads no configuration:
   test/ppx:pp.exe -- the ppx driver, run to expand a source file and diff the expansion: `ppx_ocannl` links base, ppxlib, str and einsum_parser -- no configuration reader -- so no `ocannl_config` can reach its output
 
-OK: 16 dune files; 216 test stanzas, 2 inline-test libraries and 30 exe-running rules declare ocannl_config; 3 exempt.
+OK: 16 dune files; 216 test stanzas, 2 inline-test libraries and 32 exe-running rules declare ocannl_config; 3 exempt.

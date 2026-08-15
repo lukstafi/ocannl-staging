@@ -98,7 +98,26 @@ type kind =
   | Runs_executable  (** a [(rule)] that runs an executable — where an [(executable)] stanza's
                          dependencies have to live, there being no [deps] field on one *)
 
-type site = { kind : kind; name : string; declares_config : bool }
+(** [subdir] is the directory the stanza applies to, relative to the dune file's own: empty at the
+    top level, and the path a [(subdir …)] wrapper names inside one. A wrapped stanza runs
+    elsewhere, so it is that directory's config it needs — test/operations/dune configures
+    test/operations/config this way. *)
+type site = { kind : kind; name : string; declares_config : bool; subdir : string }
+
+(** [in_subdir parent child] joins two relative directories, either of which may be empty. *)
+let in_subdir parent child =
+  if String.is_empty parent then child
+  else if String.is_empty child then parent
+  else parent ^ "/" ^ child
+
+(* [(subdir <dir> <stanza>…)] applies its body to another directory. Descending into it is what
+   keeps its stanzas subject to the same rules; ignoring it would drop them silently, which is the
+   one thing this scan must not do. *)
+let rec walk dir stanzas ~f =
+  List.concat_map stanzas ~f:(fun stanza ->
+      match stanza with
+      | Sexp.List (Sexp.Atom "subdir" :: Sexp.Atom sub :: body) -> walk (in_subdir dir sub) body ~f
+      | stanza -> f dir stanza)
 
 let kind_name = function
   | Test -> "test"
@@ -117,46 +136,35 @@ let kind_name = function
     [(:pp pp.exe)] the action reaches through [%{pp}] — without the scan having to model dune's
     variable expansion. *)
 let sites content =
-  List.filter_map (stanzas content) ~f:(fun stanza ->
-      let named kind =
-        Some
-          {
-            kind;
-            name = String.concat ~sep:", " (names_of stanza);
-            declares_config = declares_config (field stanza "deps");
-          }
-      in
+  walk "" (stanzas content) ~f:(fun subdir stanza ->
+      let site kind name declares_config = [ { kind; name; declares_config; subdir } ] in
+      let stanza_name () = String.concat ~sep:", " (names_of stanza) in
       match head stanza with
-      | Some ("test" | "tests") -> named Test
+      | Some ("test" | "tests") ->
+          site Test (stanza_name ()) (declares_config (field stanza "deps"))
       | Some "library" -> (
           match field stanza "inline_tests" with
-          | None -> None
+          | None -> []
           | Some inline ->
-              Some
-                {
-                  kind = Inline_tests;
-                  name = String.concat ~sep:", " (names_of stanza);
-                  declares_config = declares_config (field_in inline "deps");
-                })
+              site Inline_tests (stanza_name ()) (declares_config (field_in inline "deps")))
       | Some "rule" -> (
           match executables_mentioned stanza with
-          | [] -> None
+          | [] -> []
           | exes ->
-              Some
-                {
-                  kind = Runs_executable;
-                  name = String.concat ~sep:", " exes;
-                  declares_config = declares_config (field stanza "deps");
-                })
-      | _ -> None)
+              site Runs_executable
+                (String.concat ~sep:", " exes)
+                (declares_config (field stanza "deps")))
+      | _ -> [])
 
-(** Whether the directory materializes the shared configuration for itself, i.e. has a
-    [(copy_files …ocannl_config)] stanza. The other way to have one is to check a file in next to
-    the dune file, which this cannot see and the caller supplies. *)
-let copies_config content =
-  List.exists (stanzas content) ~f:(fun stanza ->
+(** The directories this dune file materializes the shared configuration into with a
+    [(copy_files …ocannl_config)] stanza, relative to its own as in {!site}. The other way for a
+    directory to have one is a file checked in next to the dune file, which this cannot see and the
+    caller supplies. *)
+let config_copy_dirs content =
+  walk "" (stanzas content) ~f:(fun subdir stanza ->
       match head stanza with
-      | Some "copy_files" ->
-          List.exists (atoms stanza) ~f:(fun atom ->
-              String.equal (Stdlib.Filename.basename atom) config_file)
-      | _ -> false)
+      | Some "copy_files"
+        when List.exists (atoms stanza) ~f:(fun atom ->
+                 String.equal (Stdlib.Filename.basename atom) config_file) ->
+          [ subdir ]
+      | _ -> [])

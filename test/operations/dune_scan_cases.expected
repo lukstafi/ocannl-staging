@@ -17,9 +17,13 @@ ok: a stanza inside a comment is not a stanza
 ok: a config named in a comment does not declare it
 ok: a config named in a string is not a dep
 ok: an executable named in a comment does not make a rule a site
+ok: a subdir's stanzas are the same kinds of site
+ok: a nested subdir names the path it applies to
+ok: stanzas outside the subdir keep the dune file's own directory
 ok: stanzas are reported in file order
 ok: copies the config -- a copy_files stanza
 ok: copies the config -- the short spelling
+ok: copies the config -- a copy_files inside a subdir names that directory
 ok: copies the config -- copying something else
 ok: copies the config -- no copy_files at all
 ok: refused -- a block comment
