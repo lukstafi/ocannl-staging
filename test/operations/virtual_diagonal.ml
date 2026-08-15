@@ -51,7 +51,19 @@ let materialize tn =
 let sym () = Idx.get_symbol ()
 let iter s = Idx.Iterator s
 let embed s : LL.scalar_t = LL.Embed_index (iter s)
+let c x : LL.scalar_t = LL.Constant x
+let add a b : LL.scalar_t = LL.Binop (Ops.Add, (a, single), (b, single))
+let mul a b : LL.scalar_t = LL.Binop (Ops.Mul, (a, single), (b, single))
 let zero tn : LL.t = LL.Zero_out tn
+
+(* A producer value has to identify the producer iteration -- EVERY symbol of it -- and stay clear
+   of the zero-init, or the executed legs inherit blind spots the structural probes cannot cover
+   either. A bare [embed i] has two: the write at index 0 carries the init value, so dropping the
+   first iteration is invisible; and a symbol missing from the value (the non-repeated [j] of a
+   partial diagonal) makes a wrong substitution on that axis invisible. Hence [1 + i] for a
+   one-symbol producer and [1 + 10*outer + inner] for a two-symbol one. *)
+let tick s = add (c 1.) (embed s)
+let tag outer inner = add (c 1.) (add (mul (c 10.) (embed outer)) (embed inner))
 
 (* a setter writing [tn] at the given index array *)
 let set_at idcs tn llsc : LL.t = LL.Set { tn; idcs; llsc; debug = "" }
@@ -161,7 +173,7 @@ let case_diagonal_generic () =
   let d = mk "d" and o = mk "o" in
   materialize o;
   let i = sym () and j = sym () and k = sym () in
-  let producer = seq (zero d) (loop i (set_at [| iter i; iter i |] d (embed i))) in
+  let producer = seq (zero d) (loop i (set_at [| iter i; iter i |] d (tick i))) in
   let consumer = loop j (loop k (set_at [| iter j; iter k |] o (get_at [| iter j; iter k |] d))) in
   let llc = seq producer consumer in
   let opt = optimize llc in
@@ -171,7 +183,9 @@ let case_diagonal_generic () =
   p "diagonal-generic: consumer read inlined under guard" (count_get opt d = 0);
   (* The guard is the whole content of the case: [o] must be the diagonal matrix, not the producer
      value smeared over every cell (guard dropped) and not all zeros (guard always failing). *)
-  let expected = Array.init 9 ~f:(fun n -> if n / 3 = n % 3 then Float.of_int (n / 3) else 0.) in
+  let expected =
+    Array.init 9 ~f:(fun n -> if n / 3 = n % 3 then Float.of_int ((n / 3) + 1) else 0.)
+  in
   let seed = [ (o, blank 9) ] and read = [ o ] in
   let virt = execute ~name:"vd_generic" opt ~seed ~read in
   let mat = execute ~name:"vd_generic_mat" (optimize ~materialized:[ d ] llc) ~seed ~read in
@@ -183,7 +197,7 @@ let case_diagonal_equal () =
   let d = mk "d" and o = mk "o" in
   materialize o;
   let i = sym () and j = sym () in
-  let producer = seq (zero d) (loop i (set_at [| iter i; iter i |] d (embed i))) in
+  let producer = seq (zero d) (loop i (set_at [| iter i; iter i |] d (tick i))) in
   (* read d[j,j]: the two call-site indices are syntactically equal, so no guard. *)
   let consumer = loop j (set_at [| iter j; iter j |] o (get_at [| iter j; iter j |] d)) in
   let llc = seq producer consumer in
@@ -194,7 +208,7 @@ let case_diagonal_equal () =
   (* Folding the guard away must not fold the producer's index dependence away with it: the
      consumer writes only its own diagonal, and each cell there holds that row's producer value. *)
   let expected =
-    Array.init 9 ~f:(fun n -> if n / 3 = n % 3 then Float.of_int (n / 3) else sentinel)
+    Array.init 9 ~f:(fun n -> if n / 3 = n % 3 then Float.of_int ((n / 3) + 1) else sentinel)
   in
   let seed = [ (o, blank 9) ] and read = [ o ] in
   let virt = execute ~name:"vd_equal" opt ~seed ~read in
@@ -210,7 +224,9 @@ let case_partial_diagonal () =
   materialize o;
   let i = sym () and j = sym () in
   let a = sym () and b = sym () and cc = sym () in
-  let producer = seq (zero d) (loop i (loop j (set_at [| iter i; iter j; iter i |] d (embed i)))) in
+  let producer =
+    seq (zero d) (loop i (loop j (set_at [| iter i; iter j; iter i |] d (tag i j))))
+  in
   let consumer =
     loop a
       (loop b
@@ -221,11 +237,13 @@ let case_partial_diagonal () =
   p "partial-diagonal: producer virtual" (known_virtual opt d);
   p "partial-diagonal: read inlined (no array read of d)" (count_get opt d = 0);
   p "partial-diagonal: one equality guard survives" (count_where opt >= 1);
-  (* Guarded on the repeated axis only: [o.(a, b, cc)] is [a] when [a = cc], for every [b]. *)
+  (* Guarded on the repeated axis only, and the non-repeated [b] is substituted normally, so it
+     shows through in the value: [o.(a, b, cc)] is [1 + 10a + b] when [a = cc], and the init
+     otherwise. *)
   let expected =
     Array.init 27 ~f:(fun n ->
-        let a = n / 9 and cc = n % 3 in
-        if a = cc then Float.of_int a else 0.)
+        let a = n / 9 and b = n / 3 % 3 and cc = n % 3 in
+        if a = cc then Float.of_int (1 + (10 * a) + b) else 0.)
   in
   let seed = [ (o, blank 27) ] and read = [ o ] in
   let virt = execute ~name:"vd_partial" opt ~seed ~read in
@@ -233,17 +251,15 @@ let case_partial_diagonal () =
   p "partial-diagonal: executed values guard the repeated axis only" (same virt [ expected ]);
   p "partial-diagonal: virtual and materialized arms agree" (same virt mat)
 
-(* === Case 4: static-vs-dynamic read of a diagonal producer === Read d[1, j] (a row slice): the
-   first position is bound to a Fixed_idx, the second is dynamic; the consistency must become a
-   guard (1 = j), NOT a Non_virtual 13 rejection. Row 1 rather than row 0 so that the executed leg
-   has a non-degenerate expectation: the producer writes [i] at [d(i, i)], so row 0 is all zeros and
-   would not distinguish a guard that always fails. *)
+(* === Case 4: static-vs-dynamic read of a diagonal producer === Read d[0, j] (a row slice): the
+   first position is bound to Fixed_idx 0, the second is dynamic; the consistency must become a
+   guard (0 = j), NOT a Non_virtual 13 rejection. *)
 let case_static_dynamic () =
   let d = mk "d" and o = mk ~dims:[| 3 |] "o" in
   materialize o;
   let i = sym () and j = sym () in
-  let producer = seq (zero d) (loop i (set_at [| iter i; iter i |] d (embed i))) in
-  let consumer = loop j (set_at [| iter j |] o (get_at [| Idx.Fixed_idx 1; iter j |] d)) in
+  let producer = seq (zero d) (loop i (set_at [| iter i; iter i |] d (tick i))) in
+  let consumer = loop j (set_at [| iter j |] o (get_at [| Idx.Fixed_idx 0; iter j |] d)) in
   let llc = seq producer consumer in
   let opt = optimize llc in
   p "static-dynamic: producer virtual" (known_virtual opt d);
@@ -252,7 +268,7 @@ let case_static_dynamic () =
   let seed = [ (o, blank 3) ] and read = [ o ] in
   let virt = execute ~name:"vd_static_dynamic" opt ~seed ~read in
   let mat = execute ~name:"vd_static_dynamic_mat" (optimize ~materialized:[ d ] llc) ~seed ~read in
-  p "static-dynamic: executed values are row 1 of the diagonal" (same virt [ [| 0.; 1.; 0. |] ]);
+  p "static-dynamic: executed values are row 0 of the diagonal" (same virt [ [| 1.; 0.; 0. |] ]);
   p "static-dynamic: virtual and materialized arms agree" (same virt mat)
 
 (* === Case 5: covered single-symbol affine producer position === Producer d[i, i+1] (single-symbol
@@ -265,7 +281,7 @@ let case_single_symbol_affine () =
   materialize o;
   let i = sym () and j = sym () in
   let aff s : Idx.axis_index = Idx.Affine { symbols = [ (1, s) ]; offset = 1 } in
-  let producer = seq (zero d) (loop i (set_at [| iter i; aff i |] d (embed i))) in
+  let producer = seq (zero d) (loop i (set_at [| iter i; aff i |] d (tick i))) in
   let consumer = loop j (set_at [| iter j |] o (get_at [| iter j; aff j |] d)) in
   let llc = seq producer consumer in
   let opt = optimize llc in
@@ -276,7 +292,7 @@ let case_single_symbol_affine () =
   let seed = [ (o, blank 3) ] and read = [ o ] in
   let virt = execute ~name:"vd_affine" opt ~seed ~read in
   let mat = execute ~name:"vd_affine_mat" (optimize ~materialized:[ d ] llc) ~seed ~read in
-  p "single-affine: executed values track the producer index" (same virt [ [| 0.; 1.; 2. |] ]);
+  p "single-affine: executed values track the producer index" (same virt [ [| 1.; 2.; 3. |] ]);
   p "single-affine: virtual and materialized arms agree" (same virt mat)
 
 (* === Case 5b: covered single-symbol affine producer read at a MISMATCHED offset === Producer d[i,
@@ -291,7 +307,7 @@ let case_single_symbol_affine_mismatch () =
   materialize o;
   let i = sym () and j = sym () in
   let aff ofs s : Idx.axis_index = Idx.Affine { symbols = [ (1, s) ]; offset = ofs } in
-  let producer = seq (zero d) (loop i (set_at [| iter i; aff 1 i |] d (embed i))) in
+  let producer = seq (zero d) (loop i (set_at [| iter i; aff 1 i |] d (tick i))) in
   let consumer = loop j (set_at [| iter j |] o (get_at [| iter j; aff 2 j |] d)) in
   let llc = seq producer consumer in
   let opt = optimize llc in
@@ -311,7 +327,7 @@ let case_single_symbol () =
   let d = mk ~dims:[| 3 |] "d" and o = mk ~dims:[| 3 |] "o" in
   materialize o;
   let i = sym () and j = sym () in
-  let producer = loop i (set_at [| iter i |] d (embed i)) in
+  let producer = loop i (set_at [| iter i |] d (tick i)) in
   let consumer = loop j (set_at [| iter j |] o (get_at [| iter j |] d)) in
   let llc = seq producer consumer in
   let opt = optimize llc in
@@ -321,7 +337,7 @@ let case_single_symbol () =
   let seed = [ (o, blank 3) ] and read = [ o ] in
   let virt = execute ~name:"vd_single" opt ~seed ~read in
   let mat = execute ~name:"vd_single_mat" (optimize ~materialized:[ d ] llc) ~seed ~read in
-  p "single-symbol: executed values track the producer index" (same virt [ [| 0.; 1.; 2. |] ]);
+  p "single-symbol: executed values track the producer index" (same virt [ [| 1.; 2.; 3. |] ]);
   p "single-symbol: virtual and materialized arms agree" (same virt mat)
 
 let () =

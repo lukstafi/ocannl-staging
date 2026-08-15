@@ -17,7 +17,7 @@ partial-diagonal: virtual and materialized arms agree: true
 static-dynamic: producer virtual: true
 static-dynamic: read inlined (no array read of d): true
 static-dynamic: one equality guard survives: true
-static-dynamic: executed values are row 1 of the diagonal: true
+static-dynamic: executed values are row 0 of the diagonal: true
 static-dynamic: virtual and materialized arms agree: true
 single-affine: producer virtual: true
 single-affine: read inlined (no array read of d): true
