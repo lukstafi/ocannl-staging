@@ -298,8 +298,8 @@ let case_single_symbol_affine_mismatch () =
   p "single-affine-mismatch: producer virtual" (known_virtual opt d);
   p "single-affine-mismatch: read inlined (no array read of d)" (count_get opt d = 0);
   p "single-affine-mismatch: equality guard survives" (count_where opt >= 1);
-  (* The guard can never hold, so every cell falls back on the init value — and the materialized
-     arm agrees, because [d(j, j + 2)] is off the written diagonal and holds the zero-init. *)
+  (* The guard can never hold, so every cell falls back on the init value, and the materialized arm
+     agrees, because [d(j, j + 2)] is off the written diagonal and holds the zero-init. *)
   let seed = [ (o, blank 3) ] and read = [ o ] in
   let virt = execute ~name:"vd_affine_mismatch" opt ~seed ~read in
   let mat = execute ~name:"vd_affine_mismatch_mat" (optimize ~materialized:[ d ] llc) ~seed ~read in

@@ -2,7 +2,7 @@ independent siblings both virtual: true
 independent siblings setters dropped: true
 independent siblings inlined at use sites (no array reads survive): true
 is_complex from sharing alone: false
-independent siblings: each use site got its own sibling's value: true
+independent siblings: each use site got its own sibling's cell: true
 independent siblings: virtual and materialized arms agree: true
 mixed cleanup keeps b setter: true
 mixed drops virtual a setter: true
@@ -10,11 +10,11 @@ mixed a virtual, b non-virtual: true
 mixed: the surviving setter still stores, the virtual sibling still reaches its use: true
 mixed: virtual and materialized arms agree: true
 forward provider inlined into materialized reader: true
-forward provider: the reader stored the provider's value, not a stale cell: true
+forward provider: the reader stored the provider's own cell, not a stale one: true
 forward provider: virtual and materialized arms agree: true
 forward virtual-to-virtual chain both virtual: true
 forward virtual-to-virtual chain fully inlined: true
-forward chain: the doubly-inlined value is (2 + 1) * 2: true
+forward chain: the doubly-inlined value is (2 + i + 1) * 2: true
 forward chain: virtual and materialized arms agree: true
 loop-carried provider kept materialized: true
 loop-carried provider read NOT rewritten (array read preserved): true

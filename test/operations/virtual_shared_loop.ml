@@ -51,6 +51,13 @@ let get s tn : LL.scalar_t = LL.Get (tn, [| iter s |])
 let add a b : LL.scalar_t = LL.Binop (Ops.Add, (a, single), (b, single))
 let mul a b : LL.scalar_t = LL.Binop (Ops.Mul, (a, single), (b, single))
 let c x : LL.scalar_t = LL.Constant x
+let embed s : LL.scalar_t = LL.Embed_index (iter s)
+
+(* Sibling providers write [base + i] rather than a constant: a constant makes the executed legs
+   blind to WHICH cell of the provider an inlined read stood for, which is the half of the rewrite
+   that the shared loop symbol puts at risk. [Embed_index] is not an array access, so this does not
+   make the provider [is_complex]. *)
+let ramp base s = add (c base) (embed s)
 
 let loop s body : LL.t =
   LL.For_loop { index = s; from_ = 0; to_ = 2; body; axis = Serial }
@@ -162,7 +169,7 @@ let case_independent () =
   materialize oa;
   materialize ob;
   let i = sym () and j = sym () and k = sym () in
-  let shared = loop i (seq (set i a (c 2.)) (set i b (c 3.))) in
+  let shared = loop i (seq (set i a (ramp 2. i)) (set i b (ramp 3. i))) in
   let use_a = loop j (set j oa (get j a)) in
   let use_b = loop k (set k ob (get k b)) in
   let llc = seq shared (seq use_a use_b) in
@@ -176,8 +183,8 @@ let case_independent () =
   let seed = [ (oa, blank 3); (ob, blank 3) ] and read = [ oa; ob ] in
   let virt = execute ~name:"vsl_independent" o ~seed ~read in
   let mat = execute ~name:"vsl_independent_mat" (optimize ~materialized:[ a; b ] llc) ~seed ~read in
-  p "independent siblings: each use site got its own sibling's value"
-    (same virt [ [| 2.; 2.; 2. |]; [| 3.; 3.; 3. |] ]);
+  p "independent siblings: each use site got its own sibling's cell"
+    (same virt [ [| 2.; 3.; 4. |]; [| 3.; 4.; 5. |] ]);
   p "independent siblings: virtual and materialized arms agree" (same virt mat)
 
 (* === Case 2: mixed loop -- one sibling virtual, one materialized === *)
@@ -186,7 +193,7 @@ let case_mixed () =
   materialize b;
   materialize oa;
   let i = sym () and j = sym () in
-  let shared = loop i (seq (set i a (c 2.)) (set i b (c 3.))) in
+  let shared = loop i (seq (set i a (ramp 2. i)) (set i b (ramp 3. i))) in
   let use_a = loop j (set j oa (get j a)) in
   let llc = seq shared use_a in
   let o = optimize llc in
@@ -197,7 +204,7 @@ let case_mixed () =
   let virt = execute ~name:"vsl_mixed" o ~seed ~read in
   let mat = execute ~name:"vsl_mixed_mat" (optimize ~materialized:[ a ] llc) ~seed ~read in
   p "mixed: the surviving setter still stores, the virtual sibling still reaches its use"
-    (same virt [ [| 3.; 3.; 3. |]; [| 2.; 2.; 2. |] ]);
+    (same virt [ [| 3.; 4.; 5. |]; [| 2.; 3.; 4. |] ]);
   p "mixed: virtual and materialized arms agree" (same virt mat)
 
 (* === Case 3: forward sibling provider inlined into a surviving materialized reader === *)
@@ -206,15 +213,15 @@ let case_forward_provider () =
   materialize b;
   let i = sym () in
   (* a written, then b reads a -- both in one loop; b survives (materialized), a virtual. *)
-  let shared = loop i (seq (set i a (c 2.)) (set i b (add (get i a) (c 1.)))) in
+  let shared = loop i (seq (set i a (ramp 2. i)) (set i b (add (get i a) (c 1.)))) in
   let o = optimize shared in
   p "forward provider inlined into materialized reader"
     (known_virtual o a && count_set o a = 0 && count_get o a = 0 && count_set o b = 1);
   let seed = [ (b, blank 3) ] and read = [ b ] in
   let virt = execute ~name:"vsl_forward" o ~seed ~read in
   let mat = execute ~name:"vsl_forward_mat" (optimize ~materialized:[ a ] shared) ~seed ~read in
-  p "forward provider: the reader stored the provider's value, not a stale cell"
-    (same virt [ [| 3.; 3.; 3. |] ]);
+  p "forward provider: the reader stored the provider's own cell, not a stale one"
+    (same virt [ [| 3.; 4.; 5. |] ]);
   p "forward provider: virtual and materialized arms agree" (same virt mat)
 
 (* === Case 4: forward virtual->virtual chain consumed downstream === *)
@@ -223,7 +230,7 @@ let case_chain () =
   materialize out;
   let i = sym () and j = sym () in
   (* a = f; b = g(a); both virtual. out = h(b), materialized, read downstream. *)
-  let shared = loop i (seq (set i a (c 2.)) (set i b (add (get i a) (c 1.)))) in
+  let shared = loop i (seq (set i a (ramp 2. i)) (set i b (add (get i a) (c 1.)))) in
   let use_b = loop j (set j out (mul (get j b) (c 2.))) in
   let llc = seq shared use_b in
   let o = optimize llc in
@@ -237,7 +244,8 @@ let case_chain () =
   let seed = [ (out, blank 3) ] and read = [ out ] in
   let virt = execute ~name:"vsl_chain" o ~seed ~read in
   let mat = execute ~name:"vsl_chain_mat" (optimize ~materialized:[ a; b ] llc) ~seed ~read in
-  p "forward chain: the doubly-inlined value is (2 + 1) * 2" (same virt [ [| 6.; 6.; 6. |] ]);
+  p "forward chain: the doubly-inlined value is (2 + i + 1) * 2"
+    (same virt [ [| 6.; 8.; 10. |] ]);
   p "forward chain: virtual and materialized arms agree" (same virt mat)
 
 (* === Case 5: loop-carried / read-before-write sibling read stays materialized === [a] is written
@@ -291,7 +299,9 @@ let case_inloop_consumer () =
   materialize cons;
   let i = sym () in
   let shared =
-    loop i (seq (set i a (c 2.)) (seq (set i b (c 3.)) (set i cons (add (get i a) (get i b)))))
+    loop i
+      (seq (set i a (ramp 2. i))
+         (seq (set i b (ramp 3. i)) (set i cons (add (get i a) (get i b)))))
   in
   let o = optimize shared in
   p "in-loop consumer: both providers virtual" (known_virtual o a && known_virtual o b);
@@ -301,7 +311,7 @@ let case_inloop_consumer () =
   let seed = [ (cons, blank 3) ] and read = [ cons ] in
   let virt = execute ~name:"vsl_inloop" o ~seed ~read in
   let mat = execute ~name:"vsl_inloop_mat" (optimize ~materialized:[ a; b ] shared) ~seed ~read in
-  p "in-loop consumer: both inlined providers reached the sum" (same virt [ [| 5.; 5.; 5. |] ]);
+  p "in-loop consumer: both inlined providers reached the sum" (same virt [ [| 5.; 7.; 9. |] ]);
   p "in-loop consumer: virtual and materialized arms agree" (same virt mat)
 
 (* === Case 9: a write under a dead loop ([to_ < from_]) never executes === The retired tracer

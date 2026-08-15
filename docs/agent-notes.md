@@ -243,10 +243,12 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   is what pins a virtualization guard; `Context.decide_materialized` on the context itself cannot do
   this, because `?prelowered` replaces the lineage state with the record's own `optimize_ctx`.
   Two traps: (a) `known_non_virtual` does NOT mean "has a context buffer" — a node written and read
-  within one routine and never observed is placed `Local`, so `get_values` on it returns the host
-  copy (the seeded values, or garbage) rather than anything the routine computed; read back only
-  nodes you declared `On_device`, and mark them `Tn.set_observable` so the aliasing planner cannot
-  hand their bytes to another node. (b) Producer/consumer indices that run past a node's dims are
+  within one routine and never observed is placed `Local`, and neither readback of it is the
+  routine's values: seeded, `set_values` allocates a context buffer the routine's local storage
+  never writes, so `get_values` hands back exactly what was uploaded (a kernel that did nothing
+  looks the same); unseeded, `Context.to_host` raises "not present in context" unless the node has
+  host-init data or a for-print proxy. Read back only nodes you declared `On_device`, and mark them
+  `Tn.set_observable` so the aliasing planner cannot hand their bytes to another node. (b) Producer/consumer indices that run past a node's dims are
   invisible while the node is virtual (the access is inlined away) and become real out-of-bounds
   traffic the moment the case executes or the materialized arm runs — size hand-built arrays for the
   materialized reading, and seed outputs with a sentinel so "wrote the wrong cells" fails the value
