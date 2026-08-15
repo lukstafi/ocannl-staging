@@ -47,9 +47,15 @@ let () =
     eprintf "Usage: %s <reference_file> <source_file...>\n" Stdlib.Sys.argv.(0);
     Stdlib.exit 1);
   let reference_file = Stdlib.Sys.argv.(1) in
+  (* The rest is the rule's whole dependency set, globbed over the library directories rather than
+     enumerated by hand (gh-ocannl-592). *)
   let source_files =
-    Array.to_list (Array.sub Stdlib.Sys.argv ~pos:2 ~len:(Array.length Stdlib.Sys.argv - 2))
+    Config_key_scan.sources_among (Array.to_list (Array.subo Stdlib.Sys.argv ~pos:2))
   in
+  if List.is_empty source_files then (
+    eprintf "%s: no sources among the arguments -- the rule's globs match nothing\n"
+      Stdlib.Sys.argv.(0);
+    Stdlib.exit 1);
   let file_keys = extract_keys reference_file in
   let code_keys = Utils.known_config_keys in
   let source_keys = Config_key_scan.keys_in_files source_files in
@@ -177,12 +183,9 @@ let () =
   (* Keying the exemptions by basename reads well and is what this list is written as -- but it is
      unambiguous only while no two scanned files share a name. Rather than let a future
      `tensor/utils.ml` inherit `arrayjit/lib/utils.ml`'s exemptions in silence (Codex P2, round 10),
-     the ambiguity fails here, where the fix is either a rename or a switch to paths. *)
-  let duplicate_basenames =
-    List.map source_files ~f:Stdlib.Filename.basename
-    |> List.sort_and_group ~compare:String.compare
-    |> List.filter_map ~f:(function name :: _ :: _ -> Some name | _ -> None)
-  in
+     the ambiguity fails here, where the fix is either a rename or a switch to paths. Precautionary
+     while the list was written by hand; load-bearing now that whole directories are globbed. *)
+  let duplicate_basenames = Config_key_scan.duplicate_basenames source_files in
   if not (List.is_empty duplicate_basenames) then
     fail
       (Printf.sprintf

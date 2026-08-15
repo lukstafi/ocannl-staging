@@ -152,7 +152,8 @@ design history) that is not derivable from the code alone.
 
 - See `ocannl_config.reference` for documentation of all settings
 - Key configs: backend selection, debug logging, optimization levels
-- **Adding a config key touches three places**, enforced by `test/operations/test_config_consistency`: document it in `ocannl_config.reference`, register it in `Utils.known_config_keys`, and if a new `.ml` file gains `get_global_arg` call sites, add that file to the consistency test's source-scan list
+- **Adding a config key touches two places**, enforced by `test/operations/test_config_consistency`: document it in `ocannl_config.reference` and register it in `Utils.known_config_keys`. A new source file needs no registration — the consistency tests glob `arrayjit/lib/*.ml`, `tensor/*.ml` and `lib/*.ml` (gh-ocannl-592). What the scan does need is the key spelled as a string literal at the call site (`~arg_name:"the_key"`): a helper taking the key as a parameter hides every key routed through it, so the same test fails any non-literal use outside the named lookup functions
+- **Classify the key too**: `test/operations/digest_completeness` fails on a key with no entry in `Utils.config_key_classification` (gh-ocannl-572) — say whether it reaches the schedule cache's identity, and which component
 
 **Configuration Methods** (in order of precedence):
 1. Command-line flags: `--ocannl_<option>=<value>` (e.g., `--ocannl_backend=cuda`)

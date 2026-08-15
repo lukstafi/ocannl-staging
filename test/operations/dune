@@ -1078,39 +1078,26 @@
  (modules test_config_consistency)
  (libraries base arrayjit.utils stdio test_utils))
 
+; The sources are globbed, not enumerated (gh-ocannl-592): a hand-written list cannot report the
+; file that falls off it, and three did -- each staying green because the same keys were read from
+; a file still on the list. The globs are the library directories; `%{deps}` hands the whole
+; dependency set to the exe, which keeps the .ml files among them (Config_key_scan.sources_among).
+
 (rule
  (target test_config_consistency.actual)
  (package neural_nets_lib)
- (deps ocannl_config)
+ (deps
+  ocannl_config
+  (glob_files ../../arrayjit/lib/*.ml)
+  (glob_files ../../tensor/*.ml)
+  (glob_files ../../lib/*.ml))
  (action
   (with-stdout-to
    %{target}
    (run
     %{dep:test_config_consistency.exe}
     %{dep:../../ocannl_config.reference}
-    %{dep:../../arrayjit/lib/utils.ml}
-    %{dep:../../arrayjit/lib/affine.ml}
-    %{dep:../../arrayjit/lib/numerics.ml}
-    %{dep:../../arrayjit/lib/backends.ml}
-    %{dep:../../arrayjit/lib/c_syntax.ml}
-    %{dep:../../arrayjit/lib/cc_backend.ml}
-    %{dep:../../arrayjit/lib/context.ml}
-    %{dep:../../arrayjit/lib/cuda_backend.ml}
-    %{dep:../../arrayjit/lib/hip_backend.ml}
-    %{dep:../../arrayjit/lib/metal_backend.ml}
-    %{dep:../../arrayjit/lib/low_level.ml}
-    %{dep:../../arrayjit/lib/schedule.ml}
-    %{dep:../../arrayjit/lib/schedule_cache.ml}
-    %{dep:../../arrayjit/lib/schedule_outcome.ml}
-    %{dep:../../arrayjit/lib/schedulers.ml}
-    %{dep:../../arrayjit/lib/autotune.ml}
-    %{dep:../../arrayjit/lib/sketch_families.ml}
-    %{dep:../../arrayjit/lib/tnode.ml}
-    %{dep:../../arrayjit/lib/assignments.ml}
-    %{dep:../../tensor/tensor.ml}
-    %{dep:../../tensor/row.ml}
-    %{dep:../../lib/train.ml}
-    %{dep:../../lib/persistence.ml}))))
+    %{deps}))))
 
 (rule
  (alias runtest)
@@ -1143,38 +1130,21 @@
  (modules digest_completeness)
  (libraries base arrayjit.utils arrayjit.ir stdio test_utils))
 
+; Same globs as test_config_consistency above, for the same reason: the second scanner inherited
+; the first one's list, so it inherited the blind spot too.
+
 (rule
  (target digest_completeness.actual)
  (package neural_nets_lib)
- (deps ocannl_config)
+ (deps
+  ocannl_config
+  (glob_files ../../arrayjit/lib/*.ml)
+  (glob_files ../../tensor/*.ml)
+  (glob_files ../../lib/*.ml))
  (action
   (with-stdout-to
    %{target}
-   (run
-    %{dep:digest_completeness.exe}
-    %{dep:../../arrayjit/lib/utils.ml}
-    %{dep:../../arrayjit/lib/affine.ml}
-    %{dep:../../arrayjit/lib/numerics.ml}
-    %{dep:../../arrayjit/lib/backends.ml}
-    %{dep:../../arrayjit/lib/c_syntax.ml}
-    %{dep:../../arrayjit/lib/cc_backend.ml}
-    %{dep:../../arrayjit/lib/context.ml}
-    %{dep:../../arrayjit/lib/cuda_backend.ml}
-    %{dep:../../arrayjit/lib/hip_backend.ml}
-    %{dep:../../arrayjit/lib/metal_backend.ml}
-    %{dep:../../arrayjit/lib/low_level.ml}
-    %{dep:../../arrayjit/lib/schedule.ml}
-    %{dep:../../arrayjit/lib/schedule_cache.ml}
-    %{dep:../../arrayjit/lib/schedule_outcome.ml}
-    %{dep:../../arrayjit/lib/schedulers.ml}
-    %{dep:../../arrayjit/lib/autotune.ml}
-    %{dep:../../arrayjit/lib/sketch_families.ml}
-    %{dep:../../arrayjit/lib/tnode.ml}
-    %{dep:../../arrayjit/lib/assignments.ml}
-    %{dep:../../tensor/tensor.ml}
-    %{dep:../../tensor/row.ml}
-    %{dep:../../lib/train.ml}
-    %{dep:../../lib/persistence.ml}))))
+   (run %{dep:digest_completeness.exe} %{deps}))))
 
 (rule
  (alias runtest)

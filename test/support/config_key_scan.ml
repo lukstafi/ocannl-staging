@@ -218,6 +218,47 @@ let keys_in_source content =
      literal is still visible as a literal. *)
   |> List.filter ~f:(fun key -> not (String.is_empty key))
 
+(** The library sources among a rule's dependencies, sorted and deduplicated.
+
+    Both consistency tests are handed [%{deps}] — the whole dependency set of the rule that runs
+    them, flattened into one argument list — because the files they scan are globbed rather than
+    enumerated (gh-ocannl-592: a hand-written list says nothing about the file that falls off it,
+    and three files did, each staying green because their keys were read from somewhere else too).
+
+    Two kinds of argument are therefore not sources. Anything that is not a [.ml] file: the config
+    file the rule depends on, the reference file, the executable itself. And dune's preprocessed
+    twin [x.pp.ml] of an [x.ml] that is in the list — those are the ppx expansion of a file already
+    scanned, so they would double every census, and they exist only where the library that owns
+    them is built, which is what would make the census differ between a machine with the CUDA
+    toolchain and one without. A twin is dropped only when its original is present, so a source
+    genuinely named [x.pp.ml] is not silently lost.
+
+    Nothing else is filtered, and both tests print how many files they scanned: a glob that stops
+    matching shows up as a diff rather than as a quietly smaller census. *)
+let sources_among args =
+  let sources =
+    List.filter args ~f:(String.is_suffix ~suffix:".ml")
+    |> List.dedup_and_sort ~compare:String.compare
+  in
+  let present = Set.of_list (module String) sources in
+  List.filter sources ~f:(fun path ->
+      match String.chop_suffix path ~suffix:".pp.ml" with
+      | Some stem -> not (Set.mem present (stem ^ ".ml"))
+      | None -> true)
+
+(** Basenames that more than one of [files] carries.
+
+    Both tests key something by basename — the forwarding exemptions in [test_config_consistency],
+    the codegen-stage module list in [digest_completeness] — which is unambiguous only while the
+    files scanned have distinct names. With the scan list enumerated by hand that could not happen
+    by accident; with globs over whole directories it can, the day someone adds a [tensor/utils.ml]
+    (Codex P2, PR #340 round 10). So it fails where the fix is, rather than silently lending one
+    file's exemptions to another. *)
+let duplicate_basenames files =
+  List.map files ~f:Stdlib.Filename.basename
+  |> List.sort_and_group ~compare:String.compare
+  |> List.filter_map ~f:(function name :: _ :: _ -> Some name | _ -> None)
+
 (** [keys_in_source] over each file, as a set. Call sites only — this is what
     [test_config_consistency] means by "every key a source file asks for is documented and
     registered". *)
