@@ -1124,7 +1124,18 @@
 (test
  (name config_scan_lexing)
  (package neural_nets_lib)
+ (deps ocannl_config)
  (modules config_scan_lexing)
+ (libraries base stdio test_utils))
+
+; How the dune-file scan behind config_dep_completeness reads a stanza, on input built to break
+; it rather than on whatever the repository's dune files happen to say today.
+
+(test
+ (name dune_scan_cases)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules dune_scan_cases)
  (libraries base stdio test_utils))
 
 (executable
@@ -1170,6 +1181,33 @@
  (package neural_nets_lib)
  (action
   (diff digest_completeness.expected digest_completeness.actual)))
+
+; gh-ocannl-597: every stanza that runs a test executable declares the shared ocannl_config. The
+; globs are recursive over the whole repository -- a new test directory is covered the day it
+; appears, which is the point of checking this at all.
+
+(executable
+ (name config_dep_completeness)
+ (modules config_dep_completeness)
+ (libraries base stdio test_utils))
+
+(rule
+ (target config_dep_completeness.actual)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (glob_files_rec ../../dune)
+  (glob_files_rec ../../ocannl_config))
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:config_dep_completeness.exe} %{workspace_root} %{deps}))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff config_dep_completeness.expected config_dep_completeness.actual)))
 
 (test
  (name test_metal_pool_bindings)
