@@ -165,12 +165,6 @@ module Sneaky = struct
   let get_global_arg name = get ~arg_name:name
 end|ocaml},
       Some "Sneaky.get_global_arg (nested)" );
-    ( "a local module is qualified too",
-      {ocaml|let real x = x
-let f () =
-  let module M = struct let get_global_arg name = get ~arg_name:name end in
-  M.get_global_arg|ocaml},
-      Some "M.get_global_arg (nested)" );
     ( "a binding inside open struct is not bare",
       {ocaml|let real x = x
 open struct
@@ -207,6 +201,26 @@ and other name = get ~arg_name:name|ocaml},
 (* let get_global_arg *)
 let other y = get ~arg_name:y|ocaml},
       Some "other" );
+  ]
+
+(* One case the compiler answers differently across the floor the opam files declare, so the test
+   accepts either answer rather than pinning the version it was recorded on.
+
+   5.5 represents `let module M = … in …` as a structure item inside the expression, so the binding
+   takes M's prefix like any other module's; through 5.4 it is `Pexp_letmodule`, which the path
+   machinery does not descend, and the name arrives bare. Matching that constructor would fix the
+   name below 5.5 and fail to compile at 5.5, where it no longer exists (PR #340 round 6 met this
+   from the other side) -- and the difference is cosmetic: what an exemption reads is `top_level`,
+   which is false in both readings, so a binding introduced this way is exempt nowhere either way.
+   That is what the case is here to pin, and both spellings pin it. *)
+let compiler_dependent_cases =
+  [
+    ( "a local module's binding is nested, so it is exempt nowhere",
+      {ocaml|let real x = x
+let f () =
+  let module M = struct let get_global_arg name = get ~arg_name:name end in
+  M.get_global_arg|ocaml},
+      [ Some "M.get_global_arg (nested)"; Some "get_global_arg (nested)" ] );
   ]
 
 (* The other spelling of a read: a field of the resolved settings record. Prose naming one is not
@@ -267,23 +281,33 @@ let () =
       else (
         ok := false;
         printf "FAIL: non-literal uses -- %s: expected %d, found %d\n" name expected found));
+  let enclosing_definition source =
+    let definitions = Scan.definitions source in
+    let render (d : Scan.definition) =
+      Option.value d.Scan.name ~default:"<anonymous function>"
+      ^ if d.Scan.top_level then "" else " (nested)"
+    in
+    List.filter_map (Scan.label_uses source) ~f:(fun u ->
+        Option.map (Scan.definition_at definitions u.Scan.offset) ~f:render)
+    |> List.hd
+  in
+  let show = Option.value ~default:"<none>" in
   List.iter definition_cases ~f:(fun (name, source, expected) ->
-      let definitions = Scan.definitions source in
-      let render (d : Scan.definition) =
-        Option.value d.Scan.name ~default:"<anonymous function>"
-        ^ if d.Scan.top_level then "" else " (nested)"
-      in
-      let found =
-        List.filter_map (Scan.label_uses source) ~f:(fun u ->
-            Option.map (Scan.definition_at definitions u.Scan.offset) ~f:render)
-        |> List.hd
-      in
+      let found = enclosing_definition source in
       if Option.equal String.equal found expected then printf "ok: enclosing definition -- %s\n" name
       else (
         ok := false;
-        printf "FAIL: enclosing definition -- %s: expected %s, found %s\n" name
-          (Option.value expected ~default:"<none>")
-          (Option.value found ~default:"<none>")));
+        printf "FAIL: enclosing definition -- %s: expected %s, found %s\n" name (show expected)
+          (show found)));
+  List.iter compiler_dependent_cases ~f:(fun (name, source, accepted) ->
+      let found = enclosing_definition source in
+      if List.mem accepted found ~equal:(Option.equal String.equal) then
+        printf "ok: enclosing definition -- %s\n" name
+      else (
+        ok := false;
+        printf "FAIL: enclosing definition -- %s: expected one of [%s], found %s\n" name
+          (String.concat ~sep:"; " (List.map accepted ~f:show))
+          (show found)));
   List.iter settings_cases ~f:(fun (name, source, expected) ->
       let found = List.sort ~compare:String.compare (Scan.settings_keys_in_source source) in
       let expected = List.sort ~compare:String.compare expected in
