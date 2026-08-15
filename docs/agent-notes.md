@@ -236,6 +236,21 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   add `~lowered_transform:(fun o -> o)` to keep the default schedule annotator off hand-built code.
   See `test/operations/prelowered_seam.ml`, and mind that scope bodies hoist ahead of the enclosing
   statement while single-assignment scopes collapse into it (gh-ocannl-584).
+- Such a hand-built case gets its differential arm for free: seed the *decision* into the
+  `optimize_ctx` you hand `LL.optimize` (`Tn.Placements.update ctx.placements tn Tn.On_device prov`
+  — what `Context.decide_materialized` does for the `Assignments` pipeline) and re-specialize the
+  SAME `LL.t`. The inlined and materialized readings of one program must agree cell for cell, which
+  is what pins a virtualization guard; `Context.decide_materialized` on the context itself cannot do
+  this, because `?prelowered` replaces the lineage state with the record's own `optimize_ctx`.
+  Two traps: (a) `known_non_virtual` does NOT mean "has a context buffer" — a node written and read
+  within one routine and never observed is placed `Local`, so `get_values` on it returns the host
+  copy (the seeded values, or garbage) rather than anything the routine computed; read back only
+  nodes you declared `On_device`, and mark them `Tn.set_observable` so the aliasing planner cannot
+  hand their bytes to another node. (b) Producer/consumer indices that run past a node's dims are
+  invisible while the node is virtual (the access is inlined away) and become real out-of-bounds
+  traffic the moment the case executes or the materialized arm runs — size hand-built arrays for the
+  materialized reading, and seed outputs with a sentinel so "wrote the wrong cells" fails the value
+  check instead of reading whatever the buffer held.
 - A node-level "what happened at first touch" flag (`zero_initialized_by_code` and friends) cannot
   soundly drive a PER-OCCURRENCE codegen decision, because nothing clears it across the traversal: a
   guard keyed on it alone collapses `Zero_out; Set; Zero_out` to one zero and drops a `Zero_out`
