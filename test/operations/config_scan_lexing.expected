@@ -47,6 +47,8 @@ ok: enclosing definition -- an ordinary comment quoting a binding is not a defin
 ok: settings read -- a field read
 ok: settings read -- a field named in a doc comment is not a read
 ok: settings read -- a module-qualified field label names the same read
+ok: settings read -- a functor-application elsewhere does not crash the scan
+ok: settings read -- an applied path in expression position is not an identifier, so not a read
 ok: settings read -- an unqualified record of the same shape is not a read
 ok: settings read -- a predicate call folds in its threshold
 ok: settings read -- a predicate merely mentioned in prose is not a call
