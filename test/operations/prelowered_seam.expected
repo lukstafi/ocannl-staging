@@ -6,6 +6,12 @@ phase2: X is a routine input: true
 phase2: X is also a routine output: true
 phase2: Y = 5*X_in (both scope operands read the input): true
 phase2: X was overwritten by the following statement: true
-phase3: the validator rejects a tensor-node write in a scope body: true
+phase3: the pipeline rejects a tensor-node write in a scope body: true
+phase3: the analysis entry points admit it (the documented probe boundary): true
 phase3: compiling the out-of-contract routine is rejected: true
+phase4: a Set_local of a local the body does not own is rejected: true
+phase4: a Set_local of a local the body declares is accepted: true
+phase4: a Workgroup_barrier in a scope body is rejected: true
+phase4: a Staged_compilation in a scope body is rejected: true
+phase4: the same constructs outside a scope body are accepted: true
 prelowered seam: PASS

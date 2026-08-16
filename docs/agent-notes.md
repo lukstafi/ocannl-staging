@@ -235,19 +235,27 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   It replaces the compile's lowering wholesale, so the analysis layer and the kernels see one IR;
   add `~lowered_transform:(fun o -> o)` to keep the default schedule annotator off hand-built code.
   See `test/operations/prelowered_seam.ml`, and mind the scope-purity contract below.
-- A `Local_scope` body is a PURE sub-computation: it may write `Set_local`/`Declare_local` state and
-  never a tensor node (gh-ocannl-584). The reason is that a body does not execute where it is
-  written — `C_syntax.pp_scalar` returns it as a local definition, `pp_local_defs` emits it ahead of
-  the enclosing statement ordered by `scope_id`, and `simplify_llc` collapses a single-assignment
-  scope into the expression, moving its reads the other way. Purity makes that emission order
-  unobservable, which is exactly what `Affine.path_before` assumes when it refuses to order sibling
-  `Arg` positions; the two would otherwise disagree. `Low_level.validate_scope_bodies` enforces it
-  at codegen (`C_syntax.compile_proc`, ahead of `validate_parallel_classified` and NOT transported
-  as an `Illegal_schedule` — no schedule choice can rescue malformed IR). The pipeline complies by
-  construction: `inline_computation` drops the inlined computation's `Set`s and `Zero_out`s. So this
-  binds hand-built IR (`?prelowered`) and future passes. Analysis-level probes of the out-of-contract
-  shape are fine and deliberate (`test/operations/affine_extraction.ml` checks that the coverage
-  query stays conservative on IR it must never trust); only codegen is closed off.
+- A `Local_scope` body's ONLY effect is on the locals it owns — its own scope id plus ids
+  `Declare_local`d lexically within it (gh-ocannl-584). Not a tensor node, not a sibling's or
+  enclosing scope's local, no `Workgroup_barrier`, no `Staged_compilation`. The reason is that a body
+  does not execute where it is written, in three different ways: `C_syntax.pp_scalar` returns it as
+  a local definition that `pp_local_defs` emits ahead of the enclosing statement ordered by
+  `scope_id`; `simplify_llc` collapses a single-assignment scope into the expression, moving its
+  reads the other way; and `hoist_cross_statement_cse` lifts a body shared by sibling statements to a
+  top-level `Declare_local` + body, running ONCE ahead of the first user. Purity makes all three
+  placements unobservable, which is exactly what `Affine.path_before` assumes when it refuses to
+  order sibling `Arg` positions; the two would otherwise disagree.
+  `Low_level.validate_scope_bodies` enforces it at BOTH ends of the pipeline: `optimize_proc` on the
+  way in (ahead of the analysis cache, so a digest hit cannot skip it — and before the hoist can
+  launder a body write into a top-level statement that no later gate would recognize) and
+  `C_syntax.compile_proc` on the way out (catching what a schedule transform constructs), the latter
+  ahead of `validate_parallel_classified` and NOT transported as an `Illegal_schedule` — no schedule
+  choice can rescue malformed IR. Its statement match is exhaustive with no catch-all, so a new
+  `Low_level.t` constructor breaks the build until someone classifies it as body-legal or not. The
+  pipeline complies by construction: `inline_computation` drops the inlined computation's `Set`s and
+  `Zero_out`s. The raw analysis entry points `analyze_proc`/`specialize_proc` deliberately do NOT
+  validate — they are the probes that must stay conservative on IR they may not trust
+  (`test/operations/affine_extraction.ml`); everything past them does.
 - A node-level "what happened at first touch" flag (`zero_initialized_by_code` and friends) cannot
   soundly drive a PER-OCCURRENCE codegen decision, because nothing clears it across the traversal: a
   guard keyed on it alone collapses `Zero_out; Set; Zero_out` to one zero and drops a `Zero_out`

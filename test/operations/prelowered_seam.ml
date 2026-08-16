@@ -24,11 +24,13 @@
    by forcing the verdict during development: the value checks fail alongside the classification
    ones).
 
-   Phase 3 pins the scope-purity contract (gh-ocannl-584) the phase-2 program is written to respect:
-   the overwrite of X lives in a statement of its own, not inside [scopeB]'s body, because a scope
-   body renders HOISTED ahead of the enclosing statement and ordered by [scope_id] rather than by
-   the operand's syntactic position. A body write is therefore malformed IR rather than
-   under-specified IR, and codegen rejects it.
+   Phases 3 and 4 pin the scope-purity contract (gh-ocannl-584) the phase-2 program is written to
+   respect: the overwrite of X lives in a statement of its own, not inside [scopeB]'s body, because
+   a scope body does not execute where it is written — it renders hoisted ahead of the enclosing
+   statement ordered by [scope_id], and [hoist_cross_statement_cse] can lift it out of the statement
+   entirely. A body write is therefore malformed IR rather than under-specified IR. Phase 3 pins
+   both pipeline gates and the analysis probe boundary between them; phase 4 pins the other three
+   ways a body can reach outside itself.
 
    Printed facts are booleans/PASS lines so the expected output stays backend-stable. *)
 
@@ -74,6 +76,14 @@ let compile_and_run ~name (llc : LL.t) ~(seed : (Tn.t * float array) list) ~(rea
   let ctx = List.fold seed ~init:ctx ~f:(fun ctx (tn, values) -> Context.set_values ctx tn values) in
   let ctx = Context.run ctx routine in
   (opt, List.map read ~f:(Context.get_values ctx))
+
+(* Whether [f] is refused by the scope-purity gate specifically -- not by any other
+   [Invalid_argument] the pipeline might raise. *)
+let rejected f =
+  try
+    f ();
+    false
+  with Invalid_argument msg -> String.is_substring msg ~substring:"validate_scope_bodies"
 
 let close values expected =
   Array.length values = Array.length expected
@@ -198,21 +208,25 @@ let phase3 () =
       }
   in
   let llc = loop ~upto:3 i (set i y (binop Ops.Add scope_a scope_b)) in
-  let opt =
-    LL.optimize (LL.empty_optimize_ctx ()) ~unoptim_ll_source:None ~ll_source:None
-      ~name:"pls_impure_scope" [] llc
-  in
-  let rejected f =
-    try
-      f ();
-      false
-    with Invalid_argument msg -> String.is_substring msg ~substring:"validate_scope_bodies"
-  in
-  p "phase3: the validator rejects a tensor-node write in a scope body"
-    (rejected (fun () -> LL.validate_scope_bodies opt.LL.llc));
-  (* And it rejects there, not merely in a standalone check: the same program driven through the
-     backend's [compile] — the path the phase-2 program takes to execution — never reaches
-     codegen. *)
+  (* The pipeline's entry gate. It has to be the entry, not just codegen:
+     [hoist_cross_statement_cse] lifts a body shared by sibling statements to a top-level
+     [Declare_local] + body, which would carry an impure body's write out of every [Local_scope] --
+     past a codegen-only check, and executing once instead of once per user statement. *)
+  p "phase3: the pipeline rejects a tensor-node write in a scope body"
+    (rejected (fun () ->
+         ignore
+           (LL.optimize (LL.empty_optimize_ctx ()) ~unoptim_ll_source:None ~ll_source:None
+              ~name:"pls_impure_scope" [] llc)));
+  (* The exit gate, reached via the analysis entry points -- which deliberately do NOT validate, so
+     that probes like affine_extraction.ml can ask what the coverage query does with IR it must
+     never trust. Everything past them does. *)
+  let admitted = ref None in
+  p "phase3: the analysis entry points admit it (the documented probe boundary)"
+    (not
+       (rejected (fun () ->
+            admitted :=
+              Some (LL.specialize_proc (LL.empty_optimize_ctx ()) (LL.analyze_proc [] llc)))));
+  let opt = Option.value_exn !admitted in
   p "phase3: compiling the out-of-contract routine is rejected"
     (rejected (fun () ->
          ignore
@@ -220,8 +234,51 @@ let phase3 () =
               ~lowered_transform:(fun o -> o)
               (Context.auto ()) Ir.Assignments.empty_comp Idx.Empty)))
 
+(* The other three ways a body can reach outside itself. Each would make the placement of a scope
+   body observable, which is the one thing purity buys: a [Set_local] of a sibling's local mutates
+   what that scope returns, and neither a barrier nor a staged callback is scope-local state at all
+   (the callback's emissions cannot even be inspected). Checked on minimal terms rather than through
+   a compile -- the rule is structural. *)
+let phase4 () =
+  let x = mk "pls4_x" and y = mk "pls4_y" in
+  let la = mk ~dims:[| 1 |] "pls4_la" and lb = mk ~dims:[| 1 |] "pls4_lb" in
+  let i = sym () in
+  let id_a = LL.get_scope la and id_b = LL.get_scope lb in
+  let scope_with body : LL.scalar_t =
+    LL.Local_scope { id = id_a; body; orig_indices = [| iter i |] }
+  in
+  let stmt body = loop ~upto:3 i (set i y (scope_with body)) in
+  (* Writing a SIBLING scope's local from this body. *)
+  p "phase4: a Set_local of a local the body does not own is rejected"
+    (rejected (fun () ->
+         LL.validate_scope_bodies
+           (stmt (seq (LL.Set_local (id_b, c 1.)) (LL.Set_local (id_a, get i x))))));
+  (* Owning it makes the same shape legal: a body may declare and write its own sub-local. *)
+  p "phase4: a Set_local of a local the body declares is accepted"
+    (not
+       (rejected (fun () ->
+            LL.validate_scope_bodies
+              (stmt
+                 (seq
+                    (LL.Declare_local { id = id_b; needs_init = false })
+                    (seq (LL.Set_local (id_b, get i x)) (LL.Set_local (id_a, LL.Get_local id_b))))))));
+  p "phase4: a Workgroup_barrier in a scope body is rejected"
+    (rejected (fun () ->
+         LL.validate_scope_bodies (stmt (seq LL.Workgroup_barrier (LL.Set_local (id_a, get i x))))));
+  p "phase4: a Staged_compilation in a scope body is rejected"
+    (rejected (fun () ->
+         LL.validate_scope_bodies
+           (stmt
+              (seq (LL.Staged_compilation (fun () -> PPrint.empty)) (LL.Set_local (id_a, get i x))))));
+  (* The same constructs at statement level are ordinary code, so the gate must not flag them. *)
+  p "phase4: the same constructs outside a scope body are accepted"
+    (not
+       (rejected (fun () ->
+            LL.validate_scope_bodies (seq LL.Workgroup_barrier (loop ~upto:3 i (set i y (get i x)))))))
+
 let () =
   phase1 ();
   phase2 ();
   phase3 ();
+  phase4 ();
   printf "prelowered seam: PASS\n"

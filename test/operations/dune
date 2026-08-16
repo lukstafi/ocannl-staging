@@ -2309,6 +2309,6 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules prelowered_seam)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio pprint)
  (preprocess
   (pps ppx_here ppx_ocannl)))
