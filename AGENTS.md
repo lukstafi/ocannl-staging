@@ -100,6 +100,12 @@ Testing notes:
   artifacts; keep routine names unique (test-specific prefixes remain useful).
 - For optimizer passes that change cell values, emitted-IR structure is not sufficient: also
   assert executed output against a materialized or otherwise independent reference run.
+- That reference must DISCRIMINATE, not merely exist: have each producer write a value that varies
+  with every symbol of its iteration and stays clear of the init/sentinel value (e.g. `1 + i`, or
+  `1 + 10*outer + inner`). A constant producer replays an identical assignment under a too-wide
+  range guard, a value omitting a symbol is constant along that axis under a wrong substitution,
+  and a value colliding with the zero-init hides a dropped first iteration — all green for the
+  wrong reason.
 
 ## Coding Conventions
 - Prefer small, composable functions; avoid unneeded global state.

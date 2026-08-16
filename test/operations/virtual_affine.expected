@@ -3,16 +3,25 @@ structural-match producer inlined (no array reads survive): true
 structural-match producer setter dropped: true
 structural-match consumer setter kept: true
 structural-match has no guard ops: true
+structural-match: every cell holds the value of the iteration bound to it: true
+structural-match: virtual and materialized arms agree: true
 unit-solve(plain) producer virtual: true
 unit-solve(plain) producer inlined (no array reads survive): true
 unit-solve(plain) producer setter dropped: true
 unit-solve(plain) consumer setter kept: true
 unit-solve(plain) emits a range guard (Where + Cmple lower + Cmplt upper): true
+unit-solve(plain): every cell holds the value of the one iteration that scattered it: true
+unit-solve(plain): virtual and materialized arms agree: true
 triangular producer virtual: true
 triangular producer inlined (no array reads survive): true
 triangular consumer setter kept: true
 triangular emits a range guard (Where + Cmple lower + Cmplt upper): true
+triangular: executed values are the scattered band over the zero-init: true
+triangular: virtual and materialized arms agree: true
 non-injective producer stays non-virtual: true
 non-injective producer array read preserved: true
+non-injective: the scattered value reached the consumer through the buffer: true
 stage-a diagonal producer virtual: true
 stage-a diagonal inlined (no array reads survive): true
+stage-a diagonal: executed values are the diagonal over the zero-init: true
+stage-a diagonal: virtual and materialized arms agree: true
