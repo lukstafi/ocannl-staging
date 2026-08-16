@@ -218,6 +218,68 @@ let keys_in_source content =
      literal is still visible as a literal. *)
   |> List.filter ~f:(fun key -> not (String.is_empty key))
 
+(** The library sources among a rule's dependencies, sorted and deduplicated.
+
+    Both consistency tests are handed [%{deps}] — the whole dependency set of the rule that runs
+    them, flattened into one argument list — because the files they scan are globbed rather than
+    enumerated (gh-ocannl-592: a hand-written list says nothing about the file that falls off it,
+    and three files did, each staying green because their keys were read from somewhere else too).
+
+    Two kinds of argument are therefore not sources. Anything that is not a [.ml] file: the config
+    file the rule depends on, the reference file, the executable itself. And dune's preprocessed
+    twin [x.pp.ml] of an [x.ml] that is in the list — those are the ppx expansion of a file already
+    scanned, so they would double every census, and they exist only where the library that owns
+    them is built, which is what would make the census differ between a machine with the CUDA
+    toolchain and one without. A twin is dropped only when its original is present, so a source
+    genuinely named [x.pp.ml] is not silently lost.
+
+    Nothing else is filtered, and both tests print how many files they scanned: a glob that stops
+    matching shows up as a diff rather than as a quietly smaller census. *)
+let sources_among args =
+  let sources =
+    List.filter args ~f:(String.is_suffix ~suffix:".ml")
+    |> List.dedup_and_sort ~compare:String.compare
+  in
+  let present = Set.of_list (module String) sources in
+  List.filter sources ~f:(fun path ->
+      match String.chop_suffix path ~suffix:".pp.ml" with
+      | Some stem -> not (Set.mem present (stem ^ ".ml"))
+      | None -> true)
+
+(** [files] counted per directory, as a line for a golden: which directories the census actually
+    came from, and how many files each contributed.
+
+    The alternative to printing it would be a list of permitted roots inside the test — a second
+    copy of the globs in [test/operations/dune], which is the hand-maintained list gh-ocannl-592
+    removed. Printing makes the scope reviewable instead: a file arriving from somewhere the globs
+    do not name shows up as a new directory in the diff, and the per-directory counts move when a
+    glob starts or stops matching. The generated sources dune produces in these directories
+    ([tensor/parser.ml] from menhir, the [select]ed backend implementations) are part of the count,
+    as they are part of the library (Codex P2, round 9 of PR #343). *)
+let by_directory files =
+  let strip path =
+    let rec go p = match String.chop_prefix p ~prefix:"../" with Some p -> go p | None -> p in
+    go (Stdlib.Filename.dirname path)
+  in
+  List.map files ~f:strip
+  |> List.sort_and_group ~compare:String.compare
+  |> List.map ~f:(fun group ->
+         Printf.sprintf "%s %d" (List.hd_exn group) (List.length group))
+  |> String.concat ~sep:", "
+
+(** Basenames that more than one of [files] carries.
+
+    Both tests key something by basename — the forwarding exemptions in [test_config_consistency],
+    the codegen-stage module list in [digest_completeness] — which is unambiguous only while the
+    files scanned have distinct names. With the scan list enumerated by hand that could not happen
+    by accident; with globs over whole directories it can, the day someone adds a [tensor/utils.ml]
+    (Codex P2, PR #340 round 10). So it fails where the fix is, rather than silently lending one
+    file's exemptions to another. *)
+let duplicate_basenames files =
+  List.map files ~f:Stdlib.Filename.basename
+  |> List.sort_and_group ~compare:String.compare
+  |> List.filter_map ~f:(function name :: _ :: _ -> Some name | _ -> None)
+
 (** [keys_in_source] over each file, as a set. Call sites only — this is what
     [test_config_consistency] means by "every key a source file asks for is documented and
     registered". *)
@@ -276,6 +338,88 @@ let settings_keys_in_source content =
   in
   iterator.structure iterator (structure_of content);
   List.rev !keys
+
+(** Where a file reads a field of a record called [settings] without the [Utils.] receiver that
+    {!settings_keys_in_source} recognises — a bare [settings.large_models], or one through an alias
+    ([module U = Utils], [let open Utils in …], [include Utils], at any depth).
+
+    That receiver is the convention the settings census rests on, and a read spelled any other way
+    vanishes from it: a key read only that way at codegen could then be classified code-borne and
+    pass [digest_completeness] unchallenged, which is the misclassification that test exists to
+    catch (Codex P2, rounds 14 and 15 of PR #343).
+
+    Resolving aliases and opens is the other way to close this, and a bigger machine than the
+    convention needs — no source spells a read that way today, so the convention is checked
+    instead, exactly as the string-literal one for [arg_name] is. Policing the READ rather than the
+    scope is what makes it precise: [module Lazy = Utils.Lazy] and a qualified record expression
+    such as [Utils.{ value; unique_id }] introduce no such read and do not appear here, while
+    [Low_level.virtualize_settings.max_visits] is a different record and never did.
+
+    [offset] is where the read sits, for the caller's report. *)
+let unqualified_settings_reads content =
+  let found = ref [] in
+  let is_utils_settings path =
+    List.length path >= 2
+    && List.equal String.equal (List.drop path (List.length path - 2)) [ "Utils"; "settings" ]
+  in
+  (* Where `Utils.settings` is used AS a record rather than read through: the receiver of a field
+     access is the one place it may appear. Everything else -- `let s = Utils.settings`,
+     `read Utils.settings`, storing it, returning it -- puts the reads out of the census's reach,
+     since they are then spelled against a name this scan has no reason to know (Codex P2, rounds
+     16 and 17 of PR #343). Blessing that one position covers the whole class at once, where
+     naming the ways to alias it did not. *)
+  let blessed = Hash_set.create (module Int) in
+  (* The predicates {!settings_keys_in_source} folds thresholds into are recognised as CALLS, so
+     handing one around as a value loses its keys the same way handing the record around does
+     (Codex P2, round 20). Their one visible position is the function of an application. *)
+  let predicates = [ "debug_log_from_routines"; "with_runtime_debug" ] in
+  let ends_in names path =
+    List.last path |> Option.value_map ~default:false ~f:(List.mem names ~equal:String.equal)
+  in
+  let iterator =
+    {
+      Ast_iterator.default_iterator with
+      expr =
+        (fun self expr ->
+          (match expr.pexp_desc with
+          | Pexp_apply (f, _) -> (
+              match longident_of f with
+              | Some path when ends_in predicates path ->
+                  Hash_set.add blessed f.pexp_loc.loc_start.pos_cnum
+              | _ -> ())
+          | _ -> ());
+          (match expr.pexp_desc with
+          (* A write is not a read -- the census counts none of these -- but it is the same
+             qualified use of the record, and `Utils.settings.k <- v` is how train.ml sets a few. *)
+          | Pexp_field (receiver, _) | Pexp_setfield (receiver, _, _) -> (
+              match longident_of receiver with
+              | Some path when is_utils_settings path ->
+                  Hash_set.add blessed receiver.pexp_loc.loc_start.pos_cnum
+              | Some path
+                when List.last path |> Option.value_map ~default:false ~f:(String.equal "settings")
+                ->
+                  (* A field read of something CALLED settings but not `Utils.settings`: a bare
+                     `settings.k` under an open, or `U.settings.k` under an alias. *)
+                  found := expr.pexp_loc.loc_start.pos_cnum :: !found
+              | _ -> ())
+          | Pexp_ident { txt; _ } when ends_in predicates (flatten_longident txt) ->
+              (* Blessed above if this is the function of an application. *)
+              found := expr.pexp_loc.loc_start.pos_cnum :: !found
+          | Pexp_ident { txt; _ }
+            when List.last (flatten_longident txt)
+                 |> Option.value_map ~default:false ~f:(String.equal "settings") ->
+              (* Any identifier ending in `settings`, not only the qualified one: under a local
+                 open the record is spelled bare, and `read settings` hands it on just as
+                 `read Utils.settings` does (Codex P2, round 18). Recorded now and discarded below
+                 if it turns out to be a blessed receiver -- a field access is visited before its
+                 receiver. *)
+              found := expr.pexp_loc.loc_start.pos_cnum :: !found
+          | _ -> ());
+          Ast_iterator.default_iterator.expr self expr);
+    }
+  in
+  iterator.structure iterator (structure_of content);
+  List.rev !found |> List.filter ~f:(fun offset -> not (Hash_set.mem blessed offset))
 
 (** Every configuration read of a file — [arg_name] call sites and {!settings_keys_in_source} —
     keyed by file basename, for tests that care {e where} a key is read. Field names that are not

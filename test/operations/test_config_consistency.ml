@@ -47,16 +47,27 @@ let () =
     eprintf "Usage: %s <reference_file> <source_file...>\n" Stdlib.Sys.argv.(0);
     Stdlib.exit 1);
   let reference_file = Stdlib.Sys.argv.(1) in
+  (* The rest is the rule's whole dependency set, globbed over the library directories rather than
+     enumerated by hand (gh-ocannl-592). *)
   let source_files =
-    Array.to_list (Array.sub Stdlib.Sys.argv ~pos:2 ~len:(Array.length Stdlib.Sys.argv - 2))
+    Config_key_scan.sources_among (Array.to_list (Array.subo Stdlib.Sys.argv ~pos:2))
   in
+  if List.is_empty source_files then (
+    eprintf "%s: no sources among the arguments -- the rule's globs match nothing\n"
+      Stdlib.Sys.argv.(0);
+    Stdlib.exit 1);
   let file_keys = extract_keys reference_file in
   let code_keys = Utils.known_config_keys in
   let source_keys = Config_key_scan.keys_in_files source_files in
   let ok = ref true in
+  (* Both channels, and a nonzero exit below: a golden-diff test that prints its failures and
+     exits 0 can be `dune promote`d into passing, blessing the FAIL text as the expected output
+     (Codex P2, round 10 of PR #343). A nonzero exit means dune never writes the redirected stdout,
+     so the same lines go to stderr, where they survive to be read. *)
   let fail msg =
     ok := false;
-    printf "FAIL: %s\n" msg
+    printf "FAIL: %s\n" msg;
+    eprintf "FAIL: %s\n" msg
   in
   (* 1. Source call-site keys must all appear in the reference file *)
   let missing_in_ref = Set.diff source_keys file_keys in
@@ -177,12 +188,9 @@ let () =
   (* Keying the exemptions by basename reads well and is what this list is written as -- but it is
      unambiguous only while no two scanned files share a name. Rather than let a future
      `tensor/utils.ml` inherit `arrayjit/lib/utils.ml`'s exemptions in silence (Codex P2, round 10),
-     the ambiguity fails here, where the fix is either a rename or a switch to paths. *)
-  let duplicate_basenames =
-    List.map source_files ~f:Stdlib.Filename.basename
-    |> List.sort_and_group ~compare:String.compare
-    |> List.filter_map ~f:(function name :: _ :: _ -> Some name | _ -> None)
-  in
+     the ambiguity fails here, where the fix is either a rename or a switch to paths. Precautionary
+     while the list was written by hand; load-bearing now that whole directories are globbed. *)
+  let duplicate_basenames = Config_key_scan.duplicate_basenames source_files in
   if not (List.is_empty duplicate_basenames) then
     fail
       (Printf.sprintf
@@ -203,6 +211,25 @@ let () =
     String.strip (String.sub original ~pos:line_start ~len:(line_end - line_start))
   in
   let forwarding_hit = ref (Set.empty (module String)) in
+  (* 6b. The OTHER spelling of a read -- a field of `Utils.settings` -- is recognised by that
+     receiver, and a read spelled any other way (bare `settings.k` under an `open Utils`, or
+     `U.settings.k` under an alias, at any depth) vanishes from the census: a key read only that
+     way at codegen could then be classified code-borne and pass digest_completeness unchallenged
+     (Codex P2, rounds 14 and 15). The READ is what is checked, not the scope, so a qualified
+     record expression like row.ml's `Utils.{ value; unique_id }` is not a finding. utils.ml is
+     where the record lives, so its own unqualified reads are the definition, not a hidden call
+     site. *)
+  List.iter source_files ~f:(fun fname ->
+      let base = Stdlib.Filename.basename fname in
+      if not (String.equal base "utils.ml") then (
+        let original = In_channel.read_all fname in
+        List.iter (Config_key_scan.unqualified_settings_reads original) ~f:(fun offset ->
+            fail
+            @@ Printf.sprintf
+                 "%s uses the settings record or one of its predicates somewhere the census \
+                  cannot follow -- a read without the `Utils.settings` receiver, or either handed \
+                  on to be read elsewhere: %s"
+                 base (line_at original offset))));
   List.iter source_files ~f:(fun fname ->
       let base = Stdlib.Filename.basename fname in
       let known =
@@ -275,4 +302,8 @@ let () =
       "OK: %d files spell every config key as a string literal, outside %d forwarding functions: \
        %s.\n"
       (List.length source_files) (Set.length exempted_sites)
-      (String.concat ~sep:", " @@ Set.to_list exempted_sites))
+      (String.concat ~sep:", " @@ Set.to_list exempted_sites);
+    (* Which directories the census came from, so that the globs' reach is reviewable rather than
+       implicit -- see Config_key_scan.by_directory. *)
+    printf "OK: scanned %s.\n" (Config_key_scan.by_directory source_files))
+  else Stdlib.exit 1

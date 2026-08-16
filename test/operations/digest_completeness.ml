@@ -48,16 +48,38 @@ let class_name : Utils.config_key_class -> string = function
 
 let () =
   if Array.length Stdlib.Sys.argv < 2 then (
-    eprintf "Usage: %s <source_file...>\n" Stdlib.Sys.argv.(0);
+    eprintf "Usage: %s <dependency...>\n" Stdlib.Sys.argv.(0);
     Stdlib.exit 1);
-  let source_files = Array.to_list (Array.subo Stdlib.Sys.argv ~pos:1) in
+  (* The arguments are the rule's whole dependency set, globbed over the library directories rather
+     than enumerated by hand (gh-ocannl-592). *)
+  let source_files =
+    Config_key_scan.sources_among (Array.to_list (Array.subo Stdlib.Sys.argv ~pos:1))
+  in
+  if List.is_empty source_files then (
+    eprintf "%s: no sources among the arguments -- the rule's globs match nothing\n"
+      Stdlib.Sys.argv.(0);
+    Stdlib.exit 1);
   let by_file = Config_key_scan.keys_by_file source_files in
   let ok = ref true in
+  (* Both channels, and a nonzero exit below: a golden-diff test that prints its failures and
+     exits 0 can be `dune promote`d into passing, blessing the FAIL text as the expected output
+     (Codex P2, round 10 of PR #343). A nonzero exit means dune never writes the redirected stdout,
+     so the same lines go to stderr, where they survive to be read. *)
   let fail msg =
     ok := false;
-    printf "FAIL: %s\n" msg
+    printf "FAIL: %s\n" msg;
+    eprintf "FAIL: %s\n" msg
   in
   let listing keys = String.concat ~sep:", " (Set.to_list keys) in
+  (* [codegen_stage_modules] selects by basename, so two scanned files sharing a name would make
+     the selection ambiguous -- possible only since the globs replaced the enumerated list. *)
+  let duplicate_basenames = Config_key_scan.duplicate_basenames source_files in
+  if not (List.is_empty duplicate_basenames) then
+    fail
+      (Printf.sprintf
+         "scanned files share a basename, which the codegen-stage list is keyed by -- rename one \
+          or key the list by path: %s"
+         (String.concat ~sep:", " duplicate_basenames));
   (* 1. The classification covers exactly the known keys, once each. *)
   let classified =
     List.concat_map Utils.config_key_classification ~f:(fun (_, _, keys) -> keys)
@@ -117,6 +139,11 @@ let () =
          "keys read at codegen but classified code-borne: %s -- a codegen read happens after the \
           lowered code the canonical digest names, so it cannot reach the digest"
          (listing miscl));
+  (* The file count is part of the golden so that a glob which stops matching -- a renamed
+     directory, a source layout change -- reads as a diff rather than as a quietly smaller census
+     (gh-ocannl-592). *)
+  printf "Sources scanned: %d -- %s\n" (List.length source_files)
+    (Config_key_scan.by_directory source_files);
   (* The reviewable part: the classification itself, and which keys the scan found at codegen. The
      census counts both spellings of a read, [get_global_arg] call sites and [Utils.settings]
      fields, so a settings-borne key cannot slip past check 3 (Codex P2 on PR #337). *)
@@ -134,3 +161,4 @@ let () =
   if !ok then
     printf "OK: %d config keys classified against %d cache-key components.\n"
       (Set.length classified) (List.length SC.key_components)
+  else Stdlib.exit 1

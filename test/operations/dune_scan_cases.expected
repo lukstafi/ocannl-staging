@@ -1,0 +1,98 @@
+ok: a test declaring the dep
+ok: a test omitting the dep
+ok: a test with deps but not this one
+ok: the dep is found wherever in deps it sits
+ok: an explicit file dependency declares it
+ok: a config elsewhere is a dependency too
+ok: so does one bound to a name
+ok: an alias of the same name is not the file
+ok: nor is an environment variable of that name
+ok: a glob does not depend on the copied config
+ok: a multi-test stanza is one site naming both
+ok: inline tests declare the dep inside their own field
+ok: an inline-test field with no deps at all
+ok: a library's own deps are not the inline tests' deps
+ok: a plain library is not a site
+ok: an executable is not a site
+ok: a rule running an executable is a site
+ok: a rule running an executable through a named dep is one too
+ok: a named dep may wrap its path in a dependency form
+ok: a named dep resolving to no executable is not evidence of an external tool
+ok: a chdir moves the directory whose config matters
+ok: and the dependency that satisfies it is the one reaching that directory
+ok: a test's own action can move where it runs
+ok: a test with an ordinary action still runs where it is
+ok: a helper chdir'd elsewhere does not move the test
+ok: but a helper running an executable elsewhere is its own site
+ok: a test's shell action leaves its directory unestablished too
+ok: a chdir into a child is answered by the stanza's own config
+ok: the child's own config answers it as well
+ok: a sibling chdir is reported at the sibling
+ok: an explicit relative program is a site without an extension
+ok: a bare word is still a tool on PATH
+ok: an absolute path is a system tool
+ok: a launcher's target is reported without guessing that it is one
+ok: and so is a tool that is only reading them
+ok: an unresolvable argument counts as much as a resolved one
+ok: ordinary arguments are not executables
+ok: a chdir to a pform leaves the directory unestablished
+ok: a chdir to a pform over a PATH tool is not
+ok: an unclassified action under a chdir keeps that directory
+ok: and an unclassified action under a pform chdir is unplaceable, like a command
+ok: a rewritten PATH makes a bare command unplaceable
+ok: but a path-qualified command still names what it names
+ok: a chdir under a PATH rewrite keeps its directory
+ok: a chdir to the stanza's own directory changes nothing
+ok: a nested action does not hide the executable
+ok: a rule running no executable is not a site
+ok: a PATH tool with no workspace argument is not a site
+ok: a PATH tool handed something from the workspace is unplaceable
+ok: an alias stanza is read like a rule
+ok: a public executable through %{bin:...}
+ok: %{exe:...} names one too
+ok: a shell action is not parsed, it is reported
+ok: including one where a word split would have lost the executable
+ok: a rule that copies an executable does not run it
+ok: a command this scan cannot place is reported, not ignored
+ok: dynamic-run executes a program as much as run does
+ok: an action head on neither list is reported
+ok: a program action's arguments are not actions
+ok: an executable elsewhere keeps its path
+ok: a filename's punctuation is part of its identity
+ok: a toolchain pform runs a compiler, not a test
+ok: a path built out of a pform is not guessed at
+ok: a stanza inside a comment is not a stanza
+ok: a config named in a comment does not declare it
+ok: a config named in a string is not a dep
+ok: an executable named in a comment does not make a rule a site
+ok: a subdir's stanzas are the same kinds of site
+ok: a nested subdir names the path it applies to
+ok: stanzas outside the subdir keep the dune file's own directory
+ok: stanzas are reported in file order
+ok: path-rewriting stanzas -- an env stanza setting PATH
+ok: path-rewriting stanzas -- one setting something else to PATH
+ok: path-rewriting stanzas -- an env stanza that touches neither
+ok: declared config paths -- the local one
+ok: declared config paths -- one in a sibling
+ok: declared config paths -- one in a common parent, which a sibling chdir may legitimately need
+ok: declared config paths -- several, reported in full
+ok: declared config paths -- a config the dependency language does not depend on
+ok: copies the config -- a copy_files stanza
+ok: copies the config -- the short spelling
+ok: copies the config -- a copy_files inside a subdir names that directory
+ok: copies the config -- copying something else
+ok: copies the config -- a wildcard that covers it
+ok: copies the config -- a wildcard that cannot
+ok: copies the config -- dune's set syntax is taken as possibly matching
+ok: copies the config -- no copy_files at all
+ok: unclassified heads -- a classified stanza
+ok: unclassified heads -- a stanza that runs nothing
+ok: unclassified heads -- a cram stanza
+ok: unclassified heads -- an include, whose contents the scan never sees
+ok: unclassified heads -- inside a subdir, too
+ok: unclassified heads -- something that is not a stanza at all
+ok: accepted marker -- the marker inside a string is not a comment to either reader
+ok: accepted marker -- nor is one in a line comment
+ok: refused -- a marker nested inside a stanza
+ok: refused -- a block comment
+ok: refused -- a datum comment

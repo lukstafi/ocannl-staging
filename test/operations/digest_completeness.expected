@@ -1,3 +1,4 @@
+Sources scanned: 83 -- arrayjit/lib 47, benchmarks/runners/ocannl 8, bin 4, lib 8, tensor 14, tools 2
 Cache-key components (Schedule_cache.key_components): digest, backend, numerics, codegen, pool
 Keys read at codegen (c_syntax.ml, cc_backend.ml, cuda_backend.ml, hip_backend.ml, metal_backend.ml, schedule_cache.ml): 29
 
