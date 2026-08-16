@@ -91,15 +91,33 @@ let names_of stanza =
       | Some args -> List.filter_map args ~f:(function Sexp.Atom n -> Some n | _ -> None)
       | _ -> [])
 
-(* An atom carries a path inside dune's own punctuation: [%{dep:mlp_names.exe}] and [./%{pp}] are
-   one atom each. Split on everything a path cannot contain, so the parts can be read separately. *)
-let path_char c =
-  Char.is_alphanum c || List.mem [ '_'; '.'; '-'; '/'; '\\' ] c ~equal:Char.equal
+(** A command atom, split at dune's [%{…}] boundaries and nowhere else.
 
-let words atom =
-  String.map atom ~f:(fun c -> if path_char c then c else ' ')
-  |> String.split ~on:' '
-  |> List.filter ~f:(Fn.non String.is_empty)
+    An earlier version tokenized on an allowlist of "characters a path may contain", which quietly
+    cut valid filenames in half: [%{dep:helper+pp.exe}] came out as [pp.exe] and matched an
+    exemption written for a different executable (Codex P2, round 4 of PR #343). A filename
+    allowlist is a guess about the filesystem; [%{] and [}] are dune's own delimiters, and they are
+    all this needs to know. *)
+type piece = Literal of string | Pform of string
+
+let pieces atom =
+  let length = String.length atom in
+  let rec go acc position =
+    let literal_from start = if start < length then [ Literal (String.subo atom ~pos:start) ] else [] in
+    match String.substr_index atom ~pos:position ~pattern:"%{" with
+    | None -> List.rev acc @ literal_from position
+    | Some start -> (
+        let acc =
+          if start > position then Literal (String.sub atom ~pos:position ~len:(start - position)) :: acc
+          else acc
+        in
+        match String.index_from atom (start + 2) '}' with
+        (* Unterminated: not a pform at all, so the rest is text. *)
+        | None -> List.rev acc @ literal_from start
+        | Some stop ->
+            go (Pform (String.sub atom ~pos:(start + 2) ~len:(stop - start - 2)) :: acc) (stop + 1))
+  in
+  go [] 0
 
 (** What a [(run …)] action's command names.
 
@@ -109,28 +127,25 @@ let words atom =
     directions: it counts a rule that merely copies an executable, and it misses every way of
     naming one that does not spell the extension — [%{bin:probe}] the first among them (Codex P2,
     round 2 of PR #343), which is the same fall-through as round 1's [(alias …)] one spelling
-    further in. Patching spellings one at a time invites a third round, so what this reads is the
-    command position of a [run] action, and a command it cannot place FAILS rather than counting
+    further in. Patching spellings one at a time invites a further round, so what this reads is the
+    command position of a program action, and a command it cannot place FAILS rather than counting
     as nothing.
 
-    The spellings it does place, all of them present in this repository or in dune's own manual:
-    a path ending in [.exe] however it is wrapped ([%{dep:foo.exe}], [%{exe:foo.exe}], [./foo.exe]);
+    The spellings it places, all of them present in this repository or in dune's own manual: a
+    literal path ending in [.exe]; [%{dep:…}] and [%{exe:…}], which name a path the same way;
     [%{bin:name}], which resolves a PUBLIC executable — conservatively a site, because dune resolves
     it from this workspace before PATH, and an external tool that reads no configuration is what the
-    exemption list is for; and [%{name}] bound by a named dependency [(:name pp.exe)], which the
-    action reaches without ever spelling the file. A bare word is a tool on PATH ([python3],
-    [diff]): not something this repository builds, so not a site. *)
+    exemption list is for; [%{name}] bound by a named dependency [(:name pp.exe)], which the action
+    reaches without ever spelling the file; and the toolchain pforms, which run a compiler. A bare
+    word is a tool on PATH ([python3], [diff]): not something this repository builds, so not a
+    site. *)
 type command =
-  | Runs of string  (** the executable, by basename or by the name [%{bin:…}] gave *)
-  | External  (** a tool on PATH, which this repository does not build *)
+  | Runs of string  (** the executable, by the path written or the name [%{bin:…}] gave *)
+  | External  (** a tool on PATH or in the toolchain, which this repository does not build *)
   | Unrecognized of string  (** command position this scan cannot read — reported, never ignored *)
 
-let pform_payload atom ~prefix =
-  match String.substr_index atom ~pattern:("%{" ^ prefix) with
-  | None -> None
-  | Some start -> (
-      let rest = String.drop_prefix atom (start + String.length prefix + 2) in
-      match String.lsplit2 rest ~on:'}' with Some (payload, _) -> Some payload | None -> None)
+(** Pforms naming a program that is part of the toolchain rather than of this repository. *)
+let toolchain_pforms = [ "ocaml"; "ocamlc"; "ocamlopt"; "cc"; "cxx"; "make" ]
 
 (* The path AS WRITTEN, less a leading [./] that only says "here". Reducing it to a basename would
    make `%{dep:../../tools/pp.exe}` and a local `pp.exe` the same identity, and an exemption
@@ -138,25 +153,32 @@ let pform_payload atom ~prefix =
    check exists to prevent (Codex P2, round 3, and #340 round 10 before it). *)
 let program_path path = Option.value (String.chop_prefix path ~prefix:"./") ~default:path
 
+let is_executable path = String.is_suffix path ~suffix:".exe"
+
 let classify_command ~named_deps cmd =
-  match List.find (words cmd) ~f:(String.is_suffix ~suffix:".exe") with
-  | Some path -> Runs (program_path path)
-  | None -> (
-      match
-        List.find_map [ "bin:"; "exe:" ] ~f:(fun prefix -> pform_payload cmd ~prefix)
-      with
-      | Some name -> Runs (program_path name)
-      | None -> (
-          (* [./%{pp}] with [(deps (:pp pp.exe))]: the action names the dependency, not the file. *)
-          match pform_payload cmd ~prefix:"" with
-          | None -> External
-          | Some name -> (
-              match List.Assoc.find named_deps name ~equal:String.equal with
-              | Some paths -> (
-                  match List.find paths ~f:(String.is_suffix ~suffix:".exe") with
-                  | Some path -> Runs (program_path path)
-                  | None -> External)
-              | None -> Unrecognized cmd)))
+  let cmd = program_path cmd in
+  match pieces cmd with
+  | [ Literal path ] -> if is_executable path then Runs path else External
+  | [ Pform pform ] -> (
+      match String.lsplit2 pform ~on:':' with
+      | Some (("dep" | "exe" | "path" | "file"), path) ->
+          if is_executable path then Runs (program_path path) else Unrecognized cmd
+      | Some ("bin", name) -> Runs name
+      | Some _ -> Unrecognized cmd
+      | None ->
+          if List.mem toolchain_pforms pform ~equal:String.equal then External
+          else (
+            (* [./%{pp}] with [(deps (:pp pp.exe))]: the action names the dependency, not the
+               file. *)
+            match List.Assoc.find named_deps pform ~equal:String.equal with
+            | Some paths -> (
+                match List.find paths ~f:is_executable with
+                | Some path -> Runs (program_path path)
+                | None -> External)
+            | None -> Unrecognized cmd))
+  (* Text and pforms mixed, or a pform inside a path: rather than guess where the program's name
+     begins, say so. *)
+  | _ -> Unrecognized cmd
 
 (** The [(:name …)] bindings of a stanza's [(deps …)] field. *)
 let named_deps_of stanza =
@@ -167,7 +189,7 @@ let named_deps_of stanza =
         | Sexp.List (Sexp.Atom name :: values) when String.is_prefix name ~prefix:":" ->
             Some
               ( String.drop_prefix name 1,
-                List.concat_map values ~f:(function Sexp.Atom a -> words a | _ -> []) )
+                List.filter_map values ~f:(function Sexp.Atom a -> Some a | _ -> None) )
         | _ -> None)
 
 (** Actions that execute a program. [dynamic-run] is here because dune runs one there too (Codex
@@ -199,8 +221,14 @@ let rec commands_in sexp =
   let nested = match sexp with Sexp.List l -> List.concat_map l ~f:commands_in | _ -> [] in
   match sexp with
   | Sexp.List (Sexp.Atom ("run" | "dynamic-run") :: Sexp.Atom cmd :: _) -> cmd :: nested
+  (* A shell action carries its command line as one string; there the separator really is
+     whitespace, and each word is read as a command of its own. *)
   | Sexp.List (Sexp.Atom ("bash" | "system") :: args) ->
-      List.concat_map args ~f:(function Sexp.Atom a -> [ a ] | _ -> []) @ nested
+      List.concat_map args ~f:(function
+        | Sexp.Atom a -> List.filter (String.split_on_chars a ~on:[ ' '; '\t'; '\n' ])
+                           ~f:(Fn.non String.is_empty)
+        | _ -> [])
+      @ nested
   | _ -> nested
 
 (** Heads inside a stanza's [(action …)] that are on neither action list, each once. *)

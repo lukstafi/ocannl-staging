@@ -27,6 +27,9 @@ ok: dynamic-run executes a program as much as run does
 ok: an action head on neither list is reported
 ok: a program action's arguments are not actions
 ok: an executable elsewhere keeps its path
+ok: a filename's punctuation is part of its identity
+ok: a toolchain pform runs a compiler, not a test
+ok: a path built out of a pform is not guessed at
 ok: a stanza inside a comment is not a stanza
 ok: a config named in a comment does not declare it
 ok: a config named in a string is not a dep

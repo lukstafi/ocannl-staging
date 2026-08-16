@@ -123,6 +123,18 @@ let cases =
     ( "an executable elsewhere keeps its path",
       {dune|(rule (action (run %{dep:../../tools/pp.exe} --impl x.ml)))|dune},
       [ "rule running ../../tools/pp.exe" ] );
+    (* And the whole filename, punctuation included: splitting on "characters a path may contain"
+       cut `helper+pp.exe` down to `pp.exe`, which is a different executable and a different
+       exemption (Codex P2, round 4). Dune's own `%{` and `}` are the only boundaries. *)
+    ( "a filename's punctuation is part of its identity",
+      {dune|(rule (action (run %{dep:helper+pp.exe} --impl x.ml)))|dune},
+      [ "rule running helper+pp.exe" ] );
+    ( "a toolchain pform runs a compiler, not a test",
+      {dune|(rule (action (run %{ocaml} script.ml)))|dune},
+      [] );
+    ( "a path built out of a pform is not guessed at",
+      {dune|(rule (action (run %{dep:tools}/probe.exe)))|dune},
+      [ "rule whose command this scan cannot read: %{dep:tools}/probe.exe" ] );
     (* What the file says, not what its prose says. *)
     ( "a stanza inside a comment is not a stanza",
       {dune|; (test (name phantom))
