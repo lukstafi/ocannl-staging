@@ -211,12 +211,20 @@ take_lock() {
     exit 1 unless flock(STDIN, LOCK_EX | LOCK_NB);
     unlink $ARGV[0];
     exit 2 if -e $ARGV[0];
-    if (open my $fh, ">", $ARGV[1]) { print $fh "$ARGV[2] $ARGV[3]\n"; close $fh }
+    open(my $fh, ">", $ARGV[1]) or exit 3;
+    print $fh "$ARGV[2] $ARGV[3]\n" or exit 3;
+    close $fh or exit 3;
     exit 0;
   ' "$PWD/.test-run.lock.owner" "$PWD/.test-run.lock.launcher" \
     "$$" "$(ps_token "$$")" <&9
   case $? in
     0) ;;
+    3)
+      # Checked like the owner clear: proceeding without a recorded
+      # identity would leave a stalled pre-publication launcher as an
+      # unidentifiable lock holder.
+      die "cannot record the launcher identity beside the lock (stale file/directory at .test-run.lock.launcher?)"
+      ;;
     2) die "cannot clear the stale lock owner pointer (worktree not writable?)" ;;
     *)
       # The owner pointer, not `last`: with OCANNL_TEST_RUNS overridden, the
