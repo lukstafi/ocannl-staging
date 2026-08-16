@@ -1650,6 +1650,18 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name tile_mma_narrow)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND)
+  (env_var OCANNL_CC_FP16_ARITHMETIC))
+ (modules tile_mma_narrow)
+ (libraries base ocannl stdio unix)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name tile_mma_declines)
  (package neural_nets_lib)
  (deps
