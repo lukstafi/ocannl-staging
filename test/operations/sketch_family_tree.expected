@@ -189,15 +189,67 @@ tree leaves = flat enumeration: true
   pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
   pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm128 bn128 bk128: bm=128 gives 1 row block(s); a Grid split needs at least 2
   pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn128 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
-== half-prec cpu: 2 seeds ==
+== half-prec cpu seeds: 11 seeds ==
+ 0  gpu:false mma:false simd:0  bm:16  bn:16  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 1  gpu:false mma:false simd:0  bm:8   bn:8   bk:8   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 2  gpu:false mma:true simd:0  bm:0   bn:0   bk:0   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 3  gpu:false mma:true simd:0  bm:16  bn:0   bk:0   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 4  gpu:false mma:true simd:0  bm:64  bn:0   bk:64  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1 packprec:single
+ 5  gpu:false mma:true simd:0  bm:64  bn:0   bk:256 tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1 packprec:single
+ 6  gpu:false mma:true simd:0  bm:128 bn:128 bk:128 tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1 packprec:single
+ 7  gpu:false mma:true simd:0  bm:64  bn:128 bk:256 tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1 packprec:single
+ 8  gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1 packprec:single
+ 9  gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:false grid:true packrest:true epi:false swz:- depth:1 packprec:single
+10  gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:false grid:true packrest:false epi:false swz:- depth:1 packprec:single
+== half-prec cpu: 11 seeds ==
 tree leaves = flat enumeration: true
 -- refuted --
   pipeline=blocktile > packing=hoisted: hoisted packing needs a host-init-backed constant operand; neither operand is one
-  pipeline=tensorized: register tiling requires uniform f32/f64 operand and accumulator precisions
+  pipeline=tensorized > tensorized-form=whole-triple > row-block=bm64: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted: no host-init-backed constant operand to pack at link time
+  pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid: no host-init-backed constant operand to pack at link time
+  pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid-pack-rest: no host-init-backed constant operand to pack at link time
+  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn0 bk64: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn0 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm128 bn128 bk128: bm=128 gives 1 row block(s); a Grid split needs at least 2
+  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn128 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk64: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm128 bn128 bk128: bm=128 gives 1 row block(s); a Grid split needs at least 2
+  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn128 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
 == half-prec gpu: 5 seeds ==
 tree leaves = flat enumeration: true
 -- refuted --
   pipeline=tensorized: backend advertises no mma format tile for operands (half, half) with accumulator half
+== half-prec cpu, narrow_compute_f32 off: 2 seeds ==
+tree leaves = flat enumeration: true
+-- refuted --
+  pipeline=blocktile > packing=hoisted: hoisted packing needs a host-init-backed constant operand; neither operand is one
+  pipeline=tensorized: register tiling requires uniform vector-capable compute precisions (f32/f64, or fp16 where arithmetic is native)
+== half-prec cpu seeds, native fp16: 11 seeds ==
+ 0  gpu:false mma:false simd:0  bm:16  bn:16  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 1  gpu:false mma:false simd:0  bm:8   bn:8   bk:8   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 2  gpu:false mma:true simd:0  bm:0   bn:0   bk:0   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 3  gpu:false mma:true simd:0  bm:16  bn:0   bk:0   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 4  gpu:false mma:true simd:0  bm:64  bn:0   bk:64  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 5  gpu:false mma:true simd:0  bm:64  bn:0   bk:256 tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 6  gpu:false mma:true simd:0  bm:128 bn:128 bk:128 tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 7  gpu:false mma:true simd:0  bm:64  bn:128 bk:256 tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 8  gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 9  gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:false grid:true packrest:true epi:false swz:- depth:1
+10  gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:false grid:true packrest:false epi:false swz:- depth:1
+== half-prec cpu seeds, fp16 policy on promoted target: 11 seeds ==
+ 0  gpu:false mma:false simd:0  bm:16  bn:16  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 1  gpu:false mma:false simd:0  bm:8   bn:8   bk:8   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 2  gpu:false mma:true simd:0  bm:0   bn:0   bk:0   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 3  gpu:false mma:true simd:0  bm:16  bn:0   bk:0   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 4  gpu:false mma:true simd:0  bm:64  bn:0   bk:64  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1 packprec:single
+ 5  gpu:false mma:true simd:0  bm:64  bn:0   bk:256 tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1 packprec:single
+ 6  gpu:false mma:true simd:0  bm:128 bn:128 bk:128 tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1 packprec:single
+ 7  gpu:false mma:true simd:0  bm:64  bn:128 bk:256 tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1 packprec:single
+ 8  gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1 packprec:single
+ 9  gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:false grid:true packrest:true epi:false swz:- depth:1 packprec:single
+10  gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:false grid:true packrest:false epi:false swz:- depth:1 packprec:single
 == transposed-B cpu: 9 seeds ==
 tree leaves = flat enumeration: true
 -- refuted --

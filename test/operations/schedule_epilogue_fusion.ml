@@ -149,6 +149,7 @@ let () =
               swizzle = None;
               pad_stride = None;
               pipeline_depth = 1;
+              tile_prec = None;
             };
           Sched.Stage
             {
@@ -160,6 +161,7 @@ let () =
               swizzle = None;
               pad_stride = None;
               pipeline_depth = 1;
+              tile_prec = None;
             };
           Sched.Privatize { target = prod2.Tensor.value; over = k_o };
           Sched.Fuse_epilogue { target = prod2.Tensor.value; shared = false };

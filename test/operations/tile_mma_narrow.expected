@@ -1,0 +1,6 @@
+bf16 packed+tensorized matmul matches the serial twin bitwise: true
+bf16 packing widens into f32 panels; only d crosses the narrow bridge: true
+half hoisted-packed matmul matches the serial twin bitwise: true
+half hoisted pack converts on the host; only d crosses the narrow bridge: true
+pure-f16 packed+tensorized matmul matches the serial twin bitwise: true
+pure-f16 register tiling: half lanes, identity bridges: true

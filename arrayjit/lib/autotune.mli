@@ -142,6 +142,7 @@ type sketch_params = {
   sk_epilogue : bool;
   sk_swizzle : Ir.Low_level.swizzle_kind option;
   sk_depth : int;
+  sk_pack_prec : Ir.Ops.prec option;
 }
 (** Parameters of one matmul-sketch seed candidate; see the implementation's field docs. Exposed for
     tests (the seeding pre-filter of gh-ocannl-479 and the mixed grid-outermost shape of

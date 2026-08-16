@@ -435,9 +435,11 @@ let () =
           (* CUDA: the wmma f16 intrinsic, or the lane-0 fallback on older devices. *)
           has "nvcuda::wmma" || has "== 0)"
         else
-          (* Half precision declines the register tiling (single/double only): the scalar
-             fallback. *)
-          has "== 0)" && (not (has "simdgroup")) && not (has "Tile_mma register tiling")
+          (* gh-ocannl-575: the register tiling fires over narrow storage — the compute precision
+             is f32 under the default [narrow_compute_f32] policy ([fp16_arithmetic] is off), and
+             all three operands widen/narrow at the memory boundary. *)
+          has "Tile_mma register tiling"
+          && has "narrow storage bridged: d:half a:half b:half"
       in
       p "half tensorized structure as expected" ok);
 
@@ -547,7 +549,10 @@ let () =
         (* CUDA: the wmma bf16 fragment path. Both bf16 renderings need sm_80, the same floor the
            tf32 legs above already pin strictly. *)
         has "(wmma-bf16)"
-      else has "== 0)" && (not (has "simdgroup")) && not (has "Tile_mma register tiling"))
+      else
+        (* gh-ocannl-575: register-tiled at the f32 accumulator precision, the bf16 operands
+           bridged at the memory boundary. *)
+        has "Tile_mma register tiling" && has "narrow storage bridged: a:bfloat16 b:bfloat16")
     ();
   (* The uniform combination in all three operand orientations. CUDA's inline-PTX arm gathers every
      fragment element through an explicit (row, col) address, so a transposed operand only swaps
@@ -561,7 +566,12 @@ let () =
     else if on_gpu then
       (* CUDA: the inline-PTX bf16 path (sm_80+). *)
       has "mma.sync.aligned.m16n8k16"
-    else has "== 0)" && (not (has "simdgroup")) && not (has "Tile_mma register tiling")
+    else
+      (* gh-ocannl-575: uniform bf16 register-tiles with f32 compute under the default
+         [narrow_compute_f32] policy, every operand bridged. The [bfu_tb] leg still declines to
+         the scalar fallback (transposed B), which [uniform_check]'s caller handles below. *)
+      has "Tile_mma register tiling"
+      && has "narrow storage bridged: d:bfloat16 a:bfloat16 b:bfloat16"
   in
   bf16_leg ~tag:"bfu" ~acc_prec:Ir.Ops.bfloat16 ~build:mul ~check:uniform_check ();
   bf16_leg ~tag:"bfu_ta" ~acc_prec:Ir.Ops.bfloat16 ~check:uniform_check
@@ -569,7 +579,13 @@ let () =
       let%op t = mtab +* "ki;kj=>ij" mtbb in
       t)
     ();
-  bf16_leg ~tag:"bfu_tb" ~acc_prec:Ir.Ops.bfloat16 ~check:uniform_check
+  (* Transposed B: the register tiling declines [tb] on the C backends (stride-[ldb] gathers), so
+     this leg keeps the lane-0 scalar fallback there, unlike the other orientations. *)
+  bf16_leg ~tag:"bfu_tb" ~acc_prec:Ir.Ops.bfloat16
+    ~check:(fun src ->
+      let has s = String.is_substring src ~substring:s in
+      if on_metal || on_gpu then uniform_check src
+      else has "== 0)" && (not (has "simdgroup")) && not (has "Tile_mma register tiling"))
     ~build:(fun () ->
       let%op t = mtab +* "ik;jk=>ij" mtbb in
       t)
@@ -645,9 +661,14 @@ let () =
              if on_gpu then
                (* CUDA sm_89+: the inline-PTX path; the lane-0 fallback on older devices. *)
                has "mma.sync.aligned.m16n8k32" || has "== 0)"
-             else
-               (* Fp8 declines the register tiling (single/double only): the scalar fallback. *)
+             else if String.equal tag "f8_tb" then
+               (* Transposed B declines the register tiling on the C backends. *)
                has "== 0)" && (not (has "simdgroup")) && not (has "Tile_mma register tiling")
+             else
+               (* gh-ocannl-575: fp8 storage register-tiles at the f32 accumulator precision;
+                  fp8 has no whole-vector conversion, so the operand loads convert per lane
+                  (the [vec_bridge] fallback arm) while the arithmetic stays vectorized. *)
+               has "Tile_mma register tiling" && has "narrow storage bridged: a:fp8 b:fp8"
            in
            p (Printf.sprintf "%s tensorized structure as expected" tag) ok
      in
@@ -766,6 +787,7 @@ let () =
           swizzle = None;
           pad_stride = None;
           pipeline_depth = 1;
+          tile_prec = None;
         };
       Sched.Stage
         {
@@ -777,6 +799,7 @@ let () =
           swizzle = None;
           pad_stride = None;
           pipeline_depth = 1;
+          tile_prec = None;
         };
       tz;
     ]

@@ -44,6 +44,7 @@ type saved_optop =
       pipeline_depth : int option; [@sexp.option]
           (** [None] encodes depth 1, so pre-pipelining cache entries stay readable (the
               [swizzle]/[pad_stride] precedent). *)
+      tile_prec : Ops.prec option; [@sexp.option]
     }
   | Privatize of { target : int; over : sym_ref }
   | Expand_zero of { tn : int }
@@ -280,8 +281,17 @@ let to_saved r (sched : Schedule.schedule) : saved_schedule * registry =
           | Schedule.Pad { axis; to_multiple_of } ->
               (r, Pad { axis = resolve_exn r axis; to_multiple_of })
           | Schedule.Stage
-              { source; tile_loops; shared; cooperative; hoisted; swizzle; pad_stride; pipeline_depth }
-            ->
+              {
+                source;
+                tile_loops;
+                shared;
+                cooperative;
+                hoisted;
+                swizzle;
+                pad_stride;
+                pipeline_depth;
+                tile_prec;
+              } ->
               ( r,
                 Stage
                   {
@@ -293,6 +303,7 @@ let to_saved r (sched : Schedule.schedule) : saved_schedule * registry =
                     swizzle;
                     pad_stride;
                     pipeline_depth = (if pipeline_depth = 1 then None else Some pipeline_depth);
+                    tile_prec;
                   } )
           | Schedule.Privatize { target; over } ->
               (r, Privatize { target = resolve_tn_exn r target; over = resolve_exn r over })
@@ -360,8 +371,17 @@ let of_saved canonical (saved : saved_schedule) : Schedule.schedule * registry =
           | Pad { axis; to_multiple_of } ->
               (r, Schedule.Pad { axis = unresolve_exn r axis; to_multiple_of })
           | Stage
-              { source; tile_loops; shared; cooperative; hoisted; swizzle; pad_stride; pipeline_depth }
-            ->
+              {
+                source;
+                tile_loops;
+                shared;
+                cooperative;
+                hoisted;
+                swizzle;
+                pad_stride;
+                pipeline_depth;
+                tile_prec;
+              } ->
               ( r,
                 Schedule.Stage
                   {
@@ -373,6 +393,7 @@ let of_saved canonical (saved : saved_schedule) : Schedule.schedule * registry =
                     swizzle;
                     pad_stride;
                     pipeline_depth = Option.value pipeline_depth ~default:1;
+                    tile_prec;
                   } )
           | Privatize { target; over } ->
               ( r,

@@ -95,6 +95,7 @@ type optop =
       swizzle : Low_level.swizzle_kind option;
       pad_stride : int option;
       pipeline_depth : int;
+      tile_prec : Ops.prec option;
     }
       (** Stage reads of [source] through a tile: a fresh [Local]-mode node registered in the traced
           store, its dims derived per source axis from the range of the index terms over
@@ -228,7 +229,19 @@ type optop =
           in the compute is compatible: its bracketing barriers are uniformly reached and separate
           same-buffer phases even more strongly than required. Backends that cannot render
           workgroup-shared staging (the serial C backends) reject the composition exactly as they
-          reject unpipelined shared staging. *)
+          reject unpipelined shared staging.
+
+          [tile_prec = Some p] mints the tile at storage precision [p] instead of the source's,
+          folding the widening conversion into the staging copy (gh-ocannl-575, the gh-ocannl-517
+          packing seam): a packed panel of a narrow-storage operand becomes e.g. f32 scratch,
+          converted once per element at pack time instead of once per read at the memory boundary,
+          and precision-uniformity consumers (the register-tiled [Tile_mma] micro-kernel) see the
+          compute precision directly. Only widenings are accepted — [p] must equal the source's
+          storage precision or be [single]/[double] over a narrow float — because a widening is
+          exact and its round-trip is the identity, making the transform unconditionally
+          numerics-preserving; a narrowing tile would change values and is rejected. Composes with
+          [hoisted] (the host-side pack converts) and with the in-kernel copy nest; the edge-guard
+          zero fill is at the tile's precision either way. *)
   | Privatize of { target : Tn.t; over : Indexing.symbol }
       (** Accumulator privatization: contract the read-modify-write accumulation of the materialized
           [target] across the (Serial) [over] loop's whole subtree into a per-thread [Local]

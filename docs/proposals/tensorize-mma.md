@@ -598,6 +598,19 @@ of fission shaped the implementation:
 Verified on cc (6 per-segment candidates: 2 packing + 2 hoisted + 2 tensorized) and Metal (9:
 4 blocktiling + 5 simdgroup) — all compile and time (`autotune_fission_sketch.ml`).
 
+## Narrow (16-bit) operands on the CPU register tiling (gh-ocannl-575, 2026-08-16)
+
+The CPU register-tiled rendering joined the gh-517 storage/compute seam: `try_register_tile` keys
+its gates, lane geometry and accumulator registers off `comp_prec` (narrow storage bridges at the
+memory boundary through `vec_bridge`/`convert_precision`; the C-tile accumulates at compute
+precision across the whole k extent and narrows once — the gh-545 accumulator precedent), packing
+`Stage`s can mint their tiles at the compute precision (`tile_prec`, widening folded into the
+packing copy, host-side for hoisted packs), and the sketch seeding resolves compute precision
+through the shared `Numerics.cpu_compute_prec` so narrow sites seed exactly where the emission
+fires — pure-fp16 (f16 accumulators, doubled lanes, bitwise vs the scalar half rendering) only
+where `native_fp16_arithmetic` holds. Design record and x86 measurements:
+[gh-ocannl-575-narrow-register-tiling](gh-ocannl-575-narrow-register-tiling.md).
+
 ## Relations
 
 - [schedule-ir-optops](schedule-ir-optops.md): §5 `Stage` supplies the shared tiles and

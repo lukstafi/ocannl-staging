@@ -2,6 +2,23 @@
 
 ### Added
 
+- **The CPU register tiling reaches 16-bit GEMMs** (gh-ocannl-575, the gh-ocannl-516/517
+  remainder): `try_register_tile` joined the storage/compute-precision seam — its gates, lane
+  geometry and accumulator registers follow the compute precision, narrow-storage operands widen
+  and narrow at the memory boundary through the existing vector bridges, and the C-tile narrows
+  once per cell after the whole k extent (the gh-ocannl-545 accumulator rule; bitwise vs the
+  scalar fallback whenever storage = compute, pure-fp16 on native-arithmetic targets included).
+  Packing `Stage`s can mint their tiles at the compute precision (`tile_prec`, exact widenings
+  only), folding the widening conversion into the packing copy — host-side for hoisted
+  constant-pool packs — so packed panels become f32 scratch and the micro-kernel streams them
+  unconverted. Autotune's sketch pre-filters resolve the same `Numerics.cpu_compute_prec` the
+  emission asks (single source of truth), so narrow-storage matmul/conv sites now seed the
+  tensorized families (packed seeds carry `sk_pack_prec`), and pure-fp16 seeds fire exactly where
+  the probe reports native arithmetic. Measured on x86 (gcc 15, n=512): f32-GEBP-over-narrow
+  storage reaches 51.3 GFLOP/s at bf16 and 37.1 at fp16 against a 0.4-0.7 GFLOP/s scalar narrow
+  rendering; computing fp16 in fp16 where the compiler merely promotes loses ~18x, confirming the
+  gating. The pure-f16-vs-f32-GEBP decision on genuinely native hardware (NEON) is still pending;
+  see docs/proposals/gh-ocannl-575-narrow-register-tiling.md.
 - **Accumulation chains materialize a running sum instead of re-summing at every consumer**
   (gh-ocannl-573): a transformer's residual stream used to stay `Virtual` end to end — each
   running-sum node's per-cell read multiplicity passes the visit cap (its consumers' copy-position

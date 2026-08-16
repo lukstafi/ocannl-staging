@@ -72,7 +72,7 @@ let gpu_full_limits =
 let show (p : Autotune.sketch_params) =
   Printf.sprintf
     "gpu:%b mma:%b simd:%-2d bm:%-3d bn:%-3d bk:%-3d tm:%d tn:%d hoist:%b grid:%b packrest:%b \
-     epi:%b swz:%s depth:%d"
+     epi:%b swz:%s depth:%d%s"
     p.Autotune.sk_gpu p.Autotune.sk_mma p.Autotune.sk_simd p.Autotune.sk_bm p.Autotune.sk_bn
     p.Autotune.sk_bk p.Autotune.sk_tm p.Autotune.sk_tn p.Autotune.sk_hoist p.Autotune.sk_grid
     p.Autotune.sk_pack_rest p.Autotune.sk_epilogue
@@ -81,6 +81,10 @@ let show (p : Autotune.sketch_params) =
     | Some LL.Swizzle_b128 -> "b128"
     | Some LL.Swizzle_elem -> "elem")
     p.Autotune.sk_depth
+    (* Appended only when set, so the f32 sections' lines are unchanged (gh-ocannl-575). *)
+    (match p.Autotune.sk_pack_prec with
+    | None -> ""
+    | Some pr -> " packprec:" ^ Ir.Ops.prec_string pr)
 
 let section name ~is_gpu ~is_cpu ~limits opt =
   let seeds = Autotune.sketch_seed_params ~is_gpu ~is_cpu ~limits opt in
@@ -200,8 +204,14 @@ let () =
   let opt_awk = with_lowering ~name:"sft_awk" awk in
   awkward_section "awkward 20^3 gpu" ~is_gpu:true ~is_cpu:false ~limits:gpu_full_limits opt_awk;
   awkward_section "awkward 20^3 cpu" ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt_awk;
-  (* Half-precision operands: the CPU register tiling requires uniform f32/f64, and the synthetic
-     GPU capability advertises only the f32 format triple. *)
+  (* Half-precision operands (gh-ocannl-575): the seeding pre-filter resolves compute precision
+     through the same [Numerics.cpu_compute_prec] the emission asks. Under the default
+     [narrow_compute_f32] policy the site computes in f32, so the CPU tensorized families
+     enumerate, with the packed seeds minting f32 panels ([sk_pack_prec], the packprec column);
+     with the policy off the branch is refuted; with native-fp16 limits plus the
+     [fp16_arithmetic] policy the seeds are pure-f16 (no packprec — panels stay half, at twice
+     the lanes). The synthetic GPU capability still advertises only the f32 format triple, so the
+     GPU leg stays a witness for "not proposed". *)
   let ha =
     NTDSL.init ~l:"ha" ~prec:Ir.Ops.half ~o:[ nn; nn ]
       ~f:(fun idcs -> Float.of_int (((idcs.(0) * nn) + idcs.(1)) % 7) *. 0.5)
@@ -214,8 +224,28 @@ let () =
   in
   let%op hmm = ha +* "ik;kj=>ij" hb in
   let opt_h = with_lowering ~name:"sft_half" hmm in
+  let _ = section "half-prec cpu seeds" ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt_h in
   awkward_section "half-prec cpu" ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt_h;
   awkward_section "half-prec gpu" ~is_gpu:true ~is_cpu:false ~limits:gpu_full_limits opt_h;
+  let module Numerics = Ir.Numerics in
+  let saved_policy = Numerics.get () in
+  Numerics.set_policy { saved_policy with narrow_compute_f32 = false };
+  awkward_section "half-prec cpu, narrow_compute_f32 off" ~is_gpu:false ~is_cpu:true
+    ~limits:cpu_limits opt_h;
+  Numerics.set_policy { saved_policy with fp16_arithmetic = true };
+  let cpu_native_fp16_limits = { cpu_limits with native_fp16_arithmetic = true } in
+  let _ =
+    section "half-prec cpu seeds, native fp16" ~is_gpu:false ~is_cpu:true
+      ~limits:cpu_native_fp16_limits opt_h
+  in
+  (* The policy alone must not flip the resolution: on a merely promoted target ([cpu_limits],
+     native_fp16_arithmetic = false) fp16 still computes in f32 and the packed seeds keep their
+     f32 panels. *)
+  let _ =
+    section "half-prec cpu seeds, fp16 policy on promoted target" ~is_gpu:false ~is_cpu:true
+      ~limits:cpu_limits opt_h
+  in
+  Numerics.set_policy saved_policy;
   (* Transposed B (k on its minor axis): whole-triple and the hoisted-only Grid shape read B in
      place, which the register tiling statically declines; packing shapes normalize the layout. *)
   let tb =

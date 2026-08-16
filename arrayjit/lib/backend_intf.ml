@@ -130,7 +130,11 @@ type hardware_limits = {
           hardware envelope of the analytic cost model (gh-ocannl-491): rough documented constants
           or cheap device queries — the model ranks candidate schedules, it does not predict
           runtimes. Never gates compilation and never overrides a measured timing; [None] when the
-          backend offers no estimate. *)
+          backend offers no estimate. Known single-precision bias (gh-ocannl-575): a pure-fp16
+          kernel on a {!native_fp16_arithmetic} target has twice this ceiling, so its roofline
+          flops leg over-estimates — harmless for ranking because a site's candidates all share
+          one policy-resolved compute precision (footprint widths, by contrast, are exact: they
+          come off each node's own storage precision). *)
   peak_memory_bandwidth : float option;
       (** Advisory peak main-memory bandwidth in bytes/s, the other leg of the roofline envelope
           (gh-ocannl-491). Same contract as [peak_flops]: advisory, rough, never load-bearing for

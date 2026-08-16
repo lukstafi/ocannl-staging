@@ -3715,10 +3715,22 @@ module C_syntax (B : C_syntax_config) = struct
            and stored back at block exit. RM = 4 rows; RN = 3 vector columns on AVX2-class
            16-register files ([vector_bytes = 32]), 6 on NEON/AVX-512-class 32-register files —
            RM×RN + RM + RN live registers, tinyBLAS's budget. Edge tiles are peeled into scalar
-           loops, not masked. For each output element the k-chain runs in serial order with the same
-           fused rounding, so the rendering is BITWISE equal to the scalar fallback; the plain-add
+           loops, not masked.
+
+           Like the [Vectorized] renderings, the register geometry is keyed off the *compute*
+           precision (gh-ocannl-517/575): narrow-storage operands cross the memory boundary through
+           [vec_bridge] (vectors) and [convert_precision] (the A splats and the scalar peel), and
+           the C-tile accumulates at [comp_prec] across the whole k-loop, narrowing once at the
+           store — the same once-per-cell narrowing as [try_vectorize_reduce]'s epilogue. Where
+           storage and compute precisions coincide (including pure-fp16 on native-arithmetic
+           targets, where [comp_prec] leaves [Half_prec] alone) the bridges are the identity
+           memcpys, and for each output element the k-chain runs in serial order with the same
+           fused rounding, so the rendering is BITWISE equal to the scalar fallback. A
+           narrow-storage rendering instead rounds strictly less often than the fallback's
+           per-k-step narrowing (better, never bitwise on inexact values — the gh-ocannl-545
+           accumulator precedent), so parity tests pick narrow-exact inputs. The plain-add
            (non-FMA) fallback form is declined — its [a * b + c] arithmetic is only
-           maybe-contracted, so a vector twin could not promise that equality. Emitted under the
+           maybe-contracted, so a vector twin could not promise the equality. Emitted under the
            same lane-0 guard as the fallback ([`Vec_extensions] backends render the lane loop
            serially; GPU backends never take this path). *)
         let try_register_tile () : PPrint.document option =
@@ -3764,17 +3776,22 @@ module C_syntax (B : C_syntax_config) = struct
               (List.exists [ fst d; fst a; fst b ] ~f:is_pipelined)
           in
           let d_tn = fst d in
-          let prec = Lazy.force d_tn.Tn.storage_prec in
+          let d_store_prec = Lazy.force d_tn.Tn.storage_prec in
+          let a_store_prec = Lazy.force (fst a).Tn.storage_prec in
+          let b_store_prec = Lazy.force (fst b).Tn.storage_prec in
+          let prec = comp_prec d_store_prec in
           let* () =
             no_test
-              ~reason:(Printf.sprintf "output precision %s is not f32/f64" (Ops.prec_string prec))
-              (match prec with Ops.Single_prec _ | Ops.Double_prec _ -> false | _ -> true)
+              ~reason:
+                (Printf.sprintf "compute precision %s is not vector-capable here"
+                   (Ops.prec_string prec))
+              (not (B.vector_prec_ok prec))
           in
           let* () =
-            no_test ~reason:"mixed operand precisions"
+            no_test ~reason:"mixed operand compute precisions"
               (not
-                 (Ops.equal_prec (Lazy.force (fst a).Tn.storage_prec) prec
-                 && Ops.equal_prec (Lazy.force (fst b).Tn.storage_prec) prec))
+                 (Ops.equal_prec (comp_prec a_store_prec) prec
+                 && Ops.equal_prec (comp_prec b_store_prec) prec))
           in
           (* The fallback carries the arithmetic form; require the fused one (see above). *)
           let rec innermost_set (llc : Low_level.t) =
@@ -3806,7 +3823,15 @@ module C_syntax (B : C_syntax_config) = struct
           let vtyp, typedef_doc = vec_ext_typ ~prec ~lanes in
           let ctyp = B.typ_of_prec prec in
           let it = B.loop_index_type in
-          let fma_fn = match prec with Ops.Double_prec _ -> "fma" | _ -> "fmaf" in
+          (* The fused scalar step at the compute precision. fp16 must go through the same
+             [#if]-selected macro as [vec_acc_fma]'s per-lane arm and the scalar rendering, or the
+             peel and the vector body would round differently (gh-ocannl-516). *)
+          let fma_fn =
+            match prec with
+            | Ops.Double_prec _ -> "fma"
+            | Ops.Half_prec _ -> "OCANNL_HALF_FMA"
+            | _ -> "fmaf"
+          in
           let _, (d_ptr, ldd, _, _) = operand ldd d in
           let _, (a_ptr, lda, _, _) = operand lda a in
           let _, (b_ptr, ldb, _, _) = operand ldb b in
@@ -3814,6 +3839,26 @@ module C_syntax (B : C_syntax_config) = struct
           let a_at ~row ~l =
             if ta then Printf.sprintf "tmma_a__[%s * %d + %s]" l lda row
             else Printf.sprintf "tmma_a__[%s * %d + %s]" row lda l
+          in
+          (* Scalar memory-boundary conversions (empty when storage = compute): the same
+             [convert_precision] spellings the scalar fallback renders through, so the peel's
+             arithmetic matches it by construction. *)
+          let scal ~from ~to_ expr =
+            let pre, post = B.convert_precision ~from ~to_ in
+            pre ^ expr ^ post
+          in
+          let a_elt ~row ~l = scal ~from:a_store_prec ~to_:prec (a_at ~row ~l) in
+          let b_elt idx = scal ~from:b_store_prec ~to_:prec (Printf.sprintf "tmma_b__[%s]" idx) in
+          (* Vector memory-boundary bridges: identity memcpys when storage = compute, the
+             gh-ocannl-517 widen/narrow conversions otherwise. *)
+          let extra_typedefs = Hashtbl.create (module String) in
+          let need_typedef name doc = Hashtbl.set extra_typedefs ~key:name ~data:doc in
+          let fresh pfx = pfx ^ "__" in
+          let d_load, d_store =
+            vec_bridge ~store_prec:d_store_prec ~prec ~lanes ~vtyp ~need_typedef ~fresh
+          in
+          let b_load, _ =
+            vec_bridge ~store_prec:b_store_prec ~prec ~lanes ~vtyp ~need_typedef ~fresh
           in
           let stmts = separate hardline in
           (* Scalar peel of rows [i_lo, i_hi) × cols [j_lo, j_hi): same fmaf chain per element. *)
@@ -3829,46 +3874,44 @@ module C_syntax (B : C_syntax_config) = struct
                 ^^ nest 2
                      (hardline
                      ^^ string
-                          (Printf.sprintf "%s tmma_acc__ = tmma_d__[tmma_i__ * %d + tmma_j__];" ctyp
-                             ldd)
+                          (Printf.sprintf "%s tmma_acc__ = %s;" ctyp
+                             (scal ~from:d_store_prec ~to_:prec
+                                (Printf.sprintf "tmma_d__[tmma_i__ * %d + tmma_j__]" ldd)))
                      ^^ hardline
                      ^^ string
                           (Printf.sprintf
                              "for (%stmma_l__ = 0; tmma_l__ < %d; ++tmma_l__) tmma_acc__ = %s(%s, \
-                              tmma_b__[tmma_l__ * %d + tmma_j__], tmma_acc__);"
+                              %s, tmma_acc__);"
                              it k fma_fn
-                             (a_at ~row:"tmma_i__" ~l:"tmma_l__")
-                             ldb)
+                             (a_elt ~row:"tmma_i__" ~l:"tmma_l__")
+                             (b_elt (Printf.sprintf "tmma_l__ * %d + tmma_j__" ldb)))
                      ^^ hardline
                      ^^ string
-                          (Printf.sprintf "tmma_d__[tmma_i__ * %d + tmma_j__] = tmma_acc__;" ldd))
+                          (Printf.sprintf "tmma_d__[tmma_i__ * %d + tmma_j__] = %s;" ldd
+                             (scal ~from:prec ~to_:d_store_prec "tmma_acc__")))
                 ^^ hardline ^^ string "} }";
               ]
           in
           let grid = vec_acc_grid ~prefix:"tmma_c" ~rows:rm ~cols:rn in
-          let c_move ~load r c =
-            let mem =
-              Printf.sprintf "&tmma_d__[(tmma_i__ + %d) * %d + tmma_j__ + %d]" r ldd (c * lanes)
-            in
-            let reg = "&" ^ grid.(r).(c) in
-            let src, dst = if load then (mem, reg) else (reg, mem) in
-            string (Printf.sprintf "__builtin_memcpy(%s, %s, sizeof(%s));" dst src grid.(r).(c))
+          let d_mem r c =
+            string
+              (Printf.sprintf "tmma_d__[(tmma_i__ + %d) * %d + tmma_j__ + %d]" r ldd (c * lanes))
           in
           let full_blocks =
             if m_full = 0 || n_full = 0 then []
             else
               let k_body =
                 List.init rn ~f:(fun c ->
-                    string
-                      (Printf.sprintf
-                         "%s tmma_b_%d__; __builtin_memcpy(&tmma_b_%d__, &tmma_b__[tmma_l__ * %d + \
-                          tmma_j__ + %d], sizeof(tmma_b_%d__));"
-                         vtyp c c ldb (c * lanes) c))
+                    b_load
+                      ~dst:(Printf.sprintf "tmma_b_%d__" c)
+                      ~mem:
+                        (string
+                           (Printf.sprintf "tmma_b__[tmma_l__ * %d + tmma_j__ + %d]" ldb (c * lanes))))
                 @ List.concat
                     (List.init rm ~f:(fun r ->
                          string
                            (Printf.sprintf "%s tmma_a_%d__ = ((%s){0} + %s);" vtyp r vtyp
-                              (a_at ~row:(Printf.sprintf "(tmma_i__ + %d)" r) ~l:"tmma_l__"))
+                              (a_elt ~row:(Printf.sprintf "(tmma_i__ + %d)" r) ~l:"tmma_l__"))
                          :: List.init rn ~f:(fun c ->
                              vec_acc_fma ~prec ~lanes
                                ~dst:grid.(r).(c)
@@ -3890,38 +3933,52 @@ module C_syntax (B : C_syntax_config) = struct
                              bw)
                      ^^ nest 2
                           (hardline
-                          ^^ stmts
-                               (per_cell (fun r c ->
-                                    string (Printf.sprintf "%s %s;" vtyp grid.(r).(c))
-                                    ^^ space ^^ c_move ~load:true r c))
+                          ^^ stmts (per_cell (fun r c -> d_load ~dst:grid.(r).(c) ~mem:(d_mem r c)))
                           ^^ hardline
                           ^^ string
                                (Printf.sprintf "for (%stmma_l__ = 0; tmma_l__ < %d; ++tmma_l__) {"
                                   it k)
                           ^^ nest 2 (hardline ^^ stmts k_body)
                           ^^ hardline ^^ string "}" ^^ hardline
-                          ^^ stmts (per_cell (fun r c -> c_move ~load:false r c)))
+                          ^^ stmts (per_cell (fun r c -> d_store ~src:grid.(r).(c) ~mem:(d_mem r c))))
                      ^^ hardline ^^ string "}")
                 ^^ hardline ^^ string "}";
               ]
           in
           let body =
-            [
-              typedef_doc;
-              string (Printf.sprintf "%s *tmma_d__ = " ctyp) ^^ d_ptr ^^ semi;
-              string (Printf.sprintf "const %s *tmma_a__ = " ctyp) ^^ a_ptr ^^ semi;
-              string (Printf.sprintf "const %s *tmma_b__ = " ctyp) ^^ b_ptr ^^ semi;
-            ]
+            (typedef_doc :: registered_typedefs extra_typedefs)
+            @ [
+                (* Operand pointers keep their storage element type -- the bridges and the scalar
+                   conversions cross to the compute precision at each access. *)
+                string (Printf.sprintf "%s *tmma_d__ = " (B.typ_of_prec d_store_prec))
+                ^^ d_ptr ^^ semi;
+                string (Printf.sprintf "const %s *tmma_a__ = " (B.typ_of_prec a_store_prec))
+                ^^ a_ptr ^^ semi;
+                string (Printf.sprintf "const %s *tmma_b__ = " (B.typ_of_prec b_store_prec))
+                ^^ b_ptr ^^ semi;
+              ]
             @ full_blocks
             @ scalar_peel ~i_lo:0 ~i_hi:m_full ~j_lo:n_full ~j_hi:n
             @ scalar_peel ~i_lo:m_full ~i_hi:m ~j_lo:0 ~j_hi:n
+          in
+          let narrow_note =
+            let note role sp =
+              if Ops.equal_prec sp prec then None
+              else Some (Printf.sprintf "%s:%s" role (Ops.prec_string sp))
+            in
+            match
+              List.filter_opt
+                [ note "d" d_store_prec; note "a" a_store_prec; note "b" b_store_prec ]
+            with
+            | [] -> ""
+            | notes -> "; narrow storage bridged: " ^ String.concat ~sep:" " notes
           in
           Some
             (string
                (Printf.sprintf
                   "{ /* Tile_mma register tiling: %dx%d C-tile of %d-lane %s held across the \
-                   k-loop (full blocks %dx%d of %dx%d). */"
-                  rm rn lanes ctyp m_full n_full m n)
+                   k-loop (full blocks %dx%d of %dx%d)%s. */"
+                  rm rn lanes ctyp m_full n_full m n narrow_note)
             ^^ nest 2 (hardline ^^ stmts body)
             ^^ hardline ^^ string "}")
         in

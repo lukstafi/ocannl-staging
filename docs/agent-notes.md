@@ -681,6 +681,27 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   probed as one without. `cc_backend_arch_flags` now defaults to `auto`, which asks the target
   which family it is in and probes that family's spelling (`-mcpu=native` on ARM, `-march=native`
   on x86 — where `-mcpu=` is merely an alias for `-mtune=` and would not select the ISA at all).
+- The register-tiled `Tile_mma` rendering is on the same seam (gh-ocannl-575): gates, lane count
+  and the C-tile registers follow `comp_prec`, operands bridge at the memory boundary
+  (`vec_bridge` identity = the old memcpys, so f32 emission is unchanged), and the accumulator
+  narrows ONCE per cell after the whole k extent — strictly better rounding than the fallback's
+  per-k-step narrowing, so narrow-storage parity tests need narrow-exact inputs while
+  storage-=-compute renderings (pure-fp16 included) stay bitwise vs the fallback. Packing `Stage`s
+  take `tile_prec` (exact widenings only) to fold the widening into the pack; seeding resolves the
+  same `Numerics.cpu_compute_prec` the emission uses — change either side only through that
+  helper, or "timed is not tensorized" returns for narrow sites.
+- **gcc `-O3` can collapse the register tiling ~10x on the f16 d-bridge shape** (gcc 15.2, x86):
+  on the k_o-outermost serial GEBP it unrolls the k-loop 4x and spills the accumulator C-tile
+  (hot loop 29 insns / 2 stack refs at `-O2` vs 375 / 147 at `-O3`; measured 3.4 vs ~30 GFLOP/s,
+  bin/narrow_gebp_bench). f32/bf16 shapes and clang (whose `__builtin_elementwise_fma` arm avoids
+  per-lane subscripts) are unaffected; the fragment-contracted i_o-outermost shape dodges it, and
+  `#pragma GCC unroll 1` does NOT fix it. When a narrow cc GEMM benches absurdly slow, try
+  `cc_backend_optimization_level=2` before suspecting the rendering; the tuner's measured search
+  routes around it on its own.
+- Computing fp16 in fp16 on a *promoted* target is a ~18x loss against f32-compute-over-fp16
+  (measured, same bench) — the reason `fp16_arithmetic` is ignored off-native and pure-f16 seeds
+  gate on `hardware_limits.native_fp16_arithmetic`. The decisive pure-f16-vs-f32-GEBP measurement
+  on genuinely native hardware (NEON) has NOT run yet; see the gh-575 proposal doc's pending note.
 - The traffic win is real but it favors **fp16, not bf16**, the reverse of gh-ocannl-517's
   expectation. On an M-series at n = 2^22, a bandwidth-bound elementwise add measures 131 GB/s at
   f32, 1.97x that at half storage, and **0.91x** at bf16 (`bin/narrow_storage_bench.exe`); a

@@ -136,6 +136,17 @@ type sketch_params = {
           synchronous form, whose occupancy cost phase 1 measured. The rendering is bitwise
           identical to the plain sibling, so the tuner's choice is free of numerics concerns.
           Unstaged seeds have no cooperative copy to pipeline and are never twinned. *)
+  sk_pack_prec : Ir.Ops.prec option;
+      (** CPU packing compositions only: the compute precision the site's register-tiled
+          micro-kernel runs at, resolved by the seeding pre-filter through
+          {!Ir.Numerics.cpu_compute_prec} (gh-ocannl-575). The packing [Stage]s mint their tiles at
+          this precision ([Stage.tile_prec]) where it differs from an operand's storage precision,
+          folding the narrow-storage widening into the packing copy — packed panels become e.g. f32
+          scratch, converted once per element at pack time instead of once per read inside the
+          micro-kernel. [None] for GPU seeds and for CPU sites whose storage already is the compute
+          precision. Recorded in the params (rather than re-derived at build time) because schedule
+          construction has no [hardware_limits] and the instantiated schedule must reproduce the
+          seed-time decision exactly. *)
 }
 
 (* Resolve the tensor-core input format from storage precision before seeding a typed matmul/conv
@@ -1242,6 +1253,7 @@ let gpu_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
           swizzle = None;
           pad_stride = None;
           pipeline_depth = 1;
+          tile_prec = None;
         };
       Sched.Stage
         {
@@ -1253,6 +1265,7 @@ let gpu_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
           swizzle = None;
           pad_stride = None;
           pipeline_depth = 1;
+          tile_prec = None;
         };
       Sched.Privatize { target = site.m_d; over = k_o };
       Sched.Unroll { axis = i_t; materialize = true };
@@ -1289,6 +1302,7 @@ let cpu_sketch_schedule (site : matmul_site) { sk_bm = bm; sk_bn = bn; sk_bk = b
           swizzle = None;
           pad_stride = None;
           pipeline_depth = 1;
+          tile_prec = None;
         };
       Sched.Stage
         {
@@ -1300,6 +1314,7 @@ let cpu_sketch_schedule (site : matmul_site) { sk_bm = bm; sk_bn = bn; sk_bk = b
           swizzle = None;
           pad_stride = None;
           pipeline_depth = 1;
+          tile_prec = None;
         };
       Sched.Privatize { target = site.m_d; over = k_o };
     ]
@@ -1386,6 +1401,7 @@ let gpu_mma_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
             swizzle = sk_swizzle;
             pad_stride = None;
             pipeline_depth = sk_depth;
+            tile_prec = None;
           };
         Sched.Stage
           {
@@ -1397,6 +1413,7 @@ let gpu_mma_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
             swizzle = sk_swizzle;
             pad_stride = None;
             pipeline_depth = sk_depth;
+            tile_prec = None;
           };
         tz;
       ]
@@ -1456,7 +1473,8 @@ let cpu_mma_sketch_schedule (site : matmul_site) { sk_bm = bm; _ } : Sched.sched
    is privatized to per-chunk block-scope storage by the renderer ([C_syntax.parallel_grid_safe]'s
    privatization rule). *)
 let cpu_mma_pack_sketch_schedule (site : matmul_site)
-    { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_hoist; sk_grid; sk_pack_rest; _ } : Sched.schedule =
+    { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_hoist; sk_grid; sk_pack_rest; sk_pack_prec; _ } :
+    Sched.schedule =
   let outer_i = if sk_grid then LL.Grid else LL.Serial in
   let grid_outermost = sk_grid && (sk_hoist || sk_pack_rest) in
   let sp_i, i_o, i_i = Sched.split ~axis:site.m_i ~factor:bm ~outer:outer_i ~inner:LL.Serial in
@@ -1470,7 +1488,26 @@ let cpu_mma_pack_sketch_schedule (site : matmul_site)
       ([ sp_i; sp_j; sp_k ], j_i, sink i_i [ j_o ] @ if grid_outermost then [] else sink i_o [ j_o ])
   in
   let stage ~hoisted source tile_loops =
-    Sched.Stage { source; tile_loops; shared = false; cooperative = None; hoisted; swizzle = None; pad_stride = None; pipeline_depth = 1 }
+    (* [sk_pack_prec] is the site's compute precision; mint the packed tile there where the source
+       stores narrower (gh-ocannl-575) — the widening rides the packing copy and the register-tiled
+       micro-kernel reads uniform compute-precision panels. Normalized to [None] when the source
+       already stores at it, keeping the [Stage] canonical. *)
+    let tile_prec =
+      Option.bind sk_pack_prec ~f:(fun p ->
+          if Ir.Ops.equal_prec p (Lazy.force source.Ir.Tnode.storage_prec) then None else Some p)
+    in
+    Sched.Stage
+      {
+        source;
+        tile_loops;
+        shared = false;
+        cooperative = None;
+        hoisted;
+        swizzle = None;
+        pad_stride = None;
+        pipeline_depth = 1;
+        tile_prec;
+      }
   in
   let stages =
     if grid_outermost then
@@ -1600,10 +1637,26 @@ let conv_split_row_current (site : conv_site) ~row_o ~row_i : Idx.symbol list =
    chunk. Both cases are unzeroed (the seeds gate accordingly): the [Zero_out] lives in its own
    [`Zeros] segment, so no zero geometry is needed. *)
 let cpu_conv_sketch_schedule ~(opt : LL.optimized) (site : conv_site)
-    { sk_grid; sk_bm; sk_epilogue; _ } : Sched.schedule =
+    { sk_grid; sk_bm; sk_epilogue; sk_pack_prec; _ } : Sched.schedule =
   let stage source tile_loops =
+    (* Mint the im2col/panel tiles at the site's compute precision where the source stores
+       narrower (gh-ocannl-575); see [cpu_mma_pack_sketch_schedule]. *)
+    let tile_prec =
+      Option.bind sk_pack_prec ~f:(fun p ->
+          if Ir.Ops.equal_prec p (Lazy.force source.Ir.Tnode.storage_prec) then None else Some p)
+    in
     Sched.Stage
-      { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = None; pad_stride = None; pipeline_depth = 1 }
+      {
+        source;
+        tile_loops;
+        shared = false;
+        cooperative = None;
+        hoisted = false;
+        swizzle = None;
+        pad_stride = None;
+        pipeline_depth = 1;
+        tile_prec;
+      }
   in
   (* Fuse-before-annotate (gh-ocannl-501): the fused twin of an aligned-merged seed omits the preset
      [Retype] on the tail nest [Fuse_epilogue] consumes — see [conv_tail_loop_syms]. *)
@@ -1691,7 +1744,7 @@ let gpu_conv_sketch_schedule (site : conv_site)
     { sk_simd = w; sk_bm; sk_bn; sk_bk; sk_tm; sk_depth; _ } : Sched.schedule =
   let stage source tile_loops =
     Sched.Stage
-      { source; tile_loops; shared = true; cooperative = Some w; hoisted = false; swizzle = None; pad_stride = None; pipeline_depth = sk_depth }
+      { source; tile_loops; shared = true; cooperative = Some w; hoisted = false; swizzle = None; pad_stride = None; pipeline_depth = sk_depth; tile_prec = None }
   in
   let outer_grid =
     List.map site.c_outer ~f:(fun (s, _) -> Sched.Retype { axis = s; ty = LL.Grid })
@@ -1835,23 +1888,34 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
           sk_epilogue = false;
           sk_swizzle = None;
           sk_depth = 1;
+          sk_pack_prec = None;
         }
       in
       let cpu_seeds =
         if not is_cpu then []
         else
-          let uniform_f32_64 =
-            (match prec with Ir.Ops.Single_prec _ | Ir.Ops.Double_prec _ -> true | _ -> false)
-            && Ir.Ops.equal_prec (Lazy.force site.c_a.Ir.Tnode.storage_prec) prec
-            && Ir.Ops.equal_prec (Lazy.force site.c_b.Ir.Tnode.storage_prec) prec
+          (* Compute-precision uniformity and vector-capability, resolved through the same
+             [Numerics.cpu_compute_prec] the emission asks (gh-ocannl-575) — see the matmul
+             family's CPU branch for the rationale. *)
+          let native_fp16 = limits.Ir.Backend_intf.native_fp16_arithmetic in
+          let comp_prec p = Ir.Numerics.cpu_compute_prec ~native_fp16_arithmetic:native_fp16 p in
+          let cprec = comp_prec prec in
+          let uniform_vec_capable =
+            (match cprec with
+            | Ir.Ops.Single_prec _ | Ir.Ops.Double_prec _ -> true
+            | Ir.Ops.Half_prec _ -> native_fp16
+            | _ -> false)
+            && Ir.Ops.equal_prec (comp_prec (Lazy.force site.c_a.Ir.Tnode.storage_prec)) cprec
+            && Ir.Ops.equal_prec (comp_prec (Lazy.force site.c_b.Ir.Tnode.storage_prec)) cprec
           in
           let lanes =
-            limits.Ir.Backend_intf.simd_vector_bytes / max 1 (Ir.Ops.prec_in_bytes prec)
+            limits.Ir.Backend_intf.simd_vector_bytes / max 1 (Ir.Ops.prec_in_bytes cprec)
           in
           if
             not
               (limits.Ir.Backend_intf.simd_vector_bytes >= 8
-              && lanes >= 2 && uniform_f32_64 && site.c_fma && site.c_noc >= lanes && offset_free)
+              && lanes >= 2 && uniform_vec_capable && site.c_fma && site.c_noc >= lanes
+              && offset_free)
           then []
           else
             (* Grid flavors need every materialized write in the routine covered by the Grid axis
@@ -1868,6 +1932,17 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
                fused twin of an aligned-grid seed omits the preset [Retype] on the tail nest the
                fusion consumes (fuse-before-annotate, gh-ocannl-501; see [conv_tail_loop_syms]), so
                the twin compiles on merged segments too. *)
+            let base =
+              {
+                base with
+                sk_pack_prec =
+                  (if
+                     Ir.Ops.equal_prec cprec (Lazy.force site.c_a.Ir.Tnode.storage_prec)
+                     && Ir.Ops.equal_prec cprec (Lazy.force site.c_b.Ir.Tnode.storage_prec)
+                   then None
+                   else Some cprec);
+              }
+            in
             let grid_ok =
               (match site.c_outer with (_, n) :: _ -> n >= 2 | [] -> false)
               && (List.length real_stmts <= 2 || Option.is_some (conv_aligned_grid site opt))
@@ -2124,6 +2199,7 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
       sk_epilogue = fused;
       sk_swizzle = None;
       sk_depth = 1;
+      sk_pack_prec = None;
     }
   in
   let blocktile_child =
@@ -2458,17 +2534,25 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
            (gh-ocannl-479): a candidate that statically must render the scalar fallback refutes
            the family's tensorized promise — it would otherwise be timed, and possibly crowned and
            cached, under a tensorized label, making "the tensorized candidate lost"
-           indistinguishable from "it never ran tensorized". Statically decidable: operand-precision
-           uniformity (f32/f64 only), the fused accumulation form, the micro-kernel column extent
-           vs. the vector lane count, and transposed-B storage for renderings that read B {e in
-           place} (a packing Stage normalizes the layout, so the packed flavors are exempt). What is
-           only knowable at emission (address spaces, footprint interactions with other locals) is
-           covered by the decline diagnostics and the [C_syntax.mma_census]. *)
-        let prec = Lazy.force site.m_d.Ir.Tnode.storage_prec in
-        let uniform_f32_64 =
-          (match prec with Ir.Ops.Single_prec _ | Ir.Ops.Double_prec _ -> true | _ -> false)
-          && Ir.Ops.equal_prec (Lazy.force site.m_a.Ir.Tnode.storage_prec) prec
-          && Ir.Ops.equal_prec (Lazy.force site.m_b.Ir.Tnode.storage_prec) prec
+           indistinguishable from "it never ran tensorized". Statically decidable: operand
+           {e compute}-precision uniformity and vector-capability (gh-ocannl-575: resolved through
+           the same [Numerics.cpu_compute_prec] the emission asks, so narrow storage computing in
+           f32 seeds, and pure-fp16 seeds exactly where the probe reports native arithmetic), the
+           fused accumulation form, the micro-kernel column extent vs. the vector lane count, and
+           transposed-B storage for renderings that read B {e in place} (a packing Stage normalizes
+           the layout, so the packed flavors are exempt). What is only knowable at emission
+           (address spaces, footprint interactions with other locals) is covered by the decline
+           diagnostics and the [C_syntax.mma_census]. *)
+        let native_fp16 = limits.Ir.Backend_intf.native_fp16_arithmetic in
+        let comp_prec p = Ir.Numerics.cpu_compute_prec ~native_fp16_arithmetic:native_fp16 p in
+        let prec = comp_prec (Lazy.force site.m_d.Ir.Tnode.storage_prec) in
+        let uniform_vec_capable =
+          (match prec with
+          | Ir.Ops.Single_prec _ | Ir.Ops.Double_prec _ -> true
+          | Ir.Ops.Half_prec _ -> native_fp16
+          | _ -> false)
+          && Ir.Ops.equal_prec (comp_prec (Lazy.force site.m_a.Ir.Tnode.storage_prec)) prec
+          && Ir.Ops.equal_prec (comp_prec (Lazy.force site.m_b.Ir.Tnode.storage_prec)) prec
         in
         let lanes = limits.Ir.Backend_intf.simd_vector_bytes / max 1 (Ir.Ops.prec_in_bytes prec) in
         let tb_in_place = Option.value site.m_tb ~default:false in
@@ -2480,8 +2564,9 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
             ( lanes >= 2,
               Printf.sprintf "fewer than two vector lanes at %s (simd_vector_bytes=%d)"
                 (Ir.Ops.prec_string prec) limits.Ir.Backend_intf.simd_vector_bytes );
-            ( uniform_f32_64,
-              "register tiling requires uniform f32/f64 operand and accumulator precisions" );
+            ( uniform_vec_capable,
+              "register tiling requires uniform vector-capable compute precisions (f32/f64, or \
+               fp16 where arithmetic is native)" );
             (site.m_fma, "register tiling requires the fused accumulation form");
             ( not (Utils.debug_log_from_routines ()),
               "routine logging is active (debug_log_from_routines): [C_syntax.try_register_tile] \
@@ -2549,7 +2634,21 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                the extents divide outright ([full_div]) and those shapes refute non-dividing
                geometries. *)
             let packed () =
-              let prec_bytes = Ir.Ops.prec_in_bytes (Lazy.force site.m_a.Ir.Tnode.storage_prec) in
+              (* Packed tiles are minted at the COMPUTE precision (gh-ocannl-575: the widening
+                 folds into the packing copy), so the footprint caps are judged in its element
+                 size — an f32 panel over fp16 storage is twice the storage bytes, and a pure-fp16
+                 panel on a native target is half the f32 one. *)
+              let prec_bytes = Ir.Ops.prec_in_bytes prec in
+              let pack_prec =
+                (* Per-operand storage precs may differ (only the compute precs are uniform); the
+                   schedule builder normalizes back to [None] per [Stage] whose source already
+                   stores at the compute precision. *)
+                if
+                  Ir.Ops.equal_prec prec (Lazy.force site.m_a.Ir.Tnode.storage_prec)
+                  && Ir.Ops.equal_prec prec (Lazy.force site.m_b.Ir.Tnode.storage_prec)
+                then None
+                else Some prec
+              in
               let tile_bytes_cap = 256 * 1024 in
               let menu =
                 List.map
@@ -2583,7 +2682,14 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                       && divides bk site.m_nk
                     in
                     ( Printf.sprintf "bm%d bn%d bk%d" bm bn bk,
-                      { base_params with sk_mma = true; sk_bm = bm; sk_bn = bn; sk_bk = bk },
+                      {
+                        base_params with
+                        sk_mma = true;
+                        sk_bm = bm;
+                        sk_bn = bn;
+                        sk_bk = bk;
+                        sk_pack_prec = pack_prec;
+                      },
                       verdict,
                       full_div,
                       tiles_bytes ))
