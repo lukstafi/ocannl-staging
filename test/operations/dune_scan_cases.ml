@@ -12,8 +12,9 @@ open Stdio
 module Scan = Test_utils.Dune_stanza_scan
 
 let render (site : Scan.site) =
+  let where = Scan.in_subdir site.Scan.subdir site.Scan.cwd in
   Printf.sprintf "%s%s %s%s"
-    (if String.is_empty site.Scan.subdir then "" else "in " ^ site.Scan.subdir ^ ": ")
+    (if String.is_empty where then "" else "in " ^ where ^ ": ")
     (Scan.kind_name site.Scan.kind) site.Scan.name
     (if site.Scan.declares_config then " [declares]" else "")
 
@@ -77,6 +78,27 @@ let cases =
       {dune|(rule (targets out.ml) (deps (:pp pp.exe) (:input in.ml))
  (action (run ./%{pp} --impl %{input} -o %{targets})))|dune},
       [ "rule running pp.exe" ] );
+    (* A dependency form wrapping the path binds the executable just as surely; keeping only bare
+       atoms lost it, after which the binding looked empty and the command external (Codex P2,
+       round 6). *)
+    ( "a named dep may wrap its path in a dependency form",
+      {dune|(rule (deps ocannl_config (:runner (file probe.exe))) (action (run %{runner})))|dune},
+      [ "rule running probe.exe [declares]" ] );
+    ( "a named dep resolving to no executable is not evidence of an external tool",
+      {dune|(rule (deps (:script run.sh)) (action (run %{script})))|dune},
+      [ "rule whose command this scan cannot read: %{script}" ] );
+    (* dune runs a chdir'd action elsewhere, and OCANNL searches upward from THERE, so that
+       directory's config is the one that has to be built (Codex P2, round 6). *)
+    ( "a chdir moves the directory whose config matters",
+      {dune|(rule (deps ocannl_config) (action (chdir ../sibling (run %{dep:probe.exe}))))|dune},
+      [ "in ../sibling: rule running probe.exe" ] );
+    ( "and the dependency that satisfies it is the one reaching that directory",
+      {dune|(rule (deps ../sibling/ocannl_config)
+ (action (chdir ../sibling (run %{dep:probe.exe}))))|dune},
+      [ "in ../sibling: rule running probe.exe [declares]" ] );
+    ( "a chdir to the stanza's own directory changes nothing",
+      {dune|(rule (deps ocannl_config) (action (chdir . (run %{dep:probe.exe}))))|dune},
+      [ "rule running probe.exe [declares]" ] );
     ( "a nested action does not hide the executable",
       {dune|(rule (alias slow) (deps ocannl_config)
  (action (no-infer (progn (with-stdout-to x.actual (run %{dep:mnist_conv.exe}))

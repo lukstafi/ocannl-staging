@@ -31,6 +31,19 @@ open Base
 
 let config_file = "ocannl_config"
 
+(** [in_subdir parent child] joins two relative directories, either of which may be empty or [.] —
+    [(chdir . …)] and a plain [./] say "here", and saying it must not make a directory look like a
+    different one. *)
+let in_subdir parent child =
+  let clean d =
+    if String.is_empty d || String.equal d "." then ""
+    else Option.value (String.chop_prefix d ~prefix:"./") ~default:d
+  in
+  match (clean parent, clean child) with
+  | "", child -> child
+  | parent, "" -> parent
+  | parent, child -> parent ^ "/" ^ child
+
 (* Sexplib reads these as comments; dune does not. See the header. *)
 let sexp_only_comment_markers = [ "#|"; "#;" ]
 
@@ -68,27 +81,28 @@ let rec atoms = function Sexp.Atom a -> [ a ] | Sexp.List l -> List.concat_map l
     is added, rather than an exotic form that does not silently passing. *)
 let file_dep_forms = [ "file"; "glob_files"; "glob_files_rec"; "source_tree"; "include" ]
 
-(** Whether a [(deps …)] field really depends on the shared configuration file — the one in the
-    stanza's OWN directory, which is where the executable's config search will look.
+(** Whether a [(deps …)] field really depends on the configuration file the executable will find:
+    the one in the directory the process RUNS in, which is the stanza's own unless a [chdir] moved
+    it.
 
     Not any path with that name: a dependency on [../config/ocannl_config] builds the shared source
     file, which sits nowhere on the upward search from [_build/default/<test dir>], and leaves the
     local copy that [(copy_files …)] produces unbuilt — the order-dependent behaviour this check
     exists to reject, wearing the look of a declaration (Codex P2, round 5 of PR #343). Dependency
-    paths are written relative to the stanza's directory, so the local file is exactly
-    [ocannl_config]. *)
-let rec dep_names_config sexp =
+    paths are written relative to the stanza's directory, so the file wanted is [<cwd>/ocannl_config]
+    for a process running in [<cwd>]. *)
+let rec dep_names_path sexp ~path =
   match sexp with
-  | Sexp.Atom atom ->
-      List.mem [ config_file; "./" ^ config_file ] atom ~equal:String.equal
+  | Sexp.Atom atom -> List.mem [ path; "./" ^ path ] atom ~equal:String.equal
   | Sexp.List (Sexp.Atom head :: rest) ->
       (* [(:name <deps>)] binds a name to ordinary dependencies; the forms above take paths. *)
       (String.is_prefix head ~prefix:":" || List.mem file_dep_forms head ~equal:String.equal)
-      && List.exists rest ~f:dep_names_config
+      && List.exists rest ~f:(dep_names_path ~path)
   | Sexp.List _ -> false
 
-let declares_config args =
-  match args with None -> false | Some args -> List.exists args ~f:dep_names_config
+let declares_config ?(cwd = "") args =
+  let path = in_subdir cwd config_file in
+  match args with None -> false | Some args -> List.exists args ~f:(dep_names_path ~path)
 
 (** The names a [(name …)] or [(names …)] field gives, in order. *)
 let names_of stanza =
@@ -182,22 +196,34 @@ let classify_command ~named_deps cmd =
             | Some paths -> (
                 match List.find paths ~f:is_executable with
                 | Some path -> Runs (program_path path)
-                | None -> External)
+                (* A binding that resolves to no executable is not evidence of an external tool:
+                   the action runs whatever it binds, and this scan did not recognise it. *)
+                | None -> Unrecognized cmd)
             | None -> Unrecognized cmd))
   (* Text and pforms mixed, or a pform inside a path: rather than guess where the program's name
      begins, say so. *)
   | _ -> Unrecognized cmd
 
-(** The [(:name …)] bindings of a stanza's [(deps …)] field. *)
+(** The [(:name …)] bindings of a stanza's [(deps …)] field, with the paths each one binds.
+
+    The paths are collected through the dependency forms that wrap them, because
+    [(:runner (file probe.exe))] binds an executable as surely as [(:runner probe.exe)] does, and
+    keeping only the bare atoms lost it — after which the binding looked empty and the command
+    reading it looked external (Codex P2, round 6 of PR #343). *)
 let named_deps_of stanza =
+  let rec paths sexp =
+    match sexp with
+    | Sexp.Atom a -> [ a ]
+    | Sexp.List (Sexp.Atom head :: rest) when List.mem file_dep_forms head ~equal:String.equal ->
+        List.concat_map rest ~f:paths
+    | Sexp.List _ -> []
+  in
   match field stanza "deps" with
   | None -> []
   | Some args ->
       List.filter_map args ~f:(function
         | Sexp.List (Sexp.Atom name :: values) when String.is_prefix name ~prefix:":" ->
-            Some
-              ( String.drop_prefix name 1,
-                List.filter_map values ~f:(function Sexp.Atom a -> Some a | _ -> None) )
+            Some (String.drop_prefix name 1, List.concat_map values ~f:paths)
         | _ -> None)
 
 (** Actions that execute a program. [dynamic-run] is here because dune runs one there too (Codex
@@ -223,11 +249,19 @@ let inert_actions =
   ]
 
 (* Every command an action runs, at any depth: [(with-stdout-to … (run …))],
-   [(no-infer (progn (run …) …))] and the rest nest the one that matters. *)
-let rec commands_in sexp =
-  let nested = match sexp with Sexp.List l -> List.concat_map l ~f:commands_in | _ -> [] in
+   [(no-infer (progn (run …) …))] and the rest nest the one that matters. Each comes with the
+   directory the process will run in, relative to the stanza's own: [chdir] moves it, and the
+   configuration an OCANNL executable finds is the one it searches upward from THERE, not the one
+   next to the dune file (Codex P2, round 6 of PR #343). *)
+let rec commands_in ?(cwd = "") sexp =
+  let nested =
+    match sexp with Sexp.List l -> List.concat_map l ~f:(commands_in ~cwd) | _ -> []
+  in
   match sexp with
-  | Sexp.List (Sexp.Atom ("run" | "dynamic-run") :: Sexp.Atom cmd :: _) -> `Command cmd :: nested
+  | Sexp.List (Sexp.Atom "chdir" :: Sexp.Atom dir :: rest) ->
+      List.concat_map rest ~f:(commands_in ~cwd:(in_subdir cwd dir))
+  | Sexp.List (Sexp.Atom ("run" | "dynamic-run") :: Sexp.Atom cmd :: _) ->
+      (cwd, `Command cmd) :: nested
   (* A shell action hands a command line to a shell, and this scan does not parse shell. Splitting
      it on whitespace looked like reading it and was not: `if ready; then ./probe.exe; fi` yields
      `./probe.exe;`, which ends in no extension and passes for an external tool -- so the rule runs
@@ -235,7 +269,7 @@ let rec commands_in sexp =
      unreadable instead, which the caller settles by declaring the dependency anyway or by
      rewriting the action as a `run`. *)
   | Sexp.List (Sexp.Atom ("bash" | "system") :: args) ->
-      List.filter_map args ~f:(function Sexp.Atom a -> Some (`Shell a) | _ -> None) @ nested
+      List.filter_map args ~f:(function Sexp.Atom a -> Some (cwd, `Shell a) | _ -> None) @ nested
   | _ -> nested
 
 (** Heads inside a stanza's [(action …)] that are on neither action list, each once. *)
@@ -260,11 +294,14 @@ let unclassified_action_heads stanza =
   | None -> []
   | Some args -> List.concat_map args ~f:walk_action |> List.dedup_and_sort ~compare:String.compare
 
+(** What a stanza runs, each with the directory it runs in. *)
 let executables_run stanza =
   let named_deps = named_deps_of stanza in
-  List.map (commands_in stanza) ~f:(function
-    | `Command cmd -> classify_command ~named_deps cmd
-    | `Shell line -> Unrecognized ("shell: " ^ line))
+  List.map (commands_in stanza) ~f:(fun (cwd, command) ->
+      ( cwd,
+        match command with
+        | `Command cmd -> classify_command ~named_deps cmd
+        | `Shell line -> Unrecognized ("shell: " ^ line) ))
   |> List.dedup_and_sort ~compare:Poly.compare
 
 type kind =
@@ -280,14 +317,18 @@ type kind =
 (** [subdir] is the directory the stanza applies to, relative to the dune file's own: empty at the
     top level, and the path a [(subdir …)] wrapper names inside one. A wrapped stanza runs
     elsewhere, so it is that directory's config it needs — test/operations/dune configures
-    test/operations/config this way. *)
-type site = { kind : kind; name : string; declares_config : bool; subdir : string }
+    test/operations/config this way.
 
-(** [in_subdir parent child] joins two relative directories, either of which may be empty. *)
-let in_subdir parent child =
-  if String.is_empty parent then child
-  else if String.is_empty child then parent
-  else parent ^ "/" ^ child
+    [cwd] is the directory the process runs in, relative to the stanza's: empty unless a [chdir]
+    moved it. The two compose — [in_subdir subdir cwd] is the directory whose configuration the
+    executable will actually find, and the one that has to have one. *)
+type site = {
+  kind : kind;
+  name : string;
+  declares_config : bool;
+  subdir : string;
+  cwd : string;
+}
 
 (* [(subdir <dir> <stanza>…)] applies its body to another directory. Descending into it is what
    keeps its stanzas subject to the same rules; ignoring it would drop them silently, which is the
@@ -338,7 +379,10 @@ let inert_heads =
     site, which the caller fails on. *)
 let sites content =
   walk "" (stanzas content) ~f:(fun subdir stanza ->
-      let site kind name declares_config = [ { kind; name; declares_config; subdir } ] in
+      (* A [test] runs where its stanza is, so its process directory is the stanza's. *)
+      let site ?(cwd = "") kind name declares_config =
+        [ { kind; name; declares_config; subdir; cwd } ]
+      in
       let stanza_name () = String.concat ~sep:", " (names_of stanza) in
       match head stanza with
       | Some ("test" | "tests") ->
@@ -349,17 +393,28 @@ let sites content =
           | Some inline ->
               site Inline_tests (stanza_name ()) (declares_config (field_in inline "deps")))
       | Some h when List.mem action_heads h ~equal:String.equal ->
-          let declares = declares_config (field stanza "deps") in
+          let deps = field stanza "deps" in
+          (* One site per directory the rule runs something in: what each needs is that
+             directory's config, declared by the path that reaches it from here. *)
+          let declares cwd = declares_config ~cwd deps in
           let run = executables_run stanza in
-          let exes = List.filter_map run ~f:(function Runs name -> Some name | _ -> None) in
-          let unreadable =
-            List.filter_map run ~f:(function Unrecognized cmd -> Some cmd | _ -> None)
+          let by_cwd =
+            List.map run ~f:fst |> List.dedup_and_sort ~compare:String.compare
+            |> List.concat_map ~f:(fun cwd ->
+                   let for_cwd f =
+                     List.filter_map run ~f:(fun (c, command) ->
+                         if String.equal c cwd then f command else None)
+                   in
+                   let exes = for_cwd (function Runs name -> Some name | _ -> None) in
+                   let unreadable = for_cwd (function Unrecognized cmd -> Some cmd | _ -> None) in
+                   (if List.is_empty exes then []
+                    else site ~cwd Runs_executable (String.concat ~sep:", " exes) (declares cwd))
+                   @ List.concat_map unreadable ~f:(fun cmd ->
+                         site ~cwd Unreadable_command cmd (declares cwd)))
           in
-          (if List.is_empty exes then []
-           else site Runs_executable (String.concat ~sep:", " exes) declares)
-          @ List.concat_map unreadable ~f:(fun cmd -> site Unreadable_command cmd declares)
+          by_cwd
           @ List.concat_map (unclassified_action_heads stanza) ~f:(fun head ->
-                site Unclassified_action head declares)
+                site Unclassified_action head (declares ""))
       | _ -> [])
 
 (** Stanza heads in [content] that {!sites} has no classification for, each once. The caller fails

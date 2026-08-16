@@ -113,10 +113,13 @@ let () =
                 to Dune_stanza_scan.action_heads if it can run an executable, or to inert_heads if \
                 it cannot"
                dune_file head));
-      (* A `(subdir …)` stanza runs elsewhere, so it is that directory's config it reaches for. *)
+      (* Both displacements matter and they compose: a `(subdir …)` stanza applies elsewhere, and a
+         `chdir` action runs elsewhere again. The config an executable finds is the one in the
+         directory the PROCESS runs in. *)
       let copies = Set.of_list (module String) (Scan.config_copy_dirs content) in
-      let directory_of site = Scan.in_subdir dir site.Scan.subdir in
-      List.map sites ~f:(fun site -> (site.Scan.subdir, directory_of site))
+      let relative site = Scan.in_subdir site.Scan.subdir site.Scan.cwd in
+      let directory_of site = repo_relative [ dir ] (relative site) in
+      List.map sites ~f:(fun site -> (relative site, directory_of site))
       |> List.dedup_and_sort ~compare:Poly.compare
       |> List.iter ~f:(fun (subdir, directory) ->
              if not (Set.mem config_dirs directory || Set.mem copies subdir) then
@@ -126,7 +129,8 @@ let () =
                      `(copy_files ../config/%s)`"
                     dune_file directory Scan.config_file Scan.config_file));
       let described =
-        List.map sites ~f:(fun ({ Scan.kind; name; declares_config; subdir = _ } as site) ->
+        List.map sites ~f:(fun ({ Scan.kind; name; declares_config; subdir = _; cwd = _ } as site)
+                          ->
             let key = directory_of site ^ ":" ^ name in
             (* An exemption is spent only where the dep is actually absent, so declaring it anyway
                makes the entry stale and the list gets pruned rather than growing quietly. *)
