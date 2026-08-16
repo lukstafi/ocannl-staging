@@ -894,17 +894,13 @@ struct
      arithmetic runs in f32 and the narrow format is a storage format: one widen per load, one
      narrow per store. Under [narrow_compute_f32 = false] the narrow arms below take over again and
      every operator rounds to the target's storage precision (the pre-gh-517 semantics). *)
+  (* gh-ocannl-516: fp16 is the one narrow format a CPU can execute natively, and where it does,
+     computing in it doubles the lane count against f32. Opt-in, and only where the arithmetic is
+     genuinely 16-bit -- on a target that merely promotes to float there is no throughput to win,
+     so the policy is ignored rather than silently costing mantissa. The resolution itself lives in
+     [Numerics.cpu_compute_prec] so autotune's seeding shares it verbatim (gh-ocannl-575). *)
   let compute_prec prec =
-    match prec with
-    (* gh-ocannl-516: fp16 is the one narrow format a CPU can execute natively, and where it does,
-       computing in it doubles the lane count against f32. Opt-in, and only where the arithmetic is
-       genuinely 16-bit -- on a target that merely promotes to float there is no throughput to win,
-       so the policy is ignored rather than silently costing mantissa. *)
-    | Ops.Half_prec _
-      when (Numerics.get ()).fp16_arithmetic && has_native_fp16_arithmetic () ->
-        prec
-    | _ when Ops.is_narrow_float prec && (Numerics.get ()).narrow_compute_f32 -> Ops.single
-    | _ -> prec
+    Numerics.cpu_compute_prec ~native_fp16_arithmetic:(has_native_fp16_arithmetic ()) prec
 
   (* The explicit vector renderings work at the compute precision, so admitting fp16 here is
      admitting native 16-bit vector arithmetic -- [vec_ext_typ] mints a [HALF_T] vector and the

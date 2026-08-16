@@ -75,3 +75,17 @@ let get () =
 (** Programmatic override, e.g. per-experiment toggles from training scripts. Call before
     compilation; routines already compiled keep the numerics they were compiled with. *)
 let set_policy p = policy := Some p
+
+(** The compute precision the CPU backends resolve a storage precision to under the current policy:
+    fp16 stays fp16 only where {!field-fp16_arithmetic} asks for it AND the target's arithmetic is
+    genuinely 16-bit (gh-ocannl-516); every other narrow float computes in f32 under
+    {!field-narrow_compute_f32} (gh-ocannl-517); everything else is itself. The single source of
+    truth shared by [Cc_backend.compute_prec] (emission) and autotune's sketch seeding (the
+    candidate pre-filter and the packed-[Stage] tile precisions, gh-ocannl-575) — the gh-ocannl-545
+    lesson: when seeding and emission can disagree about a gate, candidates get timed under labels
+    their rendering does not honor. *)
+let cpu_compute_prec ~native_fp16_arithmetic (prec : Ops.prec) : Ops.prec =
+  match prec with
+  | Ops.Half_prec _ when (get ()).fp16_arithmetic && native_fp16_arithmetic -> prec
+  | _ when Ops.is_narrow_float prec && (get ()).narrow_compute_f32 -> Ops.single
+  | _ -> prec
