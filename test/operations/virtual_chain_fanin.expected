@@ -10,6 +10,8 @@ scope: producer materialized (scope-body loads count, fan-in 9): true
 scope: executed values match the reference: true
 scope rmw: self-read excluded, producer stays virtual (fan-in 8): true
 scope rmw: executed values match the reference: true
+where: producer stays virtual (fan-in 5: mask + the wider arm): true
+where: executed values match the reference (both arms exercised): true
 pipeline: x7 stays virtual: true
 pipeline: x8 materialized by the fan-in cap: true
 pipeline: x9 and x10 virtual again past the reset: true

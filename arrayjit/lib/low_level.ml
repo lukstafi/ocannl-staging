@@ -1097,10 +1097,22 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
     | Embed_index _ -> ()
     | Binop (Arg1, (llv1, _), _llv2) -> loop llv1
     | Binop (Arg2, _llv1, (llv2, _)) -> loop llv2
-    | Ternop (_, (llv1, _), (llv2, _), (llv3, _)) ->
+    | Ternop (op, (llv1, _), (llv2, _), (llv3, _)) -> (
         loop llv1;
-        loop llv2;
-        loop llv3
+        match (Ops.ternop_conditionality op, reads) with
+        | Ops.All_three, _ | Ops.Cond_and_one_arm, None ->
+            loop llv2;
+            loop llv3
+        | Ops.Cond_and_one_arm, Some (self, r) ->
+            (* Exactly one arm evaluates per visit ([Ops.ternop_conditionality]): the setter's
+               fan-in charges the wider arm, not the union — two arms each within the cap must
+               not jointly trip it. The other traced facts still record from both arms (their
+               subjects are rendering-level, and both arms are rendered). *)
+            let r2 = Hash_set.create (module Tnode) and r3 = Hash_set.create (module Tnode) in
+            loop_scalar ~loop_ranges ~lhs ~reads:(Some (self, r2)) llv2;
+            loop_scalar ~loop_ranges ~lhs ~reads:(Some (self, r3)) llv3;
+            let wider = if Hash_set.length r3 > Hash_set.length r2 then r3 else r2 in
+            Hash_set.iter wider ~f:(Hash_set.add r))
     | Binop (_, (llv1, _), (llv2, _)) ->
         loop llv1;
         loop llv2
@@ -5117,11 +5129,23 @@ let decide_placements (optim_ctx : optimize_ctx) traced_store ~max_visits ~reads
       | Get_dynamic { tn = q; dyn_value = v, _; _ } ->
           reads_of_scalar ~self (if Tn.equal q self then acc else Set.add acc q) v
       | Local_scope { body; _ } -> reads_of_proc ~self acc body
-      | Binop (Ops.Arg1, (v1, _), _) -> reads_of_scalar ~self acc v1
-      | Binop (Ops.Arg2, _, (v2, _)) -> reads_of_scalar ~self acc v2
-      | Ternop (_, (v1, _), (v2, _), (v3, _)) ->
-          reads_of_scalar ~self (reads_of_scalar ~self (reads_of_scalar ~self acc v1) v2) v3
-      | Binop (_, (v1, _), (v2, _)) -> reads_of_scalar ~self (reads_of_scalar ~self acc v1) v2
+      | Ternop (op, (v1, _), (v2, _), (v3, _)) -> (
+          let acc = reads_of_scalar ~self acc v1 in
+          match Ops.ternop_conditionality op with
+          | Ops.All_three -> reads_of_scalar ~self (reads_of_scalar ~self acc v2) v3
+          | Ops.Cond_and_one_arm ->
+              (* Exactly one arm evaluates per visit: charge the wider arm, not the union. *)
+              let s2 = reads_of_scalar ~self (Set.empty (module Tnode)) v2
+              and s3 = reads_of_scalar ~self (Set.empty (module Tnode)) v3 in
+              Set.union acc (if Set.length s3 > Set.length s2 then s3 else s2))
+      | Binop (op, (v1, _), (v2, _)) -> (
+          match Ops.binop_conditionality op with
+          | Ops.Only_first -> reads_of_scalar ~self acc v1
+          | Ops.Only_second -> reads_of_scalar ~self acc v2
+          | Ops.Both_operands | Ops.Gated_second ->
+              (* A gated second operand still charges: the worst-case evaluation runs both, and
+                 with a single alternative the per-arm maximum degenerates to the union. *)
+              reads_of_scalar ~self (reads_of_scalar ~self acc v1) v2)
       | Unop (_, (v, _)) -> reads_of_scalar ~self acc v
     in
     let memo = Hashtbl.create (module Tnode) in

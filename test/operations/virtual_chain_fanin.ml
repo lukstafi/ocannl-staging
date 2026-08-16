@@ -190,7 +190,44 @@ let phase1b () =
     (out2, blank dim) :: (Array.to_list (Array.sub ws ~pos:0 ~len:8) |> List.mapi ~f:(fun k w -> (w, w_vals k)))
   in
   let got2 = execute ~name:"vcf_scope_rmw" o2 ~seed:seed2 ~read:[ out2 ] in
-  p "scope rmw: executed values match the reference" (same got2 [ expected2 ])
+  p "scope rmw: executed values match the reference" (same got2 [ expected2 ]);
+  (* Review round 5: [Where]'s arms are mutually exclusive per evaluation
+     ([Ops.ternop_conditionality] = [Cond_and_one_arm]), so a setter's fan-in charges the wider
+     arm, not the union: mask + two 4-load arms is fan-in 5, within the cap — the union (9) would
+     spuriously materialize. Both arms execute in the parity leg (mask alternates). *)
+  let y4 = mk "y4" and out4 = mk "wout" and m = mk "m" in
+  materialize out4;
+  materialize m;
+  let i4 = sym () and j4 = sym () in
+  let arm pos =
+    Array.fold
+      (Array.sub ws ~pos ~len:4)
+      ~init:(Ll_test.c 0.)
+      ~f:(fun acc w -> add acc (get w [| iter i4 |]))
+  in
+  let producer4 =
+    loop_n i4 dim
+      (set y4 [| iter i4 |]
+         (LL.Ternop (Ir.Ops.Where, (get m [| iter i4 |], single), (arm 0, single), (arm 4, single))))
+  in
+  let consumer4 = loop_n j4 dim (set out4 [| iter j4 |] (get y4 [| iter j4 |])) in
+  let o4 = optimize ~name:"vcf_where" (seq producer4 consumer4) in
+  p "where: producer stays virtual (fan-in 5: mask + the wider arm)" (known_virtual o4 y4);
+  let m_vals = Array.init dim ~f:(fun i -> Float.of_int (i % 2)) in
+  let expected4 =
+    Array.init dim ~f:(fun i ->
+        let pos = if i % 2 <> 0 then 0 else 4 in
+        Array.foldi
+          (Array.init 4 ~f:(fun k -> w_vals (pos + k)))
+          ~init:0.
+          ~f:(fun _ acc w -> acc +. w.(i)))
+  in
+  let seed4 =
+    (out4, blank dim) :: (m, m_vals)
+    :: (Array.to_list ws |> List.mapi ~f:(fun k w -> (w, w_vals k)))
+  in
+  let got4 = execute ~name:"vcf_where" o4 ~seed:seed4 ~read:[ out4 ] in
+  p "where: executed values match the reference (both arms exercised)" (same got4 [ expected4 ])
 
 (* === Phase 2: the Assignments pipeline === *)
 
