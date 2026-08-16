@@ -277,3 +277,62 @@ jobs:
       run: rm -rf _opam/.opam-switch/sources _opam/.opam-switch/build
     - run: opam exec -- dune build
     - run: opam exec -- dune runtest
+    # `tools/test-run.sh` carries branches that ONLY execute under MSYS: it
+    # sources `tools/opam-env.sh` unconditionally and fatally (a dune on PATH
+    # does not imply rewritten cygwin paths there), routes dune through
+    # `tools/dune-quiet.sh`, degrades its process-liveness probe to a bare pid
+    # where MSYS `ps` lacks the lstart/state columns, and takes the worktree
+    # flock through MSYS perl. Nothing on Linux or macOS reaches any of that,
+    # and the script is otherwise driven from rare hand-run Windows sessions --
+    # so without this step those branches rot invisibly and are discovered by
+    # whoever next needs the runner, mid-task.
+    #
+    # Deliberately built around `tools/promote.sh`: a source file dune merely
+    # copies into `_build`, so the step costs a workspace scan rather than a
+    # compile. What is under test is the runner's plumbing, not dune's ability
+    # to build anything.
+    #
+    # Runs regardless of whether `dune runtest` above passed (but not after a
+    # cancellation): Windows runs twice a week, so letting a golden drift mask
+    # the runner's health would cost three days of signal for nothing. It is
+    # last so that the converse cannot happen either -- a broken runner must
+    # not abort the sweep's only Windows test coverage.
+    - name: Smoke tools/test-run.sh (Git Bash)
+      if: ${{ !cancelled() && runner.os == 'Windows' }}
+      shell: bash
+      run: |
+        expect() { # <expected-exit> <label> <command...>
+          local want=$1 label=$2 got=0
+          shift 2
+          "$@" || got=$?
+          if [ "$got" != "$want" ]; then
+            echo "::error::test-run.sh $label exited $got, expected $want"
+            exit 1
+          fi
+        }
+        # Attached run, then the one-shot verdict read. `status` exits 0 for any
+        # FINISHED run (3 still running, 1 died without a verdict), so its 0
+        # asserts that a verdict was published -- `run`'s 0 is what asserts the
+        # build was green.
+        expect 0 'run' tools/test-run.sh run --cap 300 build tools/promote.sh
+        expect 0 'status last' tools/test-run.sh status last
+        # A failing dune must still surface as dune's own 1. On Windows that
+        # status travels through dune-quiet.sh's stderr filter, where a dropped
+        # PIPESTATUS would report every red run as green -- the one failure this
+        # whole file exists to prevent. Exactly 1, not merely nonzero: the
+        # script's own refusals (usage, lock, unrewritten toolchain) exit 2 and
+        # the cap exits 142, and neither may pass for a build failure.
+        expect 1 'run (failing target)' \
+          tools/test-run.sh run --cap 300 build @no-such-alias-smoke
+        # Detached mode: `start` publishes pointers and returns immediately,
+        # `wait` polls the verdict FILE under its own bound (the run's cap plus
+        # slack) and exits with dune's status. Both rest on the liveness probes
+        # that degrade on MSYS, and on the `last` symlink -- which cygwin-style
+        # symlinks make a real question on Windows. `list` walks every recorded
+        # run through the same probes plus the retention scan.
+        expect 0 'start' tools/test-run.sh start --cap 300 build tools/promote.sh
+        expect 0 'wait last' tools/test-run.sh wait last
+        expect 0 'list' tools/test-run.sh list
+        # Not covered: the second-launch lock refusal (exit 2), which needs a
+        # run still holding the lock when the second arrives -- i.e. minutes of
+        # real build, against a step meant to cost seconds.
