@@ -63,8 +63,10 @@ command -v dune >/dev/null 2>&1 || die "dune not found (opam environment not set
 RUNS=${OCANNL_TEST_RUNS:-$HOME/.ocannl-test-runs}
 mkdir -p "$RUNS" || die "cannot create $RUNS"
 # The worktree key makes locks and `last` per-checkout, so concurrent sessions
-# in different worktrees neither collide nor read each other's verdicts.
-wt_key=$(pwd | tr -c 'A-Za-z0-9' '_')
+# in different worktrees neither collide nor read each other's verdicts. The
+# readable basename is for humans listing $RUNS; the crc of the full path is
+# what keeps two paths differing only in punctuation from sharing a key.
+wt_key=$(basename "$PWD" | tr -c 'A-Za-z0-9' '_')$(printf %s "$PWD" | cksum | awk '{print $1}')
 
 # Cap a command, killing its whole process group when the cap expires -- the
 # sibling of sweep.sh's supervisor (see the rationale there). `perl -e 'alarm N;
@@ -74,13 +76,18 @@ wt_key=$(pwd | tr -c 'A-Za-z0-9' '_')
 # HUP: a foreground run treats it like TERM; a detached run (OCANNL_TESTRUN_BG)
 # ignores it, since surviving the launching session is its whole point.
 # setpgrp is eval-guarded and the group kill falls back to a plain kill, for
-# MSYS perl where process groups are shaky.
+# MSYS perl where process groups are shaky. The child closes fd 9 (the
+# per-worktree lock) before exec: dune actions can leave background
+# descendants behind, and a descendant inheriting the lock would hold it
+# indefinitely after the run's verdict was already recorded. The lock's
+# holders are thus exactly the script/wrapper shell and this supervisor --
+# the processes whose lifetime IS the managed run.
 capped_perl='
   use POSIX ();
   my $cap = shift;
   my $pid = fork();
   die "fork: $!" unless defined $pid;
-  if (!$pid) { eval { setpgrp(0, 0) }; exec @ARGV; exit 127 }
+  if (!$pid) { eval { setpgrp(0, 0) }; POSIX::close(9); exec @ARGV; exit 127 }
   my $blast = sub { my $sig = shift; kill($sig, -$pid) or kill($sig, $pid) };
   my $reap = sub {
     my $code = shift;
@@ -106,8 +113,9 @@ capped_perl='
 
 # Take the per-worktree lock on fd 9, non-blocking. perl takes it and exits;
 # the lock lives on the open file DESCRIPTION, which this shell holds through
-# fd 9 and every child inherits -- so it clears exactly when the last process
-# of the run exits, with nothing to reclaim after a crash (see sweep.sh).
+# fd 9 and the capped supervisor inherits (dune's side closes it, see above)
+# -- so it clears exactly when the run's managing processes exit, with
+# nothing to reclaim after a crash (see sweep.sh).
 take_lock() {
   exec 9>>"$RUNS/lock-$wt_key" || die "cannot open lock file"
   perl -e 'use Fcntl ":flock"; exit(flock(STDIN, LOCK_EX | LOCK_NB) ? 0 : 1)' <&9 || {
@@ -126,8 +134,13 @@ new_run() {
   : >"$run_dir/log"
   ln -sfn "$run_dir" "$RUNS/last-$wt_key"
   # Runs are throwaway diagnostics; reap old ones so the directory cannot grow
-  # without bound. -type d skips the `last-*` symlinks.
-  find "$RUNS" -maxdepth 1 -type d -name '2*' -mtime +7 -exec rm -rf {} + 2>/dev/null
+  # without bound. Keyed on the VERDICT file's age, because a directory without
+  # one may be a live run (`--cap 0` is supported and unbounded, and $RUNS is
+  # shared across worktrees whose locks are independent). Verdict-less
+  # directories are reaped only on a much longer leash, as crash leftovers.
+  find "$RUNS" -maxdepth 2 -name exit -mtime +7 2>/dev/null |
+    while IFS= read -r f; do rm -rf "${f%/exit}"; done
+  find "$RUNS" -maxdepth 1 -type d -name '2*' -mtime +30 -exec rm -rf {} + 2>/dev/null
 }
 
 resolve_run() {
@@ -177,7 +190,9 @@ digest() {
 
 finish_run() { # rc -> append sentinel, record verdict
   printf 'exit: %s\n' "$1" >>"$run_dir/log"
-  printf '%s\n' "$1" >"$run_dir/exit"
+  # Written aside and renamed: the verdict file's EXISTENCE is the completion
+  # signal `status`/`wait` key on, so it must never be observable empty.
+  printf '%s\n' "$1" >"$run_dir/exit.tmp" && mv -f "$run_dir/exit.tmp" "$run_dir/exit"
 }
 
 sub=${1:-}
@@ -194,12 +209,30 @@ case $sub in
         *) break ;;
       esac
     done
+    # A mistyped cap would reach perl's numeric compare as 0 and silently
+    # disable the alarm -- the one property this script must never lose.
+    case $cap in '' | *[!0-9]*) die "--cap must be a nonnegative integer of seconds (0 disables)" ;; esac
     [ $# -gt 0 ] || set -- runtest
     take_lock
     new_run "$@"
     if [ "$sub" = run ]; then
-      perl -e "$capped_perl" -- "$cap" dune "$@" >>"$run_dir/log" 2>&1
+      # The supervisor pid is recorded for foreground runs too: if this shell
+      # is killed before the verdict lands (harness cancellation, closed
+      # terminal), the orphaned run stays manageable -- `status` detects the
+      # dead/live supervisor and `stop` can still reach it. The trap forwards
+      # shell-directed signals; wait is retried because a trapped signal
+      # returns from `wait` early, before the supervisor has exited.
+      perl -e "$capped_perl" -- "$cap" dune "$@" >>"$run_dir/log" 2>&1 &
+      sup=$!
+      printf '%s\n' "$sup" >"$run_dir/pid"
+      trap 'kill -TERM "$sup" 2>/dev/null' INT TERM
+      wait "$sup"
       rc=$?
+      while [ "$rc" -gt 128 ] && kill -0 "$sup" 2>/dev/null; do
+        wait "$sup"
+        rc=$?
+      done
+      trap - INT TERM
       finish_run "$rc"
       digest "$run_dir"
       exit "$rc"
@@ -262,9 +295,13 @@ case $sub in
         echo "run died without recording a verdict (killed externally?): $run_dir"
         exit 1
       fi
-      [ "$waited" -ge "$budget" ] && { echo "wait timed out after ${budget}s: $run_dir"; exit 124; }
-      sleep 5
-      waited=$(( waited + 5 ))
+      # Each sleep is bounded by the remaining budget, so a short --timeout is
+      # honored to the second rather than rounded up to the polling interval.
+      remaining=$(( budget - waited ))
+      [ "$remaining" -le 0 ] && { echo "wait timed out after ${budget}s: $run_dir"; exit 124; }
+      step=$(( remaining < 5 ? remaining : 5 ))
+      sleep "$step"
+      waited=$(( waited + step ))
     done
     digest "$run_dir"
     exit "$(cat "$run_dir/exit")"
