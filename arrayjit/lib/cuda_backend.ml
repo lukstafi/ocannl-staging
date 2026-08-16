@@ -291,9 +291,14 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       Stdio.Out_channel.output_string build_file.oc cu_src;
       build_file.finalize ());
     [%log "compiling to PTX"];
-    let with_debug =
-      Utils.settings.output_debug_files_in_build_directory || Utils.settings.log_level > 0
-    in
+    (* [with_debug] only asks NVRTC to keep the compilation log on a SUCCESSFUL compile (a failing
+       one carries its log in the exception either way), and the only reader of that log is the
+       [.cu_log] build file written just below -- so it wants exactly the flag that writes it, and
+       that file's [Option.value_exn] is what makes the implication load-bearing. The
+       [|| log_level > 0] disjunct it used to carry made the log's retention hostage to a verbosity
+       knob that nothing here consults (gh-ocannl-595). Kernel debug codegen is separate: it comes
+       from [Utils.with_runtime_debug ()] via [--device-debug] below. *)
+    let with_debug = Utils.settings.output_debug_files_in_build_directory in
     let cuda_include_opt =
       (* On Windows, check for the no-spaces junction created by ocaml-cudajit *)
       let cuda_path =

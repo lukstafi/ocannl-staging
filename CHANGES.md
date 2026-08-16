@@ -22,6 +22,14 @@
   from the schedule-cache key let a default-flags run replay a tf32-tuned winner at 5.9x slower than
   not tuning at all.
 
+- **The startup streams are pinned, on both halves** (gh-ocannl-593):
+  `test/operations/startup_streams` runs an executable that writes nothing of its own, once with the
+  chatter turned all the way up (stdout must stay empty — the convention that lets a tool make
+  stdout a data channel) and once with a default configuration whose `ocannl_config` carries an
+  unknown key (stderr must be the three lines a user can read). Until now every test config set
+  `suppress_welcome_message=true` and `log_config_sourcing=false`, so flipping the `Stdio.eprintf`
+  calls in `arrayjit/lib/utils.ml` back to `Stdio.printf` left `dune runtest` fully green.
+
 - **Hand-built lowered code can be executed, not only analyzed** (gh-ocannl-562): `Context.compile`
   and backend `compile` take `?prelowered:Ir.Low_level.optimized`, which replaces the compile's own
   lowering of the comp. Unlike `?lowered_transform`, which substitutes the codegen input only, the
@@ -33,6 +41,22 @@
   read-before-write case that motivated it.
 
 ### Changed
+
+- **Startup chatter is opt-in, so that a warning on stderr is legible** (gh-ocannl-595).
+  gh-ocannl-581 moved the config chatter off stdout, which fixed the data-channel problem and left
+  stderr carrying 83 lines of routine trace on a default run — burying the unknown-config-key
+  warning, the one startup message that means the user made a mistake, and training red-blindness
+  wherever stderr is coloured as the error stream. `log_config_sourcing` now defaults to false and
+  `log_level` to 0 (the value every `ocannl_config` in this repository had already chosen), taking a
+  default run's stderr to three lines: the welcome banner and whatever warnings there are. Enabling
+  `log_config_sourcing` now traces every key rather than deferring to `log_level`, which is the
+  reading of "tell me where the configuration came from" — including the bootstrap keys resolved
+  before the config file can turn the trace on (`no_config_file`, `suppress_welcome_message` and the
+  setting's own lookup), which get a report of their own, defaulted cases included, since they
+  cannot report themselves as they go. Groundwork, separately defensible: the
+  CUDA and HIP backends' `with_debug` — the RTC flag that keeps a compilation log on a SUCCESSFUL
+  compile — no longer keys on `log_level`, only on `output_debug_files_in_build_directory`, whose
+  build file is the log's only reader.
 
 - The autotuner's schedule disk-cache key gained a **codegen component** (gh-ocannl-572): the
   backend-independent emission gates (`large_models`, `buffer_aliasing`, the effective

@@ -22,10 +22,11 @@
 # config file.
 #
 # Only one `ocannl_config` file is used per run, searched for in the current directory
-# and in ancestor directories. Unless `log_config_sourcing` is false, the source of the
-# `log_level` config is always printed, and the sources of other configs are printed
-# when the log level > 0. This startup chatter -- the welcome message included -- goes to
-# stderr, so an OCANNL-linked executable's stdout stays a clean data channel.
+# and in ancestor directories. Set `log_config_sourcing` to see where each setting a run
+# reads comes from. This startup chatter -- the welcome message included -- goes to
+# stderr, so an OCANNL-linked executable's stdout stays a clean data channel; stderr in
+# turn stays quiet by default, so that a warning -- e.g. about an unknown config key --
+# is legible when it appears.
 #
 # Every setting below is COMMENTED OUT and its value is (one of) the defaults, so that
 # this file can be copied wholesale to an `ocannl_config` without thereby stating a
@@ -44,12 +45,12 @@
 # variable configuration is used.
 #no_config_file=false
 
-# If true, prints to stderr where each configuration setting comes from (commandline,
-# environment, config file, or the hard-coded default): always for `log_level`, and for the
-# remaining settings when the log level > 0. Set to false to keep the output clean, e.g. in tests;
-# re-enable it (also for a single run, via `--ocannl_log_config_sourcing=true`) to debug
-# which configuration a run actually picks up.
-#log_config_sourcing=true
+# If true, prints to stderr where each setting a run reads comes from (commandline,
+# environment, config file, or the hard-coded default). Off by default: the trace runs to
+# some eighty lines on a run that reads a config file, and it would bury the warnings that
+# share stderr with it. Enable it (also for a single run, via
+# `--ocannl_log_config_sourcing=true`) to debug which configuration a run actually picks up.
+#log_config_sourcing=false
 
 # A goal-oriented preset bundle. Two are built in:
 #   reproducible -- deterministic, and identical across machines wherever reasonable
@@ -86,8 +87,10 @@
 
 # Configurations that are stored as `Utils.settings`:
 
-# The log level, for ppx_minidebug and with a few other uses in OCANNL.
-#log_level=1
+# The log level, for ppx_minidebug and with a few other uses in OCANNL. 0 (the default) is
+# quiet; 1 adds e.g. backend info to printed tensor headers; the settings that make the
+# generated code itself verbose require 2 (see the two entries below).
+#log_level=0
 
 # If `log_level` is at least 2 and this is true, the generated code will contain
 # printf statements, whose output is then (typically) integrated into ppx_minidebug logs.

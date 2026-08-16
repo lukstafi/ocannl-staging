@@ -90,9 +90,9 @@ Testing notes:
 - Tests read `test/config/ocannl_config` and can emit .ll/.c/.cu/.metal into build_files/.
 - Config startup chatter (the welcome message, the `log_config_sourcing` trace, the profile
   banner) goes to stderr, so an OCANNL-linked executable's stdout stays a clean data channel and
-  `.expected` goldens (dune captures stdout) never see it. Pass `--ocannl_log_config_sourcing=true`
-  (or set it in the config file) to see where each setting a run reads comes from; the test configs
-  set `log_config_sourcing=false` to keep terminal output quiet.
+  `.expected` goldens (dune captures stdout) never see it. The sourcing trace is off by default, so
+  stderr carries little more than warnings; pass `--ocannl_log_config_sourcing=true` (or set it in
+  the config file) to see where each setting a run reads comes from.
   Canonical workflow:
   write the test, run `dune build test/<...>.exe.output`, then either
   `cp _build/default/test/<...>.exe.output test/<name>.expected` or `dune promote`. Both

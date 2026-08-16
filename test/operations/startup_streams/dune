@@ -1,0 +1,103 @@
+; gh-ocannl-593 / gh-ocannl-595: the two streams an OCANNL-linked executable writes at startup.
+; The local ocannl_config (not the shared test/config one -- the config search stops at the first
+; file walking up from the working directory) is deliberately a DEFAULT configuration carrying an
+; unknown key; see the comments there and in startup_streams.ml.
+
+(executable
+ (name startup_streams)
+ (modules startup_streams)
+ (libraries base arrayjit.utils stdio))
+
+; The stdout half, with the chatter turned all the way UP: `no_config_file` picks the
+; "Configuration defaults file is disabled" welcome arm, and the sourcing trace reports every key
+; the library reads. `with-stdout-to` captures stdout ALONE, which is exactly the discrimination
+; the test needs -- the golden is empty, and it is the whole assertion. The dep on ocannl_config
+; is what config_dep_completeness asks of a rule that runs an executable; this rule disables the
+; file rather than reading it, and depending on it anyway keeps the two claims independent.
+
+(rule
+ (target stdout_clean.actual)
+ (deps ocannl_config)
+ (action
+  (with-stdout-to
+   %{target}
+   (run
+    %{dep:startup_streams.exe}
+    --ocannl_no_config_file=true
+    --ocannl_log_config_sourcing=true
+    --ocannl_log_level=1))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff stdout_clean.expected stdout_clean.actual)))
+
+; The stderr half, on a default run: the subject writes nothing itself, so the golden is the
+; library's entire startup output -- and the point is that a warning is legible in it. The second
+; process is the same executable in its normalizer mode, stripping the build directory from the
+; config file's absolute path; it is given a silent configuration of its own so that the build log
+; does not carry a copy of the chatter under test.
+;
+; The env_var deps are what make the executable's own guard reachable: dune tracks no environment
+; variable but OCANNL_BACKEND, so an ambient OCANNL setting arriving after this target was built
+; would otherwise leave the stale .raw in place and the test green without having run (Codex P2 on
+; PR #348). Declaring them makes the change invalidate the rule, the guard fire, and the run fail
+; by name. All four spellings of each, as `Utils.env_var_names` builds them -- note that the dashed
+; variants dash only the PREFIX (`ocannl-log_level`, not `ocannl-log-level`), so an all-dashed
+; spelling would declare a variable nothing reads. The keys are the ones that shape stderr -- what
+; the guard checks, less `clean_up_*`, which are pinned on the commandline below and so cannot be
+; reached from the environment.
+
+(rule
+ (target default_stderr.raw)
+ (deps
+  ocannl_config
+  (env_var ocannl_suppress_welcome_message)
+  (env_var OCANNL_SUPPRESS_WELCOME_MESSAGE)
+  (env_var ocannl-suppress_welcome_message)
+  (env_var OCANNL-SUPPRESS_WELCOME_MESSAGE)
+  (env_var ocannl_log_config_sourcing)
+  (env_var OCANNL_LOG_CONFIG_SOURCING)
+  (env_var ocannl-log_config_sourcing)
+  (env_var OCANNL-LOG_CONFIG_SOURCING)
+  (env_var ocannl_log_level)
+  (env_var OCANNL_LOG_LEVEL)
+  (env_var ocannl-log_level)
+  (env_var OCANNL-LOG_LEVEL)
+  (env_var ocannl_no_config_file)
+  (env_var OCANNL_NO_CONFIG_FILE)
+  (env_var ocannl-no_config_file)
+  (env_var OCANNL-NO_CONFIG_FILE)
+  (env_var ocannl_profile)
+  (env_var OCANNL_PROFILE)
+  (env_var ocannl-profile)
+  (env_var OCANNL-PROFILE))
+ (action
+  (with-stderr-to
+   %{target}
+   (run
+    %{dep:startup_streams.exe}
+    guard
+    --ocannl_clean_up_build_files_on_startup=false
+    --ocannl_clean_up_log_files_on_startup=false))))
+
+(rule
+ (target default_stderr.actual)
+ (deps ocannl_config)
+ (action
+  (with-stdin-from
+   %{dep:default_stderr.raw}
+   (with-stdout-to
+    %{target}
+    (run
+     %{dep:startup_streams.exe}
+     normalize
+     --ocannl_no_config_file=true
+     --ocannl_suppress_welcome_message=true)))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff default_stderr.expected default_stderr.actual)))

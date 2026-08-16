@@ -408,8 +408,14 @@ let bool_of_config_string ~arg_name s =
     file, or the hard-coded default). It gates the logging of the config-reading functions
     themselves, so it is bootstrapped directly rather than via {!get_global_arg}: the initial value
     only reflects the commandline and the environment, and the config file setting is applied once
-    the config file is read. Can also be set programmatically, e.g. to trace configs a test reads. *)
-let log_config_sourcing = ref true
+    the config file is read. Can also be set programmatically, e.g. to trace configs a test reads.
+
+    Opt-in (gh-ocannl-595): the trace is a debugging tool -- some eighty lines on a run that reads a
+    config file -- and it shares stderr with the unknown-config-key warning, the one startup message
+    that means the user made a mistake. Enabling it traces every key, without a second dependence on
+    [log_level]: it says "tell me where the configuration came from", and answering that for one key
+    is not a useful reading of it. *)
+let log_config_sourcing = ref false
 
 let env_var_names n =
   let env_variants = [ "ocannl_" ^ n; "ocannl-" ^ n ] in
@@ -454,21 +460,16 @@ let read_env_var n =
   | Some (env_n, result) -> Some (result, env_n)
 
 (** The bootstrap reader: the few keys that are consulted before the config file exists (and hence
-    before profiles are resolved) come from the commandline or the environment only. *)
+    before profiles are resolved) come from the commandline or the environment only.
+
+    Silent, deliberately. These keys are read before {!log_config_sourcing} is resolved -- one of the
+    reads IS that resolution -- so nothing here can know whether anyone asked for a trace, and each
+    is read more than once besides (three call sites consult [suppress_welcome_message]). Their
+    provenance is reported once, in full, by [bootstrap_config_report] below. *)
 let read_cmdline_or_env_var n =
-  let with_debug =
-    !log_config_sourcing
-    && (settings.log_level > 0 || equal_string n "log_level")
-    && not (Hash_set.mem accessed_global_args n)
-  in
   match read_cmdline_var n with
-  | Some (result, arg) ->
-      if with_debug then Stdio.eprintf "Found %s, commandline %s\n%!" result arg;
-      Some result
-  | None ->
-      Option.map (read_env_var n) ~f:(fun (result, env_n) ->
-          if with_debug then Stdio.eprintf "Found %s, environment %s\n%!" result env_n;
-          result)
+  | Some (result, _arg) -> Some result
+  | None -> Option.map (read_env_var n) ~f:fst
 
 (* Originally from the library core.filename_base. *)
 let filename_parts filename =
@@ -758,6 +759,61 @@ let active_profile =
               (describe_config_level level);
           (level, name, parse_profile_payload ~name text))
 
+(** The provenance of the settings that resolve before {!get_global_arg_with_source} can report
+    them, which is exactly the four read directly above: the three bootstrap keys and [profile].
+    Everything else in OCANNL goes through that function and is traced as it goes.
+
+    They cannot report themselves as they go. Each bootstrap key is read before
+    {!log_config_sourcing} is settled -- one of the reads settles it -- and each is read more than
+    once; [profile] resolves before the trace has a place to put a "not picked" line. So the report
+    is assembled here instead, walking the same sources in the same order, and it covers the
+    DEFAULTED cases: a run that sets none of the four still says so, which is what makes enabling
+    the trace in a config file (the common way) report every setting the run read. Reporting only
+    what was found is where rounds 1 and 2 of Codex's review on PR #348 went wrong twice.
+
+    Recomputed rather than remembered: the lookups are pure functions of [Sys.argv], the environment
+    and the config table, so one place holding the whole precedence walk cannot drift from the
+    resolution the way scattered logging did. Two asymmetries are real, not oversights: a config
+    file cannot supply [no_config_file] (it is what decides whether the file is read at all), and no
+    profile can supply any of the bootstrap keys -- {!profile_ineligible_keys} rejects them,
+    profiles being resolved later still. The bootstrap keys all default to false, [profile] to
+    unset. *)
+let () =
+  if !log_config_sourcing then (
+    Stdio.eprintf
+      "\nOCANNL: settings resolved before the ordinary per-key trace could report them:\n%!";
+    let report n line =
+      Stdio.eprintf "Retrieving commandline, environment, or config file variable ocannl_%s\n%!" n;
+      Stdio.eprintf "%s\n%!" line
+    in
+    List.iter
+      [ "log_config_sourcing"; "no_config_file"; "suppress_welcome_message" ]
+      ~f:(fun n ->
+        let from_file =
+          if equal_string n "no_config_file" then None else Hashtbl.find config_file_args n
+        in
+        let value, source =
+          match read_cmdline_var n with
+          | Some (value, arg) -> (value, From_cmdline arg)
+          | None -> (
+              match read_env_var n with
+              | Some (value, var) -> (value, From_env var)
+              | None -> (
+                  match from_file with
+                  | Some value -> (value, From_config_file)
+                  | None -> ("false", From_default)))
+        in
+        report n (describe_config_source ~value ~default:"false" source));
+    (* Taken from the resolved profile rather than re-walked: the walk above it normalizes empty
+       values and falls through per level, and a second copy of that rule could disagree with the
+       one that decides. The banner it prints on the way is about the payload taking effect; this
+       line is about where the setting came from, and only it appears when no profile is picked. *)
+    report "profile"
+      (match active_profile with
+      | Some (level, name, _) ->
+          Printf.sprintf "Found %s, in %s" name (describe_config_level level)
+      | None -> describe_config_source ~value:"" ~default:"" From_default))
+
 let profile_lookup =
   Option.map active_profile ~f:(fun (level, name, table) ->
       (level, name, fun key -> Hashtbl.find table key))
@@ -766,11 +822,7 @@ let profile_lookup =
     payload of the profile picked at one of those levels; returns [default] if none has it, together
     with where the value came from. *)
 let get_global_arg_with_source ~default ~arg_name:n =
-  let with_debug =
-    !log_config_sourcing
-    && (settings.log_level > 0 || equal_string n "log_level")
-    && not (Hash_set.mem accessed_global_args n)
-  in
+  let with_debug = !log_config_sourcing && not (Hash_set.mem accessed_global_args n) in
   if with_debug then
     Stdio.eprintf "Retrieving commandline, environment, or config file variable ocannl_%s\n%!" n;
   let result, source =
@@ -787,9 +839,14 @@ let get_global_flag ~default ~arg_name:n =
   bool_of_config_string ~arg_name:n
   @@ get_global_arg ~default:(if default then "true" else "false") ~arg_name:n
 
+(* Defaults to 0 (gh-ocannl-595): every [ocannl_config] in this repository chose 0, which is the
+   measure of a suspect default. Level 1 is a verbosity the user asks for -- it adds the backend
+   info to {!Tnode.header} and raises the ppx_minidebug runtime's threshold; the gates that change
+   what a kernel computes ([with_runtime_debug], [debug_log_from_routines]) sit at level 2 and are
+   unaffected. *)
 let original_log_level =
   let log_level =
-    let s = String.strip @@ get_global_arg ~default:"1" ~arg_name:"log_level" in
+    let s = String.strip @@ get_global_arg ~default:"0" ~arg_name:"log_level" in
     match Int.of_string_opt s with
     | Some ll -> ll
     | None -> invalid_arg @@ "ocannl_log_level setting should be an integer; found: " ^ s
