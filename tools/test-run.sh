@@ -57,8 +57,6 @@ die() { echo "test-run: $*" >&2; exit 2; }
 # at this worktree's root no matter where the caller's cwd wandered, and the
 # per-worktree lock below keys on the tree actually being tested.
 cd "$(dirname "$0")/.." || die "cannot cd to repo root"
-command -v dune >/dev/null 2>&1 || . tools/opam-env.sh
-command -v dune >/dev/null 2>&1 || die "dune not found (opam environment not set up?)"
 
 RUNS=${OCANNL_TEST_RUNS:-$HOME/.ocannl-test-runs}
 mkdir -p "$RUNS" || die "cannot create $RUNS"
@@ -93,6 +91,10 @@ capped_perl='
   my $pid = fork();
   die "fork: $!" unless defined $pid;
   if (!$pid) {
+    # The wrapper ignores TERM/INT/HUP, and SIG_IGN survives fork AND exec --
+    # without this reset dune would start deaf to the very signals the cap
+    # and `stop` rely on, degrading every cancellation to the KILL escalation.
+    $SIG{TERM} = "DEFAULT"; $SIG{INT} = "DEFAULT"; $SIG{HUP} = "DEFAULT";
     eval { setpgrp(0, 0) };
     eval {
       if ($ENV{OCANNL_TESTRUN_RD} && getpgrp(0) == $$) {
@@ -144,9 +146,13 @@ capped_perl='
 take_lock() {
   exec 9>>"$PWD/.test-run.lock" || die "cannot open lock file"
   perl -e 'use Fcntl ":flock"; exit(flock(STDIN, LOCK_EX | LOCK_NB) ? 0 : 1)' <&9 || {
+    # The owner pointer, not `last`: with OCANNL_TEST_RUNS overridden, the
+    # refused invocation's `last` can resolve in a DIFFERENT state directory
+    # (or nowhere), which would leave the lock holder uninspectable.
+    owner=$(cat "$PWD/.test-run.lock.owner" 2>/dev/null)
     echo "test-run: another test-run is active in this worktree; check it with:" >&2
-    echo "  tools/test-run.sh status last" >&2
-    echo "(a stale one can be stopped with: tools/test-run.sh stop last)" >&2
+    echo "  tools/test-run.sh status ${owner:-last}" >&2
+    echo "(a stale one can be stopped with: tools/test-run.sh stop ${owner:-last})" >&2
     exit 2
   }
 }
@@ -158,6 +164,10 @@ new_run() {
   printf '%s\n' "$cap" >"$run_dir/cap"
   : >"$run_dir/log"
   ln -sfn "$run_dir" "$RUNS/last-$wt_key"
+  # Advisory owner pointer for the lock-refusal message (the lock itself is
+  # the authority; a crash merely leaves this stale, and its reader only
+  # uses it to TARGET status/stop).
+  printf '%s\n' "$run_dir" >"$PWD/.test-run.lock.owner"
   # Runs are throwaway diagnostics; reap old ones so the directory cannot grow
   # without bound. Deletion demands the full run schema -- the timestamped
   # name AND this script's metadata files -- never mere position under $RUNS,
@@ -229,13 +239,16 @@ digest() {
   echo "command: dune $(cat "$dir/cmd")"
   echo "verdict: $verdict (exit $rc)"
   echo "log:     $dir/log"
-  if grep -qE '^File "[^"]*\.expected"|\.corrected' "$dir/log" 2>/dev/null; then
+  # Digest sits on `wait`'s deadline path, so it examines at most the last
+  # 10MB of the log rather than scaling with an arbitrarily noisy run.
+  scan_log() { tail -c 10000000 "$dir/log" 2>/dev/null; }
+  if scan_log | grep -qE '^File "[^"]*\.expected"|\.corrected'; then
     echo "promotion diffs present -- inspect the log, accept with \`dune promote\`" \
          "(tools/promote.sh on Windows)"
   fi
   if [ "$rc" != 0 ]; then
-    fp=$({ grep -hoE '^File "[^"]+", line [0-9]+' "$dir/log"
-           grep -hoE '^(Error|Fatal error|Exception)[^,]*' "$dir/log"
+    fp=$({ scan_log | grep -oE '^File "[^"]+", line [0-9]+'
+           scan_log | grep -oE '^(Error|Fatal error|Exception)[^,]*'
          } 2>/dev/null | sort -u | head -40)
     if [ -n "$fp" ]; then
       echo "fingerprint:"
@@ -272,6 +285,15 @@ case $sub in
     # disable the alarm -- the one property this script must never lose.
     case $cap in '' | *[!0-9]*) die "--cap must be a nonnegative integer of seconds (0 disables)" ;; esac
     [ $# -gt 0 ] || set -- runtest
+    # The toolchain check gates only LAUNCHES: status/wait/stop/list must
+    # keep working from a shell with no opam environment -- not least so a
+    # runaway launched under an earlier environment can still be stopped.
+    command -v dune >/dev/null 2>&1 || . tools/opam-env.sh
+    command -v dune >/dev/null 2>&1 || die "dune not found (opam environment not set up?)"
+    # On Windows every link step floods stderr with benign binutils warnings
+    # that would drown the digest's log tail; dune-quiet.sh filters exactly
+    # those while preserving dune's exit status (CLAUDE.md).
+    case ${OSTYPE:-} in msys* | cygwin*) DUNE=tools/dune-quiet.sh ;; *) DUNE=dune ;; esac
     take_lock
     new_run "$@"
     # ONE launch shape for both modes: a wrapper subshell owns the supervisor
@@ -288,7 +310,7 @@ case $sub in
       # It exits naturally right after, and KILL remains available.
       trap '' HUP TERM INT
       OCANNL_TESTRUN_BG=1 OCANNL_TESTRUN_RD=$run_dir \
-        perl -e "$capped_perl" -- "$cap" dune "$@" >>"$run_dir/log" 2>&1 &
+        perl -e "$capped_perl" -- "$cap" "$DUNE" "$@" >>"$run_dir/log" 2>&1 &
       sup=$!
       printf '%s\n' "$sup" >"$run_dir/pid"
       ps -o lstart= -p "$sup" 2>/dev/null >"$run_dir/ptoken"
