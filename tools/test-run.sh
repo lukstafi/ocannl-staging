@@ -377,6 +377,15 @@ publish_run() {
   }
 }
 
+# The two-party publication handshake commits through ONE O_EXCL-created
+# file: the launcher claims "published" before touching any pointer, the
+# wrapper claims "expired" when its bounded wait runs out, and the first
+# writer wins -- expiry and publication are mutually exclusive by
+# construction, with no check-then-act gap between separate marker files.
+claim_handoff() { # <published|expired>
+  ( set -C; printf '%s\n' "$1" >"$run_dir/handoff" ) 2>/dev/null
+}
+
 resolve_run() {
   local ref=${1:-last}
   if [ "$ref" = last ]; then
@@ -590,19 +599,18 @@ case $sub in
           kill -KILL -- "-$pgid" 2>/dev/null
       fi
       finish_run "$rc"
-      # Publication handshake: hold the lock until the parent has published
-      # this run (bounded, so an abandoned launch cannot pin it). A fast
-      # dune could otherwise let a SECOND run acquire the lock and publish,
-      # only to have `last` and the owner pointer overwritten with this
-      # already-finished run when its launcher resumed.
+      # Publication handshake: hold the lock until the launcher has claimed
+      # publication (bounded, so an abandoned launch cannot pin it) -- a
+      # fast dune could otherwise let a SECOND run acquire and publish, only
+      # to be overwritten when this stalled launcher resumed. The claim is
+      # the O_EXCL arbiter (see claim_handoff); after a "published" claim
+      # this wrapper still holds the lock for up to one poll interval, which
+      # covers the launcher's ms-scale pointer writes.
       for _ in 1 2 3 4 5 6 7 8 9 10; do
-        [ -f "$run_dir/published" ] && break
+        [ -f "$run_dir/handoff" ] && break
         sleep 1
       done
-      # An expired handshake is recorded so the resumed launcher knows NOT
-      # to publish: the lock it would be publishing under may already belong
-      # to a newer run.
-      [ -f "$run_dir/published" ] || : >"$run_dir/handshake_expired" 2>/dev/null
+      [ -f "$run_dir/handoff" ] || claim_handoff expired || :
       # Release protocol: simply close our fd. The lock lives on the shared
       # open file DESCRIPTION, so the kernel releases it exactly when the
       # last holder closes -- and any leftover descendant that can still
@@ -627,16 +635,14 @@ case $sub in
     # recorded would be invisible to status/stop and must not report started.
     { printf '%s\n' "$wrapper" >"$run_dir/wpid" &&
       ps_token "$wrapper" >"$run_dir/wtoken"; } || wrap_ids=bad
-    if [ -f "$run_dir/handshake_expired" ]; then
-      # The wrapper waited out the handshake and released the lock before
-      # this launcher got to publish (descheduled >10s around a fast dune).
-      # The lock may already belong to a newer run, and publishing now
-      # would overwrite THAT run's `last`/owner pointers with this finished
-      # one -- keep the verdict, skip publication. (A wrapper expiring in
-      # the final ms before our publish still loses this race; the window
-      # is milliseconds and misdirects only the convenience pointers.)
+    if ! claim_handoff published; then
+      # The wrapper won the arbiter with "expired": it released the lock,
+      # which may already belong to a newer run whose `last`/owner pointers
+      # must not be overwritten by this finished one -- keep the verdict,
+      # skip publication.
       echo "test-run: launch stalled past the publication handshake;" >&2
       echo "  verdict kept unpublished at: $(printf %q "$run_dir")" >&2
+      unpublished=1
     elif [ "${wrap_ids:-ok}" = bad ] || ! publish_run; then
       # An unpublishable run must not keep running untracked: cancel via the
       # supervisor (waiting briefly for the wrapper to record its pid) and
@@ -646,9 +652,6 @@ case $sub in
       # be reaped, and its recycled pid must not receive the TERM.
       sup_alive "$run_dir" && kill -TERM "$(cat "$run_dir/pid")" 2>/dev/null
       die "run could not be published; cancelled it (remnants at $run_dir)"
-    else
-      # The wrapper's unlock handshakes on this marker (see above).
-      : >"$run_dir/published" 2>/dev/null || :
     fi
     if [ "$sub" = run ]; then
       # Attached: wait for the wrapper -- its exit means the verdict file is
@@ -675,11 +678,21 @@ case $sub in
     fi
     trap - INT TERM HUP
     disown
-    echo "started: $run_dir"
-    echo "  command: dune $*"
-    echo "  log:     $run_dir/log"
-    echo "  check:   tools/test-run.sh status last    # from this worktree; never blocks"
-    echo "  gate:    tools/test-run.sh wait last      # bounded; exits with dune's status"
+    if [ -n "${unpublished:-}" ]; then
+      # No `last` link exists for this run -- pointing at `last` would
+      # inspect the wrong run or fail. Name the directory explicitly.
+      q=$(printf %q "$run_dir")
+      echo "started UNPUBLISHED (handshake expired): $run_dir"
+      echo "  command: dune $*"
+      echo "  check:   tools/test-run.sh status $q"
+      echo "  gate:    tools/test-run.sh wait $q"
+    else
+      echo "started: $run_dir"
+      echo "  command: dune $*"
+      echo "  log:     $run_dir/log"
+      echo "  check:   tools/test-run.sh status last    # from this worktree; never blocks"
+      echo "  gate:    tools/test-run.sh wait last      # bounded; exits with dune's status"
+    fi
     ;;
   status)
     resolve_run "${1:-last}"
@@ -841,6 +854,9 @@ case $sub in
       fi
     }
     reap_leftovers() { # <signal>
+      # Ownership rechecked at entry (and per census kill below): if the
+      # lock changed hands since the caller's gate, nothing here may fire.
+      lock_still_owned "$run_dir" || return 0
       if group_verified "$run_dir"; then
         kill "-$1" -- "-$(cat "$run_dir/pgid")" 2>/dev/null
       fi
@@ -848,8 +864,13 @@ case $sub in
         case $p in '' | *[!0-9]* | 0) continue ;; esac
         # Re-verified per pid immediately before the signal: the census ran
         # as one batch, and a holder that exited meanwhile could have had
-        # its pid recycled by an unrelated process.
+        # its pid recycled by an unrelated process. The ownership recheck
+        # closes the handoff race too -- if a NEW launch acquired the lock
+        # mid-reap, take_lock cleared the owner pointer atomically with
+        # acquisition, so the pointer can no longer name this run and the
+        # new run's holders are never signaled.
         holds_lock_now "$p" || continue
+        lock_still_owned "$run_dir" || return 0
         kill "-$1" "$p" 2>/dev/null
       done
     }
