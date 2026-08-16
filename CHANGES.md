@@ -52,8 +52,8 @@
   `log_config_sourcing` now traces every key rather than deferring to `log_level`, which is the
   reading of "tell me where the configuration came from" — including the bootstrap keys resolved
   before the config file can turn the trace on (`no_config_file`, `suppress_welcome_message` and the
-  setting's own lookup), whose provenance is buffered and replayed once it is known that someone
-  asked for it. Groundwork, separately defensible: the
+  setting's own lookup), which get a report of their own, defaulted cases included, since they
+  cannot report themselves as they go. Groundwork, separately defensible: the
   CUDA and HIP backends' `with_debug` — the RTC flag that keeps a compilation log on a SUCCESSFUL
   compile — no longer keys on `log_level`, only on `output_debug_files_in_build_directory`, whose
   build file is the log's only reader.
