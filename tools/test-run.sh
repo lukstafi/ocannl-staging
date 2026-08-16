@@ -519,13 +519,19 @@ resolve_run() {
     # The pointer is a plain file (see publish_run). A symlink there was
     # written by a version predating that change and may still name a run
     # that is LIVE -- `stop last` has to be able to reach one, and only a
-    # later publication replaces the link -- so read whichever form is
-    # present rather than waiting for the migration.
-    if [ -L "$RUNS/last-$wt_key" ]; then
-      run_dir=$(readlink "$RUNS/last-$wt_key" 2>/dev/null) || run_dir=
-    else
-      run_dir=$(cat "$RUNS/last-$wt_key" 2>/dev/null) || run_dir=
-    fi
+    # later publication replaces the link -- so both spellings are read.
+    #
+    # Deliberately NOT a `-L` test selecting the matching read: publish_run's
+    # rename can replace the symlink with the pointer file between the test
+    # and the read, and a reader must not fail on a path that named a valid
+    # run throughout. Trying the reads themselves has no such gap, in THIS
+    # order: a symlink can only ever become a file (publish_run writes
+    # nothing else), so a failed `readlink` means `cat` now applies. The
+    # reverse order would still race -- `cat` fails on a symlink to a
+    # directory, and the rename could land before the `readlink` retry.
+    run_dir=$(readlink "$RUNS/last-$wt_key" 2>/dev/null) || run_dir=
+    [ -n "$run_dir" ] ||
+      { run_dir=$(cat "$RUNS/last-$wt_key" 2>/dev/null) || run_dir=; }
     [ -n "$run_dir" ] || die "no runs recorded for this worktree"
     [ -d "$run_dir" ] || die "no such run: $run_dir"
   elif [ -d "$ref" ]; then
