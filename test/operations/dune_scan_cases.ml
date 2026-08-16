@@ -145,6 +145,11 @@ let cases =
     ( "a bare word is still a tool on PATH",
       {dune|(rule (action (run diff a b)))|dune},
       [] );
+    (* An absolute path names something the system provides -- no more ours than a bare word is
+       (Codex P2, round 18). *)
+    ( "an absolute path is a system tool",
+      {dune|(rule (action (run /usr/bin/python3 --version)))|dune},
+      [] );
     (* A PATH tool handed something this repository builds may be launching it (`env probe.exe`)
        or reading it (`diff old.exe new.exe`), and dune's grammar does not say which -- so neither
        is guessed: the pair is reported, and the check settles it the way it settles every other
@@ -184,6 +189,11 @@ let cases =
     (* A rewritten PATH is the other way a command name stops saying what it names: there even a
        bare word may be a local executable, so the External verdict is the one that cannot be
        trusted under it (Codex P2, round 16). *)
+    (* An action head the scan cannot place keeps the directory it sits in, since it may run an
+       OCANNL program there (Codex P2, round 18). *)
+    ( "an unclassified action under a chdir keeps that directory",
+      {dune|(rule (deps child/ocannl_config) (action (chdir child (invent-an-action probe.exe))))|dune},
+      [ "in child: rule with an action this scan cannot place: invent-an-action [declares]" ] );
     ( "a rewritten PATH makes a bare command unplaceable",
       {dune|(rule (deps ocannl_config) (action (setenv PATH . (run env probe))))|dune},
       [
@@ -330,6 +340,16 @@ let cases =
       [ "test a [declares]"; "rule running e.exe [declares]"; "test b" ] );
   ]
 
+(* Stanzas that rewrite the executable search path for a whole directory, which the check refuses
+   rather than modelling. Only the NAME position of an `env-vars` binding counts: setting some
+   other variable to the literal value `PATH` rewrites nothing (Codex P2, round 18). *)
+let path_rewriting_cases =
+  [
+    ("an env stanza setting PATH", {dune|(env (_ (env-vars (PATH .))))|dune}, [ "env" ]);
+    ("one setting something else to PATH", {dune|(env (_ (env-vars (OTHER PATH))))|dune}, []);
+    ("an env stanza that touches neither", {dune|(env (_ (flags (:standard))))|dune}, []);
+  ]
+
 (* WHICH config file a stanza depends on, as written. The scan reports the paths; which of them is
    the one the process will actually read is the check's decision, since only it knows where
    configs exist -- OCANNL walks up from the process directory and reads the first it finds, so an
@@ -438,6 +458,8 @@ let () =
           []
       in
       check name expected found);
+  List.iter path_rewriting_cases ~f:(fun (name, source, expected) ->
+      check ("path-rewriting stanzas -- " ^ name) expected (Scan.path_rewriting_stanzas source));
   List.iter declared_paths_cases ~f:(fun (name, source, expected) ->
       let found =
         List.concat_map (Scan.sites source) ~f:(fun site -> site.Scan.declared_config_paths)

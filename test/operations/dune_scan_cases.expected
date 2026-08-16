@@ -30,12 +30,14 @@ ok: the child's own config answers it as well
 ok: a sibling chdir is reported at the sibling
 ok: an explicit relative program is a site without an extension
 ok: a bare word is still a tool on PATH
+ok: an absolute path is a system tool
 ok: a launcher's target is reported without guessing that it is one
 ok: and so is a tool that is only reading them
 ok: an unresolvable argument counts as much as a resolved one
 ok: ordinary arguments are not executables
 ok: a chdir to a pform leaves the directory unestablished
 ok: a chdir to a pform over a PATH tool is not
+ok: an unclassified action under a chdir keeps that directory
 ok: a rewritten PATH makes a bare command unplaceable
 ok: but a path-qualified command still names what it names
 ok: a chdir under a PATH rewrite keeps its directory
@@ -66,6 +68,9 @@ ok: a subdir's stanzas are the same kinds of site
 ok: a nested subdir names the path it applies to
 ok: stanzas outside the subdir keep the dune file's own directory
 ok: stanzas are reported in file order
+ok: path-rewriting stanzas -- an env stanza setting PATH
+ok: path-rewriting stanzas -- one setting something else to PATH
+ok: path-rewriting stanzas -- an env stanza that touches neither
 ok: declared config paths -- the local one
 ok: declared config paths -- one in a sibling
 ok: declared config paths -- one in a common parent, which a sibling chdir may legitimately need

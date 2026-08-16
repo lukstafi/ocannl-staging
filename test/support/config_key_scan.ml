@@ -388,9 +388,14 @@ let unqualified_settings_reads content =
                      `settings.k` under an open, or `U.settings.k` under an alias. *)
                   found := expr.pexp_loc.loc_start.pos_cnum :: !found
               | _ -> ())
-          | Pexp_ident { txt; _ } when is_utils_settings (flatten_longident txt) ->
-              (* Recorded now, discarded below if it turns out to be a blessed receiver: the field
-                 access is visited before its receiver. *)
+          | Pexp_ident { txt; _ }
+            when List.last (flatten_longident txt)
+                 |> Option.value_map ~default:false ~f:(String.equal "settings") ->
+              (* Any identifier ending in `settings`, not only the qualified one: under a local
+                 open the record is spelled bare, and `read settings` hands it on just as
+                 `read Utils.settings` does (Codex P2, round 18). Recorded now and discarded below
+                 if it turns out to be a blessed receiver -- a field access is visited before its
+                 receiver. *)
               found := expr.pexp_loc.loc_start.pos_cnum :: !found
           | _ -> ());
           Ast_iterator.default_iterator.expr self expr);

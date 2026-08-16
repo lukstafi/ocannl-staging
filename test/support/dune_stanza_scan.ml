@@ -272,10 +272,17 @@ let program_path path = Option.value (String.chop_prefix path ~prefix:"./") ~def
 
 let is_executable path = String.is_suffix path ~suffix:".exe"
 
-(* An explicit path is not a PATH lookup. `./probe` and `../tools/probe` name something this
-   repository produced, whatever their extension, and stripping the `./` before asking loses the
-   one thing that distinguishes them from `python3` (Codex P2, round 8). *)
-let is_explicit_path path = String.is_prefix path ~prefix:"./" || String.contains path '/'
+(* An explicit RELATIVE path is not a PATH lookup. `./probe` and `../tools/probe` name something
+   this repository produced, whatever their extension, and stripping the `./` before asking loses
+   the one thing that distinguishes them from `python3` (Codex P2, round 8). An ABSOLUTE one names
+   something the system provides -- `/usr/bin/python3` is no more ours than `python3` is (round
+   18). *)
+let is_absolute path =
+  String.is_prefix path ~prefix:"/" || String.is_prefix path ~prefix:"\\"
+  || (String.length path >= 2 && Char.equal path.[1] ':')
+
+let is_explicit_path path =
+  (not (is_absolute path)) && (String.is_prefix path ~prefix:"./" || String.contains path '/')
 
 let classify_command ~named_deps cmd =
   let explicit = is_explicit_path cmd in
@@ -426,25 +433,30 @@ let rec commands_in ?(cwd = "") sexp =
 
 (** Heads inside a stanza's [(action …)] that are on neither action list, each once. *)
 let unclassified_action_heads stanza =
-  let rec walk_action sexp =
+  (* With the directory it sits in: an unknown action may run an OCANNL program, and a `chdir`
+     around it moves where that would read its configuration (Codex P2, round 18). *)
+  let rec walk_action ~cwd sexp =
     match sexp with
     | Sexp.Atom _ -> []
+    | Sexp.List (Sexp.Atom "chdir" :: Sexp.Atom dir :: rest) ->
+        List.concat_map rest ~f:(walk_action ~cwd:(in_subdir cwd dir))
     | Sexp.List (Sexp.Atom head :: args) ->
         let nested =
           (* A program action's arguments are its command line, not further actions. *)
           if List.mem program_actions head ~equal:String.equal then []
-          else List.concat_map args ~f:walk_action
+          else List.concat_map args ~f:(walk_action ~cwd)
         in
         if
           List.mem program_actions head ~equal:String.equal
           || List.mem inert_actions head ~equal:String.equal
         then nested
-        else head :: nested
-    | Sexp.List l -> List.concat_map l ~f:walk_action
+        else (cwd, head) :: nested
+    | Sexp.List l -> List.concat_map l ~f:(walk_action ~cwd)
   in
   match field stanza "action" with
   | None -> []
-  | Some args -> List.concat_map args ~f:walk_action |> List.dedup_and_sort ~compare:String.compare
+  | Some args ->
+      List.concat_map args ~f:(walk_action ~cwd:"") |> List.dedup_and_sort ~compare:Poly.compare
 
 (** What a stanza runs, each with the directory it runs in. *)
 let executables_run stanza =
@@ -631,8 +643,8 @@ let sites content =
           (* One site per directory the rule runs something in: what each needs is that
              directory's config, declared by the path that reaches it from here. *)
           sites_for ~is_test:false
-          @ List.concat_map (unclassified_action_heads stanza) ~f:(fun head ->
-                site Unclassified_action head)
+          @ List.concat_map (unclassified_action_heads stanza) ~f:(fun (cwd, head) ->
+                site ~cwd Unclassified_action head)
       | _ -> [])
 
 (** Stanza heads in [content] that {!sites} has no classification for, each once. The caller fails
@@ -660,10 +672,19 @@ let unclassified_heads content =
     [env] stanza at all, and the day one touches PATH the check says so rather than quietly reading
     bare names as tools (Codex P2, round 17 of PR #343). *)
 let path_rewriting_stanzas content =
+  (* The NAME position of an `env-vars` binding, not any atom in the stanza: setting some other
+     variable to the literal value `PATH` rewrites nothing (Codex P2, round 18). *)
+  let rec sets_path sexp =
+    match sexp with
+    | Sexp.List (Sexp.Atom "env-vars" :: bindings) ->
+        List.exists bindings ~f:(function
+          | Sexp.List (Sexp.Atom "PATH" :: _) -> true
+          | _ -> false)
+    | Sexp.List l -> List.exists l ~f:sets_path
+    | Sexp.Atom _ -> false
+  in
   walk "" (stanzas content) ~f:(fun _subdir stanza ->
-      match head stanza with
-      | Some "env" when List.mem (atoms stanza) "PATH" ~equal:String.equal -> [ "env" ]
-      | _ -> [])
+      match head stanza with Some "env" when sets_path stanza -> [ "env" ] | _ -> [])
   |> List.dedup_and_sort ~compare:String.compare
 
 (** The directories this dune file materializes the shared configuration into with a
