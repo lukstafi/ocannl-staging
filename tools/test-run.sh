@@ -178,6 +178,15 @@ new_run() {
   # longer leash, as crash leftovers.
   find "$RUNS" -maxdepth 1 -type d -name '2*Z-*' 2>/dev/null |
     while IFS= read -r d; do
+      # The find glob is only a pre-filter; deletion requires the EXACT
+      # generated shape -- YYYYMMDDTHHMMSSZ-<pid> -- so a stray directory
+      # like `2-oldZ-backup` cannot qualify even if it contains files with
+      # the metadata names.
+      case $(basename "$d") in
+        [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z-*) ;;
+        *) continue ;;
+      esac
+      case ${d##*Z-} in '' | *[!0-9]*) continue ;; esac
       [ -f "$d/cmd" ] && [ -f "$d/cap" ] || continue
       if [ -f "$d/exit" ]; then
         [ -n "$(find "$d/exit" -mtime +7 2>/dev/null)" ] && rm -rf "$d"
@@ -254,8 +263,10 @@ digest() {
       echo "fingerprint:"
       printf '%s\n' "$fp" | sed 's/^/  /'
     else
-      echo "no Error/File lines matched; last 25 log lines:"
-      tail -25 "$dir/log" | sed 's/^/  /'
+      echo "no Error/File lines matched; log tail:"
+      # Byte-capped BEFORE the line cap: a giant newline-free record would
+      # otherwise ride through `tail -n` whole.
+      tail -c 4000 "$dir/log" | tail -n 25 | sed 's/^/  /'
     fi
   fi
 }
@@ -354,10 +365,14 @@ case $sub in
     if [ -f "$run_dir/exit" ]; then
       digest "$run_dir"
     elif [ -f "$run_dir/pid" ] && ! sup_alive "$run_dir"; then
-      # Grace period: the wrapper writes `exit` moments after the supervisor
-      # dies; without this pause a normal completion caught mid-write would be
-      # misreported as a crash.
-      sleep 2
+      # Grace period: after the supervisor dies the wrapper may still be
+      # publishing, or reaping a leftover process group (bounded ~3s); only
+      # a quiet full grace is evidence of death, not the dead pid alone.
+      g=0
+      while [ "$g" -lt 5 ] && [ ! -f "$run_dir/exit" ]; do
+        sleep 1
+        g=$(( g + 1 ))
+      done
       if [ -f "$run_dir/exit" ]; then digest "$run_dir"; else
         echo "run died without recording a verdict (killed externally?): $run_dir"
         exit 1
@@ -387,9 +402,23 @@ case $sub in
       # the second rather than rounded up to an interval.
       remaining=$(( budget - waited ))
       if [ -f "$run_dir/pid" ] && ! sup_alive "$run_dir"; then
-        step=$(( remaining < 2 ? remaining : 2 )) # same mid-write grace as `status`
-        [ "$step" -gt 0 ] && sleep "$step"
+        # A dead supervisor is NOT yet proof that no verdict is coming: the
+        # wrapper may be mid-publication, or spending its bounded ~3s reaping
+        # a leftover process group. Only a quiet FULL grace is evidence of
+        # death; a budget that expires first is the documented timeout, since
+        # the verdict is genuinely still pending.
+        grace=$(( remaining < 5 ? remaining : 5 ))
+        g=0
+        while [ "$g" -lt "$grace" ] && [ ! -f "$run_dir/exit" ]; do
+          sleep 1
+          g=$(( g + 1 ))
+        done
+        waited=$(( waited + g ))
         [ -f "$run_dir/exit" ] && break
+        if [ "$waited" -ge "$budget" ]; then
+          echo "wait timed out after ${budget}s: $run_dir"
+          exit 124
+        fi
         echo "run died without recording a verdict (killed externally?): $run_dir"
         exit 1
       fi
@@ -407,7 +436,9 @@ case $sub in
     [ -f "$run_dir/pid" ] || die "no pid recorded for $run_dir"
     if sup_alive "$run_dir"; then
       kill -TERM "$(cat "$run_dir/pid")" 2>/dev/null
-      echo "sent TERM; confirm with: tools/test-run.sh wait last"
+      # Name the run explicitly: `last` may resolve to a DIFFERENT run when
+      # this stop targeted an identifier from another worktree's history.
+      echo "sent TERM; confirm with: tools/test-run.sh wait \"$run_dir\""
     else
       echo "supervisor already gone (or its pid was recycled); nothing signaled"
     fi
