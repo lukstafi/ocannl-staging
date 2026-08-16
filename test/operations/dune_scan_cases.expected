@@ -7,6 +7,7 @@ ok: the shared source config is not the local one
 ok: so does one bound to a name
 ok: an alias of the same name is not the file
 ok: nor is an environment variable of that name
+ok: a glob does not depend on the copied config
 ok: a multi-test stanza is one site naming both
 ok: inline tests declare the dep inside their own field
 ok: an inline-test field with no deps at all

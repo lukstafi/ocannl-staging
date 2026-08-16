@@ -1090,7 +1090,10 @@
   ocannl_config
   (glob_files ../../arrayjit/lib/*.ml)
   (glob_files ../../tensor/*.ml)
-  (glob_files ../../lib/*.ml))
+  (glob_files ../../lib/*.ml)
+  (glob_files ../../bin/*.ml)
+  (glob_files ../../tools/*.ml)
+  (glob_files ../../benchmarks/runners/ocannl/*.ml))
  (action
   (with-stdout-to
    %{target}
@@ -1140,7 +1143,10 @@
   ocannl_config
   (glob_files ../../arrayjit/lib/*.ml)
   (glob_files ../../tensor/*.ml)
-  (glob_files ../../lib/*.ml))
+  (glob_files ../../lib/*.ml)
+  (glob_files ../../bin/*.ml)
+  (glob_files ../../tools/*.ml)
+  (glob_files ../../benchmarks/runners/ocannl/*.ml))
  (action
   (with-stdout-to
    %{target}

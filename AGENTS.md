@@ -164,7 +164,8 @@ Key points:
   no space; prose comments use `# `) so copying it states nothing. Adding a key requires two
   updates, enforced by `test/operations/test_config_consistency`: document it there and register it
   in `Utils.known_config_keys`. A new source file needs no registration — the consistency tests
-  glob `arrayjit/lib/*.ml`, `tensor/*.ml` and `lib/*.ml` (gh-ocannl-592) — but the key must be
+  glob every directory that can read configuration (`arrayjit/lib`, `tensor`, `lib`, `bin`,
+  `tools`, `benchmarks/runners/ocannl`; gh-ocannl-592) — but the key must be
   spelled as a string literal at the call site (`~arg_name:"the_key"`), which the same test
   enforces. Classify the key too, in `Utils.config_key_classification`, or
   `test/operations/digest_completeness` fails (gh-ocannl-572).

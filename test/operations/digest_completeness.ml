@@ -137,7 +137,7 @@ let () =
   (* The file count is part of the golden so that a glob which stops matching -- a renamed
      directory, a source layout change -- reads as a diff rather than as a quietly smaller census
      (gh-ocannl-592). *)
-  printf "Library sources scanned: %d\n" (List.length source_files);
+  printf "Sources scanned: %d\n" (List.length source_files);
   (* The reviewable part: the classification itself, and which keys the scan found at codegen. The
      census counts both spellings of a read, [get_global_arg] call sites and [Utils.settings]
      fields, so a settings-borne key cannot slip past check 3 (Codex P2 on PR #337). *)

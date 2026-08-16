@@ -72,14 +72,27 @@ let field stanza name =
 
 let rec atoms = function Sexp.Atom a -> [ a ] | Sexp.List l -> List.concat_map l ~f:atoms
 
-(** Dependency-specification forms that carry FILE dependencies, so that the config file named
-    inside one is really depended upon. Dune's dependency language also has forms that name
-    something else entirely — [(alias ocannl_config)], [(env_var ocannl_config)],
-    [(package ocannl_config)] — and reading those as a file dependency would let a stanza pass this
-    check while depending on no config at all (Codex P2, round 3 of PR #343). Anything not listed
-    here does not count, which fails safe: an exotic form that does name the file fails loudly and
-    is added, rather than an exotic form that does not silently passing. *)
-let file_dep_forms = [ "file"; "glob_files"; "glob_files_rec"; "source_tree"; "include" ]
+(** Dependency-specification forms that really depend on the file they name, so that the config
+    named inside one is built before the test runs.
+
+    Only [(file …)] and a bare path. Dune's dependency language has forms that name something else
+    entirely — [(alias ocannl_config)], [(env_var ocannl_config)], [(package ocannl_config)] — and
+    reading those as a file dependency lets a stanza pass while depending on no config at all
+    (Codex P2, round 3 of PR #343). The GLOB forms are excluded for a subtler reason of the same
+    kind (round 7): they match the source tree, and in a directory whose config arrives through
+    [(copy_files …)] the file is a generated target, so [(deps (glob_files ocannl_config))] matches
+    nothing and builds nothing. Checked against dune 3.18 in a cleaned build directory, where such
+    a rule fails with "cat: ocannl_config: No such file or directory" exactly as a rule with no
+    deps at all does.
+
+    Anything not listed does not count, which fails safe: a form that does depend on the file fails
+    loudly and is added, rather than one that does not silently passing. *)
+let file_dep_forms = [ "file" ]
+
+(** Forms that name paths, for finding what a [(:name …)] binding might point at. Wider than
+    {!file_dep_forms} on purpose: here the question is what an executable could be called, and
+    recognising more spellings only means recognising more of the executables that get run. *)
+let path_bearing_forms = [ "file"; "glob_files"; "glob_files_rec"; "source_tree" ]
 
 (** Whether a [(deps …)] field really depends on the configuration file the executable will find:
     the one in the directory the process RUNS in, which is the stanza's own unless a [chdir] moved
@@ -214,7 +227,8 @@ let named_deps_of stanza =
   let rec paths sexp =
     match sexp with
     | Sexp.Atom a -> [ a ]
-    | Sexp.List (Sexp.Atom head :: rest) when List.mem file_dep_forms head ~equal:String.equal ->
+    | Sexp.List (Sexp.Atom head :: rest) when List.mem path_bearing_forms head ~equal:String.equal
+      ->
         List.concat_map rest ~f:paths
     | Sexp.List _ -> []
   in

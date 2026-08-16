@@ -53,6 +53,12 @@ let cases =
     ( "nor is an environment variable of that name",
       {dune|(test (name t) (deps (env_var ocannl_config)))|dune},
       [ "test t" ] );
+    (* A glob matches the source tree, and in a directory whose config arrives through
+       `(copy_files …)` the file is a generated target -- so the glob matches nothing and builds
+       nothing, while looking like a declaration (Codex P2, round 7). *)
+    ( "a glob does not depend on the copied config",
+      {dune|(test (name t) (deps (glob_files ocannl_config)))|dune},
+      [ "test t" ] );
     ( "a multi-test stanza is one site naming both",
       {dune|(tests (names a b) (deps ocannl_config))|dune},
       [ "test a, b [declares]" ] );
