@@ -127,7 +127,7 @@ let () =
   let stage ?(source = a) ?(tile_loops = [ k ]) ?(shared = false) ?(cooperative = None)
       ?(hoisted = false) ?(swizzle = None) ?(pad_stride = None) ?(pipeline_depth = 1) () =
     Sched.Stage
-      { source; tile_loops; shared; cooperative; hoisted; swizzle; pad_stride; pipeline_depth }
+      { source; tile_loops; shared; cooperative; hoisted; swizzle; pad_stride; pipeline_depth; tile_prec = None }
   in
   check "stage packing proves coverage" (stage ());
   check "stage packing two tile loops" (stage ~tile_loops:[ i2; k ] ());

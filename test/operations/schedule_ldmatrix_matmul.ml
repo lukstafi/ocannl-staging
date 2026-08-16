@@ -127,6 +127,7 @@ let staged_schedule ~out ~src_a ~src_b ~swz_a ~swz_b ~bk ~ta ~tb (opt : LL.optim
         swizzle = swz_a;
         pad_stride = None;
         pipeline_depth = 1;
+        tile_prec = None;
       };
     Sched.Stage
       {
@@ -138,6 +139,7 @@ let staged_schedule ~out ~src_a ~src_b ~swz_a ~swz_b ~bk ~ta ~tb (opt : LL.optim
         swizzle = swz_b;
         pad_stride = None;
         pipeline_depth = 1;
+        tile_prec = None;
       };
     tz;
   ]

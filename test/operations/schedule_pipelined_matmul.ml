@@ -195,6 +195,7 @@ let () =
           swizzle = None;
           pad_stride = None;
           pipeline_depth;
+          tile_prec = None;
         }
     in
     ( [
@@ -491,6 +492,7 @@ let () =
                swizzle = None;
                pad_stride = None;
                pipeline_depth = 2;
+               tile_prec = None;
              }
          in
          ignore (Sched.apply [ op ] opt : LL.optimized)));
@@ -532,6 +534,7 @@ let () =
                  swizzle = None;
                  pad_stride = None;
                  pipeline_depth = 2;
+                 tile_prec = None;
                };
            ]
          in

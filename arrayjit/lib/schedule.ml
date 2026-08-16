@@ -39,6 +39,7 @@ type optop =
       swizzle : Low_level.swizzle_kind option;
       pad_stride : int option;
       pipeline_depth : int;
+      tile_prec : Ops.prec option;
     }
   | Privatize of { target : Tn.t; over : Indexing.symbol }
   | Expand_zero of { tn : Tn.t; indices : Indexing.symbol list }
@@ -998,11 +999,11 @@ let hoistable_constant tn = Tn.known_host_constant tn && Host_inits.mem tn
    host-initialized constant. [src_prog]/[packed_prog] are the per-axis affine index programs:
    [(coefficient, position in sym_extents) array * offset], evaluated over the odometer enumeration
    of the tile and outer loop symbols. *)
-let pack_constant_tile ~debug ~(src_nd : Ndarray.t) ~(src_dims : int array) ~(prec : Ops.prec)
-    ~(packed_dims : int array) ~(sym_extents : int array)
-    ~(src_prog : ((int * int) array * int) array) ~(packed_prog : ((int * int) array * int) array) :
-    Ndarray.t =
-  if not (Ops.equal_prec (Ndarray.get_prec src_nd) prec) then
+let pack_constant_tile ~debug ~(src_nd : Ndarray.t) ~(src_dims : int array)
+    ~(src_prec : Ops.prec) ~(prec : Ops.prec) ~(packed_dims : int array)
+    ~(sym_extents : int array) ~(src_prog : ((int * int) array * int) array)
+    ~(packed_prog : ((int * int) array * int) array) : Ndarray.t =
+  if not (Ops.equal_prec (Ndarray.get_prec src_nd) src_prec) then
     invalid_arg ("Schedule.Stage: hoisted staging: host-init precision mismatch for " ^ debug);
   if not (Array.equal Int.equal (Ndarray.dims src_nd) src_dims) then
     invalid_arg ("Schedule.Stage: hoisted staging: host-init dims mismatch for " ^ debug);
@@ -1013,14 +1014,14 @@ let pack_constant_tile ~debug ~(src_nd : Ndarray.t) ~(src_dims : int array) ~(pr
   let eval (terms, off) = Array.fold terms ~init:off ~f:(fun acc (c, p) -> acc + (c * vals.(p))) in
   let src_idx = Array.create ~len:(Array.length src_dims) 0 in
   let dst_idx = Array.create ~len:(Array.length packed_dims) 0 in
-  let f2 src dstb =
+  let pack ~set_elem =
     let rec go d =
       if d = n_syms then (
         Array.iteri src_prog ~f:(fun a pr -> src_idx.(a) <- eval pr);
         (* The edge guard: out-of-range coordinates arise only from edge tiles. *)
         if Array.for_alli src_idx ~f:(fun a i -> i < src_dims.(a)) then (
           Array.iteri packed_prog ~f:(fun a pr -> dst_idx.(a) <- eval pr);
-          Stdlib.Bigarray.Genarray.set dstb dst_idx (Stdlib.Bigarray.Genarray.get src src_idx)))
+          set_elem ()))
       else
         for v = 0 to sym_extents.(d) - 1 do
           vals.(d) <- v;
@@ -1029,7 +1030,22 @@ let pack_constant_tile ~debug ~(src_nd : Ndarray.t) ~(src_dims : int array) ~(pr
     in
     go 0
   in
-  Ndarray.apply2 { f2 } src_nd dst;
+  if Ops.equal_prec src_prec prec then
+    Ndarray.apply2
+      {
+        f2 =
+          (fun src dstb ->
+            pack ~set_elem:(fun () ->
+                Stdlib.Bigarray.Genarray.set dstb dst_idx
+                  (Stdlib.Bigarray.Genarray.get src src_idx)));
+      }
+      src_nd dst
+  else
+    (* The widening pack (gh-ocannl-575): [tile_prec] only admits exact widenings (narrow float to
+       f32/f64), so the float round-trip is the identity on every element and matches the kernels'
+       own conversions bitwise. *)
+    pack ~set_elem:(fun () ->
+        Ndarray.set_from_float dst dst_idx (Ndarray.get_as_float src_nd src_idx));
   dst
 
 (* "[Tile_mma] is a barrier": the intrinsic's emission contract brackets the block in workgroup
@@ -1090,9 +1106,26 @@ let written_nodes (llc : Low_level.t) : Set.M(Tn).t =
   !acc
 
 let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_stride
-    ~pipeline_depth (opt : Low_level.optimized) : Low_level.optimized =
+    ~pipeline_depth ~tile_prec (opt : Low_level.optimized) : Low_level.optimized =
   let open Low_level in
   if List.is_empty tile_loops then invalid_arg "Schedule.Stage: empty tile_loops";
+  let source_prec = Lazy.force source.Tn.storage_prec in
+  (* [tile_prec] admits exact widenings only (gh-ocannl-575): a widening is value-preserving and
+     its round-trip is the identity, so the transform stays numerics-preserving no matter which
+     precision the consumers compute at. *)
+  let stage_prec =
+    match tile_prec with
+    | None -> source_prec
+    | Some p when Ops.equal_prec p source_prec -> p
+    | Some (Ops.Single_prec _ as p) | Some (Ops.Double_prec _ as p)
+      when Ops.is_narrow_float source_prec ->
+        p
+    | Some p ->
+        invalid_arg
+          (Printf.sprintf
+             "Schedule.Stage: tile_prec %s is not an exact widening of %s storage for %s"
+             (Ops.prec_string p) (Ops.prec_string source_prec) (Tn.debug_name source))
+  in
   Option.iter cooperative ~f:(fun w ->
       if not shared then invalid_arg "Schedule.Stage: cooperative staging requires shared = true";
       if w <= 0 then invalid_arg "Schedule.Stage: cooperative simd width must be positive");
@@ -1310,7 +1343,7 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_
              let tp, _, _ = decomp.(a) in
              normalize_affine ~terms:tp ~offset:0))
     in
-    let prec = Lazy.force source.Tn.storage_prec in
+    let prec = stage_prec in
     let tile =
       Tn.create ~namespace:tile_namespace (Tn.Specified prec) ~id:(fresh_tile_id ())
         ~label:("packed" :: source.Tn.label)
@@ -1360,8 +1393,8 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_
                  ("Schedule.Stage: host-init data for " ^ Tn.debug_name source
                 ^ " disappeared before link")
          in
-         pack_constant_tile ~debug ~src_nd ~src_dims ~prec ~packed_dims ~sym_extents ~src_prog
-           ~packed_prog));
+         pack_constant_tile ~debug ~src_nd ~src_dims ~src_prec:source_prec ~prec ~packed_dims
+           ~sym_extents ~src_prog ~packed_prog));
     let llc = remap_reads ~source ~from_idcs:idcs0 ~tile ~tile_idcs:packed_read_idcs opt.llc in
     (* [pack_constant_tile] zero-fills pad slots of edge tiles, so the packed buffer satisfies the
        [zero_fringe] contract over its whole index space. *)
@@ -1379,7 +1412,7 @@ let apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_
     (* Serial tile loops may sit above or below L*: the load nest iterates them under fresh symbols,
      so only outer-part symbols and reused workgroup axes pin the staging point. *)
     (* Mint the tile. *)
-    let prec = Lazy.force source.Tn.storage_prec in
+    let prec = stage_prec in
     let tile_dims = Array.map tile_axes ~f:snd in
     (* [pad_stride] (gh-ocannl-481 item 4): round the tile's MINOR dim up to a multiple, so the
        tile's leading-dimension stride — which is that dim, and which every consumer reads off the
@@ -3451,10 +3484,20 @@ let can_fuse_epilogue ~target (opt : Low_level.optimized) : bool =
 
 let apply_opt_op (opt : Low_level.optimized) (op : optop) : Low_level.optimized =
   match op with
-  | Stage { source; tile_loops; shared; cooperative; hoisted; swizzle; pad_stride; pipeline_depth }
-    ->
+  | Stage
+      {
+        source;
+        tile_loops;
+        shared;
+        cooperative;
+        hoisted;
+        swizzle;
+        pad_stride;
+        pipeline_depth;
+        tile_prec;
+      } ->
       apply_stage ~source ~tile_loops ~shared ~cooperative ~hoisted ~swizzle ~pad_stride
-        ~pipeline_depth opt
+        ~pipeline_depth ~tile_prec opt
   | Privatize { target; over } -> apply_privatize ~target ~over opt
   | Tensorize _ -> apply_tensorize op opt
   | Fuse_epilogue { target; shared } -> apply_fuse_epilogue ~target ~shared opt

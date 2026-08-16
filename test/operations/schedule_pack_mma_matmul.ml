@@ -115,7 +115,7 @@ let composed_schedule ~a ~b (opt : LL.optimized) : Sched.schedule =
   let sp_k, k_o, k_i = Sched.split ~axis:k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
   let stage source tile_loops =
     Sched.Stage
-      { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = None; pad_stride = None; pipeline_depth = 1 }
+      { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = None; pad_stride = None; pipeline_depth = 1; tile_prec = None }
   in
   [ sp_i; sp_k ]
   (* i_o i_i j k_o k_i -> k_o i_o i_i j k_i (B~ packs at k_o, outside the row blocks). *)
@@ -260,7 +260,7 @@ let () =
     let sp_k, k_o, k_i = Sched.split ~axis:k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
     let stage source tile_loops =
       Sched.Stage
-        { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = None; pad_stride = None; pipeline_depth = 1 }
+        { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = None; pad_stride = None; pipeline_depth = 1; tile_prec = None }
     in
     let tz, _lane = Sched.tensorize ~i:i_i ~j ~k:k_i ~simd_width:1 in
     [ ez; sp_zi; sp_i; sp_k ] @ sink j [ k_o ] @ sink i_i [ k_o ] @ sink i_o [ k_o ]
@@ -334,6 +334,7 @@ let () =
             swizzle = None;
             pad_stride = None;
             pipeline_depth = 1;
+            tile_prec = None;
           };
         tz;
       ]
@@ -400,6 +401,7 @@ let () =
             swizzle = None;
             pad_stride = None;
             pipeline_depth = 1;
+            tile_prec = None;
           };
         Sched.Stage
           {
@@ -411,6 +413,7 @@ let () =
             swizzle = None;
             pad_stride = None;
             pipeline_depth = 1;
+            tile_prec = None;
           };
         tz;
       ]

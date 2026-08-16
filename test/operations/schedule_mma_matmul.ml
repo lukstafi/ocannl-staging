@@ -787,6 +787,7 @@ let () =
           swizzle = None;
           pad_stride = None;
           pipeline_depth = 1;
+          tile_prec = None;
         };
       Sched.Stage
         {
@@ -798,6 +799,7 @@ let () =
           swizzle = None;
           pad_stride = None;
           pipeline_depth = 1;
+          tile_prec = None;
         };
       tz;
     ]

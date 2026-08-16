@@ -74,6 +74,9 @@ type saved_optop =
           (** Likewise omitted when unset, so pre-gh-481 cache files parse. *)
       pipeline_depth : int option; [@sexp.option]
           (** [None] encodes depth 1 and is omitted, so pre-gh-487 cache files parse. *)
+      tile_prec : Ops.prec option; [@sexp.option]
+          (** The staged tile's storage precision override (gh-ocannl-575); omitted when unset, so
+              pre-gh-575 cache files parse. *)
     }
   | Privatize of { target : int; over : sym_ref }
   | Expand_zero of { tn : int }

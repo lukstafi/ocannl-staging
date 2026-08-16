@@ -88,6 +88,7 @@ let tiled_schedule ?(reorder = true) ~ma ~mb ~mc ~hoist_a ~hoist_b (opt : LL.opt
           swizzle = None;
           pad_stride = None;
           pipeline_depth = 1;
+          tile_prec = None;
         };
       Sched.Stage
         {
@@ -99,6 +100,7 @@ let tiled_schedule ?(reorder = true) ~ma ~mb ~mc ~hoist_a ~hoist_b (opt : LL.opt
           swizzle = None;
           pad_stride = None;
           pipeline_depth = 1;
+          tile_prec = None;
         };
     ]
   in

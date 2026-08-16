@@ -126,6 +126,7 @@ let () =
           swizzle = None;
           pad_stride = None;
           pipeline_depth = 1;
+          tile_prec = None;
         };
       Sched.Stage
         {
@@ -137,6 +138,7 @@ let () =
           swizzle = None;
           pad_stride = None;
           pipeline_depth = 1;
+          tile_prec = None;
         };
       Sched.Privatize { target = mc1.Tensor.value; over = k_o };
     ]
@@ -219,6 +221,7 @@ let () =
             swizzle = None;
             pad_stride = None;
             pipeline_depth = 1;
+            tile_prec = None;
           };
       ]
       opt
