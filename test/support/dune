@@ -1,4 +1,15 @@
+; Two support libraries, deliberately split by dependency (gh-ocannl-600). [test_utils] stays on
+; [arrayjit.ir] alone, because tests like config_scan_lexing and test_ndarray link nothing more;
+; [ll_test] links [ocannl], for the hand-built-Low_level harness.
+
 (library
  (name test_utils)
  (package neural_nets_lib)
+ (modules test_utils config_key_scan dune_stanza_scan)
  (libraries base stdio arrayjit.ir compiler-libs.common sexplib))
+
+(library
+ (name ll_test)
+ (package neural_nets_lib)
+ (modules ll_test)
+ (libraries base stdio ocannl))

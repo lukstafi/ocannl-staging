@@ -302,6 +302,15 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name local_host_access)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules local_host_access)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name context_host_access)
  (package neural_nets_lib)
  (deps ocannl_config)
@@ -848,7 +857,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules virtual_shared_loop)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio ll_test)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -870,7 +879,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules virtual_affine)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio ll_test)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -947,7 +956,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules virtual_diagonal)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio ll_test)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2323,6 +2332,6 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules prelowered_seam)
- (libraries base ocannl stdio pprint)
+ (libraries base ocannl stdio pprint ll_test)
  (preprocess
   (pps ppx_here ppx_ocannl)))

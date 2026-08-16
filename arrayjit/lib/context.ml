@@ -426,6 +426,33 @@ let host_buffer (tn : Tn.t) =
 let mem ctx (tn : Tn.t) : bool =
   Backends.query ctx.wrapped { q = (fun _ c -> Map.mem c.BI.ctx_buffers tn) }
 
+let placements ctx =
+  Backends.query ctx.wrapped { q = (fun _ c -> c.BI.optimize_ctx.Ir.Low_level.placements) }
+
+(* gh-ocannl-599: [Local] is the unobservable placement class -- routine-scoped scratch the backend
+   may keep in registers or on the stack, never a context buffer a routine writes back. Host access
+   to such a node is meaningless, and nothing about it looks meaningless from the outside:
+   [from_host] allocates a context buffer for it (the [init_from_host] fallback), the routine
+   computes into its local storage, and [to_host] then hands back exactly the bytes that were
+   uploaded -- plausible numbers no kernel wrote. Both directions therefore refuse.
+
+   The check reads the effective placement, so it fires only where a decision (or a declared
+   [Local] intent) exists: a node no routine of this lineage has mentioned is undecided and keeps
+   the ordinary behavior, including the "not present in context" refusal. *)
+let local_placement ctx (tn : Tn.t) : int option =
+  match Tn.Placements.get (placements ctx) tn with Some (Tn.Local, prov) -> Some prov | _ -> None
+
+let refuse_local ~fn ctx (tn : Tn.t) prov =
+  raise
+  @@ Utils.User_error
+       (Printf.sprintf
+          "Context.%s: node %s is placed Local in this context's lineage (provenance %d): \
+           routine-scoped scratch with no context buffer, so host access to it cannot observe (or \
+           reach) what the routines compute. Request materialization -- e.g. \
+           Train.set_materialized, Context.decide_materialized, or Tnode.set_observable -- before \
+           the first routine using the node is compiled. Backend: %s"
+          fn (Tn.debug_name tn) prov (backend_name ctx))
+
 (* For-print proxies (gh-ocannl-333 AC 5): when a tensor's node is not materialized in a context,
    [Train.printf] recompiles a copy ([%cd "for_print" =: t]) into a fresh node and registers it here
    as a proxy for the source node, so {!to_host} can read the source's value through the copy. The
@@ -491,24 +518,39 @@ let to_host ctx (tn : Tn.t) : Nd.t =
             else false);
       }
   in
-  if transfer tn then nd
-  else
-    match Ir.Host_inits.find tn with
-    | Some init ->
-        (* An ndarray-backed literal that is not part of any computation in this context (so it was
-           never allocated on the device): its value is its registered host initialization data.
-           Return a private copy so a mutating caller (e.g. [set_value]'s read-modify-write) cannot
-           corrupt the shared initialization buffer used to initialize other contexts. *)
-        copy_nd (Lazy.force init)
-    | None -> (
-        (* Read through a for-print proxy, if a copy of [tn] was materialized for printing. *)
-        match Hashtbl.find for_print_proxies tn with
-        | Some proxy when transfer proxy -> nd
-        | _ ->
-            raise
-            @@ Utils.User_error
-                 (Printf.sprintf "Context.to_host: node %s is not present in context (backend %s)"
-                    (Tn.debug_name tn) (backend_name ctx)))
+  (* Read through a for-print proxy, if a copy of [tn] was materialized for printing. *)
+  let from_proxy () =
+    match Hashtbl.find for_print_proxies tn with
+    | Some proxy when transfer proxy -> Some nd
+    | _ -> None
+  in
+  match local_placement ctx tn with
+  | Some prov -> (
+      (* A [Local] node's own buffer, if the context has one at all, holds only what a host write
+         put there, and its host-init data predates every run -- neither is what the routines
+         computed. The one honest read is a for-print proxy: a separate, materialized node
+         recomputing the value. *)
+      match from_proxy () with Some nd -> nd | None -> refuse_local ~fn:"to_host" ctx tn prov)
+  | None ->
+      if transfer tn then nd
+      else (
+        match Ir.Host_inits.find tn with
+        | Some init ->
+            (* An ndarray-backed literal that is not part of any computation in this context (so it
+               was never allocated on the device): its value is its registered host initialization
+               data. Return a private copy so a mutating caller (e.g. [set_value]'s
+               read-modify-write) cannot corrupt the shared initialization buffer used to initialize
+               other contexts. *)
+            copy_nd (Lazy.force init)
+        | None -> (
+            match from_proxy () with
+            | Some nd -> nd
+            | None ->
+                raise
+                @@ Utils.User_error
+                     (Printf.sprintf
+                        "Context.to_host: node %s is not present in context (backend %s)"
+                        (Tn.debug_name tn) (backend_name ctx))))
 
 (** Uploads the host buffer [nd] into [tn]'s device buffer, allocating it if needed, and returns a
     context in which [tn] is marked initialized (so a subsequent {!run} reading [tn] succeeds). *)
@@ -527,6 +569,12 @@ let from_host ctx (tn : Tn.t) (nd : Nd.t) : t =
               "Context.from_host: node %s is an @| slice view; write its parent %s instead"
               (Tn.debug_name tn) (Tn.debug_name parent))
   | None -> ());
+  (* gh-ocannl-599: refuse the write too, rather than only reporting on the read. Seeding a [Local]
+     node is a no-op from the routine's point of view -- the routine reads its own local storage --
+     so the upload is silently lost either way; refusing here is also what keeps the context from
+     acquiring a buffer for a node with no observable buffer, which is what made the later read look
+     legitimate. *)
+  Option.iter (local_placement ctx tn) ~f:(refuse_local ~fn:"from_host" ctx tn);
   (* Interval analysis, Phase B: a host write acts as a writer around the bounds-settlement point --
      pre-settlement it proposes the scanned [min, max] into the node's bounds candidate,
      post-settlement it validates against the settled bounds (or raises). See
@@ -695,9 +743,6 @@ let release ctx =
         -> Backends.finalize (module Backend) c);
     }
 
-let placements ctx =
-  Backends.query ctx.wrapped { q = (fun _ c -> c.BI.optimize_ctx.Ir.Low_level.placements) }
-
 (* gh-560: the analyze-only entry points — lowering and optimization without backend codegen or
    linking. [Backends.lower_assignments] forks the lineage state itself, so the result is read off
    a hermetic sibling: the argument context, its ledger and frontier are unaffected. With the
@@ -708,12 +753,7 @@ let lowered_for_decisions ?name ?(materialized = []) ?(inline = []) ctx comp bin
   let optim_ctx = Ir.Low_level.copy_optimize_ctx optim_ctx in
   (* The same decision recording as [decide_materialized] / [decide_inline] below, applied to the
      hermetic fork rather than a child context. *)
-  let plc = optim_ctx.Ir.Low_level.placements in
-  List.iter materialized ~f:(fun tn ->
-      match Tn.Placements.get plc tn with
-      | None | Some ((Tn.Never_virtual | Tn.On_device), _) ->
-          Tn.Placements.update plc tn Tn.On_device 31
-      | Some ((Tn.Virtual | Tn.Local | Tn.Effectively_constant), _) -> ());
+  Ir.Low_level.decide_materialized optim_ctx materialized;
   List.iter inline ~f:(Hash_set.add optim_ctx.Ir.Low_level.inline_preferences);
   let _name, (lowered : Ir.Low_level.optimized) =
     Backends.lower_assignments optim_ctx ?name bindings comp.Asgns.asgns
@@ -738,12 +778,7 @@ let decide_materialized ctx tns =
             (* Fork the lineage state exactly like a compile would, then record the decisions in the
                fork: the argument context and its other descendants are unaffected. *)
             let optimize_ctx = Ir.Low_level.copy_optimize_ctx bctx.BI.optimize_ctx in
-            let plc = optimize_ctx.Ir.Low_level.placements in
-            List.iter tns ~f:(fun tn ->
-                match Tn.Placements.get plc tn with
-                | None | Some ((Tn.Never_virtual | Tn.On_device), _) ->
-                    Tn.Placements.update plc tn Tn.On_device 31
-                | Some ((Tn.Virtual | Tn.Local | Tn.Effectively_constant), _) -> ());
+            Ir.Low_level.decide_materialized optimize_ctx tns;
             (Backend.make_child ~optimize_ctx bctx, ()));
       }
   in

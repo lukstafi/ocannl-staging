@@ -1,6 +1,7 @@
 (* gh-ocannl-562: the [?prelowered] test seam — compiling and LINKING a hand-built
    [Ir.Low_level.optimized], so that IR shapes the [Assignments] pipeline never emits can be pinned
-   by executed values and not only by structural assertions.
+   by executed values and not only by structural assertions. This is where the seam is worked out;
+   the [Ll_test] support library (gh-ocannl-600) packages it for the tests that use it.
 
    Before the seam, backend [compile] always re-lowered from [Assignments]: [?lowered_transform]
    substitutes the codegen input only, while [code.lowered] — which drives I/O classification
@@ -36,46 +37,9 @@
 
 open Base
 open Stdio
-module LL = Ir.Low_level
-module Tn = Ir.Tnode
-module Idx = Ir.Indexing
-module Ops = Ir.Ops
+open Ll_test
 
-let single = Ops.single
-let p name b = printf "%s: %b\n" name b
-let next_id = ref 5620
-
-let mk ?(dims = [| 4 |]) label =
-  Int.incr next_id;
-  Tn.create (Tn.Specified single) ~id:!next_id ~label:[ label ]
-    ~unpadded_dims:(lazy dims)
-    ~padding:(lazy None)
-    ()
-
-let sym () = Idx.get_symbol ()
-let iter s = Idx.Iterator s
-let get s tn : LL.scalar_t = LL.Get (tn, [| iter s |])
-let set s tn llsc : LL.t = LL.Set { tn; idcs = [| iter s |]; llsc; debug = "" }
-let binop op a b : LL.scalar_t = LL.Binop (op, (a, single), (b, single))
-let c x : LL.scalar_t = LL.Constant x
-let loop ~upto s body : LL.t = LL.For_loop { index = s; from_ = 0; to_ = upto; body; axis = Serial }
-let seq a b : LL.t = LL.Seq (a, b)
-
-(* Hand-built code is compiled AS WRITTEN: the identity [lowered_transform] takes the place of the
-   default schedule annotator, which would otherwise parallelize or fission the loop nest. *)
-let compile_and_run ~name (llc : LL.t) ~(seed : (Tn.t * float array) list) ~(read : Tn.t list) =
-  let opt =
-    LL.optimize (LL.empty_optimize_ctx ()) ~unoptim_ll_source:None ~ll_source:None ~name [] llc
-  in
-  let ctx = Context.auto () in
-  let ctx, routine =
-    Context.compile ~name ~prelowered:opt
-      ~lowered_transform:(fun o -> o)
-      ctx Ir.Assignments.empty_comp Idx.Empty
-  in
-  let ctx = List.fold seed ~init:ctx ~f:(fun ctx (tn, values) -> Context.set_values ctx tn values) in
-  let ctx = Context.run ctx routine in
-  (opt, List.map read ~f:(Context.get_values ctx))
+let mk = node_factory ~first_id:5620 ~dims:[| 4 |] ()
 
 (* Whether [f] is refused by the scope-purity gate specifically -- not by any other
    [Invalid_argument] the pipeline might raise. *)
@@ -85,19 +49,18 @@ let rejected f =
     false
   with Invalid_argument msg -> String.is_substring msg ~substring:"validate_scope_bodies"
 
-let close values expected =
-  Array.length values = Array.length expected
-  && Array.for_alli values ~f:(fun i v -> Float.(abs (v -. expected.(i)) <= 1e-5))
-
 (* A hand-written [Y[i] = X[i] * 2 + 1] over 4 cells: seeded, executed and read back. *)
 let phase1 () =
   let x = mk "pls_x" and y = mk "pls_y" in
-  Tn.update_memory_mode y Tn.On_device 99;
-  Tn.set_observable y;
+  materialize y;
   let i = sym () in
-  let llc = loop ~upto:3 i (set i y (binop Ops.Add (binop Ops.Mul (get i x) (c 2.)) (c 1.))) in
+  let llc =
+    loop ~upto:3 i (set y [| iter i |] (add (mul (get x [| iter i |]) (c 2.)) (c 1.)))
+  in
   let xv = [| 1.5; 2.5; 3.5; 4.5 |] in
-  let opt, results = compile_and_run ~name:"pls_pointwise" llc ~seed:[ (x, xv) ] ~read:[ y ] in
+  let opt, results =
+    optimize_and_execute ~name:"pls_pointwise" llc ~seed:[ (x, xv) ] ~read:[ y ]
+  in
   let (inputs, outputs), _merge = LL.input_and_output_nodes opt in
   p "phase1: the hand-built read-only node is a routine input" (Set.mem inputs x);
   p "phase1: the written node is a routine output" (Set.mem outputs y);
@@ -122,11 +85,10 @@ let phase1 () =
 let phase2 () =
   let x = mk "pls2_x" and y = mk "pls2_y" in
   let la = mk ~dims:[| 1 |] "pls2_la" and lb = mk ~dims:[| 1 |] "pls2_lb" in
-  Tn.update_memory_mode y Tn.On_device 99;
-  Tn.set_observable y;
+  materialize y;
   (* The scope-local scalars stand for inlined nodes, exactly as the virtualizer's own scopes do. *)
-  Tn.update_memory_mode la Tn.Virtual 99;
-  Tn.update_memory_mode lb Tn.Virtual 99;
+  virtualize la;
+  virtualize lb;
   let i = sym () and k = sym () and j = sym () in
   let id_a = LL.get_scope la in
   let id_b = LL.get_scope lb in
@@ -137,7 +99,8 @@ let phase2 () =
         body =
           seq
             (LL.Set_local (id_a, c 0.))
-            (loop ~upto:1 k (LL.Set_local (id_a, binop Ops.Add (LL.Get_local id_a) (get i x))));
+            (loop ~upto:1 k
+               (LL.Set_local (id_a, add (LL.Get_local id_a) (get x [| iter i |]))));
         orig_indices = [| iter i |];
       }
   in
@@ -145,16 +108,18 @@ let phase2 () =
     LL.Local_scope
       {
         id = id_b;
-        body = LL.Set_local (id_b, binop Ops.Mul (get i x) (c 3.));
+        body = LL.Set_local (id_b, mul (get x [| iter i |]) (c 3.));
         orig_indices = [| iter i |];
       }
   in
   let llc =
-    seq (loop ~upto:3 i (set i y (binop Ops.Add scope_a scope_b))) (loop ~upto:3 j (set j x (c 5.)))
+    seq
+      (loop ~upto:3 i (set y [| iter i |] (add scope_a scope_b)))
+      (loop ~upto:3 j (set x [| iter j |] (c 5.)))
   in
   let xv = [| 1.5; 2.5; 3.5; 4.5 |] in
   let opt, results =
-    compile_and_run ~name:"pls_sibling_scopes" llc ~seed:[ (x, xv) ] ~read:[ y; x ]
+    optimize_and_execute ~name:"pls_sibling_scopes" llc ~seed:[ (x, xv) ] ~read:[ y; x ]
   in
   (match Hashtbl.find opt.LL.traced_store x with
   | None -> p "phase2: X traced" false
@@ -181,10 +146,9 @@ let phase2 () =
 let phase3 () =
   let x = mk "pls3_x" and y = mk "pls3_y" in
   let la = mk ~dims:[| 1 |] "pls3_la" and lb = mk ~dims:[| 1 |] "pls3_lb" in
-  Tn.update_memory_mode y Tn.On_device 99;
-  Tn.set_observable y;
-  Tn.update_memory_mode la Tn.Virtual 99;
-  Tn.update_memory_mode lb Tn.Virtual 99;
+  materialize y;
+  virtualize la;
+  virtualize lb;
   let i = sym () and k = sym () in
   let id_a = LL.get_scope la in
   let id_b = LL.get_scope lb in
@@ -195,7 +159,8 @@ let phase3 () =
         body =
           seq
             (LL.Set_local (id_a, c 0.))
-            (loop ~upto:1 k (LL.Set_local (id_a, binop Ops.Add (LL.Get_local id_a) (get i x))));
+            (loop ~upto:1 k
+               (LL.Set_local (id_a, add (LL.Get_local id_a) (get x [| iter i |]))));
         orig_indices = [| iter i |];
       }
   in
@@ -203,20 +168,20 @@ let phase3 () =
     LL.Local_scope
       {
         id = id_b;
-        body = seq (set i x (c 5.)) (LL.Set_local (id_b, binop Ops.Mul (get i x) (c 3.)));
+        body =
+          seq
+            (set x [| iter i |] (c 5.))
+            (LL.Set_local (id_b, mul (get x [| iter i |]) (c 3.)));
         orig_indices = [| iter i |];
       }
   in
-  let llc = loop ~upto:3 i (set i y (binop Ops.Add scope_a scope_b)) in
+  let llc = loop ~upto:3 i (set y [| iter i |] (add scope_a scope_b)) in
   (* The pipeline's entry gate. It has to be the entry, not just codegen:
      [hoist_cross_statement_cse] lifts a body shared by sibling statements to a top-level
      [Declare_local] + body, which would carry an impure body's write out of every [Local_scope] --
      past a codegen-only check, and executing once instead of once per user statement. *)
   p "phase3: the pipeline rejects a tensor-node write in a scope body"
-    (rejected (fun () ->
-         ignore
-           (LL.optimize (LL.empty_optimize_ctx ()) ~unoptim_ll_source:None ~ll_source:None
-              ~name:"pls_impure_scope" [] llc)));
+    (rejected (fun () -> ignore (optimize ~name:"pls_impure_scope" llc)));
   (* The exit gate, reached via the analysis entry points -- which deliberately do NOT validate, so
      that probes like affine_extraction.ml can ask what the coverage query does with IR it must
      never trust. Everything past them does. *)
@@ -232,7 +197,7 @@ let phase3 () =
          ignore
            (Context.compile ~name:"pls_impure_scope" ~prelowered:opt
               ~lowered_transform:(fun o -> o)
-              (Context.auto ()) Ir.Assignments.empty_comp Idx.Empty)))
+              (Context.auto ()) Ir.Assignments.empty_comp Ir.Indexing.Empty)))
 
 (* The other three ways a body can reach outside itself. Each would make the placement of a scope
    body observable, which is the one thing purity buys: a [Set_local] of a sibling's local mutates
@@ -247,12 +212,12 @@ let phase4 () =
   let scope_with body : LL.scalar_t =
     LL.Local_scope { id = id_a; body; orig_indices = [| iter i |] }
   in
-  let stmt body = loop ~upto:3 i (set i y (scope_with body)) in
+  let stmt body = loop ~upto:3 i (set y [| iter i |] (scope_with body)) in
   (* Writing a SIBLING scope's local from this body. *)
   p "phase4: a Set_local of a local the body does not own is rejected"
     (rejected (fun () ->
          LL.validate_scope_bodies
-           (stmt (seq (LL.Set_local (id_b, c 1.)) (LL.Set_local (id_a, get i x))))));
+           (stmt (seq (LL.Set_local (id_b, c 1.)) (LL.Set_local (id_a, get x [| iter i |]))))));
   (* Owning it makes the same shape legal: a body may declare and write its own sub-local. *)
   p "phase4: a Set_local of a local the body declares is accepted"
     (not
@@ -261,20 +226,26 @@ let phase4 () =
               (stmt
                  (seq
                     (LL.Declare_local { id = id_b; needs_init = false })
-                    (seq (LL.Set_local (id_b, get i x)) (LL.Set_local (id_a, LL.Get_local id_b))))))));
+                    (seq
+                       (LL.Set_local (id_b, get x [| iter i |]))
+                       (LL.Set_local (id_a, LL.Get_local id_b))))))));
   p "phase4: a Workgroup_barrier in a scope body is rejected"
     (rejected (fun () ->
-         LL.validate_scope_bodies (stmt (seq LL.Workgroup_barrier (LL.Set_local (id_a, get i x))))));
+         LL.validate_scope_bodies
+           (stmt (seq LL.Workgroup_barrier (LL.Set_local (id_a, get x [| iter i |]))))));
   p "phase4: a Staged_compilation in a scope body is rejected"
     (rejected (fun () ->
          LL.validate_scope_bodies
            (stmt
-              (seq (LL.Staged_compilation (fun () -> PPrint.empty)) (LL.Set_local (id_a, get i x))))));
+              (seq
+                 (LL.Staged_compilation (fun () -> PPrint.empty))
+                 (LL.Set_local (id_a, get x [| iter i |]))))));
   (* The same constructs at statement level are ordinary code, so the gate must not flag them. *)
   p "phase4: the same constructs outside a scope body are accepted"
     (not
        (rejected (fun () ->
-            LL.validate_scope_bodies (seq LL.Workgroup_barrier (loop ~upto:3 i (set i y (get i x)))))))
+            LL.validate_scope_bodies
+              (seq LL.Workgroup_barrier (loop ~upto:3 i (set y [| iter i |] (get x [| iter i |])))))))
 
 (* gh-ocannl-584 review round 2: purity alone does not make the hoist sound. A body's INPUTS include
    the scope locals it reads, and [hoist_cross_statement_cse] evaluates a body shared by sibling
@@ -294,10 +265,9 @@ let phase4 () =
 let phase5 () =
   let y = mk ~dims:[| 2 |] "pls5_y" in
   let ls = mk ~dims:[| 1 |] "pls5_ls" and ext_tn = mk ~dims:[| 1 |] "pls5_ext" in
-  Tn.update_memory_mode y Tn.On_device 99;
-  Tn.set_observable y;
-  Tn.update_memory_mode ls Tn.Virtual 99;
-  Tn.update_memory_mode ext_tn Tn.Virtual 99;
+  materialize y;
+  virtualize ls;
+  virtualize ext_tn;
   let ext = LL.get_scope ext_tn in
   (* An accumulation, so [simplify_llc] cannot collapse the scope before the hoist pass sees it. *)
   let scope () : LL.scalar_t =
@@ -309,33 +279,17 @@ let phase5 () =
         body =
           seq
             (LL.Set_local (id, c 0.))
-            (loop ~upto:1 k (LL.Set_local (id, binop Ops.Add (LL.Get_local id) (LL.Get_local ext))));
+            (loop ~upto:1 k (LL.Set_local (id, add (LL.Get_local id) (LL.Get_local ext))));
         orig_indices = [||];
       }
   in
-  let set_at idx llsc : LL.t =
-    LL.Set { tn = y; idcs = [| Idx.Fixed_idx idx |]; llsc; debug = "" }
-  in
+  let set_at idx llsc : LL.t = set y [| fixed idx |] llsc in
   let program ~mutated =
     seq
       (seq (LL.Declare_local { id = ext; needs_init = false }) (LL.Set_local (ext, c 1.)))
       (seq
          (set_at 0 (scope ()))
          (seq (if mutated then LL.Set_local (ext, c 2.) else LL.Noop) (set_at 1 (scope ()))))
-  in
-  let rec count_scopes (llc : LL.t) =
-    match llc with
-    | LL.Seq (a, b) -> count_scopes a + count_scopes b
-    | LL.For_loop { body; _ } -> count_scopes body
-    | LL.If { body; _ } -> count_scopes body
-    | LL.Set { llsc; _ } | LL.Set_local (_, llsc) -> count_scalar llsc
-    | _ -> 0
-  and count_scalar (llsc : LL.scalar_t) =
-    match llsc with
-    | LL.Local_scope { body; _ } -> 1 + count_scopes body
-    | LL.Binop (_, (a, _), (b, _)) -> count_scalar a + count_scalar b
-    | LL.Unop (_, (a, _)) -> count_scalar a
-    | _ -> 0
   in
   (* Structural: the shared body is hoisted out of both users when nothing writes its local in
      between, and left in place when something does. *)
@@ -345,7 +299,7 @@ let phase5 () =
     (count_scopes (LL.hoist_cross_statement_cse (program ~mutated:true)) = 2);
   (* Executed: the later user must see the mutation, which is what the hoist would have erased. *)
   let _opt, results =
-    compile_and_run ~name:"pls_local_hazard" (program ~mutated:true) ~seed:[] ~read:[ y ]
+    optimize_and_execute ~name:"pls_local_hazard" (program ~mutated:true) ~seed:[] ~read:[ y ]
   in
   match results with
   | [ yv ] ->
@@ -368,9 +322,8 @@ let phase5 () =
 let phase6 () =
   let x = mk "pls6_x" and y = mk "pls6_y" in
   let lb = mk ~dims:[| 1 |] "pls6_lb" in
-  Tn.update_memory_mode y Tn.On_device 99;
-  Tn.set_observable y;
-  Tn.update_memory_mode lb Tn.Virtual 99;
+  materialize y;
+  virtualize lb;
   let i = sym () in
   (* Two alpha-equivalent impure scopes — same free index, same body shape, distinct ids — in
      sibling statements, the shape [hoist_shared_locals] groups. *)
@@ -379,19 +332,25 @@ let phase6 () =
     LL.Local_scope
       {
         id;
-        body = seq (set i x (c 5.)) (LL.Set_local (id, binop Ops.Mul (get i x) (c 3.)));
+        body =
+          seq
+            (set x [| iter i |] (c 5.))
+            (LL.Set_local (id, mul (get x [| iter i |]) (c 3.)));
         orig_indices = [| iter i |];
       }
   in
   let llc =
     loop ~upto:3 i
-      (seq (set i y (impure_scope ())) (set i y (binop Ops.Add (get i y) (impure_scope ()))))
+      (seq
+         (set y [| iter i |] (impure_scope ()))
+         (set y [| iter i |] (add (get y [| iter i |]) (impure_scope ()))))
   in
   let admitted = ref None in
   p "phase6: the analysis entry points admit two impure siblings"
     (not
        (rejected (fun () ->
-            admitted := Some (LL.specialize_proc (LL.empty_optimize_ctx ()) (LL.analyze_proc [] llc)))));
+            admitted :=
+              Some (LL.specialize_proc (LL.empty_optimize_ctx ()) (LL.analyze_proc [] llc)))));
   let opt = Option.value_exn !admitted in
   (* The laundering the guard prevents: had the hoist fired, the write would sit at statement level
      and no [Local_scope] would carry it. *)
@@ -402,7 +361,7 @@ let phase6 () =
          ignore
            (Context.compile ~name:"pls_impure_siblings" ~prelowered:opt
               ~lowered_transform:(fun o -> o)
-              (Context.auto ()) Ir.Assignments.empty_comp Idx.Empty)))
+              (Context.auto ()) Ir.Assignments.empty_comp Ir.Indexing.Empty)))
 
 let () =
   phase1 ();

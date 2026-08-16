@@ -235,19 +235,25 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   It replaces the compile's lowering wholesale, so the analysis layer and the kernels see one IR;
   add `~lowered_transform:(fun o -> o)` to keep the default schedule annotator off hand-built code.
   See `test/operations/prelowered_seam.ml`, and mind the scope-purity contract below.
-- Such a hand-built case gets its differential arm for free: seed the *decision* into the
-  `optimize_ctx` you hand `LL.optimize` (`Tn.Placements.update ctx.placements tn Tn.On_device prov`
-  — what `Context.decide_materialized` does for the `Assignments` pipeline) and re-specialize the
-  SAME `LL.t`. The inlined and materialized readings of one program must agree cell for cell, which
-  is what pins a virtualization guard; `Context.decide_materialized` on the context itself cannot do
-  this, because `?prelowered` replaces the lineage state with the record's own `optimize_ctx`.
+- Do not re-derive that harness: `test/support/ll_test.ml` (library `ll_test`, links `ocannl`) holds
+  the LL builders, ONE exhaustive `Low_level.t`/`scalar_t` traversal with the counters derived from
+  it, and `optimize`/`run`/`execute` — add `ll_test` to the test's `(libraries ...)`. A new IR
+  constructor is handled there once instead of in every copy. `test_utils` stays separate on purpose:
+  it depends on `arrayjit.ir` alone, for tests that link no more than that.
+- Such a hand-built case gets its differential arm for free: pre-decide the placement in the
+  `optimize_ctx` you hand `LL.optimize` (`Low_level.decide_materialized`, which is what
+  `Context.decide_materialized` records for the `Assignments` pipeline; `Ll_test.optimize
+  ~materialized` wraps it) and re-specialize the SAME `LL.t`. The inlined and materialized readings
+  of one program must agree cell for cell, which is what pins a virtualization guard;
+  `Context.decide_materialized` on the context itself cannot do this, because `?prelowered` replaces
+  the lineage state with the record's own `optimize_ctx`.
   Three traps: (a) `known_non_virtual` does NOT mean "has a context buffer" — a node written and read
-  within one routine and never observed is placed `Local`, and neither readback of it is the
-  routine's values: seeded, `set_values` allocates a context buffer the routine's local storage
-  never writes, so `get_values` hands back exactly what was uploaded (a kernel that did nothing
-  looks the same); unseeded, `Context.to_host` raises "not present in context" unless the node has
-  host-init data or a for-print proxy. Read back only nodes you declared `On_device`, and mark them
-  `Tn.set_observable` so the aliasing planner cannot hand their bytes to another node. (b) Producer/consumer indices that run past a node's dims are
+  within one routine and never observed is placed `Local`, routine-scoped scratch whose values never
+  reach a context buffer. Host access to a node this lineage placed `Local` raises in BOTH
+  directions (gh-ocannl-599; `test/operations/local_host_access.ml`), so the mistake fails loudly
+  rather than reporting the uploaded copy back as a computed value. Read back only nodes you
+  declared `On_device`, and mark them `Tn.set_observable` so the aliasing planner cannot hand their
+  bytes to another node. (b) Producer/consumer indices that run past a node's dims are
   invisible while the node is virtual (the access is inlined away) and become real out-of-bounds
   traffic the moment the case executes or the materialized arm runs — size hand-built arrays for the
   materialized reading, and seed outputs with a sentinel so "wrote the wrong cells" fails the value

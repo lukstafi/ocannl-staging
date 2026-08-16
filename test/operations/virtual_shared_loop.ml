@@ -2,10 +2,10 @@
 
    High-level lowering never places two distinct tensors in the same for-loop (each assignment
    lowers to its own [loop_over_dims]), so these cases are built directly as [Ir.Low_level.t] and
-   run through [Ir.Low_level.optimize] -- the same pipeline (trace_node_facts -> decide_placements -> virtual_llc ->
-   cleanup_virtual_llc -> simplify -> CSE -> hoist) the backends use. We assert structurally on the
-   optimized form and on the resulting [traced_array]/memory-mode facts, which precisely pin the
-   #134 invariants:
+   run through the [Ll_test] harness (gh-ocannl-600) -- the same pipeline (trace_node_facts ->
+   decide_placements -> virtual_llc -> cleanup_virtual_llc -> simplify -> CSE -> hoist) the backends
+   use. We assert structurally on the optimized form and on the resulting [traced_array]/memory-mode
+   facts, which precisely pin the #134 invariants:
 
    - shared loop symbols no longer force [is_complex]; - each candidate tensor in a shared loop gets
    its own stored computation and inlines downstream; - a surviving (materialized) sibling setter
@@ -22,146 +22,10 @@
    [On_device] — the materialized reading of the same program — and the two arms must agree. *)
 
 open Base
-module LL = Ir.Low_level
-module Tn = Ir.Tnode
-module Ops = Ir.Ops
+open Ll_test
 
-let single = Ir.Ops.single
-let next_id = ref 1000
-
-let mk ?(dims = [| 3 |]) label =
-  Int.incr next_id;
-  Tn.create (Tn.Specified single) ~id:!next_id ~label:[ label ]
-    ~unpadded_dims:(lazy dims)
-    ~padding:(lazy None)
-    ()
-
-(* Materialized nodes are also the ones the executed legs seed and read back, so they are marked
-   observable: the buffer-aliasing planner may not hand their bytes to another node. Both facts are
-   declared intent, settled before optimization, so neither perturbs the structural pins. *)
-let materialize tn =
-  Tn.update_memory_mode tn Tn.On_device 99;
-  Tn.set_observable tn
-
-(* --- low-level builders --- *)
-let sym () = Ir.Indexing.get_symbol ()
-let iter s = Ir.Indexing.Iterator s
-let set s tn llsc : LL.t = LL.Set { tn; idcs = [| iter s |]; llsc; debug = "" }
-let get s tn : LL.scalar_t = LL.Get (tn, [| iter s |])
-let add a b : LL.scalar_t = LL.Binop (Ops.Add, (a, single), (b, single))
-let mul a b : LL.scalar_t = LL.Binop (Ops.Mul, (a, single), (b, single))
-let c x : LL.scalar_t = LL.Constant x
-let embed s : LL.scalar_t = LL.Embed_index (iter s)
-
-(* Sibling providers write [base + i] rather than a constant: a constant makes the executed legs
-   blind to WHICH cell of the provider an inlined read stood for, which is the half of the rewrite
-   that the shared loop symbol puts at risk. [Embed_index] is not an array access, so this does not
-   make the provider [is_complex]. *)
-let ramp base s = add (c base) (embed s)
-
-let loop s body : LL.t =
-  LL.For_loop { index = s; from_ = 0; to_ = 2; body; axis = Serial }
-
-let seq a b : LL.t = LL.Seq (a, b)
-
-(* [materialized] pre-decides those nodes' placement in the lineage, exactly as
-   [Context.decide_materialized] does for the [Assignments] pipeline: it is what gives each case a
-   materialized arm to compare its inlined values against. *)
-let optimize ?(materialized = []) llc : LL.optimized =
-  let ctx : LL.optimize_ctx = LL.empty_optimize_ctx () in
-  List.iter materialized ~f:(fun tn -> Tn.Placements.update ctx.LL.placements tn Tn.On_device 589);
-  LL.optimize ctx ~unoptim_ll_source:None ~ll_source:None ~name:"shared_loop" [] llc
-
-(* --- the executed leg --- Hand-built code is compiled AS WRITTEN: the identity
-   [lowered_transform] takes the place of the default schedule annotator, which would otherwise
-   parallelize or fission the loop nest. *)
-let base_ctx = lazy (Context.auto ())
-
-let execute ~name (o : LL.optimized) ~(seed : (Tn.t * float array) list) ~(read : Tn.t list) =
-  let ctx = Lazy.force base_ctx in
-  let ctx, routine =
-    Context.compile ~name ~prelowered:o
-      ~lowered_transform:(fun x -> x)
-      ctx Ir.Assignments.empty_comp Ir.Indexing.Empty
-  in
-  let ctx = List.fold seed ~init:ctx ~f:(fun ctx (tn, vs) -> Context.set_values ctx tn vs) in
-  let ctx = Context.run ctx routine in
-  List.map read ~f:(Context.get_values ctx)
-
-(* Cells no writer covers keep this sentinel, so "wrote the wrong cells" fails the value check
-   instead of reading whatever the buffer happened to hold. *)
-let blank n = Array.create ~len:n (-1.)
-
-let close values expected =
-  Array.length values = Array.length expected
-  && Array.for_alli values ~f:(fun i v -> Float.(abs (v -. expected.(i)) <= 1e-5))
-
-let same got expected = List.for_all2_exn got expected ~f:close
-
-(* Post-optimization placement probes: decisions live on the optimize_ctx's placements
-   (context-scoped memory modes), not on the tnode (which now holds only declared intent). *)
-let known_virtual (o : LL.optimized) tn = Tn.Placements.known_virtual o.optimize_ctx.placements tn
-
-let known_non_virtual (o : LL.optimized) tn =
-  Tn.Placements.known_non_virtual o.optimize_ctx.placements tn
-
-(* --- structural probes on the optimized form --- *)
-let rec walk_t ~on_set ~on_get (llc : LL.t) =
-  match llc with
-  | LL.Noop | LL.Declare_local _ | LL.Comment _ | LL.Staged_compilation _ | LL.Workgroup_barrier
-  | LL.Tile_mma _ ->
-      ()
-  | LL.Seq (a, b) ->
-      walk_t ~on_set ~on_get a;
-      walk_t ~on_set ~on_get b
-  | LL.For_loop { body; _ } -> walk_t ~on_set ~on_get body
-  | LL.Zero_out tn -> on_set tn
-  | LL.Set { tn; llsc; _ } ->
-      on_set tn;
-      walk_s ~on_set ~on_get llsc
-  | LL.Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
-      on_set tn;
-      walk_s ~on_set ~on_get v;
-      walk_s ~on_set ~on_get llsc
-  | LL.Set_from_vec { tn; arg = s, _; _ } ->
-      on_set tn;
-      walk_s ~on_set ~on_get s
-  | LL.Set_local (_, s) -> walk_s ~on_set ~on_get s
-  | LL.If { cond = c, _; body } ->
-      walk_s ~on_set ~on_get c;
-      walk_t ~on_set ~on_get body
-
-and walk_s ~on_set ~on_get (s : LL.scalar_t) =
-  match s with
-  | LL.Constant _ | LL.Constant_bits _ | LL.Get_local _ | LL.Embed_index _ | LL.Get_merge_buffer _
-    ->
-      ()
-  | LL.Get (tn, _) -> on_get tn
-  | LL.Get_dynamic { tn; dyn_value = v, _; _ } ->
-      on_get tn;
-      walk_s ~on_set ~on_get v
-  | LL.Local_scope { body; _ } -> walk_t ~on_set ~on_get body
-  | LL.Ternop (_, (a, _), (b, _), (d, _)) ->
-      walk_s ~on_set ~on_get a;
-      walk_s ~on_set ~on_get b;
-      walk_s ~on_set ~on_get d
-  | LL.Binop (_, (a, _), (b, _)) ->
-      walk_s ~on_set ~on_get a;
-      walk_s ~on_set ~on_get b
-  | LL.Unop (_, (a, _)) -> walk_s ~on_set ~on_get a
-
-let count_set (o : LL.optimized) tn =
-  let n = ref 0 in
-  walk_t ~on_set:(fun t -> if t.Tn.id = tn.Tn.id then Int.incr n) ~on_get:(fun _ -> ()) o.llc;
-  !n
-
-let count_get (o : LL.optimized) tn =
-  let n = ref 0 in
-  walk_t ~on_set:(fun _ -> ()) ~on_get:(fun t -> if t.Tn.id = tn.Tn.id then Int.incr n) o.llc;
-  !n
-
-let is_complex (o : LL.optimized) tn = (Hashtbl.find_exn o.traced_store tn).LL.is_complex
-let p name b = Stdio.printf "%s: %b\n" name b
+let mk = node_factory ~first_id:1000 ~dims:[| 3 |] ()
+let optimize ?materialized llc = optimize ?materialized ~name:"shared_loop" llc
 
 (* === Case 1: two independent virtual siblings in one loop, read downstream === *)
 let case_independent () =
@@ -169,9 +33,9 @@ let case_independent () =
   materialize oa;
   materialize ob;
   let i = sym () and j = sym () and k = sym () in
-  let shared = loop i (seq (set i a (ramp 2. i)) (set i b (ramp 3. i))) in
-  let use_a = loop j (set j oa (get j a)) in
-  let use_b = loop k (set k ob (get k b)) in
+  let shared = loop_n i 3 (seq (set a [| iter i |] (ramp 2. i)) (set b [| iter i |] (ramp 3. i))) in
+  let use_a = loop_n j 3 (set oa [| iter j |] (get a [| iter j |])) in
+  let use_b = loop_n k 3 (set ob [| iter k |] (get b [| iter k |])) in
   let llc = seq shared (seq use_a use_b) in
   let o = optimize llc in
   p "independent siblings both virtual" (known_virtual o a && known_virtual o b);
@@ -193,8 +57,8 @@ let case_mixed () =
   materialize b;
   materialize oa;
   let i = sym () and j = sym () in
-  let shared = loop i (seq (set i a (ramp 2. i)) (set i b (ramp 3. i))) in
-  let use_a = loop j (set j oa (get j a)) in
+  let shared = loop_n i 3 (seq (set a [| iter i |] (ramp 2. i)) (set b [| iter i |] (ramp 3. i))) in
+  let use_a = loop_n j 3 (set oa [| iter j |] (get a [| iter j |])) in
   let llc = seq shared use_a in
   let o = optimize llc in
   p "mixed cleanup keeps b setter" (count_set o b = 1);
@@ -213,7 +77,10 @@ let case_forward_provider () =
   materialize b;
   let i = sym () in
   (* a written, then b reads a -- both in one loop; b survives (materialized), a virtual. *)
-  let shared = loop i (seq (set i a (ramp 2. i)) (set i b (add (get i a) (c 1.)))) in
+  let shared =
+    loop_n i 3
+      (seq (set a [| iter i |] (ramp 2. i)) (set b [| iter i |] (add (get a [| iter i |]) (c 1.))))
+  in
   let o = optimize shared in
   p "forward provider inlined into materialized reader"
     (known_virtual o a && count_set o a = 0 && count_get o a = 0 && count_set o b = 1);
@@ -230,8 +97,11 @@ let case_chain () =
   materialize out;
   let i = sym () and j = sym () in
   (* a = f; b = g(a); both virtual. out = h(b), materialized, read downstream. *)
-  let shared = loop i (seq (set i a (ramp 2. i)) (set i b (add (get i a) (c 1.)))) in
-  let use_b = loop j (set j out (mul (get j b) (c 2.))) in
+  let shared =
+    loop_n i 3
+      (seq (set a [| iter i |] (ramp 2. i)) (set b [| iter i |] (add (get a [| iter i |]) (c 1.))))
+  in
+  let use_b = loop_n j 3 (set out [| iter j |] (mul (get b [| iter j |]) (c 2.))) in
   let llc = seq shared use_b in
   let o = optimize llc in
   p "forward virtual-to-virtual chain both virtual" (known_virtual o a && known_virtual o b);
@@ -259,8 +129,10 @@ let case_reverse () =
   let a = mk ~dims:[| 4 |] "a" and b = mk "b" in
   materialize b;
   let i = sym () in
-  let read_ahead = LL.Get (a, [| Ir.Indexing.Affine { symbols = [ (1, i) ]; offset = 1 } |]) in
-  let shared = loop i (seq (set i a (c 2.)) (set i b (add read_ahead (c 1.)))) in
+  let read_ahead = get a [| aff [ (1, i) ] 1 |] in
+  let shared =
+    loop_n i 3 (seq (set a [| iter i |] (c 2.)) (set b [| iter i |] (add read_ahead (c 1.))))
+  in
   let o = optimize shared in
   p "loop-carried provider kept materialized" (known_non_virtual o a);
   p "loop-carried provider read NOT rewritten (array read preserved)" (count_get o a >= 1);
@@ -279,7 +151,7 @@ let case_complex () =
   materialize y;
   materialize z;
   let i = sym () in
-  let l = loop i (set i z (mul (get i x) (get i y))) in
+  let l = loop_n i 3 (set z [| iter i |] (mul (get x [| iter i |]) (get y [| iter i |]))) in
   let o = optimize l in
   p "is_complex from genuine complex scalar" (is_complex o z);
   let got =
@@ -299,9 +171,12 @@ let case_inloop_consumer () =
   materialize cons;
   let i = sym () in
   let shared =
-    loop i
-      (seq (set i a (ramp 2. i))
-         (seq (set i b (ramp 3. i)) (set i cons (add (get i a) (get i b)))))
+    loop_n i 3
+      (seq
+         (set a [| iter i |] (ramp 2. i))
+         (seq
+            (set b [| iter i |] (ramp 3. i))
+            (set cons [| iter i |] (add (get a [| iter i |]) (get b [| iter i |])))))
   in
   let o = optimize shared in
   p "in-loop consumer: both providers virtual" (known_virtual o a && known_virtual o b);
@@ -321,14 +196,10 @@ let case_dead_loop () =
   let d = mk "dead" and out = mk "dlo" in
   materialize out;
   let i = sym () and j = sym () in
-  let dead_write =
-    LL.For_loop
-      { index = i; from_ = 0; to_ = -1; body = set i d (c 7.); axis = Serial }
-  in
-  let consume = loop j (set j out (get j d)) in
+  let dead_write = loop ~upto:(-1) i (set d [| iter i |] (c 7.)) in
+  let consume = loop_n j 3 (set out [| iter j |] (get d [| iter j |])) in
   let o = optimize (seq dead_write consume) in
-  let traced = Base.Hashtbl.find_exn o.LL.traced_store d in
-  p "dead loop: node stays read-only" traced.LL.read_only;
+  p "dead loop: node stays read-only" (read_only o d);
   let (inputs, outputs), _merge = LL.input_and_output_nodes o in
   p "dead loop: node is a routine input, not an output"
     (Set.mem inputs d && not (Set.mem outputs d));
@@ -348,15 +219,10 @@ let case_dead_non_traced () =
   let d = mk "deadnt" and out = mk "dnto" in
   materialize out;
   let i = sym () and j = sym () in
-  let dead_write =
-    LL.For_loop { index = i; from_ = 0; to_ = -1; body = set i d (c 7.); axis = Serial }
-  in
-  let consume =
-    loop j (LL.Set { tn = out; idcs = [| iter j |]; llsc = LL.Get (d, [| Ir.Indexing.Fixed_idx 0 |]); debug = "" })
-  in
+  let dead_write = loop ~upto:(-1) i (set d [| iter i |] (c 7.)) in
+  let consume = loop_n j 3 (set out [| iter j |] (get d [| fixed 0 |])) in
   let o = optimize (seq dead_write consume) in
-  let traced = Base.Hashtbl.find_exn o.LL.traced_store d in
-  p "dead-write coverage: read_before_write set" traced.LL.read_before_write;
+  p "dead-write coverage: read_before_write set" (read_before_write o d);
   let (inputs, _outputs), _merge = LL.input_and_output_nodes o in
   p "dead-write coverage: node is a routine input" (Set.mem inputs d);
   let got =
@@ -375,16 +241,15 @@ let case_if_cond_read () =
   let a = mk "guarded" in
   let i = sym () in
   let guarded_update =
-    loop i
+    loop_n i 3
       (LL.If
          {
-           cond = (LL.Binop (Ops.Cmplt, (get i a, single), (c 1., single)), single);
-           body = set i a (c 1.);
+           cond = (binop Ops.Cmplt (get a [| iter i |]) (c 1.), single);
+           body = set a [| iter i |] (c 1.);
          })
   in
   let o = optimize guarded_update in
-  let traced = Base.Hashtbl.find_exn o.LL.traced_store a in
-  p "if-cond read: read_before_write set" traced.LL.read_before_write;
+  p "if-cond read: read_before_write set" (read_before_write o a);
   let (inputs, _outputs), _merge = LL.input_and_output_nodes o in
   p "if-cond read: node is a routine input" (Set.mem inputs a);
   (* Only the cells whose incoming value is below 1 are clamped; the rest keep what was seeded, so

@@ -21,6 +21,7 @@ triangular: virtual and materialized arms agree: true
 non-injective producer stays non-virtual: true
 non-injective producer array read preserved: true
 non-injective: the scattered value reached the consumer through the buffer: true
+non-injective: the Local producer refuses host readback: true
 stage-a diagonal producer virtual: true
 stage-a diagonal inlined (no array reads survive): true
 stage-a diagonal: executed values are the diagonal over the zero-init: true

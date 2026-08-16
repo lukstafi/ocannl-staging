@@ -1,0 +1,9 @@
+the pipeline placed the intermediate Local: true
+get_values on a Local node is refused: true
+set_values on a Local node is refused: true
+get_value on a Local node is refused: true
+set_value on a Local node is refused: true
+materialized: the same node is On_device: true
+materialized: get_values returns the computed contraction: true
+materialized: set_values/get_values round-trip: true
+an undecided node: not present

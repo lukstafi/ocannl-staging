@@ -564,6 +564,25 @@ let copy_optimize_ctx { computations; placements; alias_candidates; inline_prefe
     inline_preferences = Hash_set.copy inline_preferences;
   }
 
+(** Records an [On_device] decision in the lineage state for each node of [tns] this lineage has not
+    already resolved otherwise — the "materialize this node" move of the placement lattice, and the
+    [Materialize] half of the inlining decision vector.
+
+    Nodes already resolved to [Virtual] / [Local] / [Effectively_constant] keep their resolution:
+    decisions are final within a lineage, since already-compiled routines depend on them.
+
+    {!Context.decide_materialized} is the context-level form (it forks the lineage first), and is
+    what ordinary [Assignments] callers want. This raw form serves the two paths that hold an
+    [optimize_ctx] directly: the analyze-only entry points, and hand-built {!optimize} calls in
+    tests — for which no context-level form can work, since the [?prelowered] seam replaces the
+    context's lineage state with the optimized record's own [optimize_ctx]. *)
+let decide_materialized ?(provenance = 31) (optim_ctx : optimize_ctx) tns =
+  List.iter tns ~f:(fun tn ->
+      match Tnode.Placements.get optim_ctx.placements tn with
+      | None | Some ((Tnode.Never_virtual | Tnode.On_device), _) ->
+          Tnode.Placements.update optim_ctx.placements tn Tnode.On_device provenance
+      | Some ((Tnode.Virtual | Tnode.Local | Tnode.Effectively_constant), _) -> ())
+
 type traced_store = (Tn.t, traced_array) Base.Hashtbl.t [@@deriving sexp_of]
 
 (** Granularity of the XOR remap applied to a swizzled node's minor axis (gh-ocannl-481 item 3, D1).
