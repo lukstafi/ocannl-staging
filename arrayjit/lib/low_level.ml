@@ -3407,49 +3407,6 @@ let has_accumulation (llc : t) : bool =
 
 exception Impure_scope of string
 
-(* The scope ids a single statement binds: every [Local_scope] in its expression, at any depth.
-   Their definitions are what [C_syntax.pp_local_defs] emits ahead of the statement, ordered by
-   [scope_id]; a local NOT in this set was declared before the statement (a top-level
-   [Declare_local], or an enclosing statement's binder) and is therefore already in scope whatever
-   the ordering. *)
-let statement_bound_scopes (llsc : scalar_t) : Set.M(Int).t =
-  let acc = ref (Set.empty (module Int)) in
-  let rec sc (l : scalar_t) =
-    match l with
-    | Local_scope { id; body; _ } ->
-        acc := Set.add !acc id.scope_id;
-        pr body
-    | Get_dynamic { dyn_value = v, _; _ } -> sc v
-    | Ternop (_, (a, _), (b, _), (c, _)) ->
-        sc a;
-        sc b;
-        sc c
-    | Binop (_, (a, _), (b, _)) ->
-        sc a;
-        sc b
-    | Unop (_, (a, _)) -> sc a
-    | Get_local _ | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> ()
-  and pr (l : t) =
-    match l with
-    | Seq (a, b) ->
-        pr a;
-        pr b
-    | For_loop { body; _ } -> pr body
-    | If { cond = c, _; body } ->
-        sc c;
-        pr body
-    | Set { llsc; _ } | Set_local (_, llsc) -> sc llsc
-    | Set_dynamic { dyn_value = v, _; llsc; _ } ->
-        sc v;
-        sc llsc
-    | Set_from_vec { arg = a, _; _ } -> sc a
-    | Tile_mma { fallback; _ } -> pr fallback
-    | Zero_out _ | Declare_local _ | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier ->
-        ()
-  in
-  sc llsc;
-  !acc
-
 (** gh-ocannl-584: the scope-purity contract. A [Local_scope] body's ONLY effect is on the locals it
     owns — its own scope id, plus ids [Declare_local]d lexically within it. Raises
     [Invalid_argument] on anything else inside a body, at any nesting depth: a tensor-node write
@@ -3503,16 +3460,16 @@ let scope_purity_violation_gen (root : [ `Proc of t | `Scalar of scalar_t ]) : s
      an integer-keyed set would let a body write a local it does not own. A list is the right shape
      here -- a body owns one id plus whatever it declares. *)
   let owns owned id = List.mem owned id ~equal:equal_scope_id in
-  let rec proc ~scope ~owned ~chain ~stmt_ids (llc : t) : scope_id list =
+  let rec proc ~scope ~owned (llc : t) : scope_id list =
     let ban what = Option.iter scope ~f:(fun s -> reject s (what ())) in
     match llc with
-    | Seq (a, b) -> proc ~scope ~owned:(proc ~scope ~owned ~chain ~stmt_ids a) ~chain ~stmt_ids b
+    | Seq (a, b) -> proc ~scope ~owned:(proc ~scope ~owned a) b
     | For_loop { body; _ } ->
-        ignore (proc ~scope ~owned ~chain ~stmt_ids body : scope_id list);
+        ignore (proc ~scope ~owned body : scope_id list);
         owned
     | If { cond = c, _; body } ->
-        scalar ~scope ~owned ~chain ~stmt_ids c;
-        ignore (proc ~scope ~owned ~chain ~stmt_ids body : scope_id list);
+        scalar ~scope ~owned c;
+        ignore (proc ~scope ~owned body : scope_id list);
         owned
     | Declare_local { id; _ } -> id :: owned
     | Set_local (id, llsc) ->
@@ -3520,27 +3477,27 @@ let scope_purity_violation_gen (root : [ `Proc of t | `Scalar of scalar_t ]) : s
           ban (fun () ->
               "a Set_local of v" ^ Int.to_string id.scope_id ^ "_" ^ Tn.debug_name id.tn
               ^ ", a local the body does not own,");
-        scalar ~scope ~owned ~chain ~stmt_ids llsc;
+        scalar ~scope ~owned llsc;
         owned
     | Zero_out tn ->
         ban (wrote "Zero_out" tn);
         owned
     | Set { tn; llsc; _ } ->
         ban (wrote "Set" tn);
-        scalar ~scope ~owned ~chain ~stmt_ids llsc;
+        scalar ~scope ~owned llsc;
         owned
     | Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
         ban (wrote "Set_dynamic" tn);
-        scalar ~scope ~owned ~chain ~stmt_ids v;
-        scalar ~scope ~owned ~chain ~stmt_ids llsc;
+        scalar ~scope ~owned v;
+        scalar ~scope ~owned llsc;
         owned
     | Set_from_vec { tn; arg = a, _; _ } ->
         ban (wrote "Set_from_vec" tn);
-        scalar ~scope ~owned ~chain ~stmt_ids a;
+        scalar ~scope ~owned a;
         owned
     | Tile_mma { d = d_tn, _; fallback; _ } ->
         ban (wrote "Tile_mma" d_tn);
-        ignore (proc ~scope ~owned ~chain ~stmt_ids fallback : scope_id list);
+        ignore (proc ~scope ~owned fallback : scope_id list);
         owned
     (* Neither is scope-local state, and neither can be placed by the hoisting rules: a barrier is a
        synchronization effect, and a staged callback emits code this walk cannot see. *)
@@ -3551,19 +3508,12 @@ let scope_purity_violation_gen (root : [ `Proc of t | `Scalar of scalar_t ]) : s
         ban (fun () -> "a Staged_compilation, whose callback emits code that cannot be inspected,");
         owned
     | Noop | Comment _ -> owned
-  and scalar ~scope ~owned ~chain ~stmt_ids (llsc : scalar_t) : unit =
-    (* At a statement's expression root the statement's own binders are not known yet; compute them
-       once here and carry them into every body below. *)
-    let stmt_ids = match stmt_ids with Some ids -> ids | None -> statement_bound_scopes llsc in
-    let scalar ~scope ~owned llsc = scalar ~scope ~owned ~chain ~stmt_ids:(Some stmt_ids) llsc in
+  and scalar ~scope ~owned (llsc : scalar_t) : unit =
     match llsc with
     (* A nested body starts from its own id alone: it owns neither its parent's local nor a
        sibling's, so it cannot make their emission order observable. *)
     | Local_scope { id; body; _ } ->
-        ignore
-          (proc ~scope:(Some id) ~owned:[ id ] ~chain:(chain @ [ id ]) ~stmt_ids:(Some stmt_ids)
-             body
-            : scope_id list)
+        ignore (proc ~scope:(Some id) ~owned:[ id ] body : scope_id list)
     | Get_dynamic { dyn_value = v, _; _ } -> scalar ~scope ~owned v
     | Ternop (_, (s1, _), (s2, _), (s3, _)) ->
         scalar ~scope ~owned s1;
@@ -3573,33 +3523,12 @@ let scope_purity_violation_gen (root : [ `Proc of t | `Scalar of scalar_t ]) : s
         scalar ~scope ~owned s1;
         scalar ~scope ~owned s2
     | Unop (_, (s, _)) -> scalar ~scope ~owned s
-    (* gh-ocannl-584 review round 4: a body's READS of locals bound by the same statement are
-       ordered by [scope_id], not by where the operand sits. Reading a sibling emitted LATER is a
-       forward reference to a variable not yet declared; reading one emitted earlier is fine and is
-       ordinary pipeline output ([eliminate_common_subexpressions] rewrites a duplicate scope to a
-       [Get_local] of the first occurrence, always a smaller id -- layer_norm_divided_mean does
-       exactly this). Locals from an enclosing scope, or declared before the statement, are in scope
-       however the siblings are ordered. *)
-    | Get_local id ->
-        let outermost = List.hd chain in
-        if
-          (not (List.is_empty chain))
-          && (not (owns owned id))
-          && (not (List.mem chain id ~equal:equal_scope_id))
-          && Set.mem stmt_ids id.scope_id
-          && Option.value_map outermost ~default:false ~f:(fun o -> id.scope_id > o.scope_id)
-        then
-          Option.iter scope ~f:(fun s ->
-              reject s
-                ("a Get_local of v" ^ Int.to_string id.scope_id ^ "_" ^ Tn.debug_name id.tn
-               ^ ", a local of a sibling scope this statement emits LATER (definitions are ordered \
-                  by scope_id, so the read would precede the declaration),"))
-    | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> ()
+    | Get_local _ | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> ()
   in
   match
     match root with
-    | `Proc llc -> ignore (proc ~scope:None ~owned:[] ~chain:[] ~stmt_ids:None llc : scope_id list)
-    | `Scalar llsc -> scalar ~scope:None ~owned:[] ~chain:[] ~stmt_ids:None llsc
+    | `Proc llc -> ignore (proc ~scope:None ~owned:[] llc : scope_id list)
+    | `Scalar llsc -> scalar ~scope:None ~owned:[] llsc
   with
   | () -> None
   | exception Impure_scope msg -> Some msg

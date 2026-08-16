@@ -404,59 +404,6 @@ let phase6 () =
               ~lowered_transform:(fun o -> o)
               (Context.auto ()) Ir.Assignments.empty_comp Idx.Empty)))
 
-(* gh-ocannl-584 review round 4: a body's READS of locals bound by the same statement are ordered by
-   [scope_id] — [pp_local_defs] sorts the definitions — not by where the operand sits in the
-   expression. Reading a sibling the statement emits LATER is a forward reference to a variable not
-   yet declared. Reading one emitted EARLIER is fine, and is ordinary pipeline output:
-   [eliminate_common_subexpressions] rewrites a duplicate scope to a [Get_local] of the first
-   occurrence, whose id is always smaller (layer_norm_divided_mean does exactly this — a strict "no
-   sibling reads" rule was tried and rejects its lowering). Locals from an enclosing scope, or
-   declared before the statement, are in scope however the siblings are ordered. *)
-let phase7 () =
-  let x = mk "pls7_x" and y = mk "pls7_y" in
-  let l1 = mk ~dims:[| 1 |] "pls7_l1" and l2 = mk ~dims:[| 1 |] "pls7_l2" in
-  let i = sym () in
-  (* Minted in order, so [early] sorts before [late] in the emitted definitions. *)
-  let early = LL.get_scope l1 in
-  let late = LL.get_scope l2 in
-  let scope id ~body : LL.scalar_t = LL.Local_scope { id; body; orig_indices = [| iter i |] } in
-  let stmt llsc = loop ~upto:3 i (set i y llsc) in
-  (* [late]'s body reads [early]'s local: the definition it needs is emitted first. *)
-  let backward =
-    stmt
-      (binop Ops.Add
-         (scope early ~body:(LL.Set_local (early, get i x)))
-         (scope late ~body:(LL.Set_local (late, binop Ops.Mul (LL.Get_local early) (c 2.)))))
-  in
-  (* [early]'s body reads [late]'s local: emitted first, so the read precedes the declaration. *)
-  let forward =
-    stmt
-      (binop Ops.Add
-         (scope early ~body:(LL.Set_local (early, binop Ops.Mul (LL.Get_local late) (c 2.))))
-         (scope late ~body:(LL.Set_local (late, get i x))))
-  in
-  p "phase7: reading a sibling local emitted earlier is accepted"
-    (not (rejected (fun () -> LL.validate_scope_bodies backward)));
-  p "phase7: reading a sibling local emitted later is rejected"
-    (rejected (fun () -> LL.validate_scope_bodies forward));
-  (* A nested body reading its ENCLOSING scope's local: declared at the top of the enclosing block,
-     so it is in scope whatever the sibling ordering. *)
-  let nested_inner = LL.get_scope l2 in
-  let enclosing =
-    stmt
-      (scope early
-         ~body:
-           (seq
-              (LL.Set_local (early, get i x))
-              (LL.Set_local
-                 ( early,
-                   scope nested_inner
-                     ~body:(LL.Set_local (nested_inner, binop Ops.Mul (LL.Get_local early) (c 2.)))
-                 ))))
-  in
-  p "phase7: a nested body reading its enclosing scope's local is accepted"
-    (not (rejected (fun () -> LL.validate_scope_bodies enclosing)))
-
 let () =
   phase1 ();
   phase2 ();
@@ -464,5 +411,4 @@ let () =
   phase4 ();
   phase5 ();
   phase6 ();
-  phase7 ();
   printf "prelowered seam: PASS\n"

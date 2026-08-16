@@ -281,13 +281,16 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   is what keeps the raw analysis probes usable: an impure body reaching the pass would otherwise be
   laundered to a top-level `Declare_local` + body, and `Context.compile ?prelowered` would compile a
   silently changed routine. Rejected, never rewritten — pinned by `prelowered_seam` phase 6.
-  A body's READS of locals bound by the SAME statement are ordered by `scope_id` too (that is the
-  order `pp_local_defs` emits the definitions in), not by where the operand sits: reading a sibling
-  the statement emits LATER is a forward reference to an undeclared variable, and is rejected;
-  reading one emitted earlier is fine and is ordinary pipeline output (CSE rewrites a duplicate
-  scope to a `Get_local` of the first occurrence, whose id is always smaller — a strict "no sibling
-  reads" rule rejects `layer_norm_divided_mean`'s own lowering). Enclosing-scope locals and locals
-  declared before the statement are unconstrained.
+  The contract governs a body's EFFECTS only; it deliberately says nothing about the ORDER of its
+  reads of other locals. A rule for that was written and reverted (gh-ocannl-584 review rounds 4-5):
+  deciding "is this local emitted before me?" means replicating codegen's emission algorithm
+  (`pp_local_defs` sorts by `scope_id`, per-statement def blocks, `Set_dynamic` concatenating two
+  operands' defs), and every divergence is a FALSE REJECTION of valid IR — three surfaced in one
+  review round, one of them rejecting CSE output inside a scope body, which the pipeline really
+  produces. What the rule would have caught (a hand-built read of a sibling emitted later) fails
+  loudly as a backend "use of undeclared identifier", not silently. If the guarantee is ever wanted,
+  it belongs in `pp_local_defs`, which HAS the emission order in hand and so cannot diverge from
+  it.
   `Low_level.validate_scope_bodies` enforces it at BOTH ends of the pipeline: `optimize_proc` on the
   way in (ahead of the analysis cache, so a digest hit cannot skip it — and before the hoist can
   launder a body write into a top-level statement that no later gate would recognize) and
