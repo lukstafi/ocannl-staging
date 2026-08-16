@@ -635,7 +635,35 @@ case $sub in
     ;;
   stop)
     resolve_run "${1:-last}"
-    [ -f "$run_dir/exit" ] && { echo "already finished:"; digest "$run_dir"; exit 0; }
+    if [ -f "$run_dir/exit" ]; then
+      # Finished -- but a descendant dune backgrounded may still hold the
+      # worktree lock (the wrapper deliberately leaves it riding on their
+      # fd 9). The leaderless group cannot be identity-checked directly, so
+      # corroborate three ways before signaling: the lock file is still
+      # LOCKED, the owner pointer names THIS run, and the recorded group is
+      # alive -- together: the processes keeping this worktree busy are this
+      # run's leftovers. Escalation re-checks the same evidence.
+      lock_held() { # exits 0 iff someone still holds the worktree lock
+        perl -e 'use Fcntl ":flock";
+                 open(my $fh, ">>", $ARGV[0]) or exit 1;
+                 exit(flock($fh, LOCK_EX | LOCK_NB) ? 1 : 0)' \
+          "$PWD/.test-run.lock" 2>/dev/null
+      }
+      leftovers() {
+        pg=$(cat "$run_dir/pgid" 2>/dev/null) && kill -0 -- "-$pg" 2>/dev/null &&
+          [ "$(cat "$PWD/.test-run.lock.owner" 2>/dev/null)" = "$run_dir" ] &&
+          lock_held
+      }
+      if leftovers; then
+        kill -TERM -- "-$pg" 2>/dev/null
+        sleep 2
+        if leftovers; then kill -KILL -- "-$pg" 2>/dev/null; fi
+        echo "finished, but its leftover processes held the worktree lock; reaped group $pg"
+      fi
+      echo "already finished:"
+      digest "$run_dir"
+      exit 0
+    fi
     if sup_alive "$run_dir"; then
       kill -TERM "$(cat "$run_dir/pid")" 2>/dev/null
       # Name the run explicitly: `last` may resolve to a DIFFERENT run when
