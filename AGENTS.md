@@ -168,7 +168,10 @@ Key points:
   `tools`, `benchmarks/runners/ocannl`; gh-ocannl-592) — but the key must be
   spelled as a string literal at the call site (`~arg_name:"the_key"`), which the same test
   enforces. Classify the key too, in `Utils.config_key_classification`, or
-  `test/operations/digest_completeness` fails (gh-ocannl-572).
+  `test/operations/digest_completeness` fails (gh-ocannl-572). A new module that reads
+  configuration AFTER lowering — a new backend, say — additionally goes in that test's
+  `codegen_stage_modules` list: the globs scan it either way, but that list is what marks its reads
+  as downstream of the canonical digest, and it is a judgment call, so it stays hand-written.
 - The built-in profile payloads are embedded strings in `arrayjit/lib/utils.ml`, quoted verbatim at
   the end of `ocannl_config.reference`; the same test checks the quote and that payload keys are
   known and documented.

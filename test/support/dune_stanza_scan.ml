@@ -134,9 +134,17 @@ let config_search_path cwd =
     |> List.rev
     |> fun descendants -> descendants @ [ "" ]
 
-let declares_config ?(cwd = "") args =
-  let paths = List.map (config_search_path cwd) ~f:(fun dir -> in_subdir dir config_file) in
-  match args with None -> false | Some args -> List.exists args ~f:(dep_names_path ~paths)
+(** The directories of {!config_search_path} whose config the [(deps …)] field names, nearest
+    first. Which of them is the one that MATTERS depends on where a config actually exists, which
+    this module cannot see: OCANNL reads the nearest one on the path, so a dependency on an
+    ancestor is enough only while no nearer directory has a config of its own (Codex P2, round 10
+    of PR #343). The caller knows which directories have one, and decides. *)
+let declared_config_dirs ?(cwd = "") args =
+  List.filter (config_search_path cwd) ~f:(fun dir ->
+      let paths = [ in_subdir dir config_file ] in
+      match args with None -> false | Some args -> List.exists args ~f:(dep_names_path ~paths))
+
+let declares_config ?(cwd = "") args = not (List.is_empty (declared_config_dirs ~cwd args))
 
 (** The names a [(name …)] or [(names …)] field gives, in order. *)
 let names_of stanza =
@@ -206,6 +214,9 @@ type command =
 (** Pforms naming a program that is part of the toolchain rather than of this repository. *)
 let toolchain_pforms = [ "ocaml"; "ocamlc"; "ocamlopt"; "cc"; "cxx"; "make" ]
 
+(** How a [(test)] stanza's custom action names the test binary. *)
+let test_pform = "%{test}"
+
 (* The path AS WRITTEN, less a leading [./] that only says "here". Reducing it to a basename would
    make `%{dep:../../tools/pp.exe}` and a local `pp.exe` the same identity, and an exemption
    naming one would cover the other -- the same collapse the config scanner's duplicate-basename
@@ -231,7 +242,8 @@ let classify_command ~named_deps cmd =
       | Some ("bin", name) -> Runs name
       | Some _ -> Unrecognized cmd
       | None ->
-          if List.mem toolchain_pforms pform ~equal:String.equal then External
+          if String.equal pform "test" then Runs test_pform
+          else if List.mem toolchain_pforms pform ~equal:String.equal then External
           else (
             (* [./%{pp}] with [(deps (:pp pp.exe))]: the action names the dependency, not the
                file. *)
@@ -373,6 +385,9 @@ type site = {
   kind : kind;
   name : string;
   declares_config : bool;
+      (** whether the deps name a config anywhere on the site's search path; which one had to be
+          named is {!declared_config_dirs}, since only the caller knows where configs exist *)
+  declared_config_dirs : string list;
   subdir : string;
   cwd : string;
 }
@@ -427,67 +442,70 @@ let inert_heads =
     site, which the caller fails on. *)
 let sites content =
   walk "" (stanzas content) ~f:(fun subdir stanza ->
-      (* A [test] runs where its stanza is, so its process directory is the stanza's. *)
-      let site ?(cwd = "") kind name declares_config =
-        [ { kind; name; declares_config; subdir; cwd } ]
+      let deps () = field stanza "deps" in
+      let site ?(cwd = "") ?deps:(deps_field = deps ()) kind name =
+        [
+          {
+            kind;
+            name;
+            declares_config = declares_config ~cwd deps_field;
+            declared_config_dirs = declared_config_dirs ~cwd deps_field;
+            subdir;
+            cwd;
+          };
+        ]
       in
       let stanza_name () = String.concat ~sep:", " (names_of stanza) in
-      let deps () = field stanza "deps" in
-      (* Where a stanza's actions run, relative to it: nowhere else unless something moved them. A
-         `(test)` may carry a custom action, and a `chdir` in one moves the test's own process just
-         as it does a rule's (Codex P2, round 8). *)
-      let action_cwds () =
-        match List.map (commands_in stanza) ~f:fst |> List.dedup_and_sort ~compare:String.compare
-        with
-        | [] -> [ "" ]
-        | cwds -> cwds
+      (* Everything a stanza's actions run, each with the directory it runs in. A `(test)` may
+         carry a custom action, so this serves both branches; the difference is only WHICH of the
+         commands is the test itself. *)
+      let run = executables_run stanza in
+      let sites_for ~is_test =
+        List.map run ~f:fst |> List.dedup_and_sort ~compare:String.compare
+        |> List.concat_map ~f:(fun cwd ->
+               let for_cwd f =
+                 List.filter_map run ~f:(fun (c, command) ->
+                     if String.equal c cwd then f command else None)
+               in
+               let exes =
+                 for_cwd (function
+                   (* In a test stanza, `%{test}` is the test binary itself, reported as the Test
+                      site rather than as something the action also runs. *)
+                   | Runs name when is_test && String.equal name test_pform -> None
+                   | Runs name -> Some name
+                   | _ -> None)
+               in
+               let unreadable = for_cwd (function Unrecognized cmd -> Some cmd | _ -> None) in
+               let unlocatable = for_cwd (function Unknown_directory cmd -> Some cmd | _ -> None) in
+               (if List.is_empty exes then []
+                else site ~cwd Runs_executable (String.concat ~sep:", " exes))
+               @ List.concat_map unreadable ~f:(fun cmd -> site ~cwd Unreadable_command cmd)
+               @ List.concat_map unlocatable ~f:(fun cmd -> site ~cwd Unreadable_directory cmd))
       in
       match head stanza with
       | Some ("test" | "tests") ->
-          (* A custom action can leave the scan unable to say where the test runs, exactly as it
-             can for a rule; that verdict travels with the site rather than being dropped here
-             (Codex P2, round 9). *)
-          let unlocatable =
-            List.filter_map (executables_run stanza) ~f:(function
-              | cwd, Unknown_directory cmd -> Some (cwd, cmd)
+          (* Where the TEST runs, which is where its own command runs -- not where a helper in the
+             same action happens to be sent (Codex P2, round 10). With no custom action, dune runs
+             it in the stanza's directory. *)
+          let test_cwds =
+            List.filter_map run ~f:(function
+              | cwd, Runs name when String.equal name test_pform -> Some cwd
               | _ -> None)
+            |> List.dedup_and_sort ~compare:String.compare
           in
-          List.concat_map (action_cwds ()) ~f:(fun cwd ->
-              site ~cwd Test (stanza_name ()) (declares_config ~cwd (deps ())))
-          @ List.concat_map unlocatable ~f:(fun (cwd, cmd) ->
-                site ~cwd Unreadable_directory cmd (declares_config ~cwd (deps ())))
+          let test_cwds = if List.is_empty test_cwds then [ "" ] else test_cwds in
+          List.concat_map test_cwds ~f:(fun cwd -> site ~cwd Test (stanza_name ()))
+          @ sites_for ~is_test:true
       | Some "library" -> (
           match field stanza "inline_tests" with
           | None -> []
-          | Some inline ->
-              site Inline_tests (stanza_name ()) (declares_config (field_in inline "deps")))
+          | Some inline -> site ~deps:(field_in inline "deps") Inline_tests (stanza_name ()))
       | Some h when List.mem action_heads h ~equal:String.equal ->
           (* One site per directory the rule runs something in: what each needs is that
              directory's config, declared by the path that reaches it from here. *)
-          let declares cwd = declares_config ~cwd (deps ()) in
-          let run = executables_run stanza in
-          let by_cwd =
-            List.map run ~f:fst |> List.dedup_and_sort ~compare:String.compare
-            |> List.concat_map ~f:(fun cwd ->
-                   let for_cwd f =
-                     List.filter_map run ~f:(fun (c, command) ->
-                         if String.equal c cwd then f command else None)
-                   in
-                   let exes = for_cwd (function Runs name -> Some name | _ -> None) in
-                   let unreadable = for_cwd (function Unrecognized cmd -> Some cmd | _ -> None) in
-                   let unlocatable =
-                     for_cwd (function Unknown_directory cmd -> Some cmd | _ -> None)
-                   in
-                   (if List.is_empty exes then []
-                    else site ~cwd Runs_executable (String.concat ~sep:", " exes) (declares cwd))
-                   @ List.concat_map unreadable ~f:(fun cmd ->
-                         site ~cwd Unreadable_command cmd (declares cwd))
-                   @ List.concat_map unlocatable ~f:(fun cmd ->
-                         site ~cwd Unreadable_directory cmd (declares cwd)))
-          in
-          by_cwd
+          sites_for ~is_test:false
           @ List.concat_map (unclassified_action_heads stanza) ~f:(fun head ->
-                site Unclassified_action head (declares ""))
+                site Unclassified_action head)
       | _ -> [])
 
 (** Stanza heads in [content] that {!sites} has no classification for, each once. The caller fails

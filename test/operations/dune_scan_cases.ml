@@ -110,6 +110,16 @@ let cases =
     ( "a test with an ordinary action still runs where it is",
       {dune|(test (name t) (deps ocannl_config) (action (run %{test} --flag)))|dune},
       [ "test t [declares]" ] );
+    (* The test's own command is what says where the TEST runs; a helper sent elsewhere in the same
+       action is a site of its own, not a relocation of the test (Codex P2, round 10). *)
+    ( "a helper chdir'd elsewhere does not move the test",
+      {dune|(test (name t) (deps ocannl_config)
+ (action (progn (chdir ../scratch (run diff a b)) (run %{test}))))|dune},
+      [ "test t [declares]" ] );
+    ( "but a helper running an executable elsewhere is its own site",
+      {dune|(test (name t) (deps ocannl_config)
+ (action (progn (chdir ../scratch (run %{dep:probe.exe})) (run %{test}))))|dune},
+      [ "test t [declares]"; "in ../scratch: rule running probe.exe" ] );
     ( "a test's shell action leaves its directory unestablished too",
       {dune|(test (name t) (deps ocannl_config) (action (bash "cd ../sibling && ./%{test}")))|dune},
       [
@@ -226,7 +236,7 @@ let cases =
 (test (name t))|dune},
       [ "test t" ] );
     ( "a config named in a string is not a dep",
-      {dune|(test (name t) (action (run %{exe} "ocannl_config")))|dune},
+      {dune|(test (name t) (action (run %{test} "ocannl_config")))|dune},
       [ "test t" ] );
     ( "an executable named in a comment does not make a rule a site",
       {dune|(rule (alias runtest)

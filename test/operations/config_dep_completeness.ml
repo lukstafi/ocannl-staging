@@ -92,9 +92,15 @@ let () =
     printf "FAIL: no dune files among the arguments -- the rule's globs match nothing\n";
     Stdlib.exit 1);
   let ok = ref true in
+  (* Reported on both channels, and the run exits nonzero. A golden-diff test that prints its
+     failures and exits 0 can be `dune promote`d into passing, blessing the FAIL text as the
+     expected output (Codex P2, round 10) -- so the exit status carries the verdict. Since a
+     nonzero exit means dune never writes the redirected stdout, the same lines go to stderr, where
+     they survive to be read. *)
   let fail msg =
     ok := false;
-    printf "FAIL: %s\n" msg
+    printf "FAIL: %s\n" msg;
+    eprintf "FAIL: %s\n" msg
   in
   let exemptions = Map.of_alist_exn (module String) exempt_sites in
   let exemptions_used = ref (Set.empty (module String)) in
@@ -119,27 +125,42 @@ let () =
       let copies = Set.of_list (module String) (Scan.config_copy_dirs content) in
       let relative site = Scan.in_subdir site.Scan.subdir site.Scan.cwd in
       let directory_of site = repo_relative [ dir ] (relative site) in
-      List.map sites ~f:(fun site ->
-          (* The config an executable finds is the nearest one at or above where it runs, so the
-             directories to look in are the same search path the dependency may name. *)
-          ( List.map (Scan.config_search_path site.Scan.cwd) ~f:(Scan.in_subdir site.Scan.subdir),
-            directory_of site ))
+      (* The config an executable reads is the NEAREST one at or above where it runs, so that is
+         both the one that has to exist and the one the dependency has to name: depending on an
+         ancestor while a nearer directory has its own leaves the file actually read unbuilt
+         (Codex P2, round 10). *)
+      let has_config subdir =
+        Set.mem config_dirs (repo_relative [ dir ] subdir) || Set.mem copies subdir
+      in
+      let nearest_config site =
+        List.map (Scan.config_search_path site.Scan.cwd) ~f:(Scan.in_subdir site.Scan.subdir)
+        |> List.find ~f:has_config
+      in
+      List.map sites ~f:(fun site -> (Option.is_some (nearest_config site), directory_of site))
       |> List.dedup_and_sort ~compare:Poly.compare
-      |> List.iter ~f:(fun (searched, directory) ->
-             if
-               not
-                 (List.exists searched ~f:(fun subdir ->
-                      Set.mem config_dirs (repo_relative [ dir ] subdir) || Set.mem copies subdir))
-             then
+      |> List.iter ~f:(fun (found, directory) ->
+             if not found then
                fail
                  (Printf.sprintf
-                    "%s runs test executables in %s, which has no %s to depend on -- add \
-                     `(copy_files ../config/%s)`"
+                    "%s runs test executables in %s, which has no %s at or above it to depend on \
+                     -- add `(copy_files ../config/%s)`"
                     dune_file directory Scan.config_file Scan.config_file));
       let described =
-        List.map sites ~f:(fun ({ Scan.kind; name; declares_config; subdir = _; cwd = _ } as site)
-                          ->
+        List.map sites
+          ~f:(fun
+              ({ Scan.kind; name; declared_config_dirs; declares_config = _; subdir = _; cwd = _ }
+               as site)
+            ->
             let key = directory_of site ^ ":" ^ name in
+            (* Declaring the config the process will actually read: the nearest one on its search
+               path, not merely some ancestor's (Codex P2, round 10). *)
+            let declares_config =
+              match nearest_config site with
+              | None -> false
+              | Some nearest ->
+                  List.exists declared_config_dirs ~f:(fun declared ->
+                      String.equal (Scan.in_subdir site.Scan.subdir declared) nearest)
+            in
             (* An exemption is spent only where the dep is actually absent, so declaring it anyway
                makes the entry stale and the list gets pruned rather than growing quietly. *)
             let exempt =
@@ -243,3 +264,4 @@ let () =
        declare %s; %d exempt.\n"
       (List.length dune_files) (count "test") (count "inline tests") (count "rule running")
       Scan.config_file (count "exempt")
+  else Stdlib.exit 1
