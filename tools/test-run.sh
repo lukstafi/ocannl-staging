@@ -26,9 +26,9 @@
 #   tools/test-run.sh list                             # recent runs and their states
 #
 # Exit codes: `run` and `wait` exit with dune's status (142 = the cap expired,
-# 143/130 = cancelled, 124 = `wait` itself timed out, and dune never reaches
-# those on its own). `status` exits 0 finished, 3 still running, 1 died without
-# a verdict. Usage and lock refusals exit 2.
+# 143/130 = cancelled, 137 = SIGKILLed, 124 = `wait` itself timed out; dune
+# never reaches those on its own). `status` exits 0 finished, 3 still running,
+# 1 died without a verdict. Usage and lock refusals exit 2.
 #
 # Everything after the options is dune's argv, verbatim (default: `runtest`):
 #   tools/test-run.sh run runtest test/operations
@@ -62,10 +62,11 @@ command -v dune >/dev/null 2>&1 || die "dune not found (opam environment not set
 
 RUNS=${OCANNL_TEST_RUNS:-$HOME/.ocannl-test-runs}
 mkdir -p "$RUNS" || die "cannot create $RUNS"
-# The worktree key makes locks and `last` per-checkout, so concurrent sessions
-# in different worktrees neither collide nor read each other's verdicts. The
+# The worktree key makes the `last` symlink per-checkout, so concurrent
+# sessions in different worktrees don't read each other's verdicts. The
 # readable basename is for humans listing $RUNS; the crc of the full path is
 # what keeps two paths differing only in punctuation from sharing a key.
+# (The LOCK is deliberately not keyed here -- see take_lock.)
 wt_key=$(basename "$PWD" | tr -c 'A-Za-z0-9' '_')$(printf %s "$PWD" | cksum | awk '{print $1}')
 
 # Cap a command, killing its whole process group when the cap expires -- the
@@ -132,8 +133,16 @@ capped_perl='
 # fd 9 and the capped supervisor inherits (dune's side closes it, see above)
 # -- so it clears exactly when the run's managing processes exit, with
 # nothing to reclaim after a crash (see sweep.sh).
+#
+# The lock file sits BESIDE the worktree it protects (a gitignored dotfile
+# dune's scanner also ignores), not under $RUNS: OCANNL_TEST_RUNS is a
+# supported override for diagnostics storage, and keying the lock there would
+# split the lock namespace while leaving _build shared -- two sessions with
+# different overrides would both "acquire" their lock and collide on dune's.
+# A lock belongs in the same namespace as the resource it protects (the same
+# lesson sweep.sh records).
 take_lock() {
-  exec 9>>"$RUNS/lock-$wt_key" || die "cannot open lock file"
+  exec 9>>"$PWD/.test-run.lock" || die "cannot open lock file"
   perl -e 'use Fcntl ":flock"; exit(flock(STDIN, LOCK_EX | LOCK_NB) ? 0 : 1)' <&9 || {
     echo "test-run: another test-run is active in this worktree; check it with:" >&2
     echo "  tools/test-run.sh status last" >&2
@@ -150,13 +159,37 @@ new_run() {
   : >"$run_dir/log"
   ln -sfn "$run_dir" "$RUNS/last-$wt_key"
   # Runs are throwaway diagnostics; reap old ones so the directory cannot grow
-  # without bound. Keyed on the VERDICT file's age, because a directory without
-  # one may be a live run (`--cap 0` is supported and unbounded, and $RUNS is
-  # shared across worktrees whose locks are independent). Verdict-less
-  # directories are reaped only on a much longer leash, as crash leftovers.
-  find "$RUNS" -maxdepth 2 -name exit -mtime +7 2>/dev/null |
-    while IFS= read -r f; do rm -rf "${f%/exit}"; done
-  find "$RUNS" -maxdepth 1 -type d -name '2*' -mtime +30 -exec rm -rf {} + 2>/dev/null
+  # without bound. Deletion demands the full run schema -- the timestamped
+  # name AND this script's metadata files -- never mere position under $RUNS,
+  # because the override can point $RUNS at a directory with other tenants
+  # and "has a file named exit" must not mark those for deletion. Age is the
+  # VERDICT file's, since a verdict-less directory may be a live run
+  # (`--cap 0` is supported and unbounded); those are reaped only on a much
+  # longer leash, as crash leftovers.
+  find "$RUNS" -maxdepth 1 -type d -name '2*Z-*' 2>/dev/null |
+    while IFS= read -r d; do
+      [ -f "$d/cmd" ] && [ -f "$d/cap" ] || continue
+      if [ -f "$d/exit" ]; then
+        [ -n "$(find "$d/exit" -mtime +7 2>/dev/null)" ] && rm -rf "$d"
+      else
+        [ -n "$(find "$d" -maxdepth 0 -mtime +30 2>/dev/null)" ] && rm -rf "$d"
+      fi
+    done
+}
+
+# "Is the recorded supervisor still running?" -- answered with the pid AND a
+# start-time token, because a bare `kill -0` latches onto whatever process
+# recycled the pid after a reboot or wrapper crash: `status`/`list` would
+# report a stale run as active forever and `stop` would TERM an innocent
+# process. An empty token (MSYS ps without lstart) degrades to the plain
+# pid check rather than failing.
+sup_alive() {
+  local pid tok now
+  pid=$(cat "$1/pid" 2>/dev/null) || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  tok=$(tr -s ' ' <"$1/ptoken" 2>/dev/null) || tok=
+  now=$(ps -o lstart= -p "$pid" 2>/dev/null | tr -s ' ')
+  [ -z "$tok" ] || [ -z "$now" ] || [ "$tok" = "$now" ]
 }
 
 resolve_run() {
@@ -181,9 +214,14 @@ resolve_run() {
 digest() {
   local dir=$1 rc verdict fp
   rc=$(cat "$dir/exit" 2>/dev/null) || die "no verdict recorded in $dir"
+  # 142 is the ONLY code the cap produces (the supervisor's SIGALRM exit), so
+  # only it may say "timeout". 137 is a SIGKILL -- an OOM kill or a forced
+  # external kill -- and labeling it a timeout would send triage hunting a
+  # hang that never happened.
   case $rc in
     0) verdict=pass ;;
-    124 | 137 | 142) verdict="TIMEOUT (run was killed, not judged)" ;;
+    142) verdict="TIMEOUT (cap expired; run was killed, not judged)" ;;
+    137) verdict="KILLED (SIGKILL: OOM or forced kill; not judged)" ;;
     129 | 130 | 143) verdict="CANCELLED (run was killed, not judged)" ;;
     126 | 127) verdict="ERROR (toolchain/setup: nothing ran)" ;;
     *) verdict=FAIL ;;
@@ -243,11 +281,17 @@ case $sub in
     # wrapper inherits lock fd 9; its pid file is what `stop` signals (the
     # supervisor traps TERM and reaps the group).
     (
-      trap '' HUP
+      # Immune to group-directed cancellation (`kill -- -PGID` from a task
+      # runner reaches launcher, wrapper and supervisor alike): the
+      # supervisor takes the TERM, reaps dune and exits 143, while this
+      # wrapper must survive those extra seconds to publish that verdict.
+      # It exits naturally right after, and KILL remains available.
+      trap '' HUP TERM INT
       OCANNL_TESTRUN_BG=1 OCANNL_TESTRUN_RD=$run_dir \
         perl -e "$capped_perl" -- "$cap" dune "$@" >>"$run_dir/log" 2>&1 &
       sup=$!
       printf '%s\n' "$sup" >"$run_dir/pid"
+      ps -o lstart= -p "$sup" 2>/dev/null >"$run_dir/ptoken"
       wait "$sup"
       rc=$?
       # A SIGKILLed supervisor cannot reap its process group, and dune would
@@ -287,7 +331,7 @@ case $sub in
     resolve_run "${1:-last}"
     if [ -f "$run_dir/exit" ]; then
       digest "$run_dir"
-    elif [ -f "$run_dir/pid" ] && ! kill -0 "$(cat "$run_dir/pid")" 2>/dev/null; then
+    elif [ -f "$run_dir/pid" ] && ! sup_alive "$run_dir"; then
       # Grace period: the wrapper writes `exit` moments after the supervisor
       # dies; without this pause a normal completion caught mid-write would be
       # misreported as a crash.
@@ -320,7 +364,7 @@ case $sub in
       # bounded by the remaining budget, so a short --timeout is honored to
       # the second rather than rounded up to an interval.
       remaining=$(( budget - waited ))
-      if [ -f "$run_dir/pid" ] && ! kill -0 "$(cat "$run_dir/pid")" 2>/dev/null; then
+      if [ -f "$run_dir/pid" ] && ! sup_alive "$run_dir"; then
         step=$(( remaining < 2 ? remaining : 2 )) # same mid-write grace as `status`
         [ "$step" -gt 0 ] && sleep "$step"
         [ -f "$run_dir/exit" ] && break
@@ -339,8 +383,12 @@ case $sub in
     resolve_run "${1:-last}"
     [ -f "$run_dir/exit" ] && { echo "already finished:"; digest "$run_dir"; exit 0; }
     [ -f "$run_dir/pid" ] || die "no pid recorded for $run_dir"
-    kill -TERM "$(cat "$run_dir/pid")" 2>/dev/null || echo "supervisor already gone"
-    echo "sent TERM; confirm with: tools/test-run.sh wait last"
+    if sup_alive "$run_dir"; then
+      kill -TERM "$(cat "$run_dir/pid")" 2>/dev/null
+      echo "sent TERM; confirm with: tools/test-run.sh wait last"
+    else
+      echo "supervisor already gone (or its pid was recycled); nothing signaled"
+    fi
     ;;
   list)
     found=0
@@ -349,7 +397,7 @@ case $sub in
       found=1
       d=${d%/}
       if [ -f "$d/exit" ]; then state="exit $(cat "$d/exit")"
-      elif [ -f "$d/pid" ] && kill -0 "$(cat "$d/pid")" 2>/dev/null; then state=running
+      elif [ -f "$d/pid" ] && sup_alive "$d"; then state=running
       else state=unknown
       fi
       printf '%s  %-8s  dune %s\n' "$(basename "$d")" "$state" "$(cat "$d/cmd" 2>/dev/null)"
