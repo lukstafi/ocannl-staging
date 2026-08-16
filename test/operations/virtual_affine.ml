@@ -2,10 +2,10 @@
    affine LHS indices).
 
    High-level lowering never produces these shapes directly in a controllable way, so -- like
-   [virtual_shared_loop.ml] -- the cases are built directly as [Ir.Low_level.t] and run through
-   [Ir.Low_level.optimize] (the same trace_node_facts -> virtual_llc -> cleanup -> simplify pipeline the
-   backends use). We assert structurally on the optimized form (which producers virtualize, that no
-   intermediate array read/setter survives, and which stay materialized).
+   [virtual_shared_loop.ml] -- the cases are built directly as [Ir.Low_level.t] and run through the
+   [Ll_test] harness (gh-ocannl-600), i.e. the same trace_node_facts -> virtual_llc -> cleanup ->
+   simplify pipeline the backends use. We assert structurally on the optimized form (which producers
+   virtualize, that no intermediate array read/setter survives, and which stay materialized).
 
    Cases: - structural affine match: producer [2*oh+wh] consumed at the same affine structure
    inlines with no intermediate buffer; - unit-coefficient solving at a plain iterator: producer
@@ -24,187 +24,10 @@
    carry the scattered value, and the rest the init value. *)
 
 open Base
-module LL = Ir.Low_level
-module Tn = Ir.Tnode
-module Ops = Ir.Ops
-module Idx = Ir.Indexing
+open Ll_test
 
-let single = Ir.Ops.single
-let next_id = ref 2000
-
-let mk ?(dims = [| 6 |]) label =
-  Int.incr next_id;
-  Tn.create (Tn.Specified single) ~id:!next_id ~label:[ label ]
-    ~unpadded_dims:(lazy dims)
-    ~padding:(lazy None)
-    ()
-
-(* Materialized nodes are also the ones the executed legs seed and read back, so they are marked
-   observable: the buffer-aliasing planner may not hand their bytes to another node. Both facts are
-   declared intent, settled before optimization, so neither perturbs the structural pins. *)
-let materialize tn =
-  Tn.update_memory_mode tn Tn.On_device 99;
-  Tn.set_observable tn
-
-(* --- low-level builders --- *)
-let sym () = Idx.get_symbol ()
-let iter s = Idx.Iterator s
-let aff terms offset = Idx.Affine { symbols = terms; offset }
-let set tn idcs llsc : LL.t = LL.Set { tn; idcs; llsc; debug = "" }
-let get tn idcs : LL.scalar_t = LL.Get (tn, idcs)
-let c x : LL.scalar_t = LL.Constant x
-let embed s : LL.scalar_t = LL.Embed_index (iter s)
-let add a b : LL.scalar_t = LL.Binop (Ops.Add, (a, single), (b, single))
-let mul a b : LL.scalar_t = LL.Binop (Ops.Mul, (a, single), (b, single))
-let zero tn : LL.t = LL.Zero_out tn
-
-(* Producers write [1 + 10*outer + inner] rather than a constant, so the executed legs can tell
-   WHICH producer iteration supplied each cell. A constant cannot: solving keeps a residual
-   producer loop, and a range guard that admits an extra iteration replays an identical assignment,
-   so an all-[7.] oracle stays green under exactly the too-wide bound the guard exists to prevent.
-   The [1 +] keeps every scattered value distinct from the zero-init too. *)
-let tag outer inner = add (c 1.) (add (mul (c 10.) (embed outer)) (embed inner))
-
-(* [from_ = 0, to_ = n - 1] gives a loop of width [n]. *)
-let loop_r s n body : LL.t =
-  LL.For_loop { index = s; from_ = 0; to_ = n - 1; body; axis = Serial }
-
-let seq a b : LL.t = LL.Seq (a, b)
-
-(* [materialized] pre-decides those nodes' placement in the lineage, exactly as
-   [Context.decide_materialized] does for the [Assignments] pipeline: it is what gives each case a
-   materialized arm to compare its inlined scatter against. *)
-let optimize ?(materialized = []) llc : LL.optimized =
-  let ctx : LL.optimize_ctx = LL.empty_optimize_ctx () in
-  List.iter materialized ~f:(fun tn -> Tn.Placements.update ctx.LL.placements tn Tn.On_device 589);
-  LL.optimize ctx ~unoptim_ll_source:None ~ll_source:None ~name:"virtual_affine" [] llc
-
-(* --- the executed leg --- Hand-built code is compiled AS WRITTEN: the identity
-   [lowered_transform] takes the place of the default schedule annotator, which would otherwise
-   parallelize or fission the loop nest. *)
-let base_ctx = lazy (Context.auto ())
-
-let execute ~name (o : LL.optimized) ~(seed : (Tn.t * float array) list) ~(read : Tn.t list) =
-  let ctx = Lazy.force base_ctx in
-  let ctx, routine =
-    Context.compile ~name ~prelowered:o
-      ~lowered_transform:(fun x -> x)
-      ctx Ir.Assignments.empty_comp Idx.Empty
-  in
-  let ctx = List.fold seed ~init:ctx ~f:(fun ctx (tn, vs) -> Context.set_values ctx tn vs) in
-  let ctx = Context.run ctx routine in
-  List.map read ~f:(Context.get_values ctx)
-
-(* Cells no writer covers keep this sentinel, so "wrote the wrong cells" fails the value check
-   instead of reading whatever the buffer happened to hold. *)
-let blank n = Array.create ~len:n (-1.)
-
-let close values expected =
-  Array.length values = Array.length expected
-  && Array.for_alli values ~f:(fun i v -> Float.(abs (v -. expected.(i)) <= 1e-5))
-
-let same got expected = List.for_all2_exn got expected ~f:close
-
-(* Post-optimization placement probes: decisions live on the optimize_ctx's placements
-   (context-scoped memory modes), not on the tnode (which now holds only declared intent). *)
-let known_virtual (o : LL.optimized) tn = Tn.Placements.known_virtual o.optimize_ctx.placements tn
-
-let known_non_virtual (o : LL.optimized) tn =
-  Tn.Placements.known_non_virtual o.optimize_ctx.placements tn
-
-(* --- structural probes on the optimized form --- *)
-let rec walk_t ~on_set ~on_get (llc : LL.t) =
-  match llc with
-  | LL.Noop | LL.Declare_local _ | LL.Comment _ | LL.Staged_compilation _ | LL.Workgroup_barrier
-  | LL.Tile_mma _ ->
-      ()
-  | LL.Seq (a, b) ->
-      walk_t ~on_set ~on_get a;
-      walk_t ~on_set ~on_get b
-  | LL.For_loop { body; _ } -> walk_t ~on_set ~on_get body
-  | LL.Zero_out tn -> on_set tn
-  | LL.Set { tn; llsc; _ } ->
-      on_set tn;
-      walk_s ~on_set ~on_get llsc
-  | LL.Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
-      on_set tn;
-      walk_s ~on_set ~on_get v;
-      walk_s ~on_set ~on_get llsc
-  | LL.Set_from_vec { tn; arg = s, _; _ } ->
-      on_set tn;
-      walk_s ~on_set ~on_get s
-  | LL.Set_local (_, s) -> walk_s ~on_set ~on_get s
-  | LL.If { cond = c, _; body } ->
-      walk_s ~on_set ~on_get c;
-      walk_t ~on_set ~on_get body
-
-and walk_s ~on_set ~on_get (s : LL.scalar_t) =
-  match s with
-  | LL.Constant _ | LL.Constant_bits _ | LL.Get_local _ | LL.Embed_index _ | LL.Get_merge_buffer _
-    ->
-      ()
-  | LL.Get (tn, _) -> on_get tn
-  | LL.Get_dynamic { tn; dyn_value = v, _; _ } ->
-      on_get tn;
-      walk_s ~on_set ~on_get v
-  | LL.Local_scope { body; _ } -> walk_t ~on_set ~on_get body
-  | LL.Ternop (_, (a, _), (b, _), (d, _)) ->
-      walk_s ~on_set ~on_get a;
-      walk_s ~on_set ~on_get b;
-      walk_s ~on_set ~on_get d
-  | LL.Binop (_, (a, _), (b, _)) ->
-      walk_s ~on_set ~on_get a;
-      walk_s ~on_set ~on_get b
-  | LL.Unop (_, (a, _)) -> walk_s ~on_set ~on_get a
-
-let count_set (o : LL.optimized) tn =
-  let n = ref 0 in
-  walk_t ~on_set:(fun t -> if t.Tn.id = tn.Tn.id then Int.incr n) ~on_get:(fun _ -> ()) o.llc;
-  !n
-
-let count_get (o : LL.optimized) tn =
-  let n = ref 0 in
-  walk_t ~on_set:(fun _ -> ()) ~on_get:(fun t -> if t.Tn.id = tn.Tn.id then Int.incr n) o.llc;
-  !n
-
-(* Count [Where] guards and the two canonical bound comparisons in the optimized form: range guards
-   emitted by unit-coefficient solving render as [Where (And (Cmple _, Cmplt _), value, Get_local)]
-   — one shape per role, a direct [Cmple] lower bound and a strict [Cmplt] upper bound — whereas a
-   pure structural affine match introduces neither. *)
-let count_guard_ops (o : LL.optimized) =
-  let wh = ref 0 and le = ref 0 and lt = ref 0 in
-  let rec t (llc : LL.t) =
-    match llc with
-    | LL.Seq (a, b) ->
-        t a;
-        t b
-    | LL.For_loop { body; _ } -> t body
-    | LL.Set { llsc; _ } -> s llsc
-    | LL.Set_from_vec { arg = a, _; _ } -> s a
-    | LL.Set_local (_, x) -> s x
-    | _ -> ()
-  and s (sc : LL.scalar_t) =
-    match sc with
-    | LL.Ternop (op, (a, _), (b, _), (d, _)) ->
-        (match op with Ops.Where -> Int.incr wh | _ -> ());
-        s a;
-        s b;
-        s d
-    | LL.Binop (op, (a, _), (b, _)) ->
-        (match op with
-        | Ops.Cmple -> Int.incr le
-        | Ops.Cmplt -> Int.incr lt
-        | _ -> ());
-        s a;
-        s b
-    | LL.Unop (_, (a, _)) -> s a
-    | LL.Local_scope { body; _ } -> t body
-    | _ -> ()
-  in
-  t o.LL.llc;
-  (!wh, !le, !lt)
-
-let p name b = Stdio.printf "%s: %b\n" name b
+let mk = node_factory ~first_id:2000 ~dims:[| 6 |] ()
+let optimize ?materialized llc = optimize ?materialized ~name:"virtual_affine" llc
 
 (* === Case 1: structural affine match === *)
 let case_structural_match () =
@@ -212,10 +35,11 @@ let case_structural_match () =
   materialize out;
   let oh = sym () and wh = sym () and a = sym () and b = sym () in
   (* Injective + surjective scatter over [0, 6): no zero-init (lowering payoff). *)
-  let prod = loop_r oh 3 (loop_r wh 2 (set tgt [| aff [ (2, oh); (1, wh) ] 0 |] (tag oh wh))) in
+  let prod = loop_n oh 3 (loop_n wh 2 (set tgt [| aff [ (2, oh); (1, wh) ] 0 |] (tag oh wh))) in
   let cons =
-    loop_r a 3
-      (loop_r b 2 (set out [| aff [ (2, a); (1, b) ] 0 |] (get tgt [| aff [ (2, a); (1, b) ] 0 |])))
+    loop_n a 3
+      (loop_n b 2
+         (set out [| aff [ (2, a); (1, b) ] 0 |] (get tgt [| aff [ (2, a); (1, b) ] 0 |])))
   in
   let llc = seq prod cons in
   let o = optimize llc in
@@ -242,8 +66,8 @@ let case_unit_solve_plain () =
   let tgt = mk ~dims:[| 6 |] "usolve" and out = mk ~dims:[| 6 |] "out2" in
   materialize out;
   let oh = sym () and wh = sym () and t = sym () in
-  let prod = loop_r oh 3 (loop_r wh 2 (set tgt [| aff [ (2, oh); (1, wh) ] 0 |] (tag oh wh))) in
-  let cons = loop_r t 6 (set out [| iter t |] (get tgt [| iter t |])) in
+  let prod = loop_n oh 3 (loop_n wh 2 (set tgt [| aff [ (2, oh); (1, wh) ] 0 |] (tag oh wh))) in
+  let cons = loop_n t 6 (set out [| iter t |] (get tgt [| iter t |])) in
   let llc = seq prod cons in
   let o = optimize llc in
   p "unit-solve(plain) producer virtual" (known_virtual o tgt);
@@ -274,11 +98,9 @@ let case_triangular () =
   (* Triangular map is injective but not surjective, so it carries a zero-init. *)
   let prod =
     seq (zero tgt)
-      (loop_r s1 3 (loop_r s2 2 (set tgt [| iter s1; aff [ (1, s1); (1, s2) ] 0 |] (tag s1 s2))))
+      (loop_n s1 3 (loop_n s2 2 (set tgt [| iter s1; aff [ (1, s1); (1, s2) ] 0 |] (tag s1 s2))))
   in
-  let cons =
-    loop_r a 3 (loop_r b 4 (set out [| iter a; iter b |] (get tgt [| iter a; iter b |])))
-  in
+  let cons = loop_n a 3 (loop_n b 4 (set out [| iter a; iter b |] (get tgt [| iter a; iter b |]))) in
   let llc = seq prod cons in
   let o = optimize llc in
   p "triangular producer virtual" (known_virtual o tgt);
@@ -309,10 +131,11 @@ let case_noninjective () =
   let tgt = mk ~dims:[| 5 |] "ni" and out = mk ~dims:[| 5 |] "out4" in
   materialize out;
   let i = sym () and j = sym () and a = sym () and b = sym () in
-  let prod = loop_r i 3 (loop_r j 3 (set tgt [| aff [ (1, i); (1, j) ] 0 |] (c 1.))) in
+  let prod = loop_n i 3 (loop_n j 3 (set tgt [| aff [ (1, i); (1, j) ] 0 |] (c 1.))) in
   let cons =
-    loop_r a 3
-      (loop_r b 3 (set out [| aff [ (1, a); (1, b) ] 0 |] (get tgt [| aff [ (1, a); (1, b) ] 0 |])))
+    loop_n a 3
+      (loop_n b 3
+         (set out [| aff [ (1, a); (1, b) ] 0 |] (get tgt [| aff [ (1, a); (1, b) ] 0 |])))
   in
   let o = optimize (seq prod cons) in
   (* i+j with both ranges > 1 is not injective: the dropped producer loops fold over a fiber, so the
@@ -325,23 +148,29 @@ let case_noninjective () =
      iteration, so a per-iteration value would only pin which write of the fiber lands last, which
      is the loop order rather than the property under test. Only [out] is read back: [tgt] is
      non-virtual but unobservable, so the pipeline places it [Local] (routine-scoped scratch with
-     no context buffer), which is exactly the point. *)
-  let got = execute ~name:"va_noninjective" o ~seed:[ (out, blank 5) ] ~read:[ out ] in
+     no context buffer). The second fact pins that reading it back raises (gh-ocannl-599) rather
+     than answering with whatever a host write left behind — which is how this case reported an
+     array of sentinels when its executed leg was first written. *)
+  let ctx = run ~name:"va_noninjective" o ~seed:[ (out, blank 5) ] in
   p "non-injective: the scattered value reached the consumer through the buffer"
-    (same got [ Array.create ~len:5 1. ])
+    (close (Context.get_values ctx out) (Array.create ~len:5 1.));
+  p "non-injective: the Local producer refuses host readback"
+    (refused_as_local (fun () -> Context.get_values ctx tgt))
 
 (* === Case 5: Stage A diagonal [i;i] still virtualizes (no regression) === *)
 let case_stage_a_diagonal () =
   let d = mk ~dims:[| 3; 3 |] "diag" and out = mk ~dims:[| 3; 3 |] "out5" in
   materialize out;
   let i = sym () and a = sym () and b = sym () in
-  let prod = seq (zero d) (loop_r i 3 (set d [| iter i; iter i |] (add (c 4.) (embed i)))) in
-  let cons = loop_r a 3 (loop_r b 3 (set out [| iter a; iter b |] (get d [| iter a; iter b |]))) in
+  let prod = seq (zero d) (loop_n i 3 (set d [| iter i; iter i |] (add (c 4.) (embed i)))) in
+  let cons = loop_n a 3 (loop_n b 3 (set out [| iter a; iter b |] (get d [| iter a; iter b |]))) in
   let llc = seq prod cons in
   let o = optimize llc in
   p "stage-a diagonal producer virtual" (known_virtual o d);
   p "stage-a diagonal inlined (no array reads survive)" (count_get o d = 0);
-  let expected = Array.init 9 ~f:(fun n -> if n / 3 = n % 3 then Float.of_int (4 + (n / 3)) else 0.) in
+  let expected =
+    Array.init 9 ~f:(fun n -> if n / 3 = n % 3 then Float.of_int (4 + (n / 3)) else 0.)
+  in
   let seed = [ (out, blank 9) ] and read = [ out ] in
   let virt = execute ~name:"va_stage_a" o ~seed ~read in
   let mat = execute ~name:"va_stage_a_mat" (optimize ~materialized:[ d ] llc) ~seed ~read in

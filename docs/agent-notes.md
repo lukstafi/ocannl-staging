@@ -235,12 +235,18 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   It replaces the compile's lowering wholesale, so the analysis layer and the kernels see one IR;
   add `~lowered_transform:(fun o -> o)` to keep the default schedule annotator off hand-built code.
   See `test/operations/prelowered_seam.ml`, and mind the scope-purity contract below.
-- Such a hand-built case gets its differential arm for free: seed the *decision* into the
-  `optimize_ctx` you hand `LL.optimize` (`Tn.Placements.update ctx.placements tn Tn.On_device prov`
-  — what `Context.decide_materialized` does for the `Assignments` pipeline) and re-specialize the
-  SAME `LL.t`. The inlined and materialized readings of one program must agree cell for cell, which
-  is what pins a virtualization guard; `Context.decide_materialized` on the context itself cannot do
-  this, because `?prelowered` replaces the lineage state with the record's own `optimize_ctx`.
+- Do not re-derive that harness: `test/support/ll_test.ml` (library `ll_test`, links `ocannl`) holds
+  the LL builders, ONE exhaustive `Low_level.t`/`scalar_t` traversal with the counters derived from
+  it, and `optimize`/`run`/`execute` — add `ll_test` to the test's `(libraries ...)`. A new IR
+  constructor is handled there once instead of in every copy. `test_utils` stays separate on purpose:
+  it depends on `arrayjit.ir` alone, for tests that link no more than that.
+- Such a hand-built case gets its differential arm for free: pre-decide the placement in the
+  `optimize_ctx` you hand `LL.optimize` (`Low_level.decide_materialized`, which is what
+  `Context.decide_materialized` records for the `Assignments` pipeline; `Ll_test.optimize
+  ~materialized` wraps it) and re-specialize the SAME `LL.t`. The inlined and materialized readings
+  of one program must agree cell for cell, which is what pins a virtualization guard;
+  `Context.decide_materialized` on the context itself cannot do this, because `?prelowered` replaces
+  the lineage state with the record's own `optimize_ctx`.
   Three traps: (a) `known_non_virtual` does NOT mean "has a context buffer" — a node written and read
   within one routine and never observed is placed `Local`, routine-scoped scratch whose values never
   reach a context buffer. Host access to a node this lineage placed `Local` raises in BOTH

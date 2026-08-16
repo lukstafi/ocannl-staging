@@ -857,7 +857,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules virtual_shared_loop)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio ll_test)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -879,7 +879,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules virtual_affine)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio ll_test)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -956,7 +956,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules virtual_diagonal)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio ll_test)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2332,6 +2332,6 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules prelowered_seam)
- (libraries base ocannl stdio pprint)
+ (libraries base ocannl stdio pprint ll_test)
  (preprocess
   (pps ppx_here ppx_ocannl)))
