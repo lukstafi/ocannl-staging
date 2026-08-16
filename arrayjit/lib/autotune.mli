@@ -201,7 +201,11 @@ val sketch_seed_params :
     CUDA's bf16 has no wmma accumulator of its own); on the C backends:
     operand-precision uniformity (f32/f64), the fused accumulation form, micro-kernel column extent
     at least one vector of lanes ([limits.simd_vector_bytes]), and transposed-B storage for shapes
-    that read B in place. Exposed for tests. *)
+    that read B in place. Builder preconditions the schedule builders settle identically for every
+    tile completion — the zero-expansion row-axis rule, and the GPU sketches' companion-coverage
+    rule per fusion flavor — also pre-filter here, as the family tree's construction-time
+    refutations (gh-ocannl-577): a seed list never proposes a candidate that statically must fail
+    its build. Exposed for tests. *)
 
 val matmul_sketch_tree :
   is_gpu:bool ->
@@ -212,10 +216,14 @@ val matmul_sketch_tree :
 (** The matmul sketch family as a refinement tree (gh-ocannl-514 phase 1): decision levels —
     pipeline, packing shape, geometry, twins — whose lazily-refined choices depend on earlier
     commitments, and whose {!Ir.Schedule_space.leaves} are exactly the family's
-    {!sketch_seed_params} contribution, in enumeration order ([matmul_seed_params] {e is}
-    [leaves] of this tree). [None] when no matmul site is detected. The conv family and the
-    epilogue-twin level factor the same way as follow-ups. Exposed for tests and as the phase-4
-    search driver's entry into the family space. *)
+    {!sketch_seed_params} unfused contribution, in enumeration order (the fused twins enumerate
+    from the tree's [Fuse_epilogue] flavor, whose construction-time verdicts differ —
+    gh-ocannl-577). [None] when no matmul site is detected. Statically-decidable builder
+    preconditions refute at the pipeline level here — above the geometry menus and the tile
+    lattice, so a family whose every completion must fail its candidate build never expands
+    (gh-ocannl-577). The conv family and the epilogue-twin level factor the same way as
+    follow-ups. Exposed for tests and as the phase-4 search driver's entry into the family
+    space. *)
 
 val geometry_lattice_witness : string
 (** The exclusion witness marking the tile-size lattice branches beyond the curated geometry

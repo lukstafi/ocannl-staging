@@ -378,7 +378,16 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   candidate-generation mode — the autotuner seeds fine-flagged per-segment sketches when the finer
   segmentation mints new digests, and a fine winner records `finer_fission` in its cache entry so
   replay re-segments identically — never the default pipeline, which would pay the extra launches
-  unconditionally for parallelism its 2-loop presets cannot use.
+  unconditionally for parallelism its 2-loop presets cannot use. Since gh-ocannl-577 the
+  coverage verdict is also a construction-time refutation in the matmul family tree
+  (`matmul_coverage_witness`): this is sound because `companion_geometry`'s Ok/Error never depends
+  on the geometry its `annotate` callback emits — only on the lowering, the site chain, the fused
+  flavor's `skip` and the zeroing expansion. If you ever make the verdict consult the emitted
+  geometry, the static witness goes stale and the tree will refute families whose candidates
+  would build (or vice versa) — keep the invariant, or re-derive the witness. The fused
+  (`Fuse_epilogue`) flavor is judged separately: skipping the epilogue tail can empty the
+  coverage demand before the alignment analysis is consulted, so twins can survive a routine the
+  unfused family is refuted on.
 - "`Tile_mma` is a barrier" is only half true, and the half that fails is the one barrier elision
   wants. Every rendering form ENDS the intrinsic block with a workgroup barrier, so a staging
   barrier that follows one is always redundant (`Schedule.elide_staged_barriers` drops it, and the
