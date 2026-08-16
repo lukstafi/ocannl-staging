@@ -193,6 +193,12 @@ let cases =
     ( "but a path-qualified command still names what it names",
       {dune|(rule (deps ocannl_config) (action (setenv PATH . (run %{dep:probe.exe}))))|dune},
       [ "rule running probe.exe [declares]" ] );
+    (* And the directory a nested chdir chose is still where the process runs: PATH says nothing
+       about that (Codex P2, round 17). *)
+    ( "a chdir under a PATH rewrite keeps its directory",
+      {dune|(rule (deps child/ocannl_config)
+ (action (setenv PATH . (chdir child (run ./probe.exe)))))|dune},
+      [ "in child: rule running probe.exe [declares]" ] );
     ( "a chdir to the stanza's own directory changes nothing",
       {dune|(rule (deps ocannl_config) (action (chdir . (run %{dep:probe.exe}))))|dune},
       [ "rule running probe.exe [declares]" ] );
@@ -381,6 +387,14 @@ let unclassified_cases =
     ("something that is not a stanza at all", {dune|bare_atom|dune}, [ "<not a stanza>" ]);
   ]
 
+(* A stanza dune reads whole and sexplib reads with a hole in it: the markers are atoms to the one
+   and comments to the other, and counting only the file's top-level forms would have found both
+   readers reporting one stanza (Codex P2, round 17). *)
+let nested_marker_case =
+  ( "a marker nested inside a stanza",
+    {dune|(rule (deps ocannl_config)
+ (action (progn (echo #|) (run %{dep:probe.exe}) (echo |#))))|dune} )
+
 (* The two sequences sexplib reads as comments and dune does not. Reading such a file would drop
    whatever they enclose, so the scan refuses it -- but only when something was actually dropped,
    which a second count of the top-level forms is what establishes. Inside a string or after a
@@ -447,7 +461,7 @@ let () =
           []
       in
       check ("accepted marker -- " ^ name) expected found);
-  List.iter refused_cases ~f:(fun (name, source) ->
+  List.iter (nested_marker_case :: refused_cases) ~f:(fun (name, source) ->
       match Scan.sites source with
       | exception _ -> printf "ok: refused -- %s\n" name
       | sites ->

@@ -139,6 +139,14 @@ let () =
                 to Dune_stanza_scan.action_heads if it can run an executable, or to inert_heads if \
                 it cannot"
                dune_file head));
+      List.iter (Scan.path_rewriting_stanzas content) ~f:(fun head ->
+          fail
+            (Printf.sprintf
+               "%s has a `(%s ...)` stanza that rewrites PATH, which changes what a bare command \
+                name resolves to -- here and in subdirectories. This check does not model \
+                environment stanzas: run programs by path, or teach Dune_stanza_scan to carry the \
+                override"
+               dune_file head));
       (* Both displacements matter and they compose: a `(subdir …)` stanza applies elsewhere, and a
          `chdir` action runs elsewhere again. The config an executable finds is the one in the
          directory the PROCESS runs in. *)

@@ -362,41 +362,42 @@ let unqualified_settings_reads content =
     List.length path >= 2
     && List.equal String.equal (List.drop path (List.length path - 2)) [ "Utils"; "settings" ]
   in
+  (* Where `Utils.settings` is used AS a record rather than read through: the receiver of a field
+     access is the one place it may appear. Everything else -- `let s = Utils.settings`,
+     `read Utils.settings`, storing it, returning it -- puts the reads out of the census's reach,
+     since they are then spelled against a name this scan has no reason to know (Codex P2, rounds
+     16 and 17 of PR #343). Blessing that one position covers the whole class at once, where
+     naming the ways to alias it did not. *)
+  let blessed = Hash_set.create (module Int) in
   let iterator =
     {
       Ast_iterator.default_iterator with
-      (* A value alias is the third way to lose the receiver: after `let s = Utils.settings`, the
-         reads are `s.k` and no path says `settings` at all. The binding itself is what gets
-         reported, since that is where the convention is broken (Codex P2, round 16). *)
-      value_binding =
-        (fun self binding ->
-          (match binding.pvb_expr.pexp_desc with
-          | Pexp_field (receiver, { txt = field; _ })
-            when Option.value_map (longident_of receiver) ~default:false ~f:(fun path ->
-                     List.equal String.equal path [ "Utils" ] || is_utils_settings path)
-                 && Option.value_map (List.last (flatten_longident field)) ~default:false
-                      ~f:(String.equal "settings") ->
-              found := binding.pvb_loc.loc_start.pos_cnum :: !found
-          | Pexp_ident { txt; _ } when is_utils_settings (flatten_longident txt) ->
-              found := binding.pvb_loc.loc_start.pos_cnum :: !found
-          | _ -> ());
-          Ast_iterator.default_iterator.value_binding self binding);
       expr =
         (fun self expr ->
           (match expr.pexp_desc with
-          | Pexp_field (receiver, _) -> (
+          (* A write is not a read -- the census counts none of these -- but it is the same
+             qualified use of the record, and `Utils.settings.k <- v` is how train.ml sets a few. *)
+          | Pexp_field (receiver, _) | Pexp_setfield (receiver, _, _) -> (
               match longident_of receiver with
+              | Some path when is_utils_settings path ->
+                  Hash_set.add blessed receiver.pexp_loc.loc_start.pos_cnum
               | Some path
                 when List.last path |> Option.value_map ~default:false ~f:(String.equal "settings")
-                     && not (is_utils_settings path) ->
+                ->
+                  (* A field read of something CALLED settings but not `Utils.settings`: a bare
+                     `settings.k` under an open, or `U.settings.k` under an alias. *)
                   found := expr.pexp_loc.loc_start.pos_cnum :: !found
               | _ -> ())
+          | Pexp_ident { txt; _ } when is_utils_settings (flatten_longident txt) ->
+              (* Recorded now, discarded below if it turns out to be a blessed receiver: the field
+                 access is visited before its receiver. *)
+              found := expr.pexp_loc.loc_start.pos_cnum :: !found
           | _ -> ());
           Ast_iterator.default_iterator.expr self expr);
     }
   in
   iterator.structure iterator (structure_of content);
-  List.rev !found
+  List.rev !found |> List.filter ~f:(fun offset -> not (Hash_set.mem blessed offset))
 
 (** Every configuration read of a file — [arg_name] call sites and {!settings_keys_in_source} —
     keyed by file basename, for tests that care {e where} a key is read. Field names that are not

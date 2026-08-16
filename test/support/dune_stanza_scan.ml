@@ -44,9 +44,13 @@ let in_subdir parent child =
   | parent, "" -> parent
   | parent, child -> parent ^ "/" ^ child
 
-(* How many stanzas a dune file has, counted by nothing but parentheses, skipping `;` comments and
-   quoted strings. This is a CROSS-CHECK, not a second parser: it says how many top-level forms are
-   there, and sexplib has to agree.
+(* How many forms a dune file has AT EVERY DEPTH, counted by nothing but parentheses and tokens,
+   skipping `;` comments and quoted strings. This is a CROSS-CHECK, not a second parser: it says
+   how many forms are there, and sexplib has to agree.
+
+   Counting only the top level was not enough: `(progn (echo #|) (run ./probe.exe) (echo |#))` is
+   one stanza to both readers while sexplib drops the middle of it, and the executable action with
+   it (Codex P2, round 17 of PR #343). Agreement has to be about the whole file.
 
    The disagreement it exists to catch is `#|…|#` and `#;`, which sexplib reads as comments and
    dune does not, so sexplib could swallow a whole stanza. An earlier version refused any file
@@ -54,8 +58,8 @@ let in_subdir parent child =
    or after a `;`, sexplib does not treat them as comments either, and refusing there would take
    the whole suite down over an unrelated string (Codex P2, round 12 of PR #343). Counting says
    precisely when something was swallowed. *)
-let top_level_form_count content =
-  let count = ref 0 and depth = ref 0 in
+let form_count content =
+  let count = ref 0 in
   let i = ref 0 in
   let length = String.length content in
   let delimiter c = Char.is_whitespace c || List.mem [ '('; ')'; ';'; '"' ] c ~equal:Char.equal in
@@ -66,8 +70,8 @@ let top_level_form_count content =
           Int.incr i
         done
     | '"' ->
-        (* A quoted string is one form where a form can start. *)
-        if !depth = 0 then Int.incr count;
+        (* A quoted string is one form. *)
+        Int.incr count;
         Int.incr i;
         let closed = ref false in
         while (not !closed) && !i < length do
@@ -78,15 +82,14 @@ let top_level_form_count content =
           Int.incr i
         done;
         Int.decr i
-    | '(' ->
-        if !depth = 0 then Int.incr count;
-        Int.incr depth
-    | ')' -> if !depth > 0 then Int.decr depth
+    | '(' -> Int.incr count
+    | ')' -> ()
     | c when Char.is_whitespace c -> ()
     | _ ->
-        (* A bare atom is a form too, even at the top level, where dune would reject it and sexplib
-           happily returns it -- so the two still agree on the count and the caller reports it. *)
-        if !depth = 0 then Int.incr count;
+        (* A bare atom is a form too, at the top level as much as inside a stanza: dune would
+           reject one there and sexplib happily returns it, so the two still agree on the count and
+           the caller reports it. *)
+        Int.incr count;
         while !i < length && not (delimiter content.[!i]) do
           Int.incr i
         done;
@@ -99,14 +102,18 @@ let top_level_form_count content =
     must say so rather than report a file with a hole in it. *)
 let stanzas content =
   let parsed = Sexplib.Sexp.scan_sexps (Lexing.from_string content) in
-  let counted = top_level_form_count content in
-  if List.length parsed <> counted then
+  let rec nodes sexp =
+    match sexp with Sexp.Atom _ -> 1 | Sexp.List l -> 1 + List.sum (module Int) l ~f:nodes
+  in
+  let parsed_count = List.sum (module Int) parsed ~f:nodes in
+  let counted = form_count content in
+  if parsed_count <> counted then
     failwith
       (Printf.sprintf
-         "dune file parses as %d stanzas but has %d top-level forms -- sexplib and dune disagree \
-          about what is a comment here (`#|…|#` and `#;` are comments to the one and atoms to the \
-          other), so this scan would read the file with a hole in it"
-         (List.length parsed) counted);
+         "dune file parses as %d forms but has %d -- sexplib and dune disagree about what is a \
+          comment here (`#|…|#` and `#;` are comments to the one and atoms to the other), so this \
+          scan would read the file with a hole in it"
+         parsed_count counted);
   parsed
 
 let head = function Sexp.List (Sexp.Atom h :: _) -> Some h | _ -> None
@@ -376,14 +383,16 @@ let rec commands_in ?(cwd = "") sexp =
   | Sexp.List (Sexp.Atom "setenv" :: Sexp.Atom "PATH" :: value :: rest) ->
       let value = match value with Sexp.Atom v -> v | _ -> "..." in
       List.concat_map rest ~f:(commands_in ~cwd)
-      |> List.map ~f:(fun (_, command) ->
+      (* The directory a nested `chdir` chose is still where the process runs; PATH says nothing
+         about it (Codex P2, round 17). *)
+      |> List.map ~f:(fun (inner_cwd, command) ->
              let named =
                match command with
                | Program (cmd, _) -> cmd
                | Shell line -> "shell: " ^ line
                | Elsewhere (what, _) | Unnameable (what, _) -> what
              in
-             ( cwd,
+             ( inner_cwd,
                Unnameable (Printf.sprintf "%s, under `(setenv PATH %s ...)`" named value, command) ))
   | Sexp.List (Sexp.Atom "chdir" :: Sexp.Atom dir :: rest)
     when String.is_substring dir ~substring:"%{" ->
@@ -640,6 +649,21 @@ let unclassified_heads content =
       (* A bare atom or a list that does not start with one is not a stanza dune would accept, so
          it is reported the same way rather than passed over. *)
       | None -> [ "<not a stanza>" ])
+  |> List.dedup_and_sort ~compare:String.compare
+
+(** Stanzas that rewrite PATH for a whole directory: [(env (_ (env-vars (PATH …))))] and its kin.
+
+    There a bare command name may resolve to something this repository builds, so every classification
+    that reads one off an atom is unreliable -- and unlike the action-local [(setenv PATH …)], the
+    effect reaches other dune files, since an [env] stanza applies to subdirectories too. Modelling
+    that is not what a stanza scan should attempt, so it is refused instead: this repository has no
+    [env] stanza at all, and the day one touches PATH the check says so rather than quietly reading
+    bare names as tools (Codex P2, round 17 of PR #343). *)
+let path_rewriting_stanzas content =
+  walk "" (stanzas content) ~f:(fun _subdir stanza ->
+      match head stanza with
+      | Some "env" when List.mem (atoms stanza) "PATH" ~equal:String.equal -> [ "env" ]
+      | _ -> [])
   |> List.dedup_and_sort ~compare:String.compare
 
 (** The directories this dune file materializes the shared configuration into with a

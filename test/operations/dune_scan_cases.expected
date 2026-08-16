@@ -38,6 +38,7 @@ ok: a chdir to a pform leaves the directory unestablished
 ok: a chdir to a pform over a PATH tool is not
 ok: a rewritten PATH makes a bare command unplaceable
 ok: but a path-qualified command still names what it names
+ok: a chdir under a PATH rewrite keeps its directory
 ok: a chdir to the stanza's own directory changes nothing
 ok: a nested action does not hide the executable
 ok: a rule running no executable is not a site
@@ -86,5 +87,6 @@ ok: unclassified heads -- inside a subdir, too
 ok: unclassified heads -- something that is not a stanza at all
 ok: accepted marker -- the marker inside a string is not a comment to either reader
 ok: accepted marker -- nor is one in a line comment
+ok: refused -- a marker nested inside a stanza
 ok: refused -- a block comment
 ok: refused -- a datum comment
