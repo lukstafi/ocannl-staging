@@ -452,6 +452,13 @@ case $sub in
       sup=$!
       printf '%s\n' "$sup" >"$run_dir/pid"
       ps_token "$sup" >"$run_dir/ptoken"
+      # The supervisor's child writes its pgid before exec; record the group
+      # LEADER's start token as soon as it appears (exec preserves start
+      # time), so an orphan-group `stop` can verify identity instead of
+      # trusting a possibly recycled numeric pgid.
+      for _ in 1 2 3; do [ -f "$run_dir/pgid" ] && break; sleep 1; done
+      [ -f "$run_dir/pgid" ] &&
+        ps_token "$(cat "$run_dir/pgid")" >"$run_dir/gtoken" 2>/dev/null
       wait "$sup"
       rc=$?
       # A SIGKILLed supervisor cannot reap its process group, and dune would
@@ -605,19 +612,19 @@ case $sub in
       # Name the run explicitly: `last` may resolve to a DIFFERENT run when
       # this stop targeted an identifier from another worktree's history.
       echo "sent TERM; confirm with: tools/test-run.sh wait \"$run_dir\""
-    elif pg=$(cat "$run_dir/pgid" 2>/dev/null) && kill -0 -- "-$pg" 2>/dev/null; then
+    elif proc_alive "$run_dir/pgid" "$run_dir/gtoken" &&
+         pg=$(cat "$run_dir/pgid") && kill -0 -- "-$pg" 2>/dev/null; then
       # SIGKILL can remove wrapper and supervisor around a dune that survives
       # in its own recorded group -- still holding the worktree lock, beyond
-      # its cap. Corroborate before signaling: the group must still look like
-      # a build, so a recycled pgid cannot get an innocent group TERMed.
-      if pgrep -g "$pg" -l 2>/dev/null | grep -qE 'dune|ocaml|gcc|clang|\.exe'; then
-        kill -TERM -- "-$pg" 2>/dev/null
-        echo "sent TERM to the orphaned process group $pg; re-run stop to confirm"
-      else
-        echo "recorded process group $pg no longer looks like this run; nothing signaled"
-      fi
+      # its cap. Identity is the group LEADER's recorded start token (the
+      # same mechanism as every other liveness check here); a recycled pgid
+      # -- even one leading a process named dune -- fails the token and is
+      # never signaled. A leaderless surviving group is refused too, the
+      # conservative side: clean that up by hand.
+      kill -TERM -- "-$pg" 2>/dev/null
+      echo "sent TERM to the orphaned process group $pg; re-run stop to confirm"
     else
-      echo "nothing left to signal (supervisor gone, no surviving group)"
+      echo "nothing left to signal (supervisor gone; no identity-verified surviving group)"
     fi
     ;;
   list)
