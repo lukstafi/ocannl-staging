@@ -339,8 +339,21 @@ digest() {
 finish_run() { # rc -> append sentinel, record verdict
   printf 'exit: %s\n' "$1" >>"$run_dir/log"
   # Written aside and renamed: the verdict file's EXISTENCE is the completion
-  # signal `status`/`wait` key on, so it must never be observable empty.
-  printf '%s\n' "$1" >"$run_dir/exit.tmp" && mv -f "$run_dir/exit.tmp" "$run_dir/exit"
+  # signal `status`/`wait` key on, so it must never be observable empty. The
+  # write is retried with backoff -- a filesystem that filled up during the
+  # run may clear, and giving up silently would downgrade a real verdict
+  # into a generic "died without recording a verdict".
+  local n=0
+  until printf '%s\n' "$1" >"$run_dir/exit.tmp" &&
+        mv -f "$run_dir/exit.tmp" "$run_dir/exit"; do
+    n=$(( n + 1 ))
+    if [ "$n" -ge 3 ]; then
+      printf 'test-run: FAILED to record verdict %s (filesystem?)\n' "$1" \
+        >>"$run_dir/log" 2>/dev/null
+      return 1
+    fi
+    sleep 2
+  done
 }
 
 sub=${1:-}
@@ -376,6 +389,15 @@ case $sub in
     case ${OSTYPE:-} in msys* | cygwin*) DUNE=tools/dune-quiet.sh ;; *) DUNE=dune ;; esac
     take_lock
     new_run "$@"
+    # For an attached run, cancellation forwarding is armed BEFORE the
+    # wrapper exists: a signal landing in the launch gap would otherwise take
+    # bash's default exit while the signal-immune wrapper ran on,
+    # unpublished, holding the lock. Until the supervisor pid is recorded
+    # the handler can only raise the flag; the attached path below converts
+    # a flagged cancellation once the supervisor is reachable.
+    cancelled=0
+    [ "$sub" = run ] &&
+      trap 'cancelled=1; kill -TERM "$(cat "$run_dir/pid" 2>/dev/null)" 2>/dev/null' INT TERM HUP
     # ONE launch shape for both modes: a wrapper subshell owns the supervisor
     # and publishes the verdict, so no fate of the LAUNCHING shell (HUP from a
     # closed terminal, harness cancellation, plain kill) can lose it -- `run`
@@ -439,10 +461,15 @@ case $sub in
     # The wrapper's unlock handshakes on this marker (see above).
     : >"$run_dir/published" 2>/dev/null || :
     if [ "$sub" = run ]; then
-      # Attached: forward shell-directed cancellation to the supervisor, and
-      # wait for the wrapper -- its exit means the verdict file is published.
-      # A trapped signal returns from `wait` early, hence the retry loop.
-      trap 'kill -TERM "$(cat "$run_dir/pid" 2>/dev/null)" 2>/dev/null' INT TERM HUP
+      # Attached: wait for the wrapper -- its exit means the verdict file is
+      # published. A cancellation flagged during the launch gap is converted
+      # here, now that the supervisor pid exists (briefly waiting for the
+      # wrapper to record it). A trapped signal returns from `wait` early,
+      # hence the retry loop.
+      if [ "$cancelled" = 1 ]; then
+        for _ in 1 2 3; do [ -f "$run_dir/pid" ] && break; sleep 1; done
+        [ -f "$run_dir/pid" ] && kill -TERM "$(cat "$run_dir/pid")" 2>/dev/null
+      fi
       while kill -0 "$wrapper" 2>/dev/null; do wait "$wrapper"; done
       trap - INT TERM HUP
       if [ -f "$run_dir/exit" ]; then
@@ -490,6 +517,11 @@ case $sub in
       esac
     done
     resolve_run "$ref"
+    if [ -n "$budget" ]; then
+      # Same trap --cap had: leading zeros reach bash arithmetic as octal.
+      case $budget in *[!0-9]*) die "--timeout must be a nonnegative integer of seconds" ;; esac
+      budget=$(( 10#$budget ))
+    fi
     # Bounded by construction: default budget is the run's own cap plus slack
     # for cleanup, so a `wait` outlives a hung run only briefly -- never forever.
     cap=$(cat "$run_dir/cap" 2>/dev/null) || cap=3600
@@ -528,14 +560,24 @@ case $sub in
   stop)
     resolve_run "${1:-last}"
     [ -f "$run_dir/exit" ] && { echo "already finished:"; digest "$run_dir"; exit 0; }
-    [ -f "$run_dir/pid" ] || die "no pid recorded for $run_dir"
     if sup_alive "$run_dir"; then
       kill -TERM "$(cat "$run_dir/pid")" 2>/dev/null
       # Name the run explicitly: `last` may resolve to a DIFFERENT run when
       # this stop targeted an identifier from another worktree's history.
       echo "sent TERM; confirm with: tools/test-run.sh wait \"$run_dir\""
+    elif pg=$(cat "$run_dir/pgid" 2>/dev/null) && kill -0 -- "-$pg" 2>/dev/null; then
+      # SIGKILL can remove wrapper and supervisor around a dune that survives
+      # in its own recorded group -- still holding the worktree lock, beyond
+      # its cap. Corroborate before signaling: the group must still look like
+      # a build, so a recycled pgid cannot get an innocent group TERMed.
+      if pgrep -g "$pg" -l 2>/dev/null | grep -qE 'dune|ocaml|gcc|clang|\.exe'; then
+        kill -TERM -- "-$pg" 2>/dev/null
+        echo "sent TERM to the orphaned process group $pg; re-run stop to confirm"
+      else
+        echo "recorded process group $pg no longer looks like this run; nothing signaled"
+      fi
     else
-      echo "supervisor already gone (or its pid was recycled); nothing signaled"
+      echo "nothing left to signal (supervisor gone, no surviving group)"
     fi
     ;;
   list)
