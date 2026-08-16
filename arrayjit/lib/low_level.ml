@@ -3211,6 +3211,69 @@ let writes_of_stmt (stmt : t) : Set.M(Tn).t =
   loop stmt;
   !acc
 
+(** The scope locals a [Local_scope] body READS, at any depth. The companion of {!reads_of_body} for
+    the other half of a body's inputs: [reads_of_body] tracks tensor nodes and ignores [Get_local]
+    entirely, which left cross-statement hoisting blind to local-valued dependencies
+    (gh-ocannl-584 review round 2). Over-approximate on purpose — it includes locals the body itself
+    owns, which no sibling statement can write, and an enlarged hazard set only narrows hoisting. *)
+let local_reads_of_body (body : t) : scope_id list =
+  let acc = ref [] in
+  let rec loop_proc (llc : t) =
+    match llc with
+    | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _ | Workgroup_barrier ->
+        ()
+    | Seq (c1, c2) ->
+        loop_proc c1;
+        loop_proc c2
+    | For_loop { body; _ } -> loop_proc body
+    | Set { llsc; _ } | Set_local (_, llsc) -> loop_scalar llsc
+    | Set_dynamic { dyn_value = v, _; llsc; _ } ->
+        loop_scalar v;
+        loop_scalar llsc
+    | Set_from_vec { arg = a, _; _ } -> loop_scalar a
+    | Tile_mma { fallback; _ } -> loop_proc fallback
+    | If { cond = c, _; body } ->
+        loop_scalar c;
+        loop_proc body
+  and loop_scalar (llsc : scalar_t) =
+    match llsc with
+    | Get_local id -> acc := id :: !acc
+    | Local_scope { body; _ } -> loop_proc body
+    | Get_dynamic { dyn_value = v, _; _ } -> loop_scalar v
+    | Ternop (_, (s1, _), (s2, _), (s3, _)) ->
+        loop_scalar s1;
+        loop_scalar s2;
+        loop_scalar s3
+    | Binop (_, (s1, _), (s2, _)) ->
+        loop_scalar s1;
+        loop_scalar s2
+    | Unop (_, (s, _)) -> loop_scalar s
+    | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> ()
+  in
+  loop_proc body;
+  !acc
+
+(** The scope locals a statement writes, mirroring {!writes_of_stmt}: recursive through [Seq],
+    [For_loop] and [If] bodies, and deliberately NOT into [Local_scope] bodies within its
+    expressions. Scope purity is what makes that omission sound — a body only writes locals it owns,
+    which by construction no other statement shares (gh-ocannl-584). *)
+let local_writes_of_stmt (stmt : t) : scope_id list =
+  let acc = ref [] in
+  let rec loop (s : t) =
+    match s with
+    | Set_local (id, _) -> acc := id :: !acc
+    | Seq (a, b) ->
+        loop a;
+        loop b
+    | For_loop { body; _ } -> loop body
+    | If { body; _ } -> loop body
+    | Set _ | Set_dynamic _ | Set_from_vec _ | Zero_out _ | Tile_mma _ | Noop | Comment _
+    | Staged_compilation _ | Declare_local _ | Workgroup_barrier ->
+        ()
+  in
+  loop stmt;
+  !acc
+
 (** Returns [true] if the given [scope_id] is read (via [Get_local]) before the first definitely
     executed [Set_local] to that id in [body]. Used to decide whether a [Local_scope] or hoisted
     [Declare_local] needs a zero initializer. A loop body write is only considered definite when the
@@ -3356,9 +3419,14 @@ let has_accumulation (llc : t) : bool =
     [hoist_cross_statement_cse] lifts a body shared by sibling statements out of the statement
     altogether, to run ONCE ahead of the first user. An effect in a body is therefore placed by none
     of the rules a reader of the expression would expect. Confining bodies to the locals they own
-    makes all three placements unobservable, which is what {!Affine.path_before} already assumes
-    when it declines to order sibling [Arg] positions, and what makes the collapse and the hoist
-    unconditionally sound.
+    makes all three placements unobservable to everything OUTSIDE the body, which is what
+    {!Affine.path_before} already assumes when it declines to order sibling [Arg] positions, and
+    what makes the collapse sound.
+
+    Purity is about a body's effects, and it is not on its own enough for the hoist, which also
+    needs the body's INPUTS unchanged across the statements it is lifted over — the obligation of
+    [hoist_shared_locals]'s hazard check, which covers tensor reads ({!reads_of_body}) and scope
+    locals ({!local_reads_of_body}) alike.
 
     The statement match is deliberately exhaustive with no catch-all: a new {!t} constructor breaks
     this build until someone classifies it as body-legal or not.
@@ -3382,21 +3450,26 @@ let validate_scope_bodies (llc : t) : unit =
   let wrote construct tn () = construct ^ " writes the tensor node " ^ Tn.debug_name tn in
   (* [owned] carries the ids the enclosing body may write, extended lexically by [Declare_local];
      [proc] threads it along a [Seq] and returns it. Declarations inside a loop or guard body do not
-     escape it. *)
-  let rec proc ~scope ~owned (llc : t) : Set.M(Int).t =
+     escape it. Membership is by whole {!scope_id} ([equal_scope_id]), not by the [scope_id]
+     integer: hand-built IR can mint two locals sharing an integer but naming different tensor
+     nodes, and codegen renders those as DIFFERENT C variables ([pp_scope_id] concatenates both), so
+     an integer-keyed set would let a body write a local it does not own. A list is the right shape
+     here -- a body owns one id plus whatever it declares. *)
+  let owns owned id = List.mem owned id ~equal:equal_scope_id in
+  let rec proc ~scope ~owned (llc : t) : scope_id list =
     let ban what = Option.iter scope ~f:(fun s -> reject s (what ())) in
     match llc with
     | Seq (a, b) -> proc ~scope ~owned:(proc ~scope ~owned a) b
     | For_loop { body; _ } ->
-        ignore (proc ~scope ~owned body : Set.M(Int).t);
+        ignore (proc ~scope ~owned body : scope_id list);
         owned
     | If { cond = c, _; body } ->
         scalar ~scope ~owned c;
-        ignore (proc ~scope ~owned body : Set.M(Int).t);
+        ignore (proc ~scope ~owned body : scope_id list);
         owned
-    | Declare_local { id; _ } -> Set.add owned id.scope_id
+    | Declare_local { id; _ } -> id :: owned
     | Set_local (id, llsc) ->
-        if Option.is_some scope && not (Set.mem owned id.scope_id) then
+        if Option.is_some scope && not (owns owned id) then
           ban (fun () ->
               "a Set_local of v"
               ^ Int.to_string id.scope_id
@@ -3421,7 +3494,7 @@ let validate_scope_bodies (llc : t) : unit =
         owned
     | Tile_mma { d = d_tn, _; fallback; _ } ->
         ban (wrote "Tile_mma" d_tn);
-        ignore (proc ~scope ~owned fallback : Set.M(Int).t);
+        ignore (proc ~scope ~owned fallback : scope_id list);
         owned
     (* Neither is scope-local state, and neither can be placed by the hoisting rules: a barrier is a
        synchronization effect, and a staged callback emits code this walk cannot see. *)
@@ -3437,9 +3510,7 @@ let validate_scope_bodies (llc : t) : unit =
     (* A nested body starts from its own id alone: it owns neither its parent's local nor a
        sibling's, so it cannot make their emission order observable. *)
     | Local_scope { id; body; _ } ->
-        ignore
-          (proc ~scope:(Some id) ~owned:(Set.singleton (module Int) id.scope_id) body
-            : Set.M(Int).t)
+        ignore (proc ~scope:(Some id) ~owned:[ id ] body : scope_id list)
     | Get_dynamic { dyn_value = v, _; _ } -> scalar ~scope ~owned v
     | Ternop (_, (s1, _), (s2, _), (s3, _)) ->
         scalar ~scope ~owned s1;
@@ -3451,7 +3522,7 @@ let validate_scope_bodies (llc : t) : unit =
     | Unop (_, (s, _)) -> scalar ~scope ~owned s
     | Get_local _ | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> ()
   in
-  ignore (proc ~scope:None ~owned:(Set.empty (module Int)) llc : Set.M(Int).t)
+  ignore (proc ~scope:None ~owned:[] llc : scope_id list)
 
 (** {2 Hardware axis analyses}
 
@@ -3784,11 +3855,18 @@ and hoist_shared_locals_segment (stmts : t list) : t list =
     List.iter shared_groups ~f:(fun (target_scalar, canonical_id, user_indices, all_ids) ->
         let first_user = List.hd_exn user_indices in
         let last_user = List.last_exn user_indices in
-        (* Collect reads of the Local_scope body *)
+        (* Collect reads of the Local_scope body -- tensor nodes AND scope locals. Both are inputs
+           to the body, so a write to either between the hoist point and a later user would make
+           that user read a stale value (gh-ocannl-584 review round 2: the pipeline does produce
+           bodies reading a local declared outside them, e.g. layer_norm_divided_mean, via
+           [eliminate_common_subexpressions] and this pass's own [Get_local] rewrites). *)
         let body_reads =
           match target_scalar with
           | Local_scope { body; _ } -> reads_of_body body
           | _ -> Set.empty (module Tn)
+        in
+        let body_local_reads =
+          match target_scalar with Local_scope { body; _ } -> local_reads_of_body body | _ -> []
         in
         (* Check for writes between first_user and last_user that could invalidate hoisting. Include
            writes from ALL statements (including user statements) from first_user up to but not
@@ -3796,10 +3874,15 @@ and hoist_shared_locals_segment (stmts : t list) : t list =
            Local_scope, so earlier users' writes can affect what later users would read. *)
         let safe =
           let hazard_writes = ref (Set.empty (module Tn)) in
+          let hazard_local_writes = ref [] in
           for i = first_user to last_user - 1 do
-            hazard_writes := Set.union !hazard_writes (writes_of_stmt stmts.(i))
+            hazard_writes := Set.union !hazard_writes (writes_of_stmt stmts.(i));
+            hazard_local_writes := local_writes_of_stmt stmts.(i) @ !hazard_local_writes
           done;
           Set.is_empty (Set.inter body_reads !hazard_writes)
+          && not
+               (List.exists !hazard_local_writes ~f:(fun w ->
+                    List.mem body_local_reads w ~equal:equal_scope_id))
         in
         if safe then (
           (* Extract body from canonical Local_scope *)

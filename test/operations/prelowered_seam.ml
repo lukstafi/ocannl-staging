@@ -276,9 +276,86 @@ let phase4 () =
        (rejected (fun () ->
             LL.validate_scope_bodies (seq LL.Workgroup_barrier (loop ~upto:3 i (set i y (get i x)))))))
 
+(* gh-ocannl-584 review round 2: purity alone does not make the hoist sound. A body's INPUTS include
+   the scope locals it reads, and [hoist_cross_statement_cse] evaluates a body shared by sibling
+   statements ONCE ahead of the first user — so a [Set_local] of a local the body reads, sitting
+   between two users, leaves the later user reading a stale value. The hazard check saw only tensor
+   nodes ([reads_of_body] ignores [Get_local], [writes_of_stmt] ignores [Set_local]), so it could
+   not see that dependency at all. Bodies reading a local declared outside them are ordinary
+   pipeline output, not a hand-built curiosity: [eliminate_common_subexpressions] and this very pass
+   create them (a strict "a body may only read locals it owns" rule was tried and rejects
+   layer_norm_divided_mean's own lowering).
+
+   [ext := 1; Y[0] = S{2*ext}; ext := 2; Y[1] = S'{2*ext}] with [S] and [S'] alpha-equivalent.
+   Correct is [Y = [2; 4]]; hoisting [S] above the mutation gives [Y = [2; 2]].
+
+   The positive control is the same program WITHOUT the intervening mutation, which must still hoist
+   — otherwise "declines to hoist" would pass by never hoisting anything. *)
+let phase5 () =
+  let y = mk ~dims:[| 2 |] "pls5_y" in
+  let ls = mk ~dims:[| 1 |] "pls5_ls" and ext_tn = mk ~dims:[| 1 |] "pls5_ext" in
+  Tn.update_memory_mode y Tn.On_device 99;
+  Tn.set_observable y;
+  Tn.update_memory_mode ls Tn.Virtual 99;
+  Tn.update_memory_mode ext_tn Tn.Virtual 99;
+  let ext = LL.get_scope ext_tn in
+  (* An accumulation, so [simplify_llc] cannot collapse the scope before the hoist pass sees it. *)
+  let scope () : LL.scalar_t =
+    let id = LL.get_scope ls in
+    let k = sym () in
+    LL.Local_scope
+      {
+        id;
+        body =
+          seq
+            (LL.Set_local (id, c 0.))
+            (loop ~upto:1 k (LL.Set_local (id, binop Ops.Add (LL.Get_local id) (LL.Get_local ext))));
+        orig_indices = [||];
+      }
+  in
+  let set_at idx llsc : LL.t =
+    LL.Set { tn = y; idcs = [| Idx.Fixed_idx idx |]; llsc; debug = "" }
+  in
+  let program ~mutated =
+    seq
+      (seq (LL.Declare_local { id = ext; needs_init = false }) (LL.Set_local (ext, c 1.)))
+      (seq
+         (set_at 0 (scope ()))
+         (seq (if mutated then LL.Set_local (ext, c 2.) else LL.Noop) (set_at 1 (scope ()))))
+  in
+  let rec count_scopes (llc : LL.t) =
+    match llc with
+    | LL.Seq (a, b) -> count_scopes a + count_scopes b
+    | LL.For_loop { body; _ } -> count_scopes body
+    | LL.If { body; _ } -> count_scopes body
+    | LL.Set { llsc; _ } | LL.Set_local (_, llsc) -> count_scalar llsc
+    | _ -> 0
+  and count_scalar (llsc : LL.scalar_t) =
+    match llsc with
+    | LL.Local_scope { body; _ } -> 1 + count_scopes body
+    | LL.Binop (_, (a, _), (b, _)) -> count_scalar a + count_scalar b
+    | LL.Unop (_, (a, _)) -> count_scalar a
+    | _ -> 0
+  in
+  (* Structural: the shared body is hoisted out of both users when nothing writes its local in
+     between, and left in place when something does. *)
+  p "phase5: a shared body reading an untouched local is still hoisted (positive control)"
+    (count_scopes (LL.hoist_cross_statement_cse (program ~mutated:false)) = 0);
+  p "phase5: a shared body whose local is written between users is not hoisted"
+    (count_scopes (LL.hoist_cross_statement_cse (program ~mutated:true)) = 2);
+  (* Executed: the later user must see the mutation, which is what the hoist would have erased. *)
+  let _opt, results =
+    compile_and_run ~name:"pls_local_hazard" (program ~mutated:true) ~seed:[] ~read:[ y ]
+  in
+  match results with
+  | [ yv ] ->
+      p "phase5: Y = [2; 4] — the second user sees the intervening write" (close yv [| 2.; 4. |])
+  | _ -> assert false
+
 let () =
   phase1 ();
   phase2 ();
   phase3 ();
   phase4 ();
+  phase5 ();
   printf "prelowered seam: PASS\n"

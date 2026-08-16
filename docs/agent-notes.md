@@ -243,8 +243,14 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   `scope_id`; `simplify_llc` collapses a single-assignment scope into the expression, moving its
   reads the other way; and `hoist_cross_statement_cse` lifts a body shared by sibling statements to a
   top-level `Declare_local` + body, running ONCE ahead of the first user. Purity makes all three
-  placements unobservable, which is exactly what `Affine.path_before` assumes when it refuses to
-  order sibling `Arg` positions; the two would otherwise disagree.
+  placements unobservable from outside the body, which is exactly what `Affine.path_before` assumes
+  when it refuses to order sibling `Arg` positions; the two would otherwise disagree. Purity governs
+  a body's EFFECTS, not its inputs — the hoist separately needs the body's reads untouched across
+  the statements it is lifted over, and its hazard check must cover scope locals (`Get_local` /
+  `Set_local`) as well as tensor nodes, or a shared body is lifted above a `Set_local` of a local it
+  reads and later users read a stale value (a real miscompile, pinned by `prelowered_seam` phase 5).
+  Bodies reading a local declared OUTSIDE them are ordinary pipeline output — CSE and the hoist
+  itself create them — so "a body may only read locals it owns" is not available as a rule.
   `Low_level.validate_scope_bodies` enforces it at BOTH ends of the pipeline: `optimize_proc` on the
   way in (ahead of the analysis cache, so a digest hit cannot skip it — and before the hoist can
   launder a body write into a top-level statement that no later gate would recognize) and

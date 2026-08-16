@@ -146,8 +146,11 @@ and scalar_t =
           single-assignment scope into the expression (moving its reads the other way), and
           [hoist_cross_statement_cse] lifts a body shared by sibling statements out of the statement
           entirely, to run once ahead of the first user. Purity is what makes all three placements
-          unobservable — the same assumption {!Affine.path_before} makes when it declines to order
-          sibling [Arg] positions. Enforced by {!validate_scope_bodies}; the optimization pipeline
+          unobservable from outside the body — the same assumption {!Affine.path_before} makes when
+          it declines to order sibling [Arg] positions. (It governs a body's effects, not its
+          inputs: the hoist additionally needs the body's reads — tensor nodes and scope locals
+          alike — untouched across the statements it is lifted over, which is its own hazard
+          check's obligation.) Enforced by {!validate_scope_bodies}; the optimization pipeline
           satisfies it by construction. *)
   | Get_local of scope_id
   | Get of Tnode.t * Indexing.axis_index array
