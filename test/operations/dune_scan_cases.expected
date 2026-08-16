@@ -30,15 +30,17 @@ ok: the child's own config answers it as well
 ok: a sibling chdir is reported at the sibling
 ok: an explicit relative program is a site without an extension
 ok: a bare word is still a tool on PATH
-ok: an external tool handed an executable is reported, not guessed at
-ok: and so is one that is only reading them
+ok: a launcher's target is reported without guessing that it is one
+ok: and so is a tool that is only reading them
+ok: an unresolvable argument counts as much as a resolved one
 ok: ordinary arguments are not executables
 ok: a chdir to a pform leaves the directory unestablished
 ok: a chdir to a pform over a PATH tool is not
 ok: a chdir to the stanza's own directory changes nothing
 ok: a nested action does not hide the executable
 ok: a rule running no executable is not a site
-ok: a rule running a non-OCaml tool is not a site
+ok: a PATH tool with no workspace argument is not a site
+ok: a PATH tool handed something from the workspace is unplaceable
 ok: an alias stanza is read like a rule
 ok: a public executable through %{bin:...}
 ok: %{exe:...} names one too

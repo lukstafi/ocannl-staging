@@ -23,22 +23,27 @@
 
    An `(executable)` no rule runs is structurally not a site and needs no exemption: that is how
    the diagnostic and tutorial executables (`bench_circles_step`, `gpt2_generate`, the `@slow`
-   runners' companions) stay off this list without anyone maintaining one. The one genuine
-   exemption is named below, with its reason. *)
+   runners' companions) stay off this list without anyone maintaining one. What does need an
+   exemption is a rule that runs something this scan cannot vouch for, and those are named below
+   with their reasons. *)
 
 open Base
 open Stdio
 module Scan = Test_utils.Dune_stanza_scan
 
-(* A rule that runs an executable which reads no configuration. Keyed by "<dir>:<exe>", and each
-   entry has to earn its place on every run (see the staleness check): an exemption is a claim
-   about what an executable links, and a claim that stops being true is not a free pass. *)
+(* Rules that run something which reads no configuration. Keyed by "<dir>:<what the scan reports>",
+   and each entry has to earn its place on every run (see the staleness check): an exemption is a
+   claim about what a program links, and a claim that stops being true is not a free pass. *)
 let exempt_sites =
   [
     ( "test/ppx:pp.exe",
       "the ppx driver, run to expand a source file and diff the expansion: `ppx_ocannl` links \
        base, ppxlib, str and einsum_parser -- no configuration reader -- so no `ocannl_config` \
        can reach its output" );
+    ( "benchmarks:python3, handed %{dep:test_orchestrate.py}",
+      "the benchmark orchestrator's own unit tests, in Python: the interpreter runs a script that \
+       imports orchestrate.py and runners/bench_common.py and calls no OCANNL executable, so \
+       there is no configuration in reach -- and a Python process would not read one anyway" );
   ]
 
 (* Dune runs this from the rule's own directory inside the build tree and hands it paths relative
@@ -102,6 +107,17 @@ let () =
     printf "FAIL: %s\n" msg;
     eprintf "FAIL: %s\n" msg
   in
+  (* Every directory any dune file copies a config into, gathered before anything is checked: a
+     stanza in one directory may run something in another, whose config a THIRD file materializes
+     (Codex P2, round 14). Read from the stanzas rather than from the glob, which matches sources
+     only, so a copy that has never been built still counts. *)
+  let copied_config_dirs =
+    List.concat_map dune_files ~f:(fun (dune_file, on_disk) ->
+        let dir = Stdlib.Filename.dirname dune_file in
+        Scan.config_copy_dirs (In_channel.read_all on_disk)
+        |> List.map ~f:(fun subdir -> repo_relative [ dir ] subdir))
+    |> Set.of_list (module String)
+  in
   let exemptions = Map.of_alist_exn (module String) exempt_sites in
   let exemptions_used = ref (Set.empty (module String)) in
   let counts = Hashtbl.create (module String) in
@@ -122,11 +138,6 @@ let () =
       (* Both displacements matter and they compose: a `(subdir …)` stanza applies elsewhere, and a
          `chdir` action runs elsewhere again. The config an executable finds is the one in the
          directory the PROCESS runs in. *)
-      let copies =
-        Scan.config_copy_dirs content
-        |> List.map ~f:(fun subdir -> repo_relative [ dir ] subdir)
-        |> Set.of_list (module String)
-      in
       let stanza_dir site = repo_relative [ dir ] site.Scan.subdir in
       let directory_of site = repo_relative [ dir ] (Scan.in_subdir site.Scan.subdir site.Scan.cwd) in
       (* Where the executable's own config search leads, nearest first: its directory and every
@@ -134,7 +145,9 @@ let () =
          it reads is the FIRST of those that has a config -- so that is both the file that must
          exist and the one the dependency must name, whether the process runs in a descendant of
          the stanza's directory, a sibling, or the stanza's own (Codex P2, rounds 9 to 11). *)
-      let has_config directory = Set.mem config_dirs directory || Set.mem copies directory in
+      let has_config directory =
+        Set.mem config_dirs directory || Set.mem copied_config_dirs directory
+      in
       let nearest_config site =
         let rec ancestors directory =
           directory

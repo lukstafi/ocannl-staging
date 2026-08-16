@@ -211,6 +211,22 @@ let () =
     String.strip (String.sub original ~pos:line_start ~len:(line_end - line_start))
   in
   let forwarding_hit = ref (Set.empty (module String)) in
+  (* 6b. The OTHER spelling of a read -- a field of `Utils.settings` -- is recognised by that
+     receiver, which `open Utils` or `module U = Utils` would make optional. A key read only that
+     way at codegen would then vanish from digest_completeness's census and could be classified
+     code-borne unchallenged. utils.ml is where the record lives, so its own unqualified reads are
+     the definition, not a hidden call site (Codex P2, round 14). *)
+  List.iter source_files ~f:(fun fname ->
+      let base = Stdlib.Filename.basename fname in
+      if not (String.equal base "utils.ml") then
+        List.iter
+          (Config_key_scan.utils_in_scope (In_channel.read_all fname))
+          ~f:(fun spelling ->
+            fail
+            @@ Printf.sprintf
+                 "%s brings Utils into scope unqualified (%s), which would let a settings read be \
+                  spelled without the `Utils.settings` receiver both scanners look for"
+                 base spelling));
   List.iter source_files ~f:(fun fname ->
       let base = Stdlib.Filename.basename fname in
       let known =

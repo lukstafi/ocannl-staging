@@ -1,6 +1,6 @@
 arrayjit/lib/dune: nothing that runs a test executable
 arrayjit/test/dune: 20 tests
-benchmarks/dune: nothing that runs a test executable
+benchmarks/dune: 1 exempt rule (python3, handed %{dep:test_orchestrate.py})
 benchmarks/runners/ocannl/dune: nothing that runs a test executable
 bin/dune: nothing that runs a test executable
 lib/dune: nothing that runs a test executable
@@ -22,5 +22,6 @@ Actions that do not: progn, concurrent, chdir, setenv, with-stdout-to, with-stde
 
 Exempt from the dependency, running an executable that reads no configuration:
   test/ppx:pp.exe -- the ppx driver, run to expand a source file and diff the expansion: `ppx_ocannl` links base, ppxlib, str and einsum_parser -- no configuration reader -- so no `ocannl_config` can reach its output
+  benchmarks:python3, handed %{dep:test_orchestrate.py} -- the benchmark orchestrator's own unit tests, in Python: the interpreter runs a script that imports orchestrate.py and runners/bench_common.py and calls no OCANNL executable, so there is no configuration in reach -- and a Python process would not read one anyway
 
-OK: 16 dune files; 216 test stanzas, 2 inline-test libraries and 32 exe-running rules declare ocannl_config; 3 exempt.
+OK: 16 dune files; 216 test stanzas, 2 inline-test libraries and 32 exe-running rules declare ocannl_config; 4 exempt.

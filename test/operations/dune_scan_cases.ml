@@ -149,15 +149,22 @@ let cases =
        or reading it (`diff old.exe new.exe`), and dune's grammar does not say which -- so neither
        is guessed: the pair is reported, and the check settles it the way it settles every other
        unreadable command (Codex P2, rounds 12 and 13). *)
-    ( "an external tool handed an executable is reported, not guessed at",
+    ( "a launcher's target is reported without guessing that it is one",
       {dune|(rule (deps ocannl_config) (action (run env %{dep:probe.exe} --flag)))|dune},
-      [ "rule whose command this scan cannot read: env, handed probe.exe [declares]" ] );
-    ( "and so is one that is only reading them",
+      [
+        "rule whose working directory this scan cannot establish: env, handed %{dep:probe.exe} \
+         [declares]";
+      ] );
+    ( "and so is a tool that is only reading them",
       {dune|(rule (action (run diff old.exe new.exe)))|dune},
       [
-        "rule whose command this scan cannot read: diff, handed new.exe";
-        "rule whose command this scan cannot read: diff, handed old.exe";
+        "rule whose working directory this scan cannot establish: diff, handed old.exe, new.exe";
       ] );
+    (* Fail closed on an argument the scan cannot resolve either: `./%{runner}` names whatever the
+       binding does, and dropping it would hide a launched executable (Codex P2, round 14). *)
+    ( "an unresolvable argument counts as much as a resolved one",
+      {dune|(rule (deps (:runner probe.exe)) (action (run env ./%{runner})))|dune},
+      [ "rule whose working directory this scan cannot establish: env, handed ./%{runner}" ] );
     ( "ordinary arguments are not executables",
       {dune|(rule (action (run %{dep:probe.exe} --input data.csv --out %{targets})))|dune},
       [ "rule running probe.exe" ] );
@@ -185,9 +192,19 @@ let cases =
     ( "a rule running no executable is not a site",
       {dune|(rule (alias runtest) (action (diff a.expected a.actual)))|dune},
       [] );
-    ( "a rule running a non-OCaml tool is not a site",
-      {dune|(rule (alias runtest) (deps helper.py) (action (run python3 %{dep:test_it.py})))|dune},
+    ( "a PATH tool with no workspace argument is not a site",
+      {dune|(rule (alias runtest) (action (run python3 --version)))|dune},
       [] );
+    (* But one handed something from the workspace is: `env probe.exe` launches it, `diff old.exe
+       new.exe` reads it, and `env -C ../s probe.exe` launches it elsewhere -- three readings dune's
+       grammar does not tell apart (Codex P2, rounds 12 to 14). The strongest is assumed, so the
+       check asks for an exemption with a reason rather than guessing. *)
+    ( "a PATH tool handed something from the workspace is unplaceable",
+      {dune|(rule (alias runtest) (deps helper.py) (action (run python3 %{dep:test_it.py})))|dune},
+      [
+        "rule whose working directory this scan cannot establish: python3, handed \
+         %{dep:test_it.py}";
+      ] );
     (* An `(alias ...)` stanza took an action of its own before dune 2.0 and can still depend on an
        executable, so it is read like a rule rather than passed over (Codex P2, round 1). *)
     ( "an alias stanza is read like a rule",

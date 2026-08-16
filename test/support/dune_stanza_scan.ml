@@ -347,8 +347,7 @@ let inert_actions =
 (** What an action puts in a position where a program could be named. [Elsewhere] wraps another
     of these with the destination of a [chdir] this scan cannot resolve. *)
 type command_site =
-  | Program of string
-  | Argument of string * string  (** the command, and one of its arguments *)
+  | Program of string * string list  (** the command, and the arguments it was given *)
   | Shell of string
   | Elsewhere of string * command_site
 
@@ -372,8 +371,7 @@ let rec commands_in ?(cwd = "") sexp =
       |> List.map ~f:(fun (_, command) ->
              let named =
                match command with
-               | Program cmd -> cmd
-               | Argument (_, arg) -> arg
+               | Program (cmd, _) -> cmd
                | Shell line -> "shell: " ^ line
                | Elsewhere (what, _) -> what
              in
@@ -384,17 +382,8 @@ let rec commands_in ?(cwd = "") sexp =
   | Sexp.List (Sexp.Atom "chdir" :: Sexp.Atom dir :: rest) ->
       List.concat_map rest ~f:(commands_in ~cwd:(in_subdir cwd dir))
   | Sexp.List (Sexp.Atom ("run" | "dynamic-run") :: Sexp.Atom cmd :: args) ->
-      (* A PATH tool handed something this repository builds may be launching it (`env probe.exe`)
-         or may be reading it (`diff old.exe new.exe`) -- dune's grammar does not say which, and
-         nothing structural distinguishes them (Codex P2, rounds 12 and 13). So neither guess is
-         made: the pair is reported as a command this scan cannot place, which the check settles
-         the way it settles every other one -- the rule declares the dependency, or names an
-         exemption with the reason. *)
-      ((cwd, Program cmd)
-      :: List.filter_map args ~f:(function
-           | Sexp.Atom arg -> Some (cwd, Argument (cmd, arg))
-           | _ -> None))
-      @ nested
+      (cwd, Program (cmd, List.filter_map args ~f:(function Sexp.Atom a -> Some a | _ -> None)))
+      :: nested
   (* A shell action hands a command line to a shell, and this scan does not parse shell. Splitting
      it on whitespace looked like reading it and was not: `if ready; then ./probe.exe; fi` yields
      `./probe.exe;`, which ends in no extension and passes for an external tool -- so the rule runs
@@ -433,19 +422,33 @@ let executables_run stanza =
   let named_deps = named_deps_of stanza in
   let rec classify command =
     match command with
-    | Program cmd -> classify_command ~named_deps cmd
+    | Program (cmd, args) -> (
+        match classify_command ~named_deps cmd with
+        (* A PATH tool is only the end of the story while it is handed nothing this repository
+           builds. `env probe.exe` launches it; `diff old.exe new.exe` reads it; `env -C ../s
+           probe.exe` launches it SOMEWHERE ELSE -- and dune's grammar says which of the three it
+           is no more than a list of launchers would (Codex P2, rounds 12 to 14). So the strongest
+           of the three is assumed: something may run, in a directory this scan cannot establish.
+           A command that IS a workspace executable answers for itself, and its arguments are its
+           data. *)
+        | External -> (
+            let handed =
+              List.filter args ~f:(fun arg ->
+                  match classify_command ~named_deps arg with
+                  | Runs _ | Unrecognized _ -> true
+                  | External | Unknown_directory _ -> false)
+            in
+            match handed with
+            | [] -> External
+            | handed ->
+                Unknown_directory
+                  (Printf.sprintf "%s, handed %s" cmd (String.concat ~sep:", " handed)))
+        | classified -> classified)
     | Shell line -> Unknown_directory ("shell: " ^ line)
     (* Only what could read a configuration cares which directory it runs in: a PATH tool reads
        none wherever it is (Codex P2, round 13). *)
     | Elsewhere (what, command) -> (
         match classify command with External -> External | _ -> Unknown_directory what)
-    (* An argument matters only when it names an executable -- everything else a command line
-       carries (flags, inputs, targets) is not something being run. Which of the two it is, this
-       scan does not guess. *)
-    | Argument (cmd, arg) -> (
-        match classify_command ~named_deps arg with
-        | Runs name -> Unrecognized (Printf.sprintf "%s, handed %s" cmd name)
-        | External | Unrecognized _ | Unknown_directory _ -> External)
   in
   List.filter_map (commands_in stanza) ~f:(fun (cwd, command) ->
       match classify command with External -> None | classified -> Some (cwd, classified))
