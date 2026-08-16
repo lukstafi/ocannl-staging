@@ -38,6 +38,7 @@ ok: ordinary arguments are not executables
 ok: a chdir to a pform leaves the directory unestablished
 ok: a chdir to a pform over a PATH tool is not
 ok: an unclassified action under a chdir keeps that directory
+ok: and an unclassified action under a pform chdir is unplaceable, like a command
 ok: a rewritten PATH makes a bare command unplaceable
 ok: but a path-qualified command still names what it names
 ok: a chdir under a PATH rewrite keeps its directory

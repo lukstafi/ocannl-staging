@@ -194,6 +194,13 @@ let cases =
     ( "an unclassified action under a chdir keeps that directory",
       {dune|(rule (deps child/ocannl_config) (action (chdir child (invent-an-action probe.exe))))|dune},
       [ "in child: rule with an action this scan cannot place: invent-an-action [declares]" ] );
+    ( "and an unclassified action under a pform chdir is unplaceable, like a command",
+      {dune|(rule (deps ocannl_config)
+ (action (chdir %{workspace_root} (invent-an-action probe.exe))))|dune},
+      [
+        "rule whose working directory this scan cannot establish: invent-an-action, under \
+         `(chdir %{workspace_root} ...)` [declares]";
+      ] );
     ( "a rewritten PATH makes a bare command unplaceable",
       {dune|(rule (deps ocannl_config) (action (setenv PATH . (run env probe))))|dune},
       [

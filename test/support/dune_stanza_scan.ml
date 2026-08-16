@@ -438,6 +438,14 @@ let unclassified_action_heads stanza =
   let rec walk_action ~cwd sexp =
     match sexp with
     | Sexp.Atom _ -> []
+    (* A destination built out of a pform is no directory this scan can resolve, here as much as in
+       `commands_in`: taking it literally would put the site in a directory whose ancestors include
+       the stanza's own, and accept the stanza-local dependency for a process running elsewhere
+       (Codex P2, round 19 of PR #343). *)
+    | Sexp.List (Sexp.Atom "chdir" :: Sexp.Atom dir :: rest)
+      when String.is_substring dir ~substring:"%{" ->
+        List.map (List.concat_map rest ~f:(walk_action ~cwd)) ~f:(fun (_, head) ->
+            (None, Printf.sprintf "%s, under `(chdir %s ...)`" head dir))
     | Sexp.List (Sexp.Atom "chdir" :: Sexp.Atom dir :: rest) ->
         List.concat_map rest ~f:(walk_action ~cwd:(in_subdir cwd dir))
     | Sexp.List (Sexp.Atom head :: args) ->
@@ -450,7 +458,7 @@ let unclassified_action_heads stanza =
           List.mem program_actions head ~equal:String.equal
           || List.mem inert_actions head ~equal:String.equal
         then nested
-        else (cwd, head) :: nested
+        else (Some cwd, head) :: nested
     | Sexp.List l -> List.concat_map l ~f:(walk_action ~cwd)
   in
   match field stanza "action" with
@@ -643,8 +651,9 @@ let sites content =
           (* One site per directory the rule runs something in: what each needs is that
              directory's config, declared by the path that reaches it from here. *)
           sites_for ~is_test:false
-          @ List.concat_map (unclassified_action_heads stanza) ~f:(fun (cwd, head) ->
-                site ~cwd Unclassified_action head)
+          @ List.concat_map (unclassified_action_heads stanza) ~f:(function
+                | Some cwd, head -> site ~cwd Unclassified_action head
+                | None, what -> site Unreadable_directory what)
       | _ -> [])
 
 (** Stanza heads in [content] that {!sites} has no classification for, each once. The caller fails
