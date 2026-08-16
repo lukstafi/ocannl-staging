@@ -30,6 +30,9 @@ ok: the child's own config answers it as well
 ok: a sibling chdir is reported at the sibling
 ok: an explicit relative program is a site without an extension
 ok: a bare word is still a tool on PATH
+ok: an external tool handed an executable is running it
+ok: ordinary arguments are not executables
+ok: a chdir to a pform leaves the directory unestablished
 ok: a chdir to the stanza's own directory changes nothing
 ok: a nested action does not hide the executable
 ok: a rule running no executable is not a site
@@ -65,6 +68,9 @@ ok: copies the config -- a copy_files stanza
 ok: copies the config -- the short spelling
 ok: copies the config -- a copy_files inside a subdir names that directory
 ok: copies the config -- copying something else
+ok: copies the config -- a wildcard that covers it
+ok: copies the config -- a wildcard that cannot
+ok: copies the config -- dune's set syntax is taken as possibly matching
 ok: copies the config -- no copy_files at all
 ok: unclassified heads -- a classified stanza
 ok: unclassified heads -- a stanza that runs nothing
@@ -72,5 +78,7 @@ ok: unclassified heads -- a cram stanza
 ok: unclassified heads -- an include, whose contents the scan never sees
 ok: unclassified heads -- inside a subdir, too
 ok: unclassified heads -- something that is not a stanza at all
+ok: accepted marker -- the marker inside a string is not a comment to either reader
+ok: accepted marker -- nor is one in a line comment
 ok: refused -- a block comment
 ok: refused -- a datum comment

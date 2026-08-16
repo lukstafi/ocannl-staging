@@ -44,20 +44,70 @@ let in_subdir parent child =
   | parent, "" -> parent
   | parent, child -> parent ^ "/" ^ child
 
-(* Sexplib reads these as comments; dune does not. See the header. *)
-let sexp_only_comment_markers = [ "#|"; "#;" ]
+(* How many stanzas a dune file has, counted by nothing but parentheses, skipping `;` comments and
+   quoted strings. This is a CROSS-CHECK, not a second parser: it says how many top-level forms are
+   there, and sexplib has to agree.
+
+   The disagreement it exists to catch is `#|…|#` and `#;`, which sexplib reads as comments and
+   dune does not, so sexplib could swallow a whole stanza. An earlier version refused any file
+   CONTAINING those two characters, which is wrong in the ordinary case: inside a quoted argument
+   or after a `;`, sexplib does not treat them as comments either, and refusing there would take
+   the whole suite down over an unrelated string (Codex P2, round 12 of PR #343). Counting says
+   precisely when something was swallowed. *)
+let top_level_form_count content =
+  let count = ref 0 and depth = ref 0 in
+  let i = ref 0 in
+  let length = String.length content in
+  let delimiter c = Char.is_whitespace c || List.mem [ '('; ')'; ';'; '"' ] c ~equal:Char.equal in
+  while !i < length do
+    (match content.[!i] with
+    | ';' ->
+        while !i < length && not (Char.equal content.[!i] '\n') do
+          Int.incr i
+        done
+    | '"' ->
+        (* A quoted string is one form where a form can start. *)
+        if !depth = 0 then Int.incr count;
+        Int.incr i;
+        let closed = ref false in
+        while (not !closed) && !i < length do
+          (match content.[!i] with
+          | '\\' -> Int.incr i
+          | '"' -> closed := true
+          | _ -> ());
+          Int.incr i
+        done;
+        Int.decr i
+    | '(' ->
+        if !depth = 0 then Int.incr count;
+        Int.incr depth
+    | ')' -> if !depth > 0 then Int.decr depth
+    | c when Char.is_whitespace c -> ()
+    | _ ->
+        (* A bare atom is a form too, even at the top level, where dune would reject it and sexplib
+           happily returns it -- so the two still agree on the count and the caller reports it. *)
+        if !depth = 0 then Int.incr count;
+        while !i < length && not (delimiter content.[!i]) do
+          Int.incr i
+        done;
+        Int.decr i);
+    Int.incr i
+  done;
+  !count
 
 (** Raises if [content] is not something both readers agree on: a scan that cannot read its input
-    must say so rather than report an empty file. *)
+    must say so rather than report a file with a hole in it. *)
 let stanzas content =
-  List.iter sexp_only_comment_markers ~f:(fun marker ->
-      if String.is_substring content ~substring:marker then
-        failwith
-          (Printf.sprintf
-             "dune file uses %S, which sexplib reads as a comment and dune does not -- this scan \
-              would read the file with a hole in it"
-             marker));
-  Sexplib.Sexp.scan_sexps (Lexing.from_string content)
+  let parsed = Sexplib.Sexp.scan_sexps (Lexing.from_string content) in
+  let counted = top_level_form_count content in
+  if List.length parsed <> counted then
+    failwith
+      (Printf.sprintf
+         "dune file parses as %d stanzas but has %d top-level forms -- sexplib and dune disagree \
+          about what is a comment here (`#|…|#` and `#;` are comments to the one and atoms to the \
+          other), so this scan would read the file with a hole in it"
+         (List.length parsed) counted);
+  parsed
 
 let head = function Sexp.List (Sexp.Atom h :: _) -> Some h | _ -> None
 
@@ -71,6 +121,25 @@ let field stanza name =
   match stanza with Sexp.List (_ :: fields) -> field_in fields name | _ -> None
 
 let rec atoms = function Sexp.Atom a -> [ a ] | Sexp.List l -> List.concat_map l ~f:atoms
+
+(** Whether a [copy_files] pattern could name [name] — the literal spelling, or a wildcard that
+    covers it. Only [*] and [?] are interpreted; a pattern using dune's set syntax ([{a,b}], [[ab]])
+    is taken as possibly matching, since this decides where a config EXISTS and guessing wide only
+    risks accepting a directory that has one anyway, while guessing narrow rejects a correctly
+    configured one (Codex P2, round 12 of PR #343). *)
+let glob_could_match pattern ~name =
+  if String.exists pattern ~f:(fun c -> List.mem [ '{'; '[' ] c ~equal:Char.equal) then true
+  else
+    let pattern = String.to_array pattern and name = String.to_array name in
+    let rec go p n =
+      if p = Array.length pattern then n = Array.length name
+      else
+        match pattern.(p) with
+        | '*' -> go (p + 1) n || (n < Array.length name && go p (n + 1))
+        | '?' -> n < Array.length name && go (p + 1) (n + 1)
+        | c -> n < Array.length name && Char.equal c name.(n) && go (p + 1) (n + 1)
+    in
+    go 0 0
 
 (** Dependency-specification forms that really depend on the file they name, so that the config
     named inside one is built before the test runs.
@@ -285,10 +354,33 @@ let rec commands_in ?(cwd = "") sexp =
     match sexp with Sexp.List l -> List.concat_map l ~f:(commands_in ~cwd) | _ -> []
   in
   match sexp with
+  (* A destination built out of a pform ([%{workspace_root}]) is not a path this scan can resolve,
+     and treating it as a literal directory name would have the process searching from a directory
+     that does not exist -- possibly landing back on the stanza's own config (Codex P2, round 12).
+     Everything under it is reported as running somewhere unestablished. *)
+  | Sexp.List (Sexp.Atom "chdir" :: Sexp.Atom dir :: rest)
+    when String.is_substring dir ~substring:"%{" ->
+      List.concat_map rest ~f:(commands_in ~cwd)
+      |> List.map ~f:(fun (_, command) ->
+             let named =
+               match command with
+               | `Command cmd -> cmd
+               | `Argument arg -> arg
+               | `Shell line -> "shell: " ^ line
+               | `Elsewhere what -> what
+             in
+             (cwd, `Elsewhere (Printf.sprintf "%s, under `(chdir %s ...)`" named dir)))
   | Sexp.List (Sexp.Atom "chdir" :: Sexp.Atom dir :: rest) ->
       List.concat_map rest ~f:(commands_in ~cwd:(in_subdir cwd dir))
-  | Sexp.List (Sexp.Atom ("run" | "dynamic-run") :: Sexp.Atom cmd :: _) ->
-      (cwd, `Command cmd) :: nested
+  | Sexp.List (Sexp.Atom ("run" | "dynamic-run") :: Sexp.Atom cmd :: args) ->
+      (* An external tool handed a workspace executable is running it: `(run env probe.exe)` and
+         its kind. Rather than keep a list of launchers, every argument is read the same way the
+         command is, and the ones that name an executable count (Codex P2, round 12). *)
+      ((cwd, `Command cmd)
+      :: List.filter_map args ~f:(function
+           | Sexp.Atom arg -> Some (cwd, `Argument arg)
+           | _ -> None))
+      @ nested
   (* A shell action hands a command line to a shell, and this scan does not parse shell. Splitting
      it on whitespace looked like reading it and was not: `if ready; then ./probe.exe; fi` yields
      `./probe.exe;`, which ends in no extension and passes for an external tool -- so the rule runs
@@ -325,11 +417,17 @@ let unclassified_action_heads stanza =
 (** What a stanza runs, each with the directory it runs in. *)
 let executables_run stanza =
   let named_deps = named_deps_of stanza in
-  List.map (commands_in stanza) ~f:(fun (cwd, command) ->
-      ( cwd,
-        match command with
-        | `Command cmd -> classify_command ~named_deps cmd
-        | `Shell line -> Unknown_directory ("shell: " ^ line) ))
+  List.filter_map (commands_in stanza) ~f:(fun (cwd, command) ->
+      match command with
+      | `Command cmd -> Some (cwd, classify_command ~named_deps cmd)
+      | `Shell line -> Some (cwd, Unknown_directory ("shell: " ^ line))
+      | `Elsewhere what -> Some (cwd, Unknown_directory what)
+      (* An argument counts only when it names an executable: everything else a command line
+         carries -- flags, inputs, targets -- is not something being run. *)
+      | `Argument arg -> (
+          match classify_command ~named_deps arg with
+          | Runs name -> Some (cwd, Runs name)
+          | External | Unrecognized _ | Unknown_directory _ -> None))
   |> List.dedup_and_sort ~compare:Poly.compare
 
 type kind =
@@ -502,9 +600,12 @@ let unclassified_heads content =
 let config_copy_dirs content =
   walk "" (stanzas content) ~f:(fun subdir stanza ->
       match head stanza with
-      (* [copy_files#] is the preprocessing spelling of the same stanza. *)
+      (* [copy_files#] is the preprocessing spelling of the same stanza. A wildcard is read as
+         possibly matching the config: this decides where a config EXISTS, so guessing wide only
+         risks accepting a directory that has one by another route, while guessing narrow would
+         reject a correctly configured one (Codex P2, round 12). *)
       | Some ("copy_files" | "copy_files#")
         when List.exists (atoms stanza) ~f:(fun atom ->
-                 String.equal (Stdlib.Filename.basename atom) config_file) ->
+                 glob_could_match (Stdlib.Filename.basename atom) ~name:config_file) ->
           [ subdir ]
       | _ -> [])

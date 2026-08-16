@@ -145,6 +145,23 @@ let cases =
     ( "a bare word is still a tool on PATH",
       {dune|(rule (action (run diff a b)))|dune},
       [] );
+    (* A launcher runs what it is handed, so an argument that names an executable counts as much as
+       the command does -- read the same way, rather than from a list of launchers (Codex P2,
+       round 12). *)
+    ( "an external tool handed an executable is running it",
+      {dune|(rule (deps ocannl_config) (action (run env %{dep:probe.exe} --flag)))|dune},
+      [ "rule running probe.exe [declares]" ] );
+    ( "ordinary arguments are not executables",
+      {dune|(rule (action (run %{dep:probe.exe} --input data.csv --out %{targets})))|dune},
+      [ "rule running probe.exe" ] );
+    (* Where a chdir destination is built out of a pform, the directory cannot be resolved, and
+       taking it literally would search a directory that does not exist (Codex P2, round 12). *)
+    ( "a chdir to a pform leaves the directory unestablished",
+      {dune|(rule (deps ocannl_config) (action (chdir %{workspace_root} (run %{dep:probe.exe}))))|dune},
+      [
+        "rule whose working directory this scan cannot establish: %{dep:probe.exe}, under `(chdir \
+         %{workspace_root} ...)` [declares]";
+      ] );
     ( "a chdir to the stanza's own directory changes nothing",
       {dune|(rule (deps ocannl_config) (action (chdir . (run %{dep:probe.exe}))))|dune},
       [ "rule running probe.exe [declares]" ] );
@@ -296,6 +313,13 @@ let copy_cases =
       {dune|(subdir config (copy_files (files ../../config/ocannl_config)))|dune},
       [ "config" ] );
     ("copying something else", {dune|(copy_files (files ../data/*.csv))|dune}, []);
+    (* A wildcard that could cover the config counts as materializing it: this decides where a
+       config EXISTS, so guessing wide risks accepting a directory that has one anyway, while
+       guessing narrow rejects a correctly configured one (Codex P2, round 12). *)
+    ("a wildcard that covers it", {dune|(copy_files (files ../config/*))|dune}, [ "." ]);
+    ("a wildcard that cannot", {dune|(copy_files (files ../config/*.expected))|dune}, []);
+    ("dune's set syntax is taken as possibly matching",
+     {dune|(copy_files (files ../config/{ocannl_config,other}))|dune}, [ "." ]);
     ("no copy_files at all", {dune|(test (name t) (deps ocannl_config))|dune}, []);
   ]
 
@@ -317,13 +341,27 @@ let unclassified_cases =
   ]
 
 (* The two sequences sexplib reads as comments and dune does not. Reading such a file would drop
-   whatever they enclose, so the scan refuses it instead of reporting a shorter file. *)
+   whatever they enclose, so the scan refuses it -- but only when something was actually dropped,
+   which a second count of the top-level forms is what establishes. Inside a string or after a
+   `;`, sexplib does not treat them as comments either, and refusing there would take the whole
+   suite down over an unrelated argument (Codex P2, round 12). *)
 let refused_cases =
   [
     ("a block comment", {dune|#| (test (name hidden)) |#
 (test (name t))|dune});
     ("a datum comment", {dune|#;(test (name hidden))
 (test (name t))|dune});
+  ]
+
+let accepted_marker_cases =
+  [
+    ( "the marker inside a string is not a comment to either reader",
+      {dune|(rule (deps ocannl_config) (action (echo "#| not a comment |#")))|dune},
+      [] );
+    ( "nor is one in a line comment",
+      {dune|; dune would read #| as an atom; sexplib would not
+(test (name t) (deps ocannl_config))|dune},
+      [ "test t [declares]" ] );
   ]
 
 let () =
@@ -359,6 +397,15 @@ let () =
       check ("copies the config -- " ^ name) expected found);
   List.iter unclassified_cases ~f:(fun (name, source, expected) ->
       check ("unclassified heads -- " ^ name) expected (Scan.unclassified_heads source));
+  List.iter accepted_marker_cases ~f:(fun (name, source, expected) ->
+      let found =
+        try List.map (Scan.sites source) ~f:render
+        with exn ->
+          ok := false;
+          printf "FAIL: accepted marker -- %s: the scan refused it: %s\n" name (Exn.to_string exn);
+          []
+      in
+      check ("accepted marker -- " ^ name) expected found);
   List.iter refused_cases ~f:(fun (name, source) ->
       match Scan.sites source with
       | exception _ -> printf "ok: refused -- %s\n" name
