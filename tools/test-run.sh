@@ -213,8 +213,12 @@ new_run() {
   # VERDICT file's, since a verdict-less directory may be a live run
   # (`--cap 0` is supported and unbounded); those are reaped only on a much
   # longer leash, as crash leftovers.
-  find "$RUNS" -maxdepth 1 -type d -name '2*Z-*' 2>/dev/null |
+  # -mindepth 1 plus the explicit guard: find emits the starting directory
+  # itself at depth 0, and an override pointing $RUNS at a directory that
+  # happens to match the schema must not get the whole state root deleted.
+  find "$RUNS" -mindepth 1 -maxdepth 1 -type d -name '2*Z-*' 2>/dev/null |
     while IFS= read -r d; do
+      [ "$d" = "$RUNS" ] && continue
       # The find glob is only a pre-filter; deletion requires the EXACT
       # generated shape -- YYYYMMDDTHHMMSSZ-<pid> -- so a stray directory
       # like `2-oldZ-backup` cannot qualify even if it contains files with
@@ -259,6 +263,10 @@ ps_token() { LC_ALL=C TZ=UTC ps -o lstart= -p "$1" 2>/dev/null | tr -s ' '; }
 proc_alive() { # pid-file token-file
   local pid tok now
   pid=$(cat "$1" 2>/dev/null) || return 1
+  # A corrupted or forged pid file must never reach kill: 0 and negative
+  # values are POSIX kill specials (caller's group / broadcast), so only a
+  # positive decimal integer is a pid at all.
+  case $pid in '' | *[!0-9]* | 0) return 1 ;; esac
   kill -0 "$pid" 2>/dev/null || return 1
   tok=$(tr -s ' ' <"$2" 2>/dev/null) || tok=
   now=$(ps_token "$pid")
@@ -465,10 +473,15 @@ case $sub in
       # survive it -- still mutating _build while the verdict below releases
       # the lock. The group is recorded (only when it is truly its own, see
       # the supervisor comment), so reap any survivors first.
-      if pgid=$(cat "$run_dir/pgid" 2>/dev/null) && kill -0 -- "-$pgid" 2>/dev/null; then
+      if proc_alive "$run_dir/pgid" "$run_dir/gtoken" &&
+         pgid=$(cat "$run_dir/pgid") && kill -0 -- "-$pgid" 2>/dev/null; then
         kill -TERM -- "-$pgid" 2>/dev/null
         sleep 2
-        kill -KILL -- "-$pgid" 2>/dev/null
+        # Revalidate before escalating: TERM usually empties the group within
+        # the grace, and a numeric pgid could be recycled during it -- KILL
+        # only a group whose recorded leader identity still matches.
+        proc_alive "$run_dir/pgid" "$run_dir/gtoken" &&
+          kill -KILL -- "-$pgid" 2>/dev/null
       fi
       finish_run "$rc"
       # Publication handshake: hold the lock until the parent has published
