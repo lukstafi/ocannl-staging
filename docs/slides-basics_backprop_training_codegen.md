@@ -202,8 +202,6 @@ let sgd_update ~learning_rate ?momentum ?weight_decay ?nesterov
 lukstafi@Mac ocannl % dune exec test/training/moons_demo.exe -- --ocannl_log_level=0
                                       
 Welcome to OCANNL! Reading configuration defaults from /Users/lukstafi/ocannl/ocannl_config.
-Retrieving commandline, environment, or config file variable ocannl_log_level
-Found 0, commandline --ocannl_log_level=0
 Epoch=1, step=0, batch=0, lr=0.2, loss=19.45, epoch loss=19.45
 Epoch=1, step=1, batch=1, lr=0.2, loss=8.998, epoch loss=28.45
 Epoch=1, step=2, batch=2, lr=0.2, loss=9.299, epoch loss=37.75
