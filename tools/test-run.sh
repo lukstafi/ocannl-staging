@@ -213,6 +213,7 @@ new_run() {
   # wait and the wrapper all operate on a run that cannot be tracked.
   { printf '%s\n' "$*" >"$run_dir/cmd" &&
     printf '%s\n' "$cap" >"$run_dir/cap" &&
+    printf '%s\n' "$PWD" >"$run_dir/wt" &&
     : >"$run_dir/log"; } || die "cannot write run metadata in $run_dir"
   # Runs are throwaway diagnostics; reap old ones so the directory cannot grow
   # without bound. Deletion demands the full run schema -- the timestamped
@@ -244,7 +245,18 @@ new_run() {
       case ${b#*Z-} in '' | *[!0-9]*) continue ;; esac
       [ -f "$d/cmd" ] && [ -f "$d/cap" ] || continue
       if [ -f "$d/exit" ]; then
-        [ -n "$(find "$d/exit" -mtime +7 2>/dev/null)" ] && rm -rf "$d"
+        if [ -n "$(find "$d/exit" -mtime +7 2>/dev/null)" ]; then
+          # A completed run whose leftovers still hold ITS worktree's lock
+          # keeps its metadata -- deleting it would strand that worktree
+          # with the advertised status/stop recovery pointing at nothing.
+          w=$(cat "$d/wt" 2>/dev/null)
+          if [ -n "$w" ] &&
+             [ "$(cat "$w/.test-run.lock.owner" 2>/dev/null)" = "$d" ] &&
+             lock_held "$w/.test-run.lock"; then
+            continue
+          fi
+          rm -rf "$d"
+        fi
       else
         # A verdict-less directory may be a LIVE run (--cap 0 is supported and
         # unbounded, and $RUNS is shared across worktrees): never reap while
@@ -263,6 +275,12 @@ new_run() {
 # report a stale run as active forever and `stop` would TERM an innocent
 # process. An empty token (MSYS ps without lstart) degrades to the plain
 # pid check rather than failing.
+lock_held() { # <lock-file>; exits 0 iff some process holds its flock
+  perl -e 'use Fcntl ":flock";
+           open(my $fh, ">>", $ARGV[0]) or exit 1;
+           exit(flock($fh, LOCK_EX | LOCK_NB) ? 1 : 0)' "$1" 2>/dev/null
+}
+
 # One fixed rendering for start-time tokens: lstart is locale- AND
 # timezone-formatted, so an unpinned rendering makes the same process print
 # differently from a shell in another TZ -- classifying a live run as dead
@@ -448,15 +466,18 @@ case $sub in
     case ${OSTYPE:-} in msys* | cygwin*) DUNE=tools/dune-quiet.sh ;; *) DUNE=dune ;; esac
     take_lock
     new_run "$@"
-    # For an attached run, cancellation forwarding is armed BEFORE the
-    # wrapper exists: a signal landing in the launch gap would otherwise take
-    # bash's default exit while the signal-immune wrapper ran on,
-    # unpublished, holding the lock. Until the supervisor pid is recorded
-    # the handler can only raise the flag; the attached path below converts
-    # a flagged cancellation once the supervisor is reachable.
+    # Cancellation/deferral is armed BEFORE the wrapper exists, for BOTH
+    # modes: a signal landing in the launch gap would otherwise take bash's
+    # default exit while the signal-immune wrapper ran on, unpublished,
+    # holding the lock. For `run` the handler forwards to the supervisor
+    # (and the attached path converts a too-early flag once the pid is
+    # recorded); for `start` the signal is merely deferred past publication
+    # -- the launcher is about to exit anyway, and the run is MEANT to
+    # survive it.
     cancelled=0
-    [ "$sub" = run ] &&
-      trap 'cancelled=1; kill -TERM "$(cat "$run_dir/pid" 2>/dev/null)" 2>/dev/null' INT TERM HUP
+    trap 'cancelled=1
+          [ "$sub" = run ] &&
+            kill -TERM "$(cat "$run_dir/pid" 2>/dev/null)" 2>/dev/null' INT TERM HUP
     # ONE launch shape for both modes: a wrapper subshell owns the supervisor
     # and publishes the verdict, so no fate of the LAUNCHING shell (HUP from a
     # closed terminal, harness cancellation, plain kill) can lose it -- `run`
@@ -558,6 +579,7 @@ case $sub in
       echo "run died without recording a verdict (wrapper killed?): $run_dir"
       exit 1
     fi
+    trap - INT TERM HUP
     disown
     echo "started: $run_dir"
     echo "  command: dune $*"
@@ -643,32 +665,32 @@ case $sub in
   stop)
     resolve_run "${1:-last}"
     if [ -f "$run_dir/exit" ]; then
-      # Finished -- but a descendant dune backgrounded may still hold the
+      # Finished -- but descendants dune backgrounded may still hold the
       # worktree lock (the wrapper deliberately leaves it riding on their
-      # fd 9). The leaderless group cannot be identity-checked directly, so
-      # corroborate three ways before signaling: the lock file is still
-      # LOCKED, the owner pointer names THIS run, and the recorded group is
-      # alive -- together: the processes keeping this worktree busy are this
-      # run's leftovers. Escalation re-checks the same evidence.
-      lock_held() { # exits 0 iff someone still holds the worktree lock
-        perl -e 'use Fcntl ":flock";
-                 open(my $fh, ">>", $ARGV[0]) or exit 1;
-                 exit(flock($fh, LOCK_EX | LOCK_NB) ? 1 : 0)' \
-          "$PWD/.test-run.lock" 2>/dev/null
+      # fd 9), possibly having setsid'd out of the recorded group. Gate on
+      # the lock being HELD with the owner pointer naming THIS run: then
+      # whatever holds it is this run's leftovers. Signal the recorded group
+      # if alive, and ask the lock file ITSELF for the rest (lsof sees
+      # escapees no group census can); re-check the gate before escalating.
+      leftover_lock() {
+        [ "$(cat "$PWD/.test-run.lock.owner" 2>/dev/null)" = "$run_dir" ] &&
+          lock_held "$PWD/.test-run.lock"
       }
-      leftovers() {
-        pg=$(cat "$run_dir/pgid" 2>/dev/null) || return 1
-        # 0/negative/garbage are POSIX kill specials, never a group of ours.
-        case $pg in '' | *[!0-9]* | 0) return 1 ;; esac
-        kill -0 -- "-$pg" 2>/dev/null &&
-          [ "$(cat "$PWD/.test-run.lock.owner" 2>/dev/null)" = "$run_dir" ] &&
-          lock_held
+      reap_leftovers() { # <signal>
+        pg=$(cat "$run_dir/pgid" 2>/dev/null)
+        case $pg in '' | *[!0-9]* | 0) pg= ;; esac
+        [ -n "$pg" ] && kill -0 -- "-$pg" 2>/dev/null &&
+          kill "-$1" -- "-$pg" 2>/dev/null
+        for p in $(lsof -t -- "$PWD/.test-run.lock" 2>/dev/null); do
+          case $p in '' | *[!0-9]* | 0) continue ;; esac
+          kill "-$1" "$p" 2>/dev/null
+        done
       }
-      if leftovers; then
-        kill -TERM -- "-$pg" 2>/dev/null
+      if leftover_lock; then
+        reap_leftovers TERM
         sleep 2
-        if leftovers; then kill -KILL -- "-$pg" 2>/dev/null; fi
-        echo "finished, but its leftover processes held the worktree lock; reaped group $pg"
+        if leftover_lock; then reap_leftovers KILL; fi
+        echo "finished, but its leftover processes held the worktree lock; reaped them"
       fi
       echo "already finished:"
       digest "$run_dir"
