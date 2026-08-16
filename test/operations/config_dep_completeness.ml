@@ -90,9 +90,9 @@ let () =
      whose config has simply never been built still counts as having one. *)
   let config_dirs =
     of_basename Scan.config_file
-    (* The repository root is "" everywhere else here, and `Filename.dirname` calls it "." -- a
-       config checked in at the root would otherwise be invisible to the ancestor walk that ends
-       there (Codex P2, round 16). *)
+    (* One spelling of the repository root: it is "" everywhere else here, while `Filename.dirname`
+       calls it ".". The ancestor walk below normalizes the same way, so the two agree wherever a
+       directory from one meets a directory from the other (Codex P2, round 16). *)
     |> List.map ~f:(fun (path, _) ->
            match Stdlib.Filename.dirname path with "." -> "" | directory -> directory)
     |> Set.of_list (module String)
@@ -153,21 +153,24 @@ let () =
       let stanza_dir site = repo_relative [ dir ] site.Scan.subdir in
       let directory_of site = repo_relative [ dir ] (Scan.in_subdir site.Scan.subdir site.Scan.cwd) in
       (* Where the executable's own config search leads, nearest first: its directory and every
-         ancestor up to the repository root, exactly as `Utils.config_file_args` walks them. What
-         it reads is the FIRST of those that has a config -- so that is both the file that must
-         exist and the one the dependency must name, whether the process runs in a descendant of
-         the stanza's directory, a sibling, or the stanza's own (Codex P2, rounds 9 to 11). *)
+         ancestor below the repository root, as `Utils.config_file_args` walks them. What it reads
+         is the FIRST of those that has a config -- so that is both the file that must exist and the
+         one the dependency must name, whether the process runs in a descendant of the stanza's
+         directory, a sibling, or the stanza's own (Codex P2, rounds 9 to 11). *)
       let has_config directory =
         Set.mem config_dirs directory || Set.mem copied_config_dirs directory
       in
+      (* The repository root itself is NOT one of those stops, even though the executable's own
+         search does end there. A root `ocannl_config` is gitignored personal dev settings, so
+         letting one satisfy a site would make this check pass on the developer's machine and fail
+         in CI, for the very directory whose missing `(copy_files ../config/ocannl_config)` it
+         exists to catch. Only a config a checked-in stanza puts in reach counts. *)
       let nearest_config site =
         let rec ancestors directory =
-          directory
-          ::
-          (if String.is_empty directory then []
-           else
-             ancestors
-               (match Stdlib.Filename.dirname directory with "." -> "" | parent -> parent))
+          if String.is_empty directory then []
+          else
+            directory
+            :: ancestors (match Stdlib.Filename.dirname directory with "." -> "" | parent -> parent)
         in
         List.find (ancestors (directory_of site)) ~f:has_config
       in
