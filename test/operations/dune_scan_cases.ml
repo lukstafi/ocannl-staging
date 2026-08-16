@@ -30,11 +30,17 @@ let cases =
     (* The dep may sit anywhere in the field, including inside a group, and a directory reaching
        for a config elsewhere still declares one. *)
     ( "the dep is found wherever in deps it sits",
-      {dune|(test (name t) (deps (glob_files *.data) ../config/ocannl_config))|dune},
+      {dune|(test (name t) (deps (glob_files *.data) (env_var OCANNL_BACKEND) ocannl_config))|dune},
       [ "test t [declares]" ] );
     ( "an explicit file dependency declares it",
-      {dune|(test (name t) (deps (file ../config/ocannl_config)))|dune},
+      {dune|(test (name t) (deps (file ocannl_config)))|dune},
       [ "test t [declares]" ] );
+    (* The local copy is what the executable's config search finds; the shared source file sits
+       nowhere on the upward path from the test's directory, so depending on it declares nothing
+       (Codex P2, round 5). *)
+    ( "the shared source config is not the local one",
+      {dune|(test (name t) (deps ../config/ocannl_config))|dune},
+      [ "test t" ] );
     ( "so does one bound to a name",
       {dune|(test (name t) (deps (:cfg ocannl_config)))|dune},
       [ "test t [declares]" ] );
@@ -96,9 +102,16 @@ let cases =
     ( "%{exe:...} names one too",
       {dune|(rule (action (run %{exe:probe.exe})))|dune},
       [ "rule running probe.exe" ] );
-    ( "a shell action's command line is read the same way",
+    (* This scan does not parse shell, and splitting a command line on whitespace only looked like
+       reading it: `if ready; then ./probe.exe; fi` yields `./probe.exe;`, which passes for an
+       external tool (Codex P2, round 5). A shell line is reported as unreadable, which the check
+       settles by requiring the dependency. *)
+    ( "a shell action is not parsed, it is reported",
       {dune|(rule (deps ocannl_config) (action (bash "./probe.exe --flag > out")))|dune},
-      [ "rule running probe.exe [declares]" ] );
+      [ "rule whose command this scan cannot read: shell: ./probe.exe --flag > out [declares]" ] );
+    ( "including one where a word split would have lost the executable",
+      {dune|(rule (action (system "if ready; then ./probe.exe; fi")))|dune},
+      [ "rule whose command this scan cannot read: shell: if ready; then ./probe.exe; fi" ] );
     (* Command position, not "an .exe somewhere in the stanza": a rule that only moves an
        executable around runs nothing. *)
     ( "a rule that copies an executable does not run it",

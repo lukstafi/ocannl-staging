@@ -68,11 +68,19 @@ let rec atoms = function Sexp.Atom a -> [ a ] | Sexp.List l -> List.concat_map l
     is added, rather than an exotic form that does not silently passing. *)
 let file_dep_forms = [ "file"; "glob_files"; "glob_files_rec"; "source_tree"; "include" ]
 
-(** Whether a [(deps …)] field really depends on the shared configuration file. Path-insensitive: a
-    directory reaching for a config elsewhere ([../config/ocannl_config]) still declares it. *)
+(** Whether a [(deps …)] field really depends on the shared configuration file — the one in the
+    stanza's OWN directory, which is where the executable's config search will look.
+
+    Not any path with that name: a dependency on [../config/ocannl_config] builds the shared source
+    file, which sits nowhere on the upward search from [_build/default/<test dir>], and leaves the
+    local copy that [(copy_files …)] produces unbuilt — the order-dependent behaviour this check
+    exists to reject, wearing the look of a declaration (Codex P2, round 5 of PR #343). Dependency
+    paths are written relative to the stanza's directory, so the local file is exactly
+    [ocannl_config]. *)
 let rec dep_names_config sexp =
   match sexp with
-  | Sexp.Atom atom -> String.equal (Stdlib.Filename.basename atom) config_file
+  | Sexp.Atom atom ->
+      List.mem [ config_file; "./" ^ config_file ] atom ~equal:String.equal
   | Sexp.List (Sexp.Atom head :: rest) ->
       (* [(:name <deps>)] binds a name to ordinary dependencies; the forms above take paths. *)
       (String.is_prefix head ~prefix:":" || List.mem file_dep_forms head ~equal:String.equal)
@@ -215,20 +223,19 @@ let inert_actions =
   ]
 
 (* Every command an action runs, at any depth: [(with-stdout-to … (run …))],
-   [(no-infer (progn (run …) …))] and the rest nest the one that matters. A shell action carries
-   its command line as a string, which the same word split reads. *)
+   [(no-infer (progn (run …) …))] and the rest nest the one that matters. *)
 let rec commands_in sexp =
   let nested = match sexp with Sexp.List l -> List.concat_map l ~f:commands_in | _ -> [] in
   match sexp with
-  | Sexp.List (Sexp.Atom ("run" | "dynamic-run") :: Sexp.Atom cmd :: _) -> cmd :: nested
-  (* A shell action carries its command line as one string; there the separator really is
-     whitespace, and each word is read as a command of its own. *)
+  | Sexp.List (Sexp.Atom ("run" | "dynamic-run") :: Sexp.Atom cmd :: _) -> `Command cmd :: nested
+  (* A shell action hands a command line to a shell, and this scan does not parse shell. Splitting
+     it on whitespace looked like reading it and was not: `if ready; then ./probe.exe; fi` yields
+     `./probe.exe;`, which ends in no extension and passes for an external tool -- so the rule runs
+     a test executable and the check says nothing (Codex P2, round 5). A shell line is reported as
+     unreadable instead, which the caller settles by declaring the dependency anyway or by
+     rewriting the action as a `run`. *)
   | Sexp.List (Sexp.Atom ("bash" | "system") :: args) ->
-      List.concat_map args ~f:(function
-        | Sexp.Atom a -> List.filter (String.split_on_chars a ~on:[ ' '; '\t'; '\n' ])
-                           ~f:(Fn.non String.is_empty)
-        | _ -> [])
-      @ nested
+      List.filter_map args ~f:(function Sexp.Atom a -> Some (`Shell a) | _ -> None) @ nested
   | _ -> nested
 
 (** Heads inside a stanza's [(action …)] that are on neither action list, each once. *)
@@ -255,7 +262,9 @@ let unclassified_action_heads stanza =
 
 let executables_run stanza =
   let named_deps = named_deps_of stanza in
-  List.map (commands_in stanza) ~f:(classify_command ~named_deps)
+  List.map (commands_in stanza) ~f:(function
+    | `Command cmd -> classify_command ~named_deps cmd
+    | `Shell line -> Unrecognized ("shell: " ^ line))
   |> List.dedup_and_sort ~compare:Poly.compare
 
 type kind =

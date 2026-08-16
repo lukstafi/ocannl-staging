@@ -3,6 +3,7 @@ ok: a test omitting the dep
 ok: a test with deps but not this one
 ok: the dep is found wherever in deps it sits
 ok: an explicit file dependency declares it
+ok: the shared source config is not the local one
 ok: so does one bound to a name
 ok: an alias of the same name is not the file
 ok: nor is an environment variable of that name
@@ -20,7 +21,8 @@ ok: a rule running a non-OCaml tool is not a site
 ok: an alias stanza is read like a rule
 ok: a public executable through %{bin:...}
 ok: %{exe:...} names one too
-ok: a shell action's command line is read the same way
+ok: a shell action is not parsed, it is reported
+ok: including one where a word split would have lost the executable
 ok: a rule that copies an executable does not run it
 ok: a command this scan cannot place is reported, not ignored
 ok: dynamic-run executes a program as much as run does
