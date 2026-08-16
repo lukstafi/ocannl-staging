@@ -314,6 +314,12 @@ type virtualize_settings = {
       (** Recompute-cost cap for inlining: a node whose setters have enclosing reduction loops
           (loops not appearing in the setter's indices) with a trip-count product exceeding this
           value is never virtualized. Negative values disable the cap. *)
+  mutable max_inline_fanin : int;
+      (** Transitive fan-in cap for inlining (gh-573): a node whose fully-inlined computation would
+          read more than this many distinct materialized nodes — accumulated through chains of
+          virtual producers, per setter — is materialized instead. Bounds the per-consumer
+          recomputation of accumulation chains (e.g. a transformer's residual stream), which the
+          per-node visit and reduction caps cannot see. Negative values disable the cap. *)
   mutable inline_scalar_constexprs : bool;
   mutable inline_simple_computations : bool;
   mutable inline_complex_computations : bool;
@@ -370,6 +376,11 @@ type traced_array = {
           read-multiplicity metric, same-cell reads count, while a setter's own read-modify-write
           does not. Gates the recompute-cost guard: a node never read in the routine has no inlining
           cost, so it must stay eligible for virtual dead-code elimination. *)
+  mutable setter_reads : Set.M(Tnode).t list;
+      (** Per setter statement ([Set]/[Set_from_vec]), the tensor nodes its right-hand side reads,
+          the node's own read-modify-write self-reads excluded. Analysis fact behind the transitive
+          inline-fanin guard (gh-573), which takes the per-setter maximum (a read of one cell
+          executes one setter's computation). *)
 }
 [@@deriving sexp_of]
 
@@ -400,7 +411,8 @@ type optimize_ctx = {
   inline_preferences : Hash_set.M(Tnode).t;
       (** gh-555: the [Inline] half of the per-lineage inlining decision vector. A node recorded
           here is exempt from the heuristic virtualization caps ([virtualize_max_visits],
-          [virtualize_max_inline_reduction]) — the caps are priors of the default decision policy,
+          [virtualize_max_inline_reduction], [virtualize_max_inline_fanin]) — the caps are priors
+          of the default decision policy,
           not legality; the legality rejections and observability pessimizations still apply. The
           [Materialize] half of the vector is a pre-seeded [On_device] decision in [placements]
           (see [Context.decide_materialized] / [Context.decide_inline]). *)

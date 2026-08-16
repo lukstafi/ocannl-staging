@@ -458,6 +458,7 @@ type virtualize_settings = {
   mutable enable_device_only : bool;
   mutable max_visits : int;
   mutable max_inline_reduction : int;
+  mutable max_inline_fanin : int;
   mutable inline_scalar_constexprs : bool;
   mutable inline_simple_computations : bool;
   mutable inline_complex_computations : bool;
@@ -469,6 +470,9 @@ let virtualize_settings =
   in
   let max_inline_reduction =
     Int.of_string @@ Utils.get_global_arg ~arg_name:"virtualize_max_inline_reduction" ~default:"16"
+  in
+  let max_inline_fanin =
+    Int.of_string @@ Utils.get_global_arg ~arg_name:"virtualize_max_inline_fanin" ~default:"8"
   in
   let enable_device_only = Utils.get_global_flag ~default:true ~arg_name:"enable_device_only" in
   let inline_scalar_constexprs =
@@ -484,6 +488,7 @@ let virtualize_settings =
     enable_device_only;
     max_visits;
     max_inline_reduction;
+    max_inline_fanin;
     inline_scalar_constexprs;
     inline_simple_computations;
     inline_complex_computations;
@@ -516,6 +521,13 @@ type traced_array = {
           own read-modify-write does not. A node never read in the routine has no inlining cost, so
           the recompute-cost guard must not materialize it (it may instead be dropped as a committed
           virtual computation, or inlined by a later routine in the lineage). *)
+  mutable setter_reads : Set.M(Tnode).t list;
+      (** Per setter statement ([Set]/[Set_from_vec]), the tensor nodes its right-hand side reads —
+          the node's own read-modify-write self-reads excluded (when inlined they become the local
+          accumulator, not a load). Decision-independent analysis fact behind the transitive
+          inline-fanin guard (gh-573): a read of a cell executes one setter's computation, so the
+          guard takes the per-setter maximum, not the union — a Block/concat node written by one
+          range-guarded setter per component costs one component per read. *)
 }
 [@@deriving sexp_of]
 
@@ -536,7 +548,8 @@ type optimize_ctx = {
   inline_preferences : Hash_set.M(Tnode).t;
       (** gh-555: the [Inline] half of the per-lineage inlining decision vector. A node recorded
           here is exempt from the heuristic virtualization caps ([virtualize_max_visits],
-          [virtualize_max_inline_reduction]) in {!decide_placements} — the caps are priors of the
+          [virtualize_max_inline_reduction], [virtualize_max_inline_fanin]) in {!decide_placements}
+          — the caps are priors of the
           default policy, not legality. Legality is unaffected: [check_and_store_virtual] /
           [inline_computation] can still reject the node ([Never_virtual] with their provenances).
           The [Materialize] half of the vector is a pre-seeded [On_device] decision in
@@ -607,7 +620,7 @@ type swizzle_kind =
     the virtual placement (reduction extent × per-cell read multiplicity — the cost the flip trades
     against memory traffic). [`Materialize] flips a node the policy left virtual (via
     [Context.decide_materialized]); [`Inline] flips a node materialized by the heuristic caps
-    (provenance 1 or 39 — never by legality or observability, which are not decisions), via
+    (provenance 1, 39 or 41 — never by legality or observability, which are not decisions), via
     [Context.decide_inline]. An [`Inline] flip's legality is settled only when the virtualizer
     replays ([check_and_store_virtual]): a rejected flip reproduces the materialized placement. *)
 type flip_candidate = {
@@ -689,6 +702,7 @@ let get_node store tn =
         is_range_producer = false;
         inline_reduction_extent = 1;
         read_by_other = false;
+        setter_reads = [];
       })
 
 let is_constexpr_comp traced_store llsc =
@@ -955,8 +969,11 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
         traced.zeroed_out <- true
     | Set { tn; idcs; llsc; debug = _ } ->
         check_no_concat idcs;
-        loop_scalar ~loop_ranges ~lhs:(Some (tn, idcs)) llsc;
+        let reads = Hash_set.create (module Tnode) in
+        loop_scalar ~loop_ranges ~lhs:(Some (tn, idcs)) ~reads:(Some reads) llsc;
         let traced : traced_array = get_node traced_store tn in
+        traced.setter_reads <-
+          Set.of_list (module Tnode) (Hash_set.to_list reads) :: traced.setter_reads;
         traced.inline_reduction_extent <-
           max traced.inline_reduction_extent (reduction_extent loop_ranges idcs);
         if (not traced.has_assignment) && (not (Hash_set.mem read_seen tn)) && is_scalar_dims tn
@@ -986,8 +1003,11 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
         track_symbol reverse_node_map tn idcs
     | Set_from_vec { tn; idcs; length = _; vec_unop = _; arg = arg, _; debug = _ } ->
         check_no_concat idcs;
-        loop_scalar ~loop_ranges ~lhs:(Some (tn, idcs)) arg;
+        let reads = Hash_set.create (module Tnode) in
+        loop_scalar ~loop_ranges ~lhs:(Some (tn, idcs)) ~reads:(Some reads) arg;
         let traced : traced_array = get_node traced_store tn in
+        traced.setter_reads <-
+          Set.of_list (module Tnode) (Hash_set.to_list reads) :: traced.setter_reads;
         traced.inline_reduction_extent <-
           max traced.inline_reduction_extent (reduction_extent loop_ranges idcs);
         (* Vector operations cannot be scalar constexpr or one-hot selectors. *)
@@ -997,7 +1017,7 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
         traced.is_complex <- traced.is_complex || not (is_constexpr_comp traced_store arg);
         traced.has_assignment <- true;
         track_symbol reverse_node_map tn idcs
-    | Set_local (_, llsc) -> loop_scalar ~loop_ranges ~lhs:None llsc
+    | Set_local (_, llsc) -> loop_scalar ~loop_ranges ~lhs:None ~reads:None llsc
     | Declare_local _ -> ()
     | Comment _ -> ()
     | Staged_compilation _ -> ()
@@ -1010,17 +1030,18 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
            reaches fact tracing. *)
         invalid_arg "Low_level.trace_node_facts: Tile_mma reached the optimization pipeline"
     | If { cond = c, _; body } ->
-        loop_scalar ~loop_ranges ~lhs:None c;
+        loop_scalar ~loop_ranges ~lhs:None ~reads:None c;
         loop body
-  and loop_scalar ~loop_ranges ~lhs llsc =
-    let loop = loop_scalar ~loop_ranges ~lhs in
+  and loop_scalar ~loop_ranges ~lhs ~reads llsc =
+    let loop = loop_scalar ~loop_ranges ~lhs ~reads in
     match llsc with
     | Constant _ | Constant_bits _ -> ()
     | Get (ptr, indices) ->
         check_no_concat indices;
         let traced : traced_array = get_node traced_store ptr in
-        if not (Option.exists lhs ~f:(fun (tn, _) -> Tn.equal ptr tn)) then
+        if not (Option.exists lhs ~f:(fun (tn, _) -> Tn.equal ptr tn)) then (
           traced.read_by_other <- true;
+          Option.iter reads ~f:(fun r -> Hash_set.add r ptr));
         (* The read-modify-write exemption: a read at the enclosing statement's write position is
            not a visit ([inline_complex_computations]), whichever node it reads. *)
         let exempt =
@@ -1043,6 +1064,9 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
                      "Low_evel.optimize_proc: currently only one merge buffer per routine is \
                       allowed, found nodes %{Tn.debug_name source} and %{Tn.debug_name merge_node}"]);
         merge_node_ref := Some source
+        (* Not recorded in [reads]: a merge-buffer read loads a materialized copy, never inlining
+           the source's computation, and the source's placement here says nothing about that copy.
+           The fanin guard undercounts the one load — the safe direction for a heuristic cap. *)
     | Embed_index _ -> ()
     | Binop (Arg1, (llv1, _), _llv2) -> loop llv1
     | Binop (Arg2, _llv1, (llv2, _)) -> loop llv2
@@ -4949,7 +4973,8 @@ let drop_dead_loop_accesses (accs : Tn.t Affine.access list) : Tn.t Affine.acces
 (* The placement decision procedure over the traced facts and affine metrics — the tail of the
    retired [visit_llc], factored out (gh-554; the analysis/decision split of gh-555 step 1). Writes
    decisions into the lineage's placements table; the metrics are forced only when a decision
-   actually consults them. The heuristic caps ([max_visits], [max_inline_reduction]) are priors of
+   actually consults them. The heuristic caps ([max_visits], [max_inline_reduction],
+   [max_inline_fanin]) are priors of
    this default policy, not legality: a node in [optim_ctx.inline_preferences] (gh-555) is exempt
    from both, like one-hot selector producers always were, while the legality rejections
    ([check_and_store_virtual] / [inline_computation]) and the observability pessimizations
@@ -4957,19 +4982,20 @@ let drop_dead_loop_accesses (accs : Tn.t Affine.access list) : Tn.t Affine.acces
 let decide_placements (optim_ctx : optimize_ctx) traced_store ~max_visits ~reads_covered
     ~read_multiplicity =
   let plc = optim_ctx.placements in
+  (* task-73617488: one-hot selector producers are exempt from the heuristic caps. The ordinary
+     [virtual_llc]/[cleanup_virtual_llc] path will inline them so that
+     [rewrite_one_hot_reductions] can fire at default [max_visits = 1]. gh-555: an explicit
+     [Inline] decision ([inline_preferences]) is the same kind of exemption, searchable. *)
+  let cap_exempt traced =
+    (traced.prefers_virtual_one_hot && not traced.has_non_one_hot_setter)
+    || Hash_set.mem optim_ctx.inline_preferences traced.tn
+  in
   Hashtbl.iter traced_store ~f:(fun traced ->
       let tn = traced.tn in
       let covered =
         lazy (match (Lazy.force reads_covered) tn with `Covered -> true | `Unknown _ -> false)
       in
-      let cap_exempt =
-        (* task-73617488: one-hot selector producers are exempt from the heuristic caps. The
-           ordinary [virtual_llc]/[cleanup_virtual_llc] path will inline them so that
-           [rewrite_one_hot_reductions] can fire at default [max_visits = 1]. gh-555: an explicit
-           [Inline] decision ([inline_preferences]) is the same kind of exemption, searchable. *)
-        (traced.prefers_virtual_one_hot && not traced.has_non_one_hot_setter)
-        || Hash_set.mem optim_ctx.inline_preferences tn
-      in
+      let cap_exempt = cap_exempt traced in
       if
         virtualize_settings.inline_scalar_constexprs && traced.is_scalar_constexpr
         && not (Tn.Placements.known_non_virtual plc tn)
@@ -5020,7 +5046,59 @@ let decide_placements (optim_ctx : optimize_ctx) traced_store ~max_visits ~reads
          contents are preserved: it is an input of the routine. *)
       if (not (Tn.Placements.known_virtual plc tn)) && not (Lazy.force covered) then (
         traced.read_before_write <- true;
-        Tn.Placements.update plc tn On_device 36))
+        Tn.Placements.update plc tn On_device 36));
+  (* Transitive inline-fanin guard (gh-573): the per-node caps above cannot see chains. A running
+     sum such as a transformer's residual stream has per-cell read multiplicity within the visit
+     cap (its consumers' copy-position reads are read-modify-write-exempt) and no reduction loops,
+     yet inlining it replays the entire prefix of the chain at every consumer — quadratic in depth.
+     The per-evaluation cost that actually grows is the fan-in of the fully-inlined computation:
+     the number of distinct materialized nodes it loads (the issue's triangular kernel signatures).
+     Bottom-up over the setter-reads graph, a node still headed for inlining accumulates its
+     virtual dependencies' fan-in sets; when the set outgrows the cap, the node is materialized
+     (provenance 41 — a heuristic policy decision, [`Inline]-flippable like the other caps), which
+     resets the fan-in of everything downstream: the chain materializes once per ~cap
+     contributors instead of once per consumer. Per-setter maximum, not union across setters — a
+     read of one cell executes one setter's computation (Block/concat range-guarded setters). *)
+  if virtualize_settings.max_inline_fanin >= 0 then (
+    let memo = Hashtbl.create (module Tnode) in
+    let rec fanin tn : Set.M(Tnode).t =
+      match Hashtbl.find memo tn with
+      | Some s -> s
+      | None ->
+          (* Cycle guard: a node re-entered during its own expansion counts as one contributor, as
+             if materialized — a cyclically-read node has an uncovered read and was placed
+             [On_device] by the coverage rule above anyway. *)
+          Hashtbl.set memo ~key:tn ~data:(Set.singleton (module Tnode) tn);
+          let s =
+            match Hashtbl.find traced_store tn with
+            | None -> Set.singleton (module Tnode) tn
+            | Some traced ->
+                let expand acc p =
+                  (* Recurse first: the dependency's own decision lands before its placement is
+                     consulted, making the result traversal-order-independent. *)
+                  let s_p = fanin p in
+                  if Tn.Placements.known_non_virtual plc p then Set.add acc p
+                  else Set.union acc s_p
+                in
+                let s =
+                  List.fold traced.setter_reads
+                    ~init:(Set.empty (module Tnode))
+                    ~f:(fun best reads ->
+                      let s = Set.fold reads ~init:(Set.empty (module Tnode)) ~f:expand in
+                      if Set.length s > Set.length best then s else best)
+                in
+                if
+                  Set.length s > virtualize_settings.max_inline_fanin
+                  && traced.has_assignment && traced.read_by_other
+                  && Option.is_none (Tn.Placements.get plc tn)
+                  && not (cap_exempt traced)
+                then Tn.Placements.update plc tn Never_virtual 41;
+                s
+          in
+          Hashtbl.set memo ~key:tn ~data:s;
+          s
+    in
+    Hashtbl.iter_keys traced_store ~f:(fun tn -> ignore (fanin tn : Set.M(Tnode).t)))
 
 type analysis = {
   an_llc : t;
@@ -5105,7 +5183,7 @@ let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : opt
             match Tn.Placements.raw_entry plc tn with
             | Some (Virtual, _) when not (Tn.known_virtual tn || Tn.known_constant tn) ->
                 Some `Materialize
-            | Some (Never_virtual, (1 | 39)) -> Some `Inline
+            | Some (Never_virtual, (1 | 39 | 41)) -> Some `Inline
             | _ -> None
           in
           match flip with

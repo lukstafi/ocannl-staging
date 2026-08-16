@@ -2,6 +2,20 @@
 
 ### Added
 
+- **Accumulation chains materialize a running sum instead of re-summing at every consumer**
+  (gh-ocannl-573): a transformer's residual stream used to stay `Virtual` end to end — each
+  running-sum node's per-cell read multiplicity passes the visit cap (its consumers' copy-position
+  reads are read-modify-write-exempt) and it has no reduction loops, so no per-node guard fired —
+  and every LayerNorm site re-derived the residual by re-summing the entire prefix, quadratic in
+  depth (9.3% of the gpt2_mini step on an APU). `decide_placements` now walks the per-setter
+  read-dependency graph bottom-up accumulating each virtualization candidate's transitive inline
+  fan-in — the distinct materialized nodes its fully-inlined computation would load — and
+  materializes a node whose fan-in exceeds `virtualize_max_inline_fanin` (default 8; negative
+  disables), which resets the fan-in downstream. The decision is a heuristic policy prior like the
+  other caps (`Never_virtual` provenance 41): `Context.decide_inline` exempts a node from it, and
+  it is reported as an `` `Inline `` flip candidate, so the placement search can undo it where
+  measurement disagrees.
+
 - **Checkpoints load by mapping the file, not by copying it** (gh-ocannl-467): `Persistence.load`
   and `Persistence.restore` wrap each payload as a private, copy-on-write `Unix.map_file` region
   instead of decoding it element by element into a fresh host buffer — so a checkpoint's pages are
