@@ -67,7 +67,7 @@ mkdir -p "$RUNS" || die "cannot create $RUNS"
 # are compared as strings, so a relative override must not record a
 # different spelling than a later absolute reference resolves to.
 RUNS=$(cd "$RUNS" && pwd -P) || die "cannot resolve $RUNS"
-# The worktree key makes the `last` symlink per-checkout, so concurrent
+# The worktree key makes the `last` pointer per-checkout, so concurrent
 # sessions in different worktrees don't read each other's verdicts. The
 # readable basename is for humans listing $RUNS; the crc of the full path is
 # what keeps two paths differing only in punctuation from sharing a key.
@@ -425,7 +425,7 @@ wrapper_alive() { proc_alive "$1/wpid" "$1/wtoken"; }
 # group.
 group_verified() { [ -s "$1/gtoken" ] && proc_alive "$1/pgid" "$1/gtoken"; }
 
-# Make the launched run discoverable (`last` symlink, lock-owner pointer).
+# Make the launched run discoverable (`last` pointer, lock-owner pointer).
 # Deliberately AFTER the wrapper exists and is recorded, so any directory
 # reachable via `last` already carries its full launch metadata -- a status
 # probe can then never mistake a mid-launch run for a dead or running one.
@@ -434,15 +434,40 @@ publish_run() { # 0 published; 2 abandoned by the wrapper's timeout; 1 error
   # wrapper that gave up waiting marked the claim abandoned and released
   # the lock, which may already belong to a newer run.
   [ ! -f "$run_dir/pub_abandoned" ] || return 2
-  # `ln -sfn` onto an existing DIRECTORY silently creates the link INSIDE it,
-  # leaving `last` dangling while the launch reports success -- refuse a
-  # non-symlink squatter, and re-read the link to prove it points here.
-  { [ ! -e "$RUNS/last-$wt_key" ] || [ -L "$RUNS/last-$wt_key" ]; } || {
-    echo "test-run: $RUNS/last-$wt_key exists and is not a symlink; remove it" >&2
+  # A PLAIN FILE holding the run directory's path, not a symlink: under MSYS
+  # (Git Bash) with the default `winsymlinks` mode, `ln -s` does not create a
+  # link at all -- it silently COPIES, so a directory target left a full copy
+  # of the run directory at `last-<key>` and every `last` lookup afterwards
+  # resolved to nothing. Native symlinks there need a privilege the shell may
+  # not hold, so the portable pointer is the file. Rename-based, hence still
+  # atomic: a reader sees the old path or the new one, never a partial write.
+  #
+  # Anything at the pointer path that is neither a regular file nor a
+  # symlink left by an earlier version is a squatter -- notably the
+  # DIRECTORY the copying `ln -s` used to leave behind. (`-f` follows, so a
+  # symlink to a run directory needs the explicit `-L` arm.)
+  { [ ! -e "$RUNS/last-$wt_key" ] || [ -f "$RUNS/last-$wt_key" ] ||
+    [ -L "$RUNS/last-$wt_key" ]; } || {
+    echo "test-run: $RUNS/last-$wt_key exists and is not a regular file; remove it" >&2
     return 1
   }
-  { ln -sfn "$run_dir" "$RUNS/last-$wt_key" &&
-    [ "$(readlink "$RUNS/last-$wt_key" 2>/dev/null)" = "$run_dir" ]; } || {
+  # Written through a temporary and put in place with rename(2), which
+  # REPLACES whatever the path names -- a previous pointer, or a symlink one
+  # written before this script stopped using symlinks -- in a single atomic
+  # step, then re-read to prove the pointer names this run before the launch
+  # reports success. Neither of the obvious spellings works here: `mv` stats
+  # the destination THROUGH the link, so a symlink to a run directory makes
+  # it move the pointer INSIDE that directory; and unlinking first would
+  # leave `last` absent for an interval, which is the very gap the
+  # old-or-new guarantee exists to rule out (a launcher killed inside it
+  # would strand a recorded, possibly live, run with no `last` at all).
+  # rename(2) also refuses a directory destination outright, so the squatter
+  # above cannot be absorbed even if the guard is somehow raced.
+  { printf '%s\n' "$run_dir" >"$RUNS/last-$wt_key.tmp.$$" &&
+    perl -e 'rename($ARGV[0], $ARGV[1]) or exit 1' \
+      "$RUNS/last-$wt_key.tmp.$$" "$RUNS/last-$wt_key" &&
+    [ "$(cat "$RUNS/last-$wt_key" 2>/dev/null)" = "$run_dir" ]; } || {
+    rm -f "$RUNS/last-$wt_key.tmp.$$"
     echo "test-run: cannot update $RUNS/last-$wt_key" >&2
     return 1
   }
@@ -491,8 +516,23 @@ mark_abandoned() { : >"$run_dir/pub_abandoned" 2>/dev/null; }
 resolve_run() {
   local ref=${1:-last}
   if [ "$ref" = last ]; then
-    run_dir=$(readlink "$RUNS/last-$wt_key" 2>/dev/null) ||
-      die "no runs recorded for this worktree"
+    # The pointer is a plain file (see publish_run). A symlink there was
+    # written by a version predating that change and may still name a run
+    # that is LIVE -- `stop last` has to be able to reach one, and only a
+    # later publication replaces the link -- so both spellings are read.
+    #
+    # Deliberately NOT a `-L` test selecting the matching read: publish_run's
+    # rename can replace the symlink with the pointer file between the test
+    # and the read, and a reader must not fail on a path that named a valid
+    # run throughout. Trying the reads themselves has no such gap, in THIS
+    # order: a symlink can only ever become a file (publish_run writes
+    # nothing else), so a failed `readlink` means `cat` now applies. The
+    # reverse order would still race -- `cat` fails on a symlink to a
+    # directory, and the rename could land before the `readlink` retry.
+    run_dir=$(readlink "$RUNS/last-$wt_key" 2>/dev/null) || run_dir=
+    [ -n "$run_dir" ] ||
+      { run_dir=$(cat "$RUNS/last-$wt_key" 2>/dev/null) || run_dir=; }
+    [ -n "$run_dir" ] || die "no runs recorded for this worktree"
     [ -d "$run_dir" ] || die "no such run: $run_dir"
   elif [ -d "$ref" ]; then
     # Canonicalized (physically -- symlink spellings differ per referrer)

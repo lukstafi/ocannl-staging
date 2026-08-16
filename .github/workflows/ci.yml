@@ -327,9 +327,10 @@ jobs:
         # Detached mode: `start` publishes pointers and returns immediately,
         # `wait` polls the verdict FILE under its own bound (the run's cap plus
         # slack) and exits with dune's status. Both rest on the liveness probes
-        # that degrade on MSYS, and on the `last` symlink -- which cygwin-style
-        # symlinks make a real question on Windows. `list` walks every recorded
-        # run through the same probes plus the retention scan.
+        # that degrade on MSYS, and on the `last` pointer -- which is a plain
+        # file precisely because MSYS `ln -s` copies instead of linking.
+        # `list` walks every recorded run through the same probes plus the
+        # retention scan.
         expect 0 'start' tools/test-run.sh start --cap 300 build tools/promote.sh
         expect 0 'wait last' tools/test-run.sh wait last
         expect 0 'list' tools/test-run.sh list
