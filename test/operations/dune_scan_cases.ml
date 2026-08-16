@@ -145,12 +145,19 @@ let cases =
     ( "a bare word is still a tool on PATH",
       {dune|(rule (action (run diff a b)))|dune},
       [] );
-    (* A launcher runs what it is handed, so an argument that names an executable counts as much as
-       the command does -- read the same way, rather than from a list of launchers (Codex P2,
-       round 12). *)
-    ( "an external tool handed an executable is running it",
+    (* A PATH tool handed something this repository builds may be launching it (`env probe.exe`)
+       or reading it (`diff old.exe new.exe`), and dune's grammar does not say which -- so neither
+       is guessed: the pair is reported, and the check settles it the way it settles every other
+       unreadable command (Codex P2, rounds 12 and 13). *)
+    ( "an external tool handed an executable is reported, not guessed at",
       {dune|(rule (deps ocannl_config) (action (run env %{dep:probe.exe} --flag)))|dune},
-      [ "rule running probe.exe [declares]" ] );
+      [ "rule whose command this scan cannot read: env, handed probe.exe [declares]" ] );
+    ( "and so is one that is only reading them",
+      {dune|(rule (action (run diff old.exe new.exe)))|dune},
+      [
+        "rule whose command this scan cannot read: diff, handed new.exe";
+        "rule whose command this scan cannot read: diff, handed old.exe";
+      ] );
     ( "ordinary arguments are not executables",
       {dune|(rule (action (run %{dep:probe.exe} --input data.csv --out %{targets})))|dune},
       [ "rule running probe.exe" ] );
@@ -162,6 +169,11 @@ let cases =
         "rule whose working directory this scan cannot establish: %{dep:probe.exe}, under `(chdir \
          %{workspace_root} ...)` [declares]";
       ] );
+    (* But only for something that could read a configuration there: a PATH tool reads none
+       wherever it runs, so an unresolvable destination over one is not a finding (round 13). *)
+    ( "a chdir to a pform over a PATH tool is not",
+      {dune|(rule (action (chdir %{workspace_root} (run diff a b))))|dune},
+      [] );
     ( "a chdir to the stanza's own directory changes nothing",
       {dune|(rule (deps ocannl_config) (action (chdir . (run %{dep:probe.exe}))))|dune},
       [ "rule running probe.exe [declares]" ] );
