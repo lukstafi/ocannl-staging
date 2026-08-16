@@ -89,7 +89,30 @@ wt_key=$(basename "$PWD" | tr -c 'A-Za-z0-9' '_')$(printf %s "$PWD" | cksum | aw
 capped_perl='
   use POSIX ();
   my $cap = shift;
-  my $pid = fork();
+  my $pid;
+  my $blast = sub { my $sig = shift; kill($sig, -$pid) or kill($sig, $pid) };
+  my $reap = sub {
+    my $code = shift;
+    if ($pid) {
+      $blast->("TERM");
+      for (1 .. 50) {
+        last if waitpid($pid, POSIX::WNOHANG()) > 0;
+        select undef, undef, undef, 0.1;
+      }
+      $blast->("KILL");
+      waitpid($pid, 0);
+    }
+    exit $code;
+  };
+  # Armed BEFORE the fork: this process inherits the wrapper'"'"'s ignored
+  # TERM/INT, so a stop that lands in the window before the handlers exist
+  # would be silently discarded while stop reported success. Armed early, a
+  # pre-fork signal simply exits before dune ever starts.
+  $SIG{ALRM} = sub { $reap->(142) };
+  $SIG{INT} = sub { $reap->(130) };
+  $SIG{TERM} = sub { $reap->(143) };
+  $SIG{HUP} = $ENV{OCANNL_TESTRUN_BG} ? "IGNORE" : sub { $reap->(129) };
+  $pid = fork();
   die "fork: $!" unless defined $pid;
   if (!$pid) {
     # The wrapper ignores TERM/INT/HUP, and SIG_IGN survives fork AND exec --
@@ -107,22 +130,6 @@ capped_perl='
     exec @ARGV;
     exit 127;
   }
-  my $blast = sub { my $sig = shift; kill($sig, -$pid) or kill($sig, $pid) };
-  my $reap = sub {
-    my $code = shift;
-    $blast->("TERM");
-    for (1 .. 50) {
-      last if waitpid($pid, POSIX::WNOHANG()) > 0;
-      select undef, undef, undef, 0.1;
-    }
-    $blast->("KILL");
-    waitpid($pid, 0);
-    exit $code;
-  };
-  $SIG{ALRM} = sub { $reap->(142) };
-  $SIG{INT} = sub { $reap->(130) };
-  $SIG{TERM} = sub { $reap->(143) };
-  $SIG{HUP} = $ENV{OCANNL_TESTRUN_BG} ? "IGNORE" : sub { $reap->(129) };
   alarm $cap if $cap > 0;
   waitpid($pid, 0);
   my $st = $?;
@@ -436,10 +443,14 @@ case $sub in
         # Supervisor AND wrapper gone: no process is left to publish. A dead
         # supervisor alone proves nothing -- the wrapper may still be reaping
         # leftovers or mid-publication, and those iterations simply keep
-        # polling within the budget. One short settle covers a verdict
-        # renamed into place between the checks above.
-        sleep 1
+        # polling within the budget. One short settle, bounded like every
+        # sleep here, covers a verdict renamed into place between the checks
+        # above; an already-expired budget reports the documented timeout.
+        step=$(( remaining < 1 ? remaining : 1 ))
+        [ "$step" -gt 0 ] && sleep "$step"
+        waited=$(( waited + step ))
         [ -f "$run_dir/exit" ] && break
+        [ "$remaining" -le 0 ] && { echo "wait timed out after ${budget}s: $run_dir"; exit 124; }
         echo "run died without recording a verdict (killed externally?): $run_dir"
         exit 1
       fi
