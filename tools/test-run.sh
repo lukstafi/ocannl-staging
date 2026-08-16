@@ -599,18 +599,24 @@ case $sub in
           kill -KILL -- "-$pgid" 2>/dev/null
       fi
       finish_run "$rc"
-      # Publication handshake: hold the lock until the launcher has claimed
-      # publication (bounded, so an abandoned launch cannot pin it) -- a
-      # fast dune could otherwise let a SECOND run acquire and publish, only
-      # to be overwritten when this stalled launcher resumed. The claim is
-      # the O_EXCL arbiter (see claim_handoff); after a "published" claim
-      # this wrapper still holds the lock for up to one poll interval, which
-      # covers the launcher's ms-scale pointer writes.
-      for _ in 1 2 3 4 5 6 7 8 9 10; do
-        [ -f "$run_dir/handoff" ] && break
+      # Publication handshake: hold the lock until publication has actually
+      # COMPLETED (pub_done), not merely been claimed -- a launcher
+      # descheduled between its claim and the pointer writes must not have a
+      # second run acquire the lock and then be overwritten. Bounded twice:
+      # after 10s with no claim the wrapper claims "expired" (the launcher
+      # then keeps its verdict unpublished); a published claim that never
+      # completes gets a longer grace before this wrapper gives up -- its
+      # own exit is the release, and an abandoned launch must not pin the
+      # worktree forever.
+      hw=0
+      while [ ! -f "$run_dir/pub_done" ]; do
+        hw=$(( hw + 1 ))
+        if [ "$hw" -gt 10 ]; then
+          claim_handoff expired && break
+          [ "$hw" -gt 70 ] && break
+        fi
         sleep 1
       done
-      [ -f "$run_dir/handoff" ] || claim_handoff expired || :
       # Release protocol: simply close our fd. The lock lives on the shared
       # open file DESCRIPTION, so the kernel releases it exactly when the
       # last holder closes -- and any leftover descendant that can still
@@ -652,6 +658,11 @@ case $sub in
       # be reaped, and its recycled pid must not receive the TERM.
       sup_alive "$run_dir" && kill -TERM "$(cat "$run_dir/pid")" 2>/dev/null
       die "run could not be published; cancelled it (remnants at $run_dir)"
+    else
+      # Completion acknowledgement: the wrapper holds the lock until this
+      # exists, so the pointers written by publish_run are already in place
+      # when any later run can first acquire.
+      : >"$run_dir/pub_done" 2>/dev/null || :
     fi
     if [ "$sub" = run ]; then
       # Attached: wait for the wrapper -- its exit means the verdict file is
