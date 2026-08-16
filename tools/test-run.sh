@@ -27,8 +27,9 @@
 #
 # Exit codes: `run` and `wait` exit with dune's status (142 = the cap expired,
 # 143/130 = cancelled, 137 = SIGKILLed, 124 = `wait` itself timed out; dune
-# never reaches those on its own). `status` exits 0 finished, 3 still running,
-# 1 died without a verdict. Usage and lock refusals exit 2.
+# never reaches those on its own). `status` exits 0 finished, 3 still running
+# (or verdict publication in flight), 1 died without a verdict. Usage and lock
+# refusals exit 2.
 #
 # Everything after the options is dune's argv, verbatim (default: `runtest`):
 #   tools/test-run.sh run runtest test/operations
@@ -75,12 +76,12 @@ wt_key=$(basename "$PWD" | tr -c 'A-Za-z0-9' '_')$(printf %s "$PWD" | cksum | aw
 # HUP: a foreground run treats it like TERM; a detached run (OCANNL_TESTRUN_BG)
 # ignores it, since surviving the launching session is its whole point.
 # setpgrp is eval-guarded and the group kill falls back to a plain kill, for
-# MSYS perl where process groups are shaky. The child closes fd 9 (the
-# per-worktree lock) before exec: dune actions can leave background
-# descendants behind, and a descendant inheriting the lock would hold it
-# indefinitely after the run's verdict was already recorded. The lock's
-# holders are thus exactly the script/wrapper shell and this supervisor --
-# the processes whose lifetime IS the managed run. The child also records its
+# MSYS perl where process groups are shaky. The child deliberately KEEPS
+# lock fd 9: a group SIGKILL can wipe the wrapper and supervisor while dune
+# (in its own process group) survives, and the surviving orphan must go on
+# holding the worktree lock while it can still mutate _build. The wrapper
+# releases the lock EXPLICITLY once the verdict is published, so descendants
+# dune leaves behind cannot extend it either way. The child also records its
 # pgid (only once confirmed to LEAD its own group, so a group-kill can never
 # hit the caller on platforms where setpgrp failed): if this supervisor is
 # SIGKILLed, the wrapper uses it to reap the surviving dune before
@@ -103,7 +104,6 @@ capped_perl='
         close $fh;
       }
     };
-    POSIX::close(9);
     exec @ARGV;
     exit 127;
   }
@@ -131,10 +131,10 @@ capped_perl='
 '
 
 # Take the per-worktree lock on fd 9, non-blocking. perl takes it and exits;
-# the lock lives on the open file DESCRIPTION, which this shell holds through
-# fd 9 and the capped supervisor inherits (dune's side closes it, see above)
-# -- so it clears exactly when the run's managing processes exit, with
-# nothing to reclaim after a crash (see sweep.sh).
+# the lock lives on the open file DESCRIPTION, which every process of the
+# run inherits through fd 9 -- released by the wrapper's explicit unlock
+# when the verdict is published, or by the kernel when the last surviving
+# process exits, with nothing to reclaim after a crash (see sweep.sh).
 #
 # The lock file sits BESIDE the worktree it protects (a gitignored dotfile
 # dune's scanner also ignores), not under $RUNS: OCANNL_TEST_RUNS is a
@@ -160,14 +160,25 @@ take_lock() {
 new_run() {
   run_dir=$RUNS/$(date -u +%Y%m%dT%H%M%SZ)-$$
   mkdir "$run_dir" || die "cannot create $run_dir"
-  printf '%s\n' "$*" >"$run_dir/cmd"
-  printf '%s\n' "$cap" >"$run_dir/cap"
-  : >"$run_dir/log"
-  ln -sfn "$run_dir" "$RUNS/last-$wt_key"
+  # Every pre-launch metadata write is checked: a quota hit or squatter that
+  # slipped through here would let the launch report success while status,
+  # wait and the wrapper all operate on a run that cannot be tracked.
+  { printf '%s\n' "$*" >"$run_dir/cmd" &&
+    printf '%s\n' "$cap" >"$run_dir/cap" &&
+    : >"$run_dir/log"; } || die "cannot write run metadata in $run_dir"
+  # `ln -sfn` onto an existing DIRECTORY silently creates the link INSIDE it,
+  # leaving `last` dangling while the launch reports success -- refuse a
+  # non-symlink squatter, and re-read the link to prove it points here.
+  [ ! -e "$RUNS/last-$wt_key" ] || [ -L "$RUNS/last-$wt_key" ] ||
+    die "$RUNS/last-$wt_key exists and is not a symlink; remove it"
+  ln -sfn "$run_dir" "$RUNS/last-$wt_key" &&
+    [ "$(readlink "$RUNS/last-$wt_key" 2>/dev/null)" = "$run_dir" ] ||
+    die "cannot update $RUNS/last-$wt_key"
   # Advisory owner pointer for the lock-refusal message (the lock itself is
   # the authority; a crash merely leaves this stale, and its reader only
   # uses it to TARGET status/stop).
-  printf '%s\n' "$run_dir" >"$PWD/.test-run.lock.owner"
+  printf '%s\n' "$run_dir" >"$PWD/.test-run.lock.owner" ||
+    die "cannot record the lock owner pointer"
   # Runs are throwaway diagnostics; reap old ones so the directory cannot grow
   # without bound. Deletion demands the full run schema -- the timestamped
   # name AND this script's metadata files -- never mere position under $RUNS,
@@ -191,7 +202,13 @@ new_run() {
       if [ -f "$d/exit" ]; then
         [ -n "$(find "$d/exit" -mtime +7 2>/dev/null)" ] && rm -rf "$d"
       else
-        [ -n "$(find "$d" -maxdepth 0 -mtime +30 2>/dev/null)" ] && rm -rf "$d"
+        # A verdict-less directory may be a LIVE run (--cap 0 is supported and
+        # unbounded, and $RUNS is shared across worktrees): never reap while
+        # its supervisor or wrapper still runs, and age it by the newest file
+        # INSIDE -- appending to `log` does not touch the directory's mtime.
+        sup_alive "$d" && continue
+        wrapper_alive "$d" && continue
+        [ -z "$(find "$d" -mtime -30 2>/dev/null | head -1)" ] && rm -rf "$d"
       fi
     done
 }
@@ -202,14 +219,19 @@ new_run() {
 # report a stale run as active forever and `stop` would TERM an innocent
 # process. An empty token (MSYS ps without lstart) degrades to the plain
 # pid check rather than failing.
-sup_alive() {
+proc_alive() { # pid-file token-file
   local pid tok now
-  pid=$(cat "$1/pid" 2>/dev/null) || return 1
+  pid=$(cat "$1" 2>/dev/null) || return 1
   kill -0 "$pid" 2>/dev/null || return 1
-  tok=$(tr -s ' ' <"$1/ptoken" 2>/dev/null) || tok=
+  tok=$(tr -s ' ' <"$2" 2>/dev/null) || tok=
   now=$(ps -o lstart= -p "$pid" 2>/dev/null | tr -s ' ')
   [ -z "$tok" ] || [ -z "$now" ] || [ "$tok" = "$now" ]
 }
+sup_alive() { proc_alive "$1/pid" "$1/ptoken"; }
+# The wrapper outlives the supervisor only briefly (publication plus a
+# bounded group-reap) -- but that window is exactly where "no verdict yet"
+# must not be misread as "no verdict coming".
+wrapper_alive() { proc_alive "$1/wpid" "$1/wtoken"; }
 
 resolve_run() {
   local ref=${1:-last}
@@ -337,8 +359,17 @@ case $sub in
         kill -KILL -- "-$pgid" 2>/dev/null
       fi
       finish_run "$rc"
+      # Explicit unlock, so descendants dune may have left behind (which
+      # inherit fd 9) cannot extend the worktree lock past the published
+      # verdict; LOCK_UN releases the shared description for every holder.
+      perl -e 'use Fcntl ":flock"; flock(STDIN, LOCK_UN)' <&9 2>/dev/null || :
     ) </dev/null >/dev/null 2>&1 &
     wrapper=$!
+    # The wrapper's own identity, recorded by its parent (bash 3.2 has no
+    # BASHPID for the subshell to name itself): status and wait use it to
+    # tell "verdict publication in flight" from "nothing left to publish".
+    printf '%s\n' "$wrapper" >"$run_dir/wpid"
+    ps -o lstart= -p "$wrapper" 2>/dev/null >"$run_dir/wtoken"
     if [ "$sub" = run ]; then
       # Attached: forward shell-directed cancellation to the supervisor, and
       # wait for the wrapper -- its exit means the verdict file is published.
@@ -365,15 +396,15 @@ case $sub in
     if [ -f "$run_dir/exit" ]; then
       digest "$run_dir"
     elif [ -f "$run_dir/pid" ] && ! sup_alive "$run_dir"; then
-      # Grace period: after the supervisor dies the wrapper may still be
-      # publishing, or reaping a leftover process group (bounded ~3s); only
-      # a quiet full grace is evidence of death, not the dead pid alone.
-      g=0
-      while [ "$g" -lt 5 ] && [ ! -f "$run_dir/exit" ]; do
-        sleep 1
-        g=$(( g + 1 ))
-      done
-      if [ -f "$run_dir/exit" ]; then digest "$run_dir"; else
+      # One-shot and honest -- no sleeping in `status`. The wrapper outlives
+      # the supervisor briefly (group-reap, publication); its liveness is
+      # what distinguishes "verdict in flight" from a dead run.
+      if wrapper_alive "$run_dir"; then
+        echo "finishing: supervisor exited, verdict publication in flight: $run_dir"
+        exit 3
+      elif [ -f "$run_dir/exit" ]; then
+        digest "$run_dir" # published between the two checks above
+      else
         echo "run died without recording a verdict (killed externally?): $run_dir"
         exit 1
       fi
@@ -401,24 +432,14 @@ case $sub in
       # bounded by the remaining budget, so a short --timeout is honored to
       # the second rather than rounded up to an interval.
       remaining=$(( budget - waited ))
-      if [ -f "$run_dir/pid" ] && ! sup_alive "$run_dir"; then
-        # A dead supervisor is NOT yet proof that no verdict is coming: the
-        # wrapper may be mid-publication, or spending its bounded ~3s reaping
-        # a leftover process group. Only a quiet FULL grace is evidence of
-        # death; a budget that expires first is the documented timeout, since
-        # the verdict is genuinely still pending.
-        grace=$(( remaining < 5 ? remaining : 5 ))
-        g=0
-        while [ "$g" -lt "$grace" ] && [ ! -f "$run_dir/exit" ]; do
-          sleep 1
-          g=$(( g + 1 ))
-        done
-        waited=$(( waited + g ))
+      if [ -f "$run_dir/pid" ] && ! sup_alive "$run_dir" && ! wrapper_alive "$run_dir"; then
+        # Supervisor AND wrapper gone: no process is left to publish. A dead
+        # supervisor alone proves nothing -- the wrapper may still be reaping
+        # leftovers or mid-publication, and those iterations simply keep
+        # polling within the budget. One short settle covers a verdict
+        # renamed into place between the checks above.
+        sleep 1
         [ -f "$run_dir/exit" ] && break
-        if [ "$waited" -ge "$budget" ]; then
-          echo "wait timed out after ${budget}s: $run_dir"
-          exit 124
-        fi
         echo "run died without recording a verdict (killed externally?): $run_dir"
         exit 1
       fi
