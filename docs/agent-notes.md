@@ -923,6 +923,17 @@ that they earn a lookup rather than always-loaded space.
   cadence would pay the cold-switch cost every time. The two ride the same cadence because they
   fail the same way: slowly, and through the dependency cone or the toolchain rather than through
   a change under review.
+- The Windows job ends with a smoke of `tools/test-run.sh` itself, from Git Bash: `run`, `status
+  last`, a deliberately failing target, `start`/`wait last`, `list`, each asserted against its
+  documented exit code. That script's MSYS branches (unconditional and fatal `opam-env.sh` sourcing,
+  dune routed through `dune-quiet.sh`, the tokenless liveness degradation where MSYS `ps` has no
+  lstart/state columns, the flock through MSYS perl) execute nowhere else, and are otherwise reached
+  only from rare hand-run Windows sessions — where their rot is discovered mid-task. It builds
+  `tools/promote.sh`, a source file dune copies rather than compiles, so it costs a workspace scan;
+  the failing-target leg is the load-bearing one, since it is where a dropped `PIPESTATUS` in
+  `dune-quiet.sh` would report red runs as green. It runs even when `dune runtest` above went red
+  (Windows runs twice a week; a golden drift must not mask the runner's health for three days) and
+  it runs last, so a broken runner cannot abort the sweep's only Windows test coverage.
 - `tools/sweep.sh` is the GPU-backend coverage: cc and metal locally, cuda on `rog-nv-wsl`, hip on
   `minix-amd-wsl`, all pinned to ONE resolved commit so a mid-sweep merge cannot leave the machines
   testing different trees. It records a row per unit in `~/.ocannl-sweep/history.tsv` and never
