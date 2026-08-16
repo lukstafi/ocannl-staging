@@ -242,7 +242,7 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   SAME `LL.t`. The inlined and materialized readings of one program must agree cell for cell, which
   is what pins a virtualization guard; `Context.decide_materialized` on the context itself cannot do
   this, because `?prelowered` replaces the lineage state with the record's own `optimize_ctx`.
-  Two traps: (a) `known_non_virtual` does NOT mean "has a context buffer" — a node written and read
+  Three traps: (a) `known_non_virtual` does NOT mean "has a context buffer" — a node written and read
   within one routine and never observed is placed `Local`, and neither readback of it is the
   routine's values: seeded, `set_values` allocates a context buffer the routine's local storage
   never writes, so `get_values` hands back exactly what was uploaded (a kernel that did nothing
@@ -252,7 +252,13 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   invisible while the node is virtual (the access is inlined away) and become real out-of-bounds
   traffic the moment the case executes or the materialized arm runs — size hand-built arrays for the
   materialized reading, and seed outputs with a sentinel so "wrote the wrong cells" fails the value
-  check instead of reading whatever the buffer held.
+  check instead of reading whatever the buffer held. (c) The oracle has to discriminate, not merely
+  exist: a producer must write a value that varies with EVERY symbol of its iteration and stays off
+  the init value (`1 + i`, `1 + 10*outer + inner` — the `tick`/`tag` helpers in
+  `test/operations/virtual_diagonal.ml`), because a constant producer just replays an identical
+  assignment under a too-wide range guard, a value omitting a symbol is constant along that axis
+  under a wrong substitution, and a value colliding with the zero-init hides a dropped first
+  iteration.
 - A node-level "what happened at first touch" flag (`zero_initialized_by_code` and friends) cannot
   soundly drive a PER-OCCURRENCE codegen decision, because nothing clears it across the traversal: a
   guard keyed on it alone collapses `Zero_out; Set; Zero_out` to one zero and drops a `Zero_out`
