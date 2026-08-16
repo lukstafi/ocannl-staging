@@ -190,6 +190,11 @@ type entry = {
           3), where it holds the whole-routine prelude — resolved against the {e base} canonical
           form and applied before fission, the segment keys then addressing the {e post-prelude}
           segmentation. *)
+  finer_fission : bool option; [@sexp.option]
+      (** [Some true]: the [segments] keys address {!Schedule.fission_scheduled}'s [arity_cuts]
+          (finer) segmentation (gh-ocannl-574); replay must re-segment under the same mode or the
+          keys miss wholesale. Omitted when false, so entries stay byte-stable and pre-gh-574
+          entries parse without an [entry_version] bump. *)
   best_ms : float;  (** The winning candidate's measured time, for diagnostics. *)
   baseline_ms : float;
       (** The unscheduled baseline's measured time, for diagnostics; [infinity] on GPU backends,

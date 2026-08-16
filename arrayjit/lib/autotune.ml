@@ -704,15 +704,20 @@ type fiss_flavor =
               contains the behavior the user gets without tuning: on launch-overhead-bound workloads
               the aggressive [min_parallel:1] presets can all lose to it. *)
     }
-  | F_saved of (string * SC.saved_schedule) list
-  | F_sketch of (string * sketch_params) list
+  | F_saved of { entries : (string * SC.saved_schedule) list; fine : bool }
+      (** [fine]: the segmentation the entries key into is {!Sched.fission_scheduled}'s
+          [arity_cuts] one (gh-ocannl-574) — it must be recorded, or a fine winner's replay would
+          re-segment coarse and trip the drift guard. *)
+  | F_sketch of { entries : (string * sketch_params) list; fine : bool }
       (** Per-segment matmul sketches: for each listed segment (keyed by its pre-schedule structural
           digest, like [F_saved]), the composed sketch pipeline instantiated with the given
           parameters; every other segment gets the plain default preset — the same pipeline the
           seed-time segment enumeration ran, so the segmentation converges. On a key miss
           (segmentation drift) the candidate degrades to the plain fissioned preset and dedups away
           by digest; unlike [F_saved] it never replays a cache entry, so no loud drift guard is
-          needed. *)
+          needed. [fine] as in [F_saved]: the {e finer} [arity_cuts] segmentation, which frees a
+          matmul site whose segment otherwise carries a companion that cannot follow the site's
+          full arity (the lm_head's max-logits reduction, gh-ocannl-574). *)
   | F_split of { sites : (sr_site * int) list }
       (** Split-reduce seeds (gh-ocannl-484 task 3): per listed site, a
           [Sched.Split_reduce { axis = sr_axis; target = sr_target; num_blocks }] — applied {e
@@ -730,10 +735,11 @@ type fiss_flavor =
 
 type spec = Whole of whole_flavor | Fiss of fiss_flavor
 
-(* The replayable/cacheable description of a compiled candidate. *)
+(* The replayable/cacheable description of a compiled candidate. [fine] as in [F_saved]: the
+   winner's per-segment schedules address the [arity_cuts] segmentation (gh-ocannl-574). *)
 type form =
   | Whole_saved of SC.saved_schedule
-  | Fiss_saved of (string * SC.saved_schedule) list
+  | Fiss_saved of { segs : (string * SC.saved_schedule) list; fine : bool }
   | Split_saved of SC.saved_schedule * (string * SC.saved_schedule) list
 
 type unit_gen = {
@@ -955,7 +961,7 @@ let emit_calibration ~backend ~device ~limits ~label ~digest ~measured_ms
    census anomalies (gh-ocannl-479). *)
 let spec_expects_mma = function
   | Whole (W_sketch p) -> p.sk_mma
-  | Fiss (F_sketch entries) -> List.exists entries ~f:(fun (_, p) -> p.sk_mma)
+  | Fiss (F_sketch { entries; _ }) -> List.exists entries ~f:(fun (_, p) -> p.sk_mma)
   | _ -> false
 
 (* The swizzled staged twin is labeled apart from its plain sibling (gh-ocannl-481 item 3, D3): the
@@ -995,9 +1001,11 @@ let spec_label = function
       Printf.sprintf "F_preset[bs=%s%s%s]" (bs_label block_size)
         (if privatize then " priv" else "")
         (if config_thresholds then " cfg-thresh" else "")
-  | Fiss (F_saved assoc) -> Printf.sprintf "F_saved[%d segs]" (List.length assoc)
-  | Fiss (F_sketch entries) ->
-      Printf.sprintf "F_sketch[%s]"
+  | Fiss (F_saved { entries = assoc; fine }) ->
+      Printf.sprintf "F_saved[%s%d segs]" (if fine then "fine " else "") (List.length assoc)
+  | Fiss (F_sketch { entries; fine }) ->
+      Printf.sprintf "F_sketch[%s%s]"
+        (if fine then "fine " else "")
         (String.concat ~sep:","
            (List.map entries ~f:(fun (_, p) ->
                 Printf.sprintf "%s%s%s %dx%dx%d%s%s%s%s%s%s%s"
@@ -1138,21 +1146,30 @@ let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu ~
             | F_preset { block_size; privatize; config_thresholds } ->
                 let sched = preset_sched ?block_size ~config_thresholds seg in
                 if privatize then extend_with_privatize ~static_indices sched seg else sched
-            | F_saved entries | F_split_saved (_, entries) -> (
+            | F_saved { entries; _ } | F_split_saved (_, entries) -> (
                 let seg_canon = SC.canonicalize ~static_indices ~with_placements:false seg in
                 match List.Assoc.find entries ~equal:String.equal (SC.digest seg_canon) with
                 | Some saved -> fst (SC.of_saved seg_canon saved)
                 | None -> [])
-            | F_sketch entries -> (
+            | F_sketch { entries; _ } -> (
                 match List.Assoc.find entries ~equal:String.equal (seg_key seg) with
                 | Some p -> sketch_schedule ~p seg
                 | None -> preset_sched seg)
             | F_split _ -> preset_sched seg
           in
+          (* The [arity_cuts] (finer) segmentation is part of the candidate's identity: the seeds
+             enumerated their keyed segments under it, and a fine winner's saved schedules only
+             resolve against it (gh-ocannl-574). *)
+          let arity_cuts =
+            match flavor with
+            | F_saved { fine; _ } | F_sketch { fine; _ } -> fine
+            | F_preset _ | F_split _ | F_split_saved _ -> false
+          in
           let tuples =
             (* Match the default pipeline's placements (statement-crossing [Local]s promoted on
                GPU), so fissioned candidates and the untuned baseline schedule the same code. *)
-            Sched.fission_scheduled ~promote_locals:is_gpu ~preset ~zero_sched ~static_indices opt
+            Sched.fission_scheduled ~promote_locals:is_gpu ~arity_cuts ~preset ~zero_sched
+              ~static_indices opt
           in
           (* Genuine-drift guard for saved replays (cross-process cache entries): with the
              empty-on-miss closure above, a saved winner whose segmentation no longer matches would
@@ -1160,7 +1177,7 @@ let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu ~
              every final [`Normal] segment found its saved schedule. *)
           (match flavor with
           | F_preset _ | F_sketch _ | F_split _ -> ()
-          | F_saved entries | F_split_saved (_, entries) ->
+          | F_saved { entries; _ } | F_split_saved (_, entries) ->
               List.iter tuples ~f:(fun (kind, pre, _, _) ->
                   match kind with
                   | `Zeros | `Solo -> ()
@@ -1198,7 +1215,7 @@ let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu ~
               (List.map posts ~f:(fun post -> SC.digest (SC.canonicalize ~static_indices post)))
           in
           let form =
-            if List.is_empty prelude_saved then Fiss_saved assoc
+            if List.is_empty prelude_saved then Fiss_saved { segs = assoc; fine = arity_cuts }
             else Split_saved (prelude_saved, assoc)
           in
           captured := Some (form, units, posts, digest_after);
@@ -1418,12 +1435,16 @@ let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) (u : unit_g
 let extend_spec (elem : compiled) (u : unit_gen) (op : SC.saved_optop) : spec option =
   match (elem.form, u.u_key) with
   | Whole_saved _, None -> Some (Whole (W_saved (u.u_saved @ [ op ])))
-  | Fiss_saved assoc, Some key ->
+  | Fiss_saved { segs = assoc; fine }, Some key ->
       Some
         (Fiss
            (F_saved
-              (List.map assoc ~f:(fun (k, s) ->
-                   if String.equal k key then (k, u.u_saved @ [ op ]) else (k, s)))))
+              {
+                entries =
+                  List.map assoc ~f:(fun (k, s) ->
+                      if String.equal k key then (k, u.u_saved @ [ op ]) else (k, s));
+                fine;
+              }))
   | Split_saved (prelude, assoc), Some key ->
       Some
         (Fiss
@@ -1866,7 +1887,8 @@ let model_default ?report ctx comp bindings =
               contenders
               @
               match fiss with
-              | Some (entries, s) -> [ (spec_label (Fiss (F_sketch entries)), s, `Fiss entries) ]
+              | Some (entries, s) ->
+                  [ (spec_label (Fiss (F_sketch { entries; fine = false })), s, `Fiss entries) ]
               | None -> []
             in
             (* Argmin with ties to the default: the model only displaces the honest default on a
@@ -2356,7 +2378,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
   in
   let flat_schedule = function
     | Whole_saved saved -> saved
-    | Fiss_saved assoc -> List.concat_map assoc ~f:snd
+    | Fiss_saved { segs = assoc; _ } -> List.concat_map assoc ~f:snd
     | Split_saved (prelude, assoc) -> prelude @ List.concat_map assoc ~f:snd
   in
   let is_fissioned = function
@@ -2415,7 +2437,13 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                whole-routine prelude, [segments] the post-prelude per-segment schedules. *)
             | Some assoc when not (List.is_empty entry.SC.saved) ->
                 Fiss (F_split_saved (entry.SC.saved, assoc))
-            | Some assoc -> Fiss (F_saved assoc)
+            | Some assoc ->
+                Fiss
+                  (F_saved
+                     {
+                       entries = assoc;
+                       fine = Option.value entry.SC.finer_fission ~default:false;
+                     })
             | None -> Whole (W_saved entry.SC.saved)
           in
           match compile_spec_real Outcome.Cache_replay spec with
@@ -3102,7 +3130,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
          once, on a hermetic copy of the base lowering with the same pipeline settings the candidate
          transform uses ([preset_sched]'s defaults), and detect a matmul site per [`Normal] segment
          — keyed by the segment's structural pre-schedule digest, like [F_saved]. *)
-      let fiss_sketch_entries =
+      let enum_fiss_entries ~arity_cuts =
         if not (is_gpu || is_cpu) then []
         else
           let scratch =
@@ -3118,8 +3146,8 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
           in
           let zero_sched tns = if is_gpu then Sched.zero_expansion ~limits tns else [] in
           match
-            Sched.fission_scheduled ~promote_locals:is_gpu ~preset ~zero_sched ~static_indices
-              scratch
+            Sched.fission_scheduled ~promote_locals:is_gpu ~arity_cuts ~preset ~zero_sched
+              ~static_indices scratch
           with
           | exception Outcome.Cause_at _ -> []
           | [] | [ _ ] -> [] (* Unfissioned: the whole-routine sketches cover the site. *)
@@ -3136,19 +3164,46 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                               pre,
                               params )))
       in
-      let fiss_sketch_entries =
+      let dedup_by_key entries =
         (* Structurally identical segments share a digest — and thus, at apply time, a schedule — so
            keep one entry per digest. *)
-        List.fold fiss_sketch_entries ~init:[] ~f:(fun acc ((key, _, _) as e) ->
+        List.fold entries ~init:[] ~f:(fun acc ((key, _, _) as e) ->
             if List.exists acc ~f:(fun (k, _, _) -> String.equal k key) then acc else e :: acc)
         |> List.rev
       in
-      let fiss_sketch_entries =
+      let prefilter_entries ~tag entries =
         (* Per-segment pre-filtering: each segment's sketches are their own family — cross-segment
            scores are incomparable (different code volumes), and the singles below are also ranked
            per segment by the recombination step. *)
-        List.map fiss_sketch_entries ~f:(fun (key, pre, ps) ->
-            (key, model_prefilter_params ~seg_opt:pre ~family:("segment " ^ dshort key) ps))
+        List.map entries ~f:(fun (key, pre, ps) ->
+            (key, model_prefilter_params ~seg_opt:pre ~family:(tag ^ dshort key) ps))
+      in
+      let fiss_sketch_entries =
+        prefilter_entries ~tag:"segment " (dedup_by_key (enum_fiss_entries ~arity_cuts:false))
+      in
+      (* The finer ([arity_cuts]) segmentation (gh-ocannl-574): cutting apart a companion that
+         cannot follow its site's full arity — the lm_head's max-logits reduction and that
+         reduction's initialization nest — frees the site's kernel to seed at full arity, where the
+         shared segment's every seed declines on companion coverage. GPU-only: the constraint the
+         cut relieves is the GPU sketches' kernel-global launch geometry. Only segments whose
+         digest is {e new} versus the coarse segmentation seed singles — an unchanged segment's
+         parameters are already timed by its coarse single, and the extra cuts elsewhere in a fine
+         twin could only add launches — but the full fine key list is kept so the fine
+         recombination below can staff unchanged segments from coarse-timed bests. *)
+      let fine_all_entries =
+        if not is_gpu then []
+        else
+          let fine = dedup_by_key (enum_fiss_entries ~arity_cuts:true) in
+          let coarse_keys = List.map fiss_sketch_entries ~f:fst in
+          if
+            List.for_all fine ~f:(fun (k, _, _) -> List.mem coarse_keys k ~equal:String.equal)
+          then [] (* The finer mode cut nothing new: the coarse seeds cover every segment. *)
+          else prefilter_entries ~tag:"fine segment " fine
+      in
+      let fine_new_entries =
+        let coarse_keys = List.map fiss_sketch_entries ~f:fst in
+        List.filter fine_all_entries ~f:(fun (k, _) ->
+            not (List.mem coarse_keys k ~equal:String.equal))
       in
       let fiss_sketch_specs =
         (* Single-segment specs: each parameter set of each keyed segment is proposed alone, every
@@ -3161,7 +3216,9 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
            tail). Cross-segment combination is recovered below by recombining each segment's
            best-timed single into one composite candidate. *)
         List.concat_map fiss_sketch_entries ~f:(fun (key, ps) ->
-            List.map ps ~f:(fun p -> Fiss (F_sketch [ (key, p) ])))
+            List.map ps ~f:(fun p -> Fiss (F_sketch { entries = [ (key, p) ]; fine = false })))
+        @ List.concat_map fine_new_entries ~f:(fun (key, ps) ->
+              List.map ps ~f:(fun p -> Fiss (F_sketch { entries = [ (key, p) ]; fine = true })))
       in
       n_fiss_sketch_candidates := List.length fiss_sketch_specs;
       (* Split-reduce seeds (gh-ocannl-484 task 3), detected on the base lowering — the prelude
@@ -3223,9 +3280,9 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
       List.iter seed_specs ~f:(fun spec ->
           let result = try_spec spec in
           (match (spec, result) with
-          | Fiss (F_sketch [ (key, p) ]), Some (_, ms) ->
+          | Fiss (F_sketch { entries = [ (key, p) ]; fine }), Some (_, ms) ->
               Int.incr n_fiss_sketch_timed;
-              fiss_single_results := (key, (p, ms)) :: !fiss_single_results
+              fiss_single_results := (key, fine, (p, ms)) :: !fiss_single_results
           | Fiss (F_sketch _), Some _ -> Int.incr n_fiss_sketch_timed
           | Fiss (F_split { sites = [ (s, b) ] }), Some (_, ms) ->
               Int.incr n_sr_timed;
@@ -3243,14 +3300,36 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
          full routine may sketch several segments at once. One extra composite candidate applies
          each keyed segment's best-timed single simultaneously — informed by the singles' own
          timings, where the full cartesian product would be exponential. *)
+      let best_single_for ~fine_ok key =
+        List.filter !fiss_single_results ~f:(fun (k, fine, _) ->
+            String.equal k key && (fine_ok || not fine))
+        |> List.min_elt ~compare:(fun (_, _, (_, a)) (_, _, (_, b)) -> Float.compare a b)
+        |> Option.map ~f:(fun (_, _, (p, _)) -> (key, p))
+      in
       let recombined =
         List.filter_map fiss_sketch_entries ~f:(fun (key, _) ->
-            List.filter !fiss_single_results ~f:(fun (k, _) -> String.equal k key)
-            |> List.min_elt ~compare:(fun (_, (_, a)) (_, (_, b)) -> Float.compare a b)
-            |> Option.map ~f:(fun (_, (p, _)) -> (key, p)))
+            best_single_for ~fine_ok:false key)
       in
       if List.length recombined >= 2 then
-        Option.iter (try_spec (Fiss (F_sketch recombined))) ~f:(fun timed ->
+        Option.iter (try_spec (Fiss (F_sketch { entries = recombined; fine = false })))
+          ~f:(fun timed ->
+            Int.incr n_fiss_sketch_timed;
+            admit timed);
+      (* The fine composite (gh-ocannl-574): the fine winner in a multi-segment routine needs the
+         freed site's best AND the other segments' bests in one candidate. Keys address the fine
+         segmentation; segments unchanged by the finer cuts share their digest with the coarse
+         segmentation, so their coarse-timed bests staff the composite directly (the segment code
+         behind a digest is identical, hence the parameters transfer). Proposed only when a fine
+         single was actually timed — otherwise the composite is the coarse one plus extra
+         launches. *)
+      let fine_recombined =
+        if List.exists !fiss_single_results ~f:(fun (_, fine, _) -> fine) then
+          List.filter_map fine_all_entries ~f:(fun (key, _) -> best_single_for ~fine_ok:true key)
+        else []
+      in
+      if List.length fine_recombined >= 2 then
+        Option.iter (try_spec (Fiss (F_sketch { entries = fine_recombined; fine = true })))
+          ~f:(fun timed ->
             Int.incr n_fiss_sketch_timed;
             admit timed);
       (* Multi-site split-reduce recombination: apply each detected site's best-timed [num_blocks]
@@ -3346,12 +3425,13 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
          if nothing_timed then
            logf "nothing was timed: storing no cache entry (gh-ocannl-532)"
          else
-           let saved, segments =
+           let saved, segments, finer_fission =
              let best_c = Option.value_exn best_c ~message:timed_winner_exists in
              match best_c.form with
-             | Whole_saved saved -> (saved, None)
-             | Fiss_saved assoc -> ([], Some assoc)
-             | Split_saved (prelude, assoc) -> (prelude, Some assoc)
+             | Whole_saved saved -> (saved, None, None)
+             | Fiss_saved { segs = assoc; fine } ->
+                 ([], Some assoc, if fine then Some true else None)
+             | Split_saved (prelude, assoc) -> (prelude, Some assoc, None)
            in
            SC.store ~dir:cache_dir ~key
              {
@@ -3362,6 +3442,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                source_digest = base_digest;
                saved;
                segments;
+               finer_fission;
                best_ms;
                baseline_ms;
                default_ms = default_ms ();
@@ -3446,7 +3527,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
           let spec =
             match best_c.form with
             | Whole_saved saved -> Whole (W_saved saved)
-            | Fiss_saved assoc -> Fiss (F_saved assoc)
+            | Fiss_saved { segs; fine } -> Fiss (F_saved { entries = segs; fine })
             | Split_saved (prelude, assoc) -> Fiss (F_split_saved (prelude, assoc))
           in
           (* Nothing the replay needs is an artifact — [spec] above is the winner's saved schedule —

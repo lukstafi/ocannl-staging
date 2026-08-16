@@ -359,7 +359,18 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   such a site declines on companion coverage — that single decline held gpt2_mini's five FFN-class
   kernels at a 1024-thread launch, 70% of the CUDA step at 1.3% of fp32 peak (gh-ocannl-569). A
   companion that reduces OVER the site's minor axis (the lm_head's max-logits row) trims the common
-  prefix below the site's arity and correctly still declines — that one needs fission, not coverage.
+  prefix below the site's arity and correctly still declines — that one needs fission, not coverage:
+  `fission_scheduled ~arity_cuts:true` (gh-ocannl-574) cuts it apart. Why such a pair merges in the
+  first place: the fission pass's no-parallelism-loss guard compares chains under the presets'
+  `max_chain=2` cap, so trimming a rank-3 GEMM's minor axis reads as lossless; and a max-reduce is
+  the shape that hits it because its `-inf` init is a `Set` nest, not a `Zero_out` — a sum-reduce's
+  `Zero_out` already separates the statements. The arity_cuts mode analyzes uncapped AND requires
+  merged nests to share one extent list (the init nest is conflict-free with the GEMM, so a pure
+  no-loss rule would still merge it and companion coverage would still decline on it). It is a
+  candidate-generation mode — the autotuner seeds fine-flagged per-segment sketches when the finer
+  segmentation mints new digests, and a fine winner records `finer_fission` in its cache entry so
+  replay re-segments identically — never the default pipeline, which would pay the extra launches
+  unconditionally for parallelism its 2-loop presets cannot use.
 - "`Tile_mma` is a barrier" is only half true, and the half that fails is the one barrier elision
   wants. Every rendering form ENDS the intrinsic block with a workgroup barrier, so a staging
   barrier that follows one is always redundant (`Schedule.elide_staged_barriers` drops it, and the
