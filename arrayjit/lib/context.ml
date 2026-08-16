@@ -753,12 +753,7 @@ let lowered_for_decisions ?name ?(materialized = []) ?(inline = []) ctx comp bin
   let optim_ctx = Ir.Low_level.copy_optimize_ctx optim_ctx in
   (* The same decision recording as [decide_materialized] / [decide_inline] below, applied to the
      hermetic fork rather than a child context. *)
-  let plc = optim_ctx.Ir.Low_level.placements in
-  List.iter materialized ~f:(fun tn ->
-      match Tn.Placements.get plc tn with
-      | None | Some ((Tn.Never_virtual | Tn.On_device), _) ->
-          Tn.Placements.update plc tn Tn.On_device 31
-      | Some ((Tn.Virtual | Tn.Local | Tn.Effectively_constant), _) -> ());
+  Ir.Low_level.decide_materialized optim_ctx materialized;
   List.iter inline ~f:(Hash_set.add optim_ctx.Ir.Low_level.inline_preferences);
   let _name, (lowered : Ir.Low_level.optimized) =
     Backends.lower_assignments optim_ctx ?name bindings comp.Asgns.asgns
@@ -783,12 +778,7 @@ let decide_materialized ctx tns =
             (* Fork the lineage state exactly like a compile would, then record the decisions in the
                fork: the argument context and its other descendants are unaffected. *)
             let optimize_ctx = Ir.Low_level.copy_optimize_ctx bctx.BI.optimize_ctx in
-            let plc = optimize_ctx.Ir.Low_level.placements in
-            List.iter tns ~f:(fun tn ->
-                match Tn.Placements.get plc tn with
-                | None | Some ((Tn.Never_virtual | Tn.On_device), _) ->
-                    Tn.Placements.update plc tn Tn.On_device 31
-                | Some ((Tn.Virtual | Tn.Local | Tn.Effectively_constant), _) -> ());
+            Ir.Low_level.decide_materialized optimize_ctx tns;
             (Backend.make_child ~optimize_ctx bctx, ()));
       }
   in

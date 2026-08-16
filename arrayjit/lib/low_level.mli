@@ -415,6 +415,17 @@ val copy_optimize_ctx : optimize_ctx -> optimize_ctx
     copies. Backend [compile] forks the incoming context's [optimize_ctx] through this, so sibling
     candidate compiles from one frontier are hermetic. *)
 
+val decide_materialized : ?provenance:int -> optimize_ctx -> Tnode.t list -> unit
+(** Records an [On_device] decision for each node this lineage has not already resolved otherwise —
+    the "materialize this node" move of the placement lattice. Nodes already resolved to [Virtual] /
+    [Local] / [Effectively_constant] keep their resolution: decisions are final within a lineage.
+
+    [Context.decide_materialized] is the context-level form (it forks the lineage first) and is what
+    ordinary [Assignments] callers want. This raw form serves the paths holding an [optimize_ctx]
+    directly: the analyze-only entry points, and hand-built [optimize] calls in tests — for which no
+    context-level form can work, since the [?prelowered] seam replaces the context's lineage state
+    with the optimized record's own [optimize_ctx]. *)
+
 (** Granularity of the XOR remap applied to a swizzled node's minor axis (gh-ocannl-481 item 3, D1).
     Both flavors are per-row bijections of the minor axis, so the IR-level semantics are identical;
     they differ in the unit the XOR permutes and therefore in which access pattern they
