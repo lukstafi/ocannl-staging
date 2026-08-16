@@ -369,11 +369,25 @@ let unqualified_settings_reads content =
      16 and 17 of PR #343). Blessing that one position covers the whole class at once, where
      naming the ways to alias it did not. *)
   let blessed = Hash_set.create (module Int) in
+  (* The predicates {!settings_keys_in_source} folds thresholds into are recognised as CALLS, so
+     handing one around as a value loses its keys the same way handing the record around does
+     (Codex P2, round 20). Their one visible position is the function of an application. *)
+  let predicates = [ "debug_log_from_routines"; "with_runtime_debug" ] in
+  let ends_in names path =
+    List.last path |> Option.value_map ~default:false ~f:(List.mem names ~equal:String.equal)
+  in
   let iterator =
     {
       Ast_iterator.default_iterator with
       expr =
         (fun self expr ->
+          (match expr.pexp_desc with
+          | Pexp_apply (f, _) -> (
+              match longident_of f with
+              | Some path when ends_in predicates path ->
+                  Hash_set.add blessed f.pexp_loc.loc_start.pos_cnum
+              | _ -> ())
+          | _ -> ());
           (match expr.pexp_desc with
           (* A write is not a read -- the census counts none of these -- but it is the same
              qualified use of the record, and `Utils.settings.k <- v` is how train.ml sets a few. *)
@@ -388,6 +402,9 @@ let unqualified_settings_reads content =
                      `settings.k` under an open, or `U.settings.k` under an alias. *)
                   found := expr.pexp_loc.loc_start.pos_cnum :: !found
               | _ -> ())
+          | Pexp_ident { txt; _ } when ends_in predicates (flatten_longident txt) ->
+              (* Blessed above if this is the function of an application. *)
+              found := expr.pexp_loc.loc_start.pos_cnum :: !found
           | Pexp_ident { txt; _ }
             when List.last (flatten_longident txt)
                  |> Option.value_map ~default:false ~f:(String.equal "settings") ->

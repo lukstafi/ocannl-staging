@@ -226,9 +226,9 @@ let () =
         List.iter (Config_key_scan.unqualified_settings_reads original) ~f:(fun offset ->
             fail
             @@ Printf.sprintf
-                 "%s uses the settings record somewhere the census cannot follow -- a read \
-                  without the `Utils.settings` receiver, or the record itself passed on to be read \
-                  elsewhere: %s"
+                 "%s uses the settings record or one of its predicates somewhere the census \
+                  cannot follow -- a read without the `Utils.settings` receiver, or either handed \
+                  on to be read elsewhere: %s"
                  base (line_at original offset))));
   List.iter source_files ~f:(fun fname ->
       let base = Stdlib.Filename.basename fname in
