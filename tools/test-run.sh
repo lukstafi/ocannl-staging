@@ -67,7 +67,7 @@ mkdir -p "$RUNS" || die "cannot create $RUNS"
 # are compared as strings, so a relative override must not record a
 # different spelling than a later absolute reference resolves to.
 RUNS=$(cd "$RUNS" && pwd -P) || die "cannot resolve $RUNS"
-# The worktree key makes the `last` symlink per-checkout, so concurrent
+# The worktree key makes the `last` pointer per-checkout, so concurrent
 # sessions in different worktrees don't read each other's verdicts. The
 # readable basename is for humans listing $RUNS; the crc of the full path is
 # what keeps two paths differing only in punctuation from sharing a key.
@@ -425,7 +425,7 @@ wrapper_alive() { proc_alive "$1/wpid" "$1/wtoken"; }
 # group.
 group_verified() { [ -s "$1/gtoken" ] && proc_alive "$1/pgid" "$1/gtoken"; }
 
-# Make the launched run discoverable (`last` symlink, lock-owner pointer).
+# Make the launched run discoverable (`last` pointer, lock-owner pointer).
 # Deliberately AFTER the wrapper exists and is recorded, so any directory
 # reachable via `last` already carries its full launch metadata -- a status
 # probe can then never mistake a mid-launch run for a dead or running one.
@@ -434,15 +434,30 @@ publish_run() { # 0 published; 2 abandoned by the wrapper's timeout; 1 error
   # wrapper that gave up waiting marked the claim abandoned and released
   # the lock, which may already belong to a newer run.
   [ ! -f "$run_dir/pub_abandoned" ] || return 2
-  # `ln -sfn` onto an existing DIRECTORY silently creates the link INSIDE it,
-  # leaving `last` dangling while the launch reports success -- refuse a
-  # non-symlink squatter, and re-read the link to prove it points here.
-  { [ ! -e "$RUNS/last-$wt_key" ] || [ -L "$RUNS/last-$wt_key" ]; } || {
-    echo "test-run: $RUNS/last-$wt_key exists and is not a symlink; remove it" >&2
+  # A PLAIN FILE holding the run directory's path, not a symlink: under MSYS
+  # (Git Bash) with the default `winsymlinks` mode, `ln -s` does not create a
+  # link at all -- it silently COPIES, so a directory target left a full copy
+  # of the run directory at `last-<key>` and every `last` lookup afterwards
+  # resolved to nothing. Native symlinks there need a privilege the shell may
+  # not hold, so the portable pointer is the file. Rename-based, hence still
+  # atomic: a reader sees the old path or the new one, never a partial write.
+  #
+  # An earlier version of this script pointed `last` with a symlink; retire
+  # one in place rather than tripping the squatter guard below on it.
+  [ -L "$RUNS/last-$wt_key" ] && rm -f "$RUNS/last-$wt_key"
+  # Anything else that is not a regular file is a squatter -- notably the
+  # directory that the copying `ln -s` above used to leave behind. Refuse it
+  # instead of letting `mv` move the pointer INSIDE it.
+  { [ ! -e "$RUNS/last-$wt_key" ] || [ -f "$RUNS/last-$wt_key" ]; } || {
+    echo "test-run: $RUNS/last-$wt_key exists and is not a regular file; remove it" >&2
     return 1
   }
-  { ln -sfn "$run_dir" "$RUNS/last-$wt_key" &&
-    [ "$(readlink "$RUNS/last-$wt_key" 2>/dev/null)" = "$run_dir" ]; } || {
+  # Written through a temporary and re-read, to prove the pointer names this
+  # run before the launch reports success.
+  { printf '%s\n' "$run_dir" >"$RUNS/last-$wt_key.tmp.$$" &&
+    mv -f "$RUNS/last-$wt_key.tmp.$$" "$RUNS/last-$wt_key" &&
+    [ "$(cat "$RUNS/last-$wt_key" 2>/dev/null)" = "$run_dir" ]; } || {
+    rm -f "$RUNS/last-$wt_key.tmp.$$"
     echo "test-run: cannot update $RUNS/last-$wt_key" >&2
     return 1
   }
@@ -491,8 +506,8 @@ mark_abandoned() { : >"$run_dir/pub_abandoned" 2>/dev/null; }
 resolve_run() {
   local ref=${1:-last}
   if [ "$ref" = last ]; then
-    run_dir=$(readlink "$RUNS/last-$wt_key" 2>/dev/null) ||
-      die "no runs recorded for this worktree"
+    run_dir=$(cat "$RUNS/last-$wt_key" 2>/dev/null) || run_dir=
+    [ -n "$run_dir" ] || die "no runs recorded for this worktree"
     [ -d "$run_dir" ] || die "no such run: $run_dir"
   elif [ -d "$ref" ]; then
     # Canonicalized (physically -- symlink spellings differ per referrer)

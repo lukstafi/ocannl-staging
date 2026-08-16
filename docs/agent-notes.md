@@ -934,6 +934,21 @@ that they earn a lookup rather than always-loaded space.
   `dune-quiet.sh` would report red runs as green. It runs even when `dune runtest` above went red
   (Windows runs twice a week; a golden drift must not mask the runner's health for three days) and
   it runs last, so a broken runner cannot abort the sweep's only Windows test coverage.
+- That smoke step has itself been run on real MSYS (rog, Git Bash, under GitHub's exact
+  `bash --noprofile --norc -eo pipefail`), so it is a confirmed test rather than an untested one.
+  All four MSYS branches were checked directly and hold: `opam-env.sh` sourced from a PATH with
+  neither `dune` nor `ocamlfind` yields a toolchain that LINKS (not merely compiles), and refuses
+  fatally with exit 2 when opam is absent; `dune-quiet.sh` preserves dune's status through its
+  stderr filter (1, 0, and an arbitrary 7 from a shim) while dropping only the `.drectve` lines;
+  MSYS perl's flock genuinely excludes a second process; and `proc_alive` does not in fact need
+  its tokenless fallback there — MSYS `ps` has no `-o` at all, but MSYS *does* provide
+  `/proc/<pid>/stat`, so `ps_token` takes the Linux branch and records real tokens.
+- What that run FOUND: under MSYS with the default `winsymlinks` mode, `ln -s` does not create a
+  link, it silently COPIES — so `ln -sfn <run-dir> last-<key>` left a full copy of the run
+  directory where the pointer belonged, and every `last` lookup afterwards resolved to nothing.
+  `test-run.sh` now points `last` with a plain file holding the path (written through a temporary
+  and renamed, so still atomic), which needs no symlink privilege on any platform. Reach for a
+  pointer file, not a symlink, in anything that must work from Git Bash.
 - `tools/sweep.sh` is the GPU-backend coverage: cc and metal locally, cuda on `rog-nv-wsl`, hip on
   `minix-amd-wsl`, all pinned to ONE resolved commit so a mid-sweep merge cannot leave the machines
   testing different trees. It records a row per unit in `~/.ocannl-sweep/history.tsv` and never
