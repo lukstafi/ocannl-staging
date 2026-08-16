@@ -20,6 +20,10 @@ ok: a named dep may wrap its path in a dependency form
 ok: a named dep resolving to no executable is not evidence of an external tool
 ok: a chdir moves the directory whose config matters
 ok: and the dependency that satisfies it is the one reaching that directory
+ok: a test's own action can move where it runs
+ok: a test with an ordinary action still runs where it is
+ok: an explicit relative program is a site without an extension
+ok: a bare word is still a tool on PATH
 ok: a chdir to the stanza's own directory changes nothing
 ok: a nested action does not hide the executable
 ok: a rule running no executable is not a site

@@ -136,6 +136,11 @@ let () =
                makes the entry stale and the list gets pruned rather than growing quietly. *)
             let exempt =
               match kind with
+              (* A shell action needs an exemption even where the dep is declared, since the dep
+                 cannot be shown to be the right one; the others only where it is missing. *)
+              | Scan.Unreadable_directory when Map.mem exemptions key ->
+                  exemptions_used := Set.add !exemptions_used key;
+                  true
               | Scan.Runs_executable when (not declares_config) && Map.mem exemptions key ->
                   exemptions_used := Set.add !exemptions_used key;
                   true
@@ -143,8 +148,19 @@ let () =
             in
             (* What the check requires is the dependency; an extra one harms nothing. So a stanza
                this scan cannot read through matters only where the dependency is ABSENT — there,
-               and only there, does "what does this run?" decide anything. *)
+               and only there, does "what does this run?" decide anything.
+               Except when what is unknown is WHERE it runs: no dependency of this stanza's can be
+               shown to build the config that process will find, so declaring one settles nothing
+               (Codex P2, round 8). *)
             (match (declares_config, exempt, kind) with
+            | _, false, Scan.Unreadable_directory ->
+                fail
+                  (Printf.sprintf
+                     "%s runs `%s`, and a shell may change directory without dune knowing -- so \
+                      which %s the process finds cannot be established here. Write the action as \
+                      a `run` (with a `chdir` if it needs one), or exempt it by name with the \
+                      reason"
+                     dune_file name Scan.config_file)
             | true, _, _ -> bump (Scan.kind_name kind)
             | false, true, _ -> bump "exempt"
             | false, false, Scan.Unreadable_command ->

@@ -178,6 +178,9 @@ type command =
   | Runs of string  (** the executable, by the path written or the name [%{bin:…}] gave *)
   | External  (** a tool on PATH or in the toolchain, which this repository does not build *)
   | Unrecognized of string  (** command position this scan cannot read — reported, never ignored *)
+  | Unknown_directory of string
+      (** a shell command line: not only is the program unreadable, the directory it runs in is
+          too, because [cd] inside the line moves it without dune knowing (Codex P2, round 8) *)
 
 (** Pforms naming a program that is part of the toolchain rather than of this repository. *)
 let toolchain_pforms = [ "ocaml"; "ocamlc"; "ocamlopt"; "cc"; "cxx"; "make" ]
@@ -190,10 +193,16 @@ let program_path path = Option.value (String.chop_prefix path ~prefix:"./") ~def
 
 let is_executable path = String.is_suffix path ~suffix:".exe"
 
+(* An explicit path is not a PATH lookup. `./probe` and `../tools/probe` name something this
+   repository produced, whatever their extension, and stripping the `./` before asking loses the
+   one thing that distinguishes them from `python3` (Codex P2, round 8). *)
+let is_explicit_path path = String.is_prefix path ~prefix:"./" || String.contains path '/'
+
 let classify_command ~named_deps cmd =
+  let explicit = is_explicit_path cmd in
   let cmd = program_path cmd in
   match pieces cmd with
-  | [ Literal path ] -> if is_executable path then Runs path else External
+  | [ Literal path ] -> if is_executable path || explicit then Runs path else External
   | [ Pform pform ] -> (
       match String.lsplit2 pform ~on:':' with
       | Some (("dep" | "exe" | "path" | "file"), path) ->
@@ -279,9 +288,10 @@ let rec commands_in ?(cwd = "") sexp =
   (* A shell action hands a command line to a shell, and this scan does not parse shell. Splitting
      it on whitespace looked like reading it and was not: `if ready; then ./probe.exe; fi` yields
      `./probe.exe;`, which ends in no extension and passes for an external tool -- so the rule runs
-     a test executable and the check says nothing (Codex P2, round 5). A shell line is reported as
-     unreadable instead, which the caller settles by declaring the dependency anyway or by
-     rewriting the action as a `run`. *)
+     a test executable and the check says nothing (Codex P2, round 5). A shell line is reported
+     whole instead, and as something stronger than an unreadable command: `cd ../sibling &&
+     ./probe.exe` moves the working directory with no dune `chdir` to show for it, so the directory
+     whose config the process will find is unknown too (round 8). *)
   | Sexp.List (Sexp.Atom ("bash" | "system") :: args) ->
       List.filter_map args ~f:(function Sexp.Atom a -> Some (cwd, `Shell a) | _ -> None) @ nested
   | _ -> nested
@@ -315,7 +325,7 @@ let executables_run stanza =
       ( cwd,
         match command with
         | `Command cmd -> classify_command ~named_deps cmd
-        | `Shell line -> Unrecognized ("shell: " ^ line) ))
+        | `Shell line -> Unknown_directory ("shell: " ^ line) ))
   |> List.dedup_and_sort ~compare:Poly.compare
 
 type kind =
@@ -325,6 +335,8 @@ type kind =
                          dependencies have to live, there being no [deps] field on one *)
   | Unreadable_command  (** a [(run …)] whose command this scan cannot place: reported, so that
                             what it runs is settled by a reader rather than by silence *)
+  | Unreadable_directory  (** a shell action: the directory the process ends up in is unknown, so
+                              no dependency of this stanza's can be shown to be the right one *)
   | Unclassified_action  (** an action head on neither {!program_actions} nor {!inert_actions} —
                              it might run a program, so it is reported too *)
 
@@ -358,6 +370,7 @@ let kind_name = function
   | Inline_tests -> "inline tests"
   | Runs_executable -> "rule running"
   | Unreadable_command -> "rule whose command this scan cannot read:"
+  | Unreadable_directory -> "rule whose working directory this scan cannot establish:"
   | Unclassified_action -> "rule with an action this scan cannot place:"
 
 (** Stanza heads that carry an action, so one of them may run a test executable. [alias] is here
@@ -398,19 +411,29 @@ let sites content =
         [ { kind; name; declares_config; subdir; cwd } ]
       in
       let stanza_name () = String.concat ~sep:", " (names_of stanza) in
+      let deps () = field stanza "deps" in
+      (* Where a stanza's actions run, relative to it: nowhere else unless something moved them. A
+         `(test)` may carry a custom action, and a `chdir` in one moves the test's own process just
+         as it does a rule's (Codex P2, round 8). *)
+      let action_cwds () =
+        match List.map (commands_in stanza) ~f:fst |> List.dedup_and_sort ~compare:String.compare
+        with
+        | [] -> [ "" ]
+        | cwds -> cwds
+      in
       match head stanza with
       | Some ("test" | "tests") ->
-          site Test (stanza_name ()) (declares_config (field stanza "deps"))
+          List.concat_map (action_cwds ()) ~f:(fun cwd ->
+              site ~cwd Test (stanza_name ()) (declares_config ~cwd (deps ())))
       | Some "library" -> (
           match field stanza "inline_tests" with
           | None -> []
           | Some inline ->
               site Inline_tests (stanza_name ()) (declares_config (field_in inline "deps")))
       | Some h when List.mem action_heads h ~equal:String.equal ->
-          let deps = field stanza "deps" in
           (* One site per directory the rule runs something in: what each needs is that
              directory's config, declared by the path that reaches it from here. *)
-          let declares cwd = declares_config ~cwd deps in
+          let declares cwd = declares_config ~cwd (deps ()) in
           let run = executables_run stanza in
           let by_cwd =
             List.map run ~f:fst |> List.dedup_and_sort ~compare:String.compare
@@ -421,10 +444,15 @@ let sites content =
                    in
                    let exes = for_cwd (function Runs name -> Some name | _ -> None) in
                    let unreadable = for_cwd (function Unrecognized cmd -> Some cmd | _ -> None) in
+                   let unlocatable =
+                     for_cwd (function Unknown_directory cmd -> Some cmd | _ -> None)
+                   in
                    (if List.is_empty exes then []
                     else site ~cwd Runs_executable (String.concat ~sep:", " exes) (declares cwd))
                    @ List.concat_map unreadable ~f:(fun cmd ->
-                         site ~cwd Unreadable_command cmd (declares cwd)))
+                         site ~cwd Unreadable_command cmd (declares cwd))
+                   @ List.concat_map unlocatable ~f:(fun cmd ->
+                         site ~cwd Unreadable_directory cmd (declares cwd)))
           in
           by_cwd
           @ List.concat_map (unclassified_action_heads stanza) ~f:(fun head ->

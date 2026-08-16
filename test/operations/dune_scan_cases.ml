@@ -102,6 +102,22 @@ let cases =
       {dune|(rule (deps ../sibling/ocannl_config)
  (action (chdir ../sibling (run %{dep:probe.exe}))))|dune},
       [ "in ../sibling: rule running probe.exe [declares]" ] );
+    (* A `(test)` may carry a custom action, and a chdir in one moves the test's own process
+       (Codex P2, round 8). *)
+    ( "a test's own action can move where it runs",
+      {dune|(test (name t) (deps ocannl_config) (action (chdir ../sibling (run %{test}))))|dune},
+      [ "in ../sibling: test t" ] );
+    ( "a test with an ordinary action still runs where it is",
+      {dune|(test (name t) (deps ocannl_config) (action (run %{test} --flag)))|dune},
+      [ "test t [declares]" ] );
+    (* An explicit path names something this repository produced, whatever its extension; stripping
+       the `./` before asking loses what distinguishes it from `python3` (Codex P2, round 8). *)
+    ( "an explicit relative program is a site without an extension",
+      {dune|(rule (deps ocannl_config) (action (run ./probe)))|dune},
+      [ "rule running probe [declares]" ] );
+    ( "a bare word is still a tool on PATH",
+      {dune|(rule (action (run diff a b)))|dune},
+      [] );
     ( "a chdir to the stanza's own directory changes nothing",
       {dune|(rule (deps ocannl_config) (action (chdir . (run %{dep:probe.exe}))))|dune},
       [ "rule running probe.exe [declares]" ] );
@@ -136,10 +152,16 @@ let cases =
        settles by requiring the dependency. *)
     ( "a shell action is not parsed, it is reported",
       {dune|(rule (deps ocannl_config) (action (bash "./probe.exe --flag > out")))|dune},
-      [ "rule whose command this scan cannot read: shell: ./probe.exe --flag > out [declares]" ] );
+      [
+        "rule whose working directory this scan cannot establish: shell: ./probe.exe --flag > out \
+         [declares]";
+      ] );
     ( "including one where a word split would have lost the executable",
       {dune|(rule (action (system "if ready; then ./probe.exe; fi")))|dune},
-      [ "rule whose command this scan cannot read: shell: if ready; then ./probe.exe; fi" ] );
+      [
+        "rule whose working directory this scan cannot establish: shell: if ready; then \
+         ./probe.exe; fi";
+      ] );
     (* Command position, not "an .exe somewhere in the stanza": a rule that only moves an
        executable around runs nothing. *)
     ( "a rule that copies an executable does not run it",
