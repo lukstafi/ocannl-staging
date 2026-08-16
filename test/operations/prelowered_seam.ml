@@ -352,10 +352,63 @@ let phase5 () =
       p "phase5: Y = [2; 4] — the second user sees the intervening write" (close yv [| 2.; 4. |])
   | _ -> assert false
 
+(* gh-ocannl-584 review round 3: the raw [analyze_proc] / [specialize_proc] pair is public and does
+   NOT validate — deliberately, so probes can ask what the analysis makes of IR it must never trust
+   (affine_extraction.ml). But [specialize_proc] still runs [hoist_cross_statement_cse], and that is
+   the one pass that can move an effect OUT of a [Local_scope]: two alpha-equivalent impure bodies
+   in sibling statements would be lifted to a top-level [Declare_local] + body, after which the
+   codegen gate sees no impure scope and compiles a silently changed program (the write executing
+   once ahead of the first user instead of once per user statement). Phase 3 takes this route with a
+   single scope, so it cannot trigger the hoist.
+
+   The fix guards the PASS rather than the door: it declines to hoist a body that is not pure. The
+   impure body therefore stays inside its scope, and the exit gate refuses the routine — rejected,
+   never rewritten. Phase 5's positive control is the other half of this: pure shared bodies must
+   still hoist. *)
+let phase6 () =
+  let x = mk "pls6_x" and y = mk "pls6_y" in
+  let lb = mk ~dims:[| 1 |] "pls6_lb" in
+  Tn.update_memory_mode y Tn.On_device 99;
+  Tn.set_observable y;
+  Tn.update_memory_mode lb Tn.Virtual 99;
+  let i = sym () in
+  (* Two alpha-equivalent impure scopes — same free index, same body shape, distinct ids — in
+     sibling statements, the shape [hoist_shared_locals] groups. *)
+  let impure_scope () : LL.scalar_t =
+    let id = LL.get_scope lb in
+    LL.Local_scope
+      {
+        id;
+        body = seq (set i x (c 5.)) (LL.Set_local (id, binop Ops.Mul (get i x) (c 3.)));
+        orig_indices = [| iter i |];
+      }
+  in
+  let llc =
+    loop ~upto:3 i
+      (seq (set i y (impure_scope ())) (set i y (binop Ops.Add (get i y) (impure_scope ()))))
+  in
+  let admitted = ref None in
+  p "phase6: the analysis entry points admit two impure siblings"
+    (not
+       (rejected (fun () ->
+            admitted := Some (LL.specialize_proc (LL.empty_optimize_ctx ()) (LL.analyze_proc [] llc)))));
+  let opt = Option.value_exn !admitted in
+  (* The laundering the guard prevents: had the hoist fired, the write would sit at statement level
+     and no [Local_scope] would carry it. *)
+  p "phase6: the hoist declined, so the impure body is still inside its scope"
+    (Option.is_some (LL.scope_purity_violation opt.LL.llc));
+  p "phase6: compiling the specialized routine is still rejected"
+    (rejected (fun () ->
+         ignore
+           (Context.compile ~name:"pls_impure_siblings" ~prelowered:opt
+              ~lowered_transform:(fun o -> o)
+              (Context.auto ()) Ir.Assignments.empty_comp Idx.Empty)))
+
 let () =
   phase1 ();
   phase2 ();
   phase3 ();
   phase4 ();
   phase5 ();
+  phase6 ();
   printf "prelowered seam: PASS\n"

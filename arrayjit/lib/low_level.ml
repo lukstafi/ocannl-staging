@@ -3405,8 +3405,10 @@ let has_accumulation (llc : t) : bool =
   in
   loop llc
 
-(** gh-ocannl-584: the scope-purity contract. A [Local_scope] body's ONLY effect is on the locals
-    it owns — its own scope id, plus ids [Declare_local]d lexically within it. Raises
+exception Impure_scope of string
+
+(** gh-ocannl-584: the scope-purity contract. A [Local_scope] body's ONLY effect is on the locals it
+    owns — its own scope id, plus ids [Declare_local]d lexically within it. Raises
     [Invalid_argument] on anything else inside a body, at any nesting depth: a tensor-node write
     ([Set], [Set_from_vec], [Set_dynamic], [Zero_out], [Tile_mma]); a [Set_local] of a sibling or
     enclosing scope's local; a [Workgroup_barrier]; and a [Staged_compilation], whose callback emits
@@ -3439,13 +3441,15 @@ let has_accumulation (llc : t) : bool =
     anything a later pass constructs). The raw analysis entry points [analyze_proc] and
     [specialize_proc] deliberately do NOT validate: they are the probes that must stay conservative
     on IR they may not trust (see [test/operations/affine_extraction.ml]). *)
-let validate_scope_bodies (llc : t) : unit =
+
+let scope_purity_violation_gen (root : [ `Proc of t | `Scalar of scalar_t ]) : string option =
   let reject scope what =
-    invalid_arg
-      ("Low_level.validate_scope_bodies: " ^ what ^ " inside the body of local scope v"
-      ^ Int.to_string scope.scope_id ^ "_" ^ Tn.debug_name scope.tn
-      ^ " -- a scope body is hoisted out of the position it is written in, so its only effect may \
-         be on the locals it owns (gh-ocannl-584)")
+    raise
+      (Impure_scope
+         (what ^ " inside the body of local scope v" ^ Int.to_string scope.scope_id ^ "_"
+        ^ Tn.debug_name scope.tn
+        ^ " -- a scope body is hoisted out of the position it is written in, so its only effect \
+           may be on the locals it owns (gh-ocannl-584)"))
   in
   let wrote construct tn () = construct ^ " writes the tensor node " ^ Tn.debug_name tn in
   (* [owned] carries the ids the enclosing body may write, extended lexically by [Declare_local];
@@ -3471,9 +3475,8 @@ let validate_scope_bodies (llc : t) : unit =
     | Set_local (id, llsc) ->
         if Option.is_some scope && not (owns owned id) then
           ban (fun () ->
-              "a Set_local of v"
-              ^ Int.to_string id.scope_id
-              ^ "_" ^ Tn.debug_name id.tn ^ ", a local the body does not own,");
+              "a Set_local of v" ^ Int.to_string id.scope_id ^ "_" ^ Tn.debug_name id.tn
+              ^ ", a local the body does not own,");
         scalar ~scope ~owned llsc;
         owned
     | Zero_out tn ->
@@ -3522,7 +3525,24 @@ let validate_scope_bodies (llc : t) : unit =
     | Unop (_, (s, _)) -> scalar ~scope ~owned s
     | Get_local _ | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> ()
   in
-  ignore (proc ~scope:None ~owned:[] llc : scope_id list)
+  match
+    match root with
+    | `Proc llc -> ignore (proc ~scope:None ~owned:[] llc : scope_id list)
+    | `Scalar llsc -> scalar ~scope:None ~owned:[] llsc
+  with
+  | () -> None
+  | exception Impure_scope msg -> Some msg
+
+let scope_purity_violation (llc : t) : string option = scope_purity_violation_gen (`Proc llc)
+
+(** The scalar form: pass a [Local_scope] to ask whether ITS body is pure — [scope_purity_violation]
+    on a bare body would walk it with no enclosing scope and find nothing. *)
+let scope_purity_violation_scalar (llsc : scalar_t) : string option =
+  scope_purity_violation_gen (`Scalar llsc)
+
+let validate_scope_bodies (llc : t) : unit =
+  Option.iter (scope_purity_violation llc) ~f:(fun msg ->
+      invalid_arg ("Low_level.validate_scope_bodies: " ^ msg))
 
 (** {2 Hardware axis analyses}
 
@@ -3872,6 +3892,16 @@ and hoist_shared_locals_segment (stmts : t list) : t list =
            writes from ALL statements (including user statements) from first_user up to but not
            including last_user. User statements perform tensor writes after evaluating their
            Local_scope, so earlier users' writes can affect what later users would read. *)
+        (* gh-ocannl-584 review round 3: the pass guards its OWN precondition rather than trusting a
+           gate at every door into it. This is the one pass that can move an effect out of a
+           [Local_scope] -- lifting the body to a top-level [Declare_local] + body -- so an impure
+           body reaching it would be laundered into a shape the codegen gate no longer recognizes,
+           and the routine would compile silently changed (the write executing once ahead of the
+           first user instead of once per user). Declining to hoist leaves the impure body inside
+           its scope, where the exit gate refuses it: the program is REJECTED, never rewritten. This
+           keeps the raw [analyze_proc] / [specialize_proc] probes usable on out-of-contract IR,
+           which is why they do not validate. *)
+        let pure_body = Option.is_none (scope_purity_violation_scalar target_scalar) in
         let safe =
           let hazard_writes = ref (Set.empty (module Tn)) in
           let hazard_local_writes = ref [] in
@@ -3884,7 +3914,7 @@ and hoist_shared_locals_segment (stmts : t list) : t list =
                (List.exists !hazard_local_writes ~f:(fun w ->
                     List.mem body_local_reads w ~equal:equal_scope_id))
         in
-        if safe then (
+        if safe && pure_body then (
           (* Extract body from canonical Local_scope *)
           let body =
             match target_scalar with Local_scope { body; _ } -> body | _ -> assert false

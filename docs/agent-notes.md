@@ -251,6 +251,13 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   reads and later users read a stale value (a real miscompile, pinned by `prelowered_seam` phase 5).
   Bodies reading a local declared OUTSIDE them are ordinary pipeline output — CSE and the hoist
   itself create them — so "a body may only read locals it owns" is not available as a rule.
+  `hoist_cross_statement_cse` is the ONLY pass that can move an effect out of a `Local_scope`
+  (`simplify_llc`'s collapse cannot match an impure body; CSE's dedup leaves the surviving
+  occurrence impure), so it guards its own precondition with `scope_purity_violation` and declines
+  to hoist an impure body, instead of every public door into `specialize_proc` needing a gate. That
+  is what keeps the raw analysis probes usable: an impure body reaching the pass would otherwise be
+  laundered to a top-level `Declare_local` + body, and `Context.compile ?prelowered` would compile a
+  silently changed routine. Rejected, never rewritten — pinned by `prelowered_seam` phase 6.
   `Low_level.validate_scope_bodies` enforces it at BOTH ends of the pipeline: `optimize_proc` on the
   way in (ahead of the analysis cache, so a digest hit cannot skip it — and before the hoist can
   launder a body write into a top-level statement that no later gate would recognize) and

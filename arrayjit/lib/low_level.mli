@@ -265,6 +265,13 @@ val hardware_axes : t -> hardware_axis_info list
 val launch_dims : t -> launch_dims
 (** Per-slot maximum extents over the kernel's annotated loops. *)
 
+val scope_purity_violation : t -> string option
+(** gh-ocannl-584: the predicate form of {!validate_scope_bodies} — [None] when every [Local_scope]
+    body in [llc] is pure, else a description of the first violation. [hoist_cross_statement_cse]
+    uses it to guard its own precondition (it is the one pass that can move an effect out of a
+    scope, so an impure body reaching it would be laundered past the codegen gate); tests use it to
+    assert that a body was left where it was. *)
+
 val validate_scope_bodies : t -> unit
 (** gh-ocannl-584: enforces the scope-purity contract stated at {!scalar_t.Local_scope} — a scope
     body's only effect is on the locals it owns (its own scope id, plus ids [Declare_local]d
