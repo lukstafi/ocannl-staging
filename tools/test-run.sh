@@ -208,6 +208,11 @@ take_lock() {
   # leftovers for OUR lsof presence on the lock file and TERM this very
   # launcher. Clear it the moment the lock changes hands.
   rm -f "$PWD/.test-run.lock.owner" 2>/dev/null
+  # Checked: with the pointer left naming the previous run (lock file
+  # writable but worktree directory not), that stop-misattribution window
+  # would stay open for the whole launch.
+  [ ! -e "$PWD/.test-run.lock.owner" ] ||
+    die "cannot clear the stale lock owner pointer (worktree not writable?)"
 }
 
 new_run() {
@@ -494,7 +499,10 @@ case $sub in
     # because the detached-mode supervisor deliberately ignores HUP.
     fwd_sig() {
       cancelled=$1
-      if [ "$sub" = run ]; then
+      # sup_alive, not a bare pid read: after the supervisor is reaped its
+      # recorded pid can be recycled, and a late signal must not be
+      # forwarded to whatever process now wears that number.
+      if [ "$sub" = run ] && sup_alive "$run_dir"; then
         case $1 in INT) s=INT ;; *) s=TERM ;; esac
         kill "-$s" "$(cat "$run_dir/pid" 2>/dev/null)" 2>/dev/null
       fi
@@ -593,7 +601,7 @@ case $sub in
       if [ -n "$cancelled" ]; then
         for _ in 1 2 3; do [ -f "$run_dir/pid" ] && break; sleep 1; done
         case $cancelled in INT) s=INT ;; *) s=TERM ;; esac
-        [ -f "$run_dir/pid" ] && kill "-$s" "$(cat "$run_dir/pid")" 2>/dev/null
+        sup_alive "$run_dir" && kill "-$s" "$(cat "$run_dir/pid")" 2>/dev/null
       fi
       # wrapper_alive, not a bare kill -0: after the wrapper is reaped its
       # pid can be recycled, and probing the number alone would spin this
@@ -711,11 +719,28 @@ case $sub in
     # STILL held afterwards (no lsof on this system, or unkillable holders).
     run_wt=$(cat "$run_dir/wt" 2>/dev/null)
     run_wt=${run_wt:-$PWD}
+    # The census prefers /proc/locks (exact: only pids actually HOLDING the
+    # flock, matched by inode); lsof is the macOS fallback and lists any
+    # process with the file open -- a distinction that matters if some
+    # third-party tool happens to have our lock file open without holding it.
+    lock_holder_pids() {
+      perl -e '
+        my @st = stat($ARGV[0]) or exit 1;
+        open my $fh, "<", "/proc/locks" or exit 1;
+        while (<$fh>) {
+          my @f = split;
+          next unless defined $f[1] && $f[1] eq "FLOCK";
+          my ($maj, $min, $ino) = split /:/, $f[5];
+          print "$f[4]\n" if defined $ino && $ino == $st[1];
+        }
+      ' "$run_wt/.test-run.lock" 2>/dev/null && return 0
+      lsof -t -- "$run_wt/.test-run.lock" 2>/dev/null
+    }
     reap_leftovers() { # <signal>
       if proc_alive "$run_dir/pgid" "$run_dir/gtoken"; then
         kill "-$1" -- "-$(cat "$run_dir/pgid")" 2>/dev/null
       fi
-      for p in $(lsof -t -- "$run_wt/.test-run.lock" 2>/dev/null); do
+      for p in $(lock_holder_pids); do
         case $p in '' | *[!0-9]* | 0) continue ;; esac
         kill "-$1" "$p" 2>/dev/null
       done
@@ -769,6 +794,20 @@ case $sub in
         echo "orphaned process group $pg ignored TERM; escalated to KILL"
       else
         echo "sent TERM to the orphaned process group $pg; re-run stop to confirm"
+      fi
+    elif wrapper_alive "$run_dir"; then
+      # The run is MANAGED right now: either just launched (supervisor pid
+      # not yet recorded) or finishing (verdict publication in flight). It
+      # must never fall through to leftover recovery -- the wrapper ignores
+      # TERM and the census would KILL it mid-publication. Give the launch
+      # a moment and use the supervisor path if it becomes reachable.
+      for _ in 1 2 3; do [ -f "$run_dir/pid" ] && break; sleep 1; done
+      if sup_alive "$run_dir"; then
+        kill -TERM "$(cat "$run_dir/pid")" 2>/dev/null
+        echo "sent TERM; confirm with: tools/test-run.sh wait $(printf %q "$run_dir")"
+      else
+        echo "run is finishing (verdict publication in flight); confirm with:" \
+             "tools/test-run.sh wait $(printf %q "$run_dir")"
       fi
     elif lock_still_owned "$run_dir"; then
       # Dead without a verdict, yet its leftovers still hold the worktree
