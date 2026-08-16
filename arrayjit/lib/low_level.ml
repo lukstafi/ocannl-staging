@@ -5126,7 +5126,13 @@ let decide_placements (optim_ctx : optimize_ctx) traced_store ~max_visits ~reads
           Hashtbl.set memo ~key:tn ~data:(Set.singleton (module Tnode) tn);
           let expand acc p =
             (* Recurse first: the dependency's own decision lands before its placement is
-               consulted, making the result traversal-order-independent. *)
+               consulted, making the result traversal-order-independent. An undecided dependency
+               expands as though it will be virtual, though inlining legality is only settled
+               later ([check_and_store_virtual], inside the virtualizer this pass feeds) — an
+               over-approximation erring toward materialization, the safe direction shared with
+               the multiplicity bound; the opposite default would let a chain of undecided links
+               through the cap on every first compile. A consumer spuriously materialized this
+               way stays an [`Inline] flip candidate, the search's channel for undoing it. *)
             let s_p = fanin p in
             if Tn.Placements.known_non_virtual plc p then Set.add acc p else Set.union acc s_p
           in
