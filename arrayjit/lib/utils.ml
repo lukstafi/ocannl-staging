@@ -408,8 +408,14 @@ let bool_of_config_string ~arg_name s =
     file, or the hard-coded default). It gates the logging of the config-reading functions
     themselves, so it is bootstrapped directly rather than via {!get_global_arg}: the initial value
     only reflects the commandline and the environment, and the config file setting is applied once
-    the config file is read. Can also be set programmatically, e.g. to trace configs a test reads. *)
-let log_config_sourcing = ref true
+    the config file is read. Can also be set programmatically, e.g. to trace configs a test reads.
+
+    Opt-in (gh-ocannl-595): the trace is a debugging tool -- some eighty lines on a run that reads a
+    config file -- and it shares stderr with the unknown-config-key warning, the one startup message
+    that means the user made a mistake. Enabling it traces every key, without a second dependence on
+    [log_level]: it says "tell me where the configuration came from", and answering that for one key
+    is not a useful reading of it. *)
+let log_config_sourcing = ref false
 
 let env_var_names n =
   let env_variants = [ "ocannl_" ^ n; "ocannl-" ^ n ] in
@@ -456,11 +462,7 @@ let read_env_var n =
 (** The bootstrap reader: the few keys that are consulted before the config file exists (and hence
     before profiles are resolved) come from the commandline or the environment only. *)
 let read_cmdline_or_env_var n =
-  let with_debug =
-    !log_config_sourcing
-    && (settings.log_level > 0 || equal_string n "log_level")
-    && not (Hash_set.mem accessed_global_args n)
-  in
+  let with_debug = !log_config_sourcing && not (Hash_set.mem accessed_global_args n) in
   match read_cmdline_var n with
   | Some (result, arg) ->
       if with_debug then Stdio.eprintf "Found %s, commandline %s\n%!" result arg;
@@ -766,11 +768,7 @@ let profile_lookup =
     payload of the profile picked at one of those levels; returns [default] if none has it, together
     with where the value came from. *)
 let get_global_arg_with_source ~default ~arg_name:n =
-  let with_debug =
-    !log_config_sourcing
-    && (settings.log_level > 0 || equal_string n "log_level")
-    && not (Hash_set.mem accessed_global_args n)
-  in
+  let with_debug = !log_config_sourcing && not (Hash_set.mem accessed_global_args n) in
   if with_debug then
     Stdio.eprintf "Retrieving commandline, environment, or config file variable ocannl_%s\n%!" n;
   let result, source =
@@ -787,9 +785,14 @@ let get_global_flag ~default ~arg_name:n =
   bool_of_config_string ~arg_name:n
   @@ get_global_arg ~default:(if default then "true" else "false") ~arg_name:n
 
+(* Defaults to 0 (gh-ocannl-595): every [ocannl_config] in this repository chose 0, which is the
+   measure of a suspect default. Level 1 is a verbosity the user asks for -- it adds the backend
+   info to {!Tnode.header} and raises the ppx_minidebug runtime's threshold; the gates that change
+   what a kernel computes ([with_runtime_debug], [debug_log_from_routines]) sit at level 2 and are
+   unaffected. *)
 let original_log_level =
   let log_level =
-    let s = String.strip @@ get_global_arg ~default:"1" ~arg_name:"log_level" in
+    let s = String.strip @@ get_global_arg ~default:"0" ~arg_name:"log_level" in
     match Int.of_string_opt s with
     | Some ll -> ll
     | None -> invalid_arg @@ "ocannl_log_level setting should be an integer; found: " ^ s

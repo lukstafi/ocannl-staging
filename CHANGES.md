@@ -34,6 +34,19 @@
 
 ### Changed
 
+- **Startup chatter is opt-in, so that a warning on stderr is legible** (gh-ocannl-595).
+  gh-ocannl-581 moved the config chatter off stdout, which fixed the data-channel problem and left
+  stderr carrying 83 lines of routine trace on a default run — burying the unknown-config-key
+  warning, the one startup message that means the user made a mistake, and training red-blindness
+  wherever stderr is coloured as the error stream. `log_config_sourcing` now defaults to false and
+  `log_level` to 0 (the value every `ocannl_config` in this repository had already chosen), taking a
+  default run's stderr to three lines: the welcome banner and whatever warnings there are. Enabling
+  `log_config_sourcing` now traces every key rather than deferring to `log_level`, which is the
+  reading of "tell me where the configuration came from". Groundwork, separately defensible: the
+  CUDA and HIP backends' `with_debug` — the RTC flag that keeps a compilation log on a SUCCESSFUL
+  compile — no longer keys on `log_level`, only on `output_debug_files_in_build_directory`, whose
+  build file is the log's only reader.
+
 - The autotuner's schedule disk-cache key gained a **codegen component** (gh-ocannl-572): the
   backend-independent emission gates (`large_models`, `buffer_aliasing`, the effective
   routine-logging predicate — folding in `log_level > 1` so a verbosity bump alone never churns keys
