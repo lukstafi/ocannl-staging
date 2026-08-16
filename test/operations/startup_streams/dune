@@ -1,0 +1,68 @@
+; gh-ocannl-593 / gh-ocannl-595: the two streams an OCANNL-linked executable writes at startup.
+; The local ocannl_config (not the shared test/config one -- the config search stops at the first
+; file walking up from the working directory) is deliberately a DEFAULT configuration carrying an
+; unknown key; see the comments there and in startup_streams.ml.
+
+(executable
+ (name startup_streams)
+ (modules startup_streams)
+ (libraries base arrayjit.utils stdio))
+
+; The stdout half, with the chatter turned all the way UP: `no_config_file` picks the
+; "Configuration defaults file is disabled" welcome arm, and the sourcing trace reports every key
+; the library reads. `with-stdout-to` captures stdout ALONE, which is exactly the discrimination
+; the test needs -- the golden is empty, and it is the whole assertion. The dep on ocannl_config
+; is what config_dep_completeness asks of a rule that runs an executable; this rule disables the
+; file rather than reading it, and depending on it anyway keeps the two claims independent.
+
+(rule
+ (target stdout_clean.actual)
+ (deps ocannl_config)
+ (action
+  (with-stdout-to
+   %{target}
+   (run
+    %{dep:startup_streams.exe}
+    --ocannl_no_config_file=true
+    --ocannl_log_config_sourcing=true
+    --ocannl_log_level=1))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff stdout_clean.expected stdout_clean.actual)))
+
+; The stderr half, on a default run: the subject writes nothing itself, so the golden is the
+; library's entire startup output -- and the point is that a warning is legible in it. The second
+; process is the same executable in its normalizer mode, turning the config file's absolute path
+; into a basename; it is given a silent configuration of its own so that the build log does not
+; carry a copy of the chatter under test.
+
+(rule
+ (target default_stderr.raw)
+ (deps ocannl_config)
+ (action
+  (with-stderr-to
+   %{target}
+   (run %{dep:startup_streams.exe} guard))))
+
+(rule
+ (target default_stderr.actual)
+ (deps ocannl_config)
+ (action
+  (with-stdin-from
+   %{dep:default_stderr.raw}
+   (with-stdout-to
+    %{target}
+    (run
+     %{dep:startup_streams.exe}
+     normalize
+     --ocannl_no_config_file=true
+     --ocannl_suppress_welcome_message=true)))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff default_stderr.expected default_stderr.actual)))

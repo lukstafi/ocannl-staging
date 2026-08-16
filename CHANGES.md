@@ -22,6 +22,14 @@
   from the schedule-cache key let a default-flags run replay a tf32-tuned winner at 5.9x slower than
   not tuning at all.
 
+- **The startup streams are pinned, on both halves** (gh-ocannl-593):
+  `test/operations/startup_streams` runs an executable that writes nothing of its own, once with the
+  chatter turned all the way up (stdout must stay empty — the convention that lets a tool make
+  stdout a data channel) and once with a default configuration whose `ocannl_config` carries an
+  unknown key (stderr must be the three lines a user can read). Until now every test config set
+  `suppress_welcome_message=true` and `log_config_sourcing=false`, so flipping the `Stdio.eprintf`
+  calls in `arrayjit/lib/utils.ml` back to `Stdio.printf` left `dune runtest` fully green.
+
 - **Hand-built lowered code can be executed, not only analyzed** (gh-ocannl-562): `Context.compile`
   and backend `compile` take `?prelowered:Ir.Low_level.optimized`, which replaces the compile's own
   lowering of the comp. Unlike `?lowered_transform`, which substitutes the codegen input only, the

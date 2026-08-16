@@ -940,7 +940,12 @@ that they earn a lookup rather than always-loaded space.
   startup chatter (welcome message, `log_config_sourcing` trace, profile banner) and every other
   library diagnostic go to stderr. That is what lets a tool make stdout a data channel — the
   benchmark one-JSON-line runners, `tools/fit_envelope.exe`'s config-pasteable fits — without
-  suppression flags. Keep new library-side reporting on stderr.
+  suppression flags. Keep new library-side reporting on stderr. `test/operations/startup_streams`
+  pins both halves: stdout stays empty with the chatter turned all the way up, and a default run's
+  stderr is the welcome banner plus whatever warnings there are. The second half is why
+  `log_config_sourcing` and `log_level` default to off/0 (gh-ocannl-595): a stream that carries
+  eighty lines of routine trace cannot carry a warning, and the unknown-config-key warning is the
+  one startup message that means the user made a mistake.
 - Prefer the minimal targeted fix over speculative hardening: offer hardening separately as an
   option with its costs, don't fold it into the fix.
 - Git refuses to check out or update a branch that ANOTHER worktree has checked out. This is
