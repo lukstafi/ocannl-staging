@@ -355,7 +355,11 @@ group_verified() { [ -s "$1/gtoken" ] && proc_alive "$1/pgid" "$1/gtoken"; }
 # Deliberately AFTER the wrapper exists and is recorded, so any directory
 # reachable via `last` already carries its full launch metadata -- a status
 # probe can then never mistake a mid-launch run for a dead or running one.
-publish_run() {
+publish_run() { # 0 published; 2 abandoned by the wrapper's timeout; 1 error
+  # Checked on entry AND immediately before the last pointer write: a
+  # wrapper that gave up waiting marked the claim abandoned and released
+  # the lock, which may already belong to a newer run.
+  [ ! -f "$run_dir/pub_abandoned" ] || return 2
   # `ln -sfn` onto an existing DIRECTORY silently creates the link INSIDE it,
   # leaving `last` dangling while the launch reports success -- refuse a
   # non-symlink squatter, and re-read the link to prove it points here.
@@ -370,7 +374,10 @@ publish_run() {
   }
   # Advisory owner pointer for the lock-refusal message (the lock itself is
   # the authority; a crash merely leaves this stale, and its reader only
-  # uses it to TARGET status/stop).
+  # uses it to TARGET status/stop). The abandonment recheck sits directly
+  # before this, the most consequential pointer: stop's reaping authorizes
+  # against it.
+  [ ! -f "$run_dir/pub_abandoned" ] || return 2
   printf '%s\n' "$run_dir" >"$PWD/.test-run.lock.owner" || {
     echo "test-run: cannot record the lock owner pointer" >&2
     return 1
@@ -613,7 +620,10 @@ case $sub in
         hw=$(( hw + 1 ))
         if [ "$hw" -gt 10 ]; then
           claim_handoff expired && break
-          [ "$hw" -gt 70 ] && break
+          # Giving up on a claimed-but-never-completed publication: mark it
+          # ABANDONED first, so the launcher, however late it resumes, will
+          # refuse to write pointers under a lock that is about to pass on.
+          [ "$hw" -gt 70 ] && { : >"$run_dir/pub_abandoned" 2>/dev/null; break; }
         fi
         sleep 1
       done
@@ -649,20 +659,36 @@ case $sub in
       echo "test-run: launch stalled past the publication handshake;" >&2
       echo "  verdict kept unpublished at: $(printf %q "$run_dir")" >&2
       unpublished=1
-    elif [ "${wrap_ids:-ok}" = bad ] || ! publish_run; then
-      # An unpublishable run must not keep running untracked: cancel via the
-      # supervisor (waiting briefly for the wrapper to record its pid) and
-      # let the wrapper publish the 143 into the unpublished directory.
-      for _ in 1 2 3; do [ -f "$run_dir/pid" ] && break; sleep 1; done
-      # sup_alive, like every other forwarding path: a fast dune may already
-      # be reaped, and its recycled pid must not receive the TERM.
-      sup_alive "$run_dir" && kill -TERM "$(cat "$run_dir/pid")" 2>/dev/null
-      die "run could not be published; cancelled it (remnants at $run_dir)"
     else
-      # Completion acknowledgement: the wrapper holds the lock until this
-      # exists, so the pointers written by publish_run are already in place
-      # when any later run can first acquire.
-      : >"$run_dir/pub_done" 2>/dev/null || :
+      if [ "${wrap_ids:-ok}" = bad ]; then
+        pub_rc=1
+      else
+        publish_run
+        pub_rc=$?
+      fi
+      if [ "$pub_rc" = 0 ]; then
+        # Completion acknowledgement: the wrapper holds the lock until this
+        # exists, so the pointers written by publish_run are already in
+        # place when any later run can first acquire.
+        : >"$run_dir/pub_done" 2>/dev/null || :
+      elif [ "$pub_rc" = 2 ]; then
+        # The wrapper marked our claim abandoned (launcher stalled past even
+        # the long grace); the run finished on its own -- keep the verdict,
+        # write nothing.
+        echo "test-run: publication abandoned after a stalled launch;" >&2
+        echo "  verdict kept unpublished at: $(printf %q "$run_dir")" >&2
+        unpublished=1
+      else
+        # An unpublishable run must not keep running untracked: cancel via
+        # the supervisor (waiting briefly for the wrapper to record its pid)
+        # and let the wrapper publish the 143 into the unpublished
+        # directory.
+        for _ in 1 2 3; do [ -f "$run_dir/pid" ] && break; sleep 1; done
+        # sup_alive, like every other forwarding path: a fast dune may
+        # already be reaped, and its recycled pid must not receive the TERM.
+        sup_alive "$run_dir" && kill -TERM "$(cat "$run_dir/pid")" 2>/dev/null
+        die "run could not be published; cancelled it (remnants at $run_dir)"
+      fi
     fi
     if [ "$sub" = run ]; then
       # Attached: wait for the wrapper -- its exit means the verdict file is
