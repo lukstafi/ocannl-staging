@@ -24,7 +24,18 @@ factors, for the beam/preset dimension) rides with phase 4's beam subsumption, w
 consumer lives. The tree judges what the seeding layer owns — site classification, caps,
 advertised capabilities, explicit configuration; builder-settled analyses (companion coverage,
 auto-probed pool rendering) stay candidate-build concerns by design, their failures being
-classified declines rather than mislabeled timings. Recorded follow-ups: an A-orientation
+classified declines rather than mislabeled timings. Refined by gh-577 after the phase-6
+evaluation measured the doctrine's cost (the lifted lattice pricing spaces whose every member
+died at candidate build): the *statically-decidable components* of builder-settled rules — those
+whose verdict is a function of the site classification and the lowering alone, invariant across
+tile completions — lift into construction-time refutations at the pipeline level, above the
+geometry menus and the lattice. Lifted so far: the zero-expansion row-axis rule, and the GPU
+companion-coverage rule per fusion flavor (`companion_geometry`'s verdict never depends on the
+geometry annotator, so one trivial-annotator query settles a flavor's whole family; the fused
+flavor is judged separately because skipping the epilogue tail can make coverage pass where the
+unfused form fails). The builders' raise sites remain the safety net for parameters replayed
+against a different lowering (fission recombination), and genuinely build-settled analyses stay
+candidate-build declines. Recorded follow-ups: an A-orientation
 site classifier (the `m_tb` analogue for forms reading A in place), plus the conv-family and
 epilogue-twin factorings. Phase 3 implemented: the dual (floor) extraction —
 `Cost_model.completion_floor` — with every approximation biased down, the exact mirror of

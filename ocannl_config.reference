@@ -616,6 +616,15 @@
 # the cap.
 #virtualize_max_inline_reduction=16
 
+# Transitive fan-in cap for inlining: a tensor node whose fully-inlined computation would read
+# more than this many distinct materialized tensor nodes (accumulated through chains of virtual
+# producers, per setter) is materialized instead. This bounds the per-consumer recomputation of
+# accumulation chains such as a transformer's residual stream, which the per-node visit and
+# reduction caps cannot see: the chain materializes a running sum once per roughly this many
+# contributors instead of being re-summed in full at every consumer. Negative values disable
+# the cap.
+#virtualize_max_inline_fanin=8
+
 # If `true`, tensor nodes will by default not be hosted.
 #enable_device_only=true
 
