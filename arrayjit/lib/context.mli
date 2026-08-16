@@ -251,7 +251,11 @@ val copy : ?into_merge_buffer:Ir.Backend_intf.merge_buffer_use -> src:t -> dst:t
       licenses backend optimizations (e.g. stack allocation). The mode is only ever assigned by the
       compiler, to nodes never read outside their defining routine; to prevent it, request
       materialization (e.g. [Train.set_materialized]) before the first routine using the node is
-      compiled. *)
+      compiled. Host access to a node this lineage placed [Local] {b raises}
+      ({!Ir.Utils.User_error}) in both directions (gh-ocannl-599): the routines never read the
+      buffer a host write would allocate, and never write one for a host read, so a permitted
+      transfer would report the uploaded copy back as if it were a computed value. A for-print proxy
+      is still read, since it is a separate materialized node. *)
 
 val mem : t -> Ir.Tnode.t -> bool
 (** Whether the node has a device buffer allocated in this context. *)
@@ -264,11 +268,14 @@ val register_for_print : src:Ir.Tnode.t -> proxy:Ir.Tnode.t -> unit
 
 val to_host : t -> Ir.Tnode.t -> Ir.Ndarray.t
 (** Transfers the node's device buffer into a fresh host [Ndarray] and returns it. Raises if the
-    node is not present in the context (and has no host-init data or for-print proxy). *)
+    node is not present in the context (and has no host-init data or for-print proxy), and if this
+    lineage placed the node [Local] -- routine-scoped scratch, whose buffer no routine writes (see
+    the on-demand host access section above). *)
 
 val from_host : t -> Ir.Tnode.t -> Ir.Ndarray.t -> t
 (** Uploads the host buffer into the node's device buffer (allocating it if needed) and returns a
-    context in which the node is marked initialized. *)
+    context in which the node is marked initialized. Raises if this lineage placed the node [Local]:
+    no routine reads the uploaded buffer. *)
 
 val get_values : t -> Ir.Tnode.t -> float array
 (** Retrieves all (unpadded) values of the node via an on-demand device-to-host transfer. *)

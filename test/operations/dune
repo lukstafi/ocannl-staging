@@ -302,6 +302,15 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name local_host_access)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules local_host_access)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name context_host_access)
  (package neural_nets_lib)
  (deps ocannl_config)
