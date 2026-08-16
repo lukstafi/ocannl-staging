@@ -57,7 +57,9 @@ die() { echo "test-run: $*" >&2; exit 2; }
 # Pin to the repo containing THIS script (promote.sh convention): dune then runs
 # at this worktree's root no matter where the caller's cwd wandered, and the
 # per-worktree lock below keys on the tree actually being tested.
-cd "$(dirname "$0")/.." || die "cannot cd to repo root"
+# -P: the physical path, so the same worktree entered through a symlink and
+# through its real path derive the same key, lock file, and recorded wt.
+cd -P "$(dirname "$0")/.." || die "cannot cd to repo root"
 
 RUNS=${OCANNL_TEST_RUNS:-$HOME/.ocannl-test-runs}
 mkdir -p "$RUNS" || die "cannot create $RUNS"
@@ -323,6 +325,11 @@ proc_alive() { # pid-file token-file
   # positive decimal integer is a pid at all.
   case $pid in '' | *[!0-9]* | 0) return 1 ;; esac
   kill -0 "$pid" 2>/dev/null || return 1
+  # A zombie passes kill -0 and still prints its recorded lstart, but it
+  # will never publish anything -- treating it as alive would make status
+  # lie forever under an init that does not reap. Empty state (ps without
+  # the column) falls through to the token check.
+  case $(ps -o state= -p "$pid" 2>/dev/null | tr -d ' ') in Z*) return 1 ;; esac
   tok=$(tr -s ' ' <"$2" 2>/dev/null) || tok=
   # No RECORDED identity (MSYS ps without lstart) degrades to the plain pid
   # check -- but where one was recorded, a pid that can no longer produce a
@@ -805,23 +812,33 @@ case $sub in
       for p in $(lsof -t -- "$run_wt/.test-run.lock" 2>/dev/null); do
         case $p in '' | *[!0-9]* | 0) continue ;; esac
         if [ -d /proc ]; then
-          perl -e '
-            my ($pid, $target) = @ARGV;
-            my @st = stat($target) or exit 1;
-            opendir(my $dh, "/proc/$pid/fd") or exit 1;
-            for my $fd (readdir $dh) {
-              next if $fd =~ /^\./;
-              my @fs = stat("/proc/$pid/fd/$fd") or next;
-              next unless $fs[0] == $st[0] && $fs[1] == $st[1];
-              open(my $fi, "<", "/proc/$pid/fdinfo/$fd") or next;
-              while (<$fi>) { exit 0 if /^lock:.*FLOCK/ }
-            }
-            exit 1
-          ' "$p" "$run_wt/.test-run.lock" 2>/dev/null && printf '%s\n' "$p"
+          fd_holds_lock "$p" && printf '%s\n' "$p"
         else
           printf '%s\n' "$p"
         fi
       done
+    }
+    fd_holds_lock() { # Linux: does <pid> hold a FLOCK on the lock file NOW?
+      perl -e '
+        my ($pid, $target) = @ARGV;
+        my @st = stat($target) or exit 1;
+        opendir(my $dh, "/proc/$pid/fd") or exit 1;
+        for my $fd (readdir $dh) {
+          next if $fd =~ /^\./;
+          my @fs = stat("/proc/$pid/fd/$fd") or next;
+          next unless $fs[0] == $st[0] && $fs[1] == $st[1];
+          open(my $fi, "<", "/proc/$pid/fdinfo/$fd") or next;
+          while (<$fi>) { exit 0 if /^lock:.*FLOCK/ }
+        }
+        exit 1
+      ' "$1" "$run_wt/.test-run.lock" 2>/dev/null
+    }
+    holds_lock_now() { # revalidated at SIGNAL time, not census time
+      if [ -d /proc ]; then
+        fd_holds_lock "$1"
+      else
+        lsof -t -- "$run_wt/.test-run.lock" 2>/dev/null | grep -qx "$1"
+      fi
     }
     reap_leftovers() { # <signal>
       if group_verified "$run_dir"; then
@@ -829,6 +846,10 @@ case $sub in
       fi
       for p in $(lock_holder_pids); do
         case $p in '' | *[!0-9]* | 0) continue ;; esac
+        # Re-verified per pid immediately before the signal: the census ran
+        # as one batch, and a holder that exited meanwhile could have had
+        # its pid recycled by an unrelated process.
+        holds_lock_now "$p" || continue
         kill "-$1" "$p" 2>/dev/null
       done
     }
