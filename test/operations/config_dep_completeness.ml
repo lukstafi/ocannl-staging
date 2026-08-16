@@ -122,44 +122,48 @@ let () =
       (* Both displacements matter and they compose: a `(subdir …)` stanza applies elsewhere, and a
          `chdir` action runs elsewhere again. The config an executable finds is the one in the
          directory the PROCESS runs in. *)
-      let copies = Set.of_list (module String) (Scan.config_copy_dirs content) in
-      let relative site = Scan.in_subdir site.Scan.subdir site.Scan.cwd in
-      let directory_of site = repo_relative [ dir ] (relative site) in
-      (* The config an executable reads is the NEAREST one at or above where it runs, so that is
-         both the one that has to exist and the one the dependency has to name: depending on an
-         ancestor while a nearer directory has its own leaves the file actually read unbuilt
-         (Codex P2, round 10). *)
-      let has_config subdir =
-        Set.mem config_dirs (repo_relative [ dir ] subdir) || Set.mem copies subdir
+      let copies =
+        Scan.config_copy_dirs content
+        |> List.map ~f:(fun subdir -> repo_relative [ dir ] subdir)
+        |> Set.of_list (module String)
       in
+      let stanza_dir site = repo_relative [ dir ] site.Scan.subdir in
+      let directory_of site = repo_relative [ dir ] (Scan.in_subdir site.Scan.subdir site.Scan.cwd) in
+      (* Where the executable's own config search leads, nearest first: its directory and every
+         ancestor up to the repository root, exactly as `Utils.config_file_args` walks them. What
+         it reads is the FIRST of those that has a config -- so that is both the file that must
+         exist and the one the dependency must name, whether the process runs in a descendant of
+         the stanza's directory, a sibling, or the stanza's own (Codex P2, rounds 9 to 11). *)
+      let has_config directory = Set.mem config_dirs directory || Set.mem copies directory in
       let nearest_config site =
-        List.map (Scan.config_search_path site.Scan.cwd) ~f:(Scan.in_subdir site.Scan.subdir)
-        |> List.find ~f:has_config
+        let rec ancestors directory =
+          directory
+          ::
+          (if String.is_empty directory then []
+           else
+             ancestors
+               (match Stdlib.Filename.dirname directory with "." -> "" | parent -> parent))
+        in
+        List.find (ancestors (directory_of site)) ~f:has_config
       in
-      List.map sites ~f:(fun site -> (Option.is_some (nearest_config site), directory_of site))
-      |> List.dedup_and_sort ~compare:Poly.compare
-      |> List.iter ~f:(fun (found, directory) ->
-             if not found then
-               fail
-                 (Printf.sprintf
-                    "%s runs test executables in %s, which has no %s at or above it to depend on \
-                     -- add `(copy_files ../config/%s)`"
-                    dune_file directory Scan.config_file Scan.config_file));
       let described =
         List.map sites
           ~f:(fun
-              ({ Scan.kind; name; declared_config_dirs; declares_config = _; subdir = _; cwd = _ }
+              ({ Scan.kind; name; declared_config_paths; declares_config = _; subdir = _; cwd = _ }
                as site)
             ->
             let key = directory_of site ^ ":" ^ name in
             (* Declaring the config the process will actually read: the nearest one on its search
-               path, not merely some ancestor's (Codex P2, round 10). *)
+               path, not merely some ancestor's (Codex P2, round 10). Dependency paths are written
+               relative to the stanza, so they are resolved from there before comparing. *)
             let declares_config =
               match nearest_config site with
               | None -> false
               | Some nearest ->
-                  List.exists declared_config_dirs ~f:(fun declared ->
-                      String.equal (Scan.in_subdir site.Scan.subdir declared) nearest)
+                  List.exists declared_config_paths ~f:(fun declared ->
+                      String.equal
+                        (Stdlib.Filename.dirname (repo_relative [ stanza_dir site ] declared))
+                        (if String.is_empty nearest then "." else nearest))
             in
             (* An exemption is spent only where the dep is actually absent, so declaring it anyway
                makes the entry stale and the list gets pruned rather than growing quietly. *)
@@ -181,7 +185,17 @@ let () =
                Except when what is unknown is WHERE it runs: no dependency of this stanza's can be
                shown to build the config that process will find, so declaring one settles nothing
                (Codex P2, round 8). *)
+            (* An exempt site needs no config where it runs -- that is what the exemption says --
+               so the availability check comes after it, not over every site (Codex P2, round
+               11). *)
             (match (declares_config, exempt, kind) with
+            | _, true, _ -> bump "exempt"
+            | _, false, _ when Option.is_none (nearest_config site) ->
+                fail
+                  (Printf.sprintf
+                     "%s runs %s in %s, which has no %s at or above it to depend on -- add \
+                      `(copy_files ../config/%s)`"
+                     dune_file name (directory_of site) Scan.config_file Scan.config_file)
             | _, false, Scan.Unreadable_directory ->
                 fail
                   (Printf.sprintf
@@ -191,7 +205,6 @@ let () =
                       reason"
                      dune_file name Scan.config_file)
             | true, _, _ -> bump (Scan.kind_name kind)
-            | false, true, _ -> bump "exempt"
             | false, false, Scan.Unreadable_command ->
                 fail
                   (Printf.sprintf

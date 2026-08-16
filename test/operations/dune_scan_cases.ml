@@ -36,12 +36,11 @@ let cases =
     ( "an explicit file dependency declares it",
       {dune|(test (name t) (deps (file ocannl_config)))|dune},
       [ "test t [declares]" ] );
-    (* The local copy is what the executable's config search finds; the shared source file sits
-       nowhere on the upward path from the test's directory, so depending on it declares nothing
-       (Codex P2, round 5). *)
-    ( "the shared source config is not the local one",
+    (* A config elsewhere is still a dependency on a file -- WHICH file it has to be is settled by
+       the check, which knows where configs exist; see declared_paths_cases below. *)
+    ( "a config elsewhere is a dependency too",
       {dune|(test (name t) (deps ../config/ocannl_config))|dune},
-      [ "test t" ] );
+      [ "test t [declares]" ] );
     ( "so does one bound to a name",
       {dune|(test (name t) (deps (:cfg ocannl_config)))|dune},
       [ "test t [declares]" ] );
@@ -97,7 +96,7 @@ let cases =
        directory's config is the one that has to be built (Codex P2, round 6). *)
     ( "a chdir moves the directory whose config matters",
       {dune|(rule (deps ocannl_config) (action (chdir ../sibling (run %{dep:probe.exe}))))|dune},
-      [ "in ../sibling: rule running probe.exe" ] );
+      [ "in ../sibling: rule running probe.exe [declares]" ] );
     ( "and the dependency that satisfies it is the one reaching that directory",
       {dune|(rule (deps ../sibling/ocannl_config)
  (action (chdir ../sibling (run %{dep:probe.exe}))))|dune},
@@ -106,7 +105,7 @@ let cases =
        (Codex P2, round 8). *)
     ( "a test's own action can move where it runs",
       {dune|(test (name t) (deps ocannl_config) (action (chdir ../sibling (run %{test}))))|dune},
-      [ "in ../sibling: test t" ] );
+      [ "in ../sibling: test t [declares]" ] );
     ( "a test with an ordinary action still runs where it is",
       {dune|(test (name t) (deps ocannl_config) (action (run %{test} --flag)))|dune},
       [ "test t [declares]" ] );
@@ -119,7 +118,7 @@ let cases =
     ( "but a helper running an executable elsewhere is its own site",
       {dune|(test (name t) (deps ocannl_config)
  (action (progn (chdir ../scratch (run %{dep:probe.exe})) (run %{test}))))|dune},
-      [ "test t [declares]"; "in ../scratch: rule running probe.exe" ] );
+      [ "test t [declares]"; "in ../scratch: rule running probe.exe [declares]" ] );
     ( "a test's shell action leaves its directory unestablished too",
       {dune|(test (name t) (deps ocannl_config) (action (bash "cd ../sibling && ./%{test}")))|dune},
       [
@@ -135,9 +134,9 @@ let cases =
     ( "the child's own config answers it as well",
       {dune|(rule (deps child/ocannl_config) (action (chdir child (run %{dep:probe.exe}))))|dune},
       [ "in child: rule running probe.exe [declares]" ] );
-    ( "but a sibling's search path does not include the stanza's directory",
+    ( "a sibling chdir is reported at the sibling",
       {dune|(rule (deps ocannl_config) (action (chdir ../sibling (run %{dep:probe.exe}))))|dune},
-      [ "in ../sibling: rule running probe.exe" ] );
+      [ "in ../sibling: rule running probe.exe [declares]" ] );
     (* An explicit path names something this repository produced, whatever its extension; stripping
        the `./` before asking loses what distinguishes it from `python3` (Codex P2, round 8). *)
     ( "an explicit relative program is a site without an extension",
@@ -267,6 +266,27 @@ let cases =
       [ "test a [declares]"; "rule running e.exe [declares]"; "test b" ] );
   ]
 
+(* WHICH config file a stanza depends on, as written. The scan reports the paths; which of them is
+   the one the process will actually read is the check's decision, since only it knows where
+   configs exist -- OCANNL walks up from the process directory and reads the first it finds, so an
+   ancestor's answers only while no nearer directory has its own (Codex P2, rounds 9 to 11). *)
+let declared_paths_cases =
+  [
+    ("the local one", {dune|(test (name t) (deps ocannl_config))|dune}, [ "ocannl_config" ]);
+    ( "one in a sibling",
+      {dune|(rule (deps ../sibling/ocannl_config) (action (run %{dep:probe.exe})))|dune},
+      [ "../sibling/ocannl_config" ] );
+    ( "one in a common parent, which a sibling chdir may legitimately need",
+      {dune|(rule (deps ../ocannl_config) (action (chdir ../b (run %{dep:probe.exe}))))|dune},
+      [ "../ocannl_config" ] );
+    ( "several, reported in full",
+      {dune|(test (name t) (deps ocannl_config child/ocannl_config))|dune},
+      [ "child/ocannl_config"; "ocannl_config" ] );
+    ( "a config the dependency language does not depend on",
+      {dune|(test (name t) (deps (alias ocannl_config) (glob_files ocannl_config)))|dune},
+      [] );
+  ]
+
 (* Which directories the file materializes a config into: "." stands for its own. *)
 let copy_cases =
   [
@@ -325,6 +345,12 @@ let () =
           []
       in
       check name expected found);
+  List.iter declared_paths_cases ~f:(fun (name, source, expected) ->
+      let found =
+        List.concat_map (Scan.sites source) ~f:(fun site -> site.Scan.declared_config_paths)
+        |> List.dedup_and_sort ~compare:String.compare
+      in
+      check ("declared config paths -- " ^ name) expected found);
   List.iter copy_cases ~f:(fun (name, source, expected) ->
       let found =
         List.map (Scan.config_copy_dirs source) ~f:(fun dir ->

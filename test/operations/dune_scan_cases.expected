@@ -3,7 +3,7 @@ ok: a test omitting the dep
 ok: a test with deps but not this one
 ok: the dep is found wherever in deps it sits
 ok: an explicit file dependency declares it
-ok: the shared source config is not the local one
+ok: a config elsewhere is a dependency too
 ok: so does one bound to a name
 ok: an alias of the same name is not the file
 ok: nor is an environment variable of that name
@@ -27,7 +27,7 @@ ok: but a helper running an executable elsewhere is its own site
 ok: a test's shell action leaves its directory unestablished too
 ok: a chdir into a child is answered by the stanza's own config
 ok: the child's own config answers it as well
-ok: but a sibling's search path does not include the stanza's directory
+ok: a sibling chdir is reported at the sibling
 ok: an explicit relative program is a site without an extension
 ok: a bare word is still a tool on PATH
 ok: a chdir to the stanza's own directory changes nothing
@@ -56,6 +56,11 @@ ok: a subdir's stanzas are the same kinds of site
 ok: a nested subdir names the path it applies to
 ok: stanzas outside the subdir keep the dune file's own directory
 ok: stanzas are reported in file order
+ok: declared config paths -- the local one
+ok: declared config paths -- one in a sibling
+ok: declared config paths -- one in a common parent, which a sibling chdir may legitimately need
+ok: declared config paths -- several, reported in full
+ok: declared config paths -- a config the dependency language does not depend on
 ok: copies the config -- a copy_files stanza
 ok: copies the config -- the short spelling
 ok: copies the config -- a copy_files inside a subdir names that directory

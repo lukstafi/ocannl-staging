@@ -94,57 +94,28 @@ let file_dep_forms = [ "file" ]
     recognising more spellings only means recognising more of the executables that get run. *)
 let path_bearing_forms = [ "file"; "glob_files"; "glob_files_rec"; "source_tree" ]
 
-(** Whether a [(deps …)] field really depends on the configuration file the executable will find:
-    the one in the directory the process RUNS in, which is the stanza's own unless a [chdir] moved
-    it.
+(** Every config file a [(deps …)] field really depends on, as the path is written — relative to
+    the stanza's directory.
 
-    Not any path with that name: a dependency on [../config/ocannl_config] builds the shared source
-    file, which sits nowhere on the upward search from [_build/default/<test dir>], and leaves the
-    local copy that [(copy_files …)] produces unbuilt — the order-dependent behaviour this check
-    exists to reject, wearing the look of a declaration (Codex P2, round 5 of PR #343). Dependency
-    paths are written relative to the stanza's directory, so the file wanted is [<cwd>/ocannl_config]
-    for a process running in [<cwd>]. *)
-let rec dep_names_path sexp ~paths =
-  match sexp with
-  | Sexp.Atom atom ->
-      List.exists paths ~f:(fun path -> List.mem [ path; "./" ^ path ] atom ~equal:String.equal)
-  | Sexp.List (Sexp.Atom head :: rest) ->
-      (* [(:name <deps>)] binds a name to ordinary dependencies; the forms above take paths. *)
-      (String.is_prefix head ~prefix:":" || List.mem file_dep_forms head ~equal:String.equal)
-      && List.exists rest ~f:(dep_names_path ~paths)
-  | Sexp.List _ -> false
-
-(** Directories whose config an executable running in [cwd] would find, nearest first, as paths
-    relative to the stanza — the process directory and, when it is a DESCENDANT of the stanza's,
-    every directory between them.
-
-    OCANNL searches upward from the process directory, so a rule that chdirs into a child needs no
-    config of the child's: the stanza's own is on that search path, and demanding an exact match
-    rejects a correctly configured rule (Codex P2, round 9 of PR #343). A cwd that leaves the
-    subtree ([../sibling]) puts none of those ancestors on the path, so only its own counts. *)
-let config_search_path cwd =
-  let cwd = in_subdir cwd "" in
-  if String.is_empty cwd then [ "" ]
-  else if List.mem (String.split cwd ~on:'/') ".." ~equal:String.equal then [ cwd ]
-  else
-    String.split cwd ~on:'/'
-    |> List.folding_map ~init:[] ~f:(fun prefix component ->
-           let prefix = prefix @ [ component ] in
-           (prefix, String.concat ~sep:"/" prefix))
-    |> List.rev
-    |> fun descendants -> descendants @ [ "" ]
-
-(** The directories of {!config_search_path} whose config the [(deps …)] field names, nearest
-    first. Which of them is the one that MATTERS depends on where a config actually exists, which
-    this module cannot see: OCANNL reads the nearest one on the path, so a dependency on an
-    ancestor is enough only while no nearer directory has a config of its own (Codex P2, round 10
-    of PR #343). The caller knows which directories have one, and decides. *)
-let declared_config_dirs ?(cwd = "") args =
-  List.filter (config_search_path cwd) ~f:(fun dir ->
-      let paths = [ in_subdir dir config_file ] in
-      match args with None -> false | Some args -> List.exists args ~f:(dep_names_path ~paths))
-
-let declares_config ?(cwd = "") args = not (List.is_empty (declared_config_dirs ~cwd args))
+    Which of them is the one that MATTERS this module cannot say. OCANNL walks UP from the process
+    directory and reads the first config it finds ([Utils.config_file_args]), so the dependency has
+    to name that one: an ancestor's will do while no nearer directory has its own, and a rule that
+    chdirs out of the stanza's subtree may legitimately name a common parent (Codex P2, rounds 9
+    to 11 of PR #343). Where the files exist, and hence which directory wins, is the caller's
+    knowledge. *)
+let declared_config_paths args =
+  let rec collect sexp =
+    match sexp with
+    | Sexp.Atom atom ->
+        if String.equal (Stdlib.Filename.basename atom) config_file then [ atom ] else []
+    | Sexp.List (Sexp.Atom head :: rest)
+      when String.is_prefix head ~prefix:":" || List.mem file_dep_forms head ~equal:String.equal ->
+        List.concat_map rest ~f:collect
+    | Sexp.List _ -> []
+  in
+  match args with
+  | None -> []
+  | Some args -> List.concat_map args ~f:collect |> List.dedup_and_sort ~compare:String.compare
 
 (** The names a [(name …)] or [(names …)] field gives, in order. *)
 let names_of stanza =
@@ -385,9 +356,9 @@ type site = {
   kind : kind;
   name : string;
   declares_config : bool;
-      (** whether the deps name a config anywhere on the site's search path; which one had to be
-          named is {!declared_config_dirs}, since only the caller knows where configs exist *)
-  declared_config_dirs : string list;
+      (** whether the deps depend on any config file at all; WHICH one had to be named is
+          {!declared_config_paths}, since only the caller knows where configs exist *)
+  declared_config_paths : string list;
   subdir : string;
   cwd : string;
 }
@@ -448,8 +419,8 @@ let sites content =
           {
             kind;
             name;
-            declares_config = declares_config ~cwd deps_field;
-            declared_config_dirs = declared_config_dirs ~cwd deps_field;
+            declares_config = not (List.is_empty (declared_config_paths deps_field));
+            declared_config_paths = declared_config_paths deps_field;
             subdir;
             cwd;
           };
