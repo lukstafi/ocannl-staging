@@ -487,7 +487,14 @@ case $sub in
     # already on PATH proves nothing there, because `opam env` emits
     # cygwin-style paths that leave linking broken until opam-env.sh
     # rewrites them (CLAUDE.md).
-    case ${OSTYPE:-} in msys* | cygwin*) . tools/opam-env.sh ;; esac
+    # Fatal on failure: the rewrite is REQUIRED there even when a dune is
+    # already discoverable, so continuing would run a mismatched toolchain.
+    case ${OSTYPE:-} in
+      msys* | cygwin*)
+        . tools/opam-env.sh ||
+          die "tools/opam-env.sh failed; refusing an unrewritten Windows toolchain"
+        ;;
+    esac
     command -v dune >/dev/null 2>&1 || . tools/opam-env.sh
     command -v dune >/dev/null 2>&1 || die "dune not found (opam environment not set up?)"
     # On Windows every link step floods stderr with benign binutils warnings
@@ -591,6 +598,11 @@ case $sub in
       exec 9>&-
     ) </dev/null >/dev/null 2>&1 &
     wrapper=$!
+    # The launcher's own fd 9 copy served its purpose the moment the wrapper
+    # inherited the lock's description: close it, so an attached launcher
+    # never appears in a leftover census -- a concurrent stop must not reap
+    # the process that is about to deliver the digest.
+    exec 9>&-
     # The wrapper's own identity, recorded by its parent (bash 3.2 has no
     # BASHPID for the subshell to name itself): status and wait use it to
     # tell "verdict publication in flight" from "nothing left to publish".
