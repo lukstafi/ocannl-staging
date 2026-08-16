@@ -131,8 +131,10 @@ let () =
         (fun ctx () -> Context.run ctx routine)
         ctx (Stdlib.Array.make repeats ())
     in
-    let values = Context.get_values ctx mc.Tensor.value in
     let stop = Time_now.nanoseconds_since_unix_epoch () in
+    (* Readback OUTSIDE the timed region (the [Context.get_values] trap, docs/agent-notes.md):
+       the cc scheduler is synchronous, so the run loop needs no readback to complete. *)
+    let values = Context.get_values ctx mc.Tensor.value in
     let secs = Float.of_int63 Int63.(stop - start) /. 1e9 /. Float.of_int repeats in
     p "%-12s %8.3f ms  %8.2f GFLOP/s  (spot check %.2f)\n" variant (secs *. 1e3)
       (flops /. secs /. 1e9)

@@ -252,8 +252,20 @@ let () =
                 && (has "ocannl_vec16h" || has "ocannl_vec8h")
               else not (has "tmma_")))
    | exception e ->
-       (* No [_Float16] in this toolchain at all: the forced-native kernel cannot compile. *)
-       Stdio.eprintf "pure-f16 leg unavailable (%s)\n%!" (Exn.to_string e);
-       skipped parity_name;
-       skipped structure_name);
+       (* The one condition verified to warrant a skip: the generated kernel failed to COMPILE
+          over the half type ([Backend_rejected]'s detail quotes the compiler output, which names
+          [HALF_T]/[_Float16] when the type is the problem). In fact even a no-[_Float16]
+          toolchain is expected to run this leg — [HALF_T] is then [uint16_t] and every half
+          operation the tiling emits routes through the emulation-safe [OCANNL_HALF_FMA] /
+          [HALF_TO_FLOAT] macros, the same ones the serial twin uses — so this arm should never
+          fire; it exists so an exotic toolchain reads as a loud skip rather than a red suite.
+          Every other failure (schedule construction, runtime, parity readback) propagates: a
+          swallowed exception here would false-green exactly when the implementation breaks. *)
+       let msg = Exn.to_string e in
+       let mentions s = String.is_substring msg ~substring:s in
+       if mentions "failed to compile" && (mentions "_Float16" || mentions "HALF_T") then (
+         Stdio.eprintf "pure-f16 leg unavailable, toolchain rejected the half kernel (%s)\n%!" msg;
+         skipped parity_name;
+         skipped structure_name)
+       else raise e);
   Numerics.set_policy saved_policy

@@ -15,8 +15,8 @@
   emission asks (single source of truth), so narrow-storage matmul/conv sites now seed the
   tensorized families (packed seeds carry `sk_pack_prec`), and pure-fp16 seeds fire exactly where
   the probe reports native arithmetic. Measured on x86 (gcc 15, n=512): f32-GEBP-over-narrow
-  storage reaches 45.5 GFLOP/s at bf16 and 35.1 at fp16 against a 0.4-0.7 GFLOP/s scalar narrow
-  rendering; computing fp16 in fp16 where the compiler merely promotes loses ~17x, confirming the
+  storage reaches 51.3 GFLOP/s at bf16 and 37.1 at fp16 against a 0.4-0.7 GFLOP/s scalar narrow
+  rendering; computing fp16 in fp16 where the compiler merely promotes loses ~18x, confirming the
   gating. The pure-f16-vs-f32-GEBP decision on genuinely native hardware (NEON) is still pending;
   see docs/proposals/gh-ocannl-575-narrow-register-tiling.md.
 

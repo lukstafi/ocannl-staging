@@ -681,7 +681,7 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   `#pragma GCC unroll 1` does NOT fix it. When a narrow cc GEMM benches absurdly slow, try
   `cc_backend_optimization_level=2` before suspecting the rendering; the tuner's measured search
   routes around it on its own.
-- Computing fp16 in fp16 on a *promoted* target is a ~17x loss against f32-compute-over-fp16
+- Computing fp16 in fp16 on a *promoted* target is a ~18x loss against f32-compute-over-fp16
   (measured, same bench) — the reason `fp16_arithmetic` is ignored off-native and pure-f16 seeds
   gate on `hardware_limits.native_fp16_arithmetic`. The decisive pure-f16-vs-f32-GEBP measurement
   on genuinely native hardware (NEON) has NOT run yet; see the gh-575 proposal doc's pending note.

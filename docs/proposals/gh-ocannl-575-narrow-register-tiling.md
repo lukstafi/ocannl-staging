@@ -80,17 +80,18 @@ reorder a site's candidates because they all share one policy-resolved compute p
 ## Measurement (ROG: Core Ultra 9 275HX, WSL2, gcc 15.2, cc backend at -O3, n = 512)
 
 `bin/narrow_gebp_bench.exe` (naive serial vs packed GEBP serial vs grid-outermost per-chunk
-variant; exact inputs; readbacks outside the timed region):
+variant; exact inputs; readbacks outside the timed region — re-measured after the Codex round-1
+fix moved the spot-check readback out of the timed interval):
 
 | storage → compute | naive | packmma | packmma_par |
 |---|---|---|---|
-| f32 → f32 | 21.3 GFLOP/s | 63.9 | 49.0 |
-| bf16 → f32 (widened panels) | 0.38 | **45.5 (118x)** | 34.0 |
-| f16 → f32 (widened panels) | 0.65 | 3.4 (see below) | **35.1 (54x)** |
+| f32 → f32 | 21.5 GFLOP/s | 74.1 | 55.7 |
+| bf16 → f32 (widened panels) | 0.38 | **51.3 (135x)** | 34.3 |
+| f16 → f32 (widened panels) | 0.65 | 3.4 (see below) | **37.1 (57x)** |
 | f16 → f16 forced on promoted HW | 0.65 | 2.1 | 2.0 |
 
-- The headline: **f32-GEBP-over-narrow-storage is a ~50-120x win over the scalar narrow
-  rendering** on x86, and lands within ~25% of the f32 GEBP — the storage seam pays for itself.
+- The headline: **f32-GEBP-over-narrow-storage is a ~57-135x win over the scalar narrow
+  rendering** on x86, and lands within ~30% of the f32 GEBP — the storage seam pays for itself.
 - The f16 `packmma` anomaly is a **gcc-15 `-O3` pessimization**, not a rendering defect: on the
   k_o-outermost serial shape with the f16 d-bridge, `-O3` unrolls the k-loop 4x and spills the
   accumulator C-tile (hot loop: 29 insns / 2 stack refs at `-O2` vs 375 insns / 147 stack refs at
@@ -100,7 +101,7 @@ variant; exact inputs; readbacks outside the timed region):
   levels (63.9 vs ~67 GFLOP/s standalone). The tuner routes around it by measurement; a
   `cc_backend_optimization_level=2` run is the manual workaround on gcc.
 - The forced pure-f16 row is the negative control for the gating: computing in f16 where the
-  compiler promotes is a ~17x loss against f32-compute — exactly why `fp16_arithmetic` is ignored
+  compiler promotes is a ~18x loss against f32-compute — exactly why `fp16_arithmetic` is ignored
   off-native and why the pure-f16 seeds fire only where the probe reports native.
 
 **Still pending: the honest NEON measurement.** The issue's decision point — pure-f16 GEBP vs
