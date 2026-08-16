@@ -857,8 +857,12 @@ case $sub in
     # supervisor pid must read as dead, not as running forever. The wrapper
     # check covers both edges of the run -- starting (supervisor pid not yet
     # recorded) and finishing (group-reap, verdict publication in flight).
+    # The explicit `exit 0` on the finished paths is the header contract:
+    # `status` reports PUBLICATION, not the run's verdict, so it must not
+    # inherit whatever `digest`'s last command happened to return.
     if [ -f "$run_dir/exit" ]; then
       digest "$run_dir"
+      exit 0
     elif sup_alive "$run_dir"; then
       echo "running: dune $(cat "$run_dir/cmd")  (log: $run_dir/log)"
       exit 3
@@ -867,6 +871,7 @@ case $sub in
       exit 3
     elif [ -f "$run_dir/exit" ]; then
       digest "$run_dir" # published between the checks above
+      exit 0
     else
       echo "run died without recording a verdict (killed externally?): $run_dir"
       exit 1
