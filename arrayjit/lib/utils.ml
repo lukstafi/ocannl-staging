@@ -615,44 +615,6 @@ let describe_config_source ~value ~default = function
         (describe_config_level level)
   | From_default -> Printf.sprintf "Not found, using default %s" default
 
-(** The provenance of the three keys resolved before there was a trace to report it in.
-
-    They cannot report themselves as they go: each is read before {!log_config_sourcing} is settled
-    -- one of the reads settles it -- and each is read more than once. So the report is assembled
-    here instead, after the config file, from the same sources in the same order, and it covers the
-    defaulted cases too: a run that sets none of them still says so, which is what makes enabling the
-    trace in a config file (the common way) report every setting the run read (Codex P2, rounds 1-2
-    on PR #348).
-
-    Recomputed rather than remembered: the lookups are pure functions of [Sys.argv], the environment
-    and the config table, so one place holding the whole precedence walk cannot drift from the
-    resolution the way scattered logging did. Two asymmetries are real, not oversights: a config
-    file cannot supply [no_config_file] (it is what decides whether the file is read at all), and no
-    profile can supply any of the three -- {!profile_ineligible_keys} rejects them, profiles being
-    resolved later still. All three default to false. *)
-let () =
-  if !log_config_sourcing then (
-    Stdio.eprintf "\nOCANNL: configuration resolved before the config file was read:\n%!";
-    List.iter
-      [ "log_config_sourcing"; "no_config_file"; "suppress_welcome_message" ]
-      ~f:(fun n ->
-        let from_file =
-          if equal_string n "no_config_file" then None else Hashtbl.find config_file_args n
-        in
-        let value, source =
-          match read_cmdline_var n with
-          | Some (value, arg) -> (value, From_cmdline arg)
-          | None -> (
-              match read_env_var n with
-              | Some (value, var) -> (value, From_env var)
-              | None -> (
-                  match from_file with
-                  | Some value -> (value, From_config_file)
-                  | None -> ("false", From_default)))
-        in
-        Stdio.eprintf "Retrieving commandline, environment, or config file variable ocannl_%s\n%!" n;
-        Stdio.eprintf "%s\n%!" (describe_config_source ~value ~default:"false" source)))
-
 (** The precedence walk, factored out of {!get_global_arg} so it can be exercised on synthetic
     sources (see test/operations/config_profiles.ml). The lookups are pure; logging happens at the
     call site, which is the only place that knows which sublevel won. *)
@@ -796,6 +758,61 @@ let active_profile =
             Stdio.eprintf "\nOCANNL: using the configuration profile %S, picked via %s.\n%!" name
               (describe_config_level level);
           (level, name, parse_profile_payload ~name text))
+
+(** The provenance of the settings that resolve before {!get_global_arg_with_source} can report
+    them, which is exactly the four read directly above: the three bootstrap keys and [profile].
+    Everything else in OCANNL goes through that function and is traced as it goes.
+
+    They cannot report themselves as they go. Each bootstrap key is read before
+    {!log_config_sourcing} is settled -- one of the reads settles it -- and each is read more than
+    once; [profile] resolves before the trace has a place to put a "not picked" line. So the report
+    is assembled here instead, walking the same sources in the same order, and it covers the
+    DEFAULTED cases: a run that sets none of the four still says so, which is what makes enabling
+    the trace in a config file (the common way) report every setting the run read. Reporting only
+    what was found is where rounds 1 and 2 of Codex's review on PR #348 went wrong twice.
+
+    Recomputed rather than remembered: the lookups are pure functions of [Sys.argv], the environment
+    and the config table, so one place holding the whole precedence walk cannot drift from the
+    resolution the way scattered logging did. Two asymmetries are real, not oversights: a config
+    file cannot supply [no_config_file] (it is what decides whether the file is read at all), and no
+    profile can supply any of the bootstrap keys -- {!profile_ineligible_keys} rejects them,
+    profiles being resolved later still. The bootstrap keys all default to false, [profile] to
+    unset. *)
+let () =
+  if !log_config_sourcing then (
+    Stdio.eprintf
+      "\nOCANNL: settings resolved before the ordinary per-key trace could report them:\n%!";
+    let report n line =
+      Stdio.eprintf "Retrieving commandline, environment, or config file variable ocannl_%s\n%!" n;
+      Stdio.eprintf "%s\n%!" line
+    in
+    List.iter
+      [ "log_config_sourcing"; "no_config_file"; "suppress_welcome_message" ]
+      ~f:(fun n ->
+        let from_file =
+          if equal_string n "no_config_file" then None else Hashtbl.find config_file_args n
+        in
+        let value, source =
+          match read_cmdline_var n with
+          | Some (value, arg) -> (value, From_cmdline arg)
+          | None -> (
+              match read_env_var n with
+              | Some (value, var) -> (value, From_env var)
+              | None -> (
+                  match from_file with
+                  | Some value -> (value, From_config_file)
+                  | None -> ("false", From_default)))
+        in
+        report n (describe_config_source ~value ~default:"false" source));
+    (* Taken from the resolved profile rather than re-walked: the walk above it normalizes empty
+       values and falls through per level, and a second copy of that rule could disagree with the
+       one that decides. The banner it prints on the way is about the payload taking effect; this
+       line is about where the setting came from, and only it appears when no profile is picked. *)
+    report "profile"
+      (match active_profile with
+      | Some (level, name, _) ->
+          Printf.sprintf "Found %s, in %s" name (describe_config_level level)
+      | None -> describe_config_source ~value:"" ~default:"" From_default))
 
 let profile_lookup =
   Option.map active_profile ~f:(fun (level, name, table) ->
