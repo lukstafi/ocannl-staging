@@ -281,7 +281,57 @@ let phase3 () =
   p "cross-routine: x7 stays virtual" (known_virtual o_b c.xs.(6));
   p "cross-routine: x8 materialized by the fan-in cap" (known_non_virtual o_b c.xs.(7));
   p "cross-routine: x9 and x10 virtual"
-    (known_virtual o_b c.xs.(8) && known_virtual o_b c.xs.(9))
+    (known_virtual o_b c.xs.(8) && known_virtual o_b c.xs.(9));
+  (* Review round 3: a routine that UPDATES an inherited virtual node must not lose the stored
+     prefix behind the update's excluded self-read — the inherited component reads union with the
+     local setter reads. Routine B': x5 += w6 (self-update of the inherited virtual), then three
+     fresh links; x5's fan-in is {w6} ∪ {x0, w1..w5} = 7, so the second fresh link (fan-in 9)
+     trips the cap while the first (fan-in 8) stays virtual. *)
+  let c2 = build_chain ~first_id:3300 () in
+  let llc_a2 =
+    let out_a2 = c2.mk "out_a2" in
+    materialize out_a2;
+    let s = sym () in
+    List.reduce_exn ~f:seq
+      (List.take c2.links split
+      @ [ loop_n s dim (set out_a2 [| iter s |] (get c2.xs.(split - 1) [| iter s |])) ])
+  in
+  let x5 = c2.xs.(split - 1) in
+  let upd =
+    let s = sym () in
+    loop_n s dim (set x5 [| iter s |] (add (get x5 [| iter s |]) (get c2.ws.(5) [| iter s |])))
+  in
+  let link6 =
+    let s = sym () in
+    loop_n s dim
+      (set c2.xs.(5) [| iter s |] (add (get x5 [| iter s |]) (get c2.ws.(6) [| iter s |])))
+  in
+  let link7 =
+    let s = sym () in
+    loop_n s dim
+      (set c2.xs.(6) [| iter s |] (add (get c2.xs.(5) [| iter s |]) (get c2.ws.(7) [| iter s |])))
+  in
+  let link8 =
+    let s = sym () in
+    loop_n s dim
+      (set c2.xs.(7) [| iter s |] (add (get c2.xs.(6) [| iter s |]) (get c2.ws.(8) [| iter s |])))
+  in
+  let consumer2 =
+    let s = sym () in
+    loop_n s dim (set c2.out [| iter s |] (get c2.xs.(7) [| iter s |]))
+  in
+  let ctx2 = LL.empty_optimize_ctx () in
+  let _o_a2 =
+    LL.optimize ctx2 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_xupd_a" [] llc_a2
+  in
+  let o_b2 =
+    LL.optimize ctx2 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_xupd_b" []
+      (List.reduce_exn ~f:seq [ upd; link6; link7; link8; consumer2 ])
+  in
+  p "cross-routine update: x6 stays virtual (fan-in 8, prefix counted through the update)"
+    (known_virtual o_b2 c2.xs.(5));
+  p "cross-routine update: x7 materialized by the fan-in cap" (known_non_virtual o_b2 c2.xs.(6));
+  p "cross-routine update: x8 virtual past the reset" (known_virtual o_b2 c2.xs.(7))
 (* No executed leg for this phase yet: routine B's kernel parameters miss the leaves reaching it
    only through the inlined cross-routine computation ([input_and_output_nodes] folds over the
    traced store, which is built from the raw code) — a pre-existing gap, gh-ocannl-610.

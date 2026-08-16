@@ -5150,14 +5150,15 @@ let decide_placements (optim_ctx : optimize_ctx) traced_store ~max_visits ~reads
                 let s = Set.fold reads ~init:(Set.empty (module Tnode)) ~f:expand in
                 if Set.length s > Set.length best then s else best)
           in
-          (* A node this routine reads but never sets, committed [Virtual] by an earlier routine in
-             the lineage: its replayed computation's reads stand in for the missing setters (one
-             stored component ≈ one setter, so the same per-setter maximum applies). *)
-          let inherited_reads traced =
-            if
-              Option.exists traced ~f:(fun tr -> tr.has_assignment)
-              || not (Tn.Placements.known_virtual plc tn)
-            then []
+          (* A node committed [Virtual] by an earlier routine in the lineage: its stored
+             computation's reads stand in for setters this routine does not see (one stored
+             component ≈ one setter, so the same per-setter maximum applies). Computed even when
+             this routine sets the node too — a read replays the stored definition AND the local
+             updates, and the local update's excluded self-read must not hide the prefix — so the
+             inherited maximum unions with the local one. Only prior routines' components exist
+             here: this routine's are stored later, by the virtualizer this pass feeds. *)
+          let inherited_reads () =
+            if not (Tn.Placements.known_virtual plc tn) then []
             else
               match Hashtbl.find optim_ctx.computations tn with
               | Some comps ->
@@ -5168,15 +5169,15 @@ let decide_placements (optim_ctx : optimize_ctx) traced_store ~max_visits ~reads
           let s =
             match Hashtbl.find traced_store tn with
             | None -> (
-                match inherited_reads None with
+                match inherited_reads () with
                 | [] -> Set.singleton (module Tnode) tn
                 | read_sets -> max_expansion read_sets)
             | Some traced ->
-                let read_sets =
-                  if List.is_empty traced.setter_reads then inherited_reads (Some traced)
-                  else traced.setter_reads
+                let s =
+                  Set.union
+                    (max_expansion traced.setter_reads)
+                    (max_expansion (inherited_reads ()))
                 in
-                let s = max_expansion read_sets in
                 traced.inline_fanin <- max 1 (Set.length s);
                 if
                   Set.length s > virtualize_settings.max_inline_fanin
