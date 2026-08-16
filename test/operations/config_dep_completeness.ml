@@ -137,12 +137,23 @@ let () =
                   true
               | _ -> false
             in
-            if exempt then bump "exempt"
-            else if declares_config then bump (Scan.kind_name kind)
-            else
-              fail
-                (Printf.sprintf "%s: the %s %s does not declare %s in its deps" dune_file
-                   (Scan.kind_name kind) name Scan.config_file);
+            (match kind with
+            (* Declaring the dep does not settle this one: what the rule runs is unknown, so
+               whether it needs the dep is unknown too (Codex P2, round 2). *)
+            | Scan.Unreadable_command ->
+                fail
+                  (Printf.sprintf
+                     "%s runs `%s`, which this check cannot read -- name the executable in a way \
+                      Dune_stanza_scan.classify_command places (a path, `%%{bin:…}`, or a named \
+                      dependency), or teach it that spelling"
+                     dune_file name)
+            | _ ->
+                if exempt then bump "exempt"
+                else if declares_config then bump (Scan.kind_name kind)
+                else
+                  fail
+                    (Printf.sprintf "%s: the %s %s does not declare %s in its deps" dune_file
+                       (Scan.kind_name kind) name Scan.config_file));
             (kind, name, exempt))
       in
       let tally kind =

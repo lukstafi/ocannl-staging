@@ -79,24 +79,101 @@ let names_of stanza =
       | _ -> [])
 
 (* An atom carries a path inside dune's own punctuation: [%{dep:mlp_names.exe}] and [./%{pp}] are
-   one atom each. Split on everything a path cannot contain and keep what ends in [.exe]. *)
+   one atom each. Split on everything a path cannot contain, so the parts can be read separately. *)
 let path_char c =
   Char.is_alphanum c || List.mem [ '_'; '.'; '-'; '/'; '\\' ] c ~equal:Char.equal
 
-let executables_mentioned stanza =
-  atoms stanza
-  |> List.concat_map ~f:(fun atom ->
-         String.map atom ~f:(fun c -> if path_char c then c else ' ')
-         |> String.split ~on:' '
-         |> List.filter ~f:(String.is_suffix ~suffix:".exe")
-         |> List.map ~f:Stdlib.Filename.basename)
-  |> List.dedup_and_sort ~compare:String.compare
+let words atom =
+  String.map atom ~f:(fun c -> if path_char c then c else ' ')
+  |> String.split ~on:' '
+  |> List.filter ~f:(Fn.non String.is_empty)
+
+(** What a [(run …)] action's command names.
+
+    {1 Why command position, and why an unrecognized command fails}
+
+    Looking for a [.exe] anywhere in the stanza is the tempting rule and the wrong one in both
+    directions: it counts a rule that merely copies an executable, and it misses every way of
+    naming one that does not spell the extension — [%{bin:probe}] the first among them (Codex P2,
+    round 2 of PR #343), which is the same fall-through as round 1's [(alias …)] one spelling
+    further in. Patching spellings one at a time invites a third round, so what this reads is the
+    command position of a [run] action, and a command it cannot place FAILS rather than counting
+    as nothing.
+
+    The spellings it does place, all of them present in this repository or in dune's own manual:
+    a path ending in [.exe] however it is wrapped ([%{dep:foo.exe}], [%{exe:foo.exe}], [./foo.exe]);
+    [%{bin:name}], which resolves a PUBLIC executable — conservatively a site, because dune resolves
+    it from this workspace before PATH, and an external tool that reads no configuration is what the
+    exemption list is for; and [%{name}] bound by a named dependency [(:name pp.exe)], which the
+    action reaches without ever spelling the file. A bare word is a tool on PATH ([python3],
+    [diff]): not something this repository builds, so not a site. *)
+type command =
+  | Runs of string  (** the executable, by basename or by the name [%{bin:…}] gave *)
+  | External  (** a tool on PATH, which this repository does not build *)
+  | Unrecognized of string  (** command position this scan cannot read — reported, never ignored *)
+
+let pform_payload atom ~prefix =
+  match String.substr_index atom ~pattern:("%{" ^ prefix) with
+  | None -> None
+  | Some start -> (
+      let rest = String.drop_prefix atom (start + String.length prefix + 2) in
+      match String.lsplit2 rest ~on:'}' with Some (payload, _) -> Some payload | None -> None)
+
+let classify_command ~named_deps cmd =
+  match List.find (words cmd) ~f:(String.is_suffix ~suffix:".exe") with
+  | Some path -> Runs (Stdlib.Filename.basename path)
+  | None -> (
+      match
+        List.find_map [ "bin:"; "exe:" ] ~f:(fun prefix -> pform_payload cmd ~prefix)
+      with
+      | Some name -> Runs (Stdlib.Filename.basename name)
+      | None -> (
+          (* [./%{pp}] with [(deps (:pp pp.exe))]: the action names the dependency, not the file. *)
+          match pform_payload cmd ~prefix:"" with
+          | None -> External
+          | Some name -> (
+              match List.Assoc.find named_deps name ~equal:String.equal with
+              | Some paths -> (
+                  match List.find paths ~f:(String.is_suffix ~suffix:".exe") with
+                  | Some path -> Runs (Stdlib.Filename.basename path)
+                  | None -> External)
+              | None -> Unrecognized cmd)))
+
+(** The [(:name …)] bindings of a stanza's [(deps …)] field. *)
+let named_deps_of stanza =
+  match field stanza "deps" with
+  | None -> []
+  | Some args ->
+      List.filter_map args ~f:(function
+        | Sexp.List (Sexp.Atom name :: values) when String.is_prefix name ~prefix:":" ->
+            Some
+              ( String.drop_prefix name 1,
+                List.concat_map values ~f:(function Sexp.Atom a -> words a | _ -> []) )
+        | _ -> None)
+
+(* Every command an action runs, at any depth: [(with-stdout-to … (run …))],
+   [(no-infer (progn (run …) …))] and the rest nest the one that matters. A shell action carries
+   its command line as a string, which the same word split reads. *)
+let rec commands_in sexp =
+  let nested = match sexp with Sexp.List l -> List.concat_map l ~f:commands_in | _ -> [] in
+  match sexp with
+  | Sexp.List (Sexp.Atom "run" :: Sexp.Atom cmd :: _) -> cmd :: nested
+  | Sexp.List (Sexp.Atom ("bash" | "system") :: args) ->
+      List.concat_map args ~f:(function Sexp.Atom a -> [ a ] | _ -> []) @ nested
+  | _ -> nested
+
+let executables_run stanza =
+  let named_deps = named_deps_of stanza in
+  List.map (commands_in stanza) ~f:(classify_command ~named_deps)
+  |> List.dedup_and_sort ~compare:Poly.compare
 
 type kind =
   | Test  (** a [(test)] or [(tests)] stanza, which dune runs itself *)
   | Inline_tests  (** a [(library)] with an [(inline_tests)] field, ditto *)
   | Runs_executable  (** a [(rule)] that runs an executable — where an [(executable)] stanza's
                          dependencies have to live, there being no [deps] field on one *)
+  | Unreadable_command  (** a [(run …)] whose command this scan cannot place: reported, so that
+                            what it runs is settled by a reader rather than by silence *)
 
 (** [subdir] is the directory the stanza applies to, relative to the dune file's own: empty at the
     top level, and the path a [(subdir …)] wrapper names inside one. A wrapped stanza runs
@@ -123,6 +200,7 @@ let kind_name = function
   | Test -> "test"
   | Inline_tests -> "inline tests"
   | Runs_executable -> "rule running"
+  | Unreadable_command -> "rule whose command this scan cannot read:"
 
 (** Stanza heads that carry an action, so one of them may run a test executable. [alias] is here
     for the same reason [rule] is: it took an [action] field before dune 2.0, and it can still
@@ -152,10 +230,9 @@ let inert_heads =
     tutorial such as [gpt2_generate] needs no exemption from the check built on this. It is
     structurally not a site, rather than a name on a list someone has to keep true.
 
-    An action counts as running an executable when it mentions one at all. That covers both
-    spellings the repository uses — [%{dep:foo.exe}] inline in the action, and a named dependency
-    [(:pp pp.exe)] the action reaches through [%{pp}] — without the scan having to model dune's
-    variable expansion. *)
+    What a rule runs is read from the command position of its [run] actions, in every spelling
+    {!classify_command} places — and a command it cannot place becomes an {!Unreadable_command}
+    site, which the caller fails on. *)
 let sites content =
   walk "" (stanzas content) ~f:(fun subdir stanza ->
       let site kind name declares_config = [ { kind; name; declares_config; subdir } ] in
@@ -168,13 +245,16 @@ let sites content =
           | None -> []
           | Some inline ->
               site Inline_tests (stanza_name ()) (declares_config (field_in inline "deps")))
-      | Some h when List.mem action_heads h ~equal:String.equal -> (
-          match executables_mentioned stanza with
-          | [] -> []
-          | exes ->
-              site Runs_executable
-                (String.concat ~sep:", " exes)
-                (declares_config (field stanza "deps")))
+      | Some h when List.mem action_heads h ~equal:String.equal ->
+          let declares = declares_config (field stanza "deps") in
+          let run = executables_run stanza in
+          let exes = List.filter_map run ~f:(function Runs name -> Some name | _ -> None) in
+          let unreadable =
+            List.filter_map run ~f:(function Unrecognized cmd -> Some cmd | _ -> None)
+          in
+          (if List.is_empty exes then []
+           else site Runs_executable (String.concat ~sep:", " exes) declares)
+          @ List.concat_map unreadable ~f:(fun cmd -> site Unreadable_command cmd declares)
       | _ -> [])
 
 (** Stanza heads in [content] that {!sites} has no classification for, each once. The caller fails

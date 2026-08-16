@@ -73,6 +73,26 @@ let cases =
     ( "an alias stanza is read like a rule",
       {dune|(alias (name runtest) (deps ocannl_config) (action (run %{dep:probe.exe})))|dune},
       [ "rule running probe.exe [declares]" ] );
+    (* What the command names, in the spellings that do not say `.exe` (Codex P2, round 2). A
+       `%{bin:…}` resolves a public executable of this workspace before it looks at PATH, so it
+       counts; an external tool that reads no configuration is what the exemption list is for. *)
+    ( "a public executable through %{bin:...}",
+      {dune|(rule (deps ocannl_config) (action (run %{bin:probe} --read=backend)))|dune},
+      [ "rule running probe [declares]" ] );
+    ( "%{exe:...} names one too",
+      {dune|(rule (action (run %{exe:probe.exe})))|dune},
+      [ "rule running probe.exe" ] );
+    ( "a shell action's command line is read the same way",
+      {dune|(rule (deps ocannl_config) (action (bash "./probe.exe --flag > out")))|dune},
+      [ "rule running probe.exe [declares]" ] );
+    (* Command position, not "an .exe somewhere in the stanza": a rule that only moves an
+       executable around runs nothing. *)
+    ( "a rule that copies an executable does not run it",
+      {dune|(rule (target probe.copy) (action (copy %{dep:probe.exe} %{target})))|dune},
+      [] );
+    ( "a command this scan cannot place is reported, not ignored",
+      {dune|(rule (deps ocannl_config) (action (run %{dep:helper.sh})))|dune},
+      [ "rule whose command this scan cannot read: %{dep:helper.sh} [declares]" ] );
     (* What the file says, not what its prose says. *)
     ( "a stanza inside a comment is not a stanza",
       {dune|; (test (name phantom))
