@@ -35,17 +35,50 @@
 
 ; The stderr half, on a default run: the subject writes nothing itself, so the golden is the
 ; library's entire startup output -- and the point is that a warning is legible in it. The second
-; process is the same executable in its normalizer mode, turning the config file's absolute path
-; into a basename; it is given a silent configuration of its own so that the build log does not
-; carry a copy of the chatter under test.
+; process is the same executable in its normalizer mode, stripping the build directory from the
+; config file's absolute path; it is given a silent configuration of its own so that the build log
+; does not carry a copy of the chatter under test.
+;
+; The env_var deps are what make the executable's own guard reachable: dune tracks no environment
+; variable but OCANNL_BACKEND, so an ambient OCANNL setting arriving after this target was built
+; would otherwise leave the stale .raw in place and the test green without having run (Codex P2 on
+; PR #348). Declaring them makes the change invalidate the rule, the guard fire, and the run fail
+; by name. All four spellings of each, since `Utils.read_env_var` accepts all four; the keys are
+; the ones that shape stderr -- what the guard checks, less `clean_up_*`, which are pinned on the
+; commandline below and so cannot be reached from the environment.
 
 (rule
  (target default_stderr.raw)
- (deps ocannl_config)
+ (deps
+  ocannl_config
+  (env_var OCANNL_SUPPRESS_WELCOME_MESSAGE)
+  (env_var ocannl_suppress_welcome_message)
+  (env_var OCANNL-SUPPRESS-WELCOME-MESSAGE)
+  (env_var ocannl-suppress-welcome-message)
+  (env_var OCANNL_LOG_CONFIG_SOURCING)
+  (env_var ocannl_log_config_sourcing)
+  (env_var OCANNL-LOG-CONFIG-SOURCING)
+  (env_var ocannl-log-config-sourcing)
+  (env_var OCANNL_LOG_LEVEL)
+  (env_var ocannl_log_level)
+  (env_var OCANNL-LOG-LEVEL)
+  (env_var ocannl-log-level)
+  (env_var OCANNL_NO_CONFIG_FILE)
+  (env_var ocannl_no_config_file)
+  (env_var OCANNL-NO-CONFIG-FILE)
+  (env_var ocannl-no-config-file)
+  (env_var OCANNL_PROFILE)
+  (env_var ocannl_profile)
+  (env_var OCANNL-PROFILE)
+  (env_var ocannl-profile))
  (action
   (with-stderr-to
    %{target}
-   (run %{dep:startup_streams.exe} guard))))
+   (run
+    %{dep:startup_streams.exe}
+    guard
+    --ocannl_clean_up_build_files_on_startup=false
+    --ocannl_clean_up_log_files_on_startup=false))))
 
 (rule
  (target default_stderr.actual)

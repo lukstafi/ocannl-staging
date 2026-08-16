@@ -459,17 +459,44 @@ let read_env_var n =
   | None | Some (_, "") -> None
   | Some (env_n, result) -> Some (result, env_n)
 
+(** The provenance of the bootstrap keys, held until it is known whether anyone asked for it.
+
+    The bootstrap reads happen before {!log_config_sourcing} can be resolved -- one of them IS that
+    resolution -- so printing them eagerly would need the trace on by default, which is what
+    gh-ocannl-595 undid. Buffering instead keeps the setting's promise whole: enabling it anywhere,
+    the config file included, reports every setting the run read (Codex P2 on PR #348). *)
+let bootstrap_sourcing_log = ref []
+
+(** Prints and drains the buffer if the trace is on by now; keeps buffering otherwise, since a later
+    source may still turn it on. The last call site drops what is left. *)
+let flush_bootstrap_sourcing () =
+  if !log_config_sourcing then (
+    let seen = Hash_set.create (module String) in
+    List.rev !bootstrap_sourcing_log
+    |> List.iter ~f:(fun msg ->
+           (* The bootstrap keys are read more than once (three call sites consult
+              [suppress_welcome_message]), and a repeated lookup is not news. *)
+           if not (Hash_set.mem seen msg) then (
+             Hash_set.add seen msg;
+             Stdio.eprintf "%s\n%!" msg));
+    bootstrap_sourcing_log := [])
+
 (** The bootstrap reader: the few keys that are consulted before the config file exists (and hence
     before profiles are resolved) come from the commandline or the environment only. *)
 let read_cmdline_or_env_var n =
-  let with_debug = !log_config_sourcing && not (Hash_set.mem accessed_global_args n) in
+  let report msg =
+    if not (Hash_set.mem accessed_global_args n) then
+      bootstrap_sourcing_log := msg :: !bootstrap_sourcing_log
+  in
   match read_cmdline_var n with
   | Some (result, arg) ->
-      if with_debug then Stdio.eprintf "Found %s, commandline %s\n%!" result arg;
+      report @@ Printf.sprintf "Found %s, commandline %s" result arg;
+      flush_bootstrap_sourcing ();
       Some result
   | None ->
       Option.map (read_env_var n) ~f:(fun (result, env_n) ->
-          if with_debug then Stdio.eprintf "Found %s, environment %s\n%!" result env_n;
+          report @@ Printf.sprintf "Found %s, environment %s" result env_n;
+          flush_bootstrap_sourcing ();
           result)
 
 (* Originally from the library core.filename_base. *)
@@ -492,7 +519,9 @@ let log_config_sourcing_arg = read_cmdline_or_env_var "log_config_sourcing"
 
 let () =
   Option.iter log_config_sourcing_arg ~f:(fun v ->
-      log_config_sourcing := bool_of_config_string ~arg_name:"log_config_sourcing" v)
+      log_config_sourcing := bool_of_config_string ~arg_name:"log_config_sourcing" v);
+  (* Its own lookup was buffered, the reference being false at the time. *)
+  flush_bootstrap_sourcing ()
 
 (** Parses the [ocannl_config] syntax: one [key=value] per line, [#] and [~~] lines are comments,
     empty values mean "unset", the [ocannl_] key prefix is optional and keys are case-insensitive.
@@ -569,7 +598,14 @@ let () =
   (* The commandline and the environment take precedence, and were already applied above. *)
   if Option.is_none log_config_sourcing_arg then
     Option.iter (Hashtbl.find config_file_args "log_config_sourcing") ~f:(fun v ->
-        log_config_sourcing := bool_of_config_string ~arg_name:"log_config_sourcing" v)
+        log_config_sourcing := bool_of_config_string ~arg_name:"log_config_sourcing" v);
+  (* The last chance for the bootstrap provenance to be wanted: a config file that turns the trace
+     on gets it replayed here, after the banner it could not precede. Nothing buffers past this
+     point -- every later read goes through [get_global_arg_with_source]. *)
+  if !log_config_sourcing && not (List.is_empty !bootstrap_sourcing_log) then
+    Stdio.eprintf "\nOCANNL: configuration resolved before the config file was read:\n%!";
+  flush_bootstrap_sourcing ();
+  bootstrap_sourcing_log := []
 
 (** {2 Configuration profiles (gh-ocannl-559)} *)
 

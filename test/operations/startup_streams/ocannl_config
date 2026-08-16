@@ -1,0 +1,10 @@
+# gh-ocannl-595: a DEFAULT configuration, deliberately -- this test's subject is what a user who
+# has set nothing sees on stderr, so `log_level`, `log_config_sourcing` and
+# `suppress_welcome_message` are conspicuously absent (the shared test/config one sets all three,
+# which is why it cannot serve here).
+#
+# The unknown key is the point of the file: it provokes the one startup message that means the
+# user made a mistake, and the golden shows it arriving at the top of a three-line stream. The
+# startup-cleanup keys, which would otherwise have this executable complain on stderr about
+# directories it does not create, are pinned on the rule's commandline instead -- see dune.
+definitely_not_a_config_key=1

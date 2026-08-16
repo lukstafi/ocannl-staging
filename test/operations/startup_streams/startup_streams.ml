@@ -25,45 +25,52 @@ open Base
 open Stdio
 
 (* Keys that would rewrite the stderr golden if they arrived from the ambient environment, which
-   outranks this directory's config file -- and dune tracks no environment variable but
-   OCANNL_BACKEND, so a stale golden could be reused besides. As in `profiles/`, the executable
-   cannot PREVENT this (the settings are read during [Utils]'s initialization) but detecting it is
-   enough: a rule that exits nonzero writes no golden, so a mystifying diff becomes a named
-   failure. Only the stderr rule guards; the stdout rule's claim is stream-level and holds under
-   any of these. *)
-let stderr_shaping_keys =
-  [
-    "suppress_welcome_message";
-    "log_config_sourcing";
-    "log_level";
-    "no_config_file";
-    "profile";
-    "clean_up_build_files_on_startup";
-    "clean_up_log_files_on_startup";
-  ]
+   outranks this directory's config file. As in `profiles/`, the executable cannot PREVENT this
+   (the settings are read during [Utils]'s initialization) but detecting it is enough: a rule that
+   exits nonzero writes no golden, so a mystifying diff becomes a named failure. The dune rule
+   declares the same keys as env_var dependencies, which is what gets this guard RUN when one of
+   them changes. Only the stderr rule guards; the stdout rule's claim is stream-level and holds
+   under any of these.
 
+   The startup-cleanup keys are not here: they are pinned on the rule's commandline, which no
+   environment variable can outrank -- the honest option wherever it is available, a guard being
+   only the second best. It is not available for these five: pinning them on the commandline is
+   pinning the very defaults under test. *)
+let stderr_shaping_keys =
+  [ "suppress_welcome_message"; "log_config_sourcing"; "log_level"; "no_config_file"; "profile" ]
+
+(* On STDOUT, deliberately: the rule captures this process's stderr into its target, so a diagnostic
+   written there would be swallowed by the very redirection it is explaining, leaving dune to report
+   a bare "Command exited with code 1". Stdout is where the reason survives. *)
 let guard () =
   List.iter stderr_shaping_keys ~f:(fun arg_name ->
       Option.iter (Utils.read_env_var arg_name) ~f:(fun (value, var) ->
-          eprintf
+          printf
             "startup_streams: %s=%s is set in the environment and would rewrite this test's \
              expected stderr; unset it to run the test.\n"
             var value;
           Stdlib.exit 1))
 
 (* The captured stderr names the config file by the absolute path the walk-up search built, so the
-   golden gets the basename instead. Also strips a trailing CR: on Windows the capture is
+   golden gets the basename instead. The subject ran in this same directory (dune runs both actions
+   of the rule there), which is what lets the prefix be stripped as a substring: tokenizing on
+   spaces would mangle the path under a checkout whose own path contains one (Codex P2 on PR #348).
+   Both separators are covered because the path is built with [Filename.concat] on the platform's,
+   while the capture may be read anywhere. Also strips a trailing CR: on Windows the capture is
    text-mode, and the golden is pinned to LF by .gitattributes. *)
+let directory_prefixes () =
+  let cwd = Stdlib.Sys.getcwd () in
+  let slashed = String.tr ~target:'\\' ~replacement:'/' cwd in
+  let backslashed = String.tr ~target:'/' ~replacement:'\\' cwd in
+  [ slashed ^ "/"; backslashed ^ "\\" ]
+
 let normalize () =
   Out_channel.set_binary_mode stdout true;
+  let prefixes = directory_prefixes () in
   In_channel.iter_lines In_channel.stdin ~f:(fun line ->
       let line = String.rstrip ~drop:(Char.equal '\r') line in
-      String.split line ~on:' '
-      |> List.map ~f:(fun token ->
-             if String.is_substring token ~substring:"ocannl_config" then
-               Stdlib.Filename.basename token
-             else token)
-      |> String.concat ~sep:" "
+      List.fold prefixes ~init:line ~f:(fun line prefix ->
+          String.substr_replace_all line ~pattern:prefix ~with_:"")
       |> printf "%s\n")
 
 let () =
