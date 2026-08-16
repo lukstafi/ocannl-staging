@@ -523,11 +523,24 @@ type traced_array = {
           virtual computation, or inlined by a later routine in the lineage). *)
   mutable setter_reads : Set.M(Tnode).t list;
       (** Per setter statement ([Set]/[Set_from_vec]), the tensor nodes its right-hand side reads —
-          the node's own read-modify-write self-reads excluded (when inlined they become the local
-          accumulator, not a load). Decision-independent analysis fact behind the transitive
-          inline-fanin guard (gh-573): a read of a cell executes one setter's computation, so the
-          guard takes the per-setter maximum, not the union — a Block/concat node written by one
-          range-guarded setter per component costs one component per read. *)
+          including reads inside [Local_scope] bodies in the right-hand side (their loads execute
+          per evaluation of the setter), and excluding the node's own read-modify-write self-reads
+          (when inlined they become the local accumulator, not a load). Decision-independent
+          analysis fact behind the transitive inline-fanin guard (gh-573): a read of a cell
+          executes one setter's computation, so the guard takes the per-setter maximum, not the
+          union — a Block/concat node written by one range-guarded setter per component costs one
+          component per read. The per-setter maximum is chosen before downstream unions, so a
+          consumer overlapping one alternative but not another can be undercounted — accepted: an
+          exact treatment is combinatorial across multi-setter dependencies, and both error
+          directions of this heuristic prior are benign (a miss reproduces the pre-guard
+          placement, which stays a [`Materialize] flip candidate with a fanin-charged cost). *)
+  mutable inline_fanin : int;
+      (** The transitive inline fan-in the guard computed for this node under the current
+          placements: the number of distinct materialized nodes the node's fully-inlined
+          computation would load (at least 1). Decision-dependent (written by [decide_placements]
+          on the candidate's private store copy); multiplies into [fc_recompute_cost] so the
+          search and the memory-budget planner see the true cost of re-inlining a node the fanin
+          cap materialized. *)
 }
 [@@deriving sexp_of]
 
@@ -617,8 +630,10 @@ type swizzle_kind =
 
 (** gh-555: one searchable inlining decision dimension of a compile — a node whose placement the
     default policy decided, together with the flip a search can try and the recompute-cost bound of
-    the virtual placement (reduction extent × per-cell read multiplicity — the cost the flip trades
-    against memory traffic). [`Materialize] flips a node the policy left virtual (via
+    the virtual placement (reduction extent × per-cell read multiplicity × transitive inline
+    fan-in — the cost the flip trades against memory traffic; without the fan-in factor a node the
+    fanin cap materialized would rank among the cheapest to re-inline, and the memory-budget
+    planner would prefer undoing exactly the guard's decision). [`Materialize] flips a node the policy left virtual (via
     [Context.decide_materialized]); [`Inline] flips a node materialized by the heuristic caps
     (provenance 1, 39 or 41 — never by legality or observability, which are not decisions), via
     [Context.decide_inline]. An [`Inline] flip's legality is settled only when the virtualizer
@@ -703,6 +718,7 @@ let get_node store tn =
         inline_reduction_extent = 1;
         read_by_other = false;
         setter_reads = [];
+        inline_fanin = 1;
       })
 
 let is_constexpr_comp traced_store llsc =
@@ -947,8 +963,11 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
     match Affine.fiber_cardinality ~domain:(Map.to_alist loop_ranges) idcs with
     | `Exact n | `At_least n -> n
   in
-  let rec loop_proc ~loop_ranges llc =
-    let loop = loop_proc ~loop_ranges in
+  (* [scope_reads] is the enclosing setter's read collector when this traversal is inside a
+     [Local_scope] body in that setter's right-hand side (gh-573): the body's loads execute per
+     evaluation of the setter, so they belong to its [setter_reads]. [None] at top level. *)
+  let rec loop_proc ~loop_ranges ~scope_reads llc =
+    let loop = loop_proc ~loop_ranges ~scope_reads in
     match llc with
     | Noop -> ()
     | (Seq (c1, c2) : t) ->
@@ -958,7 +977,9 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
         (* A dead loop ([to_ < from_]) never executes its body: record no facts from it, like the
            retired tracer, which never enumerated such loops. *)
         if to_ >= from_ then
-          loop_proc ~loop_ranges:(Map.set loop_ranges ~key:index ~data:(to_ - from_ + 1)) body
+          loop_proc ~scope_reads
+            ~loop_ranges:(Map.set loop_ranges ~key:index ~data:(to_ - from_ + 1))
+            body
     | Zero_out tn ->
         let traced : traced_array = get_node traced_store tn in
         if (not traced.has_assignment) && not (Hash_set.mem read_seen tn) then (
@@ -1017,7 +1038,7 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
         traced.is_complex <- traced.is_complex || not (is_constexpr_comp traced_store arg);
         traced.has_assignment <- true;
         track_symbol reverse_node_map tn idcs
-    | Set_local (_, llsc) -> loop_scalar ~loop_ranges ~lhs:None ~reads:None llsc
+    | Set_local (_, llsc) -> loop_scalar ~loop_ranges ~lhs:None ~reads:scope_reads llsc
     | Declare_local _ -> ()
     | Comment _ -> ()
     | Staged_compilation _ -> ()
@@ -1030,7 +1051,7 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
            reaches fact tracing. *)
         invalid_arg "Low_level.trace_node_facts: Tile_mma reached the optimization pipeline"
     | If { cond = c, _; body } ->
-        loop_scalar ~loop_ranges ~lhs:None ~reads:None c;
+        loop_scalar ~loop_ranges ~lhs:None ~reads:scope_reads c;
         loop body
   and loop_scalar ~loop_ranges ~lhs ~reads llsc =
     let loop = loop_scalar ~loop_ranges ~lhs ~reads in
@@ -1053,7 +1074,7 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
         (* gh-343: [Get_dynamic] is produced after this tracing pass, so this arm is defensive; the
            dynamic index sub-expression is still traversed for completeness. *)
         loop v
-    | Local_scope { body; _ } -> loop_proc ~loop_ranges body
+    | Local_scope { body; _ } -> loop_proc ~loop_ranges ~scope_reads:reads body
     | Get_local _ -> ()
     | Get_merge_buffer (source, _) ->
         Option.iter !merge_node_ref ~f:(fun merge_node ->
@@ -1079,7 +1100,7 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
         loop llv2
     | Unop (_, (llsc, _)) -> loop llsc
   in
-  loop_proc ~loop_ranges:(Map.empty (module Indexing.Symbol)) llc
+  loop_proc ~loop_ranges:(Map.empty (module Indexing.Symbol)) ~scope_reads:None llc
 
 let%diagn2_sexp check_and_store_virtual (optim_ctx : optimize_ctx) traced static_indices top_llc =
   let exception Non_virtual of int in
@@ -5060,6 +5081,40 @@ let decide_placements (optim_ctx : optimize_ctx) traced_store ~max_visits ~reads
      contributors instead of once per consumer. Per-setter maximum, not union across setters — a
      read of one cell executes one setter's computation (Block/concat range-guarded setters). *)
   if virtualize_settings.max_inline_fanin >= 0 then (
+    (* The reads a stored computation replays when [inline_computation] inlines it: [Get]s of nodes
+       other than [self], including inside [Local_scope] bodies. Mirrors [trace_node_facts]'
+       collection for this routine's own setters; used for a dependency this routine only READS
+       whose definition an earlier routine in the lineage committed [Virtual] — its traced entry
+       here has no setters, but its computation will be replayed all the same. Merge-buffer reads
+       stay uncounted (a materialized copy), and projections charge only the evaluated operand. *)
+    let rec reads_of_proc ~self acc (c : t) =
+      match c with
+      | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _
+        ->
+          acc
+      | Tile_mma _ -> acc (* post-optimization construct; never in stored computations *)
+      | Seq (c1, c2) -> reads_of_proc ~self (reads_of_proc ~self acc c1) c2
+      | For_loop { body; _ } -> reads_of_proc ~self acc body
+      | Set { llsc; _ } -> reads_of_scalar ~self acc llsc
+      | Set_dynamic { dyn_value = v, _; llsc; _ } ->
+          reads_of_scalar ~self (reads_of_scalar ~self acc v) llsc
+      | Set_from_vec { arg = v, _; _ } -> reads_of_scalar ~self acc v
+      | Set_local (_, llsc) -> reads_of_scalar ~self acc llsc
+      | If { cond = c0, _; body } -> reads_of_proc ~self (reads_of_scalar ~self acc c0) body
+    and reads_of_scalar ~self acc (sc : scalar_t) =
+      match sc with
+      | Constant _ | Constant_bits _ | Embed_index _ | Get_local _ | Get_merge_buffer _ -> acc
+      | Get (q, _) -> if Tn.equal q self then acc else Set.add acc q
+      | Get_dynamic { tn = q; dyn_value = v, _; _ } ->
+          reads_of_scalar ~self (if Tn.equal q self then acc else Set.add acc q) v
+      | Local_scope { body; _ } -> reads_of_proc ~self acc body
+      | Binop (Ops.Arg1, (v1, _), _) -> reads_of_scalar ~self acc v1
+      | Binop (Ops.Arg2, _, (v2, _)) -> reads_of_scalar ~self acc v2
+      | Ternop (_, (v1, _), (v2, _), (v3, _)) ->
+          reads_of_scalar ~self (reads_of_scalar ~self (reads_of_scalar ~self acc v1) v2) v3
+      | Binop (_, (v1, _), (v2, _)) -> reads_of_scalar ~self (reads_of_scalar ~self acc v1) v2
+      | Unop (_, (v, _)) -> reads_of_scalar ~self acc v
+    in
     let memo = Hashtbl.create (module Tnode) in
     let rec fanin tn : Set.M(Tnode).t =
       match Hashtbl.find memo tn with
@@ -5069,24 +5124,48 @@ let decide_placements (optim_ctx : optimize_ctx) traced_store ~max_visits ~reads
              if materialized — a cyclically-read node has an uncovered read and was placed
              [On_device] by the coverage rule above anyway. *)
           Hashtbl.set memo ~key:tn ~data:(Set.singleton (module Tnode) tn);
+          let expand acc p =
+            (* Recurse first: the dependency's own decision lands before its placement is
+               consulted, making the result traversal-order-independent. *)
+            let s_p = fanin p in
+            if Tn.Placements.known_non_virtual plc p then Set.add acc p else Set.union acc s_p
+          in
+          (* Per-setter maximum over the per-setter read sets (see [setter_reads]). *)
+          let max_expansion read_sets =
+            List.fold read_sets
+              ~init:(Set.empty (module Tnode))
+              ~f:(fun best reads ->
+                let s = Set.fold reads ~init:(Set.empty (module Tnode)) ~f:expand in
+                if Set.length s > Set.length best then s else best)
+          in
+          (* A node this routine reads but never sets, committed [Virtual] by an earlier routine in
+             the lineage: its replayed computation's reads stand in for the missing setters (one
+             stored component ≈ one setter, so the same per-setter maximum applies). *)
+          let inherited_reads traced =
+            if
+              Option.exists traced ~f:(fun tr -> tr.has_assignment)
+              || not (Tn.Placements.known_virtual plc tn)
+            then []
+            else
+              match Hashtbl.find optim_ctx.computations tn with
+              | Some comps ->
+                  List.map comps ~f:(fun (_, code) ->
+                      reads_of_proc ~self:tn (Set.empty (module Tnode)) code)
+              | None -> []
+          in
           let s =
             match Hashtbl.find traced_store tn with
-            | None -> Set.singleton (module Tnode) tn
+            | None -> (
+                match inherited_reads None with
+                | [] -> Set.singleton (module Tnode) tn
+                | read_sets -> max_expansion read_sets)
             | Some traced ->
-                let expand acc p =
-                  (* Recurse first: the dependency's own decision lands before its placement is
-                     consulted, making the result traversal-order-independent. *)
-                  let s_p = fanin p in
-                  if Tn.Placements.known_non_virtual plc p then Set.add acc p
-                  else Set.union acc s_p
+                let read_sets =
+                  if List.is_empty traced.setter_reads then inherited_reads (Some traced)
+                  else traced.setter_reads
                 in
-                let s =
-                  List.fold traced.setter_reads
-                    ~init:(Set.empty (module Tnode))
-                    ~f:(fun best reads ->
-                      let s = Set.fold reads ~init:(Set.empty (module Tnode)) ~f:expand in
-                      if Set.length s > Set.length best then s else best)
-                in
+                let s = max_expansion read_sets in
+                traced.inline_fanin <- max 1 (Set.length s);
                 if
                   Set.length s > virtualize_settings.max_inline_fanin
                   && traced.has_assignment && traced.read_by_other
@@ -5190,7 +5269,11 @@ let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : opt
           | None -> acc
           | Some fc_flip ->
               let mult = max 1 ((Lazy.force an.an_read_multiplicity) tn) in
-              { fc_tn = tn; fc_flip; fc_recompute_cost = traced.inline_reduction_extent * mult }
+              {
+                fc_tn = tn;
+                fc_flip;
+                fc_recompute_cost = traced.inline_reduction_extent * mult * traced.inline_fanin;
+              }
               :: acc)
     |> List.sort ~compare:(fun a b ->
            match Int.compare b.fc_recompute_cost a.fc_recompute_cost with

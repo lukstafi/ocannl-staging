@@ -11,10 +11,13 @@
   read-dependency graph bottom-up accumulating each virtualization candidate's transitive inline
   fan-in — the distinct materialized nodes its fully-inlined computation would load — and
   materializes a node whose fan-in exceeds `virtualize_max_inline_fanin` (default 8; negative
-  disables), which resets the fan-in downstream. The decision is a heuristic policy prior like the
-  other caps (`Never_virtual` provenance 41): `Context.decide_inline` exempts a node from it, and
-  it is reported as an `` `Inline `` flip candidate, so the placement search can undo it where
-  measurement disagrees.
+  disables), which resets the fan-in downstream. The fan-in of a node an earlier routine in the
+  lineage committed `Virtual` is derived from its stored computation (reads inside `Local_scope`
+  bodies included), so a chain cannot escape the cap by being compiled in pieces. The decision is
+  a heuristic policy prior like the other caps (`Never_virtual` provenance 41):
+  `Context.decide_inline` exempts a node from it, and it is reported as an `` `Inline `` flip
+  candidate whose recompute cost carries the fan-in — without that factor the memory-budget
+  planner would rank the guard's own decisions among the cheapest to undo.
 
 - **Checkpoints load by mapping the file, not by copying it** (gh-ocannl-467): `Persistence.load`
   and `Persistence.restore` wrap each payload as a private, copy-on-write `Unix.map_file` region

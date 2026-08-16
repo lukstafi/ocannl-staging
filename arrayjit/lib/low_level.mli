@@ -377,10 +377,13 @@ type traced_array = {
           does not. Gates the recompute-cost guard: a node never read in the routine has no inlining
           cost, so it must stay eligible for virtual dead-code elimination. *)
   mutable setter_reads : Set.M(Tnode).t list;
-      (** Per setter statement ([Set]/[Set_from_vec]), the tensor nodes its right-hand side reads,
-          the node's own read-modify-write self-reads excluded. Analysis fact behind the transitive
-          inline-fanin guard (gh-573), which takes the per-setter maximum (a read of one cell
-          executes one setter's computation). *)
+      (** Per setter statement ([Set]/[Set_from_vec]), the tensor nodes its right-hand side reads —
+          including reads inside [Local_scope] bodies, excluding the node's own read-modify-write
+          self-reads. Analysis fact behind the transitive inline-fanin guard (gh-573), which takes
+          the per-setter maximum (a read of one cell executes one setter's computation). *)
+  mutable inline_fanin : int;
+      (** The transitive inline fan-in [decide_placements] computed for this node under the current
+          placements (at least 1); multiplies into [fc_recompute_cost]. *)
 }
 [@@deriving sexp_of]
 
@@ -457,7 +460,8 @@ type swizzle_kind =
 
 (** gh-555: one searchable inlining decision dimension of a compile — a node whose placement the
     default policy decided, together with the flip a search can try and the recompute-cost bound of
-    the virtual placement (reduction extent × per-cell read multiplicity). [`Materialize] flips a
+    the virtual placement (reduction extent × per-cell read multiplicity × transitive inline
+    fan-in). [`Materialize] flips a
     node the policy left virtual (via [Context.decide_materialized]); [`Inline] flips a node
     materialized by the heuristic caps (never by legality or observability), via
     [Context.decide_inline]. An [`Inline] flip's legality is settled only when the virtualizer
