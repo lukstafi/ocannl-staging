@@ -43,34 +43,36 @@
 ; variable but OCANNL_BACKEND, so an ambient OCANNL setting arriving after this target was built
 ; would otherwise leave the stale .raw in place and the test green without having run (Codex P2 on
 ; PR #348). Declaring them makes the change invalidate the rule, the guard fire, and the run fail
-; by name. All four spellings of each, since `Utils.read_env_var` accepts all four; the keys are
-; the ones that shape stderr -- what the guard checks, less `clean_up_*`, which are pinned on the
-; commandline below and so cannot be reached from the environment.
+; by name. All four spellings of each, as `Utils.env_var_names` builds them -- note that the dashed
+; variants dash only the PREFIX (`ocannl-log_level`, not `ocannl-log-level`), so an all-dashed
+; spelling would declare a variable nothing reads. The keys are the ones that shape stderr -- what
+; the guard checks, less `clean_up_*`, which are pinned on the commandline below and so cannot be
+; reached from the environment.
 
 (rule
  (target default_stderr.raw)
  (deps
   ocannl_config
-  (env_var OCANNL_SUPPRESS_WELCOME_MESSAGE)
   (env_var ocannl_suppress_welcome_message)
-  (env_var OCANNL-SUPPRESS-WELCOME-MESSAGE)
-  (env_var ocannl-suppress-welcome-message)
-  (env_var OCANNL_LOG_CONFIG_SOURCING)
+  (env_var OCANNL_SUPPRESS_WELCOME_MESSAGE)
+  (env_var ocannl-suppress_welcome_message)
+  (env_var OCANNL-SUPPRESS_WELCOME_MESSAGE)
   (env_var ocannl_log_config_sourcing)
-  (env_var OCANNL-LOG-CONFIG-SOURCING)
-  (env_var ocannl-log-config-sourcing)
-  (env_var OCANNL_LOG_LEVEL)
+  (env_var OCANNL_LOG_CONFIG_SOURCING)
+  (env_var ocannl-log_config_sourcing)
+  (env_var OCANNL-LOG_CONFIG_SOURCING)
   (env_var ocannl_log_level)
-  (env_var OCANNL-LOG-LEVEL)
-  (env_var ocannl-log-level)
-  (env_var OCANNL_NO_CONFIG_FILE)
+  (env_var OCANNL_LOG_LEVEL)
+  (env_var ocannl-log_level)
+  (env_var OCANNL-LOG_LEVEL)
   (env_var ocannl_no_config_file)
-  (env_var OCANNL-NO-CONFIG-FILE)
-  (env_var ocannl-no-config-file)
-  (env_var OCANNL_PROFILE)
+  (env_var OCANNL_NO_CONFIG_FILE)
+  (env_var ocannl-no_config_file)
+  (env_var OCANNL-NO_CONFIG_FILE)
   (env_var ocannl_profile)
-  (env_var OCANNL-PROFILE)
-  (env_var ocannl-profile))
+  (env_var OCANNL_PROFILE)
+  (env_var ocannl-profile)
+  (env_var OCANNL-PROFILE))
  (action
   (with-stderr-to
    %{target}
