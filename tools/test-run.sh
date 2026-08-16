@@ -173,19 +173,6 @@ new_run() {
   { printf '%s\n' "$*" >"$run_dir/cmd" &&
     printf '%s\n' "$cap" >"$run_dir/cap" &&
     : >"$run_dir/log"; } || die "cannot write run metadata in $run_dir"
-  # `ln -sfn` onto an existing DIRECTORY silently creates the link INSIDE it,
-  # leaving `last` dangling while the launch reports success -- refuse a
-  # non-symlink squatter, and re-read the link to prove it points here.
-  [ ! -e "$RUNS/last-$wt_key" ] || [ -L "$RUNS/last-$wt_key" ] ||
-    die "$RUNS/last-$wt_key exists and is not a symlink; remove it"
-  ln -sfn "$run_dir" "$RUNS/last-$wt_key" &&
-    [ "$(readlink "$RUNS/last-$wt_key" 2>/dev/null)" = "$run_dir" ] ||
-    die "cannot update $RUNS/last-$wt_key"
-  # Advisory owner pointer for the lock-refusal message (the lock itself is
-  # the authority; a crash merely leaves this stale, and its reader only
-  # uses it to TARGET status/stop).
-  printf '%s\n' "$run_dir" >"$PWD/.test-run.lock.owner" ||
-    die "cannot record the lock owner pointer"
   # Runs are throwaway diagnostics; reap old ones so the directory cannot grow
   # without bound. Deletion demands the full run schema -- the timestamped
   # name AND this script's metadata files -- never mere position under $RUNS,
@@ -226,12 +213,18 @@ new_run() {
 # report a stale run as active forever and `stop` would TERM an innocent
 # process. An empty token (MSYS ps without lstart) degrades to the plain
 # pid check rather than failing.
+# One fixed rendering for start-time tokens: lstart is locale- AND
+# timezone-formatted, so an unpinned rendering makes the same process print
+# differently from a shell in another TZ -- classifying a live run as dead
+# and letting stop refuse to reach it.
+ps_token() { LC_ALL=C TZ=UTC ps -o lstart= -p "$1" 2>/dev/null | tr -s ' '; }
+
 proc_alive() { # pid-file token-file
   local pid tok now
   pid=$(cat "$1" 2>/dev/null) || return 1
   kill -0 "$pid" 2>/dev/null || return 1
   tok=$(tr -s ' ' <"$2" 2>/dev/null) || tok=
-  now=$(ps -o lstart= -p "$pid" 2>/dev/null | tr -s ' ')
+  now=$(ps_token "$pid")
   [ -z "$tok" ] || [ -z "$now" ] || [ "$tok" = "$now" ]
 }
 sup_alive() { proc_alive "$1/pid" "$1/ptoken"; }
@@ -239,6 +232,32 @@ sup_alive() { proc_alive "$1/pid" "$1/ptoken"; }
 # bounded group-reap) -- but that window is exactly where "no verdict yet"
 # must not be misread as "no verdict coming".
 wrapper_alive() { proc_alive "$1/wpid" "$1/wtoken"; }
+
+# Make the launched run discoverable (`last` symlink, lock-owner pointer).
+# Deliberately AFTER the wrapper exists and is recorded, so any directory
+# reachable via `last` already carries its full launch metadata -- a status
+# probe can then never mistake a mid-launch run for a dead or running one.
+publish_run() {
+  # `ln -sfn` onto an existing DIRECTORY silently creates the link INSIDE it,
+  # leaving `last` dangling while the launch reports success -- refuse a
+  # non-symlink squatter, and re-read the link to prove it points here.
+  { [ ! -e "$RUNS/last-$wt_key" ] || [ -L "$RUNS/last-$wt_key" ]; } || {
+    echo "test-run: $RUNS/last-$wt_key exists and is not a symlink; remove it" >&2
+    return 1
+  }
+  { ln -sfn "$run_dir" "$RUNS/last-$wt_key" &&
+    [ "$(readlink "$RUNS/last-$wt_key" 2>/dev/null)" = "$run_dir" ]; } || {
+    echo "test-run: cannot update $RUNS/last-$wt_key" >&2
+    return 1
+  }
+  # Advisory owner pointer for the lock-refusal message (the lock itself is
+  # the authority; a crash merely leaves this stale, and its reader only
+  # uses it to TARGET status/stop).
+  printf '%s\n' "$run_dir" >"$PWD/.test-run.lock.owner" || {
+    echo "test-run: cannot record the lock owner pointer" >&2
+    return 1
+  }
+}
 
 resolve_run() {
   local ref=${1:-last}
@@ -254,6 +273,11 @@ resolve_run() {
   else
     die "no such run: $ref (neither a directory nor an entry under $RUNS)"
   fi
+  # Only directories this runner created may be trusted: without this, an
+  # arbitrary directory's stray `pid` file (with the missing token read as
+  # the documented fallback) could get an unrelated process TERMed by stop.
+  [ -f "$run_dir/cmd" ] && [ -f "$run_dir/cap" ] ||
+    die "not a test-run directory (no cmd/cap metadata): $run_dir"
 }
 
 # The compact report `run`, `wait` and `status` all end with. Fingerprint in
@@ -353,7 +377,7 @@ case $sub in
         perl -e "$capped_perl" -- "$cap" "$DUNE" "$@" >>"$run_dir/log" 2>&1 &
       sup=$!
       printf '%s\n' "$sup" >"$run_dir/pid"
-      ps -o lstart= -p "$sup" 2>/dev/null >"$run_dir/ptoken"
+      ps_token "$sup" >"$run_dir/ptoken"
       wait "$sup"
       rc=$?
       # A SIGKILLed supervisor cannot reap its process group, and dune would
@@ -376,7 +400,15 @@ case $sub in
     # BASHPID for the subshell to name itself): status and wait use it to
     # tell "verdict publication in flight" from "nothing left to publish".
     printf '%s\n' "$wrapper" >"$run_dir/wpid"
-    ps -o lstart= -p "$wrapper" 2>/dev/null >"$run_dir/wtoken"
+    ps_token "$wrapper" >"$run_dir/wtoken"
+    if ! publish_run; then
+      # An unpublishable run must not keep running untracked: cancel via the
+      # supervisor (waiting briefly for the wrapper to record its pid) and
+      # let the wrapper publish the 143 into the unpublished directory.
+      for _ in 1 2 3; do [ -f "$run_dir/pid" ] && break; sleep 1; done
+      [ -f "$run_dir/pid" ] && kill -TERM "$(cat "$run_dir/pid")" 2>/dev/null
+      die "run could not be published; cancelled it (remnants at $run_dir)"
+    fi
     if [ "$sub" = run ]; then
       # Attached: forward shell-directed cancellation to the supervisor, and
       # wait for the wrapper -- its exit means the verdict file is published.
@@ -400,24 +432,24 @@ case $sub in
     ;;
   status)
     resolve_run "${1:-last}"
+    # One-shot and honest -- no sleeping in `status`. Ordered by LIVENESS,
+    # never by pid-file presence: a wrapper killed before it recorded the
+    # supervisor pid must read as dead, not as running forever. The wrapper
+    # check covers both edges of the run -- starting (supervisor pid not yet
+    # recorded) and finishing (group-reap, verdict publication in flight).
     if [ -f "$run_dir/exit" ]; then
       digest "$run_dir"
-    elif [ -f "$run_dir/pid" ] && ! sup_alive "$run_dir"; then
-      # One-shot and honest -- no sleeping in `status`. The wrapper outlives
-      # the supervisor briefly (group-reap, publication); its liveness is
-      # what distinguishes "verdict in flight" from a dead run.
-      if wrapper_alive "$run_dir"; then
-        echo "finishing: supervisor exited, verdict publication in flight: $run_dir"
-        exit 3
-      elif [ -f "$run_dir/exit" ]; then
-        digest "$run_dir" # published between the two checks above
-      else
-        echo "run died without recording a verdict (killed externally?): $run_dir"
-        exit 1
-      fi
-    else
+    elif sup_alive "$run_dir"; then
       echo "running: dune $(cat "$run_dir/cmd")  (log: $run_dir/log)"
       exit 3
+    elif wrapper_alive "$run_dir"; then
+      echo "managed, verdict pending (starting or finishing): $run_dir"
+      exit 3
+    elif [ -f "$run_dir/exit" ]; then
+      digest "$run_dir" # published between the checks above
+    else
+      echo "run died without recording a verdict (killed externally?): $run_dir"
+      exit 1
     fi
     ;;
   wait)
@@ -439,7 +471,7 @@ case $sub in
       # bounded by the remaining budget, so a short --timeout is honored to
       # the second rather than rounded up to an interval.
       remaining=$(( budget - waited ))
-      if [ -f "$run_dir/pid" ] && ! sup_alive "$run_dir" && ! wrapper_alive "$run_dir"; then
+      if ! sup_alive "$run_dir" && ! wrapper_alive "$run_dir"; then
         # Supervisor AND wrapper gone: no process is left to publish. A dead
         # supervisor alone proves nothing -- the wrapper may still be reaping
         # leftovers or mid-publication, and those iterations simply keep
@@ -482,8 +514,9 @@ case $sub in
       found=1
       d=${d%/}
       if [ -f "$d/exit" ]; then state="exit $(cat "$d/exit")"
-      elif [ -f "$d/pid" ] && sup_alive "$d"; then state=running
-      else state=unknown
+      elif sup_alive "$d"; then state=running
+      elif wrapper_alive "$d"; then state=finishing
+      else state=dead
       fi
       printf '%s  %-8s  dune %s\n' "$(basename "$d")" "$state" "$(cat "$d/cmd" 2>/dev/null)"
     done
