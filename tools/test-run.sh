@@ -95,16 +95,36 @@ capped_perl='
     my $code = shift;
     # A signal landing AFTER dune was reaped must neither blast the stale
     # pid/group (a recycled pid could make that an innocent process) nor
-    # replace the real verdict with the signal code.
-    exit $done if !$pid && defined $done;
+    # replace the real verdict with the signal code. $done covers the common
+    # case; the WNOHANG probe covers the statements between the reaping
+    # waitpid and the bookkeeping -- there, $? still holds the status the
+    # main flow has not yet read (captured before our own waitpid resets it).
+    exit $done if defined $done;
     if ($pid) {
+      my $saved = $?;
+      my $r = waitpid($pid, POSIX::WNOHANG());
+      if ($r == -1) {
+        exit(($saved & 127) ? 128 + ($saved & 127) : $saved >> 8);
+      }
+      if ($r == $pid) {
+        my $st = $?;
+        exit(($st & 127) ? 128 + ($st & 127) : $st >> 8);
+      }
       $blast->("TERM");
+      # Grace for the WHOLE group, not just the leader: a leader that exits
+      # fast must not collapse its descendants'"'"' grace to one polling
+      # interval. (Where the child has no group of its own, the group probe
+      # fails and this degrades to the plain leader wait.)
+      my $gone = 0;
       for (1 .. 50) {
-        last if waitpid($pid, POSIX::WNOHANG()) > 0;
+        $gone = 1 if !$gone && waitpid($pid, POSIX::WNOHANG()) != 0;
+        last if $gone && !kill(0, -$pid);
         select undef, undef, undef, 0.1;
       }
-      $blast->("KILL");
-      waitpid($pid, 0);
+      if (!$gone || kill(0, -$pid)) {
+        $blast->("KILL");
+        waitpid($pid, 0) unless $gone;
+      }
     }
     exit $code;
   };
@@ -199,11 +219,16 @@ new_run() {
       # generated shape -- YYYYMMDDTHHMMSSZ-<pid> -- so a stray directory
       # like `2-oldZ-backup` cannot qualify even if it contains files with
       # the metadata names.
-      case $(basename "$d") in
+      b=$(basename "$d")
+      case $b in
         [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z-*) ;;
         *) continue ;;
       esac
-      case ${d##*Z-} in '' | *[!0-9]*) continue ;; esac
+      # NON-greedy strip: the prefix pattern pins the first `Z-` to position
+      # 15, so this is the entire remainder of the basename -- a name like
+      # `...Z-archiveZ-456` leaves `archiveZ-456` here and is rejected,
+      # where a greedy strip would leave `456` and pass it.
+      case ${b#*Z-} in '' | *[!0-9]*) continue ;; esac
       [ -f "$d/cmd" ] && [ -f "$d/cap" ] || continue
       if [ -f "$d/exit" ]; then
         [ -n "$(find "$d/exit" -mtime +7 2>/dev/null)" ] && rm -rf "$d"
@@ -373,6 +398,11 @@ case $sub in
     # A mistyped cap would reach perl's numeric compare as 0 and silently
     # disable the alarm -- the one property this script must never lose.
     case $cap in '' | *[!0-9]*) die "--cap must be a nonnegative integer of seconds (0 disables)" ;; esac
+    # Bounded BEFORE arithmetic: an oversized value would wrap in bash's
+    # signed arithmetic (2^64 -> 0) and silently disable the alarm, the one
+    # behavior reserved for an explicit --cap 0. Ten digits (~317 years) is
+    # ample and cannot wrap.
+    [ ${#cap} -le 10 ] || die "--cap too large (max 10 digits)"
     # Decimal-normalized once here: a leading zero (--cap 08) would pass the
     # digit check, reach perl as decimal, and then blow up bash arithmetic
     # downstream as an invalid octal.
@@ -381,6 +411,11 @@ case $sub in
     # The toolchain check gates only LAUNCHES: status/wait/stop/list must
     # keep working from a shell with no opam environment -- not least so a
     # runaway launched under an earlier environment can still be stopped.
+    # On MSYS/Cygwin the environment helper runs UNCONDITIONALLY: a dune
+    # already on PATH proves nothing there, because `opam env` emits
+    # cygwin-style paths that leave linking broken until opam-env.sh
+    # rewrites them (CLAUDE.md).
+    case ${OSTYPE:-} in msys* | cygwin*) . tools/opam-env.sh ;; esac
     command -v dune >/dev/null 2>&1 || . tools/opam-env.sh
     command -v dune >/dev/null 2>&1 || die "dune not found (opam environment not set up?)"
     # On Windows every link step floods stderr with benign binutils warnings
@@ -518,8 +553,10 @@ case $sub in
     done
     resolve_run "$ref"
     if [ -n "$budget" ]; then
-      # Same trap --cap had: leading zeros reach bash arithmetic as octal.
+      # Same traps --cap had: leading zeros reach bash arithmetic as octal,
+      # and oversized values wrap.
       case $budget in *[!0-9]*) die "--timeout must be a nonnegative integer of seconds" ;; esac
+      [ ${#budget} -le 10 ] || die "--timeout too large (max 10 digits)"
       budget=$(( 10#$budget ))
     fi
     # Bounded by construction: default budget is the run's own cap plus slack
@@ -545,7 +582,9 @@ case $sub in
         [ "$step" -gt 0 ] && sleep "$step"
         waited=$(( waited + step ))
         [ -f "$run_dir/exit" ] && break
-        [ "$remaining" -le 0 ] && { echo "wait timed out after ${budget}s: $run_dir"; exit 124; }
+        # Recomputed AFTER the settle: consuming the final second must report
+        # the documented timeout, not slip through on the pre-sleep value.
+        [ $(( budget - waited )) -le 0 ] && { echo "wait timed out after ${budget}s: $run_dir"; exit 124; }
         echo "run died without recording a verdict (killed externally?): $run_dir"
         exit 1
       fi
