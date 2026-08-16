@@ -155,6 +155,7 @@ let () =
       source_digest = SC.digest base_canon;
       saved = [];
       segments = Some !segments_assoc;
+      finer_fission = None;
       best_ms = 0.;
       baseline_ms = 0.;
       default_ms = None;

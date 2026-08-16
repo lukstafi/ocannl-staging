@@ -67,6 +67,14 @@
       segment's site has its [Zero_out] in a separate [`Zeros] segment, so the pipelines skip the
       zero-expansion geometry there — sound because [Privatize] init-loads the accumulator tile from
       the (pre-zeroed) target and [Tile_mma] loads the accumulator fragment before the reduction.
+      On GPU backends the segmentation is additionally enumerated under
+      {!Ir.Schedule.fission_scheduled}'s [arity_cuts] (finer) mode (gh-ocannl-574): a segment
+      carrying a companion that cannot follow its site's full arity — the lm_head GEMM with its
+      max-logits row reduction — has every seed of the shared segment decline on companion
+      coverage, and the finer cut frees the site into its own kernel; segments whose digest is new
+      versus the coarse segmentation seed [fine]-flagged singles, one composite recombines the fine
+      keys' best-timed singles (coarse-timed bests staff the digest-identical segments), and a fine
+      winner records the mode in its cache entry so replay re-segments identically.
     - {b Convolution sketches} (gh-ocannl-493): when a convolution accumulation site is detected
       ({!detect_conv}), the implicit-GEMM pipeline — the packing [Stage] serving as im2col, the
       micro-kernel the ordinary [Tile_mma]. On the C backends: serial and Grid-parallel flavors, the
@@ -376,8 +384,9 @@ type report = {
           measures the one-kernel fused form against the fissioned two-kernel form. *)
   fiss_sketch_candidates : int;
       (** Per-fission-segment sketch candidates seeded (0 when the computation does not fission, or
-          no segment contains a compatible matmul site). Deterministic given the computation and
-          backend. *)
+          no segment contains a compatible matmul site). Includes the finer-segmentation
+          ([arity_cuts], gh-ocannl-574) singles on GPU backends. Deterministic given the
+          computation and backend. *)
   fiss_sketch_timed : int;
       (** Of the seeded per-fission-segment sketch candidates, those that compiled and were actually
           timed (not rejected by op preconditions or hardware limits, not deduplicated by digest).

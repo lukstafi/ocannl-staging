@@ -202,3 +202,219 @@ let () =
                Ir.Schedule_outcome.Cause_at (_, Ir.Schedule_outcome.Unsupported { feature; _ }) ->
                String.equal feature "autotune_sketch_companion_coverage"
            | exception _ -> false))
+
+(* gh-ocannl-574 (the gh-569 residual): the boundary above is respected by CUTTING, not by
+   coverage. The lm_head shape proper — a materialized GEMM whose row-MAX companion follows in the
+   same fission segment (a max target's [-inf] initialization is a [Set] nest, so no [Zero_out]
+   separates the statements, unlike the rowsum above) — must fission apart under the finer
+   [arity_cuts] segmentation: the GEMM ships alone and its seeds then spread the minor output axis
+   (j) across [Grid] blocks, while the reduction runs as its own downstream kernel with the stream
+   supplying the synchronization. *)
+let () =
+  let b = 4 and n = 32 and m = 64 and k = 16 in
+  let xv = Array.init (b * n * k) ~f:(fun i -> Float.of_int (i % 7) *. 0.25) in
+  let wv = Array.init (k * m) ~f:(fun i -> Float.of_int (i % 5) *. 0.125) in
+  let z_expected =
+    Array.init (b * n * m) ~f:(fun idx ->
+        let bi = idx / (n * m) in
+        let i = idx % (n * m) / m and j = idx % m in
+        let acc = ref 0. in
+        for kk = 0 to k - 1 do
+          acc := !acc +. (xv.((bi * n * k) + (i * k) + kk) *. wv.((kk * m) + j))
+        done;
+        !acc)
+  in
+  let r_expected =
+    Array.init (b * n) ~f:(fun row ->
+        Array.fold
+          (Array.sub z_expected ~pos:(row * m) ~len:m)
+          ~init:Float.neg_infinity ~f:Float.max)
+  in
+  let mk_comp tag =
+    let x = TDSL.ndarray xv ~label:[ tag ^ "_x" ] ~batch_dims:[ b ] ~output_dims:[ n; k ] () in
+    let w = TDSL.ndarray wv ~label:[ tag ^ "_w" ] ~output_dims:[ k; m ] () in
+    let%op z = x +* "b|ik;kj=>b|ij" w in
+    Train.set_materialized z.Tensor.value;
+    let%op r = z @^^ "b|ij => b|i" in
+    (named (tag ^ "_head") (Train.forward r), z, r)
+  in
+  let comp, z, r = mk_comp "lm" in
+  let limits = Context.hardware_limits (Context.auto ()) in
+  let captured = ref None in
+  let _ctx, _r =
+    Context.compile
+      ~lowered_transform:(fun opt ->
+        captured := Some opt;
+        opt)
+      (Context.auto ()) comp Ir.Indexing.Empty
+  in
+  let opt = Option.value_exn !captured in
+  let gpu_seeds opt =
+    List.filter
+      (Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false ~limits opt)
+      ~f:(fun p -> p.Autotune.sk_gpu && not p.Autotune.sk_epilogue)
+  in
+  (* The fission segmentation, exactly as the autotuner's seed enumeration runs it (GPU pipeline;
+     hermetic copy per query — [promote_locals] mutates placements). *)
+  let segments ~arity_cuts opt =
+    let scratch =
+      {
+        opt with
+        LL.traced_store = Hashtbl.copy opt.LL.traced_store;
+        LL.optimize_ctx = LL.copy_optimize_ctx opt.LL.optimize_ctx;
+      }
+    in
+    Sched.fission_scheduled ~promote_locals:true ~arity_cuts
+      ~preset:(Sched.default_gpu ~min_parallel:1 ~limits)
+      ~zero_sched:(Sched.zero_expansion ~min_parallel:1 ~limits)
+      ~static_indices:[] scratch
+  in
+  let normals tuples =
+    List.filter_map tuples ~f:(fun (kind, pre, _, _) ->
+        match kind with `Normal -> Some pre | `Zeros | `Solo -> None)
+  in
+  (* Coarse segmentation: the GEMM shares its segment with the row-max companion (and the max
+     target's initialization nest), and every GPU seed of that segment declines on companion
+     coverage — the production decline gh-574 sets out to relieve. *)
+  let coarse = normals (segments ~arity_cuts:false opt) in
+  p "lm: coarse fission keeps the row-max companion in the GEMM's segment"
+    (match coarse with
+    | [ seg ] ->
+        let seeds = gpu_seeds seg in
+        (not (List.is_empty seeds))
+        && List.for_all seeds ~f:(fun sp ->
+               match Autotune.sketch_schedule ~p:sp seg with
+               | _ -> false
+               | exception
+                   Ir.Schedule_outcome.Cause_at (_, Ir.Schedule_outcome.Unsupported { feature; _ })
+                 ->
+                   String.equal feature "autotune_sketch_companion_coverage"
+               | exception _ -> false)
+    | _ -> false);
+  (* Finer segmentation: the GEMM segment is freed, its seeds construct, and they spread j — the
+     axis whose extent m = 64 is unique in this workload (b = 4, i = 32, k = 16). *)
+  let bounds seg = LL.loop_bounds seg.LL.llc in
+  let spreads_j seg sched =
+    List.exists sched ~f:(function
+      | Sched.Split { axis; factor; outer = LL.Grid; _ } -> (
+          factor < m
+          &&
+          match List.Assoc.find (bounds seg) axis ~equal:Ir.Indexing.equal_symbol with
+          | Some (0, hi) -> hi + 1 = m
+          | _ -> false)
+      | _ -> false)
+  in
+  let fine_gemm_seg tuples =
+    List.find (normals tuples) ~f:(fun seg -> not (List.is_empty (gpu_seeds seg)))
+  in
+  p "lm: arity_cuts fission frees the GEMM and its seeds spread j across Grid blocks"
+    (match fine_gemm_seg (segments ~arity_cuts:true opt) with
+    | None -> false
+    | Some seg ->
+        let seeds = gpu_seeds seg in
+        (not (List.is_empty seeds))
+        && List.for_all seeds ~f:(fun sp ->
+               match Autotune.sketch_schedule ~p:sp seg with
+               | sched -> spreads_j seg sched
+               | exception exn ->
+                   Stdio.eprintf "lm: fine seed FAILED to construct: %s\n" (Exn.to_string exn);
+                   false));
+  (* Executed: the finer fissioned form (default per-segment presets) computes the same values —
+     the cut's stream-order synchronization replaces the fused segment's serial order. Runs on
+     every backend. *)
+  let comp_e, z_e, r_e = mk_comp "lme" in
+  let is_cpu = Sched.backend_is_cpu backend_name in
+  let transforms opt =
+    let preset seg =
+      if is_gpu then Sched.default_gpu ~min_parallel:1 ~limits seg
+      else if is_cpu then Sched.default_cpu ~min_parallel:1 seg
+      else []
+    in
+    let zero_sched tns = if is_gpu then Sched.zero_expansion ~limits tns else [] in
+    List.map
+      (Sched.fission_scheduled ~promote_locals:is_gpu ~arity_cuts:true ~preset ~zero_sched
+         ~static_indices:[] opt) ~f:(fun (_, _, _, post) -> post)
+  in
+  let approx got want = Array.for_all2_exn got want ~f:(fun a c -> Float.(abs (a - c) < 1e-3)) in
+  p "lm: the finer fissioned form executes correctly"
+    (match
+       let ctx, routine =
+         Context.compile ~lowered_transforms:transforms (Context.auto ()) comp_e Ir.Indexing.Empty
+       in
+       let ctx = Context.run ctx routine in
+       (Context.get_values ctx z_e.Tensor.value, Context.get_values ctx r_e.Tensor.value)
+     with
+    | got_z, got_r -> approx got_z z_expected && approx got_r r_expected
+    | exception exn ->
+        Stdio.eprintf "lm: finer fissioned execution FAILED: %s\n" (Exn.to_string exn);
+        false);
+  (* Executed per seed (GPU backends): each fine GPU seed's sketch schedule on the freed GEMM
+     segment, presets elsewhere — the executable half of the spreads-j pin. Vacuous on cc,
+     announced on stderr. *)
+  if not is_gpu then
+    Stdio.eprintf "lm: %s is not a GPU backend — the per-seed executable check below is vacuous\n"
+      backend_name;
+  p "lm: every fine GPU seed compiles and computes correctly"
+    ((not is_gpu)
+    ||
+    let n_seeds =
+      match fine_gemm_seg (segments ~arity_cuts:true opt) with
+      | Some seg -> List.length (gpu_seeds seg)
+      | None -> 0
+    in
+    n_seeds > 0
+    && List.for_all (List.init n_seeds ~f:Fn.id) ~f:(fun idx ->
+           let comp_s, z_s, r_s = mk_comp (Printf.sprintf "lms%d" idx) in
+           let transforms opt =
+             let preset seg =
+               (* The freed GEMM segment is the only one with GPU seeds; every other segment keeps
+                  the default preset. *)
+               match List.nth (gpu_seeds seg) idx with
+               | Some sp -> Autotune.sketch_schedule ~p:sp seg
+               | None -> Sched.default_gpu ~min_parallel:1 ~limits seg
+             in
+             let zero_sched = Sched.zero_expansion ~limits in
+             List.map
+               (Sched.fission_scheduled ~promote_locals:true ~arity_cuts:true ~preset ~zero_sched
+                  ~static_indices:[] opt) ~f:(fun (_, _, _, post) -> post)
+           in
+           match
+             let ctx, routine =
+               Context.compile ~lowered_transforms:transforms (Context.auto ()) comp_s
+                 Ir.Indexing.Empty
+             in
+             let ctx = Context.run ctx routine in
+             (Context.get_values ctx z_s.Tensor.value, Context.get_values ctx r_s.Tensor.value)
+           with
+           | got_z, got_r -> approx got_z z_expected && approx got_r r_expected
+           | exception exn ->
+               Stdio.eprintf "lm: fine GPU seed %d FAILED %s\n" idx (Exn.to_string exn);
+               false));
+  (* Tune integration: the search on the lm_head shape (fine candidates seeded on GPU backends)
+     crowns a winner that computes the right values, and a second tune replays it through the disk
+     cache — exercising the [finer_fission] entry field when a fine candidate won. *)
+  clean_cache "lm_head_cache";
+  let tune_once () =
+    let reports = ref [] in
+    let ctx = Context.auto () in
+    let ctx, routine =
+      Autotune.tune ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:"lm_head_cache"
+        ~timing_ctx:(Context.auto ())
+        ~report:(fun rep -> reports := rep :: !reports)
+        ctx comp Ir.Indexing.Empty
+    in
+    let ctx = Context.run ctx routine in
+    ((Context.get_values ctx z.Tensor.value, Context.get_values ctx r.Tensor.value), !reports)
+  in
+  let (got_z, got_r), reports = tune_once () in
+  p "lm: tuned head matches the reference" (approx got_z z_expected && approx got_r r_expected);
+  (match reports with
+  | [ rep ] ->
+      if is_gpu && rep.Autotune.fiss_sketch_candidates = 0 then
+        Stdio.eprintf "lm: NOTE: no per-segment sketch candidates were seeded on %s\n" backend_name
+  | _ -> ());
+  let (got_z2, got_r2), reports2 = tune_once () in
+  p "lm: cache-replayed head matches the reference"
+    (approx got_z2 z_expected && approx got_r2 r_expected);
+  p "lm: second tune was a cache hit or full replay"
+    (match reports2 with [ rep ] -> rep.Autotune.cache_hit || not rep.Autotune.partial | _ -> false)

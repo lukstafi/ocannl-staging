@@ -5004,8 +5004,10 @@ type funit = {
 }
 
 (* Units: each real statement with the comments preceding it. Trailing comments attach to the last
-   unit. *)
-let collect_units plc (opt : Low_level.optimized) (stmts : Low_level.t list) : funit list =
+   unit. [max_chain] caps the standalone chains; it must match the cap {!aligned_merge}'s merged
+   analysis runs under (see there). *)
+let collect_units ?max_chain plc (opt : Low_level.optimized) (stmts : Low_level.t list) :
+    funit list =
   let open Low_level in
   let is_glue = function Noop | Comment _ -> true | _ -> false in
   let mk index glue stmt =
@@ -5020,7 +5022,7 @@ let collect_units plc (opt : Low_level.optimized) (stmts : Low_level.t list) : f
              [Local_scope] bodies, dynamic accesses or non-injective/uncovered writes). In its own
              segment such a statement runs as a serial 1×1 launch and its neighbors keep their
              parallelism. Read-only statements never bail; their chains are empty. *)
-          match analyze_parallel_chains { opt with llc = stmt } with
+          match analyze_parallel_chains ?max_chain { opt with llc = stmt } with
           | chains -> (`Normal, chains)
           | exception Bail -> (`Solo, []))
     in
@@ -5082,30 +5084,66 @@ let mat_conflict plc seg (s : stmt_summary) =
    nest's parallel size shrinks versus its standalone analysis. Alignment may trim linked chains to
    a common prefix; when it would, cutting (a launch boundary, today's behavior) is the better
    default than trading parallelism for one launch — and keeps the fissioned candidates of the
-   schedule search at full per-segment parallelism. *)
-let aligned_merge (opt : Low_level.optimized) seg (u : funit) : bool =
+   schedule search at full per-segment parallelism.
+
+   [max_chain] must match the cap the standalone chains ([seg.g_chains], [u.f_chains]) were
+   computed under, so the no-loss comparison is arity-for-arity.
+
+   [uniform_shapes] (the [arity_cuts] mode of {!fission_scheduled}): additionally require every
+   materialized-writing nest's merged chain to carry the {e same} extent list. The GPU matmul
+   sketches emit one geometry at the site's full arity over every such nest of the kernel
+   ([companion_geometry], gh-ocannl-521/569), so a nest whose chain cannot follow that arity — a
+   reduction over the site's minor axis, an initialization nest of the reduction target — makes
+   every sketch seed of the shared segment decline; cutting it apart frees the site (gh-ocannl-574).
+   Nests with no materialized writes have empty chains and are exempt, mirroring the coverage
+   demand. *)
+let aligned_merge ?max_chain ?(uniform_shapes = false) (opt : Low_level.optimized) seg (u : funit) :
+    bool =
   let llc =
     Low_level.unflat_lines (List.concat_map (seg.g_units @ [ u ]) ~f:(fun u' -> u'.f_stmts))
   in
-  match analyze_parallel_chains { opt with llc } with
+  match analyze_parallel_chains ?max_chain { opt with llc } with
   | exception Bail -> false
   | merged -> (
-      match
-        List.for_all2 merged (seg.g_chains @ u.f_chains) ~f:(fun m s ->
-            chain_size m >= chain_size s)
-      with
-      | List.Or_unequal_lengths.Ok ok -> ok
-      | Unequal_lengths -> false)
+      let no_loss =
+        match
+          List.for_all2 merged (seg.g_chains @ u.f_chains) ~f:(fun m s ->
+              chain_size m >= chain_size s)
+        with
+        | List.Or_unequal_lengths.Ok ok -> ok
+        | Unequal_lengths -> false
+      in
+      no_loss
+      &&
+      match uniform_shapes with
+      | false -> true
+      | true -> (
+          let extents chain =
+            List.filter_map chain ~f:(function
+              | Low_level.For_loop fc -> Some (fc.to_ + 1)
+              | _ -> None)
+          in
+          let nonempty c = if List.is_empty c then None else Some (extents c) in
+          match List.filter_map merged ~f:nonempty with
+          | [] -> true
+          | e0 :: rest -> List.for_all rest ~f:(List.equal ( = ) e0)))
 
-let group_units (opt : Low_level.optimized) (units : funit list) : segment list =
+let group_units ?max_chain ?(arity_cuts = false) (opt : Low_level.optimized) (units : funit list) :
+    segment list =
   let plc = opt.Low_level.optimize_ctx.placements in
   let close cur acc = match cur with None -> acc | Some seg -> seg :: acc in
+  let mergeable seg s u =
+    (* In [arity_cuts] mode even a conflict-free extension must pass the uniform-shape rule: an
+       unrelated nest of a different arity (the reduction target's initialization) fails the
+       sketches' companion coverage just like a trimmed one. *)
+    if arity_cuts then aligned_merge ?max_chain ~uniform_shapes:true opt seg u
+    else (not (mat_conflict plc seg s)) || aligned_merge ?max_chain opt seg u
+  in
   let rec go cur acc = function
     | [] -> List.rev (close cur acc)
     | u :: tl -> (
         match (cur, u.f_kind, u.f_sum) with
-        | Some ({ g_kind = `Normal; _ } as seg), `Normal, Some s
-          when (not (mat_conflict plc seg s)) || aligned_merge opt seg u ->
+        | Some ({ g_kind = `Normal; _ } as seg), `Normal, Some s when mergeable seg s u ->
             go (Some (merge_segs ~kind:`Normal seg (seg_of_unit u))) acc tl
         | Some ({ g_kind = `Zeros; _ } as seg), `Zeros, Some s when not (mat_conflict plc seg s) ->
             go (Some (merge_segs ~kind:`Zeros seg (seg_of_unit u))) acc tl
@@ -5441,8 +5479,9 @@ let promote_statement_crossing_locals plc (stmts : Low_level.t list) :
               (tn, prior) :: undo)
             else undo))
 
-let fission_scheduled ?(promote_locals = false) ~(preset : Low_level.optimized -> schedule)
-    ~(zero_sched : Tn.t list -> schedule) ~static_indices (opt : Low_level.optimized) :
+let fission_scheduled ?(promote_locals = false) ?(arity_cuts = false)
+    ~(preset : Low_level.optimized -> schedule) ~(zero_sched : Tn.t list -> schedule)
+    ~static_indices (opt : Low_level.optimized) :
     ([ `Normal | `Zeros | `Solo ] * Low_level.optimized * schedule * Low_level.optimized) list =
   let plc = opt.Low_level.optimize_ctx.placements in
   let stmts = Low_level.flat_lines [ opt.Low_level.llc ] in
@@ -5454,8 +5493,12 @@ let fission_scheduled ?(promote_locals = false) ~(preset : Low_level.optimized -
     let sched = preset opt in
     [ (`Normal, opt, sched, apply ~static_indices sched opt) ]
   in
-  let units = collect_units plc opt stmts in
-  let segs = group_units opt units in
+  (* The [arity_cuts] mode analyzes chains uncapped: the no-loss guard (and the uniform-shape rule)
+     must see each nest's full arity, not the default presets' Grid+Workgroup prefix — under the
+     cap, a merge that trims a rank-3 site's minor axis reads as lossless (gh-ocannl-574). *)
+  let max_chain = if arity_cuts then Some Int.max_value else None in
+  let units = collect_units ?max_chain plc opt stmts in
+  let segs = group_units ?max_chain ~arity_cuts opt units in
   if List.length segs <= 1 then fallback ()
   else
     match resolve_scope_crossings (Array.of_list units) segs with

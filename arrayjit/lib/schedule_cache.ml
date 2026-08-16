@@ -497,6 +497,11 @@ type entry = {
   segments : (string * saved_schedule) list option; [@sexp.option]
       (** A fissioned winner: per-segment schedules keyed by the {e pre-schedule} segment's
           canonical digest ([saved] is then empty). [None] for whole-routine schedules. *)
+  finer_fission : bool option; [@sexp.option]
+      (** [Some true]: the [segments] keys address {!Schedule.fission_scheduled}'s [arity_cuts]
+          (finer) segmentation (gh-ocannl-574); replay must re-segment under the same mode or the
+          keys miss wholesale. Omitted when false, so entries stay byte-stable and pre-gh-574
+          entries parse without an [entry_version] bump. *)
   best_ms : float;
   baseline_ms : float;
   default_ms : float option; [@sexp.option]

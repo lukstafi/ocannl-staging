@@ -5,3 +5,10 @@ bc: every unfused GPU seed compiles and computes correctly: true
 bc: tuned batched head matches the reference: true
 bc: the tuning census records no companion-coverage decline: true
 bc: reduction-over-j companion still declines every GPU seed: true
+lm: coarse fission keeps the row-max companion in the GEMM's segment: true
+lm: arity_cuts fission frees the GEMM and its seeds spread j across Grid blocks: true
+lm: the finer fissioned form executes correctly: true
+lm: every fine GPU seed compiles and computes correctly: true
+lm: tuned head matches the reference: true
+lm: cache-replayed head matches the reference: true
+lm: second tune was a cache hit or full replay: true

@@ -646,6 +646,7 @@ val zero_expansion :
 
 val fission_scheduled :
   ?promote_locals:bool ->
+  ?arity_cuts:bool ->
   preset:(Low_level.optimized -> schedule) ->
   zero_sched:(Tnode.t list -> schedule) ->
   static_indices:Indexing.static_symbol list ->
@@ -664,6 +665,20 @@ val fission_scheduled :
     [`Normal] tuple over the whole routine with [preset]'s schedule. Callers compile each scheduled
     segment as its own kernel in order (the plural transform seam of backend [compile]); see
     {!maybe_default_schedules} for the synchronization contract.
+
+    [arity_cuts] (default [false], gh-ocannl-574): segment for the {e full-arity} sketch pipelines
+    instead of the default presets. The no-parallelism-loss guard normally compares chains under
+    the presets' Grid+Workgroup cap, so a merge that trims a rank-3+ site's minor axis reads as
+    lossless — correct for the default annotators, which never bind more than that prefix, but the
+    GPU matmul sketches annotate the site's whole chain and cover every materialized-writing nest
+    of the kernel with the same geometry ([companion_geometry], gh-ocannl-521/569). Under
+    [arity_cuts] chains are analyzed uncapped and a merge additionally requires every
+    materialized-writing nest to keep an identical extent list, so a companion that cannot follow
+    the site's arity — a reduction {e over} the site's minor axis and the reduction target's
+    initialization nest, the lm_head's max-logits row — is cut into its own downstream kernel
+    (stream order supplies the synchronization) and the site's kernel seeds at full arity. The
+    finer segmentation costs launches the default pipeline does not want to pay unconditionally,
+    so this is a candidate-generation mode (the autotuner times it), never the default.
 
     [promote_locals] (default [false]): promote statement-crossing [Local] scratch to [On_device]
     before segmentation. A nest whose only writes land in [Local] scratch gets no parallel chain
