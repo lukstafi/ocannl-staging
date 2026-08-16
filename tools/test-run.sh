@@ -1,0 +1,1124 @@
+#!/usr/bin/env bash
+# Run dune test targets (`dune runtest ...`, `dune build @slow`, directory
+# aliases) with a correct, compact, machine-readable verdict -- so that nobody,
+# and especially no coding agent, hand-rolls shell around dune again.
+#
+# Each ingredient answers a failure mode that has actually cost a session:
+#   - Unpiped status: `dune runtest 2>&1 | tail` reports TAIL's status (no
+#     pipefail), so a promotion diff reads as a green run.
+#   - No `status` variable anywhere: in zsh it is a read-only alias for `$?`,
+#     so ad-hoc wrappers that use it die before printing their sentinel and a
+#     green suite looks failed.
+#   - A wall-clock cap: a hung run (macOS XProtect stalling a fresh exe, a
+#     wedged backend) otherwise strands whatever is waiting on it.
+#   - A verdict FILE, not a process probe: waiter loops on `pgrep -x dune`
+#     match the editor's immortal `dune ocaml-merlin` daemons and spin forever
+#     (one PR review accumulated ten such stranded shells); `kill -0 $pid` can
+#     latch onto a recycled pid. `wait` here polls for the verdict file with a
+#     hard timeout, so it cannot strand.
+#
+# Usage:
+#   tools/test-run.sh run   [--cap N] [DUNE ARGS...]   # foreground; digest; dune's status
+#   tools/test-run.sh start [--cap N] [DUNE ARGS...]   # detached; survives the session
+#   tools/test-run.sh status [RUN|last]                # one-shot, never blocks
+#   tools/test-run.sh wait   [RUN|last] [--timeout N]  # bounded; exits with the run's status
+#   tools/test-run.sh stop   [RUN|last]                # TERM the run's process group
+#   tools/test-run.sh list                             # recent runs and their states
+#
+# Exit codes: `run` and `wait` exit with dune's status (142 = the cap expired,
+# 143/130 = cancelled, 137 = SIGKILLed, 124 = `wait` itself timed out; dune
+# never reaches those on its own). `status` exits 0 finished, 3 still running
+# (or verdict publication in flight), 1 died without a verdict. Usage and lock
+# refusals exit 2.
+#
+# Everything after the options is dune's argv, verbatim (default: `runtest`):
+#   tools/test-run.sh run runtest test/operations
+#   tools/test-run.sh run build @slow
+#   OCANNL_BACKEND=cuda tools/test-run.sh run runtest
+#
+# Prefer `run`. In an agent harness, launch `run` through the harness's own
+# background mode and let the harness notify on exit -- that already removes
+# every reason to write a waiter. `start`/`wait` exist only for a run that must
+# outlive the launching session. The cap defaults to $OCANNL_TEST_CAP or 3600s;
+# `--cap 0` disables it (then supply your own bound).
+#
+# One run at a time per worktree, enforced with an flock: a second `run`/`start`
+# refuses loudly, pointing at the active run, instead of queueing behind dune's
+# own lock -- "I lost track of a run so I started another" is exactly the spiral
+# this script exists to prevent. `stop` the active run if it is truly stale.
+#
+# Windows (Git Bash) is best-effort: the flock and cap work under MSYS perl, but
+# process-group kills may only reach dune itself, not its compiler children.
+
+set -u
+
+die() { echo "test-run: $*" >&2; exit 2; }
+
+# Pin to the repo containing THIS script (promote.sh convention): dune then runs
+# at this worktree's root no matter where the caller's cwd wandered, and the
+# per-worktree lock below keys on the tree actually being tested.
+# -P: the physical path, so the same worktree entered through a symlink and
+# through its real path derive the same key, lock file, and recorded wt.
+cd -P "$(dirname "$0")/.." || die "cannot cd to repo root"
+
+RUNS=${OCANNL_TEST_RUNS:-$HOME/.ocannl-test-runs}
+mkdir -p "$RUNS" || die "cannot create $RUNS"
+# Canonicalized: run identities (owner pointer, `last`, wt cross-references)
+# are compared as strings, so a relative override must not record a
+# different spelling than a later absolute reference resolves to.
+RUNS=$(cd "$RUNS" && pwd -P) || die "cannot resolve $RUNS"
+# The worktree key makes the `last` symlink per-checkout, so concurrent
+# sessions in different worktrees don't read each other's verdicts. The
+# readable basename is for humans listing $RUNS; the crc of the full path is
+# what keeps two paths differing only in punctuation from sharing a key.
+# (The LOCK is deliberately not keyed here -- see take_lock.)
+wt_key=$(basename "$PWD" | tr -c 'A-Za-z0-9' '_')$(printf %s "$PWD" | cksum | awk '{print $1}')
+
+# Cap a command, killing its whole process group when the cap expires -- the
+# sibling of sweep.sh's supervisor (see the rationale there). `perl -e 'alarm N;
+# exec ...'` alone is not enough: alarm survives exec, so SIGALRM would reach
+# only dune while every compiler it spawned kept running and holding _build
+# locks. Exits 142 on expiry; forwards INT/TERM to the group and reaps it.
+# HUP: a foreground run treats it like TERM; a detached run (OCANNL_TESTRUN_BG)
+# ignores it, since surviving the launching session is its whole point.
+# setpgrp is eval-guarded and the group kill falls back to a plain kill, for
+# MSYS perl where process groups are shaky. The child deliberately KEEPS
+# lock fd 9: a group SIGKILL can wipe the wrapper and supervisor while dune
+# (in its own process group) survives, and the surviving orphan must go on
+# holding the worktree lock while it can still mutate _build. The wrapper
+# releases the lock EXPLICITLY once the verdict is published, so descendants
+# dune leaves behind cannot extend it either way. The child also records its
+# pgid (only once confirmed to LEAD its own group, so a group-kill can never
+# hit the caller on platforms where setpgrp failed): if this supervisor is
+# SIGKILLed, the wrapper uses it to reap the surviving dune before
+# publishing a verdict and releasing the lock.
+capped_perl='
+  use POSIX ();
+  my $cap = shift;
+  my ($pid, $done);
+  my $blast = sub { my $sig = shift; kill($sig, -$pid) or kill($sig, $pid) };
+  my $reap = sub {
+    my $code = shift;
+    # A signal landing AFTER dune was reaped must neither blast the stale
+    # pid/group (a recycled pid could make that an innocent process) nor
+    # replace the real verdict with the signal code. $done covers the common
+    # case; the WNOHANG probe covers the statements between the reaping
+    # waitpid and the bookkeeping -- there, $? still holds the status the
+    # main flow has not yet read (captured before our own waitpid resets it).
+    exit $done if defined $done;
+    if ($pid) {
+      my $saved = $?;
+      my $r = waitpid($pid, POSIX::WNOHANG());
+      if ($r == -1) {
+        exit(($saved & 127) ? 128 + ($saved & 127) : $saved >> 8);
+      }
+      if ($r == $pid) {
+        my $st = $?;
+        exit(($st & 127) ? 128 + ($st & 127) : $st >> 8);
+      }
+      $blast->("TERM");
+      # Grace for the WHOLE group, not just the leader: a leader that exits
+      # fast must not collapse its descendants'"'"' grace to one polling
+      # interval. (Where the child has no group of its own, the group probe
+      # fails and this degrades to the plain leader wait.)
+      my $gone = 0;
+      for (1 .. 50) {
+        $gone = 1 if !$gone && waitpid($pid, POSIX::WNOHANG()) != 0;
+        last if $gone && !kill(0, -$pid);
+        select undef, undef, undef, 0.1;
+      }
+      if (!$gone || kill(0, -$pid)) {
+        $blast->("KILL");
+        # Bounded reap: a child stuck in uninterruptible kernel I/O keeps
+        # even SIGKILL pending, and a blocking waitpid here would hang the
+        # supervisor -- the cap must report its 142/143 regardless; the
+        # stuck process then keeps the worktree lock through its fd 9.
+        unless ($gone) {
+          for (1 .. 50) {
+            last if waitpid($pid, POSIX::WNOHANG()) != 0;
+            select undef, undef, undef, 0.1;
+          }
+        }
+      }
+    }
+    exit $code;
+  };
+  # Armed BEFORE the fork: this process inherits the wrapper'"'"'s ignored
+  # TERM/INT, so a stop that lands in the window before the handlers exist
+  # would be silently discarded while stop reported success. Armed early, a
+  # pre-fork signal simply exits before dune ever starts.
+  $SIG{ALRM} = sub { $reap->(142) };
+  $SIG{INT} = sub { $reap->(130) };
+  $SIG{TERM} = sub { $reap->(143) };
+  $SIG{HUP} = $ENV{OCANNL_TESTRUN_BG} ? "IGNORE" : sub { $reap->(129) };
+  $pid = fork();
+  die "fork: $!" unless defined $pid;
+  if (!$pid) {
+    # The wrapper ignores TERM/INT/HUP, and SIG_IGN survives fork AND exec --
+    # without this reset dune would start deaf to the very signals the cap
+    # and `stop` rely on, degrading every cancellation to the KILL escalation.
+    $SIG{TERM} = "DEFAULT"; $SIG{INT} = "DEFAULT"; $SIG{HUP} = "DEFAULT";
+    eval { setpgrp(0, 0) };
+    eval {
+      if ($ENV{OCANNL_TESTRUN_RD} && getpgrp(0) == $$) {
+        open my $fh, ">", "$ENV{OCANNL_TESTRUN_RD}/pgid" or die;
+        print $fh $$;
+        close $fh;
+        # The leader publishes its OWN start token before exec: a token
+        # sampled later by the wrapper could capture a recycled pid if the
+        # leader exited first. Linux reads /proc/self/stat (matching
+        # ps_token'"'"'s tick rendering); elsewhere ps renders lstart under
+        # the same pinned locale/TZ and squeeze.
+        my $tok = "";
+        if (open my $sf, "<", "/proc/self/stat") {
+          my $s = <$sf>;
+          if ($s =~ /\)\s+(.*)$/) {
+            my @f = split /\s+/, $1;
+            $tok = defined $f[19] ? $f[19] : "";
+          }
+        } else {
+          local $ENV{LC_ALL} = "C";
+          local $ENV{TZ} = "UTC";
+          $tok = qx{ps -o lstart= -p $$ 2>/dev/null};
+          $tok =~ s/\s+$//;
+          $tok =~ s/ +/ /g;
+        }
+        if ($tok ne "") {
+          open my $gf, ">", "$ENV{OCANNL_TESTRUN_RD}/gtoken" or die;
+          print $gf "$tok\n";
+          close $gf;
+        }
+      }
+    };
+    exec @ARGV;
+    exit 127;
+  }
+  alarm $cap if $cap > 0;
+  waitpid($pid, 0);
+  my $st = $?;
+  # Verdict recorded and $pid cleared BEFORE anything else, in this order --
+  # a handler firing in between then sees defined $done and exits with the
+  # real status.
+  $done = ($st & 127) ? 128 + ($st & 127) : $st >> 8;
+  $pid = 0;
+  alarm 0;
+  exit $done;
+'
+
+# Take the per-worktree lock on fd 9, non-blocking. perl takes it and exits;
+# the lock lives on the open file DESCRIPTION, which every process of the
+# run inherits through fd 9 -- released by the wrapper's explicit unlock
+# when the verdict is published, or by the kernel when the last surviving
+# process exits, with nothing to reclaim after a crash (see sweep.sh).
+#
+# The lock file sits BESIDE the worktree it protects (a gitignored dotfile
+# dune's scanner also ignores), not under $RUNS: OCANNL_TEST_RUNS is a
+# supported override for diagnostics storage, and keying the lock there would
+# split the lock namespace while leaving _build shared -- two sessions with
+# different overrides would both "acquire" their lock and collide on dune's.
+# A lock belongs in the same namespace as the resource it protects (the same
+# lesson sweep.sh records).
+take_lock() {
+  exec 9>>"$PWD/.test-run.lock" || die "cannot open lock file"
+  # Acquisition and the stale-owner clear happen inside ONE process: the
+  # pointer still names the PREVIOUS run at handoff, and any scheduling gap
+  # between taking the lock and clearing it would let a concurrent stop of
+  # that run blame its leftovers for OUR presence on the lock file and TERM
+  # this very launcher. Exit codes: 1 lock busy, 2 pointer unclearable.
+  # The launcher identity is published INSIDE the acquisition critical
+  # section (same perl), so there is no instant at which the lock is held
+  # with neither an owner pointer nor a recorded launcher -- a stall
+  # anywhere after acquisition leaves an identity the refusal message can
+  # report.
+  perl -e '
+    use Fcntl ":flock";
+    exit 1 unless flock(STDIN, LOCK_EX | LOCK_NB);
+    unlink $ARGV[0];
+    exit 2 if -e $ARGV[0];
+    open(my $fh, ">", $ARGV[1]) or exit 3;
+    print $fh "$ARGV[2] $ARGV[3]\n" or exit 3;
+    close $fh or exit 3;
+    exit 0;
+  ' "$PWD/.test-run.lock.owner" "$PWD/.test-run.lock.launcher" \
+    "$$" "$(ps_token "$$")" <&9
+  case $? in
+    0) ;;
+    3)
+      # Checked like the owner clear: proceeding without a recorded
+      # identity would leave a stalled pre-publication launcher as an
+      # unidentifiable lock holder.
+      die "cannot record the launcher identity beside the lock (stale file/directory at .test-run.lock.launcher?)"
+      ;;
+    2) die "cannot clear the stale lock owner pointer (worktree not writable?)" ;;
+    *)
+      # The owner pointer, not `last`: with OCANNL_TEST_RUNS overridden, the
+      # refused invocation's `last` can resolve in a DIFFERENT state
+      # directory (or nowhere), leaving the lock holder uninspectable.
+      # %q, so a runs directory containing spaces or metacharacters survives
+      # copy-pasting the recovery commands.
+      owner=$(cat "$PWD/.test-run.lock.owner" 2>/dev/null)
+      launcher_live() { # same liveness rules as proc_alive, zombies included
+        read -r lpid ltok <"$PWD/.test-run.lock.launcher" 2>/dev/null || return 1
+        case $lpid in '' | *[!0-9]* | 0) return 1 ;; esac
+        kill -0 "$lpid" 2>/dev/null || return 1
+        case $(ps -o state= -p "$lpid" 2>/dev/null | tr -d ' ') in Z*) return 1 ;; esac
+        [ "$(ps_token "$lpid")" = "$ltok" ]
+      }
+      if [ -z "$owner" ] && launcher_live; then
+        # No published owner yet, but the recorded launcher is live: a
+        # launch is mid-flight (or stalled) between acquisition and
+        # publication.
+        echo "test-run: a launch is in progress in this worktree (launcher pid $lpid);" >&2
+        echo "  retry shortly, or if it is stuck: kill $lpid" >&2
+        exit 2
+      fi
+      owner=$(printf %q "${owner:-last}")
+      echo "test-run: another test-run is active in this worktree; check it with:" >&2
+      echo "  tools/test-run.sh status $owner" >&2
+      echo "(a stale one can be stopped with: tools/test-run.sh stop $owner)" >&2
+      exit 2
+      ;;
+  esac
+}
+
+new_run() {
+  run_dir=$RUNS/$(date -u +%Y%m%dT%H%M%SZ)-$$
+  mkdir "$run_dir" || die "cannot create $run_dir"
+  # Every pre-launch metadata write is checked: a quota hit or squatter that
+  # slipped through here would let the launch report success while status,
+  # wait and the wrapper all operate on a run that cannot be tracked.
+  { { printf '%q ' "$@"; echo; } >"$run_dir/cmd" &&
+    printf '%s\n' "$cap" >"$run_dir/cap" &&
+    printf '%s\n' "$PWD" >"$run_dir/wt" &&
+    : >"$run_dir/log"; } || die "cannot write run metadata in $run_dir"
+  # Runs are throwaway diagnostics; reap old ones so the directory cannot grow
+  # without bound. Deletion demands the full run schema -- the timestamped
+  # name AND this script's metadata files -- never mere position under $RUNS,
+  # because the override can point $RUNS at a directory with other tenants
+  # and "has a file named exit" must not mark those for deletion. Age is the
+  # VERDICT file's, since a verdict-less directory may be a live run
+  # (`--cap 0` is supported and unbounded); those are reaped only on a much
+  # longer leash, as crash leftovers.
+  # -mindepth 1 plus the explicit guard: find emits the starting directory
+  # itself at depth 0, and an override pointing $RUNS at a directory that
+  # happens to match the schema must not get the whole state root deleted.
+  find "$RUNS" -mindepth 1 -maxdepth 1 -type d -name '2*Z-*' 2>/dev/null |
+    while IFS= read -r d; do
+      [ "$d" = "$RUNS" ] && continue
+      # The find glob is only a pre-filter; deletion requires the EXACT
+      # generated shape -- YYYYMMDDTHHMMSSZ-<pid> -- so a stray directory
+      # like `2-oldZ-backup` cannot qualify even if it contains files with
+      # the metadata names.
+      b=$(basename "$d")
+      case $b in
+        [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z-*) ;;
+        *) continue ;;
+      esac
+      # NON-greedy strip: the prefix pattern pins the first `Z-` to position
+      # 15, so this is the entire remainder of the basename -- a name like
+      # `...Z-archiveZ-456` leaves `archiveZ-456` here and is rejected,
+      # where a greedy strip would leave `456` and pass it.
+      case ${b#*Z-} in '' | *[!0-9]*) continue ;; esac
+      [ -f "$d/cmd" ] && [ -f "$d/cap" ] || continue
+      if [ -f "$d/exit" ]; then
+        if [ -n "$(find "$d/exit" -mtime +7 2>/dev/null)" ]; then
+          # A completed run whose leftovers still hold ITS worktree's lock
+          # keeps its metadata -- deleting it would strand that worktree
+          # with the advertised status/stop recovery pointing at nothing.
+          lock_still_owned "$d" && continue
+          rm -rf "$d"
+        fi
+      else
+        # A verdict-less directory may be a LIVE run (--cap 0 is supported and
+        # unbounded, and $RUNS is shared across worktrees): never reap while
+        # its supervisor or wrapper still runs, and age it by the newest file
+        # INSIDE -- appending to `log` does not touch the directory's mtime.
+        sup_alive "$d" && continue
+        wrapper_alive "$d" && continue
+        # Same held-lock guard as the completed branch: a crashed run's
+        # descendant can hold its worktree lock without a verdict on record.
+        lock_still_owned "$d" && continue
+        [ -z "$(find "$d" -mtime -30 2>/dev/null | head -1)" ] && rm -rf "$d"
+      fi
+    done
+}
+
+# "Is the recorded supervisor still running?" -- answered with the pid AND a
+# start-time token, because a bare `kill -0` latches onto whatever process
+# recycled the pid after a reboot or wrapper crash: `status`/`list` would
+# report a stale run as active forever and `stop` would TERM an innocent
+# process. An empty token (MSYS ps without lstart) degrades to the plain
+# pid check rather than failing.
+lock_held() { # <lock-file>; exits 0 iff some process holds its flock
+  perl -e 'use Fcntl ":flock";
+           open(my $fh, ">>", $ARGV[0]) or exit 1;
+           exit(flock($fh, LOCK_EX | LOCK_NB) ? 1 : 0)' "$1" 2>/dev/null
+}
+
+# Is the RECORDED worktree of run-dir $1 still locked with $1 as the named
+# owner? Then $1's leftovers are what is holding it -- grounds both for
+# reaping them (stop) and for keeping $1's metadata alive (retention).
+lock_still_owned() {
+  local w
+  w=$(cat "$1/wt" 2>/dev/null) || return 1
+  [ -n "$w" ] &&
+    [ "$(cat "$w/.test-run.lock.owner" 2>/dev/null)" = "$1" ] &&
+    lock_held "$w/.test-run.lock"
+}
+
+# One fixed rendering for start-time tokens: lstart is locale- AND
+# timezone-formatted, so an unpinned rendering makes the same process print
+# differently from a shell in another TZ -- classifying a live run as dead
+# and letting stop refuse to reach it.
+ps_token() {
+  # Linux: starttime in clock ticks from /proc/<pid>/stat -- lstart's
+  # one-second resolution cannot tell a pid recycled within the same second
+  # from the original. Elsewhere: lstart under a pinned locale/TZ.
+  if [ -r "/proc/$1/stat" ]; then
+    perl -e '
+      open my $fh, "<", "/proc/$ARGV[0]/stat" or exit 0;
+      my $s = <$fh>;
+      $s =~ /\)\s+(.*)$/ or exit 0;   # comm may contain spaces/parens
+      my @f = split /\s+/, $1;        # $f[0] is field 3 (state)
+      print defined $f[19] ? $f[19] : "";
+    ' "$1" 2>/dev/null
+  else
+    # Squeezed AND trimmed: ps pads lstart to a fixed width, and tokens are
+    # compared as strings against records written by other renderers (the
+    # group leader trims its own) -- one canonical form for all writers.
+    LC_ALL=C TZ=UTC ps -o lstart= -p "$1" 2>/dev/null |
+      tr -s ' ' | sed 's/^ *//; s/ *$//'
+  fi
+}
+
+proc_alive() { # pid-file token-file
+  local pid tok now
+  pid=$(cat "$1" 2>/dev/null) || return 1
+  # A corrupted or forged pid file must never reach kill: 0 and negative
+  # values are POSIX kill specials (caller's group / broadcast), so only a
+  # positive decimal integer is a pid at all.
+  case $pid in '' | *[!0-9]* | 0) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  # A zombie passes kill -0 and still prints its recorded lstart, but it
+  # will never publish anything -- treating it as alive would make status
+  # lie forever under an init that does not reap. Empty state (ps without
+  # the column) falls through to the token check.
+  case $(ps -o state= -p "$pid" 2>/dev/null | tr -d ' ') in Z*) return 1 ;; esac
+  tok=$(tr -s ' ' <"$2" 2>/dev/null | sed 's/^ *//; s/ *$//') || tok=
+  # No RECORDED identity (MSYS ps without lstart) degrades to the plain pid
+  # check -- but where one was recorded, a pid that can no longer produce a
+  # token (exited between kill -0 and ps_token, possibly recycled) must
+  # fail, not pass.
+  [ -z "$tok" ] && return 0
+  now=$(ps_token "$pid")
+  [ -n "$now" ] || return 1
+  [ "$tok" = "$now" ]
+}
+sup_alive() { proc_alive "$1/pid" "$1/ptoken"; }
+# The wrapper outlives the supervisor only briefly (publication plus a
+# bounded group-reap) -- but that window is exactly where "no verdict yet"
+# must not be misread as "no verdict coming".
+wrapper_alive() { proc_alive "$1/wpid" "$1/wtoken"; }
+# Group signaling demands a RECORDED leader token: proc_alive's empty-token
+# fallback exists for supervisor/wrapper pids on platforms without lstart,
+# and is too weak to aim a signal at a whole, possibly recycled, process
+# group.
+group_verified() { [ -s "$1/gtoken" ] && proc_alive "$1/pgid" "$1/gtoken"; }
+
+# Make the launched run discoverable (`last` symlink, lock-owner pointer).
+# Deliberately AFTER the wrapper exists and is recorded, so any directory
+# reachable via `last` already carries its full launch metadata -- a status
+# probe can then never mistake a mid-launch run for a dead or running one.
+publish_run() { # 0 published; 2 abandoned by the wrapper's timeout; 1 error
+  # Checked on entry AND immediately before the last pointer write: a
+  # wrapper that gave up waiting marked the claim abandoned and released
+  # the lock, which may already belong to a newer run.
+  [ ! -f "$run_dir/pub_abandoned" ] || return 2
+  # `ln -sfn` onto an existing DIRECTORY silently creates the link INSIDE it,
+  # leaving `last` dangling while the launch reports success -- refuse a
+  # non-symlink squatter, and re-read the link to prove it points here.
+  { [ ! -e "$RUNS/last-$wt_key" ] || [ -L "$RUNS/last-$wt_key" ]; } || {
+    echo "test-run: $RUNS/last-$wt_key exists and is not a symlink; remove it" >&2
+    return 1
+  }
+  { ln -sfn "$run_dir" "$RUNS/last-$wt_key" &&
+    [ "$(readlink "$RUNS/last-$wt_key" 2>/dev/null)" = "$run_dir" ]; } || {
+    echo "test-run: cannot update $RUNS/last-$wt_key" >&2
+    return 1
+  }
+  # Advisory owner pointer for the lock-refusal message (the lock itself is
+  # the authority; a crash merely leaves this stale, and its reader only
+  # uses it to TARGET status/stop). The abandonment recheck sits directly
+  # before this, the most consequential pointer: stop's reaping authorizes
+  # against it. The wrapper-liveness barrier covers the one release path
+  # that cannot leave a marker (the wrapper's final-exit residual): a dead
+  # wrapper means the lock may already belong to a newer run.
+  [ ! -f "$run_dir/pub_abandoned" ] || return 2
+  wrapper_alive "$run_dir" || return 2
+  printf '%s\n' "$run_dir" >"$PWD/.test-run.lock.owner" || {
+    echo "test-run: cannot record the lock owner pointer" >&2
+    return 1
+  }
+}
+
+# The two-party publication handshake commits through ONE O_EXCL-created
+# file: the launcher claims "published" before touching any pointer, the
+# wrapper claims "expired" when its bounded wait runs out, and the first
+# writer wins -- expiry and publication are mutually exclusive by
+# construction, with no check-then-act gap between separate marker files.
+claim_handoff() { # <published|expired>
+  ( set -C; printf '%s\n' "$1" >"$run_dir/handoff" ) 2>/dev/null
+}
+
+# The run's metadata micro-lock: serializes the launcher's
+# {check-abandoned, write-pointers} critical section against the wrapper's
+# {mark-abandoned, release} -- the check and its consequential writes were
+# otherwise separate operations, and a launcher paused exactly between them
+# could overwrite a newer run's pointers however many markers existed.
+# Blocking flock; both sections are milliseconds.
+with_meta_lock() { # <cmd...>
+  (
+    exec 8>>"$run_dir/meta.lock" || exit 1
+    # Bounded: a publisher wedged on a dead filesystem must not deadlock
+    # the wrapper's abandonment (or vice versa) into pinning the worktree.
+    perl -e 'use Fcntl ":flock"; alarm 30; $SIG{ALRM} = sub { exit 2 };
+             exit(flock(STDIN, LOCK_EX) ? 0 : 1)' <&8 || exit 1
+    "$@"
+  )
+}
+mark_abandoned() { : >"$run_dir/pub_abandoned" 2>/dev/null; }
+
+resolve_run() {
+  local ref=${1:-last}
+  if [ "$ref" = last ]; then
+    run_dir=$(readlink "$RUNS/last-$wt_key" 2>/dev/null) ||
+      die "no runs recorded for this worktree"
+    [ -d "$run_dir" ] || die "no such run: $run_dir"
+  elif [ -d "$ref" ]; then
+    # Canonicalized (physically -- symlink spellings differ per referrer)
+    # for the same reason as $RUNS: identity is compared as a string
+    # against recorded pointers.
+    run_dir=$(cd "$ref" && pwd -P) || die "cannot resolve $ref"
+  elif [ -d "$RUNS/$ref" ]; then
+    # The bare identifiers `list` prints resolve here.
+    run_dir=$RUNS/$ref
+  else
+    die "no such run: $ref (neither a directory nor an entry under $RUNS)"
+  fi
+  # Only directories this runner created may be trusted: without this, an
+  # arbitrary directory's stray `pid` file (with the missing token read as
+  # the documented fallback) could get an unrelated process TERMed by stop.
+  [ -f "$run_dir/cmd" ] && [ -f "$run_dir/cap" ] ||
+    die "not a test-run directory (no cmd/cap metadata): $run_dir"
+}
+
+# The compact report `run`, `wait` and `status` all end with. Fingerprint in
+# the sweep.sh sense: the `File "..."` and `Error ...` lines, deduplicated, so
+# a new failure is distinguishable from a standing one without opening the log.
+digest() {
+  local dir=$1 rc verdict fp
+  rc=$(cat "$dir/exit" 2>/dev/null) || die "no verdict recorded in $dir"
+  # 142 is the ONLY code the cap produces (the supervisor's SIGALRM exit), so
+  # only it may say "timeout". 137 is a SIGKILL -- an OOM kill or a forced
+  # external kill -- and labeling it a timeout would send triage hunting a
+  # hang that never happened.
+  case $rc in
+    0) verdict=pass ;;
+    142) verdict="TIMEOUT (cap expired; run was killed, not judged)" ;;
+    137) verdict="KILLED (SIGKILL: OOM or forced kill; not judged)" ;;
+    129 | 130 | 143) verdict="CANCELLED (run was killed, not judged)" ;;
+    126 | 127) verdict="ERROR (toolchain/setup: nothing ran)" ;;
+    *) verdict=FAIL ;;
+  esac
+  echo "command: dune $(cat "$dir/cmd")"
+  echo "verdict: $verdict (exit $rc)"
+  echo "log:     $dir/log"
+  # Digest sits on `wait`'s deadline path, so it examines at most the last
+  # 10MB of the log rather than scaling with an arbitrarily noisy run.
+  scan_log() { tail -c 10000000 "$dir/log" 2>/dev/null; }
+  if scan_log | grep -qE '^File "[^"]*\.expected"|\.corrected'; then
+    echo "promotion diffs present -- inspect the log, accept with \`dune promote\`" \
+         "(tools/promote.sh on Windows)"
+  fi
+  if [ "$rc" != 0 ]; then
+    fp=$({ scan_log | grep -oE '^File "[^"]+", line [0-9]+'
+           scan_log | grep -oE '^(Error|Fatal error|Exception)[^,]*'
+         } 2>/dev/null | sort -u | head -40)
+    if [ -n "$fp" ]; then
+      echo "fingerprint:"
+      printf '%s\n' "$fp" | sed 's/^/  /'
+    else
+      echo "no Error/File lines matched; log tail:"
+      # Byte-capped BEFORE the line cap: a giant newline-free record would
+      # otherwise ride through `tail -n` whole.
+      tail -c 4000 "$dir/log" | tail -n 25 | sed 's/^/  /'
+    fi
+  fi
+}
+
+finish_run() { # rc -> append sentinel, record verdict
+  printf 'exit: %s\n' "$1" >>"$run_dir/log"
+  # Written aside and renamed: the verdict file's EXISTENCE is the completion
+  # signal `status`/`wait` key on, so it must never be observable empty. The
+  # write is retried with backoff -- a filesystem that filled up during the
+  # run may clear, and giving up silently would downgrade a real verdict
+  # into a generic "died without recording a verdict".
+  local n=0
+  until printf '%s\n' "$1" >"$run_dir/exit.tmp" &&
+        mv -f "$run_dir/exit.tmp" "$run_dir/exit"; do
+    n=$(( n + 1 ))
+    if [ "$n" -ge 3 ]; then
+      printf 'test-run: FAILED to record verdict %s (filesystem?)\n' "$1" \
+        >>"$run_dir/log" 2>/dev/null
+      return 1
+    fi
+    sleep 2
+  done
+}
+
+sub=${1:-}
+[ -n "$sub" ] || die "usage: tools/test-run.sh run|start|status|wait|stop|list ... (see header)"
+shift
+
+case $sub in
+  run | start)
+    cap=${OCANNL_TEST_CAP:-3600}
+    while [ $# -gt 0 ]; do
+      case $1 in
+        --cap) [ $# -ge 2 ] || die "--cap requires a value"; cap=$2; shift 2 ;;
+        --) shift; break ;;
+        *) break ;;
+      esac
+    done
+    # A mistyped cap would reach perl's numeric compare as 0 and silently
+    # disable the alarm -- the one property this script must never lose.
+    case $cap in '' | *[!0-9]*) die "--cap must be a nonnegative integer of seconds (0 disables)" ;; esac
+    # Bounded BEFORE arithmetic: an oversized value would wrap in bash's
+    # signed arithmetic (2^64 -> 0), and even values that bash keeps exceed
+    # perl's signed alarm range (2^31), which DISABLES the alarm rather than
+    # scheduling it -- both silently produce the unbounded run reserved for
+    # an explicit --cap 0. Nine digits (~31 years) fits every range.
+    [ ${#cap} -le 9 ] || die "--cap too large (max 9 digits)"
+    # Decimal-normalized once here: a leading zero (--cap 08) would pass the
+    # digit check, reach perl as decimal, and then blow up bash arithmetic
+    # downstream as an invalid octal.
+    cap=$(( 10#$cap ))
+    [ $# -gt 0 ] || set -- runtest
+    # The toolchain check gates only LAUNCHES: status/wait/stop/list must
+    # keep working from a shell with no opam environment -- not least so a
+    # runaway launched under an earlier environment can still be stopped.
+    # On MSYS/Cygwin the environment helper runs UNCONDITIONALLY: a dune
+    # already on PATH proves nothing there, because `opam env` emits
+    # cygwin-style paths that leave linking broken until opam-env.sh
+    # rewrites them (CLAUDE.md).
+    # Fatal on failure: the rewrite is REQUIRED there even when a dune is
+    # already discoverable, so continuing would run a mismatched toolchain.
+    case ${OSTYPE:-} in
+      msys* | cygwin*)
+        . tools/opam-env.sh ||
+          die "tools/opam-env.sh failed; refusing an unrewritten Windows toolchain"
+        ;;
+    esac
+    command -v dune >/dev/null 2>&1 || . tools/opam-env.sh
+    command -v dune >/dev/null 2>&1 || die "dune not found (opam environment not set up?)"
+    # On Windows every link step floods stderr with benign binutils warnings
+    # that would drown the digest's log tail; dune-quiet.sh filters exactly
+    # those while preserving dune's exit status (CLAUDE.md).
+    case ${OSTYPE:-} in msys* | cygwin*) DUNE=tools/dune-quiet.sh ;; *) DUNE=dune ;; esac
+    take_lock
+    new_run "$@"
+    # Cancellation/deferral is armed BEFORE the wrapper exists, for BOTH
+    # modes: a signal landing in the launch gap would otherwise take bash's
+    # default exit while the signal-immune wrapper ran on, unpublished,
+    # holding the lock. For `run` the handler forwards to the supervisor
+    # (and the attached path converts a too-early flag once the pid is
+    # recorded); for `start` the signal is merely deferred past publication
+    # -- the launcher is about to exit anyway, and the run is MEANT to
+    # survive it.
+    cancelled=
+    # Per-signal, so an interrupt records 130 and not a generic 143: INT is
+    # relayed as INT (the supervisor maps it to 130); HUP relays as TERM
+    # because the detached-mode supervisor deliberately ignores HUP.
+    fwd_sig() {
+      cancelled=$1
+      # sup_alive, not a bare pid read: after the supervisor is reaped its
+      # recorded pid can be recycled, and a late signal must not be
+      # forwarded to whatever process now wears that number.
+      if [ "$sub" = run ] && sup_alive "$run_dir"; then
+        case $1 in INT) s=INT ;; *) s=TERM ;; esac
+        kill "-$s" "$(cat "$run_dir/pid" 2>/dev/null)" 2>/dev/null
+      fi
+    }
+    trap 'fwd_sig INT' INT
+    trap 'fwd_sig TERM' TERM
+    trap 'fwd_sig HUP' HUP
+    # ONE launch shape for both modes: a wrapper subshell owns the supervisor
+    # and publishes the verdict, so no fate of the LAUNCHING shell (HUP from a
+    # closed terminal, harness cancellation, plain kill) can lose it -- `run`
+    # differs from `start` only in staying attached to wait and digest. The
+    # wrapper inherits lock fd 9; its pid file is what `stop` signals (the
+    # supervisor traps TERM and reaps the group).
+    (
+      # Immune to group-directed cancellation (`kill -- -PGID` from a task
+      # runner reaches launcher, wrapper and supervisor alike): the
+      # supervisor takes the TERM, reaps dune and exits 143, while this
+      # wrapper must survive those extra seconds to publish that verdict.
+      # It exits naturally right after, and KILL remains available.
+      trap '' HUP TERM INT
+      OCANNL_TESTRUN_BG=1 OCANNL_TESTRUN_RD=$run_dir \
+        perl -e "$capped_perl" -- "$cap" "$DUNE" "$@" >>"$run_dir/log" 2>&1 &
+      sup=$!
+      # Checked: a run whose supervisor identity cannot be recorded would be
+      # uncancellable by stop while dune ran on -- cancel it instead.
+      { printf '%s\n' "$sup" >"$run_dir/pid" &&
+        ps_token "$sup" >"$run_dir/ptoken"; } || kill -TERM "$sup" 2>/dev/null
+      # Same Linux-empty rule as the wrapper token: a supervisor that
+      # vanished mid-record must not linger as a bare recyclable pid.
+      if [ -d /proc ] && [ ! -s "$run_dir/ptoken" ]; then
+        kill -TERM "$sup" 2>/dev/null
+      fi
+      # (The group leader publishes its own pgid AND start token pre-exec,
+      # inside the supervisor's child -- see capped_perl. Sampling either
+      # here could capture a recycled pid.)
+      wait "$sup"
+      rc=$?
+      # A SIGKILLed supervisor cannot reap its process group, and dune would
+      # survive it -- still mutating _build while the verdict below releases
+      # the lock. The group is recorded (only when it is truly its own, see
+      # the supervisor comment), so reap any survivors first.
+      if group_verified "$run_dir" &&
+         pgid=$(cat "$run_dir/pgid") && kill -0 -- "-$pgid" 2>/dev/null; then
+        kill -TERM -- "-$pgid" 2>/dev/null
+        sleep 2
+        # Revalidate before escalating: TERM usually empties the group within
+        # the grace, and a numeric pgid could be recycled during it -- KILL
+        # only a group whose recorded leader identity still matches.
+        group_verified "$run_dir" &&
+          kill -KILL -- "-$pgid" 2>/dev/null
+      fi
+      finish_run "$rc"
+      # Publication handshake: hold the lock until publication has actually
+      # COMPLETED (pub_done), not merely been claimed -- a launcher
+      # descheduled between its claim and the pointer writes must not have a
+      # second run acquire the lock and then be overwritten. Bounded twice:
+      # after 10s with no claim the wrapper claims "expired" (the launcher
+      # then keeps its verdict unpublished); a published claim that never
+      # completes gets a longer grace before this wrapper gives up -- its
+      # own exit is the release, and an abandoned launch must not pin the
+      # worktree forever.
+      hw=0
+      while [ ! -f "$run_dir/pub_done" ]; do
+        hw=$(( hw + 1 ))
+        if [ "$hw" -gt 10 ]; then
+          claim_handoff expired && break
+          # Giving up on a claimed-but-never-completed publication: mark it
+          # ABANDONED first (under the metadata lock, so it serializes with
+          # the launcher's check-and-write section), so the launcher,
+          # however late it resumes, refuses to write pointers under a lock
+          # that is about to pass on. The lock is released only once the
+          # marker is DURABLY there -- a transiently failed write must not
+          # let a resumed launcher publish stale pointers later; if it
+          # cannot land within the extra grace, the wrapper's unavoidable
+          # exit releases anyway (documented residual).
+          if [ "$hw" -gt 70 ]; then
+            with_meta_lock mark_abandoned || :
+            [ -f "$run_dir/pub_abandoned" ] && break
+            # NO lockless fallback: a publisher wedged holding the metadata
+            # lock is exactly who the marker must be serialized against.
+            # Its pre-owner-write barrier is this wrapper's liveness, so
+            # the final-exit release below stays safe (documented residual:
+            # a wrapper dying between that check and the write).
+            [ "$hw" -gt 100 ] && break
+          fi
+        fi
+        sleep 1
+      done
+      # If publication never completed (expired or abandoned), restore the
+      # owner pointer to THIS run while we still hold the lock: a detached
+      # descendant surviving us keeps the flock through its inherited fd,
+      # and without an owner naming this run, lock_still_owned would refuse
+      # the attribution and stop could never reap it.
+      if [ ! -f "$run_dir/pub_done" ]; then
+        printf '%s\n' "$run_dir" >"$PWD/.test-run.lock.owner" 2>/dev/null || :
+      fi
+      # Release protocol: simply close our fd. The lock lives on the shared
+      # open file DESCRIPTION, so the kernel releases it exactly when the
+      # last holder closes -- and any leftover descendant that can still
+      # mutate _build holds an inherited copy of that description WHATEVER
+      # process group it moved itself into (setsid included), which no
+      # group-membership census could see. An explicit LOCK_UN would strip
+      # the lock out from under such survivors; closing only our own copy
+      # frees it immediately in the common no-survivors case and otherwise
+      # precisely as long as one lives.
+      exec 9>&-
+    ) </dev/null >/dev/null 2>&1 &
+    wrapper=$!
+    # The launcher's own fd 9 copy served its purpose the moment the wrapper
+    # inherited the lock's description: close it, so an attached launcher
+    # never appears in a leftover census -- a concurrent stop must not reap
+    # the process that is about to deliver the digest.
+    exec 9>&-
+    # The wrapper's own identity, recorded by its parent (bash 3.2 has no
+    # BASHPID for the subshell to name itself): status and wait use it to
+    # tell "verdict publication in flight" from "nothing left to publish".
+    # Checked like every launch write -- a run whose identity cannot be
+    # recorded would be invisible to status/stop and must not report started.
+    { printf '%s\n' "$wrapper" >"$run_dir/wpid" &&
+      ps_token "$wrapper" >"$run_dir/wtoken"; } || wrap_ids=bad
+    # On Linux /proc is authoritative: an empty token there means the
+    # wrapper vanished mid-record, and accepting it would leave the bare-pid
+    # fallback exposed to recycling. (Elsewhere empty is the documented
+    # MSYS degradation.)
+    if [ -d /proc ] && [ ! -s "$run_dir/wtoken" ]; then wrap_ids=bad; fi
+    if ! claim_handoff published; then
+      # The wrapper won the arbiter with "expired": it released the lock,
+      # which may already belong to a newer run whose `last`/owner pointers
+      # must not be overwritten by this finished one -- keep the verdict,
+      # skip publication.
+      echo "test-run: launch stalled past the publication handshake;" >&2
+      echo "  verdict kept unpublished at: $(printf %q "$run_dir")" >&2
+      unpublished=1
+    else
+      if [ "${wrap_ids:-ok}" = bad ]; then
+        pub_rc=1
+      else
+        with_meta_lock publish_run
+        pub_rc=$?
+      fi
+      if [ "$pub_rc" = 0 ]; then
+        # Completion acknowledgement: the wrapper holds the lock until this
+        # exists, so the pointers written by publish_run are already in
+        # place when any later run can first acquire.
+        : >"$run_dir/pub_done" 2>/dev/null || :
+      elif [ "$pub_rc" = 2 ]; then
+        # The wrapper marked our claim abandoned (launcher stalled past even
+        # the long grace); the run finished on its own -- keep the verdict,
+        # write nothing.
+        echo "test-run: publication abandoned after a stalled launch;" >&2
+        echo "  verdict kept unpublished at: $(printf %q "$run_dir")" >&2
+        unpublished=1
+      else
+        # An unpublishable run must not keep running untracked: cancel via
+        # the supervisor (waiting briefly for the wrapper to record its pid)
+        # and let the wrapper publish the 143 into the unpublished
+        # directory.
+        for _ in 1 2 3; do [ -f "$run_dir/pid" ] && break; sleep 1; done
+        # sup_alive, like every other forwarding path: a fast dune may
+        # already be reaped, and its recycled pid must not receive the TERM.
+        sup_alive "$run_dir" && kill -TERM "$(cat "$run_dir/pid")" 2>/dev/null
+        die "run could not be published; cancelled it (remnants at $run_dir)"
+      fi
+    fi
+    if [ "$sub" = run ]; then
+      # Attached: wait for the wrapper -- its exit means the verdict file is
+      # published. A cancellation flagged during the launch gap is converted
+      # here, now that the supervisor pid exists (briefly waiting for the
+      # wrapper to record it). A trapped signal returns from `wait` early,
+      # hence the retry loop.
+      if [ -n "$cancelled" ]; then
+        for _ in 1 2 3; do [ -f "$run_dir/pid" ] && break; sleep 1; done
+        case $cancelled in INT) s=INT ;; *) s=TERM ;; esac
+        sup_alive "$run_dir" && kill "-$s" "$(cat "$run_dir/pid")" 2>/dev/null
+      fi
+      # wrapper_alive, not a bare kill -0: after the wrapper is reaped its
+      # pid can be recycled, and probing the number alone would spin this
+      # loop on an unrelated process.
+      while wrapper_alive "$run_dir"; do wait "$wrapper" 2>/dev/null; done
+      trap - INT TERM HUP
+      if [ -f "$run_dir/exit" ]; then
+        digest "$run_dir"
+        exit "$(cat "$run_dir/exit")"
+      fi
+      echo "run died without recording a verdict (wrapper killed?): $run_dir"
+      exit 1
+    fi
+    trap - INT TERM HUP
+    disown
+    if [ -n "${unpublished:-}" ]; then
+      # No `last` link exists for this run -- pointing at `last` would
+      # inspect the wrong run or fail. Name the directory explicitly.
+      q=$(printf %q "$run_dir")
+      echo "started UNPUBLISHED (handshake expired): $run_dir"
+      echo "  command: dune $*"
+      echo "  check:   tools/test-run.sh status $q"
+      echo "  gate:    tools/test-run.sh wait $q"
+    else
+      echo "started: $run_dir"
+      echo "  command: dune $*"
+      echo "  log:     $run_dir/log"
+      echo "  check:   tools/test-run.sh status last    # from this worktree; never blocks"
+      echo "  gate:    tools/test-run.sh wait last      # bounded; exits with dune's status"
+    fi
+    ;;
+  status)
+    resolve_run "${1:-last}"
+    # One-shot and honest -- no sleeping in `status`. Ordered by LIVENESS,
+    # never by pid-file presence: a wrapper killed before it recorded the
+    # supervisor pid must read as dead, not as running forever. The wrapper
+    # check covers both edges of the run -- starting (supervisor pid not yet
+    # recorded) and finishing (group-reap, verdict publication in flight).
+    if [ -f "$run_dir/exit" ]; then
+      digest "$run_dir"
+    elif sup_alive "$run_dir"; then
+      echo "running: dune $(cat "$run_dir/cmd")  (log: $run_dir/log)"
+      exit 3
+    elif wrapper_alive "$run_dir"; then
+      echo "managed, verdict pending (starting or finishing): $run_dir"
+      exit 3
+    elif [ -f "$run_dir/exit" ]; then
+      digest "$run_dir" # published between the checks above
+    else
+      echo "run died without recording a verdict (killed externally?): $run_dir"
+      exit 1
+    fi
+    ;;
+  wait)
+    ref=last budget=
+    while [ $# -gt 0 ]; do
+      case $1 in
+        --timeout)
+          [ $# -ge 2 ] || die "--timeout requires a value"
+          budget=$2 budget_given=1
+          shift 2
+          ;;
+        *) ref=$1; shift ;;
+      esac
+    done
+    resolve_run "$ref"
+    if [ -n "${budget_given:-}" ]; then
+      # Same traps --cap had: leading zeros reach bash arithmetic as octal,
+      # and oversized values wrap. Gated on the option being GIVEN, so an
+      # explicitly empty value ('--timeout ""' from an unset harness
+      # variable) is rejected rather than silently using the default budget.
+      case $budget in '' | *[!0-9]*) die "--timeout must be a nonnegative integer of seconds" ;; esac
+      [ ${#budget} -le 9 ] || die "--timeout too large (max 9 digits)"
+      budget=$(( 10#$budget ))
+    fi
+    # Bounded by construction: default budget is the run's own cap plus slack
+    # for cleanup, so a `wait` outlives a hung run only briefly -- never forever.
+    cap=$(cat "$run_dir/cap" 2>/dev/null) || cap=3600
+    [ -n "$cap" ] || cap=3600
+    cap=$(( 10#$cap )) # decimal, whatever an older run recorded
+    [ -n "$budget" ] || budget=$(( cap > 0 ? cap + 120 : 7200 ))
+    waited=0
+    while [ ! -f "$run_dir/exit" ]; do
+      # Every sleep here -- the poll AND the dead-supervisor grace -- is
+      # bounded by the remaining budget, so a short --timeout is honored to
+      # the second rather than rounded up to an interval.
+      remaining=$(( budget - waited ))
+      if ! sup_alive "$run_dir" && ! wrapper_alive "$run_dir"; then
+        # Supervisor AND wrapper gone: no process is left to publish. A dead
+        # supervisor alone proves nothing -- the wrapper may still be reaping
+        # leftovers or mid-publication, and those iterations simply keep
+        # polling within the budget. One short settle, bounded like every
+        # sleep here, covers a verdict renamed into place between the checks
+        # above; an already-expired budget reports the documented timeout.
+        step=$(( remaining < 1 ? remaining : 1 ))
+        [ "$step" -gt 0 ] && sleep "$step"
+        waited=$(( waited + step ))
+        [ -f "$run_dir/exit" ] && break
+        # Recomputed AFTER the settle: consuming the final second must report
+        # the documented timeout, not slip through on the pre-sleep value.
+        [ $(( budget - waited )) -le 0 ] && { echo "wait timed out after ${budget}s: $run_dir"; exit 124; }
+        echo "run died without recording a verdict (killed externally?): $run_dir"
+        exit 1
+      fi
+      [ "$remaining" -le 0 ] && { echo "wait timed out after ${budget}s: $run_dir"; exit 124; }
+      step=$(( remaining < 5 ? remaining : 5 ))
+      sleep "$step"
+      waited=$(( waited + step ))
+    done
+    digest "$run_dir"
+    exit "$(cat "$run_dir/exit")"
+    ;;
+  stop)
+    resolve_run "${1:-last}"
+    # Leftover recovery, shared by the finished and dead-without-verdict
+    # branches. Descendants of dune may hold the run's worktree lock through
+    # inherited fd 9, possibly having setsid'd out of the recorded group.
+    # Everything uses the run's RECORDED worktree, not the caller's cwd --
+    # an explicit run directory may belong to another checkout. The gate:
+    # the lock is HELD with the owner pointer naming THIS run, so whatever
+    # holds it is this run's leftovers. The recorded group is signaled only
+    # under a matching leader token (a recycled numeric pgid is never
+    # trusted); the lsof census on the lock file covers detached holders
+    # the group cannot see. reap_cycle reports honestly when the lock is
+    # STILL held afterwards (no lsof on this system, or unkillable holders).
+    run_wt=$(cat "$run_dir/wt" 2>/dev/null)
+    run_wt=${run_wt:-$PWD}
+    # The census prefers /proc/locks (only pids actually HOLDING the flock,
+    # matched by device AND inode -- inode numbers repeat across
+    # filesystems); lsof is the fallback and lists any process with the
+    # file open. A NON-EMPTY proc answer is authoritative, but an empty one
+    # proves nothing: the flock outlives its acquiring pid on the shared
+    # description (our take_lock perl exits immediately), and /proc/locks
+    # can then name no holder while the lock is demonstrably held -- so an
+    # empty scan falls through to lsof rather than concluding "nobody".
+    lock_holder_pids() {
+      local out
+      out=$(perl -e '
+        my @st = stat($ARGV[0]) or exit 1;
+        my $dev = $st[0];
+        my ($maj, $min) = (($dev >> 8) & 0xfff, ($dev & 0xff) | (($dev >> 12) & ~0xff));
+        open my $fh, "<", "/proc/locks" or exit 1;
+        while (<$fh>) {
+          my @f = split;
+          next unless defined $f[1] && $f[1] eq "FLOCK";
+          my ($lmaj, $lmin, $ino) = split /:/, $f[5];
+          print "$f[4]\n"
+            if defined $ino && $ino == $st[1] &&
+               hex($lmaj) == $maj && hex($lmin) == $min;
+        }
+      ' "$run_wt/.test-run.lock" 2>/dev/null)
+      if [ -n "$out" ]; then
+        printf '%s\n' "$out"
+        return 0
+      fi
+      if [ -d /proc ]; then
+        # /proc/locks named nobody, yet the lock is held (inherited-only
+        # descriptions can be invisible there) -- sweep every process's
+        # fdinfo instead of depending on lsof, which need not be installed.
+        for pd in /proc/[0-9]*; do
+          p=${pd#/proc/}
+          fd_holds_lock "$p" && printf '%s\n' "$p"
+        done
+        return 0
+      fi
+      # macOS: lsof lists OPENERS -- the accepted approximation, there being
+      # no portable flock-holder API.
+      lsof -t -- "$run_wt/.test-run.lock" 2>/dev/null
+    }
+    fd_holds_lock() { # Linux: does <pid> hold a FLOCK on the lock file NOW?
+      perl -e '
+        my ($pid, $target) = @ARGV;
+        my @st = stat($target) or exit 1;
+        opendir(my $dh, "/proc/$pid/fd") or exit 1;
+        for my $fd (readdir $dh) {
+          next if $fd =~ /^\./;
+          my @fs = stat("/proc/$pid/fd/$fd") or next;
+          next unless $fs[0] == $st[0] && $fs[1] == $st[1];
+          open(my $fi, "<", "/proc/$pid/fdinfo/$fd") or next;
+          while (<$fi>) { exit 0 if /^lock:.*FLOCK/ }
+        }
+        exit 1
+      ' "$1" "$run_wt/.test-run.lock" 2>/dev/null
+    }
+    holds_lock_now() { # revalidated at SIGNAL time, not census time
+      if [ -d /proc ]; then
+        fd_holds_lock "$1"
+      else
+        lsof -t -- "$run_wt/.test-run.lock" 2>/dev/null | grep -qx "$1"
+      fi
+    }
+    reap_leftovers() { # <signal>
+      # Ownership rechecked at entry (and per census kill below): if the
+      # lock changed hands since the caller's gate, nothing here may fire.
+      lock_still_owned "$run_dir" || return 0
+      if group_verified "$run_dir"; then
+        kill "-$1" -- "-$(cat "$run_dir/pgid")" 2>/dev/null
+      fi
+      for p in $(lock_holder_pids); do
+        case $p in '' | *[!0-9]* | 0) continue ;; esac
+        # Re-verified per pid immediately before the signal: the census ran
+        # as one batch, and a holder that exited meanwhile could have had
+        # its pid recycled by an unrelated process. The ownership recheck
+        # closes the handoff race too -- if a NEW launch acquired the lock
+        # mid-reap, take_lock cleared the owner pointer atomically with
+        # acquisition, so the pointer can no longer name this run and the
+        # new run's holders are never signaled.
+        holds_lock_now "$p" || continue
+        lock_still_owned "$run_dir" || return 0
+        kill "-$1" "$p" 2>/dev/null
+      done
+    }
+    reap_cycle() { # exits 0 iff this run's hold on the lock is gone
+      lock_still_owned "$run_dir" || return 0
+      reap_leftovers TERM
+      sleep 2
+      if lock_still_owned "$run_dir"; then
+        reap_leftovers KILL
+        sleep 1
+      fi
+      ! lock_still_owned "$run_dir"
+    }
+    report_reap() {
+      if reap_cycle; then
+        echo "$1, but its leftover processes held the worktree lock; reaped them"
+      else
+        echo "$1, but leftover processes STILL hold $run_wt's lock" \
+             "(no lsof on this system, or unkillable holders); inspect with:" \
+             "lsof $(printf %q "$run_wt/.test-run.lock")"
+      fi
+    }
+    if [ -f "$run_dir/exit" ]; then
+      lock_still_owned "$run_dir" && report_reap "finished"
+      echo "already finished:"
+      digest "$run_dir"
+      exit 0
+    fi
+    if sup_alive "$run_dir"; then
+      kill -TERM "$(cat "$run_dir/pid")" 2>/dev/null
+      # Name the run explicitly (%q-quoted): `last` may resolve to a
+      # DIFFERENT run when this stop targeted an identifier from another
+      # worktree's history.
+      echo "sent TERM; confirm with: tools/test-run.sh wait $(printf %q "$run_dir")"
+    elif group_verified "$run_dir" &&
+         pg=$(cat "$run_dir/pgid") && kill -0 -- "-$pg" 2>/dev/null; then
+      # SIGKILL can remove wrapper and supervisor around a dune that survives
+      # in its own recorded group -- still holding the worktree lock, beyond
+      # its cap. Identity is the group LEADER's recorded start token (the
+      # same mechanism as every other liveness check here); a recycled pgid
+      # -- even one leading a process named dune -- fails the token and is
+      # never signaled. A leaderless surviving group is refused too, the
+      # conservative side: clean that up by hand. TERM gets a bounded grace,
+      # then a revalidated KILL -- an orphan that ignores TERM has lost its
+      # cap and would otherwise hold the worktree lock indefinitely.
+      kill -TERM -- "-$pg" 2>/dev/null
+      sleep 2
+      if group_verified "$run_dir" && kill -0 -- "-$pg" 2>/dev/null; then
+        kill -KILL -- "-$pg" 2>/dev/null
+        echo "orphaned process group $pg ignored TERM; escalated to KILL"
+      else
+        echo "sent TERM to the orphaned process group $pg; re-run stop to confirm"
+      fi
+    elif wrapper_alive "$run_dir"; then
+      # The run is MANAGED right now: either just launched (supervisor pid
+      # not yet recorded) or finishing (verdict publication in flight). It
+      # must never fall through to leftover recovery -- the wrapper ignores
+      # TERM and the census would KILL it mid-publication. Give the launch
+      # a moment and use the supervisor path if it becomes reachable.
+      for _ in 1 2 3; do [ -f "$run_dir/pid" ] && break; sleep 1; done
+      if sup_alive "$run_dir"; then
+        kill -TERM "$(cat "$run_dir/pid")" 2>/dev/null
+        echo "sent TERM; confirm with: tools/test-run.sh wait $(printf %q "$run_dir")"
+      else
+        echo "run is finishing (verdict publication in flight); confirm with:" \
+             "tools/test-run.sh wait $(printf %q "$run_dir")"
+      fi
+    elif lock_still_owned "$run_dir"; then
+      # Dead without a verdict, yet its leftovers still hold the worktree
+      # lock (a setsid escapee outliving a killed wrapper/supervisor) --
+      # the same recovery as the finished branch, or later runs stay
+      # refused forever.
+      report_reap "run is dead without a verdict"
+    else
+      echo "nothing left to signal (supervisor gone; no identity-verified surviving group)"
+    fi
+    ;;
+  list)
+    found=0
+    for d in "$RUNS"/2*/; do
+      [ -d "$d" ] || continue
+      found=1
+      d=${d%/}
+      if [ -f "$d/exit" ]; then state="exit $(cat "$d/exit")"
+      elif sup_alive "$d"; then state=running
+      elif wrapper_alive "$d"; then state=finishing
+      else state=dead
+      fi
+      printf '%s  %-8s  dune %s\n' "$(basename "$d")" "$state" "$(cat "$d/cmd" 2>/dev/null)"
+    done
+    [ "$found" = 1 ] || echo "no recorded runs in $RUNS"
+    ;;
+  *) die "unknown subcommand: $sub (run|start|status|wait|stop|list)" ;;
+esac

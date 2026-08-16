@@ -105,3 +105,4 @@ docs/*.blg
 /.claude/*
 !/.claude/settings.json
 !/.claude/skills/
+/.test-run.lock*
