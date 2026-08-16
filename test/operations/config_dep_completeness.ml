@@ -119,10 +119,18 @@ let () =
       let copies = Set.of_list (module String) (Scan.config_copy_dirs content) in
       let relative site = Scan.in_subdir site.Scan.subdir site.Scan.cwd in
       let directory_of site = repo_relative [ dir ] (relative site) in
-      List.map sites ~f:(fun site -> (relative site, directory_of site))
+      List.map sites ~f:(fun site ->
+          (* The config an executable finds is the nearest one at or above where it runs, so the
+             directories to look in are the same search path the dependency may name. *)
+          ( List.map (Scan.config_search_path site.Scan.cwd) ~f:(Scan.in_subdir site.Scan.subdir),
+            directory_of site ))
       |> List.dedup_and_sort ~compare:Poly.compare
-      |> List.iter ~f:(fun (subdir, directory) ->
-             if not (Set.mem config_dirs directory || Set.mem copies subdir) then
+      |> List.iter ~f:(fun (searched, directory) ->
+             if
+               not
+                 (List.exists searched ~f:(fun subdir ->
+                      Set.mem config_dirs (repo_relative [ dir ] subdir) || Set.mem copies subdir))
+             then
                fail
                  (Printf.sprintf
                     "%s runs test executables in %s, which has no %s to depend on -- add \

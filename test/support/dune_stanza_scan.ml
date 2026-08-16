@@ -104,18 +104,39 @@ let path_bearing_forms = [ "file"; "glob_files"; "glob_files_rec"; "source_tree"
     exists to reject, wearing the look of a declaration (Codex P2, round 5 of PR #343). Dependency
     paths are written relative to the stanza's directory, so the file wanted is [<cwd>/ocannl_config]
     for a process running in [<cwd>]. *)
-let rec dep_names_path sexp ~path =
+let rec dep_names_path sexp ~paths =
   match sexp with
-  | Sexp.Atom atom -> List.mem [ path; "./" ^ path ] atom ~equal:String.equal
+  | Sexp.Atom atom ->
+      List.exists paths ~f:(fun path -> List.mem [ path; "./" ^ path ] atom ~equal:String.equal)
   | Sexp.List (Sexp.Atom head :: rest) ->
       (* [(:name <deps>)] binds a name to ordinary dependencies; the forms above take paths. *)
       (String.is_prefix head ~prefix:":" || List.mem file_dep_forms head ~equal:String.equal)
-      && List.exists rest ~f:(dep_names_path ~path)
+      && List.exists rest ~f:(dep_names_path ~paths)
   | Sexp.List _ -> false
 
+(** Directories whose config an executable running in [cwd] would find, nearest first, as paths
+    relative to the stanza — the process directory and, when it is a DESCENDANT of the stanza's,
+    every directory between them.
+
+    OCANNL searches upward from the process directory, so a rule that chdirs into a child needs no
+    config of the child's: the stanza's own is on that search path, and demanding an exact match
+    rejects a correctly configured rule (Codex P2, round 9 of PR #343). A cwd that leaves the
+    subtree ([../sibling]) puts none of those ancestors on the path, so only its own counts. *)
+let config_search_path cwd =
+  let cwd = in_subdir cwd "" in
+  if String.is_empty cwd then [ "" ]
+  else if List.mem (String.split cwd ~on:'/') ".." ~equal:String.equal then [ cwd ]
+  else
+    String.split cwd ~on:'/'
+    |> List.folding_map ~init:[] ~f:(fun prefix component ->
+           let prefix = prefix @ [ component ] in
+           (prefix, String.concat ~sep:"/" prefix))
+    |> List.rev
+    |> fun descendants -> descendants @ [ "" ]
+
 let declares_config ?(cwd = "") args =
-  let path = in_subdir cwd config_file in
-  match args with None -> false | Some args -> List.exists args ~f:(dep_names_path ~path)
+  let paths = List.map (config_search_path cwd) ~f:(fun dir -> in_subdir dir config_file) in
+  match args with None -> false | Some args -> List.exists args ~f:(dep_names_path ~paths)
 
 (** The names a [(name …)] or [(names …)] field gives, in order. *)
 let names_of stanza =
@@ -423,8 +444,18 @@ let sites content =
       in
       match head stanza with
       | Some ("test" | "tests") ->
+          (* A custom action can leave the scan unable to say where the test runs, exactly as it
+             can for a rule; that verdict travels with the site rather than being dropped here
+             (Codex P2, round 9). *)
+          let unlocatable =
+            List.filter_map (executables_run stanza) ~f:(function
+              | cwd, Unknown_directory cmd -> Some (cwd, cmd)
+              | _ -> None)
+          in
           List.concat_map (action_cwds ()) ~f:(fun cwd ->
               site ~cwd Test (stanza_name ()) (declares_config ~cwd (deps ())))
+          @ List.concat_map unlocatable ~f:(fun (cwd, cmd) ->
+                site ~cwd Unreadable_directory cmd (declares_config ~cwd (deps ())))
       | Some "library" -> (
           match field stanza "inline_tests" with
           | None -> []

@@ -246,6 +246,27 @@ let sources_among args =
       | Some stem -> not (Set.mem present (stem ^ ".ml"))
       | None -> true)
 
+(** [files] counted per directory, as a line for a golden: which directories the census actually
+    came from, and how many files each contributed.
+
+    The alternative to printing it would be a list of permitted roots inside the test — a second
+    copy of the globs in [test/operations/dune], which is the hand-maintained list gh-ocannl-592
+    removed. Printing makes the scope reviewable instead: a file arriving from somewhere the globs
+    do not name shows up as a new directory in the diff, and the per-directory counts move when a
+    glob starts or stops matching. The generated sources dune produces in these directories
+    ([tensor/parser.ml] from menhir, the [select]ed backend implementations) are part of the count,
+    as they are part of the library (Codex P2, round 9 of PR #343). *)
+let by_directory files =
+  let strip path =
+    let rec go p = match String.chop_prefix p ~prefix:"../" with Some p -> go p | None -> p in
+    go (Stdlib.Filename.dirname path)
+  in
+  List.map files ~f:strip
+  |> List.sort_and_group ~compare:String.compare
+  |> List.map ~f:(fun group ->
+         Printf.sprintf "%s %d" (List.hd_exn group) (List.length group))
+  |> String.concat ~sep:", "
+
 (** Basenames that more than one of [files] carries.
 
     Both tests key something by basename — the forwarding exemptions in [test_config_consistency],

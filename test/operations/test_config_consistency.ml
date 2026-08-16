@@ -278,4 +278,7 @@ let () =
       "OK: %d files spell every config key as a string literal, outside %d forwarding functions: \
        %s.\n"
       (List.length source_files) (Set.length exempted_sites)
-      (String.concat ~sep:", " @@ Set.to_list exempted_sites))
+      (String.concat ~sep:", " @@ Set.to_list exempted_sites);
+    (* Which directories the census came from, so that the globs' reach is reviewable rather than
+       implicit -- see Config_key_scan.by_directory. *)
+    printf "OK: scanned %s.\n" (Config_key_scan.by_directory source_files))

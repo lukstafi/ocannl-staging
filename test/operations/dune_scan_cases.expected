@@ -22,6 +22,10 @@ ok: a chdir moves the directory whose config matters
 ok: and the dependency that satisfies it is the one reaching that directory
 ok: a test's own action can move where it runs
 ok: a test with an ordinary action still runs where it is
+ok: a test's shell action leaves its directory unestablished too
+ok: a chdir into a child is answered by the stanza's own config
+ok: the child's own config answers it as well
+ok: but a sibling's search path does not include the stanza's directory
 ok: an explicit relative program is a site without an extension
 ok: a bare word is still a tool on PATH
 ok: a chdir to the stanza's own directory changes nothing

@@ -110,6 +110,24 @@ let cases =
     ( "a test with an ordinary action still runs where it is",
       {dune|(test (name t) (deps ocannl_config) (action (run %{test} --flag)))|dune},
       [ "test t [declares]" ] );
+    ( "a test's shell action leaves its directory unestablished too",
+      {dune|(test (name t) (deps ocannl_config) (action (bash "cd ../sibling && ./%{test}")))|dune},
+      [
+        "test t [declares]";
+        "rule whose working directory this scan cannot establish: shell: cd ../sibling && \
+         ./%{test} [declares]";
+      ] );
+    (* OCANNL searches UPWARD, so an action that chdirs into a child finds the stanza's own config;
+       demanding the child have one rejects a correctly configured rule (Codex P2, round 9). *)
+    ( "a chdir into a child is answered by the stanza's own config",
+      {dune|(rule (deps ocannl_config) (action (chdir child (run %{dep:probe.exe}))))|dune},
+      [ "in child: rule running probe.exe [declares]" ] );
+    ( "the child's own config answers it as well",
+      {dune|(rule (deps child/ocannl_config) (action (chdir child (run %{dep:probe.exe}))))|dune},
+      [ "in child: rule running probe.exe [declares]" ] );
+    ( "but a sibling's search path does not include the stanza's directory",
+      {dune|(rule (deps ocannl_config) (action (chdir ../sibling (run %{dep:probe.exe}))))|dune},
+      [ "in ../sibling: rule running probe.exe" ] );
     (* An explicit path names something this repository produced, whatever its extension; stripping
        the `./` before asking loses what distinguishes it from `python3` (Codex P2, round 8). *)
     ( "an explicit relative program is a site without an extension",
