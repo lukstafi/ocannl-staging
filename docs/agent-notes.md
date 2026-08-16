@@ -318,6 +318,14 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   occurrence-level; they coincide only at first touch on the linear path.
 - Big-reduction producers are forced `Never_virtual` by `virtualize_max_inline_reduction`
   (default 16) — remember it when a structural expectation assumes inlining.
+- Wide-fanin producers are forced `Never_virtual 41` by `virtualize_max_inline_fanin` (default 8,
+  gh-573): a node whose fully-inlined computation would load more than that many distinct
+  materialized nodes — accumulated through chains of virtual producers, per setter — materializes,
+  resetting the fan-in downstream. This is the guard that breaks residual-stream-style running sums
+  (per-cell multiplicity passes the visit cap because copy-position reads are rmw-exempt, yet each
+  consumer re-sums the whole prefix); a structural expectation assuming a deep all-virtual chain
+  must disable it (`Low_level.virtualize_settings.max_inline_fanin <- -1`). Like the other caps it
+  is a flippable policy prior, not legality (`test/operations/virtual_chain_fanin.ml`).
 - `check_half_prec_constants_cutoff` (`Ops.exceeds_fp16_cutoff`, enforced from
   `Low_level.simplify_llc.check_constant` during lowering, hence backend-independently) is a
   HEADROOM policy, not a representability check: its default 2^14 sits far below fp16's 65504 max

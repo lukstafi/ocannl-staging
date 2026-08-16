@@ -179,7 +179,8 @@ searchable, per-compilation-lineage decision vector rather than a fixed pre-pass
 - The **Materialize** half of the vector is a pre-seeded `On_device` decision in the lineage's
   placements (`Context.decide_materialized`).
 - The **Inline** half is `optimize_ctx.inline_preferences` (`Context.decide_inline`): nodes exempt
-  from the heuristic caps (`virtualize_max_visits`, `virtualize_max_inline_reduction`) — the caps
+  from the heuristic caps (`virtualize_max_visits`, `virtualize_max_inline_reduction`,
+  `virtualize_max_inline_fanin`) — the caps
   are priors of the *default* decision policy, not legality. Legality (`check_and_store_virtual`,
   `inline_computation`, including the injectivity conditions that preserve reduction order — the
   determinism contract) and the observability pessimizations (read-only, read-before-write) apply
@@ -233,7 +234,20 @@ Key analyses performed:
   sampled truncated loop ranges.
 - **Placement decisions** (`decide_placements`): resolves virtual/materialized placements from the
   facts and metrics — the visit cap (`virtualize_max_visits`), the recompute-cost cap
-  (`virtualize_max_inline_reduction`), read-only and recurrence pessimizations.
+  (`virtualize_max_inline_reduction`), the transitive inline-fanin cap
+  (`virtualize_max_inline_fanin`, gh-573; see below), read-only and recurrence pessimizations.
+
+  The fanin cap is the one guard that sees *chains* of virtual producers. A running sum such as a
+  transformer's residual stream passes the per-node caps (its consumers' copy-position reads are
+  read-modify-write-exempt, and it has no reduction loops), yet inlining it replays the whole
+  prefix of the chain at every consumer — quadratic-in-depth recomputation. `decide_placements`
+  therefore walks the per-setter read-dependency graph bottom-up, accumulating for each
+  virtualization candidate the set of distinct materialized nodes its fully-inlined computation
+  would load (per-setter maximum, not union: a read of one cell executes one setter's computation,
+  so Block/concat component setters do not stack). A candidate whose set outgrows the cap is
+  materialized (`Never_virtual` provenance **41**), which resets the fan-in of everything
+  downstream: the chain materializes a running sum once per roughly `virtualize_max_inline_fanin`
+  contributors instead of being re-summed at every consumer.
 
 ### 2. Virtualization Phase (`virtual_llc` + `check_and_store_virtual`)
 
@@ -432,6 +446,12 @@ The optimization behavior is controlled by `virtualize_settings`:
 
 - `max_visits`: maximum per-cell read multiplicity (bounded via the affine access relations) before
   a tensor is materialized (default: **1**).
+- `max_inline_reduction`: recompute-cost cap — a node whose setters have enclosing reduction loops
+  with a trip-count product exceeding this value is materialized (default: **16**; negative
+  disables).
+- `max_inline_fanin`: transitive fan-in cap (gh-573) — a node whose fully-inlined computation would
+  read more than this many distinct materialized nodes, accumulated through chains of virtual
+  producers, is materialized (default: **8**; negative disables).
 - `enable_device_only`: whether to prefer device-only storage when possible (default: **true**).
 - `inline_scalar_constexprs`: whether to inline scalar constant expressions regardless of access
   counts (default: **true**).

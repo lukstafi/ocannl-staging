@@ -458,6 +458,7 @@ type virtualize_settings = {
   mutable enable_device_only : bool;
   mutable max_visits : int;
   mutable max_inline_reduction : int;
+  mutable max_inline_fanin : int;
   mutable inline_scalar_constexprs : bool;
   mutable inline_simple_computations : bool;
   mutable inline_complex_computations : bool;
@@ -469,6 +470,9 @@ let virtualize_settings =
   in
   let max_inline_reduction =
     Int.of_string @@ Utils.get_global_arg ~arg_name:"virtualize_max_inline_reduction" ~default:"16"
+  in
+  let max_inline_fanin =
+    Int.of_string @@ Utils.get_global_arg ~arg_name:"virtualize_max_inline_fanin" ~default:"8"
   in
   let enable_device_only = Utils.get_global_flag ~default:true ~arg_name:"enable_device_only" in
   let inline_scalar_constexprs =
@@ -484,6 +488,7 @@ let virtualize_settings =
     enable_device_only;
     max_visits;
     max_inline_reduction;
+    max_inline_fanin;
     inline_scalar_constexprs;
     inline_simple_computations;
     inline_complex_computations;
@@ -516,6 +521,26 @@ type traced_array = {
           own read-modify-write does not. A node never read in the routine has no inlining cost, so
           the recompute-cost guard must not materialize it (it may instead be dropped as a committed
           virtual computation, or inlined by a later routine in the lineage). *)
+  mutable setter_reads : Set.M(Tnode).t list;
+      (** Per setter statement ([Set]/[Set_from_vec]), the tensor nodes its right-hand side reads —
+          including reads inside [Local_scope] bodies in the right-hand side (their loads execute
+          per evaluation of the setter), and excluding the node's own read-modify-write self-reads
+          (when inlined they become the local accumulator, not a load). Decision-independent
+          analysis fact behind the transitive inline-fanin guard (gh-573): a read of a cell
+          executes one setter's computation, so the guard takes the per-setter maximum, not the
+          union — a Block/concat node written by one range-guarded setter per component costs one
+          component per read. The per-setter maximum is chosen before downstream unions, so a
+          consumer overlapping one alternative but not another can be undercounted — accepted: an
+          exact treatment is combinatorial across multi-setter dependencies, and both error
+          directions of this heuristic prior are benign (a miss reproduces the pre-guard
+          placement, which stays a [`Materialize] flip candidate with a fanin-charged cost). *)
+  mutable inline_fanin : int;
+      (** The transitive inline fan-in the guard computed for this node under the current
+          placements: the number of distinct materialized nodes the node's fully-inlined
+          computation would load (at least 1). Decision-dependent (written by [decide_placements]
+          on the candidate's private store copy); multiplies into [fc_recompute_cost] so the
+          search and the memory-budget planner see the true cost of re-inlining a node the fanin
+          cap materialized. *)
 }
 [@@deriving sexp_of]
 
@@ -536,7 +561,8 @@ type optimize_ctx = {
   inline_preferences : Hash_set.M(Tnode).t;
       (** gh-555: the [Inline] half of the per-lineage inlining decision vector. A node recorded
           here is exempt from the heuristic virtualization caps ([virtualize_max_visits],
-          [virtualize_max_inline_reduction]) in {!decide_placements} — the caps are priors of the
+          [virtualize_max_inline_reduction], [virtualize_max_inline_fanin]) in {!decide_placements}
+          — the caps are priors of the
           default policy, not legality. Legality is unaffected: [check_and_store_virtual] /
           [inline_computation] can still reject the node ([Never_virtual] with their provenances).
           The [Materialize] half of the vector is a pre-seeded [On_device] decision in
@@ -604,10 +630,12 @@ type swizzle_kind =
 
 (** gh-555: one searchable inlining decision dimension of a compile — a node whose placement the
     default policy decided, together with the flip a search can try and the recompute-cost bound of
-    the virtual placement (reduction extent × per-cell read multiplicity — the cost the flip trades
-    against memory traffic). [`Materialize] flips a node the policy left virtual (via
+    the virtual placement (reduction extent × per-cell read multiplicity × transitive inline
+    fan-in — the cost the flip trades against memory traffic; without the fan-in factor a node the
+    fanin cap materialized would rank among the cheapest to re-inline, and the memory-budget
+    planner would prefer undoing exactly the guard's decision). [`Materialize] flips a node the policy left virtual (via
     [Context.decide_materialized]); [`Inline] flips a node materialized by the heuristic caps
-    (provenance 1 or 39 — never by legality or observability, which are not decisions), via
+    (provenance 1, 39 or 41 — never by legality or observability, which are not decisions), via
     [Context.decide_inline]. An [`Inline] flip's legality is settled only when the virtualizer
     replays ([check_and_store_virtual]): a rejected flip reproduces the materialized placement. *)
 type flip_candidate = {
@@ -689,6 +717,8 @@ let get_node store tn =
         is_range_producer = false;
         inline_reduction_extent = 1;
         read_by_other = false;
+        setter_reads = [];
+        inline_fanin = 1;
       })
 
 let is_constexpr_comp traced_store llsc =
@@ -933,8 +963,17 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
     match Affine.fiber_cardinality ~domain:(Map.to_alist loop_ranges) idcs with
     | `Exact n | `At_least n -> n
   in
-  let rec loop_proc ~loop_ranges llc =
-    let loop = loop_proc ~loop_ranges in
+  (* [scope_reads] is the enclosing setter's identity and read sinks when this traversal is
+     inside a [Local_scope] body in that setter's right-hand side (gh-573): the body's loads
+     execute per evaluation of the setter, so they belong to its [setter_reads], with the
+     setter's own read-modify-write self-reads still excluded. The payload carries TWO sinks,
+     (self, statement sink, current sink): scope bodies hoist to just before the enclosing
+     statement and execute unconditionally (both [Where] arms' bodies really run — see the
+     operand-conditionality notes), so they record into the statement sink, while directly
+     conditional arm expressions record into per-arm current sinks maxed by the [Ternop] arm
+     below. [None] at top level. *)
+  let rec loop_proc ~loop_ranges ~scope_reads llc =
+    let loop = loop_proc ~loop_ranges ~scope_reads in
     match llc with
     | Noop -> ()
     | (Seq (c1, c2) : t) ->
@@ -944,7 +983,9 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
         (* A dead loop ([to_ < from_]) never executes its body: record no facts from it, like the
            retired tracer, which never enumerated such loops. *)
         if to_ >= from_ then
-          loop_proc ~loop_ranges:(Map.set loop_ranges ~key:index ~data:(to_ - from_ + 1)) body
+          loop_proc ~scope_reads
+            ~loop_ranges:(Map.set loop_ranges ~key:index ~data:(to_ - from_ + 1))
+            body
     | Zero_out tn ->
         let traced : traced_array = get_node traced_store tn in
         if (not traced.has_assignment) && not (Hash_set.mem read_seen tn) then (
@@ -955,8 +996,11 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
         traced.zeroed_out <- true
     | Set { tn; idcs; llsc; debug = _ } ->
         check_no_concat idcs;
-        loop_scalar ~loop_ranges ~lhs:(Some (tn, idcs)) llsc;
+        let reads = Hash_set.create (module Tnode) in
+        loop_scalar ~loop_ranges ~lhs:(Some (tn, idcs)) ~reads:(Some (tn, reads, reads)) llsc;
         let traced : traced_array = get_node traced_store tn in
+        traced.setter_reads <-
+          Set.of_list (module Tnode) (Hash_set.to_list reads) :: traced.setter_reads;
         traced.inline_reduction_extent <-
           max traced.inline_reduction_extent (reduction_extent loop_ranges idcs);
         if (not traced.has_assignment) && (not (Hash_set.mem read_seen tn)) && is_scalar_dims tn
@@ -986,8 +1030,11 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
         track_symbol reverse_node_map tn idcs
     | Set_from_vec { tn; idcs; length = _; vec_unop = _; arg = arg, _; debug = _ } ->
         check_no_concat idcs;
-        loop_scalar ~loop_ranges ~lhs:(Some (tn, idcs)) arg;
+        let reads = Hash_set.create (module Tnode) in
+        loop_scalar ~loop_ranges ~lhs:(Some (tn, idcs)) ~reads:(Some (tn, reads, reads)) arg;
         let traced : traced_array = get_node traced_store tn in
+        traced.setter_reads <-
+          Set.of_list (module Tnode) (Hash_set.to_list reads) :: traced.setter_reads;
         traced.inline_reduction_extent <-
           max traced.inline_reduction_extent (reduction_extent loop_ranges idcs);
         (* Vector operations cannot be scalar constexpr or one-hot selectors. *)
@@ -997,7 +1044,7 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
         traced.is_complex <- traced.is_complex || not (is_constexpr_comp traced_store arg);
         traced.has_assignment <- true;
         track_symbol reverse_node_map tn idcs
-    | Set_local (_, llsc) -> loop_scalar ~loop_ranges ~lhs:None llsc
+    | Set_local (_, llsc) -> loop_scalar ~loop_ranges ~lhs:None ~reads:scope_reads llsc
     | Declare_local _ -> ()
     | Comment _ -> ()
     | Staged_compilation _ -> ()
@@ -1010,10 +1057,10 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
            reaches fact tracing. *)
         invalid_arg "Low_level.trace_node_facts: Tile_mma reached the optimization pipeline"
     | If { cond = c, _; body } ->
-        loop_scalar ~loop_ranges ~lhs:None c;
+        loop_scalar ~loop_ranges ~lhs:None ~reads:scope_reads c;
         loop body
-  and loop_scalar ~loop_ranges ~lhs llsc =
-    let loop = loop_scalar ~loop_ranges ~lhs in
+  and loop_scalar ~loop_ranges ~lhs ~reads llsc =
+    let loop = loop_scalar ~loop_ranges ~lhs ~reads in
     match llsc with
     | Constant _ | Constant_bits _ -> ()
     | Get (ptr, indices) ->
@@ -1021,6 +1068,12 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
         let traced : traced_array = get_node traced_store ptr in
         if not (Option.exists lhs ~f:(fun (tn, _) -> Tn.equal ptr tn)) then
           traced.read_by_other <- true;
+        (* The collector carries the setter's identity separately from [lhs], which a
+           [Local_scope] body does not inherit: the read-modify-write self-read exclusion must
+           follow the OUTER setter through the body, or a self-accumulating scope records a
+           phantom contributor that can flip a decision at the cap boundary. *)
+        Option.iter reads ~f:(fun (self, _stmt, cur) ->
+            if not (Tn.equal ptr self) then Hash_set.add cur ptr);
         (* The read-modify-write exemption: a read at the enclosing statement's write position is
            not a visit ([inline_complex_computations]), whichever node it reads. *)
         let exempt =
@@ -1032,7 +1085,12 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
         (* gh-343: [Get_dynamic] is produced after this tracing pass, so this arm is defensive; the
            dynamic index sub-expression is still traversed for completeness. *)
         loop v
-    | Local_scope { body; _ } -> loop_proc ~loop_ranges body
+    | Local_scope { body; _ } ->
+        (* The body hoists to statement level, outside any conditional arm of the enclosing
+           expression: its reads record into the statement sink unconditionally. *)
+        loop_proc ~loop_ranges
+          ~scope_reads:(Option.map reads ~f:(fun (self, stmt, _cur) -> (self, stmt, stmt)))
+          body
     | Get_local _ -> ()
     | Get_merge_buffer (source, _) ->
         Option.iter !merge_node_ref ~f:(fun merge_node ->
@@ -1043,19 +1101,37 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
                      "Low_evel.optimize_proc: currently only one merge buffer per routine is \
                       allowed, found nodes %{Tn.debug_name source} and %{Tn.debug_name merge_node}"]);
         merge_node_ref := Some source
+        (* Not recorded in [reads]: a merge-buffer read loads a materialized copy, never inlining
+           the source's computation, and the source's placement here says nothing about that copy.
+           The fanin guard undercounts the one load — the safe direction for a heuristic cap. *)
     | Embed_index _ -> ()
     | Binop (Arg1, (llv1, _), _llv2) -> loop llv1
     | Binop (Arg2, _llv1, (llv2, _)) -> loop llv2
-    | Ternop (_, (llv1, _), (llv2, _), (llv3, _)) ->
+    | Ternop (op, (llv1, _), (llv2, _), (llv3, _)) -> (
         loop llv1;
-        loop llv2;
-        loop llv3
+        match (Ops.ternop_conditionality op, reads) with
+        | Ops.All_three, _ | Ops.Cond_and_one_arm, None ->
+            loop llv2;
+            loop llv3
+        | Ops.Cond_and_one_arm, Some (self, stmt, cur) ->
+            (* Exactly one arm's EXPRESSION evaluates per visit ([Ops.ternop_conditionality]): the
+               setter's fan-in charges the wider arm, not the union — two arms each within the cap
+               must not jointly trip it. [Local_scope] bodies inside the arms are the exception:
+               they hoist to statement level and both execute, so their reads flow to the
+               statement sink via the [Local_scope] arm above rather than into the per-arm sinks.
+               The other traced facts still record from both arms (their subjects are
+               rendering-level, and both arms are rendered). *)
+            let r2 = Hash_set.create (module Tnode) and r3 = Hash_set.create (module Tnode) in
+            loop_scalar ~loop_ranges ~lhs ~reads:(Some (self, stmt, r2)) llv2;
+            loop_scalar ~loop_ranges ~lhs ~reads:(Some (self, stmt, r3)) llv3;
+            let wider = if Hash_set.length r3 > Hash_set.length r2 then r3 else r2 in
+            Hash_set.iter wider ~f:(Hash_set.add cur))
     | Binop (_, (llv1, _), (llv2, _)) ->
         loop llv1;
         loop llv2
     | Unop (_, (llsc, _)) -> loop llsc
   in
-  loop_proc ~loop_ranges:(Map.empty (module Indexing.Symbol)) llc
+  loop_proc ~loop_ranges:(Map.empty (module Indexing.Symbol)) ~scope_reads:None llc
 
 let%diagn2_sexp check_and_store_virtual (optim_ctx : optimize_ctx) traced static_indices top_llc =
   let exception Non_virtual of int in
@@ -4949,7 +5025,8 @@ let drop_dead_loop_accesses (accs : Tn.t Affine.access list) : Tn.t Affine.acces
 (* The placement decision procedure over the traced facts and affine metrics — the tail of the
    retired [visit_llc], factored out (gh-554; the analysis/decision split of gh-555 step 1). Writes
    decisions into the lineage's placements table; the metrics are forced only when a decision
-   actually consults them. The heuristic caps ([max_visits], [max_inline_reduction]) are priors of
+   actually consults them. The heuristic caps ([max_visits], [max_inline_reduction],
+   [max_inline_fanin]) are priors of
    this default policy, not legality: a node in [optim_ctx.inline_preferences] (gh-555) is exempt
    from both, like one-hot selector producers always were, while the legality rejections
    ([check_and_store_virtual] / [inline_computation]) and the observability pessimizations
@@ -4957,19 +5034,20 @@ let drop_dead_loop_accesses (accs : Tn.t Affine.access list) : Tn.t Affine.acces
 let decide_placements (optim_ctx : optimize_ctx) traced_store ~max_visits ~reads_covered
     ~read_multiplicity =
   let plc = optim_ctx.placements in
+  (* task-73617488: one-hot selector producers are exempt from the heuristic caps. The ordinary
+     [virtual_llc]/[cleanup_virtual_llc] path will inline them so that
+     [rewrite_one_hot_reductions] can fire at default [max_visits = 1]. gh-555: an explicit
+     [Inline] decision ([inline_preferences]) is the same kind of exemption, searchable. *)
+  let cap_exempt traced =
+    (traced.prefers_virtual_one_hot && not traced.has_non_one_hot_setter)
+    || Hash_set.mem optim_ctx.inline_preferences traced.tn
+  in
   Hashtbl.iter traced_store ~f:(fun traced ->
       let tn = traced.tn in
       let covered =
         lazy (match (Lazy.force reads_covered) tn with `Covered -> true | `Unknown _ -> false)
       in
-      let cap_exempt =
-        (* task-73617488: one-hot selector producers are exempt from the heuristic caps. The
-           ordinary [virtual_llc]/[cleanup_virtual_llc] path will inline them so that
-           [rewrite_one_hot_reductions] can fire at default [max_visits = 1]. gh-555: an explicit
-           [Inline] decision ([inline_preferences]) is the same kind of exemption, searchable. *)
-        (traced.prefers_virtual_one_hot && not traced.has_non_one_hot_setter)
-        || Hash_set.mem optim_ctx.inline_preferences tn
-      in
+      let cap_exempt = cap_exempt traced in
       if
         virtualize_settings.inline_scalar_constexprs && traced.is_scalar_constexpr
         && not (Tn.Placements.known_non_virtual plc tn)
@@ -5020,7 +5098,149 @@ let decide_placements (optim_ctx : optimize_ctx) traced_store ~max_visits ~reads
          contents are preserved: it is an input of the routine. *)
       if (not (Tn.Placements.known_virtual plc tn)) && not (Lazy.force covered) then (
         traced.read_before_write <- true;
-        Tn.Placements.update plc tn On_device 36))
+        Tn.Placements.update plc tn On_device 36));
+  (* Transitive inline-fanin guard (gh-573): the per-node caps above cannot see chains. A running
+     sum such as a transformer's residual stream has per-cell read multiplicity within the visit
+     cap (its consumers' copy-position reads are read-modify-write-exempt) and no reduction loops,
+     yet inlining it replays the entire prefix of the chain at every consumer — quadratic in depth.
+     The per-evaluation cost that actually grows is the fan-in of the fully-inlined computation:
+     the number of distinct materialized nodes it loads (the issue's triangular kernel signatures).
+     Bottom-up over the setter-reads graph, a node still headed for inlining accumulates its
+     virtual dependencies' fan-in sets; when the set outgrows the cap, the node is materialized
+     (provenance 41 — a heuristic policy decision, [`Inline]-flippable like the other caps), which
+     resets the fan-in of everything downstream: the chain materializes once per ~cap
+     contributors instead of once per consumer. Per-setter maximum, not union across setters — a
+     read of one cell executes one setter's computation (Block/concat range-guarded setters). *)
+  if virtualize_settings.max_inline_fanin >= 0 then (
+    (* The reads a stored computation replays when [inline_computation] inlines it: [Get]s of nodes
+       other than [self], including inside [Local_scope] bodies. Mirrors [trace_node_facts]'
+       collection for this routine's own setters; used for a dependency this routine only READS
+       whose definition an earlier routine in the lineage committed [Virtual] — its traced entry
+       here has no setters, but its computation will be replayed all the same. Merge-buffer reads
+       stay uncounted (a materialized copy), and projections charge only the evaluated operand. *)
+    (* [reads_of_proc acc code] is the statement-level sink; [reads_of_scalar (stmt, cur) v]
+       threads the statement sink alongside the current (possibly per-arm) expression sink:
+       [Local_scope] bodies hoist to statement level and execute unconditionally — both [Where]
+       arms' bodies really run — so their reads join [stmt], while directly conditional arm
+       expressions collect into fresh [cur] sinks maxed by the [Cond_and_one_arm] case. *)
+    let rec reads_of_proc ~self acc (c : t) =
+      match c with
+      | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _
+        ->
+          acc
+      | Tile_mma _ -> acc (* post-optimization construct; never in stored computations *)
+      | Seq (c1, c2) -> reads_of_proc ~self (reads_of_proc ~self acc c1) c2
+      | For_loop { from_; to_; body; _ } ->
+          (* A dead loop ([to_ < from_]) replays zero times: charge nothing, mirroring
+             [trace_node_facts] (which records no facts from dead-loop bodies). *)
+          if to_ >= from_ then reads_of_proc ~self acc body else acc
+      | Set { llsc; _ } -> scalar_into ~self acc llsc
+      | Set_dynamic { dyn_value = v, _; llsc; _ } ->
+          scalar_into ~self (scalar_into ~self acc v) llsc
+      | Set_from_vec { arg = v, _; _ } -> scalar_into ~self acc v
+      | Set_local (_, llsc) -> scalar_into ~self acc llsc
+      | If { cond = c0, _; body } -> reads_of_proc ~self (scalar_into ~self acc c0) body
+    and scalar_into ~self acc v =
+      let stmt, cur = reads_of_scalar ~self (acc, Set.empty (module Tnode)) v in
+      Set.union stmt cur
+    and reads_of_scalar ~self ((stmt, cur) as acc) (sc : scalar_t) =
+      match sc with
+      | Constant _ | Constant_bits _ | Embed_index _ | Get_local _ | Get_merge_buffer _ -> acc
+      | Get (q, _) -> if Tn.equal q self then acc else (stmt, Set.add cur q)
+      | Get_dynamic { tn = q; dyn_value = v, _; _ } ->
+          reads_of_scalar ~self (stmt, (if Tn.equal q self then cur else Set.add cur q)) v
+      | Local_scope { body; _ } -> (reads_of_proc ~self stmt body, cur)
+      | Ternop (op, (v1, _), (v2, _), (v3, _)) -> (
+          let acc = reads_of_scalar ~self acc v1 in
+          match Ops.ternop_conditionality op with
+          | Ops.All_three -> reads_of_scalar ~self (reads_of_scalar ~self acc v2) v3
+          | Ops.Cond_and_one_arm ->
+              (* Exactly one arm's expression evaluates per visit: charge the wider arm, not the
+                 union. The arms' hoisted scope bodies flowed to [stmt] above regardless. *)
+              let stmt, cur = acc in
+              let stmt, s2 = reads_of_scalar ~self (stmt, Set.empty (module Tnode)) v2 in
+              let stmt, s3 = reads_of_scalar ~self (stmt, Set.empty (module Tnode)) v3 in
+              (stmt, Set.union cur (if Set.length s3 > Set.length s2 then s3 else s2)))
+      | Binop (op, (v1, _), (v2, _)) -> (
+          match Ops.binop_conditionality op with
+          | Ops.Only_first -> reads_of_scalar ~self acc v1
+          | Ops.Only_second -> reads_of_scalar ~self acc v2
+          | Ops.Both_operands | Ops.Gated_second ->
+              (* A gated second operand still charges: the worst-case evaluation runs both, and
+                 with a single alternative the per-arm maximum degenerates to the union. *)
+              reads_of_scalar ~self (reads_of_scalar ~self acc v1) v2)
+      | Unop (_, (v, _)) -> reads_of_scalar ~self acc v
+    in
+    let memo = Hashtbl.create (module Tnode) in
+    let rec fanin tn : Set.M(Tnode).t =
+      match Hashtbl.find memo tn with
+      | Some s -> s
+      | None ->
+          (* Cycle guard: a node re-entered during its own expansion counts as one contributor, as
+             if materialized — a cyclically-read node has an uncovered read and was placed
+             [On_device] by the coverage rule above anyway. *)
+          Hashtbl.set memo ~key:tn ~data:(Set.singleton (module Tnode) tn);
+          let expand acc p =
+            (* Recurse first: the dependency's own decision lands before its placement is
+               consulted, making the result traversal-order-independent. An undecided dependency
+               expands as though it will be virtual, though inlining legality is only settled
+               later ([check_and_store_virtual], inside the virtualizer this pass feeds) — an
+               over-approximation erring toward materialization, the safe direction shared with
+               the multiplicity bound; the opposite default would let a chain of undecided links
+               through the cap on every first compile. A consumer spuriously materialized this
+               way stays an [`Inline] flip candidate, the search's channel for undoing it. *)
+            let s_p = fanin p in
+            if Tn.Placements.known_non_virtual plc p then Set.add acc p else Set.union acc s_p
+          in
+          (* Per-setter maximum over the per-setter read sets (see [setter_reads]). *)
+          let max_expansion read_sets =
+            List.fold read_sets
+              ~init:(Set.empty (module Tnode))
+              ~f:(fun best reads ->
+                let s = Set.fold reads ~init:(Set.empty (module Tnode)) ~f:expand in
+                if Set.length s > Set.length best then s else best)
+          in
+          (* A node committed [Virtual] by an earlier routine in the lineage: its stored
+             computation's reads stand in for setters this routine does not see (one stored
+             component ≈ one setter, so the same per-setter maximum applies). Computed even when
+             this routine sets the node too — a read replays the stored definition AND the local
+             updates, and the local update's excluded self-read must not hide the prefix — so the
+             inherited maximum unions with the local one. Only prior routines' components exist
+             here: this routine's are stored later, by the virtualizer this pass feeds. *)
+          let inherited_reads () =
+            if not (Tn.Placements.known_virtual plc tn) then []
+            else
+              match Hashtbl.find optim_ctx.computations tn with
+              | Some comps ->
+                  List.map comps ~f:(fun (_, code) ->
+                      reads_of_proc ~self:tn (Set.empty (module Tnode)) code)
+              | None -> []
+          in
+          let s =
+            match Hashtbl.find traced_store tn with
+            | None -> (
+                match inherited_reads () with
+                | [] -> Set.singleton (module Tnode) tn
+                | read_sets -> max_expansion read_sets)
+            | Some traced ->
+                let s =
+                  Set.union
+                    (max_expansion traced.setter_reads)
+                    (max_expansion (inherited_reads ()))
+                in
+                traced.inline_fanin <- max 1 (Set.length s);
+                if
+                  Set.length s > virtualize_settings.max_inline_fanin
+                  && traced.has_assignment && traced.read_by_other
+                  && Option.is_none (Tn.Placements.get plc tn)
+                  && not (cap_exempt traced)
+                then Tn.Placements.update plc tn Never_virtual 41;
+                s
+          in
+          Hashtbl.set memo ~key:tn ~data:s;
+          s
+    in
+    Hashtbl.iter_keys traced_store ~f:(fun tn -> ignore (fanin tn : Set.M(Tnode).t)))
 
 type analysis = {
   an_llc : t;
@@ -5105,14 +5325,18 @@ let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : opt
             match Tn.Placements.raw_entry plc tn with
             | Some (Virtual, _) when not (Tn.known_virtual tn || Tn.known_constant tn) ->
                 Some `Materialize
-            | Some (Never_virtual, (1 | 39)) -> Some `Inline
+            | Some (Never_virtual, (1 | 39 | 41)) -> Some `Inline
             | _ -> None
           in
           match flip with
           | None -> acc
           | Some fc_flip ->
               let mult = max 1 ((Lazy.force an.an_read_multiplicity) tn) in
-              { fc_tn = tn; fc_flip; fc_recompute_cost = traced.inline_reduction_extent * mult }
+              {
+                fc_tn = tn;
+                fc_flip;
+                fc_recompute_cost = traced.inline_reduction_extent * mult * traced.inline_fanin;
+              }
               :: acc)
     |> List.sort ~compare:(fun a b ->
            match Int.compare b.fc_recompute_cost a.fc_recompute_cost with
