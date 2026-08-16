@@ -208,7 +208,14 @@ take_lock() {
     exit(-e $ARGV[0] ? 2 : 0);
   ' "$PWD/.test-run.lock.owner" <&9
   case $? in
-    0) ;;
+    0)
+      # Advisory launcher identity, for the window between acquisition and
+      # the wrapper being recorded: a launcher that stalls THERE would
+      # otherwise hold the lock with no recorded identity at all, and the
+      # refusal message below is where the next user lands.
+      printf '%s %s\n' "$$" "$(ps_token "$$")" \
+        >"$PWD/.test-run.lock.launcher" 2>/dev/null || :
+      ;;
     2) die "cannot clear the stale lock owner pointer (worktree not writable?)" ;;
     *)
       # The owner pointer, not `last`: with OCANNL_TEST_RUNS overridden, the
@@ -217,6 +224,15 @@ take_lock() {
       # %q, so a runs directory containing spaces or metacharacters survives
       # copy-pasting the recovery commands.
       owner=$(cat "$PWD/.test-run.lock.owner" 2>/dev/null)
+      if [ -z "$owner" ] && read -r lpid ltok <"$PWD/.test-run.lock.launcher" 2>/dev/null &&
+         kill -0 "$lpid" 2>/dev/null && [ "$(ps_token "$lpid")" = "$ltok" ]; then
+        # No published owner yet, but the recorded launcher is live: a
+        # launch is mid-flight (or stalled) between acquisition and
+        # publication.
+        echo "test-run: a launch is in progress in this worktree (launcher pid $lpid);" >&2
+        echo "  retry shortly, or if it is stuck: kill $lpid" >&2
+        exit 2
+      fi
       owner=$(printf %q "${owner:-last}")
       echo "test-run: another test-run is active in this worktree; check it with:" >&2
       echo "  tools/test-run.sh status $owner" >&2
@@ -417,11 +433,14 @@ claim_handoff() { # <published|expired>
 with_meta_lock() { # <cmd...>
   (
     exec 8>>"$run_dir/meta.lock" || exit 1
-    perl -e 'use Fcntl ":flock"; exit(flock(STDIN, LOCK_EX) ? 0 : 1)' <&8 || exit 1
+    # Bounded: a publisher wedged on a dead filesystem must not deadlock
+    # the wrapper's abandonment (or vice versa) into pinning the worktree.
+    perl -e 'use Fcntl ":flock"; alarm 30; $SIG{ALRM} = sub { exit 2 };
+             exit(flock(STDIN, LOCK_EX) ? 0 : 1)' <&8 || exit 1
     "$@"
   )
 }
-mark_abandoned() { : >"$run_dir/pub_abandoned" 2>/dev/null || :; }
+mark_abandoned() { : >"$run_dir/pub_abandoned" 2>/dev/null; }
 
 resolve_run() {
   local ref=${1:-last}
@@ -654,11 +673,27 @@ case $sub in
           # ABANDONED first (under the metadata lock, so it serializes with
           # the launcher's check-and-write section), so the launcher,
           # however late it resumes, refuses to write pointers under a lock
-          # that is about to pass on.
-          [ "$hw" -gt 70 ] && { with_meta_lock mark_abandoned; break; }
+          # that is about to pass on. The lock is released only once the
+          # marker is DURABLY there -- a transiently failed write must not
+          # let a resumed launcher publish stale pointers later; if it
+          # cannot land within the extra grace, the wrapper's unavoidable
+          # exit releases anyway (documented residual).
+          if [ "$hw" -gt 70 ]; then
+            with_meta_lock mark_abandoned || mark_abandoned || :
+            [ -f "$run_dir/pub_abandoned" ] && break
+            [ "$hw" -gt 100 ] && break
+          fi
         fi
         sleep 1
       done
+      # If publication never completed (expired or abandoned), restore the
+      # owner pointer to THIS run while we still hold the lock: a detached
+      # descendant surviving us keeps the flock through its inherited fd,
+      # and without an owner naming this run, lock_still_owned would refuse
+      # the attribution and stop could never reap it.
+      if [ ! -f "$run_dir/pub_done" ]; then
+        printf '%s\n' "$run_dir" >"$PWD/.test-run.lock.owner" 2>/dev/null || :
+      fi
       # Release protocol: simply close our fd. The lock lives on the shared
       # open file DESCRIPTION, so the kernel releases it exactly when the
       # last holder closes -- and any leftover descendant that can still
