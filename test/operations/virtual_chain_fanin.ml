@@ -227,7 +227,48 @@ let phase1b () =
     :: (Array.to_list ws |> List.mapi ~f:(fun k w -> (w, w_vals k)))
   in
   let got4 = execute ~name:"vcf_where" o4 ~seed:seed4 ~read:[ out4 ] in
-  p "where: executed values match the reference (both arms exercised)" (same got4 [ expected4 ])
+  p "where: executed values match the reference (both arms exercised)" (same got4 [ expected4 ]);
+  (* Review round 6: [Local_scope] bodies inside [Where] arms hoist to statement level and BOTH
+     execute (see the operand-conditionality agent notes), so their reads union at the statement
+     sink rather than joining the per-arm maximum: mask + two hoisted 4-load bodies is fan-in 9 —
+     over the cap — where the arm-expression maximum alone would report 5. *)
+  let y5 = mk "y5" and out5 = mk "hout" and lva = mk "lva" and lvb = mk "lvb" in
+  materialize out5;
+  virtualize lva;
+  virtualize lvb;
+  let i5 = sym () and j5 = sym () in
+  let ida = LL.get_scope lva and idb = LL.get_scope lvb in
+  let scope_arm sid pos =
+    LL.Local_scope
+      {
+        id = sid;
+        body =
+          LL.Set_local
+            ( sid,
+              Array.fold
+                (Array.sub ws ~pos ~len:4)
+                ~init:(Ll_test.c 0.)
+                ~f:(fun acc w -> add acc (get w [| iter i5 |])) );
+        orig_indices = [| iter i5 |];
+      }
+  in
+  let producer5 =
+    loop_n i5 dim
+      (set y5 [| iter i5 |]
+         (LL.Ternop
+            (Ir.Ops.Where, (get m [| iter i5 |], single), (scope_arm ida 0, single),
+             (scope_arm idb 4, single))))
+  in
+  let consumer5 = loop_n j5 dim (set out5 [| iter j5 |] (get y5 [| iter j5 |])) in
+  let o5 = optimize ~name:"vcf_where_scopes" (seq producer5 consumer5) in
+  p "where scopes: producer materialized (hoisted bodies both charge, fan-in 9)"
+    (known_non_virtual o5 y5);
+  let seed5 =
+    (out5, blank dim) :: (m, m_vals)
+    :: (Array.to_list ws |> List.mapi ~f:(fun k w -> (w, w_vals k)))
+  in
+  let got5 = execute ~name:"vcf_where_scopes" o5 ~seed:seed5 ~read:[ out5 ] in
+  p "where scopes: executed values match the reference" (same got5 [ expected4 ])
 
 (* === Phase 2: the Assignments pipeline === *)
 

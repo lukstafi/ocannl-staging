@@ -963,10 +963,15 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
     match Affine.fiber_cardinality ~domain:(Map.to_alist loop_ranges) idcs with
     | `Exact n | `At_least n -> n
   in
-  (* [scope_reads] is the enclosing setter's identity and read collector when this traversal is
+  (* [scope_reads] is the enclosing setter's identity and read sinks when this traversal is
      inside a [Local_scope] body in that setter's right-hand side (gh-573): the body's loads
      execute per evaluation of the setter, so they belong to its [setter_reads], with the
-     setter's own read-modify-write self-reads still excluded. [None] at top level. *)
+     setter's own read-modify-write self-reads still excluded. The payload carries TWO sinks,
+     (self, statement sink, current sink): scope bodies hoist to just before the enclosing
+     statement and execute unconditionally (both [Where] arms' bodies really run — see the
+     operand-conditionality notes), so they record into the statement sink, while directly
+     conditional arm expressions record into per-arm current sinks maxed by the [Ternop] arm
+     below. [None] at top level. *)
   let rec loop_proc ~loop_ranges ~scope_reads llc =
     let loop = loop_proc ~loop_ranges ~scope_reads in
     match llc with
@@ -992,7 +997,7 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
     | Set { tn; idcs; llsc; debug = _ } ->
         check_no_concat idcs;
         let reads = Hash_set.create (module Tnode) in
-        loop_scalar ~loop_ranges ~lhs:(Some (tn, idcs)) ~reads:(Some (tn, reads)) llsc;
+        loop_scalar ~loop_ranges ~lhs:(Some (tn, idcs)) ~reads:(Some (tn, reads, reads)) llsc;
         let traced : traced_array = get_node traced_store tn in
         traced.setter_reads <-
           Set.of_list (module Tnode) (Hash_set.to_list reads) :: traced.setter_reads;
@@ -1026,7 +1031,7 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
     | Set_from_vec { tn; idcs; length = _; vec_unop = _; arg = arg, _; debug = _ } ->
         check_no_concat idcs;
         let reads = Hash_set.create (module Tnode) in
-        loop_scalar ~loop_ranges ~lhs:(Some (tn, idcs)) ~reads:(Some (tn, reads)) arg;
+        loop_scalar ~loop_ranges ~lhs:(Some (tn, idcs)) ~reads:(Some (tn, reads, reads)) arg;
         let traced : traced_array = get_node traced_store tn in
         traced.setter_reads <-
           Set.of_list (module Tnode) (Hash_set.to_list reads) :: traced.setter_reads;
@@ -1067,8 +1072,8 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
            [Local_scope] body does not inherit: the read-modify-write self-read exclusion must
            follow the OUTER setter through the body, or a self-accumulating scope records a
            phantom contributor that can flip a decision at the cap boundary. *)
-        Option.iter reads ~f:(fun (self, r) ->
-            if not (Tn.equal ptr self) then Hash_set.add r ptr);
+        Option.iter reads ~f:(fun (self, _stmt, cur) ->
+            if not (Tn.equal ptr self) then Hash_set.add cur ptr);
         (* The read-modify-write exemption: a read at the enclosing statement's write position is
            not a visit ([inline_complex_computations]), whichever node it reads. *)
         let exempt =
@@ -1080,7 +1085,12 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
         (* gh-343: [Get_dynamic] is produced after this tracing pass, so this arm is defensive; the
            dynamic index sub-expression is still traversed for completeness. *)
         loop v
-    | Local_scope { body; _ } -> loop_proc ~loop_ranges ~scope_reads:reads body
+    | Local_scope { body; _ } ->
+        (* The body hoists to statement level, outside any conditional arm of the enclosing
+           expression: its reads record into the statement sink unconditionally. *)
+        loop_proc ~loop_ranges
+          ~scope_reads:(Option.map reads ~f:(fun (self, stmt, _cur) -> (self, stmt, stmt)))
+          body
     | Get_local _ -> ()
     | Get_merge_buffer (source, _) ->
         Option.iter !merge_node_ref ~f:(fun merge_node ->
@@ -1103,16 +1113,19 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
         | Ops.All_three, _ | Ops.Cond_and_one_arm, None ->
             loop llv2;
             loop llv3
-        | Ops.Cond_and_one_arm, Some (self, r) ->
-            (* Exactly one arm evaluates per visit ([Ops.ternop_conditionality]): the setter's
-               fan-in charges the wider arm, not the union — two arms each within the cap must
-               not jointly trip it. The other traced facts still record from both arms (their
-               subjects are rendering-level, and both arms are rendered). *)
+        | Ops.Cond_and_one_arm, Some (self, stmt, cur) ->
+            (* Exactly one arm's EXPRESSION evaluates per visit ([Ops.ternop_conditionality]): the
+               setter's fan-in charges the wider arm, not the union — two arms each within the cap
+               must not jointly trip it. [Local_scope] bodies inside the arms are the exception:
+               they hoist to statement level and both execute, so their reads flow to the
+               statement sink via the [Local_scope] arm above rather than into the per-arm sinks.
+               The other traced facts still record from both arms (their subjects are
+               rendering-level, and both arms are rendered). *)
             let r2 = Hash_set.create (module Tnode) and r3 = Hash_set.create (module Tnode) in
-            loop_scalar ~loop_ranges ~lhs ~reads:(Some (self, r2)) llv2;
-            loop_scalar ~loop_ranges ~lhs ~reads:(Some (self, r3)) llv3;
+            loop_scalar ~loop_ranges ~lhs ~reads:(Some (self, stmt, r2)) llv2;
+            loop_scalar ~loop_ranges ~lhs ~reads:(Some (self, stmt, r3)) llv3;
             let wider = if Hash_set.length r3 > Hash_set.length r2 then r3 else r2 in
-            Hash_set.iter wider ~f:(Hash_set.add r))
+            Hash_set.iter wider ~f:(Hash_set.add cur))
     | Binop (_, (llv1, _), (llv2, _)) ->
         loop llv1;
         loop llv2
@@ -5105,6 +5118,11 @@ let decide_placements (optim_ctx : optimize_ctx) traced_store ~max_visits ~reads
        whose definition an earlier routine in the lineage committed [Virtual] — its traced entry
        here has no setters, but its computation will be replayed all the same. Merge-buffer reads
        stay uncounted (a materialized copy), and projections charge only the evaluated operand. *)
+    (* [reads_of_proc acc code] is the statement-level sink; [reads_of_scalar (stmt, cur) v]
+       threads the statement sink alongside the current (possibly per-arm) expression sink:
+       [Local_scope] bodies hoist to statement level and execute unconditionally — both [Where]
+       arms' bodies really run — so their reads join [stmt], while directly conditional arm
+       expressions collect into fresh [cur] sinks maxed by the [Cond_and_one_arm] case. *)
     let rec reads_of_proc ~self acc (c : t) =
       match c with
       | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _
@@ -5116,28 +5134,33 @@ let decide_placements (optim_ctx : optimize_ctx) traced_store ~max_visits ~reads
           (* A dead loop ([to_ < from_]) replays zero times: charge nothing, mirroring
              [trace_node_facts] (which records no facts from dead-loop bodies). *)
           if to_ >= from_ then reads_of_proc ~self acc body else acc
-      | Set { llsc; _ } -> reads_of_scalar ~self acc llsc
+      | Set { llsc; _ } -> scalar_into ~self acc llsc
       | Set_dynamic { dyn_value = v, _; llsc; _ } ->
-          reads_of_scalar ~self (reads_of_scalar ~self acc v) llsc
-      | Set_from_vec { arg = v, _; _ } -> reads_of_scalar ~self acc v
-      | Set_local (_, llsc) -> reads_of_scalar ~self acc llsc
-      | If { cond = c0, _; body } -> reads_of_proc ~self (reads_of_scalar ~self acc c0) body
-    and reads_of_scalar ~self acc (sc : scalar_t) =
+          scalar_into ~self (scalar_into ~self acc v) llsc
+      | Set_from_vec { arg = v, _; _ } -> scalar_into ~self acc v
+      | Set_local (_, llsc) -> scalar_into ~self acc llsc
+      | If { cond = c0, _; body } -> reads_of_proc ~self (scalar_into ~self acc c0) body
+    and scalar_into ~self acc v =
+      let stmt, cur = reads_of_scalar ~self (acc, Set.empty (module Tnode)) v in
+      Set.union stmt cur
+    and reads_of_scalar ~self ((stmt, cur) as acc) (sc : scalar_t) =
       match sc with
       | Constant _ | Constant_bits _ | Embed_index _ | Get_local _ | Get_merge_buffer _ -> acc
-      | Get (q, _) -> if Tn.equal q self then acc else Set.add acc q
+      | Get (q, _) -> if Tn.equal q self then acc else (stmt, Set.add cur q)
       | Get_dynamic { tn = q; dyn_value = v, _; _ } ->
-          reads_of_scalar ~self (if Tn.equal q self then acc else Set.add acc q) v
-      | Local_scope { body; _ } -> reads_of_proc ~self acc body
+          reads_of_scalar ~self (stmt, (if Tn.equal q self then cur else Set.add cur q)) v
+      | Local_scope { body; _ } -> (reads_of_proc ~self stmt body, cur)
       | Ternop (op, (v1, _), (v2, _), (v3, _)) -> (
           let acc = reads_of_scalar ~self acc v1 in
           match Ops.ternop_conditionality op with
           | Ops.All_three -> reads_of_scalar ~self (reads_of_scalar ~self acc v2) v3
           | Ops.Cond_and_one_arm ->
-              (* Exactly one arm evaluates per visit: charge the wider arm, not the union. *)
-              let s2 = reads_of_scalar ~self (Set.empty (module Tnode)) v2
-              and s3 = reads_of_scalar ~self (Set.empty (module Tnode)) v3 in
-              Set.union acc (if Set.length s3 > Set.length s2 then s3 else s2))
+              (* Exactly one arm's expression evaluates per visit: charge the wider arm, not the
+                 union. The arms' hoisted scope bodies flowed to [stmt] above regardless. *)
+              let stmt, cur = acc in
+              let stmt, s2 = reads_of_scalar ~self (stmt, Set.empty (module Tnode)) v2 in
+              let stmt, s3 = reads_of_scalar ~self (stmt, Set.empty (module Tnode)) v3 in
+              (stmt, Set.union cur (if Set.length s3 > Set.length s2 then s3 else s2)))
       | Binop (op, (v1, _), (v2, _)) -> (
           match Ops.binop_conditionality op with
           | Ops.Only_first -> reads_of_scalar ~self acc v1
