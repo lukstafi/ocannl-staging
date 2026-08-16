@@ -203,6 +203,11 @@ take_lock() {
     echo "(a stale one can be stopped with: tools/test-run.sh stop $owner)" >&2
     exit 2
   }
+  # The lock is ours, but the owner pointer still names the PREVIOUS run
+  # until publish_run -- and a concurrent stop of that run would blame its
+  # leftovers for OUR lsof presence on the lock file and TERM this very
+  # launcher. Clear it the moment the lock changes hands.
+  rm -f "$PWD/.test-run.lock.owner" 2>/dev/null
 }
 
 new_run() {
@@ -693,45 +698,49 @@ case $sub in
     ;;
   stop)
     resolve_run "${1:-last}"
-    if [ -f "$run_dir/exit" ]; then
-      # Finished -- but descendants dune backgrounded may still hold the
-      # run's worktree lock (the wrapper deliberately leaves it riding on
-      # their fd 9), possibly having setsid'd out of the recorded group.
-      # Everything here uses the run's RECORDED worktree, not the caller's
-      # cwd -- an explicit run directory may belong to another checkout.
-      # Gate on the lock being HELD with the owner pointer naming THIS run:
-      # then whatever holds it is this run's leftovers. Signal the recorded
-      # group if alive, and ask the lock file ITSELF for the rest (lsof
-      # sees escapees no group census can); re-check before escalating, and
-      # report honestly if the lock is STILL held afterwards (no lsof on
-      # this system, or unkillable holders) instead of claiming success.
-      run_wt=$(cat "$run_dir/wt" 2>/dev/null)
-      run_wt=${run_wt:-$PWD}
-      reap_leftovers() { # <signal>
-        pg=$(cat "$run_dir/pgid" 2>/dev/null)
-        case $pg in '' | *[!0-9]* | 0) pg= ;; esac
-        [ -n "$pg" ] && kill -0 -- "-$pg" 2>/dev/null &&
-          kill "-$1" -- "-$pg" 2>/dev/null
-        for p in $(lsof -t -- "$run_wt/.test-run.lock" 2>/dev/null); do
-          case $p in '' | *[!0-9]* | 0) continue ;; esac
-          kill "-$1" "$p" 2>/dev/null
-        done
-      }
-      if lock_still_owned "$run_dir"; then
-        reap_leftovers TERM
-        sleep 2
-        if lock_still_owned "$run_dir"; then
-          reap_leftovers KILL
-          sleep 1
-        fi
-        if lock_still_owned "$run_dir"; then
-          echo "finished, but leftover processes STILL hold $run_wt's lock" \
-               "(no lsof on this system, or unkillable holders); inspect with:" \
-               "lsof $(printf %q "$run_wt/.test-run.lock")"
-        else
-          echo "finished, but its leftover processes held the worktree lock; reaped them"
-        fi
+    # Leftover recovery, shared by the finished and dead-without-verdict
+    # branches. Descendants of dune may hold the run's worktree lock through
+    # inherited fd 9, possibly having setsid'd out of the recorded group.
+    # Everything uses the run's RECORDED worktree, not the caller's cwd --
+    # an explicit run directory may belong to another checkout. The gate:
+    # the lock is HELD with the owner pointer naming THIS run, so whatever
+    # holds it is this run's leftovers. The recorded group is signaled only
+    # under a matching leader token (a recycled numeric pgid is never
+    # trusted); the lsof census on the lock file covers detached holders
+    # the group cannot see. reap_cycle reports honestly when the lock is
+    # STILL held afterwards (no lsof on this system, or unkillable holders).
+    run_wt=$(cat "$run_dir/wt" 2>/dev/null)
+    run_wt=${run_wt:-$PWD}
+    reap_leftovers() { # <signal>
+      if proc_alive "$run_dir/pgid" "$run_dir/gtoken"; then
+        kill "-$1" -- "-$(cat "$run_dir/pgid")" 2>/dev/null
       fi
+      for p in $(lsof -t -- "$run_wt/.test-run.lock" 2>/dev/null); do
+        case $p in '' | *[!0-9]* | 0) continue ;; esac
+        kill "-$1" "$p" 2>/dev/null
+      done
+    }
+    reap_cycle() { # exits 0 iff this run's hold on the lock is gone
+      lock_still_owned "$run_dir" || return 0
+      reap_leftovers TERM
+      sleep 2
+      if lock_still_owned "$run_dir"; then
+        reap_leftovers KILL
+        sleep 1
+      fi
+      ! lock_still_owned "$run_dir"
+    }
+    report_reap() {
+      if reap_cycle; then
+        echo "$1, but its leftover processes held the worktree lock; reaped them"
+      else
+        echo "$1, but leftover processes STILL hold $run_wt's lock" \
+             "(no lsof on this system, or unkillable holders); inspect with:" \
+             "lsof $(printf %q "$run_wt/.test-run.lock")"
+      fi
+    }
+    if [ -f "$run_dir/exit" ]; then
+      lock_still_owned "$run_dir" && report_reap "finished"
       echo "already finished:"
       digest "$run_dir"
       exit 0
@@ -761,6 +770,12 @@ case $sub in
       else
         echo "sent TERM to the orphaned process group $pg; re-run stop to confirm"
       fi
+    elif lock_still_owned "$run_dir"; then
+      # Dead without a verdict, yet its leftovers still hold the worktree
+      # lock (a setsid escapee outliving a killed wrapper/supervisor) --
+      # the same recovery as the finished branch, or later runs stay
+      # refused forever.
+      report_reap "run is dead without a verdict"
     else
       echo "nothing left to signal (supervisor gone; no identity-verified surviving group)"
     fi
