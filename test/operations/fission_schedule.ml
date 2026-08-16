@@ -396,6 +396,107 @@ let () =
     (match segs with [ seg ] -> annotated seg && grid_axes seg = 2 | _ -> false);
   p "aligned: the scratch is not promoted" (not (Tn.Placements.is_materialized_peek plc tmp))
 
+(* --- 6. Structural: the arity_cuts (finer) segmentation mode, gh-ocannl-574. The default mode
+   compares parallelism under the presets' Grid+Workgroup cap, so a materialized GEMM merges with a
+   reduction over its minor output axis (the lm_head's max-logits row: the max target's [-inf]
+   initialization is a [Set] nest, not a [Zero_out], so nothing separates the three statements) —
+   correct for the default annotators, fatal for the full-arity GPU sketches, whose every seed then
+   declines on companion coverage. Under [arity_cuts:true] the same code cuts the GEMM into its own
+   kernel; shapes whose companions can follow the site's full arity (bias+relu) and shapes already
+   separated by a [Zero_out] (a sum-reduce) segment identically in both modes. --- *)
+let () =
+  let capture comp =
+    let stash = ref None in
+    let _ctx, _routine =
+      Context.compile
+        ~lowered_transform:(fun opt ->
+          stash := Some opt;
+          opt)
+        (Context.auto ()) comp Ir.Indexing.Empty
+    in
+    Option.value_exn ~here:[%here] !stash
+  in
+  let rec writes_tn tn (llc : LL.t) =
+    match llc with
+    | LL.Set { tn = t; _ } | LL.Set_dynamic { tn = t; _ } | LL.Set_from_vec { tn = t; _ }
+    | LL.Zero_out t
+    | LL.Tile_mma { d = t, _; _ } ->
+        Tn.equal t tn
+    | LL.Seq (a, b) -> writes_tn tn a || writes_tn tn b
+    | LL.For_loop { body; _ } | LL.If { body; _ } -> writes_tn tn body
+    | _ -> false
+  in
+  let segments ~arity_cuts opt =
+    (* A hermetic copy per query: [promote_locals] mutates the lowering's placements, and the modes
+       must not observe each other's surviving promotions. *)
+    let scratch =
+      {
+        opt with
+        LL.traced_store = Hashtbl.copy opt.LL.traced_store;
+        LL.optimize_ctx = LL.copy_optimize_ctx opt.LL.optimize_ctx;
+      }
+    in
+    let limits = Ir.Backend_intf.no_hardware_limits in
+    Sched.fission_scheduled ~promote_locals:true ~arity_cuts
+      ~preset:(Sched.default_gpu ~min_parallel:1 ~limits)
+      ~zero_sched:(Sched.zero_expansion ~min_parallel:1 ~limits)
+      ~static_indices:[] scratch
+  in
+  let seg_kinds tuples = List.map tuples ~f:(fun (kind, _, _, _) -> kind) in
+  let b = 4 and n = 32 and m = 64 and k = 16 in
+  let xv = Array.init (b * n * k) ~f:(fun i -> Float.of_int (i % 7) *. 0.25) in
+  let wv = Array.init (k * m) ~f:(fun i -> Float.of_int (i % 5) *. 0.125) in
+  let x = TDSL.ndarray xv ~label:[ "fx" ] ~batch_dims:[ b ] ~output_dims:[ n; k ] () in
+  let w = TDSL.ndarray wv ~label:[ "fw" ] ~output_dims:[ k; m ] () in
+  let%op z = x +* "b|ik;kj=>b|ij" w in
+  Train.set_materialized z.Tensor.value;
+  let%op r = z @^^ "b|ij => b|i" in
+  let opt = capture (named "arity_max" (Train.forward r)) in
+  let ztn = z.Tensor.value and rtn = r.Tensor.value in
+  (match seg_kinds (segments ~arity_cuts:false opt) with
+  | [ `Zeros; `Normal ] ->
+      p "arity: default mode merges the GEMM with its row-max companion"
+        (match segments ~arity_cuts:false opt with
+        | [ _; (_, pre, _, _) ] -> writes_tn ztn pre.LL.llc && writes_tn rtn pre.LL.llc
+        | _ -> false)
+  | _ -> p "arity: default mode merges the GEMM with its row-max companion" false);
+  (match segments ~arity_cuts:true opt with
+  | [ (`Zeros, _, _, _); (`Normal, gemm, _, _); (`Normal, red, _, _) ] ->
+      p "arity: arity_cuts frees the GEMM from the row-max companion"
+        (writes_tn ztn gemm.LL.llc
+        && (not (writes_tn rtn gemm.LL.llc))
+        && writes_tn rtn red.LL.llc
+        && not (writes_tn ztn red.LL.llc))
+  | _ -> p "arity: arity_cuts frees the GEMM from the row-max companion" false);
+  (* Full-arity-compatible companion: bias+relu follows the site's chain, so both modes keep the
+     merged single kernel. *)
+  let x2 = TDSL.ndarray xv ~label:[ "fx2" ] ~batch_dims:[ b ] ~output_dims:[ n; k ] () in
+  let w2 = TDSL.ndarray wv ~label:[ "fw2" ] ~output_dims:[ k; m ] () in
+  let bv = Array.init m ~f:(fun i -> Float.of_int (i % 3) -. 1.) in
+  let bias = TDSL.ndarray bv ~label:[ "fb2" ] ~output_dims:[ m ] () in
+  let%op z2 = x2 +* "b|ik;kj=>b|ij" w2 in
+  Train.set_materialized z2.Tensor.value;
+  let%op y2 = relu (z2 + bias) in
+  let opt2 = capture (named "arity_relu" (Train.forward y2)) in
+  p "arity: bias+relu companion stays merged in both modes"
+    (List.equal Poly.equal
+       (seg_kinds (segments ~arity_cuts:false opt2))
+       [ `Zeros; `Normal ]
+    && List.equal Poly.equal (seg_kinds (segments ~arity_cuts:true opt2)) [ `Zeros; `Normal ]);
+  (* A sum-reduce target is zero-initialized, so its [Zero_out] already separates the statements:
+     both modes agree. *)
+  let x3 = TDSL.ndarray xv ~label:[ "fx3" ] ~batch_dims:[ b ] ~output_dims:[ n; k ] () in
+  let w3 = TDSL.ndarray wv ~label:[ "fw3" ] ~output_dims:[ k; m ] () in
+  let%op z3 = x3 +* "b|ik;kj=>b|ij" w3 in
+  Train.set_materialized z3.Tensor.value;
+  let%op r3 = z3 ++ "b|ij => b|i" in
+  let opt3 = capture (named "arity_sum" (Train.forward r3)) in
+  p "arity: Zero_out-separated sum-reduce segments identically in both modes"
+    (List.equal Poly.equal
+       (seg_kinds (segments ~arity_cuts:false opt3))
+       (seg_kinds (segments ~arity_cuts:true opt3))
+    && List.length (seg_kinds (segments ~arity_cuts:false opt3)) = 4)
+
 (* --- 4. Executed: backward pass — Zero_out and reduction statements segment away from the gradient
    accumulation nest. --- *)
 let () =
