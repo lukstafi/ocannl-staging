@@ -194,29 +194,34 @@ capped_perl='
 # lesson sweep.sh records).
 take_lock() {
   exec 9>>"$PWD/.test-run.lock" || die "cannot open lock file"
-  perl -e 'use Fcntl ":flock"; exit(flock(STDIN, LOCK_EX | LOCK_NB) ? 0 : 1)' <&9 || {
-    # The owner pointer, not `last`: with OCANNL_TEST_RUNS overridden, the
-    # refused invocation's `last` can resolve in a DIFFERENT state directory
-    # (or nowhere), which would leave the lock holder uninspectable.
-    owner=$(cat "$PWD/.test-run.lock.owner" 2>/dev/null)
-    # %q, so a runs directory containing spaces or metacharacters survives
-    # copy-pasting the recovery commands.
-    owner=$(printf %q "${owner:-last}")
-    echo "test-run: another test-run is active in this worktree; check it with:" >&2
-    echo "  tools/test-run.sh status $owner" >&2
-    echo "(a stale one can be stopped with: tools/test-run.sh stop $owner)" >&2
-    exit 2
-  }
-  # The lock is ours, but the owner pointer still names the PREVIOUS run
-  # until publish_run -- and a concurrent stop of that run would blame its
-  # leftovers for OUR lsof presence on the lock file and TERM this very
-  # launcher. Clear it the moment the lock changes hands.
-  rm -f "$PWD/.test-run.lock.owner" 2>/dev/null
-  # Checked: with the pointer left naming the previous run (lock file
-  # writable but worktree directory not), that stop-misattribution window
-  # would stay open for the whole launch.
-  [ ! -e "$PWD/.test-run.lock.owner" ] ||
-    die "cannot clear the stale lock owner pointer (worktree not writable?)"
+  # Acquisition and the stale-owner clear happen inside ONE process: the
+  # pointer still names the PREVIOUS run at handoff, and any scheduling gap
+  # between taking the lock and clearing it would let a concurrent stop of
+  # that run blame its leftovers for OUR presence on the lock file and TERM
+  # this very launcher. Exit codes: 1 lock busy, 2 pointer unclearable.
+  perl -e '
+    use Fcntl ":flock";
+    exit 1 unless flock(STDIN, LOCK_EX | LOCK_NB);
+    unlink $ARGV[0];
+    exit(-e $ARGV[0] ? 2 : 0);
+  ' "$PWD/.test-run.lock.owner" <&9
+  case $? in
+    0) ;;
+    2) die "cannot clear the stale lock owner pointer (worktree not writable?)" ;;
+    *)
+      # The owner pointer, not `last`: with OCANNL_TEST_RUNS overridden, the
+      # refused invocation's `last` can resolve in a DIFFERENT state
+      # directory (or nowhere), leaving the lock holder uninspectable.
+      # %q, so a runs directory containing spaces or metacharacters survives
+      # copy-pasting the recovery commands.
+      owner=$(cat "$PWD/.test-run.lock.owner" 2>/dev/null)
+      owner=$(printf %q "${owner:-last}")
+      echo "test-run: another test-run is active in this worktree; check it with:" >&2
+      echo "  tools/test-run.sh status $owner" >&2
+      echo "(a stale one can be stopped with: tools/test-run.sh stop $owner)" >&2
+      exit 2
+      ;;
+  esac
 }
 
 new_run() {
@@ -630,7 +635,9 @@ case $sub in
       # supervisor (waiting briefly for the wrapper to record its pid) and
       # let the wrapper publish the 143 into the unpublished directory.
       for _ in 1 2 3; do [ -f "$run_dir/pid" ] && break; sleep 1; done
-      [ -f "$run_dir/pid" ] && kill -TERM "$(cat "$run_dir/pid")" 2>/dev/null
+      # sup_alive, like every other forwarding path: a fast dune may already
+      # be reaped, and its recycled pid must not receive the TERM.
+      sup_alive "$run_dir" && kill -TERM "$(cat "$run_dir/pid")" 2>/dev/null
       die "run could not be published; cancelled it (remnants at $run_dir)"
     else
       # The wrapper's unlock handshakes on this marker (see above).
