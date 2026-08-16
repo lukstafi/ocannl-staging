@@ -977,16 +977,23 @@ let swz_label p =
    cooperative-stage depth, so the label must carry it. *)
 let depth_label p = if p.sk_depth > 1 then Printf.sprintf " pd%d" p.sk_depth else ""
 
+(* A widened-pack candidate (gh-ocannl-575) differs from a plain sibling only in the packed tiles'
+   precision, so the label must carry it. *)
+let pack_prec_label p =
+  match p.sk_pack_prec with
+  | Some pr -> Printf.sprintf " pack%s" (Ir.Ops.prec_string pr)
+  | None -> ""
+
 let spec_label = function
   | Whole (W_saved s) -> Printf.sprintf "W_saved[%d ops]" (List.length s)
   | Whole (W_preset { block_size }) -> Printf.sprintf "W_preset[bs=%s]" (bs_label block_size)
   | Whole (W_sketch p) when p.sk_mma ->
-      Printf.sprintf "W_sketch[%smma-%s %dx%dx%d%s%s%s%s%s%s%s]"
+      Printf.sprintf "W_sketch[%smma-%s %dx%dx%d%s%s%s%s%s%s%s%s]"
         (if p.sk_conv then "conv-" else "")
         (if p.sk_gpu then "gpu" else "cpu")
         p.sk_bm p.sk_bn p.sk_bk
         (if p.sk_bk > 0 then if p.sk_gpu then " staged" else " pack" else "")
-        (swz_label p) (depth_label p)
+        (pack_prec_label p) (swz_label p) (depth_label p)
         (if p.sk_hoist then " hoist" else "")
         (if p.sk_grid then " grid" else "")
         (if p.sk_pack_rest then " packrest" else "")
@@ -1008,13 +1015,13 @@ let spec_label = function
         (if fine then "fine " else "")
         (String.concat ~sep:","
            (List.map entries ~f:(fun (_, p) ->
-                Printf.sprintf "%s%s%s %dx%dx%d%s%s%s%s%s%s%s"
+                Printf.sprintf "%s%s%s %dx%dx%d%s%s%s%s%s%s%s%s"
                   (if p.sk_conv then "conv-" else "")
                   (if p.sk_mma then "mma-" else "")
                   (if p.sk_gpu then "gpu" else "cpu")
                   p.sk_bm p.sk_bn p.sk_bk
                   (if p.sk_mma then "" else Printf.sprintf "/%dx%d" p.sk_tm p.sk_tn)
-                  (swz_label p) (depth_label p)
+                  (pack_prec_label p) (swz_label p) (depth_label p)
                   (if p.sk_hoist then " hoist" else "")
                   (if p.sk_grid then " grid" else "")
                   (if p.sk_pack_rest then " packrest" else "")
