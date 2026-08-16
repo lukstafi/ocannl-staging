@@ -332,6 +332,12 @@ let phase3 () =
     (known_virtual o_b2 c2.xs.(5));
   p "cross-routine update: x7 materialized by the fan-in cap" (known_non_virtual o_b2 c2.xs.(6));
   p "cross-routine update: x8 virtual past the reset" (known_virtual o_b2 c2.xs.(7))
+(* Review round 4 note: [reads_of_proc] skips dead loops ([to_ < from_]) for parity with
+   [trace_node_facts] — a dead body replays zero times. No boundary pin: the posited scenario (an
+   earlier routine committing a Virtual whose stored computation holds a dead-loop setter) is not
+   reachable through the pipeline — a zero-initialized node whose only setter is dead never
+   virtualizes (it reaches later routines as an undecided read-only node and materializes by the
+   read-only rule), so no stored computation with a dead loop exists to over-charge. *)
 (* No executed leg for this phase yet: routine B's kernel parameters miss the leaves reaching it
    only through the inlined cross-routine computation ([input_and_output_nodes] folds over the
    traced store, which is built from the raw code) — a pre-existing gap, gh-ocannl-610.

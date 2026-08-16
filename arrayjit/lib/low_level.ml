@@ -5100,7 +5100,10 @@ let decide_placements (optim_ctx : optimize_ctx) traced_store ~max_visits ~reads
           acc
       | Tile_mma _ -> acc (* post-optimization construct; never in stored computations *)
       | Seq (c1, c2) -> reads_of_proc ~self (reads_of_proc ~self acc c1) c2
-      | For_loop { body; _ } -> reads_of_proc ~self acc body
+      | For_loop { from_; to_; body; _ } ->
+          (* A dead loop ([to_ < from_]) replays zero times: charge nothing, mirroring
+             [trace_node_facts] (which records no facts from dead-loop bodies). *)
+          if to_ >= from_ then reads_of_proc ~self acc body else acc
       | Set { llsc; _ } -> reads_of_scalar ~self acc llsc
       | Set_dynamic { dyn_value = v, _; llsc; _ } ->
           reads_of_scalar ~self (reads_of_scalar ~self acc v) llsc
