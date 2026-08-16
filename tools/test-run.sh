@@ -442,20 +442,30 @@ publish_run() { # 0 published; 2 abandoned by the wrapper's timeout; 1 error
   # not hold, so the portable pointer is the file. Rename-based, hence still
   # atomic: a reader sees the old path or the new one, never a partial write.
   #
-  # An earlier version of this script pointed `last` with a symlink; retire
-  # one in place rather than tripping the squatter guard below on it.
-  [ -L "$RUNS/last-$wt_key" ] && rm -f "$RUNS/last-$wt_key"
-  # Anything else that is not a regular file is a squatter -- notably the
-  # directory that the copying `ln -s` above used to leave behind. Refuse it
-  # instead of letting `mv` move the pointer INSIDE it.
-  { [ ! -e "$RUNS/last-$wt_key" ] || [ -f "$RUNS/last-$wt_key" ]; } || {
+  # Anything at the pointer path that is neither a regular file nor a
+  # symlink left by an earlier version is a squatter -- notably the
+  # DIRECTORY the copying `ln -s` used to leave behind. (`-f` follows, so a
+  # symlink to a run directory needs the explicit `-L` arm.)
+  { [ ! -e "$RUNS/last-$wt_key" ] || [ -f "$RUNS/last-$wt_key" ] ||
+    [ -L "$RUNS/last-$wt_key" ]; } || {
     echo "test-run: $RUNS/last-$wt_key exists and is not a regular file; remove it" >&2
     return 1
   }
-  # Written through a temporary and re-read, to prove the pointer names this
-  # run before the launch reports success.
+  # Written through a temporary and put in place with rename(2), which
+  # REPLACES whatever the path names -- a previous pointer, or a symlink one
+  # written before this script stopped using symlinks -- in a single atomic
+  # step, then re-read to prove the pointer names this run before the launch
+  # reports success. Neither of the obvious spellings works here: `mv` stats
+  # the destination THROUGH the link, so a symlink to a run directory makes
+  # it move the pointer INSIDE that directory; and unlinking first would
+  # leave `last` absent for an interval, which is the very gap the
+  # old-or-new guarantee exists to rule out (a launcher killed inside it
+  # would strand a recorded, possibly live, run with no `last` at all).
+  # rename(2) also refuses a directory destination outright, so the squatter
+  # above cannot be absorbed even if the guard is somehow raced.
   { printf '%s\n' "$run_dir" >"$RUNS/last-$wt_key.tmp.$$" &&
-    mv -f "$RUNS/last-$wt_key.tmp.$$" "$RUNS/last-$wt_key" &&
+    perl -e 'rename($ARGV[0], $ARGV[1]) or exit 1' \
+      "$RUNS/last-$wt_key.tmp.$$" "$RUNS/last-$wt_key" &&
     [ "$(cat "$RUNS/last-$wt_key" 2>/dev/null)" = "$run_dir" ]; } || {
     rm -f "$RUNS/last-$wt_key.tmp.$$"
     echo "test-run: cannot update $RUNS/last-$wt_key" >&2
