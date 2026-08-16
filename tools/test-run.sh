@@ -123,7 +123,16 @@ capped_perl='
       }
       if (!$gone || kill(0, -$pid)) {
         $blast->("KILL");
-        waitpid($pid, 0) unless $gone;
+        # Bounded reap: a child stuck in uninterruptible kernel I/O keeps
+        # even SIGKILL pending, and a blocking waitpid here would hang the
+        # supervisor -- the cap must report its 142/143 regardless; the
+        # stuck process then keeps the worktree lock through its fd 9.
+        unless ($gone) {
+          for (1 .. 50) {
+            last if waitpid($pid, POSIX::WNOHANG()) != 0;
+            select undef, undef, undef, 0.1;
+          }
+        }
       }
     }
     exit $code;
@@ -404,7 +413,7 @@ case $sub in
     cap=${OCANNL_TEST_CAP:-3600}
     while [ $# -gt 0 ]; do
       case $1 in
-        --cap) cap=$2; shift 2 ;;
+        --cap) [ $# -ge 2 ] || die "--cap requires a value"; cap=$2; shift 2 ;;
         --) shift; break ;;
         *) break ;;
       esac
@@ -501,18 +510,16 @@ case $sub in
         [ -f "$run_dir/published" ] && break
         sleep 1
       done
-      # Explicit unlock -- but ONLY when the recorded group is verifiably
-      # empty. A dune that exited leaving a live descendant (its group still
-      # occupied, so the pgid cannot have been recycled) must not have the
-      # lock pulled out from under it while it can still mutate _build; the
-      # descendant's own inherited fd 9 then carries the lock and the kernel
-      # releases it when the last member exits. For the empty/absent-group
-      # case, LOCK_UN releases the shared description for every holder, so
-      # stray fd copies cannot extend the lock past the published verdict.
-      if ! { pgid=$(cat "$run_dir/pgid") &&
-             kill -0 -- "-$pgid"; } 2>/dev/null; then
-        perl -e 'use Fcntl ":flock"; flock(STDIN, LOCK_UN)' <&9 2>/dev/null || :
-      fi
+      # Release protocol: simply close our fd. The lock lives on the shared
+      # open file DESCRIPTION, so the kernel releases it exactly when the
+      # last holder closes -- and any leftover descendant that can still
+      # mutate _build holds an inherited copy of that description WHATEVER
+      # process group it moved itself into (setsid included), which no
+      # group-membership census could see. An explicit LOCK_UN would strip
+      # the lock out from under such survivors; closing only our own copy
+      # frees it immediately in the common no-survivors case and otherwise
+      # precisely as long as one lives.
+      exec 9>&-
     ) </dev/null >/dev/null 2>&1 &
     wrapper=$!
     # The wrapper's own identity, recorded by its parent (bash 3.2 has no
@@ -584,7 +591,7 @@ case $sub in
     ref=last budget=
     while [ $# -gt 0 ]; do
       case $1 in
-        --timeout) budget=$2; shift 2 ;;
+        --timeout) [ $# -ge 2 ] || die "--timeout requires a value"; budget=$2; shift 2 ;;
         *) ref=$1; shift ;;
       esac
     done
@@ -650,7 +657,10 @@ case $sub in
           "$PWD/.test-run.lock" 2>/dev/null
       }
       leftovers() {
-        pg=$(cat "$run_dir/pgid" 2>/dev/null) && kill -0 -- "-$pg" 2>/dev/null &&
+        pg=$(cat "$run_dir/pgid" 2>/dev/null) || return 1
+        # 0/negative/garbage are POSIX kill specials, never a group of ours.
+        case $pg in '' | *[!0-9]* | 0) return 1 ;; esac
+        kill -0 -- "-$pg" 2>/dev/null &&
           [ "$(cat "$PWD/.test-run.lock.owner" 2>/dev/null)" = "$run_dir" ] &&
           lock_held
       }
@@ -666,9 +676,10 @@ case $sub in
     fi
     if sup_alive "$run_dir"; then
       kill -TERM "$(cat "$run_dir/pid")" 2>/dev/null
-      # Name the run explicitly: `last` may resolve to a DIFFERENT run when
-      # this stop targeted an identifier from another worktree's history.
-      echo "sent TERM; confirm with: tools/test-run.sh wait \"$run_dir\""
+      # Name the run explicitly (%q-quoted): `last` may resolve to a
+      # DIFFERENT run when this stop targeted an identifier from another
+      # worktree's history.
+      echo "sent TERM; confirm with: tools/test-run.sh wait $(printf %q "$run_dir")"
     elif proc_alive "$run_dir/pgid" "$run_dir/gtoken" &&
          pg=$(cat "$run_dir/pgid") && kill -0 -- "-$pg" 2>/dev/null; then
       # SIGKILL can remove wrapper and supervisor around a dune that survives
@@ -677,9 +688,17 @@ case $sub in
       # same mechanism as every other liveness check here); a recycled pgid
       # -- even one leading a process named dune -- fails the token and is
       # never signaled. A leaderless surviving group is refused too, the
-      # conservative side: clean that up by hand.
+      # conservative side: clean that up by hand. TERM gets a bounded grace,
+      # then a revalidated KILL -- an orphan that ignores TERM has lost its
+      # cap and would otherwise hold the worktree lock indefinitely.
       kill -TERM -- "-$pg" 2>/dev/null
-      echo "sent TERM to the orphaned process group $pg; re-run stop to confirm"
+      sleep 2
+      if proc_alive "$run_dir/pgid" "$run_dir/gtoken" && kill -0 -- "-$pg" 2>/dev/null; then
+        kill -KILL -- "-$pg" 2>/dev/null
+        echo "orphaned process group $pg ignored TERM; escalated to KILL"
+      else
+        echo "sent TERM to the orphaned process group $pg; re-run stop to confirm"
+      fi
     else
       echo "nothing left to signal (supervisor gone; no identity-verified surviving group)"
     fi
