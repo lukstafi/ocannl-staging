@@ -81,13 +81,29 @@ wt_key=$(basename "$PWD" | tr -c 'A-Za-z0-9' '_')$(printf %s "$PWD" | cksum | aw
 # descendants behind, and a descendant inheriting the lock would hold it
 # indefinitely after the run's verdict was already recorded. The lock's
 # holders are thus exactly the script/wrapper shell and this supervisor --
-# the processes whose lifetime IS the managed run.
+# the processes whose lifetime IS the managed run. The child also records its
+# pgid (only once confirmed to LEAD its own group, so a group-kill can never
+# hit the caller on platforms where setpgrp failed): if this supervisor is
+# SIGKILLed, the wrapper uses it to reap the surviving dune before
+# publishing a verdict and releasing the lock.
 capped_perl='
   use POSIX ();
   my $cap = shift;
   my $pid = fork();
   die "fork: $!" unless defined $pid;
-  if (!$pid) { eval { setpgrp(0, 0) }; POSIX::close(9); exec @ARGV; exit 127 }
+  if (!$pid) {
+    eval { setpgrp(0, 0) };
+    eval {
+      if ($ENV{OCANNL_TESTRUN_RD} && getpgrp(0) == $$) {
+        open my $fh, ">", "$ENV{OCANNL_TESTRUN_RD}/pgid" or die;
+        print $fh $$;
+        close $fh;
+      }
+    };
+    POSIX::close(9);
+    exec @ARGV;
+    exit 127;
+  }
   my $blast = sub { my $sig = shift; kill($sig, -$pid) or kill($sig, $pid) };
   my $reap = sub {
     my $code = shift;
@@ -148,10 +164,15 @@ resolve_run() {
   if [ "$ref" = last ]; then
     run_dir=$(readlink "$RUNS/last-$wt_key" 2>/dev/null) ||
       die "no runs recorded for this worktree"
-  else
+    [ -d "$run_dir" ] || die "no such run: $run_dir"
+  elif [ -d "$ref" ]; then
     run_dir=$ref
+  elif [ -d "$RUNS/$ref" ]; then
+    # The bare identifiers `list` prints resolve here.
+    run_dir=$RUNS/$ref
+  else
+    die "no such run: $ref (neither a directory nor an entry under $RUNS)"
   fi
-  [ -d "$run_dir" ] || die "no such run: $run_dir"
 }
 
 # The compact report `run`, `wait` and `status` all end with. Fingerprint in
@@ -215,40 +236,46 @@ case $sub in
     [ $# -gt 0 ] || set -- runtest
     take_lock
     new_run "$@"
-    if [ "$sub" = run ]; then
-      # The supervisor pid is recorded for foreground runs too: if this shell
-      # is killed before the verdict lands (harness cancellation, closed
-      # terminal), the orphaned run stays manageable -- `status` detects the
-      # dead/live supervisor and `stop` can still reach it. The trap forwards
-      # shell-directed signals; wait is retried because a trapped signal
-      # returns from `wait` early, before the supervisor has exited.
-      perl -e "$capped_perl" -- "$cap" dune "$@" >>"$run_dir/log" 2>&1 &
-      sup=$!
-      printf '%s\n' "$sup" >"$run_dir/pid"
-      trap 'kill -TERM "$sup" 2>/dev/null' INT TERM
-      wait "$sup"
-      rc=$?
-      while [ "$rc" -gt 128 ] && kill -0 "$sup" 2>/dev/null; do
-        wait "$sup"
-        rc=$?
-      done
-      trap - INT TERM
-      finish_run "$rc"
-      digest "$run_dir"
-      exit "$rc"
-    fi
-    # Detached: the wrapper subshell inherits lock fd 9 and owns the
-    # supervisor; its pid file is what `stop` signals (the supervisor traps
-    # TERM and reaps the group). It must write the verdict file even if dune
-    # is killed, which is why the supervisor cannot simply be exec'd here.
+    # ONE launch shape for both modes: a wrapper subshell owns the supervisor
+    # and publishes the verdict, so no fate of the LAUNCHING shell (HUP from a
+    # closed terminal, harness cancellation, plain kill) can lose it -- `run`
+    # differs from `start` only in staying attached to wait and digest. The
+    # wrapper inherits lock fd 9; its pid file is what `stop` signals (the
+    # supervisor traps TERM and reaps the group).
     (
       trap '' HUP
-      OCANNL_TESTRUN_BG=1 perl -e "$capped_perl" -- "$cap" dune "$@" >>"$run_dir/log" 2>&1 &
+      OCANNL_TESTRUN_BG=1 OCANNL_TESTRUN_RD=$run_dir \
+        perl -e "$capped_perl" -- "$cap" dune "$@" >>"$run_dir/log" 2>&1 &
       sup=$!
       printf '%s\n' "$sup" >"$run_dir/pid"
       wait "$sup"
-      finish_run "$?"
+      rc=$?
+      # A SIGKILLed supervisor cannot reap its process group, and dune would
+      # survive it -- still mutating _build while the verdict below releases
+      # the lock. The group is recorded (only when it is truly its own, see
+      # the supervisor comment), so reap any survivors first.
+      if pgid=$(cat "$run_dir/pgid" 2>/dev/null) && kill -0 -- "-$pgid" 2>/dev/null; then
+        kill -TERM -- "-$pgid" 2>/dev/null
+        sleep 2
+        kill -KILL -- "-$pgid" 2>/dev/null
+      fi
+      finish_run "$rc"
     ) </dev/null >/dev/null 2>&1 &
+    wrapper=$!
+    if [ "$sub" = run ]; then
+      # Attached: forward shell-directed cancellation to the supervisor, and
+      # wait for the wrapper -- its exit means the verdict file is published.
+      # A trapped signal returns from `wait` early, hence the retry loop.
+      trap 'kill -TERM "$(cat "$run_dir/pid" 2>/dev/null)" 2>/dev/null' INT TERM HUP
+      while kill -0 "$wrapper" 2>/dev/null; do wait "$wrapper"; done
+      trap - INT TERM HUP
+      if [ -f "$run_dir/exit" ]; then
+        digest "$run_dir"
+        exit "$(cat "$run_dir/exit")"
+      fi
+      echo "run died without recording a verdict (wrapper killed?): $run_dir"
+      exit 1
+    fi
     disown
     echo "started: $run_dir"
     echo "  command: dune $*"
@@ -289,15 +316,17 @@ case $sub in
     [ -n "$budget" ] || budget=$(( cap > 0 ? cap + 120 : 7200 ))
     waited=0
     while [ ! -f "$run_dir/exit" ]; do
+      # Every sleep here -- the poll AND the dead-supervisor grace -- is
+      # bounded by the remaining budget, so a short --timeout is honored to
+      # the second rather than rounded up to an interval.
+      remaining=$(( budget - waited ))
       if [ -f "$run_dir/pid" ] && ! kill -0 "$(cat "$run_dir/pid")" 2>/dev/null; then
-        sleep 2 # same mid-write grace as `status`
+        step=$(( remaining < 2 ? remaining : 2 )) # same mid-write grace as `status`
+        [ "$step" -gt 0 ] && sleep "$step"
         [ -f "$run_dir/exit" ] && break
         echo "run died without recording a verdict (killed externally?): $run_dir"
         exit 1
       fi
-      # Each sleep is bounded by the remaining budget, so a short --timeout is
-      # honored to the second rather than rounded up to the polling interval.
-      remaining=$(( budget - waited ))
       [ "$remaining" -le 0 ] && { echo "wait timed out after ${budget}s: $run_dir"; exit 124; }
       step=$(( remaining < 5 ? remaining : 5 ))
       sleep "$step"
