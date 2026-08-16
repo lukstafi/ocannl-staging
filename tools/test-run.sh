@@ -506,7 +506,16 @@ mark_abandoned() { : >"$run_dir/pub_abandoned" 2>/dev/null; }
 resolve_run() {
   local ref=${1:-last}
   if [ "$ref" = last ]; then
-    run_dir=$(cat "$RUNS/last-$wt_key" 2>/dev/null) || run_dir=
+    # The pointer is a plain file (see publish_run). A symlink there was
+    # written by a version predating that change and may still name a run
+    # that is LIVE -- `stop last` has to be able to reach one, and only a
+    # later publication replaces the link -- so read whichever form is
+    # present rather than waiting for the migration.
+    if [ -L "$RUNS/last-$wt_key" ]; then
+      run_dir=$(readlink "$RUNS/last-$wt_key" 2>/dev/null) || run_dir=
+    else
+      run_dir=$(cat "$RUNS/last-$wt_key" 2>/dev/null) || run_dir=
+    fi
     [ -n "$run_dir" ] || die "no runs recorded for this worktree"
     [ -d "$run_dir" ] || die "no such run: $run_dir"
   elif [ -d "$ref" ]; then
