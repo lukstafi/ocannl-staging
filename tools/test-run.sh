@@ -164,6 +164,30 @@ capped_perl='
         open my $fh, ">", "$ENV{OCANNL_TESTRUN_RD}/pgid" or die;
         print $fh $$;
         close $fh;
+        # The leader publishes its OWN start token before exec: a token
+        # sampled later by the wrapper could capture a recycled pid if the
+        # leader exited first. Linux reads /proc/self/stat (matching
+        # ps_token'"'"'s tick rendering); elsewhere ps renders lstart under
+        # the same pinned locale/TZ and squeeze.
+        my $tok = "";
+        if (open my $sf, "<", "/proc/self/stat") {
+          my $s = <$sf>;
+          if ($s =~ /\)\s+(.*)$/) {
+            my @f = split /\s+/, $1;
+            $tok = defined $f[19] ? $f[19] : "";
+          }
+        } else {
+          local $ENV{LC_ALL} = "C";
+          local $ENV{TZ} = "UTC";
+          $tok = qx{ps -o lstart= -p $$ 2>/dev/null};
+          $tok =~ s/\s+$//;
+          $tok =~ s/ +/ /g;
+        }
+        if ($tok ne "") {
+          open my $gf, ">", "$ENV{OCANNL_TESTRUN_RD}/gtoken" or die;
+          print $gf "$tok\n";
+          close $gf;
+        }
       }
     };
     exec @ARGV;
@@ -233,8 +257,14 @@ take_lock() {
       # %q, so a runs directory containing spaces or metacharacters survives
       # copy-pasting the recovery commands.
       owner=$(cat "$PWD/.test-run.lock.owner" 2>/dev/null)
-      if [ -z "$owner" ] && read -r lpid ltok <"$PWD/.test-run.lock.launcher" 2>/dev/null &&
-         kill -0 "$lpid" 2>/dev/null && [ "$(ps_token "$lpid")" = "$ltok" ]; then
+      launcher_live() { # same liveness rules as proc_alive, zombies included
+        read -r lpid ltok <"$PWD/.test-run.lock.launcher" 2>/dev/null || return 1
+        case $lpid in '' | *[!0-9]* | 0) return 1 ;; esac
+        kill -0 "$lpid" 2>/dev/null || return 1
+        case $(ps -o state= -p "$lpid" 2>/dev/null | tr -d ' ') in Z*) return 1 ;; esac
+        [ "$(ps_token "$lpid")" = "$ltok" ]
+      }
+      if [ -z "$owner" ] && launcher_live; then
         # No published owner yet, but the recorded launcher is live: a
         # launch is mid-flight (or stalled) between acquisition and
         # publication.
@@ -353,7 +383,11 @@ ps_token() {
       print defined $f[19] ? $f[19] : "";
     ' "$1" 2>/dev/null
   else
-    LC_ALL=C TZ=UTC ps -o lstart= -p "$1" 2>/dev/null | tr -s ' '
+    # Squeezed AND trimmed: ps pads lstart to a fixed width, and tokens are
+    # compared as strings against records written by other renderers (the
+    # group leader trims its own) -- one canonical form for all writers.
+    LC_ALL=C TZ=UTC ps -o lstart= -p "$1" 2>/dev/null |
+      tr -s ' ' | sed 's/^ *//; s/ *$//'
   fi
 }
 
@@ -370,7 +404,7 @@ proc_alive() { # pid-file token-file
   # lie forever under an init that does not reap. Empty state (ps without
   # the column) falls through to the token check.
   case $(ps -o state= -p "$pid" 2>/dev/null | tr -d ' ') in Z*) return 1 ;; esac
-  tok=$(tr -s ' ' <"$2" 2>/dev/null) || tok=
+  tok=$(tr -s ' ' <"$2" 2>/dev/null | sed 's/^ *//; s/ *$//') || tok=
   # No RECORDED identity (MSYS ps without lstart) degrades to the plain pid
   # check -- but where one was recorded, a pid that can no longer produce a
   # token (exited between kill -0 and ps_token, possibly recycled) must
@@ -638,18 +672,14 @@ case $sub in
       # uncancellable by stop while dune ran on -- cancel it instead.
       { printf '%s\n' "$sup" >"$run_dir/pid" &&
         ps_token "$sup" >"$run_dir/ptoken"; } || kill -TERM "$sup" 2>/dev/null
-      # The supervisor's child writes its pgid before exec; record the group
-      # LEADER's start token as soon as it appears (exec preserves start
-      # time), so an orphan-group `stop` can verify identity instead of
-      # trusting a possibly recycled numeric pgid.
-      for _ in 1 2 3; do [ -f "$run_dir/pgid" ] && break; sleep 1; done
-      # Recorded only when NONEMPTY: an empty token (leader already gone, or
-      # ps without lstart) would read as the plain-pid fallback and let a
-      # recycled pgid pass -- group signaling requires a real token.
-      if [ -f "$run_dir/pgid" ]; then
-        gt=$(ps_token "$(cat "$run_dir/pgid")")
-        [ -n "$gt" ] && printf '%s\n' "$gt" >"$run_dir/gtoken"
+      # Same Linux-empty rule as the wrapper token: a supervisor that
+      # vanished mid-record must not linger as a bare recyclable pid.
+      if [ -d /proc ] && [ ! -s "$run_dir/ptoken" ]; then
+        kill -TERM "$sup" 2>/dev/null
       fi
+      # (The group leader publishes its own pgid AND start token pre-exec,
+      # inside the supervisor's child -- see capped_perl. Sampling either
+      # here could capture a recycled pid.)
       wait "$sup"
       rc=$?
       # A SIGKILLed supervisor cannot reap its process group, and dune would
@@ -735,6 +765,11 @@ case $sub in
     # recorded would be invisible to status/stop and must not report started.
     { printf '%s\n' "$wrapper" >"$run_dir/wpid" &&
       ps_token "$wrapper" >"$run_dir/wtoken"; } || wrap_ids=bad
+    # On Linux /proc is authoritative: an empty token there means the
+    # wrapper vanished mid-record, and accepting it would leave the bare-pid
+    # fallback exposed to recycling. (Elsewhere empty is the documented
+    # MSYS degradation.)
+    if [ -d /proc ] && [ ! -s "$run_dir/wtoken" ]; then wrap_ids=bad; fi
     if ! claim_handoff published; then
       # The wrapper won the arbiter with "expired": it released the lock,
       # which may already belong to a newer run whose `last`/owner pointers
