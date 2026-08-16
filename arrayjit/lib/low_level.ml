@@ -963,9 +963,10 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
     match Affine.fiber_cardinality ~domain:(Map.to_alist loop_ranges) idcs with
     | `Exact n | `At_least n -> n
   in
-  (* [scope_reads] is the enclosing setter's read collector when this traversal is inside a
-     [Local_scope] body in that setter's right-hand side (gh-573): the body's loads execute per
-     evaluation of the setter, so they belong to its [setter_reads]. [None] at top level. *)
+  (* [scope_reads] is the enclosing setter's identity and read collector when this traversal is
+     inside a [Local_scope] body in that setter's right-hand side (gh-573): the body's loads
+     execute per evaluation of the setter, so they belong to its [setter_reads], with the
+     setter's own read-modify-write self-reads still excluded. [None] at top level. *)
   let rec loop_proc ~loop_ranges ~scope_reads llc =
     let loop = loop_proc ~loop_ranges ~scope_reads in
     match llc with
@@ -991,7 +992,7 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
     | Set { tn; idcs; llsc; debug = _ } ->
         check_no_concat idcs;
         let reads = Hash_set.create (module Tnode) in
-        loop_scalar ~loop_ranges ~lhs:(Some (tn, idcs)) ~reads:(Some reads) llsc;
+        loop_scalar ~loop_ranges ~lhs:(Some (tn, idcs)) ~reads:(Some (tn, reads)) llsc;
         let traced : traced_array = get_node traced_store tn in
         traced.setter_reads <-
           Set.of_list (module Tnode) (Hash_set.to_list reads) :: traced.setter_reads;
@@ -1025,7 +1026,7 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
     | Set_from_vec { tn; idcs; length = _; vec_unop = _; arg = arg, _; debug = _ } ->
         check_no_concat idcs;
         let reads = Hash_set.create (module Tnode) in
-        loop_scalar ~loop_ranges ~lhs:(Some (tn, idcs)) ~reads:(Some reads) arg;
+        loop_scalar ~loop_ranges ~lhs:(Some (tn, idcs)) ~reads:(Some (tn, reads)) arg;
         let traced : traced_array = get_node traced_store tn in
         traced.setter_reads <-
           Set.of_list (module Tnode) (Hash_set.to_list reads) :: traced.setter_reads;
@@ -1060,9 +1061,14 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
     | Get (ptr, indices) ->
         check_no_concat indices;
         let traced : traced_array = get_node traced_store ptr in
-        if not (Option.exists lhs ~f:(fun (tn, _) -> Tn.equal ptr tn)) then (
+        if not (Option.exists lhs ~f:(fun (tn, _) -> Tn.equal ptr tn)) then
           traced.read_by_other <- true;
-          Option.iter reads ~f:(fun r -> Hash_set.add r ptr));
+        (* The collector carries the setter's identity separately from [lhs], which a
+           [Local_scope] body does not inherit: the read-modify-write self-read exclusion must
+           follow the OUTER setter through the body, or a self-accumulating scope records a
+           phantom contributor that can flip a decision at the cap boundary. *)
+        Option.iter reads ~f:(fun (self, r) ->
+            if not (Tn.equal ptr self) then Hash_set.add r ptr);
         (* The read-modify-write exemption: a read at the enclosing statement's write position is
            not a visit ([inline_complex_computations]), whichever node it reads. *)
         let exempt =

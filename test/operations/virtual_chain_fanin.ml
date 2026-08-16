@@ -157,7 +157,40 @@ let phase1b () =
         Array.foldi (Array.init 9 ~f:w_vals) ~init:0. ~f:(fun _ acc w -> acc +. w.(i)))
   in
   let got = execute ~name:"vcf_scope" o ~seed ~read:[ out ] in
-  p "scope: executed values match the reference" (same got [ expected ])
+  p "scope: executed values match the reference" (same got [ expected ]);
+  (* Review round 2: a scope body ACCUMULATING INTO the setter's own node must not record the
+     self-read as a contributor. y2 is zero-initialized and set from a scope reading y2 itself
+     plus exactly 8 materialized nodes: fan-in 8, at the cap — a phantom self contributor would
+     make it 9 and flip the decision. *)
+  let y2 = mk "y2" and out2 = mk "sout2" and lv2 = mk "lv2" in
+  materialize out2;
+  virtualize lv2;
+  let i2 = sym () and j2 = sym () in
+  let id2 = LL.get_scope lv2 in
+  let body2 =
+    LL.Set_local
+      ( id2,
+        Array.fold (Array.sub ws ~pos:0 ~len:8)
+          ~init:(get y2 [| iter i2 |])
+          ~f:(fun acc w -> add acc (get w [| iter i2 |])) )
+  in
+  let producer2 =
+    seq (zero y2)
+      (loop_n i2 dim
+         (set y2 [| iter i2 |] (LL.Local_scope { id = id2; body = body2; orig_indices = [| iter i2 |] })))
+  in
+  let consumer2 = loop_n j2 dim (set out2 [| iter j2 |] (get y2 [| iter j2 |])) in
+  let o2 = optimize ~name:"vcf_scope_rmw" (seq producer2 consumer2) in
+  p "scope rmw: self-read excluded, producer stays virtual (fan-in 8)" (known_virtual o2 y2);
+  let expected2 =
+    Array.init dim ~f:(fun i ->
+        Array.foldi (Array.init 8 ~f:w_vals) ~init:0. ~f:(fun _ acc w -> acc +. w.(i)))
+  in
+  let seed2 =
+    (out2, blank dim) :: (Array.to_list (Array.sub ws ~pos:0 ~len:8) |> List.mapi ~f:(fun k w -> (w, w_vals k)))
+  in
+  let got2 = execute ~name:"vcf_scope_rmw" o2 ~seed:seed2 ~read:[ out2 ] in
+  p "scope rmw: executed values match the reference" (same got2 [ expected2 ])
 
 (* === Phase 2: the Assignments pipeline === *)
 
