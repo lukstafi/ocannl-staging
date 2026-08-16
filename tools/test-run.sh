@@ -269,8 +269,14 @@ proc_alive() { # pid-file token-file
   case $pid in '' | *[!0-9]* | 0) return 1 ;; esac
   kill -0 "$pid" 2>/dev/null || return 1
   tok=$(tr -s ' ' <"$2" 2>/dev/null) || tok=
+  # No RECORDED identity (MSYS ps without lstart) degrades to the plain pid
+  # check -- but where one was recorded, a pid that can no longer produce a
+  # token (exited between kill -0 and ps_token, possibly recycled) must
+  # fail, not pass.
+  [ -z "$tok" ] && return 0
   now=$(ps_token "$pid")
-  [ -z "$tok" ] || [ -z "$now" ] || [ "$tok" = "$now" ]
+  [ -n "$now" ] || return 1
+  [ "$tok" = "$now" ]
 }
 sup_alive() { proc_alive "$1/pid" "$1/ptoken"; }
 # The wrapper outlives the supervisor only briefly (publication plus a
@@ -458,8 +464,10 @@ case $sub in
       OCANNL_TESTRUN_BG=1 OCANNL_TESTRUN_RD=$run_dir \
         perl -e "$capped_perl" -- "$cap" "$DUNE" "$@" >>"$run_dir/log" 2>&1 &
       sup=$!
-      printf '%s\n' "$sup" >"$run_dir/pid"
-      ps_token "$sup" >"$run_dir/ptoken"
+      # Checked: a run whose supervisor identity cannot be recorded would be
+      # uncancellable by stop while dune ran on -- cancel it instead.
+      { printf '%s\n' "$sup" >"$run_dir/pid" &&
+        ps_token "$sup" >"$run_dir/ptoken"; } || kill -TERM "$sup" 2>/dev/null
       # The supervisor's child writes its pgid before exec; record the group
       # LEADER's start token as soon as it appears (exec preserves start
       # time), so an orphan-group `stop` can verify identity instead of
@@ -493,10 +501,18 @@ case $sub in
         [ -f "$run_dir/published" ] && break
         sleep 1
       done
-      # Explicit unlock, so descendants dune may have left behind (which
-      # inherit fd 9) cannot extend the worktree lock past the published
-      # verdict; LOCK_UN releases the shared description for every holder.
-      perl -e 'use Fcntl ":flock"; flock(STDIN, LOCK_UN)' <&9 2>/dev/null || :
+      # Explicit unlock -- but ONLY when the recorded group is verifiably
+      # empty. A dune that exited leaving a live descendant (its group still
+      # occupied, so the pgid cannot have been recycled) must not have the
+      # lock pulled out from under it while it can still mutate _build; the
+      # descendant's own inherited fd 9 then carries the lock and the kernel
+      # releases it when the last member exits. For the empty/absent-group
+      # case, LOCK_UN releases the shared description for every holder, so
+      # stray fd copies cannot extend the lock past the published verdict.
+      if ! { pgid=$(cat "$run_dir/pgid") &&
+             kill -0 -- "-$pgid"; } 2>/dev/null; then
+        perl -e 'use Fcntl ":flock"; flock(STDIN, LOCK_UN)' <&9 2>/dev/null || :
+      fi
     ) </dev/null >/dev/null 2>&1 &
     wrapper=$!
     # The wrapper's own identity, recorded by its parent (bash 3.2 has no
