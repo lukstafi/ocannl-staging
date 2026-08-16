@@ -267,9 +267,12 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       Stdio.Out_channel.output_string build_file.oc hip_src;
       build_file.finalize ());
     [%log "compiling to a code object"];
-    let with_debug =
-      Utils.settings.output_debug_files_in_build_directory || Utils.settings.log_level > 0
-    in
+    (* [with_debug] only asks hiprtc to keep the compilation log on a SUCCESSFUL compile (a failing
+       one carries its log in the exception either way), and the only reader of that log is the
+       [.hip_log] build file written just below -- so it wants exactly the flag that writes it. The
+       [|| log_level > 0] disjunct it used to carry made the log's retention hostage to a verbosity
+       knob that nothing here consults (gh-ocannl-595). *)
+    let with_debug = Utils.settings.output_debug_files_in_build_directory in
     (* hiprtc targets the architecture of the current default device when no [--offload-arch] is
        given. On Linux hiprtc ships built-in HIP headers; on Windows (observed with ROCm 7.1)
        [#include <hip/hip_fp16.h>] is not found without an include path, so point at the SDK's
