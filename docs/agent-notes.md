@@ -858,6 +858,21 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
 CLAUDE.md holds the workflow rules; these are the dune/OCaml mechanics behind them, narrow enough
 that they earn a lookup rather than always-loaded space.
 
+- `tools/test-run.sh` is the one way to run `dune runtest` / `dune build @slow` from a session;
+  its header documents usage. It exists because every hand-rolled alternative has failed in
+  practice, each differently: piping dune to `tail` reports tail's status (no pipefail), so
+  promotion diffs read as green; a wrapper variable named `status` is read-only in zsh, so the
+  assignment dies before the sentinel prints and a green suite looks failed; waiter loops on
+  `pgrep -x dune` match the editor's immortal `dune ocaml-merlin` daemons and spin forever (one
+  review session accumulated ten stranded waiter shells); `kill -0 $pid` can latch onto a
+  recycled pid; and an uncapped hung run (macOS XProtect stalling a fresh exe, a wedged backend)
+  strands whatever waits on it. The script runs dune unpiped under a wall-clock cap that kills
+  the whole process group, records the verdict in a FILE (`wait` polls that file under a hard
+  timeout — it structurally cannot strand), and holds a per-worktree flock so a second
+  invocation refuses loudly instead of queueing behind dune's lock — "I lost track of a run so
+  I started another" being the usual start of the spiral. Prefer foreground `run` launched
+  through the agent harness's background mode (the harness notifies on exit); `start`/`status`/
+  `wait`/`stop` are only for runs that must outlive the launching session.
 - `(copy_files ...)` creates PASSIVE rules: they do not fire just because you build a sibling target
   in the same directory — only when listed in that target's `(deps ...)` or requested explicitly. A
   rule consuming copy_files output must therefore declare it. And validate a `(mode promote)` target
