@@ -89,10 +89,14 @@ wt_key=$(basename "$PWD" | tr -c 'A-Za-z0-9' '_')$(printf %s "$PWD" | cksum | aw
 capped_perl='
   use POSIX ();
   my $cap = shift;
-  my $pid;
+  my ($pid, $done);
   my $blast = sub { my $sig = shift; kill($sig, -$pid) or kill($sig, $pid) };
   my $reap = sub {
     my $code = shift;
+    # A signal landing AFTER dune was reaped must neither blast the stale
+    # pid/group (a recycled pid could make that an innocent process) nor
+    # replace the real verdict with the signal code.
+    exit $done if !$pid && defined $done;
     if ($pid) {
       $blast->("TERM");
       for (1 .. 50) {
@@ -133,8 +137,13 @@ capped_perl='
   alarm $cap if $cap > 0;
   waitpid($pid, 0);
   my $st = $?;
+  # Verdict recorded and $pid cleared BEFORE anything else, in this order --
+  # a handler firing in between then sees defined $done and exits with the
+  # real status.
+  $done = ($st & 127) ? 128 + ($st & 127) : $st >> 8;
+  $pid = 0;
   alarm 0;
-  exit($st & 127 ? 128 + ($st & 127) : $st >> 8);
+  exit $done;
 '
 
 # Take the per-worktree lock on fd 9, non-blocking. perl takes it and exits;
@@ -157,9 +166,12 @@ take_lock() {
     # refused invocation's `last` can resolve in a DIFFERENT state directory
     # (or nowhere), which would leave the lock holder uninspectable.
     owner=$(cat "$PWD/.test-run.lock.owner" 2>/dev/null)
+    # %q, so a runs directory containing spaces or metacharacters survives
+    # copy-pasting the recovery commands.
+    owner=$(printf %q "${owner:-last}")
     echo "test-run: another test-run is active in this worktree; check it with:" >&2
-    echo "  tools/test-run.sh status ${owner:-last}" >&2
-    echo "(a stale one can be stopped with: tools/test-run.sh stop ${owner:-last})" >&2
+    echo "  tools/test-run.sh status $owner" >&2
+    echo "(a stale one can be stopped with: tools/test-run.sh stop $owner)" >&2
     exit 2
   }
 }
@@ -348,6 +360,10 @@ case $sub in
     # A mistyped cap would reach perl's numeric compare as 0 and silently
     # disable the alarm -- the one property this script must never lose.
     case $cap in '' | *[!0-9]*) die "--cap must be a nonnegative integer of seconds (0 disables)" ;; esac
+    # Decimal-normalized once here: a leading zero (--cap 08) would pass the
+    # digit check, reach perl as decimal, and then blow up bash arithmetic
+    # downstream as an invalid octal.
+    cap=$(( 10#$cap ))
     [ $# -gt 0 ] || set -- runtest
     # The toolchain check gates only LAUNCHES: status/wait/stop/list must
     # keep working from a shell with no opam environment -- not least so a
@@ -390,6 +406,15 @@ case $sub in
         kill -KILL -- "-$pgid" 2>/dev/null
       fi
       finish_run "$rc"
+      # Publication handshake: hold the lock until the parent has published
+      # this run (bounded, so an abandoned launch cannot pin it). A fast
+      # dune could otherwise let a SECOND run acquire the lock and publish,
+      # only to have `last` and the owner pointer overwritten with this
+      # already-finished run when its launcher resumed.
+      for _ in 1 2 3 4 5 6 7 8 9 10; do
+        [ -f "$run_dir/published" ] && break
+        sleep 1
+      done
       # Explicit unlock, so descendants dune may have left behind (which
       # inherit fd 9) cannot extend the worktree lock past the published
       # verdict; LOCK_UN releases the shared description for every holder.
@@ -399,9 +424,11 @@ case $sub in
     # The wrapper's own identity, recorded by its parent (bash 3.2 has no
     # BASHPID for the subshell to name itself): status and wait use it to
     # tell "verdict publication in flight" from "nothing left to publish".
-    printf '%s\n' "$wrapper" >"$run_dir/wpid"
-    ps_token "$wrapper" >"$run_dir/wtoken"
-    if ! publish_run; then
+    # Checked like every launch write -- a run whose identity cannot be
+    # recorded would be invisible to status/stop and must not report started.
+    if ! { printf '%s\n' "$wrapper" >"$run_dir/wpid" &&
+           ps_token "$wrapper" >"$run_dir/wtoken" &&
+           publish_run; }; then
       # An unpublishable run must not keep running untracked: cancel via the
       # supervisor (waiting briefly for the wrapper to record its pid) and
       # let the wrapper publish the 143 into the unpublished directory.
@@ -409,6 +436,8 @@ case $sub in
       [ -f "$run_dir/pid" ] && kill -TERM "$(cat "$run_dir/pid")" 2>/dev/null
       die "run could not be published; cancelled it (remnants at $run_dir)"
     fi
+    # The wrapper's unlock handshakes on this marker (see above).
+    : >"$run_dir/published" 2>/dev/null || :
     if [ "$sub" = run ]; then
       # Attached: forward shell-directed cancellation to the supervisor, and
       # wait for the wrapper -- its exit means the verdict file is published.
@@ -464,6 +493,8 @@ case $sub in
     # Bounded by construction: default budget is the run's own cap plus slack
     # for cleanup, so a `wait` outlives a hung run only briefly -- never forever.
     cap=$(cat "$run_dir/cap" 2>/dev/null) || cap=3600
+    [ -n "$cap" ] || cap=3600
+    cap=$(( 10#$cap )) # decimal, whatever an older run recorded
     [ -n "$budget" ] || budget=$(( cap > 0 ? cap + 120 : 7200 ))
     waited=0
     while [ ! -f "$run_dir/exit" ]; do
