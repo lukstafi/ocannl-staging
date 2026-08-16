@@ -249,12 +249,7 @@ new_run() {
           # A completed run whose leftovers still hold ITS worktree's lock
           # keeps its metadata -- deleting it would strand that worktree
           # with the advertised status/stop recovery pointing at nothing.
-          w=$(cat "$d/wt" 2>/dev/null)
-          if [ -n "$w" ] &&
-             [ "$(cat "$w/.test-run.lock.owner" 2>/dev/null)" = "$d" ] &&
-             lock_held "$w/.test-run.lock"; then
-            continue
-          fi
+          lock_still_owned "$d" && continue
           rm -rf "$d"
         fi
       else
@@ -264,6 +259,9 @@ new_run() {
         # INSIDE -- appending to `log` does not touch the directory's mtime.
         sup_alive "$d" && continue
         wrapper_alive "$d" && continue
+        # Same held-lock guard as the completed branch: a crashed run's
+        # descendant can hold its worktree lock without a verdict on record.
+        lock_still_owned "$d" && continue
         [ -z "$(find "$d" -mtime -30 2>/dev/null | head -1)" ] && rm -rf "$d"
       fi
     done
@@ -279,6 +277,17 @@ lock_held() { # <lock-file>; exits 0 iff some process holds its flock
   perl -e 'use Fcntl ":flock";
            open(my $fh, ">>", $ARGV[0]) or exit 1;
            exit(flock($fh, LOCK_EX | LOCK_NB) ? 1 : 0)' "$1" 2>/dev/null
+}
+
+# Is the RECORDED worktree of run-dir $1 still locked with $1 as the named
+# owner? Then $1's leftovers are what is holding it -- grounds both for
+# reaping them (stop) and for keeping $1's metadata alive (retention).
+lock_still_owned() {
+  local w
+  w=$(cat "$1/wt" 2>/dev/null) || return 1
+  [ -n "$w" ] &&
+    [ "$(cat "$w/.test-run.lock.owner" 2>/dev/null)" = "$1" ] &&
+    lock_held "$w/.test-run.lock"
 }
 
 # One fixed rendering for start-time tokens: lstart is locale- AND
@@ -474,10 +483,20 @@ case $sub in
     # recorded); for `start` the signal is merely deferred past publication
     # -- the launcher is about to exit anyway, and the run is MEANT to
     # survive it.
-    cancelled=0
-    trap 'cancelled=1
-          [ "$sub" = run ] &&
-            kill -TERM "$(cat "$run_dir/pid" 2>/dev/null)" 2>/dev/null' INT TERM HUP
+    cancelled=
+    # Per-signal, so an interrupt records 130 and not a generic 143: INT is
+    # relayed as INT (the supervisor maps it to 130); HUP relays as TERM
+    # because the detached-mode supervisor deliberately ignores HUP.
+    fwd_sig() {
+      cancelled=$1
+      if [ "$sub" = run ]; then
+        case $1 in INT) s=INT ;; *) s=TERM ;; esac
+        kill "-$s" "$(cat "$run_dir/pid" 2>/dev/null)" 2>/dev/null
+      fi
+    }
+    trap 'fwd_sig INT' INT
+    trap 'fwd_sig TERM' TERM
+    trap 'fwd_sig HUP' HUP
     # ONE launch shape for both modes: a wrapper subshell owns the supervisor
     # and publishes the verdict, so no fate of the LAUNCHING shell (HUP from a
     # closed terminal, harness cancellation, plain kill) can lose it -- `run`
@@ -566,11 +585,15 @@ case $sub in
       # here, now that the supervisor pid exists (briefly waiting for the
       # wrapper to record it). A trapped signal returns from `wait` early,
       # hence the retry loop.
-      if [ "$cancelled" = 1 ]; then
+      if [ -n "$cancelled" ]; then
         for _ in 1 2 3; do [ -f "$run_dir/pid" ] && break; sleep 1; done
-        [ -f "$run_dir/pid" ] && kill -TERM "$(cat "$run_dir/pid")" 2>/dev/null
+        case $cancelled in INT) s=INT ;; *) s=TERM ;; esac
+        [ -f "$run_dir/pid" ] && kill "-$s" "$(cat "$run_dir/pid")" 2>/dev/null
       fi
-      while kill -0 "$wrapper" 2>/dev/null; do wait "$wrapper"; done
+      # wrapper_alive, not a bare kill -0: after the wrapper is reaped its
+      # pid can be recycled, and probing the number alone would spin this
+      # loop on an unrelated process.
+      while wrapper_alive "$run_dir"; do wait "$wrapper" 2>/dev/null; done
       trap - INT TERM HUP
       if [ -f "$run_dir/exit" ]; then
         digest "$run_dir"
@@ -613,15 +636,21 @@ case $sub in
     ref=last budget=
     while [ $# -gt 0 ]; do
       case $1 in
-        --timeout) [ $# -ge 2 ] || die "--timeout requires a value"; budget=$2; shift 2 ;;
+        --timeout)
+          [ $# -ge 2 ] || die "--timeout requires a value"
+          budget=$2 budget_given=1
+          shift 2
+          ;;
         *) ref=$1; shift ;;
       esac
     done
     resolve_run "$ref"
-    if [ -n "$budget" ]; then
+    if [ -n "${budget_given:-}" ]; then
       # Same traps --cap had: leading zeros reach bash arithmetic as octal,
-      # and oversized values wrap.
-      case $budget in *[!0-9]*) die "--timeout must be a nonnegative integer of seconds" ;; esac
+      # and oversized values wrap. Gated on the option being GIVEN, so an
+      # explicitly empty value ('--timeout ""' from an unset harness
+      # variable) is rejected rather than silently using the default budget.
+      case $budget in '' | *[!0-9]*) die "--timeout must be a nonnegative integer of seconds" ;; esac
       [ ${#budget} -le 9 ] || die "--timeout too large (max 9 digits)"
       budget=$(( 10#$budget ))
     fi
@@ -666,31 +695,42 @@ case $sub in
     resolve_run "${1:-last}"
     if [ -f "$run_dir/exit" ]; then
       # Finished -- but descendants dune backgrounded may still hold the
-      # worktree lock (the wrapper deliberately leaves it riding on their
-      # fd 9), possibly having setsid'd out of the recorded group. Gate on
-      # the lock being HELD with the owner pointer naming THIS run: then
-      # whatever holds it is this run's leftovers. Signal the recorded group
-      # if alive, and ask the lock file ITSELF for the rest (lsof sees
-      # escapees no group census can); re-check the gate before escalating.
-      leftover_lock() {
-        [ "$(cat "$PWD/.test-run.lock.owner" 2>/dev/null)" = "$run_dir" ] &&
-          lock_held "$PWD/.test-run.lock"
-      }
+      # run's worktree lock (the wrapper deliberately leaves it riding on
+      # their fd 9), possibly having setsid'd out of the recorded group.
+      # Everything here uses the run's RECORDED worktree, not the caller's
+      # cwd -- an explicit run directory may belong to another checkout.
+      # Gate on the lock being HELD with the owner pointer naming THIS run:
+      # then whatever holds it is this run's leftovers. Signal the recorded
+      # group if alive, and ask the lock file ITSELF for the rest (lsof
+      # sees escapees no group census can); re-check before escalating, and
+      # report honestly if the lock is STILL held afterwards (no lsof on
+      # this system, or unkillable holders) instead of claiming success.
+      run_wt=$(cat "$run_dir/wt" 2>/dev/null)
+      run_wt=${run_wt:-$PWD}
       reap_leftovers() { # <signal>
         pg=$(cat "$run_dir/pgid" 2>/dev/null)
         case $pg in '' | *[!0-9]* | 0) pg= ;; esac
         [ -n "$pg" ] && kill -0 -- "-$pg" 2>/dev/null &&
           kill "-$1" -- "-$pg" 2>/dev/null
-        for p in $(lsof -t -- "$PWD/.test-run.lock" 2>/dev/null); do
+        for p in $(lsof -t -- "$run_wt/.test-run.lock" 2>/dev/null); do
           case $p in '' | *[!0-9]* | 0) continue ;; esac
           kill "-$1" "$p" 2>/dev/null
         done
       }
-      if leftover_lock; then
+      if lock_still_owned "$run_dir"; then
         reap_leftovers TERM
         sleep 2
-        if leftover_lock; then reap_leftovers KILL; fi
-        echo "finished, but its leftover processes held the worktree lock; reaped them"
+        if lock_still_owned "$run_dir"; then
+          reap_leftovers KILL
+          sleep 1
+        fi
+        if lock_still_owned "$run_dir"; then
+          echo "finished, but leftover processes STILL hold $run_wt's lock" \
+               "(no lsof on this system, or unkillable holders); inspect with:" \
+               "lsof $(printf %q "$run_wt/.test-run.lock")"
+        else
+          echo "finished, but its leftover processes held the worktree lock; reaped them"
+        fi
       fi
       echo "already finished:"
       digest "$run_dir"
