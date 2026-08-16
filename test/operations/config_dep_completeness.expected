@@ -15,6 +15,9 @@ test/support/dune: nothing that runs a test executable
 test/training/dune: 11 tests, 4 exe-running rules
 tools/dune: nothing that runs a test executable
 
+Stanza kinds that can run a test executable: rule, alias (plus `test`, `tests` and a `library`'s `inline_tests`, which dune runs itself).
+Stanza kinds that cannot: executable, executables, copy_files, copy_files#, install, env, dirs, data_only_dirs, vendored_dirs, include_subdirs, documentation, ocamllex, ocamlyacc, menhir, toplevel, deprecated_library_name. Anything else fails above.
+
 Exempt from the dependency, running an executable that reads no configuration:
   test/ppx:pp.exe -- the ppx driver, run to expand a source file and diff the expansion: `ppx_ocannl` links base, ppxlib, str and einsum_parser -- no configuration reader -- so no `ocannl_config` can reach its output
 

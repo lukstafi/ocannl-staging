@@ -60,6 +60,11 @@ Testing notes:
 - Inline ppx_expect tests and standalone Dune `test` stanzas with `.expected` files are exclusive.
   Prefer standalone tests for new compiler features; reserve tutorial `%expect` tests for
   illustrative output.
+- Every `(test)`/`(tests)` stanza, every `(library)` with `(inline_tests)`, and every `(rule ...)`
+  that runs a test executable must list `ocannl_config` in its deps — an `(executable)` stanza has
+  no `deps` field, so the dep goes on its companion rule. Without it the test reads whatever is in
+  `_build/default/<test dir>` when it runs, which makes the result order-dependent (gh-ocannl-586).
+  `test/operations/config_dep_completeness` checks this over every `dune` file (gh-ocannl-597).
 - Avoid `dune exec test/.../<name>.exe` for standalone tests: its working directory bypasses the
   copied `test/config/ocannl_config`, so a test may fail or silently select another backend.
   Build `test/<dir>/<name>.exe.output`, inspect `_build/default/test/<dir>/<name>.exe.output`,
@@ -156,9 +161,13 @@ Key points:
   (gh-ocannl-559) — so a specific key always beats an aggregate of equal immediacy, and
   `--ocannl_profile=reproducible` still overrides an exhaustive config file.
 - `ocannl_config.reference` is authoritative, and ships with every setting COMMENTED OUT (`#key=…`,
-  no space; prose comments use `# `) so copying it states nothing. Adding a key requires three
-  updates, enforced by `test/operations/test_config_consistency`: document it there, register it in
-  `Utils.known_config_keys`, and add a newly participating source file to the test's scan list.
+  no space; prose comments use `# `) so copying it states nothing. Adding a key requires two
+  updates, enforced by `test/operations/test_config_consistency`: document it there and register it
+  in `Utils.known_config_keys`. A new source file needs no registration — the consistency tests
+  glob `arrayjit/lib/*.ml`, `tensor/*.ml` and `lib/*.ml` (gh-ocannl-592) — but the key must be
+  spelled as a string literal at the call site (`~arg_name:"the_key"`), which the same test
+  enforces. Classify the key too, in `Utils.config_key_classification`, or
+  `test/operations/digest_completeness` fails (gh-ocannl-572).
 - The built-in profile payloads are embedded strings in `arrayjit/lib/utils.ml`, quoted verbatim at
   the end of `ocannl_config.reference`; the same test checks the quote and that payload keys are
   known and documented.

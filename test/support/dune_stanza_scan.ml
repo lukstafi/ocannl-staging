@@ -124,6 +124,27 @@ let kind_name = function
   | Inline_tests -> "inline tests"
   | Runs_executable -> "rule running"
 
+(** Stanza heads that carry an action, so one of them may run a test executable. [alias] is here
+    for the same reason [rule] is: it took an [action] field before dune 2.0, and it can still
+    depend on an executable. *)
+let action_heads = [ "rule"; "alias" ]
+
+(** Stanza heads classified as running no test executable. Declaring things to build ([executable],
+    [ocamllex]), placing files ([copy_files], [install]), or describing the directory ([env],
+    [dirs]) — none of them run anything of their own.
+
+    The list exists so that {!unclassified_heads} can report what is on neither list. A head nobody
+    has classified might carry an action, and passing over it in silence is the failure this whole
+    scan exists to end (Codex P2, round 1 of PR #343) — [cram] is the live example: dune runs cram
+    tests, this repository has none, and the day one appears the scan says so rather than counting
+    it as nothing. *)
+let inert_heads =
+  [
+    "executable"; "executables"; "copy_files"; "copy_files#"; "install"; "env"; "dirs";
+    "data_only_dirs"; "vendored_dirs"; "include_subdirs"; "documentation"; "ocamllex"; "ocamlyacc";
+    "menhir"; "toplevel"; "deprecated_library_name";
+  ]
+
 (** Every place in [content] that runs a test executable.
 
     An [(executable)] stanza is not one: it declares something to build, and dune runs it only
@@ -131,8 +152,8 @@ let kind_name = function
     tutorial such as [gpt2_generate] needs no exemption from the check built on this. It is
     structurally not a site, rather than a name on a list someone has to keep true.
 
-    A rule counts as running an executable when it mentions one at all. That covers both spellings
-    the repository uses — [%{dep:foo.exe}] inline in the action, and a named dependency
+    An action counts as running an executable when it mentions one at all. That covers both
+    spellings the repository uses — [%{dep:foo.exe}] inline in the action, and a named dependency
     [(:pp pp.exe)] the action reaches through [%{pp}] — without the scan having to model dune's
     variable expansion. *)
 let sites content =
@@ -147,7 +168,7 @@ let sites content =
           | None -> []
           | Some inline ->
               site Inline_tests (stanza_name ()) (declares_config (field_in inline "deps")))
-      | Some "rule" -> (
+      | Some h when List.mem action_heads h ~equal:String.equal -> (
           match executables_mentioned stanza with
           | [] -> []
           | exes ->
@@ -156,6 +177,22 @@ let sites content =
                 (declares_config (field stanza "deps")))
       | _ -> [])
 
+(** Stanza heads in [content] that {!sites} has no classification for, each once. The caller fails
+    on them: see {!inert_heads} for why silence is not an option here. *)
+let unclassified_heads content =
+  walk "" (stanzas content) ~f:(fun _subdir stanza ->
+      match head stanza with
+      | Some h
+        when List.mem action_heads h ~equal:String.equal
+             || List.mem inert_heads h ~equal:String.equal
+             || List.mem [ "test"; "tests"; "library"; "subdir" ] h ~equal:String.equal ->
+          []
+      | Some h -> [ h ]
+      (* A bare atom or a list that does not start with one is not a stanza dune would accept, so
+         it is reported the same way rather than passed over. *)
+      | None -> [ "<not a stanza>" ])
+  |> List.dedup_and_sort ~compare:String.compare
+
 (** The directories this dune file materializes the shared configuration into with a
     [(copy_files …ocannl_config)] stanza, relative to its own as in {!site}. The other way for a
     directory to have one is a file checked in next to the dune file, which this cannot see and the
@@ -163,7 +200,8 @@ let sites content =
 let config_copy_dirs content =
   walk "" (stanzas content) ~f:(fun subdir stanza ->
       match head stanza with
-      | Some "copy_files"
+      (* [copy_files#] is the preprocessing spelling of the same stanza. *)
+      | Some ("copy_files" | "copy_files#")
         when List.exists (atoms stanza) ~f:(fun atom ->
                  String.equal (Stdlib.Filename.basename atom) config_file) ->
           [ subdir ]

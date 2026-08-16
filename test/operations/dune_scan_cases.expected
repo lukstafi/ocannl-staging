@@ -13,6 +13,7 @@ ok: a rule running an executable through a named dep is one too
 ok: a nested action does not hide the executable
 ok: a rule running no executable is not a site
 ok: a rule running a non-OCaml tool is not a site
+ok: an alias stanza is read like a rule
 ok: a stanza inside a comment is not a stanza
 ok: a config named in a comment does not declare it
 ok: a config named in a string is not a dep
@@ -26,5 +27,11 @@ ok: copies the config -- the short spelling
 ok: copies the config -- a copy_files inside a subdir names that directory
 ok: copies the config -- copying something else
 ok: copies the config -- no copy_files at all
+ok: unclassified heads -- a classified stanza
+ok: unclassified heads -- a stanza that runs nothing
+ok: unclassified heads -- a cram stanza
+ok: unclassified heads -- an include, whose contents the scan never sees
+ok: unclassified heads -- inside a subdir, too
+ok: unclassified heads -- something that is not a stanza at all
 ok: refused -- a block comment
 ok: refused -- a datum comment

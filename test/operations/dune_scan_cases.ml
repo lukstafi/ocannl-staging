@@ -68,6 +68,11 @@ let cases =
     ( "a rule running a non-OCaml tool is not a site",
       {dune|(rule (alias runtest) (deps helper.py) (action (run python3 %{dep:test_it.py})))|dune},
       [] );
+    (* An `(alias ...)` stanza took an action of its own before dune 2.0 and can still depend on an
+       executable, so it is read like a rule rather than passed over (Codex P2, round 1). *)
+    ( "an alias stanza is read like a rule",
+      {dune|(alias (name runtest) (deps ocannl_config) (action (run %{dep:probe.exe})))|dune},
+      [ "rule running probe.exe [declares]" ] );
     (* What the file says, not what its prose says. *)
     ( "a stanza inside a comment is not a stanza",
       {dune|; (test (name phantom))
@@ -121,6 +126,23 @@ let copy_cases =
     ("no copy_files at all", {dune|(test (name t) (deps ocannl_config))|dune}, []);
   ]
 
+(* Which stanza kinds the scan has no classification for. One it cannot place might carry an
+   action that runs a test executable, so it is reported rather than counted as nothing. *)
+let unclassified_cases =
+  [
+    ("a classified stanza", {dune|(test (name t) (deps ocannl_config))|dune}, []);
+    ("a stanza that runs nothing", {dune|(ocamllex lexer)|dune}, []);
+    (* Dune runs cram tests; this repository has none, and the day one appears the scan says so. *)
+    ("a cram stanza", {dune|(cram (applies_to my_test) (deps helper.exe))|dune}, [ "cram" ]);
+    ( "an include, whose contents the scan never sees",
+      {dune|(include stanzas.inc)|dune},
+      [ "include" ] );
+    ( "inside a subdir, too",
+      {dune|(subdir gen (cram (applies_to x)))|dune},
+      [ "cram" ] );
+    ("something that is not a stanza at all", {dune|bare_atom|dune}, [ "<not a stanza>" ]);
+  ]
+
 (* The two sequences sexplib reads as comments and dune does not. Reading such a file would drop
    whatever they enclose, so the scan refuses it instead of reporting a shorter file. *)
 let refused_cases =
@@ -156,6 +178,8 @@ let () =
             if String.is_empty dir then "." else dir)
       in
       check ("copies the config -- " ^ name) expected found);
+  List.iter unclassified_cases ~f:(fun (name, source, expected) ->
+      check ("unclassified heads -- " ^ name) expected (Scan.unclassified_heads source));
   List.iter refused_cases ~f:(fun (name, source) ->
       match Scan.sites source with
       | exception _ -> printf "ok: refused -- %s\n" name

@@ -104,6 +104,15 @@ let () =
       let dir = Stdlib.Filename.dirname dune_file in
       let content = In_channel.read_all on_disk in
       let sites = Scan.sites content in
+      (* A stanza kind the scan cannot place might carry an action that runs a test executable, so
+         it is reported rather than counted as nothing (Codex P2, round 1). *)
+      List.iter (Scan.unclassified_heads content) ~f:(fun head ->
+          fail
+            (Printf.sprintf
+               "%s has a `(%s ...)` stanza, which this check has no classification for -- add it \
+                to Dune_stanza_scan.action_heads if it can run an executable, or to inert_heads if \
+                it cannot"
+               dune_file head));
       (* A `(subdir …)` stanza runs elsewhere, so it is that directory's config it reaches for. *)
       let copies = Set.of_list (module String) (Scan.config_copy_dirs content) in
       let directory_of site = Scan.in_subdir dir site.Scan.subdir in
@@ -171,6 +180,11 @@ let () =
          (String.concat ~sep:", " (Set.to_list stale)));
   (* The reviewable part: an exemption is a claim about what an executable links, which no scan can
      check, so it is printed rather than merely held. *)
+  printf "\nStanza kinds that can run a test executable: %s (plus `test`, `tests` and a `library`'s \
+          `inline_tests`, which dune runs itself).\n"
+    (String.concat ~sep:", " Scan.action_heads);
+  printf "Stanza kinds that cannot: %s. Anything else fails above.\n"
+    (String.concat ~sep:", " Scan.inert_heads);
   printf "\nExempt from the dependency, running an executable that reads no configuration:\n";
   List.iter exempt_sites ~f:(fun (key, why) -> printf "  %s -- %s\n" key why);
   let count kind = Option.value (Hashtbl.find counts kind) ~default:0 in
