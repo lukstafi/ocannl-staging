@@ -339,38 +339,48 @@ let settings_keys_in_source content =
   iterator.structure iterator (structure_of content);
   List.rev !keys
 
-(** Where a file brings [Utils]'s contents into scope unqualified: [open Utils], or a module alias
-    bound to [Utils] itself.
+(** Where a file reads a field of a record called [settings] without the [Utils.] receiver that
+    {!settings_keys_in_source} recognises — a bare [settings.large_models], or one through an alias
+    ([module U = Utils], [let open Utils in …], [include Utils], at any depth).
 
-    {!settings_keys_in_source} recognises a settings read by its receiver, [Utils.settings] — the
-    qualified spelling every source uses today. Either of these would let a read be spelled
-    [settings.large_models] or [U.settings.large_models] and vanish from the census, and a key read
-    only that way at codegen could then be classified code-borne and pass [digest_completeness]
-    unchallenged, which is the misclassification that test exists to catch (Codex P2, round 14 of
-    PR #343).
+    That receiver is the convention the settings census rests on, and a read spelled any other way
+    vanishes from it: a key read only that way at codegen could then be classified code-borne and
+    pass [digest_completeness] unchallenged, which is the misclassification that test exists to
+    catch (Codex P2, rounds 14 and 15 of PR #343).
 
-    Resolving aliases is the other way to close this, and a bigger machine than the convention
-    needs: no source does either today, so the convention is checked instead — the same choice as
-    the string-literal one for [arg_name]. A submodule alias such as [module Lazy = Utils.Lazy]
-    brings no [settings] into scope and does not appear here. *)
-let utils_in_scope content =
-  let path_of module_expr =
-    match module_expr.pmod_desc with
-    | Pmod_ident { txt; _ } -> Some (String.concat ~sep:"." (flatten_longident txt))
-    | _ -> None
+    Resolving aliases and opens is the other way to close this, and a bigger machine than the
+    convention needs — no source spells a read that way today, so the convention is checked
+    instead, exactly as the string-literal one for [arg_name] is. Policing the READ rather than the
+    scope is what makes it precise: [module Lazy = Utils.Lazy] and a qualified record expression
+    such as [Utils.{ value; unique_id }] introduce no such read and do not appear here, while
+    [Low_level.virtualize_settings.max_visits] is a different record and never did.
+
+    [offset] is where the read sits, for the caller's report. *)
+let unqualified_settings_reads content =
+  let found = ref [] in
+  let iterator =
+    {
+      Ast_iterator.default_iterator with
+      expr =
+        (fun self expr ->
+          (match expr.pexp_desc with
+          | Pexp_field (receiver, _) -> (
+              match longident_of receiver with
+              | Some path
+                when List.last path |> Option.value_map ~default:false ~f:(String.equal "settings")
+                     && not
+                          (List.length path >= 2
+                          && List.equal String.equal
+                               (List.drop path (List.length path - 2))
+                               [ "Utils"; "settings" ]) ->
+                  found := expr.pexp_loc.loc_start.pos_cnum :: !found
+              | _ -> ())
+          | _ -> ());
+          Ast_iterator.default_iterator.expr self expr);
+    }
   in
-  let is_utils path = String.equal path "Utils" || String.is_suffix path ~suffix:".Utils" in
-  List.filter_map (structure_of content) ~f:(fun item ->
-      match item.pstr_desc with
-      | Pstr_open { popen_expr; _ } -> (
-          match path_of popen_expr with
-          | Some path when is_utils path -> Some ("open " ^ path)
-          | _ -> None)
-      | Pstr_module { pmb_name = { txt = Some name; _ }; pmb_expr; _ } -> (
-          match path_of pmb_expr with
-          | Some path when is_utils path -> Some (Printf.sprintf "module %s = %s" name path)
-          | _ -> None)
-      | _ -> None)
+  iterator.structure iterator (structure_of content);
+  List.rev !found
 
 (** Every configuration read of a file — [arg_name] call sites and {!settings_keys_in_source} —
     keyed by file basename, for tests that care {e where} a key is read. Field names that are not

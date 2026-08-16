@@ -212,21 +212,23 @@ let () =
   in
   let forwarding_hit = ref (Set.empty (module String)) in
   (* 6b. The OTHER spelling of a read -- a field of `Utils.settings` -- is recognised by that
-     receiver, which `open Utils` or `module U = Utils` would make optional. A key read only that
-     way at codegen would then vanish from digest_completeness's census and could be classified
-     code-borne unchallenged. utils.ml is where the record lives, so its own unqualified reads are
-     the definition, not a hidden call site (Codex P2, round 14). *)
+     receiver, and a read spelled any other way (bare `settings.k` under an `open Utils`, or
+     `U.settings.k` under an alias, at any depth) vanishes from the census: a key read only that
+     way at codegen could then be classified code-borne and pass digest_completeness unchallenged
+     (Codex P2, rounds 14 and 15). The READ is what is checked, not the scope, so a qualified
+     record expression like row.ml's `Utils.{ value; unique_id }` is not a finding. utils.ml is
+     where the record lives, so its own unqualified reads are the definition, not a hidden call
+     site. *)
   List.iter source_files ~f:(fun fname ->
       let base = Stdlib.Filename.basename fname in
-      if not (String.equal base "utils.ml") then
-        List.iter
-          (Config_key_scan.utils_in_scope (In_channel.read_all fname))
-          ~f:(fun spelling ->
+      if not (String.equal base "utils.ml") then (
+        let original = In_channel.read_all fname in
+        List.iter (Config_key_scan.unqualified_settings_reads original) ~f:(fun offset ->
             fail
             @@ Printf.sprintf
-                 "%s brings Utils into scope unqualified (%s), which would let a settings read be \
-                  spelled without the `Utils.settings` receiver both scanners look for"
-                 base spelling));
+                 "%s reads a settings field without the `Utils.settings` receiver both scanners \
+                  look for, so the read is invisible to the census: %s"
+                 base (line_at original offset))));
   List.iter source_files ~f:(fun fname ->
       let base = Stdlib.Filename.basename fname in
       let known =
