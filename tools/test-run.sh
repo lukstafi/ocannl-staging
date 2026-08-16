@@ -399,10 +399,11 @@ case $sub in
     # disable the alarm -- the one property this script must never lose.
     case $cap in '' | *[!0-9]*) die "--cap must be a nonnegative integer of seconds (0 disables)" ;; esac
     # Bounded BEFORE arithmetic: an oversized value would wrap in bash's
-    # signed arithmetic (2^64 -> 0) and silently disable the alarm, the one
-    # behavior reserved for an explicit --cap 0. Ten digits (~317 years) is
-    # ample and cannot wrap.
-    [ ${#cap} -le 10 ] || die "--cap too large (max 10 digits)"
+    # signed arithmetic (2^64 -> 0), and even values that bash keeps exceed
+    # perl's signed alarm range (2^31), which DISABLES the alarm rather than
+    # scheduling it -- both silently produce the unbounded run reserved for
+    # an explicit --cap 0. Nine digits (~31 years) fits every range.
+    [ ${#cap} -le 9 ] || die "--cap too large (max 9 digits)"
     # Decimal-normalized once here: a leading zero (--cap 08) would pass the
     # digit check, reach perl as decimal, and then blow up bash arithmetic
     # downstream as an invalid octal.
@@ -556,7 +557,7 @@ case $sub in
       # Same traps --cap had: leading zeros reach bash arithmetic as octal,
       # and oversized values wrap.
       case $budget in *[!0-9]*) die "--timeout must be a nonnegative integer of seconds" ;; esac
-      [ ${#budget} -le 10 ] || die "--timeout too large (max 10 digits)"
+      [ ${#budget} -le 9 ] || die "--timeout too large (max 9 digits)"
       budget=$(( 10#$budget ))
     fi
     # Bounded by construction: default budget is the run's own cap plus slack
