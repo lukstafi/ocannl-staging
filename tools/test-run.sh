@@ -201,21 +201,22 @@ take_lock() {
   # between taking the lock and clearing it would let a concurrent stop of
   # that run blame its leftovers for OUR presence on the lock file and TERM
   # this very launcher. Exit codes: 1 lock busy, 2 pointer unclearable.
+  # The launcher identity is published INSIDE the acquisition critical
+  # section (same perl), so there is no instant at which the lock is held
+  # with neither an owner pointer nor a recorded launcher -- a stall
+  # anywhere after acquisition leaves an identity the refusal message can
+  # report.
   perl -e '
     use Fcntl ":flock";
     exit 1 unless flock(STDIN, LOCK_EX | LOCK_NB);
     unlink $ARGV[0];
-    exit(-e $ARGV[0] ? 2 : 0);
-  ' "$PWD/.test-run.lock.owner" <&9
+    exit 2 if -e $ARGV[0];
+    if (open my $fh, ">", $ARGV[1]) { print $fh "$ARGV[2] $ARGV[3]\n"; close $fh }
+    exit 0;
+  ' "$PWD/.test-run.lock.owner" "$PWD/.test-run.lock.launcher" \
+    "$$" "$(ps_token "$$")" <&9
   case $? in
-    0)
-      # Advisory launcher identity, for the window between acquisition and
-      # the wrapper being recorded: a launcher that stalls THERE would
-      # otherwise hold the lock with no recorded identity at all, and the
-      # refusal message below is where the next user lands.
-      printf '%s %s\n' "$$" "$(ps_token "$$")" \
-        >"$PWD/.test-run.lock.launcher" 2>/dev/null || :
-      ;;
+    0) ;;
     2) die "cannot clear the stale lock owner pointer (worktree not writable?)" ;;
     *)
       # The owner pointer, not `last`: with OCANNL_TEST_RUNS overridden, the
@@ -407,8 +408,11 @@ publish_run() { # 0 published; 2 abandoned by the wrapper's timeout; 1 error
   # the authority; a crash merely leaves this stale, and its reader only
   # uses it to TARGET status/stop). The abandonment recheck sits directly
   # before this, the most consequential pointer: stop's reaping authorizes
-  # against it.
+  # against it. The wrapper-liveness barrier covers the one release path
+  # that cannot leave a marker (the wrapper's final-exit residual): a dead
+  # wrapper means the lock may already belong to a newer run.
   [ ! -f "$run_dir/pub_abandoned" ] || return 2
+  wrapper_alive "$run_dir" || return 2
   printf '%s\n' "$run_dir" >"$PWD/.test-run.lock.owner" || {
     echo "test-run: cannot record the lock owner pointer" >&2
     return 1
@@ -679,8 +683,13 @@ case $sub in
           # cannot land within the extra grace, the wrapper's unavoidable
           # exit releases anyway (documented residual).
           if [ "$hw" -gt 70 ]; then
-            with_meta_lock mark_abandoned || mark_abandoned || :
+            with_meta_lock mark_abandoned || :
             [ -f "$run_dir/pub_abandoned" ] && break
+            # NO lockless fallback: a publisher wedged holding the metadata
+            # lock is exactly who the marker must be serialized against.
+            # Its pre-owner-write barrier is this wrapper's liveness, so
+            # the final-exit release below stays safe (documented residual:
+            # a wrapper dying between that check and the write).
             [ "$hw" -gt 100 ] && break
           fi
         fi
