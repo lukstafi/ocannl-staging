@@ -90,7 +90,11 @@ let () =
      whose config has simply never been built still counts as having one. *)
   let config_dirs =
     of_basename Scan.config_file
-    |> List.map ~f:(fun (path, _) -> Stdlib.Filename.dirname path)
+    (* The repository root is "" everywhere else here, and `Filename.dirname` calls it "." -- a
+       config checked in at the root would otherwise be invisible to the ancestor walk that ends
+       there (Codex P2, round 16). *)
+    |> List.map ~f:(fun (path, _) ->
+           match Stdlib.Filename.dirname path with "." -> "" | directory -> directory)
     |> Set.of_list (module String)
   in
   if List.is_empty dune_files then (

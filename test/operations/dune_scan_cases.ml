@@ -181,6 +181,18 @@ let cases =
     ( "a chdir to a pform over a PATH tool is not",
       {dune|(rule (action (chdir %{workspace_root} (run diff a b))))|dune},
       [] );
+    (* A rewritten PATH is the other way a command name stops saying what it names: there even a
+       bare word may be a local executable, so the External verdict is the one that cannot be
+       trusted under it (Codex P2, round 16). *)
+    ( "a rewritten PATH makes a bare command unplaceable",
+      {dune|(rule (deps ocannl_config) (action (setenv PATH . (run env probe))))|dune},
+      [
+        "rule whose working directory this scan cannot establish: env, under `(setenv PATH . \
+         ...)` [declares]";
+      ] );
+    ( "but a path-qualified command still names what it names",
+      {dune|(rule (deps ocannl_config) (action (setenv PATH . (run %{dep:probe.exe}))))|dune},
+      [ "rule running probe.exe [declares]" ] );
     ( "a chdir to the stanza's own directory changes nothing",
       {dune|(rule (deps ocannl_config) (action (chdir . (run %{dep:probe.exe}))))|dune},
       [ "rule running probe.exe [declares]" ] );

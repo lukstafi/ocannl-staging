@@ -358,9 +358,29 @@ let settings_keys_in_source content =
     [offset] is where the read sits, for the caller's report. *)
 let unqualified_settings_reads content =
   let found = ref [] in
+  let is_utils_settings path =
+    List.length path >= 2
+    && List.equal String.equal (List.drop path (List.length path - 2)) [ "Utils"; "settings" ]
+  in
   let iterator =
     {
       Ast_iterator.default_iterator with
+      (* A value alias is the third way to lose the receiver: after `let s = Utils.settings`, the
+         reads are `s.k` and no path says `settings` at all. The binding itself is what gets
+         reported, since that is where the convention is broken (Codex P2, round 16). *)
+      value_binding =
+        (fun self binding ->
+          (match binding.pvb_expr.pexp_desc with
+          | Pexp_field (receiver, { txt = field; _ })
+            when Option.value_map (longident_of receiver) ~default:false ~f:(fun path ->
+                     List.equal String.equal path [ "Utils" ] || is_utils_settings path)
+                 && Option.value_map (List.last (flatten_longident field)) ~default:false
+                      ~f:(String.equal "settings") ->
+              found := binding.pvb_loc.loc_start.pos_cnum :: !found
+          | Pexp_ident { txt; _ } when is_utils_settings (flatten_longident txt) ->
+              found := binding.pvb_loc.loc_start.pos_cnum :: !found
+          | _ -> ());
+          Ast_iterator.default_iterator.value_binding self binding);
       expr =
         (fun self expr ->
           (match expr.pexp_desc with
@@ -368,11 +388,7 @@ let unqualified_settings_reads content =
               match longident_of receiver with
               | Some path
                 when List.last path |> Option.value_map ~default:false ~f:(String.equal "settings")
-                     && not
-                          (List.length path >= 2
-                          && List.equal String.equal
-                               (List.drop path (List.length path - 2))
-                               [ "Utils"; "settings" ]) ->
+                     && not (is_utils_settings path) ->
                   found := expr.pexp_loc.loc_start.pos_cnum :: !found
               | _ -> ())
           | _ -> ());

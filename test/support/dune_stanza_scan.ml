@@ -350,6 +350,10 @@ type command_site =
   | Program of string * string list  (** the command, and the arguments it was given *)
   | Shell of string
   | Elsewhere of string * command_site
+      (** a destination this scan cannot resolve, wrapping what runs there *)
+  | Unnameable of string * command_site
+      (** a rewritten PATH, wrapping what runs under it: there a bare command name no longer says
+          what it names *)
 
 (* Every command an action runs, at any depth: [(with-stdout-to … (run …))],
    [(no-infer (progn (run …) …))] and the rest nest the one that matters. Each comes with the
@@ -365,6 +369,22 @@ let rec commands_in ?(cwd = "") sexp =
      and treating it as a literal directory name would have the process searching from a directory
      that does not exist -- possibly landing back on the stanza's own config (Codex P2, round 12).
      Everything under it is reported as running somewhere unestablished. *)
+  (* Rewriting PATH changes what a bare command name means, so nothing under it can be placed by
+     reading the atom: `(setenv PATH . (run env probe))` may launch a local `probe` this scan would
+     otherwise call a tool (Codex P2, round 16). Modelling the environment is not on the table;
+     saying so is. *)
+  | Sexp.List (Sexp.Atom "setenv" :: Sexp.Atom "PATH" :: value :: rest) ->
+      let value = match value with Sexp.Atom v -> v | _ -> "..." in
+      List.concat_map rest ~f:(commands_in ~cwd)
+      |> List.map ~f:(fun (_, command) ->
+             let named =
+               match command with
+               | Program (cmd, _) -> cmd
+               | Shell line -> "shell: " ^ line
+               | Elsewhere (what, _) | Unnameable (what, _) -> what
+             in
+             ( cwd,
+               Unnameable (Printf.sprintf "%s, under `(setenv PATH %s ...)`" named value, command) ))
   | Sexp.List (Sexp.Atom "chdir" :: Sexp.Atom dir :: rest)
     when String.is_substring dir ~substring:"%{" ->
       List.concat_map rest ~f:(commands_in ~cwd)
@@ -373,7 +393,7 @@ let rec commands_in ?(cwd = "") sexp =
                match command with
                | Program (cmd, _) -> cmd
                | Shell line -> "shell: " ^ line
-               | Elsewhere (what, _) -> what
+               | Elsewhere (what, _) | Unnameable (what, _) -> what
              in
              (* Kept as the command it is, tagged with the destination: an unresolvable directory
                 only matters for something that might read configuration there, and a PATH tool
@@ -449,6 +469,11 @@ let executables_run stanza =
        none wherever it is (Codex P2, round 13). *)
     | Elsewhere (what, command) -> (
         match classify command with External -> External | _ -> Unknown_directory what)
+    (* Under a rewritten PATH the External verdict is the one that cannot be trusted: it was read
+       off a bare name, and PATH is what gives a bare name its meaning. A path-qualified command
+       still names what it names (Codex P2, round 16). *)
+    | Unnameable (what, command) -> (
+        match classify command with External -> Unknown_directory what | other -> other)
   in
   List.filter_map (commands_in stanza) ~f:(fun (cwd, command) ->
       match classify command with External -> None | classified -> Some (cwd, classified))

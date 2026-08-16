@@ -36,6 +36,8 @@ ok: an unresolvable argument counts as much as a resolved one
 ok: ordinary arguments are not executables
 ok: a chdir to a pform leaves the directory unestablished
 ok: a chdir to a pform over a PATH tool is not
+ok: a rewritten PATH makes a bare command unplaceable
+ok: but a path-qualified command still names what it names
 ok: a chdir to the stanza's own directory changes nothing
 ok: a nested action does not hide the executable
 ok: a rule running no executable is not a site
