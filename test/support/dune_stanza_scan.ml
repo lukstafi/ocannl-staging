@@ -59,15 +59,28 @@ let field stanza name =
 
 let rec atoms = function Sexp.Atom a -> [ a ] | Sexp.List l -> List.concat_map l ~f:atoms
 
-(** Whether a [(deps …)] field mentions the shared configuration file. Path-insensitive: a
+(** Dependency-specification forms that carry FILE dependencies, so that the config file named
+    inside one is really depended upon. Dune's dependency language also has forms that name
+    something else entirely — [(alias ocannl_config)], [(env_var ocannl_config)],
+    [(package ocannl_config)] — and reading those as a file dependency would let a stanza pass this
+    check while depending on no config at all (Codex P2, round 3 of PR #343). Anything not listed
+    here does not count, which fails safe: an exotic form that does name the file fails loudly and
+    is added, rather than an exotic form that does not silently passing. *)
+let file_dep_forms = [ "file"; "glob_files"; "glob_files_rec"; "source_tree"; "include" ]
+
+(** Whether a [(deps …)] field really depends on the shared configuration file. Path-insensitive: a
     directory reaching for a config elsewhere ([../config/ocannl_config]) still declares it. *)
+let rec dep_names_config sexp =
+  match sexp with
+  | Sexp.Atom atom -> String.equal (Stdlib.Filename.basename atom) config_file
+  | Sexp.List (Sexp.Atom head :: rest) ->
+      (* [(:name <deps>)] binds a name to ordinary dependencies; the forms above take paths. *)
+      (String.is_prefix head ~prefix:":" || List.mem file_dep_forms head ~equal:String.equal)
+      && List.exists rest ~f:dep_names_config
+  | Sexp.List _ -> false
+
 let declares_config args =
-  match args with
-  | None -> false
-  | Some args ->
-      List.exists args ~f:(fun arg ->
-          List.exists (atoms arg) ~f:(fun atom ->
-              String.equal (Stdlib.Filename.basename atom) config_file))
+  match args with None -> false | Some args -> List.exists args ~f:dep_names_config
 
 (** The names a [(name …)] or [(names …)] field gives, in order. *)
 let names_of stanza =
@@ -119,14 +132,20 @@ let pform_payload atom ~prefix =
       let rest = String.drop_prefix atom (start + String.length prefix + 2) in
       match String.lsplit2 rest ~on:'}' with Some (payload, _) -> Some payload | None -> None)
 
+(* The path AS WRITTEN, less a leading [./] that only says "here". Reducing it to a basename would
+   make `%{dep:../../tools/pp.exe}` and a local `pp.exe` the same identity, and an exemption
+   naming one would cover the other -- the same collapse the config scanner's duplicate-basename
+   check exists to prevent (Codex P2, round 3, and #340 round 10 before it). *)
+let program_path path = Option.value (String.chop_prefix path ~prefix:"./") ~default:path
+
 let classify_command ~named_deps cmd =
   match List.find (words cmd) ~f:(String.is_suffix ~suffix:".exe") with
-  | Some path -> Runs (Stdlib.Filename.basename path)
+  | Some path -> Runs (program_path path)
   | None -> (
       match
         List.find_map [ "bin:"; "exe:" ] ~f:(fun prefix -> pform_payload cmd ~prefix)
       with
-      | Some name -> Runs (Stdlib.Filename.basename name)
+      | Some name -> Runs (program_path name)
       | None -> (
           (* [./%{pp}] with [(deps (:pp pp.exe))]: the action names the dependency, not the file. *)
           match pform_payload cmd ~prefix:"" with
@@ -135,7 +154,7 @@ let classify_command ~named_deps cmd =
               match List.Assoc.find named_deps name ~equal:String.equal with
               | Some paths -> (
                   match List.find paths ~f:(String.is_suffix ~suffix:".exe") with
-                  | Some path -> Runs (Stdlib.Filename.basename path)
+                  | Some path -> Runs (program_path path)
                   | None -> External)
               | None -> Unrecognized cmd)))
 
@@ -151,16 +170,60 @@ let named_deps_of stanza =
                 List.concat_map values ~f:(function Sexp.Atom a -> words a | _ -> []) )
         | _ -> None)
 
+(** Actions that execute a program. [dynamic-run] is here because dune runs one there too (Codex
+    P2, round 3); [system] and [bash] hand a command line to a shell. *)
+let program_actions = [ "run"; "dynamic-run"; "system"; "bash" ]
+
+(** Every other head dune's action language admits, including the predicate heads that appear in a
+    [(with-accepted-exit-codes …)] test. None of them executes a program of its own — they nest
+    actions, move bytes around, or compare files.
+
+    The list is here so that {!unclassified_action_heads} can report a head on neither list. Three
+    review rounds found this scan missing a way to run something — a stanza kind, then a command
+    spelling, then [dynamic-run] — each patched instance leaving the next one waiting. What ends
+    that is the fall-through, not the third patch: dune's action vocabulary is closed and short, so
+    the scan can say what it knows and fail on the rest. *)
+let inert_actions =
+  [
+    "progn"; "concurrent"; "chdir"; "setenv"; "with-stdout-to"; "with-stderr-to";
+    "with-outputs-to"; "with-stdin-from"; "with-accepted-exit-codes"; "ignore-stdout";
+    "ignore-stderr"; "ignore-outputs"; "no-infer"; "echo"; "write-file"; "cat"; "copy"; "copy#";
+    "copy-and-add-line-directive"; "diff"; "diff?"; "cmp"; "pipe-stdout"; "pipe-stderr";
+    "pipe-outputs"; "format-dune-file"; "or"; "and"; "not";
+  ]
+
 (* Every command an action runs, at any depth: [(with-stdout-to … (run …))],
    [(no-infer (progn (run …) …))] and the rest nest the one that matters. A shell action carries
    its command line as a string, which the same word split reads. *)
 let rec commands_in sexp =
   let nested = match sexp with Sexp.List l -> List.concat_map l ~f:commands_in | _ -> [] in
   match sexp with
-  | Sexp.List (Sexp.Atom "run" :: Sexp.Atom cmd :: _) -> cmd :: nested
+  | Sexp.List (Sexp.Atom ("run" | "dynamic-run") :: Sexp.Atom cmd :: _) -> cmd :: nested
   | Sexp.List (Sexp.Atom ("bash" | "system") :: args) ->
       List.concat_map args ~f:(function Sexp.Atom a -> [ a ] | _ -> []) @ nested
   | _ -> nested
+
+(** Heads inside a stanza's [(action …)] that are on neither action list, each once. *)
+let unclassified_action_heads stanza =
+  let rec walk_action sexp =
+    match sexp with
+    | Sexp.Atom _ -> []
+    | Sexp.List (Sexp.Atom head :: args) ->
+        let nested =
+          (* A program action's arguments are its command line, not further actions. *)
+          if List.mem program_actions head ~equal:String.equal then []
+          else List.concat_map args ~f:walk_action
+        in
+        if
+          List.mem program_actions head ~equal:String.equal
+          || List.mem inert_actions head ~equal:String.equal
+        then nested
+        else head :: nested
+    | Sexp.List l -> List.concat_map l ~f:walk_action
+  in
+  match field stanza "action" with
+  | None -> []
+  | Some args -> List.concat_map args ~f:walk_action |> List.dedup_and_sort ~compare:String.compare
 
 let executables_run stanza =
   let named_deps = named_deps_of stanza in
@@ -174,6 +237,8 @@ type kind =
                          dependencies have to live, there being no [deps] field on one *)
   | Unreadable_command  (** a [(run …)] whose command this scan cannot place: reported, so that
                             what it runs is settled by a reader rather than by silence *)
+  | Unclassified_action  (** an action head on neither {!program_actions} nor {!inert_actions} —
+                             it might run a program, so it is reported too *)
 
 (** [subdir] is the directory the stanza applies to, relative to the dune file's own: empty at the
     top level, and the path a [(subdir …)] wrapper names inside one. A wrapped stanza runs
@@ -201,6 +266,7 @@ let kind_name = function
   | Inline_tests -> "inline tests"
   | Runs_executable -> "rule running"
   | Unreadable_command -> "rule whose command this scan cannot read:"
+  | Unclassified_action -> "rule with an action this scan cannot place:"
 
 (** Stanza heads that carry an action, so one of them may run a test executable. [alias] is here
     for the same reason [rule] is: it took an [action] field before dune 2.0, and it can still
@@ -255,6 +321,8 @@ let sites content =
           (if List.is_empty exes then []
            else site Runs_executable (String.concat ~sep:", " exes) declares)
           @ List.concat_map unreadable ~f:(fun cmd -> site Unreadable_command cmd declares)
+          @ List.concat_map (unclassified_action_heads stanza) ~f:(fun head ->
+                site Unclassified_action head declares)
       | _ -> [])
 
 (** Stanza heads in [content] that {!sites} has no classification for, each once. The caller fails

@@ -32,6 +32,20 @@ let cases =
     ( "the dep is found wherever in deps it sits",
       {dune|(test (name t) (deps (glob_files *.data) ../config/ocannl_config))|dune},
       [ "test t [declares]" ] );
+    ( "an explicit file dependency declares it",
+      {dune|(test (name t) (deps (file ../config/ocannl_config)))|dune},
+      [ "test t [declares]" ] );
+    ( "so does one bound to a name",
+      {dune|(test (name t) (deps (:cfg ocannl_config)))|dune},
+      [ "test t [declares]" ] );
+    (* Dune's dependency language names other things than files, and depending on an ALIAS or an
+       environment variable of that name is not depending on the file (Codex P2, round 3). *)
+    ( "an alias of the same name is not the file",
+      {dune|(test (name t) (deps (alias ocannl_config)))|dune},
+      [ "test t" ] );
+    ( "nor is an environment variable of that name",
+      {dune|(test (name t) (deps (env_var ocannl_config)))|dune},
+      [ "test t" ] );
     ( "a multi-test stanza is one site naming both",
       {dune|(tests (names a b) (deps ocannl_config))|dune},
       [ "test a, b [declares]" ] );
@@ -93,6 +107,22 @@ let cases =
     ( "a command this scan cannot place is reported, not ignored",
       {dune|(rule (deps ocannl_config) (action (run %{dep:helper.sh})))|dune},
       [ "rule whose command this scan cannot read: %{dep:helper.sh} [declares]" ] );
+    (* dynamic-run executes a program too (Codex P2, round 3), and an action head on neither list
+       is reported rather than passed over -- which is what makes a fourth such action harmless. *)
+    ( "dynamic-run executes a program as much as run does",
+      {dune|(rule (deps ocannl_config) (action (dynamic-run %{dep:probe.exe} --flag)))|dune},
+      [ "rule running probe.exe [declares]" ] );
+    ( "an action head on neither list is reported",
+      {dune|(rule (deps ocannl_config) (action (invent-an-action probe.exe)))|dune},
+      [ "rule with an action this scan cannot place: invent-an-action [declares]" ] );
+    ( "a program action's arguments are not actions",
+      {dune|(rule (action (run %{dep:probe.exe} --diff --copy)))|dune},
+      [ "rule running probe.exe" ] );
+    (* Identity is the path as written: a basename would let one directory's exemption cover a
+       different executable of the same name (Codex P2, round 3). *)
+    ( "an executable elsewhere keeps its path",
+      {dune|(rule (action (run %{dep:../../tools/pp.exe} --impl x.ml)))|dune},
+      [ "rule running ../../tools/pp.exe" ] );
     (* What the file says, not what its prose says. *)
     ( "a stanza inside a comment is not a stanza",
       {dune|; (test (name phantom))

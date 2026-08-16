@@ -147,6 +147,13 @@ let () =
                       Dune_stanza_scan.classify_command places (a path, `%%{bin:…}`, or a named \
                       dependency), or teach it that spelling"
                      dune_file name)
+            | Scan.Unclassified_action ->
+                fail
+                  (Printf.sprintf
+                     "%s has a `(%s ...)` action, which this check has no classification for -- \
+                      add it to Dune_stanza_scan.program_actions if it executes a program, or to \
+                      inert_actions if it does not"
+                     dune_file name)
             | _ ->
                 if exempt then bump "exempt"
                 else if declares_config then bump (Scan.kind_name kind)
@@ -196,6 +203,9 @@ let () =
     (String.concat ~sep:", " Scan.action_heads);
   printf "Stanza kinds that cannot: %s. Anything else fails above.\n"
     (String.concat ~sep:", " Scan.inert_heads);
+  printf "Actions that execute a program: %s.\n" (String.concat ~sep:", " Scan.program_actions);
+  printf "Actions that do not: %s. Anything else fails above.\n"
+    (String.concat ~sep:", " Scan.inert_actions);
   printf "\nExempt from the dependency, running an executable that reads no configuration:\n";
   List.iter exempt_sites ~f:(fun (key, why) -> printf "  %s -- %s\n" key why);
   let count kind = Option.value (Hashtbl.find counts kind) ~default:0 in
