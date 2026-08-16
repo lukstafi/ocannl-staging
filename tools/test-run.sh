@@ -61,6 +61,10 @@ cd "$(dirname "$0")/.." || die "cannot cd to repo root"
 
 RUNS=${OCANNL_TEST_RUNS:-$HOME/.ocannl-test-runs}
 mkdir -p "$RUNS" || die "cannot create $RUNS"
+# Canonicalized: run identities (owner pointer, `last`, wt cross-references)
+# are compared as strings, so a relative override must not record a
+# different spelling than a later absolute reference resolves to.
+RUNS=$(cd "$RUNS" && pwd) || die "cannot resolve $RUNS"
 # The worktree key makes the `last` symlink per-checkout, so concurrent
 # sessions in different worktrees don't read each other's verdicts. The
 # readable basename is for humans listing $RUNS; the crc of the full path is
@@ -329,6 +333,11 @@ sup_alive() { proc_alive "$1/pid" "$1/ptoken"; }
 # bounded group-reap) -- but that window is exactly where "no verdict yet"
 # must not be misread as "no verdict coming".
 wrapper_alive() { proc_alive "$1/wpid" "$1/wtoken"; }
+# Group signaling demands a RECORDED leader token: proc_alive's empty-token
+# fallback exists for supervisor/wrapper pids on platforms without lstart,
+# and is too weak to aim a signal at a whole, possibly recycled, process
+# group.
+group_verified() { [ -s "$1/gtoken" ] && proc_alive "$1/pgid" "$1/gtoken"; }
 
 # Make the launched run discoverable (`last` symlink, lock-owner pointer).
 # Deliberately AFTER the wrapper exists and is recorded, so any directory
@@ -363,7 +372,9 @@ resolve_run() {
       die "no runs recorded for this worktree"
     [ -d "$run_dir" ] || die "no such run: $run_dir"
   elif [ -d "$ref" ]; then
-    run_dir=$ref
+    # Canonicalized for the same reason as $RUNS: identity is compared as a
+    # string against recorded pointers.
+    run_dir=$(cd "$ref" && pwd) || die "cannot resolve $ref"
   elif [ -d "$RUNS/$ref" ]; then
     # The bare identifiers `list` prints resolve here.
     run_dir=$RUNS/$ref
@@ -535,22 +546,27 @@ case $sub in
       # time), so an orphan-group `stop` can verify identity instead of
       # trusting a possibly recycled numeric pgid.
       for _ in 1 2 3; do [ -f "$run_dir/pgid" ] && break; sleep 1; done
-      [ -f "$run_dir/pgid" ] &&
-        ps_token "$(cat "$run_dir/pgid")" >"$run_dir/gtoken" 2>/dev/null
+      # Recorded only when NONEMPTY: an empty token (leader already gone, or
+      # ps without lstart) would read as the plain-pid fallback and let a
+      # recycled pgid pass -- group signaling requires a real token.
+      if [ -f "$run_dir/pgid" ]; then
+        gt=$(ps_token "$(cat "$run_dir/pgid")")
+        [ -n "$gt" ] && printf '%s\n' "$gt" >"$run_dir/gtoken"
+      fi
       wait "$sup"
       rc=$?
       # A SIGKILLed supervisor cannot reap its process group, and dune would
       # survive it -- still mutating _build while the verdict below releases
       # the lock. The group is recorded (only when it is truly its own, see
       # the supervisor comment), so reap any survivors first.
-      if proc_alive "$run_dir/pgid" "$run_dir/gtoken" &&
+      if group_verified "$run_dir" &&
          pgid=$(cat "$run_dir/pgid") && kill -0 -- "-$pgid" 2>/dev/null; then
         kill -TERM -- "-$pgid" 2>/dev/null
         sleep 2
         # Revalidate before escalating: TERM usually empties the group within
         # the grace, and a numeric pgid could be recycled during it -- KILL
         # only a group whose recorded leader identity still matches.
-        proc_alive "$run_dir/pgid" "$run_dir/gtoken" &&
+        group_verified "$run_dir" &&
           kill -KILL -- "-$pgid" 2>/dev/null
       fi
       finish_run "$rc"
@@ -719,25 +735,38 @@ case $sub in
     # STILL held afterwards (no lsof on this system, or unkillable holders).
     run_wt=$(cat "$run_dir/wt" 2>/dev/null)
     run_wt=${run_wt:-$PWD}
-    # The census prefers /proc/locks (exact: only pids actually HOLDING the
-    # flock, matched by inode); lsof is the macOS fallback and lists any
-    # process with the file open -- a distinction that matters if some
-    # third-party tool happens to have our lock file open without holding it.
+    # The census prefers /proc/locks (only pids actually HOLDING the flock,
+    # matched by device AND inode -- inode numbers repeat across
+    # filesystems); lsof is the fallback and lists any process with the
+    # file open. A NON-EMPTY proc answer is authoritative, but an empty one
+    # proves nothing: the flock outlives its acquiring pid on the shared
+    # description (our take_lock perl exits immediately), and /proc/locks
+    # can then name no holder while the lock is demonstrably held -- so an
+    # empty scan falls through to lsof rather than concluding "nobody".
     lock_holder_pids() {
-      perl -e '
+      local out
+      out=$(perl -e '
         my @st = stat($ARGV[0]) or exit 1;
+        my $dev = $st[0];
+        my ($maj, $min) = (($dev >> 8) & 0xfff, ($dev & 0xff) | (($dev >> 12) & ~0xff));
         open my $fh, "<", "/proc/locks" or exit 1;
         while (<$fh>) {
           my @f = split;
           next unless defined $f[1] && $f[1] eq "FLOCK";
-          my ($maj, $min, $ino) = split /:/, $f[5];
-          print "$f[4]\n" if defined $ino && $ino == $st[1];
+          my ($lmaj, $lmin, $ino) = split /:/, $f[5];
+          print "$f[4]\n"
+            if defined $ino && $ino == $st[1] &&
+               hex($lmaj) == $maj && hex($lmin) == $min;
         }
-      ' "$run_wt/.test-run.lock" 2>/dev/null && return 0
-      lsof -t -- "$run_wt/.test-run.lock" 2>/dev/null
+      ' "$run_wt/.test-run.lock" 2>/dev/null)
+      if [ -n "$out" ]; then
+        printf '%s\n' "$out"
+      else
+        lsof -t -- "$run_wt/.test-run.lock" 2>/dev/null
+      fi
     }
     reap_leftovers() { # <signal>
-      if proc_alive "$run_dir/pgid" "$run_dir/gtoken"; then
+      if group_verified "$run_dir"; then
         kill "-$1" -- "-$(cat "$run_dir/pgid")" 2>/dev/null
       fi
       for p in $(lock_holder_pids); do
@@ -776,7 +805,7 @@ case $sub in
       # DIFFERENT run when this stop targeted an identifier from another
       # worktree's history.
       echo "sent TERM; confirm with: tools/test-run.sh wait $(printf %q "$run_dir")"
-    elif proc_alive "$run_dir/pgid" "$run_dir/gtoken" &&
+    elif group_verified "$run_dir" &&
          pg=$(cat "$run_dir/pgid") && kill -0 -- "-$pg" 2>/dev/null; then
       # SIGKILL can remove wrapper and supervisor around a dune that survives
       # in its own recorded group -- still holding the worktree lock, beyond
@@ -789,7 +818,7 @@ case $sub in
       # cap and would otherwise hold the worktree lock indefinitely.
       kill -TERM -- "-$pg" 2>/dev/null
       sleep 2
-      if proc_alive "$run_dir/pgid" "$run_dir/gtoken" && kill -0 -- "-$pg" 2>/dev/null; then
+      if group_verified "$run_dir" && kill -0 -- "-$pg" 2>/dev/null; then
         kill -KILL -- "-$pg" 2>/dev/null
         echo "orphaned process group $pg ignored TERM; escalated to KILL"
       else
