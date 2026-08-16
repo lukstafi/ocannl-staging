@@ -64,7 +64,7 @@ mkdir -p "$RUNS" || die "cannot create $RUNS"
 # Canonicalized: run identities (owner pointer, `last`, wt cross-references)
 # are compared as strings, so a relative override must not record a
 # different spelling than a later absolute reference resolves to.
-RUNS=$(cd "$RUNS" && pwd) || die "cannot resolve $RUNS"
+RUNS=$(cd "$RUNS" && pwd -P) || die "cannot resolve $RUNS"
 # The worktree key makes the `last` symlink per-checkout, so concurrent
 # sessions in different worktrees don't read each other's verdicts. The
 # readable basename is for humans listing $RUNS; the crc of the full path is
@@ -372,9 +372,10 @@ resolve_run() {
       die "no runs recorded for this worktree"
     [ -d "$run_dir" ] || die "no such run: $run_dir"
   elif [ -d "$ref" ]; then
-    # Canonicalized for the same reason as $RUNS: identity is compared as a
-    # string against recorded pointers.
-    run_dir=$(cd "$ref" && pwd) || die "cannot resolve $ref"
+    # Canonicalized (physically -- symlink spellings differ per referrer)
+    # for the same reason as $RUNS: identity is compared as a string
+    # against recorded pointers.
+    run_dir=$(cd "$ref" && pwd -P) || die "cannot resolve $ref"
   elif [ -d "$RUNS/$ref" ]; then
     # The bare identifiers `list` prints resolve here.
     run_dir=$RUNS/$ref
@@ -586,6 +587,10 @@ case $sub in
         [ -f "$run_dir/published" ] && break
         sleep 1
       done
+      # An expired handshake is recorded so the resumed launcher knows NOT
+      # to publish: the lock it would be publishing under may already belong
+      # to a newer run.
+      [ -f "$run_dir/published" ] || : >"$run_dir/handshake_expired" 2>/dev/null
       # Release protocol: simply close our fd. The lock lives on the shared
       # open file DESCRIPTION, so the kernel releases it exactly when the
       # last holder closes -- and any leftover descendant that can still
@@ -608,18 +613,29 @@ case $sub in
     # tell "verdict publication in flight" from "nothing left to publish".
     # Checked like every launch write -- a run whose identity cannot be
     # recorded would be invisible to status/stop and must not report started.
-    if ! { printf '%s\n' "$wrapper" >"$run_dir/wpid" &&
-           ps_token "$wrapper" >"$run_dir/wtoken" &&
-           publish_run; }; then
+    { printf '%s\n' "$wrapper" >"$run_dir/wpid" &&
+      ps_token "$wrapper" >"$run_dir/wtoken"; } || wrap_ids=bad
+    if [ -f "$run_dir/handshake_expired" ]; then
+      # The wrapper waited out the handshake and released the lock before
+      # this launcher got to publish (descheduled >10s around a fast dune).
+      # The lock may already belong to a newer run, and publishing now
+      # would overwrite THAT run's `last`/owner pointers with this finished
+      # one -- keep the verdict, skip publication. (A wrapper expiring in
+      # the final ms before our publish still loses this race; the window
+      # is milliseconds and misdirects only the convenience pointers.)
+      echo "test-run: launch stalled past the publication handshake;" >&2
+      echo "  verdict kept unpublished at: $(printf %q "$run_dir")" >&2
+    elif [ "${wrap_ids:-ok}" = bad ] || ! publish_run; then
       # An unpublishable run must not keep running untracked: cancel via the
       # supervisor (waiting briefly for the wrapper to record its pid) and
       # let the wrapper publish the 143 into the unpublished directory.
       for _ in 1 2 3; do [ -f "$run_dir/pid" ] && break; sleep 1; done
       [ -f "$run_dir/pid" ] && kill -TERM "$(cat "$run_dir/pid")" 2>/dev/null
       die "run could not be published; cancelled it (remnants at $run_dir)"
+    else
+      # The wrapper's unlock handshakes on this marker (see above).
+      : >"$run_dir/published" 2>/dev/null || :
     fi
-    # The wrapper's unlock handshakes on this marker (see above).
-    : >"$run_dir/published" 2>/dev/null || :
     if [ "$sub" = run ]; then
       # Attached: wait for the wrapper -- its exit means the verdict file is
       # published. A cancellation flagged during the launch gap is converted
@@ -773,9 +789,32 @@ case $sub in
       ' "$run_wt/.test-run.lock" 2>/dev/null)
       if [ -n "$out" ]; then
         printf '%s\n' "$out"
-      else
-        lsof -t -- "$run_wt/.test-run.lock" 2>/dev/null
+        return 0
       fi
+      # lsof lists OPENERS; where /proc exists, keep only pids whose
+      # descriptor on the lock file actually carries a lock (fdinfo shows a
+      # `lock:` FLOCK row). Elsewhere (macOS) the opener set is the accepted
+      # approximation -- there is no portable flock-holder API.
+      for p in $(lsof -t -- "$run_wt/.test-run.lock" 2>/dev/null); do
+        case $p in '' | *[!0-9]* | 0) continue ;; esac
+        if [ -d /proc ]; then
+          perl -e '
+            my ($pid, $target) = @ARGV;
+            my @st = stat($target) or exit 1;
+            opendir(my $dh, "/proc/$pid/fd") or exit 1;
+            for my $fd (readdir $dh) {
+              next if $fd =~ /^\./;
+              my @fs = stat("/proc/$pid/fd/$fd") or next;
+              next unless $fs[0] == $st[0] && $fs[1] == $st[1];
+              open(my $fi, "<", "/proc/$pid/fdinfo/$fd") or next;
+              while (<$fi>) { exit 0 if /^lock:.*FLOCK/ }
+            }
+            exit 1
+          ' "$p" "$run_wt/.test-run.lock" 2>/dev/null && printf '%s\n' "$p"
+        else
+          printf '%s\n' "$p"
+        fi
+      done
     }
     reap_leftovers() { # <signal>
       if group_verified "$run_dir"; then
