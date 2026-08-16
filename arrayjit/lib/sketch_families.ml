@@ -893,6 +893,17 @@ let detect_conv (llc : LL.t) : conv_site option =
             detection must be behavior-preserving");
   site
 
+(* The statically-decidable precondition of {!zero_geometry}, shared with the family tree's
+   construction-time verdicts (gh-ocannl-577): a zeroed site whose output lacks a row axis before
+   the minor axis fails every pipeline's zero expansion, whatever the tile geometry. *)
+let zero_expansion_witness (site : matmul_site) : string option =
+  if not site.m_zeroed then None
+  else
+    let rank = Array.length (Lazy.force site.m_d.Ir.Tnode.dims) in
+    if rank < 2 || site.m_row_axis >= rank - 1 then
+      Some "zero expansion needs a row axis before the minor axis (autotune_sketch_output_rank)"
+    else None
+
 (* Zero-geometry ops shared by the sketch pipelines: expand the whole-node [Zero_out] of the output
    and give the resulting nest a compatible parallel geometry, via [mk_zops] on its two fresh loop
    symbols. When the site is NOT zeroed — a fission segment's site never is, the [Zero_out] lands in
@@ -903,8 +914,7 @@ let zero_geometry (site : matmul_site) ~(mk_zops : zi:Idx.symbol -> zj:Idx.symbo
     : Sched.schedule =
   if not site.m_zeroed then []
   else (
-    let rank = Array.length (Lazy.force site.m_d.Ir.Tnode.dims) in
-    if rank < 2 || site.m_row_axis >= rank - 1 then
+    if Option.is_some (zero_expansion_witness site) then
       (* This is a known limitation of the generated sketch, not an arbitrary exception from a
          user transform. Preserve that distinction at the narrow site so strict candidate failure
          classification records a decline and continues trying the remaining seeds. *)
@@ -1136,6 +1146,29 @@ let companion_coverage_unsupported ~tensorized why =
    arity. *)
 let matmul_site_chain (site : matmul_site) =
   site.m_bo @ ((site.m_i, site.m_ni) :: site.m_bi) @ [ (site.m_j, site.m_nj) ]
+
+(* The statically-decidable component of the GPU sketches' companion-coverage rule, decided once
+   at tree-construction time (gh-ocannl-577). [companion_geometry]'s Ok/Error verdict never
+   depends on the geometry [annotate] emits — only the lowering, the site's chain, the fused
+   flavor's [skip] and the zeroing expansion select it — so one query with a trivial annotator
+   settles buildability for every tile completion of the flavor: curated menus, twins and the
+   whole tile lattice alike. [fused] selects the [Fuse_epilogue] twins' flavor, which skips the
+   epilogue tail nest — coverage can pass fused where it fails unfused (the tail was the failing
+   companion, or its exclusion empties the demand before the alignment analysis is consulted), the
+   pre-gh-521 "only the fused twin survives" regime, so the two flavors are judged separately.
+   The raise sites in the schedule builders stay as the safety net for parameters replayed
+   against a different lowering (fission recombination). *)
+let matmul_coverage_witness ~(opt : LL.optimized) ~(fused : bool) (site : matmul_site) :
+    string option =
+  match
+    companion_geometry ~site_syms:(matmul_site_chain site)
+      ~skip:(if fused then epilogue_tail_loop_syms ~target:site.m_d opt else [])
+      ~expanded_zeros:(if site.m_zeroed then [ site.m_d ] else [])
+      ~annotate:(fun _ _ -> [])
+      opt
+  with
+  | Ok _ -> None
+  | Error why -> Some (Printf.sprintf "GPU matmul companion coverage (gh-521): %s" why)
 
 (* Chain-position roles matching [matmul_site_chain]: batch positions get no annotation (batch
    loops stay [Serial] — the 3-slot grid budget is spent on the row/column blocks, and serial
@@ -2039,8 +2072,24 @@ let interval_axis ~axis ~(values : int array) ~(box_verdict : int -> int -> stri
   | 1 -> Sspace.Choice { level = axis; children = [ (label 0 0, child 0 0) ] }
   | n -> split 0 (n - 1)
 
-let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits) site :
-    sketch_params Sspace.tree =
+let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
+    ~(opt : LL.optimized) ~(fused : bool) site : sketch_params Sspace.tree =
+  (* Builder preconditions statically decidable at tree construction (gh-ocannl-577): rules the
+     schedule builders settle identically for every tile completion refute here, with their
+     witnesses, instead of failing candidate by candidate at build — the same lift phase 2 gave
+     the hardware floors and configuration disables. The guard sits above the geometry menus and
+     the tile lattice, so a refuted family never expands a lattice box (the gh-514 phase-6
+     finding: the lifted lattice priced spaces whose every member died at candidate build). The
+     zero-expansion rule binds every pipeline; companion coverage only the GPU ones — but under
+     [is_gpu] both pipeline branches are GPU pipelines, so one guard serves both preconditions. *)
+  let precondition_witness =
+    match zero_expansion_witness site with
+    | Some _ as w -> w
+    | None -> if is_gpu then matmul_coverage_witness ~opt ~fused site else None
+  in
+  let precondition_guard child =
+    match precondition_witness with Some w -> Sspace.Refuted w | None -> child
+  in
   let divides c n = c <= n && n % c = 0 in
   let leaf p = Sspace.Child (lazy (Sspace.Leaf p)) in
   let choice level children = Sspace.Choice { level; children } in
@@ -2072,7 +2121,7 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
       sk_grid = false;
       sk_pack_rest = false;
       sk_conv = false;
-      sk_epilogue = false;
+      sk_epilogue = fused;
       sk_swizzle = None;
       sk_depth = 1;
     }
@@ -2713,17 +2762,22 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                  [ ("whole-triple", whole_child); ("packed", subt (fun () -> packed ())) ]))
     | _ -> Sspace.Refuted "backend kind seeds no tensorized pipeline"
   in
-  choice "pipeline" [ ("blocktile", blocktile_child); ("tensorized", mma_child) ]
+  choice "pipeline"
+    [
+      ("blocktile", precondition_guard blocktile_child);
+      ("tensorized", precondition_guard mma_child);
+    ]
 
-let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits) site :
-    sketch_params list =
-  Sspace.leaves (matmul_family_tree ~is_gpu ~is_cpu ~limits site)
+let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits) ~opt ~fused
+    site : sketch_params list =
+  Sspace.leaves (matmul_family_tree ~is_gpu ~is_cpu ~limits ~opt ~fused site)
 
 (* The exported tree view of the matmul family (site detection included); the conv family and the
    epilogue-twin level factor the same way as mechanical follow-ups. *)
 let matmul_sketch_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
     (opt : LL.optimized) : sketch_params Sspace.tree option =
-  Option.map (detect_matmul opt.LL.llc) ~f:(matmul_family_tree ~is_gpu ~is_cpu ~limits)
+  Option.map (detect_matmul opt.LL.llc)
+    ~f:(matmul_family_tree ~is_gpu ~is_cpu ~limits ~opt ~fused:false)
 
 (* gh-ocannl-514 phase 5: lift every tile-lattice exclusion in the family tree, preserving the
    laziness of everything else — a lifted branch remains subject to legality (box refutations),

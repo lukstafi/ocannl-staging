@@ -226,6 +226,27 @@ let () =
   let%op tmm = av +* "ik;jk=>ij" tb in
   let opt_t = with_lowering ~name:"sft_tb" tmm in
   awkward_section "transposed-B cpu" ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt_t;
+  (* A companion nest that cannot follow the site's full arity (gh-ocannl-577): the matmul's
+     output feeds a row reduction in the same routine — the lm_head max-logits pattern. The GPU
+     companion-coverage rule (gh-521) then fails for {e every} tile completion, a fact decidable
+     from the site and the lowering alone, so the tree refutes both pipelines at construction —
+     where each candidate previously died at build. The refutation sits above the geometry menus
+     and the lattice: lifting the lattice over the refuted family expands nothing and scores
+     nothing (the gh-514 phase-6 finding this pins). CPU pipelines carry no kernel-global launch
+     geometry and still enumerate. *)
+  let%op cred = (av +* "ik;kj=>ij" bv) ++ "ij=>i" in
+  let opt_c = with_lowering ~name:"sft_companion" cred in
+  awkward_section "companion-reduction gpu" ~is_gpu:true ~is_cpu:false ~limits:gpu_full_limits
+    opt_c;
+  awkward_section "companion-reduction cpu" ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt_c;
+  (match Autotune.matmul_sketch_tree ~is_gpu:true ~is_cpu:false ~limits:gpu_full_limits opt_c with
+  | None -> Stdio.printf "companion-reduction: no site detected\n"
+  | Some tree ->
+      let lifted = Autotune.lift_geometry_lattice tree in
+      let _best, stats = Sspace.search ~score:(fun _ -> Some Float.infinity) lifted in
+      Stdio.printf
+        "lifted-lattice search over the refuted family: %d expanded, %d scored, %d refuted\n"
+        stats.Sspace.st_expanded stats.Sspace.st_scored stats.Sspace.st_refuted);
   (* Tight hardware limits: the staged operand tiles are a sound workgroup-memory floor, so
      geometries whose depth-1 tiles exceed the cap refute outright and dividing geometries whose
      doubled tiles exceed it refute their depth twins; a blocktile geometry's launch size

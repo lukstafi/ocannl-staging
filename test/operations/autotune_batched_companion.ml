@@ -173,10 +173,12 @@ let () =
 
   (* The safety boundary the lifted arity must NOT cross (the lm_head shape): a companion that
      REDUCES over the site's minor output axis reads cells every j-block wrote, with no intra-kernel
-     synchronization — spreading j is a race there until fission separates the reduction. Every
-     seed must still raise the companion-coverage decline (here the analysis bails outright on the
-     reduction target's whole-node [Zero_out]; a pre-zeroed variant would instead trim the
-     component's common prefix below the site's arity — either way, no schedule is constructed). *)
+     synchronization — spreading j is a race there until fission separates the reduction. Since
+     gh-ocannl-577 the coverage verdict is decided at tree construction (here the analysis bails
+     outright on the reduction target's whole-node [Zero_out]; a pre-zeroed variant would instead
+     trim the component's common prefix below the site's arity): the family refutes with the
+     coverage witness before any seed is proposed, so no schedule is constructed AND none is
+     enumerated. *)
   let x2 = TDSL.ndarray xv ~label:[ "bc_x2" ] ~batch_dims:[ b ] ~output_dims:[ n; k ] () in
   let w2 = TDSL.ndarray wv ~label:[ "bc_w2" ] ~output_dims:[ k; m ] () in
   let%op z2 = x2 +* "b|ik;kj=>b|ij" w2 in
@@ -193,15 +195,30 @@ let () =
   in
   let opt2 = Option.value_exn !captured2 in
   let seeds2 = gpu_seeds opt2 in
-  p "bc: reduction-over-j companion still declines every GPU seed"
-    ((not (List.is_empty seeds2))
-    && List.for_all seeds2 ~f:(fun sp ->
-           match Autotune.sketch_schedule ~p:sp opt2 with
-           | _ -> false
-           | exception
-               Ir.Schedule_outcome.Cause_at (_, Ir.Schedule_outcome.Unsupported { feature; _ }) ->
-               String.equal feature "autotune_sketch_companion_coverage"
-           | exception _ -> false))
+  p "bc: reduction-over-j companion refutes the GPU family pre-proposal"
+    (List.is_empty seeds2
+    &&
+    match Autotune.matmul_sketch_tree ~is_gpu:true ~is_cpu:false ~limits opt2 with
+    | Some tree ->
+        let refs = Ir.Schedule_space.refutations tree in
+        (not (List.is_empty refs))
+        && List.for_all refs ~f:(fun (_, w) ->
+               String.is_substring w ~substring:"companion coverage (gh-521)")
+    | None -> false);
+  (* The builders' raise site remains the safety net for parameters replayed against a lowering
+     they were not seeded for (the fission-recombination scenario): a seed minted on the
+     buildable batched head must still raise the coverage decline when applied to the
+     reduction-companion routine. *)
+  p "bc: a foreign seed replayed against the companion routine still raises the decline"
+    (match seeds with
+    | sp :: _ -> (
+        match Autotune.sketch_schedule ~p:sp opt2 with
+        | _ -> false
+        | exception
+            Ir.Schedule_outcome.Cause_at (_, Ir.Schedule_outcome.Unsupported { feature; _ }) ->
+            String.equal feature "autotune_sketch_companion_coverage"
+        | exception _ -> false)
+    | [] -> false)
 
 (* gh-ocannl-574 (the gh-569 residual): the boundary above is respected by CUTTING, not by
    coverage. The lm_head shape proper — a materialized GEMM whose row-MAX companion follows in the
@@ -274,22 +291,23 @@ let () =
         match kind with `Normal -> Some pre | `Zeros | `Solo -> None)
   in
   (* Coarse segmentation: the GEMM shares its segment with the row-max companion (and the max
-     target's initialization nest), and every GPU seed of that segment declines on companion
-     coverage — the production decline gh-574 sets out to relieve. *)
+     target's initialization nest) — the production decline gh-574 sets out to relieve. Since
+     gh-ocannl-577 the segment's family refutes on the companion-coverage witness at tree
+     construction, so its seed list is empty rather than every proposed seed declining at
+     build. *)
   let coarse = normals (segments ~arity_cuts:false opt) in
   p "lm: coarse fission keeps the row-max companion in the GEMM's segment"
     (match coarse with
-    | [ seg ] ->
-        let seeds = gpu_seeds seg in
-        (not (List.is_empty seeds))
-        && List.for_all seeds ~f:(fun sp ->
-               match Autotune.sketch_schedule ~p:sp seg with
-               | _ -> false
-               | exception
-                   Ir.Schedule_outcome.Cause_at (_, Ir.Schedule_outcome.Unsupported { feature; _ })
-                 ->
-                   String.equal feature "autotune_sketch_companion_coverage"
-               | exception _ -> false)
+    | [ seg ] -> (
+        List.is_empty (gpu_seeds seg)
+        &&
+        match Autotune.matmul_sketch_tree ~is_gpu:true ~is_cpu:false ~limits seg with
+        | Some tree ->
+            let refs = Ir.Schedule_space.refutations tree in
+            (not (List.is_empty refs))
+            && List.for_all refs ~f:(fun (_, w) ->
+                   String.is_substring w ~substring:"companion coverage (gh-521)")
+        | None -> false)
     | _ -> false);
   (* Finer segmentation: the GEMM segment is freed, its seeds construct, and they spread j — the
      axis whose extent m = 64 is unique in this workload (b = 4, i = 32, k = 16). *)
