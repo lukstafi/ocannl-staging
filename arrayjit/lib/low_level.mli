@@ -136,6 +136,22 @@ type t =
 
 and scalar_t =
   | Local_scope of { id : scope_id; body : t; orig_indices : Indexing.axis_index array }
+      (** An inlined sub-computation whose value is [body]'s final [Set_local] of [id].
+
+          {b Scope purity} (gh-ocannl-584): [body]'s only effect is on the locals it owns — its own
+          [id], plus ids [Declare_local]d lexically within it. Never a tensor node, never a sibling
+          or enclosing scope's local, and no barrier or staged callback. A scope body does not
+          execute where it is written: codegen hoists it ahead of the enclosing statement ordered by
+          [scope_id] rather than by the operand's syntactic position, [simplify_llc] collapses a
+          single-assignment scope into the expression (moving its reads the other way), and
+          [hoist_cross_statement_cse] lifts a body shared by sibling statements out of the statement
+          entirely, to run once ahead of the first user. Purity is what makes all three placements
+          unobservable from outside the body — the same assumption {!Affine.path_before} makes when
+          it declines to order sibling [Arg] positions. (It governs a body's effects, not its
+          inputs: the hoist additionally needs the body's reads — tensor nodes and scope locals
+          alike — untouched across the statements it is lifted over, which is its own hazard
+          check's obligation.) Enforced by {!validate_scope_bodies}; the optimization pipeline
+          satisfies it by construction. *)
   | Get_local of scope_id
   | Get of Tnode.t * Indexing.axis_index array
   | Get_dynamic of {
@@ -248,6 +264,25 @@ val hardware_axes : t -> hardware_axis_info list
 
 val launch_dims : t -> launch_dims
 (** Per-slot maximum extents over the kernel's annotated loops. *)
+
+val scope_purity_violation : t -> string option
+(** gh-ocannl-584: the predicate form of {!validate_scope_bodies} — [None] when every [Local_scope]
+    body in [llc] is pure, else a description of the first violation. [hoist_cross_statement_cse]
+    uses it to guard its own precondition (it is the one pass that can move an effect out of a
+    scope, so an impure body reaching it would be laundered past the codegen gate); tests use it to
+    assert that a body was left where it was. *)
+
+val validate_scope_bodies : t -> unit
+(** gh-ocannl-584: enforces the scope-purity contract stated at {!scalar_t.Local_scope} — a scope
+    body's only effect is on the locals it owns (its own scope id, plus ids [Declare_local]d
+    lexically within it). Raises [Invalid_argument] on anything else inside a [Local_scope] body at
+    any nesting depth: a tensor-node write ([Set], [Set_from_vec], [Set_dynamic], [Zero_out],
+    [Tile_mma]), a [Set_local] of a sibling or enclosing scope's local, a [Workgroup_barrier], or a
+    [Staged_compilation]. Applied at both ends of the pipeline — {!optimize} on the way in
+    (before a pass can launder a violation out of any body) and [C_syntax.compile_proc] on the way
+    out. The raw analysis entry points {!analyze_proc} / {!specialize_proc} deliberately do not
+    validate, being the probes that must stay conservative on IR they may not trust. The
+    optimization pipeline satisfies the contract by construction. *)
 
 val validate_parallel : Tnode.Placements.t -> t -> unit
 (** Backend-independent well-formedness of hardware annotations (axis-types proposal §2); a no-op

@@ -194,7 +194,9 @@ let () =
      [Arg] evaluation position, so scope A's read and scope B's write of the same node never
      interleave their interior components — and coverage claims nothing across sibling operands
      (evaluation order among them is not modeled), so X keeps its read-before-write (input)
-     classification. *)
+     classification. Scope B's write is deliberately out of contract (gh-ocannl-584): the point is
+     that the query stays conservative on IR it must never trust, so it is probed here rather than
+     compiled. *)
   let x = fresh_tn "X" [| 4 |] in
   let y2 = fresh_tn "Y" [| 4 |] in
   let i7 = Idx.get_symbol () in
@@ -263,9 +265,10 @@ let () =
      classify X as read-before-write — a routine input ([input_and_output_nodes]) whose incoming
      buffer is preserved. If coverage wrongly crossed the sibling operands, both facts would flip
      and X's incoming values could be silently overwritten. The classification→execution leg is
-     pinned by read_before_write_flip.ml on pipeline-produced code; this pattern itself cannot
-     reach codegen (the optimizer never emits materialized-node writes inside scope bodies — the
-     crosscheck-soak corner), so the decision surface is the deepest executable check here. *)
+     pinned by read_before_write_flip.ml on pipeline-produced code; this pattern itself cannot reach
+     codegen — a write inside a scope body is out of contract (gh-ocannl-584) and
+     [Low_level.validate_scope_bodies] rejects it there, which is why the probe stops at the
+     analysis and decision levels the query actually has to survive. *)
   let materialize tn = Tn.update_memory_mode tn Tn.On_device 99 in
   materialize x;
   materialize y2;

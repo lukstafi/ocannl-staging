@@ -2625,6 +2625,10 @@ let simplify_llc static_indices llc =
            constant. *)
         let v', vprec' = loop_scalar (v, vprec) in
         (Get_dynamic { tn; idcs; dyn_axis; dyn_value = (v', vprec') }, Lazy.force tn.Tn.storage_prec)
+    (* Collapsing a single-assignment scope into the enclosing expression demotes its hoisted reads
+       to in-expression reads, i.e. moves them relative to any sibling scope body's effects. That is
+       unconditionally sound under scope purity (gh-ocannl-584, {!validate_scope_bodies}): sibling
+       bodies touch only their own locals, so no read can observe where it was placed. *)
     | Local_scope { id; body = Set_local (id2, v); _ } when equal_scope_id id id2 ->
         ignore (Lazy.force id.tn.Tn.dims);
         loop_scalar (v, Lazy.force id.tn.Tn.storage_prec)
@@ -3207,6 +3211,69 @@ let writes_of_stmt (stmt : t) : Set.M(Tn).t =
   loop stmt;
   !acc
 
+(** The scope locals a [Local_scope] body READS, at any depth. The companion of {!reads_of_body} for
+    the other half of a body's inputs: [reads_of_body] tracks tensor nodes and ignores [Get_local]
+    entirely, which left cross-statement hoisting blind to local-valued dependencies
+    (gh-ocannl-584 review round 2). Over-approximate on purpose — it includes locals the body itself
+    owns, which no sibling statement can write, and an enlarged hazard set only narrows hoisting. *)
+let local_reads_of_body (body : t) : scope_id list =
+  let acc = ref [] in
+  let rec loop_proc (llc : t) =
+    match llc with
+    | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _ | Workgroup_barrier ->
+        ()
+    | Seq (c1, c2) ->
+        loop_proc c1;
+        loop_proc c2
+    | For_loop { body; _ } -> loop_proc body
+    | Set { llsc; _ } | Set_local (_, llsc) -> loop_scalar llsc
+    | Set_dynamic { dyn_value = v, _; llsc; _ } ->
+        loop_scalar v;
+        loop_scalar llsc
+    | Set_from_vec { arg = a, _; _ } -> loop_scalar a
+    | Tile_mma { fallback; _ } -> loop_proc fallback
+    | If { cond = c, _; body } ->
+        loop_scalar c;
+        loop_proc body
+  and loop_scalar (llsc : scalar_t) =
+    match llsc with
+    | Get_local id -> acc := id :: !acc
+    | Local_scope { body; _ } -> loop_proc body
+    | Get_dynamic { dyn_value = v, _; _ } -> loop_scalar v
+    | Ternop (_, (s1, _), (s2, _), (s3, _)) ->
+        loop_scalar s1;
+        loop_scalar s2;
+        loop_scalar s3
+    | Binop (_, (s1, _), (s2, _)) ->
+        loop_scalar s1;
+        loop_scalar s2
+    | Unop (_, (s, _)) -> loop_scalar s
+    | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> ()
+  in
+  loop_proc body;
+  !acc
+
+(** The scope locals a statement writes, mirroring {!writes_of_stmt}: recursive through [Seq],
+    [For_loop] and [If] bodies, and deliberately NOT into [Local_scope] bodies within its
+    expressions. Scope purity is what makes that omission sound — a body only writes locals it owns,
+    which by construction no other statement shares (gh-ocannl-584). *)
+let local_writes_of_stmt (stmt : t) : scope_id list =
+  let acc = ref [] in
+  let rec loop (s : t) =
+    match s with
+    | Set_local (id, _) -> acc := id :: !acc
+    | Seq (a, b) ->
+        loop a;
+        loop b
+    | For_loop { body; _ } -> loop body
+    | If { body; _ } -> loop body
+    | Set _ | Set_dynamic _ | Set_from_vec _ | Zero_out _ | Tile_mma _ | Noop | Comment _
+    | Staged_compilation _ | Declare_local _ | Workgroup_barrier ->
+        ()
+  in
+  loop stmt;
+  !acc
+
 (** Returns [true] if the given [scope_id] is read (via [Get_local]) before the first definitely
     executed [Set_local] to that id in [body]. Used to decide whether a [Local_scope] or hoisted
     [Declare_local] needs a zero initializer. A loop body write is only considered definite when the
@@ -3337,6 +3404,145 @@ let has_accumulation (llc : t) : bool =
         false
   in
   loop llc
+
+exception Impure_scope of string
+
+(** gh-ocannl-584: the scope-purity contract. A [Local_scope] body's ONLY effect is on the locals it
+    owns — its own scope id, plus ids [Declare_local]d lexically within it. Raises
+    [Invalid_argument] on anything else inside a body, at any nesting depth: a tensor-node write
+    ([Set], [Set_from_vec], [Set_dynamic], [Zero_out], [Tile_mma]); a [Set_local] of a sibling or
+    enclosing scope's local; a [Workgroup_barrier]; and a [Staged_compilation], whose callback emits
+    code this cannot inspect.
+
+    The rule exists because a scope body does not execute where it is written. [C_syntax.pp_scalar]
+    returns it as a local definition, which [pp_local_defs] emits ahead of the enclosing statement,
+    ordered by [scope_id] rather than by the operand's syntactic position; [simplify_llc] collapses
+    a single-assignment scope into the expression, moving its reads the other way; and
+    [hoist_cross_statement_cse] lifts a body shared by sibling statements out of the statement
+    altogether, to run ONCE ahead of the first user. An effect in a body is therefore placed by none
+    of the rules a reader of the expression would expect. Confining bodies to the locals they own
+    makes all three placements unobservable to everything OUTSIDE the body, which is what
+    {!Affine.path_before} already assumes when it declines to order sibling [Arg] positions, and
+    what makes the collapse sound.
+
+    Purity is about a body's effects, and it is not on its own enough for the hoist, which also
+    needs the body's INPUTS unchanged across the statements it is lifted over — the obligation of
+    [hoist_shared_locals]'s hazard check, which covers tensor reads ({!reads_of_body}) and scope
+    locals ({!local_reads_of_body}) alike.
+
+    The statement match is deliberately exhaustive with no catch-all: a new {!t} constructor breaks
+    this build until someone classifies it as body-legal or not.
+
+    The optimizer satisfies the contract by construction: [inline_computation] drops the inlined
+    computation's [Set]s and [Zero_out]s, rewriting only the setters of the node being inlined, and
+    into [Set_local] of the scope's own id. So this binds hand-built and future-pass IR, at both
+    ends of the pipeline — [optimize_proc] on the way in (before any pass can launder a violation
+    into a shape later gates would accept) and [C_syntax.compile_proc] on the way out (catching
+    anything a later pass constructs). The raw analysis entry points [analyze_proc] and
+    [specialize_proc] deliberately do NOT validate: they are the probes that must stay conservative
+    on IR they may not trust (see [test/operations/affine_extraction.ml]). *)
+
+let scope_purity_violation_gen (root : [ `Proc of t | `Scalar of scalar_t ]) : string option =
+  let reject scope what =
+    raise
+      (Impure_scope
+         (what ^ " inside the body of local scope v" ^ Int.to_string scope.scope_id ^ "_"
+        ^ Tn.debug_name scope.tn
+        ^ " -- a scope body is hoisted out of the position it is written in, so its only effect \
+           may be on the locals it owns (gh-ocannl-584)"))
+  in
+  let wrote construct tn () = construct ^ " writes the tensor node " ^ Tn.debug_name tn in
+  (* [owned] carries the ids the enclosing body may write, extended lexically by [Declare_local];
+     [proc] threads it along a [Seq] and returns it. Declarations inside a loop or guard body do not
+     escape it. Membership is by whole {!scope_id} ([equal_scope_id]), not by the [scope_id]
+     integer: hand-built IR can mint two locals sharing an integer but naming different tensor
+     nodes, and codegen renders those as DIFFERENT C variables ([pp_scope_id] concatenates both), so
+     an integer-keyed set would let a body write a local it does not own. A list is the right shape
+     here -- a body owns one id plus whatever it declares. *)
+  let owns owned id = List.mem owned id ~equal:equal_scope_id in
+  let rec proc ~scope ~owned (llc : t) : scope_id list =
+    let ban what = Option.iter scope ~f:(fun s -> reject s (what ())) in
+    match llc with
+    | Seq (a, b) -> proc ~scope ~owned:(proc ~scope ~owned a) b
+    | For_loop { body; _ } ->
+        ignore (proc ~scope ~owned body : scope_id list);
+        owned
+    | If { cond = c, _; body } ->
+        scalar ~scope ~owned c;
+        ignore (proc ~scope ~owned body : scope_id list);
+        owned
+    | Declare_local { id; _ } -> id :: owned
+    | Set_local (id, llsc) ->
+        if Option.is_some scope && not (owns owned id) then
+          ban (fun () ->
+              "a Set_local of v" ^ Int.to_string id.scope_id ^ "_" ^ Tn.debug_name id.tn
+              ^ ", a local the body does not own,");
+        scalar ~scope ~owned llsc;
+        owned
+    | Zero_out tn ->
+        ban (wrote "Zero_out" tn);
+        owned
+    | Set { tn; llsc; _ } ->
+        ban (wrote "Set" tn);
+        scalar ~scope ~owned llsc;
+        owned
+    | Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
+        ban (wrote "Set_dynamic" tn);
+        scalar ~scope ~owned v;
+        scalar ~scope ~owned llsc;
+        owned
+    | Set_from_vec { tn; arg = a, _; _ } ->
+        ban (wrote "Set_from_vec" tn);
+        scalar ~scope ~owned a;
+        owned
+    | Tile_mma { d = d_tn, _; fallback; _ } ->
+        ban (wrote "Tile_mma" d_tn);
+        ignore (proc ~scope ~owned fallback : scope_id list);
+        owned
+    (* Neither is scope-local state, and neither can be placed by the hoisting rules: a barrier is a
+       synchronization effect, and a staged callback emits code this walk cannot see. *)
+    | Workgroup_barrier ->
+        ban (fun () -> "a Workgroup_barrier, a synchronization effect,");
+        owned
+    | Staged_compilation _ ->
+        ban (fun () -> "a Staged_compilation, whose callback emits code that cannot be inspected,");
+        owned
+    | Noop | Comment _ -> owned
+  and scalar ~scope ~owned (llsc : scalar_t) : unit =
+    match llsc with
+    (* A nested body starts from its own id alone: it owns neither its parent's local nor a
+       sibling's, so it cannot make their emission order observable. *)
+    | Local_scope { id; body; _ } ->
+        ignore (proc ~scope:(Some id) ~owned:[ id ] body : scope_id list)
+    | Get_dynamic { dyn_value = v, _; _ } -> scalar ~scope ~owned v
+    | Ternop (_, (s1, _), (s2, _), (s3, _)) ->
+        scalar ~scope ~owned s1;
+        scalar ~scope ~owned s2;
+        scalar ~scope ~owned s3
+    | Binop (_, (s1, _), (s2, _)) ->
+        scalar ~scope ~owned s1;
+        scalar ~scope ~owned s2
+    | Unop (_, (s, _)) -> scalar ~scope ~owned s
+    | Get_local _ | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> ()
+  in
+  match
+    match root with
+    | `Proc llc -> ignore (proc ~scope:None ~owned:[] llc : scope_id list)
+    | `Scalar llsc -> scalar ~scope:None ~owned:[] llsc
+  with
+  | () -> None
+  | exception Impure_scope msg -> Some msg
+
+let scope_purity_violation (llc : t) : string option = scope_purity_violation_gen (`Proc llc)
+
+(** The scalar form: pass a [Local_scope] to ask whether ITS body is pure — [scope_purity_violation]
+    on a bare body would walk it with no enclosing scope and find nothing. *)
+let scope_purity_violation_scalar (llsc : scalar_t) : string option =
+  scope_purity_violation_gen (`Scalar llsc)
+
+let validate_scope_bodies (llc : t) : unit =
+  Option.iter (scope_purity_violation llc) ~f:(fun msg ->
+      invalid_arg ("Low_level.validate_scope_bodies: " ^ msg))
 
 (** {2 Hardware axis analyses}
 
@@ -3669,24 +3875,46 @@ and hoist_shared_locals_segment (stmts : t list) : t list =
     List.iter shared_groups ~f:(fun (target_scalar, canonical_id, user_indices, all_ids) ->
         let first_user = List.hd_exn user_indices in
         let last_user = List.last_exn user_indices in
-        (* Collect reads of the Local_scope body *)
+        (* Collect reads of the Local_scope body -- tensor nodes AND scope locals. Both are inputs
+           to the body, so a write to either between the hoist point and a later user would make
+           that user read a stale value (gh-ocannl-584 review round 2: the pipeline does produce
+           bodies reading a local declared outside them, e.g. layer_norm_divided_mean, via
+           [eliminate_common_subexpressions] and this pass's own [Get_local] rewrites). *)
         let body_reads =
           match target_scalar with
           | Local_scope { body; _ } -> reads_of_body body
           | _ -> Set.empty (module Tn)
         in
+        let body_local_reads =
+          match target_scalar with Local_scope { body; _ } -> local_reads_of_body body | _ -> []
+        in
         (* Check for writes between first_user and last_user that could invalidate hoisting. Include
            writes from ALL statements (including user statements) from first_user up to but not
            including last_user. User statements perform tensor writes after evaluating their
            Local_scope, so earlier users' writes can affect what later users would read. *)
+        (* gh-ocannl-584 review round 3: the pass guards its OWN precondition rather than trusting a
+           gate at every door into it. This is the one pass that can move an effect out of a
+           [Local_scope] -- lifting the body to a top-level [Declare_local] + body -- so an impure
+           body reaching it would be laundered into a shape the codegen gate no longer recognizes,
+           and the routine would compile silently changed (the write executing once ahead of the
+           first user instead of once per user). Declining to hoist leaves the impure body inside
+           its scope, where the exit gate refuses it: the program is REJECTED, never rewritten. This
+           keeps the raw [analyze_proc] / [specialize_proc] probes usable on out-of-contract IR,
+           which is why they do not validate. *)
+        let pure_body = Option.is_none (scope_purity_violation_scalar target_scalar) in
         let safe =
           let hazard_writes = ref (Set.empty (module Tn)) in
+          let hazard_local_writes = ref [] in
           for i = first_user to last_user - 1 do
-            hazard_writes := Set.union !hazard_writes (writes_of_stmt stmts.(i))
+            hazard_writes := Set.union !hazard_writes (writes_of_stmt stmts.(i));
+            hazard_local_writes := local_writes_of_stmt stmts.(i) @ !hazard_local_writes
           done;
           Set.is_empty (Set.inter body_reads !hazard_writes)
+          && not
+               (List.exists !hazard_local_writes ~f:(fun w ->
+                    List.mem body_local_reads w ~equal:equal_scope_id))
         in
-        if safe then (
+        if safe && pure_body then (
           (* Extract body from canonical Local_scope *)
           let body =
             match target_scalar with Local_scope { body; _ } -> body | _ -> assert false
@@ -4968,6 +5196,12 @@ let cached_analyze_proc (static_indices : Indexing.static_symbol list) (llc : t)
           an)
 
 let optimize_proc (input_ctx : optimize_ctx) static_indices llc =
+  (* gh-ocannl-584: the pipeline's entry gate for scope purity, ahead of the analysis cache so a
+     digest hit cannot skip it. Codegen's gate alone would not do: [hoist_cross_statement_cse] lifts
+     a body shared by sibling statements to a top-level [Declare_local] + body, which moves an impure
+     body's write out of any [Local_scope] -- past the later check, and executing once instead of
+     once per user statement. Catch it while it is still visibly a body. *)
+  validate_scope_bodies llc;
   specialize_proc input_ctx (cached_analyze_proc static_indices llc)
 
 let code_hum_margin = ref 100

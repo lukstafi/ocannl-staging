@@ -234,8 +234,7 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   `Context.compile ?prelowered` with `~name` and `Ir.Assignments.empty_comp` (gh-ocannl-562).
   It replaces the compile's lowering wholesale, so the analysis layer and the kernels see one IR;
   add `~lowered_transform:(fun o -> o)` to keep the default schedule annotator off hand-built code.
-  See `test/operations/prelowered_seam.ml`, and mind that scope bodies hoist ahead of the enclosing
-  statement while single-assignment scopes collapse into it (gh-ocannl-584).
+  See `test/operations/prelowered_seam.ml`, and mind the scope-purity contract below.
 - Such a hand-built case gets its differential arm for free: seed the *decision* into the
   `optimize_ctx` you hand `LL.optimize` (`Tn.Placements.update ctx.placements tn Tn.On_device prov`
   — what `Context.decide_materialized` does for the `Assignments` pipeline) and re-specialize the
@@ -259,6 +258,50 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   assignment under a too-wide range guard, a value omitting a symbol is constant along that axis
   under a wrong substitution, and a value colliding with the zero-init hides a dropped first
   iteration.
+- A `Local_scope` body's ONLY effect is on the locals it owns — its own scope id plus ids
+  `Declare_local`d lexically within it (gh-ocannl-584). Not a tensor node, not a sibling's or
+  enclosing scope's local, no `Workgroup_barrier`, no `Staged_compilation`. The reason is that a body
+  does not execute where it is written, in three different ways: `C_syntax.pp_scalar` returns it as
+  a local definition that `pp_local_defs` emits ahead of the enclosing statement ordered by
+  `scope_id`; `simplify_llc` collapses a single-assignment scope into the expression, moving its
+  reads the other way; and `hoist_cross_statement_cse` lifts a body shared by sibling statements to a
+  top-level `Declare_local` + body, running ONCE ahead of the first user. Purity makes all three
+  placements unobservable from outside the body, which is exactly what `Affine.path_before` assumes
+  when it refuses to order sibling `Arg` positions; the two would otherwise disagree. Purity governs
+  a body's EFFECTS, not its inputs — the hoist separately needs the body's reads untouched across
+  the statements it is lifted over, and its hazard check must cover scope locals (`Get_local` /
+  `Set_local`) as well as tensor nodes, or a shared body is lifted above a `Set_local` of a local it
+  reads and later users read a stale value (a real miscompile, pinned by `prelowered_seam` phase 5).
+  Bodies reading a local declared OUTSIDE them are ordinary pipeline output — CSE and the hoist
+  itself create them — so "a body may only read locals it owns" is not available as a rule.
+  `hoist_cross_statement_cse` is the ONLY pass that can move an effect out of a `Local_scope`
+  (`simplify_llc`'s collapse cannot match an impure body; CSE's dedup leaves the surviving
+  occurrence impure), so it guards its own precondition with `scope_purity_violation` and declines
+  to hoist an impure body, instead of every public door into `specialize_proc` needing a gate. That
+  is what keeps the raw analysis probes usable: an impure body reaching the pass would otherwise be
+  laundered to a top-level `Declare_local` + body, and `Context.compile ?prelowered` would compile a
+  silently changed routine. Rejected, never rewritten — pinned by `prelowered_seam` phase 6.
+  The contract governs a body's EFFECTS only; it deliberately says nothing about the ORDER of its
+  reads of other locals. A rule for that was written and reverted (gh-ocannl-584 review rounds 4-5):
+  deciding "is this local emitted before me?" means replicating codegen's emission algorithm
+  (`pp_local_defs` sorts by `scope_id`, per-statement def blocks, `Set_dynamic` concatenating two
+  operands' defs), and every divergence is a FALSE REJECTION of valid IR — three surfaced in one
+  review round, one of them rejecting CSE output inside a scope body, which the pipeline really
+  produces. What the rule would have caught (a hand-built read of a sibling emitted later) fails
+  loudly as a backend "use of undeclared identifier", not silently. If the guarantee is ever wanted,
+  it belongs in `pp_local_defs`, which HAS the emission order in hand and so cannot diverge from
+  it.
+  `Low_level.validate_scope_bodies` enforces it at BOTH ends of the pipeline: `optimize_proc` on the
+  way in (ahead of the analysis cache, so a digest hit cannot skip it — and before the hoist can
+  launder a body write into a top-level statement that no later gate would recognize) and
+  `C_syntax.compile_proc` on the way out (catching what a schedule transform constructs), the latter
+  ahead of `validate_parallel_classified` and NOT transported as an `Illegal_schedule` — no schedule
+  choice can rescue malformed IR. Its statement match is exhaustive with no catch-all, so a new
+  `Low_level.t` constructor breaks the build until someone classifies it as body-legal or not. The
+  pipeline complies by construction: `inline_computation` drops the inlined computation's `Set`s and
+  `Zero_out`s. The raw analysis entry points `analyze_proc`/`specialize_proc` deliberately do NOT
+  validate — they are the probes that must stay conservative on IR they may not trust
+  (`test/operations/affine_extraction.ml`); everything past them does.
 - A node-level "what happened at first touch" flag (`zero_initialized_by_code` and friends) cannot
   soundly drive a PER-OCCURRENCE codegen decision, because nothing clears it across the traversal: a
   guard keyed on it alone collapses `Zero_out; Set; Zero_out` to one zero and drops a `Zero_out`

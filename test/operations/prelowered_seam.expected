@@ -4,6 +4,20 @@ phase1: executed values match the hand-built formula: true
 phase2: X is classified read-before-write: true
 phase2: X is a routine input: true
 phase2: X is also a routine output: true
-phase2: Y = 2*X_in + 10 (the scope reads preserved the input): true
-phase2: X was overwritten by the sibling scope: true
+phase2: Y = 5*X_in (both scope operands read the input): true
+phase2: X was overwritten by the following statement: true
+phase3: the pipeline rejects a tensor-node write in a scope body: true
+phase3: the analysis entry points admit it (the documented probe boundary): true
+phase3: compiling the out-of-contract routine is rejected: true
+phase4: a Set_local of a local the body does not own is rejected: true
+phase4: a Set_local of a local the body declares is accepted: true
+phase4: a Workgroup_barrier in a scope body is rejected: true
+phase4: a Staged_compilation in a scope body is rejected: true
+phase4: the same constructs outside a scope body are accepted: true
+phase5: a shared body reading an untouched local is still hoisted (positive control): true
+phase5: a shared body whose local is written between users is not hoisted: true
+phase5: Y = [2; 4] — the second user sees the intervening write: true
+phase6: the analysis entry points admit two impure siblings: true
+phase6: the hoist declined, so the impure body is still inside its scope: true
+phase6: compiling the specialized routine is still rejected: true
 prelowered seam: PASS
