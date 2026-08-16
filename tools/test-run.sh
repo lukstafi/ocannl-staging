@@ -232,7 +232,7 @@ new_run() {
   # Every pre-launch metadata write is checked: a quota hit or squatter that
   # slipped through here would let the launch report success while status,
   # wait and the wrapper all operate on a run that cannot be tracked.
-  { printf '%s\n' "$*" >"$run_dir/cmd" &&
+  { { printf '%q ' "$@"; echo; } >"$run_dir/cmd" &&
     printf '%s\n' "$cap" >"$run_dir/cap" &&
     printf '%s\n' "$PWD" >"$run_dir/wt" &&
     : >"$run_dir/log"; } || die "cannot write run metadata in $run_dir"
@@ -315,7 +315,22 @@ lock_still_owned() {
 # timezone-formatted, so an unpinned rendering makes the same process print
 # differently from a shell in another TZ -- classifying a live run as dead
 # and letting stop refuse to reach it.
-ps_token() { LC_ALL=C TZ=UTC ps -o lstart= -p "$1" 2>/dev/null | tr -s ' '; }
+ps_token() {
+  # Linux: starttime in clock ticks from /proc/<pid>/stat -- lstart's
+  # one-second resolution cannot tell a pid recycled within the same second
+  # from the original. Elsewhere: lstart under a pinned locale/TZ.
+  if [ -r "/proc/$1/stat" ]; then
+    perl -e '
+      open my $fh, "<", "/proc/$ARGV[0]/stat" or exit 0;
+      my $s = <$fh>;
+      $s =~ /\)\s+(.*)$/ or exit 0;   # comm may contain spaces/parens
+      my @f = split /\s+/, $1;        # $f[0] is field 3 (state)
+      print defined $f[19] ? $f[19] : "";
+    ' "$1" 2>/dev/null
+  else
+    LC_ALL=C TZ=UTC ps -o lstart= -p "$1" 2>/dev/null | tr -s ' '
+  fi
+}
 
 proc_alive() { # pid-file token-file
   local pid tok now
@@ -392,6 +407,21 @@ publish_run() { # 0 published; 2 abandoned by the wrapper's timeout; 1 error
 claim_handoff() { # <published|expired>
   ( set -C; printf '%s\n' "$1" >"$run_dir/handoff" ) 2>/dev/null
 }
+
+# The run's metadata micro-lock: serializes the launcher's
+# {check-abandoned, write-pointers} critical section against the wrapper's
+# {mark-abandoned, release} -- the check and its consequential writes were
+# otherwise separate operations, and a launcher paused exactly between them
+# could overwrite a newer run's pointers however many markers existed.
+# Blocking flock; both sections are milliseconds.
+with_meta_lock() { # <cmd...>
+  (
+    exec 8>>"$run_dir/meta.lock" || exit 1
+    perl -e 'use Fcntl ":flock"; exit(flock(STDIN, LOCK_EX) ? 0 : 1)' <&8 || exit 1
+    "$@"
+  )
+}
+mark_abandoned() { : >"$run_dir/pub_abandoned" 2>/dev/null || :; }
 
 resolve_run() {
   local ref=${1:-last}
@@ -621,9 +651,11 @@ case $sub in
         if [ "$hw" -gt 10 ]; then
           claim_handoff expired && break
           # Giving up on a claimed-but-never-completed publication: mark it
-          # ABANDONED first, so the launcher, however late it resumes, will
-          # refuse to write pointers under a lock that is about to pass on.
-          [ "$hw" -gt 70 ] && { : >"$run_dir/pub_abandoned" 2>/dev/null; break; }
+          # ABANDONED first (under the metadata lock, so it serializes with
+          # the launcher's check-and-write section), so the launcher,
+          # however late it resumes, refuses to write pointers under a lock
+          # that is about to pass on.
+          [ "$hw" -gt 70 ] && { with_meta_lock mark_abandoned; break; }
         fi
         sleep 1
       done
@@ -663,7 +695,7 @@ case $sub in
       if [ "${wrap_ids:-ok}" = bad ]; then
         pub_rc=1
       else
-        publish_run
+        with_meta_lock publish_run
         pub_rc=$?
       fi
       if [ "$pub_rc" = 0 ]; then
@@ -855,18 +887,19 @@ case $sub in
         printf '%s\n' "$out"
         return 0
       fi
-      # lsof lists OPENERS; where /proc exists, keep only pids whose
-      # descriptor on the lock file actually carries a lock (fdinfo shows a
-      # `lock:` FLOCK row). Elsewhere (macOS) the opener set is the accepted
-      # approximation -- there is no portable flock-holder API.
-      for p in $(lsof -t -- "$run_wt/.test-run.lock" 2>/dev/null); do
-        case $p in '' | *[!0-9]* | 0) continue ;; esac
-        if [ -d /proc ]; then
+      if [ -d /proc ]; then
+        # /proc/locks named nobody, yet the lock is held (inherited-only
+        # descriptions can be invisible there) -- sweep every process's
+        # fdinfo instead of depending on lsof, which need not be installed.
+        for pd in /proc/[0-9]*; do
+          p=${pd#/proc/}
           fd_holds_lock "$p" && printf '%s\n' "$p"
-        else
-          printf '%s\n' "$p"
-        fi
-      done
+        done
+        return 0
+      fi
+      # macOS: lsof lists OPENERS -- the accepted approximation, there being
+      # no portable flock-holder API.
+      lsof -t -- "$run_wt/.test-run.lock" 2>/dev/null
     }
     fd_holds_lock() { # Linux: does <pid> hold a FLOCK on the lock file NOW?
       perl -e '
