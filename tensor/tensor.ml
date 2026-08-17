@@ -770,6 +770,32 @@ let constant_fill ~debug values =
       Nd.set_flat_values nd values;
       (Some (Asgns.Reshape nd), None)
 
+(* Registers [values] as [tn]'s host initialization data (gh-ocannl-633). The buffer is shaped only
+   when forced, i.e. after shape inference: interior cells are filled row-major cycling over
+   [values] ([Constant_fill]'s in-kernel semantics; the [Total_elems] shape constraint pins the
+   element count to the values length, so cycling matters only for the 1-element [Constant] case,
+   which broadcasts), and padding regions are filled with the committed padding value, matching
+   [reset_padding_regions]. *)
+let register_small_constant_host_init tn values =
+  Ir.Host_inits.register tn
+    (lazy
+      (let prec = Lazy.force tn.Tn.storage_prec in
+       let dims = Lazy.force tn.Tn.dims in
+       let padding = Tn.get_padding tn in
+       let debug = "Host init for " ^ Tn.debug_name tn in
+       let nd = Nd.create_array ~debug prec ~dims ~padding in
+       let interior =
+         match padding with
+         | None -> dims
+         | Some (pads, _) ->
+             Array.map2_exn dims pads ~f:(fun d Ir.Ops.{ left; right } -> d - left - right)
+       in
+       let numel = Array.fold interior ~init:1 ~f:( * ) in
+       let size = Array.length values in
+       let flat = Array.init numel ~f:(fun i -> values.(i % size)) in
+       Nd.set_flat_values ?padding:(Option.map padding ~f:fst) nd flat;
+       nd))
+
 let ndarray ?(grad_spec = Prohibit_grad) values ?(label = []) ?top_down_prec ?batch_dims ?batch_axes
     ?input_dims ?output_dims ?input_axes ?output_axes ?deduced () =
   let num_label =
@@ -794,6 +820,16 @@ let ndarray ?(grad_spec = Prohibit_grad) values ?(label = []) ?top_down_prec ?ba
      stick as [Effectively_constant] there; the explicit marker carries the constancy (consumed by
      hoisted operand packing, gh-ocannl-470). *)
   Tn.set_host_constant t.value;
+  (* gh-ocannl-633: a below-threshold literal keeps its in-kernel init (the recipe virtualization
+     inlines), but its values are also registered as host-init data like the ndarray-backed path
+     above the threshold: a lineage that materializes the node drops the in-kernel init and
+     self-initializes at link time from this entry
+     ([Low_level.hosted_constant_inits_to_link_time]), and hoisted operand packing
+     ([Schedule.hoistable_constant]) can read the values below the size cutoff. *)
+  (match fetch_op with
+  | Some (Asgns.Constant _ | Asgns.Constant_fill _) ->
+      register_small_constant_host_init t.value values
+  | _ -> ());
   let max_abs = Array.fold values ~init:0. ~f:(fun acc v -> Float.(max acc @@ abs v)) in
   Ir.Ops.(
     if exceeds_fp16_cutoff max_abs then

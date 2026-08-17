@@ -29,15 +29,12 @@ let unset_config key = Hashtbl.remove Utils.config_file_args key
 
 (* A fresh computation per compile: tensors carry their memory modes and lowering results, so a
    second compile of the same graph would not re-decide anything. [a]'s eight values are small
-   enough to be filled by generated code under the default [limit_constant_fill_size], which is what
-   gives the code-borne flip below something to act on. *)
-let canonical_of ctx =
-  let a =
-    TDSL.ndarray [| 1.; 2.; 3.; 4.; 5.; 6.; 7.; 8. |] ~label:[ "dif_a" ] ~output_dims:[ 8 ] ()
-  in
-  let%op b = a *. a in
-  let%op c = b + b in
-  let comp = Train.forward c in
+   enough to be filled by generated code under the default [limit_constant_fill_size]; read twice
+   per cell, placement materializes it, and gh-ocannl-633 then moves its initialization to the
+   link-time host-init upload in EVERY regime — the convergence probe below. [b] read twice by [c]
+   is the code-borne flip's substrate: the visit cap decides whether it inlines into its readers or
+   materializes. *)
+let canonical_of_comp ctx comp =
   let canon = ref None in
   let _ctx, _routine =
     Context.compile
@@ -48,13 +45,21 @@ let canonical_of ctx =
   in
   Option.value_exn ~here:[%here] !canon
 
+let canonical_of ?(materialized_constant = false) ctx =
+  let a =
+    TDSL.ndarray [| 1.; 2.; 3.; 4.; 5.; 6.; 7.; 8. |] ~label:[ "dif_a" ] ~output_dims:[ 8 ] ()
+  in
+  let b = TDSL.O.(if materialized_constant then a *. a else relu a) in
+  let c = TDSL.O.(b + b) in
+  canonical_of_comp ctx (Train.forward c)
+
 (* The key is a function of the canonical form and the current configuration, so a knob that cannot
    touch the code is answered without recompiling. *)
 let key_of ctx canon =
   SC.cache_key ~limits:(Context.hardware_limits ctx) canon ~backend:(Context.backend_name ctx)
 
-let identity_of ctx =
-  let canon = canonical_of ctx in
+let identity_of ?materialized_constant ctx =
+  let canon = canonical_of ?materialized_constant ctx in
   (SC.digest canon, key_of ctx canon)
 
 let () =
@@ -66,16 +71,28 @@ let () =
     (let digest1, key1 = identity_of ctx in
      String.equal digest0 digest1 && String.equal key0 key1);
 
-  (* Code-borne: below the limit a constant tensor is filled by generated code, above it from a
-     host array — a different program either way. *)
-  set_config "limit_constant_fill_size" "1";
-  p "the code-borne flip took effect"
-    (String.equal "1" (Utils.get_global_arg ~default:"" ~arg_name:"limit_constant_fill_size"));
+  (* Code-borne: the default precision shapes every fresh tensor the front end builds, hence the
+     code they lower to. Mutated in the ref, not the config file: the key is copied into
+     [Tensor.default_value_prec] at startup, so a config poke would flip nothing (the Codex P2
+     caution below). *)
+  let prec0 = !Tensor.default_value_prec in
+  Tensor.default_value_prec := Ir.Ops.double;
   let digest_v, key_v = identity_of ctx in
-  unset_config "limit_constant_fill_size";
-  p "a code-borne knob (limit_constant_fill_size) changes the digest"
-    (not (String.equal digest0 digest_v));
+  Tensor.default_value_prec := prec0;
+  p "a code-borne knob (default_prec) changes the digest" (not (String.equal digest0 digest_v));
   p "and therefore the cache key" (not (String.equal key0 key_v));
+
+  (* gh-ocannl-633: [limit_constant_fill_size] is classified code-borne — it changes the
+     assignments the front end builds — but once placement MATERIALIZES a small constant (two
+     reads per cell exceed the default [virtualize_max_visits]), the in-kernel init moves to the
+     link-time host-init upload, so both regimes compile the same program and the identity
+     converges — a correct cache hit, not a missed separation. *)
+  let digest_m0, key_m0 = identity_of ~materialized_constant:true ctx in
+  set_config "limit_constant_fill_size" "1";
+  let digest_m1, key_m1 = identity_of ~materialized_constant:true ctx in
+  unset_config "limit_constant_fill_size";
+  p "a materialized constant compiles identically in both constant-fill regimes (gh-633)"
+    (String.equal digest_m0 digest_m1 && String.equal key_m0 key_m1);
 
   (* Keyed, backend-independent: the index/pool-slot width is read when a kernel is emitted. *)
   let large_models0 = Utils.settings.large_models in
