@@ -2181,6 +2181,12 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
     | Embed_index _ -> llsc
     | Ternop (op, (llv1, prec1), (llv2, prec2), (llv3, prec3)) ->
         Ternop (op, (loop llv1, prec1), (loop llv2, prec2), (loop llv3, prec3))
+    (* Review round 9: a projection's discarded operand is never evaluated — do not descend into
+       it (attempting to inline a merge-tainted inherited virtual there would raise for code
+       that never runs); collapse to the selected operand, mirroring [simplify_llc]'s Arg1/Arg2
+       arms — the renderers emit the selected operand alone either way. *)
+    | Binop (Arg1, (llv1, _), _) -> loop llv1
+    | Binop (Arg2, _, (llv2, _)) -> loop llv2
     | Binop (op, (llv1, prec1), (llv2, prec2)) -> Binop (op, (loop llv1, prec1), (loop llv2, prec2))
     | Unop (op, (llsc, prec)) -> Unop (op, (loop llsc, prec))
   in
@@ -5557,23 +5563,26 @@ let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
     match sc with
     | Constant _ | Constant_bits _ | Embed_index _ | Get_local _ -> ()
     | Get_merge_buffer (source, _) ->
-        (match merge_node with
-        | Some m when Tn.equal m source -> ()
-        | _ ->
-            raise
-              (Utils.User_error
-                 [%string
-                   "an inlined cross-routine computation reads the merge buffer of \
-                    %{Tn.debug_name source}, which is not this routine's declared merge node: \
-                    merge-buffer contents are transient to the routine receiving the transfer, \
-                    so a computation reading them must not be deferred across routines. Mark the \
-                    node computed from the merge buffer as materialized (e.g. via \
-                    Train.set_materialized) in the routine that reads the transfer."]));
-        (* The SOURCE deliberately does not enter [accessed]: the merge buffer is the parameter,
-           and an ordinary traced entry for the source would mint a duplicate buffer through
-           [C_syntax.compile_proc]/[allocate_delta] — the raw tracer records only [merge_node]
-           (review round 5). *)
-        uses_merge := true
+        (* Dead merge reads mirror the raw tracer's dead-body skip (review round 9): the read
+           never executes, so it neither validates against the declared merge node nor keeps the
+           declaration alive. The SOURCE deliberately does not enter [accessed] in either case:
+           the merge buffer is the parameter, and an ordinary traced entry for the source would
+           mint a duplicate buffer through [C_syntax.compile_proc]/[allocate_delta] — the raw
+           tracer records only [merge_node] (review round 5). *)
+        if live then (
+          (match merge_node with
+          | Some m when Tn.equal m source -> ()
+          | _ ->
+              raise
+                (Utils.User_error
+                   [%string
+                     "an inlined cross-routine computation reads the merge buffer of \
+                      %{Tn.debug_name source}, which is not this routine's declared merge node: \
+                      merge-buffer contents are transient to the routine receiving the transfer, \
+                      so a computation reading them must not be deferred across routines. Mark \
+                      the node computed from the merge buffer as materialized (e.g. via \
+                      Train.set_materialized) in the routine that reads the transfer."]));
+          uses_merge := true)
     | Get (tn, _) -> read ~live tn
     | Get_dynamic { tn; dyn_value = v, _; _ } ->
         scalar ~live v;

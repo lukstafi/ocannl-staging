@@ -1048,7 +1048,56 @@ let phase5 () =
        [
          Array.init dim ~f:(fun i -> 600. +. Float.of_int i);
          Array.init dim ~f:(fun i -> 500. +. Float.of_int i);
-       ])
+       ]);
+  (* Review round 9, P2: the CONSUMER's own projection around an inherited virtual — the
+     discarded operand is never evaluated, so a merge-tainted deferred node there must not
+     reject the routine. virtual_llc collapses Arg1/Arg2 to the selected operand (mirroring
+     simplify), so the discarded inline is never attempted; mv is the merge-tainted deferred
+     node from the merge-splice pins above, on the same lineage. *)
+  let ell16 = mk "ell16" in
+  materialize ell16;
+  let out19 = mk "prjout3" in
+  materialize out19;
+  let llc_b14 =
+    let s = sym () in
+    loop_n s dim
+      (set out19 [| iter s |]
+         (binop Ir.Ops.Arg2 (get mv [| iter s |]) (get ell16 [| iter s |])))
+  in
+  let o_b14 =
+    LL.optimize ctx2 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_proj3_b" [] llc_b14
+  in
+  let ell16_vals = Array.init dim ~f:(fun i -> 71. +. Float.of_int i) in
+  let got14 =
+    execute ~name:"vcf_proj3_b" o_b14
+      ~seed:[ (ell16, ell16_vals); (out19, blank dim) ]
+      ~read:[ out19 ]
+  in
+  p "consumer projection: tainted node in the discarded operand is legal, values project"
+    (same got14 [ ell16_vals ]);
+  (* Review round 9, P2: a merge read inside a DEAD loop mirrors the raw tracer's dead-body skip
+     — it neither validates against the declared merge node nor keeps a declaration alive. The
+     routine's live merge read of msrc5 stays the declared node while the dead read of msrc6 is
+     ignored. *)
+  let msrc5 = mk "msrc5" in
+  materialize msrc5;
+  let msrc6 = mk "msrc6" in
+  materialize msrc6;
+  let mtar2 = mk "mtar2" and mtar3 = mk "mtar3" in
+  materialize mtar2;
+  materialize mtar3;
+  let ctx14 = LL.empty_optimize_ctx () in
+  let llc_m5 =
+    let s = sym () and sd = sym () in
+    seq
+      (loop_n s dim (set mtar2 [| iter s |] (LL.Get_merge_buffer (msrc5, [| iter s |]))))
+      (loop ~upto:(-1) sd (set mtar3 [| iter sd |] (LL.Get_merge_buffer (msrc6, [| iter sd |]))))
+  in
+  let o_m5 =
+    LL.optimize ctx14 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_merge_dead" [] llc_m5
+  in
+  p "dead merge read: ignored, the live declaration stands"
+    (match o_m5.LL.merge_node with Some m -> Tn.equal m msrc5 | None -> false)
 
 (* === Phase 6: deferral-only comp through the ordinary pipeline (review round 3) === *)
 

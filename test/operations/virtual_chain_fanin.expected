@@ -78,6 +78,8 @@ discarded-splice: executed values are the projected operand's: true
 dominated-guard splice: routine A defers v15: true
 dominated-guard splice: the same-guard write covers, leaf15 is not an input: true
 dominated-guard splice: taken branch writes then consumes: true
+consumer projection: tainted node in the discarded operand is legal, values project: true
+dead merge read: ignored, the live declaration stands: true
 pipeline deferral-only: links and runs as a no-op on a fresh context: true
 pipeline deferral-only: the target stayed virtual: true
 pipeline consumer on a w2-less chain: rejected at link (spliced input demanded): true
