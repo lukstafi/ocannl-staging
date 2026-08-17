@@ -745,6 +745,74 @@ let () =
     skipped "edge-extent tensorized matmul matches the serial twin bitwise";
     skipped "edge-extent register tiling with peeled edges");
 
+  (* --- Extent-adapted tile width (gh-ocannl-575): an 8x40 output. The C-tile width [rn * lanes] is
+     chosen against the actual column extent rather than pinned at the register-pressure cap, so a
+     width that divides 40 wins over the widest one: 5 vectors at NEON's 4 f32 lanes, 1 at AVX2's 8,
+     either way covering all 40 columns instead of peeling 16 of them into the scalar loop (the cap
+     would take 24 on both). The peel is what the measurement on native-fp16 hardware showed to be
+     the dominant cost -- 3.6x on a pure-fp16 n = 512 GEBP -- so the pin is [n_full = n]. Bitwise
+     against the serial twin either way: the peeled columns' chains are the same fused serial-k
+     chains, just rendered scalar. --- *)
+  if not on_gpu then (
+    let wi = 8 and wk = 8 and wj = 40 in
+    (* Both operands must vary with BOTH their axes or the oracle stops discriminating: a modulus
+       dividing the row stride makes every reduction row identical, and a mis-indexed k read then
+       still matches the serial twin (Codex P1 on PR #357). 11 and 13 are coprime to the strides
+       (8 and 40), so all 8 rows and all 8 columns of each operand differ — and so do all 8 rows of
+       the product, whose columns take 13 distinct values, more than any tile width in play. The
+       values stay exactly representable (multiples of 1/32 throughout). *)
+    let wav = Array.init (wi * wk) ~f:(fun x -> Float.of_int (x % 11) *. 0.125) in
+    let wbv = Array.init (wk * wj) ~f:(fun x -> (Float.of_int (x % 13) -. 6.) *. 0.25) in
+    let wa = TDSL.ndarray wav ~label:[ "wa" ] ~input_dims:[ wk ] ~output_dims:[ wi ] () in
+    let wb = TDSL.ndarray wbv ~label:[ "wb" ] ~input_dims:[ wj ] ~output_dims:[ wk ] () in
+    let%op wc0 = wa * wb in
+    let ctx_w0 = Context.auto () in
+    let ctx_w0, routine_w0 =
+      Context.compile
+        ~lowered_transform:(fun opt -> opt)
+        ctx_w0
+        (named "mm_width_serial" (Train.forward wc0))
+        Ir.Indexing.Empty
+    in
+    let ctx_w0 = Context.run ctx_w0 routine_w0 in
+    let got_width_serial =
+      nonzero "mm_width_serial" (Context.get_values ctx_w0 wc0.Tensor.value)
+    in
+    let%op wc1 = wa * wb in
+    let width_schedule (opt : LL.optimized) : Sched.schedule =
+      let paths = nest_paths opt.LL.llc in
+      let i, j, k =
+        match List.find_exn paths ~f:(fun p -> List.length p = 3) with
+        | [ i; j; k ] -> (i, j, k)
+        | _ -> assert false
+      in
+      let ez, zsyms = Sched.expand_zero ~tn:wc1.Tensor.value in
+      let zj = match zsyms with [ _; zj ] -> zj | _ -> assert false in
+      let rz = Sched.Retype { axis = zj; ty = LL.Workgroup } in
+      let tz, _lane = Sched.tensorize ~i ~j ~k ~simd_width:wj in
+      [ ez; rz; tz ]
+    in
+    let transform_w opt = Sched.apply (width_schedule opt) opt in
+    let ctx_w = Context.auto () in
+    let ctx_w, routine_w =
+      Context.compile ~lowered_transform:transform_w ctx_w
+        (named "mm_width_mma" (Train.forward wc1))
+        Ir.Indexing.Empty
+    in
+    let ctx_w = Context.run ctx_w routine_w in
+    let got_width = Context.get_values ctx_w wc1.Tensor.value in
+    p "extent-adapted tensorized matmul matches the serial twin bitwise"
+      (Array.for_all2_exn got_width got_width_serial ~f:Float.equal);
+    match read_generated "mm_width_mma" with
+    | None -> p "extent-adapted tile width covers the column extent" false
+    | Some src ->
+        let has s = String.is_substring src ~substring:s in
+        p "extent-adapted tile width covers the column extent"
+          (has "Tile_mma register tiling" && has "full blocks 8x40 of 8x40"))
+  else (
+    skipped "extent-adapted tensorized matmul matches the serial twin bitwise";
+    skipped "extent-adapted tile width covers the column extent");
+
   (* --- The staged + tensorized composition (lane-aware Stage): shared tiles for ma and mb,
      cooperatively loaded under fresh extent-32 Workgroup lane loops, then the micro-kernel
      tensorized. Loop order after the swaps is i_o(Grid) { k_o { i_i { j { k_i } } } }, so both

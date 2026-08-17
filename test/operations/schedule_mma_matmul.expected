@@ -29,6 +29,8 @@ f8_tb tensorized matmul matches the serial twin bitwise: true
 f8_tb tensorized structure as expected: true
 edge-extent tensorized matmul matches the serial twin bitwise: true
 edge-extent register tiling with peeled edges: true
+extent-adapted tensorized matmul matches the serial twin bitwise: true
+extent-adapted tile width covers the column extent: true
 staged+tensorized matmul parity (GPU) or clean rejection (CPU): true
 staged+tensorized structure as expected: true
 staged+tensorized half matmul matches the serial twin: true

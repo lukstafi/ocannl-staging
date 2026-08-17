@@ -907,6 +907,20 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   identities out of the fp16 constant guard's scope); the runner-side workaround they replaced —
   pinning the softmax at f32 and materializing the masked scores — is gone, so do not
   reintroduce a pin for a constant the library now keeps representable.
+- Before comparing two vector renderings, check that neither is measuring its SCALAR PEEL
+  (gh-ocannl-575). `try_register_tile` covers `n - (n mod bw)` columns and peels the rest to scalar
+  code, and a peeled column costs roughly a whole vector slot — so at a width that does not divide
+  the extent, the peel can be most of the runtime. This bit the pure-fp16 vs f32-compute comparison
+  exactly backwards: doubling the lane count doubles `bw` too, and at n = 512 the wider tile peeled
+  32 columns where the f32 one peeled 8, reading as "fp16 arithmetic is 1.5x slower" when it is
+  1.6-1.8x faster. The tile width now adapts to the extent, but the general trap outlives the fix:
+  when a change moves lane counts, tile widths, or blocking factors, benchmark at extents ALL arms
+  divide evenly (or sweep the geometry) before attributing a difference to arithmetic. Power-of-two
+  extents are not automatically safe — they are multiples of no odd width.
+- Single-threaded microbenchmarks on Apple Silicon read ~40% high on the first run of a cold
+  machine and settle once runs are back-to-back (core-cluster placement and clock behavior). Take
+  the median of several warm repetitions; a lone run after an idle gap is not comparable to one
+  taken mid-sweep.
 
 ## Build and test mechanics
 
