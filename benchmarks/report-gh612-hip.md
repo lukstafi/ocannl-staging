@@ -12,7 +12,7 @@ pre-both baseline.
 **Verdict: both fixes pay off on this device, and both of the issue's predicted line items are
 confirmed to ~1% in absolute terms — but neither of their *shares* survives, because the
 denominator moved 1.44x underneath them. Against the re-established denominator gh-574 is worth
-1.30x and gh-573 a further 1.32x on the default-placement arm, 1.71x composed: kernel time goes
+1.30x and gh-573 a further 1.31x on the default-placement arm, 1.71x composed: kernel time goes
 32.33 → 18.88 ms, and the five kernels that were 47.2% of the gh-569 step are now 6.8%.**
 
 The two predictions in detail, because the distinction between "the absolute cost was right" and
@@ -248,11 +248,13 @@ the fission is finer. The interaction is not hypothetical; it is 2.6 ms in both 
 
 ## Part 3 — the gh-573 arm: `virtualize_max_inline_fanin` −1 vs 8
 
-A config flip on one tree. Code-borne, so each value is a fresh compile.
+A config flip on one tree. Code-borne, so each value is a fresh compile. The rows below are this
+arm's **three order-balanced reps**; Part 4 pools all six reps of cap 8 and so quotes slightly
+different medians (60.93 untuned, 18.67 step) from the same runs plus three more.
 
 | | cap −1 (before) | cap 8 (after) | |
 |---|---:|---:|---|
-| **arm A per-kernel profile** | **24.82 ms** / 135 kernels | **18.89 ms** / 136 kernels | **1.32x** (−23.9%) |
+| **arm A per-kernel profile** | **24.82 ms** / 135 kernels | **18.89 ms** / 136 kernels | **1.31x** (−23.9%) |
 | **untuned-default pipeline**, 3 reps | 65.63 / 65.48 / 65.59 | **61.31 / 60.94 / 60.86** | **1.076x** (−4.65 ms) |
 | shipped step p50, 3 reps | 18.94 / 22.48 / 20.86 | 18.98 / 18.82 / 18.50 | 1.11x — **not claimed** |
 | arm the search shipped | B, B, B | A, A, A | — |

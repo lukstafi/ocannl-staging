@@ -217,7 +217,7 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   [report-gh612-hip.md](report-gh612-hip.md) (WSL2/HIP on gfx1151 — its successor, and the
   measurement of gh-ocannl-573's fanin guard and gh-ocannl-574's `arity_cuts` finer fission in one
   session against a re-established denominator: both predicted line items reproduce to ~1% in
-  absolute terms while neither share survives, 1.30x and 1.32x on the default-placement arm, kernel
+  absolute terms while neither share survives, 1.30x and 1.31x on the default-placement arm, kernel
   time 32.33 → 18.88 ms — also the reference for why a share is a share of a placement and a tree,
   for the fact that any `virtualize_max_inline_fanin` ≥ 16 never fires on a 4-layer model, and for
   the three-instrument discipline (per-kernel profile 0.08–1.6%, untuned-default 0.2–0.7%, shipped

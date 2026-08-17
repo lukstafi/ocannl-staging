@@ -19,7 +19,15 @@
 #
 # Results land under $OUT_ROOT/<label>/r<rep> (default /tmp/gh612).
 set -u
+# Every subcommand `cd`s into a checkout, so any caller-supplied path that has to survive that cd
+# must be absolutized HERE, before the first cd — a relative OUT_ROOT (or <tree>) would otherwise be
+# created next to the invocation directory and then re-resolved inside the checkout, and the first
+# redirection into it fails. FIXTURE is the deliberate exception: it is relative to <tree>/benchmarks,
+# which is exactly where the runner is invoked from.
 OUT_ROOT=${OUT_ROOT:-/tmp/gh612}
+mkdir -p "$OUT_ROOT"
+OUT_ROOT=$(cd "$OUT_ROOT" && pwd)
+abspath() { case $1 in /*) echo "$1" ;; *) (cd "$1" && pwd) ;; esac; }
 PIN=${PIN:-taskset -c 0-15}
 FIXTURE=${FIXTURE:-fixtures/gpt2_mini.safetensors}
 ARCH=${ARCH:-gfx1151}
@@ -34,6 +42,7 @@ cell_dir() { echo "$OUT_ROOT/$1/r$2"; }
 
 cmd_search() {
   local tree=$1 label=$2 rep=$3; shift 3
+  tree=$(abspath "$tree")
   local out; out=$(cell_dir "$label" "$rep")
   rm -rf "$out"; mkdir -p "$out"            # mkdir BEFORE any redirection into it
   cd "$tree/benchmarks" || exit 1
@@ -55,6 +64,7 @@ cmd_search() {
 # Arm A compiles first and arm B overwrites the same path, so snapshot by polling on content.
 cmd_snap() {
   local tree=$1 label=$2 rep=$3; shift 3
+  tree=$(abspath "$tree")
   local out; out=$(cell_dir "$label" "$rep")
   local snap="$out/armsnap"; rm -rf "$snap"; mkdir -p "$snap"
   cd "$tree/benchmarks" || exit 1
@@ -109,6 +119,7 @@ EOF
 
 cmd_profile() {
   local tree=$1 label=$2 rep=$3 n=${4:-3}
+  tree=$(abspath "$tree")
   local out; out=$(cell_dir "$label" "$rep")
   local src; src=$(cat "$out/armA.path")
   cd "$tree/benchmarks" || exit 1
@@ -188,6 +199,7 @@ cmd_sweep() {
 
 cmd_roofline() {
   local tree=$1
+  tree=$(abspath "$tree")
   cd "$tree" || exit 1                      # roofline_hip.cpp path is relative to the TREE ROOT
   hipcc --offload-arch="$ARCH" -O3 -o "$OUT_ROOT/roofline" benchmarks/roofline_hip.cpp \
         -I/opt/rocm/include -L/opt/rocm/lib -lrocblas || exit 1
@@ -195,7 +207,6 @@ cmd_roofline() {
   $PIN "$OUT_ROOT/roofline"
 }
 
-mkdir -p "$OUT_ROOT"
 sub=${1:-}; shift || true
 case $sub in
   search)   cmd_search   "$@" ;;
