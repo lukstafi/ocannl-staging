@@ -523,6 +523,13 @@ type optimized = {
           the whole-routine list). Excluded: nodes never assigned or never read, scalar constexprs
           and pure one-hot selector producers, and nodes placed by legality, intent or
           observability rather than the heuristic policy. *)
+  spliced_rbw : Set.M(Tnode).t;
+      (** gh-610 review round 6: the nodes whose [read_before_write] was set by the FINAL-code
+          reconciliation (a spliced read preceding, or not definitely covered by, the routine's
+          own writes) — as opposed to the raw analysis' uncovered-read classification, which also
+          flags every pure input. [Backends]' prior-context demand keys on this set: a
+          reconcile-flipped node's entry value must already live in the linked context, while
+          raw-classified inputs keep the assignments layer's curated exclusions. *)
 }
 [@@deriving sexp_of]
 
@@ -616,7 +623,9 @@ val input_and_output_nodes : optimized -> (Set.M(Tnode).t * Set.M(Tnode).t) * Tn
 (** Inputs are the materialized read-only and read-before-write (within the code) non-constant
     non-merge nodes. They are inputs in a broad sense, as they could be recurrent nodes or
     parameters. Outputs are all the materialized nodes written-to by the code. The last returned
-    component is the input merge node, if used in the code. *)
+    component is the input merge node, if used in the code. Reads entering the code only through a
+    cross-routine inlined computation count: the traced store is completed from the final
+    optimized code (gh-610). *)
 
 val loop_bounds : t -> (Indexing.symbol * (int * int)) list
 (** All [For_loop] bindings within the code (loop symbols are unique within a routine), with

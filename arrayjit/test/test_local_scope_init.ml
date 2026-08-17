@@ -29,6 +29,7 @@ let make_optimized llc =
       pipelined = Base.Map.empty (module Tn);
       zero_fringe = Base.Set.empty (module Tn);
       flip_candidates = [];
+      spliced_rbw = Base.Set.empty (module Tn);
     }
 
 let pp llc =

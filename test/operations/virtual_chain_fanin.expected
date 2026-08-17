@@ -24,6 +24,71 @@ cross-routine: routine A leaves x1..x5 virtual: true
 cross-routine: x7 stays virtual: true
 cross-routine: x8 materialized by the fan-in cap: true
 cross-routine: x9 and x10 virtual: true
+cross-routine: executed values match the reference: true
 cross-routine update: x6 stays virtual (fan-in 8, prefix counted through the update): true
 cross-routine update: x7 materialized by the fan-in cap: true
 cross-routine update: x8 virtual past the reset: true
+all-virtual: routine A optimizes to an empty schedule: true
+all-virtual: the empty schedule has an empty interface: true
+all-virtual: x1..x5 committed virtual: true
+all-virtual: the deferred computations persist in the lineage: true
+all-virtual: routine A compiles and runs as a no-op: true
+all-virtual: fan-in decisions unchanged in routine B (x8 trips the cap): true
+all-virtual: routine B declares the spliced leaves as inputs: true
+all-virtual: executed values match the reference: true
+pre-write splice: routine A defers v: true
+pre-write splice: ell flips to read_before_write: true
+pre-write splice: ell is an input of routine B: true
+pre-write splice: out sees the incoming ell, ell holds the overwrite: true
+merge splice: routine A defers the merge-reading node: true
+merge splice: the deferred-away merge declaration is dropped from routine A: true
+merge splice: consuming it in a later routine is rejected: true
+merge splice: same-source consumer is rejected too: true
+same-routine merge read: source is the merge param, not an ordinary entry: true
+partial-write splice: routine A defers v2: true
+partial-write splice: ell2 stays read_before_write (per-cell coverage): true
+partial-write splice: ell2 is an input of routine B: true
+partial-write splice: uncovered cells read the incoming values: true
+dead-write splice: routine A defers v3: true
+dead-write splice: ell3 is read-before-write (a dead write supplies no coverage): true
+dead-only mention: dead code is dropped wholesale, nothing registered: true
+dead-write splice: out sees incoming ell3, ell3 holds the live overwrite: true
+discarded operand: routine A defers v5: true
+discarded operand: no phantom input from the discarded read: true
+discarded operand: executed values are the projected operand's: true
+guarded-write splice: routine A defers v7: true
+guarded-write splice: ell7 stays read_before_write (guarded write is not definite): true
+guarded-write splice: ell7 is an input of routine B: true
+guarded-write splice, false branch: the entry values are observed: true
+guarded-write splice, true branch: the overwrite is observed: true
+same-position splice: routine A defers v9: true
+same-position splice: ell9 is read-before-write (rmw is not exempt from the interface): true
+same-position splice: updated in place over the incoming values: true
+sibling merge: v10 stays virtual in the shared loop: true
+sibling merge: consuming v10 is legal, only its own setter's reads splice: true
+update splice: routine A defers v12: true
+update splice: ell12 is read-before-write despite the local v12 assignment: true
+update splice: out sees the pre-overwrite leaf through the updated computation: true
+raw-read isolation: routine A defers v13: true
+raw-read isolation: ew keeps its raw guards-taken verdict (not an input): true
+raw-read isolation: executed values match on the taken branch: true
+discarded-splice: routine A defers v14: true
+discarded-splice: extra3 keeps its raw verdict (discarded operand did not splice it): true
+discarded-splice: executed values are the projected operand's: true
+dominated-guard splice: routine A defers v15: true
+dominated-guard splice: the same-guard write covers, leaf15 is not an input: true
+dominated-guard splice: taken branch writes then consumes: true
+consumer projection: tainted node in the discarded operand is legal, values project: true
+dead merge read: ignored, the live declaration stands: true
+dead-taint: routine A defers v16: true
+dead-taint: consuming is legal, the live component's values splice: true
+failed-inline: routine A defers v17: true
+failed-inline: consuming at an un-inlinable site fails actionably: true
+dynamic-table: routine A defers v18: true
+dynamic-table: inherited table is rejected actionably: true
+dead-consumer splice: tainted reference in dead code is legal, live values flow: true
+pipeline deferral-only: links and runs as a no-op on a fresh context: true
+pipeline deferral-only: the target stayed virtual: true
+pipeline consumer on a w2-less chain: rejected at link (spliced input demanded): true
+pipeline incremental arc: compute leaf, defer, consume — matches the reference: true
+pipeline write-mentioned spliced leaf: demanded despite the embedded-write mention: true

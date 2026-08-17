@@ -597,10 +597,26 @@ let%debug3_sexp verify_prior_context ~(plc : Tn.Placements.t) ~ctx_arrays ~from_
       then raise @@ Utils.User_error ("The linked context lacks node " ^ Tnode.debug_name tn))
 
 let%debug3_sexp from_prior_context_batch ~(plc : Tn.Placements.t)
-    (comps : Assignments.comp option array) : Tn.t_set =
-  Array.filter_map comps ~f:(fun comp ->
-      Option.map comp ~f:(fun comp ->
-          Set.diff (Assignments.context_nodes ~plc comp.Assignments.asgns) comp.embedded_nodes))
+    (comps : (Assignments.comp * Low_level.optimized) option array) : Tn.t_set =
+  (* Filtered per comp by its own reconciled traced store, like the single-compile path: the raw
+     assignments over-approximate what the residual schedule needs (gh-ocannl-611, round 3). *)
+  Array.filter_map comps ~f:(fun pair ->
+      Option.map pair ~f:(fun (comp, lowered) ->
+          let raw =
+            Set.diff (Assignments.context_nodes ~plc comp.Assignments.asgns) comp.embedded_nodes
+            |> Set.filter ~f:(Hashtbl.mem lowered.Low_level.traced_store)
+          in
+          match comp.Assignments.asgns with
+          | Assignments.Noop -> raw
+          | _ ->
+              let (inputs, _), _ = Low_level.input_and_output_nodes lowered in
+              let reads, writes = Assignments.collect_nodes_guess_output comp.Assignments.asgns in
+              let mentioned = Set.union reads writes in
+              let demanded =
+                Set.filter inputs ~f:(fun tn ->
+                    (not (Set.mem mentioned tn)) || Set.mem lowered.Low_level.spliced_rbw tn)
+              in
+              Set.union raw demanded))
   |> Array.fold ~init:(Set.empty (module Tnode)) ~f:Set.union
 
 (** Adds a scheduler and brings a lowered no-device backend on par with lowered device backends. *)
@@ -869,11 +885,47 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
           (Either.Second { batch; count = List.length segments }, lowered)
     in
     (* Placements of all context nodes are settled by codegen (the [compile] just above), so this
-       query resolves against the code's own lineage fork. *)
+       query resolves against the code's own lineage fork. The raw assignments over-approximate
+       what the RESIDUAL schedule needs — a deferral-only routine reads nothing at run time, so
+       linking it on a fresh context must not demand its deferred computations' leaves
+       (gh-ocannl-611, review round 3). The reconciled traced store is exactly the final
+       schedule's node registry, so it is the filter. *)
     let from_prior_context : Tn.t_set =
-      Set.diff
-        (Assignments.context_nodes ~plc:lowered.Low_level.optimize_ctx.placements comp.asgns)
-        comp.embedded_nodes
+      let raw =
+        Set.diff
+          (Assignments.context_nodes ~plc:lowered.Low_level.optimize_ctx.placements comp.asgns)
+          comp.embedded_nodes
+        |> Set.filter ~f:(Hashtbl.mem lowered.Low_level.traced_store)
+      in
+      (* Splicing reconciles in the OTHER direction too (round 5): leaves reaching the routine
+         only through an inlined cross-routine computation are absent from the raw assignments,
+         yet their entry values are required — without them, [verify_prior_context] would accept
+         a context where [allocate_delta] zero-fills the spliced inputs and the consumer
+         silently computes with zeros. The reconciled interface's inputs are exactly the
+         entry-value-matters nodes. Two deliberate bounds on the union: only inputs the raw
+         assignments never MENTION are added — a mentioned node's prior-context status is
+         already curated by [context_nodes]' exclusions (the random-seed and threefry nodes of
+         init comps are mentioned yet deliberately not demanded) — and only for a routine
+         CARRYING an assignments program, since [from_prior_context] is an assignments-layer
+         promise: a hand-built [?prelowered] routine (empty comp) supplies its inputs through
+         the context API after linking (the ll_test seed-then-run pattern). *)
+      match comp.asgns with
+      | Assignments.Noop -> raw
+      | _ ->
+          let (inputs, _), _ = Low_level.input_and_output_nodes lowered in
+          let reads, writes = Assignments.collect_nodes_guess_output comp.asgns in
+          let mentioned = Set.union reads writes in
+          (* A RECONCILE-FLIPPED read-before-write input overrides the mention filter (round 6):
+             a comp that writes a node AFTER consuming an inherited computation reading it
+             mentions the node only as a write, yet the splice needs its entry value. The key is
+             [spliced_rbw] — flips made against the FINAL code — not the raw flag: the raw
+             analysis also marks every pure input read-before-write, and demanding those broke
+             ndarray-literal and seed-node flows across the suite. *)
+          let demanded =
+            Set.filter inputs ~f:(fun tn ->
+                (not (Set.mem mentioned tn)) || Set.mem lowered.Low_level.spliced_rbw tn)
+          in
+          Set.union raw demanded
     in
     {
       from_prior_context;
@@ -915,7 +967,7 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
     in
     let from_prior_context =
       from_prior_context_batch ~plc:batch_plc
-      @@ Array.mapi lowereds ~f:(fun i -> Option.map ~f:(fun _ -> comps.(i)))
+      @@ Array.mapi lowereds ~f:(fun i -> Option.map ~f:(fun l -> (comps.(i), l)))
     in
     {
       from_prior_context;

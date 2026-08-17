@@ -129,6 +129,7 @@ let () =
         pipelined = Map.empty (module Ir.Tnode);
         zero_fringe = Set.empty (module Ir.Tnode);
         flip_candidates = [];
+    spliced_rbw = Base.Set.empty (module Ir.Tnode);
       }
     in
     fake

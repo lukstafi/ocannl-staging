@@ -5426,6 +5426,7 @@ let segment_optimized (full : Low_level.optimized) (llc : Low_level.t) : Low_lev
     pipelined = Map.filter_keys full.Low_level.pipelined ~f:(Set.mem tns);
     zero_fringe = Set.filter full.Low_level.zero_fringe ~f:(Set.mem tns);
     flip_candidates = full.Low_level.flip_candidates;
+    spliced_rbw = Set.filter full.Low_level.spliced_rbw ~f:(Set.mem tns);
   }
 
 (* Expand-and-annotate schedule for a segment of materialized whole-node [Zero_out]s (GPU): the

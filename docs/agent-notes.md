@@ -182,6 +182,70 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   phantom "accessible" nodes (this is how the cache was caught); (2) on a hit, still re-run
   `pin_device_written_bounds` — its raising writer-after-settled-reader guard must fire regardless
   of caching.
+- **The traced store is the routine's node registry, and it is RECONCILED with the FINAL
+  optimized code** (gh-ocannl-610): kernel parameters (`C_syntax.compile_proc`), context
+  allocation (`Backends.allocate_delta`) and the routine interface
+  (`Low_level.input_and_output_nodes`) all enumerate `optimized.traced_store`, which
+  `analyze_proc` builds from the RAW code — cross-routine inlining (a splice of a computation an
+  earlier routine committed `Virtual`) makes the two diverge in both directions.
+  `specialize_proc`'s `reconcile_traced_store` walks the final llc in program order and: gives
+  spliced-in nodes fresh `read_only` entries (codegen otherwise emits an undeclared identifier);
+  flips an already-traced node to `read_before_write` when a spliced read lands before the
+  routine's own first write, and re-judges reads AFTER a write with the same per-cell machinery
+  the raw pipeline uses (`reads_covered_query` over the final code's affine accesses, built
+  lazily) — syntactic priority is not coverage: a write of some cells or under an `If` covers
+  nothing it did not touch; prunes read-only entries the final code never touches (phantom
+  inputs of deferral-only routines) while KEEPING entries that record a raw write even when
+  unaccessed — out-of-contract probes (gh-ocannl-584 scope writes, `affine_extraction.ml`) check
+  raw decision-level facts, so the prune must stay no wider than the phantom-input genre; and
+  drops a raw-declared merge node whose read was deferred away (linking would otherwise demand a
+  transfer never consumed). Merge splices are rejected at CONSUMPTION time, not post-hoc:
+  `virtual_llc` snapshots which inherited computations read a merge buffer at entry (before the
+  walk stores this routine's own), and `inline_computation` raises on consuming one — the final
+  code cannot distinguish a legitimate same-routine inlining of the declared merge read from a
+  cross-routine splice whose consumer declares the SAME source, which would silently rebind the
+  read to the consumer's transfer; `reconcile_traced_store` keeps a mismatch check as backstop.
+  The walk observes the raw analysis' conventions or it re-diverges (review rounds 3-6):
+  dead-loop bodies register (renderers emit them, so their identifiers need parameters) but
+  neither supply coverage (`written_seen`) nor demand it, and the coverage query filters through
+  `drop_dead_loop_accesses` like the raw side; `Binop` dispatches through
+  `Ops.binop_conditionality` in both the reconcile walk and the merge-taint scan — a projection's
+  discarded operand is never rendered, so its reads are not parameters and its merge read must
+  not taint; the taint scan is `~self`-filtered like `inline_computation`'s own setter filter, or
+  a shared-loop sibling's merge read rejects valid sharing. The STRICT coverage verdicts —
+  guarded writes filtered (never definite), rmw exemption off (a same-position spliced read is a
+  genuine RMW), `zeroed_out` counted as written — apply PER NODE, to exactly the nodes read
+  inside INLINED bodies (`virtual_llc` records them at each `inline_computation` splice and
+  returns the set): splicing is what moves reads to positions the raw analysis never judged.
+  Raw-positioned reads keep the raw verdicts, whose lenient contracts deliberately classify
+  patterns initialized by an earlier routine of the program — routine-wide strictness broke
+  real flows across the suite, and a has-local-assignment provenance test for "inherited"
+  missed consumption through an update of an inherited virtual (rounds 6-7). `from_prior_context` (both `Backends.compile` and `from_prior_context_batch`)
+  reconciles in BOTH directions: the raw-assignments set is filtered by the reconciled traced
+  store (raw over-approximates the residual schedule — a deferral-only routine must link on a
+  fresh context) and, for routines carrying an assignments program, unioned with the reconciled
+  interface's inputs the raw asgns never MENTION (raw also UNDER-approximates: a consumer whose
+  asgns read only the virtual node would otherwise zero-fill its spliced leaves silently). Both
+  bounds on the union are load-bearing: mentioned nodes keep `context_nodes`' curated exclusions
+  (init comps' random-seed/threefry nodes are mentioned yet deliberately not demanded — the
+  unbounded union broke `Train.init_params` across the suite), and hand-built `?prelowered`
+  routines (empty comp) are exempt entirely — their inputs arrive via `Context.set_values` after
+  linking, the ll_test seed-then-run pattern. Reconcile-FLIPPED read-before-write nodes
+  (`optimized.spliced_rbw`) override the mention filter — a consumer that overwrites a spliced
+  leaf mentions it only as a write, yet the splice needs its entry value; the raw
+  `read_before_write` flag cannot serve as the key, since `decide_placements` also sets it on
+  every pure input (uncovered reads), and demanding those broke ndarray-literal flows. The merge SOURCE never gets an ordinary traced
+  entry (the merge buffer is the parameter; a source entry would double the transfer buffer's
+  allocation).
+  Related pre-existing quirk: `rmw_exempt` excuses copy-position reads from the coverage verdict
+  that feeds `read_before_write` (fine for multiplicity, questionable for the interface) —
+  gh-ocannl-618; the phase-5 partial-write test reads at an offset position to stay off it.
+  Corollary (gh-ocannl-611): a routine whose every statement virtualizes away is LEGAL —
+  cleanup's top-level elision degenerates to `Noop`, with an EMPTY interface — its stored
+  computations persist in the lineage for later consumers, so "compile a deferral-only routine"
+  is a supported incremental-compilation move. Whether deferred computations should observe
+  inputs mutated between deferral and consumption is gh-ocannl-617. The acceptance pins are
+  `test/operations/virtual_chain_fanin.ml` phases 3–5.
 - **A knob read after lowering cannot reach a digest over lowered code** — it must be carried by a
   cache-key component or the cache replays across regimes (gh-ocannl-568: 5.9x). So every config
   key is classified in `Utils.config_key_classification` as code-borne / `Keyed <component>` /
