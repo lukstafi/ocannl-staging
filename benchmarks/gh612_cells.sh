@@ -55,10 +55,11 @@ HERE=$(cd "$(dirname "$0")" && pwd)   # the driver's own directory: cmd_finger d
 EXE=../_build/default/benchmarks/runners/ocannl/bench_gpt.exe
 ROUTINE=cross_entropy_loss_fwd
 
-# The autotune cache dir is per label AND per rep, never shared. Two independent reasons, both
-# load-bearing: the cache key omits the Numerics policy (gh-ocannl-568), and a warm cache makes an
-# A/B vacuous by replaying the other arm's crowned schedule (report-gh481-cuda.md measured
-# compile_s 1.76 s warm against 29 s cold, with the "winner" being whatever the other arm found).
+# The autotune cache dir is per label AND per rep, never shared: a warm cache makes an A/B vacuous by
+# replaying the other arm's crowned schedule (report-gh481-cuda.md measured compile_s 1.76 s warm
+# against 29 s cold, with the "winner" being whatever the other arm found), and a rep that replays is
+# not an independent search. NOT because of cross-Numerics aliasing -- gh-ocannl-568 fixed that and
+# `numerics` is a Schedule_cache key component, so naming it here would reverse its own fix.
 # Third path-safety finding in a row (relative paths, then empty paths, now traversal), so the gate
 # lives HERE -- the single place every subcommand's paths are built -- rather than at each `rm -rf`.
 # A label is caller input and feeds `rm -rf`: `../../../home/me/data` would escape OUT_ROOT entirely.

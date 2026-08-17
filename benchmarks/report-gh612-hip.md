@@ -73,9 +73,13 @@ where on CUDA they were the larger half.
   | master | `5d0c86d8` (staging `origin/master`) | present | present (default 8) |
 
 - Cache discipline: one **cold** search into a fresh `--ocannl_autotune_cache_dir` per cell *per
-  rep*, never shared ([#568](https://github.com/ahrefs/ocannl/issues/568): the cache key omits the
-  Numerics policy; [`report-gh481-cuda.md`](report-gh481-cuda.md): a warm cache makes an A/B
-  vacuous by replaying the other arm's winner). All work under `taskset -c 0-15`.
+  rep*, never shared. The reason is
+  [`report-gh481-cuda.md`](report-gh481-cuda.md)'s: a warm cache makes an A/B vacuous by replaying the
+  other arm's crowned schedule, and a rep that replays is not an independent search. It is **not**
+  cross-precision aliasing — [#568](https://github.com/ahrefs/ocannl/issues/568) *fixed* that, and
+  `numerics` is in `Schedule_cache.key_components` on all three commits measured here (visible in the
+  cache filenames' `-n<tag>-` component), so citing it as a live hazard would reverse the fix it
+  delivered. All work under `taskset -c 0-15`.
 - Arm order balanced across reps, per gh-481: gh-574 ran BASE→FEAT, FEAT→BASE, BASE→FEAT; gh-573
   ran cap8→cap−1, cap−1→cap8, cap8→cap−1; the cap sweep's claim-bearing pair ran cap8→cap4,
   cap4→cap8, cap8→cap4 inside one block (Part 4).
@@ -555,9 +559,10 @@ distinct transitive materialized inputs per setter, which varies with architectu
 constant depth, so "a 4-layer model" is already an over-generalization of a single measured graph and
 "shallow models" more so. Both are avoided above and in the README index entry.
 
-What that leaves is narrow and still useful: on this graph the guard is silent only from cap 32 up,
-fires on one node at 16, four at 8, nine at 4 and twenty-three at 2 — and cap 4 is 5.7% faster than
-the shipped default. Changing the global
+What that leaves is narrow and still useful: on this graph placement is identical to cap −1 only from
+cap 32 up, and the placement difference grows one node at 16, four at 8, nine at 4 and twenty-three at
+2 — and cap 4 is 5.7% faster than the shipped default. (Nodes' worth of difference, not firing counts:
+see the proxy caveat above.) Changing the global
 default on that would be the gh-479 mistake in a new costume — the measurement that would justify
 moving it is a cap sweep across several fixtures of differing depth *and* differing residual
 fan-in structure, which this session did not run.
@@ -679,8 +684,9 @@ $D diff feat574 1 master-capoff 1        # the negative control: must print 0 ke
 `finger` also prints the two **whole-chain** totals — `QK^T WHOLE CHAIN` and `lm_head / CE WHOLE
 CHAIN` — which are the only defensible comparands for those two line items, since post-fission the
 mask, row-max and softmax work runs in separate downstream kernels and a fragment-to-fused-kernel
-ratio is meaningless. BASE prints 8 kernels / 3.666 ms and 5 / 8.165 ms; FEAT prints 16 / 2.038 ms
-and 6 / 0.384 ms.
+ratio is meaningless. BASE prints 8 kernels / 3.666 ms and 4 / 8.136 ms; FEAT prints 16 / 2.038 ms
+and 5 / 0.357 ms. (The CE chain is anchored on `logits`, not `wte`, so the input token-embedding
+gather is excluded — see Part 2.)
 
 ```bash
 # Part 4, the cap sweep. `sweep` reverses the cap order on alternate reps, so no cap sits
@@ -694,14 +700,14 @@ and 6 / 0.384 ms.
 $D sweep $M 3 4                            # cap 4, r1-r3
 FIRST_REP=4 $D sweep $M 3 8 4              # the balanced block, r4-r6 (both caps, order alternated)
 $D sweep $M 3 2                            # the n=3 cap-2 row
-$D sweep $M 1 16 32 -1                     # the shape of the curve (structural, one rep each)
-# then snapshot each cap and compare KERNEL MULTISETS, not kernel counts. Equal counts can absorb a
-# changed materialization decision -- cap 16 emits 135 kernels exactly like cap -1 yet differs by one
-# signature -- so a count cannot establish that a cap did nothing. `diff` needs only `snap` here; the
-# ms columns are omitted without `profile`.
-for cap in 2 4 8 16 32 -1; do
-  $D snap $M sweep-cap$cap 1 --ocannl_virtualize_max_inline_fanin=$cap
-done
+$D sweep $M 1 16 32                        # the shape of the curve (structural, one rep each).
+                                           # NOT -1: Part 3's master-capoff already is that cell, and
+                                           # re-running it would make 27 cold cells against a 26-run
+                                           # correctness gate.
+# Compare KERNEL MULTISETS, not kernel counts. Equal counts can absorb a changed materialization
+# decision -- cap 16 emits 135 kernels exactly like cap -1 yet differs by one signature -- so a count
+# cannot establish that a cap did nothing. `diff` needs only `snap`; the ms columns are omitted
+# without `profile`.
 # Silence requires BOTH sides at 0 exclusive signatures AND zero differing multiplicities -- and
 # note that an equal KERNEL COUNT proves nothing: cap 16 and cap -1 both emit 135 kernels while their
 # placement differs. On this graph only cap 32 comes back placement-identical.
