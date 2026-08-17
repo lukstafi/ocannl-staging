@@ -1526,7 +1526,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules op_legality)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
