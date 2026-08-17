@@ -1335,7 +1335,9 @@ let rec computation_reads_merge ~self : t -> bool = function
   | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _ ->
       false
   | Seq (c1, c2) -> computation_reads_merge ~self c1 || computation_reads_merge ~self c2
-  | For_loop { body; _ } -> computation_reads_merge ~self body
+  (* A dead loop's body replays zero times: no taint from it (review round 10), mirroring
+     [drop_dead_loop_accesses] and the fan-in collector's dead-loop skip. *)
+  | For_loop { from_; to_; body; _ } -> to_ >= from_ && computation_reads_merge ~self body
   | Set { tn; llsc; _ } -> Tn.equal tn self && scalar_reads_merge_buffer ~self llsc
   | Set_local (_, llsc) -> scalar_reads_merge_buffer ~self llsc
   | Set_from_vec { tn; arg = s, _; _ } -> Tn.equal tn self && scalar_reads_merge_buffer ~self s
@@ -1760,6 +1762,12 @@ let%track7_sexp inline_computation ~id ~inherited_merge_tainted (optim_ctx : opt
           let body = List.filter_map ~f:(loop env) @@ flat_lines [ llc ] in
           if List.is_empty body then None else Some (unflat_lines body)
       | For_loop { index; body; _ } when Map.mem env index -> loop env body
+      | For_loop { from_; to_; _ } when to_ < from_ ->
+          (* A dead loop replays zero times: drop it from the spliced body (review round 10) —
+             it would otherwise RENDER in the consumer (renderers emit dead loops), and a merge
+             read inside it would reference a parameter the consumer cannot declare. Mirrors
+             the tracer's and the fan-in collector's dead-body skips. *)
+          Some Noop
       | For_loop { index; from_; to_; body; axis } ->
           (* Freshen the binding. *)
           let fresh = Indexing.get_symbol () in

@@ -80,6 +80,8 @@ dominated-guard splice: the same-guard write covers, leaf15 is not an input: tru
 dominated-guard splice: taken branch writes then consumes: true
 consumer projection: tainted node in the discarded operand is legal, values project: true
 dead merge read: ignored, the live declaration stands: true
+dead-taint: routine A defers v16: true
+dead-taint: consuming is legal, the live component's values splice: true
 pipeline deferral-only: links and runs as a no-op on a fresh context: true
 pipeline deferral-only: the target stayed virtual: true
 pipeline consumer on a w2-less chain: rejected at link (spliced input demanded): true

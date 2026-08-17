@@ -1097,7 +1097,55 @@ let phase5 () =
     LL.optimize ctx14 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_merge_dead" [] llc_m5
   in
   p "dead merge read: ignored, the live declaration stands"
-    (match o_m5.LL.merge_node with Some m -> Tn.equal m msrc5 | None -> false)
+    (match o_m5.LL.merge_node with Some m -> Tn.equal m msrc5 | None -> false);
+  (* Review round 10, P2: a merge read only inside a DEAD loop of a stored computation must not
+     taint it — the dead component replays zero times when inlined, mirroring the raw tracer. *)
+  let msrc7 = mk "msrc7" in
+  materialize msrc7;
+  let ell17 = mk "ell17" in
+  materialize ell17;
+  let v16 = mk "v16" and out20 = mk "dtout" in
+  materialize out20;
+  let ctx15 = LL.empty_optimize_ctx () in
+  let lv16 = mk "lv16" in
+  virtualize lv16;
+  let id16 = LL.get_scope lv16 in
+  let llc_a15 =
+    let s = sym () and sd = sym () in
+    (* The dead merge read lives inside the setter's scope body — a dead sub-loop around a
+       [Set_local] — so v16 keeps one consistent setter and stays a virtualization candidate. *)
+    loop_n s dim
+      (set v16 [| iter s |]
+         (LL.Local_scope
+            {
+              id = id16;
+              body =
+                seq
+                  (loop ~upto:(-1) sd
+                     (LL.Set_local (id16, LL.Get_merge_buffer (msrc7, [| iter sd |]))))
+                  (LL.Set_local (id16, add (get ell17 [| iter s |]) (c 100.)));
+              orig_indices = [| iter s |];
+            }))
+  in
+  let o_a15 =
+    LL.optimize ctx15 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_dtaint_a" [] llc_a15
+  in
+  p "dead-taint: routine A defers v16" (known_virtual o_a15 v16);
+  let llc_b15 =
+    let s = sym () in
+    loop_n s dim (set out20 [| iter s |] (get v16 [| iter s |]))
+  in
+  let o_b15 =
+    LL.optimize ctx15 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_dtaint_b" [] llc_b15
+  in
+  let ell17_vals = Array.init dim ~f:(fun i -> 84. +. Float.of_int i) in
+  let got15 =
+    execute ~name:"vcf_dtaint_b" o_b15
+      ~seed:[ (ell17, ell17_vals); (out20, blank dim) ]
+      ~read:[ out20 ]
+  in
+  p "dead-taint: consuming is legal, the live component's values splice"
+    (same got15 [ Array.map ell17_vals ~f:(fun x -> x +. 100.) ])
 
 (* === Phase 6: deferral-only comp through the ordinary pipeline (review round 3) === *)
 
