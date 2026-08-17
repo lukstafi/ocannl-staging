@@ -326,13 +326,16 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   consumer re-sums the whole prefix); a structural expectation assuming a deep all-virtual chain
   must disable it (`Low_level.virtualize_settings.max_inline_fanin <- -1`). Like the other caps it
   is a flippable policy prior, not legality (`test/operations/virtual_chain_fanin.ml`). **The cap's
-  bite is a function of model DEPTH, and the default 8 is only just inside the range where it fires
-  on a shallow model**: measured on gpt2_mini (4 layers, gfx1151, `report-gh612-hip.md`), caps 16,
-  32 and −1 produce the identical 76-segment arm A and untuned-default times within 0.3% of each
-  other — i.e. a cap of 16 never fires at all there, so a "cap sweep" above 8 is measuring nothing.
-  Cap 4 beat the default 8 by a non-overlapping 7.1% on that workload. Before reading a cap
-  comparison as a performance trade, check the arm's segment count: if it matches cap −1's, the
-  guard is silent, not losing.
+  bite depends on how many distinct transitive materialized inputs a chain accumulates — which varies
+  with depth AND with graph shape at constant depth — so a cap conclusion holds for the graph it was
+  measured on and not for a size class.** On gpt2_mini specifically (4 layers, gfx1151,
+  `report-gh612-hip.md`), caps 16, 32 and −1 emit the identical **135-kernel** arm A and
+  untuned-default times within 0.3%, i.e. 16 never fires there and a cap sweep above 8 measures
+  nothing; cap 4 beat the default 8 by a non-overlapping 5.7% in an order-balanced block. Two traps
+  worth carrying: before reading a cap comparison as a performance trade, check the arm's **kernel
+  count** (from `schedule_log_launches`, NOT the `F_saved` label) — if it matches cap −1's, the guard
+  is silent rather than losing; and balance cap order across reps, because a fixed order confounds
+  the cap with session position (that was worth ~1.4pp of an apparent 7.1%).
 - `check_half_prec_constants_cutoff` (`Ops.exceeds_fp16_cutoff`, enforced from
   `Low_level.simplify_llc.check_constant` during lowering, hence backend-independently) is a
   HEADROOM policy, not a representability check: its default 2^14 sits far below fp16's 65504 max

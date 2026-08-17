@@ -24,10 +24,27 @@ set -u
 # created next to the invocation directory and then re-resolved inside the checkout, and the first
 # redirection into it fails. FIXTURE is the deliberate exception: it is relative to <tree>/benchmarks,
 # which is exactly where the runner is invoked from.
-OUT_ROOT=${OUT_ROOT:-/tmp/gh612}
-mkdir -p "$OUT_ROOT"
-OUT_ROOT=$(cd "$OUT_ROOT" && pwd)
-abspath() { case $1 in /*) echo "$1" ;; *) (cd "$1" && pwd) ;; esac; }
+#
+# And no path may be produced by a command substitution that yields an EMPTY string on failure:
+# `rm -rf "$OUT_ROOT/$label/r$rep"` with an empty OUT_ROOT is `rm -rf /<label>/r<rep>`. `set -u` does
+# not catch that (the variable is set, just empty), so resolution ABORTS instead of falling through.
+resolve_dir() {                      # absolute path to an existing usable directory, or abort
+  local d=$1 abs
+  mkdir -p "$d" 2>/dev/null || { echo "gh612_cells: cannot create directory: $d" >&2; exit 2; }
+  abs=$(cd "$d" 2>/dev/null && pwd) || abs=""
+  [ -n "$abs" ] && [ -d "$abs" ] || { echo "gh612_cells: not a usable directory: $d" >&2; exit 2; }
+  printf '%s\n' "$abs"
+}
+require_dir() {                      # like resolve_dir but must already exist (never creates)
+  local d=$1 abs
+  abs=$(cd "$d" 2>/dev/null && pwd) || abs=""
+  [ -n "$abs" ] && [ -d "$abs" ] || { echo "gh612_cells: no such directory: $d" >&2; exit 2; }
+  printf '%s\n' "$abs"
+}
+# NOTE: an `exit` inside $( ) exits only the substitution's subshell, so the abort has to be
+# re-asserted at the call site. Every use of resolve_dir/require_dir is followed by this check.
+OUT_ROOT=$(resolve_dir "${OUT_ROOT:-/tmp/gh612}")
+case ${OUT_ROOT:-} in /?*) ;; *) echo "gh612_cells: OUT_ROOT unusable, refusing to run" >&2; exit 2;; esac
 PIN=${PIN:-taskset -c 0-15}
 FIXTURE=${FIXTURE:-fixtures/gpt2_mini.safetensors}
 ARCH=${ARCH:-gfx1151}
@@ -40,9 +57,10 @@ ROUTINE=cross_entropy_loss_fwd
 # compile_s 1.76 s warm against 29 s cold, with the "winner" being whatever the other arm found).
 cell_dir() { echo "$OUT_ROOT/$1/r$2"; }
 
-cmd_search() {
+cmd_search() { (
   local tree=$1 label=$2 rep=$3; shift 3
-  tree=$(abspath "$tree")
+  tree=$(require_dir "$tree")
+  case ${tree:-} in /?*) ;; *) exit 2;; esac
   local out; out=$(cell_dir "$label" "$rep")
   rm -rf "$out"; mkdir -p "$out"            # mkdir BEFORE any redirection into it
   cd "$tree/benchmarks" || exit 1
@@ -58,13 +76,14 @@ cmd_search() {
   # arm, and which arm shipped.
   grep -E 'untuned-default pipeline|winner replay ok|tune_placements: winner' "$out/search.err"
   grep -oh 'finer_fission [a-z]*' "$out"/cache/*.sexp 2>/dev/null | sort -u
-}
+) }
 
 # Warm replay of the cell's cached winner, capturing the emitted source and the launch geometry.
 # Arm A compiles first and arm B overwrites the same path, so snapshot by polling on content.
-cmd_snap() {
+cmd_snap() { (
   local tree=$1 label=$2 rep=$3; shift 3
-  tree=$(abspath "$tree")
+  tree=$(require_dir "$tree")
+  case ${tree:-} in /?*) ;; *) exit 2;; esac
   local out; out=$(cell_dir "$label" "$rep")
   local snap="$out/armsnap"; rm -rf "$snap"; mkdir -p "$snap"
   cd "$tree/benchmarks" || exit 1
@@ -84,7 +103,7 @@ cmd_snap() {
   kill $w 2>/dev/null; wait $w 2>/dev/null
   echo "$label r$rep replay: exit $st"
   pick_armA "$out"
-}
+) }
 
 # Arm A is the FIRST fissioned compile of the routine in the launch log; the `seg i/N` totals are
 # the real fission widths. Do NOT read the count off an `F_saved[fine N segs]` label -- that N is
@@ -117,9 +136,10 @@ EOF
   echo "no complete snapshot with $n kernels in $out/armsnap" >&2; return 1
 }
 
-cmd_profile() {
+cmd_profile() { (
   local tree=$1 label=$2 rep=$3 n=${4:-3}
-  tree=$(abspath "$tree")
+  tree=$(require_dir "$tree")
+  case ${tree:-} in /?*) ;; *) exit 2;; esac
   local out; out=$(cell_dir "$label" "$rep")
   local src; src=$(cat "$out/armA.path")
   # Clear this subcommand's OWN artifact set before regenerating it. Every producing subcommand here
@@ -144,7 +164,7 @@ cmd_profile() {
   done
   echo "  paired step p50 for this cell:"
   grep -ho '"p50":[0-9.]*' "$out/search.out" "$out/replay.out" 2>/dev/null
-}
+) }
 
 # The acceptance fingerprints, read off the emitted source. Kernel parameter lists span multiple
 # lines, so this cannot be done with a line-oriented grep -- `[^)]*` hits the newline before it
@@ -152,7 +172,9 @@ cmd_profile() {
 # gpt2_kernel_harness.py does.
 cmd_finger() {
   local out; out=$(cell_dir "$1" "$2")
-  python3 - "$(cat "$out/armA.path")" "$out" <<'EOF'
+  # `|| return` on the COMMAND line: absent fingerprints must not look like passing ones. Without
+  # it the geometry dump below still succeeds and `finger` exits 0 having printed no evidence.
+  python3 - "$(cat "$out/armA.path")" "$out" <<'EOF' || return 1
 import re,sys,csv,statistics,collections
 src=open(sys.argv[1]).read(); out=sys.argv[2]
 SIG=re.compile(r'extern\s+"C"\s+__global__\s+void\s+(\w+__seg(\d+))\s*\(([^)]*)\)', re.S)
@@ -196,28 +218,33 @@ EOF
 # report-gh481-cuda.md's arm-order rule exists for.
 cmd_sweep() {
   local tree=$1 reps=$2; shift 2
+  tree=$(require_dir "$tree")        # BEFORE the loop: each cell must see the same absolute tree
+  case ${tree:-} in /?*) ;; *) return 2;; esac
   local caps=("$@") r cap ordered
   for r in $(seq "$reps"); do
     if [ $((r % 2)) -eq 1 ]; then ordered=("${caps[@]}")
     else ordered=(); for ((i=${#caps[@]}-1; i>=0; i--)); do ordered+=("${caps[$i]}"); done; fi
     echo "=== sweep rep $r, order: ${ordered[*]} ==="
     for cap in "${ordered[@]}"; do
-      cmd_search "$tree" "sweep-cap$cap" "$r" --ocannl_virtualize_max_inline_fanin="$cap"
+      cmd_search "$tree" "sweep-cap$cap" "$r" --ocannl_virtualize_max_inline_fanin="$cap" \
+        || { echo "gh612_cells: cap $cap rep $r failed; aborting the sweep rather than reporting a" \
+                  "half-balanced series" >&2; return 1; }
     done
   done
   echo "NOTE: read the untuned column and the arm A KERNEL count first. A cap whose kernel count"
   echo "      matches cap -1's is not losing a trade-off, it is never firing."
 }
 
-cmd_roofline() {
+cmd_roofline() { (
   local tree=$1
-  tree=$(abspath "$tree")
+  tree=$(require_dir "$tree")
+  case ${tree:-} in /?*) ;; *) exit 2;; esac
   cd "$tree" || exit 1                      # roofline_hip.cpp path is relative to the TREE ROOT
   hipcc --offload-arch="$ARCH" -O3 -o "$OUT_ROOT/roofline" benchmarks/roofline_hip.cpp \
         -I/opt/rocm/include -L/opt/rocm/lib -lrocblas || exit 1
   # CPU quiet: the bandwidth leg shares the LPDDR5X controller with it on this APU.
   $PIN "$OUT_ROOT/roofline"
-}
+) }
 
 sub=${1:-}; shift || true
 case $sub in

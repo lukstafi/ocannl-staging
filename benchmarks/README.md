@@ -219,7 +219,8 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   session against a re-established denominator: both predicted line items reproduce to ~1% in
   absolute terms while neither share survives, 1.30x and 1.31x on the default-placement arm, kernel
   time 32.33 → 18.88 ms — also the reference for why a share is a share of a placement and a tree,
-  for the fact that any `virtualize_max_inline_fanin` ≥ 16 never fires on a 4-layer model, and for
+  for the fact that on the `gpt2_mini` graph any `virtualize_max_inline_fanin` ≥ 16 never fires at
+  all (so a cap sweep above 8 measures nothing there), and for
   the three-instrument discipline (per-kernel profile 0.08–1.6%, untuned-default 0.2–0.7%, shipped
   tuned p50 2.6–18.7%) that a tuned-cell A/B on that box needs),
   [report-cifar-cuda.md](report-cifar-cuda.md) (Linux/CUDA, the cifar-scale conv baseline

@@ -33,8 +33,9 @@ One prediction needs a caveat and one needs a correction. The caveat: at its shi
 identifiable reason given in Part 3 — without the guard the search ships materialize-all instead,
 which is the crude form of the same transform. The correction: that is a fact about the default, not
 the mechanism. **Cap 4 beats the default 8 by 5.7% with non-overlapping ranges, measured in one
-order-balanced block, and any cap ≥ 16 emits the identical 135-kernel arm A as cap −1 — i.e. never
-fires at all on this model** — so 8 is not a well-centred default here (Part 4).
+order-balanced block, and on the `gpt2_mini` graph any cap ≥ 16 emits the identical 135-kernel arm A
+as cap −1 — i.e. never fires at all** — so 8 is not well-centred for this fixture (Part 4, which
+scopes that narrowly).
 
 The four QKᵀ sites are freed here as they were on CUDA, but they are the **smaller** half of
 gh-574's win on this device (2.39 ms against the lm_head's 8.04) — the reverse of CUDA.
@@ -75,11 +76,35 @@ gh-574's win on this device (2.39 ms against the lm_head's 8.04) — the reverse
   cap4→cap8, cap8→cap4 inside one block (Part 4).
 - Driver checked in as [`gh612_cells.sh`](gh612_cells.sh); every number here came out of it, and
   the Reproduction section quotes its invocations rather than restating commands.
-- **Correctness gate: all 26 tuned runs of this session — every arm, every cap, every rep — emit
-  bit-identical loss sequences**
-  (`7.09794, 7.08114, 7.12363, 7.10122, 7.11247, 7.07110, 7.10847, 7.09132`), one distinct sequence
-  across all 26. Every arm computes the same thing; nothing below is a comparison across differing
-  numerics.
+- **Correctness gate, and what it does *not* cover.** All 26 tuned runs of this session emit
+  bit-identical loss sequences (`7.09794, 7.08114, 7.12363, 7.10122, 7.11247, 7.07110, 7.10847,
+  7.09132`) — one distinct sequence across all 26, spanning both placement arms, all six caps and
+  all three trees. But that gate reaches **only the arm the search shipped**: `bench_gpt` keeps the
+  routine `Train.tune_placements` returns and reads losses only from it, the discarded arm's
+  `?report` carries timing metadata alone, and `autotune: winner replay ok` is a compile-and-
+  dispatchability check (digest-guarded), not a value check — the search times candidates without
+  comparing their outputs to anything. The per-kernel harness cannot fill the gap either: it runs
+  kernels in isolation on synthetic buffers and never checks results.
+
+  This matters here because arm A is profiled in **every** cell while only `master-cap8` shipped it:
+
+  | artifact | shipped? | covered by the loss gate |
+  |---|---|---|
+  | `master-cap8` arm A — the denominator, both fingerprints, all Part 1 tables | yes (6/6 reps) | **yes** |
+  | `base574` / `feat574` / `master-capoff` arm B | yes (3/3 reps each) | **yes** |
+  | `base574` / `feat574` / `master-capoff` **arm A** — the Part 2 and Part 3 ratios | no | **no** |
+
+  So the denominator artifact and both acceptance fingerprints rest on an output-verified routine,
+  and the three comparison ratios (gh-574's 1.30x, gh-573's 1.31x, and the negative control) rest on
+  artifacts that were compiled, dispatched and timed on the real lineage but never checked against a
+  reference. `AGENTS.md` is explicit that for passes which change cell values, emitted-IR structure
+  is not sufficient — so this is a stated limitation, not a defended position. What partially
+  substitutes, and is weaker than an executed check: the autotuner's own accounting puts all four
+  cells' arm A within 0.6% on FLOPs (7.81–7.86 GFLOP) at identical losses wherever the arm shipped,
+  and `feat574`'s and `master-capoff`'s arm A have **zero differing kernel signatures**, so those two
+  stand or fall together. Closing it properly needs a way to ship the default-placement arm on
+  demand; there is no such config today (both arms always run and the faster one ships), so it is
+  filed rather than bodged.
 
 ### Three instruments, three noise floors
 
@@ -376,9 +401,9 @@ rather than from a label, and their untuned-default times agree to 0.3%. So thos
 being traded off — the guard is never reached, and a cap sweep above 8 measures nothing. The
 kernel count is monotone in the cap (144 / 137 / 136 / 135 / 135 / 135), which is the guard firing
 more often as the cap tightens, and it is the column to read first: **a cap whose kernel count
-matches cap −1's is silent, not losing.** On this 4-layer model the residual stream's maximum
-transitive inline fan-in therefore lies between 9 and 16, and the shipped default of 8 sits one step
-inside the range where the guard does anything.
+matches cap −1's is silent, not losing.** On this graph the residual stream's maximum transitive
+inline fan-in therefore lies between 9 and 16, and the shipped default of 8 sits one step inside the
+range where the guard does anything on it.
 
 **Cap 4 beats cap 8 by 5.7%, measured in one balanced block.** The first revision reported 7.1% from
 reps that had cap 8 running roughly two hours earlier in the session than cap 4 — arm confounded
@@ -408,13 +433,18 @@ block of its own, so it is the weaker of the statements here; what does support 
 the deterministic untuned instrument, where cap 4's 60.36–60.70 and cap −1's 65.48–65.63 are 8.4%
 apart and nowhere near touching. Stated as a chain, not as a measurement.
 
-**What this does not license.** One workload, one depth. The cap's bite is a function of how many
-contributors a residual stream accumulates, i.e. of model depth, so a 4-layer fixture is the least
-favourable case for a large cap and the most favourable for a small one — a deeper model would move
-the cliff up and could easily make 8 fire where 4 over-materializes. Changing the global default on
-this evidence would be the gh-479 mistake in a new costume. What the table supports is that **8 is
-not a well-centred default on gfx1151 for shallow models**, and that a cap-vs-depth sweep on a
-deeper fixture is the measurement that would justify moving it.
+**What this does not license, stated narrowly.** This is **one fixture** — `gpt2_mini` at 4 layers,
+d=256, 8 heads — on one device, so what the table establishes is the cap's behaviour *for that
+fixture*, and nothing broader. Depth is not even the only thing that would move it: the guard counts
+distinct transitive materialized inputs per setter, which varies with architecture and graph shape at
+constant depth, so "a 4-layer model" is already an over-generalization of a single measured graph and
+"shallow models" more so. Both are avoided above and in the README index entry.
+
+What that leaves is narrow and still useful: on this graph the guard is silent at 16 and above, fires
+once more at 4 than at 8, and cap 4 is 5.7% faster than the shipped default. Changing the global
+default on that would be the gh-479 mistake in a new costume — the measurement that would justify
+moving it is a cap sweep across several fixtures of differing depth *and* differing residual
+fan-in structure, which this session did not run.
 
 ## Part 5 — what the re-established profile says to do next
 
