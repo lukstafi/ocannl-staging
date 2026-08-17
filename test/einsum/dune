@@ -270,7 +270,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_set_scale)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 

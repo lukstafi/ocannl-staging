@@ -10,7 +10,12 @@ let default_lone_param () =
     let w_o = TDSL.param "w_o" () in
     let _ctx : Context.t = Train.init_params (Context.auto ()) Train.IDX.empty w_o in
     Train.printf _ctx w_o;
-    Stdio.print_endline "\nERROR: Should have raised an exception"
+    (* Recorded outcome, not a failure: since d6121e6e ("Update hidden dims heuristic test") a lone
+       parameter takes the heuristic's default shape instead of raising, and the golden pins the
+       tensor it gets. The line here used to read "ERROR: Should have raised an exception" -- text
+       left over from the raising cases below, which sat in a passing golden reading like a blessed
+       regression (gh-ocannl-601). The sibling [lone_param_1d] records the same outcome silently. *)
+    Stdio.printf "Lone parameter took the heuristic's default shape; no error\n"
   with Row.Shape_error (msg, _) -> Stdio.printf "Got acceptable error: %s\n" msg
 
 let lone_param_1d () =
@@ -65,7 +70,7 @@ let default_bias_param () =
     let%op w_o = { x } + { y } in
     let _ctx : Context.t = Train.init_params (Context.auto ()) Train.IDX.empty w_o in
     Train.printf _ctx w_o;
-    Stdio.print_endline "\nERROR: Should have raised an exception"
+    Verdict.fail "should have raised an exception"
   with Row.Shape_error (msg, _) -> Stdio.printf "Got expected error: %s\n" msg
 
 let default_bias_param_1d () =

@@ -8,8 +8,7 @@ Testing default lone parameter -- corner case
 │└┴──────────┘         │
 └──────────────────────┘
 grad_*._w_o <not-in-context>
-
-ERROR: Should have raised an exception
+Lone parameter took the heuristic's default shape; no error
 Testing lone parameter 1D -- corner case
 [5]: w_o shape  
 scalar 4.49e-1

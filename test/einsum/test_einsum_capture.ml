@@ -87,11 +87,11 @@ let test_set_dim_and_set_equal () =
 
   (try
      Shape.set_equal var6 var7;
-     Stdio.printf "Test 4 - ERROR: Should have thrown exception for different values\n"
+     fail "Test 4: set_equal on differently-solved variables did not raise"
    with
   | Row.Shape_error (msg, _) ->
       Stdio.printf "Test 4 - set_equal error case: Correctly caught exception: %s\n" msg
-  | _ -> Stdio.printf "Test 4 - ERROR: Unexpected exception type\n");
+  | _ -> fail "Test 4: unexpected exception type");
 
   (* Test 5: Using captured variables in actual einsum operations *)
   let ctx = Context.auto () in

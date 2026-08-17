@@ -112,7 +112,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_param_shape_error)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -279,7 +279,7 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules merge_buffer_static_verification)
- (libraries base ocannl stdio arrayjit.utils)
+ (libraries base ocannl stdio arrayjit.utils arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -648,7 +648,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_block_tensor)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -976,7 +976,7 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules test_tnode_namespaces)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 

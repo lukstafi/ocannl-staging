@@ -127,7 +127,7 @@ let () =
   Persistence.save ~ctx ~appending:false (Set.of_list (module Tn) [ tn1 ]) path;
   (try
      let _ctx = Persistence.restore ~ctx (Set.of_list (module Tn) [ tn2 ]) path in
-     Stdio.printf "ERROR: should have raised\n"
+     Verdict.fail "should have raised"
    with Failure msg -> Stdio.printf "Caught: %s\n" msg);
   cleanup "missing";
 
@@ -148,7 +148,7 @@ let () =
   in
   (try
      let _ctx = Persistence.restore ~ctx (Set.of_list (module Tn) [ tn_wrong ]) path in
-     Stdio.printf "ERROR: should have raised\n"
+     Verdict.fail "should have raised"
    with Failure msg -> Stdio.printf "Caught: %s\n" msg);
   cleanup "dimfail";
 
@@ -163,7 +163,7 @@ let () =
   (* Don't reinitialize - tn1 is still in registry *)
   (try
      let _ = Persistence.load ~ctx path in
-     Stdio.printf "ERROR: should have raised\n"
+     Verdict.fail "should have raised"
    with Failure msg -> Stdio.printf "Caught: %s\n" msg);
   cleanup "clash";
 
@@ -203,7 +203,7 @@ let () =
   in
   (try
      let _ctx = Persistence.restore ~ctx (Set.of_list (module Tn) [ tn_diff_pad ]) path in
-     Stdio.printf "ERROR: should have raised\n"
+     Verdict.fail "should have raised"
    with Failure msg -> Stdio.printf "Caught: %s\n" msg);
   cleanup "padmismatch";
 
@@ -394,7 +394,7 @@ let () =
   let ctx = Context.cpu () in
   (try
      let _ = Persistence.load ~ctx ~mmap:true path in
-     Stdio.printf "ERROR: should have raised\n"
+     Verdict.fail "should have raised"
    with Failure msg ->
      (* The message embeds the machine-dependent path. *)
      Verdict.p "Caught a payload-past-end-of-file failure"

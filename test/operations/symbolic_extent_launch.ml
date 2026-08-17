@@ -43,7 +43,7 @@ let () =
   seq_ref := 7;
   (try
      ignore (Context.run ctx routine : Context.t);
-     printf "ERROR: expected a bind-validation error for extent=7\n"
+     Verdict.fail "expected a bind-validation error for extent=7"
    with Utils.User_error msg -> printf "extent=7 rejected: %s\n" msg);
   (* Autotuning an extent-parameterized routine (gh-490 stage 3): measurement binds extents at their
      upper bound, the schedule-cache identity is extent-value-independent (the extent is a kernel

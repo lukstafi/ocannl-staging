@@ -52,7 +52,7 @@ let () =
   List.iter [ "1bad"; "a.b"; "with space"; "" ] ~f:(fun ns ->
       try
         Tensor.unsafe_reinitialize ~namespace:ns ();
-        Stdio.printf "ERROR: accepted %S\n" ns
+        Verdict.fail (Printf.sprintf "namespace validation accepted %S" ns)
       with Invalid_argument msg -> Stdio.printf "Caught: %s\n" msg);
   Tensor.unsafe_reinitialize ();
 
@@ -80,12 +80,12 @@ let () =
   (* Re-loading under an already-used prefix clashes. *)
   (try
      let _ = Persistence.load ~ctx ~prefix_namespace:"left" path in
-     Stdio.printf "ERROR: should have raised\n"
+     Verdict.fail "should have raised"
    with Failure msg -> Stdio.printf "Caught: %s\n" msg);
   (* Invalid prefixes are rejected up front. *)
   (try
      let _ = Persistence.load ~ctx ~prefix_namespace:"not ok" path in
-     Stdio.printf "ERROR: should have raised\n"
+     Verdict.fail "should have raised"
    with Invalid_argument msg -> Stdio.printf "Caught: %s\n" msg);
   cleanup "surgery";
 
