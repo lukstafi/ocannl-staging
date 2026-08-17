@@ -137,8 +137,14 @@ type hardware_limits = {
           come off each node's own storage precision). *)
   peak_memory_bandwidth : float option;
       (** Advisory peak main-memory bandwidth in bytes/s, the other leg of the roofline envelope
-          (gh-ocannl-491). Same contract as [peak_flops]: advisory, rough, never load-bearing for
-          correctness; [None] when the backend offers no estimate. *)
+          (gh-ocannl-491). Same contract as [peak_flops] — advisory, rough, never load-bearing for
+          correctness; [None] when the backend offers no estimate — with one bias requirement
+          (gh-ocannl-578): the value must be a {e class ceiling}, at least what any machine of the
+          backend's class can sustain. Streaming kernels with exact byte counts are routine now
+          (the calibration pass, packed initializations), and each one achieving more than the
+          advisory trips the gh-514 agreement warning — while under [autotune_bound_pruning] an
+          understated leg over-prunes. Overstatement only loosens an advisory bound; calibrated
+          [model_peak_*] overrides beat these wherever fidelity matters. *)
   native_fp16_arithmetic : bool;
       (** Whether 16-bit float arithmetic executes natively at twice f32's lane count (gh-ocannl-516:
           ARMv8.2-FP16, AVX512-FP16). [false] covers both "no [_Float16] on this target" and the

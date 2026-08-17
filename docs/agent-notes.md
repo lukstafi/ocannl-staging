@@ -909,10 +909,12 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   phase 0) runs on EVERY candidate `Autotune.tune` times whenever envelope constants are
   present — not gated by `autotune_log` or the calibration file — warning unconditionally on
   stderr only for exact-count candidates (approx exceedances log under autotune_log as possible
-  over-counting). On machines whose class-level `hardware_limits` peaks understate the hardware
-  (e.g. Metal's 2e11 B/s vs a 4e11 B/s M-Max), tuning runs may newly print `BOUND VIOLATION`
-  warnings. That is the invariant working: refit `model_peak_*` from calibration data rather
-  than silencing the check. The warning prints once per (backend, device, digest) per process —
+  over-counting). The class-level `hardware_limits` bandwidth advisories are class CEILINGS for
+  exactly this reason (gh-ocannl-578): a machine sustaining more than its backend's advisory
+  would otherwise print `BOUND VIOLATION` on every exact streaming row. If such warnings appear
+  anyway, that is the invariant working — a new hardware tier has outgrown the ceiling, or a
+  configured `model_peak_*` override is stale: refit from calibration data rather than silencing
+  the check. The warning prints once per (backend, device, digest) per process —
   a candidate timed again (two tuning arms, a re-tune) warns once — but every timing still writes
   its own calibration row, so the fitter sees all of them.
 - The envelope's memory leg is unfittable from matmul-family tuning data alone (gh-ocannl-578):
