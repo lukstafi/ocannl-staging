@@ -602,8 +602,16 @@ let%debug3_sexp from_prior_context_batch ~(plc : Tn.Placements.t)
      assignments over-approximate what the residual schedule needs (gh-ocannl-611, round 3). *)
   Array.filter_map comps ~f:(fun pair ->
       Option.map pair ~f:(fun (comp, lowered) ->
-          Set.diff (Assignments.context_nodes ~plc comp.Assignments.asgns) comp.embedded_nodes
-          |> Set.filter ~f:(Hashtbl.mem lowered.Low_level.traced_store)))
+          let raw =
+            Set.diff (Assignments.context_nodes ~plc comp.Assignments.asgns) comp.embedded_nodes
+            |> Set.filter ~f:(Hashtbl.mem lowered.Low_level.traced_store)
+          in
+          match comp.Assignments.asgns with
+          | Assignments.Noop -> raw
+          | _ ->
+              let (inputs, _), _ = Low_level.input_and_output_nodes lowered in
+              let reads, writes = Assignments.collect_nodes_guess_output comp.Assignments.asgns in
+              Set.union raw (Set.diff inputs (Set.union reads writes))))
   |> Array.fold ~init:(Set.empty (module Tnode)) ~f:Set.union
 
 (** Adds a scheduler and brings a lowered no-device backend on par with lowered device backends. *)
@@ -878,10 +886,30 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
        (gh-ocannl-611, review round 3). The reconciled traced store is exactly the final
        schedule's node registry, so it is the filter. *)
     let from_prior_context : Tn.t_set =
-      Set.diff
-        (Assignments.context_nodes ~plc:lowered.Low_level.optimize_ctx.placements comp.asgns)
-        comp.embedded_nodes
-      |> Set.filter ~f:(Hashtbl.mem lowered.Low_level.traced_store)
+      let raw =
+        Set.diff
+          (Assignments.context_nodes ~plc:lowered.Low_level.optimize_ctx.placements comp.asgns)
+          comp.embedded_nodes
+        |> Set.filter ~f:(Hashtbl.mem lowered.Low_level.traced_store)
+      in
+      (* Splicing reconciles in the OTHER direction too (round 5): leaves reaching the routine
+         only through an inlined cross-routine computation are absent from the raw assignments,
+         yet their entry values are required — without them, [verify_prior_context] would accept
+         a context where [allocate_delta] zero-fills the spliced inputs and the consumer
+         silently computes with zeros. The reconciled interface's inputs are exactly the
+         entry-value-matters nodes. Two deliberate bounds on the union: only inputs the raw
+         assignments never MENTION are added — a mentioned node's prior-context status is
+         already curated by [context_nodes]' exclusions (the random-seed and threefry nodes of
+         init comps are mentioned yet deliberately not demanded) — and only for a routine
+         CARRYING an assignments program, since [from_prior_context] is an assignments-layer
+         promise: a hand-built [?prelowered] routine (empty comp) supplies its inputs through
+         the context API after linking (the ll_test seed-then-run pattern). *)
+      match comp.asgns with
+      | Assignments.Noop -> raw
+      | _ ->
+          let (inputs, _), _ = Low_level.input_and_output_nodes lowered in
+          let reads, writes = Assignments.collect_nodes_guess_output comp.asgns in
+          Set.union raw (Set.diff inputs (Set.union reads writes))
     in
     {
       from_prior_context;

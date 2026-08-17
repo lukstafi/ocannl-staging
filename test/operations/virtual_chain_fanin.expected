@@ -44,6 +44,7 @@ merge splice: routine A defers the merge-reading node: true
 merge splice: the deferred-away merge declaration is dropped from routine A: true
 merge splice: consuming it in a later routine is rejected: true
 merge splice: same-source consumer is rejected too: true
+same-routine merge read: source is the merge param, not an ordinary entry: true
 partial-write splice: routine A defers v2: true
 partial-write splice: ell2 stays read_before_write (per-cell coverage): true
 partial-write splice: ell2 is an input of routine B: true
@@ -62,3 +63,5 @@ guarded-write splice, false branch: the entry values are observed: true
 guarded-write splice, true branch: the overwrite is observed: true
 pipeline deferral-only: links and runs as a no-op on a fresh context: true
 pipeline deferral-only: the target stayed virtual: true
+pipeline consumer on a w2-less chain: rejected at link (spliced input demanded): true
+pipeline incremental arc: compute leaf, defer, consume — matches the reference: true

@@ -5460,7 +5460,10 @@ let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
                     so a computation reading them must not be deferred across routines. Mark the \
                     node computed from the merge buffer as materialized (e.g. via \
                     Train.set_materialized) in the routine that reads the transfer."]));
-        Hash_set.add accessed source;
+        (* The SOURCE deliberately does not enter [accessed]: the merge buffer is the parameter,
+           and an ordinary traced entry for the source would mint a duplicate buffer through
+           [C_syntax.compile_proc]/[allocate_delta] — the raw tracer records only [merge_node]
+           (review round 5). *)
         uses_merge := true
     | Get (tn, _) -> read ~live tn
     | Get_dynamic { tn; dyn_value = v, _; _ } ->

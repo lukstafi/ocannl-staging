@@ -211,10 +211,19 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   `drop_dead_loop_accesses` like the raw side; `Binop` dispatches through
   `Ops.binop_conditionality` in both the reconcile walk and `reads_merge_buffer` — a projection's
   discarded operand is never rendered, so its reads are not parameters and its merge read must
-  not taint. `from_prior_context` (both `Backends.compile` and `from_prior_context_batch`) is
-  filtered by the reconciled traced store for the same reason the interface is: raw assignments
-  over-approximate the residual schedule, and a deferral-only routine must link on a fresh
-  context (`verify_prior_context` used to demand its deferred computations' leaves).
+  not taint. `from_prior_context` (both `Backends.compile` and `from_prior_context_batch`)
+  reconciles in BOTH directions: the raw-assignments set is filtered by the reconciled traced
+  store (raw over-approximates the residual schedule — a deferral-only routine must link on a
+  fresh context) and, for routines carrying an assignments program, unioned with the reconciled
+  interface's inputs the raw asgns never MENTION (raw also UNDER-approximates: a consumer whose
+  asgns read only the virtual node would otherwise zero-fill its spliced leaves silently). Both
+  bounds on the union are load-bearing: mentioned nodes keep `context_nodes`' curated exclusions
+  (init comps' random-seed/threefry nodes are mentioned yet deliberately not demanded — the
+  unbounded union broke `Train.init_params` across the suite), and hand-built `?prelowered`
+  routines (empty comp) are exempt entirely — their inputs arrive via `Context.set_values` after
+  linking, the ll_test seed-then-run pattern. The merge SOURCE never gets an ordinary traced
+  entry (the merge buffer is the parameter; a source entry would double the transfer buffer's
+  allocation).
   Related pre-existing quirk: `rmw_exempt` excuses copy-position reads from the coverage verdict
   that feeds `read_before_write` (fine for multiplicity, questionable for the interface) —
   gh-ocannl-618; the phase-5 partial-write test reads at an offset position to stay off it.

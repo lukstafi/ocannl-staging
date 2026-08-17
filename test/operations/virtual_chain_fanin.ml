@@ -563,6 +563,24 @@ let phase5 () =
     with Utils.User_error msg -> String.is_substring msg ~substring:"merge buffer"
   in
   p "merge splice: same-source consumer is rejected too" rejected2;
+  (* Review round 5, P2: a legitimate same-routine merge read that survives optimization must
+     not mint an ordinary traced entry for its SOURCE — the merge buffer is the parameter, and a
+     phantom source entry would double the transfer buffer's allocation. *)
+  let msrc3 = mk "msrc3" in
+  materialize msrc3;
+  let mtar = mk "mtar" in
+  materialize mtar;
+  let ctx7 = LL.empty_optimize_ctx () in
+  let llc_m3 =
+    let s = sym () in
+    loop_n s dim (set mtar [| iter s |] (LL.Get_merge_buffer (msrc3, [| iter s |])))
+  in
+  let o_m3 =
+    LL.optimize ctx7 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_merge_self" [] llc_m3
+  in
+  p "same-routine merge read: source is the merge param, not an ordinary entry"
+    ((match o_m3.LL.merge_node with Some m -> Tn.equal m msrc3 | None -> false)
+    && not (Hashtbl.mem o_m3.LL.traced_store msrc3));
   (* Review round 2, P1: a write covering only SOME cells does not cover a later spliced read —
      coverage is per-cell and guard-aware, decided by [reads_covered_query] over the final code,
      not by syntactic write-before-read order. Routine B writes ell2[0] only, then consumes
@@ -798,7 +816,42 @@ let phase6 () =
   let _ctx_ran = Context.run ctx_fresh routine_defer in
   p "pipeline deferral-only: links and runs as a no-op on a fresh context" true;
   p "pipeline deferral-only: the target stayed virtual"
-    (Tn.Placements.known_virtual (Context.placements ctx_fresh) v6.Tensor.value)
+    (Tn.Placements.known_virtual (Context.placements ctx_fresh) v6.Tensor.value);
+  (* Review round 5, P1: the CONSUMER on this w2-less chain must be rejected at link time — its
+     spliced input w2 now enters from_prior_context, where pre-fix it silently computed with a
+     zero-filled fresh allocation. *)
+  let out6 = TDSL.O.( + ) v6 v6 in
+  let rejected =
+    try
+      let _ctx, _routine = Context.compile ctx_fresh (Train.forward out6) Ir.Indexing.Empty in
+      false
+    with Utils.User_error msg -> String.is_substring msg ~substring:"lacks node"
+  in
+  p "pipeline consumer on a w2-less chain: rejected at link (spliced input demanded)" rejected;
+  (* The positive arc on ONE chain — compute the leaf, defer, consume — matches the reference:
+     the ordinary-pipeline twin of phase 4's prelowered flow. *)
+  Tensor.unsafe_reinitialize ();
+  let base2 =
+    NTDSL.init ~l:"vcf_p6base2" ~prec:Ir.Ops.single ~o:[ dim ]
+      ~f:(fun idcs -> Float.of_int (10 * (idcs.(0) + 1)))
+      ()
+  in
+  let w3 = TDSL.O.( + ) base2 base2 in
+  let ctx1 = Context.auto () in
+  let ctx1, r_w = Context.compile ctx1 (Train.forward w3) Ir.Indexing.Empty in
+  let ctx1 = Context.run ctx1 r_w in
+  let v8 = TDSL.O.( + ) w3 w3 in
+  let ctx1, r_defer =
+    Context.compile ~name:"vcf_p6_defer2" ctx1 (Tensor.consume_forward_code v8) Ir.Indexing.Empty
+  in
+  let ctx1 = Context.run ctx1 r_defer in
+  let out8 = TDSL.O.( + ) v8 v8 in
+  let ctx1, r_out = Context.compile ctx1 (Train.forward out8) Ir.Indexing.Empty in
+  let ctx1 = Context.run ctx1 r_out in
+  let got = Context.get_values ctx1 out8.Tensor.value in
+  let expected = Array.init dim ~f:(fun i -> 80. *. Float.of_int (i + 1)) in
+  p "pipeline incremental arc: compute leaf, defer, consume — matches the reference"
+    (close got expected)
 
 let () =
   phase1 ();
