@@ -115,9 +115,10 @@ where on CUDA they were the larger half.
 
   A few ulp is the *expected* signature here and is the reason the gate is still worth having:
   different schedules reassociate the same f32 reduction, so exact equality was never the right
-  prediction — divergence beyond a handful of ulp would be. What the gate shows is that every arm
-  computes the same function to ~20 of f32's 24 mantissa bits; what it cannot show is bitwise
-  agreement, which nothing in this session measured. (26 is the number of *cold tuned cells* the
+  prediction — divergence beyond a handful of ulp would be. What the gate shows is that every
+  **shipped** arm computes the same function to ~20 of f32's 24 mantissa bits — the coverage table
+  below is explicit that the discarded arm A routines of `base574`, `feat574` and `master-capoff` are
+  never executed by it — and what it cannot show is bitwise agreement, which nothing here measured. (26 is the number of *cold tuned cells* the
   session ran and the Reproduction section regenerates: 3 each for BASE, FEAT and cap −1, 6 for cap 8,
   6 for cap 4, 3 for cap 2, and one each at 16 and 32. Part 4 reuses Part 3's cap-8 and cap −1 cells
   rather than re-running them — an earlier draft re-ran cap −1 as a 27th cell, which would have put a
@@ -574,7 +575,7 @@ cap4→cap8, cap8→cap4):
 **Non-overlapping** (cap 4's slowest 17.66 against cap 8's fastest 18.58), all six reps shipping arm
 A so no arm lottery is in play, and the deterministic untuned column agrees in the same block (cap 8
 60.91–60.93 against cap 4 60.36–60.70). Pooled over all six reps per cap the ranges stay disjoint at
-−6.2%. The claim is **−5.7%**, from the balanced block.
+−5.9% (17.56 against 18.66). The claim is **−5.7%**, from the balanced block.
 
 **The replays are order-balanced too, and that is a separate requirement from balancing the
 searches.** Once every quoted timing comes from pass 2, the *replay* order is what can confound the

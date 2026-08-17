@@ -271,25 +271,37 @@ cmd_profile() { (
   python3 gpt2_kernel_harness.py --source "$src" --launches "$out/launches.err" \
           --out "$out/harness.hip" || exit 1
   hipcc --offload-arch="$ARCH" -O2 -o "$out/harness" "$out/harness.hip" || exit 1
+  # Stage the evidence files. Shell redirection creates bucket-$i.txt the instant the command
+  # starts, so an interruption partway through the LAST bucket run leaves 3 CSVs and 3 bucket files
+  # in place -- and `profiles`, which counts filenames, accepts a truncated bucket table that Part 1
+  # consumes as stability evidence. Publishing only after every run completes removes that state.
+  local pstage="$OUT_ROOT/.staging-$label-r$rep-profile"
+  rm -rf "$pstage"; mkdir -p "$pstage" || exit 2
+  PSTAGE=$pstage
+  trap 'rm -rf "$PSTAGE"' EXIT INT TERM
   local i
   for i in $(seq "$n"); do
-    if ! $PIN "$out/harness" > "$out/kernels-$i.csv" 2> "$out/kernels-$i.err"; then
+    if ! $PIN "$out/harness" > "$pstage/kernels-$i.csv" 2> "$pstage/kernels-$i.err"; then
       # Clear the ENTIRE set, not just this run: `finger` accepts however many CSVs it discovers, so
       # leaving runs 1..i-1 behind turns a failed 3-run profile into plausible 1- or 2-run medians.
       echo "gh612_cells: harness run $i failed; discarding the whole profile for this cell" >&2
-      rm -f "$out"/kernels-*.csv "$out"/kernels-*.err "$out"/bucket-*.txt; return 1
+      rm -rf "$pstage"; trap - EXIT INT TERM; return 1
     fi
     # stderr's last line is the sum-vs-step validation the report quotes. Pair it against THIS
     # cell's own step p50 (search.out / replay.out): another rep is a different crowned artifact,
     # so pairing across reps compares a profile to a step it is not a profile of.
-    tail -1 "$out/kernels-$i.err"
-    if ! python3 gpt2_bucket.py --source "$src" --stats "$out/kernels-$i.csv" --steps 1 \
-            > "$out/bucket-$i.txt" 2>&1; then
+    tail -1 "$pstage/kernels-$i.err"
+    if ! python3 gpt2_bucket.py --source "$src" --stats "$pstage/kernels-$i.csv" --steps 1 \
+            > "$pstage/bucket-$i.txt" 2>&1; then
       echo "gh612_cells: gpt2_bucket.py failed on run $i; discarding the whole profile" >&2
-      sed -n '$p' "$out/bucket-$i.txt" >&2
-      rm -f "$out"/kernels-*.csv "$out"/kernels-*.err "$out"/bucket-*.txt; return 1
+      sed -n '$p' "$pstage/bucket-$i.txt" >&2
+      rm -rf "$pstage"; trap - EXIT INT TERM; return 1
     fi
   done
+  # every run completed: publish atomically
+  rm -f "$out"/kernels-*.csv "$out"/kernels-*.err "$out"/bucket-*.txt
+  mv "$pstage"/* "$out"/ || { echo "gh612_cells: could not publish the profile" >&2; return 1; }
+  rmdir "$pstage"; trap - EXIT INT TERM
   # `profile` always measures the saved ARM A source, but the step p50 belongs to whichever arm the
   # search SHIPPED. Pairing them is only valid where arm A shipped; elsewhere the sum and the step
   # describe different routines and printing them together would invite exactly the wrong inference.
