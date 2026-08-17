@@ -32,9 +32,9 @@ One prediction needs a caveat and one needs a correction. The caveat: at its shi
 8, gh-573's payoff on the *end-to-end* step is inside this box's search-noise floor, for an
 identifiable reason given in Part 3 — without the guard the search ships materialize-all instead,
 which is the crude form of the same transform. The correction: that is a fact about the default, not
-the mechanism. **At cap 4 the same guard is worth 17.48 ms against cap −1's 20.86 with
-non-overlapping ranges (1.19x), and any cap ≥ 16 never fires at all on this model** — so 8 is not a
-well-centred default here (Part 4).
+the mechanism. **Cap 4 beats the default 8 by 5.7% with non-overlapping ranges, measured in one
+order-balanced block, and any cap ≥ 16 emits the identical 135-kernel arm A as cap −1 — i.e. never
+fires at all on this model** — so 8 is not a well-centred default here (Part 4).
 
 The four QKᵀ sites are freed here as they were on CUDA, but they are the **smaller** half of
 gh-574's win on this device (2.39 ms against the lm_head's 8.04) — the reverse of CUDA.
@@ -71,10 +71,15 @@ gh-574's win on this device (2.39 ms against the lm_head's 8.04) — the reverse
   Numerics policy; [`report-gh481-cuda.md`](report-gh481-cuda.md): a warm cache makes an A/B
   vacuous by replaying the other arm's winner). All work under `taskset -c 0-15`.
 - Arm order balanced across reps, per gh-481: gh-574 ran BASE→FEAT, FEAT→BASE, BASE→FEAT; gh-573
-  ran cap8→cap−1, cap−1→cap8, cap8→cap−1.
-- **Correctness gate: all 12 tuned runs emit bit-identical loss sequences**
-  (`7.09794, 7.08114, 7.12363, 7.10122, 7.11247, 7.07110, 7.10847, 7.09132`). Every arm computes
-  the same thing; nothing below is a comparison across differing numerics.
+  ran cap8→cap−1, cap−1→cap8, cap8→cap−1; the cap sweep's claim-bearing pair ran cap8→cap4,
+  cap4→cap8, cap8→cap4 inside one block (Part 4).
+- Driver checked in as [`gh612_cells.sh`](gh612_cells.sh); every number here came out of it, and
+  the Reproduction section quotes its invocations rather than restating commands.
+- **Correctness gate: all 26 tuned runs of this session — every arm, every cap, every rep — emit
+  bit-identical loss sequences**
+  (`7.09794, 7.08114, 7.12363, 7.10122, 7.11247, 7.07110, 7.10847, 7.09132`), one distinct sequence
+  across all 26. Every arm computes the same thing; nothing below is a comparison across differing
+  numerics.
 
 ### Three instruments, three noise floors
 
@@ -93,11 +98,19 @@ gh-569's tables are of. Which arm actually *shipped* is reported separately and 
 mixed in.
 
 `rocprofv3` still collects nothing on this box (no `/dev/kfd` under WSL2); the per-kernel
-reconstruction and its caveats are gh-569's and are not re-argued. Its validation is re-run and is
-tighter than before: **the sum of the 136 per-kernel medians is 18.880 / 18.876 / 18.891 ms against
-a measured step p50 of 18.50–18.98 ms — agreement to 0.5%**, against gh-569's 1.6–2.0%. It got
-tighter for a reportable reason: the lm_head, gh-569's least reproducible kernel (7.945 / 5.888 /
-7.989 ms, a 36% spread), is no longer a 7.9 ms outlier.
+reconstruction and its caveats are gh-569's and are not re-argued. Its validation is re-run:
+**the sum of the 136 per-kernel medians is 18.880 / 18.876 / 18.891 ms against the step p50 of the
+cell those kernels were emitted by — 18.981 ms in its search and 19.019 ms in its replay — so
+agreement is 0.5–0.8%**, against gh-569's 1.6–2.0%.
+
+The pairing is the load-bearing part of that sentence and it is worth being explicit about, because
+the looser reading is available and wrong. Across the three search reps the step p50 spans
+18.50–18.98 ms, and holding the r1 profile against r3's 18.50 would read a 2.1% discrepancy — but
+that is not a weaker validation of the same thing, it is not a validation at all: each rep crowns a
+different artifact with different tile sizes, and this profile is a profile of r1's. A per-kernel
+sum may only be checked against the step time of the compile it came from. Validation got tighter
+than gh-569's for a reportable reason: the lm_head, gh-569's least reproducible kernel (7.945 /
+5.888 / 7.989 ms, a 36% spread), is no longer a 7.9 ms outlier.
 
 ## Part 0 — the old denominator is gone, and the two line items survived it
 
@@ -128,7 +141,7 @@ placement and a tree; these two absolute costs turned out to be the invariant.
 Current master, default cap, arm A: **136 kernels, 18.88 ms**. Three harness runs, three
 repetitions of the search:
 
-| bucket | kernels | ms/step | share (r1 / r2 / r3) | BASE `6d14f401` | gh-569 |
+| bucket | kernels | ms/step (run 1) | share (run 1 / 2 / 3) | BASE `6d14f401` | gh-569 |
 |---|---:|---:|---|---:|---:|
 | **attention** | 57 | 12.392 | **65.6% / 65.6% / 65.6%** | 43.9% | 32.6% |
 | **FFN GEMMs** | 53 | 5.055 | **26.8% / 26.9% / 27.1%** | 17.2% | 40.6% |
@@ -226,10 +239,10 @@ and it does not (0.1%).
 
 ### And a cost, which is why the two fixes had to be measured together
 
-The finer fission makes the **FFN bucket worse**: 35 kernels / 5.543 ms → 49 kernels / 8.151 ms,
-**+2.61 ms**. Cutting the segments apart splits the residual-stream adds into more separately
+The finer fission makes the **FFN bucket worse**: 35 kernels / 5.544 ms → 49 kernels / 8.139 ms,
+**+2.60 ms** (medians of three harness runs). Cutting the segments apart splits the residual-stream adds into more separately
 launched kernels, each of which then re-derives the running sum. That cost is what gh-573 removes
-— so measuring gh-574 alone books a real +2.61 ms against it that master does not pay, and
+— so measuring gh-574 alone books a real +2.60 ms against it that master does not pay, and
 measuring gh-573 against a pre-574 tree would miss the part of its payoff that only exists once
 the fission is finer. The interaction is not hypothetical; it is 2.6 ms in both directions.
 
@@ -268,18 +281,20 @@ agrees: arm A's crowned candidate goes **528.2 MB → 472.1 MB**, −10.6%.
 by re-summing every prior contribution. At cap −1 that is still exactly what happens, and the cost
 grows monotonically with depth:
 
+Per-kernel medians over the three harness runs, i.e. exactly what `gh612_cells.sh finger` prints:
+
 | LN site | cap −1: params / ffn_b2 prefix / ms | cap 8: params / ffn_b2 prefix / ms |
 |---|---|---|
 | ln1 l0 | 8 / 0 / 0.032 | 8 / 0 / 0.031 |
-| ln2 l0 | 9 / 0 / 0.036 | 9 / 0 / 0.037 |
-| ln1 l1 | 11 / 1 / 0.129 | 11 / 1 / 0.129 |
-| ln2 l1 | 12 / 1 / 0.287 | 13 / 1 / 0.299 |
-| ln1 l2 | 14 / **2** / 0.458 | 6 / **0** / 0.031 |
-| ln2 l2 | 15 / **2** / 0.539 | 7 / **0** / 0.033 |
+| ln2 l0 | 9 / 0 / 0.037 | 9 / 0 / 0.037 |
+| ln1 l1 | 11 / 1 / 0.129 | 11 / 1 / 0.124 |
+| ln2 l1 | 12 / 1 / 0.287 | 13 / 1 / 0.285 |
+| ln1 l2 | 14 / **2** / 0.458 | 6 / **0** / 0.029 |
+| ln2 l2 | 15 / **2** / 0.542 | 7 / **0** / 0.030 |
 | ln1 l3 | 17 / **3** / 0.620 | 9 / **1** / 0.033 |
-| ln2 l3 | 18 / **3** / 0.695 | 10 / **1** / 0.046 |
-| lnf | 20 / **4** / 0.758 | 13 / **2** / 0.180 |
-| **total** | **3.552 ms** | **0.817 ms** (**4.34x**) |
+| ln2 l3 | 18 / **3** / 0.701 | 10 / **1** / 0.041 |
+| lnf | 20 / **4** / 0.763 | 13 / **2** / 0.178 |
+| **total** | **3.566 ms** | **0.788 ms** (**4.52x**) |
 
 The prefix runs `0,0,1,1,2,2,3,3,4` at cap −1 and `0,0,1,1,`**`0,0,1,1,2`** at cap 8 — a saw-tooth
 that **resets at layer 2**, where `ln1 l2` reads a materialized `centered` node instead of
@@ -306,15 +321,15 @@ does *not* explain.
 
 **Where the payoff lands, and the control.** It is not confined to the layernorm bucket:
 
-| bucket | cap −1 | cap 8 | |
+| bucket (medians of 3 harness runs) | cap −1 | cap 8 | |
 |---|---:|---:|---|
-| layernorm / elementwise | 3.552 | 0.817 | **−2.74** |
-| FFN GEMMs | 8.200 | 5.055 | **−3.15** |
-| embedding / logits | 0.661 | 0.614 | −0.05 |
-| **attention** | **12.444** | **12.392** | **−0.05 (control)** |
+| layernorm / elementwise | 3.562 | 0.786 | **−2.78** |
+| FFN GEMMs | 8.120 | 5.075 | **−3.05** |
+| embedding / logits | 0.661 | 0.619 | −0.04 |
+| **attention** | **12.447** | **12.392** | **−0.06 (control)** |
 
 Half the win is booked to the FFN bucket because, after gh-574's finer fission, the residual
-re-summation lives in FFN-classified kernels too — the same interaction Part 2 charged +2.61 ms
+re-summation lives in FFN-classified kernels too — the same interaction Part 2 charged +2.60 ms
 for. The attention bucket is unchanged to 0.4%, which is the control: the guard has no business
 there and does nothing there.
 
@@ -339,44 +354,64 @@ shipped-step row above is untrustworthy and the signature-level rows are not.
 
 ## Part 4 — the cap sweep: is 8 the right trade on gfx1151?
 
-**No. On this workload 4 is measurably better than 8, and any cap ≥ 16 is indistinguishable from
-disabling the guard.** Three reps at caps 2, 4, 8 and −1; one at 16 and 32, which need no more
-because they are provably inert (see below).
+**No. Cap 4 beats the default 8 outside the noise floor, and any cap ≥ 16 never fires at all on this
+model.** Two things in this part were wrong in the first revision and are corrected here: the
+"identical segmentation" inference rested on an `F_saved` label that counts placement entries rather
+than kernels, and the cap-4-vs-cap-8 comparison was confounded with session position. Both were
+re-measured.
 
-| cap | tuned step p50, reps | median | untuned-default, reps | median | arm shipped | arm A segs |
-|---:|---|---:|---|---:|---|---:|
-| **2** | 17.30 / 17.33 / 19.14 | 17.33 | 60.32 / 60.17 / 60.22 | **60.22** | A A B | 85 |
-| **4** | **17.48 / 17.68 / 17.43** | **17.48** | 60.53 / 60.60 / 60.53 | **60.53** | A A A | 78 |
-| 8 (default) | 18.98 / 18.82 / 18.50 | 18.82 | 61.31 / 60.94 / 60.86 | 60.94 | A A A | 77 |
-| 16 | 19.29 | 19.29 | 65.80 | 65.80 | B | 76 |
-| 32 | 21.51 | 21.51 | 65.62 | 65.62 | B | 76 |
-| −1 (off) | 18.94 / 22.48 / 20.86 | 20.86 | 65.63 / 65.48 / 65.59 | 65.59 | B B B | 76 |
+| cap | arm A kernels | untuned-default (median, range) | tuned step p50 (median, range) | n | ships |
+|---:|---:|---|---|---:|---|
+| **2** | **144** | 60.22 (60.17–60.32) | 17.33 (17.30–19.14) | 3 | A A B |
+| **4** | **137** | 60.53 (60.36–60.70) | **17.47 (17.35–17.68)** | 6 | A ×6 |
+| 8 (default) | **136** | 60.93 (60.86–61.31) | 18.67 (18.45–19.05) | 6 | A ×6 |
+| 16 | **135** | 65.80 | 19.29 | 1 | B |
+| 32 | **135** | 65.62 | 21.51 | 1 | B |
+| −1 (off) | **135** | 65.59 (65.48–65.63) | 20.86 (18.94–22.48) | 3 | B B B |
 
-**The cliff between 8 and 16 is the sharpest thing in the table, and it is not a performance
-result — it is the guard going silent.** At caps 16, 32 and −1 arm A fissions to **76 segments in
-all three**, and the untuned-default times agree to 0.3% (65.48–65.80 ms). The cap is not being
-traded off at those settings; it is never reached. On this 4-layer model the residual stream's
-maximum transitive inline fan-in therefore lies **between 9 and 16**, and the shipped default of 8
-sits one step inside the range where the guard does anything at all.
+**Caps 16, 32 and −1 emit the identical 135-kernel arm A**, read from the launch log's fission width
+rather than from a label, and their untuned-default times agree to 0.3%. So those settings are not
+being traded off — the guard is never reached, and a cap sweep above 8 measures nothing. The
+kernel count is monotone in the cap (144 / 137 / 136 / 135 / 135 / 135), which is the guard firing
+more often as the cap tightens, and it is the column to read first: **a cap whose kernel count
+matches cap −1's is silent, not losing.** On this 4-layer model the residual stream's maximum
+transitive inline fan-in therefore lies between 9 and 16, and the shipped default of 8 sits one step
+inside the range where the guard does anything.
 
-**Cap 4 beats cap 8 outside the noise floor.** 17.43–17.68 ms against 18.50–18.98 — **the ranges do
-not overlap**, over three reps each with balanced arm order, and all six reps ship arm A so no
-arm-lottery is in play. That is −7.1% on the median. Cap 2 has the best median (17.33) but its range
-runs to 19.14 because one rep shipped arm B, so it overlaps cap 8 and is *not* better than 4 on this
-evidence; 4 is the reliable setting, and it is the one that fires exactly once more than 8 (78
-segments against 77).
+**Cap 4 beats cap 8 by 5.7%, measured in one balanced block.** The first revision reported 7.1% from
+reps that had cap 8 running roughly two hours earlier in the session than cap 4 — arm confounded
+with session position, exactly the trap gh-481's order rule exists for, and it inflated the effect by
+about 1.4 pp. Re-run as three pairs inside one block with the order alternated (cap8→cap4,
+cap4→cap8, cap8→cap4):
 
-**This also settles the question Part 3 had to leave open.** At the shipped default the end-to-end
-comparison against cap −1 is inside the noise floor. At cap 4 it is not: **17.48 ms against 20.86,
-ranges 17.43–17.68 against 18.94–22.48 — non-overlapping, 1.19x.** So the fanin guard's payoff
-*is* real end to end on this device; what is marginal is the particular default, not the mechanism.
+| | rep 4 | rep 5 | rep 6 | median | range |
+|---|---:|---:|---:|---:|---|
+| cap 8 | 18.45 | 19.05 | 18.51 | 18.51 | 18.45–19.05 |
+| **cap 4** | 17.63 | 17.45 | 17.35 | **17.45** | **17.35–17.63** |
+
+**Non-overlapping** (cap 4's slowest 17.63 against cap 8's fastest 18.45), all six reps shipping arm
+A so no arm lottery is in play, and the deterministic untuned column agrees in the same block (cap 8
+60.91–60.93 against cap 4 60.36–60.70). Pooled over all six reps per cap the ranges stay disjoint at
+−6.4%. The corrected claim is **−5.7%**, from the balanced block.
+
+Cap 2 has the best median (17.33) but its range runs to 19.14 because one rep shipped arm B, so it
+overlaps cap 8 and is **not** established as better than 4. Its 144-kernel arm A is also the most
+materialized in the table, which is the direction where the guard starts costing launches for
+recomputation it no longer had to avoid.
+
+**What the balanced evidence does and does not chain.** Two comparisons were run as balanced blocks:
+cap 8 vs cap −1 (overlapping, 1.11x — Part 3's unclaimed row) and cap 4 vs cap 8 (disjoint, 1.057x).
+The headline "cap 4 is worth 1.19x against cap −1" chains those two rather than being one balanced
+block of its own, so it is the weaker of the statements here; what does support it independently is
+the deterministic untuned instrument, where cap 4's 60.36–60.70 and cap −1's 65.48–65.63 are 8.4%
+apart and nowhere near touching. Stated as a chain, not as a measurement.
 
 **What this does not license.** One workload, one depth. The cap's bite is a function of how many
 contributors a residual stream accumulates, i.e. of model depth, so a 4-layer fixture is the least
 favourable case for a large cap and the most favourable for a small one — a deeper model would move
 the cliff up and could easily make 8 fire where 4 over-materializes. Changing the global default on
-this evidence would be the gh-479 mistake in a new costume. What the table does support is that **8
-is not a well-centred default on gfx1151 for shallow models**, and that a cap-vs-depth sweep on a
+this evidence would be the gh-479 mistake in a new costume. What the table supports is that **8 is
+not a well-centred default on gfx1151 for shallow models**, and that a cap-vs-depth sweep on a
 deeper fixture is the measurement that would justify moving it.
 
 ## Part 5 — what the re-established profile says to do next
@@ -418,8 +453,17 @@ regressing by 1024) applies to any attempt.
 
 ## Reproduction
 
+The driver is checked in as [`gh612_cells.sh`](gh612_cells.sh) and every number above came out of
+it. That is deliberate rather than tidy: the first revision of this section restated the commands by
+hand, and four of the review findings against it were transcription bugs in commands that had never
+run in that form — a missing `mkdir`, a path resolved from the wrong directory, a snapshot selected
+without its completeness check, and a line-oriented `grep` over multi-line kernel signatures that
+matches nothing. A reproduction section that quotes invocations of the real driver cannot drift from
+what produced the numbers; one that restates commands always can.
+
 ```bash
-# three trees, one fixture. The fixture must be the SAME file in all three (byte-identical input).
+# three trees, ONE fixture file. The fixture must be the same file in every tree -- symlink it
+# rather than regenerating, so the input cannot differ between arms.
 cd ocannl-staging
 for w in master:5d0c86d8 base:6d14f401 feat:76f50dcd; do
   git worktree add --detach ../wt-gh612-${w%%:*} ${w##*:}
@@ -428,80 +472,58 @@ for w in master:5d0c86d8 base:6d14f401 feat:76f50dcd; do
          ../wt-gh612-${w%%:*}/benchmarks/fixtures/gpt2_mini.safetensors
   (cd ../wt-gh612-${w%%:*} && dune build @check bin/ benchmarks/)
 done
+D=benchmarks/gh612_cells.sh   # from the tree root; results land under $OUT_ROOT (default /tmp/gh612)
 ```
 
 ```bash
-# one cell = one COLD search. The fresh cache dir is load-bearing and must never be shared
-# across reps or arms (ahrefs/ocannl#568, and gh-481's vacuous-A/B trap).
-# $EXTRA is empty for the default cap, --ocannl_virtualize_max_inline_fanin=N otherwise.
-cd <tree>/benchmarks && rm -rf /tmp/cell/cache
-BENCH_FIXTURE=fixtures/gpt2_mini.safetensors BENCH_TUNE=1 taskset -c 0-15 \
-  ../_build/default/benchmarks/runners/ocannl/bench_gpt.exe --ocannl_backend=hip \
-  --ocannl_autotune_cache_dir=/tmp/cell/cache \
-  --ocannl_autotune_log=true --ocannl_schedule_log_declines=true $EXTRA \
-  > /tmp/cell/search.out 2> /tmp/cell/search.err
-grep -E 'untuned-default pipeline|winner replay ok|tune_placements: winner' /tmp/cell/search.err
-grep -o 'finer_fission [a-z]*' /tmp/cell/cache/*.sexp        # gh-574: must be true
+# Part 2, the gh-574 arm: two trees, three reps, arm order ALTERNATED across reps (gh-481) --
+# BASE->FEAT, FEAT->BASE, BASE->FEAT. Each `search` is a cold cell with its own fresh cache.
+$D search ../wt-gh612-base base574 1;  $D search ../wt-gh612-feat feat574 1
+$D search ../wt-gh612-feat feat574 2;  $D search ../wt-gh612-base base574 2
+$D search ../wt-gh612-base base574 3;  $D search ../wt-gh612-feat feat574 3
 ```
 
 ```bash
-# the emitted source + the launch geometry, from a warm replay of exactly that artifact.
-# Arm A compiles first and arm B overwrites it, so snapshot by polling on content; the watcher
-# can catch a partially written file, so pick the snapshot by KERNEL COUNT.
-rm -rf build_files /tmp/cell/armsnap && mkdir -p /tmp/cell/armsnap
-F=build_files/bench_gpt/cross_entropy_loss_fwd__seg.hip
-( while :; do if [ -f "$F" ]; then h=$(md5sum "$F" | cut -d' ' -f1)
-    [ -f "/tmp/cell/armsnap/$h.hip" ] || cp "$F" "/tmp/cell/armsnap/$h.hip"; fi
-    sleep 0.02; done ) & W=$!
-BENCH_FIXTURE=fixtures/gpt2_mini.safetensors BENCH_TUNE=1 taskset -c 0-15 \
-  ../_build/default/benchmarks/runners/ocannl/bench_gpt.exe --ocannl_backend=hip \
-  --ocannl_autotune_cache_dir=/tmp/cell/cache \
-  --ocannl_output_debug_files_in_build_directory=true \
-  --ocannl_schedule_log_launches=true $EXTRA 2> /tmp/cell/launches.err
-kill $W
-# arm A is the FIRST fissioned compile in the launch log (the total=1 whole-routine probe aside)
-N=$(grep -o 'cross_entropy_loss_fwd seg 0/[0-9]*' /tmp/cell/launches.err \
-      | awk -F/ '$2>1{print $2; exit}')
-for f in /tmp/cell/armsnap/*.hip; do
-  [ "$(grep -c '__global__' "$f")" = "$N" ] && A=$f; done; echo "arm A = $A ($N kernels)"
+# Part 3, the gh-573 arm: one tree, a config flip, order alternated the same way.
+M=../wt-gh612-master
+$D search $M master-cap8 1;                                            $D search $M master-capoff 1 --ocannl_virtualize_max_inline_fanin=-1
+$D search $M master-capoff 2 --ocannl_virtualize_max_inline_fanin=-1;   $D search $M master-cap8 2
+$D search $M master-cap8 3;                                            $D search $M master-capoff 3 --ocannl_virtualize_max_inline_fanin=-1
 ```
 
 ```bash
-# per-kernel times and the bucket table. Three harness runs; the stderr sum-vs-step line is the
-# validation the report quotes.
-python3 gpt2_kernel_harness.py --source "$A" --launches /tmp/cell/launches.err \
-        --out /tmp/cell/harness.hip
-hipcc --offload-arch=gfx1151 -O2 -o /tmp/cell/harness /tmp/cell/harness.hip
-for i in 1 2 3; do taskset -c 0-15 /tmp/cell/harness > /tmp/cell/kernels-$i.csv \
-                     2> /tmp/cell/kernels-$i.err; tail -1 /tmp/cell/kernels-$i.err; done
-python3 gpt2_bucket.py --source "$A" --stats /tmp/cell/kernels-1.csv --steps 1 --dump
+# the per-kernel profile of the DEFAULT-PLACEMENT arm, per cell. `snap` replays the cached winner
+# with debug sources on, then selects arm A by launch-log fission width and validates the snapshot
+# (balanced braces + a clean hipcc compile) before accepting it -- a content-polling watcher can
+# copy a file whose `__global__` lines are all present but whose last body is torn, and the kernel
+# count alone does not catch that.
+for c in "../wt-gh612-base base574" "../wt-gh612-feat feat574" "$M master-cap8"; do
+  set -- $c; $D snap "$1" "$2" 1; $D profile "$1" "$2" 1 3; $D finger "$2" 1
+done
+$D snap $M master-capoff 1 --ocannl_virtualize_max_inline_fanin=-1
+$D profile $M master-capoff 1 3; $D finger master-capoff 1
+```
+
+`finger` prints the two acceptance fingerprints directly: for gh-573 the LayerNorm sites with their
+`ffn_b2` prefix lengths — which must be bounded and must **reset** rather than ramp with depth — and
+for gh-574 the lm_head/CE tail, which must show the GEMM alone and the row-max as a separate kernel.
+It parses signatures with `re.S` because the emitted parameter lists span multiple lines.
+
+```bash
+# Part 4, the cap sweep. `sweep` reverses the cap order on alternate reps, so no cap sits
+# permanently earlier in the session than another -- without that, cap 4 always precedes cap 8 and
+# session drift is indistinguishable from the cap's effect.
+$D sweep $M 3 8 4                  # the claim-bearing pair, balanced inside one block
+$D sweep $M 1 2 16 32 -1           # the shape of the curve
+# then read the arm A KERNEL count, not the F_saved label -- a cap whose kernel count matches
+# cap -1's is not losing a trade-off, it is never firing:
+for cap in 2 4 8 16 32 -1; do
+  $D snap $M sweep-cap$cap 1 --ocannl_virtualize_max_inline_fanin=$cap
+done
 ```
 
 ```bash
-# the fingerprints, read off the emitted source rather than inferred.
-# gh-573: the LayerNorm triangle -- prefix length must be bounded and must RESET, not ramp.
-grep -oE '__global__ void \w+__seg[0-9]+\([^)]*\)' "$A" \
-  | grep -E 'gamma_|beta_' | grep -oE 'l[0-9]_ffn_b2' | sort | uniq -c
-# gh-574: the CE segment cut apart -- the GEMM alone, the row-max its own kernel.
-grep -oE '__global__ void \w+__seg[0-9]+\([^)]*\)' "$A" | grep -E 'wte|max_logits'
-# and the geometry the lm_head GEMM actually launched at
-grep -E "cross_entropy_loss_fwd seg [0-9]+/$N" /tmp/cell/launches.err \
-  | sed -E 's/.*(seg [0-9]+).*(grid=\[[^]]*\]).*(block=\[[^]]*\]).*/\1 \2 \3/'
-```
-
-```bash
-# the cap sweep. Three reps per cap, and read the UNTUNED column first: it is deterministic, and a
-# cap whose untuned time and arm A segment count both match cap -1's is not being traded off, it is
-# never firing (that is what happens at 16 and above here).
-for cap in 2 4 8 16 32 -1; do for rep in 1 2 3; do
-  # ... the cold-search cell above, with --ocannl_virtualize_max_inline_fanin=$cap
-  grep -m1 'untuned-default pipeline' /tmp/cell/search.err
-  grep -m1 'winner replay ok' /tmp/cell/search.err     # arm A segment count
-done; done
-```
-
-```bash
-# the measured local roofline (CPU quiet: the bandwidth leg shares the LPDDR5X controller with it)
-hipcc --offload-arch=gfx1151 -O3 -o /tmp/roofline benchmarks/roofline_hip.cpp \
-      -I/opt/rocm/include -L/opt/rocm/lib -lrocblas && taskset -c 0-15 /tmp/roofline
+# the measured local roofline (compiled from the tree root; CPU quiet, since the bandwidth leg
+# shares the LPDDR5X controller with it on this APU)
+$D roofline $M
 ```

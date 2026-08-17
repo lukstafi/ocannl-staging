@@ -467,8 +467,16 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   emitted source; a report that quotes the label as a kernel count is wrong by ~1.8x. The launch
   log's FIRST fissioned `seg 0/N` (skipping the `N=1` whole-routine probe) is arm A, the next is
   arm B — which is also how to pick the right file out of a content-polling snapshot of
-  `<routine>__seg.hip`, since the watcher can catch a partially written file and only the kernel
-  count distinguishes them reliably.
+  `<routine>__seg.hip`. The watcher can catch a partially written file, and the kernel count alone
+  does NOT identify a usable capture: a torn file can already carry every `__global__` line while its
+  last body is incomplete, and glob order is hash order. Require balanced braces AND a clean `hipcc`
+  compile before accepting a snapshot (`benchmarks/gh612_cells.sh pick_armA`).
+- A per-kernel profile's sum may only be validated against the step time of **the compile it came
+  from**. Each search rep crowns a different artifact with different tile sizes, so holding one rep's
+  profile against another rep's step p50 measures the search lottery, not the reconstruction — on
+  gpt2_mini/HIP that turns a genuine 0.5–0.8% agreement into an apparent 2.1% disagreement, and the
+  error is invisible because both numbers are real. Quote the paired p50 from the same cell's
+  `search.out`/`replay.out`.
 - "Timed" is not "tensorized" either, and that failure is worse: a declined `Tile_mma` renders its
   scalar fallback, which compiles and runs, so the candidate is timed, ranked and possibly crowned
   under an `mma-*` label (gh-ocannl-545: 20 of 20 timed bf16 candidates on CUDA were scalar). The
