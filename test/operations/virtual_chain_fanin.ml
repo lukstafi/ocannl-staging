@@ -1145,7 +1145,34 @@ let phase5 () =
       ~read:[ out20 ]
   in
   p "dead-taint: consuming is legal, the live component's values splice"
-    (same got15 [ Array.map ell17_vals ~f:(fun x -> x +. 100.) ])
+    (same got15 [ Array.map ell17_vals ~f:(fun x -> x +. 100.) ]);
+  (* Review round 11, P2: when an INHERITED computation cannot be inlined at the consumer's read
+     site (a fixed-cell producer read across a loop trips Non_virtual 13), the local-producer
+     fallback — a materialized Get — is unavailable: the deferring routine already dropped the
+     setters, so no routine writes the buffer. The consumer fails actionably instead. *)
+  let ell18 = mk "ell18" in
+  materialize ell18;
+  let v17 = mk "v17" and out21 = mk "flout" in
+  materialize out21;
+  let ctx16 = LL.empty_optimize_ctx () in
+  let llc_a16 = set v17 [| fixed 0 |] (add (get ell18 [| fixed 0 |]) (c 100.)) in
+  let o_a16 =
+    LL.optimize ctx16 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_fail_a" [] llc_a16
+  in
+  p "failed-inline: routine A defers v17" (known_virtual o_a16 v17);
+  let llc_b16 =
+    let s = sym () in
+    loop_n s dim (set out21 [| iter s |] (get v17 [| iter s |]))
+  in
+  let rejected_fail =
+    try
+      ignore
+        (LL.optimize ctx16 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_fail_b" [] llc_b16
+          : LL.optimized);
+      false
+    with Utils.User_error msg -> String.is_substring msg ~substring:"could not be inlined"
+  in
+  p "failed-inline: consuming at an un-inlinable site fails actionably" rejected_fail
 
 (* === Phase 6: deferral-only comp through the ordinary pipeline (review round 3) === *)
 

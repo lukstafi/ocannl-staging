@@ -1367,9 +1367,10 @@ and scalar_reads_merge_buffer ~self : scalar_t -> bool = function
           scalar_reads_merge_buffer ~self a || scalar_reads_merge_buffer ~self b)
   | Unop (_, (a, _)) -> scalar_reads_merge_buffer ~self a
 
-let%track7_sexp inline_computation ~id ~inherited_merge_tainted (optim_ctx : optimize_ctx)
-    (traced : traced_array) (static_indices : Indexing.static_symbol list)
-    (call_args : Indexing.axis_index array) : t option =
+let%track7_sexp inline_computation ~id ~inherited_merge_tainted ~inherited_tns
+    (optim_ctx : optimize_ctx) (traced : traced_array)
+    (static_indices : Indexing.static_symbol list) (call_args : Indexing.axis_index array) :
+    t option =
   let exception Non_virtual of int in
   let static_indices =
     Set.of_list (module Indexing.Symbol)
@@ -1917,6 +1918,21 @@ let%track7_sexp inline_computation ~id ~inherited_merge_tainted (optim_ctx : opt
           in
           Some (unflat_lines body)
   with Non_virtual i ->
+    (* Review round 11: an INHERITED computation has no materialization fallback — the deferring
+       routine already dropped the setters from its schedule, so committing [Never_virtual] here
+       would either conflict with the lineage's [Virtual] commitment (a cryptic
+       provenance-collision error) or commit the consumer to a buffer no routine writes. Fail
+       actionably instead. *)
+    if Hash_set.mem inherited_tns traced.tn then
+      raise
+        (Utils.User_error
+           [%string
+             "the deferred computation of %{Tn.debug_name traced.tn}, stored by an earlier \
+              routine of this compilation lineage, could not be inlined at a read site of this \
+              routine (rejection %{i#Int}: unsupported indexing or vector form for inlining): \
+              no routine writes the node's buffer, so the read cannot fall back to a \
+              materialized access. Mark %{Tn.debug_name traced.tn} as materialized (e.g. via \
+              Train.set_materialized) in the routine that computes it."]);
     Tn.Placements.update optim_ctx.placements traced.tn Never_virtual i;
     None
 
@@ -2169,8 +2185,8 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
           let id = get_scope tn in
           Option.value ~default:llsc
           @@ Option.map
-               (inline_computation ~id ~inherited_merge_tainted optim_ctx traced static_indices
-                  indices)
+               (inline_computation ~id ~inherited_merge_tainted ~inherited_tns optim_ctx traced
+                  static_indices indices)
                ~f:(fun body ->
                  if Hash_set.mem inherited_tns tn then record_spliced_reads body;
                  Local_scope { id; body; orig_indices = indices })
