@@ -45,46 +45,65 @@ let access_cells (a : Tn.t Affine.access) : int * bool =
       | `At_least f -> (box / max 1 f, false)
     in
     if a.a_vec_last then
-      (* Each map instance is the base of a run along the minor axis: runs may overlap for strided
-         bases, so the product is an upper bound. *)
-      (min node_cells (image * max 1 a.a_vec_len), true)
+      (* Each map instance is the base of a run along the minor axis. When the base image is exact
+         and the runs are provably pairwise disjoint ({!Affine.vec_runs_disjoint}), the product is
+         the exact distinct-cell count (gh-ocannl-578); otherwise runs may overlap for strided
+         bases, so it is an upper bound. *)
+      let dims = Lazy.force a.a_tn.Tn.dims in
+      let minor_dim = if Array.length dims = 0 then 0 else dims.(Array.length dims - 1) in
+      let disjoint_runs = Affine.vec_runs_disjoint ~minor_dim a in
+      ( min node_cells (image * max 1 a.a_vec_len),
+        (not (exact_image && disjoint_runs)) || a.a_guarded )
     else (min node_cells image, (not exact_image) || a.a_guarded)
+
+(* Same-node accesses whose images provably share no cell: the union of their images is then the
+   sum of their cardinalities. *)
+let rec pairwise_disjoint = function
+  | [] -> true
+  | a :: tl ->
+      List.for_all tl ~f:(fun b -> not (Affine.may_touch_same_cell a b)) && pairwise_disjoint tl
 
 let footprints (accesses : Tn.t Affine.access list) : (Tn.t * node_footprint) list =
   (* Per node and direction: sum of per-access cell counts (a union upper bound, capped by the
-     node's size); exact only for a single exact access in the direction. *)
+     node's size); exact when every access in the direction is individually exact and the accesses
+     are pairwise provably disjoint ({!Affine.may_touch_same_cell} — the union of disjoint images
+     is their sum, gh-ocannl-578), which subsumes the single-exact-access case. *)
   let tbl = Hashtbl.create (module Tn) in
   let order = ref [] in
   List.iter accesses ~f:(fun a ->
-      let cells, approx = access_cells a in
-      let cur =
+      let cell =
         Hashtbl.find_or_add tbl a.a_tn ~default:(fun () ->
             order := a.a_tn :: !order;
-            (0, 0, 0, 0, 0, false))
+            ref [])
       in
-      let reads, writes, rmws, nreads, nwrites, apx = cur in
-      let next =
-        if a.a_write then
-          ( reads,
-            writes + cells,
-            (rmws + if a.a_rmw then cells else 0),
-            nreads,
-            nwrites + 1,
-            apx || approx )
-        else (reads + cells, writes, rmws, nreads + 1, nwrites, apx || approx)
-      in
-      Hashtbl.set tbl ~key:a.a_tn ~data:next);
+      cell := a :: !cell);
   List.rev_map !order ~f:(fun tn ->
-      let reads, writes, rmws, nreads, nwrites, apx = Hashtbl.find_exn tbl tn in
+      let accs = List.rev !(Hashtbl.find_exn tbl tn) in
+      let writes, reads = List.partition_tf accs ~f:(fun a -> a.Affine.a_write) in
+      let direction accs =
+        let counted = List.map accs ~f:(fun a -> (a, access_cells a)) in
+        let cells = List.sum (module Int) counted ~f:(fun (_, (c, _)) -> c) in
+        let exact =
+          List.for_all counted ~f:(fun (_, (_, approx)) -> not approx)
+          && (match counted with [] | [ _ ] -> true | _ -> pairwise_disjoint accs)
+        in
+        (cells, not exact)
+      in
+      let read_cells, reads_approx = direction reads in
+      let write_cells, writes_approx = direction writes in
+      let rmw_cells =
+        List.sum (module Int) writes ~f:(fun a ->
+            if a.Affine.a_rmw then fst (access_cells a) else 0)
+      in
       let width = Ops.prec_in_bytes (Lazy.force tn.Tn.storage_prec) in
       let node_bytes = Tn.num_elems tn * width in
       let cap n = min node_bytes (n * width) in
       ( tn,
         {
-          fp_read_bytes = cap reads;
-          fp_write_bytes = cap writes;
-          fp_rmw_bytes = cap rmws;
-          fp_approx = apx || nreads > 1 || nwrites > 1;
+          fp_read_bytes = cap read_cells;
+          fp_write_bytes = cap write_cells;
+          fp_rmw_bytes = cap rmw_cells;
+          fp_approx = reads_approx || writes_approx;
         } ))
 
 let analyze (code : Low_level.t) : summary =
@@ -171,8 +190,10 @@ let arithmetic_intensity s = Float.of_int s.flops /. Float.of_int (max 1 (total_
    conditionally-evaluated operand ({!Ops.binop_conditionality} / {!Ops.ternop_conditionality})
    counts at its cheapest instead of its dearest, so [Where] charges its condition plus the cheaper
    arm where the upper walk charges the dearer one and a gated right operand floors away, a
-   node's multiple same-direction accesses take the MAX of the exact images (a union is at least
-   its largest member) instead of the capped sum, non-exact images contribute zero, and opaque
+   node's multiple same-direction accesses sum only when the exact images are pairwise provably
+   disjoint (both extractions then agree the union is the sum) and otherwise take their MAX (a
+   union is at least its largest member) instead of the capped sum, non-exact images contribute
+   zero, and opaque
    code ([Staged_compilation], merge-buffer reads) — the upper contract's one escape hatch —
    merely loosens a floor without breaking it. [fr_exact] is [false] when any flooring occurred:
    the floor is then sound but not tight. *)
@@ -405,32 +426,44 @@ let under_dead_loop (a : Tn.t Affine.access) =
 let completion_floor ?(open_placement = fun _ -> false) (code : Low_level.t) : floor =
   let flops, flops_exact = floor_flops ~open_placement code in
   let read_uncertain, any_uncertain = floor_uncertainty ~open_placement code in
-  (* Per node and direction, the certain traffic is the largest exact single-access image (a
-     union is at least its largest member). Nodes with an open placement level contribute zero:
-     their fully-inlined completion moves no bytes for them, and the floor quantifies over every
-     completion. Committing such a node to Materialize adds back {!node_floor_bytes} — the
-     monotone refinement delta. Reads that are not certain in every completion (Where arms, open
-     producers\' operands, dead code) floor to zero, as do guarded and non-exact accesses. *)
+  (* Per node and direction, the certain traffic: the sum of the exact images when they are
+     pairwise provably disjoint (a disjoint union attains its sum, gh-ocannl-578), otherwise the
+     largest exact image (a union is at least its largest member). Nodes with an open placement
+     level contribute zero: their fully-inlined completion moves no bytes for them, and the floor
+     quantifies over every completion. Committing such a node to Materialize adds back
+     {!node_floor_bytes} — the monotone refinement delta. Reads that are not certain in every
+     completion (Where arms, open producers\' operands, dead code) floor to zero, as do guarded
+     and non-exact accesses. *)
   let tbl = Hashtbl.create (module Tn) in
   let inexact = ref (not flops_exact) in
   List.iter (Low_level.affine_accesses code) ~f:(fun a ->
       if open_placement a.Affine.a_tn || under_dead_loop a || any_uncertain a.a_tn then
         inexact := true
-      else begin
-        let cells = access_cells_floor a in
-        let cells = if (not a.a_write) && read_uncertain a.a_tn then 0 else cells in
-        if cells = 0 then inexact := true;
-        let reads, writes = Hashtbl.find tbl a.a_tn |> Option.value ~default:(0, 0) in
-        (* A second nonzero contribution in a direction means the union exceeds the retained
-           maximum unless the images coincide — which is not proved, so the floor is loose. *)
-        (if cells > 0 && (if a.a_write then writes > 0 else reads > 0) then inexact := true);
-        let next = if a.a_write then (reads, max writes cells) else (max reads cells, writes) in
-        Hashtbl.set tbl ~key:a.a_tn ~data:next
-      end);
+      else
+        let cell = Hashtbl.find_or_add tbl a.a_tn ~default:(fun () -> ref []) in
+        cell := a :: !cell);
   let bytes =
-    Hashtbl.fold tbl ~init:0 ~f:(fun ~key:tn ~data:(reads, writes) acc ->
+    Hashtbl.fold tbl ~init:0 ~f:(fun ~key:tn ~data:accs acc ->
+        let direction accs =
+          let counted =
+            List.map accs ~f:(fun a ->
+                let cells = access_cells_floor a in
+                let cells = if (not a.a_write) && read_uncertain a.a_tn then 0 else cells in
+                if cells = 0 then inexact := true;
+                (a, cells))
+          in
+          let nz = List.filter counted ~f:(fun (_, c) -> c > 0) in
+          if pairwise_disjoint (List.map nz ~f:fst) then List.sum (module Int) nz ~f:snd
+          else begin
+            (* The union exceeds the retained maximum unless the images coincide — which is not
+               proved, so the floor is loose. *)
+            (if List.length nz > 1 then inexact := true);
+            List.fold nz ~init:0 ~f:(fun m (_, c) -> max m c)
+          end
+        in
+        let writes, reads = List.partition_tf !accs ~f:(fun a -> a.Affine.a_write) in
         let width = Ops.prec_in_bytes (Lazy.force tn.Tn.storage_prec) in
-        acc + ((reads + writes) * width))
+        acc + ((direction reads + direction writes) * width))
   in
   { fr_flops = flops; fr_bytes = bytes; fr_exact = not !inexact }
 

@@ -10,8 +10,10 @@
      in refinement;
    - guarded write: the floor counts guards-never-taken (condition ops only, no write traffic)
      where the upper counts guards-taken — [fr_exact] false;
-   - two reads of one node: the floor takes the larger exact image (a union is at least its
-     largest member, flagged loose) where the upper takes the capped sum;
+   - two reads of one node: pairwise provably-disjoint exact images sum in both extractions
+     (gh-ocannl-578); possibly-overlapping ones keep the asymmetry — the floor takes the larger
+     exact image (a union is at least its largest member, flagged loose) where the upper takes
+     the capped sum;
    - short-circuiting forms: Where arms, And/Or right operands (conditional — cheaper-arm /
      left-operand floors, conditional reads zeroed) and Arg1/Arg2 discarded operands (never
      rendered at all, so absent from both extractions);
@@ -132,10 +134,9 @@ let () =
          })
   in
   let _ = show "guarded write" guarded in
-  (* Two exact reads of one node with disjoint images: G[i][j] = H[0][j] + H[1][j]. The upper
-     sums the images (10 cells = 40 rd bytes, a union bound); the floor takes only the larger
-     exact image (5 cells = 20 bytes) — a union is at least its largest member, no more is
-     certain. G writes 80 bytes both ways: floor 100 vs upper 120. *)
+  (* Two exact reads of one node with provably disjoint images: G[i][j] = H[0][j] + H[1][j]. Both
+     extractions agree the union is the sum (gh-ocannl-578): 10 cells = 40 rd bytes, G writes 80
+     bytes both ways — floor = upper = 120, exact. *)
   let g = fresh_tn "G" [| 4; 5 |] in
   let h = fresh_tn "H" [| 4; 5 |] in
   let two_reads =
@@ -153,7 +154,25 @@ let () =
               debug = "";
             }))
   in
-  let _ = show "two reads, union floor = larger image" two_reads in
+  let _ = show "two disjoint reads, both extractions sum" two_reads in
+  (* Two exact reads that may overlap: G2[i] = H8[i] + H8[i+1]. The upper sums (8 cells = 32 rd
+     bytes, a union bound); the floor takes only the larger exact image (4 cells = 16 bytes) — a
+     union is at least its largest member, no more is certain. G2 writes 16 both ways: floor 32
+     vs upper 48. *)
+  let g2 = fresh_tn "G2" [| 4 |] in
+  let h8 = fresh_tn "H8" [| 8 |] in
+  let shift1 s = Idx.Affine { symbols = [ (1, s) ]; offset = 1 } in
+  let overlapping_reads =
+    for_over i
+      (LL.Set
+         {
+           tn = g2;
+           idcs = [| it i |];
+           llsc = LL.Binop (Ops.Add, (get h8 [| it i |], sp), (get h8 [| shift1 i |], sp));
+           debug = "";
+         })
+  in
+  let _ = show "two overlapping reads, union floor = larger image" overlapping_reads in
   (* Dynamic gather: P[i] = Q[R[i]]. Q's access is uninterpretable — the upper falls back to the
      whole node, the floor to zero (inexact). *)
   let p = fresh_tn "P" [| 4 |] in

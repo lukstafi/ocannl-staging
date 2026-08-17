@@ -704,6 +704,38 @@ let linear_terms (idx : Idx.axis_index) : ((int * Idx.symbol) list * int) option
   | Idx.Affine { symbols; offset } -> Some (Idx.coalesce_affine_terms symbols, offset)
   | Idx.Sub_axis | Idx.Concat _ -> None
 
+(** Whether the runs of a vectorized access ([a_vec_last]) are pairwise disjoint in the node's flat
+    cell space — the access then touches exactly [base image * a_vec_len] distinct cells
+    (gh-ocannl-578). Sufficient conditions on the minor (last, contiguous) axis component: it is
+    linear with every symbol's range known from [a_loops]; every run stays within its row ([lo >=
+    0] and [hi + a_vec_len <= minor_dim], where [minor_dim] is the node's minor-axis extent — a
+    spilling run could overlap a base in the next row); and any two attained base values differ by
+    a multiple of the coefficient gcd [g] with [g >= a_vec_len] (or the component is constant,
+    [g = 0]). Distinct base cells then differ either in a non-minor axis — disjoint runs, since
+    none spills — or by at least a run length along the minor axis. Conservative: [false] when any
+    condition is not proved. *)
+let vec_runs_disjoint ~minor_dim (a : 'tn access) : bool =
+  a.a_vec_last
+  && Array.length a.a_map > 0
+  &&
+  match linear_terms a.a_map.(Array.length a.a_map - 1) with
+  | None -> false
+  | Some (terms, offset) -> (
+      let ranged =
+        List.map terms ~f:(fun (c, s) ->
+            Option.map (List.Assoc.find a.a_loops s ~equal:Idx.equal_symbol) ~f:(fun r -> (c, r)))
+        |> Option.all
+      in
+      match ranged with
+      | None -> false
+      | Some cts ->
+          let lo, hi =
+            List.fold cts ~init:(offset, offset) ~f:(fun (lo, hi) (c, (vlo, vhi)) ->
+                (lo + min (c * vlo) (c * vhi), hi + max (c * vlo) (c * vhi)))
+          in
+          let g = List.fold cts ~init:0 ~f:(fun g (c, _) -> gcd g c) in
+          lo >= 0 && hi + a.a_vec_len <= minor_dim && (g = 0 || g >= a.a_vec_len))
+
 let read_covered_before ?(thread = fun _ -> false) ?(static_range = fun _ -> None)
     ~(read : 'tn access) ~(writes : 'tn access list) () : [ `Covered | `Unknown of string ] =
   let exception Fail of string in

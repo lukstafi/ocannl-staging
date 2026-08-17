@@ -16,9 +16,13 @@
   floor: flops=4 bytes=16 inexact
   upper: flops=8 bytes=32
   floor <= upper: true
-== two reads, union floor = larger image ==
-  floor: flops=20 bytes=100 inexact
+== two disjoint reads, both extractions sum ==
+  floor: flops=20 bytes=120 exact
   upper: flops=20 bytes=120
+  floor <= upper: true
+== two overlapping reads, union floor = larger image ==
+  floor: flops=4 bytes=32 inexact
+  upper: flops=4 bytes=48
   floor <= upper: true
 == dynamic gather ==
   floor: flops=0 bytes=32 inexact

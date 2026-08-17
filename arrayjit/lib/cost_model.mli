@@ -11,11 +11,14 @@
     Approximation contract (each direction is explicit, all biases point the same way):
 
     - Byte counts are upper bounds on compulsory traffic (distinct cells touched, perfect-cache
-      assumption): per-access image cardinalities are exact for injective interpretable maps;
-      non-injective maps, guarded ([If]) accesses (counted guards-taken), vectorized-write runs, and
+      assumption): per-access image cardinalities are exact for injective interpretable maps, and
+      for vectorized runs whose bases are provably non-overlapping ({!Affine.vec_runs_disjoint});
+      non-injective maps, guarded ([If]) accesses (counted guards-taken), other vectorized runs, and
       uninterpretable components ([Sub_axis]/[Concat]/dynamic indices — whole-node fallback) only
       over-count, as does summing multiple same-direction accesses of one node (a union bound,
-      capped by the node's size). [fp_approx] is [false] only when the count is exact.
+      capped by the node's size) — except that a direction whose accesses are all exact and
+      pairwise provably disjoint ({!Affine.may_touch_same_cell}) sums exactly (gh-ocannl-578).
+      [fp_approx] is [false] only when the count is exact.
     - The op count is an upper bound in the same guards-taken sense, and counts every scalar
       [Unop]/[Binop]/[Ternop] evaluation as one "FLOP" regardless of precision or integerness —
       except the two-operation ternaries [FMA]/[Mul3], which count two (matching [peak_flops]'
@@ -89,9 +92,11 @@ val completion_floor : ?open_placement:(Tnode.t -> bool) -> Low_level.t -> floor
       only adds ops" does not hold and the producer's whole effect attributes to the open
       placement. Call this on the {e all-materialized} specialization of the decision surface,
       where every open node's work sits in its own producer statement.
-    - [fr_bytes]: per node and direction, the largest exact single-access image (a union is at
-      least its largest member — dual to the upper extraction's capped sum; a second nonzero
-      contribution marks the floor loose); guarded, non-exact, dead-loop-enclosed,
+    - [fr_bytes]: per node and direction, the sum of the exact images when they are pairwise
+      provably disjoint (a disjoint union attains its sum — both extractions then agree,
+      gh-ocannl-578), otherwise the largest exact image (a union is at least its largest member —
+      dual to the upper extraction's capped sum; a second nonzero contribution then marks the
+      floor loose); guarded, non-exact, dead-loop-enclosed,
       conditionally-evaluated ([Where] arm, [And]/[Or] right operand) and open-producer-operand
       accesses contribute zero — their execution is not certain in every completion. Nodes with
       [open_placement] contribute zero.
