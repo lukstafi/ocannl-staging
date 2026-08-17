@@ -619,7 +619,10 @@ let () =
   let cond_read = [ Aff.Stmt 3; Aff.Cond ] in
   let body_write = [ Aff.Stmt 3; Aff.Body; Aff.Write ] in
   let rhs_read = [ Aff.Stmt 3; Aff.Body; Aff.Rhs ] in
-  let p name b = Stdio.printf "%-64s %b\n" name b in
+  let p name b =
+    Stdio.printf "%-64s %b\n" name b;
+    Verdict.claim name b
+  in
   p "cond read is NOT statement-subordinate to the guarded body's write"
     (not (Aff.same_statement cond_read body_write));
   p "the body's own rhs read IS statement-subordinate to its write"

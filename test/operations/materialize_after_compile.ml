@@ -20,7 +20,7 @@ module Tn = Ir.Tnode
 module LL = Ir.Low_level
 module SC = Ir.Schedule_cache
 
-let p name b = Stdio.printf "%s: %b\n" name b
+let p = Verdict.p
 let approx a b = Float.(abs (a -. b) < 1e-4)
 let n = 8
 

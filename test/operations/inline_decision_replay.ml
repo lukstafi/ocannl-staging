@@ -95,7 +95,7 @@ let count_get (o : LL.optimized) tn =
   walk_t ~on_set:(fun _ -> ()) ~on_get:(fun t -> if t.Tn.id = tn.Tn.id then Int.incr n) o.llc;
   !n
 
-let p name b = Stdio.printf "%s: %b\n" name b
+let p = Verdict.p
 
 (* A reversed read [prod[2-j]]: position differs from the enclosing statement's write position, so
    unlike a plain copy it is not read-modify-write-exempt and counts toward the multiplicity. *)
@@ -185,8 +185,9 @@ let phase2 () =
     Array.foldi yv_default ~init:0.0 ~f:(fun i acc v ->
         Float.max acc (Float.abs (v -. yv_inline.(i))))
   in
-  if Float.(max_diff <= 1e-6) then Stdio.printf "phase2 parity: PASS\n"
-  else Stdio.printf "phase2 parity: FAIL (max diff %.8f)\n" max_diff
+  Verdict.pass_fail "phase2 parity"
+    Float.(max_diff <= 1e-6)
+    ~detail:(fun () -> Printf.sprintf "max diff %.8f" max_diff)
 
 let () =
   phase1 ();

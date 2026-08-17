@@ -19,7 +19,7 @@ open Ocannl
 open Ocannl.Operation.DSL_modules
 module SC = Ir.Schedule_cache
 
-let p name b = Stdio.printf "%s: %b\n" name b
+let p = Verdict.p
 
 (* Config values resolve per lookup, so a config-file entry poked in is what later reads see —
    unless the commandline or the environment states the key, which take precedence. Each flip below

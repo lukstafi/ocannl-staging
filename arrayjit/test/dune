@@ -65,7 +65,7 @@
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND))
- (libraries base stdio arrayjit.ir))
+ (libraries base stdio arrayjit.ir verdict))
 
 (test
  (name test_zero_out_codegen)
@@ -211,7 +211,7 @@
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND))
- (libraries base stdio arrayjit.ir))
+ (libraries base stdio arrayjit.ir verdict))
 
 (test
  (name test_backend_selection)

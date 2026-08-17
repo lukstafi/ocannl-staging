@@ -36,7 +36,7 @@ module Numerics = Ir.Numerics
 (* Before any backend touch: the pure-f16 leg's probe override (read per call, env is live). *)
 let () = Unix.putenv "OCANNL_CC_FP16_ARITHMETIC" "native"
 let () = Utils.settings.output_debug_files_in_build_directory <- true
-let p name b = Stdio.printf "%s: %b\n" name b
+let p = Verdict.p
 
 let skipped name =
   Stdio.eprintf "SKIPPED (vacuous): %s\n%!" name;

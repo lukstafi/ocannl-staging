@@ -24,7 +24,7 @@ module Sched = Ir.Schedule
 module Asgns = Ir.Assignments
 
 let cross_entropy_loss = Nn_blocks.cross_entropy_loss
-let p name b = Stdio.printf "%s: %b\n" name b
+let p = Verdict.p
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 
 let () =

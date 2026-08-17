@@ -17,7 +17,7 @@ open Ocannl.Operation.DSL_modules
 open Stdio
 module Tn = Ir.Tnode
 
-let p name b = printf "%s: %b\n%!" name b
+let p = Verdict.p
 let n = 12
 let k = 16
 

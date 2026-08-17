@@ -16,13 +16,12 @@
    Printed facts are booleans/PASS lines so the expected output stays backend-stable. *)
 
 open Base
-open Stdio
 open Ocannl
 open Ocannl.Operation.DSL_modules
 module LL = Ir.Low_level
 module Tn = Ir.Tnode
 
-let p name b = printf "%s: %b\n" name b
+let p = Verdict.p
 
 (* Deterministic input and (via [fixed_state_for_init]) deterministic conv params, so the two phases
    compute the same function. *)
@@ -86,5 +85,6 @@ let () =
   let max_diff =
     Array.foldi yv_default ~init:0.0 ~f:(fun i acc v -> Float.max acc (Float.abs (v -. yv_mat.(i))))
   in
-  if Float.(max_diff <= 1e-5) then printf "parity: PASS\n"
-  else printf "parity: FAIL (max diff %.8f)\n" max_diff
+  Verdict.pass_fail "parity"
+    Float.(max_diff <= 1e-5)
+    ~detail:(fun () -> Printf.sprintf "max diff %.8f" max_diff)

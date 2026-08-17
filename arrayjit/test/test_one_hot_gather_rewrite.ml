@@ -66,7 +66,7 @@ let summarize (llc : LL.t) : int * int =
   proc llc;
   (!dyn, !loops)
 
-let p name b = Stdio.printf "%s: %b\n" name b
+let p = Verdict.p
 
 (* Build [result[b,d]] as a [Set] whose scalar is a scalar-local one-hot reduction over [k].
    [table_idcs] selects the table read; [bounds] is the loop [(from_, to_)]; [reversed] flips the
