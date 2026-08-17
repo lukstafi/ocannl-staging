@@ -182,20 +182,31 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   phantom "accessible" nodes (this is how the cache was caught); (2) on a hit, still re-run
   `pin_device_written_bounds` — its raising writer-after-settled-reader guard must fire regardless
   of caching.
-- **The traced store is the routine's node registry, and it is completed from the FINAL optimized
-  code** (gh-ocannl-610): kernel parameters (`C_syntax.compile_proc`), context allocation
-  (`Backends.allocate_delta`) and the routine interface (`Low_level.input_and_output_nodes`) all
-  enumerate `optimized.traced_store`, which `analyze_proc` builds from the RAW code — so a read
-  entering only when `inline_computation` splices a computation an earlier routine of the lineage
-  committed `Virtual` used to have no entry anywhere, and C-family codegen emitted an undeclared
-  identifier. `specialize_proc` closes the gap with `register_spliced_accesses` over the final
-  llc; fresh entries get `read_only` semantics (a stored computation's setters target the virtual
-  node itself, so splices only contribute reads). Corollary (gh-ocannl-611): a routine whose every
-  statement virtualizes away is LEGAL — cleanup's top-level elision degenerates to `Noop` — its
-  runtime schedule is empty while its stored computations persist in the lineage for later
-  consumers, so "compile a deferral-only routine" is a supported incremental-compilation move.
-  The acceptance pair (spliced-leaf execution; all-virtual producer + inheriting consumer) is
-  `test/operations/virtual_chain_fanin.ml` phases 3–4.
+- **The traced store is the routine's node registry, and it is RECONCILED with the FINAL
+  optimized code** (gh-ocannl-610): kernel parameters (`C_syntax.compile_proc`), context
+  allocation (`Backends.allocate_delta`) and the routine interface
+  (`Low_level.input_and_output_nodes`) all enumerate `optimized.traced_store`, which
+  `analyze_proc` builds from the RAW code — cross-routine inlining (a splice of a computation an
+  earlier routine committed `Virtual`) makes the two diverge in both directions.
+  `specialize_proc`'s `reconcile_traced_store` walks the final llc in program order and: gives
+  spliced-in nodes fresh `read_only` entries (codegen otherwise emits an undeclared identifier);
+  flips an already-traced node to `read_before_write` when a spliced read lands before the
+  routine's own first write (raw coverage alone concludes output-only and the incoming value
+  would be ignored — a read after the first write deliberately stays unflagged, it consumes the
+  routine's own value); prunes read-only entries the final code never touches (phantom inputs of
+  deferral-only routines) while KEEPING entries that record a raw write even when unaccessed —
+  out-of-contract probes (gh-ocannl-584 scope writes, `affine_extraction.ml`) check raw
+  decision-level facts, so the prune must stay no wider than the phantom-input genre; and
+  reconciles the merge node — a raw-declared merge whose read was deferred away is dropped
+  (linking would demand a transfer never consumed), while a spliced merge read the routine does
+  not declare raises `User_error` (merge contents are transient to the transfer-receiving
+  routine, so deferring the read across routines would change which transfer it observes).
+  Corollary (gh-ocannl-611): a routine whose every statement virtualizes away is LEGAL —
+  cleanup's top-level elision degenerates to `Noop`, with an EMPTY interface — its stored
+  computations persist in the lineage for later consumers, so "compile a deferral-only routine"
+  is a supported incremental-compilation move. Whether deferred computations should observe
+  inputs mutated between deferral and consumption is gh-ocannl-617. The acceptance pins are
+  `test/operations/virtual_chain_fanin.ml` phases 3–5.
 - **A knob read after lowering cannot reach a digest over lowered code** — it must be carried by a
   cache-key component or the cache replays across regimes (gh-ocannl-568: 5.9x). So every config
   key is classified in `Utils.config_key_classification` as code-borne / `Keyed <component>` /

@@ -5290,19 +5290,62 @@ let%diagn2_sexp analyze_proc (static_indices : Indexing.static_symbol list) (llc
 let copy_traced_store (store : traced_store) : traced_store =
   Hashtbl.map store ~f:(fun t -> { t with tn = t.tn })
 
-(* gh-610: cross-routine inlining ([inline_computation] splicing a computation an earlier routine
-   of the lineage committed [Virtual]) can bring reads of materialized nodes the raw code never
-   mentions, so [analyze_proc] gave them no traced entry. Everything that treats the traced store
-   as the routine's node registry — the kernel parameter list ([C_syntax.compile_proc]), context
-   allocation ([Backends.allocate_delta]), the routine interface ([input_and_output_nodes]) —
-   would miss them, and C-family codegen then emits an identifier no parameter declares. Walk the
-   FINAL optimized code and register the missing nodes. A stored computation's setters target the
-   virtual node itself, so splices only contribute reads and fresh entries are [read_only];
-   writes are handled all the same in case a future pass splices differently. *)
-let register_spliced_accesses (traced_store : traced_store) (llc : t) : unit =
+(* gh-610: reconcile the traced store with the FINAL optimized code. The traced store is the
+   routine's node registry — the kernel parameter list ([C_syntax.compile_proc]), context
+   allocation ([Backends.allocate_delta]) and the routine interface ([input_and_output_nodes])
+   all enumerate it — but [analyze_proc] builds it from the RAW code, and cross-routine inlining
+   ([inline_computation] splicing a computation an earlier routine of the lineage committed
+   [Virtual]) makes the final code diverge from the raw code in both directions. Three
+   reconciliations, all against the final code (review round 1 of the gh-610/611 PR):
+
+   - Nodes the raw code never mentions get fresh entries, or C-family codegen emits an identifier
+     no parameter declares. A stored computation's setters target the virtual node itself, so
+     splices only contribute reads and fresh entries are [read_only]; writes are handled all the
+     same in case a future pass splices differently.
+   - A spliced read can precede the routine's own first write of an ALREADY-TRACED node; the raw
+     analysis concluded write-covers-reads, so without the flag flip the node stays output-only
+     and its incoming value would be silently ignored. A read at a walk position before the
+     node's first write is exactly such a read (a raw pre-write read would already have set
+     [read_before_write] via the coverage query), so the walk tracks first writes in program
+     order — statement-level, right-hand sides before their store commits. A spliced read AFTER
+     the first write deliberately stays unflagged: it consumes the routine's own value, so the
+     value on entry does not matter for it.
+   - Read-only entries whose node the final code never touches are dropped (an all-virtual
+     routine's deferred-computation leaves): they would otherwise read back as phantom inputs,
+     parameters, allocations and dependencies of a schedule that does not touch them. The prune
+     is deliberately no wider than that genre: an entry recording a raw WRITE keeps its place
+     even when no access survives — the vanished write is not splicing's doing (out-of-contract
+     scope writes probed at the analysis level per gh-584, optimizer elisions), and the raw
+     decision-level facts are the deliverable there. Committed-[Virtual] entries stay too — they
+     are not interface material (no parameter, no allocation) but remain introspectable.
+
+   Merge-buffer reads reconcile separately, via the return value: the result says whether the
+   final code still reads the merge buffer, so the caller can drop a raw-declared [merge_node]
+   whose read was deferred away (keeping it would make linking demand a transfer the schedule
+   never consumes). A spliced merge read the routine does NOT declare raises instead: merge
+   buffers hold the payload of the transfer preceding THIS routine's run, so deferring a merge
+   read into a later routine changes which transfer it observes — that computation must not be
+   shared across routines. *)
+let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
+    ~(merge_node : Tnode.t option) (llc : t) : bool =
+  let accessed = Hash_set.create (module Tnode) in
+  let written_seen = Hash_set.create (module Tnode) in
   let fresh_read = Hash_set.create (module Tnode) in
   let fresh_written = Hash_set.create (module Tnode) in
-  let note set tn = if not (Hashtbl.mem traced_store tn) then Hash_set.add set tn in
+  let uses_merge = ref false in
+  let read tn =
+    Hash_set.add accessed tn;
+    match Hashtbl.find traced_store tn with
+    | None -> Hash_set.add fresh_read tn
+    | Some traced ->
+        if traced.has_assignment && not (Hash_set.mem written_seen tn) then
+          traced.read_before_write <- true
+  in
+  let written tn =
+    Hash_set.add accessed tn;
+    Hash_set.add written_seen tn;
+    if not (Hashtbl.mem traced_store tn) then Hash_set.add fresh_written tn
+  in
   let rec proc (c : t) =
     match c with
     | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ -> ()
@@ -5310,17 +5353,17 @@ let register_spliced_accesses (traced_store : traced_store) (llc : t) : unit =
         proc c1;
         proc c2
     | For_loop { body; _ } -> proc body
-    | Zero_out tn -> note fresh_written tn
+    | Zero_out tn -> written tn
     | Set { tn; llsc; _ } ->
-        note fresh_written tn;
-        scalar llsc
+        scalar llsc;
+        written tn
     | Set_from_vec { tn; arg = s, _; _ } ->
-        note fresh_written tn;
-        scalar s
+        scalar s;
+        written tn
     | Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
-        note fresh_written tn;
         scalar v;
-        scalar llsc
+        scalar llsc;
+        written tn
     | Set_local (_, llsc) -> scalar llsc
     | If { cond = c0, _; body } ->
         scalar c0;
@@ -5330,11 +5373,26 @@ let register_spliced_accesses (traced_store : traced_store) (llc : t) : unit =
     | Tile_mma { fallback; _ } -> proc fallback
   and scalar (sc : scalar_t) =
     match sc with
-    | Constant _ | Constant_bits _ | Embed_index _ | Get_local _ | Get_merge_buffer _ -> ()
-    | Get (tn, _) -> note fresh_read tn
+    | Constant _ | Constant_bits _ | Embed_index _ | Get_local _ -> ()
+    | Get_merge_buffer (source, _) ->
+        (match merge_node with
+        | Some m when Tn.equal m source -> ()
+        | _ ->
+            raise
+              (Utils.User_error
+                 [%string
+                   "an inlined cross-routine computation reads the merge buffer of \
+                    %{Tn.debug_name source}, which is not this routine's declared merge node: \
+                    merge-buffer contents are transient to the routine receiving the transfer, \
+                    so a computation reading them must not be deferred across routines. Mark the \
+                    node computed from the merge buffer as materialized (e.g. via \
+                    Train.set_materialized) in the routine that reads the transfer."]));
+        Hash_set.add accessed source;
+        uses_merge := true
+    | Get (tn, _) -> read tn
     | Get_dynamic { tn; dyn_value = v, _; _ } ->
-        note fresh_read tn;
-        scalar v
+        scalar v;
+        read tn
     | Local_scope { body; _ } -> proc body
     | Ternop (_, (a, _), (b, _), (d, _)) ->
         scalar a;
@@ -5350,7 +5408,18 @@ let register_spliced_accesses (traced_store : traced_store) (llc : t) : unit =
   Hash_set.iter fresh_read ~f:(fun tn ->
       let traced = get_node traced_store tn in
       if traced.has_assignment then traced.read_before_write <- true
-      else traced.read_only <- true)
+      else traced.read_only <- true);
+  let stale =
+    Hashtbl.fold traced_store ~init:[] ~f:(fun ~key ~data acc ->
+        if
+          (not (Hash_set.mem accessed key))
+          && (not data.has_assignment) && (not data.zeroed_out)
+          && not (Tn.Placements.known_virtual plc key)
+        then key :: acc
+        else acc)
+  in
+  List.iter stale ~f:(Hashtbl.remove traced_store);
+  !uses_merge
 
 let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : optimized =
   let static_indices = an.an_static_indices in
@@ -5369,7 +5438,9 @@ let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : opt
     @@ cleanup_virtual_llc input_ctx.placements ~static_indices
     @@ virtual_llc_result
   in
-  register_spliced_accesses traced_store llc;
+  let uses_merge =
+    reconcile_traced_store input_ctx.placements traced_store ~merge_node:an.an_merge_node llc
+  in
   (match llc with
   | Noop -> [%log "routine optimized to an empty schedule: every target virtualized (gh-611)"]
   | _ -> ());
@@ -5418,7 +5489,9 @@ let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : opt
     traced_store;
     optimize_ctx;
     llc;
-    merge_node = an.an_merge_node;
+    (* A raw-declared merge node whose read was deferred away is dropped: keeping it would make
+       linking demand a transfer the final schedule never consumes. *)
+    merge_node = (if uses_merge then an.an_merge_node else None);
     workgroup_shared = Set.empty (module Tnode);
     simdgroup_fragments = Set.empty (module Tnode);
     swizzled = Map.empty (module Tnode);

@@ -440,6 +440,11 @@ let phase4 () =
   in
   p "all-virtual: routine A optimizes to an empty schedule"
     (match o_a.LL.llc with LL.Noop -> true | _ -> false);
+  (* Review round 1 (P2): the interface must match the empty schedule — the deferred
+     computations' leaves are not phantom inputs of a routine that reads nothing. *)
+  p "all-virtual: the empty schedule has an empty interface"
+    (let (ins, outs), merge = LL.input_and_output_nodes o_a in
+     Set.is_empty ins && Set.is_empty outs && Option.is_none merge);
   p "all-virtual: x1..x5 committed virtual"
     (Array.for_alli c.xs ~f:(fun k tn -> k >= split || known_virtual o_a tn));
   p "all-virtual: the deferred computations persist in the lineage"
@@ -452,12 +457,95 @@ let phase4 () =
   in
   p "all-virtual: fan-in decisions unchanged in routine B (x8 trips the cap)"
     (known_virtual o_b c.xs.(6) && known_non_virtual o_b c.xs.(7) && known_virtual o_b c.xs.(8));
+  p "all-virtual: routine B declares the spliced leaves as inputs"
+    (let (ins, _), _ = LL.input_and_output_nodes o_b in
+     Set.mem ins c.x0 && Array.for_all c.ws ~f:(Set.mem ins));
   let got = execute ~name:"vcf_allvirt_b" o_b ~seed:(chain_seed c) ~read:[ c.out ] in
   p "all-virtual: executed values match the reference" (same got [ expected_out ])
+
+(* === Phase 5: spliced reads vs the consumer's own writes (review round 1) === *)
+
+let phase5 () =
+  (* P1: a spliced read PRECEDING the routine's own write of an already-traced node must flip it
+     to read_before_write — the raw analysis alone sees only the write, concludes the node is
+     output-only, and the incoming value would read as ignorable. Routine A defers v := ell + 100;
+     routine B consumes v (splicing the ell read) and THEN overwrites ell. *)
+  let mk = node_factory ~first_id:3500 ~dims:[| dim |] () in
+  let ell = mk "ell" in
+  materialize ell;
+  let v = mk "v" and out = mk "vout" in
+  materialize out;
+  let ctx = LL.empty_optimize_ctx () in
+  let llc_a =
+    let s = sym () in
+    loop_n s dim (set v [| iter s |] (add (get ell [| iter s |]) (c 100.)))
+  in
+  let o_a =
+    LL.optimize ctx ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_prewrite_a" [] llc_a
+  in
+  p "pre-write splice: routine A defers v" (known_virtual o_a v);
+  let llc_b =
+    let s = sym () and s2 = sym () in
+    seq
+      (loop_n s dim (set out [| iter s |] (get v [| iter s |])))
+      (loop_n s2 dim (set ell [| iter s2 |] (ramp 1000. s2)))
+  in
+  let o_b =
+    LL.optimize ctx ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_prewrite_b" [] llc_b
+  in
+  p "pre-write splice: ell flips to read_before_write" (read_before_write o_b ell);
+  p "pre-write splice: ell is an input of routine B"
+    (let (ins, _), _ = LL.input_and_output_nodes o_b in
+     Set.mem ins ell);
+  let ell_old = Array.init dim ~f:(fun i -> 1. +. Float.of_int i) in
+  let got =
+    execute ~name:"vcf_prewrite_b" o_b
+      ~seed:[ (ell, ell_old); (out, blank dim) ]
+      ~read:[ out; ell ]
+  in
+  p "pre-write splice: out sees the incoming ell, ell holds the overwrite"
+    (same got
+       [
+         Array.map ell_old ~f:(fun x -> x +. 100.);
+         Array.init dim ~f:(fun i -> 1000. +. Float.of_int i);
+       ]);
+  (* P1: a stored computation reading the merge buffer must not be consumed by a LATER routine —
+     merge-buffer contents are transient to the transfer-receiving routine, so the deferral would
+     change which transfer the read observes. The splice raises instead of emitting an undeclared
+     merge parameter. *)
+  let msrc = mk "msrc" in
+  materialize msrc;
+  let mv = mk "mv" and mout = mk "mout" in
+  materialize mout;
+  let ctx2 = LL.empty_optimize_ctx () in
+  let llc_ma =
+    let s = sym () in
+    loop_n s dim (set mv [| iter s |] (LL.Get_merge_buffer (msrc, [| iter s |])))
+  in
+  let o_ma =
+    LL.optimize ctx2 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_merge_a" [] llc_ma
+  in
+  p "merge splice: routine A defers the merge-reading node" (known_virtual o_ma mv);
+  p "merge splice: the deferred-away merge declaration is dropped from routine A"
+    (Option.is_none o_ma.LL.merge_node);
+  let llc_mb =
+    let s = sym () in
+    loop_n s dim (set mout [| iter s |] (get mv [| iter s |]))
+  in
+  let rejected =
+    try
+      ignore
+        (LL.optimize ctx2 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_merge_b" [] llc_mb
+          : LL.optimized);
+      false
+    with Utils.User_error msg -> String.is_substring msg ~substring:"merge buffer"
+  in
+  p "merge splice: consuming it in a later routine is rejected" rejected
 
 let () =
   phase1 ();
   phase1b ();
   phase2 ();
   phase3 ();
-  phase4 ()
+  phase4 ();
+  phase5 ()
