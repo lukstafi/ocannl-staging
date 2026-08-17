@@ -1148,11 +1148,13 @@
 ; The other side of the same coin: what the library WARNS about. The unknown-argument check and
 ; `read_cmdline_var` now consult one table (`Utils.cmdline_var_prefixes`), so a spelling is read
 ; and unwarned, or unread and warned, never one of each -- which is what this rule captures, three
-; arguments at a time: an all-dashed name with a `-` value separator, a mixed-separator name with
-; `=`, and one that names nothing. Only the third belongs in the golden. Both silent
-; contradictions the old two-parser arrangement produced are here: `--ocannl_log_level_1` was read
-; and warned about (its separator is not an `=`, so the key came out as `log_level_1`), and the
-; all-dashed spelling was warned about by nobody and read by nobody.
+; arguments at a time: an all-dashed name with a `-` value separator, a dashed prefix over an
+; underscored name with `=`, one whose name is dashed HALFWAY, and one that names nothing. The
+; last two belong in the golden. Every silent contradiction the old two-parser arrangement
+; produced is here: `--ocannl_log_level_0` was read and warned about (its separator is not an `=`,
+; so the key came out as `log_level_0`), while the all-dashed and halfway-dashed spellings were
+; warned about by nobody and read by nobody -- the halfway one is still not read, deliberately
+; (see `Utils.cmdline_var_names`), and now says so.
 ;
 ; stderr alone is the subject; the executable's own stdout goes nowhere. The chatter is turned off
 ; on the commandline, so the golden is the warnings and nothing else.
@@ -1169,8 +1171,9 @@
      --ocannl_no_config_file=true
      --ocannl_suppress_welcome_message=true
      --ocannl-print-decimals-precision-7
-     --ocannl_print-decimals-precision=7
+     --ocannl-print_decimals_precision=7
      --ocannl_log_level_0
+     --ocannl-print_decimals-precision=7
      --ocannl-not-a-real-key=7)))))
 
 (rule

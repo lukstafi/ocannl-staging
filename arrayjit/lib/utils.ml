@@ -437,10 +437,18 @@ let env_var_names n =
   [ prefixed; String.uppercase prefixed ]
 
 (** The commandline spellings of a config key, up to the value separator: the [ocannl_]-qualified
-    ones -- with the prefix separator and the key's own separators dashable independently, in
-    either case, and with or without a leading dash -- then, unless [qualified_only], the
-    prefix-free ones, which need a leading dash to be told from a host application's positional
-    argument.
+    ones -- then, unless [qualified_only], the prefix-free ones, which need a leading dash to be
+    told from a host application's positional argument.
+
+    The dashing is two independent choices, not one per separator: the prefix separator dashes on
+    its own, and the key's own separators dash TOGETHER. For [log_level] that is
+    [ocannl_log_level], [ocannl_log-level], [ocannl-log_level] and [ocannl-log-level] (each in
+    lowercase and in uppercase, each with one leading dash, two, or none). A key dashed halfway
+    ([ocannl-print_decimals-precision]) is not a spelling -- and, since {!cmdline_var_prefixes} is
+    also what the unknown-argument warning matches, it is reported as unknown rather than silently
+    ignored, which is what makes the narrower contract safe to have (Codex P2 on PR #363).
+    Enumerating every separator independently is the alternative, at 2^separators spellings per
+    key; nothing asked for it.
 
     [qualified_only] exists because OCANNL is a library: it scans the host executable's [Sys.argv],
     so a prefix-free key claims an application's own option of that name. That is tolerable for

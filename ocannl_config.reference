@@ -4,11 +4,15 @@
 # `--<name>=<value>`; environment variables still require the prefix (to avoid
 # conflicts with other tools) and are spelled `ocannl_<name>` or `OCANNL_<NAME>`,
 # those two and nothing else; in `ocannl_config` files the prefix has always been
-# optional. Commandline arguments additionally accept dashes for the prefix separator
-# and for the name's own separators (`--ocannl-log-level=1`), and a single leading
-# dash; in `ocannl_config` files the names are case-insensitive. The values are
-# case-sensitive and should be lowercase where case is irrelevant. The configuration
-# is read from a few sources, from highest priority:
+# optional. Commandline arguments additionally accept dashes in place of underscores,
+# as two independent choices: the prefix separator on its own, and the name's own
+# separators all together -- `--ocannl_log_level=1`, `--ocannl-log_level=1`,
+# `--ocannl_log-level=1` and `--ocannl-log-level=1` are the same setting, a halfway
+# dashed name is not a spelling and is reported as an unknown argument. A single
+# leading dash works too, as does `_` or `-` in place of the `=`; in `ocannl_config`
+# files the names are case-insensitive. The values are case-sensitive and should be
+# lowercase where case is irrelevant. The configuration is read from a few sources,
+# from highest priority:
 # 1. Commandline arguments.
 #    1a. The payload of a `profile` picked by a commandline argument.
 # 2. Environment variables.
