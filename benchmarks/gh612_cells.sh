@@ -127,16 +127,17 @@ cmd_snap() { (
   case ${tree:-} in /?*) ;; *) exit 2;; esac
   local out; out=$(cell_dir "$label" "$rep")
   case ${out:-} in /?*) ;; *) exit 2;; esac
+  # Retract the published selector FIRST, before any validation that can exit: every path out of
+  # this function from here on is a rejection, and a stale armA.path would let `diff`/`finger`/
+  # `profile` keep consuming the PREVIOUS accepted source as this cell's structural evidence.
+  # Publish-on-success only, the same rule replay2.out follows.
+  rm -f "$out/armA.path"
   # A cell with no populated cache cannot be replayed: with BENCH_TUNE=1 and an empty cache dir this
   # would run a NEW cold search and crown a different artifact, so a structural diff would compare
   # something the report never measured. Refuse instead.
   [ -d "$out/cache" ] && [ -n "$(ls -A "$out/cache" 2>/dev/null)" ] || {
     echo "gh612_cells: $label r$rep has no populated autotune cache -- run \`search\` first;" >&2
     echo "  refusing to replay, because that would silently become a fresh cold search" >&2; exit 2; }
-  # Retract the published selector BEFORE replaying: if this snapshot is rejected, a stale
-  # armA.path would let `diff`/`finger`/`profile` keep consuming the previous accepted source and
-  # present it as the new cell's structural evidence. Same rule as replay2.out -- publish on success.
-  rm -f "$out/armA.path"
   local snap="$out/armsnap"; rm -rf "$snap"; mkdir -p "$snap"
   cd "$tree/benchmarks" || exit 1
   rm -rf build_files

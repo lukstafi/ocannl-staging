@@ -797,9 +797,13 @@ for c in 16 32; do $D replay $M sweep-cap$c 1 --ocannl_virtualize_max_inline_fan
 # the claim it replaced ("bit-identical") came from an ad-hoc script that rounded before comparing.
 # EXPECT_CELLS pins the exact label/rep set, not just the count: with a reusable OUT_ROOT a stale
 # cell can stand in for a missing required one and still total 26.
+# cap 8 spans TWO labels by design (Part 3 makes r1-r3 as master-cap8, the balanced block makes
+# r4-r6 as sweep-cap8), so enumerate the ranges separately or the strict gate fails on every run.
 EXPECT_RUNS=26 EXPECT_CELLS="$(for c in base574 feat574 master-capoff; do for r in 1 2 3; do
     echo -n "$c/r$r "; done; done
-  for r in 1 2 3 4 5 6; do echo -n "master-cap8/r$r sweep-cap4/r$r "; done
+  for r in 1 2 3; do echo -n "master-cap8/r$r "; done
+  for r in 4 5 6; do echo -n "sweep-cap8/r$r "; done
+  for r in 1 2 3 4 5 6; do echo -n "sweep-cap4/r$r "; done
   for r in 1 2 3; do echo -n "sweep-cap2/r$r "; done
   echo -n "sweep-cap16/r1 sweep-cap32/r1")" $D parity
 ```
