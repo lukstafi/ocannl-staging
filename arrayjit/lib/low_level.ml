@@ -1342,7 +1342,14 @@ and scalar_reads_merge_buffer : scalar_t -> bool = function
   | Local_scope { body; _ } -> reads_merge_buffer body
   | Ternop (_, (a, _), (b, _), (d, _)) ->
       scalar_reads_merge_buffer a || scalar_reads_merge_buffer b || scalar_reads_merge_buffer d
-  | Binop (_, (a, _), (b, _)) -> scalar_reads_merge_buffer a || scalar_reads_merge_buffer b
+  | Binop (op, (a, _), (b, _)) -> (
+      (* A projection's discarded operand is never rendered, hence never reads anything: it must
+         not taint (review round 3). A gated second operand may evaluate, so it counts. *)
+      match Ops.binop_conditionality op with
+      | Ops.Only_first -> scalar_reads_merge_buffer a
+      | Ops.Only_second -> scalar_reads_merge_buffer b
+      | Ops.Both_operands | Ops.Gated_second ->
+          scalar_reads_merge_buffer a || scalar_reads_merge_buffer b)
   | Unop (_, (a, _)) -> scalar_reads_merge_buffer a
 
 let%track7_sexp inline_computation ~id ~inherited_merge_tainted (optim_ctx : optimize_ctx)
@@ -5391,46 +5398,51 @@ let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
   let fresh_written = Hash_set.create (module Tnode) in
   let suspects = Hash_set.create (module Tnode) in
   let uses_merge = ref false in
-  let read tn =
+  (* [live] is false under a dead loop ([to_ < from_]): a dead access still REGISTERS (renderers
+     emit dead-loop bodies, so their identifiers need parameters, and its entry must survive the
+     prune) but never executes, so it neither supplies coverage (a dead write does not enter
+     [written_seen]) nor demands it (a dead read flips no flag) — mirroring the raw analysis and
+     [drop_dead_loop_accesses] (review round 3). *)
+  let read ~live tn =
     Hash_set.add accessed tn;
     match Hashtbl.find traced_store tn with
     | None -> Hash_set.add fresh_read tn
     | Some traced ->
-        if traced.has_assignment && not traced.read_before_write then
+        if live && traced.has_assignment && not traced.read_before_write then
           if not (Hash_set.mem written_seen tn) then traced.read_before_write <- true
           else Hash_set.add suspects tn
   in
-  let written tn =
+  let written ~live tn =
     Hash_set.add accessed tn;
-    Hash_set.add written_seen tn;
+    if live then Hash_set.add written_seen tn;
     if not (Hashtbl.mem traced_store tn) then Hash_set.add fresh_written tn
   in
-  let rec proc (c : t) =
+  let rec proc ~live (c : t) =
     match c with
     | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ -> ()
     | Seq (c1, c2) ->
-        proc c1;
-        proc c2
-    | For_loop { body; _ } -> proc body
-    | Zero_out tn -> written tn
+        proc ~live c1;
+        proc ~live c2
+    | For_loop { from_; to_; body; _ } -> proc ~live:(live && to_ >= from_) body
+    | Zero_out tn -> written ~live tn
     | Set { tn; llsc; _ } ->
-        scalar llsc;
-        written tn
+        scalar ~live llsc;
+        written ~live tn
     | Set_from_vec { tn; arg = s, _; _ } ->
-        scalar s;
-        written tn
+        scalar ~live s;
+        written ~live tn
     | Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
-        scalar v;
-        scalar llsc;
-        written tn
-    | Set_local (_, llsc) -> scalar llsc
+        scalar ~live v;
+        scalar ~live llsc;
+        written ~live tn
+    | Set_local (_, llsc) -> scalar ~live llsc
     | If { cond = c0, _; body } ->
-        scalar c0;
-        proc body
+        scalar ~live c0;
+        proc ~live body
     (* Pre-schedule construct, unreachable here; defensively scan the semantically-equivalent
        fallback. *)
-    | Tile_mma { fallback; _ } -> proc fallback
-  and scalar (sc : scalar_t) =
+    | Tile_mma { fallback; _ } -> proc ~live fallback
+  and scalar ~live (sc : scalar_t) =
     match sc with
     | Constant _ | Constant_bits _ | Embed_index _ | Get_local _ -> ()
     | Get_merge_buffer (source, _) ->
@@ -5448,26 +5460,36 @@ let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
                     Train.set_materialized) in the routine that reads the transfer."]));
         Hash_set.add accessed source;
         uses_merge := true
-    | Get (tn, _) -> read tn
+    | Get (tn, _) -> read ~live tn
     | Get_dynamic { tn; dyn_value = v, _; _ } ->
-        scalar v;
-        read tn
-    | Local_scope { body; _ } -> proc body
+        scalar ~live v;
+        read ~live tn
+    | Local_scope { body; _ } -> proc ~live body
     | Ternop (_, (a, _), (b, _), (d, _)) ->
-        scalar a;
-        scalar b;
-        scalar d
-    | Binop (_, (a, _), (b, _)) ->
-        scalar a;
-        scalar b
-    | Unop (_, (a, _)) -> scalar a
+        scalar ~live a;
+        scalar ~live b;
+        scalar ~live d
+    | Binop (op, (a, _), (b, _)) -> (
+        (* The discarded operand of a projection is never rendered, hence never evaluated:
+           registering its reads would invent phantom parameters — dispatch through the operand
+           conditionality classifier like the affine and tracing walkers (review round 3). A
+           gated second operand IS rendered, so it registers. *)
+        match Ops.binop_conditionality op with
+        | Ops.Only_first -> scalar ~live a
+        | Ops.Only_second -> scalar ~live b
+        | Ops.Both_operands | Ops.Gated_second ->
+            scalar ~live a;
+            scalar ~live b)
+    | Unop (_, (a, _)) -> scalar ~live a
   in
-  proc llc;
+  proc ~live:true llc;
   (* Reads that follow a write of their node in program order: whether the write actually covers
      them is a per-cell, guard-aware question, answered by the same query that judged the raw
      reads. Lazy so routines without the pattern skip the affine pass over the final code. *)
   (if not (Hash_set.is_empty suspects) then
-     let covered = reads_covered_query static_indices (affine_accesses llc) in
+     let covered =
+       reads_covered_query static_indices (drop_dead_loop_accesses (affine_accesses llc))
+     in
      Hash_set.iter suspects ~f:(fun tn ->
          let traced = Hashtbl.find_exn traced_store tn in
          if not traced.read_before_write then

@@ -205,6 +205,16 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   code cannot distinguish a legitimate same-routine inlining of the declared merge read from a
   cross-routine splice whose consumer declares the SAME source, which would silently rebind the
   read to the consumer's transfer; `reconcile_traced_store` keeps a mismatch check as backstop.
+  The walk observes the raw analysis' conventions or it re-diverges (review round 3): dead-loop
+  bodies register (renderers emit them, so their identifiers need parameters) but neither supply
+  coverage (`written_seen`) nor demand it, and the coverage query filters through
+  `drop_dead_loop_accesses` like the raw side; `Binop` dispatches through
+  `Ops.binop_conditionality` in both the reconcile walk and `reads_merge_buffer` — a projection's
+  discarded operand is never rendered, so its reads are not parameters and its merge read must
+  not taint. `from_prior_context` (both `Backends.compile` and `from_prior_context_batch`) is
+  filtered by the reconciled traced store for the same reason the interface is: raw assignments
+  over-approximate the residual schedule, and a deferral-only routine must link on a fresh
+  context (`verify_prior_context` used to demand its deferred computations' leaves).
   Related pre-existing quirk: `rmw_exempt` excuses copy-position reads from the coverage verdict
   that feeds `read_before_write` (fine for multiplicity, questionable for the interface) —
   gh-ocannl-618; the phase-5 partial-write test reads at an offset position to stay off it.

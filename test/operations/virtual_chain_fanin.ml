@@ -610,7 +610,120 @@ let phase5 () =
     Array.init dim ~f:(fun i -> if i < dim - 1 then ell2_old.(i + 1) +. 100. else sentinel)
   in
   p "partial-write splice: uncovered cells read the incoming values"
-    (same got3 [ expected3 ])
+    (same got3 [ expected3 ]);
+  (* Review round 3, P1: a DEAD loop's write must not supply coverage — the raw side drops dead
+     accesses ([drop_dead_loop_accesses]) and the reconcile walk now mirrors it: a dead write
+     does not enter the first-write tracking and dead accesses are filtered from the coverage
+     query. Routine B: a dead full write of ell3, then the spliced read, then a live write. *)
+  let ell3 = mk "ell3" in
+  materialize ell3;
+  let v3 = mk "v3" and out3 = mk "dout" in
+  materialize out3;
+  let ctx4 = LL.empty_optimize_ctx () in
+  let llc_a4 =
+    let s = sym () in
+    loop_n s dim (set v3 [| iter s |] (add (get ell3 [| iter s |]) (c 100.)))
+  in
+  let o_a4 =
+    LL.optimize ctx4 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_dead_a" [] llc_a4
+  in
+  p "dead-write splice: routine A defers v3" (known_virtual o_a4 v3);
+  let llc_b4 =
+    let s0 = sym () and s = sym () and s2 = sym () in
+    List.reduce_exn ~f:seq
+      [
+        loop ~upto:(-1) s0 (set ell3 [| iter s0 |] (c 9.));
+        loop_n s dim (set out3 [| iter s |] (get v3 [| iter s |]));
+        loop_n s2 dim (set ell3 [| iter s2 |] (ramp 2000. s2));
+      ]
+  in
+  let o_b4 =
+    LL.optimize ctx4 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_dead_b" [] llc_b4
+  in
+  p "dead-write splice: ell3 is read-before-write (a dead write supplies no coverage)"
+    (read_before_write o_b4 ell3);
+  let ell3_old = Array.init dim ~f:(fun i -> 7. +. Float.of_int i) in
+  let got4 =
+    execute ~name:"vcf_dead_b" o_b4
+      ~seed:[ (ell3, ell3_old); (out3, blank dim) ]
+      ~read:[ out3; ell3 ]
+  in
+  p "dead-write splice: out sees incoming ell3, ell3 holds the live overwrite"
+    (same got4
+       [
+         Array.map ell3_old ~f:(fun x -> x +. 100.);
+         Array.init dim ~f:(fun i -> 2000. +. Float.of_int i);
+       ]);
+  (* Review round 3, P2: a projection's discarded operand is never rendered — a merge read
+     inside it must not taint the deferred computation, and its ordinary reads must not become
+     phantom parameters. v5 := Arg2(msrc.merge + extra, ell5): the whole first operand is
+     discarded, so consuming v5 in a later routine is legal and computes the second operand. *)
+  let ell5 = mk "ell5" in
+  materialize ell5;
+  let extra = mk "extra" in
+  materialize extra;
+  let v5 = mk "v5" and out5 = mk "aout" in
+  materialize out5;
+  let ctx5 = LL.empty_optimize_ctx () in
+  let llc_a5 =
+    let s = sym () in
+    loop_n s dim
+      (set v5 [| iter s |]
+         (binop Ir.Ops.Arg2
+            (add (LL.Get_merge_buffer (msrc, [| iter s |])) (get extra [| iter s |]))
+            (get ell5 [| iter s |])))
+  in
+  let o_a5 =
+    LL.optimize ctx5 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_proj_a" [] llc_a5
+  in
+  p "discarded operand: routine A defers v5" (known_virtual o_a5 v5);
+  let llc_b5 =
+    let s = sym () in
+    loop_n s dim (set out5 [| iter s |] (get v5 [| iter s |]))
+  in
+  let o_b5 =
+    LL.optimize ctx5 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_proj_b" [] llc_b5
+  in
+  p "discarded operand: no phantom input from the discarded read"
+    (let (ins, _), _ = LL.input_and_output_nodes o_b5 in
+     (not (Set.mem ins extra)) && Set.mem ins ell5);
+  let ell5_vals = Array.init dim ~f:(fun i -> 40. +. Float.of_int i) in
+  let got5 =
+    execute ~name:"vcf_proj_b" o_b5 ~seed:[ (ell5, ell5_vals); (out5, blank dim) ] ~read:[ out5 ]
+  in
+  p "discarded operand: executed values are the projected operand's" (same got5 [ ell5_vals ])
+
+(* === Phase 6: deferral-only comp through the ordinary pipeline (review round 3) === *)
+
+let phase6 () =
+  (* P1: [from_prior_context] is derived from the raw assignments, which over-approximate what
+     the residual schedule needs — pre-fix, a deferral-only comp failed [verify_prior_context]
+     on a fresh context, demanding leaves only its DEFERRED computations read. It is now
+     filtered by the reconciled traced store: the routine links and runs as a no-op. *)
+  Utils.settings.fixed_state_for_init <- Some 42;
+  Tensor.unsafe_reinitialize ();
+  let base =
+    NTDSL.init ~l:"vcf_p6base" ~prec:Ir.Ops.single ~o:[ dim ]
+      ~f:(fun idcs -> Float.of_int (10 * (idcs.(0) + 1)))
+      ()
+  in
+  let w2 = TDSL.O.( + ) base base in
+  (* Routine 1 computes w2 (materialized by [Train.forward]) on its own context chain, consuming
+     w2's forward — the deferral comp below then references w2 as a context-sourced node rather
+     than embedding it. *)
+  let ctx_w = Context.auto () in
+  let ctx_w, routine_w = Context.compile ctx_w (Train.forward w2) Ir.Indexing.Empty in
+  let _ctx_w = Context.run ctx_w routine_w in
+  let v6 = TDSL.O.( + ) w2 w2 in
+  let comp_defer = Tensor.consume_forward_code v6 in
+  let ctx_fresh = Context.auto () in
+  let ctx_fresh, routine_defer =
+    Context.compile ~name:"vcf_p6_defer" ctx_fresh comp_defer Ir.Indexing.Empty
+  in
+  let _ctx_ran = Context.run ctx_fresh routine_defer in
+  p "pipeline deferral-only: links and runs as a no-op on a fresh context" true;
+  p "pipeline deferral-only: the target stayed virtual"
+    (Tn.Placements.known_virtual (Context.placements ctx_fresh) v6.Tensor.value)
 
 let () =
   phase1 ();
@@ -618,4 +731,5 @@ let () =
   phase2 ();
   phase3 ();
   phase4 ();
-  phase5 ()
+  phase5 ();
+  phase6 ()
