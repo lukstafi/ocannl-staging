@@ -143,7 +143,9 @@ where on CUDA they were the larger half.
   reference. `AGENTS.md` is explicit that for passes which change cell values, emitted-IR structure
   is not sufficient — so this is a stated limitation, not a defended position. What partially
   substitutes, and is weaker than an executed check: the autotuner's own accounting puts all four
-  cells' arm A within 0.6% on FLOPs (7.81–7.86 GFLOP) at identical losses wherever the arm shipped.
+  cells' arm A within 0.6% on FLOPs (7.81–7.86 GFLOP), and losses agreeing within 14 f32 ulp wherever
+  the arm shipped — *agreeing*, not identical: the gate above finds five distinct full-precision
+  sequences, and reintroducing exact equality here would restate the claim this report retracts.
 
   What is **not** offered as a substitute, having been considered and rejected: the zero
   signature-level difference between `feat574`'s and `master-capoff`'s arm A does not make those two
@@ -164,7 +166,7 @@ shipped step time. Reported side by side throughout:
 |---|---|---|
 | **arm A per-kernel profile** | [`gpt2_kernel_harness.py`](gpt2_kernel_harness.py) over the emitted default-placement arm; deterministic given a source | **0.08–1.6%** over 3 harness runs |
 | **untuned-default pipeline** | the deterministic non-searched lowering, printed by every search (`autotune: untuned-default pipeline`) | **0.2–0.7%** over 3 reps |
-| shipped tuned step p50 | end-to-end, but carries gh-481's family lottery | **2.6–18.7%** over 3 reps |
+| shipped tuned step p50 | end-to-end, but carries gh-481's family lottery | **2.6–19.1%** over 3 reps |
 
 Arm A (default placements) is profiled in every cell — including the cells where the search
 shipped arm B — because it is the like-for-like structural comparand and because it is the arm
@@ -375,7 +377,7 @@ to 1.4% here against a 23.9% effect, and the untuned rows are 65.48–65.63 agai
 deterministic code path.
 
 The third row is **inside this box's noise floor and is not claimed as a result.** cap −1's own
-spread is 18.7% and the ranges overlap. gh-481 measured 20–40% as the resolution floor of a
+spread is 19.1% (22.52/18.91) and the ranges overlap. gh-481 measured 20–40% as the resolution floor of a
 tuned-cell A/B here, and 1.11x sits inside it. (Part 4 shows this is a property of the *default*
 rather than of the guard: at cap 4 the same end-to-end comparison is non-overlapping, at a chained
 1.18x — see Part 4, which distinguishes that chain from the unpaired endpoint ratio.)
@@ -523,8 +525,10 @@ and the numbers below are the signature and node levels:
 | cap −1 vs cap 4 | 26 / 28 | **9** | fires |
 | cap −1 vs cap 2 | 40 / 49 | **23** | fires |
 
-**Read the node column, not the signature column, as the count of guard firings.** They are not the
-same quantity and an earlier revision of this section conflated them: one node forced materialized
+**Read the node column, not the signature column, as the proxy for how often the guard fired** — a
+proxy, because a placement difference cannot say which decisions provenance 41 forced directly and
+which followed once a reset fan-in changed a downstream candidate. The two columns are not the same
+quantity and an earlier revision of this section conflated them: one node forced materialized
 resets fan-in downstream and can change several consumers' parameter lists, so cap 8's 16/17 exclusive
 signatures are the churn from **4** nodes' worth of placement change, not sixteen. The node column is
 itself a

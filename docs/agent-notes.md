@@ -345,8 +345,9 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   so no fan-in bound follows from it**: `decide_placements` assigns provenance 41 only to a node not
   already placed, and `virtual_llc` afterwards rejects inlining for its own legality reasons, so with
   the cap disabled a different mechanism can materialize the same node and yield an identical source.
-  The observable statement is all there is: the cap changes the emitted placement at 16 and below and
-  not at 32. Cap 4 beat the default 8 by a
+  The observable statement is all there is, and only at the caps actually swept (2, 4, 8, 16, 32, −1):
+  placement differed from cap −1 at 2, 4, 8 and 16, and matched at 32. Nothing is established for
+  caps between or above those. Cap 4 beat the default 8 by a
   non-overlapping 5.7% in a block order-balanced in BOTH the searches and the pass-2 replays (5.5%
   was the same six artifacts replayed in an unbalanced order; three replay sets of them spanned
   5.5-6.5%, so an identical schedule varies ~1pp run to run -- all three non-overlapping), and balancing that order matters: a fixed order
