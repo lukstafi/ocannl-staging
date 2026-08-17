@@ -700,14 +700,25 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   whose accumulator is itself a signed zero. `test/operations/vec_signed_zero` is the regression, and
   it needs an accumulator preloaded with `-0.0` (a zeroed one absorbs the sign) — which is why it is
   an explicit `=+` into an initialized tensor rather than a `schedule_mma_matmul` leg.
-- **gcc `-O3` can collapse the register tiling ~10x on the f16 d-bridge shape** (gcc 15.2, x86):
-  on the k_o-outermost serial GEBP it unrolls the k-loop 4x and spills the accumulator C-tile
-  (hot loop 29 insns / 2 stack refs at `-O2` vs 375 / 147 at `-O3`; measured 3.4 vs ~30 GFLOP/s,
-  bin/narrow_gebp_bench). f32/bf16 shapes and clang (whose `__builtin_elementwise_fma` arm avoids
-  per-lane subscripts) are unaffected; the fragment-contracted i_o-outermost shape dodges it, and
-  `#pragma GCC unroll 1` does NOT fix it. When a narrow cc GEMM benches absurdly slow, try
-  `cc_backend_optimization_level=2` before suspecting the rendering; the tuner's measured search
-  routes around it on its own.
+- **A vector accumulator update must reach the compiler as ONE vector operation** (gh-ocannl-614,
+  fixed). gcc -O3 register-allocated the per-lane `fmaf` loop catastrophically: on the packed GEBP
+  shape it unrolled the k-loop 7x and spilled the whole C-tile — 18 insns / 8 FMAs / 0 stack refs
+  per k step at `-O2` becoming 279 / 56 / 73 at `-O3`, a ~9x throughput loss at every storage
+  precision (`bin/narrow_gebp_bench` packmma: 112 → 12.6 GFLOP/s at f32, 94 → 10.4 at f16; the
+  earlier claim that f32/bf16 were spared predates the extent-adapted tile width). The cause is the
+  lane subscripting itself, not the unrolling: straight-line lane stores, a lane-indexed scratch
+  array, a `(vtyp){...}` constructor of per-lane `fmaf` calls, and `#pragma GCC unroll 1` all spill
+  the same way, while every form that arrives as one vector op costs the `-O2` count at `-O3`.
+  `C_syntax.vec_fma_builtin` therefore adds a middle arm to `vec_acc_fma` — a target whole-vector
+  FMA builtin (`__builtin_ia32_vfmadd{ps,pd}[256]` under `defined(__FMA__)`) mirroring clang's
+  `__builtin_elementwise_fma`, with the per-lane loop still last. Not `dst = a * b + dst`, which
+  allocates just as well but is only maybe-contracted: under `cc_backend_fp_contract=off` gcc
+  emits a mul and an add, and `schedule_mma_matmul`'s full-mantissa leg (the only bitwise leg whose
+  products are inexact, hence the only one that can see this) then fails. Residual: 512-bit widths
+  and native-fp16 lanes have no listed builtin and keep the per-lane arm, as does `vec_acc_combine`'s
+  `Max`/`Min` loop (no builtin matches `fmaxf`'s NaN semantics) — if a `Vectorized` reduction or a
+  wide-vector kernel benches ~10x off, this is the first thing to check, and
+  `cc_backend_optimization_level=2` still confirms it in one run.
 - Computing fp16 in fp16 on a *promoted* target is a ~18x loss against f32-compute-over-fp16
   (measured, same bench) — the reason `fp16_arithmetic` is ignored off-native and pure-f16 seeds
   gate on `hardware_limits.native_fp16_arithmetic`. The decisive pure-f16-vs-f32-GEBP measurement

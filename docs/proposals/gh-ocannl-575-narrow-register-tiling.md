@@ -118,36 +118,37 @@ reorder a site's candidates because they all share one policy-resolved compute p
 
 `bin/narrow_gebp_bench.exe` (naive serial vs packed GEBP serial vs grid-outermost per-chunk
 variant; exact inputs; readbacks outside the timed region — re-measured after the Codex round-1
-fix moved the spot-check readback out of the timed interval). Recorded at the fixed-cap tile
-geometry, i.e. before the extent-adapted width above, so every row is a floor rather than a ceiling:
-the three f32-compute rows share a 24-wide tile peeling 8 of 512 columns, and the forced pure-f16
-row a 48-wide one peeling 32 — see the caveat under the negative control:
+fix moved the spot-check readback out of the timed interval). Re-measured at the extent-adapted tile
+width and after the gh-ocannl-614 fix to the accumulator update, which superseded the numbers this
+section first carried (the note below says by how much):
 
 | storage → compute | naive | packmma | packmma_par |
 |---|---|---|---|
-| f32 → f32 | 21.5 GFLOP/s | 74.1 | 55.7 |
-| bf16 → f32 (widened panels) | 0.38 | **51.3 (135x)** | 34.3 |
-| f16 → f32 (widened panels) | 0.65 | 3.4 (see below) | **37.1 (57x)** |
-| f16 → f16 forced on promoted HW | 0.65 | 2.1 | 2.0 |
+| f32 → f32 | 21.8 GFLOP/s | 116.6 | 97.7 |
+| bf16 → f32 (widened panels) | 0.39 | **105.6 (271x)** | 55.4 |
+| f16 → f32 (widened panels) | 0.65 | **100.5 (156x)** | 63.9 |
+| f16 → f16 forced on promoted HW | 0.65 | 2.55 | 2.49 |
 
-- The headline: **f32-GEBP-over-narrow-storage is a ~57-135x win over the scalar narrow
-  rendering** on x86, and lands within ~30% of the f32 GEBP — the storage seam pays for itself.
-- The f16 `packmma` anomaly is a **gcc-15 `-O3` pessimization**, not a rendering defect: on the
-  k_o-outermost serial shape with the f16 d-bridge, `-O3` unrolls the k-loop 4x and spills the
-  accumulator C-tile (hot loop: 29 insns / 2 stack refs at `-O2` vs 375 insns / 147 stack refs at
-  `-O3`); the identical statement compiled at `-O2`, by clang (whose
-  `__builtin_elementwise_fma` arm avoids per-lane subscripts), or in the fragment-contracted
-  i_o-outermost shape (`packmma_par`'s) runs at full speed. f32 and bf16 barely move between
-  levels (63.9 vs ~67 GFLOP/s standalone). The tuner routes around it by measurement; a
-  `cc_backend_optimization_level=2` run is the manual workaround on gcc.
+- The headline: **f32-GEBP-over-narrow-storage is a ~156-271x win over the scalar narrow
+  rendering** on x86, and now lands within ~10% of the f32 GEBP — the storage seam pays for itself,
+  and the packing copy reading half the bytes nearly closes the gap.
+- Both corrections since the first table were emission bugs of the same kind — the rendering was
+  right, its C spelling was not — and each was worth more than the seam itself:
+  - the **extent-adapted width** (above) stopped peeling 8 of 512 columns to scalar code;
+  - **gh-ocannl-614**: the per-lane `fmaf` accumulator update made gcc -O3 spill the whole C-tile,
+    ~9x at *every* storage precision (f32 12.6, f16 10.4 GFLOP/s here) — the original claim that
+    only the f16 d-bridge shape was affected and that `packmma_par` dodged it did not survive the
+    width change. A target whole-vector FMA builtin fixed it, and the `-O3`/`-O2` gap is now within
+    run-to-run noise (f32 packmma: 120.2 / 126.1 at -O3 against 121.4 / 130.5 at -O2 over two
+    interleaved pairs, against 12.6 vs 112.4 before); see the agent-note for why not
+    `dst = a * b + dst`.
 - The forced pure-f16 row is the negative control for the gating: computing in f16 where the
-  compiler promotes is a ~18x loss against f32-compute — exactly why `fp16_arithmetic` is ignored
-  off-native and why the pure-f16 seeds fire only where the probe reports native. **The 18x is
-  not all promotion**: forcing native doubles the lane count, so this row alone ran a 48-wide tile
-  peeling 32 columns, and the NEON sweep above puts a comparable geometry at ~3.6x of its own loss.
-  A clean re-measure at the adapted width is owed on that box. The direction is not in doubt — the
-  promoted arm does f32 arithmetic with extra per-value conversions, so it cannot come out ahead of
-  computing in f32 directly — but the magnitude is inflated.
+  compiler promotes is a ~40x loss against f32-compute — exactly why `fp16_arithmetic` is ignored
+  off-native and why the pure-f16 seeds fire only where the probe reports native. Its 16
+  `_Float16` lanes are also the width with no whole-vector FMA builtin, so this row alone still
+  carries the per-lane update; the direction is not in doubt either way — the promoted arm does f32
+  arithmetic with extra per-value conversions, so it cannot come out ahead of computing in f32
+  directly.
 
 ## The NEON decision: pure-f16 wins (M4 Max, Apple clang, `-O3 -mcpu=native`, cc)
 
@@ -187,7 +188,10 @@ at n = 1024, because the packing copy reads half the bytes for the same micro-ke
   `narrow storage bridged: d:bfloat16` only), half hoisted host-converting pack, and a pure-f16
   leg (probe forced native via `OCANNL_CC_FP16_ARITHMETIC`; per-op rounding is unchanged under
   promotion, so parity stays bitwise) — all bitwise against serial twins, with emission pins.
-- `test/operations/schedule_mma_matmul.ml`: the half/bf16/fp8 whole-triple legs now register-tile
+- `test/operations/schedule_mma_matmul.ml`: a full-mantissa f32 leg pins that the accumulator
+  update stays fused (gh-ocannl-614) — the only bitwise leg whose products are inexact, hence the
+  only one that can tell a fused update from a multiply and an add; the half/bf16/fp8 whole-triple
+  legs now register-tile
   on the C backends (bitwise, narrow-exact inputs); transposed-B legs still pin the decline; an
   8x40 leg pins the extent-adapted width (`full blocks 8x40 of 8x40` — peel-free at NEON's 4 f32
   lanes and at AVX2's 8, where the old cap took 24 on both), bitwise against its serial twin.

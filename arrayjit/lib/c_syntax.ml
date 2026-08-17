@@ -1322,8 +1322,11 @@ module C_syntax (B : C_syntax_config) = struct
 
   (* [dst = op(dst, src)] on whole vector registers ([src] must also name a register): vector infix
      arithmetic for the ring operators, a fixed-trip per-lane loop for [Max]/[Min] (which have no
-     vector infix; keeps the scalar path's [fmaxf]/[fminf] NaN semantics and SLP-vectorizes under
-     -O2 like the per-lane FMA fallback). *)
+     vector infix, and whose builtins do not share [fmaxf]/[fminf]'s NaN semantics, so the scalar
+     path's spelling is the only faithful one). The per-lane form relies on SLP to reassemble it,
+     which is the shape gh-ocannl-614 found gcc -O3 mis-allocating for the FMA update; the
+     accumulator grids reached here are 1xN rather than RMxRN, so the register pressure that turned
+     into spills there is not present, but a wide [Max] reduction benching ~10x off would be this. *)
   let vec_acc_combine ~prec ~lanes ~op ~dst ~src =
     let open PPrint in
     match op with
@@ -1339,9 +1342,46 @@ module C_syntax (B : C_syntax_config) = struct
         ^^ semi
     | _ -> invalid_arg "C_syntax.vec_acc_combine: not an accumulation operator"
 
+  (* A target builtin spelling a WHOLE-VECTOR fused multiply-add for this (compute precision, lane
+     count), with the preprocessor condition under which it exists — [None] where none is known.
+
+     Why this table exists at all: gcc has no generic vector [fma] builtin (clang's
+     [__builtin_elementwise_fma], the first arm of [vec_acc_fma], is a clang extension), so on gcc
+     the accumulator update fell to the per-lane loop, whose lane-indexed reads and stores gcc -O3
+     mis-register-allocates — on the packed GEBP shape it unrolls the k-loop 7x and spills the whole
+     C-tile, 18 instructions / 8 FMAs / 0 stack references per k step becoming 279 / 56 / 73, a ~9x
+     throughput loss against -O2 at every storage precision (gh-ocannl-614; the issue's report of an
+     f16-only effect predates the extent-adapted tile width). The cause is the lane subscripting
+     itself:
+     straight-line lane stores, a lane-indexed scratch array, and a [(vtyp){...}] constructor of
+     per-lane [fmaf] calls all spill the same way, while ANY form that reaches gcc as one vector
+     operation costs the -O2 instruction count at -O3.
+
+     Which is why it is a builtin and not the obvious [dst = a * b + dst]: that would reach gcc as
+     one vector operation too, and does allocate perfectly, but it is only MAYBE contracted into an
+     FMA — under [cc_backend_fp_contract=off] it measurably is not (a mul and an add, two roundings,
+     verified against these builtins), and then the vector body would round differently from the
+     scalar peel and the serial fallback it promises to equal bit for bit. These builtins are fused
+     by definition, so the promise holds under every flag.
+
+     Only widths validated on real hardware are listed. The 512-bit forms ([..._mask] with an
+     all-ones mask and a rounding argument) exist but are unexercised here, and a wrong signature
+     would fail the kernel compile outright rather than merely run slow; [cc_vector_bytes] resolves
+     to 32 or 16 unless set by hand, so nothing reaches them by default. Native-fp16 compute (16
+     [_Float16] lanes) has no gcc builtin at all and keeps the per-lane arm. *)
+  let vec_fma_builtin ~prec ~lanes =
+    (* [__FMA__] is x86-only, so the arm self-selects away on every other target. *)
+    let x86 name = Some ("defined(__FMA__)", name) in
+    match (prec, lanes) with
+    | Ops.Single_prec _, 4 -> x86 "__builtin_ia32_vfmaddps"
+    | Ops.Single_prec _, 8 -> x86 "__builtin_ia32_vfmaddps256"
+    | Ops.Double_prec _, 2 -> x86 "__builtin_ia32_vfmaddpd"
+    | Ops.Double_prec _, 4 -> x86 "__builtin_ia32_vfmaddpd256"
+    | _ -> None
+
   (* [dst = fma(a, b, dst)] elementwise-fused on vector registers (single rounding, matching the
-     scalar path's [fmaf]/[fma]): clang's [__builtin_elementwise_fma] where available, otherwise the
-     per-lane fused loop. *)
+     scalar path's [fmaf]/[fma]): clang's [__builtin_elementwise_fma] where available, else a
+     target's whole-vector builtin ({!vec_fma_builtin}), else the per-lane fused loop. *)
   let vec_acc_fma ~prec ~lanes ~dst ~a ~b =
     let open PPrint in
     (* At fp16 the per-lane fallback must be the *same* fused multiply-add the scalar path emits,
@@ -1355,10 +1395,19 @@ module C_syntax (B : C_syntax_config) = struct
       | Ops.Half_prec _ -> "OCANNL_HALF_FMA"
       | _ -> "fmaf"
     in
+    let builtin_arm =
+      match vec_fma_builtin ~prec ~lanes with
+      | None -> empty
+      | Some (guard, builtin) ->
+          string ("#elif " ^ guard)
+          ^^ hardline
+          ^^ string (Printf.sprintf "%s = %s(%s, %s, %s);" dst builtin a b dst)
+          ^^ hardline
+    in
     string "#if OCANNL_HAS_ELEMENTWISE_FMA"
     ^^ hardline
     ^^ string (Printf.sprintf "%s = __builtin_elementwise_fma(%s, %s, %s);" dst a b dst)
-    ^^ hardline ^^ string "#else" ^^ hardline
+    ^^ hardline ^^ builtin_arm ^^ string "#else" ^^ hardline
     ^^ string
          (Printf.sprintf
             "for (int ocannl_l__ = 0; ocannl_l__ < %d; ++ocannl_l__) %s[ocannl_l__] = \
