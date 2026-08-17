@@ -90,8 +90,10 @@ where on CUDA they were the larger half.
   `compile_s` is the search cost, then a **fresh process** (`replay`) replays the cached winner and
   provides the step timings — the search leaves its own process measurably slower through accumulated
   modules and buffers. An earlier revision of this report quoted pass-1 step times throughout. Every
-  conclusion survived the correction; the point estimates moved by ≤0.2 pp except the cap headline
-  (5.7% → 5.5%). On this workload the pass-1/pass-2 gap is small (−0.4% to +0.8% per cell) because the
+  conclusion survived the correction and the point estimates moved by ≤0.2 pp; the cap headline went
+  5.7% (pass 1) → 5.5% (pass 2, replays unbalanced) → 5.7% (pass 2, replays order-balanced, which is
+  the protocol the claim asserts and the figure carried). On this workload the pass-1/pass-2 gap is
+  small (−0.4% to +0.8% per cell) because the
   step is ~18 ms across 136 kernels rather than the small-kernel regime the README's 2.5–3.5x
   describes — which is a reason to measure the gap, not to assume it.
 - **The CPU must be quiet during GPU cells, and this is not advisory on an APU.** Mid-session a
