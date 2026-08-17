@@ -1082,6 +1082,52 @@
  (modules config_profiles)
  (libraries base arrayjit.utils stdio))
 
+; gh-ocannl-605: the environment and commandline spellings of a configuration key. The rule sets
+; the synthetic keys the executable looks up -- `demo_key` in the one environment spelling that
+; survives and in the three dash-prefixed ones that do not, `dashed_only_key` in the dropped ones
+; alone -- so the golden's last lines are a live check on `Utils.env_var_names`, not a copy of it.
+; The all-dashed commandline flag is the same check on the other side: there the spelling IS read,
+; and it names a real key, the unknown-argument warning being the reason (see the .ml).
+
+(executable
+ (name config_var_spellings)
+ (modules config_var_spellings)
+ (libraries base arrayjit.utils stdio))
+
+(rule
+ (target config_var_spellings.actual)
+ (deps ocannl_config)
+ (action
+  (setenv
+   ocannl_demo_key
+   kept-spelling
+   (setenv
+    ocannl-demo_key
+    dropped-lowercase
+    (setenv
+     OCANNL-DEMO_KEY
+     dropped-uppercase
+     (setenv
+      ocannl-demo-key
+      dropped-all-dashed
+      (setenv
+       ocannl-dashed_only_key
+       dropped-lowercase
+       (setenv
+        OCANNL-DASHED_ONLY_KEY
+        dropped-uppercase
+        (with-stdout-to
+         %{target}
+         (run
+          %{dep:config_var_spellings.exe}
+          --ocannl-print-decimals-precision=7))))))))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff config_var_spellings.expected config_var_spellings.actual)))
+
 (executable
  (name test_config_consistency)
  (modules test_config_consistency)

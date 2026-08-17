@@ -1078,6 +1078,14 @@ that they earn a lookup rather than always-loaded space.
   on it and rejects a line with two, which rules out payload/config values like `-mcpu=native`; a
   setting that needs one gets a word spelling instead (`cc_backend_arch_flags=none`). A value can
   never be the empty string either: empty means "unset" at every source.
+- A configuration key has exactly TWO environment spellings, `ocannl_<key>` and `OCANNL_<KEY>`
+  (gh-ocannl-605 dropped the dash-prefixed pair). A dune rule whose output depends on an ambient
+  OCANNL setting must declare both as `(env_var …)` deps — dune tracks none but `OCANNL_BACKEND`,
+  so an undeclared one leaves a stale target in place and the test green without having run. The
+  lowercase spelling is not the redundant one: `Utils.read_env_var` consults it FIRST, so
+  `ocannl_profile` beats `OCANNL_PROFILE`. The commandline is the permissive side and always has
+  been (`Utils.cmdline_var_names`): prefixed or not, dashed or underscored at each separator
+  independently, either case, one leading dash or two.
 - An OCANNL-linked executable's stdout belongs to the program, not to the library: the config
   startup chatter (welcome message, `log_config_sourcing` trace, profile banner) and every other
   library diagnostic go to stderr. That is what lets a tool make stdout a data channel — the

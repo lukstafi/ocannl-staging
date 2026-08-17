@@ -76,6 +76,20 @@
 
 ### Changed
 
+- **An OCANNL setting has two spellings in the environment, not four** (gh-ocannl-605):
+  `ocannl_<key>` and `OCANNL_<KEY>`, which is what `ocannl_config.reference` already described. The
+  dash-prefixed `ocannl-<key>` / `OCANNL-<KEY>` are gone: documented nowhere, used by no caller,
+  unsettable from bash or zsh without `env "ocannl-log_level=1" cmd` — and the tax was paid by
+  every dune rule that has to declare the ambient variables it must be invalidated by, which had to
+  enumerate four spellings per key while the natural-looking all-dashed `ocannl-log-level` was not
+  one of them, so a dep on it tracked nothing (gh-ocannl-593). On the commandline dashes stay, and
+  now go all the way: the prefix separator and the key's own separators dash independently, so
+  `--ocannl-log-level=1` is read — where it was previously accepted by the unknown-argument
+  validator (which normalizes every dash to an underscore) and then silently ignored by the reader.
+  `Utils.env_var_names` returns two names; the commandline spellings moved to a
+  `Utils.cmdline_var_names` beside it, and `test/operations/config_var_spellings` pins both lists
+  against live lookups.
+
 - **Startup chatter is opt-in, so that a warning on stderr is legible** (gh-ocannl-595).
   gh-ocannl-581 moved the config chatter off stdout, which fixed the data-channel problem and left
   stderr carrying 83 lines of routine trace on a default run — burying the unknown-config-key

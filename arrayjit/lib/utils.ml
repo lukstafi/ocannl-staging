@@ -419,32 +419,59 @@ let bool_of_config_string ~arg_name s =
     is not a useful reading of it. *)
 let log_config_sourcing = ref false
 
+(** The environment spellings of a config key: the [ocannl_]-prefixed key, in lowercase and in
+    uppercase, and nothing else. The prefix is mandatory here (unlike on the commandline and in a
+    config file) so that OCANNL does not read an unrelated tool's variable.
+
+    Both spellings are load-bearing, and the lowercase one comes FIRST: it beats [OCANNL_PROFILE],
+    which [test/operations/profiles/dune] documents as a real precedence trap.
+
+    Dashes are not a spelling: [ocannl-log_level] and its uppercase form used to be accepted, and
+    were dropped in gh-ocannl-605. They were documented nowhere, no caller used them, and a shell
+    cannot set them without [env "ocannl-log_level=1" cmd] -- while every dune rule that has to
+    declare the ambient variables it is invalidated by had to enumerate four spellings per key, of
+    which the natural-looking all-dashed [ocannl-log-level] was never one of them. Dashes remain
+    idiomatic on the commandline, where {!cmdline_var_names} accepts them. *)
 let env_var_names n =
-  let env_variants = [ "ocannl_" ^ n; "ocannl-" ^ n ] in
-  List.concat_map env_variants ~f:(fun n -> [ n; String.uppercase n ])
+  let prefixed = "ocannl_" ^ n in
+  [ prefixed; String.uppercase prefixed ]
+
+(** The commandline spellings of a config key, up to the value separator: the [ocannl_]-qualified
+    ones -- with the prefix separator and the key's own separators dashable independently, in
+    either case, and with or without a leading dash -- then, unless [qualified_only], the
+    prefix-free ones, which need a leading dash to be told from a host application's positional
+    argument.
+
+    [qualified_only] exists because OCANNL is a library: it scans the host executable's [Sys.argv],
+    so a prefix-free key claims an application's own option of that name. That is tolerable for
+    keys nobody else would spell ([--virtualize_max_visits]) and not for [--profile], which is a
+    common application flag and which OCANNL treats as fatal when it does not name a known bundle
+    -- a host passing [--profile=prod] would die during module initialization (Codex P2 on PR
+    #291). *)
+let cmdline_var_names ?(qualified_only = false) n =
+  let n_dash = String.tr ~target:'_' ~replacement:'-' n in
+  let keys = if String.equal n n_dash then [ n ] else [ n; n_dash ] in
+  (* Prefixed commandline variants first (backward compat), then prefix-free. *)
+  let qualified =
+    List.concat_map [ "ocannl_"; "ocannl-" ] ~f:(fun prefix ->
+        List.concat_map keys ~f:(fun k ->
+            let name = prefix ^ k in
+            List.concat_map [ name; String.uppercase name ] ~f:(fun n ->
+                [ "-" ^ n; "--" ^ n; n ])))
+  in
+  let unqualified =
+    if qualified_only then [] else List.concat_map keys ~f:(fun k -> [ "--" ^ k; "-" ^ k ])
+  in
+  qualified @ unqualified
 
 (** The commandline sublevel of {!get_global_arg}: returns the setting's value and the [Sys.argv]
     element it came from. Pure -- the sourcing log lives at the resolution seam, which is the only
-    place that knows which sublevel actually won.
-
-    [qualified_only] drops the prefix-free spellings, leaving the [ocannl_]-qualified ones. OCANNL
-    is a library: it scans the host executable's [Sys.argv], so a prefix-free key claims an
-    application's own option of that name. That is tolerable for keys nobody else would spell
-    ([--virtualize_max_visits]) and not for [--profile], which is a common application flag and
-    which OCANNL treats as fatal when it does not name a known bundle -- a host passing
-    [--profile=prod] would die during module initialization (Codex P2 on PR #291). *)
+    place that knows which sublevel actually won. Each spelling {!cmdline_var_names} lists (which
+    [qualified_only] is for) may be followed by [_], [-], [=] or nothing before the value. *)
 let read_cmdline_var ?(qualified_only = false) n =
-  let n_dash = String.tr ~target:'_' ~replacement:'-' n in
-  (* Prefixed commandline variants first (backward compat), then prefix-free *)
-  let cmd_prefixed = List.concat_map (env_var_names n) ~f:(fun n -> [ "-" ^ n; "--" ^ n; n ]) in
-  let cmd_unprefixed =
-    if qualified_only then []
-    else
-      let keys = if String.equal n n_dash then [ n ] else [ n; n_dash ] in
-      List.concat_map keys ~f:(fun k -> [ "--" ^ k; "-" ^ k ])
-  in
   let cmd_variants =
-    List.concat_map (cmd_prefixed @ cmd_unprefixed) ~f:(fun n -> [ n ^ "_"; n ^ "-"; n ^ "="; n ])
+    List.concat_map (cmdline_var_names ~qualified_only n) ~f:(fun n ->
+        [ n ^ "_"; n ^ "-"; n ^ "="; n ])
   in
   Array.find_map Stdlib.Sys.argv ~f:(fun arg ->
       List.find_map cmd_variants ~f:(fun p ->
