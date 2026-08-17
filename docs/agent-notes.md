@@ -205,13 +205,20 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   code cannot distinguish a legitimate same-routine inlining of the declared merge read from a
   cross-routine splice whose consumer declares the SAME source, which would silently rebind the
   read to the consumer's transfer; `reconcile_traced_store` keeps a mismatch check as backstop.
-  The walk observes the raw analysis' conventions or it re-diverges (review round 3): dead-loop
-  bodies register (renderers emit them, so their identifiers need parameters) but neither supply
-  coverage (`written_seen`) nor demand it, and the coverage query filters through
+  The walk observes the raw analysis' conventions or it re-diverges (review rounds 3-6):
+  dead-loop bodies register (renderers emit them, so their identifiers need parameters) but
+  neither supply coverage (`written_seen`) nor demand it, and the coverage query filters through
   `drop_dead_loop_accesses` like the raw side; `Binop` dispatches through
-  `Ops.binop_conditionality` in both the reconcile walk and `reads_merge_buffer` — a projection's
+  `Ops.binop_conditionality` in both the reconcile walk and the merge-taint scan — a projection's
   discarded operand is never rendered, so its reads are not parameters and its merge read must
-  not taint. `from_prior_context` (both `Backends.compile` and `from_prior_context_batch`)
+  not taint; the taint scan is `~self`-filtered like `inline_computation`'s own setter filter, or
+  a shared-loop sibling's merge read rejects valid sharing. The STRICT coverage verdicts —
+  guarded writes filtered (never definite), rmw exemption off (a same-position spliced read is a
+  genuine RMW), `zeroed_out` counted as written — apply ONLY when the routine consumed an
+  INHERITED computation (`virtual_llc` returns the signal from `inline_computation`): raw-only
+  routines keep the raw verdicts wholesale, whose lenient contracts deliberately classify
+  patterns initialized by an earlier routine of the program — re-judging those strictly broke
+  real flows across the suite. `from_prior_context` (both `Backends.compile` and `from_prior_context_batch`)
   reconciles in BOTH directions: the raw-assignments set is filtered by the reconciled traced
   store (raw over-approximates the residual schedule — a deferral-only routine must link on a
   fresh context) and, for routines carrying an assignments program, unioned with the reconciled
@@ -221,7 +228,11 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   (init comps' random-seed/threefry nodes are mentioned yet deliberately not demanded — the
   unbounded union broke `Train.init_params` across the suite), and hand-built `?prelowered`
   routines (empty comp) are exempt entirely — their inputs arrive via `Context.set_values` after
-  linking, the ll_test seed-then-run pattern. The merge SOURCE never gets an ordinary traced
+  linking, the ll_test seed-then-run pattern. Reconcile-FLIPPED read-before-write nodes
+  (`optimized.spliced_rbw`) override the mention filter — a consumer that overwrites a spliced
+  leaf mentions it only as a write, yet the splice needs its entry value; the raw
+  `read_before_write` flag cannot serve as the key, since `decide_placements` also sets it on
+  every pure input (uncovered reads), and demanding those broke ndarray-literal flows. The merge SOURCE never gets an ordinary traced
   entry (the merge buffer is the parameter; a source entry would double the transfer buffer's
   allocation).
   Related pre-existing quirk: `rmw_exempt` excuses copy-position reads from the coverage verdict

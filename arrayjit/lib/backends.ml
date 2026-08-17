@@ -611,7 +611,12 @@ let%debug3_sexp from_prior_context_batch ~(plc : Tn.Placements.t)
           | _ ->
               let (inputs, _), _ = Low_level.input_and_output_nodes lowered in
               let reads, writes = Assignments.collect_nodes_guess_output comp.Assignments.asgns in
-              Set.union raw (Set.diff inputs (Set.union reads writes))))
+              let mentioned = Set.union reads writes in
+              let demanded =
+                Set.filter inputs ~f:(fun tn ->
+                    (not (Set.mem mentioned tn)) || Set.mem lowered.Low_level.spliced_rbw tn)
+              in
+              Set.union raw demanded))
   |> Array.fold ~init:(Set.empty (module Tnode)) ~f:Set.union
 
 (** Adds a scheduler and brings a lowered no-device backend on par with lowered device backends. *)
@@ -909,7 +914,18 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
       | _ ->
           let (inputs, _), _ = Low_level.input_and_output_nodes lowered in
           let reads, writes = Assignments.collect_nodes_guess_output comp.asgns in
-          Set.union raw (Set.diff inputs (Set.union reads writes))
+          let mentioned = Set.union reads writes in
+          (* A RECONCILE-FLIPPED read-before-write input overrides the mention filter (round 6):
+             a comp that writes a node AFTER consuming an inherited computation reading it
+             mentions the node only as a write, yet the splice needs its entry value. The key is
+             [spliced_rbw] — flips made against the FINAL code — not the raw flag: the raw
+             analysis also marks every pure input read-before-write, and demanding those broke
+             ndarray-literal and seed-node flows across the suite. *)
+          let demanded =
+            Set.filter inputs ~f:(fun tn ->
+                (not (Set.mem mentioned tn)) || Set.mem lowered.Low_level.spliced_rbw tn)
+          in
+          Set.union raw demanded
     in
     {
       from_prior_context;

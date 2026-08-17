@@ -4408,6 +4408,7 @@ module C_syntax (B : C_syntax_config) = struct
           pipelined;
           zero_fringe = _;
           flip_candidates = _;
+          spliced_rbw = _;
         } : (string * kparam_source) list * PPrint.document * Low_level.launch_dims =
     let open PPrint in
     (if not (Set.is_empty workgroup_shared) then

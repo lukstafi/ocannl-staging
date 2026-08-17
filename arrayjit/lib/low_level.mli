@@ -523,6 +523,13 @@ type optimized = {
           the whole-routine list). Excluded: nodes never assigned or never read, scalar constexprs
           and pure one-hot selector producers, and nodes placed by legality, intent or
           observability rather than the heuristic policy. *)
+  spliced_rbw : Set.M(Tnode).t;
+      (** gh-610 review round 6: the nodes whose [read_before_write] was set by the FINAL-code
+          reconciliation (a spliced read preceding, or not definitely covered by, the routine's
+          own writes) — as opposed to the raw analysis' uncovered-read classification, which also
+          flags every pure input. [Backends]' prior-context demand keys on this set: a
+          reconcile-flipped node's entry value must already live in the linked context, while
+          raw-classified inputs keep the assignments layer's curated exclusions. *)
 }
 [@@deriving sexp_of]
 

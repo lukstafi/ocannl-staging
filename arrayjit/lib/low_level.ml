@@ -697,6 +697,11 @@ type optimized = {
           make), scalar constexprs and pure one-hot selector producers (must stay virtual for their
           rewrites), and nodes placed by legality, intent or observability rather than the
           heuristic policy. *)
+  spliced_rbw : Set.M(Tnode).t;
+      (** gh-610 review round 6: the nodes whose [read_before_write] was set by the FINAL-code
+          reconciliation (a spliced read preceding, or not definitely covered by, the routine's
+          own writes) — as opposed to the raw analysis' uncovered-read classification, which also
+          flags every pure input. [Backends]' prior-context demand keys on this set. *)
 }
 [@@deriving sexp_of]
 
@@ -1322,39 +1327,53 @@ let%diagn2_sexp check_and_store_virtual (optim_ctx : optimize_ctx) traced static
       ~data:((!at_idcs, top_llc) :: current_computations)
   with Non_virtual i -> Tn.Placements.update optim_ctx.placements traced.tn Never_virtual i
 
-(* Whether the statement reads a merge buffer anywhere, [Local_scope] bodies included. *)
-let rec reads_merge_buffer : t -> bool = function
+(* Whether the computation stored for [self] would replay a merge-buffer read when inlined: a
+   shared-loop stored body carries SIBLING setters that [inline_computation] filters out, so only
+   [self]'s own setters' right-hand sides (and shared control scalars — [If] conditions — which
+   inlining keeps) can taint (review round 6). *)
+let rec computation_reads_merge ~self : t -> bool = function
   | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _ ->
       false
-  | Seq (c1, c2) -> reads_merge_buffer c1 || reads_merge_buffer c2
-  | For_loop { body; _ } -> reads_merge_buffer body
-  | Set { llsc; _ } | Set_local (_, llsc) -> scalar_reads_merge_buffer llsc
-  | Set_from_vec { arg = s, _; _ } -> scalar_reads_merge_buffer s
-  | Set_dynamic { dyn_value = v, _; llsc; _ } ->
-      scalar_reads_merge_buffer v || scalar_reads_merge_buffer llsc
-  | If { cond = c0, _; body } -> scalar_reads_merge_buffer c0 || reads_merge_buffer body
-  | Tile_mma { fallback; _ } -> reads_merge_buffer fallback
+  | Seq (c1, c2) -> computation_reads_merge ~self c1 || computation_reads_merge ~self c2
+  | For_loop { body; _ } -> computation_reads_merge ~self body
+  | Set { tn; llsc; _ } -> Tn.equal tn self && scalar_reads_merge_buffer ~self llsc
+  | Set_local (_, llsc) -> scalar_reads_merge_buffer ~self llsc
+  | Set_from_vec { tn; arg = s, _; _ } -> Tn.equal tn self && scalar_reads_merge_buffer ~self s
+  | Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
+      Tn.equal tn self
+      && (scalar_reads_merge_buffer ~self v || scalar_reads_merge_buffer ~self llsc)
+  | If { cond = c0, _; body } ->
+      scalar_reads_merge_buffer ~self c0 || computation_reads_merge ~self body
+  | Tile_mma { fallback; _ } -> computation_reads_merge ~self fallback
 
-and scalar_reads_merge_buffer : scalar_t -> bool = function
+and scalar_reads_merge_buffer ~self : scalar_t -> bool = function
   | Constant _ | Constant_bits _ | Embed_index _ | Get_local _ | Get _ -> false
   | Get_merge_buffer _ -> true
-  | Get_dynamic { dyn_value = v, _; _ } -> scalar_reads_merge_buffer v
-  | Local_scope { body; _ } -> reads_merge_buffer body
+  | Get_dynamic { dyn_value = v, _; _ } -> scalar_reads_merge_buffer ~self v
+  | Local_scope { body; _ } -> computation_reads_merge ~self body
   | Ternop (_, (a, _), (b, _), (d, _)) ->
-      scalar_reads_merge_buffer a || scalar_reads_merge_buffer b || scalar_reads_merge_buffer d
+      scalar_reads_merge_buffer ~self a
+      || scalar_reads_merge_buffer ~self b
+      || scalar_reads_merge_buffer ~self d
   | Binop (op, (a, _), (b, _)) -> (
       (* A projection's discarded operand is never rendered, hence never reads anything: it must
          not taint (review round 3). A gated second operand may evaluate, so it counts. *)
       match Ops.binop_conditionality op with
-      | Ops.Only_first -> scalar_reads_merge_buffer a
-      | Ops.Only_second -> scalar_reads_merge_buffer b
+      | Ops.Only_first -> scalar_reads_merge_buffer ~self a
+      | Ops.Only_second -> scalar_reads_merge_buffer ~self b
       | Ops.Both_operands | Ops.Gated_second ->
-          scalar_reads_merge_buffer a || scalar_reads_merge_buffer b)
-  | Unop (_, (a, _)) -> scalar_reads_merge_buffer a
+          scalar_reads_merge_buffer ~self a || scalar_reads_merge_buffer ~self b)
+  | Unop (_, (a, _)) -> scalar_reads_merge_buffer ~self a
 
-let%track7_sexp inline_computation ~id ~inherited_merge_tainted (optim_ctx : optimize_ctx)
-    (traced : traced_array) (static_indices : Indexing.static_symbol list)
-    (call_args : Indexing.axis_index array) : t option =
+let%track7_sexp inline_computation ~id ~inherited_merge_tainted ~consumed_inherited
+    (optim_ctx : optimize_ctx) (traced : traced_array)
+    (static_indices : Indexing.static_symbol list) (call_args : Indexing.axis_index array) :
+    t option =
+  (* A node with no local write at all is defined by an EARLIER routine of the lineage: consuming
+     its computation is what makes this routine's final code diverge from its raw code in ways
+     the raw analysis cannot see, which is the signal gating the reconcile-time flag flips
+     (review round 6). *)
+  if not (traced.has_assignment || traced.zeroed_out) then consumed_inherited := true;
   let exception Non_virtual of int in
   let static_indices =
     Set.of_list (module Indexing.Symbol)
@@ -1926,8 +1945,9 @@ let rec proc_contains_set_from_vec tn = function
   | _ -> false
 
 let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_indices (llc : t) :
-    t =
+    t * bool =
   let plc = optim_ctx.placements in
+  let consumed_inherited = ref false in
   (* The entry-time snapshot of merge-tainted deferred computations: everything in the table at
      this point was stored by an earlier routine of the lineage (this routine's own computations
      are stored during the walk below), so a node found here with a merge-buffer-reading body is
@@ -1938,7 +1958,7 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
   let inherited_merge_tainted =
     let tainted = Hash_set.create (module Tnode) in
     Hashtbl.iteri optim_ctx.computations ~f:(fun ~key ~data ->
-        if List.exists data ~f:(fun (_, body) -> reads_merge_buffer body) then
+        if List.exists data ~f:(fun (_, body) -> computation_reads_merge ~self:key body) then
           Hash_set.add tainted key);
     tainted
   in
@@ -2094,8 +2114,8 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
           let id = get_scope tn in
           Option.value ~default:llsc
           @@ Option.map
-               (inline_computation ~id ~inherited_merge_tainted optim_ctx traced static_indices
-                  indices)
+               (inline_computation ~id ~inherited_merge_tainted ~consumed_inherited optim_ctx
+                  traced static_indices indices)
                ~f:(fun body -> Local_scope { id; body; orig_indices = indices })
     | Get_dynamic { tn; idcs; dyn_axis; dyn_value = v, prec } ->
         Get_dynamic { tn; idcs; dyn_axis; dyn_value = (loop v, prec) }
@@ -2115,10 +2135,13 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
     | Binop (op, (llv1, prec1), (llv2, prec2)) -> Binop (op, (loop llv1, prec1), (loop llv2, prec2))
     | Unop (op, (llsc, prec)) -> Unop (op, (loop llsc, prec))
   in
-  loop_proc
-    ~process_for:(Set.empty (module Tnode))
-    ~owned:(Set.empty (module Tnode))
-    ~in_storage_pass:false llc
+  let result =
+    loop_proc
+      ~process_for:(Set.empty (module Tnode))
+      ~owned:(Set.empty (module Tnode))
+      ~in_storage_pass:false llc
+  in
+  (result, !consumed_inherited)
 
 let cleanup_virtual_llc plc ~static_indices (llc : t) : t =
   (* The current position is within scope of the definitions of the process_for virtual arrays. *)
@@ -5017,13 +5040,17 @@ let rmw_exempt ~statics_set (r : _ Affine.access) =
    is invisible to both analyses. A node without affine accesses is vacuously covered
    ([affine_accesses] and [trace_node_facts] walk the same tree, so such a node has no traced reads
    either). *)
-let reads_covered_query (static_indices : Indexing.static_symbol list)
+let reads_covered_query ?(exempt_rmw = true) (static_indices : Indexing.static_symbol list)
     (accs : Tn.t Affine.access list) : Tn.t -> [ `Covered | `Unknown of string ] =
   let by_tn = Hashtbl.create (module Tn) in
   List.iter accs ~f:(fun a -> Hashtbl.add_multi by_tn ~key:a.Affine.a_tn ~data:a);
   let statics_set = statics_set_of static_indices in
   let static_range = static_bounds static_indices in
-  let exempt = rmw_exempt ~statics_set in
+  (* [exempt_rmw:false] is the routine-INTERFACE reading (review round 6): a same-position read
+     is a genuine read-modify-write, so unless a prior definite write covers its cells the entry
+     value is required — the exemption stays for the placement/multiplicity consumers, which
+     mirror the retired tracer (gh-ocannl-618 tracks splitting the raw-side verdicts too). *)
+  let exempt r = exempt_rmw && rmw_exempt ~statics_set r in
   fun tn ->
     match Hashtbl.find by_tn tn with
     | None -> `Covered
@@ -5389,14 +5416,15 @@ let copy_traced_store (store : traced_store) : traced_store =
    buffers hold the payload of the transfer preceding THIS routine's run, so deferring a merge
    read into a later routine changes which transfer it observes — that computation must not be
    shared across routines. *)
-let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
+let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store) ~(spliced : bool)
     ~(static_indices : Indexing.static_symbol list) ~(merge_node : Tnode.t option) (llc : t) :
-    bool =
+    bool * Set.M(Tnode).t =
   let accessed = Hash_set.create (module Tnode) in
   let written_seen = Hash_set.create (module Tnode) in
   let fresh_read = Hash_set.create (module Tnode) in
   let fresh_written = Hash_set.create (module Tnode) in
   let suspects = Hash_set.create (module Tnode) in
+  let flipped_rbw = Hash_set.create (module Tnode) in
   let uses_merge = ref false in
   (* [live] is false under a dead loop ([to_ < from_]): a dead access still REGISTERS (renderers
      emit dead-loop bodies, so their identifiers need parameters, and its entry must survive the
@@ -5409,8 +5437,22 @@ let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
     match Hashtbl.find traced_store tn with
     | None -> if live then Hash_set.add fresh_read tn
     | Some traced ->
-        if live && traced.has_assignment && not traced.read_before_write then
-          if not (Hash_set.mem written_seen tn) then traced.read_before_write <- true
+        (* Flag flips are gated on [spliced]: only consuming an INHERITED computation makes the
+           final code diverge from the raw code in ways the raw analysis cannot see. A raw-only
+           routine keeps the raw verdicts wholesale — their lenient contracts (rmw exemption,
+           guards-taken) deliberately classify patterns whose initialization lives in an earlier
+           routine of the program, and re-judging those strictly broke real flows across the
+           suite (review round 6). [zeroed_out] counts as written: a [Zero_out]-only node (a
+           [Fetch] of constant 0.) records no [has_assignment], yet a spliced read before it
+           still needs the entry value. *)
+        if
+          spliced && live
+          && (traced.has_assignment || traced.zeroed_out)
+          && not traced.read_before_write
+        then
+          if not (Hash_set.mem written_seen tn) then (
+            traced.read_before_write <- true;
+            Hash_set.add flipped_rbw tn)
           else Hash_set.add suspects tn
   in
   let written ~live tn =
@@ -5499,7 +5541,7 @@ let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
         4; [a_guarded]'s doc says exactly "never a definite write"). Guarded READS still demand
         coverage — conservative in the same direction. *)
      let covered =
-       reads_covered_query static_indices
+       reads_covered_query ~exempt_rmw:false static_indices
          (drop_dead_loop_accesses (affine_accesses llc)
          |> List.filter ~f:(fun a -> not (a.Affine.a_write && a.a_guarded)))
      in
@@ -5508,11 +5550,15 @@ let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
          if not traced.read_before_write then
            match covered tn with
            | `Covered -> ()
-           | `Unknown _ -> traced.read_before_write <- true));
+           | `Unknown _ ->
+               traced.read_before_write <- true;
+               Hash_set.add flipped_rbw tn));
   Hash_set.iter fresh_written ~f:(fun tn -> (get_node traced_store tn).has_assignment <- true);
   Hash_set.iter fresh_read ~f:(fun tn ->
       let traced = get_node traced_store tn in
-      if traced.has_assignment then traced.read_before_write <- true
+      if traced.has_assignment || traced.zeroed_out then (
+        traced.read_before_write <- true;
+        Hash_set.add flipped_rbw tn)
       else traced.read_only <- true);
   (* A node mentioned ONLY in dead code still needs a registry entry (its identifier renders, so
      a parameter must declare it and the prune must not drop it) but no interface flags: it
@@ -5530,7 +5576,7 @@ let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
         else acc)
   in
   List.iter stale ~f:(Hashtbl.remove traced_store);
-  !uses_merge
+  (!uses_merge, Set.of_list (module Tnode) (Hash_set.to_list flipped_rbw))
 
 let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : optimized =
   let static_indices = an.an_static_indices in
@@ -5539,7 +5585,7 @@ let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : opt
   decide_placements input_ctx traced_store ~max_visits:virtualize_settings.max_visits
     ~reads_covered:an.an_reads_covered ~read_multiplicity:an.an_read_multiplicity;
   [%log "optimizing"];
-  let virtual_llc_result =
+  let virtual_llc_result, consumed_inherited =
     virtual_llc input_ctx traced_store an.an_reverse_node_map static_indices llc
   in
   let llc =
@@ -5549,9 +5595,9 @@ let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : opt
     @@ cleanup_virtual_llc input_ctx.placements ~static_indices
     @@ virtual_llc_result
   in
-  let uses_merge =
-    reconcile_traced_store input_ctx.placements traced_store ~static_indices
-      ~merge_node:an.an_merge_node llc
+  let uses_merge, spliced_rbw =
+    reconcile_traced_store input_ctx.placements traced_store ~spliced:consumed_inherited
+      ~static_indices ~merge_node:an.an_merge_node llc
   in
   (match llc with
   | Noop -> [%log "routine optimized to an empty schedule: every target virtualized (gh-611)"]
@@ -5610,6 +5656,7 @@ let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : opt
     pipelined = Map.empty (module Tnode);
     zero_fringe = Set.empty (module Tnode);
     flip_candidates;
+    spliced_rbw;
   }
 
 (* gh-560: the identity of a routine's analysis inputs — a canonical rendering of the raw lowered

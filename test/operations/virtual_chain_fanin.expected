@@ -61,7 +61,13 @@ guarded-write splice: ell7 stays read_before_write (guarded write is not definit
 guarded-write splice: ell7 is an input of routine B: true
 guarded-write splice, false branch: the entry values are observed: true
 guarded-write splice, true branch: the overwrite is observed: true
+same-position splice: routine A defers v9: true
+same-position splice: ell9 is read-before-write (rmw is not exempt from the interface): true
+same-position splice: updated in place over the incoming values: true
+sibling merge: v10 stays virtual in the shared loop: true
+sibling merge: consuming v10 is legal, only its own setter's reads splice: true
 pipeline deferral-only: links and runs as a no-op on a fresh context: true
 pipeline deferral-only: the target stayed virtual: true
 pipeline consumer on a w2-less chain: rejected at link (spliced input demanded): true
 pipeline incremental arc: compute leaf, defer, consume — matches the reference: true
+pipeline write-mentioned spliced leaf: demanded despite the embedded-write mention: true

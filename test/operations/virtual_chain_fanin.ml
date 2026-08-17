@@ -784,7 +784,76 @@ let phase5 () =
        [
          Array.init dim ~f:(fun i -> if i < dim - 1 then 1099. else sentinel);
          Array.create ~len:dim 999.;
-       ])
+       ]);
+  (* Review round 6, P1: a same-position spliced read is a genuine read-modify-write — the
+     multiplicity analyses exempt it ([rmw_exempt]) but the INTERFACE must not: after a partial
+     write, ell9[i] = v9[i] splices to ell9[i] = ell9[i] + 100, and the cells the partial write
+     missed require their incoming values. *)
+  let ell9 = mk "ell9" in
+  materialize ell9;
+  let v9 = mk "v9" in
+  let ctx8 = LL.empty_optimize_ctx () in
+  let llc_a8 =
+    let s = sym () in
+    loop_n s dim (set v9 [| iter s |] (add (get ell9 [| iter s |]) (c 100.)))
+  in
+  let o_a8 =
+    LL.optimize ctx8 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_rmw_a" [] llc_a8
+  in
+  p "same-position splice: routine A defers v9" (known_virtual o_a8 v9);
+  let llc_b8 =
+    let s = sym () in
+    seq
+      (set ell9 [| fixed 0 |] (c 5000.))
+      (loop_n s dim (set ell9 [| iter s |] (get v9 [| iter s |])))
+  in
+  let o_b8 =
+    LL.optimize ctx8 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_rmw_b" [] llc_b8
+  in
+  p "same-position splice: ell9 is read-before-write (rmw is not exempt from the interface)"
+    (read_before_write o_b8 ell9);
+  let ell9_old = Array.init dim ~f:(fun i -> 5. +. Float.of_int i) in
+  let got8 = execute ~name:"vcf_rmw_b" o_b8 ~seed:[ (ell9, ell9_old) ] ~read:[ ell9 ] in
+  p "same-position splice: updated in place over the incoming values"
+    (same got8 [ Array.init dim ~f:(fun i -> if i = 0 then 5100. else ell9_old.(i) +. 100.) ]);
+  (* Review round 6, P2: a shared-loop stored body carries SIBLING setters that inlining filters
+     out — a sibling's merge read must not taint the candidate. Routine A's one loop computes
+     both sib (materialized, from the merge buffer) and v10 (virtual, from ell10). *)
+  let msrc4 = mk "msrc4" in
+  materialize msrc4;
+  let sib = mk "sib" in
+  materialize sib;
+  let ell10 = mk "ell10" in
+  materialize ell10;
+  let v10 = mk "v10" and out10 = mk "shout" in
+  materialize out10;
+  let ctx9 = LL.empty_optimize_ctx () in
+  let llc_a9 =
+    let s = sym () in
+    loop_n s dim
+      (seq
+         (set sib [| iter s |] (LL.Get_merge_buffer (msrc4, [| iter s |])))
+         (set v10 [| iter s |] (add (get ell10 [| iter s |]) (c 100.))))
+  in
+  let o_a9 =
+    LL.optimize ctx9 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_shared_a" [] llc_a9
+  in
+  p "sibling merge: v10 stays virtual in the shared loop" (known_virtual o_a9 v10);
+  let llc_b9 =
+    let s = sym () in
+    loop_n s dim (set out10 [| iter s |] (get v10 [| iter s |]))
+  in
+  let o_b9 =
+    LL.optimize ctx9 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_shared_b" [] llc_b9
+  in
+  let ell10_vals = Array.init dim ~f:(fun i -> 60. +. Float.of_int i) in
+  let got9 =
+    execute ~name:"vcf_shared_b" o_b9
+      ~seed:[ (ell10, ell10_vals); (out10, blank dim) ]
+      ~read:[ out10 ]
+  in
+  p "sibling merge: consuming v10 is legal, only its own setter's reads splice"
+    (same got9 [ Array.map ell10_vals ~f:(fun x -> x +. 100.) ])
 
 (* === Phase 6: deferral-only comp through the ordinary pipeline (review round 3) === *)
 
@@ -851,7 +920,56 @@ let phase6 () =
   let got = Context.get_values ctx1 out8.Tensor.value in
   let expected = Array.init dim ~f:(fun i -> 80. *. Float.of_int (i + 1)) in
   p "pipeline incremental arc: compute leaf, defer, consume — matches the reference"
-    (close got expected)
+    (close got expected);
+  (* Review round 6, P1: a consumer that WRITES a spliced leaf after consuming mentions the leaf
+     only as an (embedded) write — the mention filter must not shield it from the prior-context
+     demand, because the splice reads the leaf's ENTRY value before the overwrite. Hand-composed
+     out of order (topo-sorted tensor forwards always init before consumers), with the fetch
+     marked embedded so the raw set excludes the leaf. *)
+  Tensor.unsafe_reinitialize ();
+  let base3 =
+    NTDSL.init ~l:"vcf_p6base3" ~prec:Ir.Ops.single ~o:[ dim ]
+      ~f:(fun idcs -> Float.of_int (10 * (idcs.(0) + 1)))
+      ()
+  in
+  let w4 = TDSL.O.( + ) base3 base3 in
+  let ctx_w4 = Context.auto () in
+  let ctx_w4, r_w4 = Context.compile ctx_w4 (Train.forward w4) Ir.Indexing.Empty in
+  let _ctx_w4 = Context.run ctx_w4 r_w4 in
+  let v11 = TDSL.O.( + ) w4 w4 in
+  let ctx_f2 = Context.auto () in
+  let ctx_f2, r_d2 =
+    Context.compile ~name:"vcf_p6_defer3" ctx_f2 (Tensor.consume_forward_code v11)
+      Ir.Indexing.Empty
+  in
+  let _ctx_d2 = Context.run ctx_f2 r_d2 in
+  let out11 = TDSL.O.( + ) v11 v11 in
+  Train.set_materialized out11.Tensor.value;
+  let overwrite_w4 : Ir.Assignments.comp =
+    {
+      asgns =
+        Ir.Assignments.Fetch
+          {
+            array = w4.Tensor.value;
+            fetch_op = Ir.Assignments.Constant 0.;
+            dims = lazy [| dim |];
+          };
+      embedded_nodes = Set.singleton (module Tn) w4.Tensor.value;
+    }
+  in
+  let comp_consume_then_write =
+    Ir.Assignments.sequence [ Tensor.consume_forward_code out11; overwrite_w4 ]
+  in
+  let rejected_w =
+    try
+      let _c, _r =
+        Context.compile ~name:"vcf_p6_overwrite" ctx_f2 comp_consume_then_write Ir.Indexing.Empty
+      in
+      false
+    with Utils.User_error msg -> String.is_substring msg ~substring:"lacks node"
+  in
+  p "pipeline write-mentioned spliced leaf: demanded despite the embedded-write mention"
+    rejected_w
 
 let () =
   phase1 ();
