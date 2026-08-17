@@ -28,9 +28,14 @@
    Phase 3 pins the cross-routine reading (review round 1): the same chain split across two
    [LL.optimize] calls sharing one [optimize_ctx] — the second routine reads a node the first
    committed [Virtual], whose fan-in is derived from the stored computation rather than from
-   (absent) local setters, so the chain cannot escape the cap by being compiled in pieces.
-   Structural pins only for now: the executed leg is blocked on gh-ocannl-610 (kernel parameters
-   miss leaves that reach a routine only through a cross-routine inlined computation). *)
+   (absent) local setters, so the chain cannot escape the cap by being compiled in pieces. The
+   executed leg is gh-ocannl-610's acceptance test: routine B's kernel parameters must include
+   the leaves (x0, w1..w5) that reach it only through the spliced cross-routine computation.
+
+   Phase 4 pins gh-ocannl-611: a routine whose entire content virtualizes away is legal — it
+   optimizes to an empty schedule ([Noop]) whose stored computations persist in the lineage,
+   compiles and runs as a no-op, and a later routine consumes the deferred chain, executed
+   against the same reference. *)
 
 open Base
 open Ll_test
@@ -337,9 +342,9 @@ let phase2 () =
 let phase3 () =
   let c = build_chain ~first_id:3200 () in
   let split = 5 in
-  (* Routine A needs a materialized output of its own or cleanup eliminates it wholesale (a
-     fully-virtual routine has nothing to keep); a copy-out of x5 mirrors a real routine's
-     observable root, and its same-position read leaves x5 virtual. *)
+  (* Routine A carries a materialized copy-out of x5, mirroring a real routine's observable root;
+     its same-position read leaves x5 virtual. Phase 4 exercises the copy-out-free, fully-virtual
+     variant (gh-ocannl-611). *)
   let out_a = c.mk "out_a" in
   materialize out_a;
   let copy_out =
@@ -360,6 +365,10 @@ let phase3 () =
   p "cross-routine: x8 materialized by the fan-in cap" (known_non_virtual o_b c.xs.(7));
   p "cross-routine: x9 and x10 virtual"
     (known_virtual o_b c.xs.(8) && known_virtual o_b c.xs.(9));
+  (* gh-ocannl-610 acceptance: routine B executes correctly, its kernel declaring parameters for
+     the leaves that reach it only through the spliced cross-routine computation. *)
+  let got = execute ~name:"vcf_xchain_b" o_b ~seed:(chain_seed c) ~read:[ c.out ] in
+  p "cross-routine: executed values match the reference" (same got [ expected_out ]);
   (* Review round 3: a routine that UPDATES an inherited virtual node must not lose the stored
      prefix behind the update's excluded self-read — the inherited component reads union with the
      local setter reads. Routine B': x5 += w6 (self-update of the inherited virtual), then three
@@ -416,14 +425,39 @@ let phase3 () =
    reachable through the pipeline — a zero-initialized node whose only setter is dead never
    virtualizes (it reaches later routines as an undecided read-only node and materializes by the
    read-only rule), so no stored computation with a dead loop exists to over-charge. *)
-(* No executed leg for this phase yet: routine B's kernel parameters miss the leaves reaching it
-   only through the inlined cross-routine computation ([input_and_output_nodes] folds over the
-   traced store, which is built from the raw code) — a pre-existing gap, gh-ocannl-610.
-   Reinstating [execute ~name:"vcf_xchain_b" o_b ~seed:(chain_seed c) ~read:[ c.out ]] against
-   [expected_out] is that issue's acceptance test. *)
+
+(* === Phase 4: a routine that optimizes to nothing (gh-ocannl-611) === *)
+
+let phase4 () =
+  let c = build_chain ~first_id:3400 () in
+  let split = 5 in
+  (* No copy-out: routine A is deferral-only — every target virtualizes and nothing remains. *)
+  let llc_a = List.reduce_exn ~f:seq (List.take c.links split) in
+  let llc_b = List.reduce_exn ~f:seq (List.drop c.links split @ [ c.consumer ]) in
+  let ctx = LL.empty_optimize_ctx () in
+  let o_a =
+    LL.optimize ctx ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_allvirt_a" [] llc_a
+  in
+  p "all-virtual: routine A optimizes to an empty schedule"
+    (match o_a.LL.llc with LL.Noop -> true | _ -> false);
+  p "all-virtual: x1..x5 committed virtual"
+    (Array.for_alli c.xs ~f:(fun k tn -> k >= split || known_virtual o_a tn));
+  p "all-virtual: the deferred computations persist in the lineage"
+    (Hashtbl.mem ctx.LL.computations c.xs.(split - 1));
+  (* The empty routine must remain compilable and runnable end to end. *)
+  let _ctx_a = run ~name:"vcf_allvirt_a" o_a ~seed:[] in
+  p "all-virtual: routine A compiles and runs as a no-op" true;
+  let o_b =
+    LL.optimize ctx ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_allvirt_b" [] llc_b
+  in
+  p "all-virtual: fan-in decisions unchanged in routine B (x8 trips the cap)"
+    (known_virtual o_b c.xs.(6) && known_non_virtual o_b c.xs.(7) && known_virtual o_b c.xs.(8));
+  let got = execute ~name:"vcf_allvirt_b" o_b ~seed:(chain_seed c) ~read:[ c.out ] in
+  p "all-virtual: executed values match the reference" (same got [ expected_out ])
 
 let () =
   phase1 ();
   phase1b ();
   phase2 ();
-  phase3 ()
+  phase3 ();
+  phase4 ()
