@@ -103,6 +103,9 @@ cmd_search() { (
   local lbl; lbl=$(sed -n '1,/arm A (default placements) best/p' "$out/search.err" \
     | grep -o 'best: [0-9.]* ms ([A-Za-z_]*\[[^]]*\]' | sed 's/.*(//')
   [ -n "${lbl:-}" ] && grep -F "calibration: $lbl" "$out/search.err" | head -1
+  # Return the BENCHMARK's status, not the last grep's. Printing evidence from a failed run and then
+  # exiting 0 is how cmd_sweep came to accept a failed cell and still call the series balanced.
+  return "$st"
 ) }
 
 # Warm replay of the cell's cached winner, capturing the emitted source and the launch geometry.
@@ -160,6 +163,11 @@ sys.exit(0 if s.count('{') == s.count('}') and s.count('{') > 0 else 1)
 EOF
     hipcc --offload-arch="$ARCH" -O2 -include hip/hip_runtime.h -c -o /dev/null "$f" \
       2>/dev/null || { echo "  $(basename "$f"): $n kernels but INCOMPLETE (no compile)" >&2; continue; }
+    # Canonical ABSOLUTE path: `finger` and `diff` open this from the caller's directory, not from
+    # the tree, so a relative entry would fail there -- or silently match an unrelated file. It is
+    # absolute today because $out is, but the invariant is asserted rather than inherited.
+    f=$(cd "$(dirname "$f")" && pwd)/$(basename "$f")
+    case $f in /?*) ;; *) echo "gh612_cells: refusing non-absolute armA path: $f" >&2; return 2;; esac
     echo "$f" > "$out/armA.path"
     echo "  arm A = $f ($n kernels, braces balanced, compiles)"
     return 0
@@ -186,7 +194,10 @@ cmd_profile() { (
   hipcc --offload-arch="$ARCH" -O2 -o "$out/harness" "$out/harness.hip" || exit 1
   local i
   for i in $(seq "$n"); do
-    $PIN "$out/harness" > "$out/kernels-$i.csv" 2> "$out/kernels-$i.err"
+    if ! $PIN "$out/harness" > "$out/kernels-$i.csv" 2> "$out/kernels-$i.err"; then
+      echo "gh612_cells: harness run $i failed; refusing the partial CSV" >&2
+      rm -f "$out/kernels-$i.csv"; return 1
+    fi
     # stderr's last line is the sum-vs-step validation the report quotes. Pair it against THIS
     # cell's own step p50 (search.out / replay.out): another rep is a different crowned artifact,
     # so pairing across reps compares a profile to a step it is not a profile of.
@@ -240,6 +251,12 @@ for f in csvs:
     for r in csv.DictReader(open(f)):
         t[int(r["Name"].rsplit("__seg",1)[1])].append(float(r["TotalDurationNs"])/1e6)
 ms={i:statistics.median(v) for i,v in t.items()}
+# A partial CSV must not be silently completed with zeros: `ms.get(i, 0)` below would then produce
+# plausible totals over kernels that were never timed.
+missing=[i for i in sigs if i not in ms]
+if missing:
+    sys.exit(f"{len(missing)} of {len(sigs)} emitted kernels have no timing (seg {missing[:5]}...) -- "
+             "the CSV set is incomplete; re-run `profile`")
 print(f"medians over {len(csvs)} harness run(s): {', '.join(os.path.basename(f) for f in csvs)}")
 def show(title, pred):
     hits=[i for i in sorted(sigs) if pred(sigs[i])]
@@ -293,6 +310,11 @@ cmd_sweep() {
   local tree=$1 reps=$2; shift 2
   tree=$(require_dir "$tree")        # BEFORE the loop: each cell must see the same absolute tree
   case ${tree:-} in /?*) ;; *) return 2;; esac
+  # An unrun sweep must not look like a successful one: `seq three` and `seq 0` both yield no
+  # iterations, and the concluding notes would otherwise print over an empty experiment.
+  case $reps in ""|*[!0-9]*) echo "gh612_cells: reps must be a positive integer, got '$reps'" >&2; return 2;; esac
+  [ "$reps" -ge 1 ] || { echo "gh612_cells: reps must be >= 1, got '$reps'" >&2; return 2; }
+  [ ${#caps[@]} -ge 1 ] || { echo "gh612_cells: no caps given" >&2; return 2; }
   local caps=("$@") r cap ordered
   for r in $(seq "$reps"); do
     if [ $((r % 2)) -eq 1 ]; then ordered=("${caps[@]}")

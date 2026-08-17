@@ -330,8 +330,9 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   with depth AND with graph shape at constant depth — so a cap conclusion holds for the graph it was
   measured on and not for a size class.** On gpt2_mini specifically (4 layers, gfx1151,
   `report-gh612-hip.md`), caps 16, 32 and −1 all emit a **135-kernel** arm A, yet only cap 32 is
-  actually silent: at cap 16 the guard fires on exactly one node (the final layer norm gains a
-  materialized `n792`) *behind an unchanged kernel count*. **Equal fission width can absorb a changed
+  actually placement-identical: at cap 16 one node's worth of placement difference appears (the final
+  layer norm gains a materialized `n792`) *behind an unchanged kernel count*. Node counts proxy guard
+  firings; nothing logs provenance-41 decisions, so they are not firing counts. **Equal fission width can absorb a changed
   materialization decision, so a kernel count cannot establish that a cap did nothing — compare the
   emitted PARAMETER-SIGNATURE multisets and the materialized-node sets** (`benchmarks/gh612_cells.sh
   diff`, which needs only a snapshot). Three distinct levels, and conflating them is easy: a kernel's

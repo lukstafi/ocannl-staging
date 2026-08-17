@@ -34,13 +34,16 @@ identifiable reason given in Part 3 — without the guard the search ships mater
 which is the crude form of the same transform. The correction: that is a fact about the default, not
 the mechanism. **Cap 4 beats the default 8 by 5.7% with non-overlapping ranges, measured in one
 order-balanced block (and 1.18x against cap −1 when the two balanced blocks are chained); on the
-`gpt2_mini` graph the guard is fully silent only at cap 32 and above,
-and at cap 16 it fires exactly once (on the final layer norm) behind an unchanged kernel count** — so
+`gpt2_mini` graph placement is identical to cap −1 only at cap 32 and above, while cap 16 already
+shows one node's worth of placement difference (at the final layer norm) behind an unchanged kernel
+count** — so
 8 is not well-centred for this fixture (Part 4, which scopes that narrowly and records the
 kernel-count inference that got this wrong first).
 
-The four QKᵀ sites are freed here as they were on CUDA, but they are the **smaller** half of
-gh-574's win on this device (2.39 ms against the lm_head's 8.04) — the reverse of CUDA.
+The four QKᵀ sites are freed here as they were on CUDA, but measured over the whole post-fission
+chain rather than the fragment that keeps the name they are worth 1.80x and contribute **17%** of what
+the two freed line items give, against the lm_head chain's 21.2x and 83% — about one sixth of it,
+where on CUDA they were the larger half.
 
 ## Provenance
 
@@ -262,11 +265,19 @@ and it does not (0.1%).
   reproducing: those are three *different tile shapes*, not one kernel rechunked, so their reuse
   differs too. gh-569's curve was measured by holding the kernel fixed and varying only the chunk
   count; nothing here is that experiment, and the ordering above is not evidence about it either way.
-- **The four QKᵀ sites are freed**, as on CUDA. In BASE they are fused with mask and row-max
-  (`mask, n240_q, n242_k, n248, n257_max_vals`) at 0.588–0.602 ms each, **2.391 ms / 7.4%**; in
-  FEAT the QKᵀ stands alone at **0.457 ms across four kernels, 5.2x cheaper**. But on this device
-  they are the *smaller* half of the win — 2.39 ms against the lm_head's 8.04 — where on CUDA they
-  were the larger half. Worth naming as a genuine cross-vendor difference rather than glossed.
+- **The four QKᵀ sites are freed**, as on CUDA — but the size of that has to be read off the whole
+  chain, not off the fragment that keeps the name. In BASE the QKᵀ is fused with its mask and row-max
+  (`mask, n240_q, n242_k, n248, n257_max_vals`, 0.588–0.602 ms each) and followed by a softmax kernel;
+  in FEAT the QKᵀ stands alone at 0.114 ms each, but the mask, row-max and softmax work it shed still
+  runs, in three downstream kernels per site. Comparing the standalone fragment against the fused
+  kernel would report 5.2x and would be meaningless. **Summing every fragment of the chain on both
+  sides: 8 kernels / 3.666 ms → 16 kernels / 2.038 ms, a real 1.80x and −1.628 ms.**
+
+  Under the same treatment the lm_head chain (`wte`/`logits`/`max_logits`/`log_probs` fragments) goes
+  5 kernels / 8.165 ms → 6 kernels / 0.384 ms, **21.2x**, −7.780 ms. So the QKᵀ sites contribute
+  **17% of what those two freed line items give, against the lm_head's 83%** — not merely the smaller
+  half but roughly one sixth, where on CUDA they were the larger half. The two together are −9.408 ms
+  against gh-574's −7.536 ms net, the difference being the FFN bucket's +2.60 ms below.
 - **Signature-set diff**: 14 kernel signatures exist only in BASE, totalling **14.663 ms**; 32
   exist only in FEAT, totalling **7.428 ms**.
 
@@ -400,8 +411,9 @@ shipped-step row above is untrustworthy and the signature-level rows are not.
 
 ## Part 4 — the cap sweep: is 8 the right trade on gfx1151?
 
-**No. Cap 4 beats the default 8 outside the noise floor, and the guard is fully silent only from cap
-32 up — at cap 16 it fires exactly once, behind an unchanged kernel count.** Three timed reps at caps
+**No. Cap 4 beats the default 8 outside the noise floor, and placement is identical to cap −1 only
+from cap 32 up — at cap 16 one node's worth of placement difference already appears, behind an
+unchanged kernel count.** Three timed reps at caps
 2, 4, 8 and −1; one each at 16 and 32, which is enough because what matters about those two is
 structural (the emitted kernel multiset) rather than a timing.
 
@@ -459,12 +471,14 @@ placement**, evidenced at the signature and node levels; it does not mean byte-i
 no claim here needs it to.
 
 At cap 16 the one site that changes is the **final layer norm**, which gains a materialized `n792` —
-its 20-parameter signature becomes 21 while the kernel count stays at 135. So `lnf`, the deepest site
-and the one with the largest accumulated prefix, is the *only* node on this graph whose transitive
-fan-in exceeds 16; the layer-3 sites are all at or below it. Corrected conclusions: the residual
-stream's maximum transitive inline fan-in on this graph lies in **(16, 32]**, not between 9 and 16;
-the guard's first bite is at cap 16, not cap 8; and what changes between 16 and 8 is not silence
-versus firing but **one** node's worth of placement difference versus **four**.
+its 20-parameter signature becomes 21 while the kernel count stays at 135. Read as a proxy rather than
+a firing log, that confines the cap-16 placement difference to `lnf`, the deepest site and the one
+with the largest accumulated prefix, and is *consistent with* `lnf` being the only chain on this graph
+whose transitive fan-in exceeds 16 — consistent with, not established by, since nothing logs the
+decisions themselves. Corrected conclusions: the maximum transitive inline fan-in on this graph is
+bounded into **(16, 32]** rather than between 9 and 16; the first cap at which placement changes at
+all is 16, not 8; and 16-versus-8 is one node's worth of difference against **four**, not silence
+against firing.
 
 The count is still monotone in the cap (144 / 137 / 136 / 135 / 135 / 135) and still the first thing
 to look at, but the rule has to be stated correctly: **a cap whose kernel count matches cap −1's may
