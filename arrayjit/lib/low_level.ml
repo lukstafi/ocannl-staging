@@ -1982,9 +1982,15 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
         record_spliced_scalar a;
         record_spliced_scalar b;
         record_spliced_scalar d
-    | Binop (_, (a, _), (b, _)) ->
-        record_spliced_scalar a;
-        record_spliced_scalar b
+    | Binop (op, (a, _), (b, _)) -> (
+        (* A projection's discarded operand is never evaluated: its reads are not spliced
+           (review round 8) — same dispatch as the reconcile and merge-taint walkers. *)
+        match Ops.binop_conditionality op with
+        | Ops.Only_first -> record_spliced_scalar a
+        | Ops.Only_second -> record_spliced_scalar b
+        | Ops.Both_operands | Ops.Gated_second ->
+            record_spliced_scalar a;
+            record_spliced_scalar b)
     | Unop (_, (a, _)) -> record_spliced_scalar a
   in
   (* The entry-time snapshot of merge-tainted deferred computations: everything in the table at
@@ -5083,7 +5089,22 @@ let rmw_exempt ~statics_set (r : _ Affine.access) =
    is invisible to both analyses. A node without affine accesses is vacuously covered
    ([affine_accesses] and [trace_node_facts] walk the same tree, so such a node has no traced reads
    either). *)
-let reads_covered_query ?(exempt_rmw = true) (static_indices : Indexing.static_symbol list)
+(* Whether every [If] guard enclosing [write] also encloses [read]: the write's path prefix up
+   to its LAST [Body] component is a prefix of the read's path, so whenever the read executes,
+   every guard admitting the write held (review round 8). Positional before-ness is the coverage
+   query's separate job. *)
+let write_guards_dominate ~(write : Tn.t Affine.access) ~(read : Tn.t Affine.access) : bool =
+  match
+    List.foldi write.Affine.a_path ~init:None ~f:(fun i acc comp ->
+        match comp with Affine.Body -> Some i | _ -> acc)
+  with
+  | None -> true
+  | Some i ->
+      let prefix = List.take write.Affine.a_path (i + 1) in
+      List.is_prefix read.Affine.a_path ~prefix ~equal:Affine.equal_path_comp
+
+let reads_covered_query ?(exempt_rmw = true)
+    ?(write_eligible = fun ~read:_ ~write:_ -> true) (static_indices : Indexing.static_symbol list)
     (accs : Tn.t Affine.access list) : Tn.t -> [ `Covered | `Unknown of string ] =
   let by_tn = Hashtbl.create (module Tn) in
   List.iter accs ~f:(fun a -> Hashtbl.add_multi by_tn ~key:a.Affine.a_tn ~data:a);
@@ -5105,6 +5126,7 @@ let reads_covered_query ?(exempt_rmw = true) (static_indices : Indexing.static_s
           List.for_all accs ~f:(fun r ->
               r.Affine.a_write || exempt r
               ||
+              let writes = List.filter writes ~f:(fun w -> write_eligible ~read:r ~write:w) in
               match Affine.read_covered_before ~static_range ~read:r ~writes () with
               | `Covered -> true
               | `Unknown w ->
@@ -5579,16 +5601,17 @@ let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
      them is a per-cell, guard-aware question, answered by the same query that judged the raw
      reads. Lazy so routines without the pattern skip the affine pass over the final code. *)
   (if not (Hash_set.is_empty suspects) then
-     (* Guarded writes are pre-filtered: the query's guards-taken contract (a guarded write
-        counts as an assignment, mirroring the retired tracer) is right for placement decisions
-        but wrong for the INPUT question — when the guard is false at runtime the entry value is
-        still required, so only definite writes may suppress [read_before_write] (review round
-        4; [a_guarded]'s doc says exactly "never a definite write"). Guarded READS still demand
-        coverage — conservative in the same direction. *)
+     (* A guarded write may suppress [read_before_write] only for reads it DOMINATES: when the
+        read executes, a same-guard write executed too, but a guard that can be false while the
+        read still runs leaves the entry value required (review rounds 4 and 8; the query's own
+        guards-taken contract stays for its placement-decision consumers). Guarded READS still
+        demand coverage — conservative in the same direction. *)
      let covered =
-       reads_covered_query ~exempt_rmw:false static_indices
-         (drop_dead_loop_accesses (affine_accesses llc)
-         |> List.filter ~f:(fun a -> not (a.Affine.a_write && a.a_guarded)))
+       reads_covered_query ~exempt_rmw:false
+         ~write_eligible:(fun ~read ~write ->
+           (not write.Affine.a_guarded) || write_guards_dominate ~write ~read)
+         static_indices
+         (drop_dead_loop_accesses (affine_accesses llc))
      in
      Hash_set.iter suspects ~f:(fun tn ->
          let traced = Hashtbl.find_exn traced_store tn in

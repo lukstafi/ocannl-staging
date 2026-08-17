@@ -951,7 +951,104 @@ let phase5 () =
   in
   p "raw-read isolation: executed values match on the taken branch"
     (same got11
-       [ Array.create ~len:dim 7.; Array.map ell13_vals ~f:(fun x -> x +. 100.) ])
+       [ Array.create ~len:dim 7.; Array.map ell13_vals ~f:(fun x -> x +. 100.) ]);
+  (* Review round 8, P2: a discarded projection operand inside an INHERITED computation must not
+     mark its node as spliced — extra3 reaches routine B only through Arg2's dead first operand,
+     so B's own raw guarded-write-then-read of extra3 keeps its raw guards-taken verdict. *)
+  let extra3 = mk "extra3" in
+  materialize extra3;
+  let ell14 = mk "ell14" in
+  materialize ell14;
+  let v14 = mk "v14" and out16 = mk "pjout" and out17 = mk "pjout2" in
+  materialize out16;
+  materialize out17;
+  let ctx12 = LL.empty_optimize_ctx () in
+  let llc_a12 =
+    let s = sym () in
+    loop_n s dim
+      (set v14 [| iter s |]
+         (binop Ir.Ops.Arg2 (get extra3 [| iter s |]) (get ell14 [| iter s |])))
+  in
+  let o_a12 =
+    LL.optimize ctx12 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_proj2_a" [] llc_a12
+  in
+  p "discarded-splice: routine A defers v14" (known_virtual o_a12 v14);
+  let llc_b12 =
+    let sg = sym () and sh = sym () and s = sym () in
+    seq
+      (LL.If
+         {
+           cond = (get gflag [| fixed 0 |], single);
+           body =
+             seq
+               (loop_n sg dim (set extra3 [| iter sg |] (c 3.)))
+               (loop_n sh dim (set out16 [| iter sh |] (get extra3 [| iter sh |])));
+         })
+      (loop_n s dim (set out17 [| iter s |] (get v14 [| iter s |])))
+  in
+  let o_b12 =
+    LL.optimize ctx12 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_proj2_b" [] llc_b12
+  in
+  p "discarded-splice: extra3 keeps its raw verdict (discarded operand did not splice it)"
+    ((not (read_before_write o_b12 extra3)) && not (Set.mem o_b12.LL.spliced_rbw extra3));
+  let ell14_vals = Array.init dim ~f:(fun i -> 33. +. Float.of_int i) in
+  let got12 =
+    execute ~name:"vcf_proj2_b" o_b12
+      ~seed:
+        [ (gflag, [| 1. |]); (ell14, ell14_vals); (extra3, blank dim); (out16, blank dim);
+          (out17, blank dim) ]
+      ~read:[ out16; out17 ]
+  in
+  p "discarded-splice: executed values are the projected operand's"
+    (same got12 [ Array.create ~len:dim 3.; ell14_vals ]);
+  (* Review round 8, P2: a guarded write DOMINATING the spliced read supplies coverage — inside
+     one [If] body the write precedes the consume, so the false path performs neither access and
+     no entry value is required. Contrast vcf_guard above, where the read sits OUTSIDE the
+     guard. *)
+  let leaf15 = mk "leaf15" in
+  materialize leaf15;
+  let v15 = mk "v15" and out18 = mk "dgout" in
+  materialize out18;
+  let ctx13 = LL.empty_optimize_ctx () in
+  let llc_a13 =
+    let s = sym () in
+    loop_n s dim (set v15 [| iter s |] (add (get leaf15 [| iter s |]) (c 100.)))
+  in
+  let o_a13 =
+    LL.optimize ctx13 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_domg_a" [] llc_a13
+  in
+  p "dominated-guard splice: routine A defers v15" (known_virtual o_a13 v15);
+  let llc_b13 =
+    let sg = sym () and sh = sym () in
+    LL.If
+      {
+        cond = (get gflag [| fixed 0 |], single);
+        body =
+          seq
+            (loop_n sg dim (set leaf15 [| iter sg |] (ramp 500. sg)))
+            (loop_n sh dim (set out18 [| iter sh |] (get v15 [| iter sh |])));
+      }
+  in
+  let o_b13 =
+    LL.optimize ctx13 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_domg_b" [] llc_b13
+  in
+  p "dominated-guard splice: the same-guard write covers, leaf15 is not an input"
+    ((not (read_before_write o_b13 leaf15))
+    && (not (Set.mem o_b13.LL.spliced_rbw leaf15))
+    &&
+    let (ins, _), _ = LL.input_and_output_nodes o_b13 in
+    not (Set.mem ins leaf15));
+  let got13 =
+    execute ~name:"vcf_domg_b" o_b13
+      ~seed:[ (gflag, [| 1. |]); (leaf15, blank dim); (out18, blank dim) ]
+      ~read:[ out18; leaf15 ]
+  in
+  p "dominated-guard splice: taken branch writes then consumes"
+    (same got13
+       [
+         Array.init dim ~f:(fun i -> 600. +. Float.of_int i);
+         Array.init dim ~f:(fun i -> 500. +. Float.of_int i);
+       ])
 
 (* === Phase 6: deferral-only comp through the ordinary pipeline (review round 3) === *)
 

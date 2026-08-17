@@ -72,6 +72,12 @@ update splice: out sees the pre-overwrite leaf through the updated computation: 
 raw-read isolation: routine A defers v13: true
 raw-read isolation: ew keeps its raw guards-taken verdict (not an input): true
 raw-read isolation: executed values match on the taken branch: true
+discarded-splice: routine A defers v14: true
+discarded-splice: extra3 keeps its raw verdict (discarded operand did not splice it): true
+discarded-splice: executed values are the projected operand's: true
+dominated-guard splice: routine A defers v15: true
+dominated-guard splice: the same-guard write covers, leaf15 is not an input: true
+dominated-guard splice: taken branch writes then consumes: true
 pipeline deferral-only: links and runs as a no-op on a fresh context: true
 pipeline deferral-only: the target stayed virtual: true
 pipeline consumer on a w2-less chain: rejected at link (spliced input demanded): true
