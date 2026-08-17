@@ -7,3 +7,8 @@
  (name fit_envelope)
  (modules fit_envelope)
  (libraries base stdio ir))
+
+(executable
+ (name calibrate_bandwidth)
+ (modules calibrate_bandwidth)
+ (libraries base stdio utils ir context ocannl))

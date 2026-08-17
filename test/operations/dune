@@ -1918,6 +1918,35 @@
  (action
   (diff autotune_bound_pruning.expected autotune_bound_pruning.actual)))
 
+; End-to-end streaming memory-bandwidth calibration (gh-ocannl-578). Run by a rule so the
+; calibration TSV's location is pinned on the command line; the backend stays the configured one —
+; the pass is backend-generic and the printed facts are structural (timings never appear).
+(executable
+ (name bandwidth_calibration)
+ (modules bandwidth_calibration)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(rule
+ (target bandwidth_calibration.actual)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (action
+  (with-stdout-to
+   %{target}
+   (run
+    %{dep:bandwidth_calibration.exe}
+    "--ocannl_autotune_calibration_file=bandwidth_calibration.tsv"))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff bandwidth_calibration.expected bandwidth_calibration.actual)))
+
 ; The dual (floor) extraction over the same hand-checkable style of programs
 ; (Ir.Cost_model.completion_floor, gh-ocannl-514 phase 3).
 (test

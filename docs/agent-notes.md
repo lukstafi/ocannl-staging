@@ -915,6 +915,21 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   than silencing the check. The warning prints once per (backend, device, digest) per process —
   a candidate timed again (two tuning arms, a re-tune) warns once — but every timing still writes
   its own calibration row, so the fitter sees all of them.
+- The envelope's memory leg is unfittable from matmul-family tuning data alone (gh-ocannl-578):
+  those rows are compute-bound — even exactly counted, their bytes/time understates achievable
+  bandwidth, and an understated `model_peak_memory_bandwidth` is the unsound direction (a
+  bound-driven search over-prunes) — and they usually carry approximate byte counts anyway.
+  `Ocannl.Calibrate.stream` (CLI: `tools/calibrate_bandwidth.exe`) is the STREAM-style calibration
+  pass whose kernels are bytes-exact by construction: one access site per node and direction, no
+  guards, tuned through `Autotune.tune ~rounds:0 ~cache_dir:""` so rows go through the ordinary
+  emission path. It verifies after the fact that exact rows actually appeared (a failure means the
+  schedule introduced guards — keep `--elems` a power of two so every workgroup size divides the
+  extent) and refits the whole file. Cost-model exactness is correspondingly wider (same issue):
+  same-direction accesses that are individually exact and pairwise provably disjoint
+  (`Affine.may_touch_same_cell`) sum exactly instead of tripping the multi-access union bound, and
+  a vectorized run whose minor-axis base spacing is at least the run length
+  (`Affine.vec_runs_disjoint`, coefficient-gcd argument) counts exactly — so scheduled streaming
+  candidates stay fit-eligible, and the floor agrees with the upper extraction on disjoint unions.
 - benchmarks/ is the cross-framework parity+timing suite (self-describing safetensors fixtures,
   one-JSON-line runners, loss-trajectory parity gate ~1e-7 fp32 vs pytorch/cpu). The gate
   doubles as a gradient oracle. tinygrad: realize the loss BEFORE `opt.step()` or it recomputes

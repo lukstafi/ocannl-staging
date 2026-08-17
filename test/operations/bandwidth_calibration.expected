@@ -1,0 +1,5 @@
+kernels tuned: stream_copy stream_scale stream_add stream_triad
+rows appended: true
+bytes-exact rows present: true
+single-backend fit: true
+memory leg fitted from these rows: true
