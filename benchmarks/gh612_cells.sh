@@ -122,6 +122,12 @@ cmd_profile() {
   tree=$(abspath "$tree")
   local out; out=$(cell_dir "$label" "$rep")
   local src; src=$(cat "$out/armA.path")
+  # Clear this subcommand's OWN artifact set before regenerating it. Every producing subcommand here
+  # does that (`search` rm -rf's the cell, `snap` the snapshot dir); `profile` writing a
+  # caller-chosen NUMBER of files is the case where forgetting it is silent rather than obvious --
+  # a later run with a smaller count leaves the earlier run's CSVs behind and every consumer
+  # medians over a mixture of two profiles.
+  rm -f "$out"/kernels-*.csv "$out"/kernels-*.err "$out"/bucket-*.txt
   cd "$tree/benchmarks" || exit 1
   python3 gpt2_kernel_harness.py --source "$src" --launches "$out/launches.err" \
           --out "$out/harness.hip" || exit 1
@@ -152,12 +158,18 @@ src=open(sys.argv[1]).read(); out=sys.argv[2]
 SIG=re.compile(r'extern\s+"C"\s+__global__\s+void\s+(\w+__seg(\d+))\s*\(([^)]*)\)', re.S)
 sigs={int(i):[" ".join(p.split()).split()[-1].lstrip("*") for p in ps.split(",") if p.strip()]
       for _,i,ps in SIG.findall(src)}
+# DISCOVER the CSV set rather than assuming how many runs `profile` was asked for: it takes a
+# caller-chosen count, so a hard-coded 1..3 silently drops runs above 3 and, before `profile`
+# started clearing its own outputs, could median across two different profiles.
+import glob, os
 t=collections.defaultdict(list)
-for k in (1,2,3):
-    try: rows=list(csv.DictReader(open(f"{out}/kernels-{k}.csv")))
-    except OSError: continue
-    for r in rows: t[int(r["Name"].rsplit("__seg",1)[1])].append(float(r["TotalDurationNs"])/1e6)
+csvs=sorted(glob.glob(os.path.join(out,"kernels-*.csv")))
+if not csvs: sys.exit(f"no kernels-*.csv in {out} -- run `profile` first")
+for f in csvs:
+    for r in csv.DictReader(open(f)):
+        t[int(r["Name"].rsplit("__seg",1)[1])].append(float(r["TotalDurationNs"])/1e6)
 ms={i:statistics.median(v) for i,v in t.items()}
+print(f"medians over {len(csvs)} harness run(s): {', '.join(os.path.basename(f) for f in csvs)}")
 def show(title, pred):
     hits=[i for i in sorted(sigs) if pred(sigs[i])]
     tot=sum(ms.get(i,0) for i in hits)
