@@ -390,10 +390,11 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   1.30x on gpt2_mini (`report-gh612-hip.md`). **Size a fission's payoff over the WHOLE CHAIN, never
   over the fragment that keeps the site's name**: post-fission the mask, row-max and softmax work runs
   in separate downstream kernels, so dividing a standalone QKᵀ by a fused QKᵀ+mask+row-max reports a
-  meaningless 5.2x. Like-for-like, summing every fragment on both sides: the lm_head/CE chain goes 5
-  kernels / 8.165 ms → 6 / 0.384 ms (21.2x) and the four QKᵀ chains 8 kernels / 3.666 ms → 16 /
+  meaningless 5.2x. Like-for-like, summing every fragment on both sides: the lm_head/CE chain goes 4
+  kernels / 8.136 ms → 5 / 0.357 ms (22.8x) and the four QKᵀ chains 8 kernels / 3.666 ms → 16 /
   2.038 ms (1.80x), so the QKᵀ sites are ~17% of what the two freed line items give against the
-  lm_head's ~83%. It also COSTS +2.57 ms in the FFN bucket, which the gh-573 fanin guard is what
+  lm_head's ~83%. Anchor the CE chain on `logits`, NOT on `wte`: the input token-embedding gather
+  reads `wte` too (the embedding is `wte * onehot_x`) and is not part of the head. It also COSTS +2.57 ms in the FFN bucket, which the gh-573 fanin guard is what
   recovers, so the two must be measured together or each is mis-attributed. Why such a
   pair merges in the first place: the fission pass's no-parallelism-loss guard compares chains under the presets'
   `max_chain=2` cap, so trimming a rank-3 GEMM's minor axis reads as lossless; and a max-reduce is

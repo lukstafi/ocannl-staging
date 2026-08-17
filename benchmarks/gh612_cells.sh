@@ -124,6 +124,12 @@ cmd_snap() { (
   case ${tree:-} in /?*) ;; *) exit 2;; esac
   local out; out=$(cell_dir "$label" "$rep")
   case ${out:-} in /?*) ;; *) exit 2;; esac
+  # A cell with no populated cache cannot be replayed: with BENCH_TUNE=1 and an empty cache dir this
+  # would run a NEW cold search and crown a different artifact, so a structural diff would compare
+  # something the report never measured. Refuse instead.
+  [ -d "$out/cache" ] && [ -n "$(ls -A "$out/cache" 2>/dev/null)" ] || {
+    echo "gh612_cells: $label r$rep has no populated autotune cache -- run \`search\` first;" >&2
+    echo "  refusing to replay, because that would silently become a fresh cold search" >&2; exit 2; }
   local snap="$out/armsnap"; rm -rf "$snap"; mkdir -p "$snap"
   cd "$tree/benchmarks" || exit 1
   rm -rf build_files
@@ -292,7 +298,10 @@ show("out projections", lambda ns: any(re.fullmatch(r'w_o_l\d+', n) for n in ns)
 # kernels, and comparing a standalone QK^T against a fused QK^T+mask+row-max is meaningless.
 qk_chain=lambda ns: ((any(n.endswith("_q") for n in ns) and any(n.endswith("_k") for n in ns))
                      or "mask" in ns or any(n.endswith("_max_vals") for n in ns))
-ce_chain=lambda ns: any(n in ("wte","logits","max_logits","log_probs","neg_nll","n810_log") for n in ns)
+# NOT a bare `wte`: the input token-embedding gather reads wte too (bench_gpt builds the embedding as
+# wte * onehot_x), and it belongs to the start of the model rather than the CE head. The lm_head
+# kernel carries `logits` as well, so anchoring there selects the head without the gather.
+ce_chain=lambda ns: any(n in ("logits","max_logits","log_probs","neg_nll","n810_log") for n in ns)
 show("QK^T WHOLE CHAIN (qk + mask + row-max + softmax)", qk_chain)
 show("lm_head / CE WHOLE CHAIN", ce_chain)
 # Bucket totals on the SAME basis as everything above -- per-kernel medians grouped by
@@ -344,10 +353,12 @@ EOF
     | sed -E 's/.*(seg [0-9]+).*grid=(\[[^]]*\]).*block=(\[[^]]*\]).*/\1 grid=\2 block=\3/'
 }
 
-# Cap sweep with BALANCED order: rep r runs the cap list forward on even r and reversed on odd, so
-# no cap is permanently earlier in the session than another. Without this, cap 4 always precedes
-# cap 8 and thermal or driver drift is indistinguishable from the cap's effect -- the confound
-# report-gh481-cuda.md's arm-order rule exists for.
+# Cap sweep with BALANCED order: within a block the list runs FORWARD on the first rep and reversed
+# on the next, alternating -- keyed on the offset from FIRST_REP, not on the absolute rep number, so
+# a block starting at r4 still begins with the forward order. Getting that wrong silently produces
+# the mirror image of a claimed sequence. Without the alternation, one cap is permanently earlier in
+# the session than the other and thermal or driver drift is indistinguishable from the cap's effect
+# -- the confound report-gh481-cuda.md's arm-order rule exists for, worth ~1.4pp here.
 # <reps> is a COUNT. FIRST_REP (env, default 1) offsets the numbering so a second block can EXTEND an
 # earlier one instead of overwriting it -- the report's cap-4 n=6 is two blocks of three, r1-r3 then
 # FIRST_REP=4 r4-r6. It is an environment variable rather than a positional argument because a rep
@@ -366,7 +377,7 @@ cmd_sweep() {
   [ "$first" -ge 1 ] || { echo "gh612_cells: first-rep must be >= 1, got '$first'" >&2; return 2; }
   [ ${#caps[@]} -ge 1 ] || { echo "gh612_cells: no caps given" >&2; return 2; }
   for r in $(seq "$first" $((first + reps - 1))); do
-    if [ $((r % 2)) -eq 1 ]; then ordered=("${caps[@]}")
+    if [ $(( (r - first) % 2 )) -eq 0 ]; then ordered=("${caps[@]}")
     else ordered=(); for ((i=${#caps[@]}-1; i>=0; i--)); do ordered+=("${caps[$i]}"); done; fi
     echo "=== sweep rep $r, order: ${ordered[*]} ==="
     for cap in "${ordered[@]}"; do

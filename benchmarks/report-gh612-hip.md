@@ -42,7 +42,7 @@ kernel-count inference that got this wrong first).
 
 The four QKᵀ sites are freed here as they were on CUDA, but measured over the whole post-fission
 chain rather than the fragment that keeps the name they are worth 1.80x and contribute **17%** of what
-the two freed line items give, against the lm_head chain's 21.2x and 83% — about one sixth of it,
+the two freed line items give, against the lm_head chain's 22.8x and 83% — about one sixth of it,
 where on CUDA they were the larger half.
 
 ## Provenance
@@ -84,7 +84,11 @@ where on CUDA they were the larger half.
 - **Correctness gate, and what it does *not* cover.** All 26 tuned runs of this session emit
   bit-identical loss sequences (`7.09794, 7.08114, 7.12363, 7.10122, 7.11247, 7.07110, 7.10847,
   7.09132`) — one distinct sequence across all 26, spanning both placement arms, all six caps and
-  all three trees. But that gate reaches **only the arm the search shipped**: `bench_gpt` keeps the
+  all three trees. (26 is the number of *cold tuned cells* the session ran and the Reproduction
+  section regenerates: 3 each for BASE, FEAT and cap −1, 6 for cap 8, 6 for cap 4, 3 for cap 2, and
+  one each at 16 and 32. Part 4 reuses Part 3's cap-8 and cap −1 cells rather than re-running them —
+  an earlier draft of the reproduction re-ran cap −1 as a 27th cell, which would have put a
+  configuration through the gate twice and made the count disagree with the experiment.) But that gate reaches **only the arm the search shipped**: `bench_gpt` keeps the
   routine `Train.tune_placements` returns and reads losses only from it, the discarded arm's
   `?report` carries timing metadata alone, and `autotune: winner replay ok` is a compile-and-
   dispatchability check (digest-guarded), not a value check — the search times candidates without
@@ -273,8 +277,12 @@ and it does not (0.1%).
   kernel would report 5.2x and would be meaningless. **Summing every fragment of the chain on both
   sides: 8 kernels / 3.666 ms → 16 kernels / 2.038 ms, a real 1.80x and −1.628 ms.**
 
-  Under the same treatment the lm_head chain (`wte`/`logits`/`max_logits`/`log_probs` fragments) goes
-  5 kernels / 8.165 ms → 6 kernels / 0.384 ms, **21.2x**, −7.780 ms. So the QKᵀ sites contribute
+  Under the same treatment the lm_head chain goes 4 kernels / 8.136 ms → 5 kernels / 0.357 ms,
+  **22.8x**, −7.780 ms. (The chain is anchored on `logits`, deliberately not on `wte`: the *input*
+  token-embedding gather reads `wte` too — the model builds the embedding as `wte * onehot_x` — and it
+  belongs to the start of the network, not the CE head. An earlier revision matched a bare `wte` and so
+  carried that ~0.028 ms gather on both sides, which inflated the kernel counts by one each and read
+  21.2x. It cancels in the delta, so −7.780 ms and the 83/17 split below are unaffected.) So the QKᵀ sites contribute
   **17% of what those two freed line items give, against the lm_head's 83%** — not merely the smaller
   half but roughly one sixth, where on CUDA they were the larger half.
 
@@ -697,8 +705,15 @@ done
 # Silence requires BOTH sides at 0 exclusive signatures AND zero differing multiplicities -- and
 # note that an equal KERNEL COUNT proves nothing: cap 16 and cap -1 both emit 135 kernels while their
 # placement differs. On this graph only cap 32 comes back placement-identical.
-for cap in 32 16 8 4 2; do
-  echo "== cap -1 vs cap $cap =="; $D diff sweep-cap-1 1 sweep-cap$cap 1
+# NOTE the cell names: cap -1 and cap 8 are Part 3's `master-capoff` and `master-cap8`, not
+# sweep-cap cells -- Part 4 deliberately does not re-run them. Naming a cell that does not exist would
+# not fail loudly: `snap` with BENCH_TUNE=1 and an empty cache would run a NEW cold search and crown a
+# different artifact, so the diff would compare something the report never measured. (`snap` now
+# refuses an uncached cell for exactly that reason.)
+$D snap $M master-capoff 1 --ocannl_virtualize_max_inline_fanin=-1
+for cap in 32 16 4 2; do $D snap $M sweep-cap$cap 1 --ocannl_virtualize_max_inline_fanin=$cap; done
+for cell in sweep-cap32 sweep-cap16 master-cap8 sweep-cap4 sweep-cap2; do
+  echo "== master-capoff vs $cell =="; $D diff master-capoff 1 "$cell" 1
 done
 ```
 
