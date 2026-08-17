@@ -45,6 +45,7 @@ require_dir() {                      # like resolve_dir but must already exist (
 # NOTE: an `exit` inside $( ) exits only the substitution's subshell, so the abort has to be
 # re-asserted at the call site. Every use of resolve_dir/require_dir is followed by this check.
 OUT_ROOT=$(resolve_dir "${OUT_ROOT:-/tmp/gh612}")
+OUT_ROOT_P=$(cd "$OUT_ROOT" 2>/dev/null && pwd -P) || OUT_ROOT_P=""
 case ${OUT_ROOT:-} in /?*) ;; *) echo "gh612_cells: OUT_ROOT unusable, refusing to run" >&2; exit 2;; esac
 PIN=${PIN:-taskset -c 0-15}
 FIXTURE=${FIXTURE:-fixtures/gpt2_mini.safetensors}
@@ -70,10 +71,15 @@ cell_dir() {
   case $rep in ""|*[!0-9]*) echo "gh612_cells: bad rep '$rep' (digits only)" >&2; exit 2;; esac
   # Belt and braces: resolve the parent that will actually be operated on and require it to sit
   # beneath OUT_ROOT, so a whitelist gap cannot turn into a deletion outside the results tree.
-  parent=$(mkdir -p "$OUT_ROOT/$label" 2>/dev/null && cd "$OUT_ROOT/$label" && pwd) || parent=""
+  # A pre-existing SYMLINK at $OUT_ROOT/<label> passes a logical-path check -- `cd`+`pwd` reports the
+  # path beneath OUT_ROOT -- while `rm -rf` follows it and deletes inside the link's target. Resolve
+  # physically (`pwd -P`) and require the physical parent beneath the physical root.
+  [ -L "$OUT_ROOT/$label" ] && { echo "gh612_cells: refusing symlinked cell parent: $OUT_ROOT/$label" >&2; exit 2; }
+  parent=$(mkdir -p "$OUT_ROOT/$label" 2>/dev/null && cd "$OUT_ROOT/$label" && pwd -P) || parent=""
+  [ -n "${OUT_ROOT_P:-}" ] || { echo "gh612_cells: OUT_ROOT has no physical path" >&2; exit 2; }
   case ${parent:-} in
-    "$OUT_ROOT"/*) ;;
-    *) echo "gh612_cells: cell path escaped OUT_ROOT: '$OUT_ROOT/$label'" >&2; exit 2;;
+    "$OUT_ROOT_P"/*) ;;
+    *) echo "gh612_cells: cell path escaped OUT_ROOT physically: '$OUT_ROOT/$label' -> '$parent'" >&2; exit 2;;
   esac
   printf '%s\n' "$parent/r$rep"
 }
@@ -202,8 +208,11 @@ cmd_profile() { (
     # cell's own step p50 (search.out / replay.out): another rep is a different crowned artifact,
     # so pairing across reps compares a profile to a step it is not a profile of.
     tail -1 "$out/kernels-$i.err"
-    python3 gpt2_bucket.py --source "$src" --stats "$out/kernels-$i.csv" --steps 1 \
-            > "$out/bucket-$i.txt" 2>&1
+    if ! python3 gpt2_bucket.py --source "$src" --stats "$out/kernels-$i.csv" --steps 1 \
+            > "$out/bucket-$i.txt" 2>&1; then
+      echo "gh612_cells: gpt2_bucket.py failed on run $i (traceback in bucket-$i.txt)" >&2
+      sed -n '$p' "$out/bucket-$i.txt" >&2; rm -f "$out/bucket-$i.txt"; return 1
+    fi
   done
   # `profile` always measures the saved ARM A source, but the step p50 belongs to whichever arm the
   # search SHIPPED. Pairing them is only valid where arm A shipped; elsewhere the sum and the step
@@ -276,6 +285,14 @@ g1=lambda ns: any(re.fullmatch(r'l\d+_ffn_w1', n) for n in ns)
 show("FFN GEMM1 + gelu", g1)
 show("q/k/v projections", lambda ns: any(re.fullmatch(r'w_[qkv]_l\d+', n) for n in ns))
 show("out projections", lambda ns: any(re.fullmatch(r'w_o_l\d+', n) for n in ns))
+# WHOLE-CHAIN totals. A chain must be summed over every fragment, not over the one that keeps its
+# name: post-fission the QK^T site's mask, row-max and softmax work runs in separate downstream
+# kernels, and comparing a standalone QK^T against a fused QK^T+mask+row-max is meaningless.
+qk_chain=lambda ns: ((any(n.endswith("_q") for n in ns) and any(n.endswith("_k") for n in ns))
+                     or "mask" in ns or any(n.endswith("_max_vals") for n in ns))
+ce_chain=lambda ns: any(n in ("wte","logits","max_logits","log_probs","neg_nll","n810_log") for n in ns)
+show("QK^T WHOLE CHAIN (qk + mask + row-max + softmax)", qk_chain)
+show("lm_head / CE WHOLE CHAIN", ce_chain)
 lm=lambda ns: "wte" in ns and any(n.endswith("_layer_norm") for n in ns)
 five=[i for i in sigs if g1(sigs[i]) or lm(sigs[i])]
 tot=sum(ms.values())
@@ -306,17 +323,24 @@ EOF
 # no cap is permanently earlier in the session than another. Without this, cap 4 always precedes
 # cap 8 and thermal or driver drift is indistinguishable from the cap's effect -- the confound
 # report-gh481-cuda.md's arm-order rule exists for.
+# <reps> is a COUNT. FIRST_REP (env, default 1) offsets the numbering so a second block can EXTEND an
+# earlier one instead of overwriting it -- the report's cap-4 n=6 is two blocks of three, r1-r3 then
+# FIRST_REP=4 r4-r6. It is an environment variable rather than a positional argument because a rep
+# number and a cap value are indistinguishable in that position.
 cmd_sweep() {
-  local tree=$1 reps=$2; shift 2
+  local tree=$1 reps=$2 first=${FIRST_REP:-1}; shift 2
+  local caps=("$@") r cap ordered i        # DECLARE before validating: under set -u a reference to an
+                                          # undeclared array aborts, which broke every valid sweep.
   tree=$(require_dir "$tree")        # BEFORE the loop: each cell must see the same absolute tree
   case ${tree:-} in /?*) ;; *) return 2;; esac
   # An unrun sweep must not look like a successful one: `seq three` and `seq 0` both yield no
   # iterations, and the concluding notes would otherwise print over an empty experiment.
   case $reps in ""|*[!0-9]*) echo "gh612_cells: reps must be a positive integer, got '$reps'" >&2; return 2;; esac
+  case $first in ""|*[!0-9]*) echo "gh612_cells: first-rep must be a positive integer, got '$first'" >&2; return 2;; esac
   [ "$reps" -ge 1 ] || { echo "gh612_cells: reps must be >= 1, got '$reps'" >&2; return 2; }
+  [ "$first" -ge 1 ] || { echo "gh612_cells: first-rep must be >= 1, got '$first'" >&2; return 2; }
   [ ${#caps[@]} -ge 1 ] || { echo "gh612_cells: no caps given" >&2; return 2; }
-  local caps=("$@") r cap ordered
-  for r in $(seq "$reps"); do
+  for r in $(seq "$first" $((first + reps - 1))); do
     if [ $((r % 2)) -eq 1 ]; then ordered=("${caps[@]}")
     else ordered=(); for ((i=${#caps[@]}-1; i>=0; i--)); do ordered+=("${caps[$i]}"); done; fi
     echo "=== sweep rep $r, order: ${ordered[*]} ==="

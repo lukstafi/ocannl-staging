@@ -276,8 +276,23 @@ and it does not (0.1%).
   Under the same treatment the lm_head chain (`wte`/`logits`/`max_logits`/`log_probs` fragments) goes
   5 kernels / 8.165 ms → 6 kernels / 0.384 ms, **21.2x**, −7.780 ms. So the QKᵀ sites contribute
   **17% of what those two freed line items give, against the lm_head's 83%** — not merely the smaller
-  half but roughly one sixth, where on CUDA they were the larger half. The two together are −9.408 ms
-  against gh-574's −7.536 ms net, the difference being the FFN bucket's +2.60 ms below.
+  half but roughly one sixth, where on CUDA they were the larger half.
+
+  Reconciling that against the net, since the two chains sum to −9.408 ms while gh-574's net is
+  −7.536 ms, a gap of **+1.872 ms** which is *not* the FFN regression alone:
+
+  | bucket | BASE | FEAT | delta |
+  |---|---:|---:|---:|
+  | FFN GEMMs | 5.544 | 8.139 | **+2.595** |
+  | attention | 14.163 | 12.542 | −1.621 (the QKᵀ chain's −1.628, so the rest of attention is flat) |
+  | embedding / logits | 8.256 | 0.538 | −7.718 (the lm_head chain's −7.780) |
+  | layernorm / elementwise | 4.319 | 3.576 | **−0.743** |
+  | sum | | | **−7.487** |
+
+  So the FFN's +2.595 ms is partly offset by a **−0.743 ms** improvement in the layernorm bucket that
+  the finer fission also produces — an earlier revision attributed the whole gap to FFN, which does not
+  balance. The bucket sum is −7.487 against the per-kernel total's −7.536; the 0.049 ms residue is
+  classification rounding, not an unexplained term.
 - **Signature-set diff**: 14 kernel signatures exist only in BASE, totalling **14.663 ms**; 32
   exist only in FEAT, totalling **7.428 ms**.
 
@@ -449,7 +464,7 @@ and the numbers below are the signature and node levels:
 | comparison | exclusive signatures | **newly materialized nodes** | verdict |
 |---|---|---:|---|
 | cap −1 vs **cap 32** | 0 / 0, no multiplicity differences | **0** | **placement identical — the guard is silent** |
-| cap −1 vs **cap 16** | 1 / 1 | **1** (`n792`) | the guard fires, once |
+| cap −1 vs **cap 16** | 1 / 1 | **1** (`n792`) | one node's worth of placement difference |
 | cap −1 vs cap 8 | 16 / 17 | **4** (`centered`, `n446`, `n792`, `x1`) | fires |
 | cap −1 vs cap 4 | 26 / 28 | **9** | fires |
 | cap −1 vs cap 2 | 40 / 49 | **23** | fires |
@@ -645,12 +660,22 @@ $D diff master-capoff 1 master-cap8 1    # gh-573: the ffn_b2 triangle disappear
 $D diff feat574 1 master-capoff 1        # the negative control: must print 0 kernels on both sides
 ```
 
+`finger` also prints the two **whole-chain** totals — `QK^T WHOLE CHAIN` and `lm_head / CE WHOLE
+CHAIN` — which are the only defensible comparands for those two line items, since post-fission the
+mask, row-max and softmax work runs in separate downstream kernels and a fragment-to-fused-kernel
+ratio is meaningless. BASE prints 8 kernels / 3.666 ms and 5 / 8.165 ms; FEAT prints 16 / 2.038 ms
+and 6 / 0.384 ms.
+
 ```bash
 # Part 4, the cap sweep. `sweep` reverses the cap order on alternate reps, so no cap sits
 # permanently earlier in the session than another -- without that, cap 4 always precedes cap 8 and
 # session drift is indistinguishable from the cap's effect.
-$D sweep $M 3 8 4                  # the claim-bearing pair, balanced inside one block
-$D sweep $M 1 2 16 32 -1           # the shape of the curve
+# The claim-bearing pair, balanced inside one block. FIRST_REP extends a block instead of
+# overwriting it, which is what the report's n=6 cap-4 and cap-8 rows are: two blocks of three.
+$D sweep $M 3 8 4                          # r1-r3
+FIRST_REP=4 $D sweep $M 3 8 4              # r4-r6 -> the n=6 rows
+$D sweep $M 3 2                            # the n=3 cap-2 row
+$D sweep $M 1 16 32 -1                     # the shape of the curve (structural, one rep each)
 # then snapshot each cap and compare KERNEL MULTISETS, not kernel counts. Equal counts can absorb a
 # changed materialization decision -- cap 16 emits 135 kernels exactly like cap -1 yet differs by one
 # signature -- so a count cannot establish that a cap did nothing. `diff` needs only `snap` here; the
