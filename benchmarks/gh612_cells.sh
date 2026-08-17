@@ -42,16 +42,20 @@ while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(BENCH_[A-Z0-9_]*\)=.
 # And no path may be produced by a command substitution that yields an EMPTY string on failure:
 # `rm -rf "$OUT_ROOT/$label/r$rep"` with an empty OUT_ROOT is `rm -rf /<label>/r<rep>`. `set -u` does
 # not catch that (the variable is set, just empty), so resolution ABORTS instead of falling through.
-resolve_dir() {                      # absolute path to an existing usable directory, or abort
+resolve_dir() {                      # absolute PHYSICAL path to an existing usable directory, or abort
   local d=$1 abs
   mkdir -p "$d" 2>/dev/null || { echo "gh612_cells: cannot create directory: $d" >&2; exit 2; }
-  abs=$(cd "$d" 2>/dev/null && pwd) || abs=""
+  abs=$(cd "$d" 2>/dev/null && pwd -P) || abs=""
   [ -n "$abs" ] && [ -d "$abs" ] || { echo "gh612_cells: not a usable directory: $d" >&2; exit 2; }
   printf '%s\n' "$abs"
 }
+# PHYSICAL, not logical: a symlinked <tree> would otherwise make check_config walk the alias's
+# ancestors while the benchmark process runs with the physical directory as its kernel cwd -- so a
+# local ocannl_config beside or above the real checkout would be consumed without ever being
+# inspected. Validation has to follow the same ancestor chain configuration lookup does.
 require_dir() {                      # like resolve_dir but must already exist (never creates)
   local d=$1 abs
-  abs=$(cd "$d" 2>/dev/null && pwd) || abs=""
+  abs=$(cd "$d" 2>/dev/null && pwd -P) || abs=""
   [ -n "$abs" ] && [ -d "$abs" ] || { echo "gh612_cells: no such directory: $d" >&2; exit 2; }
   printf '%s\n' "$abs"
 }
@@ -62,6 +66,21 @@ OUT_ROOT_P=$(cd "$OUT_ROOT" 2>/dev/null && pwd -P) || OUT_ROOT_P=""
 case ${OUT_ROOT:-} in /?*) ;; *) echo "gh612_cells: OUT_ROOT unusable, refusing to run" >&2; exit 2;; esac
 PIN=${PIN:-taskset -c 0-15}
 FIXTURE=${FIXTURE:-fixtures/gpt2_mini.safetensors}
+# The fixture is GITIGNORED, so no checkout establishes its bytes. A stale or differently generated
+# one is used consistently by every cell, which the parity gate cannot see -- it compares cells with
+# each other, not with the workload the report names. Pin the digest of the artifact the published
+# numbers were measured on; FIXTURE_MD5= (empty) opts out deliberately.
+FIXTURE_MD5=${FIXTURE_MD5-5b3dfff860fc8c54af2a7d440f4cf202}
+check_fixture() {
+  local tree=$1 f="$1/benchmarks/$FIXTURE" got
+  [ -e "$f" ] || { echo "gh612_cells: fixture missing: $f" >&2; return 2; }
+  [ -n "${FIXTURE_MD5:-}" ] || return 0
+  got=$(md5sum "$(readlink -f "$f")" 2>/dev/null | cut -d" " -f1)
+  [ "$got" = "$FIXTURE_MD5" ] || {
+    echo "gh612_cells: fixture digest mismatch -- refusing to measure a different workload" >&2
+    echo "    $f" >&2; echo "    got  $got" >&2; echo "    want $FIXTURE_MD5" >&2; return 2; }
+  return 0
+}
 ARCH=${ARCH:-gfx1151}
 HERE=$(cd "$(dirname "$0")" && pwd)   # the driver's own directory: cmd_finger does not cd into the
                                       # tree, so its helper-script paths must be absolute
@@ -159,6 +178,7 @@ cmd_search() { (
   tree=$(require_dir "$tree")
   case ${tree:-} in /?*) ;; *) exit 2;; esac
   check_config "$tree" || exit 2
+  check_fixture "$tree" || exit 2
   cd "$tree/benchmarks" || exit 1
   local t0=$SECONDS
   BENCH_FIXTURE=$FIXTURE BENCH_TUNE=1 $PIN "$EXE" --ocannl_backend=hip \
@@ -206,6 +226,7 @@ cmd_snap() { (
   tree=$(require_dir "$tree")
   case ${tree:-} in /?*) ;; *) exit 2;; esac
   check_config "$tree" || exit 2
+  check_fixture "$tree" || exit 2
   # A cell with no populated cache cannot be replayed: with BENCH_TUNE=1 and an empty cache dir this
   # would run a NEW cold search and crown a different artifact, so a structural diff would compare
   # something the report never measured. Refuse instead.
@@ -657,6 +678,7 @@ cmd_replay() { (
   tree=$(require_dir "$tree")
   case ${tree:-} in /?*) ;; *) exit 2;; esac
   check_config "$tree" || exit 2
+  check_fixture "$tree" || exit 2
   [ -d "$out/cache" ] && [ -n "$(ls -A "$out/cache" 2>/dev/null)" ] || {
     echo "gh612_cells: $label r$rep has no populated cache -- run \`search\` first" >&2; exit 2; }
   cd "$tree/benchmarks" || exit 1

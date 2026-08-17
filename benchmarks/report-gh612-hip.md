@@ -77,7 +77,12 @@ where on CUDA they were the larger half.
   vocab 1024, batch 8, forward-only (`mode: infer`), 1024 tokens/step. Precision **f32**
   (`default_prec=single`); `mma_seeded = 0` in every arm of every cell, the RDNA3.5 f32 null that
   gh-569 and [`report-gh528-hip.md`](report-gh528-hip.md) establish. The *same* fixture file is
-  symlinked into all three trees, so the input is byte-identical across arms.
+  symlinked into all three trees, so the input is byte-identical across arms — and since
+  `benchmarks/fixtures/` is gitignored, no checkout establishes its content, so the artifact these
+  numbers were measured on is pinned by digest: **md5 `5b3dfff860fc8c54af2a7d440f4cf202`**, 13 871 360
+  bytes. `gh612_cells.sh` refuses to run a cell against anything else. A stale or differently
+  generated fixture would be used *consistently* by every cell, which is invisible to the parity
+  gate — it compares cells with each other, not with the workload the report names.
 - Trees, all built and run in this one session:
 
   | tree | commit | gh-574 `arity_cuts` | gh-573 fanin guard |
@@ -724,6 +729,8 @@ for w in master:5d0c86d8 base:6d14f401 feat:76f50dcd; do
          "$d/benchmarks/fixtures/gpt2_mini.safetensors" || exit 1
   (cd "$d" && dune build @check bin/ benchmarks/) || exit 1
 done
+# The fixture is gitignored, so pin it: every cell refuses to run against a different one.
+md5sum "$(readlink -f benchmarks/fixtures/gpt2_mini.safetensors)"   # 5b3dfff860fc8c54af2a7d440f4cf202
 D=benchmarks/gh612_cells.sh   # from the tree root; results land under $OUT_ROOT (default /tmp/gh612)
 ```
 
