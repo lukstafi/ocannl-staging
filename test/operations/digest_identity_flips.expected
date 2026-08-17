@@ -1,7 +1,7 @@
 the identity is stable across two compiles of the same program: true
-the code-borne flip took effect: true
-a code-borne knob (limit_constant_fill_size) changes the digest: true
+a code-borne knob (default_prec) changes the digest: true
 and therefore the cache key: true
+a materialized constant compiles identically in both constant-fill regimes (gh-633): true
 a keyed codegen knob (large_models) leaves the digest alone: true
 while the cache key separates the regimes: true
 a cc codegen knob (cc_vector_bytes) leaves the digest alone: true
