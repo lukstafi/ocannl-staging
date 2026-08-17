@@ -101,14 +101,23 @@ where on CUDA they were the larger half.
   was replaying correctly and only the timings were corrupt: nothing in the run's own output flags it.
   That batch was discarded and re-measured on a verified-quiet box; the numbers below are the quiet
   set.
-- **Correctness gate, and what it does *not* cover.** All 26 tuned runs of this session emit
-  bit-identical loss sequences (`7.09794, 7.08114, 7.12363, 7.10122, 7.11247, 7.07110, 7.10847,
-  7.09132`) — one distinct sequence across all 26, spanning both placement arms, all six caps and
-  all three trees. (26 is the number of *cold tuned cells* the session ran and the Reproduction
-  section regenerates: 3 each for BASE, FEAT and cap −1, 6 for cap 8, 6 for cap 4, 3 for cap 2, and
-  one each at 16 and 32. Part 4 reuses Part 3's cap-8 and cap −1 cells rather than re-running them —
-  an earlier draft of the reproduction re-ran cap −1 as a 27th cell, which would have put a
-  configuration through the gate twice and made the count disagree with the experiment.) But that gate reaches **only the arm the search shipped**: `bench_gpt` keeps the
+- **Correctness gate, stated at the precision it actually holds.** Across all 26 tuned runs — both
+  placement arms, all six caps, all three trees — the 8-step loss sequences agree to **within 14 f32
+  ulp at worst (≤9.4e-7 relative; five of eight steps within 7 ulp)**. They are **not** bit-identical:
+  at full serialized precision there are **five distinct sequences**, and an earlier revision of this
+  report claimed one, because the comparison that produced it rounded to four decimals before
+  deduplicating. Retracted and recomputed; `gh612_cells.sh parity` now does this over every cell, so
+  the number is derived rather than eyeballed.
+
+  A few ulp is the *expected* signature here and is the reason the gate is still worth having:
+  different schedules reassociate the same f32 reduction, so exact equality was never the right
+  prediction — divergence beyond a handful of ulp would be. What the gate shows is that every arm
+  computes the same function to ~20 of f32's 24 mantissa bits; what it cannot show is bitwise
+  agreement, which nothing in this session measured. (26 is the number of *cold tuned cells* the
+  session ran and the Reproduction section regenerates: 3 each for BASE, FEAT and cap −1, 6 for cap 8,
+  6 for cap 4, 3 for cap 2, and one each at 16 and 32. Part 4 reuses Part 3's cap-8 and cap −1 cells
+  rather than re-running them — an earlier draft re-ran cap −1 as a 27th cell, which would have put a
+  configuration through the gate twice.) But that gate reaches **only the arm the search shipped**: `bench_gpt` keeps the
   routine `Train.tune_placements` returns and reads losses only from it, the discarded arm's
   `?report` carries timing metadata alone, and `autotune: winner replay ok` is a compile-and-
   dispatchability check (digest-guarded), not a value check — the search times candidates without

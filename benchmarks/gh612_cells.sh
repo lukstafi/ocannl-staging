@@ -11,6 +11,7 @@
 #   gh612_cells.sh replay  <tree> <label> <rep> [extra ocannl flags...]   # PASS 2: step timings
 #   gh612_cells.sh profile <tree> <label> <rep> [n-harness-runs]
 #   gh612_cells.sh finger  <label> <rep>
+#   gh612_cells.sh parity                       # the correctness gate over every cell
 #   gh612_cells.sh diff    <labelA> <repA> <labelB> <repB>
 #   gh612_cells.sh sweep   <tree> <reps> <cap>...      # balanced cap order, see below
 #   gh612_cells.sh roofline <tree>
@@ -535,8 +536,14 @@ cmd_replay() { (
   [ -d "$out/cache" ] && [ -n "$(ls -A "$out/cache" 2>/dev/null)" ] || {
     echo "gh612_cells: $label r$rep has no populated cache -- run \`search\` first" >&2; exit 2; }
   cd "$tree/benchmarks" || exit 1
+  # A populated cache DIRECTORY is not a cache hit: the key depends on the tree and the config, so a
+  # miss here (wrong cap flag, a search that cached only one arm) would leave BENCH_TUNE=1 free to run
+  # a fresh search -- which still emits step_ms and would be accepted as a "replay" while carrying
+  # exactly the search-process residue this pass exists to exclude. Disable the search so a miss
+  # cannot become one, and log the autotune decisions so the hit can be VERIFIED below.
   BENCH_FIXTURE=$FIXTURE BENCH_TUNE=1 $PIN "$EXE" --ocannl_backend=hip \
-    --ocannl_autotune_cache_dir="$out/cache" "$@" \
+    --ocannl_autotune_cache_dir="$out/cache" --ocannl_autotune_search=false \
+    --ocannl_autotune_log=true "$@" \
     > "$out/replay2.out" 2> "$out/replay2.err"
   local st=$?
   echo -n "$label r$rep pass-2 replay: exit $st  "
@@ -546,7 +553,48 @@ cmd_replay() { (
   # pass-2 loop look successful while yielding nothing for the cell.
   [ "$st" -eq 0 ] || return "$st"
   [ -n "${timing:-}" ] || { echo "gh612_cells: $label r$rep produced no step_ms record" >&2; return 1; }
+  # With the search disabled a miss does not fail -- it silently ships the UNTUNED default compile
+  # (gh-ocannl-559's no_search_report), whose step time would be ~3x and would look like a result.
+  # So require a cache hit for BOTH arms before accepting the timing.
+  local hits; hits=$(grep -c 'cache hit:' "$out/replay2.err" 2>/dev/null || echo 0)
+  [ "${hits:-0}" -ge 2 ] || {
+    echo "gh612_cells: $label r$rep is NOT a replay -- $hits cache hits (want 2, one per arm)." >&2
+    echo "  With autotune_search=false a miss ships the untuned default, so this timing is not a" >&2
+    echo "  pass-2 replay of the crowned artifact. Re-run \`search\` for this cell." >&2; return 1; }
   return 0
+) }
+
+# The correctness gate, computed rather than eyeballed. This exists because the claim it replaces
+# ("bit-identical losses") was produced by an ad-hoc script that rounded to 4 decimals before
+# comparing: at full serialized precision the runs are NOT identical, they agree to a few f32 ulp --
+# which is the right result for reassociation across different kernel schedules, and a different
+# claim. Compares every cell's loss vector at the precision bench_gpt actually serializes.
+cmd_parity() { (
+  python3 - "$OUT_ROOT" <<'EOF'
+import json,glob,os,sys,math,collections
+root=sys.argv[1]
+seqs=collections.defaultdict(list)
+for f in sorted(glob.glob(os.path.join(root,"*","r*","search.out"))):
+    t=[l for l in open(f).read().splitlines() if l.startswith("{")]
+    if not t: continue
+    d=json.loads(t[-1])
+    if "losses" not in d: continue
+    seqs[tuple(d["losses"])].append("/".join(f.split(os.sep)[-3:-1]))
+tot=sum(len(v) for v in seqs.values())
+if not tot: sys.exit(f"no search.out with losses under {root}")
+print(f"{tot} runs, {len(seqs)} distinct loss sequences at serialized precision")
+for L,ks in sorted(seqs.items(), key=lambda kv:-len(kv[1])):
+    print(f"  n={len(ks):2}  {L[0]!r} ...  e.g. {ks[0]}")
+def ulp32(x):
+    return 2.0**((math.frexp(x)[1]-1)-23)
+worst=0.0
+print("per-step agreement across ALL runs:")
+for i in range(len(next(iter(seqs)))):
+    vals=sorted({L[i] for L in seqs})
+    span=max(vals)-min(vals); u=span/ulp32(vals[0]); worst=max(worst,u)
+    print(f"  step {i}: {len(vals)} distinct, span {span:.3e} = {u:5.1f} f32 ulp (rel {span/vals[0]:.2e})")
+print(f"WORST: {worst:.0f} f32 ulp. NOT bit-identity -- state it as agreement to within that many ulp.")
+EOF
 ) }
 
 cmd_roofline() { (
@@ -566,6 +614,7 @@ case $sub in
   snap)     cmd_snap     "$@" ;;
   profile)  cmd_profile  "$@" ;;
   finger)   cmd_finger   "$@" ;;
+  parity)   cmd_parity   "$@" ;;
   replay)   cmd_replay   "$@" ;;
   diff)     cmd_diff     "$@" ;;
   sweep)    cmd_sweep    "$@" ;;
