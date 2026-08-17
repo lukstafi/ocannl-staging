@@ -1,26 +1,26 @@
-PASS: Byte
-PASS: Byte mapped
-PASS: Uint16
-PASS: Uint16 mapped
-PASS: Int32
-PASS: Int32 mapped
-PASS: Uint32
-PASS: Uint32 mapped
-PASS: Int64
-PASS: Int64 mapped
-PASS: Uint64
-PASS: Uint64 mapped
-PASS: Half
-PASS: Half mapped
-PASS: Bfloat16
-PASS: Bfloat16 mapped
-PASS: Fp8
-PASS: Fp8 mapped
-PASS: Single
-PASS: Single mapped
-PASS: Double
-PASS: Double mapped
-PASS: Uint4x32
-PASS: Uint4x32 mapped
-PASS: padded
-PASS: mapped at unaligned offset
+Byte round trip: PASS
+Byte mapped: PASS
+Uint16 round trip: PASS
+Uint16 mapped: PASS
+Int32 round trip: PASS
+Int32 mapped: PASS
+Uint32 round trip: PASS
+Uint32 mapped: PASS
+Int64 round trip: PASS
+Int64 mapped: PASS
+Uint64 round trip: PASS
+Uint64 mapped: PASS
+Half round trip: PASS
+Half mapped: PASS
+Bfloat16 round trip: PASS
+Bfloat16 mapped: PASS
+Fp8 round trip: PASS
+Fp8 mapped: PASS
+Single round trip: PASS
+Single mapped: PASS
+Double round trip: PASS
+Double mapped: PASS
+Uint4x32 round trip: PASS
+Uint4x32 mapped: PASS
+padded round trip: PASS
+mapped at unaligned offset: PASS

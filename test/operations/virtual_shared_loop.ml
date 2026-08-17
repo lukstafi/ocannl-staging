@@ -42,8 +42,10 @@ let case_independent () =
   p "independent siblings setters dropped" (count_set o a = 0 && count_set o b = 0);
   p "independent siblings inlined at use sites (no array reads survive)"
     (count_get o a = 0 && count_get o b = 0);
-  (* Sharing symbol [i] alone must not make either sibling complex. *)
-  p "is_complex from sharing alone" (is_complex o a || is_complex o b);
+  (* Sharing symbol [i] alone must not make either sibling complex. Phrased as the claim that
+     holds, so that a regression prints [false] rather than turning a designed negative into an
+     undesigned one (gh-ocannl-601). *)
+  p "no is_complex from sharing alone" (not (is_complex o a || is_complex o b));
   let seed = [ (oa, blank 3); (ob, blank 3) ] and read = [ oa; ob ] in
   let virt = execute ~name:"vsl_independent" o ~seed ~read in
   let mat = execute ~name:"vsl_independent_mat" (optimize ~materialized:[ a; b ] llc) ~seed ~read in

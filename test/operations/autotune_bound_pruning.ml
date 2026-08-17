@@ -11,7 +11,7 @@ open Ocannl
 open Ocannl.Operation.DSL_modules
 module Asgns = Ir.Assignments
 
-let p name b = Stdio.printf "%s: %b\n" name b
+let p = Verdict.p
 
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }

@@ -24,7 +24,7 @@ open Ocannl
 open Ocannl.Operation.DSL_modules
 open Stdio
 
-let p name b = printf "%s: %b\n%!" name b
+let p = Verdict.p
 let close a b = Array.for_all2_exn a b ~f:(fun x y -> Float.(abs (x - y) < 1e-5))
 let fa a = String.concat ~sep:" " (Array.to_list a |> List.map ~f:(fun v -> Printf.sprintf "%g" v))
 

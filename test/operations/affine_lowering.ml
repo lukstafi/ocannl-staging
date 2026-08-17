@@ -100,7 +100,7 @@ let setter_reads_self (llc : LL.t) tn =
   t llc;
   !found
 
-let p name b = Stdio.printf "%s: %b\n" name b
+let p = Verdict.p
 
 let ac4 () =
   (* Injective + surjective: 2*oh + wh, oh in [0,3), wh in [0,2), covers [0,6). *)

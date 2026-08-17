@@ -41,7 +41,7 @@ let loop s body : LL.t =
   LL.For_loop { index = s; from_ = 0; to_ = 2; body; axis = Serial }
 
 let seq a b : LL.t = LL.Seq (a, b)
-let p name b = Stdio.printf "%s: %b\n" name b
+let p = Verdict.p
 
 (* One "lowering" of the two-consumer routine: fresh loop symbols each call, tensor nodes fixed by
    the caller — the shape sibling candidate compiles produce. *)

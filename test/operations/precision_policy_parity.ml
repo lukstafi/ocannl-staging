@@ -118,6 +118,6 @@ let () =
   let ref_spread =
     Array.fold y_vals_a ~init:0. ~f:(fun acc v -> Float.max acc (Float.abs (v -. y_vals_a.(0))))
   in
-  Stdio.printf "reference forward varies past the parity tolerance: %b\n" Float.(ref_spread > 0.05);
-  Stdio.printf "forward parity within 0.05: %b\n" Float.(max_err < 0.05);
-  Stdio.printf "loss parity within 0.05: %b\n" Float.(Float.abs (loss_a_v -. loss_b_v) < 0.05)
+  Verdict.p "reference forward varies past the parity tolerance" Float.(ref_spread > 0.05);
+  Verdict.p "forward parity within 0.05" Float.(max_err < 0.05);
+  Verdict.p "loss parity within 0.05" Float.(Float.abs (loss_a_v -. loss_b_v) < 0.05)

@@ -39,7 +39,7 @@ open Nn_blocks.DSL_modules
 module Tn = Ir.Tnode
 module Asgns = Ir.Assignments
 
-let p name b = printf "%s: %b\n" name b
+let p = Verdict.p
 
 (* The gate's off position must really be off. An environment setting outranks the copied test
    config, so an ambient OCANNL_MEMORY_BUDGET would make the "budget off" phase plan after all and
@@ -253,8 +253,8 @@ let () =
       p "budget on: it demoted intermediates to recompute-at-use"
         (not (List.is_empty plan.bp_flips));
       p "budget on: the scored footprint is under the budget" (plan.bp_final.fp_total <= mid));
-  printf "train: loss trajectory parity across the budget gate: %s\n"
-    (if List.equal Float.equal losses_off losses_on then "PASS" else "FAIL");
+  Verdict.pass_fail "train: loss trajectory parity across the budget gate"
+    (List.equal Float.equal losses_off losses_on);
   p "train: loss decreased" Float.(List.last_exn losses_off < List.hd_exn losses_off);
   (* The modelled relief has to show up as real device memory: the demoted nodes lose their
      buffers. *)

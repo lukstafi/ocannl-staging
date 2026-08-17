@@ -20,7 +20,7 @@ module LL = Ir.Low_level
 module Idx = Ir.Indexing
 module Sched = Ir.Schedule
 
-let p name b = Stdio.printf "%s: %b\n" name b
+let p = Verdict.p
 
 let fresh_tn =
   let c = ref 960_000_000 in

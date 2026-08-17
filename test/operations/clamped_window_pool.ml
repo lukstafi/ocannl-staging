@@ -36,7 +36,7 @@ module Sched = Ir.Schedule
 module Idx = Ir.Indexing
 module Asgns = Ir.Assignments
 
-let p name b = Stdio.printf "%s: %b\n" name b
+let p = Verdict.p
 let pr fmt = Stdio.printf fmt
 
 let named name (comp : Asgns.comp) : Asgns.comp =

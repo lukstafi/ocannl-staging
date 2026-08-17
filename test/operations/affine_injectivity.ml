@@ -13,7 +13,7 @@ module Aff = Ir.Affine
 let sym () = Idx.get_symbol ()
 let aff terms offset = Idx.Affine { symbols = terms; offset }
 let ranges pairs s = List.Assoc.find pairs s ~equal:Idx.equal_symbol |> Option.value ~default:1
-let p name b = Stdio.printf "%s: %b\n" name b
+let p = Verdict.p
 
 (* Minimal projections: one single-symbol product axis per [product_axes] entry, [project_lhs] over
    those symbols. [is_injective] reads only product_iterators / product_space / project_lhs;
@@ -61,22 +61,25 @@ let () =
 
   (* Reject: i + j, both ranges > 1. *)
   let a = sym () and b = sym () in
-  p "i+j (both ranges > 1) injective"
-    (Idx.affine_injective ~symbol_range:(ranges [ (a, 3); (b, 3) ]) [| aff [ (1, a); (1, b) ] 0 |]);
+  p "i+j (both ranges > 1) rejected"
+    (not
+       (Idx.affine_injective ~symbol_range:(ranges [ (a, 3); (b, 3) ]) [| aff [ (1, a); (1, b) ] 0 |]));
 
   (* Reject: stride*o + k, k range > stride (stride=2, k range 3). *)
   let o = sym () and kk = sym () in
-  p "stride*o+k (k range > stride) injective"
-    (Idx.affine_injective
-       ~symbol_range:(ranges [ (o, 5); (kk, 3) ])
-       [| aff [ (2, o); (1, kk) ] 0 |]);
+  p "stride*o+k (k range > stride) rejected"
+    (not
+       (Idx.affine_injective
+          ~symbol_range:(ranges [ (o, 5); (kk, 3) ])
+          [| aff [ (2, o); (1, kk) ] 0 |]));
 
   (* Known-incomplete: 3*a + 4*b over ranges (3, 2) may remain false. *)
   let a2 = sym () and b2 = sym () in
-  p "3*a+4*b over (3,2) injective (known-incomplete)"
-    (Idx.affine_injective
-       ~symbol_range:(ranges [ (a2, 3); (b2, 2) ])
-       [| aff [ (3, a2); (4, b2) ] 0 |]);
+  p "3*a+4*b over (3,2) rejected (known-incomplete: the map IS injective)"
+    (not
+       (Idx.affine_injective
+          ~symbol_range:(ranges [ (a2, 3); (b2, 2) ])
+          [| aff [ (3, a2); (4, b2) ] 0 |]));
 
   Stdio.printf "=== is_injective (with product-iterator coverage) ===\n";
 
@@ -87,15 +90,15 @@ let () =
 
   (* Reject through is_injective: non-injective i+j. *)
   let a3 = sym () and b3 = sym () in
-  p "is_injective i+j"
-    (Aff.is_injective (mk_proj [ (a3, 3); (b3, 3) ] [| aff [ (1, a3); (1, b3) ] 0 |]));
+  p "is_injective rejects i+j"
+    (not (Aff.is_injective (mk_proj [ (a3, 3); (b3, 3) ] [| aff [ (1, a3); (1, b3) ] 0 |])));
 
   (* Reject through is_injective: a contraction symbol [c] is a product iterator but never appears
      on the LHS, so multiple product points collapse to one cell. The affine analysis alone would
      accept [Iterator i], but coverage must reject the whole map. *)
   let i4 = sym () and c4 = sym () in
-  p "is_injective with uncovered contraction symbol"
-    (Aff.is_injective (mk_proj [ (i4, 4); (c4, 3) ] [| Idx.Iterator i4 |]));
+  p "is_injective rejects an uncovered contraction symbol"
+    (not (Aff.is_injective (mk_proj [ (i4, 4); (c4, 3) ] [| Idx.Iterator i4 |])));
 
   Stdio.printf "=== lowering payoff: injective + surjective scatter skips neutral init ===\n";
 

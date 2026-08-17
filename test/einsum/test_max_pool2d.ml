@@ -199,7 +199,7 @@ let padding_to_string (tn : Ir.Tnode.t) =
 let check_padded_values ctx output =
   let v = Context.get_values ctx output.Tensor.value in
   printf "padded pooled = [%g %g; %g %g]\n%!" v.(0) v.(1) v.(2) v.(3);
-  printf "padded max-pool values correct (clamped windows): %b\n%!"
+  Verdict.p "padded max-pool values correct (clamped windows)"
     Float.(v.(0) = -11. && v.(1) = -9. && v.(2) = -3. && v.(3) = -1.)
 
 (** Test max_pool2d with use_padding=true ("same" pooling): output spatial dims = input/stride. The
@@ -216,9 +216,9 @@ let test_max_pool2d_padded () =
   let%op output = max_pool2d ~stride:2 ~window_size:3 ~use_padding:true () pre in
 
   (* No private copy: the pool tensor reads [pre] as a direct child. *)
-  printf "pool reads its operand directly (no copy): %b\n%!"
+  Verdict.p "pool reads its operand directly (no copy)"
     (List.exists output.Tensor.children ~f:(fun ch -> phys_equal ch.Tensor.subtensor pre));
-  printf "operand padding unforced before compilation: %b\n%!"
+  Verdict.p "operand padding unforced before compilation"
     (not (Lazy.is_val pre.value.Ir.Tnode.padding));
   let ctx = Context.auto () in
   Train.set_materialized pre.value;
@@ -237,13 +237,13 @@ let test_max_pool2d_padded_locked_data () =
   Tensor.unsafe_reinitialize ();
 
   let input = make_negative_input () in
-  printf "data node layout committed at creation: %b\n%!" (Lazy.is_val input.value.Ir.Tnode.padding);
+  Verdict.p "data node layout committed at creation" (Lazy.is_val input.value.Ir.Tnode.padding);
   let%op output = max_pool2d ~stride:2 ~window_size:3 ~use_padding:true () input in
   let ctx = Context.auto () in
   Train.set_materialized input.value;
   Train.set_materialized output.value;
   let ctx = Train.forward_once ctx output in
-  printf "clamped pool on a locked-layout data node accepted, stays unpadded: %b\n%!"
+  Verdict.p "clamped pool on a locked-layout data node accepted, stays unpadded"
     (match Lazy.force input.value.Ir.Tnode.padding with None -> true | Some _ -> false);
   check_padded_values ctx output;
 
@@ -255,7 +255,7 @@ let test_max_pool2d_padded_locked_data () =
   Train.set_materialized input.value;
   Train.set_materialized output.value;
   let ctx = Train.forward_once ctx output in
-  printf "max_pool2d_copy: data node stays unpadded: %b\n%!"
+  Verdict.p "max_pool2d_copy: data node stays unpadded"
     (match Lazy.force input.value.Ir.Tnode.padding with None -> true | Some _ -> false);
   check_padded_values ctx output
 

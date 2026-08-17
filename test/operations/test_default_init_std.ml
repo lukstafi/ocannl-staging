@@ -34,9 +34,10 @@ let std arr =
 let unique arr = List.length (List.dedup_and_sort ~compare:Float.compare (Array.to_list arr))
 
 let check ~name ~expected ~tol measured =
-  if Float.(abs (measured -. expected) <= tol) then
-    printf "%s: expected %.4f (tol %.4f): PASS\n" name expected tol
-  else printf "%s: expected %.4f (tol %.4f), got %.5f: FAIL\n" name expected tol measured
+  Verdict.pass_fail
+    (Printf.sprintf "%s: expected %.4f (tol %.4f)" name expected tol)
+    Float.(abs (measured -. expected) <= tol)
+    ~detail:(fun () -> Printf.sprintf "got %.5f" measured)
 
 let weight_values ~ctx t =
   let w =

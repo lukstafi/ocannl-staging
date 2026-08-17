@@ -493,7 +493,7 @@ let () =
   printf "\n--- Test 15: Empty stack rhses raises ---\n%!";
   (try
      let (_ : Tensor.t) = TDSL.O.stack `Output [||] in
-     printf "ERROR: expected Invalid_argument, got a tensor\n%!"
+     Verdict.fail "expected Invalid_argument, got a tensor"
    with Invalid_argument msg -> printf "raised Invalid_argument: %s\n%!" msg);
 
   (* --- Test 16: Tuple-argument elements are still translated --- *)

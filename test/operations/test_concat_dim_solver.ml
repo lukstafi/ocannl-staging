@@ -15,6 +15,10 @@
 open! Base
 open Ocannl
 
+(* Failures go through [Verdict], so that a regression exits nonzero instead of being
+   `dune promote`d into the golden as the expected output (gh-ocannl-601). *)
+let fail fmt = Printf.ksprintf Verdict.fail fmt
+
 let dummy_origin : Row.constraint_origin list =
   [
     {
@@ -81,9 +85,9 @@ let test_ac1_glb_merge_compatible () =
       if no_residual && forced then
         Stdio.printf "  PASS: operand committed to the merged size-5 GLB; no residual deferral\n"
       else
-        Stdio.printf "  FAIL: expected commit (no_residual=%b forced_to_5=%b)\n" no_residual forced
-  | `Shape m -> Stdio.printf "  FAIL: unexpected Shape_error: %s\n" m
-  | `Other e -> Stdio.printf "  FAIL: regression (expected no assert false): %s\n" e
+        fail "expected commit (no_residual=%b forced_to_5=%b)" no_residual forced
+  | `Shape m -> fail "unexpected Shape_error: %s" m
+  | `Other e -> fail "regression (expected no assert false): %s" e
 
 (* AC1 — GLB merge of two INCOMPATIBLE Concat bounds (stage 4) DEMOTES the operand to the broadcast-
    top GLB (size 1), swallowing the failed equality rather than propagating a Shape_error or
@@ -106,10 +110,10 @@ let test_ac1_glb_merge_incompatible_demotes () =
       | Some 1 ->
           Stdio.printf "  PASS: operand demoted to broadcast-top (size 1), not committed to 5/6\n"
       | other ->
-          Stdio.printf "  FAIL: expected demote to size 1, got %s\n"
+          fail "expected demote to size 1, got %s"
             (match other with Some n -> Int.to_string n | None -> "<unsolved>"))
-  | `Shape m -> Stdio.printf "  FAIL: should demote, not raise Shape_error: %s\n" m
-  | `Other e -> Stdio.printf "  FAIL: regression (expected no assert false): %s\n" e
+  | `Shape m -> fail "should demote, not raise Shape_error: %s" m
+  | `Other e -> fail "regression (expected no assert false): %s" e
 
 (* AC1 — below stage 4 the merge POSTPONES: it neither crashes, commits, nor demotes — it re-defers
    the inequality so the two bounds can still resolve equal later. PASS pins both halves: a
@@ -128,10 +132,10 @@ let test_ac1_glb_merge_postpone_below_stage4 () =
       if deferred && not_committed then
         Stdio.printf "  PASS: inequality deferred and operand left unsolved for a later stage\n"
       else
-        Stdio.printf "  FAIL: expected postpone (deferred=%b operand_unsolved=%b)\n" deferred
+        fail "expected postpone (deferred=%b operand_unsolved=%b)" deferred
           not_committed
-  | `Shape m -> Stdio.printf "  FAIL: unexpected Shape_error: %s\n" m
-  | `Other e -> Stdio.printf "  FAIL: regression (expected no assert false): %s\n" e
+  | `Shape m -> fail "unexpected Shape_error: %s" m
+  | `Other e -> fail "regression (expected no assert false): %s" e
 
 (* AC3 — variables-only [Concat = Concat] at UNEQUAL arity (3 components vs 2). The generalized
    pairing arm fires at stage >= 4 (the old guard required equal arity), equates the oldest variable
@@ -162,10 +166,10 @@ let test_ac3_unequal_arity_all_var () =
       Stdio.printf "  PASS: c=0, a=d (d read 7 after a:=7), b=e (e read 9 after b:=9)\n"
   | `Ok (c_val, d_val, e_val) ->
       let show = function Some n -> Int.to_string n | None -> "?" in
-      Stdio.printf "  FAIL: c=%s d=%s e=%s (expected 0, 7, 9)\n" (show c_val) (show d_val)
+      fail "c=%s d=%s e=%s (expected 0, 7, 9)" (show c_val) (show d_val)
         (show e_val)
-  | `Shape m -> Stdio.printf "  FAIL: unexpected Shape_error: %s\n" m
-  | `Other e -> Stdio.printf "  FAIL: regression (expected resolution, not exn): %s\n" e
+  | `Shape m -> fail "unexpected Shape_error: %s" m
+  | `Other e -> fail "regression (expected resolution, not exn): %s" e
 
 (* AC3 — the pairing arm fires even when the OTHER side carries a solved [Dim] (the guard is "one
    side all-Var", not "overlap all-Var", and must take precedence over the arithmetic-cancellation
@@ -189,10 +193,10 @@ let test_ac3_one_side_all_var_other_has_solved () =
   | `Ok (Some 4) ->
       Stdio.printf "  PASS: leftover bound b = 4 (solved Dim crossed into all-Var side)\n"
   | `Ok other ->
-      Stdio.printf "  FAIL: expected b = 4, got %s\n"
+      fail "expected b = 4, got %s"
         (match other with Some n -> Int.to_string n | None -> "?")
-  | `Shape m -> Stdio.printf "  FAIL: unexpected Shape_error: %s\n" m
-  | `Other e -> Stdio.printf "  FAIL: regression (expected no assert false): %s\n" e
+  | `Shape m -> fail "unexpected Shape_error: %s" m
+  | `Other e -> fail "regression (expected no assert false): %s" e
 
 (* Nested-[Concat] component (beyond the proposal, per user request): a component that is itself a
    [Concat] must be flattened (concatenation is associative — sum semantics) so the oldest-variable
@@ -224,9 +228,9 @@ let test_nested_concat_flattened () =
       Stdio.printf "  PASS: nested concat flattened; d=2 e=3 f=4 (a=d, b=e, c=f)\n"
   | `Ok (dv, ev, fv) ->
       let show = function Some n -> Int.to_string n | None -> "?" in
-      Stdio.printf "  FAIL: expected d,e,f = 2,3,4; got %s,%s,%s\n" (show dv) (show ev) (show fv)
-  | `Shape m -> Stdio.printf "  FAIL: unexpected Shape_error: %s\n" m
-  | `Other e -> Stdio.printf "  FAIL: regression: %s\n" e
+      fail "expected d,e,f = 2,3,4; got %s,%s,%s" (show dv) (show ev) (show fv)
+  | `Shape m -> fail "unexpected Shape_error: %s" m
+  | `Other e -> fail "regression: %s" e
 
 (* Codex P2 regression: an all-`Var` residual on one side facing a residual that still holds a non-
    variable, non-solved component (an unresolved `Affine` from a strided axis) must NOT enter the
@@ -246,10 +250,10 @@ let test_ac3_affine_residual_not_overconstrained () =
   | `Ok (_remaining, env) -> (
       match run_solve_env ~stage:Stage4 [ eq (Row.Var a) (dim 5); eq (Row.Var b) (dim 7) ] env with
       | `Ok _ -> Stdio.printf "  PASS: a and b left independent (a:=5, b:=7 both consistent)\n"
-      | `Shape m -> Stdio.printf "  FAIL: over-constrained (spurious a=b link): %s\n" m
-      | `Other e -> Stdio.printf "  FAIL: unexpected exception: %s\n" e)
-  | `Shape m -> Stdio.printf "  FAIL: first solve raised Shape_error: %s\n" m
-  | `Other e -> Stdio.printf "  FAIL: regression: %s\n" e
+      | `Shape m -> fail "over-constrained (spurious a=b link): %s" m
+      | `Other e -> fail "unexpected exception: %s" e)
+  | `Shape m -> fail "first solve raised Shape_error: %s" m
+  | `Other e -> fail "regression: %s" e
 
 let () =
   Stdio.printf "=== Concat dim-solver hardening (solver-level) ===\n";

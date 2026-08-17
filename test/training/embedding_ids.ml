@@ -8,7 +8,6 @@
 
 open Base
 open Ocannl
-open Stdio
 module IDX = Train.IDX
 open Nn_blocks.DSL_modules
 module Asgns = Ir.Assignments
@@ -47,6 +46,6 @@ let () =
     Train.run ctx sgd_step
   done;
   let final = (ctx, batch_loss).@[0] in
-  printf "initial loss finite: %b\n" (Float.is_finite initial);
-  printf "loss decreased: %b\n" Float.(final < initial);
-  printf "loss converged near zero: %b\n" Float.(final < 0.01)
+  Verdict.p "initial loss finite" (Float.is_finite initial);
+  Verdict.p "loss decreased" Float.(final < initial);
+  Verdict.p "loss converged near zero" Float.(final < 0.01)

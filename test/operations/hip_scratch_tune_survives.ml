@@ -38,7 +38,7 @@ module Tn = Ir.Tnode
 module Idx = Ir.Indexing
 module SO = Ir.Schedule_outcome
 
-let p name b = Stdio.printf "%s: %b\n%!" name b
+let p = Verdict.p
 
 (* 62500 floats = 250,000 B per work-item: over every scratch budget a device with more than 16384
    resident work-items reports, and ~12 KB under the frame hipcc refuses to emit. *)

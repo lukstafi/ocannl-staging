@@ -4,7 +4,7 @@ Dimension c: 4
 Dimension i: 5
 Dimension j: 7
 Row variable r (product of dims): 12
-HERE: test/einsum/test_einsum_capture.ml:51:21
+HERE: test/einsum/test_einsum_capture.ml:55:21
 ┌───────────────────────────┐
 │[41]: +_dim_calc shape 0:1 │
 │┌┬─────────┐               │

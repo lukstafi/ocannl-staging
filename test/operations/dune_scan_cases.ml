@@ -11,6 +11,10 @@ open Base
 open Stdio
 module Scan = Test_utils.Dune_stanza_scan
 
+(* Failures go through [Verdict], so that a regression exits nonzero instead of being
+   `dune promote`d into the golden as the expected output (gh-ocannl-601). *)
+let fail fmt = Printf.ksprintf Verdict.fail fmt
+
 let render (site : Scan.site) =
   let where = Scan.in_subdir site.Scan.subdir site.Scan.cwd in
   Printf.sprintf "%s%s %s%s"
@@ -447,12 +451,10 @@ let accepted_marker_cases =
   ]
 
 let () =
-  let ok = ref true in
   let check name expected found =
     if List.equal String.equal found expected then printf "ok: %s\n" name
     else (
-      ok := false;
-      printf "FAIL: %s -- expected [%s], found [%s]\n" name
+      fail "%s -- expected [%s], found [%s]" name
         (String.concat ~sep:"; " expected)
         (String.concat ~sep:"; " found))
   in
@@ -460,8 +462,7 @@ let () =
       let found =
         try List.map (Scan.sites source) ~f:render
         with exn ->
-          ok := false;
-          printf "FAIL: %s -- the scan raised: %s\n" name (Exn.to_string exn);
+          fail "%s -- the scan raised: %s" name (Exn.to_string exn);
           []
       in
       check name expected found);
@@ -485,8 +486,7 @@ let () =
       let found =
         try List.map (Scan.sites source) ~f:render
         with exn ->
-          ok := false;
-          printf "FAIL: accepted marker -- %s: the scan refused it: %s\n" name (Exn.to_string exn);
+          fail "accepted marker -- %s: the scan refused it: %s" name (Exn.to_string exn);
           []
       in
       check ("accepted marker -- " ^ name) expected found);
@@ -494,7 +494,5 @@ let () =
       match Scan.sites source with
       | exception _ -> printf "ok: refused -- %s\n" name
       | sites ->
-          ok := false;
-          printf "FAIL: refused -- %s: read the file as %d sites instead of refusing it\n" name
+          fail "refused -- %s: read the file as %d sites instead of refusing it" name
             (List.length sites));
-  if not !ok then Stdlib.exit 1

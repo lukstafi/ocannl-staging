@@ -25,7 +25,7 @@ open Stdio
 module Tn = Ir.Tnode
 module Asgns = Ir.Assignments
 
-let p name b = printf "%s: %b\n%!" name b
+let p = Verdict.p
 let bitwise = Array.for_all2_exn ~f:Float.equal
 let grad_of t = (Option.value_exn ~here:[%here] t.Tensor.diff).Tensor.grad
 

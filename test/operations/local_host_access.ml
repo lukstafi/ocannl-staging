@@ -25,7 +25,7 @@ open Stdio
 open Ocannl
 open Ocannl.Operation.DSL_modules
 
-let p name b = printf "%s: %b\n" name b
+let p = Verdict.p
 
 (* [a] is [4 x 32] with row [i] constant at [i + 1], and [x] is [0 .. 31], so [h.(i) = (i+1) * 496]:
    distinct per row, dependent on every term of the reduction, and nowhere near the seeded

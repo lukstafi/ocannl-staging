@@ -59,7 +59,7 @@ let () =
         (Option.is_none src.device.updating_for_merge_buffer);
       try
         let _ = Backend.link transfer_a.context consumer_code in
-        Stdio.printf "UNEXPECTED: mismatched link did not raise\n"
+        Verdict.fail "mismatched link did not raise"
       with Utils.User_error _ -> Stdio.printf "mismatch: link raised at link time\n"));
 
   (* --- Matched path: producer transfers b.value, consumer expects b.value. --- *)

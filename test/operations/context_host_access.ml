@@ -27,8 +27,8 @@ let () =
   in
   let v1 = read_in_fresh_context () in
   let v2 = read_in_fresh_context () in
-  Stdio.printf "literal matches source in ctx1: %b\n" (Array.equal Float.equal v1 big);
-  Stdio.printf "literal matches across two independent contexts: %b\n"
+  Verdict.p "literal matches source in ctx1" (Array.equal Float.equal v1 big);
+  Verdict.p "literal matches across two independent contexts"
     (Array.equal Float.equal v1 v2);
 
   (* --- set_values / get_values round-trip through the device buffer --- *)
@@ -36,11 +36,11 @@ let () =
   let ctx = Context.cpu () in
   let ctx = Train.forward_once ctx out in
   let doubled = Array.map big ~f:(fun x -> 2. *. x) in
-  Stdio.printf "out = t + t computed on device: %b\n"
+  Verdict.p "out = t + t computed on device"
     (Array.equal Float.equal (Context.get_values ctx out.Tensor.value) doubled);
   let fresh = Array.init 20 ~f:(fun i -> Float.of_int (100 + i)) in
   let ctx = Context.set_values ctx out.Tensor.value fresh in
-  Stdio.printf "set_values/get_values round-trip: %b\n"
+  Verdict.p "set_values/get_values round-trip"
     (Array.equal Float.equal (Context.get_values ctx out.Tensor.value) fresh);
 
   (* --- context-aware At accessors --- *)

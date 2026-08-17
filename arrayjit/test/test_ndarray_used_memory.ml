@@ -30,10 +30,10 @@ let alloc_hold_drop ~n ~alloc =
 let check name ~n ~bytes_per_array ~alloc =
   let held, residual = alloc_hold_drop ~n ~alloc in
   Stdio.printf "%s: %d arrays of %d bytes each\n" name n bytes_per_array;
-  Stdio.printf "  delta while held = allocated bytes: %b\n" (held = n * bytes_per_array);
+  Verdict.p "  delta while held = allocated bytes" (held = n * bytes_per_array);
   (* Coarse: one array's worth of slack, so that a straggling finalizer is not a failure but a
      double-counted or never-subtracted allocation still is. *)
-  Stdio.printf "  gauge returned to baseline after GC: %b\n" (abs residual <= bytes_per_array)
+  Verdict.p "  gauge returned to baseline after GC" (abs residual <= bytes_per_array)
 
 let () =
   let prec = Ops.single in
@@ -68,10 +68,10 @@ let () =
   let view_rank = match !cell with Some view -> Array.length (Nd.dims view) | None -> 0 in
   let held = Nd.get_used_memory () - before in
   Stdio.printf "reshape: 1 array of %d bytes\n" view_bytes;
-  Stdio.printf "  still counted while only the view is held: %b\n"
+  Verdict.p "  still counted while only the view is held"
     (view_rank = Array.length view_dims && held = view_bytes);
   cell := None;
   Stdlib.Gc.full_major ();
   Stdlib.Gc.full_major ();
-  Stdio.printf "  gauge returned to baseline after GC: %b\n"
+  Verdict.p "  gauge returned to baseline after GC"
     (abs (Nd.get_used_memory () - before) <= view_bytes)

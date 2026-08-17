@@ -19,6 +19,6 @@ let () =
   let ctx = Context.cpu () in
   let t = TDSL.range_of_shape ~output_dims:[ 4 ] () in
   (* Harness condition: t has never been run in ctx, so its node is not materialized there. *)
-  Stdio.printf "in context before print: %b\n" (Context.mem ctx t.Tensor.value);
+  Verdict.p "not in context before print" (not (Context.mem ctx t.Tensor.value));
   (* The for-print route recompiles t into ctx so its real values are shown. *)
   Train.printf ~with_grad:false ~with_code:false ctx t

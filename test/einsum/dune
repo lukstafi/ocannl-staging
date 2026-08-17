@@ -50,7 +50,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_beg_dims_alignment)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here)))
 
@@ -186,7 +186,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_einsum_capture)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -226,7 +226,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_max_pool2d)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -248,7 +248,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_padding_reset)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -259,7 +259,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_dimension_labels)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -270,7 +270,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_set_scale)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -281,7 +281,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_row_rank_cycle)
- (libraries base ocannl stdio))
+ (libraries base ocannl stdio arrayjit.verdict))
 
 (test
  (name test_row_self_reference)
@@ -308,7 +308,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_basis_total_order)
- (libraries base ocannl stdio))
+ (libraries base ocannl stdio arrayjit.verdict))
 
 (test
  (name test_concat_dim_solver)
@@ -317,7 +317,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_concat_dim_solver)
- (libraries base ocannl stdio))
+ (libraries base ocannl stdio arrayjit.verdict))
 
 (test
  (name tensor_puzzles)

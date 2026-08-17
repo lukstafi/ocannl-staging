@@ -150,13 +150,13 @@ let () =
   let _ctx_a, _loss_a, _y_a, losses_a =
     run_plain base_ctx ~input_l:"xa" ~build:make_model ~prepare:(fun _ -> ()) ~w_vals
   in
-  Stdio.printf "oracle losses finite: %b\n" (Array.for_all losses_a ~f:Float.is_finite);
+  Verdict.p "oracle losses finite" (Array.for_all losses_a ~f:Float.is_finite);
   (* Every leg below is held to "trajectory parity within 0.1" against this oracle. A tolerance
      cannot reject an input-independent forward, or a step that never updates weights, if the
      reference itself does not move: all legs would sit at one constant and every parity line would
      read [true]. So the oracle's own spread has to exceed the tolerance it gates
      (benchmarks/orchestrate.py's [loss_moved] guard, applied in-tree). *)
-  Stdio.printf "oracle loss trajectory moves past the parity tolerance: %b\n"
+  Verdict.p "oracle loss trajectory moves past the parity tolerance"
     Float.(max_abs_diff losses_a (Array.create ~len:(Array.length losses_a) losses_a.(0)) > 0.1);
 
   (* Leg B: bf16 master weights, no loss scaling (bf16 has f32's exponent range). Masters and their
@@ -177,7 +177,7 @@ let () =
   Stdio.printf "bf16 leg twin of w1 grad: %s\n"
     (prec_str (Option.value_exn twin_b.Tensor.diff).Tensor.grad);
   Stdio.printf "bf16 leg y activation: %s\n" (prec_str y_b.Tensor.value);
-  Stdio.printf "bf16 leg loss trajectory parity within 0.1: %b\n"
+  Verdict.p "bf16 leg loss trajectory parity within 0.1"
     Float.(max_abs_diff losses_a losses_b < 0.1);
 
   (* Leg C: f16 master weights with dynamic loss scaling at a benign initial scale — every step
@@ -202,8 +202,8 @@ let () =
   Stdio.printf "f16 leg twin of w1: %s\n" (prec_str twin_c.Tensor.value);
   Stdio.printf "f16 leg twin of w1 grad: %s\n"
     (prec_str (Option.value_exn twin_c.Tensor.diff).Tensor.grad);
-  Stdio.printf "f16 leg all steps ran: %b\n" (List.for_all stepped_c ~f:Fn.id);
-  Stdio.printf "f16 leg loss trajectory parity within 0.1: %b\n"
+  Verdict.p "f16 leg all steps ran" (List.for_all stepped_c ~f:Fn.id);
+  Verdict.p "f16 leg loss trajectory parity within 0.1"
     Float.(max_abs_diff losses_a losses_c < 0.1);
 
   (* Leg D: the dynamic-scale backoff/growth cycle. The b2 twin gradient is exactly the scale, so
@@ -220,7 +220,7 @@ let () =
     (String.concat ~sep:" " (List.map stepped_d ~f:(fun b -> if b then "T" else "F")));
   Stdio.printf "dynamic leg scale after each step: %s\n"
     (String.concat ~sep:" " (List.map scales_d ~f:(fun s -> Printf.sprintf "%.0f" s)));
-  Stdio.printf "dynamic leg losses on good steps finite: %b\n"
+  Verdict.p "dynamic leg losses on good steps finite"
     (List.for_alli stepped_d ~f:(fun i ran -> (not ran) || Float.is_finite losses_d.(i)));
 
   (* Leg E: the fused gated recipe (gh-ocannl-492 task 5) — one routine per step, the inf/nan gate
@@ -258,8 +258,8 @@ let () =
   let losses_e1, finite_e1, _scales_e1, _moved_e1 =
     run_gated ~input_l:"xe" ~scaler:scaler_e1 ~check_interval:1
   in
-  Stdio.printf "gated leg all windows finite: %b\n" (List.for_all finite_e1 ~f:Fn.id);
-  Stdio.printf "gated leg loss trajectory parity within 0.1: %b\n"
+  Verdict.p "gated leg all windows finite" (List.for_all finite_e1 ~f:Fn.id);
+  Verdict.p "gated leg loss trajectory parity within 0.1"
     Float.(max_abs_diff losses_a losses_e1 < 0.1);
   let scaler_e2 =
     MP.Loss_scaler.create ~init_scale:65536. ~growth_interval:100 ~backoff_factor:0.5 ()
@@ -301,6 +301,6 @@ let () =
       ctx_f
   in
   let losses_f = Array.of_list_rev !losses_f in
-  Stdio.printf "static-scale leg loss trajectory parity within 0.1: %b\n"
+  Verdict.p "static-scale leg loss trajectory parity within 0.1"
     Float.(max_abs_diff losses_a losses_f < 0.1);
   Stdio.printf "%!"

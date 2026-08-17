@@ -37,7 +37,7 @@ let test_scale_both_solved_mismatch () =
   Shape.set_dim hidden 17;
   try
     Shape.set_scale ~factor:2 hidden input;
-    Stdio.printf "ERROR: expected exception, got none\n"
+    Verdict.fail "expected exception, got none"
   with Row.Shape_error (msg, _) -> Stdio.printf "got expected Shape_error: %s\n" msg
 
 let test_scale_non_divisible () =
@@ -49,7 +49,7 @@ let test_scale_non_divisible () =
   Shape.set_dim hidden 17;
   try
     Shape.set_scale ~factor:2 hidden input;
-    Stdio.printf "ERROR: expected exception, got none\n"
+    Verdict.fail "expected exception, got none"
   with Row.Shape_error (msg, _) -> Stdio.printf "got expected Shape_error: %s\n" msg
 
 let test_scale_invalid_factor () =
@@ -60,7 +60,7 @@ let test_scale_invalid_factor () =
   let hidden = Shape.get_variable_ref "hidden_dim" in
   try
     Shape.set_scale ~factor:0 hidden input;
-    Stdio.printf "ERROR: expected exception, got none\n"
+    Verdict.fail "expected exception, got none"
   with Row.Shape_error (msg, _) -> Stdio.printf "got expected Shape_error: %s\n" msg
 
 (* set_scale used as a consistency assertion alongside einsum capture. propagate_shapes runs eagerly
@@ -127,7 +127,7 @@ let test_scale_dim_dim_mismatch_through_solver () =
   Shape.set_dim k 15;
   try
     let _ctx = Train.forward_once ctx c in
-    Stdio.printf "ERROR: expected Shape_error, got none\n"
+    Verdict.fail "expected Shape_error, got none"
   with Row.Shape_error (msg, _) ->
     let first_line = List.hd_exn (String.split_lines msg) in
     Stdio.printf "got expected Shape_error: %s\n" first_line
@@ -147,7 +147,7 @@ let test_scale_rejects_row_variable () =
   Shape.set_dim dim_var 12;
   try
     Shape.set_scale ~factor:2 s dim_var;
-    Stdio.printf "ERROR: expected exception, got none\n"
+    Verdict.fail "expected exception, got none"
   with Row.Shape_error (msg, _) -> Stdio.printf "got expected Shape_error: %s\n" msg
 
 let () =

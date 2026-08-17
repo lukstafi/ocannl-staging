@@ -21,12 +21,13 @@ let check name t ~batch ~input ~output =
     if eq b batch && eq i input && eq o output then
       Stdio.printf "%s: PASS (batch=[%s] input=[%s] output=[%s])\n" name (str b) (str i) (str o)
     else
-      Stdio.printf
-        "%s: FAIL\n\
-        \  got      batch=[%s] input=[%s] output=[%s]\n\
-        \  expected batch=[%s] input=[%s] output=[%s]\n"
-        name (str b) (str i) (str o) (str batch) (str input) (str output)
-  with Row.Shape_error (msg, _) -> Stdio.printf "%s: FAIL Shape_error: %s\n" name msg
+      Verdict.fail
+        (Printf.sprintf
+           "%s\n\
+           \  got      batch=[%s] input=[%s] output=[%s]\n\
+           \  expected batch=[%s] input=[%s] output=[%s]"
+           name (str b) (str i) (str o) (str batch) (str input) (str output))
+  with Row.Shape_error (msg, _) -> Verdict.fail (Printf.sprintf "%s: Shape_error: %s" name msg)
 
 let () =
   (* Output (list) axis labelled with a multi-character tag; only the output row carries it. *)

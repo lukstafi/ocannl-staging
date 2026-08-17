@@ -18,7 +18,7 @@ open Ocannl.Operation.DSL_modules
 module Tn = Ir.Tnode
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
-let p name b = Stdio.printf "%s: %b\n" name b
+let p = Verdict.p
 
 (* A narrow uniform consumed by further arithmetic: the uniform node is virtual, so its conversion
    ends up nested inside the consumer's expression rather than being the consumer's whole value. *)

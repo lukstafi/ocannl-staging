@@ -1,4 +1,4 @@
-in context before print: false
+not in context before print: true
 ┌───────────────────────────┐
 │[0]: r4 shape 0:4          │
 │┌┬────────────────────────┐│

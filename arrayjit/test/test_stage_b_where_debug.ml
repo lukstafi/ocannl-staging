@@ -24,7 +24,7 @@ module Ops = Ir.Ops
 module Idx = Ir.Indexing
 module LL = Ir.Low_level
 
-let p name b = Stdio.printf "%s: %b\n" name b
+let p = Verdict.p
 
 let doc_to_string doc =
   let b = Buffer.create 4096 in

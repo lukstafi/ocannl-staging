@@ -33,7 +33,7 @@ module Tn = Ir.Tnode
 module Asgns = Ir.Assignments
 module Backends = Context.Backends_deprecated
 
-let p name b = printf "%s: %b\n" name b
+let p = Verdict.p
 
 let () =
   let cap = 0x1_0000_0000 in
@@ -217,8 +217,8 @@ let () =
   let losses_on, train_mem_on = train_phase () in
   p "chain: result parity across buffer_aliasing" (Float.equal out_off out_on);
   p "chain: footprint reduced" (chain_mem_on < chain_mem_off);
-  printf "train: loss trajectory parity across buffer_aliasing: %s\n"
-    (if List.equal Float.equal losses_off losses_on then "PASS" else "FAIL");
+  Verdict.pass_fail "train: loss trajectory parity across buffer_aliasing"
+    (List.equal Float.equal losses_off losses_on);
   p "train: loss decreased" Float.(List.last_exn losses_off < List.hd_exn losses_off);
   (* Under the planner, [Low_level.sink_zero_outs] moves each gradient's Zero_out from the up-front
      zero-grads block to its first accumulation, so the backprop chain's live spans stagger: chain
