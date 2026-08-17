@@ -32,7 +32,7 @@ One prediction needs a caveat and one needs a correction. The caveat: at its shi
 8, gh-573's payoff on the *end-to-end* step is inside this box's search-noise floor, for an
 identifiable reason given in Part 3 — without the guard the search ships materialize-all instead,
 which is the crude form of the same transform. The correction: that is a fact about the default, not
-the mechanism. **Cap 4 beats the default 8 by 5.7% with non-overlapping ranges, measured in one
+the mechanism. **Cap 4 beats the default 8 by 5.5% with non-overlapping ranges, measured in one
 order-balanced block (and 1.18x against cap −1 when the two balanced blocks are chained); on the
 `gpt2_mini` graph placement is identical to cap −1 only at cap 32 and above, while cap 16 already
 shows one node's worth of placement difference (at the final layer norm) behind an unchanged kernel
@@ -85,6 +85,22 @@ where on CUDA they were the larger half.
   cap4→cap8, cap8→cap4 inside one block (Part 4).
 - Driver checked in as [`gh612_cells.sh`](gh612_cells.sh); every number here came out of it, and
   the Reproduction section quotes its invocations rather than restating commands.
+- **Every tuned step p50 quoted here is a pass-2 number**, per the two-pass protocol
+  [`benchmarks/README.md`](README.md) requires: pass 1 (`search`) runs the cold search and its
+  `compile_s` is the search cost, then a **fresh process** (`replay`) replays the cached winner and
+  provides the step timings — the search leaves its own process measurably slower through accumulated
+  modules and buffers. An earlier revision of this report quoted pass-1 step times throughout. Every
+  conclusion survived the correction; the point estimates moved by ≤0.2 pp except the cap headline
+  (5.7% → 5.5%). On this workload the pass-1/pass-2 gap is small (−0.4% to +0.8% per cell) because the
+  step is ~18 ms across 136 kernels rather than the small-kernel regime the README's 2.5–3.5x
+  describes — which is a reason to measure the gap, not to assume it.
+- **The CPU must be quiet during GPU cells, and this is not advisory on an APU.** Mid-session a
+  foreign 10-worker `dune`/gcc build appeared on the box (load average 23) and the same cached
+  artifacts replayed at 47–64 ms instead of ~19, with p10/p90 spreads of 2x — the CPU and iGPU share
+  the LPDDR5X controller and the power budget. `compile_s` stayed at ~1.3 s throughout, so the winner
+  was replaying correctly and only the timings were corrupt: nothing in the run's own output flags it.
+  That batch was discarded and re-measured on a verified-quiet box; the numbers below are the quiet
+  set.
 - **Correctness gate, and what it does *not* cover.** All 26 tuned runs of this session emit
   bit-identical loss sequences (`7.09794, 7.08114, 7.12363, 7.10122, 7.11247, 7.07110, 7.10847,
   7.09132`) — one distinct sequence across all 26, spanning both placement arms, all six caps and
@@ -144,8 +160,8 @@ mixed in.
 `rocprofv3` still collects nothing on this box (no `/dev/kfd` under WSL2); the per-kernel
 reconstruction and its caveats are gh-569's and are not re-argued. Its validation is re-run:
 **the sum of the 136 per-kernel medians is 18.880 / 18.876 / 18.891 ms against the step p50 of the
-cell those kernels were emitted by — 18.981 ms in its search and 19.019 ms in its replay — so
-agreement is 0.5–0.8%**, against gh-569's 1.6–2.0%.
+cell those kernels were emitted by — 19.015 ms in that cell's pass-2 replay — so agreement is
+0.7%**, against gh-569's 1.6–2.0%.
 
 The pairing is the load-bearing part of that sentence and it is worth being explicit about, because
 the looser reading is available and wrong. Across the three search reps the step p50 spans
@@ -240,10 +256,10 @@ two built trees.
 | | BASE | FEAT | |
 |---|---:|---:|---|
 | **arm A per-kernel profile** | **32.33 ms** / 117 kernels | **24.79 ms** / 135 kernels | **1.30x** |
-| shipped step p50, 3 reps | 25.04 / 25.72 / 26.24 | 18.87 / 19.81 / 19.85 | **1.30x** (medians) |
+| shipped step p50, 3 reps (pass 2) | 24.97 / 25.65 / 26.22 | 18.91 / 19.80 / 19.88 | **1.30x** (medians) |
 | untuned-default pipeline, 3 reps | 65.47 / 65.67 / 65.81 | 65.66 / 65.63 / 65.77 | 1.00x |
 
-The shipped-step ranges do **not** overlap (BASE min 25.04 > FEAT max 19.85), so this one survives
+The shipped-step ranges do **not** overlap (BASE min 24.97 > FEAT max 19.88), so this one survives
 the gh-481 objection without needing the per-kernel instrument — and the two instruments agree on
 1.30x to two digits.
 
@@ -254,8 +270,10 @@ and it does not (0.1%).
 ### Acceptance fingerprints
 
 - **A `fine`-flagged candidate is crowned**, in both arms, in every rep of FEAT and master; and in
-  **no** rep of BASE. Arm A ships `F_saved[fine 76 segs]` (FEAT) / `[fine 77 segs]` (master)
-  against BASE's `F_saved[58 segs]`. (The `N segs` in an `F_saved` label counts the saved
+  **no** rep of BASE. Arm A **crowns** `F_saved[fine 76 segs]` (FEAT) / `[fine 77 segs]` (master)
+  against BASE's `F_saved[58 segs]` — crowns, not ships: in FEAT and `master-capoff` the search
+  shipped arm B, so arm A's schedule is recorded and profiled but never executed against the loss
+  gate (see the coverage table in Provenance). (The `N segs` in an `F_saved` label counts the saved
   per-segment placement entries, **not** kernels — the emitted arm A holds 76/135 and 58/117
   respectively. Kernel counts here always come from the launch log and the emitted source, never
   from that label; mistaking one for the other is easy and would misreport every count below.)
@@ -335,7 +353,7 @@ different medians (60.93 untuned, 18.67 step) from the same runs plus three more
 |---|---:|---:|---|
 | **arm A per-kernel profile** | **24.82 ms** / 135 kernels | **18.89 ms** / 136 kernels | **1.31x** (−23.9%) |
 | **untuned-default pipeline**, 3 reps | 65.63 / 65.48 / 65.59 | **61.31 / 60.94 / 60.86** | **1.076x** (−4.65 ms) |
-| shipped step p50, 3 reps | 18.94 / 22.48 / 20.86 | 18.98 / 18.82 / 18.50 | 1.11x — **not claimed** |
+| shipped step p50, 3 reps (pass 2) | 19.01 / 22.56 / 20.94 | 19.01 / 18.83 / 18.53 | 1.11x — **not claimed** |
 | arm the search shipped | B, B, B | A, A, A | — |
 
 The first two rows are solid and their ranges do not overlap: the per-kernel instrument reproduces
@@ -462,12 +480,12 @@ and was re-run in one order-balanced block.
 
 | cap | arm A kernels | untuned-default (median, range) | tuned step p50 (median, range) | n | ships |
 |---:|---:|---|---|---:|---|
-| **2** | **144** | 60.22 (60.17–60.32) | 17.33 (17.30–19.14) | 3 | A A B |
-| **4** | **137** | 60.53 (60.36–60.70) | **17.47 (17.35–17.68)** | 6 | A ×6 |
-| 8 (default) | **136** | 60.93 (60.86–61.31) | 18.67 (18.45–19.05) | 6 | A ×6 |
-| 16 | **135** | 65.80 | 19.29 | 1 | B |
-| 32 | **135** | 65.62 | 21.51 | 1 | B |
-| −1 (off) | **135** | 65.59 (65.48–65.63) | 20.86 (18.94–22.48) | 3 | B B B |
+| **2** | **144** | 60.22 (60.17–60.32) | 17.44 (17.41–19.33) | 3 | A A B |
+| **4** | **137** | 60.53 (60.36–60.70) | **17.58 (17.47–17.76)** | 6 | A ×6 |
+| 8 (default) | **136** | 60.93 (60.86–61.31) | 18.72 (18.47–19.20) | 6 | A ×6 |
+| 16 | **135** | 65.80 | 19.37 | 1 | B |
+| 32 | **135** | 65.62 | 21.60 | 1 | B |
+| −1 (off) | **135** | 65.59 (65.48–65.63) | 20.94 (19.01–22.56) | 3 | B B B |
 
 **Where the guard actually goes silent — and a kernel count is not enough to tell.** Caps 16, 32 and
 −1 all emit a 135-kernel arm A, and an earlier revision of this report read that as "identical
@@ -519,35 +537,41 @@ The count is still monotone in the cap (144 / 137 / 136 / 135 / 135 / 135) and s
 to look at, but the rule has to be stated correctly: **a cap whose kernel count matches cap −1's may
 still have fired — compare the kernel multisets before concluding silence.**
 
-**Cap 4 beats cap 8 by 5.7%, measured in one balanced block.** The first revision reported 7.1% from
+**Cap 4 beats cap 8 by 5.5%, measured in one balanced block.** The first revision reported 7.1% from
 reps that had cap 8 running roughly two hours earlier in the session than cap 4 — arm confounded
 with session position, exactly the trap gh-481's order rule exists for, and it inflated the effect by
 about 1.4 pp. Re-run as three pairs inside one block with the order alternated (cap8→cap4,
 cap4→cap8, cap8→cap4):
 
-| | rep 4 | rep 5 | rep 6 | median | range |
+| pass-2 step p50 | rep 4 | rep 5 | rep 6 | median | range |
 |---|---:|---:|---:|---:|---|
-| cap 8 | 18.45 | 19.05 | 18.51 | 18.51 | 18.45–19.05 |
-| **cap 4** | 17.63 | 17.45 | 17.35 | **17.45** | **17.35–17.63** |
+| cap 8 | 18.47 | 19.20 | 18.61 | 18.61 | 18.47–19.20 |
+| **cap 4** | 17.76 | 17.58 | 17.47 | **17.58** | **17.47–17.76** |
 
-**Non-overlapping** (cap 4's slowest 17.63 against cap 8's fastest 18.45), all six reps shipping arm
+**Non-overlapping** (cap 4's slowest 17.76 against cap 8's fastest 18.47), all six reps shipping arm
 A so no arm lottery is in play, and the deterministic untuned column agrees in the same block (cap 8
 60.91–60.93 against cap 4 60.36–60.70). Pooled over all six reps per cap the ranges stay disjoint at
-−6.4%. The corrected claim is **−5.7%**, from the balanced block.
+−6.1%. The claim is **−5.5%**, from the balanced block.
 
-Cap 2 has the best median (17.33) but its range runs to 19.14 because one rep shipped arm B, so it
+One caveat on that point estimate, since it is the headline: an independent pass-2 replay of these
+same six cached artifacts gave −6.5%, so replaying the *same* schedule varies by about 1% run to run
+and the effect is 5.5–6.5% rather than a sharp 5.5%. Both replay sets are non-overlapping, so the
+*conclusion* — cap 4 beats cap 8 outside the noise floor — does not depend on which set is quoted;
+the smaller, verified-quiet figure is carried.
+
+Cap 2 has the best median (17.44) but its range runs to 19.33 because one rep shipped arm B, so it
 overlaps cap 8 and is **not** established as better than 4. Its 144-kernel arm A is also the most
 materialized in the table, which is the direction where the guard starts costing launches for
 recomputation it no longer had to avoid.
 
 **What the balanced evidence does and does not chain.** Two comparisons were run as balanced blocks:
 cap 8 vs cap −1 (overlapping, 1.11x — Part 3's unclaimed row) and cap 4 vs cap 8 (disjoint,
-**1.061x** = 18.51/17.45, i.e. the 5.7% time reduction; the two are different numbers and only the
+**1.059x** = 18.61/17.58, i.e. the 5.5% time reduction; the two are different numbers and only the
 ratio is a speedup).
 "Cap 4 against cap −1" is a **chain of those two blocks, 1.108 × 1.061 = 1.18x**, not a balanced
 measurement of its own. An earlier revision put it at 1.19x, which is the ratio of the *unpaired*
-endpoint medians (20.86 / 17.45) and silently includes cap 8's shift between the two blocks (18.82 ms
-in the cap −1 block against 18.51 ms in the cap 4 block) — so 1.18x is the chained value and 1.19x is
+endpoint medians (20.94 / 17.58) and silently includes cap 8's shift between the two blocks (18.83 ms
+in the cap −1 block against 18.61 ms in the cap 4 block) — so 1.18x is the chained value and 1.19x is
 the unpaired endpoint ratio, which is not the same statement. What supports the direction
 independently is the deterministic untuned instrument, where cap 4's 60.36–60.70 and cap −1's
 65.48–65.63 are 8.4% apart and nowhere near touching.
@@ -561,7 +585,7 @@ constant depth, so "a 4-layer model" is already an over-generalization of a sing
 
 What that leaves is narrow and still useful: on this graph placement is identical to cap −1 only from
 cap 32 up, and the placement difference grows one node at 16, four at 8, nine at 4 and twenty-three at
-2 — and cap 4 is 5.7% faster than the shipped default. (Nodes' worth of difference, not firing counts:
+2 — and cap 4 is 5.5% faster than the shipped default. (Nodes' worth of difference, not firing counts:
 see the proxy caveat above.) Changing the global
 default on that would be the gh-479 mistake in a new costume — the measurement that would justify
 moving it is a cap sweep across several fixtures of differing depth *and* differing residual
@@ -693,8 +717,8 @@ gather is excluded — see Part 2.)
 # permanently earlier in the session than another -- without that, cap 4 always precedes cap 8 and
 # session drift is indistinguishable from the cap's effect.
 # The claim-bearing cap-4-vs-cap-8 pair. IMPORTANT: the reported cap-8 row's first three values are
-# Part 3's `master-cap8` cells (18.98 / 18.82 / 18.50) -- NOT a sweep-cap8 r1-r3 -- pooled with the
-# balanced block's r4-r6 (18.45 / 19.05 / 18.51) for a median of 18.67. So generate cap 4 alone for
+# Part 3's `master-cap8` cells (19.01 / 18.83 / 18.53) -- NOT a sweep-cap8 r1-r3 -- pooled with the
+# balanced block's r4-r6 (18.47 / 19.20 / 18.61) for a median of 18.72. So generate cap 4 alone for
 # r1-r3, then the balanced pair for r4-r6; creating sweep-cap8/r1-r3 here would give nine cap-8
 # results and a different dataset from the one reported.
 $D sweep $M 3 4                            # cap 4, r1-r3
@@ -721,6 +745,19 @@ for cap in 32 16 4 2; do $D snap $M sweep-cap$cap 1 --ocannl_virtualize_max_inli
 for cell in sweep-cap32 sweep-cap16 master-cap8 sweep-cap4 sweep-cap2; do
   echo "== master-capoff vs $cell =="; $D diff master-capoff 1 "$cell" 1
 done
+```
+
+```bash
+# PASS 2, and it is not optional: every tuned step p50 the report quotes comes from here, not from
+# `search`'s JSON. A fresh process replays the cached winner, because the search process is measurably
+# slower from accumulated modules. Run these ONLY on a quiet box -- a concurrent CPU build corrupted a
+# whole batch mid-session (47-64 ms instead of ~19) with nothing in the output flagging it.
+for r in 1 2 3; do $D replay ../wt-gh612-base base574 $r; $D replay ../wt-gh612-feat feat574 $r; done
+for r in 1 2 3; do $D replay $M master-capoff $r --ocannl_virtualize_max_inline_fanin=-1; done
+for r in 1 2 3 4 5 6; do $D replay $M master-cap8 $r; done
+for r in 1 2 3 4 5 6; do $D replay $M sweep-cap4 $r --ocannl_virtualize_max_inline_fanin=4; done
+for r in 1 2 3; do $D replay $M sweep-cap2 $r --ocannl_virtualize_max_inline_fanin=2; done
+for c in 16 32; do $D replay $M sweep-cap$c 1 --ocannl_virtualize_max_inline_fanin=$c; done
 ```
 
 ```bash

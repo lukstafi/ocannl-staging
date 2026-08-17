@@ -342,7 +342,7 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   for guard firings, not the count of changed signatures — one materialization changes several
   consumers' parameter lists (on gpt2_mini, cap 8's 16/17 exclusive signatures come from 4 nodes:
   0/1/4/9/23 for caps 32/16/8/4/2). That graph's maximum transitive fan-in is therefore in (16, 32]. Cap 4 beat the default 8 by a
-  non-overlapping 5.7% in an order-balanced block, and balancing that order matters: a fixed order
+  non-overlapping 5.5% in an order-balanced block, and balancing that order matters: a fixed order
   confounds the cap with session position, which was worth ~1.4pp of an apparent 7.1%.
 - `check_half_prec_constants_cutoff` (`Ops.exceeds_fp16_cutoff`, enforced from
   `Low_level.simplify_llc.check_constant` during lowering, hence backend-independently) is a
@@ -394,7 +394,8 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   kernels / 8.136 ms → 5 / 0.357 ms (22.8x) and the four QKᵀ chains 8 kernels / 3.666 ms → 16 /
   2.038 ms (1.80x), so the QKᵀ sites are ~17% of what the two freed line items give against the
   lm_head's ~83%. Anchor the CE chain on `logits`, NOT on `wte`: the input token-embedding gather
-  reads `wte` too (the embedding is `wte * onehot_x`) and is not part of the head. It also COSTS +2.57 ms in the FFN bucket, which the gh-573 fanin guard is what
+  reads `wte` too (the embedding is `wte * onehot_x`) and is not part of the head. **The finer fission also COSTS +2.57 ms in the FFN bucket** -- it splits
+  residual adds into more separately launched kernels, each re-deriving the running sum -- which the gh-573 fanin guard is what
   recovers, so the two must be measured together or each is mis-attributed. Why such a
   pair merges in the first place: the fission pass's no-parallelism-loss guard compares chains under the presets'
   `max_chain=2` cap, so trimming a rank-3 GEMM's minor axis reads as lossless; and a max-reduce is

@@ -8,6 +8,7 @@
 # Usage:
 #   gh612_cells.sh search  <tree> <label> <rep> [extra ocannl flags...]
 #   gh612_cells.sh snap    <tree> <label> <rep> [extra ocannl flags...]
+#   gh612_cells.sh replay  <tree> <label> <rep> [extra ocannl flags...]   # PASS 2: step timings
 #   gh612_cells.sh profile <tree> <label> <rep> [n-harness-runs]
 #   gh612_cells.sh finger  <label> <rep>
 #   gh612_cells.sh diff    <labelA> <repA> <labelB> <repB>
@@ -502,6 +503,29 @@ print("\nThe negative-control reading requires BOTH `only in` signature sides at
 EOF
 }
 
+# PASS 2 of the protocol benchmarks/README.md requires for tuned cells: a FRESH process replays the
+# cached winner and provides the step timings. Pass 1 (`search`) leaves its own process measurably
+# slower -- accumulated modules and buffers add per-launch overhead -- so its step p50 penalizes the
+# tuned artifact for the search it already paid for in compile_s. `search`'s JSON is the search cost;
+# the step numbers a report quotes must come from here.
+cmd_replay() { (
+  local tree=$1 label=$2 rep=$3; shift 3
+  tree=$(require_dir "$tree")
+  case ${tree:-} in /?*) ;; *) exit 2;; esac
+  local out; out=$(cell_dir "$label" "$rep")
+  case ${out:-} in /?*) ;; *) exit 2;; esac
+  [ -d "$out/cache" ] && [ -n "$(ls -A "$out/cache" 2>/dev/null)" ] || {
+    echo "gh612_cells: $label r$rep has no populated cache -- run \`search\` first" >&2; exit 2; }
+  cd "$tree/benchmarks" || exit 1
+  BENCH_FIXTURE=$FIXTURE BENCH_TUNE=1 $PIN "$EXE" --ocannl_backend=hip \
+    --ocannl_autotune_cache_dir="$out/cache" "$@" \
+    > "$out/replay2.out" 2> "$out/replay2.err"
+  local st=$?
+  echo -n "$label r$rep pass-2 replay: exit $st  "
+  grep -h '^{' "$out/replay2.out" | tail -1 | grep -o '"step_ms":{[^}]*}'
+  return "$st"
+) }
+
 cmd_roofline() { (
   local tree=$1
   tree=$(require_dir "$tree")
@@ -519,6 +543,7 @@ case $sub in
   snap)     cmd_snap     "$@" ;;
   profile)  cmd_profile  "$@" ;;
   finger)   cmd_finger   "$@" ;;
+  replay)   cmd_replay   "$@" ;;
   diff)     cmd_diff     "$@" ;;
   sweep)    cmd_sweep    "$@" ;;
   roofline) cmd_roofline "$@" ;;
