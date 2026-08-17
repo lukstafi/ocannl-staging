@@ -360,13 +360,13 @@ the fission is finer. The interaction is not hypothetical; it is 2.6 ms in both 
 
 A config flip on one tree. Code-borne, so each value is a fresh compile. The rows below are this
 arm's **three order-balanced reps**; Part 4 pools all six reps of cap 8 and so quotes slightly
-different medians (60.93 untuned, 18.71 step) from the same runs plus three more.
+different medians (60.93 untuned, 18.66 step) from the same runs plus three more.
 
 | | cap −1 (before) | cap 8 (after) | |
 |---|---:|---:|---|
 | **arm A per-kernel profile** | **24.82 ms** / 135 kernels | **18.89 ms** / 136 kernels | **1.31x** (−23.9%) |
 | **untuned-default pipeline**, 3 reps | 65.63 / 65.48 / 65.59 | **61.31 / 60.94 / 60.86** | **1.076x** (−4.65 ms) |
-| shipped step p50, 3 reps (pass 2) | 19.01 / 22.56 / 20.94 | 19.01 / 18.83 / 18.53 | 1.11x — **not claimed** |
+| shipped step p50, 3 reps (pass 2, replay-balanced) | 18.91 / 22.52 / 20.90 | 19.05 / 18.74 / 18.45 | 1.12x — **not claimed** |
 | arm the search shipped | B, B, B | A, A, A | — |
 
 The first two rows are solid and their ranges do not overlap: the per-kernel instrument reproduces
@@ -497,10 +497,10 @@ and was re-run in one order-balanced block.
 |---:|---:|---|---|---:|---|
 | **2** | **144** | 60.22 (60.17–60.32) | 17.44 (17.41–19.33) | 3 | A A B |
 | **4** | **137** | 60.53 (60.36–60.70) | **17.56 (17.43–17.72)** | 6 | A ×6 |
-| 8 (default) | **136** | 60.93 (60.86–61.31) | 18.71 (18.53–19.05) | 6 | A ×6 |
+| 8 (default) | **136** | 60.93 (60.86–61.31) | 18.66 (18.45–19.05) | 6 | A ×6 |
 | 16 | **135** | 65.80 | 19.37 | 1 | B |
 | 32 | **135** | 65.62 | 21.60 | 1 | B |
-| −1 (off) | **135** | 65.59 (65.48–65.63) | 20.94 (19.01–22.56) | 3 | B B B |
+| −1 (off) | **135** | 65.59 (65.48–65.63) | 20.90 (18.91–22.52) | 3 | B B B |
 
 **Where the cap stops having an observable effect — and a kernel count is not enough to tell.** Caps 16, 32 and
 −1 all emit a 135-kernel arm A, and an earlier revision of this report read that as "identical
@@ -594,12 +594,12 @@ materialized in the table, which is the direction where the guard starts costing
 recomputation it no longer had to avoid.
 
 **What the balanced evidence does and does not chain.** Two comparisons were run as balanced blocks:
-cap 8 vs cap −1 (overlapping, **1.112x** = 20.94/18.83 — Part 3's unclaimed row) and cap 4 vs cap 8
+cap 8 vs cap −1 (overlapping, **1.116x** = 20.90/18.74 — Part 3's unclaimed row) and cap 4 vs cap 8
 (disjoint, **1.060x** = 18.59/17.54, i.e. the 5.7% time reduction; the two are different numbers and
 only the ratio is a speedup).
-"Cap 4 against cap −1" is a **chain of those two blocks, 1.112 × 1.060 = 1.18x**, not a balanced
+"Cap 4 against cap −1" is a **chain of those two blocks, 1.116 × 1.060 = 1.18x**, not a balanced
 measurement of its own. An earlier revision put it at 1.19x, which is the ratio of the *unpaired*
-endpoint medians (20.94 / 17.56) and silently includes cap 8's shift between the two blocks (18.83 ms
+endpoint medians (20.90 / 17.56) and silently includes cap 8's shift between the two blocks (18.74 ms
 in the cap −1 block against 18.59 ms in the cap 4 block) — so 1.18x is the chained value and 1.19x is
 the unpaired endpoint ratio, which is not the same statement. What supports the direction
 independently is the deterministic untuned instrument, where cap 4's 60.36–60.70 and cap −1's
@@ -773,8 +773,8 @@ gather is excluded — see Part 2.)
 # permanently earlier in the session than another -- without that, cap 4 always precedes cap 8 and
 # session drift is indistinguishable from the cap's effect.
 # The claim-bearing cap-4-vs-cap-8 pair. IMPORTANT: the reported cap-8 row's first three values are
-# Part 3's `master-cap8` cells (19.01 / 18.83 / 18.53) -- NOT a sweep-cap8 r1-r3 -- pooled with the
-# balanced block's r4-r6 (18.58 / 19.05 / 18.59) for a median of 18.71. So generate cap 4 alone for
+# Part 3's `master-cap8` cells (19.05 / 18.74 / 18.45) -- NOT a sweep-cap8 r1-r3 -- pooled with the
+# balanced block's r4-r6 (18.58 / 19.05 / 18.59) for a median of 18.66. So generate cap 4 alone for
 # r1-r3, then the balanced pair for r4-r6; creating sweep-cap8/r1-r3 here would give nine cap-8
 # results and a different dataset from the one reported.
 $D sweep $M 3 4                            # cap 4, r1-r3
