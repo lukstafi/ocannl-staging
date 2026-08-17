@@ -2198,7 +2198,11 @@ let cleanup_virtual_llc plc ~static_indices (llc : t) : t =
     Set.of_list (module Indexing.Symbol)
     @@ List.map ~f:(fun s -> s.Indexing.static_symbol) static_indices
   in
-  Option.value_exn ~here:[%here] @@ loop_proc ~balanced:false ~env_dom:static_indices llc
+  (* gh-611: a routine whose every statement virtualizes away is legal, not a crash — its runtime
+     schedule is empty while its stored computations and placements persist in the lineage,
+     awaiting consumption by later routines (the incremental flows: [Context.decide_inline], the
+     [?prelowered] seam, the documented cross-routine computation sharing). *)
+  Option.value ~default:Noop @@ loop_proc ~balanced:false ~env_dom:static_indices llc
 
 let rec substitute_float ~var ~value llsc =
   let loop_scalar = substitute_float ~var ~value in
@@ -5366,6 +5370,9 @@ let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : opt
     @@ virtual_llc_result
   in
   register_spliced_accesses traced_store llc;
+  (match llc with
+  | Noop -> [%log "routine optimized to an empty schedule: every target virtualized (gh-611)"]
+  | _ -> ());
   (* The searchable decision dimensions (gh-555), read off the now-committed placements: cleanup
      has committed the surviving virtual candidates, and the backend-compile finalization
      ([default_to_most_local]) has not yet rewritten the cap provenances. *)
