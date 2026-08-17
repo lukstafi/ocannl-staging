@@ -690,6 +690,19 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   take `tile_prec` (exact widenings only) to fold the widening into the pack; seeding resolves the
   same `Numerics.cpu_compute_prec` the emission uses — change either side only through that
   helper, or "timed is not tensorized" returns for narrow sites.
+- **A "packmma" timing is not evidence that anything tensorized.** A `Tile_mma` whose register-tile
+  preconditions fail renders the scalar fallback and the run still reports under whatever the
+  variant was named — the column extent below the compute vector width is the easiest way in (at
+  f32/16-byte vectors the crossover is n = 4; at f16 it is n = 8), but a narrow `vector_bytes`,
+  mixed operand compute precisions, transposed-B storage, and `debug_log_from_routines` all decline
+  too. Check `C_syntax.mma_census` (flip `mma_census_enabled` around the compile) rather than
+  trusting the label; `bin/narrow_gebp_bench` prints the census per line and warns when any
+  statement declined, and `schedule_log_declines=true` gives the per-rule reason. This is the same
+  "timed is not tensorized" hazard the seeding note above raises, seen from the bench side.
+- `bin/narrow_gebp_bench` takes its blocking factors as arguments (`[bm] [bk]` positionally, or
+  `--bm=`/`--bk=`), defaulting to 64/256. The packed variants need `n mod bm = 0` and `n mod bk = 0`
+  — an n meeting neither still runs the unblocked naive variant, so an arbitrary extent (the sort a
+  register-tiling review actually asks about) can be measured against something.
 - **Negative zero is what breaks a "bitwise equal to the scalar twin" claim** (gh-ocannl-615). Two
   spellings normalized it, both fixed but both easy to reintroduce: a scalar-to-vector splat written
   `((vtyp){0} + x)` returns `+0.0` for `x = -0.0` (IEEE `(+0.0) + (-0.0) = +0.0`), so use
