@@ -4033,10 +4033,17 @@ let validate_parallel plc (llc : t) : unit =
           ^
           (* gh-ocannl-633: a constant's in-kernel init normally moves to a link-time [Host_inits]
              upload before this check ([hosted_constant_inits_to_link_time]); when a bail-out kept
-             it (e.g. a padded constant), name the actual culprit — the schedule is not at fault. *)
+             it (e.g. a padded constant), name the actual culprit — the schedule is not at fault.
+             The flag advice is scoped honestly (review round 2): [Tensor.constant_fill]'s
+             1-element arm never consults the limit — deliberately, since routing a 1-element
+             literal to the host-backed path would pin its element count and break broadcast shape
+             inference — so for such literals the flag changes nothing, and this frame cannot tell
+             the literal's length (a broadcast scalar's node has the consumer's numel). *)
           if Tn.known_host_constant tn then
             ". The write is the in-kernel initialization of a constant that could not be moved to \
-             link time; --ocannl_limit_constant_fill_size=0 forces host-side initialization"
+             link time; for literals of at least two elements, \
+             --ocannl_limit_constant_fill_size=0 forces host-side initialization (one-element \
+             literals always initialize in kernel, keeping broadcast shape inference)"
           else "")
     in
     let rec check_writes ~covered ~enclosing llc =

@@ -1,3 +1,4 @@
 scheduled matmul over small constant operands compiles and matches reference: PASS
 fresh context reads the consumed constant via its link-time host-init upload: PASS
-scheduled matmul over a materialized broadcast-zero constant compiles and is exactly zero: PASS
+the zero constant's in-kernel Zero_out moved to link time: true
+scheduled matmul adding a materialized broadcast-zero constant matches reference: PASS

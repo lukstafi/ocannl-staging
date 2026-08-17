@@ -113,22 +113,33 @@ let () =
      [Train.set_materialized] flips the node's intent from [Effectively_constant] to [On_device],
      so eligibility must ride the persistent [host_constant] marker. Under the same
      hardware-annotating schedule, the [Zero_out] used to be rejected outright by
-     [validate_parallel]'s multi-threaded-kernel rule. The zero operand makes the output
-     all-zeros; the check still discriminates against the guarded failure mode — a dropped
-     [Zero_out] without a working upload leaves garbage in the operand, and garbage times [mb] is
-     not zero. *)
+     [validate_parallel]'s multi-threaded-kernel rule.
+
+     A zero constant's CONTENT cannot discriminate by value — its expected cells equal the
+     allocator/init sentinel by design (review round 2) — so the mechanism is asserted
+     structurally: the optimized code handed to the schedule transform must carry no surviving
+     setter of [mz] ([Ll_test.count_set] counts [Zero_out] too). The executed leg keeps a fully
+     discriminating nonzero reference by ADDING the zero operand ([(ma + mz) * mb] = part 1's
+     reference), so a dropped [Zero_out] over a garbage-filled buffer still shows; the
+     value-bearing correctness of the upload machinery itself rides parts 1-2's nonzero
+     constants, which share it. *)
   let mz = TDSL.ndarray [| 0. |] ~label:[ "mz" ] ~input_dims:[ k ] ~output_dims:[ m ] () in
   Train.set_materialized mz.Tensor.value;
-  let%op mc3 = mz * mb in
+  let%op mc3 = (ma + mz) * mb in
   let comp3 = named "mm_zero_hosted" (Train.forward mc3) in
   let ctx3 = Context.auto () in
-  let transform3 = grid_workgroup_schedule ~mc:mc3.Tensor.value in
+  let transform3 opt =
+    Verdict.p "the zero constant's in-kernel Zero_out moved to link time"
+      (Ll_test.count_set opt mz.Tensor.value = 0);
+    grid_workgroup_schedule ~mc:mc3.Tensor.value opt
+  in
   let ctx3, routine3 = Context.compile ~lowered_transform:transform3 ctx3 comp3 Ir.Indexing.Empty in
   let ctx3 = Context.run ctx3 routine3 in
   let values3 = Context.get_values ctx3 mc3.Tensor.value in
   Verdict.pass_fail
-    "scheduled matmul over a materialized broadcast-zero constant compiles and is exactly zero"
-    (Array.length values3 = m * n && Array.for_all values3 ~f:(fun v -> Float.equal v 0.))
+    "scheduled matmul adding a materialized broadcast-zero constant matches reference"
+    (Array.length values3 = Array.length reference
+    && Array.for_all2_exn values3 reference ~f:(fun a b -> Float.equal a b))
     ~detail:(fun () ->
       Printf.sprintf "got [%s]"
         (String.concat ~sep:"; " (Array.to_list (Array.map values3 ~f:Float.to_string))))
