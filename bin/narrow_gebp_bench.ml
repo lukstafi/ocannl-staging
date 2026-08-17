@@ -248,9 +248,15 @@ let () =
        above there is no divisibility class on which a plain sum vanishes (unlike the flattened
        form, whose collapse also zeroed it). What an unweighted sum cannot see is a PERMUTATION —
        a tail written with the right values at the wrong offsets leaves the multiset intact, and
-       the multiset is all a plain sum reads — and a misplaced tail is exactly what a non-dividing
-       [bm]/[bk] risks. The weight is capped so that products of these exact-in-binary operands
-       stay exact in the double accumulator.
+       the multiset is all a plain sum reads — and a misplaced edge is exactly what the peel risks.
+
+       The weight runs through [mix] on the (row, column) pair for the same reason the operands do,
+       and the flat-offset form is the trap it avoids: a weight of [1 + (t mod 251)] over the flat
+       offset t = i*n + j collapses to [1 + j] whenever 251 divides n, giving every row identical
+       weights, so at n = 251 (or 502, 753, ...) a row permutation was invisible to the checksum
+       AND to the spot cell at once. Same degeneracy as the operands', one line away, and it came
+       in with the port. Weights stay capped at 251 so that products of these exact-in-binary
+       operands stay exact in the double accumulator.
 
        Cross-variant equality is therefore EXACT in an f32 run, at every extent: the products are
        multiples of 1/8 bounded by 0.75n, so the whole reduction is exact in the f32 accumulator
@@ -267,7 +273,9 @@ let () =
        a size: an f32 run is the cross-variant oracle, and in a narrow run only the packed
        variants are comparable with each other. Both checks are outside the timed region. *)
     let checksum =
-      Array.foldi values ~init:0.0 ~f:(fun i acc v -> acc +. (v *. Float.of_int (1 + (i % 251))))
+      Array.foldi values ~init:0.0 ~f:(fun t acc v ->
+          let w = 1 + (mix ~salt:0x7E51 (t / n) (t % n) % 251) in
+          acc +. (v *. Float.of_int w))
     in
     let spot = Int.min (n + 1) (Array.length values - 1) in
     let secs = Float.of_int63 Int63.(stop - start) /. 1e9 /. Float.of_int repeats in
