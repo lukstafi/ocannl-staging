@@ -59,11 +59,18 @@ let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
 let () =
-  (* Positional integer args only — --ocannl_* config flags share the argv. *)
+  (* Positional integer args only — --ocannl_* config flags share the argv. An option is
+     [--]-prefixed (theirs, and any of ours) or a [-] followed by a non-digit; a bare [-64] is
+     therefore a positional, not an option. Dropping it would be worse here than in a one-argument
+     bench: with five positionals, a negative in any slot loses its own value AND shifts every later
+     argument into the wrong slot (`schedule_bench 256 20 -64 512` would run with m defaulting to n
+     and k = 512 read as m), hiding the invalid value from the validation below. *)
+  let is_option s =
+    String.is_prefix s ~prefix:"--"
+    || (String.is_prefix s ~prefix:"-" && String.length s > 1 && not (Char.is_digit s.[1]))
+  in
   let pos_args =
-    Array.to_list (Sys.get_argv ())
-    |> List.tl_exn
-    |> List.filter ~f:(fun s -> not (String.is_prefix s ~prefix:"-"))
+    Array.to_list (Sys.get_argv ()) |> List.tl_exn |> List.filter ~f:(fun s -> not (is_option s))
   in
   let arg i default =
     match List.nth pos_args i with Some s -> Int.of_string s | None -> default
@@ -76,6 +83,20 @@ let () =
      repeats separately so the scheduled variants can be timed at scale (arg 5, default = repeats;
      0 skips the naive leg entirely, including its warmup run — speedups then print as nan). *)
   let naive_repeats = arg 4 repeats in
+  (* Every integer argument is a positive extent or count — except [naive_repeats], whose 0 is the
+     documented "skip the naive leg" value. Validate them as one domain rather than leaving each use
+     site to discover its own bad input. *)
+  List.iter
+    [
+      ("n", n, 1); ("repeats", repeats, 1); ("m", m, 1); ("k", k, 1);
+      ("naive_repeats", naive_repeats, 0);
+    ]
+    ~f:(fun (name, v, least) ->
+      if v < least then
+        invalid_arg
+          (Printf.sprintf "schedule_bench: %s must be %s, got %d" name
+             (if least = 0 then "nonnegative" else "positive")
+             v));
   assert (n % 64 = 0 && m % 64 = 0 && k % 64 = 0);
   let mav = Array.init (m * k) ~f:(fun i -> Float.of_int (i % 13) *. 0.25) in
   let mbv = Array.init (k * n) ~f:(fun i -> Float.of_int (i % 17) -. 8.) in
