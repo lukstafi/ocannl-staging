@@ -50,6 +50,8 @@ case ${OUT_ROOT:-} in /?*) ;; *) echo "gh612_cells: OUT_ROOT unusable, refusing 
 PIN=${PIN:-taskset -c 0-15}
 FIXTURE=${FIXTURE:-fixtures/gpt2_mini.safetensors}
 ARCH=${ARCH:-gfx1151}
+HERE=$(cd "$(dirname "$0")" && pwd)   # the driver's own directory: cmd_finger does not cd into the
+                                      # tree, so its helper-script paths must be absolute
 EXE=../_build/default/benchmarks/runners/ocannl/bench_gpt.exe
 ROUTINE=cross_entropy_loss_fwd
 
@@ -243,7 +245,7 @@ cmd_finger() {
   case ${out:-} in /?*) ;; *) return 2;; esac
   # `|| return` on the COMMAND line: absent fingerprints must not look like passing ones. Without
   # it the geometry dump below still succeeds and `finger` exits 0 having printed no evidence.
-  python3 - "$(cat "$out/armA.path")" "$out" <<'EOF' || return 1
+  python3 - "$(cat "$out/armA.path")" "$out" "$HERE" <<'EOF' || return 1
 import re,sys,csv,statistics,collections
 src=open(sys.argv[1]).read(); out=sys.argv[2]
 SIG=re.compile(r'extern\s+"C"\s+__global__\s+void\s+(\w+__seg(\d+))\s*\(([^)]*)\)', re.S)
@@ -293,6 +295,29 @@ qk_chain=lambda ns: ((any(n.endswith("_q") for n in ns) and any(n.endswith("_k")
 ce_chain=lambda ns: any(n in ("wte","logits","max_logits","log_probs","neg_nll","n810_log") for n in ns)
 show("QK^T WHOLE CHAIN (qk + mask + row-max + softmax)", qk_chain)
 show("lm_head / CE WHOLE CHAIN", ce_chain)
+# Bucket totals on the SAME basis as everything above -- per-kernel medians grouped by
+# gpt2_bucket.py's own assignment. The per-run bucket-N.txt tables median each RUN's bucket total
+# instead, and median-of-sums != sum-of-medians: on base574 the two bases differ by 0.048 ms. Any
+# reconciliation against the per-kernel total has to use this one or it will not close.
+import subprocess
+r=subprocess.run(["python3",os.path.join(sys.argv[3],"gpt2_bucket.py"),"--source",sys.argv[1],
+                  "--stats",os.path.join(out,"kernels-1.csv"),"--steps","1","--dump"],
+                 capture_output=True,text=True)
+if r.returncode!=0: sys.exit(f"gpt2_bucket.py failed: {r.stderr.strip().splitlines()[-1:]}")
+dump=r.stdout
+assign={}
+for ln in dump.splitlines():
+    # the dump prints "| <routine>__segN | <bucket> | ..." -- no word boundary before "seg",
+    # since "_" is a word character, so anchor on the "__seg" prefix instead
+    mm=re.search(r"__seg(\d+)\s*\|\s*(ffn|attention|emb_logits|layernorm|other)\b", ln)
+    if mm: assign[int(mm.group(1))]=mm.group(2)
+if not assign: sys.exit("could not parse gpt2_bucket.py --dump; bucket basis unavailable")
+if assign:
+    agg=collections.defaultdict(float)
+    for i,t in ms.items(): agg[assign.get(i,"UNASSIGNED")]+=t
+    print("bucket totals (per-kernel-median basis; sums exactly to the total above):")
+    for b in sorted(agg): print(f"  {b:12} {agg[b]:7.3f} ms")
+    print(f"  {'TOTAL':12} {sum(agg.values()):7.3f} ms")
 lm=lambda ns: "wte" in ns and any(n.endswith("_layer_norm") for n in ns)
 five=[i for i in sigs if g1(sigs[i]) or lm(sigs[i])]
 tot=sum(ms.values())
@@ -350,8 +375,10 @@ cmd_sweep() {
                   "half-balanced series" >&2; return 1; }
     done
   done
-  echo "NOTE: read the untuned column and the arm A KERNEL count first. A cap whose kernel count"
-  echo "      matches cap -1's is not losing a trade-off, it is never firing."
+  echo "NOTE: an equal kernel count does NOT mean the guard was silent -- on gpt2_mini cap 16 and"
+  echo "      cap -1 both emit 135 kernels while their placement differs (n792 is newly materialized)."
+  echo "      Silence requires \`diff\` to report ZERO exclusive signatures on BOTH sides AND zero"
+  echo "      differing multiplicities. Read the untuned column for the timing trade separately."
 }
 
 # Cross-cell signature-set diff: groups kernels by their SIGNATURE (the sorted parameter-name tuple,

@@ -387,10 +387,14 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   companion that reduces OVER the site's minor axis (the lm_head's max-logits row) trims the common
   prefix below the site's arity and correctly still declines — that one needs fission, not coverage:
   `fission_scheduled ~arity_cuts:true` (gh-ocannl-574) cuts it apart — measured on HIP/gfx1151 at
-  1.30x on gpt2_mini, the fused lm_head+row-max kernel going 8.036 ms → 0.230 ms for the GEMM plus a
-  separate row-max, and the four QKᵀ+mask+row-max sites 2.391 → 0.457 ms
-  (`report-gh612-hip.md`); it also COSTS +2.61 ms in the FFN bucket there, which the gh-573 fanin
-  guard is what recovers, so the two must be measured together or each is mis-attributed. Why such a
+  1.30x on gpt2_mini (`report-gh612-hip.md`). **Size a fission's payoff over the WHOLE CHAIN, never
+  over the fragment that keeps the site's name**: post-fission the mask, row-max and softmax work runs
+  in separate downstream kernels, so dividing a standalone QKᵀ by a fused QKᵀ+mask+row-max reports a
+  meaningless 5.2x. Like-for-like, summing every fragment on both sides: the lm_head/CE chain goes 5
+  kernels / 8.165 ms → 6 / 0.384 ms (21.2x) and the four QKᵀ chains 8 kernels / 3.666 ms → 16 /
+  2.038 ms (1.80x), so the QKᵀ sites are ~17% of what the two freed line items give against the
+  lm_head's ~83%. It also COSTS +2.57 ms in the FFN bucket, which the gh-573 fanin guard is what
+  recovers, so the two must be measured together or each is mis-attributed. Why such a
   pair merges in the first place: the fission pass's no-parallelism-loss guard compares chains under the presets'
   `max_chain=2` cap, so trimming a rank-3 GEMM's minor axis reads as lossless; and a max-reduce is
   the shape that hits it because its `-inf` init is a `Set` nest, not a `Zero_out` — a sum-reduce's

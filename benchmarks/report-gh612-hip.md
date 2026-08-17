@@ -283,16 +283,24 @@ and it does not (0.1%).
 
   | bucket | BASE | FEAT | delta |
   |---|---:|---:|---:|
-  | FFN GEMMs | 5.544 | 8.139 | **+2.595** |
-  | attention | 14.163 | 12.542 | −1.621 (the QKᵀ chain's −1.628, so the rest of attention is flat) |
-  | embedding / logits | 8.256 | 0.538 | −7.718 (the lm_head chain's −7.780) |
-  | layernorm / elementwise | 4.319 | 3.576 | **−0.743** |
-  | sum | | | **−7.487** |
+  | FFN GEMMs | 5.563 | 8.132 | **+2.570** |
+  | attention | 14.179 | 12.534 | −1.645 (the QKᵀ chain's −1.628, so the rest of attention is flat) |
+  | embedding / logits | 8.259 | 0.533 | −7.727 (the lm_head chain's −7.780) |
+  | layernorm / elementwise | 4.329 | 3.595 | **−0.734** |
+  | **sum** | **32.330** | **24.794** | **−7.536** |
 
-  So the FFN's +2.595 ms is partly offset by a **−0.743 ms** improvement in the layernorm bucket that
+  So the FFN's +2.570 ms is partly offset by a **−0.734 ms** improvement in the layernorm bucket that
   the finer fission also produces — an earlier revision attributed the whole gap to FFN, which does not
-  balance. The bucket sum is −7.487 against the per-kernel total's −7.536; the 0.049 ms residue is
-  classification rounding, not an unexplained term.
+  balance.
+
+  **These bucket figures are on the per-kernel-median basis and the column sums exactly to −7.536**,
+  which is the point of stating the basis. The per-run tables in Part 1 aggregate differently: they
+  median each *run's* bucket total, and median-of-sums is not sum-of-medians — on BASE the two bases
+  differ by 0.048 ms. An earlier revision mixed them and called the resulting 0.049 ms gap
+  "classification rounding", which it cannot be: eight endpoints rounded to 0.001 ms can only differ by
+  ~0.004 ms, and classification redistributes kernel times without changing their total. It was an
+  aggregation-basis mismatch. `gh612_cells.sh finger` now prints the per-kernel-median bucket totals
+  alongside the chains so the two bases cannot be confused again.
 - **Signature-set diff**: 14 kernel signatures exist only in BASE, totalling **14.663 ms**; 32
   exist only in FEAT, totalling **7.428 ms**.
 
@@ -670,10 +678,13 @@ and 6 / 0.384 ms.
 # Part 4, the cap sweep. `sweep` reverses the cap order on alternate reps, so no cap sits
 # permanently earlier in the session than another -- without that, cap 4 always precedes cap 8 and
 # session drift is indistinguishable from the cap's effect.
-# The claim-bearing pair, balanced inside one block. FIRST_REP extends a block instead of
-# overwriting it, which is what the report's n=6 cap-4 and cap-8 rows are: two blocks of three.
-$D sweep $M 3 8 4                          # r1-r3
-FIRST_REP=4 $D sweep $M 3 8 4              # r4-r6 -> the n=6 rows
+# The claim-bearing cap-4-vs-cap-8 pair. IMPORTANT: the reported cap-8 row's first three values are
+# Part 3's `master-cap8` cells (18.98 / 18.82 / 18.50) -- NOT a sweep-cap8 r1-r3 -- pooled with the
+# balanced block's r4-r6 (18.45 / 19.05 / 18.51) for a median of 18.67. So generate cap 4 alone for
+# r1-r3, then the balanced pair for r4-r6; creating sweep-cap8/r1-r3 here would give nine cap-8
+# results and a different dataset from the one reported.
+$D sweep $M 3 4                            # cap 4, r1-r3
+FIRST_REP=4 $D sweep $M 3 8 4              # the balanced block, r4-r6 (both caps, order alternated)
 $D sweep $M 3 2                            # the n=3 cap-2 row
 $D sweep $M 1 16 32 -1                     # the shape of the curve (structural, one rep each)
 # then snapshot each cap and compare KERNEL MULTISETS, not kernel counts. Equal counts can absorb a
@@ -683,7 +694,10 @@ $D sweep $M 1 16 32 -1                     # the shape of the curve (structural,
 for cap in 2 4 8 16 32 -1; do
   $D snap $M sweep-cap$cap 1 --ocannl_virtualize_max_inline_fanin=$cap
 done
-for cap in 32 16 8 4 2; do                       # 0/0 exclusive signatures => the guard was silent
+# Silence requires BOTH sides at 0 exclusive signatures AND zero differing multiplicities -- and
+# note that an equal KERNEL COUNT proves nothing: cap 16 and cap -1 both emit 135 kernels while their
+# placement differs. On this graph only cap 32 comes back placement-identical.
+for cap in 32 16 8 4 2; do
   echo "== cap -1 vs cap $cap =="; $D diff sweep-cap-1 1 sweep-cap$cap 1
 done
 ```
