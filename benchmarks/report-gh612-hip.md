@@ -102,11 +102,17 @@ gh-574's win on this device (2.39 ms against the lm_head's 8.04) — the reverse
   reference. `AGENTS.md` is explicit that for passes which change cell values, emitted-IR structure
   is not sufficient — so this is a stated limitation, not a defended position. What partially
   substitutes, and is weaker than an executed check: the autotuner's own accounting puts all four
-  cells' arm A within 0.6% on FLOPs (7.81–7.86 GFLOP) at identical losses wherever the arm shipped,
-  and `feat574`'s and `master-capoff`'s arm A have **zero differing kernel signatures**, so those two
-  stand or fall together. Closing it properly needs a way to ship the default-placement arm on
-  demand; there is no such config today (both arms always run and the faster one ships), so it is
-  filed rather than bodged.
+  cells' arm A within 0.6% on FLOPs (7.81–7.86 GFLOP) at identical losses wherever the arm shipped.
+
+  What is **not** offered as a substitute, having been considered and rejected: the zero
+  signature-level difference between `feat574`'s and `master-capoff`'s arm A does not make those two
+  "stand or fall together". Five of their canonicalized kernel *bodies* differ, because their crowned
+  schedules differ (Part 4), and either schedule could expose a value-changing codegen bug
+  independently of the other. Signature parity is evidence about placement, not about values, and
+  using it in a correctness argument would be the category error this report spends Part 4 warning
+  about. Closing the gap properly needs a way to ship the default-placement arm on demand; there is
+  no such config today (both arms always run and the faster one ships), so it is filed rather than
+  bodged.
 
 ### Three instruments, three noise floors
 
@@ -293,7 +299,8 @@ deterministic code path.
 The third row is **inside this box's noise floor and is not claimed as a result.** cap −1's own
 spread is 18.7% and the ranges overlap. gh-481 measured 20–40% as the resolution floor of a
 tuned-cell A/B here, and 1.11x sits inside it. (Part 4 shows this is a property of the *default*
-rather than of the guard: at cap 4 the same end-to-end comparison is non-overlapping at 1.19x.)
+rather than of the guard: at cap 4 the same end-to-end comparison is non-overlapping, at a chained
+1.18x — see Part 4, which distinguishes that chain from the unpaired endpoint ratio.)
 
 **Why the end-to-end row understates the fix, mechanically.** Without the guard the search ships
 **arm B (materialize-all) in 3 of 3 reps**; with it, **arm A in 3 of 3**. Materialize-all is the
@@ -341,9 +348,12 @@ n275_multi_head_attention, n341, n414_multi_head_attention, n480, n553_multi_hea
 ```
 
 17 exist only at cap 8, totalling **1.702 ms**, and read materialized running sums in place of the
-re-summed prefix. The nodes the guard actually newly materializes here are exactly **four** —
-`centered`, `n446`, `n792`, `x1` — so those 16-vs-17 signatures are four placement decisions plus
-their downstream churn. (An earlier revision listed `n619` among them; `n619` is materialized at cap
+re-summed prefix. The placement difference between the two cells is **four nodes** — `centered`,
+`n446`, `n792`, `x1` — so those 16-vs-17 signatures are four materialization decisions' worth of
+change plus their downstream churn. "Four" is the node-level difference, which is the closest
+available proxy for guard firings and not a count of them: nothing logs provenance-41 decisions, so a
+final placement difference cannot say which of the four the guard forced directly and which followed
+from a reset fan-in. (An earlier revision listed `n619` among them; `n619` is materialized at cap
 −1 too, being an FFN output, so it is not one of the guard's decisions.) **8.495 ms of re-summation
 becomes 1.702 ms of bounded-fanin work — −6.79 ms, and every kernel involved is named.** The 119
 signatures common to both cells move the other way by **+0.87 ms** (16.32 → 17.19, +5.3%), which is
@@ -435,7 +445,8 @@ and the numbers below are the signature and node levels:
 **Read the node column, not the signature column, as the count of guard firings.** They are not the
 same quantity and an earlier revision of this section conflated them: one node forced materialized
 resets fan-in downstream and can change several consumers' parameter lists, so cap 8's 16/17 exclusive
-signatures are the churn from **4** materializations, not sixteen of them. The node column is itself a
+signatures are the churn from **4** nodes' worth of placement change, not sixteen. The node column is
+itself a
 proxy — a distinct newly materialized node is what provenance 41 produces, but nothing logs those
 decisions today, so exact firing counts would need a placement log that does not exist. Filed as
 such rather than asserted.
@@ -453,7 +464,7 @@ and the one with the largest accumulated prefix, is the *only* node on this grap
 fan-in exceeds 16; the layer-3 sites are all at or below it. Corrected conclusions: the residual
 stream's maximum transitive inline fan-in on this graph lies in **(16, 32]**, not between 9 and 16;
 the guard's first bite is at cap 16, not cap 8; and what changes between 16 and 8 is not silence
-versus firing but **one** materialization versus sixteen.
+versus firing but **one** node's worth of placement difference versus **four**.
 
 The count is still monotone in the cap (144 / 137 / 136 / 135 / 135 / 135) and still the first thing
 to look at, but the rule has to be stated correctly: **a cap whose kernel count matches cap −1's may
@@ -541,9 +552,15 @@ for (int i1610 = 0; i1610 <= 7; ++i1610) {        // batch  -- serial
 
 `grid=(1,4,1)×(16,16,1)` in master's draw is **4 blocks** — 4 of 20 workgroup processors, 12
 times over. Three of the four cells' draws put them at 16 blocks and 6.40 ms instead of 6.93, so that
-0.53 ms and the 16→4 block change are the lottery; the ~6.4 ms floor, present in every cell, is not. If these reached the FFN
-up-projection's utilization the step would fall to roughly 13.2 ms (~1.43x, taking the 6.40 ms floor
-rather than cap 8's 6.93 ms draw) — an **analytic extrapolation, not a measurement**, offered only to size the next target. Nothing here measures a
+0.53 ms and the 16→4 block change are the lottery; the ~6.4 ms floor, present in every cell, is not.
+
+At the FFN up-projection's utilization the twelve would take about **0.72 ms**, so the replacement
+step is **≈12.67 ms**; what the lottery changes is the baseline that is compared against, giving
+**1.49x** against cap 8's measured 18.88 ms or **1.45x** against a lottery-adjusted 18.35 ms (18.88
+less the 0.53 ms tile penalty). **1.45x** is the conservative figure and the one to carry. An earlier
+revision quoted 13.2 ms / 1.43x, which subtracted the 6.40 ms floor from a total containing the
+6.93 ms draw and so left the penalty in the remainder. This is an **analytic extrapolation, not a
+measurement**, offered only to size the next target. Nothing here measures a
 replacement, and the gh-569 lesson that HIP's block-count curve is non-monotone (peak at 128,
 regressing by 1024) applies to any attempt.
 

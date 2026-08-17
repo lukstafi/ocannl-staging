@@ -130,6 +130,9 @@ cmd_snap() { (
   local st=$?
   kill $w 2>/dev/null; wait $w 2>/dev/null
   echo "$label r$rep replay: exit $st"
+  # A failed replay can still leave a complete source and launch log behind (it may have died after
+  # compiling), so `pick_armA` succeeding proves nothing about the run. Refuse the artifact.
+  [ "$st" -eq 0 ] || { echo "gh612_cells: replay failed (exit $st); refusing the snapshot" >&2; exit "$st"; }
   pick_armA "$out"
 ) }
 
@@ -191,8 +194,17 @@ cmd_profile() { (
     python3 gpt2_bucket.py --source "$src" --stats "$out/kernels-$i.csv" --steps 1 \
             > "$out/bucket-$i.txt" 2>&1
   done
-  echo "  paired step p50 for this cell:"
-  grep -ho '"p50":[0-9.]*' "$out/search.out" "$out/replay.out" 2>/dev/null
+  # `profile` always measures the saved ARM A source, but the step p50 belongs to whichever arm the
+  # search SHIPPED. Pairing them is only valid where arm A shipped; elsewhere the sum and the step
+  # describe different routines and printing them together would invite exactly the wrong inference.
+  local shipped; shipped=$(grep -ho '"shipped":"[AB]"' "$out/search.out" 2>/dev/null | head -1 | grep -o '[AB]')
+  if [ "${shipped:-}" = "A" ]; then
+    echo "  paired step p50 (this cell shipped arm A, so the pairing is valid):"
+    grep -ho '"p50":[0-9.]*' "$out/search.out" "$out/replay.out" 2>/dev/null
+  else
+    echo "  NO paired step p50: this cell shipped arm ${shipped:-?}, and the profile above is arm A."
+    echo "  An arm-B step time is not a validation of an arm-A kernel sum; they are different routines."
+  fi
   # Every run, not just the first: Part 1 quotes run-1/2/3 shares as its stability evidence, so a
   # transcript that shows only run 1 cannot expose it.
   local bf
@@ -318,10 +330,17 @@ def load(name, out):
             if src[j]=="{": d+=1
             elif src[j]=="}": d-=1
             j+=1
-        # Canonicalized body: whitespace collapsed and loop-symbol NUMBERING erased (i1234 -> i#),
-        # which is compile-order noise. Two kernels differing only in their crowned TILE will still
-        # differ here -- that is the point: a body diff does NOT imply a placement change.
-        can=re.sub(r"\bi\d+\b","i#",re.sub(r"\s+"," ",src[i:j-1])).strip()
+        # Canonicalized body: whitespace collapsed, then each generated loop symbol ALPHA-RENAMED to
+        # a stable token in first-appearance order. Collapsing them all to one token instead would
+        # erase the relationships between indices -- a[i1][i2] and a[i2][i1] would hash alike -- so
+        # the renaming has to be injective. Compile-order numbering is still normalized away.
+        raw=re.sub(r"\s+"," ",src[i:j-1]).strip()
+        seen={}
+        def _rn(mo):
+            k=mo.group(0)
+            if k not in seen: seen[k]=f"v{len(seen)}"
+            return seen[k]
+        can=re.sub(r"\bi\d+\b",_rn,raw)
         sig=tuple(sorted(" ".join(q.split()).split()[-1].lstrip("*")
                          for q in m.group(3).split(",") if q.strip()))
         sigs[int(m.group(2))]=sig
