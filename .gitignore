@@ -35,13 +35,11 @@ dune-workspace
 _opam/
 .vscode/settings.json
 
-# Local configuration
-ocannl_config
-!arrayjit/test/ocannl_config
-!test/ocannl_config
-!test/config/ocannl_config
-!test/operations/profiles/ocannl_config
-!test/operations/startup_streams/ocannl_config
+# Local configuration: only the repository-root one is personal. Nested ocannl_config
+# files are test/benchmark fixtures and must be committed, so the pattern is anchored
+# rather than matching at every depth (which needed a negation line per fixture, and
+# silently green suites whenever one was forgotten).
+/ocannl_config
 # Convenience for storing particular configurations, not used by OCANNL
 ocannl_config-*
 
