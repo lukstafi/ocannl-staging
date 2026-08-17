@@ -1342,6 +1342,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name vec_signed_zero)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules vec_signed_zero)
+ (libraries base ocannl stdio)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name narrow_rng_nesting)
  (package neural_nets_lib)
  (deps
