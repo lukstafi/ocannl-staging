@@ -274,6 +274,26 @@ let () =
   in
   show_summary "where-arm reads (conditional, stays a bound)" (CM.analyze where_arms);
 
+  (* Equal-cost arms are charged in full but execute singly, so the op count is still a flagged
+     bound (gh-ocannl-578 round 2): C2[i] = where(K4[i], A16[i] * 2, A16[i+8] * 3) charges both
+     multiplications while one runs. *)
+  let where_equal_arms =
+    for_over i
+      (LL.Set
+         {
+           tn = c2;
+           idcs = [| it i |];
+           llsc =
+             LL.Ternop
+               ( Ops.Where,
+                 (get k4 [| it i |], sp),
+                 (LL.Binop (Ops.Mul, (get a16 [| it i |], sp), (LL.Constant 2., sp)), sp),
+                 (LL.Binop (Ops.Mul, (get a16 [| shift8 i |], sp), (LL.Constant 3., sp)), sp) );
+           debug = "";
+         })
+  in
+  show_summary "where equal-cost arms (op count stays a bound)" (CM.analyze where_equal_arms);
+
   (* Vectorized runs (gh-ocannl-578), strip-mined: setv4 V16[4*i] — bases 4 apart tile the node,
      16 cells written exactly. The random-bits source is read once per run. *)
   let v16 = fresh_tn "V16" [| 16 |] in

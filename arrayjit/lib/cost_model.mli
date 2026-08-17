@@ -50,8 +50,9 @@ type summary = {
   flops : int;  (** Whole-kernel arithmetic-op count (loop extents times per-statement ops). *)
   flops_approx : bool;
       (** [true] when guarded ([If]) code contributed (guards-taken bound), or a short-circuiting
-          form was charged in full while executing only in part — [Where] arms of unequal cost, a
-          gated right operand with nonzero cost (gh-ocannl-578). *)
+          form was charged in full while executing only in part — a [Where] whose arms contribute
+          any cost (only one arm executes; a cost residing in always-run hoisted scope bodies is
+          conservatively flagged too), a gated right operand with nonzero cost (gh-ocannl-578). *)
   opaque : bool;
       (** [true] when the code contains [Staged_compilation] or merge-buffer reads: some traffic and
           ops are invisible to the analysis, so counts may UNDER-estimate. *)

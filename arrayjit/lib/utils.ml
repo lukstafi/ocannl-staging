@@ -433,6 +433,12 @@ let env_var_names n =
     ([--virtualize_max_visits]) and not for [--profile], which is a common application flag and
     which OCANNL treats as fatal when it does not name a known bundle -- a host passing
     [--profile=prod] would die during module initialization (Codex P2 on PR #291). *)
+(* Keys whose prefix-free command-line spellings are never claimed: common application flags a
+   host executable is likely to own (the doc above; Codex P2 on PR #291). The single source of the
+   policy — [read_cmdline_var]'s default and [cmdline_arg_is_config_key] both derive from it, so a
+   spelling the resolver would ignore is never mistaken for a claimed argument. *)
+let qualified_only_config_keys = Set.of_list (module String) [ "profile" ]
+
 (* All [Sys.argv] spellings that address configuration key [n]: prefixed variants first (backward
    compat), then prefix-free unless [qualified_only], each with every accepted separator. *)
 let cmdline_variants ?(qualified_only = false) n =
@@ -446,7 +452,10 @@ let cmdline_variants ?(qualified_only = false) n =
   in
   List.concat_map (cmd_prefixed @ cmd_unprefixed) ~f:(fun n -> [ n ^ "_"; n ^ "-"; n ^ "="; n ])
 
-let read_cmdline_var ?(qualified_only = false) n =
+let read_cmdline_var ?qualified_only n =
+  let qualified_only =
+    Option.value qualified_only ~default:(Set.mem qualified_only_config_keys n)
+  in
   let cmd_variants = cmdline_variants ~qualified_only n in
   Array.find_map Stdlib.Sys.argv ~f:(fun arg ->
       List.find_map cmd_variants ~f:(fun p ->
@@ -460,7 +469,8 @@ let read_cmdline_var ?(qualified_only = false) n =
     no known key under any spelling can still be flagged as a probable typo. *)
 let cmdline_arg_is_config_key arg =
   Set.exists known_config_keys ~f:(fun k ->
-      List.exists (cmdline_variants k) ~f:(fun p -> String.is_prefix arg ~prefix:p))
+      let qualified_only = Set.mem qualified_only_config_keys k in
+      List.exists (cmdline_variants ~qualified_only k) ~f:(fun p -> String.is_prefix arg ~prefix:p))
 
 (** The environment sublevel of {!get_global_arg}: returns the setting's value and the variable it
     came from. An empty value counts as unset. *)

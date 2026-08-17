@@ -297,14 +297,16 @@ let analyze (code : Low_level.t) : summary =
            returns its definitions separately), so both arms' scope bodies do run. Only an operand
            no renderer emits at all — a projection's discarded one, below — may be dropped. The
            floor's [Int.min] stays sound under the same hoisting: it only loosens. Charging both
-           arms of a short-circuiting [?:] is an over-count whenever their costs differ (only one
-           executes), so it flags the op count approximate (gh-ocannl-578; equal-cost arms — the
-           always-run hoisted bodies included on both sides — keep the count exact). *)
+           arms of a short-circuiting [?:] is an over-count whenever either arm contributes any
+           work — only one arm's inline ops execute, equal costs notwithstanding — so any nonzero
+           arm flags the op count approximate (gh-ocannl-578; a cost residing entirely in hoisted
+           scope bodies does execute, so this conservatively over-flags such arms — the sound
+           direction). Only a zero-cost arm pair keeps the count exact. *)
         let ops = match op with Ops.FMA | Ops.Mul3 -> 2 | Ops.Where -> 1 in
         let c2 = arg a2 and c3 = arg a3 in
         (match Ops.ternop_conditionality op with
         | Ops.All_three -> ()
-        | Ops.Cond_and_one_arm -> if c2 <> c3 then flops_approx := true);
+        | Ops.Cond_and_one_arm -> if c2 <> 0 || c3 <> 0 then flops_approx := true);
         ops + arg a1 + c2 + c3
     | Binop (op, a1, a2) -> (
         match Ops.binop_conditionality op with

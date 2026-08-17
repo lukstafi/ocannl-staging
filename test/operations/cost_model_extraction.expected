@@ -50,6 +50,11 @@
   A16 rd=32   wr=0    rmw=0    approx
   C2  rd=0    wr=16   rmw=0    exact
   flops=8~ read=48 write=16 intensity=0.125
+== where equal-cost arms (op count stays a bound) ==
+  K4  rd=16   wr=0    rmw=0    exact
+  A16 rd=32   wr=0    rmw=0    approx
+  C2  rd=0    wr=16   rmw=0    exact
+  flops=12~ read=48 write=16 intensity=0.188
 == vectorized writes, disjoint runs (exact) ==
   U   rd=16   wr=0    rmw=0    exact
   V16 rd=0    wr=64   rmw=0    exact
