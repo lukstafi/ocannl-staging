@@ -1179,21 +1179,30 @@ module C_syntax (B : C_syntax_config) = struct
      exit — and the register-tiled [Tile_mma] micro-kernel (gh-ocannl-469) will hold its C-tile as
      an RM×RN grid of vector registers across the fused k-loop. *)
 
-  (* Broadcast one scalar expression across every lane of [vtyp] (the vector extensions splat a
-     scalar operand of a binary operator, but have no cast or initializer form that does it).
+  (* Broadcast the scalar VARIABLE [src] across every lane of [vtyp], as an initializer holding
+     [lanes] copies of it. The vector extensions splat a scalar operand of a binary operator but
+     have no cast or intrinsic form that does it, and the two arithmetic spellings that look like
+     they would both change bits the scalar twin keeps — while a remainder loop, a peeled edge and
+     the serial fallback all consume the element itself, so the rendering's BITWISE-equality promise
+     covers every input, not merely the well-behaved ones:
 
-     The subtraction is load-bearing, not style: the obvious [((vtyp){0} + x)] NORMALIZES a
-     negative-zero [x], since IEEE-754 has [(+0.0) + (-0.0) = +0.0] — so a splatted [-0.0] would
-     enter the vector arithmetic as [+0.0] while the scalar twin (a remainder loop, a peeled edge,
-     the serial fallback) consumes the element itself, and the zero-sign bits of zero results
-     diverge from a rendering that promises BITWISE equality (gh-ocannl-615). [x - 0.0] is instead
-     the exact identity on every input — both zeros, infinities, NaNs — so the splat preserves the
-     element bit for bit, and compilers fold it back to a plain broadcast. The other candidate, an
-     explicit [(vtyp){x, ..., x}] initializer, preserves it too but at [lanes] textual copies of a
-     possibly-nontrivial expression. *)
-  let vec_splat ~vtyp doc =
+     - [((vtyp){0} + x)] normalizes a negative-zero [x] to [+0.0], since IEEE-754 has
+       [(+0.0) + (-0.0) = +0.0] (gh-ocannl-615);
+     - [(x - (vtyp){0})], its replacement, is the identity on both zeros — but it is still
+       ARITHMETIC, so it quiets a signaling NaN: verified as [0x7f800001 -> 0x7fc00001] under gcc
+       [-fsignaling-nans], and by inspection at clang [-O0]. That it usually survives is only the
+       optimizer folding the subtraction into a broadcast because nothing requires it to respect
+       sNaN — the same "the compiler will probably do the right thing" dependency that
+       [vec_fma_builtin] refuses for [a * b + c] (Codex P2 on PR #360).
+
+     An initializer performs no arithmetic — each lane is a copy — so it preserves every bit
+     pattern unconditionally. Taking a variable rather than an expression is what keeps that cheap:
+     the callers bind the scalar once (the operand can be a memory load under a
+     [convert_precision] wrapper), so the [lanes] repetitions below are repetitions of an
+     identifier. *)
+  let vec_splat ~vtyp ~lanes src =
     let open PPrint in
-    parens (doc ^^ string (Printf.sprintf " - (%s){0}" vtyp))
+    string (Printf.sprintf "(%s){%s}" vtyp (String.concat ~sep:", " (List.init lanes ~f:(fun _ -> src))))
 
   (* The vector-extension typedef shared by the explicit-SIMD renderings: [lanes] elements of the
      compute precision (f32, f64, or -- where the target has native 16-bit arithmetic, gh-ocannl-516
@@ -2684,7 +2693,16 @@ module C_syntax (B : C_syntax_config) = struct
                arguments need a vector, where the implicit vector-scalar splat of binary operators
                does not apply. *)
             if scalar_mentions llsc then vec_expr llsc p
-            else vec_splat ~vtyp (uniform_scalar ~written prec llsc)
+            else
+              (* Bound to a scalar temp first: [vec_splat] repeats its argument per lane, and this
+                 one can be a memory load. Emitted here, hence before the vector declaration the
+                 caller wraps around this expression. *)
+              let sname = fresh "vunif" in
+              emit
+                (string (B.typ_of_prec prec ^ " " ^ sname ^ " = ")
+                ^^ uniform_scalar ~written prec llsc
+                ^^ semi);
+              vec_splat ~vtyp ~lanes sname
           in
           (vec_expr, vec_operand)
         in
@@ -4024,10 +4042,12 @@ module C_syntax (B : C_syntax_config) = struct
                            (Printf.sprintf "tmma_b__[tmma_l__ * %d + tmma_j__ + %d]" ldb (c * lanes))))
                 @ List.concat
                     (List.init rm ~f:(fun r ->
-                         (string (Printf.sprintf "%s tmma_a_%d__ = " vtyp r)
-                         ^^ vec_splat ~vtyp
-                              (string
-                                 (a_elt ~row:(Printf.sprintf "(tmma_i__ + %d)" r) ~l:"tmma_l__"))
+                         (string
+                            (Printf.sprintf "%s tmma_as_%d__ = %s;" ctyp r
+                               (a_elt ~row:(Printf.sprintf "(tmma_i__ + %d)" r) ~l:"tmma_l__"))
+                         ^^ hardline
+                         ^^ string (Printf.sprintf "%s tmma_a_%d__ = " vtyp r)
+                         ^^ vec_splat ~vtyp ~lanes (Printf.sprintf "tmma_as_%d__" r)
                          ^^ semi)
                          :: List.init rn ~f:(fun c ->
                              vec_acc_fma ~prec ~lanes

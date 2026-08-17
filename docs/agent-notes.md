@@ -702,7 +702,15 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   why they are an explicit `=+` into an initialized tensor rather than a `schedule_mma_matmul` leg.
   The literal is the CROSS-BACKEND half — confirmed to have corrupted CUDA host data too, not just
   cc — so its leg deliberately runs on every backend while the splat legs are CPU-gated; a
-  `Vec_extensions`-only test would have missed it.
+  `Vec_extensions`-only test would have missed it. **A splat must be arithmetic-free, not merely
+  value-preserving**: `vec_splat`'s first fix, `x - (vtyp){0}`, is the identity on both zeros but
+  still quiets a signaling NaN (`0x7f800001 -> 0x7fc00001` under gcc `-fsignaling-nans`; that it
+  usually survives is only the optimizer folding the subtraction away, which nothing requires — the
+  same "the compiler will probably do the right thing" dependency `vec_fma_builtin` refuses for
+  `a * b + c`). It renders an initializer of `lanes` copies of a bound scalar temp instead, which is
+  why the callers bind the operand first. sNaN cannot be tested end to end — host values cross as
+  OCaml doubles and the narrowing quiets it — so the structural pins keep both arithmetic spellings
+  out by name.
 - **A vector accumulator update must reach the compiler as ONE vector operation** (gh-ocannl-614,
   fixed). gcc -O3 register-allocated the per-lane `fmaf` loop catastrophically: on the packed GEBP
   shape it unrolled the k-loop 7x and spilled the whole C-tile — 18 insns / 8 FMAs / 0 stack refs

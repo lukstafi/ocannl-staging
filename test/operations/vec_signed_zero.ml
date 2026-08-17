@@ -7,9 +7,16 @@
    are BITWISE what the scalar twin computes — the peeled edges, the serial remainder loop, the
    unscheduled reference.
 
-   The splat spelling [((vtyp){0} + x)] breaks that promise on exactly one input: IEEE-754 has
+   The splat has to be ARITHMETIC-FREE to keep that promise, which is why it renders as an
+   initializer of repeated copies of a bound scalar. Both arithmetic spellings alter bits the scalar
+   twin keeps: [((vtyp){0} + x)] breaks on negative zero, since IEEE-754 has
    [(+0.0) + (-0.0) = +0.0], so a negative-zero element enters the vector arithmetic as POSITIVE
-   zero. Its products then differ from the scalar path's in the sign of a zero, and that survives
+   zero; and [(x - (vtyp){0})], the first fix for that, is the identity on both zeros but still
+   quiets a signaling NaN ([0x7f800001 -> 0x7fc00001] under gcc [-fsignaling-nans]; that it usually
+   survives is only the optimizer folding the subtraction away, which nothing requires). The legs
+   below execute the negative-zero case — a signaling NaN cannot be planted through the tensor API,
+   since host values cross as OCaml doubles and the narrowing conversion quiets it — and the
+   structural pins keep the arithmetic spellings out. Its products then differ from the scalar path's in the sign of a zero, and that survives
    into the result whenever the accumulating sum is itself a signed zero. The two legs below are
    those two arrangements, and each is checked with a comparison that can SEE the difference:
    [Float.equal] reports [-0. = +0.], so parity here is on the bits.
@@ -179,16 +186,20 @@ let () =
     p "register-tiled Tile_mma preserves negative zero (bitwise vs the serial twin)"
       (Array.for_all2_exn got want ~f:bitwise);
     match read_generated "nz_mma" with
-    | None -> p "register tiling renders a sign-preserving A splat" false
+    | None -> p "register tiling renders a bit-preserving A splat" false
     | Some src ->
         let has s = String.is_substring src ~substring:s in
-        p "register tiling renders a sign-preserving A splat"
+        p "register tiling renders a bit-preserving A splat"
           (has "Tile_mma register tiling" && has "full blocks 4x16 of 4x16"
-          (* The normalizing spelling, [((vtyp){0} + x)], must be gone from every splat site. *)
-          && not (has "){0} + ")))
+          (* An initializer of repeated copies of one bound scalar — no arithmetic, so no bit
+             pattern is altered. Both arithmetic spellings are pinned out by name: [(vtyp){0} + x]
+             normalizes a negative zero, and [x - (vtyp){0}] quiets a signaling NaN. *)
+          && has "tmma_as_0__, tmma_as_0__"
+          && (not (has "){0} + "))
+          && not (has " - (ocannl_vec")))
   else (
     skipped "register-tiled Tile_mma preserves negative zero (bitwise vs the serial twin)";
-    skipped "register tiling renders a sign-preserving A splat")
+    skipped "register tiling renders a bit-preserving A splat")
 
 (* === Leg 2: the [Vectorized] rendering's lane-uniform FMA operand. === *)
 
@@ -237,12 +248,15 @@ let () =
     p "vectorized FMA preserves a negative-zero uniform operand (bitwise vs the serial twin)"
       (Array.for_all2_exn got want ~f:bitwise);
     match read_generated "nzv_vec" with
-    | None -> p "vectorized rendering renders a sign-preserving splat" false
+    | None -> p "vectorized rendering renders a bit-preserving splat" false
     | Some src ->
         let has s = String.is_substring src ~substring:s in
-        p "vectorized rendering renders a sign-preserving splat"
-          (has "vector_size" && not (has "){0} + ")))
+        p "vectorized rendering renders a bit-preserving splat"
+          (has "vector_size"
+          && has "vunif"
+          && (not (has "){0} + "))
+          && not (has " - (ocannl_vec")))
   else (
     skipped "vectorized reference carries zeros of both signs";
     skipped "vectorized FMA preserves a negative-zero uniform operand (bitwise vs the serial twin)";
-    skipped "vectorized rendering renders a sign-preserving splat")
+    skipped "vectorized rendering renders a bit-preserving splat")
