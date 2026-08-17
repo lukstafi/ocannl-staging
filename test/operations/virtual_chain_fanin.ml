@@ -853,7 +853,105 @@ let phase5 () =
       ~read:[ out10 ]
   in
   p "sibling merge: consuming v10 is legal, only its own setter's reads splice"
-    (same got9 [ Array.map ell10_vals ~f:(fun x -> x +. 100.) ])
+    (same got9 [ Array.map ell10_vals ~f:(fun x -> x +. 100.) ]);
+  (* Review round 7, P1: consumption through an UPDATE of the inherited virtual (the consumer
+     has a local assignment to it) still records the spliced leaf reads — the strictness key is
+     what the inlined bodies read, not whether the consumed node lacks local setters. *)
+  let ell12 = mk "ell12" in
+  materialize ell12;
+  let d12 = mk "d12" in
+  materialize d12;
+  let v12 = mk "v12" and out12 = mk "uout" in
+  materialize out12;
+  let ctx10 = LL.empty_optimize_ctx () in
+  let llc_a10 =
+    let s = sym () in
+    loop_n s dim (set v12 [| iter s |] (add (get ell12 [| iter s |]) (c 100.)))
+  in
+  let o_a10 =
+    LL.optimize ctx10 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_upd_a" [] llc_a10
+  in
+  p "update splice: routine A defers v12" (known_virtual o_a10 v12);
+  let llc_b10 =
+    let s = sym () and s2 = sym () and s3 = sym () in
+    List.reduce_exn ~f:seq
+      [
+        loop_n s dim (set v12 [| iter s |] (add (get v12 [| iter s |]) (get d12 [| iter s |])));
+        loop_n s2 dim (set out12 [| iter s2 |] (get v12 [| iter s2 |]));
+        loop_n s3 dim (set ell12 [| iter s3 |] (ramp 3000. s3));
+      ]
+  in
+  let o_b10 =
+    LL.optimize ctx10 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_upd_b" [] llc_b10
+  in
+  p "update splice: ell12 is read-before-write despite the local v12 assignment"
+    (read_before_write o_b10 ell12);
+  let ell12_old = Array.init dim ~f:(fun i -> 9. +. Float.of_int i) in
+  let d12_vals = Array.init dim ~f:(fun i -> 0.5 +. Float.of_int i) in
+  let got10 =
+    execute ~name:"vcf_upd_b" o_b10
+      ~seed:[ (ell12, ell12_old); (d12, d12_vals); (out12, blank dim) ]
+      ~read:[ out12; ell12 ]
+  in
+  p "update splice: out sees the pre-overwrite leaf through the updated computation"
+    (same got10
+       [
+         Array.init dim ~f:(fun i -> ell12_old.(i) +. 100. +. d12_vals.(i));
+         Array.init dim ~f:(fun i -> 3000. +. Float.of_int i);
+       ]);
+  (* Review round 7, P1: strictness is PER SPLICED NODE — a routine that consumes an inherited
+     computation must not re-judge its unrelated raw reads. ew is written then read inside ONE
+     [If] body (guards-taken coverage: the false branch performs neither access), so it must
+     stay off the interface even though the routine splices v13 elsewhere. *)
+  let gflag = mk ~dims:[| 1 |] "gflag" in
+  materialize gflag;
+  let ew = mk "ew" in
+  materialize ew;
+  let ell13 = mk "ell13" in
+  materialize ell13;
+  let v13 = mk "v13" and out13 = mk "ewout" and out14 = mk "vout14" in
+  materialize out13;
+  materialize out14;
+  let ctx11 = LL.empty_optimize_ctx () in
+  let llc_a11 =
+    let s = sym () in
+    loop_n s dim (set v13 [| iter s |] (add (get ell13 [| iter s |]) (c 100.)))
+  in
+  let o_a11 =
+    LL.optimize ctx11 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_raw_a" [] llc_a11
+  in
+  p "raw-read isolation: routine A defers v13" (known_virtual o_a11 v13);
+  let llc_b11 =
+    let sg = sym () and sh = sym () and s = sym () in
+    seq
+      (LL.If
+         {
+           cond = (get gflag [| fixed 0 |], single);
+           body =
+             seq
+               (loop_n sg dim (set ew [| iter sg |] (c 7.)))
+               (loop_n sh dim (set out13 [| iter sh |] (get ew [| iter sh |])));
+         })
+      (loop_n s dim (set out14 [| iter s |] (get v13 [| iter s |])))
+  in
+  let o_b11 =
+    LL.optimize ctx11 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_raw_b" [] llc_b11
+  in
+  p "raw-read isolation: ew keeps its raw guards-taken verdict (not an input)"
+    ((not (read_before_write o_b11 ew))
+    && (not (Set.mem o_b11.LL.spliced_rbw ew))
+    &&
+    let (ins, _), _ = LL.input_and_output_nodes o_b11 in
+    not (Set.mem ins ew));
+  let ell13_vals = Array.init dim ~f:(fun i -> 21. +. Float.of_int i) in
+  let got11 =
+    execute ~name:"vcf_raw_b" o_b11
+      ~seed:[ (gflag, [| 1. |]); (ell13, ell13_vals); (ew, blank dim); (out13, blank dim); (out14, blank dim) ]
+      ~read:[ out13; out14 ]
+  in
+  p "raw-read isolation: executed values match on the taken branch"
+    (same got11
+       [ Array.create ~len:dim 7.; Array.map ell13_vals ~f:(fun x -> x +. 100.) ])
 
 (* === Phase 6: deferral-only comp through the ordinary pipeline (review round 3) === *)
 

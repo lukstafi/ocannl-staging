@@ -1365,15 +1365,9 @@ and scalar_reads_merge_buffer ~self : scalar_t -> bool = function
           scalar_reads_merge_buffer ~self a || scalar_reads_merge_buffer ~self b)
   | Unop (_, (a, _)) -> scalar_reads_merge_buffer ~self a
 
-let%track7_sexp inline_computation ~id ~inherited_merge_tainted ~consumed_inherited
-    (optim_ctx : optimize_ctx) (traced : traced_array)
-    (static_indices : Indexing.static_symbol list) (call_args : Indexing.axis_index array) :
-    t option =
-  (* A node with no local write at all is defined by an EARLIER routine of the lineage: consuming
-     its computation is what makes this routine's final code diverge from its raw code in ways
-     the raw analysis cannot see, which is the signal gating the reconcile-time flag flips
-     (review round 6). *)
-  if not (traced.has_assignment || traced.zeroed_out) then consumed_inherited := true;
+let%track7_sexp inline_computation ~id ~inherited_merge_tainted (optim_ctx : optimize_ctx)
+    (traced : traced_array) (static_indices : Indexing.static_symbol list)
+    (call_args : Indexing.axis_index array) : t option =
   let exception Non_virtual of int in
   let static_indices =
     Set.of_list (module Indexing.Symbol)
@@ -1945,9 +1939,54 @@ let rec proc_contains_set_from_vec tn = function
   | _ -> false
 
 let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_indices (llc : t) :
-    t * bool =
+    t * Tnode.t Hash_set.t =
   let plc = optim_ctx.placements in
-  let consumed_inherited = ref false in
+  (* Every array read inside the inlined body of an INHERITED computation (present in the
+     lineage table at routine entry — the snapshot above): cross-routine splicing introduces
+     reads the raw analysis never saw, so the reconcile-time strict coverage verdicts apply
+     exactly to these nodes, and a raw-positioned or locally-inlined read keeps the raw verdicts
+     (review round 7: a routine-wide gate dragged unrelated raw reads into strict re-judging, a
+     has-local-assignment provenance test missed consumption through an update of an inherited
+     virtual, and recording LOCAL splices re-broke the init flows — local bodies' reads were
+     already judged by the raw analysis at their producer positions). Nested inherited
+     consumption inside a local body still records: the nested [Get] routes through the same
+     arm while the local setter is processed for storage. *)
+  let spliced_reads = Hash_set.create (module Tnode) in
+  let rec record_spliced_reads (c : t) =
+    match c with
+    | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _
+      ->
+        ()
+    | Seq (c1, c2) ->
+        record_spliced_reads c1;
+        record_spliced_reads c2
+    | For_loop { body; _ } -> record_spliced_reads body
+    | Set { llsc; _ } | Set_local (_, llsc) -> record_spliced_scalar llsc
+    | Set_from_vec { arg = sc, _; _ } -> record_spliced_scalar sc
+    | Set_dynamic { dyn_value = v, _; llsc; _ } ->
+        record_spliced_scalar v;
+        record_spliced_scalar llsc
+    | If { cond = c0, _; body } ->
+        record_spliced_scalar c0;
+        record_spliced_reads body
+    | Tile_mma { fallback; _ } -> record_spliced_reads fallback
+  and record_spliced_scalar (sc : scalar_t) =
+    match sc with
+    | Constant _ | Constant_bits _ | Embed_index _ | Get_local _ | Get_merge_buffer _ -> ()
+    | Get (tn, _) -> Hash_set.add spliced_reads tn
+    | Get_dynamic { tn; dyn_value = v, _; _ } ->
+        Hash_set.add spliced_reads tn;
+        record_spliced_scalar v
+    | Local_scope { body; _ } -> record_spliced_reads body
+    | Ternop (_, (a, _), (b, _), (d, _)) ->
+        record_spliced_scalar a;
+        record_spliced_scalar b;
+        record_spliced_scalar d
+    | Binop (_, (a, _), (b, _)) ->
+        record_spliced_scalar a;
+        record_spliced_scalar b
+    | Unop (_, (a, _)) -> record_spliced_scalar a
+  in
   (* The entry-time snapshot of merge-tainted deferred computations: everything in the table at
      this point was stored by an earlier routine of the lineage (this routine's own computations
      are stored during the walk below), so a node found here with a merge-buffer-reading body is
@@ -1955,9 +1994,11 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
      consumption. A node with local setters ON TOP of an inherited tainted component (the
      update-an-inherited-virtual pattern) is tainted all the same: inlining would replay the
      inherited component. *)
+  let inherited_tns = Hash_set.create (module Tnode) in
   let inherited_merge_tainted =
     let tainted = Hash_set.create (module Tnode) in
     Hashtbl.iteri optim_ctx.computations ~f:(fun ~key ~data ->
+        Hash_set.add inherited_tns key;
         if List.exists data ~f:(fun (_, body) -> computation_reads_merge ~self:key body) then
           Hash_set.add tainted key);
     tainted
@@ -2114,9 +2155,11 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
           let id = get_scope tn in
           Option.value ~default:llsc
           @@ Option.map
-               (inline_computation ~id ~inherited_merge_tainted ~consumed_inherited optim_ctx
-                  traced static_indices indices)
-               ~f:(fun body -> Local_scope { id; body; orig_indices = indices })
+               (inline_computation ~id ~inherited_merge_tainted optim_ctx traced static_indices
+                  indices)
+               ~f:(fun body ->
+                 if Hash_set.mem inherited_tns tn then record_spliced_reads body;
+                 Local_scope { id; body; orig_indices = indices })
     | Get_dynamic { tn; idcs; dyn_axis; dyn_value = v, prec } ->
         Get_dynamic { tn; idcs; dyn_axis; dyn_value = (loop v, prec) }
     | Local_scope opts ->
@@ -2141,7 +2184,7 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
       ~owned:(Set.empty (module Tnode))
       ~in_storage_pass:false llc
   in
-  (result, !consumed_inherited)
+  (result, spliced_reads)
 
 let cleanup_virtual_llc plc ~static_indices (llc : t) : t =
   (* The current position is within scope of the definitions of the process_for virtual arrays. *)
@@ -5416,9 +5459,9 @@ let copy_traced_store (store : traced_store) : traced_store =
    buffers hold the payload of the transfer preceding THIS routine's run, so deferring a merge
    read into a later routine changes which transfer it observes — that computation must not be
    shared across routines. *)
-let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store) ~(spliced : bool)
-    ~(static_indices : Indexing.static_symbol list) ~(merge_node : Tnode.t option) (llc : t) :
-    bool * Set.M(Tnode).t =
+let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
+    ~(spliced_reads : Tnode.t Hash_set.t) ~(static_indices : Indexing.static_symbol list)
+    ~(merge_node : Tnode.t option) (llc : t) : bool * Set.M(Tnode).t =
   let accessed = Hash_set.create (module Tnode) in
   let written_seen = Hash_set.create (module Tnode) in
   let fresh_read = Hash_set.create (module Tnode) in
@@ -5437,16 +5480,18 @@ let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
     match Hashtbl.find traced_store tn with
     | None -> if live then Hash_set.add fresh_read tn
     | Some traced ->
-        (* Flag flips are gated on [spliced]: only consuming an INHERITED computation makes the
-           final code diverge from the raw code in ways the raw analysis cannot see. A raw-only
-           routine keeps the raw verdicts wholesale — their lenient contracts (rmw exemption,
+        (* Flag flips are gated PER NODE on [spliced_reads] — the nodes read inside inlined
+           bodies (review rounds 6-7): splicing is what moves reads to positions the raw
+           analysis never judged, so only those nodes get the strict coverage verdicts, while
+           raw-positioned reads keep the raw verdicts, whose lenient contracts (rmw exemption,
            guards-taken) deliberately classify patterns whose initialization lives in an earlier
-           routine of the program, and re-judging those strictly broke real flows across the
-           suite (review round 6). [zeroed_out] counts as written: a [Zero_out]-only node (a
-           [Fetch] of constant 0.) records no [has_assignment], yet a spliced read before it
-           still needs the entry value. *)
+           routine of the program — routine-wide strictness broke real flows across the suite.
+           [zeroed_out] counts as written: a [Zero_out]-only node (a [Fetch] of constant 0.)
+           records no [has_assignment], yet a spliced read before it still needs the entry
+           value. *)
         if
-          spliced && live
+          live
+          && Hash_set.mem spliced_reads tn
           && (traced.has_assignment || traced.zeroed_out)
           && not traced.read_before_write
         then
@@ -5585,7 +5630,7 @@ let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : opt
   decide_placements input_ctx traced_store ~max_visits:virtualize_settings.max_visits
     ~reads_covered:an.an_reads_covered ~read_multiplicity:an.an_read_multiplicity;
   [%log "optimizing"];
-  let virtual_llc_result, consumed_inherited =
+  let virtual_llc_result, spliced_reads =
     virtual_llc input_ctx traced_store an.an_reverse_node_map static_indices llc
   in
   let llc =
@@ -5596,8 +5641,8 @@ let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : opt
     @@ virtual_llc_result
   in
   let uses_merge, spliced_rbw =
-    reconcile_traced_store input_ctx.placements traced_store ~spliced:consumed_inherited
-      ~static_indices ~merge_node:an.an_merge_node llc
+    reconcile_traced_store input_ctx.placements traced_store ~spliced_reads ~static_indices
+      ~merge_node:an.an_merge_node llc
   in
   (match llc with
   | Noop -> [%log "routine optimized to an empty schedule: every target virtualized (gh-611)"]

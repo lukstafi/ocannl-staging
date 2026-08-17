@@ -66,6 +66,12 @@ same-position splice: ell9 is read-before-write (rmw is not exempt from the inte
 same-position splice: updated in place over the incoming values: true
 sibling merge: v10 stays virtual in the shared loop: true
 sibling merge: consuming v10 is legal, only its own setter's reads splice: true
+update splice: routine A defers v12: true
+update splice: ell12 is read-before-write despite the local v12 assignment: true
+update splice: out sees the pre-overwrite leaf through the updated computation: true
+raw-read isolation: routine A defers v13: true
+raw-read isolation: ew keeps its raw guards-taken verdict (not an input): true
+raw-read isolation: executed values match on the taken branch: true
 pipeline deferral-only: links and runs as a no-op on a fresh context: true
 pipeline deferral-only: the target stayed virtual: true
 pipeline consumer on a w2-less chain: rejected at link (spliced input demanded): true

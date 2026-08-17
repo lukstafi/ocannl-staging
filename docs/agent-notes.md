@@ -214,11 +214,13 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   not taint; the taint scan is `~self`-filtered like `inline_computation`'s own setter filter, or
   a shared-loop sibling's merge read rejects valid sharing. The STRICT coverage verdicts —
   guarded writes filtered (never definite), rmw exemption off (a same-position spliced read is a
-  genuine RMW), `zeroed_out` counted as written — apply ONLY when the routine consumed an
-  INHERITED computation (`virtual_llc` returns the signal from `inline_computation`): raw-only
-  routines keep the raw verdicts wholesale, whose lenient contracts deliberately classify
-  patterns initialized by an earlier routine of the program — re-judging those strictly broke
-  real flows across the suite. `from_prior_context` (both `Backends.compile` and `from_prior_context_batch`)
+  genuine RMW), `zeroed_out` counted as written — apply PER NODE, to exactly the nodes read
+  inside INLINED bodies (`virtual_llc` records them at each `inline_computation` splice and
+  returns the set): splicing is what moves reads to positions the raw analysis never judged.
+  Raw-positioned reads keep the raw verdicts, whose lenient contracts deliberately classify
+  patterns initialized by an earlier routine of the program — routine-wide strictness broke
+  real flows across the suite, and a has-local-assignment provenance test for "inherited"
+  missed consumption through an update of an inherited virtual (rounds 6-7). `from_prior_context` (both `Backends.compile` and `from_prior_context_batch`)
   reconciles in BOTH directions: the raw-assignments set is filtered by the reconciled traced
   store (raw over-approximates the residual schedule — a deferral-only routine must link on a
   fresh context) and, for routines carrying an assignments program, unioned with the reconciled
