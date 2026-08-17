@@ -789,7 +789,13 @@
 #cc_fp16_arithmetic=auto
 
 # Limit on the allowed size of unrolled constant tensor nodes
-# (where the initialization code sets the values).
+# (where the initialization code sets the values). At most this many elements, a constant
+# literal is inlinable: it carries in-kernel initialization code that virtualization can
+# dissolve into consumers. Above it, the literal is host-backed data uploaded at link time.
+# The threshold only decides inlinability, not where initialization lives: a small constant
+# whose placement lands on materialized also drops its in-kernel init in favor of the
+# link-time upload (gh-ocannl-633), so schedule legality does not depend on operand literal
+# sizes. Setting 0 forces host-side initialization for all constant literals.
 #limit_constant_fill_size=16
 
 # The timeout for the CC backend to wait for the compilation files to appear, in seconds.

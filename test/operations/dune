@@ -106,6 +106,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name hosted_constant_fill)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules hosted_constant_fill)
+ (libraries base ocannl arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name test_param_shape_error)
  (package neural_nets_lib)
  (deps
@@ -2522,3 +2533,4 @@
  (libraries base ocannl stdio pprint ll_test)
  (preprocess
   (pps ppx_here ppx_ocannl)))
+

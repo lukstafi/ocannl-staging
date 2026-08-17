@@ -4029,7 +4029,15 @@ let validate_parallel plc (llc : t) : unit =
          ^ " is not nested under annotated loops covering all active hardware dimensions (missing: "
           ^ String.concat ~sep:", " (List.map missing ~f:describe_pair)
           ^ "): every hardware index of an uncovered dimension executes it, racing or repeating \
-             the update")
+             the update"
+          ^
+          (* gh-ocannl-633: a constant's in-kernel init normally moves to a link-time [Host_inits]
+             upload before this check ([hosted_constant_inits_to_link_time]); when a bail-out kept
+             it (e.g. a padded constant), name the actual culprit — the schedule is not at fault. *)
+          if Tn.known_host_constant tn then
+            ". The write is the in-kernel initialization of a constant that could not be moved to \
+             link time; --ocannl_limit_constant_fill_size=0 forces host-side initialization"
+          else "")
     in
     let rec check_writes ~covered ~enclosing llc =
       match llc with
@@ -5717,6 +5725,80 @@ let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
   List.iter stale ~f:(Hashtbl.remove traced_store);
   (!uses_merge, Set.of_list (module Tnode) (Hash_set.to_list flipped_rbw))
 
+(* gh-ocannl-633: a small constant's in-kernel initialization (the unrolled [Constant_fill] fetch)
+   is the recipe virtualization inlines; once placement materializes the node, the initialization
+   belongs to link time — [Host_inits] uploads the same values into each context — not to the
+   kernel, where straight-line whole-node writes are rejected beside hardware-annotated loops
+   ([validate_parallel]'s coverage rule) and re-execute on every run. Drop the writes and flip the
+   traced facts to the read-only-input shape that above-threshold ndarray literals have, so I/O
+   classification and buffer pooling treat both regimes identically.
+
+   Conservative bail-outs keep the in-kernel init whenever: the node's placement is not a context
+   buffer ([Local] scratch is fresh per launch, link uploads cannot reach it; [Virtual] definitions
+   were already dissolved by cleanup), the node is padded (its init includes padding-region loops),
+   or any write to the node is not a fixed-index literal-constant [Set]. Walker conventions
+   (gh-ocannl-630): this pass never descends into scalar operands, so operand-conditionality
+   dispatch does not apply; writes under dead loops need no special-casing — treating a dead write
+   as candidate or disqualifier is sound either way (dropping dead code, or keeping live init). *)
+let hosted_constant_inits_to_link_time (plc : Tn.Placements.t) (traced_store : traced_store)
+    (llc : t) : t =
+  let candidates : (Tn.t, bool) Hashtbl.t = Hashtbl.create (module Tnode) in
+  let eligible tn =
+    Tn.known_constant tn && Host_inits.mem tn && Option.is_none (Tn.get_padding tn)
+  in
+  let note_write tn ok =
+    if eligible tn then
+      Hashtbl.update candidates tn ~f:(function None -> ok | Some prev -> prev && ok)
+  in
+  let is_init_set ~idcs ~llsc =
+    Array.for_all idcs ~f:(function Indexing.Fixed_idx _ -> true | _ -> false)
+    && match llsc with Constant _ -> true | _ -> false
+  in
+  let rec scan (c : t) =
+    match c with
+    | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Set_local _
+      ->
+        ()
+    | Seq (c1, c2) ->
+        scan c1;
+        scan c2
+    | For_loop { body; _ } | If { body; _ } -> scan body
+    | Zero_out tn -> note_write tn false
+    | Set { tn; idcs; llsc; _ } -> note_write tn (is_init_set ~idcs ~llsc)
+    | Set_dynamic { tn; _ } | Set_from_vec { tn; _ } -> note_write tn false
+    (* Pre-schedule construct, unreachable here; defensively treat the target as disqualified. *)
+    | Tile_mma { d = tn, _; _ } -> note_write tn false
+  in
+  scan llc;
+  let hosted =
+    Hashtbl.fold candidates ~init:[] ~f:(fun ~key:tn ~data:ok acc ->
+        if ok && Tn.Placements.is_materialized_peek plc tn then tn :: acc else acc)
+  in
+  if List.is_empty hosted then llc
+  else
+    let hosted = Set.of_list (module Tnode) hosted in
+    let rec rewrite (c : t) : t =
+      match c with
+      | Seq (c1, c2) -> (
+          match (rewrite c1, rewrite c2) with
+          | Noop, c | c, Noop -> c
+          | c1, c2 -> Seq (c1, c2))
+      | For_loop ({ body; _ } as f) -> (
+          match rewrite body with Noop -> Noop | body -> For_loop { f with body })
+      | If ({ body; _ } as i) -> (
+          match rewrite body with Noop -> Noop | body -> If { i with body })
+      | Set { tn; _ } when Set.mem hosted tn -> Noop
+      | c -> c
+    in
+    let llc = rewrite llc in
+    Set.iter hosted ~f:(fun tn ->
+        match Hashtbl.find traced_store tn with
+        | None -> ()
+        | Some traced ->
+            traced.has_assignment <- false;
+            traced.read_only <- true);
+    llc
+
 let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : optimized =
   let static_indices = an.an_static_indices in
   let llc = an.an_llc in
@@ -5730,6 +5812,7 @@ let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : opt
   let llc =
     hoist_cross_statement_cse @@ eliminate_common_subexpressions
     @@ rewrite_one_hot_reductions ~static_indices
+    @@ hosted_constant_inits_to_link_time input_ctx.placements traced_store
     @@ simplify_llc static_indices
     @@ cleanup_virtual_llc input_ctx.placements ~static_indices
     @@ virtual_llc_result

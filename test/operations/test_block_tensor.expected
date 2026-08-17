@@ -304,12 +304,26 @@ HERE: test/operations/test_block_tensor.ml:360:21
 
 Gradient of g1 (should be cos of original):
 HERE: test/operations/test_block_tensor.ml:362:21
-[290]: 1,2 shape 0:2  <not-in-context>
+┌─────────────────────┐
+│[290]: 1,2 shape 0:2 │
+│┌┬────────────┐      │
+│││axis 0      │      │
+│├┼────────────┤      │
+│││ 1.00  2.00 │      │
+│└┴────────────┘      │
+└─────────────────────┘
 grad_1,2 <not-in-context>
 
 Gradient of g2:
 HERE: test/operations/test_block_tensor.ml:364:21
-[292]: 3,4 shape 0:2  <not-in-context>
+┌─────────────────────┐
+│[292]: 3,4 shape 0:2 │
+│┌┬────────────┐      │
+│││axis 0      │      │
+│├┼────────────┤      │
+│││ 3.00  4.00 │      │
+│└┴────────────┘      │
+└─────────────────────┘
 grad_3,4 <not-in-context>
 
 --- Test 8: Gradient flow (3-way) ---
@@ -319,17 +333,38 @@ HERE: test/operations/test_block_tensor.ml:390:21
 
 Gradient of h1:
 HERE: test/operations/test_block_tensor.ml:392:21
-[315]: 0.5,1.5 shape 0:2  <not-in-context>
+┌─────────────────────────┐
+│[315]: 0.5,1.5 shape 0:2 │
+│┌┬───────────────┐       │
+│││axis 0         │       │
+│├┼───────────────┤       │
+│││ 5.00e-1  1.50 │       │
+│└┴───────────────┘       │
+└─────────────────────────┘
 grad_0.5,1.5 <not-in-context>
 
 Gradient of h2:
 HERE: test/operations/test_block_tensor.ml:394:21
-[317]: 1,2 shape 0:2  <not-in-context>
+┌─────────────────────┐
+│[317]: 1,2 shape 0:2 │
+│┌┬────────────┐      │
+│││axis 0      │      │
+│├┼────────────┤      │
+│││ 1.00  2.00 │      │
+│└┴────────────┘      │
+└─────────────────────┘
 grad_1,2 <not-in-context>
 
 Gradient of h3:
 HERE: test/operations/test_block_tensor.ml:396:21
-[319]: 3,0.1 shape 0:2  <not-in-context>
+┌───────────────────────┐
+│[319]: 3,0.1 shape 0:2 │
+│┌┬───────────────┐     │
+│││axis 0         │     │
+│├┼───────────────┤     │
+│││ 3.00  1.00e-1 │     │
+│└┴───────────────┘     │
+└───────────────────────┘
 grad_3,0.1 <not-in-context>
 
 --- Test 8b: Nested gradient flow [[n1; n2]; [n3; n4]] ---

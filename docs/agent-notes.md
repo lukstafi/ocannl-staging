@@ -148,6 +148,20 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   scope bodies really do run. Only an operand no renderer emits at all (a projection's discarded
   one) may be dropped from the upper bound. The floor's `Int.min` is unaffected: hoisting only
   loosens a lower bound.
+- **A materialized constant literal's initialization is data, not code** (gh-ocannl-633): at or
+  below `limit_constant_fill_size` a `Tensor.ndarray` literal carries an in-kernel `Constant_fill`
+  fetch — its inlining recipe — AND registers its values in `Host_inits`. When a lineage's
+  placement materializes the node, `Low_level.hosted_constant_inits_to_link_time` (in
+  `specialize_proc`, right after `simplify_llc`) deletes the in-kernel init writes and flips the
+  traced facts to read-only input, so the node self-initializes at link time exactly like an
+  above-threshold (`Reshape`-backed) literal. Consequences: schedule legality does not depend on
+  operand literal size (the straight-line init writes used to fail `validate_parallel`'s coverage
+  rule beside hardware-annotated loops); a fresh context can link a routine reading a constant
+  whose fetch an earlier routine consumed (`verify_prior_context` exempts `Host_inits` members);
+  and `Stage ~hoisted:true` reaches small constants (`Schedule.hoistable_constant`). Bail-outs
+  that KEEP the in-kernel init: padded constants (their init includes padding-region loops),
+  `Local`-placed constants (scratch is fresh per launch, uploads cannot reach it), and any write
+  that is not a fixed-index literal-constant `Set`. Test: `test/operations/hosted_constant_fill`.
 - Both digests over lowered code — the analysis cache's key (`Low_level.analysis_digest`) and the
   schedule cache's canonical identity (`Schedule_cache.canonicalize`) — share ONE walk,
   `Low_level.Canonical_render.emit` (gh-ocannl-563). Render a newly added `Low_level.t` /
