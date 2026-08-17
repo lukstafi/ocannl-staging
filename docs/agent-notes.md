@@ -698,8 +698,11 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   print through `C_syntax.c_float_literal`. Neither shows up in ordinary parity tests: `Float.equal`
   reports `-0. = +0.`, and a divergence in the sign of a zero product only survives into a result
   whose accumulator is itself a signed zero. `test/operations/vec_signed_zero` is the regression, and
-  it needs an accumulator preloaded with `-0.0` (a zeroed one absorbs the sign) — which is why it is
-  an explicit `=+` into an initialized tensor rather than a `schedule_mma_matmul` leg.
+  its splat legs need an accumulator preloaded with `-0.0` (a zeroed one absorbs the sign) — which is
+  why they are an explicit `=+` into an initialized tensor rather than a `schedule_mma_matmul` leg.
+  The literal is the CROSS-BACKEND half — confirmed to have corrupted CUDA host data too, not just
+  cc — so its leg deliberately runs on every backend while the splat legs are CPU-gated; a
+  `Vec_extensions`-only test would have missed it.
 - **A vector accumulator update must reach the compiler as ONE vector operation** (gh-ocannl-614,
   fixed). gcc -O3 register-allocated the per-lane `fmaf` loop catastrophically: on the packed GEBP
   shape it unrolled the k-loop 7x and spilled the whole C-tile — 18 insns / 8 FMAs / 0 stack refs

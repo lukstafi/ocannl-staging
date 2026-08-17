@@ -110,6 +110,26 @@ let rec innermost_loop (llc : LL.t) : Ir.Indexing.symbol option =
   | LL.If { body; _ } -> innermost_loop body
   | _ -> None
 
+(* === Leg 0: the constant literal, on every backend. ===
+
+   Upstream of both splat legs, and not a CPU concern: the constant fill of a small array lowers to
+   scalar stores of C literals on every C-family backend, and [%.16g (-0.)] is ["-0"] — an INTEGER
+   literal, [+0.0] once cast. So before gh-ocannl-615 a [-0.0] in host data was normalized before
+   any kernel ran, which is what made the first version of the legs below vacuous. Value-only, since
+   whether a given backend inlines this particular fill or uploads it is its own business; either way
+   the host's bits must come back. *)
+
+let () =
+  (* Both zeros and ordinary values, so a buffer that came back all-[+0.0] (the pre-fix behavior) or
+     all-[-0.0] (a sign-flipping "fix") both fail. *)
+  let zv = Array.init 8 ~f:(fun x -> if x % 2 = 0 then -0.0 else Float.of_int (x + 1) *. 0.5) in
+  let z = TDSL.ndarray zv ~label:[ "nzc" ] ~output_dims:[ 8 ] () in
+  let%op zc = z *. 1.0 in
+  let ctx = run ~name:"nzc_fill" ~transform:(fun opt -> opt) (Train.forward zc) in
+  let got = Context.get_values ctx z.Tensor.value in
+  p "negative-zero host data survives initialization"
+    (Array.length got = 8 && Array.for_all2_exn got zv ~f:bitwise)
+
 (* === Leg 1: the register-tiled [Tile_mma] A splat. === *)
 
 let mi = 4
@@ -144,12 +164,6 @@ let () =
       run ~name:"nz_serial" ~transform:(fun opt -> opt) [%cd d_twin =+ ma * mb ~logic:"@"]
     in
     let want = discriminating "nz_serial" (Context.get_values ctx_twin d_twin.Tensor.value) in
-    (* Upstream of the splat: the host data's negative zeros have to survive the constant fill,
-       which for an array this small inlines as scalar stores of C literals. [%.16g (-0.)] is
-       ["-0"] — the C INTEGER zero, which casts to [+0.0] — so before gh-ocannl-615 the inputs
-       above reached the kernel already normalized and everything below was vacuous. *)
-    p "inlined constant fill preserves negative zero"
-      (Array.exists (Context.get_values ctx_twin ma.Tensor.value) ~f:is_neg_zero);
     let d_mma = accumulator "nz_d_mma" in
     let transform (opt : LL.optimized) =
       let i, j, k =
@@ -173,7 +187,6 @@ let () =
           (* The normalizing spelling, [((vtyp){0} + x)], must be gone from every splat site. *)
           && not (has "){0} + ")))
   else (
-    skipped "inlined constant fill preserves negative zero";
     skipped "register-tiled Tile_mma preserves negative zero (bitwise vs the serial twin)";
     skipped "register tiling renders a sign-preserving A splat")
 

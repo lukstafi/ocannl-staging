@@ -1,4 +1,4 @@
-inlined constant fill preserves negative zero: true
+negative-zero host data survives initialization: true
 register-tiled Tile_mma preserves negative zero (bitwise vs the serial twin): true
 register tiling renders a sign-preserving A splat: true
 vectorized reference carries zeros of both signs: true
