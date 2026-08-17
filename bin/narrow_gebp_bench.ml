@@ -14,11 +14,14 @@
    variants schedule [Sched.split]s of factor [bm] over the i axis and [bk] over the k axis, so
    they need [n mod bm = 0] and [n mod bk = 0] (and an n big enough to leave a loop nest at all);
    an unschedulable n runs the unblocked naive variant alone, so an arbitrary extent still has
-   something to compare against. Each packed line carries its [C_syntax.mma_census] rendering,
-   because a [Tile_mma] whose preconditions fail (a column extent below the compute vector width
-   is one of several ways in) renders the scalar fallback while still reporting as "packmma" —
-   read the bracket, not the variant name, when deciding what a timing measured. Readbacks stay
-   outside the timed region (the [Context.get_values] trap, docs/agent-notes.md). *)
+   something to compare against. Each line carries a position-weighted checksum of the whole
+   output, which is what makes a mishandled remainder region visible — a single interior cell
+   cannot see the tail a non-dividing factor creates. Each packed line carries its
+   [C_syntax.mma_census] rendering, because a [Tile_mma] whose preconditions fail (a column extent
+   below the compute vector width is one of several ways in) renders the scalar fallback while
+   still reporting as "packmma" — read the bracket, not the variant name, when deciding what a
+   timing measured. Readbacks stay outside the timed region (the [Context.get_values] trap,
+   docs/agent-notes.md). *)
 
 open Base
 open Ocannl
@@ -98,7 +101,8 @@ let () =
   in
   let flops = 2.0 *. Float.of_int n *. Float.of_int n *. Float.of_int n in
   (* Exactly-representable inputs at every storage precision (the parity-test recipes); the spot
-     check guards against an all-zeros or NaN run without a full reference. *)
+     check and the whole-output checksum below guard against an all-zeros or NaN run, and against a
+     mishandled remainder region, without a full reference. *)
   let ma =
     NTDSL.init ~l:"ma" ~prec ~i:[ n ] ~o:[ n ]
       ~f:(fun idcs -> Float.of_int (((idcs.(0) * n) + idcs.(1)) % 3) *. 0.25)
@@ -193,11 +197,24 @@ let () =
        the cc scheduler is synchronous, so the run loop needs no readback to complete. *)
     let values = Context.get_values ctx mc.Tensor.value in
     (* Element [1][1] of the n*n result — an interior cell, away from the corners — except at
-       n = 1, where the whole output is one element. *)
+       n = 1, where the whole output is one element. One interior cell cannot see the remainder
+       region: [bm]/[bk] are arguments now, and a [Sched.split] whose factor does not divide its
+       extent puts the last partial block exactly there, so a variant that drops or repeats tail
+       work would still print a matching spot value. Hence the whole output is checksummed too:
+       every correct variant prints the identical value, a tail-mishandling one does not.
+       Position-weighted, because a plain sum of THIS data is 0 whenever 5 divides n: the total
+       factors as sum_k (sum_i ma[i][k]) (sum_j mb[k][j]), and each mb row then spans whole cycles
+       of its 5 values, whose (v-2) offsets sum to zero — the same degeneracy schedule_bench has at
+       17, reached at ordinary GEBP extents (320, 640, 1280). The weight is capped so that products
+       of these exact-in-binary operands stay exact in the double accumulator, making cross-variant
+       equality exact rather than approximate. Both checks are outside the timed region. *)
+    let checksum =
+      Array.foldi values ~init:0.0 ~f:(fun i acc v -> acc +. (v *. Float.of_int (1 + (i % 251))))
+    in
     let spot = Int.min (n + 1) (Array.length values - 1) in
     let secs = Float.of_int63 Int63.(stop - start) /. 1e9 /. Float.of_int repeats in
-    p "%-12s %8.3f ms  %8.2f GFLOP/s  (spot check [%d] %.2f)%s\n" variant (secs *. 1e3)
-      (flops /. secs /. 1e9) spot values.(spot)
+    p "%-12s %8.3f ms  %8.2f GFLOP/s  (spot check [%d] %.2f, chk %.10g)%s\n" variant (secs *. 1e3)
+      (flops /. secs /. 1e9) spot values.(spot) checksum
       (match renderings with
       | [] -> ""
       | rs ->
