@@ -105,7 +105,9 @@ where on CUDA they were the larger half.
   set.
 - **Correctness gate, stated at the precision it actually holds.** Across all 26 tuned runs — both
   placement arms, all six caps, all three trees — the 8-step loss sequences agree to **within 14 f32
-  ulp at worst (≤9.4e-7 relative; five of eight steps within 7 ulp)**. They are **not** bit-identical:
+  ulp at worst (≤9.4e-7 relative; five of eight steps within 7 ulp)** — and since the gate covers the
+  pass-2 replays as well as the searches, that is **52 records**, so the *timed* artifacts every
+  quoted p50 comes from are output-verified too, not just the searches. They are **not** bit-identical:
   at full serialized precision there are **five distinct sequences**, and an earlier revision of this
   report claimed one, because the comparison that produced it rounded to four decimals before
   deduplicating. Retracted and recomputed; `gh612_cells.sh parity` now does this over every cell, so
@@ -498,7 +500,7 @@ and was re-run in one order-balanced block.
 | 32 | **135** | 65.62 | 21.60 | 1 | B |
 | −1 (off) | **135** | 65.59 (65.48–65.63) | 20.94 (19.01–22.56) | 3 | B B B |
 
-**Where the guard actually goes silent — and a kernel count is not enough to tell.** Caps 16, 32 and
+**Where the cap stops having an observable effect — and a kernel count is not enough to tell.** Caps 16, 32 and
 −1 all emit a 135-kernel arm A, and an earlier revision of this report read that as "identical
 segmentation, so the guard never fires at 16 or above". That inference was wrong, and the way it was
 wrong is worth keeping: **equal fission width can absorb a changed materialization decision.**
@@ -512,7 +514,7 @@ and the numbers below are the signature and node levels:
 
 | comparison | exclusive signatures | **newly materialized nodes** | verdict |
 |---|---|---:|---|
-| cap −1 vs **cap 32** | 0 / 0, no multiplicity differences | **0** | **placement identical — the guard is silent** |
+| cap −1 vs **cap 32** | 0 / 0, no multiplicity differences | **0** | **placement identical to cap −1** |
 | cap −1 vs **cap 16** | 1 / 1 | **1** (`n792`) | one node's worth of placement difference |
 | cap −1 vs cap 8 | 16 / 17 | **4** (`centered`, `n446`, `n792`, `x1`) | fires |
 | cap −1 vs cap 4 | 26 / 28 | **9** | fires |
@@ -540,9 +542,18 @@ a firing log, that confines the cap-16 placement difference to `lnf`, the deepes
 with the largest accumulated prefix, and is *consistent with* `lnf` being the only chain on this graph
 whose transitive fan-in exceeds 16 — consistent with, not established by, since nothing logs the
 decisions themselves. Corrected conclusions: the maximum transitive inline fan-in on this graph is
-bounded into **(16, 32]** rather than between 9 and 16; the first cap at which placement changes at
-all is 16, not 8; and 16-versus-8 is one node's worth of difference against **four**, not silence
-against firing.
+the first cap at which placement changes at all is 16, not 8, and 16-versus-8 is one node's worth of
+difference against **four**.
+
+**What this cannot establish, and an earlier revision claimed:** that the guard is *silent* at cap 32,
+and hence that the graph's maximum transitive fan-in lies in (16, 32]. A zero placement difference
+shows only that the final placement matches cap −1's. `decide_placements` assigns provenance 41 only
+to a node not already placed (`low_level.ml`), and `virtual_llc` afterwards rejects inlining for its
+own legality reasons — so with the cap disabled a *different* mechanism can materialize the same node
+and yield an identical source. Identical placement is therefore consistent with "the guard fired and
+changed nothing", and no fan-in bound follows from it. Since nothing logs provenance-41 decisions,
+distinguishing the two would need that log. What survives is the observable statement: **the cap
+changes the emitted placement at 16 and below, and not at 32**.
 
 The count is still monotone in the cap (144 / 137 / 136 / 135 / 135 / 135) and still the first thing
 to look at, but the rule has to be stated correctly: **a cap whose kernel count matches cap −1's may
@@ -675,8 +686,15 @@ cd ocannl-staging
 for w in master:5d0c86d8 base:6d14f401 feat:76f50dcd; do
   d=../wt-gh612-${w%%:*}; want=${w##*:}
   if [ -e "$d" ]; then
-    have=$(git -C "$d" rev-parse --short HEAD) || exit 1
-    [ "$have" = "$want" ] || { echo "$d is at $have, want $want -- refusing to measure it" >&2; exit 1; }
+    # Compare FULL object ids: `--short` uses the repo's default abbreviation (7 here) while $want is
+    # 8 characters, so an abbreviated comparison rejects even the correct checkout.
+    have=$(git -C "$d" rev-parse HEAD) || exit 1
+    wantfull=$(git rev-parse "$want^{commit}") || exit 1
+    [ "$have" = "$wantfull" ] || { echo "$d is at ${have:0:8}, want $want -- refusing to measure it" >&2; exit 1; }
+    # HEAD alone does not establish that the SOURCES match the commit: a reused experiment worktree
+    # is exactly where a stray edit survives, and dune would build it under the BASE/FEAT/master label.
+    [ -z "$(git -C "$d" status --porcelain)" ] || {
+      echo "$d has uncommitted changes -- refusing to measure it" >&2; exit 1; }
   else
     git worktree add --detach "$d" "$want" || exit 1
   fi
@@ -735,9 +753,11 @@ It parses signatures with `re.S` because the emitted parameter lists span multip
 # the cross-cell signature-set diffs, which are what pin each mechanism to named kernels rather
 # than to a bucket total. These produce Part 2's 14-vs-32 counts, Part 3's 16-vs-17 and 8.495 ->
 # 1.702 ms, and the negative control's zero differing signatures.
-$D diff base574 1 feat574 1              # gh-574: the fused lm_head+row-max kernel disappears
-$D diff master-capoff 1 master-cap8 1    # gh-573: the ffn_b2 triangle disappears
-$D diff feat574 1 master-capoff 1        # the negative control: must print 0 kernels on both sides
+# || exit 1 on each: otherwise a failure in either claim-bearing diff is skipped and the block still
+# exits zero on the negative control, with the 14-vs-32 and 16-vs-17 evidence never regenerated.
+$D diff base574 1 feat574 1           || exit 1  # gh-574: the fused lm_head+row-max kernel disappears
+$D diff master-capoff 1 master-cap8 1 || exit 1  # gh-573: the ffn_b2 triangle disappears
+$D diff feat574 1 master-capoff 1     || exit 1  # negative control: 0 kernels on both sides
 ```
 
 `finger` also prints the two **whole-chain** totals — `QK^T WHOLE CHAIN` and `lm_head / CE WHOLE

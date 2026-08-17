@@ -341,7 +341,12 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   diff is not evidence of a placement change; and the count of newly materialized NODES is the proxy
   for guard firings, not the count of changed signatures — one materialization changes several
   consumers' parameter lists (on gpt2_mini, cap 8's 16/17 exclusive signatures come from 4 nodes:
-  0/1/4/9/23 for caps 32/16/8/4/2). That graph's maximum transitive fan-in is therefore in (16, 32]. Cap 4 beat the default 8 by a
+  0/1/4/9/23 for caps 32/16/8/4/2). **A zero placement difference does NOT prove the guard was silent,
+  so no fan-in bound follows from it**: `decide_placements` assigns provenance 41 only to a node not
+  already placed, and `virtual_llc` afterwards rejects inlining for its own legality reasons, so with
+  the cap disabled a different mechanism can materialize the same node and yield an identical source.
+  The observable statement is all there is: the cap changes the emitted placement at 16 and below and
+  not at 32. Cap 4 beat the default 8 by a
   non-overlapping 5.7% in a block order-balanced in BOTH the searches and the pass-2 replays (5.5%
   was the same six artifacts replayed in an unbalanced order; three replay sets of them spanned
   5.5-6.5%, so an identical schedule varies ~1pp run to run -- all three non-overlapping), and balancing that order matters: a fixed order

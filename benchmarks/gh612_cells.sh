@@ -98,11 +98,15 @@ cell_dir() {
 
 cmd_search() { (
   local tree=$1 label=$2 rep=$3; shift 3
-  tree=$(require_dir "$tree")
-  case ${tree:-} in /?*) ;; *) exit 2;; esac
+  # Same rule as snap/replay/profile, and the FIFTH place it was needed: resolve the cell and clear
+  # it before ANY other validation. A retry against a moved checkout would otherwise exit at the
+  # tree check with the old search.out, cache, replay and profile artifacts still published -- and
+  # the parity/replays/profiles gates would then certify the rejected retry from them.
   local out; out=$(cell_dir "$label" "$rep")
   case ${out:-} in /?*) ;; *) exit 2;; esac
   rm -rf "$out"; mkdir -p "$out"            # mkdir BEFORE any redirection into it
+  tree=$(require_dir "$tree")
+  case ${tree:-} in /?*) ;; *) exit 2;; esac
   cd "$tree/benchmarks" || exit 1
   local t0=$SECONDS
   BENCH_FIXTURE=$FIXTURE BENCH_TUNE=1 $PIN "$EXE" --ocannl_backend=hip \
@@ -620,15 +624,22 @@ cmd_parity() { (
 import json,glob,os,sys,math,collections
 root=sys.argv[1]
 seqs=collections.defaultdict(list)
-for f in sorted(glob.glob(os.path.join(root,"*","r*","search.out"))):
+# BOTH passes. Every quoted tuned p50 comes from a pass-2 process, and `replay` validates only its
+# exit status, a timing fragment and the cache-hit count -- so a replay that reconstructed the
+# computation incorrectly while the cold search was fine would ship an unverified timing, and
+# scanning search.out alone would never see it.
+for kind in ("search.out","replay2.out"):
+  for f in sorted(glob.glob(os.path.join(root,"*","r*",kind))):
     t=[l for l in open(f).read().splitlines() if l.startswith("{")]
     if not t: continue
     d=json.loads(t[-1])
     if "losses" not in d: continue
-    seqs[tuple(d["losses"])].append("/".join(f.split(os.sep)[-3:-1]))
+    tag="/".join(f.split(os.sep)[-3:-1]) + ("" if kind=="search.out" else " [pass2]")
+    seqs[tuple(d["losses"])].append(tag)
 tot=sum(len(v) for v in seqs.values())
 if not tot: sys.exit(f"no search.out with losses under {root}")
-print(f"{tot} runs, {len(seqs)} distinct loss sequences at serialized precision")
+p2=sum(1 for ks in seqs.values() for c in ks if c.endswith("[pass2]"))
+print(f"{tot} records ({tot-p2} search + {p2} pass-2 replay), {len(seqs)} distinct loss sequences")
 for L,ks in sorted(seqs.items(), key=lambda kv:-len(kv[1])):
     print(f"  n={len(ks):2}  {L[0]!r} ...  e.g. {ks[0]}")
 def ulp32(x):
@@ -644,12 +655,14 @@ print(f"WORST: {worst:.0f} f32 ulp (threshold {maxulp:.0f}). NOT bit-identity --
       "\n       agreement to within that many ulp.")
 bad=[]
 if worst > maxulp: bad.append(f"loss divergence {worst:.0f} ulp exceeds PARITY_MAX_ULP={maxulp:.0f}")
-if expect and tot != expect: bad.append(f"covered {tot} runs, expected EXPECT_RUNS={expect}")
+# EXPECT_RUNS counts SEARCH cells; pass-2 records are extra coverage, not extra cells.
+searched=sum(1 for ks in seqs.values() for c in ks if not c.endswith("[pass2]"))
+if expect and searched != expect: bad.append(f"covered {searched} search runs, expected EXPECT_RUNS={expect}")
 # A count is not a set: with a reusable OUT_ROOT a stale or unrelated cell can stand in for a missing
 # required one and still total EXPECT_RUNS. EXPECT_CELLS pins the exact label/rep set.
 want=set(filter(None, (sys.argv[4] if len(sys.argv)>4 else "").split()))
 if want:
-    have={c for ks in seqs.values() for c in ks}
+    have={c for ks in seqs.values() for c in ks if not c.endswith("[pass2]")}
     missing=sorted(want-have); extra=sorted(have-want)
     if missing: bad.append(f"missing required cells: {' '.join(missing)}")
     if extra: bad.append(f"unexpected cells present (stale OUT_ROOT?): {' '.join(extra)}")
