@@ -558,8 +558,9 @@ to a node not already placed (`low_level.ml`), and `virtual_llc` afterwards reje
 own legality reasons — so with the cap disabled a *different* mechanism can materialize the same node
 and yield an identical source. Identical placement is therefore consistent with "the guard fired and
 changed nothing", and no fan-in bound follows from it. Since nothing logs provenance-41 decisions,
-distinguishing the two would need that log. What survives is the observable statement: **the cap
-changes the emitted placement at 16 and below, and not at 32**.
+distinguishing the two would need that log. What survives is the observable statement, and only at
+the caps actually swept (2, 4, 8, 16, 32, −1): **placement differed from cap −1 at 2, 4, 8 and 16,
+and matched at 32.** Nothing is established for caps between or above those.
 
 The count is still monotone in the cap (144 / 137 / 136 / 135 / 135 / 135) and still the first thing
 to look at, but the rule has to be stated correctly: **a cap whose kernel count matches cap −1's may

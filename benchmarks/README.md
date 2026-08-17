@@ -225,7 +225,7 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   placement — equality there does not extrapolate, since a zero placement diff cannot show whether
   the guard fired), and for
   the three-instrument discipline (per-kernel profile 0.08–1.6%, untuned-default 0.2–0.7%, shipped
-  tuned p50 2.6–18.7%) that a tuned-cell A/B on that box needs),
+  tuned p50 2.6–19.1%) that a tuned-cell A/B on that box needs),
   [report-cifar-cuda.md](report-cifar-cuda.md) (Linux/CUDA, the cifar-scale conv baseline
   for gh-ocannl-500/502 with a per-layer breakdown) and
   [report-gh537-metal.md](report-gh537-metal.md) (macOS/Metal, the paired before/after A/B of
