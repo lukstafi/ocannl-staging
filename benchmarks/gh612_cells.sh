@@ -305,13 +305,31 @@ cmd_diff() {
   local b; b=$(cell_dir "$3" "$4"); case ${b:-} in /?*) ;; *) return 2;; esac
   python3 - "$1/r$2" "$a" "$3/r$4" "$b" <<'EOF' || return 1
 import re,sys,csv,glob,os,statistics,collections
-SIG=re.compile(r'extern\s+"C"\s+__global__\s+void\s+(\w+__seg(\d+))\s*\(([^)]*)\)', re.S)
+LOADED={}
+import hashlib
+SIG=re.compile(r'extern\s+"C"\s+__global__\s+void\s+(\w+__seg(\d+))\s*\(([^)]*)\)\s*\{', re.S)
 def load(name, out):
     try: src=open(open(os.path.join(out,"armA.path")).read().strip()).read()
     except OSError as e: sys.exit(f"{name}: {e} -- run `snap` first")
-    sigs={int(i):tuple(sorted(" ".join(q.split()).split()[-1].lstrip("*")
-                              for q in ps.split(",") if q.strip()))
-          for _,i,ps in SIG.findall(src)}
+    sigs={}; bodies={}; params=set()
+    for m in SIG.finditer(src):
+        i=m.end(); d=1; j=i
+        while d:
+            if src[j]=="{": d+=1
+            elif src[j]=="}": d-=1
+            j+=1
+        # Canonicalized body: whitespace collapsed and loop-symbol NUMBERING erased (i1234 -> i#),
+        # which is compile-order noise. Two kernels differing only in their crowned TILE will still
+        # differ here -- that is the point: a body diff does NOT imply a placement change.
+        can=re.sub(r"\bi\d+\b","i#",re.sub(r"\s+"," ",src[i:j-1])).strip()
+        sig=tuple(sorted(" ".join(q.split()).split()[-1].lstrip("*")
+                         for q in m.group(3).split(",") if q.strip()))
+        sigs[int(m.group(2))]=sig
+        bodies[int(m.group(2))]=hashlib.md5(can.encode()).hexdigest()[:10]
+        for q in m.group(3).split(","):
+            q=" ".join(q.split())
+            if q and "*" in q: params.add(q.split()[-1].lstrip("*"))
+    LOADED[name]=(sigs,bodies,params)
     t=collections.defaultdict(list)
     # Timings are OPTIONAL here: "did the guard fire" is a question about the emitted kernel set, so
     # a structural diff must work off `snap` alone, without `profile`.
@@ -324,6 +342,7 @@ def load(name, out):
     for i,sg in sigs.items(): per[sg]+=ms.get(i,0.0); n[sg]+=1
     return name, sigs, per, n, len(csvs)
 (na,sa,pa,ca,ra)=load(sys.argv[1],sys.argv[2]); (nb,sb,pb,cb,rb)=load(sys.argv[3],sys.argv[4])
+BODY_A=LOADED[na]; BODY_B=LOADED[nb]
 def hdr(n,per,sg,r):
     t=f"{sum(per.values()):.3f} ms" if r else "(no timings: run `profile` for ms)"
     print(f"{n}: {t} / {len(sg)} kernels ({r} harness runs)")
@@ -354,8 +373,28 @@ else:
           "reading.")
 print(f"\nshared signatures: {sh_a:.3f} -> {sh_b:.3f} ms ({sh_b-sh_a:+.3f}); "
       f"NET {sum(pb.values())-sum(pa.values()):+.3f} ms")
-print("The negative-control reading requires BOTH `only in` sides at 0 AND zero differing "
-      "multiplicities;\neither alone leaves the kernel sets possibly unequal.")
+# What a signature multiset does and does not settle. A kernel's POINTER PARAMETERS are exactly the
+# materialized nodes it touches, so signature-multiset equality is the right invariant for the
+# PLACEMENT question and is deliberately insensitive to the crowned tile. Bodies are not: they move
+# with the tile too, so a body diff cannot be read as a placement change. Both are printed, and the
+# newly-materialized NODE set is printed as well, because that -- not the signature count -- is the
+# quantity that corresponds to guard firings (one materialized node can change several consumers'
+# signatures, and several can be absorbed into one).
+_,ba,pna=BODY_A; _,bb,pnb=BODY_B
+mba=collections.Counter(ba.values()); mbb=collections.Counter(bb.values())
+print(f"\ncanonicalized kernel BODIES differing: {sum((mba-mbb).values())} in {na}, "
+      f"{sum((mbb-mba).values())} in {nb}")
+print("  (bodies move with the crowned tile as well as with placement, so a body diff is NOT by "
+      "itself\n   evidence that a placement decision changed -- check the crowned sketch labels too)")
+newb=sorted(pnb-pna); newa=sorted(pna-pnb)
+print(f"\nmaterialized NODES: {len(pna)} in {na}, {len(pnb)} in {nb}")
+print(f"  only in {nb} (+{len(newb)}): {', '.join(newb) if newb else '-'}")
+print(f"  only in {na} (+{len(newa)}): {', '.join(newa) if newa else '-'}")
+print("  This node count is the closest available proxy for guard FIRINGS; exact counts would need a"
+      "\n  provenance-41 placement log, which does not exist today.")
+print("\nThe negative-control reading requires BOTH `only in` signature sides at 0 AND zero differing"
+      "\nmultiplicities. It is a claim about PARAMETER-SIGNATURE multisets, i.e. about placement -- not"
+      "\nabout byte-identical kernels.")
 EOF
 }
 

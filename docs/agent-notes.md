@@ -330,11 +330,17 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   with depth AND with graph shape at constant depth — so a cap conclusion holds for the graph it was
   measured on and not for a size class.** On gpt2_mini specifically (4 layers, gfx1151,
   `report-gh612-hip.md`), caps 16, 32 and −1 all emit a **135-kernel** arm A, yet only cap 32 is
-  actually silent: at cap 16 the guard fires exactly once (the final layer norm gains a materialized
-  node) *behind an unchanged kernel count*. **Equal fission width can absorb a changed
+  actually silent: at cap 16 the guard fires on exactly one node (the final layer norm gains a
+  materialized `n792`) *behind an unchanged kernel count*. **Equal fission width can absorb a changed
   materialization decision, so a kernel count cannot establish that a cap did nothing — compare the
-  emitted kernel MULTISETS** (`benchmarks/gh612_cells.sh diff`, which needs only a snapshot). That
-  graph's maximum transitive fan-in is therefore in (16, 32]. Cap 4 beat the default 8 by a
+  emitted PARAMETER-SIGNATURE multisets and the materialized-node sets** (`benchmarks/gh612_cells.sh
+  diff`, which needs only a snapshot). Three distinct levels, and conflating them is easy: a kernel's
+  pointer parameters are exactly the materialized nodes it touches, so signature multisets track
+  PLACEMENT and are insensitive to the crowned tile; kernel BODIES also move with the tile, so a body
+  diff is not evidence of a placement change; and the count of newly materialized NODES is the proxy
+  for guard firings, not the count of changed signatures — one materialization changes several
+  consumers' parameter lists (on gpt2_mini, cap 8's 16/17 exclusive signatures come from 4 nodes:
+  0/1/4/9/23 for caps 32/16/8/4/2). That graph's maximum transitive fan-in is therefore in (16, 32]. Cap 4 beat the default 8 by a
   non-overlapping 5.7% in an order-balanced block, and balancing that order matters: a fixed order
   confounds the cap with session position, which was worth ~1.4pp of an apparent 7.1%.
 - `check_half_prec_constants_cutoff` (`Ops.exceeds_fp16_cutoff`, enforced from

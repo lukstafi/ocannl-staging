@@ -33,7 +33,8 @@ One prediction needs a caveat and one needs a correction. The caveat: at its shi
 identifiable reason given in Part 3 — without the guard the search ships materialize-all instead,
 which is the crude form of the same transform. The correction: that is a fact about the default, not
 the mechanism. **Cap 4 beats the default 8 by 5.7% with non-overlapping ranges, measured in one
-order-balanced block; on the `gpt2_mini` graph the guard is fully silent only at cap 32 and above,
+order-balanced block (and 1.18x against cap −1 when the two balanced blocks are chained); on the
+`gpt2_mini` graph the guard is fully silent only at cap 32 and above,
 and at cap 16 it fires exactly once (on the final layer norm) behind an unchanged kernel count** — so
 8 is not well-centred for this fixture (Part 4, which scopes that narrowly and records the
 kernel-count inference that got this wrong first).
@@ -339,8 +340,11 @@ n275_multi_head_attention, n341, n414_multi_head_attention, n480, n553_multi_hea
 ..., n9, wpe
 ```
 
-17 exist only at cap 8, totalling **1.702 ms**, and read the materialized running sums
-(`centered`, `x1`, `n619`, `n792`) in place of the re-summed prefix. **8.495 ms of re-summation
+17 exist only at cap 8, totalling **1.702 ms**, and read materialized running sums in place of the
+re-summed prefix. The nodes the guard actually newly materializes here are exactly **four** —
+`centered`, `n446`, `n792`, `x1` — so those 16-vs-17 signatures are four placement decisions plus
+their downstream churn. (An earlier revision listed `n619` among them; `n619` is materialized at cap
+−1 too, being an FFN output, so it is not one of the guard's decisions.) **8.495 ms of re-summation
 becomes 1.702 ms of bounded-fanin work — −6.79 ms, and every kernel involved is named.** The 119
 signatures common to both cells move the other way by **+0.87 ms** (16.32 → 17.19, +5.3%), which is
 crowned-tile drift rather than anything the guard does; net −5.92 ms. Reported rather than netted
@@ -412,16 +416,36 @@ and was re-run in one order-balanced block.
 −1 all emit a 135-kernel arm A, and an earlier revision of this report read that as "identical
 segmentation, so the guard never fires at 16 or above". That inference was wrong, and the way it was
 wrong is worth keeping: **equal fission width can absorb a changed materialization decision.**
-Comparing the emitted kernel *multisets* instead of their sizes (`gh612_cells.sh diff`, which needs
-only `snap`):
+Comparing the emitted kernel *parameter-signature multisets* instead of their sizes
+(`gh612_cells.sh diff`, which needs only `snap`). That is the right invariant for this question and
+the reason is worth stating: a kernel's pointer parameters are exactly the materialized nodes it
+touches, so a signature multiset is sensitive to placement and deliberately **insensitive to the
+crowned tile**. Kernel *bodies* are not — they move with the tile as well — so a body diff cannot be
+read as a placement change. `diff` prints all three levels (signatures, bodies, materialized nodes)
+and the numbers below are the signature and node levels:
 
-| comparison | exclusive signatures | verdict |
-|---|---|---|
-| cap −1 vs **cap 32** | 0 / 0, no multiplicity differences | **identical kernel multiset — the guard is silent** |
-| cap −1 vs **cap 16** | **1 / 1** | **the guard fires — exactly once** |
-| cap −1 vs cap 8 | 16 / 17 | fires |
-| cap −1 vs cap 4 | 26 / 28 | fires |
-| cap −1 vs cap 2 | 40 / 49 | fires |
+| comparison | exclusive signatures | **newly materialized nodes** | verdict |
+|---|---|---:|---|
+| cap −1 vs **cap 32** | 0 / 0, no multiplicity differences | **0** | **placement identical — the guard is silent** |
+| cap −1 vs **cap 16** | 1 / 1 | **1** (`n792`) | the guard fires, once |
+| cap −1 vs cap 8 | 16 / 17 | **4** (`centered`, `n446`, `n792`, `x1`) | fires |
+| cap −1 vs cap 4 | 26 / 28 | **9** | fires |
+| cap −1 vs cap 2 | 40 / 49 | **23** | fires |
+
+**Read the node column, not the signature column, as the count of guard firings.** They are not the
+same quantity and an earlier revision of this section conflated them: one node forced materialized
+resets fan-in downstream and can change several consumers' parameter lists, so cap 8's 16/17 exclusive
+signatures are the churn from **4** materializations, not sixteen of them. The node column is itself a
+proxy — a distinct newly materialized node is what provenance 41 produces, but nothing logs those
+decisions today, so exact firing counts would need a placement log that does not exist. Filed as
+such rather than asserted.
+
+At the body level cap −1 and cap 32 differ in 5 kernels each, and so do `feat574` and
+`master-capoff` — in both pairs the crowned arm A sketch differs at one site (cap −1 takes
+`16x16x8/2x2` where cap 32 takes `64x64x8/4x4`), which changes those kernels' schedules without
+changing which nodes are materialized. So "identical" throughout this report means **identical
+placement**, evidenced at the signature and node levels; it does not mean byte-identical kernels, and
+no claim here needs it to.
 
 At cap 16 the one site that changes is the **final layer norm**, which gains a materialized `n792` —
 its 20-parameter signature becomes 21 while the kernel count stays at 135. So `lnf`, the deepest site
@@ -460,10 +484,13 @@ recomputation it no longer had to avoid.
 cap 8 vs cap −1 (overlapping, 1.11x — Part 3's unclaimed row) and cap 4 vs cap 8 (disjoint,
 **1.061x** = 18.51/17.45, i.e. the 5.7% time reduction; the two are different numbers and only the
 ratio is a speedup).
-The headline "cap 4 is worth 1.19x against cap −1" chains those two rather than being one balanced
-block of its own, so it is the weaker of the statements here; what does support it independently is
-the deterministic untuned instrument, where cap 4's 60.36–60.70 and cap −1's 65.48–65.63 are 8.4%
-apart and nowhere near touching. Stated as a chain, not as a measurement.
+"Cap 4 against cap −1" is a **chain of those two blocks, 1.108 × 1.061 = 1.18x**, not a balanced
+measurement of its own. An earlier revision put it at 1.19x, which is the ratio of the *unpaired*
+endpoint medians (20.86 / 17.45) and silently includes cap 8's shift between the two blocks (18.82 ms
+in the cap −1 block against 18.51 ms in the cap 4 block) — so 1.18x is the chained value and 1.19x is
+the unpaired endpoint ratio, which is not the same statement. What supports the direction
+independently is the deterministic untuned instrument, where cap 4's 60.36–60.70 and cap −1's
+65.48–65.63 are 8.4% apart and nowhere near touching.
 
 **What this does not license, stated narrowly.** This is **one fixture** — `gpt2_mini` at 4 layers,
 d=256, 8 heads — on one device, so what the table establishes is the cap's behaviour *for that
@@ -473,8 +500,8 @@ constant depth, so "a 4-layer model" is already an over-generalization of a sing
 "shallow models" more so. Both are avoided above and in the README index entry.
 
 What that leaves is narrow and still useful: on this graph the guard is silent only from cap 32 up,
-fires once at 16, sixteen times at 8, and once more again at 4 — and cap 4 is 5.7% faster than the
-shipped default. Changing the global
+fires on one node at 16, four at 8, nine at 4 and twenty-three at 2 — and cap 4 is 5.7% faster than
+the shipped default. Changing the global
 default on that would be the gh-479 mistake in a new costume — the measurement that would justify
 moving it is a cap sweep across several fixtures of differing depth *and* differing residual
 fan-in structure, which this session did not run.
@@ -514,9 +541,7 @@ for (int i1610 = 0; i1610 <= 7; ++i1610) {        // batch  -- serial
 
 `grid=(1,4,1)×(16,16,1)` in master's draw is **4 blocks** — 4 of 20 workgroup processors, 12
 times over. Three of the four cells' draws put them at 16 blocks and 6.40 ms instead of 6.93, so that
-0.53 ms and the 16→4 block change are the lottery; the ~6.4 ms floor, present in every cell, is not.
-The extrapolation below is taken from that floor rather than from cap 8's less favourable draw, so it
-does not borrow the lottery's 8%. If these reached the FFN
+0.53 ms and the 16→4 block change are the lottery; the ~6.4 ms floor, present in every cell, is not. If these reached the FFN
 up-projection's utilization the step would fall to roughly 13.2 ms (~1.43x, taking the 6.40 ms floor
 rather than cap 8's 6.93 ms draw) — an **analytic extrapolation, not a measurement**, offered only to size the next target. Nothing here measures a
 replacement, and the gh-569 lesson that HIP's block-count curve is non-monotone (peak at 128,
