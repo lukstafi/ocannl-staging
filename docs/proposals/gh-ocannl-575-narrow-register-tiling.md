@@ -80,11 +80,13 @@ scalar speed, and that alone turned the NEON measurement below upside down (37 v
 Power-of-two extents — what deep learning actually runs — are never multiples of 48.
 
 The ranking model: per unit of `m*k`, a tile pass issues one vector FMA per lane-column plus the B
-row loads (1/`rm` per FMA) and the A splats (1/`rn`), while each peeled column costs about `lanes`
-lane-slots. The constant is an empirical fit (~8 at 8 lanes, ~10 at 4) that only has to *rank*
-candidates, not predict times; it reproduces the measured order at n = 512 within a few percent
-across `rn = 2..6`, and where several widths divide the extent evenly it lands on the largest
-affordable one. Measured on the M4 Max (10 repeats, GFLOP/s, `packmma`):
+row loads (1/`rm` per FMA) and the A splats (1/`rn`), while each peeled column costs a flat 10
+lane-slots. The peel weight deliberately does *not* scale with the lane count — the peel loop is the
+same scalar code at either width — and the fits agree: ~8 from the 8-lane sweep below, ~10 from the
+4-lane one, ~20 from the n = 2048 pair. It only has to *rank* candidates, not predict times; it
+reproduces the measured order at n = 512 within a few percent across `rn = 2..6`, and where several
+widths divide the extent evenly it lands on the largest affordable one. Measured on the M4 Max (10
+repeats, GFLOP/s, `packmma`):
 
 | rn (bw at 4/8 lanes) | 2 | 3 | 4 | 5 | 6 |
 |---|---|---|---|---|---|
@@ -97,6 +99,12 @@ The cap itself was never the problem: isolated at extents both widths divide (n 
 `rn = 4` and `rn = 6` land within ±10% of each other. The peel is the whole story. The fixed cap had
 been the geometry since gh-ocannl-469, so this lifts the f32 register tiling too (n = 512: 55.9 →
 74.3 GFLOP/s standalone) — 16-bit operands are what made it visible, not what made it true.
+
+Erring *low* on the peel weight is what costs choices, and it costs them quietly: at n = 2048 a
+`lanes`-scaled weight scored the peeling `rn = 6` just under the peel-free `rn = 4`, which measures
+1.15x faster (98.4 vs 85.5 GFLOP/s at f32) — the same cliff, one notch smaller. Extents whose only
+peel-free widths are narrow are where the model earns its keep, so it must not be tuned to the
+extents that were easy to measure.
 
 ### Cost model
 
@@ -157,9 +165,10 @@ warm ones):
 | f16 → f16, native arithmetic | 3.06 | **132.5 (1.60x)** | **181.6 (1.79x)** |
 
 **Pure-f16 GEBP is worth having: 1.6-1.8x over f32-GEBP-over-narrow-storage**, close to the 2x the
-doubled lane count allows, and the gap grows with n. The emission is what the design intends — the
-inner loop is 24 `fmla.8h` in the by-element form against 24 `fmla.4s` for the f32 arm, same
-instruction count over twice the lanes, no spills. So the seeds this issue gates on
+doubled lane count allows, and the gap grows with n. The emission is what the design intends — both
+arms resolve to a 4x4 C-tile here, and the k-loop body of each is 16 vector FMAs in the by-element
+form (`fmla.8h` against `fmla.4s`) plus its B loads and A splats, with no spills: the same
+instruction count over twice the lanes. So the seeds this issue gates on
 `native_fp16_arithmetic` earn their place, and the gating is exactly right in both directions: the
 same policy forced on promoted x86 hardware loses ~18x (the negative control above).
 

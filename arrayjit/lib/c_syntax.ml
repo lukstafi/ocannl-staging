@@ -3826,18 +3826,23 @@ module C_syntax (B : C_syntax_config) = struct
 
              The ranking model: per unit of m*k, a tile pass issues one vector FMA per lane-column
              plus the B row loads (1/rm of them per FMA) and the A splats (1/rn), while each peeled
-             column costs about [lanes] lane-slots — the constant is an empirical fit (~8 at
-             lanes = 8, ~10 at lanes = 4) that only has to RANK candidates, not predict times. It
-             reproduces the measured order at n = 512 within a few percent across rn = 2..6, and
-             where several widths divide [n] evenly it lands on the largest affordable one. *)
+             column costs [peel_cost] lane-slots. That cost does NOT scale with the lane count —
+             the peel loop is the same scalar code at either width — and the fits agree: ~8 from the
+             8-lane sweep, ~10 from the 4-lane one, ~20 from the n = 2048 pair. It only has to RANK
+             candidates, not predict times; it reproduces the measured order at n = 512 within a few
+             percent across rn = 2..6, and where several widths divide [n] evenly it lands on the
+             largest affordable one. Erring low is what costs choices — weighting a peeled column at
+             [lanes] rather than the fit picked the peeling rn = 6 over a peel-free rn = 4 at
+             n = 2048, which measures 1.15x slower (Codex P2 on PR #357). *)
           let rn =
             let cap = min (if B.vector_bytes = 32 then 3 else 6) (n / lanes) in
+            let peel_cost = 10. in
             let cost rn =
               let bw = rn * lanes in
               let n_full = n - (n % bw) in
               (Float.of_int (n_full / lanes)
               *. (1. +. (1. /. Float.of_int rm) +. (1. /. Float.of_int rn)))
-              +. Float.of_int ((n - n_full) * lanes)
+              +. (Float.of_int (n - n_full) *. peel_cost)
             in
             List.range 1 (cap + 1)
             |> List.min_elt ~compare:(fun x y ->

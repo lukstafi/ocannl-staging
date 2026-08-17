@@ -755,8 +755,14 @@ let () =
      chains, just rendered scalar. --- *)
   if not on_gpu then (
     let wi = 8 and wk = 8 and wj = 40 in
-    let wav = Array.init (wi * wk) ~f:(fun x -> Float.of_int (x % 7) *. 0.25) in
-    let wbv = Array.init (wk * wj) ~f:(fun x -> Float.of_int (x % 5) -. 2.) in
+    (* Both operands must vary with BOTH their axes or the oracle stops discriminating: a modulus
+       dividing the row stride makes every reduction row identical, and a mis-indexed k read then
+       still matches the serial twin (Codex P1 on PR #357). 11 and 13 are coprime to the strides
+       (8 and 40), so all 8 rows and all 8 columns of each operand differ — and so do all 8 rows of
+       the product, whose columns take 13 distinct values, more than any tile width in play. The
+       values stay exactly representable (multiples of 1/32 throughout). *)
+    let wav = Array.init (wi * wk) ~f:(fun x -> Float.of_int (x % 11) *. 0.125) in
+    let wbv = Array.init (wk * wj) ~f:(fun x -> (Float.of_int (x % 13) -. 6.) *. 0.25) in
     let wa = TDSL.ndarray wav ~label:[ "wa" ] ~input_dims:[ wk ] ~output_dims:[ wi ] () in
     let wb = TDSL.ndarray wbv ~label:[ "wb" ] ~input_dims:[ wj ] ~output_dims:[ wk ] () in
     let%op wc0 = wa * wb in
