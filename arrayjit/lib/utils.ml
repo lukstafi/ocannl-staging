@@ -433,9 +433,10 @@ let env_var_names n =
     ([--virtualize_max_visits]) and not for [--profile], which is a common application flag and
     which OCANNL treats as fatal when it does not name a known bundle -- a host passing
     [--profile=prod] would die during module initialization (Codex P2 on PR #291). *)
-let read_cmdline_var ?(qualified_only = false) n =
+(* All [Sys.argv] spellings that address configuration key [n]: prefixed variants first (backward
+   compat), then prefix-free unless [qualified_only], each with every accepted separator. *)
+let cmdline_variants ?(qualified_only = false) n =
   let n_dash = String.tr ~target:'_' ~replacement:'-' n in
-  (* Prefixed commandline variants first (backward compat), then prefix-free *)
   let cmd_prefixed = List.concat_map (env_var_names n) ~f:(fun n -> [ "-" ^ n; "--" ^ n; n ]) in
   let cmd_unprefixed =
     if qualified_only then []
@@ -443,13 +444,23 @@ let read_cmdline_var ?(qualified_only = false) n =
       let keys = if String.equal n n_dash then [ n ] else [ n; n_dash ] in
       List.concat_map keys ~f:(fun k -> [ "--" ^ k; "-" ^ k ])
   in
-  let cmd_variants =
-    List.concat_map (cmd_prefixed @ cmd_unprefixed) ~f:(fun n -> [ n ^ "_"; n ^ "-"; n ^ "="; n ])
-  in
+  List.concat_map (cmd_prefixed @ cmd_unprefixed) ~f:(fun n -> [ n ^ "_"; n ^ "-"; n ^ "="; n ])
+
+let read_cmdline_var ?(qualified_only = false) n =
+  let cmd_variants = cmdline_variants ~qualified_only n in
   Array.find_map Stdlib.Sys.argv ~f:(fun arg ->
       List.find_map cmd_variants ~f:(fun p ->
           Option.some_if (String.is_prefix ~prefix:p arg)
             (String.drop_prefix arg (String.length p), arg)))
+
+(** Whether a raw command-line argument addresses a known configuration key under {e any} spelling
+    {!read_cmdline_var} accepts — prefixed or prefix-free, dashed or underscored, any separator.
+    For executables that parse their own flags (tools/): such an argument belongs to the config
+    machinery and should be passed over rather than rejected as unknown, while an argument matching
+    no known key under any spelling can still be flagged as a probable typo. *)
+let cmdline_arg_is_config_key arg =
+  Set.exists known_config_keys ~f:(fun k ->
+      List.exists (cmdline_variants k) ~f:(fun p -> String.is_prefix arg ~prefix:p))
 
 (** The environment sublevel of {!get_global_arg}: returns the setting's value and the variable it
     came from. An empty value counts as unset. *)

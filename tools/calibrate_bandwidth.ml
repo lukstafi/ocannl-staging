@@ -27,10 +27,7 @@ let usage () =
   Stdlib.exit 2
 
 let () =
-  let args =
-    List.tl_exn (Array.to_list Stdlib.Sys.argv)
-    |> List.filter ~f:(fun a -> not (String.is_prefix a ~prefix:"--ocannl_"))
-  in
+  let args = List.tl_exn (Array.to_list Stdlib.Sys.argv) in
   let elems = ref (1 lsl 26) and repeats = ref None in
   List.iter args ~f:(fun a ->
       let int_flag prefix = Option.map (String.chop_prefix a ~prefix) ~f:Int.of_string in
@@ -40,7 +37,12 @@ let () =
       | None -> (
           match int_flag "--repeats=" with
           | Some n when n > 0 -> repeats := Some n
-          | _ | (exception _) -> usage ()));
+          | Some _ | (exception _) -> usage ()
+          | None ->
+              (* Any spelling the config machinery accepts for a known key (--ocannl_backend=...,
+                 --ocannl-backend=..., --backend=..., ...) is its argument, not ours; anything
+                 else is a probable typo. *)
+              if not (Utils.cmdline_arg_is_config_key a) then usage ()));
   let file =
     String.strip (Utils.get_global_arg ~arg_name:"autotune_calibration_file" ~default:"")
   in

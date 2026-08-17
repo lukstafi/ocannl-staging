@@ -8,9 +8,11 @@
    ([flops_approx]) and a never-definite write; - dynamic gather: the uninterpretable-component
    fallback to whole-node bytes; - overlapping writes: the union bound capped by the node's size;
    - multi-read exactness (gh-ocannl-578): pairwise provably-disjoint exact reads sum exactly,
-   overlapping ones stay a flagged union bound; - vectorized runs (gh-ocannl-578): bases spaced by
-   at least the run length (or on distinct in-bounds rows) count exactly, close-spaced or
-   row-spilling bases stay a flagged upper bound.
+   overlapping ones stay a flagged union bound, and conditionally-evaluated reads (Where arms)
+   stay a flagged bound even when disjoint — with the op count flagged too when the arms' costs
+   differ; - vectorized runs (gh-ocannl-578): bases spaced by at least the run length (or on
+   distinct in-bounds rows) count exactly, close-spaced or row-spilling bases stay a flagged
+   upper bound.
 
    The tail asserts the roofline bound is monotone in the envelope constants. *)
 
@@ -249,6 +251,28 @@ let () =
          })
   in
   show_summary "parity-disjoint reads (exact union)" (CM.analyze parity);
+
+  (* Conditionally-evaluated reads stay approximate even when disjoint (gh-ocannl-578 round 1):
+     C2[i] = where(K4[i], A16[i] * 2, A16[i+8]) — only one arm executes per iteration, so A16's
+     8-cell union is an upper bound, and charging both arms (unequal costs: 1 vs 0) makes the op
+     count an upper bound too. *)
+  let k4 = fresh_tn "K4" [| 4 |] in
+  let where_arms =
+    for_over i
+      (LL.Set
+         {
+           tn = c2;
+           idcs = [| it i |];
+           llsc =
+             LL.Ternop
+               ( Ops.Where,
+                 (get k4 [| it i |], sp),
+                 (LL.Binop (Ops.Mul, (get a16 [| it i |], sp), (LL.Constant 2., sp)), sp),
+                 (get a16 [| shift8 i |], sp) );
+           debug = "";
+         })
+  in
+  show_summary "where-arm reads (conditional, stays a bound)" (CM.analyze where_arms);
 
   (* Vectorized runs (gh-ocannl-578), strip-mined: setv4 V16[4*i] — bases 4 apart tile the node,
      16 cells written exactly. The random-bits source is read once per run. *)

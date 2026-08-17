@@ -18,7 +18,10 @@
       over-count, as does summing multiple same-direction accesses of one node (a union bound,
       capped by the node's size) — except that a direction whose accesses are all exact and
       pairwise provably disjoint ({!Affine.may_touch_same_cell}) sums exactly (gh-ocannl-578).
-      [fp_approx] is [false] only when the count is exact.
+      Conditional evaluation also over-counts: a read the renderers may skip — a [Where] arm, the
+      gated right operand of [&&]/[||]/a gate — or any access under a dead loop keeps its
+      direction approximate, since the image can exceed what executes. [fp_approx] is [false]
+      only when the count is exact.
     - The op count is an upper bound in the same guards-taken sense, and counts every scalar
       [Unop]/[Binop]/[Ternop] evaluation as one "FLOP" regardless of precision or integerness —
       except the two-operation ternaries [FMA]/[Mul3], which count two (matching [peak_flops]'
@@ -45,7 +48,10 @@ type summary = {
   read_bytes : int;  (** Sum of [fp_read_bytes] over [per_node]. *)
   write_bytes : int;  (** Sum of [fp_write_bytes] over [per_node]. *)
   flops : int;  (** Whole-kernel arithmetic-op count (loop extents times per-statement ops). *)
-  flops_approx : bool;  (** [true] when guarded ([If]) code contributed (guards-taken bound). *)
+  flops_approx : bool;
+      (** [true] when guarded ([If]) code contributed (guards-taken bound), or a short-circuiting
+          form was charged in full while executing only in part — [Where] arms of unequal cost, a
+          gated right operand with nonzero cost (gh-ocannl-578). *)
   opaque : bool;
       (** [true] when the code contains [Staged_compilation] or merge-buffer reads: some traffic and
           ops are invisible to the analysis, so counts may UNDER-estimate. *)

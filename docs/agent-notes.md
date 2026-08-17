@@ -927,8 +927,10 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   emission path. It verifies after the fact that exact rows actually appeared (a failure means the
   schedule introduced guards — keep `--elems` a power of two so every workgroup size divides the
   extent) and refits the whole file. Cost-model exactness is correspondingly wider (same issue):
-  same-direction accesses that are individually exact and pairwise provably disjoint
-  (`Affine.may_touch_same_cell`) sum exactly instead of tripping the multi-access union bound, and
+  same-direction accesses that are individually exact, unconditionally evaluated (no `Where` arm
+  or gated-operand reads — `Cost_model.access_uncertainty`, shared with the floor), and pairwise
+  provably disjoint (`Affine.may_touch_same_cell`) sum exactly instead of tripping the
+  multi-access union bound, and
   a vectorized run whose minor-axis base spacing is at least the run length
   (`Affine.vec_runs_disjoint`, coefficient-gcd argument) counts exactly — so scheduled streaming
   candidates stay fit-eligible, and the floor agrees with the upper extraction on disjoint unions.

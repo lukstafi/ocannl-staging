@@ -54,8 +54,8 @@ let stream ?(elems = 1 lsl 26) ?repeats ctx =
         c =: 0]
   in
   let routine = Train.to_routine ctx Idx.Empty init in
-  let ctx = Context.context routine in
-  Train.run ctx routine;
+  let init_ctx = Context.context routine in
+  Train.run init_ctx routine;
   let kernels =
     [
       ("stream_copy", [%cd c =: a]);
@@ -64,17 +64,25 @@ let stream ?(elems = 1 lsl 26) ?repeats ctx =
       ("stream_triad", [%cd a =: b + (!.0.5 *. c)]);
     ]
   in
-  List.map kernels ~f:(fun (name, comp) ->
-      let report = ref None in
-      let (_ctx : Context.t), (_routine : Context.routine) =
-        Autotune.tune ~search:true ~rounds:0 ?repeats ~cache_dir:""
-          ~report:(fun r -> report := Some r)
-          ctx (named name comp) Idx.Empty
-      in
-      match !report with
-      | Some r -> (name, r)
-      | None ->
-          (* [tune] reports exactly once per call on every path that does any work. *)
-          raise
-            (Utils.User_error
-               (Printf.sprintf "Calibrate.stream: no tuning report for %s" name)))
+  (* Winner contexts are released as soon as their report is captured, and the initialization
+     context — which owns the stream tensors' buffers — after the last kernel, exceptional paths
+     included: a long-lived caller must not accumulate three large streams (plus winners) per
+     calibration call. Leaves first, then their parent, per {!Context.release}'s precondition. *)
+  Exn.protect
+    ~finally:(fun () -> Context.release init_ctx)
+    ~f:(fun () ->
+      List.map kernels ~f:(fun (name, comp) ->
+          let report = ref None in
+          let tuned_ctx, (_routine : Context.routine) =
+            Autotune.tune ~search:true ~rounds:0 ?repeats ~cache_dir:""
+              ~report:(fun r -> report := Some r)
+              init_ctx (named name comp) Idx.Empty
+          in
+          Context.release tuned_ctx;
+          match !report with
+          | Some r -> (name, r)
+          | None ->
+              (* [tune] reports exactly once per call on every path that does any work. *)
+              raise
+                (Utils.User_error
+                   (Printf.sprintf "Calibrate.stream: no tuning report for %s" name))))
