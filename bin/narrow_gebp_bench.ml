@@ -100,17 +100,31 @@ let () =
           else Some (Printf.sprintf "%s = %d does not divide n = %d (remainder %d)" name f n (n % f)))
   in
   let flops = 2.0 *. Float.of_int n *. Float.of_int n *. Float.of_int n in
-  (* Exactly-representable inputs at every storage precision (the parity-test recipes); the spot
-     check and the whole-output checksum below guard against an all-zeros or NaN run, and against a
-     mishandled remainder region, without a full reference. *)
+  (* Operand values that vary with EVERY index at every n, and stay exactly representable at every
+     storage precision (the parity-test recipes). Each index is reduced on its own — [idcs.(0) % 3]
+     — rather than the flattened offset [(i * n + j) % 3]: a modulus applied to the flat offset
+     collapses along the row axis exactly when it divides n, so the flattened form made ma constant
+     along i whenever 3 divides n, mb constant along k whenever 5 divides n, and n = 960 lost both.
+     A transform that substitutes or repeats the wrong row of a collapsed operand then computes the
+     correct output, which no whole-output check can see. Reducing per axis never meets n, so the
+     discrimination rule (CLAUDE.md: a producer's value must vary with every symbol of its
+     iteration) holds at every extent. Residues are combined before the reduction rather than
+     scaled and added, which keeps the value sets — ma in {0.25, 0.5, 0.75}, mb in {-1, -0.5, 0,
+     0.5, 1} — and hence the 1/8 product granularity of the original data: that granularity is
+     load-bearing in a narrow-storage run, see the checksum's note below. ma is strictly positive,
+     so a dropped term cannot cancel to something plausible; mb stays signed and sums to zero over
+     its cycle, so partial sums random-walk instead of growing with n. The residual both share with
+     any bounded value set is periodicity: a k-shift by a multiple of 5, or an i/j-shift by a
+     multiple of 3, is invisible. Every blocking factor in use (4, 7, 11, 64, 256) is coprime to
+     those periods. *)
   let ma =
     NTDSL.init ~l:"ma" ~prec ~i:[ n ] ~o:[ n ]
-      ~f:(fun idcs -> Float.of_int (((idcs.(0) * n) + idcs.(1)) % 3) *. 0.25)
+      ~f:(fun idcs -> Float.of_int (1 + (((idcs.(0) % 3) + (idcs.(1) % 5)) % 3)) *. 0.25)
       ()
   in
   let mb =
     NTDSL.init ~l:"mb" ~prec ~i:[ n ] ~o:[ n ]
-      ~f:(fun idcs -> (Float.of_int (((idcs.(0) * n) + idcs.(1)) % 5) -. 2.) *. 0.5)
+      ~f:(fun idcs -> Float.of_int ((((idcs.(0) % 5) + (idcs.(1) % 3)) % 5) - 2) *. 0.5)
       ()
   in
   let packed_schedule ~grid ~tile_prec ~mc (opt : LL.optimized) : Sched.schedule =
@@ -202,12 +216,25 @@ let () =
        extent puts the last partial block exactly there, so a variant that drops or repeats tail
        work would still print a matching spot value. Hence the whole output is checksummed too:
        every correct variant prints the identical value, a tail-mishandling one does not.
-       Position-weighted, because a plain sum of THIS data is 0 whenever 5 divides n: the total
-       factors as sum_k (sum_i ma[i][k]) (sum_j mb[k][j]), and each mb row then spans whole cycles
-       of its 5 values, whose (v-2) offsets sum to zero — the same degeneracy schedule_bench has at
-       17, reached at ordinary GEBP extents (320, 640, 1280). The weight is capped so that products
-       of these exact-in-binary operands stay exact in the double accumulator, making cross-variant
-       equality exact rather than approximate. Both checks are outside the timed region. *)
+       Position-weighted for a different reason than schedule_bench's: with the per-axis residues
+       above there is no divisibility class on which a plain sum vanishes (unlike the flattened
+       form, whose collapse also zeroed it). What an unweighted sum cannot see is a PERMUTATION —
+       a tail written with the right values at the wrong offsets leaves the multiset intact, and
+       the multiset is all a plain sum reads — and a misplaced tail is exactly what a non-dividing
+       [bm]/[bk] risks. The weight is capped so that products of these exact-in-binary operands
+       stay exact in the double accumulator.
+
+       Cross-variant equality is therefore EXACT in an f32 run, at every extent: the products are
+       multiples of 1/8 bounded by 0.75n, so the whole reduction is exact in the f32 accumulator
+       and independent of the order the variants sum in. It is NOT unconditional in a narrow
+       storage run. The naive variant accumulates in the storage precision while the packed ones
+       accumulate through a wider register tile, so once a partial sum outgrows the storage
+       mantissa (bf16 carries 8 significant bits, i.e. multiples of 1/8 up to 32) the two round at
+       different points and legitimately disagree — visible here from about n = 320 in bf16. That
+       asymmetry is the bench's, not the checksum's, and it predates this check; it is why mb sums
+       to zero over its cycle, which keeps partial sums random-walking rather than growing with n.
+       Read an f32 run as the cross-variant oracle, and a bf16/f16 disagreement as a question about
+       accumulation width rather than a wrong kernel. Both checks are outside the timed region. *)
     let checksum =
       Array.foldi values ~init:0.0 ~f:(fun i acc v -> acc +. (v *. Float.of_int (1 + (i % 251))))
     in
