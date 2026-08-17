@@ -666,6 +666,12 @@ if want:
     missing=sorted(want-have); extra=sorted(have-want)
     if missing: bad.append(f"missing required cells: {' '.join(missing)}")
     if extra: bad.append(f"unexpected cells present (stale OUT_ROOT?): {' '.join(extra)}")
+    # The PASS-2 side needs the same treatment, and skipping it silently is the failure mode:
+    # `replays` accepts a replay2.out on step_ms alone, and a record without `losses` is simply not
+    # seen by the loop above -- so the gate could pass with a timed artifact never output-verified.
+    havep2={c[:-len(" [pass2]")] for ks in seqs.values() for c in ks if c.endswith("[pass2]")}
+    m2=sorted(want-havep2)
+    if m2: bad.append(f"pass-2 replays missing loss vectors (timed but unverified): {' '.join(m2)}")
 lens={len(L) for L in seqs}
 if len(lens) != 1: bad.append(f"loss vectors have differing lengths {sorted(lens)}")
 # Consistent lengths are not enough: 26 records of `"losses":[]` share a length, skip the comparison

@@ -34,7 +34,7 @@ identifiable reason given in Part 3 — without the guard the search ships mater
 which is the crude form of the same transform. The correction: that is a fact about the default, not
 the mechanism. **Cap 4 beats the default 8 by 5.7% with non-overlapping ranges, measured in one
 order-balanced block (and 1.18x against cap −1 when the two balanced blocks are chained); on the
-`gpt2_mini` graph placement is identical to cap −1 only at cap 32 and above, while cap 16 already
+`gpt2_mini` graph cap 32 is the only measured cap whose placement matches cap −1's, while cap 16 already
 shows one node's worth of placement difference (at the final layer norm) behind an unchanged kernel
 count** — so
 8 is not well-centred for this fixture (Part 4, which scopes that narrowly and records the
@@ -477,9 +477,11 @@ shipped-step row above is untrustworthy and the signature-level rows are not.
 
 ## Part 4 — the cap sweep: is 8 the right trade on gfx1151?
 
-**No. Cap 4 beats the default 8 outside the noise floor, and placement is identical to cap −1 only
-from cap 32 up — at cap 16 one node's worth of placement difference already appears, behind an
-unchanged kernel count.** Three timed reps at caps
+**No. Cap 4 beats the default 8 outside the noise floor, and cap 32 is the only cap measured here
+whose emitted placement matches cap −1's — at cap 16 one node's worth of placement difference already
+appears, behind an unchanged kernel count.** (Only 2, 4, 8, 16, 32 and −1 were measured; nothing is
+claimed about caps between or above them, and since different mechanisms can converge on the same
+placement, equality at 32 does not extrapolate upward.) Three timed reps at caps
 2, 4, 8 and −1; one each at 16 and 32, which is enough because what matters about those two is
 structural (the emitted kernel multiset) rather than a timing.
 
@@ -611,8 +613,8 @@ distinct transitive materialized inputs per setter, which varies with architectu
 constant depth, so "a 4-layer model" is already an over-generalization of a single measured graph and
 "shallow models" more so. Both are avoided above and in the README index entry.
 
-What that leaves is narrow and still useful: on this graph placement is identical to cap −1 only from
-cap 32 up, and the placement difference grows one node at 16, four at 8, nine at 4 and twenty-three at
+What that leaves is narrow and still useful: on this graph cap 32 is the only measured cap matching
+cap −1's placement, and the difference grows one node at 16, four at 8, nine at 4 and twenty-three at
 2 — and cap 4 is 5.7% faster than the shipped default. (Nodes' worth of difference, not firing counts:
 see the proxy caveat above.) Changing the global
 default on that would be the gh-479 mistake in a new costume — the measurement that would justify
