@@ -29,7 +29,11 @@
 # 143/130 = cancelled, 137 = SIGKILLed, 124 = `wait` itself timed out; dune
 # never reaches those on its own). `status` exits 0 finished, 3 still running
 # (or verdict publication in flight), 1 died without a verdict. Usage and lock
-# refusals exit 2.
+# refusals exit 2 -- every one of them, including an option placed before the
+# subcommand (`--cap 5400 run ...`, which is NOT accepted; options go after).
+# But a launcher that swallows the status -- e.g. an agent harness's background
+# mode reporting its own wrapper's 0 -- turns that refusal into a false green,
+# so read the message, not only the code: a usage error runs no tests at all.
 #
 # Everything after the options is dune's argv, verbatim (default: `runtest`):
 #   tools/test-run.sh run runtest test/operations
