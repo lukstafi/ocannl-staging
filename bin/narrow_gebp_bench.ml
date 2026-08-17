@@ -254,14 +254,17 @@ let () =
       in
       p "speedups vs naive: packmma %.1fx, packmma_par %.1fx\n" (t_naive /. t_pack)
         (t_naive /. t_par);
+      (* Count the fallback rather than "anything that is not [Mma_register_tiled]": on the C
+         backends this bench targets the two are the same set, but the latter also indicts
+         [Mma_intrinsics], so it would false-warn the moment an arm runs on a GPU. *)
       let declined =
-        List.filter (r_pack @ r_par) ~f:(fun r ->
-            not (Ir.C_syntax.equal_mma_rendering r Ir.C_syntax.Mma_register_tiled))
+        List.count (r_pack @ r_par)
+          ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_scalar_fallback)
       in
-      if not (List.is_empty declined) then
+      if declined > 0 then
         p
-          "WARNING: %d of %d Tile_mma statements did not register-tile (see the census above) —\n\
-           these are NOT register-tiled timings. Re-run with --ocannl_schedule_log_declines=true\n\
-           for the per-rule reason.\n"
-          (List.length declined)
+          "WARNING: %d of %d Tile_mma statements rendered the scalar fallback (see the census\n\
+           above) — these are NOT register-tiled timings. Re-run with\n\
+           --ocannl_schedule_log_declines=true for the per-rule reason.\n"
+          declined
           (List.length (r_pack @ r_par))
