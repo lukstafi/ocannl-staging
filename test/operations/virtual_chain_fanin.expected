@@ -51,7 +51,7 @@ partial-write splice: ell2 is an input of routine B: true
 partial-write splice: uncovered cells read the incoming values: true
 dead-write splice: routine A defers v3: true
 dead-write splice: ell3 is read-before-write (a dead write supplies no coverage): true
-dead-only mention: registered but absent from the interface: true
+dead-only mention: dead code is dropped wholesale, nothing registered: true
 dead-write splice: out sees incoming ell3, ell3 holds the live overwrite: true
 discarded operand: routine A defers v5: true
 discarded operand: no phantom input from the discarded read: true
@@ -86,6 +86,7 @@ failed-inline: routine A defers v17: true
 failed-inline: consuming at an un-inlinable site fails actionably: true
 dynamic-table: routine A defers v18: true
 dynamic-table: inherited table is rejected actionably: true
+dead-consumer splice: tainted reference in dead code is legal, live values flow: true
 pipeline deferral-only: links and runs as a no-op on a fresh context: true
 pipeline deferral-only: the target stayed virtual: true
 pipeline consumer on a w2-less chain: rejected at link (spliced input demanded): true

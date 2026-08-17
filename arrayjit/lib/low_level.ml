@@ -2048,6 +2048,12 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
         let c1 = loop c1 in
         let c2 = loop c2 in
         Seq (c1, c2)
+    (* Review round 13: dead loops are dropped at virtualization — they replay zero times, and
+       descending into them could reject valid programs (a merge-tainted splice in code that
+       never executes) or mint phantom parameters for identifiers only dead code renders.
+       Aligns the consumer side with [inline_computation]'s spliced-body elision (round 10);
+       stored computations lose their dead sub-loops at store time for the same reason. *)
+    | For_loop { from_; to_; _ } when to_ < from_ -> Noop
     | For_loop ({ index; body; _ } as for_config) -> (
         if in_storage_pass then
           For_loop
@@ -2180,7 +2186,19 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
         llsc
     | Get (tn, indices) ->
         let traced = get_node traced_store tn in
-        if Tn.Placements.known_non_virtual plc traced.tn then llsc
+        if Tn.Placements.known_non_virtual plc traced.tn then (
+          (* Review round 13: [Local] is non-virtual yet does NOT persist across routines — an
+             inherited node the earlier routine materialized as routine-local scratch has no
+             buffer a later routine can read. Only persistent placements may pass through. *)
+          if Hash_set.mem inherited_tns tn && Tn.Placements.known_not_materialized plc tn then
+            raise
+              (Utils.User_error
+                 [%string
+                   "the node %{Tn.debug_name tn} was computed as routine-local scratch by an \
+                    earlier routine of this compilation lineage: its buffer does not persist, \
+                    so a later routine cannot read it. Mark %{Tn.debug_name tn} as materialized \
+                    (e.g. via Train.set_materialized) in the routine that computes it."]);
+          llsc)
         else
           let id = get_scope tn in
           Option.value ~default:llsc
@@ -2195,15 +2213,22 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
            gather index is only known at runtime), so a LOCAL table materializes — but an
            INHERITED table has no setter left in any schedule, and letting it reach cleanup
            produces the cryptic already-virtual provenance collision. Fail actionably here. *)
-        if Hash_set.mem inherited_tns tn && not (Tn.Placements.known_non_virtual plc tn) then
+        if
+          Hash_set.mem inherited_tns tn
+          && ((not (Tn.Placements.known_non_virtual plc tn))
+             (* Round 13: [Local] passes [known_non_virtual] yet does not persist across
+                routines — only a persistent materialized table can serve the gather. *)
+             || Tn.Placements.known_not_materialized plc tn)
+        then
           raise
             (Utils.User_error
                [%string
                  "the deferred computation of %{Tn.debug_name tn}, stored by an earlier routine \
                   of this compilation lineage, is read as a dynamic-gather table in this \
                   routine: dynamically-indexed reads cannot be served by inlining, and no \
-                  routine writes the node's buffer. Mark %{Tn.debug_name tn} as materialized \
-                  (e.g. via Train.set_materialized) in the routine that computes it."]);
+                  routine writes a persistent buffer for the node. Mark %{Tn.debug_name tn} as \
+                  materialized (e.g. via Train.set_materialized) in the routine that computes \
+                  it."]);
         Get_dynamic { tn; idcs; dyn_axis; dyn_value = (loop v, prec) }
     | Local_scope opts ->
         Local_scope

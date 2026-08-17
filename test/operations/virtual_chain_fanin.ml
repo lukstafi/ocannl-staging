@@ -646,9 +646,9 @@ let phase5 () =
     LL.optimize ctx4 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_dead_a" [] llc_a4
   in
   p "dead-write splice: routine A defers v3" (known_virtual o_a4 v3);
-  (* ghost/ghost2 are mentioned ONLY inside a dead loop (review round 4, P2): they must be
-     registered — the dead body renders, so their identifiers need parameters — yet absent from
-     the interface, or no-op accesses would create phantom scheduling dependencies. *)
+  (* ghost/ghost2 are mentioned ONLY inside a dead loop: since round 13 drops dead loops at
+     virtualization, nothing about them survives — no registry entry, no parameter, no
+     interface presence (rounds 4 and 13). *)
   let ghost = mk "ghost" in
   materialize ghost;
   let ghost2 = mk "ghost2" in
@@ -668,9 +668,9 @@ let phase5 () =
   in
   p "dead-write splice: ell3 is read-before-write (a dead write supplies no coverage)"
     (read_before_write o_b4 ell3);
-  p "dead-only mention: registered but absent from the interface"
-    (Hashtbl.mem o_b4.LL.traced_store ghost
-    && Hashtbl.mem o_b4.LL.traced_store ghost2
+  p "dead-only mention: dead code is dropped wholesale, nothing registered"
+    ((not (Hashtbl.mem o_b4.LL.traced_store ghost))
+    && (not (Hashtbl.mem o_b4.LL.traced_store ghost2))
     &&
     let (ins, outs), _ = LL.input_and_output_nodes o_b4 in
     (not (Set.mem outs ghost)) && not (Set.mem ins ghost2));
@@ -1211,7 +1211,31 @@ let phase5 () =
       false
     with Utils.User_error msg -> String.is_substring msg ~substring:"dynamic-gather"
   in
-  p "dynamic-table: inherited table is rejected actionably" rejected_gd
+  p "dynamic-table: inherited table is rejected actionably" rejected_gd;
+  (* Review round 13, P2: a consumer's reference to a merge-tainted inherited node ONLY inside a
+     dead loop must not reject the routine — dead loops are dropped at virtualization before any
+     splice is attempted. mv is the tainted node from the merge-splice pins, same lineage. *)
+  let ell22 = mk "ell22" in
+  materialize ell22;
+  let out23 = mk "dcout" in
+  materialize out23;
+  let llc_b18 =
+    let sd = sym () and s = sym () in
+    seq
+      (loop ~upto:(-1) sd (set out23 [| iter sd |] (get mv [| iter sd |])))
+      (loop_n s dim (set out23 [| iter s |] (get ell22 [| iter s |])))
+  in
+  let o_b18 =
+    LL.optimize ctx2 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_deadcons_b" [] llc_b18
+  in
+  let ell22_vals = Array.init dim ~f:(fun i -> 91. +. Float.of_int i) in
+  let got18 =
+    execute ~name:"vcf_deadcons_b" o_b18
+      ~seed:[ (ell22, ell22_vals); (out23, blank dim) ]
+      ~read:[ out23 ]
+  in
+  p "dead-consumer splice: tainted reference in dead code is legal, live values flow"
+    (same got18 [ ell22_vals ])
 
 (* === Phase 6: deferral-only comp through the ordinary pipeline (review round 3) === *)
 
