@@ -10,8 +10,11 @@
    promotes ([cc_fp16_arithmetic] probes it), the policy is ignored and the run stays f32-compute.
 
    Usage: OCANNL_BACKEND=cc dune exec bin/narrow_gebp_bench.exe -- [f32|bf16|f16] [n] [repeats]
-   (defaults f32, 512, 20; n a multiple of 64). Readbacks stay outside the timed region (the
-   [Context.get_values] trap, docs/agent-notes.md). *)
+   [bm] [bk] (defaults f32, 512, 20, 64, 256; [bm]/[bk] also as [--bm=]/[--bk=] flags). The packed
+   variants schedule [Sched.split]s of factor [bm] over the i axis and [bk] over the k axis, so
+   they need [n mod bm = 0] and [n mod bk = 0]; an incompatible n runs the unblocked naive variant
+   alone, so an arbitrary extent still has something to compare against. Readbacks stay outside the
+   timed region (the [Context.get_values] trap, docs/agent-notes.md). *)
 
 open Base
 open Ocannl
@@ -57,10 +60,20 @@ let () =
   let arg i default =
     match List.nth pos_args i with Some s -> Int.of_string s | None -> default
   in
+  let flag name =
+    let prefix = "--" ^ name ^ "=" in
+    Array.to_list (Sys.get_argv ())
+    |> List.find_map ~f:(fun s -> Option.map (String.chop_prefix s ~prefix) ~f:Int.of_string)
+  in
   let n = arg 1 512 in
   let repeats = arg 2 20 in
-  assert (n % 64 = 0);
-  let bm, bk = (64, 256) in
+  let bm = Option.value (flag "bm") ~default:(arg 3 64) in
+  let bk = Option.value (flag "bk") ~default:(arg 4 256) in
+  if bm <= 0 || bk <= 0 then
+    invalid_arg (Printf.sprintf "narrow_gebp_bench: bm and bk must be positive, got %d, %d" bm bk);
+  (* The packed variants split i by [bm] and k by [bk]; both factors must divide the extent. The
+     naive variant has no blocking at all, so it runs for any n. *)
+  let indivisible = List.filter [ ("bm", bm); ("bk", bk) ] ~f:(fun (_, f) -> n % f <> 0) in
   let flops = 2.0 *. Float.of_int n *. Float.of_int n *. Float.of_int n in
   (* Exactly-representable inputs at every storage precision (the parity-test recipes); the spot
      check guards against an all-zeros or NaN run without a full reference. *)
@@ -148,12 +161,22 @@ let () =
       prec
   in
   let tile_prec = if Ir.Ops.equal_prec cprec prec then None else Some cprec in
-  p "GEBP n=%d, %d repeats, storage %s, compute %s, packed panels %s\n" n repeats
-    (Ir.Ops.prec_string prec) (Ir.Ops.prec_string cprec)
+  p "GEBP n=%d, %d repeats, blocking bm=%d bk=%d, storage %s, compute %s, packed panels %s\n" n
+    repeats bm bk (Ir.Ops.prec_string prec) (Ir.Ops.prec_string cprec)
     (Option.value_map tile_prec ~default:"(storage)" ~f:Ir.Ops.prec_string);
   let t_naive = bench ~variant:"naive" ~schedule:None () in
-  let t_pack = bench ~variant:"packmma" ~schedule:(Some (packed_schedule ~grid:false ~tile_prec)) () in
-  let t_par =
-    bench ~variant:"packmma_par" ~schedule:(Some (packed_schedule ~grid:true ~tile_prec)) ()
-  in
-  p "speedups vs naive: packmma %.1fx, packmma_par %.1fx\n" (t_naive /. t_pack) (t_naive /. t_par)
+  match indivisible with
+  | _ :: _ ->
+      p "skipping the packed variants: their Sched.split factors must divide n = %d, but\n" n;
+      List.iter indivisible ~f:(fun (name, f) ->
+          p "  %s = %d does not (n mod %s = %d)\n" name f name (n % f));
+      p "pass a compatible blocking, e.g. --bm=<f> --bk=<f> with f dividing %d.\n" n
+  | [] ->
+      let t_pack =
+        bench ~variant:"packmma" ~schedule:(Some (packed_schedule ~grid:false ~tile_prec)) ()
+      in
+      let t_par =
+        bench ~variant:"packmma_par" ~schedule:(Some (packed_schedule ~grid:true ~tile_prec)) ()
+      in
+      p "speedups vs naive: packmma %.1fx, packmma_par %.1fx\n" (t_naive /. t_pack)
+        (t_naive /. t_par)
