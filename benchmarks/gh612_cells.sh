@@ -142,14 +142,23 @@ cmd_snap() { (
         [ -n "$h" ] && [ ! -f "$snap/$h.hip" ] && cp "$f" "$snap/$h.hip"; fi
       sleep 0.02
     done ) & local w=$!
+  # Same hole `replay` had: a populated cache DIRECTORY is not a hit, so a differing tree or
+  # cache-key flag would let this search afresh and `pick_armA` would snapshot a NEWLY crowned
+  # artifact instead of the measured one -- silently corrupting every structural diff built on it.
   BENCH_FIXTURE=$FIXTURE BENCH_TUNE=1 $PIN "$EXE" --ocannl_backend=hip \
-    --ocannl_autotune_cache_dir="$out/cache" \
+    --ocannl_autotune_cache_dir="$out/cache" --ocannl_autotune_search=false \
+    --ocannl_autotune_log=true \
     --ocannl_output_debug_files_in_build_directory=true \
     --ocannl_schedule_log_launches=true "$@" \
     > "$out/replay.out" 2> "$out/launches.err"
   local st=$?
   kill $w 2>/dev/null; wait $w 2>/dev/null
   echo "$label r$rep replay: exit $st"
+  local hits; hits=$(grep -c 'cache hit:' "$out/launches.err" 2>/dev/null || echo 0)
+  [ "${hits:-0}" -ge 2 ] || {
+    echo "gh612_cells: $label r$rep snapshot is NOT a replay -- $hits cache hits (want 2, one per" >&2
+    echo "  arm). With autotune_search=false a miss ships the untuned default, so the emitted source" >&2
+    echo "  would not be the measured cell's. Re-run \`search\` for this cell." >&2; exit 2; }
   # A failed replay can still leave a complete source and launch log behind (it may have died after
   # compiling), so `pick_armA` succeeding proves nothing about the run. Refuse the artifact.
   [ "$st" -eq 0 ] || { echo "gh612_cells: replay failed (exit $st); refusing the snapshot" >&2; exit "$st"; }
@@ -544,10 +553,13 @@ cmd_replay() { (
   BENCH_FIXTURE=$FIXTURE BENCH_TUNE=1 $PIN "$EXE" --ocannl_backend=hip \
     --ocannl_autotune_cache_dir="$out/cache" --ocannl_autotune_search=false \
     --ocannl_autotune_log=true "$@" \
-    > "$out/replay2.out" 2> "$out/replay2.err"
+    > "$out/replay2.tmp" 2> "$out/replay2.err"
   local st=$?
+  # Publish replay2.out ONLY after validation: `profile` treats any nonempty replay2.out as an
+  # accepted pass-2 result, so a rejected run left on disk would be re-offered as paired evidence.
+  rm -f "$out/replay2.out"
   echo -n "$label r$rep pass-2 replay: exit $st  "
-  local timing; timing=$(grep -h '^{' "$out/replay2.out" 2>/dev/null | tail -1 | grep -o '"step_ms":{[^}]*}')
+  local timing; timing=$(grep -h '^{' "$out/replay2.tmp" 2>/dev/null | tail -1 | grep -o '"step_ms":{[^}]*}')
   echo "${timing:-<no step_ms record>}"
   # Producing the timing IS this subcommand's purpose: a zero exit with no record would let the
   # pass-2 loop look successful while yielding nothing for the cell.
@@ -561,6 +573,7 @@ cmd_replay() { (
     echo "gh612_cells: $label r$rep is NOT a replay -- $hits cache hits (want 2, one per arm)." >&2
     echo "  With autotune_search=false a miss ships the untuned default, so this timing is not a" >&2
     echo "  pass-2 replay of the crowned artifact. Re-run \`search\` for this cell." >&2; return 1; }
+  mv "$out/replay2.tmp" "$out/replay2.out"
   return 0
 ) }
 
@@ -569,8 +582,11 @@ cmd_replay() { (
 # comparing: at full serialized precision the runs are NOT identical, they agree to a few f32 ulp --
 # which is the right result for reassociation across different kernel schedules, and a different
 # claim. Compares every cell's loss vector at the precision bench_gpt actually serializes.
+# PARITY_MAX_ULP (default 64) is the failure threshold: comfortably above the few-ulp reassociation
+# noise that different schedules produce, far below anything a real correctness regression shows.
+# EXPECT_RUNS, if set, additionally pins how many cells the gate must have covered.
 cmd_parity() { (
-  python3 - "$OUT_ROOT" <<'EOF'
+  python3 - "$OUT_ROOT" "${PARITY_MAX_ULP:-64}" "${EXPECT_RUNS:-0}" <<'EOF'
 import json,glob,os,sys,math,collections
 root=sys.argv[1]
 seqs=collections.defaultdict(list)
@@ -593,7 +609,19 @@ for i in range(len(next(iter(seqs)))):
     vals=sorted({L[i] for L in seqs})
     span=max(vals)-min(vals); u=span/ulp32(vals[0]); worst=max(worst,u)
     print(f"  step {i}: {len(vals)} distinct, span {span:.3e} = {u:5.1f} f32 ulp (rel {span/vals[0]:.2e})")
-print(f"WORST: {worst:.0f} f32 ulp. NOT bit-identity -- state it as agreement to within that many ulp.")
+maxulp=float(sys.argv[2]); expect=int(sys.argv[3])
+print(f"WORST: {worst:.0f} f32 ulp (threshold {maxulp:.0f}). NOT bit-identity -- state it as"
+      "\n       agreement to within that many ulp.")
+bad=[]
+if worst > maxulp: bad.append(f"loss divergence {worst:.0f} ulp exceeds PARITY_MAX_ULP={maxulp:.0f}")
+if expect and tot != expect: bad.append(f"covered {tot} runs, expected EXPECT_RUNS={expect}")
+lens={len(L) for L in seqs}
+if len(lens) != 1: bad.append(f"loss vectors have differing lengths {sorted(lens)}")
+if tot < 2: bad.append("fewer than 2 runs: nothing to compare")
+if bad:
+    for b in bad: print("PARITY GATE FAILED: "+b, file=sys.stderr)
+    sys.exit(1)
+print("parity gate PASSED")
 EOF
 ) }
 

@@ -774,6 +774,14 @@ for c in 16 32; do $D replay $M sweep-cap$c 1 --ocannl_virtualize_max_inline_fan
 ```
 
 ```bash
+# the correctness gate. Run it after every search cell exists -- it is what produces the
+# five-sequences / 14-ulp result in Provenance, and it FAILS (exit 1) if the divergence exceeds
+# PARITY_MAX_ULP (default 64) or the run count does not match EXPECT_RUNS. Computed, not eyeballed:
+# the claim it replaced ("bit-identical") came from an ad-hoc script that rounded before comparing.
+EXPECT_RUNS=26 $D parity
+```
+
+```bash
 # the measured local roofline (compiled from the tree root; CPU quiet, since the bandwidth leg
 # shares the LPDDR5X controller with it on this APU)
 $D roofline $M
