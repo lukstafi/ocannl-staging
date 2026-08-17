@@ -5286,6 +5286,68 @@ let%diagn2_sexp analyze_proc (static_indices : Indexing.static_symbol list) (llc
 let copy_traced_store (store : traced_store) : traced_store =
   Hashtbl.map store ~f:(fun t -> { t with tn = t.tn })
 
+(* gh-610: cross-routine inlining ([inline_computation] splicing a computation an earlier routine
+   of the lineage committed [Virtual]) can bring reads of materialized nodes the raw code never
+   mentions, so [analyze_proc] gave them no traced entry. Everything that treats the traced store
+   as the routine's node registry — the kernel parameter list ([C_syntax.compile_proc]), context
+   allocation ([Backends.allocate_delta]), the routine interface ([input_and_output_nodes]) —
+   would miss them, and C-family codegen then emits an identifier no parameter declares. Walk the
+   FINAL optimized code and register the missing nodes. A stored computation's setters target the
+   virtual node itself, so splices only contribute reads and fresh entries are [read_only];
+   writes are handled all the same in case a future pass splices differently. *)
+let register_spliced_accesses (traced_store : traced_store) (llc : t) : unit =
+  let fresh_read = Hash_set.create (module Tnode) in
+  let fresh_written = Hash_set.create (module Tnode) in
+  let note set tn = if not (Hashtbl.mem traced_store tn) then Hash_set.add set tn in
+  let rec proc (c : t) =
+    match c with
+    | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ -> ()
+    | Seq (c1, c2) ->
+        proc c1;
+        proc c2
+    | For_loop { body; _ } -> proc body
+    | Zero_out tn -> note fresh_written tn
+    | Set { tn; llsc; _ } ->
+        note fresh_written tn;
+        scalar llsc
+    | Set_from_vec { tn; arg = s, _; _ } ->
+        note fresh_written tn;
+        scalar s
+    | Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
+        note fresh_written tn;
+        scalar v;
+        scalar llsc
+    | Set_local (_, llsc) -> scalar llsc
+    | If { cond = c0, _; body } ->
+        scalar c0;
+        proc body
+    (* Pre-schedule construct, unreachable here; defensively scan the semantically-equivalent
+       fallback. *)
+    | Tile_mma { fallback; _ } -> proc fallback
+  and scalar (sc : scalar_t) =
+    match sc with
+    | Constant _ | Constant_bits _ | Embed_index _ | Get_local _ | Get_merge_buffer _ -> ()
+    | Get (tn, _) -> note fresh_read tn
+    | Get_dynamic { tn; dyn_value = v, _; _ } ->
+        note fresh_read tn;
+        scalar v
+    | Local_scope { body; _ } -> proc body
+    | Ternop (_, (a, _), (b, _), (d, _)) ->
+        scalar a;
+        scalar b;
+        scalar d
+    | Binop (_, (a, _), (b, _)) ->
+        scalar a;
+        scalar b
+    | Unop (_, (a, _)) -> scalar a
+  in
+  proc llc;
+  Hash_set.iter fresh_written ~f:(fun tn -> (get_node traced_store tn).has_assignment <- true);
+  Hash_set.iter fresh_read ~f:(fun tn ->
+      let traced = get_node traced_store tn in
+      if traced.has_assignment then traced.read_before_write <- true
+      else traced.read_only <- true)
+
 let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : optimized =
   let static_indices = an.an_static_indices in
   let llc = an.an_llc in
@@ -5303,6 +5365,7 @@ let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : opt
     @@ cleanup_virtual_llc input_ctx.placements ~static_indices
     @@ virtual_llc_result
   in
+  register_spliced_accesses traced_store llc;
   (* The searchable decision dimensions (gh-555), read off the now-committed placements: cleanup
      has committed the surviving virtual candidates, and the backend-compile finalization
      ([default_to_most_local]) has not yet rewritten the cap provenances. *)
