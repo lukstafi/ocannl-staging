@@ -15,8 +15,11 @@
    they need [n mod bm = 0] and [n mod bk = 0] (and an n big enough to leave a loop nest at all);
    an unschedulable n runs the unblocked naive variant alone, so an arbitrary extent still has
    something to compare against. Each line carries a position-weighted checksum of the whole
-   output, which is what makes a mishandled remainder region visible — a single interior cell
-   cannot see the tail a non-dividing factor creates. Each packed line carries its
+   output, which is what makes a mishandled edge region visible — the register-tiled micro-kernel
+   peels row and column edges whenever its block shape does not cover the extent, and a single
+   interior cell sees none of that. In a narrow-storage run the naive and packed legs accumulate
+   at different widths, so the run says outright which checksums are comparable. Each packed line
+   carries its
    [C_syntax.mma_census] rendering, because a [Tile_mma] whose preconditions fail (a column extent
    below the compute vector width is one of several ways in) renders the scalar fallback while
    still reporting as "packmma" — read the bracket, not the variant name, when deciding what a
@@ -49,6 +52,19 @@ let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
 let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; inner })
+
+(* An aperiodic mix of the two indices, used to mint the operand values below. Aperiodic is the
+   point: any value drawn from [index mod p] repeats under [k -> k + p], so if both operands share
+   that period every packed K panel is identical and a staging bug that substitutes or repeats the
+   wrong panel is invisible — and [bk] is a user argument, so no fixed period can be assumed to be
+   coprime to it. Mixing has no shift symmetry at all, which removes the class rather than dodging
+   it. Every intermediate is masked below 2^54, so nothing overflows a 63-bit int and the sequence
+   is reproducible by an external oracle. *)
+let mix ~salt a b =
+  let x = (a * 73856093) lxor (b * 19349663) lxor salt in
+  let x = (x lxor (x lsr 13)) land 0xFFFFFF in
+  let x = x * 1274126177 land 0xFFFFFF in
+  x lxor (x lsr 7)
 
 let () =
   (* An option is [--]-prefixed (ours, and the [--ocannl_*] config flags) or a [-] followed by a
@@ -100,31 +116,34 @@ let () =
           else Some (Printf.sprintf "%s = %d does not divide n = %d (remainder %d)" name f n (n % f)))
   in
   let flops = 2.0 *. Float.of_int n *. Float.of_int n *. Float.of_int n in
-  (* Operand values that vary with EVERY index at every n, and stay exactly representable at every
-     storage precision (the parity-test recipes). Each index is reduced on its own — [idcs.(0) % 3]
-     — rather than the flattened offset [(i * n + j) % 3]: a modulus applied to the flat offset
-     collapses along the row axis exactly when it divides n, so the flattened form made ma constant
-     along i whenever 3 divides n, mb constant along k whenever 5 divides n, and n = 960 lost both.
-     A transform that substitutes or repeats the wrong row of a collapsed operand then computes the
-     correct output, which no whole-output check can see. Reducing per axis never meets n, so the
-     discrimination rule (CLAUDE.md: a producer's value must vary with every symbol of its
-     iteration) holds at every extent. Residues are combined before the reduction rather than
-     scaled and added, which keeps the value sets — ma in {0.25, 0.5, 0.75}, mb in {-1, -0.5, 0,
-     0.5, 1} — and hence the 1/8 product granularity of the original data: that granularity is
-     load-bearing in a narrow-storage run, see the checksum's note below. ma is strictly positive,
-     so a dropped term cannot cancel to something plausible; mb stays signed and sums to zero over
-     its cycle, so partial sums random-walk instead of growing with n. The residual both share with
-     any bounded value set is periodicity: a k-shift by a multiple of 5, or an i/j-shift by a
-     multiple of 3, is invisible. Every blocking factor in use (4, 7, 11, 64, 256) is coprime to
-     those periods. *)
+  (* Operand values that vary with EVERY index at every n, drawn through [mix] so that no shift of
+     any index is a symmetry, and exactly representable at every storage precision (the parity-test
+     recipes). Two traps sit behind this, both of which cost a wrong version to find. The value must
+     not be a modulus of the FLATTENED offset [(i * n + j) % p] — that loses its row dependence
+     exactly when p divides n, which made an earlier ma constant along i at 3 | n and an earlier mb
+     constant along k at 5 | n, with n = 960 collapsing both; a transform substituting the wrong row
+     of a collapsed operand then computes the correct output, which no whole-output check can see.
+     And reducing each index separately fixes that but leaves the period: with both operands drawn
+     mod 5 in k, every packed K panel repeats under [k -> k + 5], so a run with [bk = 5] hides a
+     panel-substitution bug just as thoroughly. [mix] has no shift symmetry at any lag, so neither
+     survives — measured over n = 2..2000 for the collapse, over lags 1..256 for the shift, and as
+     zero duplicate full B~ panels at every bk from 1 to 64.
+
+     The value SETS are the original ones — ma in {0.25, 0.5, 0.75}, mb in {-1, -0.5, 0, 0.5, 1} —
+     because the resulting 1/8 product granularity is load-bearing in a narrow-storage run (see the
+     checksum's note below; a finer-grained attempt overflowed the bf16 mantissa and split the legs
+     at n = 256). ma is strictly positive, so a dropped term cannot cancel into something plausible;
+     mb is signed and near-mean-zero, which makes partial sums random-walk rather than grow with n
+     — measured max |partial sum| 18 at n = 256 and 31 at n = 512, against the ~0.075n a
+     periodic-in-k pairing produced. *)
   let ma =
     NTDSL.init ~l:"ma" ~prec ~i:[ n ] ~o:[ n ]
-      ~f:(fun idcs -> Float.of_int (1 + (((idcs.(0) % 3) + (idcs.(1) % 5)) % 3)) *. 0.25)
+      ~f:(fun idcs -> Float.of_int (1 + (mix ~salt:0x5A17 idcs.(0) idcs.(1) % 3)) *. 0.25)
       ()
   in
   let mb =
     NTDSL.init ~l:"mb" ~prec ~i:[ n ] ~o:[ n ]
-      ~f:(fun idcs -> Float.of_int ((((idcs.(0) % 5) + (idcs.(1) % 3)) % 5) - 2) *. 0.5)
+      ~f:(fun idcs -> Float.of_int ((mix ~salt:0x3C6E idcs.(0) idcs.(1) % 5) - 2) *. 0.5)
       ()
   in
   let packed_schedule ~grid ~tile_prec ~mc (opt : LL.optimized) : Sched.schedule =
@@ -211,11 +230,20 @@ let () =
        the cc scheduler is synchronous, so the run loop needs no readback to complete. *)
     let values = Context.get_values ctx mc.Tensor.value in
     (* Element [1][1] of the n*n result — an interior cell, away from the corners — except at
-       n = 1, where the whole output is one element. One interior cell cannot see the remainder
-       region: [bm]/[bk] are arguments now, and a [Sched.split] whose factor does not divide its
-       extent puts the last partial block exactly there, so a variant that drops or repeats tail
-       work would still print a matching spot value. Hence the whole output is checksummed too:
-       every correct variant prints the identical value, a tail-mishandling one does not.
+       n = 1, where the whole output is one element. One interior cell cannot see a remainder
+       region, so the whole output is checksummed too: every correct variant prints the identical
+       value, a tail-mishandling one does not.
+
+       Which remainder, precisely — the obvious answer is the wrong one. A [Sched.split] whose
+       factor does not divide its extent is NOT the case covered here: [unschedulable] rejects
+       exactly those factors, so at a non-dividing [bm]/[bk] the packed variants never run and the
+       naive line has nothing to be compared against. What IS covered is the register-tiled
+       micro-kernel's own edge peel, which needs no split remainder: the [Tile_mma] covers full
+       blocks only, and n is free of any width constraint because j is never split. At n = 77 with
+       bm = 7, bk = 11 the emitted kernel carries two scalar peel loops — a column peel over
+       j in [76, 77) and a row peel over i in [4, 7) — that the same kernel at n = 76 does not
+       have, and all three variants agree on the checksum across it. So the tail this check guards
+       is the micro-kernel peel and the packing [Stage] edges, not the block remainder.
        Position-weighted for a different reason than schedule_bench's: with the per-axis residues
        above there is no divisibility class on which a plain sum vanishes (unlike the flattened
        form, whose collapse also zeroed it). What an unweighted sum cannot see is a PERMUTATION —
@@ -227,14 +255,17 @@ let () =
        Cross-variant equality is therefore EXACT in an f32 run, at every extent: the products are
        multiples of 1/8 bounded by 0.75n, so the whole reduction is exact in the f32 accumulator
        and independent of the order the variants sum in. It is NOT unconditional in a narrow
-       storage run. The naive variant accumulates in the storage precision while the packed ones
-       accumulate through a wider register tile, so once a partial sum outgrows the storage
-       mantissa (bf16 carries 8 significant bits, i.e. multiples of 1/8 up to 32) the two round at
-       different points and legitimately disagree — visible here from about n = 320 in bf16. That
-       asymmetry is the bench's, not the checksum's, and it predates this check; it is why mb sums
-       to zero over its cycle, which keeps partial sums random-walking rather than growing with n.
-       Read an f32 run as the cross-variant oracle, and a bf16/f16 disagreement as a question about
-       accumulation width rather than a wrong kernel. Both checks are outside the timed region. *)
+       storage run, and the difference is a property of the bench rather than of this check. The
+       naive variant accumulates in the storage precision while the packed ones accumulate through
+       a wider register tile, so once a partial sum outgrows the storage mantissa (bf16 carries 8
+       significant bits, i.e. multiples of 1/8 up to 32) the two round at different points and
+       legitimately disagree. It predates this checksum — the pre-existing operands already split
+       the legs at bf16 n = 320 — which is why the run announces the non-comparability outright
+       when storage is narrower than compute, rather than leaving a reader to mistake it for a bad
+       transform. The near-mean-zero mb keeps partial sums random-walking (max 31 at n = 512),
+       which buys exactness to roughly n = 512 in bf16 rather than n = 320, but buys it only up to
+       a size: an f32 run is the cross-variant oracle, and in a narrow run only the packed
+       variants are comparable with each other. Both checks are outside the timed region. *)
     let checksum =
       Array.foldi values ~init:0.0 ~f:(fun i acc v -> acc +. (v *. Float.of_int (1 + (i % 251))))
     in
@@ -266,6 +297,16 @@ let () =
   p "GEBP n=%d, %d repeats, blocking bm=%d bk=%d, storage %s, compute %s, packed panels %s\n" n
     repeats bm bk (Ir.Ops.prec_string prec) (Ir.Ops.prec_string cprec)
     (Option.value_map tile_prec ~default:"(storage)" ~f:Ir.Ops.prec_string);
+  (* Say it at runtime rather than only in a comment: with storage narrower than compute the naive
+     variant reduces in %s while the packed ones reduce through the wider register tile, so a
+     checksum difference between them is expected arithmetic, not evidence of a bad transform. A
+     reader comparing the column has to be told which comparisons are meaningful. *)
+  if Option.is_some tile_prec then
+    p
+      "note: naive accumulates in %s (storage), packed variants in %s (register tile) — their\n\
+      \      checksums are NOT comparable; the packed variants remain comparable with each other.\n\
+      \      Use an f32 run as the cross-variant oracle.\n"
+      (Ir.Ops.prec_string prec) (Ir.Ops.prec_string cprec);
   let t_naive, _ = bench ~variant:"naive" ~schedule:None () in
   match unschedulable with
   | _ :: _ ->
