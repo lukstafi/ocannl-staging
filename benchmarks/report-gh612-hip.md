@@ -38,9 +38,9 @@ report does not have one for those three artifacts; `master-cap8`'s arm A did sh
 gh-573's ratio has one verified endpoint and gh-574's has none. A value-changing codegen regression in
 a discarded arm A would leave every structural and timing figure here plausible while invalidating the
 ratio it supports. Closing this needs a way to ship a chosen arm on demand, which does not exist
-today — filed rather than worked around, and the reason it is stated in the verdict is that
-acknowledging a limitation in the provenance section does not make the headline numbers less
-dependent on it.
+today — filed as [ahrefs/ocannl#638](https://github.com/ahrefs/ocannl/issues/638) rather than worked
+around, and the reason it is stated in the verdict is that acknowledging a limitation in the
+provenance section does not make the headline numbers less dependent on it.
 
 One prediction needs a caveat and one needs a correction. The caveat: at its shipped default cap of
 8, gh-573's payoff on the *end-to-end* step is inside this box's search-noise floor, for an
