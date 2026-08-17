@@ -76,6 +76,27 @@
 
 ### Changed
 
+- **An OCANNL setting has two spellings in the environment, not four** (gh-ocannl-605):
+  `ocannl_<key>` and `OCANNL_<KEY>`, which is what `ocannl_config.reference` already described. The
+  dash-prefixed `ocannl-<key>` / `OCANNL-<KEY>` are gone: documented nowhere, used by no caller,
+  unsettable from bash or zsh without `env "ocannl-log_level=1" cmd` — and the tax was paid by
+  every dune rule that has to declare the ambient variables it must be invalidated by, which had to
+  enumerate four spellings per key while the natural-looking all-dashed `ocannl-log-level` was not
+  one of them, so a dep on it tracked nothing (gh-ocannl-593). On the commandline dashes stay, and
+  now go all the way: the prefix separator dashes on its own and the key's own separators dash as a
+  group, so `--ocannl-log-level=1` is read (a key dashed halfway is not a spelling and says so).
+  A bare `ocannl_log_level=1`, with no leading dash, is no longer read at all: a positional
+  argument belongs to the host application, and an OCANNL-linked tool taking a path named
+  `ocannl_config` was one key name away from having it eaten. The unknown-argument warning stopped parsing arguments a second
+  way (split on `=`, dash to underscore, look up the result) and now asks the reader's own table
+  whether any known key would read the argument — closing both silent contradictions the two
+  parsers produced: the all-dashed spelling used to pass validation and then be ignored, and
+  `--ocannl_log_level_0` used to be applied and warned about as unknown, its separator not being an
+  `=`. `Utils.env_var_names` returns two names; the commandline spellings moved to
+  `Utils.cmdline_var_names` / `Utils.cmdline_var_prefixes` beside it, and
+  `test/operations/config_var_spellings` pins both lists against live lookups, with
+  `config_var_warnings` pinning what the library warns about.
+
 - **Startup chatter is opt-in, so that a warning on stderr is legible** (gh-ocannl-595).
   gh-ocannl-581 moved the config chatter off stdout, which fixed the data-channel problem and left
   stderr carrying 83 lines of routine trace on a default run — burying the unknown-config-key

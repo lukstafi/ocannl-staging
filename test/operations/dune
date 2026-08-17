@@ -1082,6 +1082,130 @@
  (modules config_profiles)
  (libraries base arrayjit.utils stdio))
 
+; gh-ocannl-605: the environment and commandline spellings of a configuration key. The rule sets
+; the synthetic keys the executable looks up -- `demo_key` in the one environment spelling that
+; survives and in the three dash-prefixed ones that do not, `dashed_only_key` in the dropped ones
+; alone -- so the golden's last lines are a live check on `Utils.env_var_names`, not a copy of it.
+; The all-dashed commandline flag is the same check on the other side: there the spelling IS read,
+; and it names a real key, the unknown-argument warning being the reason (see the .ml). The BARE
+; `ocannl_print_decimals_precision=9` in front of it is the negative: it is no longer a spelling
+; (Codex P2 on PR #363), and being first in argv it would win if it were, so the golden's 7 is
+; what says a bare argument stays the host's.
+;
+; EVERY spelling of both keys is stated here, the surviving ones as empty (which counts as unset at
+; every source), so the rule's environment decides the output on its own: an ambient
+; `OCANNL_DASHED_ONLY_KEY` would otherwise turn the negative leg's None into a value, and dune,
+; which tracks no OCANNL variable but OCANNL_BACKEND, could serve the stale None besides (Codex P2
+; on PR #363). Pinning beats declaring `env_var` deps wherever it is available: a pinned rule
+; cannot be reached from the ambient environment at all.
+;
+; Windows environment names are case-INSENSITIVE, so `ocannl_demo_key` and `OCANNL_DEMO_KEY` are
+; one variable there and two here; the fixture is written so that both readings produce the same
+; golden (Codex P1 on PR #363). Two rules do it: a case pair that must be distinguishable is
+; ordered so the value that has to survive is set LAST -- the empty `OCANNL_DEMO_KEY` outside the
+; `ocannl_demo_key` that carries the value, so Windows' single variable ends up carrying it, and
+; Linux reads the lowercase spelling first anyway -- and a case pair that is only there to be
+; ignored carries ONE value in both spellings, so the control lines cannot report a collision.
+; What is thereby not tested live is the case dimension itself; that is what `env_var_names`'
+; printed list above covers, and `profiles/dune` exercises `OCANNL_PROFILE` end to end.
+
+(executable
+ (name config_var_spellings)
+ (modules config_var_spellings)
+ (libraries base arrayjit.utils stdio))
+
+(rule
+ (target config_var_spellings.actual)
+ (deps ocannl_config)
+ (action
+  (setenv
+   OCANNL_DEMO_KEY
+   ""
+   (setenv
+    ocannl_demo_key
+    kept-spelling
+    (setenv
+     OCANNL-DEMO_KEY
+     dropped-spelling
+     (setenv
+      ocannl-demo_key
+      dropped-spelling
+      (setenv
+       ocannl-demo-key
+       dropped-spelling
+       (setenv
+        ocannl_dashed_only_key
+        ""
+        (setenv
+         OCANNL_DASHED_ONLY_KEY
+         ""
+         (setenv
+          OCANNL-DASHED_ONLY_KEY
+          dropped-spelling
+          (setenv
+           ocannl-dashed_only_key
+           dropped-spelling
+           (with-stdout-to
+            %{target}
+            (run
+             %{dep:config_var_spellings.exe}
+             ocannl_print_decimals_precision=9
+             --ocannl-print-decimals-precision=7
+             --ocannl_log_level_0)))))))))))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff config_var_spellings.expected config_var_spellings.actual)))
+
+; The other side of the same coin: what the library WARNS about. The unknown-argument check and
+; `read_cmdline_var` now consult one table (`Utils.cmdline_var_prefixes`), so a spelling is read
+; and unwarned, or unread and warned, never one of each -- which is what this rule captures, three
+; arguments at a time: an all-dashed name with a `-` value separator, a dashed prefix over an
+; underscored name with `=`, one whose name is dashed HALFWAY, and one that names nothing. The
+; last two belong in the golden. Every silent contradiction the old two-parser arrangement
+; produced is here: `--ocannl_log_level_0` was read and warned about (its separator is not an `=`,
+; so the key came out as `log_level_0`), while the all-dashed and halfway-dashed spellings were
+; warned about by nobody and read by nobody -- the halfway one is still not read, deliberately
+; (see `Utils.cmdline_var_names`), and now says so. The bare `ocannl_config` is the argument that
+; must draw NO warning however much it looks like one: a positional path belongs to the host
+; application, which is why the qualified spellings all carry a leading dash.
+;
+; stderr alone is the subject; the executable's own stdout goes nowhere. Every key that shapes
+; stderr is pinned on the commandline, which no environment variable can outrank -- the five of
+; `startup_streams.ml`'s `stderr_shaping_keys` less `profile`, whose only route to this stream is
+; through the four that are pinned (a profile cannot beat an explicit key of equal immediacy, and
+; an unknown ambient profile name aborts every OCANNL executable loudly rather than rewriting a
+; golden). Pinning the whole list, not just the reported `log_config_sourcing` (Codex P2 on PR
+; #363): the rule captures a stream, so it depends on every key that can write to it.
+
+(rule
+ (target config_var_warnings.actual)
+ (deps ocannl_config)
+ (action
+  (with-stderr-to
+   %{target}
+   (ignore-stdout
+    (run
+     %{dep:config_var_spellings.exe}
+     --ocannl_no_config_file=true
+     --ocannl_suppress_welcome_message=true
+     --ocannl_log_config_sourcing=false
+     --ocannl_log_level=0
+     --ocannl-print-decimals-precision-7
+     --ocannl-print_decimals_precision=7
+     --ocannl_log_level_0
+     ocannl_config
+     --ocannl-print_decimals-precision=7
+     --ocannl-not-a-real-key=7)))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff config_var_warnings.expected config_var_warnings.actual)))
+
 (executable
  (name test_config_consistency)
  (modules test_config_consistency)

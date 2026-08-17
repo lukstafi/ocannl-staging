@@ -1091,6 +1091,21 @@ that they earn a lookup rather than always-loaded space.
   on it and rejects a line with two, which rules out payload/config values like `-mcpu=native`; a
   setting that needs one gets a word spelling instead (`cc_backend_arch_flags=none`). A value can
   never be the empty string either: empty means "unset" at every source.
+- A configuration key has exactly TWO environment spellings, `ocannl_<key>` and `OCANNL_<KEY>`
+  (gh-ocannl-605 dropped the dash-prefixed pair). A dune rule whose output depends on an ambient
+  OCANNL setting must declare both as `(env_var …)` deps — dune tracks none but `OCANNL_BACKEND`,
+  so an undeclared one leaves a stale target in place and the test green without having run. The
+  lowercase spelling is not the redundant one: `Utils.read_env_var` consults it FIRST, so
+  `ocannl_profile` beats `OCANNL_PROFILE`. The commandline is the permissive side and always has
+  been (`Utils.cmdline_var_names`), but along fixed axes rather than per separator: prefixed or
+  not, either case, one leading dash or two (never zero — a bare argument is the host's
+  positional), value separator `=`, `_`, `-` or nothing, and the dashing is TWO choices — the
+  prefix separator on its own, the key's own separators as a group. So `--ocannl-log_level=1` and
+  `--ocannl_log-level=1` are the same setting while a halfway-dashed key
+  (`--ocannl-print_decimals-precision=1`) is not a spelling at all. That table
+  (`Utils.cmdline_var_prefixes`) is also what the unknown-argument warning matches against — do not
+  give it a parser of its own, which is how it came to warn about arguments the reader applied and
+  stay silent about ones it ignored.
 - An OCANNL-linked executable's stdout belongs to the program, not to the library: the config
   startup chatter (welcome message, `log_config_sourcing` trace, profile banner) and every other
   library diagnostic go to stderr. That is what lets a tool make stdout a data channel — the
