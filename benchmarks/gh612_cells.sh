@@ -74,6 +74,11 @@ cell_dir() {
   case $label in
     ""|*/*|*..*) echo "gh612_cells: bad label '$label' (no '/', no '..')" >&2; exit 2;;
     *[!A-Za-z0-9._-]*) echo "gh612_cells: bad label '$label' (allowed: A-Za-z0-9._-)" >&2; exit 2;;
+    # RESERVE the dot-prefixed namespace. Staging lives at `.staging-<label>-r<rep>`, and the
+    # whitelist above would otherwise accept that very string as a LABEL -- so a published
+    # `.staging-foo-r1/r9` cell would be destroyed by `search ... foo 1`, whose staging path is the
+    # same directory. A leading dot also keeps parity's `.staging` skip from hiding a real cell.
+    .*) echo "gh612_cells: labels may not start with '.' (reserved for staging)" >&2; exit 2;;
   esac
   case $rep in ""|*[!0-9]*) echo "gh612_cells: bad rep '$rep' (digits only)" >&2; exit 2;; esac
   # Belt and braces: resolve the parent that will actually be operated on and require it to sit
