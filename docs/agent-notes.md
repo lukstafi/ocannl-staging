@@ -158,10 +158,18 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   operand literal size (the straight-line init writes used to fail `validate_parallel`'s coverage
   rule beside hardware-annotated loops); a fresh context can link a routine reading a constant
   whose fetch an earlier routine consumed (`verify_prior_context` exempts `Host_inits` members);
-  and `Stage ~hoisted:true` reaches small constants (`Schedule.hoistable_constant`). Bail-outs
+  and `Stage ~hoisted:true` reaches small constants (`Schedule.hoistable_constant`). Eligibility
+  is `Tn.known_host_constant` — the persistent marker, not the `Effectively_constant` intent, so
+  an explicitly `Train.set_materialized` literal still converts — and any literal-constant write
+  form is droppable under that contract: unrolled fixed-index `Set`s (`Constant_fill`), loop-borne
+  `Set`s (broadcast `Constant`), and whole-node `Zero_out` (`Constant 0.`, unreachable by the
+  `limit_constant_fill_size=0` escape since 1-element literals never consult the limit). Bail-outs
   that KEEP the in-kernel init: padded constants (their init includes padding-region loops),
-  `Local`-placed constants (scratch is fresh per launch, uploads cannot reach it), and any write
-  that is not a fixed-index literal-constant `Set`. Test: `test/operations/hosted_constant_fill`.
+  `Local`-placed constants (scratch is fresh per launch, uploads cannot reach it), any
+  non-constant write form, and constants the routine never READS — a write-only literal root (the
+  `Train.forward_once`-then-print pattern) is an explicit "compute this constant into the
+  context"; converting it would empty the routine and push observation onto print-proxy fallbacks.
+  Test: `test/operations/hosted_constant_fill`.
 - Both digests over lowered code — the analysis cache's key (`Low_level.analysis_digest`) and the
   schedule cache's canonical identity (`Schedule_cache.canonicalize`) — share ONE walk,
   `Low_level.Canonical_render.emit` (gh-ocannl-563). Render a newly added `Low_level.t` /

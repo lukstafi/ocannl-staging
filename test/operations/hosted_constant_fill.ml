@@ -43,6 +43,25 @@ let nest_paths (llc : LL.t) : Ir.Indexing.symbol list list =
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
+(* One thread per output element: Grid x Workgroup splits of the matmul's zeroing and accumulation
+   loops (the [parallel] shape of [bin/schedule_bench.ml]). Any active hardware dimension makes an
+   in-kernel constant init illegal under [validate_parallel]'s coverage rule, which is what the
+   parts below exercise. *)
+let grid_workgroup_schedule ~mc opt =
+  let paths = nest_paths opt.LL.llc in
+  let i, j =
+    match List.find paths ~f:(fun p -> List.length p = 3) with
+    | Some [ i; j; _k ] -> (i, j)
+    | _ -> failwith "hosted_constant_fill: no 3-deep i/j/k nest to schedule"
+  in
+  let ez, zsyms = Sched.expand_zero ~tn:mc in
+  let zi, zj = match zsyms with [ zi; zj ] -> (zi, zj) | _ -> assert false in
+  let sp_zi, _, _ = Sched.split ~axis:zi ~factor:2 ~outer:LL.Grid ~inner:LL.Workgroup in
+  let sp_zj, _, _ = Sched.split ~axis:zj ~factor:2 ~outer:LL.Grid ~inner:LL.Workgroup in
+  let sp_i, _, _ = Sched.split ~axis:i ~factor:2 ~outer:LL.Grid ~inner:LL.Workgroup in
+  let sp_j, _, _ = Sched.split ~axis:j ~factor:2 ~outer:LL.Grid ~inner:LL.Workgroup in
+  Sched.apply [ ez; sp_zi; sp_zj; sp_i; sp_j ] opt
+
 let () =
   let mav = Array.init (m * k) ~f:(fun i -> Float.of_int (1 + i)) in
   let mbv = Array.init (k * n) ~f:(fun i -> Float.of_int (2 + (3 * i))) in
@@ -59,21 +78,7 @@ let () =
      in-kernel init of ma/mb was a write to a materialized node covered by no hardware dimension. *)
   let%op mc = ma * mb in
   let comp = named "mm_hosted" (Train.forward mc) in
-  let transform opt =
-    let paths = nest_paths opt.LL.llc in
-    let i, j =
-      match List.find paths ~f:(fun p -> List.length p = 3) with
-      | Some [ i; j; _k ] -> (i, j)
-      | _ -> failwith "hosted_constant_fill: no 3-deep i/j/k nest to schedule"
-    in
-    let ez, zsyms = Sched.expand_zero ~tn:mc.Tensor.value in
-    let zi, zj = match zsyms with [ zi; zj ] -> (zi, zj) | _ -> assert false in
-    let sp_zi, _, _ = Sched.split ~axis:zi ~factor:2 ~outer:LL.Grid ~inner:LL.Workgroup in
-    let sp_zj, _, _ = Sched.split ~axis:zj ~factor:2 ~outer:LL.Grid ~inner:LL.Workgroup in
-    let sp_i, _, _ = Sched.split ~axis:i ~factor:2 ~outer:LL.Grid ~inner:LL.Workgroup in
-    let sp_j, _, _ = Sched.split ~axis:j ~factor:2 ~outer:LL.Grid ~inner:LL.Workgroup in
-    Sched.apply [ ez; sp_zi; sp_zj; sp_i; sp_j ] opt
-  in
+  let transform = grid_workgroup_schedule ~mc:mc.Tensor.value in
   let ctx = Context.auto () in
   let ctx, routine = Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty in
   let ctx = Context.run ctx routine in
@@ -101,4 +106,29 @@ let () =
     && Array.for_all2_exn values2 reference2 ~f:(fun a b -> Float.equal a b))
     ~detail:(fun () ->
       Printf.sprintf "got [%s]"
-        (String.concat ~sep:"; " (Array.to_list (Array.map values2 ~f:Float.to_string))))
+        (String.concat ~sep:"; " (Array.to_list (Array.map values2 ~f:Float.to_string))));
+  (* Part 3 (gh-633 review round 1, both P2s): a 1-element zero literal broadcast to a matmul
+     operand lowers as whole-node [Zero_out] — a form [--ocannl_limit_constant_fill_size=0] cannot
+     reach, since [constant_fill]'s 1-element arm never consults the limit — and
+     [Train.set_materialized] flips the node's intent from [Effectively_constant] to [On_device],
+     so eligibility must ride the persistent [host_constant] marker. Under the same
+     hardware-annotating schedule, the [Zero_out] used to be rejected outright by
+     [validate_parallel]'s multi-threaded-kernel rule. The zero operand makes the output
+     all-zeros; the check still discriminates against the guarded failure mode — a dropped
+     [Zero_out] without a working upload leaves garbage in the operand, and garbage times [mb] is
+     not zero. *)
+  let mz = TDSL.ndarray [| 0. |] ~label:[ "mz" ] ~input_dims:[ k ] ~output_dims:[ m ] () in
+  Train.set_materialized mz.Tensor.value;
+  let%op mc3 = mz * mb in
+  let comp3 = named "mm_zero_hosted" (Train.forward mc3) in
+  let ctx3 = Context.auto () in
+  let transform3 = grid_workgroup_schedule ~mc:mc3.Tensor.value in
+  let ctx3, routine3 = Context.compile ~lowered_transform:transform3 ctx3 comp3 Ir.Indexing.Empty in
+  let ctx3 = Context.run ctx3 routine3 in
+  let values3 = Context.get_values ctx3 mc3.Tensor.value in
+  Verdict.pass_fail
+    "scheduled matmul over a materialized broadcast-zero constant compiles and is exactly zero"
+    (Array.length values3 = m * n && Array.for_all values3 ~f:(fun v -> Float.equal v 0.))
+    ~detail:(fun () ->
+      Printf.sprintf "got [%s]"
+        (String.concat ~sep:"; " (Array.to_list (Array.map values3 ~f:Float.to_string))))

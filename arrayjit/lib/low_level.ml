@@ -5736,43 +5736,90 @@ let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
    Conservative bail-outs keep the in-kernel init whenever: the node's placement is not a context
    buffer ([Local] scratch is fresh per launch, link uploads cannot reach it; [Virtual] definitions
    were already dissolved by cleanup), the node is padded (its init includes padding-region loops),
-   or any write to the node is not a fixed-index literal-constant [Set]. Walker conventions
-   (gh-ocannl-630): this pass never descends into scalar operands, so operand-conditionality
-   dispatch does not apply; writes under dead loops need no special-casing — treating a dead write
-   as candidate or disqualifier is sound either way (dropping dead code, or keeping live init). *)
+   or any write to the node is not a literal-constant store. Eligibility is the HOST-CONSTANT
+   contract, [Tn.known_host_constant] — values declared forever equal to the registered host-init
+   data — not the [Effectively_constant] intent: an explicitly materialized literal
+   ([Train.set_materialized] flips the intent to [On_device]) keeps the [host_constant] marker
+   (review of gh-ocannl-633, P2). The same contract is what makes any literal-constant write form
+   droppable regardless of its indexing — every write such a node carries comes from its own fetch
+   lowering and stores the registered values — which covers all three forms the lowering emits:
+   unrolled fixed-index [Set]s ([Constant_fill]), loop-borne [Set]s (a broadcast [Constant]), and
+   whole-node [Zero_out] ([Constant 0.], whose 1-element literals the
+   [--ocannl_limit_constant_fill_size=0] escape cannot reach).
+
+   Only constants the routine also READS convert: in-routine reads are what motivate materializing
+   an operand beside its init, and every gh-633 face has them. A write-only constant — a literal
+   that IS the routine's root, the [Train.forward_once]-then-print pattern — is an explicit
+   "compute this constant into the context" request: converting it would optimize the routine to
+   [Noop] and push observation onto the [Host_inits]/for-print-proxy fallbacks, churning behavior
+   for no legality gain (no reads, so nothing races the annotated loops... the init alone can, but
+   such a routine carries no hardware loops to race with).
+
+   Walker conventions (gh-ocannl-630): the read scan descends operands exhaustively WITHOUT
+   [Ops.binop_conditionality] dispatch — counting a projection's discarded read keeps a node
+   un-converted, the status-quo direction, and a write-only constant read only by a discarded
+   operand is not a real pattern; writes under dead loops need no special-casing — treating a dead
+   write as candidate or disqualifier is sound either way (dropping dead code, or keeping live
+   init). *)
 let hosted_constant_inits_to_link_time (plc : Tn.Placements.t) (traced_store : traced_store)
     (llc : t) : t =
   let candidates : (Tn.t, bool) Hashtbl.t = Hashtbl.create (module Tnode) in
+  let reads = Hash_set.create (module Tnode) in
   let eligible tn =
-    Tn.known_constant tn && Host_inits.mem tn && Option.is_none (Tn.get_padding tn)
+    Tn.known_host_constant tn && Host_inits.mem tn && Option.is_none (Tn.get_padding tn)
   in
   let note_write tn ok =
     if eligible tn then
       Hashtbl.update candidates tn ~f:(function None -> ok | Some prev -> prev && ok)
   in
-  let is_init_set ~idcs ~llsc =
-    Array.for_all idcs ~f:(function Indexing.Fixed_idx _ -> true | _ -> false)
-    && match llsc with Constant _ -> true | _ -> false
-  in
-  let rec scan (c : t) =
+  let rec scan_scalar (sc : scalar_t) =
+    match sc with
+    | Constant _ | Constant_bits _ | Embed_index _ | Get_local _ | Get_merge_buffer _ -> ()
+    | Get (tn, _) -> Hash_set.add reads tn
+    | Get_dynamic { tn; dyn_value = v, _; _ } ->
+        Hash_set.add reads tn;
+        scan_scalar v
+    | Local_scope { body; _ } -> scan body
+    | Ternop (_, (a, _), (b, _), (d, _)) ->
+        scan_scalar a;
+        scan_scalar b;
+        scan_scalar d
+    | Binop (_, (a, _), (b, _)) ->
+        scan_scalar a;
+        scan_scalar b
+    | Unop (_, (a, _)) -> scan_scalar a
+  and scan (c : t) =
     match c with
-    | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Set_local _
-      ->
-        ()
+    | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ -> ()
     | Seq (c1, c2) ->
         scan c1;
         scan c2
-    | For_loop { body; _ } | If { body; _ } -> scan body
-    | Zero_out tn -> note_write tn false
-    | Set { tn; idcs; llsc; _ } -> note_write tn (is_init_set ~idcs ~llsc)
-    | Set_dynamic { tn; _ } | Set_from_vec { tn; _ } -> note_write tn false
+    | For_loop { body; _ } -> scan body
+    | If { cond = c0, _; body } ->
+        scan_scalar c0;
+        scan body
+    | Set_local (_, llsc) -> scan_scalar llsc
+    | Zero_out tn -> note_write tn true
+    | Set { tn; llsc; _ } ->
+        scan_scalar llsc;
+        note_write tn (match llsc with Constant _ -> true | _ -> false)
+    | Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
+        scan_scalar v;
+        scan_scalar llsc;
+        note_write tn false
+    | Set_from_vec { tn; arg = a, _; _ } ->
+        scan_scalar a;
+        note_write tn false
     (* Pre-schedule construct, unreachable here; defensively treat the target as disqualified. *)
-    | Tile_mma { d = tn, _; _ } -> note_write tn false
+    | Tile_mma { d = tn, _; fallback; _ } ->
+        scan fallback;
+        note_write tn false
   in
   scan llc;
   let hosted =
     Hashtbl.fold candidates ~init:[] ~f:(fun ~key:tn ~data:ok acc ->
-        if ok && Tn.Placements.is_materialized_peek plc tn then tn :: acc else acc)
+        if ok && Hash_set.mem reads tn && Tn.Placements.is_materialized_peek plc tn then tn :: acc
+        else acc)
   in
   if List.is_empty hosted then llc
   else
@@ -5788,6 +5835,7 @@ let hosted_constant_inits_to_link_time (plc : Tn.Placements.t) (traced_store : t
       | If ({ body; _ } as i) -> (
           match rewrite body with Noop -> Noop | body -> If { i with body })
       | Set { tn; _ } when Set.mem hosted tn -> Noop
+      | Zero_out tn when Set.mem hosted tn -> Noop
       | c -> c
     in
     let llc = rewrite llc in
@@ -5796,6 +5844,8 @@ let hosted_constant_inits_to_link_time (plc : Tn.Placements.t) (traced_store : t
         | None -> ()
         | Some traced ->
             traced.has_assignment <- false;
+            traced.zeroed_out <- false;
+            traced.zero_initialized_by_code <- false;
             traced.read_only <- true);
     llc
 
