@@ -24,6 +24,15 @@
 #
 # Results land under $OUT_ROOT/<label>/r<rep> (default /tmp/gh612).
 set -u
+# Hermetic against ambient configuration, categorically -- the same treatment gh514_cells.sh applies,
+# and for the same reason: every cell pins its treatment on the command line (which out-ranks all
+# other config sources), so an exported OCANNL_* or BENCH_* would otherwise reshape the graph or the
+# precision while every cell was contaminated CONSISTENTLY -- which the parity gate cannot see, since
+# it compares cells against each other. `BENCH_MATERIALIZE=1` or `BENCH_PRECISION=f16` in the
+# environment would silently make "default-placement f32" a false label on every number here.
+while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(OCANNL_[A-Z0-9_]*\)=.*//p')
+while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(BENCH_[A-Z0-9_]*\)=.*//p')
+
 # Every subcommand `cd`s into a checkout, so any caller-supplied path that has to survive that cd
 # must be absolutized HERE, before the first cd — a relative OUT_ROOT (or <tree>) would otherwise be
 # created next to the invocation directory and then re-resolved inside the checkout, and the first
