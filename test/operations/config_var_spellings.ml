@@ -13,11 +13,13 @@
    that was kept, and a second key in the dropped spellings only. Synthetic keys, deliberately:
    nothing there is a real setting, so the library reads no differently for having been asked.
 
-   The commandline lookup names a REAL key, because the unknown-argument warning at the foot of
-   `arrayjit/lib/utils.ml` validates the argv it did not consume -- and it normalizes every dash
-   to an underscore, so `--ocannl-print-decimals-precision=7` was accepted as a spelling of a
-   known key while `read_cmdline_var` ignored it, silently. Making the two agree is the other half
-   of gh-ocannl-605, and this line is what pins it. *)
+   The commandline lookups name REAL keys, because the unknown-argument warning at the foot of
+   `arrayjit/lib/utils.ml` inspects every argument addressed to OCANNL. It used to do so with a
+   parser of its own -- split on `=`, dash to underscore, look up -- which disagreed with the
+   reader in both directions: `--ocannl-print-decimals-precision=7` passed validation and was then
+   ignored, while `--ocannl_log_level_0` was applied and warned about, its separator not being an
+   `=`. Both now go through `Utils.cmdline_var_prefixes`, so these two lines and the sibling
+   `config_var_warnings` golden are the two halves of one claim. *)
 
 open Base
 open Stdio
@@ -57,4 +59,7 @@ let () =
       printf "    (control) %s is %s\n" var
         (match Stdlib.Sys.getenv_opt var with Some v -> "set to " ^ v | None -> "UNSET"));
   show_lookup "read_cmdline_var" "print_decimals_precision"
-    (Utils.read_cmdline_var "print_decimals_precision")
+    (Utils.read_cmdline_var "print_decimals_precision");
+  (* The `_` value separator, on the spelling the old validator called unknown while the reader
+     applied it. *)
+  show_lookup "read_cmdline_var" "log_level" (Utils.read_cmdline_var "log_level")

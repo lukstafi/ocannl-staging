@@ -84,11 +84,15 @@
   enumerate four spellings per key while the natural-looking all-dashed `ocannl-log-level` was not
   one of them, so a dep on it tracked nothing (gh-ocannl-593). On the commandline dashes stay, and
   now go all the way: the prefix separator and the key's own separators dash independently, so
-  `--ocannl-log-level=1` is read — where it was previously accepted by the unknown-argument
-  validator (which normalizes every dash to an underscore) and then silently ignored by the reader.
-  `Utils.env_var_names` returns two names; the commandline spellings moved to a
-  `Utils.cmdline_var_names` beside it, and `test/operations/config_var_spellings` pins both lists
-  against live lookups.
+  `--ocannl-log-level=1` is read. The unknown-argument warning stopped parsing arguments a second
+  way (split on `=`, dash to underscore, look up the result) and now asks the reader's own table
+  whether any known key would read the argument — closing both silent contradictions the two
+  parsers produced: the all-dashed spelling used to pass validation and then be ignored, and
+  `--ocannl_log_level_0` used to be applied and warned about as unknown, its separator not being an
+  `=`. `Utils.env_var_names` returns two names; the commandline spellings moved to
+  `Utils.cmdline_var_names` / `Utils.cmdline_var_prefixes` beside it, and
+  `test/operations/config_var_spellings` pins both lists against live lookups, with
+  `config_var_warnings` pinning what the library warns about.
 
 - **Startup chatter is opt-in, so that a warning on stderr is legible** (gh-ocannl-595).
   gh-ocannl-581 moved the config chatter off stdout, which fixed the data-channel problem and left

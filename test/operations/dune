@@ -1088,6 +1088,13 @@
 ; alone -- so the golden's last lines are a live check on `Utils.env_var_names`, not a copy of it.
 ; The all-dashed commandline flag is the same check on the other side: there the spelling IS read,
 ; and it names a real key, the unknown-argument warning being the reason (see the .ml).
+;
+; EVERY spelling of both keys is stated here, the surviving ones as empty (which counts as unset at
+; every source), so the rule's environment decides the output on its own: an ambient
+; `OCANNL_DASHED_ONLY_KEY` would otherwise turn the negative leg's None into a value, and dune,
+; which tracks no OCANNL variable but OCANNL_BACKEND, could serve the stale None besides (Codex P2
+; on PR #363). Pinning beats declaring `env_var` deps wherever it is available: a pinned rule
+; cannot be reached from the ambient environment at all.
 
 (executable
  (name config_var_spellings)
@@ -1102,31 +1109,75 @@
    ocannl_demo_key
    kept-spelling
    (setenv
-    ocannl-demo_key
-    dropped-lowercase
+    OCANNL_DEMO_KEY
+    ""
     (setenv
-     OCANNL-DEMO_KEY
-     dropped-uppercase
+     ocannl-demo_key
+     dropped-lowercase
      (setenv
-      ocannl-demo-key
-      dropped-all-dashed
+      OCANNL-DEMO_KEY
+      dropped-uppercase
       (setenv
-       ocannl-dashed_only_key
-       dropped-lowercase
+       ocannl-demo-key
+       dropped-all-dashed
        (setenv
-        OCANNL-DASHED_ONLY_KEY
-        dropped-uppercase
-        (with-stdout-to
-         %{target}
-         (run
-          %{dep:config_var_spellings.exe}
-          --ocannl-print-decimals-precision=7))))))))))
+        ocannl_dashed_only_key
+        ""
+        (setenv
+         OCANNL_DASHED_ONLY_KEY
+         ""
+         (setenv
+          ocannl-dashed_only_key
+          dropped-lowercase
+          (setenv
+           OCANNL-DASHED_ONLY_KEY
+           dropped-uppercase
+           (with-stdout-to
+            %{target}
+            (run
+             %{dep:config_var_spellings.exe}
+             --ocannl-print-decimals-precision=7
+             --ocannl_log_level_0)))))))))))))
 
 (rule
  (alias runtest)
  (package neural_nets_lib)
  (action
   (diff config_var_spellings.expected config_var_spellings.actual)))
+
+; The other side of the same coin: what the library WARNS about. The unknown-argument check and
+; `read_cmdline_var` now consult one table (`Utils.cmdline_var_prefixes`), so a spelling is read
+; and unwarned, or unread and warned, never one of each -- which is what this rule captures, three
+; arguments at a time: an all-dashed name with a `-` value separator, a mixed-separator name with
+; `=`, and one that names nothing. Only the third belongs in the golden. Both silent
+; contradictions the old two-parser arrangement produced are here: `--ocannl_log_level_1` was read
+; and warned about (its separator is not an `=`, so the key came out as `log_level_1`), and the
+; all-dashed spelling was warned about by nobody and read by nobody.
+;
+; stderr alone is the subject; the executable's own stdout goes nowhere. The chatter is turned off
+; on the commandline, so the golden is the warnings and nothing else.
+
+(rule
+ (target config_var_warnings.actual)
+ (deps ocannl_config)
+ (action
+  (with-stderr-to
+   %{target}
+   (ignore-stdout
+    (run
+     %{dep:config_var_spellings.exe}
+     --ocannl_no_config_file=true
+     --ocannl_suppress_welcome_message=true
+     --ocannl-print-decimals-precision-7
+     --ocannl_print-decimals-precision=7
+     --ocannl_log_level_0
+     --ocannl-not-a-real-key=7)))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff config_var_warnings.expected config_var_warnings.actual)))
 
 (executable
  (name test_config_consistency)
