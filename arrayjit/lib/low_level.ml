@@ -2191,6 +2191,19 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
                  if Hash_set.mem inherited_tns tn then record_spliced_reads body;
                  Local_scope { id; body; orig_indices = indices })
     | Get_dynamic { tn; idcs; dyn_axis; dyn_value = v, prec } ->
+        (* Review round 12: a dynamically-indexed read cannot be served by recomputation (the
+           gather index is only known at runtime), so a LOCAL table materializes — but an
+           INHERITED table has no setter left in any schedule, and letting it reach cleanup
+           produces the cryptic already-virtual provenance collision. Fail actionably here. *)
+        if Hash_set.mem inherited_tns tn && not (Tn.Placements.known_non_virtual plc tn) then
+          raise
+            (Utils.User_error
+               [%string
+                 "the deferred computation of %{Tn.debug_name tn}, stored by an earlier routine \
+                  of this compilation lineage, is read as a dynamic-gather table in this \
+                  routine: dynamically-indexed reads cannot be served by inlining, and no \
+                  routine writes the node's buffer. Mark %{Tn.debug_name tn} as materialized \
+                  (e.g. via Train.set_materialized) in the routine that computes it."]);
         Get_dynamic { tn; idcs; dyn_axis; dyn_value = (loop v, prec) }
     | Local_scope opts ->
         Local_scope

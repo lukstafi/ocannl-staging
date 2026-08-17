@@ -1172,7 +1172,46 @@ let phase5 () =
       false
     with Utils.User_error msg -> String.is_substring msg ~substring:"could not be inlined"
   in
-  p "failed-inline: consuming at an un-inlinable site fails actionably" rejected_fail
+  p "failed-inline: consuming at an un-inlinable site fails actionably" rejected_fail;
+  (* Review round 12, P2: an INHERITED node read as a dynamic-gather table — the Get_dynamic
+     path never routes through inline_computation, and a dynamic read cannot be served by
+     recomputation; pre-fix this died in cleanup's cryptic already-virtual collision. *)
+  let ell21 = mk "ell21" in
+  materialize ell21;
+  let sel = mk ~dims:[| 1 |] "sel" in
+  materialize sel;
+  let v18 = mk "v18" and out22 = mk "gdout" in
+  materialize out22;
+  let ctx17 = LL.empty_optimize_ctx () in
+  let llc_a17 =
+    let s = sym () in
+    loop_n s dim (set v18 [| iter s |] (add (get ell21 [| iter s |]) (c 100.)))
+  in
+  let o_a17 =
+    LL.optimize ctx17 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_gd_a" [] llc_a17
+  in
+  p "dynamic-table: routine A defers v18" (known_virtual o_a17 v18);
+  let llc_b17 =
+    let s = sym () in
+    loop_n s dim
+      (set out22 [| iter s |]
+         (LL.Get_dynamic
+            {
+              tn = v18;
+              idcs = [| fixed 0 |];
+              dyn_axis = 0;
+              dyn_value = (get sel [| fixed 0 |], single);
+            }))
+  in
+  let rejected_gd =
+    try
+      ignore
+        (LL.optimize ctx17 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_gd_b" [] llc_b17
+          : LL.optimized);
+      false
+    with Utils.User_error msg -> String.is_substring msg ~substring:"dynamic-gather"
+  in
+  p "dynamic-table: inherited table is rejected actionably" rejected_gd
 
 (* === Phase 6: deferral-only comp through the ordinary pipeline (review round 3) === *)
 
