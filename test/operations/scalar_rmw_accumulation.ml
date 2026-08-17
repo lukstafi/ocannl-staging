@@ -48,8 +48,8 @@ let () =
     done;
     !total /. Float.of_int b
   in
-  Stdio.printf "scalar rmw accumulation matches oracle: %b\n" Float.(abs (got - expected) < 1e-4);
+  Verdict.p "scalar rmw accumulation matches oracle" Float.(abs (got - expected) < 1e-4);
   (* Rerun: the re-zeroed accumulator must not drift. *)
   let ctx = Context.run ctx routine in
   let got2 = (Context.get_values ctx batch_loss.Tensor.value).(0) in
-  Stdio.printf "rerun stable: %b\n" Float.(abs (got2 - got) < 1e-6)
+  Verdict.p "rerun stable" Float.(abs (got2 - got) < 1e-6)

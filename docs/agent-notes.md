@@ -182,6 +182,70 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   phantom "accessible" nodes (this is how the cache was caught); (2) on a hit, still re-run
   `pin_device_written_bounds` — its raising writer-after-settled-reader guard must fire regardless
   of caching.
+- **The traced store is the routine's node registry, and it is RECONCILED with the FINAL
+  optimized code** (gh-ocannl-610): kernel parameters (`C_syntax.compile_proc`), context
+  allocation (`Backends.allocate_delta`) and the routine interface
+  (`Low_level.input_and_output_nodes`) all enumerate `optimized.traced_store`, which
+  `analyze_proc` builds from the RAW code — cross-routine inlining (a splice of a computation an
+  earlier routine committed `Virtual`) makes the two diverge in both directions.
+  `specialize_proc`'s `reconcile_traced_store` walks the final llc in program order and: gives
+  spliced-in nodes fresh `read_only` entries (codegen otherwise emits an undeclared identifier);
+  flips an already-traced node to `read_before_write` when a spliced read lands before the
+  routine's own first write, and re-judges reads AFTER a write with the same per-cell machinery
+  the raw pipeline uses (`reads_covered_query` over the final code's affine accesses, built
+  lazily) — syntactic priority is not coverage: a write of some cells or under an `If` covers
+  nothing it did not touch; prunes read-only entries the final code never touches (phantom
+  inputs of deferral-only routines) while KEEPING entries that record a raw write even when
+  unaccessed — out-of-contract probes (gh-ocannl-584 scope writes, `affine_extraction.ml`) check
+  raw decision-level facts, so the prune must stay no wider than the phantom-input genre; and
+  drops a raw-declared merge node whose read was deferred away (linking would otherwise demand a
+  transfer never consumed). Merge splices are rejected at CONSUMPTION time, not post-hoc:
+  `virtual_llc` snapshots which inherited computations read a merge buffer at entry (before the
+  walk stores this routine's own), and `inline_computation` raises on consuming one — the final
+  code cannot distinguish a legitimate same-routine inlining of the declared merge read from a
+  cross-routine splice whose consumer declares the SAME source, which would silently rebind the
+  read to the consumer's transfer; `reconcile_traced_store` keeps a mismatch check as backstop.
+  The walk observes the raw analysis' conventions or it re-diverges (review rounds 3-6):
+  dead-loop bodies register (renderers emit them, so their identifiers need parameters) but
+  neither supply coverage (`written_seen`) nor demand it, and the coverage query filters through
+  `drop_dead_loop_accesses` like the raw side; `Binop` dispatches through
+  `Ops.binop_conditionality` in both the reconcile walk and the merge-taint scan — a projection's
+  discarded operand is never rendered, so its reads are not parameters and its merge read must
+  not taint; the taint scan is `~self`-filtered like `inline_computation`'s own setter filter, or
+  a shared-loop sibling's merge read rejects valid sharing. The STRICT coverage verdicts —
+  guarded writes filtered (never definite), rmw exemption off (a same-position spliced read is a
+  genuine RMW), `zeroed_out` counted as written — apply PER NODE, to exactly the nodes read
+  inside INLINED bodies (`virtual_llc` records them at each `inline_computation` splice and
+  returns the set): splicing is what moves reads to positions the raw analysis never judged.
+  Raw-positioned reads keep the raw verdicts, whose lenient contracts deliberately classify
+  patterns initialized by an earlier routine of the program — routine-wide strictness broke
+  real flows across the suite, and a has-local-assignment provenance test for "inherited"
+  missed consumption through an update of an inherited virtual (rounds 6-7). `from_prior_context` (both `Backends.compile` and `from_prior_context_batch`)
+  reconciles in BOTH directions: the raw-assignments set is filtered by the reconciled traced
+  store (raw over-approximates the residual schedule — a deferral-only routine must link on a
+  fresh context) and, for routines carrying an assignments program, unioned with the reconciled
+  interface's inputs the raw asgns never MENTION (raw also UNDER-approximates: a consumer whose
+  asgns read only the virtual node would otherwise zero-fill its spliced leaves silently). Both
+  bounds on the union are load-bearing: mentioned nodes keep `context_nodes`' curated exclusions
+  (init comps' random-seed/threefry nodes are mentioned yet deliberately not demanded — the
+  unbounded union broke `Train.init_params` across the suite), and hand-built `?prelowered`
+  routines (empty comp) are exempt entirely — their inputs arrive via `Context.set_values` after
+  linking, the ll_test seed-then-run pattern. Reconcile-FLIPPED read-before-write nodes
+  (`optimized.spliced_rbw`) override the mention filter — a consumer that overwrites a spliced
+  leaf mentions it only as a write, yet the splice needs its entry value; the raw
+  `read_before_write` flag cannot serve as the key, since `decide_placements` also sets it on
+  every pure input (uncovered reads), and demanding those broke ndarray-literal flows. The merge SOURCE never gets an ordinary traced
+  entry (the merge buffer is the parameter; a source entry would double the transfer buffer's
+  allocation).
+  Related pre-existing quirk: `rmw_exempt` excuses copy-position reads from the coverage verdict
+  that feeds `read_before_write` (fine for multiplicity, questionable for the interface) —
+  gh-ocannl-618; the phase-5 partial-write test reads at an offset position to stay off it.
+  Corollary (gh-ocannl-611): a routine whose every statement virtualizes away is LEGAL —
+  cleanup's top-level elision degenerates to `Noop`, with an EMPTY interface — its stored
+  computations persist in the lineage for later consumers, so "compile a deferral-only routine"
+  is a supported incremental-compilation move. Whether deferred computations should observe
+  inputs mutated between deferral and consumption is gh-ocannl-617. The acceptance pins are
+  `test/operations/virtual_chain_fanin.ml` phases 3–5.
 - **A knob read after lowering cannot reach a digest over lowered code** — it must be carried by a
   cache-key component or the cache replays across regimes (gh-ocannl-568: 5.9x). So every config
   key is classified in `Utils.config_key_classification` as code-borne / `Keyed <component>` /
@@ -690,6 +754,19 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   take `tile_prec` (exact widenings only) to fold the widening into the pack; seeding resolves the
   same `Numerics.cpu_compute_prec` the emission uses — change either side only through that
   helper, or "timed is not tensorized" returns for narrow sites.
+- **A "packmma" timing is not evidence that anything tensorized.** A `Tile_mma` whose register-tile
+  preconditions fail renders the scalar fallback and the run still reports under whatever the
+  variant was named — the column extent below the compute vector width is the easiest way in (at
+  f32/16-byte vectors the crossover is n = 4; at f16 it is n = 8), but a narrow `vector_bytes`,
+  mixed operand compute precisions, transposed-B storage, and `debug_log_from_routines` all decline
+  too. Check `C_syntax.mma_census` (flip `mma_census_enabled` around the compile) rather than
+  trusting the label; `bin/narrow_gebp_bench` prints the census per line and warns when any
+  statement declined, and `schedule_log_declines=true` gives the per-rule reason. This is the same
+  "timed is not tensorized" hazard the seeding note above raises, seen from the bench side.
+- `bin/narrow_gebp_bench` takes its blocking factors as arguments (`[bm] [bk]` positionally, or
+  `--bm=`/`--bk=`), defaulting to 64/256. The packed variants need `n mod bm = 0` and `n mod bk = 0`
+  — an n meeting neither still runs the unblocked naive variant, so an arbitrary extent (the sort a
+  register-tiling review actually asks about) can be measured against something.
 - **Negative zero is what breaks a "bitwise equal to the scalar twin" claim** (gh-ocannl-615). Two
   spellings normalized it, both fixed but both easy to reintroduce: a scalar-to-vector splat written
   `((vtyp){0} + x)` returns `+0.0` for `x = -0.0` (IEEE `(+0.0) + (-0.0) = +0.0`), so use
@@ -1097,6 +1174,21 @@ that they earn a lookup rather than always-loaded space.
   on it and rejects a line with two, which rules out payload/config values like `-mcpu=native`; a
   setting that needs one gets a word spelling instead (`cc_backend_arch_flags=none`). A value can
   never be the empty string either: empty means "unset" at every source.
+- A configuration key has exactly TWO environment spellings, `ocannl_<key>` and `OCANNL_<KEY>`
+  (gh-ocannl-605 dropped the dash-prefixed pair). A dune rule whose output depends on an ambient
+  OCANNL setting must declare both as `(env_var …)` deps — dune tracks none but `OCANNL_BACKEND`,
+  so an undeclared one leaves a stale target in place and the test green without having run. The
+  lowercase spelling is not the redundant one: `Utils.read_env_var` consults it FIRST, so
+  `ocannl_profile` beats `OCANNL_PROFILE`. The commandline is the permissive side and always has
+  been (`Utils.cmdline_var_names`), but along fixed axes rather than per separator: prefixed or
+  not, either case, one leading dash or two (never zero — a bare argument is the host's
+  positional), value separator `=`, `_`, `-` or nothing, and the dashing is TWO choices — the
+  prefix separator on its own, the key's own separators as a group. So `--ocannl-log_level=1` and
+  `--ocannl_log-level=1` are the same setting while a halfway-dashed key
+  (`--ocannl-print_decimals-precision=1`) is not a spelling at all. That table
+  (`Utils.cmdline_var_prefixes`) is also what the unknown-argument warning matches against — do not
+  give it a parser of its own, which is how it came to warn about arguments the reader applied and
+  stay silent about ones it ignored.
 - An OCANNL-linked executable's stdout belongs to the program, not to the library: the config
   startup chatter (welcome message, `log_config_sourcing` trace, profile banner) and every other
   library diagnostic go to stderr. That is what lets a tool make stdout a data channel — the
@@ -1124,11 +1216,16 @@ that they earn a lookup rather than always-loaded space.
   from a stale main checkout that silently drops the commits just landed.
 - The same protection makes `gh pr merge --delete-branch` misleading from a worktree: the merge
   LANDS and only the cleanup fails ("fatal: 'master' is already used by worktree"), so the command
-  exits nonzero over an already-merged PR — check the PR's state (`gh pr view <n> --json state`)
-  before reacting to that status, and again before any cleanup: `gh pr merge` also returns WITHOUT
-  merging when the base has required checks or a merge queue, enabling auto-merge instead, and the
-  steps below would then tear down a PR still waiting to land. This repo has neither, so here the
-  flag's own cleanup failure is the only way that command misleads.
+  exits nonzero over an already-merged PR — check the PR's state over REST (`gh api
+  repos/<owner>/<repo>/pulls/<n> --jq '"merged=\(.merged) state=\(.state)"'`) before reacting to that
+  status, and again before any cleanup. Use REST because `gh pr view --json` and `gh pr checks` ride
+  the GraphQL endpoint, which degrades independently of it, and a nonzero `gh pr merge` whose state
+  query then 503s is exactly the shape of a merge that DID land; the REST substitute for the checks
+  is `gh api repos/<owner>/<repo>/commits/<sha>/check-runs --jq '[.check_runs[]|"\(.name):
+  \(.conclusion // .status)"]|.[]'`. `gh pr merge` also returns WITHOUT merging when the base has
+  required checks or a merge queue, enabling auto-merge instead, and the steps below would then tear
+  down a PR still waiting to land. This repo has neither, so here the flag's own cleanup failure is
+  the only way that command misleads.
   Merge without the flag and clean up in this order, every command anchored with `git -C <main>` so
   that none of them depends on the current directory: `push origin --delete <branch>`; `fetch
   --prune origin`; `merge --ff-only origin/master`; `worktree remove <path>`; `branch -d <branch>`

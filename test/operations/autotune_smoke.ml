@@ -20,7 +20,7 @@ module Sched = Ir.Schedule
 module SC = Ir.Schedule_cache
 module Asgns = Ir.Assignments
 
-let p name b = Stdio.printf "%s: %b\n" name b
+let p = Verdict.p
 let approx a b = Float.(abs (a - b) < 1e-4)
 
 let named name (comp : Asgns.comp) : Asgns.comp =
@@ -129,6 +129,7 @@ let () =
         pipelined = Map.empty (module Ir.Tnode);
         zero_fringe = Set.empty (module Ir.Tnode);
         flip_candidates = [];
+    spliced_rbw = Base.Set.empty (module Ir.Tnode);
       }
     in
     fake

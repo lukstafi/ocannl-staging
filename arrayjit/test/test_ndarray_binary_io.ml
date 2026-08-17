@@ -26,16 +26,14 @@ let test_round_trip_prec prec_name prec init_f =
   Nd.read_payload_from_channel nd2 ic n_bytes;
   Stdlib.close_in ic;
   (* Compare using exact byte comparison *)
-  if Nd.payloads_equal nd1 nd2 then Stdio.printf "PASS: %s\n" prec_name
-  else Stdio.printf "FAIL: %s\n" prec_name;
+  Verdict.pass_fail (Printf.sprintf "%s round trip" prec_name) (Nd.payloads_equal nd1 nd2);
   (* The mapped read (gh-ocannl-467) reinterprets the payload bytes in place instead of decoding
      them element by element. That the two agree is the whole premise of mapped checkpoint loading:
      each precision's payload encoding has to be its in-memory representation. *)
   let fd = Unix.openfile tmp_file [ Unix.O_RDONLY ] 0 in
   let nd3 = Nd.map_file_array prec ~dims ~byte_offset:0 fd in
   Unix.close fd;
-  if Nd.payloads_equal nd1 nd3 then Stdio.printf "PASS: %s mapped\n" prec_name
-  else Stdio.printf "FAIL: %s mapped\n" prec_name
+  Verdict.pass_fail (Printf.sprintf "%s mapped" prec_name) (Nd.payloads_equal nd1 nd3)
 
 let test_padded () =
   let prec = Ops.single in
@@ -63,8 +61,7 @@ let test_padded () =
   Nd.read_payload_from_channel ~padding:padding_arr nd2 ic n_bytes;
   Stdlib.close_in ic;
   (* Compare logical payloads *)
-  if Nd.payloads_equal ~padding:padding_arr nd1 nd2 then Stdio.printf "PASS: padded\n"
-  else Stdio.printf "FAIL: padded\n"
+  Verdict.pass_fail "padded round trip" (Nd.payloads_equal ~padding:padding_arr nd1 nd2)
 
 (* A payload does not start at the beginning of the file, and its offset is not page aligned: the
    runtime maps from the enclosing page boundary and offsets the data pointer, so any offset works
@@ -87,8 +84,7 @@ let test_mapped_at_offset () =
   Unix.close fd;
   (* The mapping outlives the descriptor it was taken from, and the file it was taken from. *)
   Stdlib.Sys.remove path;
-  if Nd.payloads_equal nd1 nd2 then Stdio.printf "PASS: mapped at unaligned offset\n"
-  else Stdio.printf "FAIL: mapped at unaligned offset\n"
+  Verdict.pass_fail "mapped at unaligned offset" (Nd.payloads_equal nd1 nd2)
 
 let () =
   (* Test each precision type *)

@@ -35,9 +35,9 @@ let check_values ctx pooled conv_out =
   let conv_v = Context.get_values ctx conv_out.Tensor.value in
   printf "pooled[0,0]=%g pooled[1,1]=%g pooled[3,3]=%g\n%!" pooled_v.(0) pooled_v.(5) pooled_v.(15);
   printf "conv[0,0]=%g conv[1,1]=%g\n%!" conv_v.(0) conv_v.(5);
-  printf "pooled values correct (windows clamped): %b\n%!"
+  Verdict.p "pooled values correct (windows clamped)"
     Float.(pooled_v.(0) = -11. && pooled_v.(5) = -6. && pooled_v.(15) = -1.);
-  printf "conv values correct (margins 0): %b\n%!" Float.(conv_v.(0) = -54. && conv_v.(5) = -99.);
+  Verdict.p "conv values correct (margins 0)" Float.(conv_v.(0) = -54. && conv_v.(5) = -99.);
   (pooled_v, conv_v)
 
 let test_shared_operand () =
@@ -91,7 +91,7 @@ let test_separate_copies () =
   let combined = Ir.Assignments.sequence [ fwd_pooled; fwd_conv ] in
   let ctx, routine = Context.compile ctx combined Train.IDX.empty in
   (* The clamped pool leaves its operand unpadded; the copy commits the conv's neutral. *)
-  printf "pool operand stays unpadded: %b\n%!"
+  Verdict.p "pool operand stays unpadded"
     (match Lazy.force input.value.Ir.Tnode.padding with None -> true | Some _ -> false);
   printf "conv operand's committed neutral: %s\n%!" (padding_elem_to_string input_c.shape);
   let ctx = Context.run ctx routine in
@@ -100,7 +100,7 @@ let test_separate_copies () =
   let ctx = Context.run ctx routine in
   let pooled_v2 = Context.get_values ctx pooled.value in
   let conv_v2 = Context.get_values ctx conv_out.value in
-  printf "second pass identical: %b\n%!"
+  Verdict.p "second pass identical"
     (Array.for_all2_exn pooled_v pooled_v2 ~f:Float.equal
     && Array.for_all2_exn conv_v conv_v2 ~f:Float.equal)
 
@@ -126,20 +126,20 @@ let test_single_operation_padding () =
   let ctx = Train.init_params ctx Train.IDX.empty pooled in
   let fwd_pooled = Train.forward pooled in
   let ctx, routine = Context.compile ctx fwd_pooled Train.IDX.empty in
-  printf "sole-consumer pool leaves the operand unpadded: %b\n%!"
+  Verdict.p "sole-consumer pool leaves the operand unpadded"
     (match Lazy.force input.value.Ir.Tnode.padding with None -> true | Some _ -> false);
 
   printf "\n=== First forward pass (single max-pool operation) ===\n%!";
   let ctx = Context.run ctx routine in
   let pooled_v = Context.get_values ctx pooled.value in
   printf "pooled[0,0]=%g pooled[1,1]=%g pooled[3,3]=%g\n%!" pooled_v.(0) pooled_v.(5) pooled_v.(15);
-  printf "pooled values correct (windows clamped): %b\n%!"
+  Verdict.p "pooled values correct (windows clamped)"
     Float.(pooled_v.(0) = -11. && pooled_v.(5) = -6. && pooled_v.(15) = -1.);
 
   (* Run second pass - results stable *)
   let ctx = Context.run ctx routine in
   let pooled_v2 = Context.get_values ctx pooled.value in
-  printf "second pass identical: %b\n%!" (Array.for_all2_exn pooled_v pooled_v2 ~f:Float.equal)
+  Verdict.p "second pass identical" (Array.for_all2_exn pooled_v pooled_v2 ~f:Float.equal)
 
 let () =
   test_shared_operand ();

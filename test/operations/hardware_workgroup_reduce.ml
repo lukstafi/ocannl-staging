@@ -23,7 +23,7 @@ module Asgns = Ir.Assignments
 module Idx = Ir.Indexing
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
-let p name b = Stdio.printf "%s: %b\n" name b
+let p = Verdict.p
 let n = 64
 let vv = Array.init n ~f:(fun i -> (Float.of_int i *. 0.5) -. 7.)
 let expected_sum = Array.fold vv ~init:0. ~f:( +. )

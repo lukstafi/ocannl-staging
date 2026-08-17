@@ -235,7 +235,7 @@ let () =
   in
   let x_writes = List.filter sib_accs ~f:(fun a -> a.Aff.a_write && a.Aff.a_tn.Tn.uid = x.Tn.uid) in
   (match Aff.read_covered_before ~read:x_read ~writes:x_writes () with
-  | `Covered -> Stdio.printf "scope A's read covered by scope B's write: UNSOUND\n"
+  | `Covered -> Verdict.fail "scope A's read covered by scope B's write: containment crossed sibling operands"
   | `Unknown _ ->
       Stdio.printf "scope A's read not covered by the sibling operand's write: correct\n");
   (* The reverse arrangement — the writing scope evaluated first in traversal order — is declined
@@ -274,9 +274,9 @@ let () =
   materialize y2;
   let opt = LL.specialize_proc (LL.empty_optimize_ctx ()) (LL.analyze_proc [] sibling) in
   (match Base.Hashtbl.find opt.LL.traced_store x with
-  | None -> Stdio.printf "decide_placements: X not traced: UNSOUND\n"
+  | None -> Verdict.fail "decide_placements: X not traced -- the fact this leg checks is missing"
   | Some traced ->
-      Stdio.printf "decide_placements classifies X as read-before-write: %b\n"
+      Verdict.p "decide_placements classifies X as read-before-write"
         traced.LL.read_before_write);
   let (inputs, _outputs), _merge = LL.input_and_output_nodes opt in
-  Stdio.printf "X is a routine input (incoming buffer preserved): %b\n" (Base.Set.mem inputs x)
+  Verdict.p "X is a routine input (incoming buffer preserved)" (Base.Set.mem inputs x)

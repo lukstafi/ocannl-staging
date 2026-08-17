@@ -20,7 +20,7 @@ module Ops = Ir.Ops
 module Idx = Ir.Indexing
 module Asgns = Ir.Assignments
 
-let p name b = Stdio.printf "%s: %b\n" name b
+let p = Verdict.p
 let single = Ops.single
 let iprec = Ops.index_prec ()
 let next_id = ref 7000

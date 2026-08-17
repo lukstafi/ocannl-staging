@@ -39,7 +39,7 @@ open Base
 open Ocannl
 open Ocannl.Operation.DSL_modules
 
-let p name b = Stdio.printf "%s: %b\n" name b
+let p = Verdict.p
 let n = 128
 let beam_width = 2
 

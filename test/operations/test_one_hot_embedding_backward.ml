@@ -31,7 +31,7 @@ let () = Utils.settings.output_debug_files_in_build_directory <- true
 let vocab = 5
 let embed = 4
 let positions = 3
-let p name b = Stdio.printf "%s: %b\n" name b
+let p = Verdict.p
 let approx a b = Float.(abs (a - b) < 1e-4)
 
 let read_generated_c base_name =

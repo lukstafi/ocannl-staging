@@ -24,7 +24,7 @@ module Ops = Ir.Ops
 module Idx = Ir.Indexing
 module LL = Ir.Low_level
 
-let p name b = Stdio.printf "%s: %b\n" name b
+let p = Verdict.p
 
 let doc_to_string doc =
   let b = Buffer.create 4096 in
@@ -56,6 +56,7 @@ let compile_to_c ~name llc =
       pipelined = Base.Map.empty (module Tn);
       zero_fringe = Base.Set.empty (module Tn);
       flip_candidates = [];
+    spliced_rbw = Base.Set.empty (module Tn);
     }
   in
   let module Syntax = Ir.C_syntax.C_syntax (Ir.C_syntax.Pure_C_config (struct

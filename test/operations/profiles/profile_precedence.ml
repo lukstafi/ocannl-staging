@@ -31,8 +31,8 @@ let keys =
 (* `no_config_file` is consulted during [Utils]'s own initialization, before this executable
    reaches [main], and would discard the ocannl_config the whole test rests on. Nothing here can
    PREVENT that -- but detecting it is enough, since a rule that exits nonzero writes no golden,
-   and detection is one list entry where clearing it in dune would be four spellings x six rules
-   (Codex P2 on PR #291). The startup chatter keys (`suppress_welcome_message`,
+   and detection is one list entry where clearing it in dune would be two spellings x six rules
+   (Codex P2 on PR #291; four spellings before gh-ocannl-605 dropped the dash-prefixed ones). The startup chatter keys (`suppress_welcome_message`,
    `log_config_sourcing`) need no guard: that output goes to stderr (gh-ocannl-581) and the rules
    capture stdout only. *)
 let guarded_keys = List.map keys ~f:fst @ [ "no_config_file" ]

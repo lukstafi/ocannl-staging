@@ -45,9 +45,11 @@ let summarize (llc : LL.t) : int * int * int =
 let report name ~hoisted_expected llc =
   let declares, scopes, gets = summarize llc in
   let hoisted = declares >= 1 in
-  let verdict = if Bool.equal hoisted hoisted_expected then "OK" else "FAIL" in
+  let as_expected = Bool.equal hoisted hoisted_expected in
   Stdio.printf "[%s] declares=%d local_scopes=%d get_locals=%d hoisted=%b expected=%b -> %s\n" name
-    declares scopes gets hoisted hoisted_expected verdict
+    declares scopes gets hoisted hoisted_expected
+    (if as_expected then "OK" else "FAIL");
+  Verdict.claim name as_expected
 
 (* A Local_scope over [tn_src] whose body reads src at a fixed index, parameterized by its scope id
    and orig_indices. Bodies are structurally identical across instances modulo the scope id, so the
@@ -211,6 +213,7 @@ let () =
       pipelined = Base.Map.empty (module Tn);
       zero_fringe = Base.Set.empty (module Tn);
       flip_candidates = [];
+    spliced_rbw = Base.Set.empty (module Tn);
     }
   in
   let module Syntax = Ir.C_syntax.C_syntax (Ir.C_syntax.Pure_C_config (struct

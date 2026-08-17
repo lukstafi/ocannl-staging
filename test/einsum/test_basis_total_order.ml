@@ -24,8 +24,8 @@ let leq ~opnd ~res : bool =
 let d ~basis n = Row.get_dim ~d:n ~basis ()
 
 let report name ~expect actual =
-  if Bool.equal expect actual then Stdio.printf "  PASS: %s\n" name
-  else Stdio.printf "  FAIL: %s (expected %b, got %b)\n" name expect actual
+  Verdict.pass_fail ("  " ^ name) (Bool.equal expect actual)
+    ~detail:(fun () -> Printf.sprintf "expected %b, got %b" expect actual)
 
 (* The basis a dim variable resolves to in [env] (or "" if unsolved/unnamed). *)
 let var_basis env v =
@@ -107,9 +107,9 @@ let test_inequality_no_propagation () =
       var_basis env v
     with Row.Shape_error _ -> "<shape-error>"
   in
-  if String.equal basis Row.bcast_if_1 then
-    Stdio.printf "  PASS: v stays 1_(bcast_if_1) after 5_rgb ⊑ v; inequality recorded no basis\n"
-  else Stdio.printf "  FAIL: inequality leaked a basis onto v (got %S, expected bcast_if_1)\n" basis
+  Verdict.pass_fail "  v stays 1_(bcast_if_1) after 5_rgb ⊑ v; inequality recorded no basis"
+    (String.equal basis Row.bcast_if_1)
+    ~detail:(fun () -> Printf.sprintf "inequality leaked basis %S onto v" basis)
 
 let () =
   Stdio.printf "Testing total-basis broadcast order:\n\n";

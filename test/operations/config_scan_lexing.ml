@@ -14,6 +14,10 @@ open Base
 open Stdio
 module Scan = Test_utils.Config_key_scan
 
+(* Failures go through [Verdict], so that a regression exits nonzero instead of being
+   `dune promote`d into the golden as the expected output (gh-ocannl-601). *)
+let fail fmt = Printf.ksprintf Verdict.fail fmt
+
 (* A key that MUST be found is spelled with the marker; a key that must NOT be found sits in prose
    or in a blanked body. Each case pairs a snippet with the keys the scan should report. *)
 let cases =
@@ -257,20 +261,17 @@ let x = Utils.settings.large_models|ocaml},
   ]
 
 let () =
-  let ok = ref true in
   List.iter cases ~f:(fun (name, source, expected) ->
       let found =
         try List.sort ~compare:String.compare (Scan.keys_in_source source)
         with _ ->
-          ok := false;
-          printf "FAIL: %s -- the snippet does not parse\n" name;
+          fail "%s -- the snippet does not parse" name;
           []
       in
       let expected = List.sort ~compare:String.compare expected in
       if List.equal String.equal found expected then printf "ok: %s\n" name
       else (
-        ok := false;
-        printf "FAIL: %s -- expected [%s], found [%s]\n" name
+        fail "%s -- expected [%s], found [%s]" name
           (String.concat ~sep:"; " expected)
           (String.concat ~sep:"; " found)));
   List.iter non_literal_cases ~f:(fun (name, source, expected) ->
@@ -279,8 +280,7 @@ let () =
       in
       if found = expected then printf "ok: non-literal uses -- %s\n" name
       else (
-        ok := false;
-        printf "FAIL: non-literal uses -- %s: expected %d, found %d\n" name expected found));
+        fail "non-literal uses -- %s: expected %d, found %d" name expected found));
   let enclosing_definition source =
     let definitions = Scan.definitions source in
     let render (d : Scan.definition) =
@@ -296,16 +296,14 @@ let () =
       let found = enclosing_definition source in
       if Option.equal String.equal found expected then printf "ok: enclosing definition -- %s\n" name
       else (
-        ok := false;
-        printf "FAIL: enclosing definition -- %s: expected %s, found %s\n" name (show expected)
+        fail "enclosing definition -- %s: expected %s, found %s" name (show expected)
           (show found)));
   List.iter compiler_dependent_cases ~f:(fun (name, source, accepted) ->
       let found = enclosing_definition source in
       if List.mem accepted found ~equal:(Option.equal String.equal) then
         printf "ok: enclosing definition -- %s\n" name
       else (
-        ok := false;
-        printf "FAIL: enclosing definition -- %s: expected one of [%s], found %s\n" name
+        fail "enclosing definition -- %s: expected one of [%s], found %s" name
           (String.concat ~sep:"; " (List.map accepted ~f:show))
           (show found)));
   List.iter settings_cases ~f:(fun (name, source, expected) ->
@@ -313,8 +311,6 @@ let () =
       let expected = List.sort ~compare:String.compare expected in
       if List.equal String.equal found expected then printf "ok: settings read -- %s\n" name
       else (
-        ok := false;
-        printf "FAIL: settings read -- %s: expected [%s], found [%s]\n" name
+        fail "settings read -- %s: expected [%s], found [%s]" name
           (String.concat ~sep:"; " expected)
           (String.concat ~sep:"; " found)));
-  if not !ok then Stdlib.exit 1

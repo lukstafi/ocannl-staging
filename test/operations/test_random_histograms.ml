@@ -29,7 +29,12 @@ let create_histogram values ~num_bins ~min_val ~max_val =
       bins.(bin_idx) <- bins.(bin_idx) + 1);
   bins
 
-let print_check name passed = printf "  %s: %s\n" name (if passed then "PASS" else "FAIL")
+(* Every check here is an assertion, so it goes through [Verdict]: a tolerance-based test whose
+   verdict lives only in stdout can be `dune promote`d into recording its own failure
+   (gh-ocannl-601). The PASS/FAIL column stays -- the numbers behind it are backend- and
+   machine-specific, so what a golden can pin is the verdict, not the value. The failing value
+   comes back on the [?detail] thunk, which is evaluated only when the check fails. *)
+let print_check name passed = Verdict.pass_fail ("  " ^ name) passed
 
 let stats values =
   let n = Array.length values in
@@ -152,28 +157,44 @@ let test_normal_at_with_shape () =
   (* Verify statistical properties - only print PASS/FAIL to avoid machine-specific output *)
   let check name value expected tolerance =
     let passed = Float.(abs (value -. expected) <= tolerance) in
-    printf "  %s (expected: ~%.1f, tolerance: %.2f): %s\n" name expected tolerance
-      (if passed then "PASS" else Printf.sprintf "FAIL (got %.4f)" value);
+    Verdict.pass_fail
+      (Printf.sprintf "  %s (expected: ~%.1f, tolerance: %.2f)" name expected tolerance)
+      passed
+      ~detail:(fun () -> Printf.sprintf "got %.4f" value);
     passed
   in
 
   let check_bound name value bound is_lower =
     let passed = if is_lower then Float.(value < bound) else Float.(value > bound) in
     let op = if is_lower then "<" else ">" in
-    printf "  %s (should be %s %.1f): %s\n" name op bound
-      (if passed then "PASS" else Printf.sprintf "FAIL (got %.4f)" value);
+    Verdict.pass_fail
+      (Printf.sprintf "  %s (should be %s %.1f)" name op bound)
+      passed
+      ~detail:(fun () -> Printf.sprintf "got %.4f" value);
     passed
   in
 
+  (* Thunks folded left to right, rather than the [&&] chain this was: short-circuiting stops at
+     the first failing check, so one regression would also delete every later line from the
+     output -- and a bare list of calls would print them backwards, OCaml evaluating list elements
+     right to left. *)
+  let checks =
+    [
+      (fun () -> check "Mean" mean 0.0 0.1);
+      (fun () -> check "Std Dev" std_dev 1.0 0.1);
+      (fun () -> check "Within 1 std dev %%" pct_1_std 68.3 3.0);
+      (fun () -> check "Within 2 std dev %%" pct_2_std 95.4 2.0);
+      (fun () -> check "Within 3 std dev %%" pct_3_std 99.7 1.0);
+      (fun () -> check "Skewness" skewness 0.0 0.15);
+      (fun () -> check "Excess Kurtosis" kurtosis 0.0 0.15);
+      (fun () -> check_bound "Min" min_val (-3.0) true);
+      (fun () -> check_bound "Max" max_val 3.0 false);
+    ]
+  in
   let all_passed =
-    check "Mean" mean 0.0 0.1 && check "Std Dev" std_dev 1.0 0.1
-    && check "Within 1 std dev %%" pct_1_std 68.3 3.0
-    && check "Within 2 std dev %%" pct_2_std 95.4 2.0
-    && check "Within 3 std dev %%" pct_3_std 99.7 1.0
-    && check "Skewness" skewness 0.0 0.15
-    && check "Excess Kurtosis" kurtosis 0.0 0.15
-    && check_bound "Min" min_val (-3.0) true
-    && check_bound "Max" max_val 3.0 false
+    List.fold checks ~init:true ~f:(fun acc check ->
+        let passed = check () in
+        acc && passed)
   in
 
   printf "\nOverall: %s\n" (if all_passed then "ALL TESTS PASSED" else "SOME TESTS FAILED")
@@ -220,8 +241,7 @@ let test_counter_bifurcation () =
   printf "Counter 0 vs Counter 0 (repeat): %d/%d values same (expected: 100%%)\n" !same_count
     num_values;
 
-  if !diff_count > 90 && !same_count = num_values then printf "\nBifurcation test: PASS\n"
-  else printf "\nBifurcation test: FAIL\n"
+  Verdict.pass_fail "\nBifurcation test" (!diff_count > 90 && !same_count = num_values)
 
 (** Test kaiming_at with proper shape structure. The result tensor needs input dimensions for
     kaiming to extract fan_in.

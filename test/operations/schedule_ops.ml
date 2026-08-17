@@ -22,7 +22,7 @@ module Sched = Ir.Schedule
 module Asgns = Ir.Assignments
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
-let p name b = Stdio.printf "%s: %b\n" name b
+let p = Verdict.p
 let approx a b = Float.(abs (a - b) < 1e-4)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 
@@ -223,6 +223,7 @@ let () =
       pipelined = Map.empty (module Ir.Tnode);
       zero_fringe = Set.empty (module Ir.Tnode);
       flip_candidates = [];
+    spliced_rbw = Base.Set.empty (module Ir.Tnode);
     }
   in
   let guarded_accum ~cond_of =

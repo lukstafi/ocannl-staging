@@ -6,9 +6,9 @@ emitted TSV (tabs shown as ' | '):
   toy | dddddddd/44444444 | fissioned fused | 10.000000 | 9.000000 | 3 | 5000000 | 400000000 | false | false | false
 
 round-trip: 5/5 rows parsed back, re-emission identical: true
-malformed "cc\tonly\tthree" parses: false
-malformed "cc\td\tl\tnot_a_number\t\t1\t0\t0\tfalse\tfalse\tfalse" parses: false
-malformed "cc\td\tl\t1.0\t\t1\t0\t0\tfalse\tfalse\tmaybe" parses: false
+malformed "cc\tonly\tthree" rejected: true
+malformed "cc\td\tl\tnot_a_number\t\t1\t0\t0\tfalse\tfalse\tfalse" rejected: true
+malformed "cc\td\tl\t1.0\t\t1\t0\t0\tfalse\tfalse\tmaybe" rejected: true
 
 fits:
 # backend cc: 3 timed rows (1 opaque excluded, 1 approx-flops / 0 approx-bytes excluded per leg, 0 multi-kernel), 1 recorded bound violation

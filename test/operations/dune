@@ -101,7 +101,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules threefry4x32_demo)
- (libraries base ocannl)
+ (libraries base ocannl arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -112,7 +112,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_param_shape_error)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -134,7 +134,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_default_init_std)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -154,7 +154,7 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules row_beg_dims_regression)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here)))
 
@@ -163,7 +163,7 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules test_concat_dim_solver)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here)))
 
@@ -207,7 +207,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules half_softmax)
- (libraries base ocannl stdio test_utils)
+ (libraries base ocannl stdio test_utils arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -229,7 +229,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules wrap_prec_convert)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -270,7 +270,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules precision_policy_parity)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -279,7 +279,7 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules merge_buffer_static_verification)
- (libraries base ocannl stdio arrayjit.utils)
+ (libraries base ocannl stdio arrayjit.utils arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -306,7 +306,7 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules local_host_access)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -315,7 +315,7 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules context_host_access)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -324,7 +324,7 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules for_print_test)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -626,7 +626,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_uniform1)
- (libraries base ocannl)
+ (libraries base ocannl arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -637,7 +637,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_axis_labels)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -648,7 +648,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_block_tensor)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -681,7 +681,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_random_histograms)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -846,7 +846,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_slice_alias)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -868,7 +868,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules affine_injectivity)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -890,7 +890,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules affine_lowering)
- (libraries base ocannl stdio unix)
+ (libraries base ocannl stdio unix arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -912,7 +912,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules sibling_placements)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -934,7 +934,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules context_copy)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -945,7 +945,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules tnode_uid_identity)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -967,7 +967,7 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules test_tensor_persistence)
- (libraries base ocannl sexplib stdio)
+ (libraries base ocannl sexplib stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -976,7 +976,7 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules test_tnode_namespaces)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -987,7 +987,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_execution_deps)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1038,7 +1038,7 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules test_debug_name_collapse)
- (libraries base arrayjit.ir stdio))
+ (libraries base arrayjit.ir stdio arrayjit.verdict))
 
 (test
  (name test_ident_blacklist)
@@ -1047,7 +1047,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_ident_blacklist)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1058,7 +1058,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_einsum3)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1069,7 +1069,7 @@
   (deps
    ocannl_config
    (env_var OCANNL_BACKEND)))
- (libraries base dynlink ocannl stdio)
+ (libraries base dynlink ocannl stdio arrayjit.verdict)
  (modules hello_world_op zero2hero_1of7 primitive_ops test_threefry4x32)
  (preprocess
   (pps ppx_here ppx_expect ppx_inline_test ppx_ocannl))
@@ -1082,10 +1082,134 @@
  (modules config_profiles)
  (libraries base arrayjit.utils stdio))
 
+; gh-ocannl-605: the environment and commandline spellings of a configuration key. The rule sets
+; the synthetic keys the executable looks up -- `demo_key` in the one environment spelling that
+; survives and in the three dash-prefixed ones that do not, `dashed_only_key` in the dropped ones
+; alone -- so the golden's last lines are a live check on `Utils.env_var_names`, not a copy of it.
+; The all-dashed commandline flag is the same check on the other side: there the spelling IS read,
+; and it names a real key, the unknown-argument warning being the reason (see the .ml). The BARE
+; `ocannl_print_decimals_precision=9` in front of it is the negative: it is no longer a spelling
+; (Codex P2 on PR #363), and being first in argv it would win if it were, so the golden's 7 is
+; what says a bare argument stays the host's.
+;
+; EVERY spelling of both keys is stated here, the surviving ones as empty (which counts as unset at
+; every source), so the rule's environment decides the output on its own: an ambient
+; `OCANNL_DASHED_ONLY_KEY` would otherwise turn the negative leg's None into a value, and dune,
+; which tracks no OCANNL variable but OCANNL_BACKEND, could serve the stale None besides (Codex P2
+; on PR #363). Pinning beats declaring `env_var` deps wherever it is available: a pinned rule
+; cannot be reached from the ambient environment at all.
+;
+; Windows environment names are case-INSENSITIVE, so `ocannl_demo_key` and `OCANNL_DEMO_KEY` are
+; one variable there and two here; the fixture is written so that both readings produce the same
+; golden (Codex P1 on PR #363). Two rules do it: a case pair that must be distinguishable is
+; ordered so the value that has to survive is set LAST -- the empty `OCANNL_DEMO_KEY` outside the
+; `ocannl_demo_key` that carries the value, so Windows' single variable ends up carrying it, and
+; Linux reads the lowercase spelling first anyway -- and a case pair that is only there to be
+; ignored carries ONE value in both spellings, so the control lines cannot report a collision.
+; What is thereby not tested live is the case dimension itself; that is what `env_var_names`'
+; printed list above covers, and `profiles/dune` exercises `OCANNL_PROFILE` end to end.
+
+(executable
+ (name config_var_spellings)
+ (modules config_var_spellings)
+ (libraries base arrayjit.utils stdio))
+
+(rule
+ (target config_var_spellings.actual)
+ (deps ocannl_config)
+ (action
+  (setenv
+   OCANNL_DEMO_KEY
+   ""
+   (setenv
+    ocannl_demo_key
+    kept-spelling
+    (setenv
+     OCANNL-DEMO_KEY
+     dropped-spelling
+     (setenv
+      ocannl-demo_key
+      dropped-spelling
+      (setenv
+       ocannl-demo-key
+       dropped-spelling
+       (setenv
+        ocannl_dashed_only_key
+        ""
+        (setenv
+         OCANNL_DASHED_ONLY_KEY
+         ""
+         (setenv
+          OCANNL-DASHED_ONLY_KEY
+          dropped-spelling
+          (setenv
+           ocannl-dashed_only_key
+           dropped-spelling
+           (with-stdout-to
+            %{target}
+            (run
+             %{dep:config_var_spellings.exe}
+             ocannl_print_decimals_precision=9
+             --ocannl-print-decimals-precision=7
+             --ocannl_log_level_0)))))))))))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff config_var_spellings.expected config_var_spellings.actual)))
+
+; The other side of the same coin: what the library WARNS about. The unknown-argument check and
+; `read_cmdline_var` now consult one table (`Utils.cmdline_var_prefixes`), so a spelling is read
+; and unwarned, or unread and warned, never one of each -- which is what this rule captures, three
+; arguments at a time: an all-dashed name with a `-` value separator, a dashed prefix over an
+; underscored name with `=`, one whose name is dashed HALFWAY, and one that names nothing. The
+; last two belong in the golden. Every silent contradiction the old two-parser arrangement
+; produced is here: `--ocannl_log_level_0` was read and warned about (its separator is not an `=`,
+; so the key came out as `log_level_0`), while the all-dashed and halfway-dashed spellings were
+; warned about by nobody and read by nobody -- the halfway one is still not read, deliberately
+; (see `Utils.cmdline_var_names`), and now says so. The bare `ocannl_config` is the argument that
+; must draw NO warning however much it looks like one: a positional path belongs to the host
+; application, which is why the qualified spellings all carry a leading dash.
+;
+; stderr alone is the subject; the executable's own stdout goes nowhere. Every key that shapes
+; stderr is pinned on the commandline, which no environment variable can outrank -- the five of
+; `startup_streams.ml`'s `stderr_shaping_keys` less `profile`, whose only route to this stream is
+; through the four that are pinned (a profile cannot beat an explicit key of equal immediacy, and
+; an unknown ambient profile name aborts every OCANNL executable loudly rather than rewriting a
+; golden). Pinning the whole list, not just the reported `log_config_sourcing` (Codex P2 on PR
+; #363): the rule captures a stream, so it depends on every key that can write to it.
+
+(rule
+ (target config_var_warnings.actual)
+ (deps ocannl_config)
+ (action
+  (with-stderr-to
+   %{target}
+   (ignore-stdout
+    (run
+     %{dep:config_var_spellings.exe}
+     --ocannl_no_config_file=true
+     --ocannl_suppress_welcome_message=true
+     --ocannl_log_config_sourcing=false
+     --ocannl_log_level=0
+     --ocannl-print-decimals-precision-7
+     --ocannl-print_decimals_precision=7
+     --ocannl_log_level_0
+     ocannl_config
+     --ocannl-print_decimals-precision=7
+     --ocannl-not-a-real-key=7)))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff config_var_warnings.expected config_var_warnings.actual)))
+
 (executable
  (name test_config_consistency)
  (modules test_config_consistency)
- (libraries base arrayjit.utils stdio test_utils))
+ (libraries base arrayjit.utils stdio test_utils arrayjit.verdict))
 
 ; The sources are globbed, not enumerated (gh-ocannl-592): a hand-written list cannot report the
 ; file that falls off it, and three did -- each staying green because the same keys were read from
@@ -1125,7 +1249,7 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules config_scan_lexing)
- (libraries base stdio test_utils))
+ (libraries base stdio test_utils arrayjit.verdict))
 
 ; How the dune-file scan behind config_dep_completeness reads a stanza, on input built to break
 ; it rather than on whatever the repository's dune files happen to say today.
@@ -1135,12 +1259,12 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules dune_scan_cases)
- (libraries base stdio test_utils))
+ (libraries base stdio test_utils arrayjit.verdict))
 
 (executable
  (name digest_completeness)
  (modules digest_completeness)
- (libraries base arrayjit.utils arrayjit.ir stdio test_utils))
+ (libraries base arrayjit.utils arrayjit.ir stdio test_utils arrayjit.verdict))
 
 ; Same globs as test_config_consistency above, for the same reason: the second scanner inherited
 ; the first one's list, so it inherited the blind spot too.
@@ -1174,7 +1298,7 @@
 (executable
  (name config_dep_completeness)
  (modules config_dep_completeness)
- (libraries base stdio test_utils))
+ (libraries base stdio test_utils arrayjit.verdict))
 
 (rule
  (target config_dep_completeness.actual)
@@ -1271,7 +1395,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_one_hot_embedding_lookup)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1282,7 +1406,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_one_hot_embedding_backward)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1293,7 +1417,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_bounds_folded_gather)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1304,7 +1428,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules hardware_axes_parity)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1315,7 +1439,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules hardware_workgroup_reduce)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1326,7 +1450,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules hardware_warp_shuffle)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1337,7 +1461,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules cpu_vectorized)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1359,7 +1483,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules narrow_rng_nesting)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1370,7 +1494,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules narrow_storage_compute)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1381,7 +1505,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules cpu_simd_reduction)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1394,7 +1518,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules cpu_parallel)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1405,7 +1529,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_ops)
- (libraries base ocannl stdio pprint)
+ (libraries base ocannl stdio pprint arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1416,7 +1540,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules autotune_smoke)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1427,7 +1551,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules autotune_serial_baseline)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1438,7 +1562,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_cache_numerics)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1449,7 +1573,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules digest_identity_flips)
- (libraries base ocannl stdio unix)
+ (libraries base ocannl stdio unix arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1460,7 +1584,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules fission_equivalence)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1471,7 +1595,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules materialize_after_compile)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1482,7 +1606,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules autotune_privatize)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1493,7 +1617,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules autotune_fission_sketch)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1504,7 +1628,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules autotune_mma_companion)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1515,7 +1639,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules autotune_batched_companion)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1526,7 +1650,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules fission_schedule)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1537,7 +1661,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules op_legality)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1548,7 +1672,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules scratch_value_variance)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1559,7 +1683,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_smem_matmul)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1570,7 +1694,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_batched_mma)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1581,7 +1705,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_mma_matmul)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1592,7 +1716,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules simplify_if_narrowing)
- (libraries base ocannl stdio))
+ (libraries base ocannl stdio arrayjit.verdict))
 
 (test
  (name schedule_pipelined_matmul)
@@ -1601,7 +1725,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_pipelined_matmul)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1612,7 +1736,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_ldmatrix_matmul)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1623,7 +1747,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_swizzle_matmul)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1634,7 +1758,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_register_matmul)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1645,7 +1769,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_cpu_pack_matmul)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1656,7 +1780,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_pack_mma_matmul)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1668,7 +1792,7 @@
   (env_var OCANNL_BACKEND)
   (env_var OCANNL_CC_FP16_ARITHMETIC))
  (modules tile_mma_narrow)
- (libraries base ocannl stdio unix)
+ (libraries base ocannl stdio unix arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1679,7 +1803,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules tile_mma_declines)
- (libraries base ocannl arrayjit.autotune stdio)
+ (libraries base ocannl arrayjit.autotune stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1690,7 +1814,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_packed_constants)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1712,7 +1836,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_safetensors)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1723,7 +1847,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules forward_fragment_order)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1745,7 +1869,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules scalar_rmw_accumulation)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1756,7 +1880,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules buffer_aliasing)
- (libraries base ocannl stdio unix)
+ (libraries base ocannl stdio unix arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1774,7 +1898,7 @@
   (env_var OCANNL_BUFFER_ALIASING)
   (env_var OCANNL_MODEL_DEFAULT_SCHEDULE))
  (modules memory_budget)
- (libraries base ocannl stdio unix)
+ (libraries base ocannl stdio unix arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1785,7 +1909,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_epilogue_fusion)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1796,7 +1920,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_partition)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1807,7 +1931,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_pad)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1818,7 +1942,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules clamped_window_pool)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1829,7 +1953,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_conv_gemm)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1840,7 +1964,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules padding_lifecycle)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1851,7 +1975,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules symbolic_extent_launch)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1862,7 +1986,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules affine_legality)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1873,7 +1997,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules affine_extraction)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1884,7 +2008,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules cost_model_extraction)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1894,7 +2018,7 @@
 (executable
  (name autotune_bound_pruning)
  (modules autotune_bound_pruning)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1956,7 +2080,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules cost_model_floor)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1967,7 +2091,7 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules envelope_fitting)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1980,7 +2104,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules sketch_family_tree)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1991,7 +2115,7 @@
 (executable
  (name cost_model_selection)
  (modules cost_model_selection)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2021,7 +2145,7 @@
 (executable
  (name model_default_fallback)
  (modules model_default_fallback)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2051,7 +2175,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules read_before_write_flip)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2062,7 +2186,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules inline_decision_replay)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2084,7 +2208,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules inline_flip_tune)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2095,7 +2219,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules analysis_cache)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2108,7 +2232,7 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules canonical_render)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here)))
 
@@ -2119,7 +2243,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules autotune_arm_containment)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2159,7 +2283,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_split_reduce)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2170,7 +2294,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules autotune_split_reduce)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2192,7 +2316,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules nonoverlap_pool_grads)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2203,7 +2327,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules overlapping_window_grads)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2214,7 +2338,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules epilogue_fusion_mma_seeds)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2225,7 +2349,7 @@
 (executable
  (name hip_scratch_budget)
  (modules hip_scratch_budget)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2251,7 +2375,7 @@
 (executable
  (name hip_scratch_tune_survives)
  (modules hip_scratch_tune_survives)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2282,7 +2406,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules autotune_candidate_release)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2291,7 +2415,7 @@
  (package neural_nets_lib)
  (modules test_cpu_topology)
  (deps ocannl_config test_cpu_topology.expected)
- (libraries base arrayjit.utils stdio)
+ (libraries base arrayjit.utils stdio arrayjit.verdict)
  (preprocess
   (pps ppx_sexp_conv)))
 
@@ -2303,7 +2427,7 @@
 (executable
  (name placement_surface)
  (modules placement_surface)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2333,7 +2457,7 @@
 (executable
  (name flip_bound_pruning)
  (modules flip_bound_pruning)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2363,7 +2487,7 @@
 (executable
  (name model_default_placements)
  (modules model_default_placements)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 

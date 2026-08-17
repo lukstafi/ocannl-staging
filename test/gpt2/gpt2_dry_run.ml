@@ -22,12 +22,12 @@ let () =
     (String.concat ~sep:"x" (Array.to_list (Array.map dims ~f:Int.to_string)));
   let vals = Context.get_values ctx logits.Tensor.value in
   printf "logits count: %d\n" (Array.length vals);
-  printf "all finite: %b\n" (Array.for_all vals ~f:Float.is_finite);
+  Verdict.p "all finite" (Array.for_all vals ~f:Float.is_finite);
   (* Positions must produce different distributions (the model is not collapsing). *)
   let row p = Array.sub vals ~pos:(p * config.vocab_size) ~len:config.vocab_size in
   let first = row 0 and last = row (seq_len - 1) in
   let differ = Array.existsi first ~f:(fun i v -> Float.(abs (v - last.(i)) > 1e-6)) in
-  printf "positions differ: %b\n" differ;
+  Verdict.p "positions differ" differ;
   (* Values should be in a sane range for random weights (LayerNorm keeps activations bounded). *)
   let max_abs = Array.fold vals ~init:0. ~f:(fun acc v -> Float.max acc (Float.abs v)) in
-  printf "max |logit| below 100: %b\n" Float.(max_abs < 100.)
+  Verdict.p "max |logit| below 100" Float.(max_abs < 100.)

@@ -63,7 +63,7 @@ let render ?(mma = CR.Structural_mma) ?(initial_tokens = []) llc =
   CR.emit ~buf policy llc;
   (Buffer.contents buf, List.rev !log)
 
-let p name b = Stdio.printf "%s: %b\n" name b
+let p = Verdict.p
 
 (* One "lowering" of a program touching a representative of every statement, scalar and index
    family: fresh symbols and scope ids per call, tensor nodes fixed by the caller — the shape

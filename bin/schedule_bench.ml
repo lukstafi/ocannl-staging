@@ -20,11 +20,23 @@
    panel under the per-chunk privatization cap, config cc_grid_private_bytes_cap, or it silently
    declines to serial: check with --ocannl_schedule_log_declines=true).
 
-   Usage: dune exec bin/schedule_bench.exe -- [n] [repeats] [m] [k] (defaults 256, 20, n, n; all
-   dims must be multiples of 64; the output is m x n, the reduction depth k — deep-K gradient-GEMM
-   geometries are m,n << k). Run with OCANNL_BACKEND=metal (or cuda); the C backends reject the
-   shared schedules. Timing includes kernel executions and one device-to-host transfer per variant
-   (runs queue on the stream; get_values synchronizes). *)
+   Usage: dune exec bin/schedule_bench.exe -- [n] [repeats] [m] [k] [naive_repeats] (defaults 256,
+   20, n, n, repeats; the output is m x n, the reduction depth k — deep-K gradient-GEMM geometries
+   are m,n << k). Each scheduled variant needs its own [Sched.split] factors to divide the extents
+   they split (i over m, j over n, k over k), and every one of them needs a non-degenerate nest to
+   address; a variant whose requirement fails is skipped by name with the reason. Two are exempt
+   from the divisibility half — [parallel] on the GPU backends and [tensorize] on the C ones, which
+   put nothing downstream of the split that a remainder guard would break — so an arbitrary
+   (non-degenerate) extent still gets a scheduled measurement on either branch, and the naive kernel
+   runs at any size whatsoever. Each line carries a position-weighted checksum of the whole output,
+   which is what makes a remainder-region error visible, and every variant carrying a [Tile_mma]
+   carries its [C_syntax.mma_census] rendering: a [Tile_mma] whose preconditions fail (a column
+   extent below the compute vector width is one way in, and arbitrary extents reach it) renders the
+   scalar fallback while still reporting under its schedule's name, so read the bracket, not the
+   variant name, when deciding what a timing measured.
+   Run with OCANNL_BACKEND=metal (or cuda); the C backends reject the shared schedules. Timing
+   includes kernel executions and one device-to-host transfer per variant (runs queue on the
+   stream; get_values synchronizes). *)
 
 open Base
 open Ocannl
@@ -59,11 +71,18 @@ let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
 let () =
-  (* Positional integer args only — --ocannl_* config flags share the argv. *)
+  (* Positional integer args only — --ocannl_* config flags share the argv. An option is
+     [--]-prefixed (theirs, and any of ours) or a [-] followed by a non-digit; a bare [-64] is
+     therefore a positional, not an option. Dropping it would be worse here than in a one-argument
+     bench: with five positionals, a negative in any slot loses its own value AND shifts every later
+     argument into the wrong slot (`schedule_bench 256 20 -64 512` would run with m defaulting to n
+     and k = 512 read as m), hiding the invalid value from the validation below. *)
+  let is_option s =
+    String.is_prefix s ~prefix:"--"
+    || (String.is_prefix s ~prefix:"-" && String.length s > 1 && not (Char.is_digit s.[1]))
+  in
   let pos_args =
-    Array.to_list (Sys.get_argv ())
-    |> List.tl_exn
-    |> List.filter ~f:(fun s -> not (String.is_prefix s ~prefix:"-"))
+    Array.to_list (Sys.get_argv ()) |> List.tl_exn |> List.filter ~f:(fun s -> not (is_option s))
   in
   let arg i default =
     match List.nth pos_args i with Some s -> Int.of_string s | None -> default
@@ -76,18 +95,76 @@ let () =
      repeats separately so the scheduled variants can be timed at scale (arg 5, default = repeats;
      0 skips the naive leg entirely, including its warmup run — speedups then print as nan). *)
   let naive_repeats = arg 4 repeats in
-  assert (n % 64 = 0 && m % 64 = 0 && k % 64 = 0);
+  (* Every integer argument is a positive extent or count — except [naive_repeats], whose 0 is the
+     documented "skip the naive leg" value. Validate them as one domain rather than leaving each use
+     site to discover its own bad input. *)
+  List.iter
+    [
+      ("n", n, 1); ("repeats", repeats, 1); ("m", m, 1); ("k", k, 1);
+      ("naive_repeats", naive_repeats, 0);
+    ]
+    ~f:(fun (name, v, least) ->
+      if v < least then
+        invalid_arg
+          (Printf.sprintf "schedule_bench: %s must be %s, got %d" name
+             (if least = 0 then "nonnegative" else "positive")
+             v));
+  (* Blocking factors, named once and shared between each schedule below and the divisibility gate
+     at the bottom, so the requirement and what is actually scheduled cannot drift apart. *)
+  let par_b = 16 in
+  let smem_bm, smem_bn, smem_bk = (16, 16, 8) in
+  let reg_bm, reg_bn, reg_bk, reg_tm, reg_tn = (64, 64, 8, 8, 8) in
+  let mma_bm, mma_bn, mma_bk, mma_w = (32, 32, 32, 32) in
+  let cpu_bm, cpu_bn, cpu_bk = (64, 64, 16) in
+  let gebp_bm, gebp_bk = (64, 64) in
+  (* Every scheduled variant addresses the i/j/k nest, so an extent of 1 makes ALL of them
+     unschedulable — [tensorize] and the unblocked ones included: the extent-1 loop is simplified
+     away before the transform runs, leaving [accum_syms] no 3-deep nest to find. That is a
+     precondition of the gate, not a requirement of any one variant's blocking, so it is folded into
+     [unmet] rather than listed per variant. *)
+  let degenerate =
+    List.filter_map [ ("m", m); ("n", n); ("k", k) ] ~f:(fun (name, e) ->
+        if e >= 2 then None
+        else
+          Some
+            (Printf.sprintf
+               "%s = %d leaves no i/j/k loop nest to schedule (an extent-1 loop is simplified away)"
+               name e))
+  in
+  (* A [Sched.split] of factor [f] over an axis of extent [e] needs [e mod f = 0]: the remainder
+     guard it constructs otherwise survives into the staged/tensorized micro-kernels these schedules
+     build on top of it. Report which factor does not divide which extent, per variant, instead of
+     tripping one bare assert for all of them. *)
+  let unmet reqs =
+    degenerate
+    @ List.filter_map reqs ~f:(fun (fname, f, ename, e) ->
+          if e % f = 0 then None
+          else
+            Some
+              (Printf.sprintf "%s = %d does not divide %s = %d (remainder %d)" fname f ename e
+                 (e % f)))
+    |> List.dedup_and_sort ~compare:String.compare
+  in
   let mav = Array.init (m * k) ~f:(fun i -> Float.of_int (i % 13) *. 0.25) in
   let mbv = Array.init (k * n) ~f:(fun i -> Float.of_int (i % 17) -. 8.) in
   let ma = TDSL.ndarray mav ~label:[ "ma" ] ~input_dims:[ k ] ~output_dims:[ m ] () in
   let mb = TDSL.ndarray mbv ~label:[ "mb" ] ~input_dims:[ n ] ~output_dims:[ k ] () in
   let flops = 2.0 *. Float.of_int m *. Float.of_int n *. Float.of_int k in
 
+  (* The i/j/k nest (i over m, j over n, k over k) is what every schedule below addresses. Extent-1
+     loops are simplified away before the transform runs, so a degenerate size leaves no 3-deep nest
+     — report that rather than raising [Not_found_s] out of a [find_exn]. *)
   let accum_syms opt =
     let paths = nest_paths opt.LL.llc in
-    match List.find_exn paths ~f:(fun p -> List.length p = 3) with
-    | [ i; j; k ] -> (i, j, k)
-    | _ -> assert false
+    match List.find paths ~f:(fun p -> List.length p = 3) with
+    | Some [ i; j; k ] -> (i, j, k)
+    | _ ->
+        failwith
+          (Printf.sprintf
+             "schedule_bench: no 3-deep i/j/k loop nest to schedule at m=%d n=%d k=%d (deepest \
+              nest found: %d loops) — the scheduled variants need non-degenerate extents"
+             m n k
+             (List.fold paths ~init:0 ~f:(fun acc p -> Int.max acc (List.length p))))
   in
 
   (* One thread per output element. *)
@@ -96,16 +173,16 @@ let () =
     ignore k;
     let ez, zsyms = Sched.expand_zero ~tn:mc in
     let zi, zj = match zsyms with [ zi; zj ] -> (zi, zj) | _ -> assert false in
-    let sp_zi, _, _ = Sched.split ~axis:zi ~factor:16 ~outer:LL.Grid ~inner:LL.Workgroup in
-    let sp_zj, _, _ = Sched.split ~axis:zj ~factor:16 ~outer:LL.Grid ~inner:LL.Workgroup in
-    let sp_i, _, _ = Sched.split ~axis:i ~factor:16 ~outer:LL.Grid ~inner:LL.Workgroup in
-    let sp_j, _, _ = Sched.split ~axis:j ~factor:16 ~outer:LL.Grid ~inner:LL.Workgroup in
+    let sp_zi, _, _ = Sched.split ~axis:zi ~factor:par_b ~outer:LL.Grid ~inner:LL.Workgroup in
+    let sp_zj, _, _ = Sched.split ~axis:zj ~factor:par_b ~outer:LL.Grid ~inner:LL.Workgroup in
+    let sp_i, _, _ = Sched.split ~axis:i ~factor:par_b ~outer:LL.Grid ~inner:LL.Workgroup in
+    let sp_j, _, _ = Sched.split ~axis:j ~factor:par_b ~outer:LL.Grid ~inner:LL.Workgroup in
     [ ez; sp_zi; sp_zj; sp_i; sp_j ]
   in
 
   (* + shared-memory operand tiles (32x32x8, 32x32 threads is over most limits: use 16x16x8). *)
   let smem_schedule ~mc opt =
-    let bm, bn, bk = (16, 16, 8) in
+    let bm, bn, bk = (smem_bm, smem_bn, smem_bk) in
     let i, j, k = accum_syms opt in
     let ez, zsyms = Sched.expand_zero ~tn:mc in
     let zi, zj = match zsyms with [ zi; zj ] -> (zi, zj) | _ -> assert false in
@@ -151,7 +228,7 @@ let () =
 
   (* CPU cache tiling + operand packing (all-Serial; the S4 shape, Boehm's packed CPU kernel). *)
   let cpupack_schedule ~mc opt =
-    let bm, bn, bk = (64, 64, 16) in
+    let bm, bn, bk = (cpu_bm, cpu_bn, cpu_bk) in
     let i, j, k = accum_syms opt in
     let sp_i, _, i_i = Sched.split ~axis:i ~factor:bm ~outer:LL.Serial ~inner:LL.Serial in
     let sp_j, j_o, j_i = Sched.split ~axis:j ~factor:bn ~outer:LL.Serial ~inner:LL.Serial in
@@ -191,7 +268,7 @@ let () =
 
   (* + TM x TN register tiles via materialized unroll (64x64 block, 8x8 per thread). *)
   let regtile_schedule ~mc opt =
-    let bm, bn, bk, tm, tn = (64, 64, 8, 8, 8) in
+    let bm, bn, bk, tm, tn = (reg_bm, reg_bn, reg_bk, reg_tm, reg_tn) in
     let i, j, k = accum_syms opt in
     let ez, zsyms = Sched.expand_zero ~tn:mc in
     let zi, zj = match zsyms with [ zi; zj ] -> (zi, zj) | _ -> assert false in
@@ -245,7 +322,7 @@ let () =
      form, [2] the double-buffered one, bitwise identical by the transform's invariant, so the
      paired timing difference is the prefetch overlap's alone. *)
   let mma_staged_schedule ~pipeline_depth ~mc opt =
-    let bm, bn, bk, w = (32, 32, 32, 32) in
+    let bm, bn, bk, w = (mma_bm, mma_bn, mma_bk, mma_w) in
     let i, j, k = accum_syms opt in
     let ez, zsyms = Sched.expand_zero ~tn:mc in
     let zi, zj = match zsyms with [ zi; zj ] -> (zi, zj) | _ -> assert false in
@@ -296,7 +373,7 @@ let () =
      — the register-tiled micro-kernel streams the contiguous packed tiles. All-Serial with a unit
      lane, so the whole-node zeroing stays legal. *)
   let packmma_schedule ~mc:_ opt =
-    let bm, bk = (64, 64) in
+    let bm, bk = (gebp_bm, gebp_bk) in
     let i, j, k = accum_syms opt in
     let sp_i, i_o, i_i = Sched.split ~axis:i ~factor:bm ~outer:LL.Serial ~inner:LL.Serial in
     let sp_k, k_o, k_i = Sched.split ~axis:k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
@@ -316,7 +393,7 @@ let () =
      alias under the blocks extension). The whole-node zeroing is no longer legal beside a
      hardware-annotated loop, so it expands with the same Grid row geometry. *)
   let packmma_par_schedule ~mc opt =
-    let bm, bk = (64, 64) in
+    let bm, bk = (gebp_bm, gebp_bk) in
     let i, j, k = accum_syms opt in
     let ez, zsyms = Sched.expand_zero ~tn:mc in
     let zi = match zsyms with [ zi; _ ] -> zi | _ -> assert false in
@@ -340,7 +417,7 @@ let () =
      panel (redundant work, but no dispatch-per-k-block; the panel must fit the per-chunk
      privatization cap). [pack_a] toggles the in-kernel per-chunk A~ pack vs. reading A in place. *)
   let packmma_outer_schedule ~pack_a ~pack_b ~mc opt =
-    let bm, bk = (64, 64) in
+    let bm, bk = (gebp_bm, gebp_bk) in
     let i, j, k = accum_syms opt in
     let ez, zsyms = Sched.expand_zero ~tn:mc in
     let zi = match zsyms with [ zi; _ ] -> zi | _ -> assert false in
@@ -369,7 +446,22 @@ let () =
       match schedule with None -> opt | Some s -> Sched.apply (s ~mc:mc.Tensor.value opt) opt
     in
     let ctx = Context.auto () in
-    let ctx, routine = Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty in
+    (* What codegen actually did with each [Tile_mma] (gh-ocannl-479). A [Tile_mma] whose
+       preconditions fail renders the scalar fallback and still reports under its schedule's name —
+       "timed is not tensorized", docs/agent-notes.md — so a variant name is not evidence of
+       tensorization and every variant carrying one has to be read from the census instead. The
+       decline rules include a column extent below the compute vector width (which arbitrary
+       extents now reach), a narrow [vector_bytes], mixed operand precisions, an accumulation not in
+       FMA form, and [debug_log_from_routines]. Collecting the census only appends to a list, so it
+       perturbs neither what is compiled nor what is timed. *)
+    Ir.C_syntax.mma_census := [];
+    Ir.C_syntax.mma_census_enabled := true;
+    let ctx, routine =
+      Exn.protect
+        ~f:(fun () -> Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty)
+        ~finally:(fun () -> Ir.C_syntax.mma_census_enabled := false)
+    in
+    let renderings = List.rev_map !Ir.C_syntax.mma_census ~f:snd in
     (* Warmup (includes any lazy initialization and host transfers). *)
     let ctx = Context.run ctx routine in
     let _ = Context.get_values ctx mc.Tensor.value in
@@ -382,10 +474,69 @@ let () =
     let values = Context.get_values ctx mc.Tensor.value in
     let stop = Time_now.nanoseconds_since_unix_epoch () in
     let secs = Float.of_int63 Int63.(stop - start) /. 1e9 /. Float.of_int repeats in
-    p "%-10s %8.3f ms  %8.2f GFLOP/s  (spot check %.1f)\n" variant (secs *. 1e3)
-      (flops /. secs /. 1e9)
-      values.(n + 1);
-    secs
+    (* Element [1][1] of the m x n result — an interior cell, away from the corners — except where
+       the output is too small to have one; print which cell was checked. One interior cell cannot
+       see the remainder region an arbitrary extent creates, and a [Sched.split] whose factor does
+       not divide its extent puts the last partial block exactly there, so the whole output is
+       checksummed too: every correct variant prints the identical value, and one that drops or
+       repeats tail work does not. Position-weighted, because a plain sum of THIS data is 0 whenever
+       17 divides n (each mb row spans a full cycle of its 17 values, and the total factors as
+       sum_k (sum_i a) (sum_j b)) — exactly the arbitrary-extent regime the checksum is for.
+       The weight is capped so that products of these exact-in-binary operands stay exact in the
+       double accumulator. Both checks are outside the timed region. *)
+    let checksum =
+      Array.foldi values ~init:0.0 ~f:(fun i acc v -> acc +. (v *. Float.of_int (1 + (i % 251))))
+    in
+    let spot = Int.min (n + 1) (Array.length values - 1) in
+    p "%-10s %8.3f ms  %8.2f GFLOP/s  (spot [%d] %.1f, chk %.10g)%s\n" variant (secs *. 1e3)
+      (flops /. secs /. 1e9) spot values.(spot) checksum
+      (match renderings with
+      | [] -> ""
+      | rs ->
+          let counted =
+            List.map
+              (List.dedup_and_sort rs ~compare:Ir.C_syntax.compare_mma_rendering)
+              ~f:(fun r ->
+                Printf.sprintf "%s x%d"
+                  (Sexp.to_string (Ir.C_syntax.sexp_of_mma_rendering r))
+                  (List.count rs ~f:(Ir.C_syntax.equal_mma_rendering r)))
+          in
+          "  [" ^ String.concat ~sep:", " counted ^ "]");
+    (secs, renderings)
+  in
+  (* A static gate cannot enumerate every way a schedule can be rejected at a given size —
+     [validate_parallel]'s coverage rules, per-kernel hardware limits and backend declines all
+     surface as exceptions out of [Context.compile], and small operands bring in whole new
+     interactions (below m,n,k = 5 the constants are initialized in-kernel, which the [tensorize]
+     variant's Workgroup retype of the zeroing loop then makes illegal). Charge such a failure to
+     the variant, not to the run: name it, keep measuring the rest, and exit nonzero at the end so a
+     scripted run still sees that something failed. *)
+  let failures = ref 0 in
+  (* Every rendering any variant produced, for the closing verdict on whether the tensorized labels
+     measured tensorized kernels. *)
+  let census = ref [] in
+  let attempt ?repeats ~variant ~schedule () =
+    try
+      let secs, renderings = bench ?repeats ~variant ~schedule () in
+      census := renderings @ !census;
+      secs
+    with e ->
+      Int.incr failures;
+      p "%-10s FAILED at this size: %s\n" variant
+        (List.hd_exn (String.split_lines (Exn.to_string e)));
+      Float.nan
+  in
+  (* A variant runs when the gate is satisfied, and is skipped by name with every reason it found
+     when it is not, so an unschedulable size still measures everything that is schedulable at it. A
+     skipped variant times as nan, like the naive leg under [naive_repeats = 0]. The naive leg needs
+     no gate — it addresses no loop nest at all, so it runs at any size, degenerate included. *)
+  let bench_v ?repeats ~variant ~reqs ~schedule () =
+    match unmet reqs with
+    | [] -> attempt ?repeats ~variant ~schedule ()
+    | reasons ->
+        p "%-10s skipped — this size is not schedulable with this blocking:\n" variant;
+        List.iter reasons ~f:(fun reason -> p "             %s\n" reason);
+        Float.nan
   in
   p "matmul m=%d n=%d k=%d, %d repeats, backend from config/OCANNL_BACKEND\n" m n k repeats;
   let backend = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc") in
@@ -399,33 +550,85 @@ let () =
     || String.is_substring backend ~substring:"hip"
   in
   let t_naive =
-    if naive_repeats > 0 then bench ~repeats:naive_repeats ~variant:"naive" ~schedule:None ()
+    if naive_repeats > 0 then attempt ~repeats:naive_repeats ~variant:"naive" ~schedule:None ()
     else Float.nan
   in
-  if has_shared then
-    let t_par = bench ~variant:"parallel" ~schedule:(Some parallel_schedule) () in
-    let t_smem = bench ~variant:"smem" ~schedule:(Some smem_schedule) () in
-    let t_reg = bench ~variant:"regtile" ~schedule:(Some regtile_schedule) () in
+  (if has_shared then
+    let mma_reqs =
+      [
+        ("bm", mma_bm, "m", m); ("bn", mma_bn, "n", n); ("w", mma_w, "n", n);
+        ("bk", mma_bk, "k", k);
+      ]
+    in
+    (* [parallel] asks for nothing beyond a nest to address: it only splits the zeroing and
+       accumulation loops, with no swap, staging, privatization or tensorization downstream of the
+       split, so [Sched.split]'s remainder guard is all the partial block needs. Measured at 17^3,
+       33^3, 100^3 and 100x17x33 on metal — the checksum matches the naive leg's at each, tail
+       included. That does NOT generalize to the others: with their reqs disabled, smem, regtile and
+       both mma_pd variants raise [Invalid_argument] at 100^3, as do all six C-backend blocked
+       variants, so those gates report a real requirement rather than an assumed one. *)
+    let t_par = bench_v ~variant:"parallel" ~reqs:[] ~schedule:(Some parallel_schedule) () in
+    let t_smem =
+      bench_v ~variant:"smem"
+        ~reqs:[ ("bm", smem_bm, "m", m); ("bn", smem_bn, "n", n); ("bk", smem_bk, "k", k) ]
+        ~schedule:(Some smem_schedule) ()
+    in
+    let t_reg =
+      bench_v ~variant:"regtile"
+        ~reqs:[ ("bm", reg_bm, "m", m); ("bn", reg_bn, "n", n); ("bk", reg_bk, "k", k) ]
+        ~schedule:(Some regtile_schedule) ()
+    in
     let t_mma1 =
-      bench ~variant:"mma_pd1" ~schedule:(Some (mma_staged_schedule ~pipeline_depth:1)) () in
+      bench_v ~variant:"mma_pd1" ~reqs:mma_reqs
+        ~schedule:(Some (mma_staged_schedule ~pipeline_depth:1)) () in
     let t_mma2 =
-      bench ~variant:"mma_pd2" ~schedule:(Some (mma_staged_schedule ~pipeline_depth:2)) () in
+      bench_v ~variant:"mma_pd2" ~reqs:mma_reqs
+        ~schedule:(Some (mma_staged_schedule ~pipeline_depth:2)) () in
     p "speedups vs naive: parallel %.1fx, smem %.1fx, regtile %.1fx, mma_pd1 %.1fx, mma_pd2 %.1fx\n"
       (t_naive /. t_par) (t_naive /. t_smem) (t_naive /. t_reg) (t_naive /. t_mma1)
       (t_naive /. t_mma2)
   else
-    let t_pack = bench ~variant:"cpupack" ~schedule:(Some cpupack_schedule) () in
-    let t_tmma = bench ~variant:"tensorize" ~schedule:(Some tensorize_schedule) () in
-    let t_pmma = bench ~variant:"packmma" ~schedule:(Some packmma_schedule) () in
-    let t_pmmap = bench ~variant:"packmma_par" ~schedule:(Some packmma_par_schedule) () in
+    (* The GEBP family blocks i and k only — j is left whole — so it asks nothing of n. The
+       [tensorize] variant has no blocking at all: the whole triple becomes one [Tile_mma], so any
+       non-degenerate extent still gets a scheduled measurement. *)
+    let gebp_reqs = [ ("bm", gebp_bm, "m", m); ("bk", gebp_bk, "k", k) ] in
+    let t_pack =
+      bench_v ~variant:"cpupack"
+        ~reqs:[ ("bm", cpu_bm, "m", m); ("bn", cpu_bn, "n", n); ("bk", cpu_bk, "k", k) ]
+        ~schedule:(Some cpupack_schedule) ()
+    in
+    let t_tmma = bench_v ~variant:"tensorize" ~reqs:[] ~schedule:(Some tensorize_schedule) () in
+    let t_pmma =
+      bench_v ~variant:"packmma" ~reqs:gebp_reqs ~schedule:(Some packmma_schedule) () in
+    let t_pmmap =
+      bench_v ~variant:"packmma_par" ~reqs:gebp_reqs ~schedule:(Some packmma_par_schedule) () in
     let t_hoist =
-      bench ~variant:"pm_hoist" ~schedule:(Some (packmma_outer_schedule ~pack_a:false ~pack_b:`Hoist)) () in
+      bench_v ~variant:"pm_hoist" ~reqs:gebp_reqs
+        ~schedule:(Some (packmma_outer_schedule ~pack_a:false ~pack_b:`Hoist)) () in
     let t_mixed =
-      bench ~variant:"pm_mixed" ~schedule:(Some (packmma_outer_schedule ~pack_a:true ~pack_b:`Hoist)) () in
+      bench_v ~variant:"pm_mixed" ~reqs:gebp_reqs
+        ~schedule:(Some (packmma_outer_schedule ~pack_a:true ~pack_b:`Hoist)) () in
     let t_bpk =
-      bench ~variant:"pm_bpk" ~schedule:(Some (packmma_outer_schedule ~pack_a:true ~pack_b:`Chunk)) () in
+      bench_v ~variant:"pm_bpk" ~reqs:gebp_reqs
+        ~schedule:(Some (packmma_outer_schedule ~pack_a:true ~pack_b:`Chunk)) () in
     p
       "speedups vs naive: cpupack %.1fx, tensorize %.1fx, packmma %.1fx, packmma_par %.1fx, \
        pm_hoist %.1fx, pm_mixed %.1fx, pm_bpk %.1fx\n"
       (t_naive /. t_pack) (t_naive /. t_tmma) (t_naive /. t_pmma) (t_naive /. t_pmmap)
-      (t_naive /. t_hoist) (t_naive /. t_mixed) (t_naive /. t_bpk)
+      (t_naive /. t_hoist) (t_naive /. t_mixed) (t_naive /. t_bpk));
+  (* The closing verdict the variant names cannot give: a [Tile_mma] that declined rendered the
+     lane-0 scalar loop, so the line above timed a scalar kernel under a tensorized label. Reported
+     rather than rejected — the census is honest for every decline rule at once, whereas a minimum
+     extent would re-introduce exactly the kind of arbitrary size constraint this change removes. *)
+  let declined =
+    List.count !census ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_scalar_fallback)
+  in
+  if declined > 0 then
+    p
+      "WARNING: %d of %d Tile_mma statements rendered the scalar fallback — the tensorized lines \
+       above are NOT tensorized timings. Re-run with --ocannl_schedule_log_declines=true for the \
+       per-rule reason (at these extents, most likely n below the compute vector width).\n"
+      declined (List.length !census);
+  if !failures > 0 then (
+    p "%d variant(s) failed at m=%d n=%d k=%d — see the FAILED lines above.\n" !failures m n k;
+    Stdlib.exit 1)

@@ -107,8 +107,8 @@ let () =
   printf "\n== live probe invariants ==\n";
   let classes = CT.core_classes () in
   let effective = CT.effective_cpu_count () in
-  printf "effective_cpu_count >= 1: %b\n" (effective >= 1);
-  printf "classes well-formed: %b\n"
+  Verdict.p "effective_cpu_count >= 1" (effective >= 1);
+  Verdict.p "classes well-formed"
     (List.is_sorted_strictly classes ~compare:(fun a b -> Int.compare b.CT.perf_rank a.CT.perf_rank)
     && List.for_all classes ~f:(fun c -> c.CT.count > 0)
     && List.for_all classes ~f:(fun c ->

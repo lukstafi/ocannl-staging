@@ -1,10 +1,10 @@
 === 1+2. On-device copy: fresh destination, then overwrite ===
-destination has the node before copy: false
+destination lacks the node before copy: true
 destination has the node after copy: true
 copied (expect 11 22 33): 11.0 22.0 33.0
 re-copied (expect 100 200 300): 100.0 200.0 300.0
 === 3. Source-absent node: host-init data via the round-trip fallback ===
-source has the node: false
+source lacks the node (host-init data only): true
 copied (expect 5 6): 5.0 6.0
 === 4. Cross-backend copy (cc -> multidev_cc) ===
 copied (expect 1.5 2.4): 1.5 2.4

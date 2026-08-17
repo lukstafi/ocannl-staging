@@ -60,16 +60,12 @@ let () =
       Stdlib.Sys.argv.(0);
     Stdlib.exit 1);
   let by_file = Config_key_scan.keys_by_file source_files in
-  let ok = ref true in
-  (* Both channels, and a nonzero exit below: a golden-diff test that prints its failures and
-     exits 0 can be `dune promote`d into passing, blessing the FAIL text as the expected output
-     (Codex P2, round 10 of PR #343). A nonzero exit means dune never writes the redirected stdout,
-     so the same lines go to stderr, where they survive to be read. *)
-  let fail msg =
-    ok := false;
-    printf "FAIL: %s\n" msg;
-    eprintf "FAIL: %s\n" msg
-  in
+  (* Failures go through [Verdict]: reported on both channels, and the run exits nonzero from its
+     teardown. A golden-diff test that prints its failures and exits 0 can be `dune promote`d into
+     passing, blessing the FAIL text as the expected output (Codex P2, round 10 of PR #343); since
+     a nonzero exit means dune never writes the redirected stdout, the same lines go to stderr,
+     where they survive to be read (gh-ocannl-601). *)
+  let fail = Verdict.fail in
   let listing keys = String.concat ~sep:", " (Set.to_list keys) in
   (* [codegen_stage_modules] selects by basename, so two scanned files sharing a name would make
      the selection ambiguous -- possible only since the globs replaced the enumerated list. *)
@@ -158,7 +154,6 @@ let () =
           printf "  %s%s\n" key
             (if Set.mem codegen_read key then " [read at codegen]" else "")));
   printf "\n";
-  if !ok then
+  if not (Verdict.any_failed ()) then
     printf "OK: %d config keys classified against %d cache-key components.\n"
       (Set.length classified) (List.length SC.key_components)
-  else Stdlib.exit 1

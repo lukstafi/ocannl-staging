@@ -39,7 +39,7 @@ let () =
   let a_ok =
     Array.for_alli a_vals ~f:(fun i v -> Float.equal (Bigarray.Genarray.get a [| i / 3; i % 3 |]) v)
   in
-  printf "a roundtrips (2x3): %b\n" a_ok;
+  Verdict.p "a roundtrips (2x3)" a_ok;
 
   (* Device roundtrip through an OCANNL tensor. *)
   let b = TDSL.wrap ~l:"b" ~b:[] ~o:[ 4 ] (Safetensors.to_ndarray st "b") () in

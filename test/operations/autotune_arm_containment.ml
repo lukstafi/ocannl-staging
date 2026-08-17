@@ -25,7 +25,7 @@ open Ocannl.Operation.DSL_modules
 module SC = Ir.Schedule_cache
 module SO = Ir.Schedule_outcome
 
-let p name b = Stdio.printf "%s: %b\n" name b
+let p = Verdict.p
 let approx a b = Float.(abs (a - b) < 1e-4)
 let n = 8
 

@@ -76,6 +76,6 @@ let () =
   let b2 = b1 *. l in
   match a2 + b2 with
   | exception Ocannl_tensor.Tensor.Session_error (msg, _) ->
-      printf "fragment cycle raises Session_error: %b\n"
+      Verdict.p "fragment cycle raises Session_error"
         (String.is_substring msg ~substring:"dependency cycle")
   | _ -> printf "fragment cycle raises Session_error: false\n"

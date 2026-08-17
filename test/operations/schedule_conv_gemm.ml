@@ -39,7 +39,7 @@ module Sched = Ir.Schedule
 module Asgns = Ir.Assignments
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
-let p name b = Stdio.printf "%s: %b\n" name b
+let p = Verdict.p
 
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
    that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a

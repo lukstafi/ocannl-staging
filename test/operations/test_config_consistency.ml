@@ -59,16 +59,12 @@ let () =
   let file_keys = extract_keys reference_file in
   let code_keys = Utils.known_config_keys in
   let source_keys = Config_key_scan.keys_in_files source_files in
-  let ok = ref true in
-  (* Both channels, and a nonzero exit below: a golden-diff test that prints its failures and
-     exits 0 can be `dune promote`d into passing, blessing the FAIL text as the expected output
-     (Codex P2, round 10 of PR #343). A nonzero exit means dune never writes the redirected stdout,
-     so the same lines go to stderr, where they survive to be read. *)
-  let fail msg =
-    ok := false;
-    printf "FAIL: %s\n" msg;
-    eprintf "FAIL: %s\n" msg
-  in
+  (* Failures go through [Verdict]: reported on both channels, and the run exits nonzero from its
+     teardown. A golden-diff test that prints its failures and exits 0 can be `dune promote`d into
+     passing, blessing the FAIL text as the expected output (Codex P2, round 10 of PR #343); since
+     a nonzero exit means dune never writes the redirected stdout, the same lines go to stderr,
+     where they survive to be read (gh-ocannl-601). *)
+  let fail = Verdict.fail in
   (* 1. Source call-site keys must all appear in the reference file *)
   let missing_in_ref = Set.diff source_keys file_keys in
   if not (Set.is_empty missing_in_ref) then
@@ -288,7 +284,7 @@ let () =
          "exempted functions that no longer forward a config key -- drop them from the exemption \
           list: %s"
          (String.concat ~sep:", " @@ Set.to_list stale));
-  if !ok then (
+  if not (Verdict.any_failed ()) then (
     printf
       "OK: %d call-site keys, all in reference file and registry; registry and reference agree on \
        %d keys.\n"
@@ -306,4 +302,3 @@ let () =
     (* Which directories the census came from, so that the globs' reach is reviewable rather than
        implicit -- see Config_key_scan.by_directory. *)
     printf "OK: scanned %s.\n" (Config_key_scan.by_directory source_files))
-  else Stdlib.exit 1

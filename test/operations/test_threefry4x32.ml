@@ -33,7 +33,7 @@ let%expect_test "threefry4x32 basic test" =
 
   (* Check all values are in [0, 1) range *)
   let all_in_range = Array.for_all result ~f:(fun x -> Float.(x >= 0.0 && x < 1.0)) in
-  Stdio.printf "All values in [0, 1) range: %b\n" all_in_range;
+  Verdict.p "All values in [0, 1) range" all_in_range;
 
   [%expect
     {|
@@ -64,7 +64,7 @@ let%expect_test "uint4x32_to_prec_uniform different precisions" =
     let result = Context.get_values !ctx uniform.value in
     Stdio.printf "%s precision - first value: %.4g, second value: %.4g\n" prec_name result.(0)
       result.(1);
-    Stdio.printf "All values in [0, 1) range: %b\n"
+    Verdict.p "All values in [0, 1) range"
       (Array.for_all result ~f:(fun x -> Float.(x >= 0.0 && x < 1.0)))
   in
 

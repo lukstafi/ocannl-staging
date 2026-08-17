@@ -101,12 +101,19 @@ let sound verdict oracle =
 
 let unsound_count = ref 0
 
+(* A query answering where the oracle says it may not is the one thing this file exists to catch,
+   so it fails the run rather than only landing in the printed tally -- which a `dune promote`
+   would otherwise bless (gh-ocannl-601). *)
+let unsound name =
+  Int.incr unsound_count;
+  Verdict.claim (name ^ ": query unsound against the oracle") false
+
 let check_conflict ~name ~query_ranges ~oracle_ranges ~dup_left ~dup_right ~pairs ~left ~right =
   let range s = find_range query_ranges s in
   let verdict = Aff.pair_conflict ~range ~dup_left ~dup_right ~pairs ~left ~right in
   let oracle = oracle_conflict ~oracle_ranges ~dup_left ~dup_right ~pairs ~left ~right in
   let ok = sound verdict oracle in
-  if not ok then Int.incr unsound_count;
+  if not ok then unsound name;
   Stdio.printf "%-34s query %-12s oracle %-12s%s\n" name (show_verdict verdict) (show_oracle oracle)
     (if ok then "" else "  UNSOUND")
 
@@ -137,7 +144,7 @@ let check_covers ~name ~query_ranges ~oracle_ranges ~dims idcs =
   let query = Aff.covers_box ~range ~dims idcs in
   let oracle = oracle_covers ~oracle_ranges ~dims idcs in
   let ok = (not query) || oracle in
-  if not ok then Int.incr unsound_count;
+  if not ok then unsound name;
   Stdio.printf "%-34s query %-12b oracle %-12b%s\n" name query oracle
     (if ok then "" else "  UNSOUND")
 
@@ -258,7 +265,7 @@ let () =
               ~left:[| lc |] ~right:[| rc |]
           in
           if not (sound verdict oracle) then (
-            Int.incr unsound_count;
+            unsound (ln ^ " vs " ^ rn);
             Stdio.printf "UNSOUND: %s vs %s: query %s oracle %s\n" ln rn (show_verdict verdict)
               (show_oracle oracle));
           Hashtbl.incr tally (show_verdict verdict ^ "/" ^ show_oracle oracle)));
@@ -304,7 +311,7 @@ let () =
       | `Exact n -> (List.for_all counts ~f:(fun c -> c = n), Printf.sprintf "Exact %d" n)
       | `At_least n -> (List.for_all counts ~f:(fun c -> c >= n), Printf.sprintf "At_least %d" n)
     in
-    if not ok then Int.incr unsound_count;
+    if not ok then unsound name;
     Stdio.printf "%-34s query %-12s oracle fibers %d..%d%s\n" name shown
       (Option.value ~default:0 (List.min_elt counts ~compare:Int.compare))
       (Option.value ~default:0 (List.max_elt counts ~compare:Int.compare))
@@ -421,7 +428,7 @@ let () =
       match oracle with `Covered -> "covered" | `Uncovered -> "uncovered" | `Opaque -> "opaque"
     in
     let ok = match (query, oracle) with `Covered, `Uncovered -> false | _ -> true in
-    if not ok then Int.incr unsound_count;
+    if not ok then unsound name;
     Stdio.printf "%-34s query %-12s oracle %-12s%s\n" name qs os (if ok then "" else "  UNSOUND")
   in
   let i1 = sym () and k1 = sym () and u1 = sym () and st = sym () in
@@ -619,7 +626,10 @@ let () =
   let cond_read = [ Aff.Stmt 3; Aff.Cond ] in
   let body_write = [ Aff.Stmt 3; Aff.Body; Aff.Write ] in
   let rhs_read = [ Aff.Stmt 3; Aff.Body; Aff.Rhs ] in
-  let p name b = Stdio.printf "%-64s %b\n" name b in
+  let p name b =
+    Stdio.printf "%-64s %b\n" name b;
+    Verdict.claim name b
+  in
   p "cond read is NOT statement-subordinate to the guarded body's write"
     (not (Aff.same_statement cond_read body_write));
   p "the body's own rhs read IS statement-subordinate to its write"

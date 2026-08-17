@@ -4,15 +4,15 @@ sgd has deps: true
 Correct order (grad then sgd): OK
 
 === Test 2: Disjoint routines ===
-x depends on y: false
-y depends on x: false
+x does not depend on y: true
+y does not depend on x: true
 can_run x: true
 can_run y: true
 Reverse order (y then x): OK
 
 === Test 3: can_run ===
 can_run grad (before execution): true
-can_run sgd (before grad): false
+cannot run sgd (before grad): true
 can_run sgd (after grad): true
 
 === Test 4: Wrong order raises ===
@@ -23,7 +23,7 @@ grad -> sgd -> grad: OK
 
 === Test 6: rollback of an execution marking ===
 can_run sgd (after grad): true
-can_run sgd (after rollback): false
+cannot run sgd (after rollback): true
 re-running grad restores it: true
 
 === Test 7: poisoned lineage ===

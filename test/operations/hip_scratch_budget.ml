@@ -27,7 +27,7 @@ module Tn = Ir.Tnode
 module Idx = Ir.Indexing
 module SO = Ir.Schedule_outcome
 
-let p name b = Stdio.printf "%s: %b\n%!" name b
+let p = Verdict.p
 
 (* Near the largest frame hipcc will accept: it refuses a stack frame over 262136 B, and 65024
    floats lands at ~260 KB, leaving ~2 KB of headroom for whatever else codegen puts on the frame

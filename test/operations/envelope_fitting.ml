@@ -70,7 +70,7 @@ let () =
     ]
   in
   List.iter bad ~f:(fun l ->
-      Stdio.printf "malformed %S parses: %b\n" l (Option.is_some (Cal.of_line l)));
+      Verdict.p (Printf.sprintf "malformed %S rejected" l) (Option.is_none (Cal.of_line l)));
   Stdio.printf "\nfits:\n";
   List.iter (Cal.fit parsed) ~f:(fun f ->
       Stdio.printf "%s" (Cal.report f);

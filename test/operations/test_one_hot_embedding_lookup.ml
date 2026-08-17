@@ -112,7 +112,7 @@ let build_embedding id_values =
   let%op embedded = c * one_hot in
   (ids, embedded)
 
-let p name b = Stdio.printf "%s: %b\n" name b
+let p = Verdict.p
 
 let () =
   (* --- Forward equivalence + observability (in-range indices) --- Run first so the forward comp is

@@ -68,8 +68,8 @@ let () =
   (* 1. Numerical stability and correctness of the loss value. *)
   let fused_loss = (ctx, loss).@[0] in
   let rel_err = Float.(abs (fused_loss - expected_loss) / abs expected_loss) in
-  printf "fused loss is finite: %b\n" (Float.is_finite fused_loss);
-  printf "fused loss matches log-sum-exp oracle (rel err < 1e-4): %b\n" Float.(rel_err < 1e-4);
+  Verdict.p "fused loss is finite" (Float.is_finite fused_loss);
+  Verdict.p "fused loss matches log-sum-exp oracle (rel err < 1e-4)" Float.(rel_err < 1e-4);
 
   (* 2. dlogits = softmax(logits) - targets, sampled on the extreme rows and a few others. *)
   let max_abs_err = ref 0. in
@@ -79,7 +79,7 @@ let () =
         let actual = (ctx, logits).@%{[| b; v |]} in
         max_abs_err := Float.max !max_abs_err (Float.abs (actual -. expected))
       done);
-  printf "dlogits = softmax - targets (max abs err < 1e-4): %b\n" Float.(!max_abs_err < 1e-4);
+  Verdict.p "dlogits = softmax - targets (max abs err < 1e-4)" Float.(!max_abs_err < 1e-4);
 
   (* 3. Virtualness census over the whole forward+backprop routine: every [batch, vocab]-sized node
      except the logits value, the logits gradient, and the targets must stay Virtual. *)
@@ -102,10 +102,10 @@ let () =
     List.filter big_non_virtual ~f:(fun tn ->
         not (List.mem allowed tn ~equal:(fun a b -> Tn.equal a b)))
   in
-  printf "probabilities and other [batch, vocab] intermediates stay virtual: %b\n"
+  Verdict.p "probabilities and other [batch, vocab] intermediates stay virtual"
     (List.is_empty unexpected);
   List.iter unexpected ~f:(fun tn -> printf "  unexpectedly materialized: %s\n" (Tn.debug_name tn));
-  printf "logits value and gradient are materialized: %b\n"
+  Verdict.p "logits value and gradient are materialized"
     (List.for_all allowed ~f:(fun tn -> not (Tn.Placements.known_virtual plc tn)));
 
   (* 4. Kernel-fission segment census (structural, using the metal analysis on the captured lowered
@@ -134,7 +134,7 @@ let () =
     /. Float.of_int kept
   in
   let rel_err2 = Float.(abs (masked_loss - expected_masked) / abs expected_masked) in
-  printf "masked+normalized loss matches oracle (rel err < 1e-4): %b\n" Float.(rel_err2 < 1e-4);
+  Verdict.p "masked+normalized loss matches oracle (rel err < 1e-4)" Float.(rel_err2 < 1e-4);
 
   (* 6. Class axes in the input row (the attention-style spec convention, e.g. "... | t -> ..."):
      the final reduction must still produce the scalar loss. *)
@@ -158,7 +158,7 @@ let () =
   let input_axis_loss = (ctx4, loss_in).@[0] in
   let expected_in = List.init batch_in ~f:row_loss_in |> List.fold ~init:0. ~f:( +. ) in
   let rel_err3 = Float.(abs (input_axis_loss - expected_in) / abs expected_in) in
-  printf "input-axis spec (attention convention) matches oracle (rel err < 1e-4): %b\n"
+  Verdict.p "input-axis spec (attention convention) matches oracle (rel err < 1e-4)"
     Float.(rel_err3 < 1e-4);
 
   (* Contrast: the naive log(softmax) formulation is non-finite on the same input. *)
@@ -172,4 +172,4 @@ let () =
   in
   let ctx3 = Train.forward_once (Context.auto ()) naive_loss in
   let naive = (ctx3, naive_loss).@[0] in
-  printf "naive log(softmax) loss is finite: %b\n" (Float.is_finite naive)
+  Verdict.p "naive log(softmax) loss is non-finite" (not (Float.is_finite naive))

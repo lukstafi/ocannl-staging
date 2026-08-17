@@ -100,16 +100,16 @@ let () =
     Stdio.printf "\n"
   done;
   let row_sum s = List.sum (module Float) (List.init n ~f:(fun t -> p.((s * n) + t))) ~f:Fn.id in
-  Stdio.printf "rows sum to 1 (within half's resolution): %b\n"
+  Verdict.p "rows sum to 1 (within half's resolution)"
     (List.for_all (List.init n ~f:Fn.id) ~f:(fun s -> Float.(abs (row_sum s - 1.) < 0.01)));
-  Stdio.printf "masked-out entries are exactly zero: %b\n"
+  Verdict.p "masked-out entries are exactly zero"
     (List.for_all
        (List.init n ~f:Fn.id)
        ~f:(fun s ->
          List.for_all
            (List.init n ~f:Fn.id)
            ~f:(fun t -> s >= t || Float.equal p.((s * n) + t) 0.)));
-  Stdio.printf "all entries finite: %b\n" (Array.for_all p ~f:Float.is_finite);
+  Verdict.p "all entries finite" (Array.for_all p ~f:Float.is_finite);
   (* Tolerance against the same softmax evaluated in double. Half's resolution below 1 is ~1e-3, so
      5e-4 admits the ulp of backend [exp] disagreement and nothing looser -- a saturated sentinel or
      a lost max-subtraction moves these by far more. *)
@@ -121,6 +121,6 @@ let () =
         List.foldi live ~init:acc ~f:(fun t acc v ->
             Float.max acc (Float.abs (p.((s * n) + t) -. (Float.exp (v -. mx) /. denom)))))
   in
-  Stdio.printf "matches a double-precision softmax within 5e-4: %b\n" Float.(worst < 5e-4);
+  Verdict.p "matches a double-precision softmax within 5e-4" Float.(worst < 5e-4);
   Stdio.printf "probs prec: %s\n"
     (Ir.Ops.prec_string (Lazy.force probs.Tensor.value.Tn.storage_prec))

@@ -45,6 +45,7 @@ let hand_built ~stmts ~tns_on_device ~tns_local =
     pipelined = Map.empty (module Tn);
     zero_fringe = Set.empty (module Tn);
     flip_candidates = [];
+    spliced_rbw = Base.Set.empty (module Tn);
   }
 
 let show = function
@@ -241,11 +242,14 @@ let () =
       in
       if applies then Int.incr viable;
       let pruned = match verdict with Sched.Op_illegal _ -> true | _ -> false in
+      let sound = Bool.( = ) pruned (not applies) in
       Stdio.printf "menu tensorize roles (%s): %-8s apply %s  pruning %s\n" label (show verdict)
         (if applies then "succeeds" else "raises")
-        (if Bool.( = ) pruned (not applies) then "sound" else "UNSOUND"));
+        (if sound then "sound" else "UNSOUND");
+      Verdict.claim ("menu tensorize roles (" ^ label ^ "): pruning sound") sound);
   Stdio.printf "viable tensorize permutations survive the gate: %s\n"
     (if !viable > 0 then "yes" else "NO");
+  Verdict.claim "viable tensorize permutations survive the gate" (!viable > 0);
 
   (* Sequential checking: verdicts against progressively applied code, stopping at illegal. *)
   let sched =

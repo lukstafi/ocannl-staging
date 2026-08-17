@@ -20,7 +20,7 @@ module LL = Ir.Low_level
 module Idx = Ir.Indexing
 module Sched = Ir.Schedule
 
-let p name b = Stdio.printf "%s: %b\n" name b
+let p = Verdict.p
 
 let fresh_tn =
   let c = ref 960_000_000 in
@@ -56,6 +56,7 @@ let hand_built ~stmts ~tns_on_device ~tns_local =
     pipelined = Map.empty (module Tn);
     zero_fringe = Set.empty (module Tn);
     flip_candidates = [];
+    spliced_rbw = Base.Set.empty (module Tn);
   }
 
 let hardware_syms (sched : Sched.schedule) : Idx.symbol list =
