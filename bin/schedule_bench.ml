@@ -29,7 +29,11 @@
    put nothing downstream of the split that a remainder guard would break — so an arbitrary
    (non-degenerate) extent still gets a scheduled measurement on either branch, and the naive kernel
    runs at any size whatsoever. Each line carries a position-weighted checksum of the whole output,
-   which is what makes a remainder-region error visible.
+   which is what makes a remainder-region error visible, and every variant carrying a [Tile_mma]
+   carries its [C_syntax.mma_census] rendering: a [Tile_mma] whose preconditions fail (a column
+   extent below the compute vector width is one way in, and arbitrary extents reach it) renders the
+   scalar fallback while still reporting under its schedule's name, so read the bracket, not the
+   variant name, when deciding what a timing measured.
    Run with OCANNL_BACKEND=metal (or cuda); the C backends reject the shared schedules. Timing
    includes kernel executions and one device-to-host transfer per variant (runs queue on the
    stream; get_values synchronizes). *)
@@ -442,7 +446,22 @@ let () =
       match schedule with None -> opt | Some s -> Sched.apply (s ~mc:mc.Tensor.value opt) opt
     in
     let ctx = Context.auto () in
-    let ctx, routine = Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty in
+    (* What codegen actually did with each [Tile_mma] (gh-ocannl-479). A [Tile_mma] whose
+       preconditions fail renders the scalar fallback and still reports under its schedule's name —
+       "timed is not tensorized", docs/agent-notes.md — so a variant name is not evidence of
+       tensorization and every variant carrying one has to be read from the census instead. The
+       decline rules include a column extent below the compute vector width (which arbitrary
+       extents now reach), a narrow [vector_bytes], mixed operand precisions, an accumulation not in
+       FMA form, and [debug_log_from_routines]. Collecting the census only appends to a list, so it
+       perturbs neither what is compiled nor what is timed. *)
+    Ir.C_syntax.mma_census := [];
+    Ir.C_syntax.mma_census_enabled := true;
+    let ctx, routine =
+      Exn.protect
+        ~f:(fun () -> Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty)
+        ~finally:(fun () -> Ir.C_syntax.mma_census_enabled := false)
+    in
+    let renderings = List.rev_map !Ir.C_syntax.mma_census ~f:snd in
     (* Warmup (includes any lazy initialization and host transfers). *)
     let ctx = Context.run ctx routine in
     let _ = Context.get_values ctx mc.Tensor.value in
@@ -469,9 +488,21 @@ let () =
       Array.foldi values ~init:0.0 ~f:(fun i acc v -> acc +. (v *. Float.of_int (1 + (i % 251))))
     in
     let spot = Int.min (n + 1) (Array.length values - 1) in
-    p "%-10s %8.3f ms  %8.2f GFLOP/s  (spot [%d] %.1f, chk %.10g)\n" variant (secs *. 1e3)
-      (flops /. secs /. 1e9) spot values.(spot) checksum;
-    secs
+    p "%-10s %8.3f ms  %8.2f GFLOP/s  (spot [%d] %.1f, chk %.10g)%s\n" variant (secs *. 1e3)
+      (flops /. secs /. 1e9) spot values.(spot) checksum
+      (match renderings with
+      | [] -> ""
+      | rs ->
+          let counted =
+            List.map
+              (List.dedup_and_sort rs ~compare:Ir.C_syntax.compare_mma_rendering)
+              ~f:(fun r ->
+                Printf.sprintf "%s x%d"
+                  (Sexp.to_string (Ir.C_syntax.sexp_of_mma_rendering r))
+                  (List.count rs ~f:(Ir.C_syntax.equal_mma_rendering r)))
+          in
+          "  [" ^ String.concat ~sep:", " counted ^ "]");
+    (secs, renderings)
   in
   (* A static gate cannot enumerate every way a schedule can be rejected at a given size —
      [validate_parallel]'s coverage rules, per-kernel hardware limits and backend declines all
@@ -481,8 +512,14 @@ let () =
      the variant, not to the run: name it, keep measuring the rest, and exit nonzero at the end so a
      scripted run still sees that something failed. *)
   let failures = ref 0 in
+  (* Every rendering any variant produced, for the closing verdict on whether the tensorized labels
+     measured tensorized kernels. *)
+  let census = ref [] in
   let attempt ?repeats ~variant ~schedule () =
-    try bench ?repeats ~variant ~schedule ()
+    try
+      let secs, renderings = bench ?repeats ~variant ~schedule () in
+      census := renderings @ !census;
+      secs
     with e ->
       Int.incr failures;
       p "%-10s FAILED at this size: %s\n" variant
@@ -579,6 +616,19 @@ let () =
        pm_hoist %.1fx, pm_mixed %.1fx, pm_bpk %.1fx\n"
       (t_naive /. t_pack) (t_naive /. t_tmma) (t_naive /. t_pmma) (t_naive /. t_pmmap)
       (t_naive /. t_hoist) (t_naive /. t_mixed) (t_naive /. t_bpk));
+  (* The closing verdict the variant names cannot give: a [Tile_mma] that declined rendered the
+     lane-0 scalar loop, so the line above timed a scalar kernel under a tensorized label. Reported
+     rather than rejected — the census is honest for every decline rule at once, whereas a minimum
+     extent would re-introduce exactly the kind of arbitrary size constraint this change removes. *)
+  let declined =
+    List.count !census ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_scalar_fallback)
+  in
+  if declined > 0 then
+    p
+      "WARNING: %d of %d Tile_mma statements rendered the scalar fallback — the tensorized lines \
+       above are NOT tensorized timings. Re-run with --ocannl_schedule_log_declines=true for the \
+       per-rule reason (at these extents, most likely n below the compute vector width).\n"
+      declined (List.length !census);
   if !failures > 0 then (
     p "%d variant(s) failed at m=%d n=%d k=%d — see the FAILED lines above.\n" !failures m n k;
     Stdlib.exit 1)
