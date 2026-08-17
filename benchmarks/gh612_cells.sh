@@ -133,6 +133,10 @@ cmd_snap() { (
   [ -d "$out/cache" ] && [ -n "$(ls -A "$out/cache" 2>/dev/null)" ] || {
     echo "gh612_cells: $label r$rep has no populated autotune cache -- run \`search\` first;" >&2
     echo "  refusing to replay, because that would silently become a fresh cold search" >&2; exit 2; }
+  # Retract the published selector BEFORE replaying: if this snapshot is rejected, a stale
+  # armA.path would let `diff`/`finger`/`profile` keep consuming the previous accepted source and
+  # present it as the new cell's structural evidence. Same rule as replay2.out -- publish on success.
+  rm -f "$out/armA.path"
   local snap="$out/armsnap"; rm -rf "$snap"; mkdir -p "$snap"
   cd "$tree/benchmarks" || exit 1
   rm -rf build_files
@@ -221,8 +225,10 @@ cmd_profile() { (
   local i
   for i in $(seq "$n"); do
     if ! $PIN "$out/harness" > "$out/kernels-$i.csv" 2> "$out/kernels-$i.err"; then
-      echo "gh612_cells: harness run $i failed; refusing the partial CSV" >&2
-      rm -f "$out/kernels-$i.csv"; return 1
+      # Clear the ENTIRE set, not just this run: `finger` accepts however many CSVs it discovers, so
+      # leaving runs 1..i-1 behind turns a failed 3-run profile into plausible 1- or 2-run medians.
+      echo "gh612_cells: harness run $i failed; discarding the whole profile for this cell" >&2
+      rm -f "$out"/kernels-*.csv "$out"/kernels-*.err "$out"/bucket-*.txt; return 1
     fi
     # stderr's last line is the sum-vs-step validation the report quotes. Pair it against THIS
     # cell's own step p50 (search.out / replay.out): another rep is a different crowned artifact,
@@ -230,8 +236,9 @@ cmd_profile() { (
     tail -1 "$out/kernels-$i.err"
     if ! python3 gpt2_bucket.py --source "$src" --stats "$out/kernels-$i.csv" --steps 1 \
             > "$out/bucket-$i.txt" 2>&1; then
-      echo "gh612_cells: gpt2_bucket.py failed on run $i (traceback in bucket-$i.txt)" >&2
-      sed -n '$p' "$out/bucket-$i.txt" >&2; rm -f "$out/bucket-$i.txt"; return 1
+      echo "gh612_cells: gpt2_bucket.py failed on run $i; discarding the whole profile" >&2
+      sed -n '$p' "$out/bucket-$i.txt" >&2
+      rm -f "$out"/kernels-*.csv "$out"/kernels-*.err "$out"/bucket-*.txt; return 1
     fi
   done
   # `profile` always measures the saved ARM A source, but the step p50 belongs to whichever arm the
@@ -586,7 +593,7 @@ cmd_replay() { (
 # noise that different schedules produce, far below anything a real correctness regression shows.
 # EXPECT_RUNS, if set, additionally pins how many cells the gate must have covered.
 cmd_parity() { (
-  python3 - "$OUT_ROOT" "${PARITY_MAX_ULP:-64}" "${EXPECT_RUNS:-0}" <<'EOF'
+  python3 - "$OUT_ROOT" "${PARITY_MAX_ULP:-64}" "${EXPECT_RUNS:-0}" "${EXPECT_CELLS:-}" <<'EOF'
 import json,glob,os,sys,math,collections
 root=sys.argv[1]
 seqs=collections.defaultdict(list)
@@ -615,6 +622,14 @@ print(f"WORST: {worst:.0f} f32 ulp (threshold {maxulp:.0f}). NOT bit-identity --
 bad=[]
 if worst > maxulp: bad.append(f"loss divergence {worst:.0f} ulp exceeds PARITY_MAX_ULP={maxulp:.0f}")
 if expect and tot != expect: bad.append(f"covered {tot} runs, expected EXPECT_RUNS={expect}")
+# A count is not a set: with a reusable OUT_ROOT a stale or unrelated cell can stand in for a missing
+# required one and still total EXPECT_RUNS. EXPECT_CELLS pins the exact label/rep set.
+want=set(filter(None, (sys.argv[4] if len(sys.argv)>4 else "").split()))
+if want:
+    have={c for ks in seqs.values() for c in ks}
+    missing=sorted(want-have); extra=sorted(have-want)
+    if missing: bad.append(f"missing required cells: {' '.join(missing)}")
+    if extra: bad.append(f"unexpected cells present (stale OUT_ROOT?): {' '.join(extra)}")
 lens={len(L) for L in seqs}
 if len(lens) != 1: bad.append(f"loss vectors have differing lengths {sorted(lens)}")
 if tot < 2: bad.append("fewer than 2 runs: nothing to compare")

@@ -32,7 +32,7 @@ One prediction needs a caveat and one needs a correction. The caveat: at its shi
 8, gh-573's payoff on the *end-to-end* step is inside this box's search-noise floor, for an
 identifiable reason given in Part 3 — without the guard the search ships materialize-all instead,
 which is the crude form of the same transform. The correction: that is a fact about the default, not
-the mechanism. **Cap 4 beats the default 8 by 5.5% with non-overlapping ranges, measured in one
+the mechanism. **Cap 4 beats the default 8 by 5.7% with non-overlapping ranges, measured in one
 order-balanced block (and 1.18x against cap −1 when the two balanced blocks are chained); on the
 `gpt2_mini` graph placement is identical to cap −1 only at cap 32 and above, while cap 16 already
 shows one node's worth of placement difference (at the final layer norm) behind an unchanged kernel
@@ -356,7 +356,7 @@ the fission is finer. The interaction is not hypothetical; it is 2.6 ms in both 
 
 A config flip on one tree. Code-borne, so each value is a fresh compile. The rows below are this
 arm's **three order-balanced reps**; Part 4 pools all six reps of cap 8 and so quotes slightly
-different medians (60.93 untuned, 18.72 step) from the same runs plus three more.
+different medians (60.93 untuned, 18.71 step) from the same runs plus three more.
 
 | | cap −1 (before) | cap 8 (after) | |
 |---|---:|---:|---|
@@ -490,8 +490,8 @@ and was re-run in one order-balanced block.
 | cap | arm A kernels | untuned-default (median, range) | tuned step p50 (median, range) | n | ships |
 |---:|---:|---|---|---:|---|
 | **2** | **144** | 60.22 (60.17–60.32) | 17.44 (17.41–19.33) | 3 | A A B |
-| **4** | **137** | 60.53 (60.36–60.70) | **17.58 (17.47–17.76)** | 6 | A ×6 |
-| 8 (default) | **136** | 60.93 (60.86–61.31) | 18.72 (18.47–19.20) | 6 | A ×6 |
+| **4** | **137** | 60.53 (60.36–60.70) | **17.56 (17.43–17.72)** | 6 | A ×6 |
+| 8 (default) | **136** | 60.93 (60.86–61.31) | 18.71 (18.53–19.05) | 6 | A ×6 |
 | 16 | **135** | 65.80 | 19.37 | 1 | B |
 | 32 | **135** | 65.62 | 21.60 | 1 | B |
 | −1 (off) | **135** | 65.59 (65.48–65.63) | 20.94 (19.01–22.56) | 3 | B B B |
@@ -546,7 +546,7 @@ The count is still monotone in the cap (144 / 137 / 136 / 135 / 135 / 135) and s
 to look at, but the rule has to be stated correctly: **a cap whose kernel count matches cap −1's may
 still have fired — compare the kernel multisets before concluding silence.**
 
-**Cap 4 beats cap 8 by 5.5%, measured in one balanced block.** The first revision reported 7.1% from
+**Cap 4 beats cap 8 by 5.7%, measured in one balanced block.** The first revision reported 7.1% from
 reps that had cap 8 running roughly two hours earlier in the session than cap 4 — arm confounded
 with session position, exactly the trap gh-481's order rule exists for, and it inflated the effect by
 about 1.4 pp. Re-run as three pairs inside one block with the order alternated (cap8→cap4,
@@ -554,19 +554,25 @@ cap4→cap8, cap8→cap4):
 
 | pass-2 step p50 | rep 4 | rep 5 | rep 6 | median | range |
 |---|---:|---:|---:|---:|---|
-| cap 8 | 18.47 | 19.20 | 18.61 | 18.61 | 18.47–19.20 |
-| **cap 4** | 17.76 | 17.58 | 17.47 | **17.58** | **17.47–17.76** |
+| cap 8 | 18.58 | 19.05 | 18.59 | 18.59 | 18.58–19.05 |
+| **cap 4** | 17.66 | 17.54 | 17.43 | **17.54** | **17.43–17.66** |
 
-**Non-overlapping** (cap 4's slowest 17.76 against cap 8's fastest 18.47), all six reps shipping arm
+**Non-overlapping** (cap 4's slowest 17.66 against cap 8's fastest 18.58), all six reps shipping arm
 A so no arm lottery is in play, and the deterministic untuned column agrees in the same block (cap 8
 60.91–60.93 against cap 4 60.36–60.70). Pooled over all six reps per cap the ranges stay disjoint at
-−6.1%. The claim is **−5.5%**, from the balanced block.
+−6.2%. The claim is **−5.7%**, from the balanced block.
 
-One caveat on that point estimate, since it is the headline: an independent pass-2 replay of these
-same six cached artifacts gave −6.5%, so replaying the *same* schedule varies by about 1% run to run
-and the effect is 5.5–6.5% rather than a sharp 5.5%. Both replay sets are non-overlapping, so the
-*conclusion* — cap 4 beats cap 8 outside the noise floor — does not depend on which set is quoted;
-the smaller, verified-quiet figure is carried.
+**The replays are order-balanced too, and that is a separate requirement from balancing the
+searches.** Once every quoted timing comes from pass 2, the *replay* order is what can confound the
+comparison, so these six run 8→4, 4→8, 8→4 exactly as their searches did. An earlier revision
+balanced only the searches and replayed all of cap 8 before all of cap 4.
+
+One caveat on the point estimate, since it is the headline: three pass-2 replay sets of these *same
+six cached artifacts* gave −6.5%, −5.5% (unbalanced replay order) and −5.7% (balanced, quiet box), so
+replaying an identical schedule varies about 1 pp run to run. All three are non-overlapping, so the
+*conclusion* — cap 4 beats cap 8 outside the noise floor — does not depend on which set is quoted.
+The balanced, verified-quiet set is the one carried, because it is the only one that matches the
+protocol the claim asserts.
 
 Cap 2 has the best median (17.44) but its range runs to 19.33 because one rep shipped arm B, so it
 overlaps cap 8 and is **not** established as better than 4. Its 144-kernel arm A is also the most
@@ -575,12 +581,12 @@ recomputation it no longer had to avoid.
 
 **What the balanced evidence does and does not chain.** Two comparisons were run as balanced blocks:
 cap 8 vs cap −1 (overlapping, **1.112x** = 20.94/18.83 — Part 3's unclaimed row) and cap 4 vs cap 8
-(disjoint, **1.059x** = 18.61/17.58, i.e. the 5.5% time reduction; the two are different numbers and
+(disjoint, **1.060x** = 18.59/17.54, i.e. the 5.7% time reduction; the two are different numbers and
 only the ratio is a speedup).
-"Cap 4 against cap −1" is a **chain of those two blocks, 1.112 × 1.059 = 1.18x**, not a balanced
+"Cap 4 against cap −1" is a **chain of those two blocks, 1.112 × 1.060 = 1.18x**, not a balanced
 measurement of its own. An earlier revision put it at 1.19x, which is the ratio of the *unpaired*
-endpoint medians (20.94 / 17.58) and silently includes cap 8's shift between the two blocks (18.83 ms
-in the cap −1 block against 18.61 ms in the cap 4 block) — so 1.18x is the chained value and 1.19x is
+endpoint medians (20.94 / 17.56) and silently includes cap 8's shift between the two blocks (18.83 ms
+in the cap −1 block against 18.59 ms in the cap 4 block) — so 1.18x is the chained value and 1.19x is
 the unpaired endpoint ratio, which is not the same statement. What supports the direction
 independently is the deterministic untuned instrument, where cap 4's 60.36–60.70 and cap −1's
 65.48–65.63 are 8.4% apart and nowhere near touching.
@@ -594,7 +600,7 @@ constant depth, so "a 4-layer model" is already an over-generalization of a sing
 
 What that leaves is narrow and still useful: on this graph placement is identical to cap −1 only from
 cap 32 up, and the placement difference grows one node at 16, four at 8, nine at 4 and twenty-three at
-2 — and cap 4 is 5.5% faster than the shipped default. (Nodes' worth of difference, not firing counts:
+2 — and cap 4 is 5.7% faster than the shipped default. (Nodes' worth of difference, not firing counts:
 see the proxy caveat above.) Changing the global
 default on that would be the gh-479 mistake in a new costume — the measurement that would justify
 moving it is a cap sweep across several fixtures of differing depth *and* differing residual
@@ -727,7 +733,7 @@ gather is excluded — see Part 2.)
 # session drift is indistinguishable from the cap's effect.
 # The claim-bearing cap-4-vs-cap-8 pair. IMPORTANT: the reported cap-8 row's first three values are
 # Part 3's `master-cap8` cells (19.01 / 18.83 / 18.53) -- NOT a sweep-cap8 r1-r3 -- pooled with the
-# balanced block's r4-r6 (18.47 / 19.20 / 18.61) for a median of 18.72. So generate cap 4 alone for
+# balanced block's r4-r6 (18.58 / 19.05 / 18.59) for a median of 18.71. So generate cap 4 alone for
 # r1-r3, then the balanced pair for r4-r6; creating sweep-cap8/r1-r3 here would give nine cap-8
 # results and a different dataset from the one reported.
 $D sweep $M 3 4                            # cap 4, r1-r3
@@ -767,8 +773,17 @@ for r in 1 2 3; do $D replay $M master-capoff $r --ocannl_virtualize_max_inline_
 # made r4-r6 as `sweep-cap8`. Replaying `master-cap8/r4-r6` would refuse (no such cache) while the
 # claim-bearing artifacts went unreplayed.
 for r in 1 2 3; do $D replay $M master-cap8 $r; done
-for r in 4 5 6; do $D replay $M sweep-cap8 $r; done
-for r in 1 2 3 4 5 6; do $D replay $M sweep-cap4 $r --ocannl_virtualize_max_inline_fanin=4; done
+for r in 1 2 3; do $D replay $M sweep-cap4 $r --ocannl_virtualize_max_inline_fanin=4; done
+# the claim-bearing r4-r6 replays must be ORDER-BALANCED too: balancing the searches does not
+# balance these, and once every quoted timing is a pass-2 number the replay order is what can
+# confound the cap comparison. Same 8->4, 4->8, 8->4 alternation the searches used.
+for r in 4 5 6; do
+  if [ $(( (r-4) % 2 )) -eq 0 ]; then order="8 4"; else order="4 8"; fi
+  for cap in $order; do
+    [ "$cap" = 4 ] && f=--ocannl_virtualize_max_inline_fanin=4 || f=
+    $D replay $M sweep-cap$cap $r $f
+  done
+done
 for r in 1 2 3; do $D replay $M sweep-cap2 $r --ocannl_virtualize_max_inline_fanin=2; done
 for c in 16 32; do $D replay $M sweep-cap$c 1 --ocannl_virtualize_max_inline_fanin=$c; done
 ```
@@ -778,7 +793,13 @@ for c in 16 32; do $D replay $M sweep-cap$c 1 --ocannl_virtualize_max_inline_fan
 # five-sequences / 14-ulp result in Provenance, and it FAILS (exit 1) if the divergence exceeds
 # PARITY_MAX_ULP (default 64) or the run count does not match EXPECT_RUNS. Computed, not eyeballed:
 # the claim it replaced ("bit-identical") came from an ad-hoc script that rounded before comparing.
-EXPECT_RUNS=26 $D parity
+# EXPECT_CELLS pins the exact label/rep set, not just the count: with a reusable OUT_ROOT a stale
+# cell can stand in for a missing required one and still total 26.
+EXPECT_RUNS=26 EXPECT_CELLS="$(for c in base574 feat574 master-capoff; do for r in 1 2 3; do
+    echo -n "$c/r$r "; done; done
+  for r in 1 2 3 4 5 6; do echo -n "master-cap8/r$r sweep-cap4/r$r "; done
+  for r in 1 2 3; do echo -n "sweep-cap2/r$r "; done
+  echo -n "sweep-cap16/r1 sweep-cap32/r1")" $D parity
 ```
 
 ```bash
