@@ -313,8 +313,9 @@ def load(name, out):
                               for q in ps.split(",") if q.strip()))
           for _,i,ps in SIG.findall(src)}
     t=collections.defaultdict(list)
+    # Timings are OPTIONAL here: "did the guard fire" is a question about the emitted kernel set, so
+    # a structural diff must work off `snap` alone, without `profile`.
     csvs=sorted(glob.glob(os.path.join(out,"kernels-*.csv")))
-    if not csvs: sys.exit(f"{name}: no kernels-*.csv -- run `profile` first")
     for f in csvs:
         for r in csv.DictReader(open(f)):
             t[int(r["Name"].rsplit("__seg",1)[1])].append(float(r["TotalDurationNs"])/1e6)
@@ -323,8 +324,10 @@ def load(name, out):
     for i,sg in sigs.items(): per[sg]+=ms.get(i,0.0); n[sg]+=1
     return name, sigs, per, n, len(csvs)
 (na,sa,pa,ca,ra)=load(sys.argv[1],sys.argv[2]); (nb,sb,pb,cb,rb)=load(sys.argv[3],sys.argv[4])
-print(f"{na}: {sum(pa.values()):.3f} ms / {len(sa)} kernels ({ra} harness runs)")
-print(f"{nb}: {sum(pb.values()):.3f} ms / {len(sb)} kernels ({rb} harness runs)")
+def hdr(n,per,sg,r):
+    t=f"{sum(per.values()):.3f} ms" if r else "(no timings: run `profile` for ms)"
+    print(f"{n}: {t} / {len(sg)} kernels ({r} harness runs)")
+hdr(na,pa,sa,ra); hdr(nb,pb,sb,rb)
 onlya=[k for k in pa if k not in pb]; onlyb=[k for k in pb if k not in pa]
 sh_a=sum(pa[k] for k in pa if k in pb); sh_b=sum(pb[k] for k in pb if k in pa)
 print(f"\nsignatures only in {na}: {sum(ca[k] for k in onlya)} kernels, {sum(pa[k] for k in onlya):.3f} ms")
@@ -340,9 +343,15 @@ if remult:
           f"({sum(x for _,x,_ in remult)} occurrences in {na} vs {sum(y for _,_,y in remult)} in {nb})")
     for k,x,y in sorted(remult, key=lambda t:-abs(t[1]-t[2]))[:8]:
         print(f"  x{x} -> x{y}  {', '.join(k)[:110]}")
+elif onlya or onlyb:
+    # Do NOT announce multiset agreement here: exclusive signatures on either side already mean the
+    # kernel sets differ, and saying "the multisets agree" would contradict the counts just printed.
+    print("\nshared signatures with differing multiplicity: 0 (the DIFFERENCE is entirely the "
+          "exclusive signatures above)")
 else:
-    print("\nshared signatures with differing multiplicity: 0 (the kernel MULTISETS agree, not just "
-          "the sets)")
+    print("\nIDENTICAL kernel sets: no exclusive signatures on either side and no differing "
+          "multiplicity\n-- the two cells emit the same kernel multiset. This is the negative-control "
+          "reading.")
 print(f"\nshared signatures: {sh_a:.3f} -> {sh_b:.3f} ms ({sh_b-sh_a:+.3f}); "
       f"NET {sum(pb.values())-sum(pa.values()):+.3f} ms")
 print("The negative-control reading requires BOTH `only in` sides at 0 AND zero differing "

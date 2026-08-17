@@ -33,9 +33,10 @@ One prediction needs a caveat and one needs a correction. The caveat: at its shi
 identifiable reason given in Part 3 — without the guard the search ships materialize-all instead,
 which is the crude form of the same transform. The correction: that is a fact about the default, not
 the mechanism. **Cap 4 beats the default 8 by 5.7% with non-overlapping ranges, measured in one
-order-balanced block, and on the `gpt2_mini` graph any cap ≥ 16 emits the identical 135-kernel arm A
-as cap −1 — i.e. never fires at all** — so 8 is not well-centred for this fixture (Part 4, which
-scopes that narrowly).
+order-balanced block; on the `gpt2_mini` graph the guard is fully silent only at cap 32 and above,
+and at cap 16 it fires exactly once (on the final layer norm) behind an unchanged kernel count** — so
+8 is not well-centred for this fixture (Part 4, which scopes that narrowly and records the
+kernel-count inference that got this wrong first).
 
 The four QKᵀ sites are freed here as they were on CUDA, but they are the **smaller** half of
 gh-574's win on this device (2.39 ms against the lm_head's 8.04) — the reverse of CUDA.
@@ -385,11 +386,18 @@ shipped-step row above is untrustworthy and the signature-level rows are not.
 
 ## Part 4 — the cap sweep: is 8 the right trade on gfx1151?
 
-**No. Cap 4 beats the default 8 outside the noise floor, and any cap ≥ 16 never fires at all on this
-model.** Two things in this part were wrong in the first revision and are corrected here: the
-"identical segmentation" inference rested on an `F_saved` label that counts placement entries rather
-than kernels, and the cap-4-vs-cap-8 comparison was confounded with session position. Both were
-re-measured.
+**No. Cap 4 beats the default 8 outside the noise floor, and the guard is fully silent only from cap
+32 up — at cap 16 it fires exactly once, behind an unchanged kernel count.** Three timed reps at caps
+2, 4, 8 and −1; one each at 16 and 32, which is enough because what matters about those two is
+structural (the emitted kernel multiset) rather than a timing.
+
+This part has been wrong twice, in the same place, and both corrections are recorded rather than
+quietly folded in — the sequence is the useful artifact. First revision: the "identical segmentation"
+inference rested on an `F_saved` label that counts placement entries, not kernels. Second: with real
+kernel counts in hand, equal counts were read as identical segmentation — but **equal fission width
+can absorb a changed materialization decision**, which is exactly what cap 16 does. Only the kernel
+multiset settles it. The cap-4-vs-cap-8 comparison was separately confounded with session position
+and was re-run in one order-balanced block.
 
 | cap | arm A kernels | untuned-default (median, range) | tuned step p50 (median, range) | n | ships |
 |---:|---:|---|---|---:|---|
@@ -400,14 +408,32 @@ re-measured.
 | 32 | **135** | 65.62 | 21.51 | 1 | B |
 | −1 (off) | **135** | 65.59 (65.48–65.63) | 20.86 (18.94–22.48) | 3 | B B B |
 
-**Caps 16, 32 and −1 emit the identical 135-kernel arm A**, read from the launch log's fission width
-rather than from a label, and their untuned-default times agree to 0.3%. So those settings are not
-being traded off — the guard is never reached, and a cap sweep above 8 measures nothing. The
-kernel count is monotone in the cap (144 / 137 / 136 / 135 / 135 / 135), which is the guard firing
-more often as the cap tightens, and it is the column to read first: **a cap whose kernel count
-matches cap −1's is silent, not losing.** On this graph the residual stream's maximum transitive
-inline fan-in therefore lies between 9 and 16, and the shipped default of 8 sits one step inside the
-range where the guard does anything on it.
+**Where the guard actually goes silent — and a kernel count is not enough to tell.** Caps 16, 32 and
+−1 all emit a 135-kernel arm A, and an earlier revision of this report read that as "identical
+segmentation, so the guard never fires at 16 or above". That inference was wrong, and the way it was
+wrong is worth keeping: **equal fission width can absorb a changed materialization decision.**
+Comparing the emitted kernel *multisets* instead of their sizes (`gh612_cells.sh diff`, which needs
+only `snap`):
+
+| comparison | exclusive signatures | verdict |
+|---|---|---|
+| cap −1 vs **cap 32** | 0 / 0, no multiplicity differences | **identical kernel multiset — the guard is silent** |
+| cap −1 vs **cap 16** | **1 / 1** | **the guard fires — exactly once** |
+| cap −1 vs cap 8 | 16 / 17 | fires |
+| cap −1 vs cap 4 | 26 / 28 | fires |
+| cap −1 vs cap 2 | 40 / 49 | fires |
+
+At cap 16 the one site that changes is the **final layer norm**, which gains a materialized `n792` —
+its 20-parameter signature becomes 21 while the kernel count stays at 135. So `lnf`, the deepest site
+and the one with the largest accumulated prefix, is the *only* node on this graph whose transitive
+fan-in exceeds 16; the layer-3 sites are all at or below it. Corrected conclusions: the residual
+stream's maximum transitive inline fan-in on this graph lies in **(16, 32]**, not between 9 and 16;
+the guard's first bite is at cap 16, not cap 8; and what changes between 16 and 8 is not silence
+versus firing but **one** materialization versus sixteen.
+
+The count is still monotone in the cap (144 / 137 / 136 / 135 / 135 / 135) and still the first thing
+to look at, but the rule has to be stated correctly: **a cap whose kernel count matches cap −1's may
+still have fired — compare the kernel multisets before concluding silence.**
 
 **Cap 4 beats cap 8 by 5.7%, measured in one balanced block.** The first revision reported 7.1% from
 reps that had cap 8 running roughly two hours earlier in the session than cap 4 — arm confounded
@@ -446,8 +472,9 @@ distinct transitive materialized inputs per setter, which varies with architectu
 constant depth, so "a 4-layer model" is already an over-generalization of a single measured graph and
 "shallow models" more so. Both are avoided above and in the README index entry.
 
-What that leaves is narrow and still useful: on this graph the guard is silent at 16 and above, fires
-once more at 4 than at 8, and cap 4 is 5.7% faster than the shipped default. Changing the global
+What that leaves is narrow and still useful: on this graph the guard is silent only from cap 32 up,
+fires once at 16, sixteen times at 8, and once more again at 4 — and cap 4 is 5.7% faster than the
+shipped default. Changing the global
 default on that would be the gh-479 mistake in a new costume — the measurement that would justify
 moving it is a cap sweep across several fixtures of differing depth *and* differing residual
 fan-in structure, which this session did not run.
@@ -455,8 +482,12 @@ fan-in structure, which this session did not run.
 ## Part 5 — what the re-established profile says to do next
 
 The step is now attention-bound (65.6%), and inside attention one line item dominates: **the 12
-q/k/v projections**. They are *invariant* across every arm of this session — untouched by both
-fixes — and become the largest thing in the step purely by everything else shrinking:
+q/k/v projections**. Neither fix touches them *structurally* — the same 12 kernel signatures appear in
+all four cells — and they become the largest thing in the step largely by everything else shrinking.
+"Invariant" would be too strong, though, and the table says so: three cells measure 6.39–6.40 ms at 16
+resident blocks, while `master-cap8`'s draw crowned a different tile and measures **6.932 ms at 4
+blocks**. So roughly **8% of its 36.7% share is the crowned-tile lottery, not the fixes** — the
+operation is untouched, the selected schedule is not:
 
 | | BASE | FEAT | master cap −1 | master cap 8 |
 |---|---:|---:|---:|---:|
@@ -482,10 +513,12 @@ for (int i1610 = 0; i1610 <= 7; ++i1610) {        // batch  -- serial
 ```
 
 `grid=(1,4,1)×(16,16,1)` in master's draw is **4 blocks** — 4 of 20 workgroup processors, 12
-times over. Three of the four cells' draws put them at 16 blocks and 6.40 ms instead of 6.93, so the
-tile choice is inside the lottery; the 6.4 ms floor is not. If these reached the FFN
-up-projection's utilization the step would fall to roughly 12.7 ms (~1.49x) — an **analytic
-extrapolation, not a measurement**, offered only to size the next target. Nothing here measures a
+times over. Three of the four cells' draws put them at 16 blocks and 6.40 ms instead of 6.93, so that
+0.53 ms and the 16→4 block change are the lottery; the ~6.4 ms floor, present in every cell, is not.
+The extrapolation below is taken from that floor rather than from cap 8's less favourable draw, so it
+does not borrow the lottery's 8%. If these reached the FFN
+up-projection's utilization the step would fall to roughly 13.2 ms (~1.43x, taking the 6.40 ms floor
+rather than cap 8's 6.93 ms draw) — an **analytic extrapolation, not a measurement**, offered only to size the next target. Nothing here measures a
 replacement, and the gh-569 lesson that HIP's block-count curve is non-monotone (peak at 128,
 regressing by 1024) applies to any attempt.
 
@@ -562,10 +595,15 @@ $D diff feat574 1 master-capoff 1        # the negative control: must print 0 ke
 # session drift is indistinguishable from the cap's effect.
 $D sweep $M 3 8 4                  # the claim-bearing pair, balanced inside one block
 $D sweep $M 1 2 16 32 -1           # the shape of the curve
-# then read the arm A KERNEL count, not the F_saved label -- a cap whose kernel count matches
-# cap -1's is not losing a trade-off, it is never firing:
+# then snapshot each cap and compare KERNEL MULTISETS, not kernel counts. Equal counts can absorb a
+# changed materialization decision -- cap 16 emits 135 kernels exactly like cap -1 yet differs by one
+# signature -- so a count cannot establish that a cap did nothing. `diff` needs only `snap` here; the
+# ms columns are omitted without `profile`.
 for cap in 2 4 8 16 32 -1; do
   $D snap $M sweep-cap$cap 1 --ocannl_virtualize_max_inline_fanin=$cap
+done
+for cap in 32 16 8 4 2; do                       # 0/0 exclusive signatures => the guard was silent
+  echo "== cap -1 vs cap $cap =="; $D diff sweep-cap-1 1 sweep-cap$cap 1
 done
 ```
 

@@ -329,13 +329,14 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   bite depends on how many distinct transitive materialized inputs a chain accumulates — which varies
   with depth AND with graph shape at constant depth — so a cap conclusion holds for the graph it was
   measured on and not for a size class.** On gpt2_mini specifically (4 layers, gfx1151,
-  `report-gh612-hip.md`), caps 16, 32 and −1 emit the identical **135-kernel** arm A and
-  untuned-default times within 0.3%, i.e. 16 never fires there and a cap sweep above 8 measures
-  nothing; cap 4 beat the default 8 by a non-overlapping 5.7% in an order-balanced block. Two traps
-  worth carrying: before reading a cap comparison as a performance trade, check the arm's **kernel
-  count** (from `schedule_log_launches`, NOT the `F_saved` label) — if it matches cap −1's, the guard
-  is silent rather than losing; and balance cap order across reps, because a fixed order confounds
-  the cap with session position (that was worth ~1.4pp of an apparent 7.1%).
+  `report-gh612-hip.md`), caps 16, 32 and −1 all emit a **135-kernel** arm A, yet only cap 32 is
+  actually silent: at cap 16 the guard fires exactly once (the final layer norm gains a materialized
+  node) *behind an unchanged kernel count*. **Equal fission width can absorb a changed
+  materialization decision, so a kernel count cannot establish that a cap did nothing — compare the
+  emitted kernel MULTISETS** (`benchmarks/gh612_cells.sh diff`, which needs only a snapshot). That
+  graph's maximum transitive fan-in is therefore in (16, 32]. Cap 4 beat the default 8 by a
+  non-overlapping 5.7% in an order-balanced block, and balancing that order matters: a fixed order
+  confounds the cap with session position, which was worth ~1.4pp of an apparent 7.1%.
 - `check_half_prec_constants_cutoff` (`Ops.exceeds_fp16_cutoff`, enforced from
   `Low_level.simplify_llc.check_constant` during lowering, hence backend-independently) is a
   HEADROOM policy, not a representability check: its default 2^14 sits far below fp16's 65504 max
