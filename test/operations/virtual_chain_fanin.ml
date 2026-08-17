@@ -540,7 +540,77 @@ let phase5 () =
       false
     with Utils.User_error msg -> String.is_substring msg ~substring:"merge buffer"
   in
-  p "merge splice: consuming it in a later routine is rejected" rejected
+  p "merge splice: consuming it in a later routine is rejected" rejected;
+  (* Review round 2, P1: the consumer declaring the SAME merge source does not rescue the splice
+     — the deferred read would observe the consumer's transfer, not the one it was written
+     against. Detection is at consumption time (an entry-time snapshot in [virtual_llc]),
+     because in the final code this case is indistinguishable from legitimate same-routine
+     inlining of a declared merge read. *)
+  let mout2 = mk "mout2" in
+  materialize mout2;
+  let llc_mb2 =
+    let s = sym () in
+    loop_n s dim
+      (set mout2 [| iter s |]
+         (add (get mv [| iter s |]) (LL.Get_merge_buffer (msrc, [| iter s |]))))
+  in
+  let rejected2 =
+    try
+      ignore
+        (LL.optimize ctx2 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_merge_b2" [] llc_mb2
+          : LL.optimized);
+      false
+    with Utils.User_error msg -> String.is_substring msg ~substring:"merge buffer"
+  in
+  p "merge splice: same-source consumer is rejected too" rejected2;
+  (* Review round 2, P1: a write covering only SOME cells does not cover a later spliced read —
+     coverage is per-cell and guard-aware, decided by [reads_covered_query] over the final code,
+     not by syntactic write-before-read order. Routine B writes ell2[0] only, then consumes
+     v2 = ell2 + 100 at an OFFSET position (out2[i] = v2[i+1]): the spliced reads touch cells
+     the write never covers, so ell2 must stay a routine input. The offset also keeps the read
+     off the enclosing write's index position: a copy-position read is [rmw_exempt] from the
+     coverage query — pre-existing query semantics that treats raw reads identically, tracked
+     separately (see the round-2 review thread). *)
+  let ell2 = mk "ell2" in
+  materialize ell2;
+  let v2 = mk "v2" and out2 = mk "pout" in
+  materialize out2;
+  let ctx3 = LL.empty_optimize_ctx () in
+  let llc_a3 =
+    let s = sym () in
+    loop_n s dim (set v2 [| iter s |] (add (get ell2 [| iter s |]) (c 100.)))
+  in
+  let o_a3 =
+    LL.optimize ctx3 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_partial_a" [] llc_a3
+  in
+  p "partial-write splice: routine A defers v2" (known_virtual o_a3 v2);
+  let llc_b3 =
+    let s = sym () in
+    seq
+      (set ell2 [| fixed 0 |] (c 5000.))
+      (loop_n s (dim - 1) (set out2 [| iter s |] (get v2 [| aff [ (1, s) ] 1 |])))
+  in
+  let o_b3 =
+    LL.optimize ctx3 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_partial_b" [] llc_b3
+  in
+  p "partial-write splice: ell2 stays read_before_write (per-cell coverage)"
+    (read_before_write o_b3 ell2);
+  p "partial-write splice: ell2 is an input of routine B"
+    (let (ins, _), _ = LL.input_and_output_nodes o_b3 in
+     Set.mem ins ell2);
+  let ell2_old = Array.init dim ~f:(fun i -> 1. +. Float.of_int i) in
+  let got3 =
+    execute ~name:"vcf_partial_b" o_b3
+      ~seed:[ (ell2, ell2_old); (out2, blank dim) ]
+      ~read:[ out2 ]
+  in
+  (* out2[i] = ell2[i+1] + 100 for i in 0..2 (incoming cells — the write touched only cell 0);
+     out2[3] keeps the sentinel, no writer covers it. *)
+  let expected3 =
+    Array.init dim ~f:(fun i -> if i < dim - 1 then ell2_old.(i + 1) +. 100. else sentinel)
+  in
+  p "partial-write splice: uncovered cells read the incoming values"
+    (same got3 [ expected3 ])
 
 let () =
   phase1 ();

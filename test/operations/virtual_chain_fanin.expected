@@ -43,3 +43,8 @@ pre-write splice: out sees the incoming ell, ell holds the overwrite: true
 merge splice: routine A defers the merge-reading node: true
 merge splice: the deferred-away merge declaration is dropped from routine A: true
 merge splice: consuming it in a later routine is rejected: true
+merge splice: same-source consumer is rejected too: true
+partial-write splice: routine A defers v2: true
+partial-write splice: ell2 stays read_before_write (per-cell coverage): true
+partial-write splice: ell2 is an input of routine B: true
+partial-write splice: uncovered cells read the incoming values: true

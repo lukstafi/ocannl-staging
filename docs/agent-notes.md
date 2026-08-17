@@ -191,16 +191,23 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   `specialize_proc`'s `reconcile_traced_store` walks the final llc in program order and: gives
   spliced-in nodes fresh `read_only` entries (codegen otherwise emits an undeclared identifier);
   flips an already-traced node to `read_before_write` when a spliced read lands before the
-  routine's own first write (raw coverage alone concludes output-only and the incoming value
-  would be ignored — a read after the first write deliberately stays unflagged, it consumes the
-  routine's own value); prunes read-only entries the final code never touches (phantom inputs of
-  deferral-only routines) while KEEPING entries that record a raw write even when unaccessed —
-  out-of-contract probes (gh-ocannl-584 scope writes, `affine_extraction.ml`) check raw
-  decision-level facts, so the prune must stay no wider than the phantom-input genre; and
-  reconciles the merge node — a raw-declared merge whose read was deferred away is dropped
-  (linking would demand a transfer never consumed), while a spliced merge read the routine does
-  not declare raises `User_error` (merge contents are transient to the transfer-receiving
-  routine, so deferring the read across routines would change which transfer it observes).
+  routine's own first write, and re-judges reads AFTER a write with the same per-cell machinery
+  the raw pipeline uses (`reads_covered_query` over the final code's affine accesses, built
+  lazily) — syntactic priority is not coverage: a write of some cells or under an `If` covers
+  nothing it did not touch; prunes read-only entries the final code never touches (phantom
+  inputs of deferral-only routines) while KEEPING entries that record a raw write even when
+  unaccessed — out-of-contract probes (gh-ocannl-584 scope writes, `affine_extraction.ml`) check
+  raw decision-level facts, so the prune must stay no wider than the phantom-input genre; and
+  drops a raw-declared merge node whose read was deferred away (linking would otherwise demand a
+  transfer never consumed). Merge splices are rejected at CONSUMPTION time, not post-hoc:
+  `virtual_llc` snapshots which inherited computations read a merge buffer at entry (before the
+  walk stores this routine's own), and `inline_computation` raises on consuming one — the final
+  code cannot distinguish a legitimate same-routine inlining of the declared merge read from a
+  cross-routine splice whose consumer declares the SAME source, which would silently rebind the
+  read to the consumer's transfer; `reconcile_traced_store` keeps a mismatch check as backstop.
+  Related pre-existing quirk: `rmw_exempt` excuses copy-position reads from the coverage verdict
+  that feeds `read_before_write` (fine for multiplicity, questionable for the interface) —
+  gh-ocannl-618; the phase-5 partial-write test reads at an offset position to stay off it.
   Corollary (gh-ocannl-611): a routine whose every statement virtualizes away is LEGAL —
   cleanup's top-level elision degenerates to `Noop`, with an EMPTY interface — its stored
   computations persist in the lineage for later consumers, so "compile a deferral-only routine"

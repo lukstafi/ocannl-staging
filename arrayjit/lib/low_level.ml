@@ -1322,9 +1322,32 @@ let%diagn2_sexp check_and_store_virtual (optim_ctx : optimize_ctx) traced static
       ~data:((!at_idcs, top_llc) :: current_computations)
   with Non_virtual i -> Tn.Placements.update optim_ctx.placements traced.tn Never_virtual i
 
-let%track7_sexp inline_computation ~id (optim_ctx : optimize_ctx) (traced : traced_array)
-    (static_indices : Indexing.static_symbol list) (call_args : Indexing.axis_index array) :
-    t option =
+(* Whether the statement reads a merge buffer anywhere, [Local_scope] bodies included. *)
+let rec reads_merge_buffer : t -> bool = function
+  | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _ ->
+      false
+  | Seq (c1, c2) -> reads_merge_buffer c1 || reads_merge_buffer c2
+  | For_loop { body; _ } -> reads_merge_buffer body
+  | Set { llsc; _ } | Set_local (_, llsc) -> scalar_reads_merge_buffer llsc
+  | Set_from_vec { arg = s, _; _ } -> scalar_reads_merge_buffer s
+  | Set_dynamic { dyn_value = v, _; llsc; _ } ->
+      scalar_reads_merge_buffer v || scalar_reads_merge_buffer llsc
+  | If { cond = c0, _; body } -> scalar_reads_merge_buffer c0 || reads_merge_buffer body
+  | Tile_mma { fallback; _ } -> reads_merge_buffer fallback
+
+and scalar_reads_merge_buffer : scalar_t -> bool = function
+  | Constant _ | Constant_bits _ | Embed_index _ | Get_local _ | Get _ -> false
+  | Get_merge_buffer _ -> true
+  | Get_dynamic { dyn_value = v, _; _ } -> scalar_reads_merge_buffer v
+  | Local_scope { body; _ } -> reads_merge_buffer body
+  | Ternop (_, (a, _), (b, _), (d, _)) ->
+      scalar_reads_merge_buffer a || scalar_reads_merge_buffer b || scalar_reads_merge_buffer d
+  | Binop (_, (a, _), (b, _)) -> scalar_reads_merge_buffer a || scalar_reads_merge_buffer b
+  | Unop (_, (a, _)) -> scalar_reads_merge_buffer a
+
+let%track7_sexp inline_computation ~id ~inherited_merge_tainted (optim_ctx : optimize_ctx)
+    (traced : traced_array) (static_indices : Indexing.static_symbol list)
+    (call_args : Indexing.axis_index array) : t option =
   let exception Non_virtual of int in
   let static_indices =
     Set.of_list (module Indexing.Symbol)
@@ -1339,6 +1362,22 @@ let%track7_sexp inline_computation ~id (optim_ctx : optimize_ctx) (traced : trac
                "Stale optimize_ctx: No computations found for #%{traced.tn.Tn.id#Int}: \
                 %{Tn.debug_name traced.tn}"])
   in
+  (* Review round 2 of the gh-610/611 PR: a computation INHERITED from an earlier routine of the
+     lineage that reads a merge buffer must not be consumed here — merge-buffer contents are
+     transient to the routine receiving the transfer, and this routine declaring the SAME merge
+     source does not rescue the splice: the deferred read would observe this routine's transfer,
+     not the one it was written against. Detection is at consumption time because only the
+     entry-time snapshot (taken in [virtual_llc]) can tell inherited components from ones stored
+     during this routine's own walk; a post-hoc scan of the final code cannot. *)
+  if Hash_set.mem inherited_merge_tainted traced.tn then
+    raise
+    @@ Utils.User_error
+         [%string
+           "the deferred computation of %{Tn.debug_name traced.tn} was stored by an earlier \
+            routine of this compilation lineage and reads a merge buffer: merge-buffer contents \
+            are transient to the routine receiving the transfer, so the computation cannot be \
+            consumed across routines. Mark %{Tn.debug_name traced.tn} as materialized (e.g. via \
+            Train.set_materialized) in the routine that computes it."];
   (* gh-509 task 4: a packed-uniform producer ([Set_from_vec]) is inlined via the lane-extract
      scalar form [vec_convert(counter[flat / lanes]).v[flat mod lanes]], where [flat] is the read
      cell's flat offset -- bitwise-identical to the vectorized stores (the lane builtins index the
@@ -1882,6 +1921,20 @@ let rec proc_contains_set_from_vec tn = function
 let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_indices (llc : t) :
     t =
   let plc = optim_ctx.placements in
+  (* The entry-time snapshot of merge-tainted deferred computations: everything in the table at
+     this point was stored by an earlier routine of the lineage (this routine's own computations
+     are stored during the walk below), so a node found here with a merge-buffer-reading body is
+     exactly a cross-routine merge splice waiting to happen — [inline_computation] rejects its
+     consumption. A node with local setters ON TOP of an inherited tainted component (the
+     update-an-inherited-virtual pattern) is tainted all the same: inlining would replay the
+     inherited component. *)
+  let inherited_merge_tainted =
+    let tainted = Hash_set.create (module Tnode) in
+    Hashtbl.iteri optim_ctx.computations ~f:(fun ~key ~data ->
+        if List.exists data ~f:(fun (_, body) -> reads_merge_buffer body) then
+          Hash_set.add tainted key);
+    tainted
+  in
   (* [process_for] holds tensors whose [Get]s must be left untouched (self/recursive references,
      replaced by [Get_local] during the tensor's own [inline_computation]). [owned] holds tensors
      whose whole-loop computation is captured at an enclosing [For_loop]: their per-statement
@@ -2033,7 +2086,9 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
         else
           let id = get_scope tn in
           Option.value ~default:llsc
-          @@ Option.map (inline_computation ~id optim_ctx traced static_indices indices)
+          @@ Option.map
+               (inline_computation ~id ~inherited_merge_tainted optim_ctx traced static_indices
+                  indices)
                ~f:(fun body -> Local_scope { id; body; orig_indices = indices })
     | Get_dynamic { tn; idcs; dyn_axis; dyn_value = v, prec } ->
         Get_dynamic { tn; idcs; dyn_axis; dyn_value = (loop v, prec) }
@@ -5302,14 +5357,15 @@ let copy_traced_store (store : traced_store) : traced_store =
      no parameter declares. A stored computation's setters target the virtual node itself, so
      splices only contribute reads and fresh entries are [read_only]; writes are handled all the
      same in case a future pass splices differently.
-   - A spliced read can precede the routine's own first write of an ALREADY-TRACED node; the raw
-     analysis concluded write-covers-reads, so without the flag flip the node stays output-only
-     and its incoming value would be silently ignored. A read at a walk position before the
-     node's first write is exactly such a read (a raw pre-write read would already have set
-     [read_before_write] via the coverage query), so the walk tracks first writes in program
-     order — statement-level, right-hand sides before their store commits. A spliced read AFTER
-     the first write deliberately stays unflagged: it consumes the routine's own value, so the
-     value on entry does not matter for it.
+   - A spliced read of an ALREADY-TRACED node can invalidate the raw analysis' write-covers-reads
+     conclusion, leaving the node output-only with its incoming value silently ignored. A read at
+     a walk position before the node's first write is flipped to [read_before_write] directly (a
+     raw pre-write read would already have set it via the coverage query); a read AFTER a write
+     is NOT thereby covered — the write may touch only some cells or sit under a guard — so such
+     reads are re-judged with the same per-cell machinery the raw pipeline uses,
+     [reads_covered_query] over the final code's affine accesses (review round 2: syntactic
+     priority is not coverage). The query is built lazily: routines without a
+     read-after-write-of-a-traced-node pattern never pay for it.
    - Read-only entries whose node the final code never touches are dropped (an all-virtual
      routine's deferred-computation leaves): they would otherwise read back as phantom inputs,
      parameters, allocations and dependencies of a schedule that does not touch them. The prune
@@ -5327,19 +5383,22 @@ let copy_traced_store (store : traced_store) : traced_store =
    read into a later routine changes which transfer it observes — that computation must not be
    shared across routines. *)
 let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
-    ~(merge_node : Tnode.t option) (llc : t) : bool =
+    ~(static_indices : Indexing.static_symbol list) ~(merge_node : Tnode.t option) (llc : t) :
+    bool =
   let accessed = Hash_set.create (module Tnode) in
   let written_seen = Hash_set.create (module Tnode) in
   let fresh_read = Hash_set.create (module Tnode) in
   let fresh_written = Hash_set.create (module Tnode) in
+  let suspects = Hash_set.create (module Tnode) in
   let uses_merge = ref false in
   let read tn =
     Hash_set.add accessed tn;
     match Hashtbl.find traced_store tn with
     | None -> Hash_set.add fresh_read tn
     | Some traced ->
-        if traced.has_assignment && not (Hash_set.mem written_seen tn) then
-          traced.read_before_write <- true
+        if traced.has_assignment && not traced.read_before_write then
+          if not (Hash_set.mem written_seen tn) then traced.read_before_write <- true
+          else Hash_set.add suspects tn
   in
   let written tn =
     Hash_set.add accessed tn;
@@ -5404,6 +5463,17 @@ let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
     | Unop (_, (a, _)) -> scalar a
   in
   proc llc;
+  (* Reads that follow a write of their node in program order: whether the write actually covers
+     them is a per-cell, guard-aware question, answered by the same query that judged the raw
+     reads. Lazy so routines without the pattern skip the affine pass over the final code. *)
+  (if not (Hash_set.is_empty suspects) then
+     let covered = reads_covered_query static_indices (affine_accesses llc) in
+     Hash_set.iter suspects ~f:(fun tn ->
+         let traced = Hashtbl.find_exn traced_store tn in
+         if not traced.read_before_write then
+           match covered tn with
+           | `Covered -> ()
+           | `Unknown _ -> traced.read_before_write <- true));
   Hash_set.iter fresh_written ~f:(fun tn -> (get_node traced_store tn).has_assignment <- true);
   Hash_set.iter fresh_read ~f:(fun tn ->
       let traced = get_node traced_store tn in
@@ -5439,7 +5509,8 @@ let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : opt
     @@ virtual_llc_result
   in
   let uses_merge =
-    reconcile_traced_store input_ctx.placements traced_store ~merge_node:an.an_merge_node llc
+    reconcile_traced_store input_ctx.placements traced_store ~static_indices
+      ~merge_node:an.an_merge_node llc
   in
   (match llc with
   | Noop -> [%log "routine optimized to an empty schedule: every target virtualized (gh-611)"]
