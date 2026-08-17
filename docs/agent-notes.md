@@ -690,6 +690,16 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   take `tile_prec` (exact widenings only) to fold the widening into the pack; seeding resolves the
   same `Numerics.cpu_compute_prec` the emission uses — change either side only through that
   helper, or "timed is not tensorized" returns for narrow sites.
+- **Negative zero is what breaks a "bitwise equal to the scalar twin" claim** (gh-ocannl-615). Two
+  spellings normalized it, both fixed but both easy to reintroduce: a scalar-to-vector splat written
+  `((vtyp){0} + x)` returns `+0.0` for `x = -0.0` (IEEE `(+0.0) + (-0.0) = +0.0`), so use
+  `C_syntax.vec_splat` — `x - (vtyp){0}`, the exact identity on every input; and a float constant
+  printed with `%.16g` alone comes out as the C *integer* literal `-0`, i.e. `+0.0` once cast, so
+  print through `C_syntax.c_float_literal`. Neither shows up in ordinary parity tests: `Float.equal`
+  reports `-0. = +0.`, and a divergence in the sign of a zero product only survives into a result
+  whose accumulator is itself a signed zero. `test/operations/vec_signed_zero` is the regression, and
+  it needs an accumulator preloaded with `-0.0` (a zeroed one absorbs the sign) — which is why it is
+  an explicit `=+` into an initialized tensor rather than a `schedule_mma_matmul` leg.
 - **gcc `-O3` can collapse the register tiling ~10x on the f16 d-bridge shape** (gcc 15.2, x86):
   on the k_o-outermost serial GEBP it unrolls the k-loop 4x and spills the accumulator C-tile
   (hot loop 29 insns / 2 stack refs at `-O2` vs 375 / 147 at `-O3`; measured 3.4 vs ~30 GFLOP/s,

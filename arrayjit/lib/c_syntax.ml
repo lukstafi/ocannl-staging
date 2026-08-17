@@ -391,6 +391,22 @@ module type C_syntax_config = sig
         captured_log_prefix) to the format string and arguments. *)
 end
 
+(** A C source literal for the floating-point constant [c].
+
+    The three special values [%.16g] cannot spell, plus a fourth it spells {e wrong}: a value with no
+    fractional part comes out without a radix point, hence as a C {e integer} literal, and while that
+    is value-preserving for every other constant, [%.16g (-0.)] is ["-0"] — the integer zero, [+0.0]
+    once cast. So a [-0.0] in host data silently became [+0.0] wherever the constant fill inlines as
+    scalar stores, the same negative-zero normalization as the vector splat (gh-ocannl-615). Only
+    this value needs the radix point forced; spelling every whole number as [N.0] instead would be
+    equivalent C and churn every codegen snapshot. *)
+let c_float_literal c =
+  if Float.(c = infinity) then "INFINITY"
+  else if Float.(c = neg_infinity) then "(-INFINITY)"
+  else if Float.is_nan c then "NAN"
+  else if Float.(c = 0.) && Float.ieee_negative c then "-0.0"
+  else Printf.sprintf "%.16g" c
+
 (** The C-family rendering of a binary operation, from {!Ops.binop_c_syntax}: prefix, first operand,
     infix, second operand (breaking after the operator), suffix.
 
@@ -1162,6 +1178,22 @@ module C_syntax (B : C_syntax_config) = struct
      [ggml_vec_dot_f32] pattern) uses a 1×N grid — N independent accumulator chains folded at loop
      exit — and the register-tiled [Tile_mma] micro-kernel (gh-ocannl-469) will hold its C-tile as
      an RM×RN grid of vector registers across the fused k-loop. *)
+
+  (* Broadcast one scalar expression across every lane of [vtyp] (the vector extensions splat a
+     scalar operand of a binary operator, but have no cast or initializer form that does it).
+
+     The subtraction is load-bearing, not style: the obvious [((vtyp){0} + x)] NORMALIZES a
+     negative-zero [x], since IEEE-754 has [(+0.0) + (-0.0) = +0.0] — so a splatted [-0.0] would
+     enter the vector arithmetic as [+0.0] while the scalar twin (a remainder loop, a peeled edge,
+     the serial fallback) consumes the element itself, and the zero-sign bits of zero results
+     diverge from a rendering that promises BITWISE equality (gh-ocannl-615). [x - 0.0] is instead
+     the exact identity on every input — both zeros, infinities, NaNs — so the splat preserves the
+     element bit for bit, and compilers fold it back to a plain broadcast. The other candidate, an
+     explicit [(vtyp){x, ..., x}] initializer, preserves it too but at [lanes] textual copies of a
+     possibly-nontrivial expression. *)
+  let vec_splat ~vtyp doc =
+    let open PPrint in
+    parens (doc ^^ string (Printf.sprintf " - (%s){0}" vtyp))
 
   (* The vector-extension typedef shared by the explicit-SIMD renderings: [lanes] elements of the
      compute precision (f32, f64, or -- where the target has native 16-bit arithmetic, gh-ocannl-516
@@ -2603,7 +2635,7 @@ module C_syntax (B : C_syntax_config) = struct
                arguments need a vector, where the implicit vector-scalar splat of binary operators
                does not apply. *)
             if scalar_mentions llsc then vec_expr llsc p
-            else string ("((" ^ vtyp ^ "){0} + ") ^^ uniform_scalar ~written prec llsc ^^ string ")"
+            else vec_splat ~vtyp (uniform_scalar ~written prec llsc)
           in
           (vec_expr, vec_operand)
         in
@@ -3943,9 +3975,11 @@ module C_syntax (B : C_syntax_config) = struct
                            (Printf.sprintf "tmma_b__[tmma_l__ * %d + tmma_j__ + %d]" ldb (c * lanes))))
                 @ List.concat
                     (List.init rm ~f:(fun r ->
-                         string
-                           (Printf.sprintf "%s tmma_a_%d__ = ((%s){0} + %s);" vtyp r vtyp
-                              (a_elt ~row:(Printf.sprintf "(tmma_i__ + %d)" r) ~l:"tmma_l__"))
+                         (string (Printf.sprintf "%s tmma_a_%d__ = " vtyp r)
+                         ^^ vec_splat ~vtyp
+                              (string
+                                 (a_elt ~row:(Printf.sprintf "(tmma_i__ + %d)" r) ~l:"tmma_l__"))
+                         ^^ semi)
                          :: List.init rn ~f:(fun c ->
                              vec_acc_fma ~prec ~lanes
                                ~dst:grid.(r).(c)
@@ -4156,14 +4190,11 @@ module C_syntax (B : C_syntax_config) = struct
     | Constant c ->
         let from_prec = Ops.double in
         let prefix, postfix = B.convert_precision ~from:from_prec ~to_:prec in
-        let c_str =
-          if Float.(c = infinity) then "INFINITY"
-          else if Float.(c = neg_infinity) then "(-INFINITY)"
-          else if Float.is_nan c then "NAN"
-          else Printf.sprintf "%.16g" c
-        in
+        let c_str = c_float_literal c in
         let expr =
-          if String.is_empty prefix && Float.(c < 0.0) && not Float.(c = neg_infinity) then
+          (* The sign BIT, not [c < 0.]: an unparenthesized [-0.0] beside a subtraction would
+             render as [--0.0]. *)
+          if String.is_empty prefix && Float.ieee_negative c && not Float.(c = neg_infinity) then
             string "(" ^^ string c_str ^^ string ")" ^^ string postfix
           else string prefix ^^ string c_str ^^ string postfix
         in
@@ -4329,13 +4360,7 @@ module C_syntax (B : C_syntax_config) = struct
     | Constant c ->
         let from_prec = Ops.double in
         let prefix, postfix = B.convert_precision ~from:from_prec ~to_:prec in
-        let c_str =
-          if Float.(c = infinity) then "INFINITY"
-          else if Float.(c = neg_infinity) then "(-INFINITY)"
-          else if Float.is_nan c then "NAN"
-          else Printf.sprintf "%.16g" c
-        in
-        (string prefix ^^ string c_str ^^ string postfix, [])
+        (string prefix ^^ string (c_float_literal c) ^^ string postfix, [])
     | Constant_bits i ->
         let from_prec = Ops.int64 in
         let prefix, postfix = B.convert_precision ~from:from_prec ~to_:prec in
