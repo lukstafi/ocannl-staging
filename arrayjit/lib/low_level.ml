@@ -5401,12 +5401,13 @@ let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
   (* [live] is false under a dead loop ([to_ < from_]): a dead access still REGISTERS (renderers
      emit dead-loop bodies, so their identifiers need parameters, and its entry must survive the
      prune) but never executes, so it neither supplies coverage (a dead write does not enter
-     [written_seen]) nor demands it (a dead read flips no flag) — mirroring the raw analysis and
-     [drop_dead_loop_accesses] (review round 3). *)
+     [written_seen]) nor demands it (a dead read flips no flag), and a node mentioned only in
+     dead code gets a flagless entry — registered for rendering, absent from the interface —
+     mirroring the raw analysis and [drop_dead_loop_accesses] (review rounds 3-4). *)
   let read ~live tn =
     Hash_set.add accessed tn;
     match Hashtbl.find traced_store tn with
-    | None -> Hash_set.add fresh_read tn
+    | None -> if live then Hash_set.add fresh_read tn
     | Some traced ->
         if live && traced.has_assignment && not traced.read_before_write then
           if not (Hash_set.mem written_seen tn) then traced.read_before_write <- true
@@ -5414,8 +5415,9 @@ let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
   in
   let written ~live tn =
     Hash_set.add accessed tn;
-    if live then Hash_set.add written_seen tn;
-    if not (Hashtbl.mem traced_store tn) then Hash_set.add fresh_written tn
+    if live then (
+      Hash_set.add written_seen tn;
+      if not (Hashtbl.mem traced_store tn) then Hash_set.add fresh_written tn)
   in
   let rec proc ~live (c : t) =
     match c with
@@ -5487,8 +5489,16 @@ let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
      them is a per-cell, guard-aware question, answered by the same query that judged the raw
      reads. Lazy so routines without the pattern skip the affine pass over the final code. *)
   (if not (Hash_set.is_empty suspects) then
+     (* Guarded writes are pre-filtered: the query's guards-taken contract (a guarded write
+        counts as an assignment, mirroring the retired tracer) is right for placement decisions
+        but wrong for the INPUT question — when the guard is false at runtime the entry value is
+        still required, so only definite writes may suppress [read_before_write] (review round
+        4; [a_guarded]'s doc says exactly "never a definite write"). Guarded READS still demand
+        coverage — conservative in the same direction. *)
      let covered =
-       reads_covered_query static_indices (drop_dead_loop_accesses (affine_accesses llc))
+       reads_covered_query static_indices
+         (drop_dead_loop_accesses (affine_accesses llc)
+         |> List.filter ~f:(fun a -> not (a.Affine.a_write && a.a_guarded)))
      in
      Hash_set.iter suspects ~f:(fun tn ->
          let traced = Hashtbl.find_exn traced_store tn in
@@ -5501,6 +5511,12 @@ let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
       let traced = get_node traced_store tn in
       if traced.has_assignment then traced.read_before_write <- true
       else traced.read_only <- true);
+  (* A node mentioned ONLY in dead code still needs a registry entry (its identifier renders, so
+     a parameter must declare it and the prune must not drop it) but no interface flags: it
+     neither reads nor writes at runtime, and advertising either would create phantom
+     dependencies for schedules that execute nothing (review round 4). [get_node] creates the
+     flagless entry; for already-entried nodes it is a no-op lookup. *)
+  Hash_set.iter accessed ~f:(fun tn -> ignore (get_node traced_store tn : traced_array));
   let stale =
     Hashtbl.fold traced_store ~init:[] ~f:(fun ~key ~data acc ->
         if

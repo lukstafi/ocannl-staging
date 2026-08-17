@@ -628,11 +628,19 @@ let phase5 () =
     LL.optimize ctx4 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_dead_a" [] llc_a4
   in
   p "dead-write splice: routine A defers v3" (known_virtual o_a4 v3);
+  (* ghost/ghost2 are mentioned ONLY inside a dead loop (review round 4, P2): they must be
+     registered — the dead body renders, so their identifiers need parameters — yet absent from
+     the interface, or no-op accesses would create phantom scheduling dependencies. *)
+  let ghost = mk "ghost" in
+  materialize ghost;
+  let ghost2 = mk "ghost2" in
+  materialize ghost2;
   let llc_b4 =
-    let s0 = sym () and s = sym () and s2 = sym () in
+    let s0 = sym () and s = sym () and s2 = sym () and s4 = sym () in
     List.reduce_exn ~f:seq
       [
         loop ~upto:(-1) s0 (set ell3 [| iter s0 |] (c 9.));
+        loop ~upto:(-1) s4 (set ghost [| iter s4 |] (get ghost2 [| iter s4 |]));
         loop_n s dim (set out3 [| iter s |] (get v3 [| iter s |]));
         loop_n s2 dim (set ell3 [| iter s2 |] (ramp 2000. s2));
       ]
@@ -642,6 +650,12 @@ let phase5 () =
   in
   p "dead-write splice: ell3 is read-before-write (a dead write supplies no coverage)"
     (read_before_write o_b4 ell3);
+  p "dead-only mention: registered but absent from the interface"
+    (Hashtbl.mem o_b4.LL.traced_store ghost
+    && Hashtbl.mem o_b4.LL.traced_store ghost2
+    &&
+    let (ins, outs), _ = LL.input_and_output_nodes o_b4 in
+    (not (Set.mem outs ghost)) && not (Set.mem ins ghost2));
   let ell3_old = Array.init dim ~f:(fun i -> 7. +. Float.of_int i) in
   let got4 =
     execute ~name:"vcf_dead_b" o_b4
@@ -691,7 +705,68 @@ let phase5 () =
   let got5 =
     execute ~name:"vcf_proj_b" o_b5 ~seed:[ (ell5, ell5_vals); (out5, blank dim) ] ~read:[ out5 ]
   in
-  p "discarded operand: executed values are the projected operand's" (same got5 [ ell5_vals ])
+  p "discarded operand: executed values are the projected operand's" (same got5 [ ell5_vals ]);
+  (* Review round 4, P1: a write under an [If] guard is never a DEFINITE write — when the guard
+     is false at runtime the entry value is still required, so a guarded full write must not
+     suppress the input flag of a later spliced read (the coverage query's guards-taken contract
+     is for placement decisions, not the interface: guarded writes are pre-filtered). Both
+     branches execute below; the offset read keeps the splice off the rmw_exempt position. *)
+  let flag = mk ~dims:[| 1 |] "flag" in
+  materialize flag;
+  let ell7 = mk "ell7" in
+  materialize ell7;
+  let v7 = mk "v7" and out7 = mk "gout" in
+  materialize out7;
+  let ctx6 = LL.empty_optimize_ctx () in
+  let llc_a6 =
+    let s = sym () in
+    loop_n s dim (set v7 [| iter s |] (add (get ell7 [| iter s |]) (c 100.)))
+  in
+  let o_a6 =
+    LL.optimize ctx6 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_guard_a" [] llc_a6
+  in
+  p "guarded-write splice: routine A defers v7" (known_virtual o_a6 v7);
+  let llc_b6 =
+    let sg = sym () and s = sym () in
+    seq
+      (LL.If
+         {
+           cond = (get flag [| fixed 0 |], single);
+           body = loop_n sg dim (set ell7 [| iter sg |] (c 999.));
+         })
+      (loop_n s (dim - 1) (set out7 [| iter s |] (get v7 [| aff [ (1, s) ] 1 |])))
+  in
+  let o_b6 =
+    LL.optimize ctx6 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_guard_b" [] llc_b6
+  in
+  p "guarded-write splice: ell7 stays read_before_write (guarded write is not definite)"
+    (read_before_write o_b6 ell7);
+  p "guarded-write splice: ell7 is an input of routine B"
+    (let (ins, _), _ = LL.input_and_output_nodes o_b6 in
+     Set.mem ins ell7);
+  let ell7_old = Array.init dim ~f:(fun i -> 3. +. Float.of_int i) in
+  let got_false =
+    execute ~name:"vcf_guard_b" o_b6
+      ~seed:[ (flag, [| 0. |]); (ell7, ell7_old); (out7, blank dim) ]
+      ~read:[ out7; ell7 ]
+  in
+  p "guarded-write splice, false branch: the entry values are observed"
+    (same got_false
+       [
+         Array.init dim ~f:(fun i -> if i < dim - 1 then ell7_old.(i + 1) +. 100. else sentinel);
+         ell7_old;
+       ]);
+  let got_true =
+    execute ~name:"vcf_guard_b_taken" o_b6
+      ~seed:[ (flag, [| 1. |]); (ell7, ell7_old); (out7, blank dim) ]
+      ~read:[ out7; ell7 ]
+  in
+  p "guarded-write splice, true branch: the overwrite is observed"
+    (same got_true
+       [
+         Array.init dim ~f:(fun i -> if i < dim - 1 then 1099. else sentinel);
+         Array.create ~len:dim 999.;
+       ])
 
 (* === Phase 6: deferral-only comp through the ordinary pipeline (review round 3) === *)
 
