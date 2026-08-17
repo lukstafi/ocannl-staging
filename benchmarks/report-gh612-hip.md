@@ -427,7 +427,9 @@ materialized in the table, which is the direction where the guard starts costing
 recomputation it no longer had to avoid.
 
 **What the balanced evidence does and does not chain.** Two comparisons were run as balanced blocks:
-cap 8 vs cap −1 (overlapping, 1.11x — Part 3's unclaimed row) and cap 4 vs cap 8 (disjoint, 1.057x).
+cap 8 vs cap −1 (overlapping, 1.11x — Part 3's unclaimed row) and cap 4 vs cap 8 (disjoint,
+**1.061x** = 18.51/17.45, i.e. the 5.7% time reduction; the two are different numbers and only the
+ratio is a speedup).
 The headline "cap 4 is worth 1.19x against cap −1" chains those two rather than being one balanced
 block of its own, so it is the weaker of the statements here; what does support it independently is
 the deterministic untuned instrument, where cap 4's 60.36–60.70 and cap −1's 65.48–65.63 are 8.4%
@@ -540,6 +542,15 @@ $D profile $M master-capoff 1 3; $D finger master-capoff 1
 `ffn_b2` prefix lengths — which must be bounded and must **reset** rather than ramp with depth — and
 for gh-574 the lm_head/CE tail, which must show the GEMM alone and the row-max as a separate kernel.
 It parses signatures with `re.S` because the emitted parameter lists span multiple lines.
+
+```bash
+# the cross-cell signature-set diffs, which are what pin each mechanism to named kernels rather
+# than to a bucket total. These produce Part 2's 14-vs-32 counts, Part 3's 16-vs-17 and 8.495 ->
+# 1.702 ms, and the negative control's zero differing signatures.
+$D diff base574 1 feat574 1              # gh-574: the fused lm_head+row-max kernel disappears
+$D diff master-capoff 1 master-cap8 1    # gh-573: the ffn_b2 triangle disappears
+$D diff feat574 1 master-capoff 1        # the negative control: must print 0 kernels on both sides
+```
 
 ```bash
 # Part 4, the cap sweep. `sweep` reverses the cap order on alternate reps, so no cap sits

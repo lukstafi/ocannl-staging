@@ -10,6 +10,7 @@
 #   gh612_cells.sh snap    <tree> <label> <rep> [extra ocannl flags...]
 #   gh612_cells.sh profile <tree> <label> <rep> [n-harness-runs]
 #   gh612_cells.sh finger  <label> <rep>
+#   gh612_cells.sh diff    <labelA> <repA> <labelB> <repB>
 #   gh612_cells.sh sweep   <tree> <reps> <cap>...      # balanced cap order, see below
 #   gh612_cells.sh roofline <tree>
 #
@@ -55,13 +56,34 @@ ROUTINE=cross_entropy_loss_fwd
 # load-bearing: the cache key omits the Numerics policy (gh-ocannl-568), and a warm cache makes an
 # A/B vacuous by replaying the other arm's crowned schedule (report-gh481-cuda.md measured
 # compile_s 1.76 s warm against 29 s cold, with the "winner" being whatever the other arm found).
-cell_dir() { echo "$OUT_ROOT/$1/r$2"; }
+# Third path-safety finding in a row (relative paths, then empty paths, now traversal), so the gate
+# lives HERE -- the single place every subcommand's paths are built -- rather than at each `rm -rf`.
+# A label is caller input and feeds `rm -rf`: `../../../home/me/data` would escape OUT_ROOT entirely.
+# Two independent checks, because either alone is bypassable: a character whitelist, and a
+# containment test on the resolved parent.
+cell_dir() {
+  local label=$1 rep=$2 parent
+  case $label in
+    ""|*/*|*..*) echo "gh612_cells: bad label '$label' (no '/', no '..')" >&2; exit 2;;
+    *[!A-Za-z0-9._-]*) echo "gh612_cells: bad label '$label' (allowed: A-Za-z0-9._-)" >&2; exit 2;;
+  esac
+  case $rep in ""|*[!0-9]*) echo "gh612_cells: bad rep '$rep' (digits only)" >&2; exit 2;; esac
+  # Belt and braces: resolve the parent that will actually be operated on and require it to sit
+  # beneath OUT_ROOT, so a whitelist gap cannot turn into a deletion outside the results tree.
+  parent=$(mkdir -p "$OUT_ROOT/$label" 2>/dev/null && cd "$OUT_ROOT/$label" && pwd) || parent=""
+  case ${parent:-} in
+    "$OUT_ROOT"/*) ;;
+    *) echo "gh612_cells: cell path escaped OUT_ROOT: '$OUT_ROOT/$label'" >&2; exit 2;;
+  esac
+  printf '%s\n' "$parent/r$rep"
+}
 
 cmd_search() { (
   local tree=$1 label=$2 rep=$3; shift 3
   tree=$(require_dir "$tree")
   case ${tree:-} in /?*) ;; *) exit 2;; esac
   local out; out=$(cell_dir "$label" "$rep")
+  case ${out:-} in /?*) ;; *) exit 2;; esac
   rm -rf "$out"; mkdir -p "$out"            # mkdir BEFORE any redirection into it
   cd "$tree/benchmarks" || exit 1
   local t0=$SECONDS
@@ -76,6 +98,11 @@ cmd_search() { (
   # arm, and which arm shipped.
   grep -E 'untuned-default pipeline|winner replay ok|tune_placements: winner' "$out/search.err"
   grep -oh 'finer_fission [a-z]*' "$out"/cache/*.sexp 2>/dev/null | sort -u
+  # The crowned arm A candidate's calibration line: analytic FLOPs and bytes at the emitted kernel
+  # count. The report's constant-FLOPs check and its 528 -> 472 MB traffic figure are read from here.
+  local lbl; lbl=$(sed -n '1,/arm A (default placements) best/p' "$out/search.err" \
+    | grep -o 'best: [0-9.]* ms (F_sketch\[[^]]*\]' | sed 's/.*(//')
+  [ -n "${lbl:-}" ] && grep -F "calibration: $lbl" "$out/search.err" | head -1
 ) }
 
 # Warm replay of the cell's cached winner, capturing the emitted source and the launch geometry.
@@ -85,6 +112,7 @@ cmd_snap() { (
   tree=$(require_dir "$tree")
   case ${tree:-} in /?*) ;; *) exit 2;; esac
   local out; out=$(cell_dir "$label" "$rep")
+  case ${out:-} in /?*) ;; *) exit 2;; esac
   local snap="$out/armsnap"; rm -rf "$snap"; mkdir -p "$snap"
   cd "$tree/benchmarks" || exit 1
   rm -rf build_files
@@ -141,6 +169,7 @@ cmd_profile() { (
   tree=$(require_dir "$tree")
   case ${tree:-} in /?*) ;; *) exit 2;; esac
   local out; out=$(cell_dir "$label" "$rep")
+  case ${out:-} in /?*) ;; *) exit 2;; esac
   local src; src=$(cat "$out/armA.path")
   # Clear this subcommand's OWN artifact set before regenerating it. Every producing subcommand here
   # does that (`search` rm -rf's the cell, `snap` the snapshot dir); `profile` writing a
@@ -164,6 +193,8 @@ cmd_profile() { (
   done
   echo "  paired step p50 for this cell:"
   grep -ho '"p50":[0-9.]*' "$out/search.out" "$out/replay.out" 2>/dev/null
+  echo "--- bucket table (run 1; the report quotes all runs' shares) ---"
+  sed -n '/| bucket/,/directly seeded/p' "$out/bucket-1.txt"
 ) }
 
 # The acceptance fingerprints, read off the emitted source. Kernel parameter lists span multiple
@@ -172,6 +203,7 @@ cmd_profile() { (
 # gpt2_kernel_harness.py does.
 cmd_finger() {
   local out; out=$(cell_dir "$1" "$2")
+  case ${out:-} in /?*) ;; *) return 2;; esac
   # `|| return` on the COMMAND line: absent fingerprints must not look like passing ones. Without
   # it the geometry dump below still succeeds and `finger` exits 0 having printed no evidence.
   python3 - "$(cat "$out/armA.path")" "$out" <<'EOF' || return 1
@@ -205,6 +237,30 @@ show("LayerNorm sites", lambda ns: any(n.startswith(("gamma_","beta_")) for n in
 # gh-574: the lm_head GEMM alone, the row-max its own kernel -- not one fused segment.
 show("lm_head / CE tail", lambda ns: any(n in ("wte","logits","max_logits") for n in ns))
 show("QK^T sites", lambda ns: any(n.endswith("_q") for n in ns) and any(n.endswith("_k") for n in ns))
+# Part 1's five-kernel table and Part 5's attention line items.
+g1=lambda ns: any(re.fullmatch(r'l\d+_ffn_w1', n) for n in ns)
+show("FFN GEMM1 + gelu", g1)
+show("q/k/v projections", lambda ns: any(re.fullmatch(r'w_[qkv]_l\d+', n) for n in ns))
+show("out projections", lambda ns: any(re.fullmatch(r'w_o_l\d+', n) for n in ns))
+lm=lambda ns: "wte" in ns and any(n.endswith("_layer_norm") for n in ns)
+five=[i for i in sigs if g1(sigs[i]) or lm(sigs[i])]
+tot=sum(ms.values())
+print(f"the five kernels (4x FFN GEMM1 + lm_head): {sum(ms.get(i,0) for i in five):.3f} ms "
+      f"= {100*sum(ms.get(i,0) for i in five)/tot:.1f}% of {tot:.3f} ms")
+# Part 1's launch-geometry census, aggregated by RESIDENT BLOCK COUNT -- the quantity that made the
+# gh-569 story legible and the one Part 5 turns on.
+geo={}
+for m in re.finditer(r'seg (\d+)/(\d+) grid=\[(\d+);(\d+);(\d+)\] block=\[(\d+);(\d+);(\d+)\]',
+                     open(os.path.join(out,"launches.err")).read()):
+    if int(m.group(2))!=len(sigs): continue
+    g=[int(m.group(i)) for i in (3,4,5)]; b=[int(m.group(i)) for i in (6,7,8)]
+    geo[int(m.group(1))]=(g[0]*g[1]*g[2], b[0]*b[1]*b[2])
+agg=collections.defaultdict(lambda:[0,0.0])
+for i in sigs:
+    if i in geo: agg[geo[i][0]][0]+=1; agg[geo[i][0]][1]+=ms.get(i,0.0)
+print("blocks | kernels | ms | share")
+for blk,(n,t) in sorted(agg.items()):
+    print(f"  {blk:5} | {n:3} | {t:6.2f} | {100*t/tot:4.1f}%")
 EOF
   echo "--- launch geometry (arm A) ---"
   local n; n=$(grep -o "$ROUTINE seg 0/[0-9]*" "$out/launches.err" | awk -F/ '$2>1{print $2; exit}')
@@ -235,6 +291,48 @@ cmd_sweep() {
   echo "      matches cap -1's is not losing a trade-off, it is never firing."
 }
 
+# Cross-cell signature-set diff: groups kernels by their SIGNATURE (the sorted parameter-name tuple,
+# which is the identity that survives renumbering between two different fissions) and reports what
+# exists only in one cell. This is what pins a mechanism to named kernels rather than to a bucket
+# total -- Part 2's 14-vs-32 signatures and Part 3's 16-vs-17 are this subcommand's output.
+cmd_diff() {
+  local a; a=$(cell_dir "$1" "$2"); case ${a:-} in /?*) ;; *) return 2;; esac
+  local b; b=$(cell_dir "$3" "$4"); case ${b:-} in /?*) ;; *) return 2;; esac
+  python3 - "$1/r$2" "$a" "$3/r$4" "$b" <<'EOF' || return 1
+import re,sys,csv,glob,os,statistics,collections
+SIG=re.compile(r'extern\s+"C"\s+__global__\s+void\s+(\w+__seg(\d+))\s*\(([^)]*)\)', re.S)
+def load(name, out):
+    try: src=open(open(os.path.join(out,"armA.path")).read().strip()).read()
+    except OSError as e: sys.exit(f"{name}: {e} -- run `snap` first")
+    sigs={int(i):tuple(sorted(" ".join(q.split()).split()[-1].lstrip("*")
+                              for q in ps.split(",") if q.strip()))
+          for _,i,ps in SIG.findall(src)}
+    t=collections.defaultdict(list)
+    csvs=sorted(glob.glob(os.path.join(out,"kernels-*.csv")))
+    if not csvs: sys.exit(f"{name}: no kernels-*.csv -- run `profile` first")
+    for f in csvs:
+        for r in csv.DictReader(open(f)):
+            t[int(r["Name"].rsplit("__seg",1)[1])].append(float(r["TotalDurationNs"])/1e6)
+    ms={i:statistics.median(v) for i,v in t.items()}
+    per=collections.defaultdict(float); n=collections.defaultdict(int)
+    for i,sg in sigs.items(): per[sg]+=ms.get(i,0.0); n[sg]+=1
+    return name, sigs, per, n, len(csvs)
+(na,sa,pa,ca,ra)=load(sys.argv[1],sys.argv[2]); (nb,sb,pb,cb,rb)=load(sys.argv[3],sys.argv[4])
+print(f"{na}: {sum(pa.values()):.3f} ms / {len(sa)} kernels ({ra} harness runs)")
+print(f"{nb}: {sum(pb.values()):.3f} ms / {len(sb)} kernels ({rb} harness runs)")
+onlya=[k for k in pa if k not in pb]; onlyb=[k for k in pb if k not in pa]
+sh_a=sum(pa[k] for k in pa if k in pb); sh_b=sum(pb[k] for k in pb if k in pa)
+print(f"\nsignatures only in {na}: {sum(ca[k] for k in onlya)} kernels, {sum(pa[k] for k in onlya):.3f} ms")
+for k in sorted(onlya, key=lambda k:-pa[k])[:8]: print(f"  {pa[k]:7.3f} ms  {', '.join(k)[:120]}")
+print(f"signatures only in {nb}: {sum(cb[k] for k in onlyb)} kernels, {sum(pb[k] for k in onlyb):.3f} ms")
+for k in sorted(onlyb, key=lambda k:-pb[k])[:8]: print(f"  {pb[k]:7.3f} ms  {', '.join(k)[:120]}")
+print(f"\nshared signatures: {sh_a:.3f} -> {sh_b:.3f} ms ({sh_b-sh_a:+.3f}); "
+      f"NET {sum(pb.values())-sum(pa.values()):+.3f} ms")
+print("A zero-differing-signatures result means the two cells emit the same kernel set -- that is the"
+      "\nnegative-control reading, and it is stronger than any timing agreement.")
+EOF
+}
+
 cmd_roofline() { (
   local tree=$1
   tree=$(require_dir "$tree")
@@ -252,6 +350,7 @@ case $sub in
   snap)     cmd_snap     "$@" ;;
   profile)  cmd_profile  "$@" ;;
   finger)   cmd_finger   "$@" ;;
+  diff)     cmd_diff     "$@" ;;
   sweep)    cmd_sweep    "$@" ;;
   roofline) cmd_roofline "$@" ;;
   *) sed -n '2,20p' "$0"; exit 1 ;;
