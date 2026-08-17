@@ -1,0 +1,6 @@
+negative-zero host data survives initialization: true
+register-tiled Tile_mma preserves negative zero (bitwise vs the serial twin): true
+register tiling renders a bit-preserving A splat: true
+vectorized reference carries zeros of both signs: true
+vectorized FMA preserves a negative-zero uniform operand (bitwise vs the serial twin): true
+vectorized rendering renders a bit-preserving splat: true

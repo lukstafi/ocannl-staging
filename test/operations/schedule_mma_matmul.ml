@@ -813,6 +813,92 @@ let () =
     skipped "extent-adapted tensorized matmul matches the serial twin bitwise";
     skipped "extent-adapted tile width covers the column extent");
 
+  (* --- Single rounding of the accumulator update (gh-ocannl-614). Every other f32 leg here feeds
+     exactly-representable products, so it cannot tell a fused update from a multiply and an add:
+     both are exact. This one feeds products that need ~40 mantissa bits, so a vector arm that
+     rounded twice per k step would diverge from the serial twin's [fmaf] chain in the low bits —
+     and the comparison is bitwise, which is where such a divergence shows.
+
+     That matters because the whole-vector arm gcc needs is a target builtin
+     ([C_syntax.vec_fma_builtin], mirroring clang's [__builtin_elementwise_fma]) rather than the
+     obvious [dst = a * b + dst]: gcc -O3 spills the C-tile when the update is a per-lane
+     subscripted loop (~9x on this GEBP shape), while [a * b + dst] allocates well but is only
+     MAYBE contracted. So this leg pins what the emission promises — a fused chain in serial k
+     order, bitwise equal to the fallback — and the structural check pins that a whole-vector arm
+     is on offer at all, which is the part that only shows up as throughput. --- *)
+  if not on_gpu then (
+    let fi = 8 and fk = 32 and fj = 32 in
+    (* Full-mantissa operands: each product needs more bits than f32 carries, so fma and mul-add
+       differ, and both vary with both axes (69 and 53 are coprime to the strides). *)
+    let fav =
+      Array.init (fi * fk) ~f:(fun x -> 1.0 +. (Float.of_int ((x % 69) + 3) *. 0x1p-18))
+    in
+    let fbv =
+      Array.init (fk * fj) ~f:(fun x -> -1.0 -. (Float.of_int ((x % 53) + 5) *. 0x1p-17))
+    in
+    let fa = TDSL.ndarray fav ~label:[ "fua" ] ~input_dims:[ fk ] ~output_dims:[ fi ] () in
+    let fb = TDSL.ndarray fbv ~label:[ "fub" ] ~input_dims:[ fj ] ~output_dims:[ fk ] () in
+    let%op fc0 = fa * fb in
+    let ctx_f0 = Context.auto () in
+    let ctx_f0, routine_f0 =
+      Context.compile
+        ~lowered_transform:(fun opt -> opt)
+        ctx_f0
+        (named "mm_fused_serial" (Train.forward fc0))
+        Ir.Indexing.Empty
+    in
+    let ctx_f0 = Context.run ctx_f0 routine_f0 in
+    let want_fused =
+      nonzero "mm_fused_serial" (Context.get_values ctx_f0 fc0.Tensor.value)
+    in
+    let%op fc1 = fa * fb in
+    let fused_schedule (opt : LL.optimized) : Sched.schedule =
+      let paths = nest_paths opt.LL.llc in
+      let i, j, k =
+        match List.find_exn paths ~f:(fun p -> List.length p = 3) with
+        | [ i; j; k ] -> (i, j, k)
+        | _ -> assert false
+      in
+      let ez, zsyms = Sched.expand_zero ~tn:fc1.Tensor.value in
+      let zj = match zsyms with [ _; zj ] -> zj | _ -> assert false in
+      let rz = Sched.Retype { axis = zj; ty = LL.Workgroup } in
+      let tz, _lane = Sched.tensorize ~i ~j ~k ~simd_width:fj in
+      [ ez; rz; tz ]
+    in
+    let transform_f opt = Sched.apply (fused_schedule opt) opt in
+    let ctx_f = Context.auto () in
+    let ctx_f, routine_f =
+      Context.compile ~lowered_transform:transform_f ctx_f
+        (named "mm_fused_mma" (Train.forward fc1))
+        Ir.Indexing.Empty
+    in
+    let ctx_f = Context.run ctx_f routine_f in
+    let got_fused = Context.get_values ctx_f fc1.Tensor.value in
+    (* Inexact by construction — each operand carries ~19 mantissa bits, so their product needs ~37
+       and f32 holds 24 — but checked rather than asserted: were the products exactly representable
+       this leg would silently duplicate the first one, which cannot see a rounding difference. *)
+    let inexact_in_f32 x = Float.(Int32.float_of_bits (Int32.bits_of_float x) <> x) in
+    p "full-mantissa products are inexact in f32"
+      (List.for_all (List.range 0 (fi * fk)) ~f:(fun x ->
+           inexact_in_f32 (fav.(x) *. fbv.(x % (fk * fj)))));
+    p "full-mantissa tensorized matmul matches the serial twin bitwise"
+      (Array.for_all2_exn got_fused want_fused ~f:Float.equal);
+    match read_generated "mm_fused_mma" with
+    | None -> p "register tiling offers a whole-vector fused accumulator update" false
+    | Some src ->
+        let has s = String.is_substring src ~substring:s in
+        p "register tiling offers a whole-vector fused accumulator update"
+          (has "Tile_mma register tiling"
+          && has "__builtin_elementwise_fma"
+          (* The gcc arm: a whole-vector builtin, not the per-lane subscripted loop the spill
+             lives in. The [#elif] guard is emitted target-independently. *)
+          && has "#elif defined(__FMA__)"
+          && has "__builtin_ia32_vfmadd"))
+  else (
+    skipped "full-mantissa products are inexact in f32";
+    skipped "full-mantissa tensorized matmul matches the serial twin bitwise";
+    skipped "register tiling offers a whole-vector fused accumulator update");
+
   (* --- The staged + tensorized composition (lane-aware Stage): shared tiles for ma and mb,
      cooperatively loaded under fresh extent-32 Workgroup lane loops, then the micro-kernel
      tensorized. Loop order after the swaps is i_o(Grid) { k_o { i_i { j { k_i } } } }, so both

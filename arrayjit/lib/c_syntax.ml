@@ -391,6 +391,22 @@ module type C_syntax_config = sig
         captured_log_prefix) to the format string and arguments. *)
 end
 
+(** A C source literal for the floating-point constant [c].
+
+    The three special values [%.16g] cannot spell, plus a fourth it spells {e wrong}: a value with no
+    fractional part comes out without a radix point, hence as a C {e integer} literal, and while that
+    is value-preserving for every other constant, [%.16g (-0.)] is ["-0"] — the integer zero, [+0.0]
+    once cast. So a [-0.0] in host data silently became [+0.0] wherever the constant fill inlines as
+    scalar stores, the same negative-zero normalization as the vector splat (gh-ocannl-615). Only
+    this value needs the radix point forced; spelling every whole number as [N.0] instead would be
+    equivalent C and churn every codegen snapshot. *)
+let c_float_literal c =
+  if Float.(c = infinity) then "INFINITY"
+  else if Float.(c = neg_infinity) then "(-INFINITY)"
+  else if Float.is_nan c then "NAN"
+  else if Float.(c = 0.) && Float.ieee_negative c then "-0.0"
+  else Printf.sprintf "%.16g" c
+
 (** The C-family rendering of a binary operation, from {!Ops.binop_c_syntax}: prefix, first operand,
     infix, second operand (breaking after the operator), suffix.
 
@@ -1163,6 +1179,31 @@ module C_syntax (B : C_syntax_config) = struct
      exit — and the register-tiled [Tile_mma] micro-kernel (gh-ocannl-469) will hold its C-tile as
      an RM×RN grid of vector registers across the fused k-loop. *)
 
+  (* Broadcast the scalar VARIABLE [src] across every lane of [vtyp], as an initializer holding
+     [lanes] copies of it. The vector extensions splat a scalar operand of a binary operator but
+     have no cast or intrinsic form that does it, and the two arithmetic spellings that look like
+     they would both change bits the scalar twin keeps — while a remainder loop, a peeled edge and
+     the serial fallback all consume the element itself, so the rendering's BITWISE-equality promise
+     covers every input, not merely the well-behaved ones:
+
+     - [((vtyp){0} + x)] normalizes a negative-zero [x] to [+0.0], since IEEE-754 has
+       [(+0.0) + (-0.0) = +0.0] (gh-ocannl-615);
+     - [(x - (vtyp){0})], its replacement, is the identity on both zeros — but it is still
+       ARITHMETIC, so it quiets a signaling NaN: verified as [0x7f800001 -> 0x7fc00001] under gcc
+       [-fsignaling-nans], and by inspection at clang [-O0]. That it usually survives is only the
+       optimizer folding the subtraction into a broadcast because nothing requires it to respect
+       sNaN — the same "the compiler will probably do the right thing" dependency that
+       [vec_fma_builtin] refuses for [a * b + c] (Codex P2 on PR #360).
+
+     An initializer performs no arithmetic — each lane is a copy — so it preserves every bit
+     pattern unconditionally. Taking a variable rather than an expression is what keeps that cheap:
+     the callers bind the scalar once (the operand can be a memory load under a
+     [convert_precision] wrapper), so the [lanes] repetitions below are repetitions of an
+     identifier. *)
+  let vec_splat ~vtyp ~lanes src =
+    let open PPrint in
+    string (Printf.sprintf "(%s){%s}" vtyp (String.concat ~sep:", " (List.init lanes ~f:(fun _ -> src))))
+
   (* The vector-extension typedef shared by the explicit-SIMD renderings: [lanes] elements of the
      compute precision (f32, f64, or -- where the target has native 16-bit arithmetic, gh-ocannl-516
      -- fp16, whose element type [HALF_T] is [_Float16] exactly when that probe passed). *)
@@ -1290,8 +1331,11 @@ module C_syntax (B : C_syntax_config) = struct
 
   (* [dst = op(dst, src)] on whole vector registers ([src] must also name a register): vector infix
      arithmetic for the ring operators, a fixed-trip per-lane loop for [Max]/[Min] (which have no
-     vector infix; keeps the scalar path's [fmaxf]/[fminf] NaN semantics and SLP-vectorizes under
-     -O2 like the per-lane FMA fallback). *)
+     vector infix, and whose builtins do not share [fmaxf]/[fminf]'s NaN semantics, so the scalar
+     path's spelling is the only faithful one). The per-lane form relies on SLP to reassemble it,
+     which is the shape gh-ocannl-614 found gcc -O3 mis-allocating for the FMA update; the
+     accumulator grids reached here are 1xN rather than RMxRN, so the register pressure that turned
+     into spills there is not present, but a wide [Max] reduction benching ~10x off would be this. *)
   let vec_acc_combine ~prec ~lanes ~op ~dst ~src =
     let open PPrint in
     match op with
@@ -1307,9 +1351,46 @@ module C_syntax (B : C_syntax_config) = struct
         ^^ semi
     | _ -> invalid_arg "C_syntax.vec_acc_combine: not an accumulation operator"
 
+  (* A target builtin spelling a WHOLE-VECTOR fused multiply-add for this (compute precision, lane
+     count), with the preprocessor condition under which it exists — [None] where none is known.
+
+     Why this table exists at all: gcc has no generic vector [fma] builtin (clang's
+     [__builtin_elementwise_fma], the first arm of [vec_acc_fma], is a clang extension), so on gcc
+     the accumulator update fell to the per-lane loop, whose lane-indexed reads and stores gcc -O3
+     mis-register-allocates — on the packed GEBP shape it unrolls the k-loop 7x and spills the whole
+     C-tile, 18 instructions / 8 FMAs / 0 stack references per k step becoming 279 / 56 / 73, a ~9x
+     throughput loss against -O2 at every storage precision (gh-ocannl-614; the issue's report of an
+     f16-only effect predates the extent-adapted tile width). The cause is the lane subscripting
+     itself:
+     straight-line lane stores, a lane-indexed scratch array, and a [(vtyp){...}] constructor of
+     per-lane [fmaf] calls all spill the same way, while ANY form that reaches gcc as one vector
+     operation costs the -O2 instruction count at -O3.
+
+     Which is why it is a builtin and not the obvious [dst = a * b + dst]: that would reach gcc as
+     one vector operation too, and does allocate perfectly, but it is only MAYBE contracted into an
+     FMA — under [cc_backend_fp_contract=off] it measurably is not (a mul and an add, two roundings,
+     verified against these builtins), and then the vector body would round differently from the
+     scalar peel and the serial fallback it promises to equal bit for bit. These builtins are fused
+     by definition, so the promise holds under every flag.
+
+     Only widths validated on real hardware are listed. The 512-bit forms ([..._mask] with an
+     all-ones mask and a rounding argument) exist but are unexercised here, and a wrong signature
+     would fail the kernel compile outright rather than merely run slow; [cc_vector_bytes] resolves
+     to 32 or 16 unless set by hand, so nothing reaches them by default. Native-fp16 compute (16
+     [_Float16] lanes) has no gcc builtin at all and keeps the per-lane arm. *)
+  let vec_fma_builtin ~prec ~lanes =
+    (* [__FMA__] is x86-only, so the arm self-selects away on every other target. *)
+    let x86 name = Some ("defined(__FMA__)", name) in
+    match (prec, lanes) with
+    | Ops.Single_prec _, 4 -> x86 "__builtin_ia32_vfmaddps"
+    | Ops.Single_prec _, 8 -> x86 "__builtin_ia32_vfmaddps256"
+    | Ops.Double_prec _, 2 -> x86 "__builtin_ia32_vfmaddpd"
+    | Ops.Double_prec _, 4 -> x86 "__builtin_ia32_vfmaddpd256"
+    | _ -> None
+
   (* [dst = fma(a, b, dst)] elementwise-fused on vector registers (single rounding, matching the
-     scalar path's [fmaf]/[fma]): clang's [__builtin_elementwise_fma] where available, otherwise the
-     per-lane fused loop. *)
+     scalar path's [fmaf]/[fma]): clang's [__builtin_elementwise_fma] where available, else a
+     target's whole-vector builtin ({!vec_fma_builtin}), else the per-lane fused loop. *)
   let vec_acc_fma ~prec ~lanes ~dst ~a ~b =
     let open PPrint in
     (* At fp16 the per-lane fallback must be the *same* fused multiply-add the scalar path emits,
@@ -1323,10 +1404,19 @@ module C_syntax (B : C_syntax_config) = struct
       | Ops.Half_prec _ -> "OCANNL_HALF_FMA"
       | _ -> "fmaf"
     in
+    let builtin_arm =
+      match vec_fma_builtin ~prec ~lanes with
+      | None -> empty
+      | Some (guard, builtin) ->
+          string ("#elif " ^ guard)
+          ^^ hardline
+          ^^ string (Printf.sprintf "%s = %s(%s, %s, %s);" dst builtin a b dst)
+          ^^ hardline
+    in
     string "#if OCANNL_HAS_ELEMENTWISE_FMA"
     ^^ hardline
     ^^ string (Printf.sprintf "%s = __builtin_elementwise_fma(%s, %s, %s);" dst a b dst)
-    ^^ hardline ^^ string "#else" ^^ hardline
+    ^^ hardline ^^ builtin_arm ^^ string "#else" ^^ hardline
     ^^ string
          (Printf.sprintf
             "for (int ocannl_l__ = 0; ocannl_l__ < %d; ++ocannl_l__) %s[ocannl_l__] = \
@@ -2603,7 +2693,16 @@ module C_syntax (B : C_syntax_config) = struct
                arguments need a vector, where the implicit vector-scalar splat of binary operators
                does not apply. *)
             if scalar_mentions llsc then vec_expr llsc p
-            else string ("((" ^ vtyp ^ "){0} + ") ^^ uniform_scalar ~written prec llsc ^^ string ")"
+            else
+              (* Bound to a scalar temp first: [vec_splat] repeats its argument per lane, and this
+                 one can be a memory load. Emitted here, hence before the vector declaration the
+                 caller wraps around this expression. *)
+              let sname = fresh "vunif" in
+              emit
+                (string (B.typ_of_prec prec ^ " " ^ sname ^ " = ")
+                ^^ uniform_scalar ~written prec llsc
+                ^^ semi);
+              vec_splat ~vtyp ~lanes sname
           in
           (vec_expr, vec_operand)
         in
@@ -3943,9 +4042,13 @@ module C_syntax (B : C_syntax_config) = struct
                            (Printf.sprintf "tmma_b__[tmma_l__ * %d + tmma_j__ + %d]" ldb (c * lanes))))
                 @ List.concat
                     (List.init rm ~f:(fun r ->
-                         string
-                           (Printf.sprintf "%s tmma_a_%d__ = ((%s){0} + %s);" vtyp r vtyp
-                              (a_elt ~row:(Printf.sprintf "(tmma_i__ + %d)" r) ~l:"tmma_l__"))
+                         (string
+                            (Printf.sprintf "%s tmma_as_%d__ = %s;" ctyp r
+                               (a_elt ~row:(Printf.sprintf "(tmma_i__ + %d)" r) ~l:"tmma_l__"))
+                         ^^ hardline
+                         ^^ string (Printf.sprintf "%s tmma_a_%d__ = " vtyp r)
+                         ^^ vec_splat ~vtyp ~lanes (Printf.sprintf "tmma_as_%d__" r)
+                         ^^ semi)
                          :: List.init rn ~f:(fun c ->
                              vec_acc_fma ~prec ~lanes
                                ~dst:grid.(r).(c)
@@ -4156,14 +4259,11 @@ module C_syntax (B : C_syntax_config) = struct
     | Constant c ->
         let from_prec = Ops.double in
         let prefix, postfix = B.convert_precision ~from:from_prec ~to_:prec in
-        let c_str =
-          if Float.(c = infinity) then "INFINITY"
-          else if Float.(c = neg_infinity) then "(-INFINITY)"
-          else if Float.is_nan c then "NAN"
-          else Printf.sprintf "%.16g" c
-        in
+        let c_str = c_float_literal c in
         let expr =
-          if String.is_empty prefix && Float.(c < 0.0) && not Float.(c = neg_infinity) then
+          (* The sign BIT, not [c < 0.]: an unparenthesized [-0.0] beside a subtraction would
+             render as [--0.0]. *)
+          if String.is_empty prefix && Float.ieee_negative c && not Float.(c = neg_infinity) then
             string "(" ^^ string c_str ^^ string ")" ^^ string postfix
           else string prefix ^^ string c_str ^^ string postfix
         in
@@ -4329,13 +4429,7 @@ module C_syntax (B : C_syntax_config) = struct
     | Constant c ->
         let from_prec = Ops.double in
         let prefix, postfix = B.convert_precision ~from:from_prec ~to_:prec in
-        let c_str =
-          if Float.(c = infinity) then "INFINITY"
-          else if Float.(c = neg_infinity) then "(-INFINITY)"
-          else if Float.is_nan c then "NAN"
-          else Printf.sprintf "%.16g" c
-        in
-        (string prefix ^^ string c_str ^^ string postfix, [])
+        (string prefix ^^ string (c_float_literal c) ^^ string postfix, [])
     | Constant_bits i ->
         let from_prec = Ops.int64 in
         let prefix, postfix = B.convert_precision ~from:from_prec ~to_:prec in

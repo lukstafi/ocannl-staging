@@ -690,14 +690,6 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   take `tile_prec` (exact widenings only) to fold the widening into the pack; seeding resolves the
   same `Numerics.cpu_compute_prec` the emission uses — change either side only through that
   helper, or "timed is not tensorized" returns for narrow sites.
-- **gcc `-O3` can collapse the register tiling ~10x on the f16 d-bridge shape** (gcc 15.2, x86):
-  on the k_o-outermost serial GEBP it unrolls the k-loop 4x and spills the accumulator C-tile
-  (hot loop 29 insns / 2 stack refs at `-O2` vs 375 / 147 at `-O3`; measured 3.4 vs ~30 GFLOP/s,
-  bin/narrow_gebp_bench). f32/bf16 shapes and clang (whose `__builtin_elementwise_fma` arm avoids
-  per-lane subscripts) are unaffected; the fragment-contracted i_o-outermost shape dodges it, and
-  `#pragma GCC unroll 1` does NOT fix it. When a narrow cc GEMM benches absurdly slow, try
-  `cc_backend_optimization_level=2` before suspecting the rendering; the tuner's measured search
-  routes around it on its own.
 - **A "packmma" timing is not evidence that anything tensorized.** A `Tile_mma` whose register-tile
   preconditions fail renders the scalar fallback and the run still reports under whatever the
   variant was named — the column extent below the compute vector width is the easiest way in (at
@@ -711,6 +703,46 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   `--bm=`/`--bk=`), defaulting to 64/256. The packed variants need `n mod bm = 0` and `n mod bk = 0`
   — an n meeting neither still runs the unblocked naive variant, so an arbitrary extent (the sort a
   register-tiling review actually asks about) can be measured against something.
+- **Negative zero is what breaks a "bitwise equal to the scalar twin" claim** (gh-ocannl-615). Two
+  spellings normalized it, both fixed but both easy to reintroduce: a scalar-to-vector splat written
+  `((vtyp){0} + x)` returns `+0.0` for `x = -0.0` (IEEE `(+0.0) + (-0.0) = +0.0`), so use
+  `C_syntax.vec_splat` — `x - (vtyp){0}`, the exact identity on every input; and a float constant
+  printed with `%.16g` alone comes out as the C *integer* literal `-0`, i.e. `+0.0` once cast, so
+  print through `C_syntax.c_float_literal`. Neither shows up in ordinary parity tests: `Float.equal`
+  reports `-0. = +0.`, and a divergence in the sign of a zero product only survives into a result
+  whose accumulator is itself a signed zero. `test/operations/vec_signed_zero` is the regression, and
+  its splat legs need an accumulator preloaded with `-0.0` (a zeroed one absorbs the sign) — which is
+  why they are an explicit `=+` into an initialized tensor rather than a `schedule_mma_matmul` leg.
+  The literal is the CROSS-BACKEND half — confirmed to have corrupted CUDA host data too, not just
+  cc — so its leg deliberately runs on every backend while the splat legs are CPU-gated; a
+  `Vec_extensions`-only test would have missed it. **A splat must be arithmetic-free, not merely
+  value-preserving**: `vec_splat`'s first fix, `x - (vtyp){0}`, is the identity on both zeros but
+  still quiets a signaling NaN (`0x7f800001 -> 0x7fc00001` under gcc `-fsignaling-nans`; that it
+  usually survives is only the optimizer folding the subtraction away, which nothing requires — the
+  same "the compiler will probably do the right thing" dependency `vec_fma_builtin` refuses for
+  `a * b + c`). It renders an initializer of `lanes` copies of a bound scalar temp instead, which is
+  why the callers bind the operand first. sNaN cannot be tested end to end — host values cross as
+  OCaml doubles and the narrowing quiets it — so the structural pins keep both arithmetic spellings
+  out by name.
+- **A vector accumulator update must reach the compiler as ONE vector operation** (gh-ocannl-614,
+  fixed). gcc -O3 register-allocated the per-lane `fmaf` loop catastrophically: on the packed GEBP
+  shape it unrolled the k-loop 7x and spilled the whole C-tile — 18 insns / 8 FMAs / 0 stack refs
+  per k step at `-O2` becoming 279 / 56 / 73 at `-O3`, a ~9x throughput loss at every storage
+  precision (`bin/narrow_gebp_bench` packmma: 112 → 12.6 GFLOP/s at f32, 94 → 10.4 at f16; the
+  earlier claim that f32/bf16 were spared predates the extent-adapted tile width). The cause is the
+  lane subscripting itself, not the unrolling: straight-line lane stores, a lane-indexed scratch
+  array, a `(vtyp){...}` constructor of per-lane `fmaf` calls, and `#pragma GCC unroll 1` all spill
+  the same way, while every form that arrives as one vector op costs the `-O2` count at `-O3`.
+  `C_syntax.vec_fma_builtin` therefore adds a middle arm to `vec_acc_fma` — a target whole-vector
+  FMA builtin (`__builtin_ia32_vfmadd{ps,pd}[256]` under `defined(__FMA__)`) mirroring clang's
+  `__builtin_elementwise_fma`, with the per-lane loop still last. Not `dst = a * b + dst`, which
+  allocates just as well but is only maybe-contracted: under `cc_backend_fp_contract=off` gcc
+  emits a mul and an add, and `schedule_mma_matmul`'s full-mantissa leg (the only bitwise leg whose
+  products are inexact, hence the only one that can see this) then fails. Residual: 512-bit widths
+  and native-fp16 lanes have no listed builtin and keep the per-lane arm, as does `vec_acc_combine`'s
+  `Max`/`Min` loop (no builtin matches `fmaxf`'s NaN semantics) — if a `Vectorized` reduction or a
+  wide-vector kernel benches ~10x off, this is the first thing to check, and
+  `cc_backend_optimization_level=2` still confirms it in one run.
 - Computing fp16 in fp16 on a *promoted* target is a ~18x loss against f32-compute-over-fp16
   (measured, same bench) — the reason `fp16_arithmetic` is ignored off-native and pure-f16 seeds
   gate on `hardware_limits.native_fp16_arithmetic`. The decisive pure-f16-vs-f32-GEBP measurement
