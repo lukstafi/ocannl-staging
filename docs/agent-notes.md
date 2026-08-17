@@ -1084,11 +1084,15 @@ that they earn a lookup rather than always-loaded space.
   so an undeclared one leaves a stale target in place and the test green without having run. The
   lowercase spelling is not the redundant one: `Utils.read_env_var` consults it FIRST, so
   `ocannl_profile` beats `OCANNL_PROFILE`. The commandline is the permissive side and always has
-  been (`Utils.cmdline_var_names`): prefixed or not, dashed or underscored at each separator
-  independently, either case, one leading dash or two, and the value separator is `=`, `_`, `-` or
-  nothing. That spelling table (`Utils.cmdline_var_prefixes`) is also what the unknown-argument
-  warning matches against — do not give it a parser of its own, which is how it came to warn about
-  arguments the reader applied and stay silent about ones it ignored.
+  been (`Utils.cmdline_var_names`), but along fixed axes rather than per separator: prefixed or
+  not, either case, one leading dash or two (never zero — a bare argument is the host's
+  positional), value separator `=`, `_`, `-` or nothing, and the dashing is TWO choices — the
+  prefix separator on its own, the key's own separators as a group. So `--ocannl-log_level=1` and
+  `--ocannl_log-level=1` are the same setting while a halfway-dashed key
+  (`--ocannl-print_decimals-precision=1`) is not a spelling at all. That table
+  (`Utils.cmdline_var_prefixes`) is also what the unknown-argument warning matches against — do not
+  give it a parser of its own, which is how it came to warn about arguments the reader applied and
+  stay silent about ones it ignored.
 - An OCANNL-linked executable's stdout belongs to the program, not to the library: the config
   startup chatter (welcome message, `log_config_sourcing` trace, profile banner) and every other
   library diagnostic go to stderr. That is what lets a tool make stdout a data channel — the

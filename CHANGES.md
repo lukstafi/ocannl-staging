@@ -83,8 +83,11 @@
   every dune rule that has to declare the ambient variables it must be invalidated by, which had to
   enumerate four spellings per key while the natural-looking all-dashed `ocannl-log-level` was not
   one of them, so a dep on it tracked nothing (gh-ocannl-593). On the commandline dashes stay, and
-  now go all the way: the prefix separator and the key's own separators dash independently, so
-  `--ocannl-log-level=1` is read. The unknown-argument warning stopped parsing arguments a second
+  now go all the way: the prefix separator dashes on its own and the key's own separators dash as a
+  group, so `--ocannl-log-level=1` is read (a key dashed halfway is not a spelling and says so).
+  A bare `ocannl_log_level=1`, with no leading dash, is no longer read at all: a positional
+  argument belongs to the host application, and an OCANNL-linked tool taking a path named
+  `ocannl_config` was one key name away from having it eaten. The unknown-argument warning stopped parsing arguments a second
   way (split on `=`, dash to underscore, look up the result) and now asks the reader's own table
   whether any known key would read the argument — closing both silent contradictions the two
   parsers produced: the all-dashed spelling used to pass validation and then be ignored, and

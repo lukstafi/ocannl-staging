@@ -9,8 +9,10 @@
 # separators all together -- `--ocannl_log_level=1`, `--ocannl-log_level=1`,
 # `--ocannl_log-level=1` and `--ocannl-log-level=1` are the same setting, a halfway
 # dashed name is not a spelling and is reported as an unknown argument. A single
-# leading dash works too, as does `_` or `-` in place of the `=`; in `ocannl_config`
-# files the names are case-insensitive. The values are case-sensitive and should be
+# leading dash works too, as does `_` or `-` in place of the `=`; a leading dash is
+# required though -- a bare `ocannl_log_level=1` is a positional argument of the host
+# application, and OCANNL leaves it alone. In `ocannl_config` files the names are
+# case-insensitive. The values are case-sensitive and should be
 # lowercase where case is irrelevant. The configuration is read from a few sources,
 # from highest priority:
 # 1. Commandline arguments.

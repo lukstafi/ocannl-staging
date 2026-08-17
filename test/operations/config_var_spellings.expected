@@ -8,28 +8,20 @@ Environment variables for `profile`:
 Commandline arguments for `log_level`:
   -ocannl_log_level
   --ocannl_log_level
-  ocannl_log_level
   -OCANNL_LOG_LEVEL
   --OCANNL_LOG_LEVEL
-  OCANNL_LOG_LEVEL
   -ocannl_log-level
   --ocannl_log-level
-  ocannl_log-level
   -OCANNL_LOG-LEVEL
   --OCANNL_LOG-LEVEL
-  OCANNL_LOG-LEVEL
   -ocannl-log_level
   --ocannl-log_level
-  ocannl-log_level
   -OCANNL-LOG_LEVEL
   --OCANNL-LOG_LEVEL
-  OCANNL-LOG_LEVEL
   -ocannl-log-level
   --ocannl-log-level
-  ocannl-log-level
   -OCANNL-LOG-LEVEL
   --OCANNL-LOG-LEVEL
-  OCANNL-LOG-LEVEL
   --log_level
   -log_level
   --log-level
@@ -37,21 +29,16 @@ Commandline arguments for `log_level`:
 Commandline arguments for `profile`, qualified_only (see `Utils.cmdline_var_names`):
   -ocannl_profile
   --ocannl_profile
-  ocannl_profile
   -OCANNL_PROFILE
   --OCANNL_PROFILE
-  OCANNL_PROFILE
   -ocannl-profile
   --ocannl-profile
-  ocannl-profile
   -OCANNL-PROFILE
   --OCANNL-PROFILE
-  OCANNL-PROFILE
 
 Live lookups, against the environment and commandline the dune rule builds:
   read_env_var "demo_key":              kept-spelling, from ocannl_demo_key
   read_env_var "dashed_only_key":       None
-    (control) ocannl-dashed_only_key is set to dropped-lowercase
-    (control) OCANNL-DASHED_ONLY_KEY is set to dropped-uppercase
+    (control) ocannl-dashed_only_key is set to dropped-spelling
   read_cmdline_var "print_decimals_precision": 7, from --ocannl-print-decimals-precision=7
   read_cmdline_var "log_level":         0, from --ocannl_log_level_0

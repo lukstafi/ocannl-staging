@@ -437,13 +437,19 @@ let env_var_names n =
   [ prefixed; String.uppercase prefixed ]
 
 (** The commandline spellings of a config key, up to the value separator: the [ocannl_]-qualified
-    ones -- then, unless [qualified_only], the prefix-free ones, which need a leading dash to be
-    told from a host application's positional argument.
+    ones -- then, unless [qualified_only], the prefix-free ones.
+
+    Every spelling carries a leading dash, one or two. A bare [ocannl_log_level=1] used to be read
+    as well, and gh-ocannl-605 dropped it (Codex P2 on PR #363): a bare argument is a host
+    application's positional, and an OCANNL-linked tool taking a path -- [ocannl_config] is the
+    obvious one -- was one key name away from having it eaten. It also left the unknown-argument
+    warning with a spelling it could not diagnose, since a bare argument is exactly what it must
+    NOT claim to know about.
 
     The dashing is two independent choices, not one per separator: the prefix separator dashes on
     its own, and the key's own separators dash TOGETHER. For [log_level] that is
     [ocannl_log_level], [ocannl_log-level], [ocannl-log_level] and [ocannl-log-level] (each in
-    lowercase and in uppercase, each with one leading dash, two, or none). A key dashed halfway
+    lowercase and in uppercase, each with one leading dash or two). A key dashed halfway
     ([ocannl-print_decimals-precision]) is not a spelling -- and, since {!cmdline_var_prefixes} is
     also what the unknown-argument warning matches, it is reported as unknown rather than silently
     ignored, which is what makes the narrower contract safe to have (Codex P2 on PR #363).
@@ -464,8 +470,7 @@ let cmdline_var_names ?(qualified_only = false) n =
     List.concat_map [ "ocannl_"; "ocannl-" ] ~f:(fun prefix ->
         List.concat_map keys ~f:(fun k ->
             let name = prefix ^ k in
-            List.concat_map [ name; String.uppercase name ] ~f:(fun n ->
-                [ "-" ^ n; "--" ^ n; n ])))
+            List.concat_map [ name; String.uppercase name ] ~f:(fun n -> [ "-" ^ n; "--" ^ n ])))
   in
   let unqualified =
     if qualified_only then [] else List.concat_map keys ~f:(fun k -> [ "--" ^ k; "-" ^ k ])
@@ -1245,9 +1250,14 @@ let () = restore_settings ()
    `read_cmdline_var` itself scans -- so the warning cannot disagree with the reader about what a
    spelling means. It costs one pass over argv per known key, at module initialization. *)
 let () =
-  let ocannl_prefixes = [ "--ocannl_"; "--ocannl-"; "-ocannl_"; "-ocannl-" ] in
-  (* Case-folded, because the uppercase spellings are read too: `--OCANNL_LOG_LEVEL=1` is a
+  (* The leading dash is what makes an argument addressed rather than positional, which is why
+     `cmdline_var_names` no longer reads bare qualified spellings: these four prefixes now cover
+     every spelling it emits, so nothing is read that cannot also be diagnosed (Codex P2 on PR
+     #363). A bare `ocannl_config` on a host tool's commandline is a path, and stays one.
+
+     Case-folded, because the uppercase spellings are read too: `--OCANNL_LOG_LEVEL=1` is a
      setting, `--OCANNL_NOT_A_KEY=1` is a mistake, and both address OCANNL. *)
+  let ocannl_prefixes = [ "--ocannl_"; "--ocannl-"; "-ocannl_"; "-ocannl-" ] in
   let addresses_ocannl arg =
     let lower = String.lowercase arg in
     List.exists ocannl_prefixes ~f:(fun p -> String.is_prefix ~prefix:p lower)

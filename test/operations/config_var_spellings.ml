@@ -54,10 +54,13 @@ let () =
      gets. *)
   show_lookup "read_env_var" "dashed_only_key" (Utils.read_env_var "dashed_only_key");
   (* The control the negative leg needs: without it that None would read the same way if the rule
-     had set nothing at all, and the test would pass for the wrong reason. *)
-  List.iter [ "ocannl-dashed_only_key"; "OCANNL-DASHED_ONLY_KEY" ] ~f:(fun var ->
-      printf "    (control) %s is %s\n" var
-        (match Stdlib.Sys.getenv_opt var with Some v -> "set to " ^ v | None -> "UNSET"));
+     had set nothing at all, and the test would pass for the wrong reason. Only the lowercase
+     spelling is asked about, and it is the spelling the rule states: a lookup of the uppercase one
+     answers differently on Windows, where environment names are case-insensitive and the two are
+     one variable, and a control that reads differently per platform is not a control. *)
+  let dropped = "ocannl-dashed_only_key" in
+  printf "    (control) %s is %s\n" dropped
+    (match Stdlib.Sys.getenv_opt dropped with Some v -> "set to " ^ v | None -> "UNSET");
   show_lookup "read_cmdline_var" "print_decimals_precision"
     (Utils.read_cmdline_var "print_decimals_precision");
   (* The `_` value separator, on the spelling the old validator called unknown while the reader
