@@ -106,11 +106,14 @@ precision-blind. The one implicit width assumption — `hardware_limits.peak_flo
 single-precision ceiling that a native-fp16 kernel doubles — is documented on the field; it cannot
 reorder a site's candidates because they all share one policy-resolved compute precision.
 
-## Measurement (ROG: Core Ultra 9 275HX, WSL2, gcc 15.2, cc backend at -O3, n = 512)
+## Measurement, x86 (ROG: Core Ultra 9 275HX, WSL2, gcc 15.2, cc backend at -O3, n = 512)
 
 `bin/narrow_gebp_bench.exe` (naive serial vs packed GEBP serial vs grid-outermost per-chunk
 variant; exact inputs; readbacks outside the timed region — re-measured after the Codex round-1
-fix moved the spot-check readback out of the timed interval):
+fix moved the spot-check readback out of the timed interval). Recorded at the fixed-cap tile
+geometry, i.e. before the extent-adapted width above, so every row is a floor rather than a ceiling:
+the three f32-compute rows share a 24-wide tile peeling 8 of 512 columns, and the forced pure-f16
+row a 48-wide one peeling 32 — see the caveat under the negative control:
 
 | storage → compute | naive | packmma | packmma_par |
 |---|---|---|---|
@@ -131,15 +134,43 @@ fix moved the spot-check readback out of the timed interval):
   `cc_backend_optimization_level=2` run is the manual workaround on gcc.
 - The forced pure-f16 row is the negative control for the gating: computing in f16 where the
   compiler promotes is a ~18x loss against f32-compute — exactly why `fp16_arithmetic` is ignored
-  off-native and why the pure-f16 seeds fire only where the probe reports native.
+  off-native and why the pure-f16 seeds fire only where the probe reports native. **The 18x is
+  not all promotion**: forcing native doubles the lane count, so this row alone ran a 48-wide tile
+  peeling 32 columns, and the NEON sweep above puts a comparable geometry at ~3.6x of its own loss.
+  A clean re-measure at the adapted width is owed on that box. The direction is not in doubt — the
+  promoted arm does f32 arithmetic with extra per-value conversions, so it cannot come out ahead of
+  computing in f32 directly — but the magnitude is inflated.
 
-**Still pending: the honest NEON measurement.** The issue's decision point — pure-f16 GEBP vs
-f32-GEBP-over-narrow-storage on a native-arithmetic target (Apple Silicon / ARMv8.2-FP16) — needs
-hardware this machine doesn't have. Run `bin/narrow_gebp_bench.exe f16 512 20
---ocannl_fp16_arithmetic=true` there (the probe resolves native automatically; compare against the
-same command without the policy). If pure-f16 loses there too, the recorded outcome should be
-"not worth seeding beyond the seam" and the `fp16_arithmetic` gating stays as the only extra
-surface.
+## The NEON decision: pure-f16 wins (M4 Max, Apple clang, `-O3 -mcpu=native`, cc)
+
+The issue's reserved decision point — pure-f16 GEBP vs f32-GEBP-over-narrow-storage on a target
+whose fp16 arithmetic is genuinely native (the probe resolves ARMv8.2-FP16 to `Native` here).
+Sustained `packmma` throughput, medians of seven back-to-back runs at 20 repeats (single-threaded,
+so a cold machine's first run turbos ~40% above the sustained figure — the numbers below are the
+warm ones):
+
+| storage → compute | naive | packmma, n=512 | packmma, n=1024 |
+|---|---|---|---|
+| f32 → f32 | 3.02 | 83.2 | 99.8 |
+| bf16 → f32 (widened panels) | 0.48 | 82.9 | 102.5 |
+| f16 → f32 (widened panels) | 1.03 | 82.9 | 101.6 |
+| f16 → f16, native arithmetic | 3.06 | **132.5 (1.60x)** | **181.6 (1.79x)** |
+
+**Pure-f16 GEBP is worth having: 1.6-1.8x over f32-GEBP-over-narrow-storage**, close to the 2x the
+doubled lane count allows, and the gap grows with n. The emission is what the design intends — the
+inner loop is 24 `fmla.8h` in the by-element form against 24 `fmla.4s` for the f32 arm, same
+instruction count over twice the lanes, no spills. So the seeds this issue gates on
+`native_fp16_arithmetic` earn their place, and the gating is exactly right in both directions: the
+same policy forced on promoted x86 hardware loses ~18x (the negative control above).
+
+The measurement is only true at the adapted tile width. At the fixed cap, the same comparison at
+n = 512 read 37.0 vs 62.1 GFLOP/s — pure-f16 *losing* 1.7x — entirely because a 48-wide tile peels
+32 of 512 columns to scalar code. The honest first measurement therefore answered a second question
+it was not asked, and the answer changed the first one; see the tile-width section above.
+
+The seam's x86 verdict — narrow storage pays for itself, landing ~30% off the f32 GEBP — holds on
+ARM with the gap closed entirely: the widened-panel arms match plain f32 at n = 512 and edge past it
+at n = 1024, because the packing copy reads half the bytes for the same micro-kernel.
 
 ## Executed coverage
 
@@ -148,7 +179,9 @@ surface.
   leg (probe forced native via `OCANNL_CC_FP16_ARITHMETIC`; per-op rounding is unchanged under
   promotion, so parity stays bitwise) — all bitwise against serial twins, with emission pins.
 - `test/operations/schedule_mma_matmul.ml`: the half/bf16/fp8 whole-triple legs now register-tile
-  on the C backends (bitwise, narrow-exact inputs); transposed-B legs still pin the decline.
+  on the C backends (bitwise, narrow-exact inputs); transposed-B legs still pin the decline; an
+  8x40 leg pins the extent-adapted width (`full blocks 8x40 of 8x40` — peel-free at NEON's 4 f32
+  lanes and at AVX2's 8, where the old cap took 24 on both), bitwise against its serial twin.
 - `test/operations/sketch_family_tree.ml`: the seeding scenarios above.
 
 ## Relations
