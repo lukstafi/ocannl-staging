@@ -216,17 +216,21 @@ EOF
 
 cmd_profile() { (
   local tree=$1 label=$2 rep=$3 n=${4:-3}
-  tree=$(require_dir "$tree")
-  case ${tree:-} in /?*) ;; *) exit 2;; esac
+  # Same rule as `snap` and `replay`, and the fourth place it was needed: resolve the cell and
+  # retract the published profile artifacts before ANY other validation, tree check included.
+  # Otherwise a rejected retry leaves the old CSVs and buckets, and the `profiles` gate certifies
+  # the rejected run using stale measurements.
   local out; out=$(cell_dir "$label" "$rep")
   case ${out:-} in /?*) ;; *) exit 2;; esac
+  rm -f "$out"/kernels-*.csv "$out"/kernels-*.err "$out"/bucket-*.txt
+  tree=$(require_dir "$tree")
+  case ${tree:-} in /?*) ;; *) exit 2;; esac
   local src; src=$(cat "$out/armA.path")
   # Clear this subcommand's OWN artifact set before regenerating it. Every producing subcommand here
   # does that (`search` rm -rf's the cell, `snap` the snapshot dir); `profile` writing a
   # caller-chosen NUMBER of files is the case where forgetting it is silent rather than obvious --
   # a later run with a smaller count leaves the earlier run's CSVs behind and every consumer
   # medians over a mixture of two profiles.
-  rm -f "$out"/kernels-*.csv "$out"/kernels-*.err "$out"/bucket-*.txt
   cd "$tree/benchmarks" || exit 1
   python3 gpt2_kernel_harness.py --source "$src" --launches "$out/launches.err" \
           --out "$out/harness.hip" || exit 1
@@ -677,13 +681,16 @@ cmd_replays() { (
 # Mirrors `replays` for the profile artifacts: the reproduction's profile block is separate commands
 # whose individual failures do not stop it, and `diff` deliberately succeeds without CSVs by omitting
 # milliseconds -- so a cell could silently never be profiled while the block reported success.
+# PROFILE_RUNS (default 3) is the count each cell must have: accepting "at least one" would let a
+# profile interrupted after its first iteration satisfy the gate, and finger/diff would then compute
+# the report's stated three-run medians from a single run.
 cmd_profiles() { (
-  local missing=0 c
+  local want=${PROFILE_RUNS:-3} missing=0 c
   for c in "$@"; do
     local d="$OUT_ROOT/$c"
     if [ ! -s "$d/armA.path" ]; then echo "MISSING armA.path: $c" >&2; missing=$((missing+1)); continue; fi
     local k; k=$(ls "$d"/kernels-*.csv 2>/dev/null | wc -l)
-    [ "$k" -ge 1 ] || { echo "MISSING kernels-*.csv: $c" >&2; missing=$((missing+1)); continue; }
+    [ "$k" -eq "$want" ] || { echo "WRONG run count: $c has $k kernels-*.csv, want $want" >&2; missing=$((missing+1)); continue; }
     local b; b=$(ls "$d"/bucket-*.txt 2>/dev/null | wc -l)
     [ "$b" -eq "$k" ] || { echo "profile artifact mismatch: $c has $k CSVs but $b bucket files" >&2; missing=$((missing+1)); }
   done

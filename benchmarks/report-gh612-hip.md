@@ -175,8 +175,8 @@ cell those kernels were emitted by — 19.015 ms in that cell's pass-2 replay �
 0.7%**, against gh-569's 1.6–2.0%.
 
 The pairing is the load-bearing part of that sentence and it is worth being explicit about, because
-the looser reading is available and wrong. Across the three search reps the step p50 spans
-18.50–18.98 ms, and holding the r1 profile against r3's 18.50 would read a 2.1% discrepancy — but
+the looser reading is available and wrong. Across the three pass-2 replays of this arm the step p50
+spans 18.53–19.02 ms, and holding the r1 profile against r3's 18.53 would read a 1.9% discrepancy — but
 that is not a weaker validation of the same thing, it is not a validation at all: each rep crowns a
 different artifact with different tile sizes, and this profile is a profile of r1's. A per-kernel
 sum may only be checked against the step time of the compile it came from. Validation got tighter
@@ -701,11 +701,16 @@ $D search $M master-cap8 3;                                            $D search
 # (balanced braces + a clean hipcc compile) before accepting it -- a content-polling watcher can
 # copy a file whose `__global__` lines are all present but whose last body is torn, and the kernel
 # count alone does not catch that.
+# && rather than ; -- a failing snap/profile/finger must stop that cell rather than letting the
+# block run on. The `profiles` gate below cannot see a finger failure (complete artifacts satisfy it
+# even when finger exited nonzero on signature parsing or its completeness check), so the chaining
+# is what propagates that one.
 for c in "../wt-gh612-base base574" "../wt-gh612-feat feat574" "$M master-cap8"; do
-  set -- $c; $D snap "$1" "$2" 1; $D profile "$1" "$2" 1 3; $D finger "$2" 1
+  set -- $c
+  $D snap "$1" "$2" 1 && $D profile "$1" "$2" 1 3 && $D finger "$2" 1 || exit 1
 done
-$D snap $M master-capoff 1 --ocannl_virtualize_max_inline_fanin=-1
-$D profile $M master-capoff 1 3; $D finger master-capoff 1
+$D snap $M master-capoff 1 --ocannl_virtualize_max_inline_fanin=-1 \
+  && $D profile $M master-capoff 1 3 && $D finger master-capoff 1 || exit 1
 # These are separate commands too, so one failing snap/profile does not stop the block and `diff`
 # deliberately succeeds without CSVs by omitting milliseconds -- a cell could go unprofiled while the
 # block reported success and the chain/exclusive-signature timings silently vanished. Assert the set.
