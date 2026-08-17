@@ -24,9 +24,12 @@
    20, n, n, repeats; the output is m x n, the reduction depth k — deep-K gradient-GEMM geometries
    are m,n << k). Each scheduled variant needs its own [Sched.split] factors to divide the extents
    they split (i over m, j over n, k over k), and every one of them needs a non-degenerate nest to
-   address; a variant whose requirement fails is skipped by name with the reason. The C-backend
-   [tensorize] variant has no blocking at all, so an arbitrary (non-degenerate) extent still gets a
-   scheduled measurement, and the naive kernel runs at any size whatsoever.
+   address; a variant whose requirement fails is skipped by name with the reason. Two are exempt
+   from the divisibility half — [parallel] on the GPU backends and [tensorize] on the C ones, which
+   put nothing downstream of the split that a remainder guard would break — so an arbitrary
+   (non-degenerate) extent still gets a scheduled measurement on either branch, and the naive kernel
+   runs at any size whatsoever. Each line carries a position-weighted checksum of the whole output,
+   which is what makes a remainder-region error visible.
    Run with OCANNL_BACKEND=metal (or cuda); the C backends reject the shared schedules. Timing
    includes kernel executions and one device-to-host transfer per variant (runs queue on the
    stream; get_values synchronizes). *)
@@ -453,10 +456,21 @@ let () =
     let stop = Time_now.nanoseconds_since_unix_epoch () in
     let secs = Float.of_int63 Int63.(stop - start) /. 1e9 /. Float.of_int repeats in
     (* Element [1][1] of the m x n result — an interior cell, away from the corners — except where
-       the output is too small to have one; print which cell was checked. *)
+       the output is too small to have one; print which cell was checked. One interior cell cannot
+       see the remainder region an arbitrary extent creates, and a [Sched.split] whose factor does
+       not divide its extent puts the last partial block exactly there, so the whole output is
+       checksummed too: every correct variant prints the identical value, and one that drops or
+       repeats tail work does not. Position-weighted, because a plain sum of THIS data is 0 whenever
+       17 divides n (each mb row spans a full cycle of its 17 values, and the total factors as
+       sum_k (sum_i a) (sum_j b)) — exactly the arbitrary-extent regime the checksum is for.
+       The weight is capped so that products of these exact-in-binary operands stay exact in the
+       double accumulator. Both checks are outside the timed region. *)
+    let checksum =
+      Array.foldi values ~init:0.0 ~f:(fun i acc v -> acc +. (v *. Float.of_int (1 + (i % 251))))
+    in
     let spot = Int.min (n + 1) (Array.length values - 1) in
-    p "%-10s %8.3f ms  %8.2f GFLOP/s  (spot check [%d] %.1f)\n" variant (secs *. 1e3)
-      (flops /. secs /. 1e9) spot values.(spot);
+    p "%-10s %8.3f ms  %8.2f GFLOP/s  (spot [%d] %.1f, chk %.10g)\n" variant (secs *. 1e3)
+      (flops /. secs /. 1e9) spot values.(spot) checksum;
     secs
   in
   (* A static gate cannot enumerate every way a schedule can be rejected at a given size —
@@ -509,11 +523,14 @@ let () =
         ("bk", mma_bk, "k", k);
       ]
     in
-    let t_par =
-      bench_v ~variant:"parallel"
-        ~reqs:[ ("factor", par_b, "m", m); ("factor", par_b, "n", n) ]
-        ~schedule:(Some parallel_schedule) ()
-    in
+    (* [parallel] asks for nothing beyond a nest to address: it only splits the zeroing and
+       accumulation loops, with no swap, staging, privatization or tensorization downstream of the
+       split, so [Sched.split]'s remainder guard is all the partial block needs. Measured at 17^3,
+       33^3, 100^3 and 100x17x33 on metal — the checksum matches the naive leg's at each, tail
+       included. That does NOT generalize to the others: with their reqs disabled, smem, regtile and
+       both mma_pd variants raise [Invalid_argument] at 100^3, as do all six C-backend blocked
+       variants, so those gates report a real requirement rather than an assumed one. *)
+    let t_par = bench_v ~variant:"parallel" ~reqs:[] ~schedule:(Some parallel_schedule) () in
     let t_smem =
       bench_v ~variant:"smem"
         ~reqs:[ ("bm", smem_bm, "m", m); ("bn", smem_bn, "n", n); ("bk", smem_bk, "k", k) ]
