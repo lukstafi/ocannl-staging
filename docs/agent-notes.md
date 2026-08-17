@@ -325,7 +325,14 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   (per-cell multiplicity passes the visit cap because copy-position reads are rmw-exempt, yet each
   consumer re-sums the whole prefix); a structural expectation assuming a deep all-virtual chain
   must disable it (`Low_level.virtualize_settings.max_inline_fanin <- -1`). Like the other caps it
-  is a flippable policy prior, not legality (`test/operations/virtual_chain_fanin.ml`).
+  is a flippable policy prior, not legality (`test/operations/virtual_chain_fanin.ml`). **The cap's
+  bite is a function of model DEPTH, and the default 8 is only just inside the range where it fires
+  on a shallow model**: measured on gpt2_mini (4 layers, gfx1151, `report-gh612-hip.md`), caps 16,
+  32 and −1 produce the identical 76-segment arm A and untuned-default times within 0.3% of each
+  other — i.e. a cap of 16 never fires at all there, so a "cap sweep" above 8 is measuring nothing.
+  Cap 4 beat the default 8 by a non-overlapping 7.1% on that workload. Before reading a cap
+  comparison as a performance trade, check the arm's segment count: if it matches cap −1's, the
+  guard is silent, not losing.
 - `check_half_prec_constants_cutoff` (`Ops.exceeds_fp16_cutoff`, enforced from
   `Low_level.simplify_llc.check_constant` during lowering, hence backend-independently) is a
   HEADROOM policy, not a representability check: its default 2^14 sits far below fp16's 65504 max
@@ -368,8 +375,12 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   kernels at a 1024-thread launch, 70% of the CUDA step at 1.3% of fp32 peak (gh-ocannl-569). A
   companion that reduces OVER the site's minor axis (the lm_head's max-logits row) trims the common
   prefix below the site's arity and correctly still declines — that one needs fission, not coverage:
-  `fission_scheduled ~arity_cuts:true` (gh-ocannl-574) cuts it apart. Why such a pair merges in the
-  first place: the fission pass's no-parallelism-loss guard compares chains under the presets'
+  `fission_scheduled ~arity_cuts:true` (gh-ocannl-574) cuts it apart — measured on HIP/gfx1151 at
+  1.30x on gpt2_mini, the fused lm_head+row-max kernel going 8.036 ms → 0.230 ms for the GEMM plus a
+  separate row-max, and the four QKᵀ+mask+row-max sites 2.391 → 0.457 ms
+  (`report-gh612-hip.md`); it also COSTS +2.61 ms in the FFN bucket there, which the gh-573 fanin
+  guard is what recovers, so the two must be measured together or each is mis-attributed. Why such a
+  pair merges in the first place: the fission pass's no-parallelism-loss guard compares chains under the presets'
   `max_chain=2` cap, so trimming a rank-3 GEMM's minor axis reads as lossless; and a max-reduce is
   the shape that hits it because its `-inf` init is a `Set` nest, not a `Zero_out` — a sum-reduce's
   `Zero_out` already separates the statements. The arity_cuts mode analyzes uncapped AND requires
@@ -387,7 +398,11 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   would build (or vice versa) — keep the invariant, or re-derive the witness. The fused
   (`Fuse_epilogue`) flavor is judged separately: skipping the epilogue tail can empty the
   coverage demand before the alignment analysis is consulted, so twins can survive a routine the
-  unfused family is refuted on.
+  unfused family is refuted on. **Consequence for diagnostics: since gh-577 a companion-coverage
+  DECLINE CENSUS is empty, and that is not evidence the rule stopped firing** — a refuted family is
+  never seeded, so it never reaches the decline log. gh-569's Part 3 read 25 coverage declines out of
+  `schedule_log_declines`; the same workload on current master logs zero
+  (`report-gh612-hip.md`). Ask the emitted source and the launch geometry instead.
 - "`Tile_mma` is a barrier" is only half true, and the half that fails is the one barrier elision
   wants. Every rendering form ENDS the intrinsic block with a workgroup barrier, so a staging
   barrier that follows one is always redundant (`Schedule.elide_staged_barriers` drops it, and the
@@ -445,6 +460,15 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   candidate compile, and a count of proposals then reads as coverage it does not have — assert on
   the *timed* counter (`report.mma_timed`, `fiss_sketch_timed`, `split_reduce_timed`), and follow it
   with an executed value check, since a candidate that compiles is not yet one that computes.
+- The `N segs` in an autotune label such as `F_saved[fine 77 segs]` counts the SAVED PER-SEGMENT
+  PLACEMENT ENTRIES, not kernels: the arm that reports `fine 77 segs` emitted 136 `__global__`s
+  (gpt2_mini on HIP, `report-gh612-hip.md`), and `[58 segs]` emitted 117. Take kernel counts from
+  the launch log (`schedule_log_launches`, whose `seg i/N` names the real fission width) or from the
+  emitted source; a report that quotes the label as a kernel count is wrong by ~1.8x. The launch
+  log's FIRST fissioned `seg 0/N` (skipping the `N=1` whole-routine probe) is arm A, the next is
+  arm B — which is also how to pick the right file out of a content-polling snapshot of
+  `<routine>__seg.hip`, since the watcher can catch a partially written file and only the kernel
+  count distinguishes them reliably.
 - "Timed" is not "tensorized" either, and that failure is worse: a declined `Tile_mma` renders its
   scalar fallback, which compiles and runs, so the candidate is timed, ranked and possibly crowned
   under an `mma-*` label (gh-ocannl-545: 20 of 20 timed bf16 candidates on CUDA were scalar). The
