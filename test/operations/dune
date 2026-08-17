@@ -681,7 +681,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_random_histograms)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1058,7 +1058,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_einsum3)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 

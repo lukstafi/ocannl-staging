@@ -45,7 +45,7 @@ let () =
   let bin = Operation.einsum "ik;km=>im" ~grad_spec:Prohibit_grad ab2 c2 () in
   let ctx2 = Train.forward_once ~output_cd_file:false ctx2 bin in
   Stdio.printf "binary chain = %s\n" (fmt_arr (get_vals ctx2 bin));
-  Stdio.printf "chain contraction match: %b\n"
+  Verdict.p "chain contraction match"
     (Array.equal Float.equal (get_vals ctx tern) (get_vals ctx2 bin))
 
 (* ---- Test 2: batched einsum3 matches binary chain ---- *)
@@ -82,7 +82,7 @@ let () =
   let bin = Operation.einsum "bik;bkm=>bim" ~grad_spec:Prohibit_grad ab2 c2 () in
   let ctx2 = Train.forward_once ~output_cd_file:false ctx2 bin in
   Stdio.printf "batched binary chain = %s\n" (fmt_arr (get_vals ctx2 bin));
-  Stdio.printf "batched chain contraction match: %b\n"
+  Verdict.p "batched chain contraction match"
     (Array.equal Float.equal (get_vals ctx tern) (get_vals ctx2 bin))
 
 (* ---- Test 3: einsum3 gradient agreement with binary chain ---- *)
@@ -135,9 +135,9 @@ let () =
   Stdio.printf "binary  grad_a = %s\n" (fmt_arr ga_bin);
   Stdio.printf "binary  grad_b = %s\n" (fmt_arr gb_bin);
   Stdio.printf "binary  grad_c = %s\n" (fmt_arr gc_bin);
-  Stdio.printf "gradient a match: %b\n" (Array.equal Float.equal ga_tern ga_bin);
-  Stdio.printf "gradient b match: %b\n" (Array.equal Float.equal gb_tern gb_bin);
-  Stdio.printf "gradient c match: %b\n" (Array.equal Float.equal gc_tern gc_bin)
+  Verdict.p "gradient a match" (Array.equal Float.equal ga_tern ga_bin);
+  Verdict.p "gradient b match" (Array.equal Float.equal gb_tern gb_bin);
+  Verdict.p "gradient c match" (Array.equal Float.equal gc_tern gc_bin)
 
 (* ---- Test 4: where with einsum spec "i;i;i=>i" equals pointwise where ---- *)
 let () =
@@ -169,7 +169,7 @@ let () =
   let wpt = Operation.where ~grad_spec:Prohibit_grad pred2 a2 b2 () in
   let ctx2 = Train.forward_once ~output_cd_file:false ctx2 wpt in
   Stdio.printf "where pointwise      = %s\n" (fmt_arr (get_vals ctx2 wpt));
-  Stdio.printf "where einsum matches pointwise: %b\n"
+  Verdict.p "where einsum matches pointwise"
     (Array.equal Float.equal (get_vals ctx wein) (get_vals ctx2 wpt))
 
 (* ---- Test 5: where einsum gradient (pred=1 passes to a, pred=0 passes to b) ---- *)
@@ -218,7 +218,7 @@ let () =
   let c = NTDSL.ndarray [| 1.; 0.; 0.; 1. |] ~output_dims:[ 2; 2 ] () in
   try
     let _ = Operation.einsum3 "ij;jk=>im" ~grad_spec:If_needed a b c () in
-    Stdio.printf "FAIL: expected Shape_error for two-RHS spec in einsum3\n"
+    Verdict.fail "expected Shape_error for two-RHS spec in einsum3"
   with Row.Shape_error (msg, _) ->
     Stdio.printf "Negative test (wrong arity): got expected Shape_error: %s\n"
       (String.prefix msg 60)
@@ -258,7 +258,7 @@ let () =
   let ref2 = Operation.einsum1 "ij=>i" ~grad_spec:Prohibit_grad w2 () in
   let ctx2 = Train.forward_once ~output_cd_file:false ctx2 ref2 in
   Stdio.printf "decomposed ref (pointwise+reduce) = %s\n" (fmt_arr (get_vals ctx2 ref2));
-  Stdio.printf "select-before-reduce match: %b\n"
+  Verdict.p "select-before-reduce match"
     (Array.equal Float.equal (get_vals ctx wein) (get_vals ctx2 ref2))
 
 (* ---- Test 9: where reduction gradient agrees with decomposed reference ---- *)
@@ -305,5 +305,5 @@ let () =
   let gb2 = get_grad ctx2 b2 in
   Stdio.printf "decomposed grad_a = %s\n" (fmt_arr ga2);
   Stdio.printf "decomposed grad_b = %s\n" (fmt_arr gb2);
-  Stdio.printf "reduction gradient a match: %b\n" (Array.equal Float.equal ga ga2);
-  Stdio.printf "reduction gradient b match: %b\n" (Array.equal Float.equal gb gb2)
+  Verdict.p "reduction gradient a match" (Array.equal Float.equal ga ga2);
+  Verdict.p "reduction gradient b match" (Array.equal Float.equal gb gb2)

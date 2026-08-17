@@ -1,7 +1,7 @@
 independent siblings both virtual: true
 independent siblings setters dropped: true
 independent siblings inlined at use sites (no array reads survive): true
-is_complex from sharing alone: false
+no is_complex from sharing alone: true
 independent siblings: each use site got its own sibling's cell: true
 independent siblings: virtual and materialized arms agree: true
 mixed cleanup keeps b setter: true

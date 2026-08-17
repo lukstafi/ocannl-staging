@@ -11,7 +11,7 @@
     EXECUTED through the [?prelowered] seam (gh-ocannl-562) — because virtualization rewrites what
     value a cell holds, which no structural pin can reach.
 
-    Three doctrines are built into the helpers here, each learned from a leg that passed for the
+    Four doctrines are built into the helpers here, each learned from a leg that passed for the
     wrong reason:
 
     - The oracle must DISCRIMINATE. A producer value has to vary with every symbol of its iteration
@@ -21,6 +21,9 @@
       constants.
     - Cells no writer covers must carry a {!sentinel}, so "wrote the wrong cells" fails the value
       check instead of reading whatever the buffer happened to hold.
+    - A claim must be able to FAIL. Every {!p} is an assertion, not a recorded observation: a run
+      with a false claim exits nonzero, so a regression cannot be [dune promote]d into the golden
+      (gh-ocannl-601). Claims are therefore phrased so [true] is the passing reading.
     - A node to be read back must be declared {!materialize}d: [known_non_virtual] does NOT mean
       "has a context buffer" — a node written and read within one routine and never observed is
       placed [Local], routine-scoped scratch, and host access to it raises (gh-ocannl-599).
@@ -195,8 +198,11 @@ let close ?(tol = 1e-5) values expected =
     length — a mismatched [~read] is a test bug, not a failed assertion. *)
 let same ?tol got expected = List.for_all2_exn got expected ~f:(close ?tol)
 
-(** Prints a named boolean fact. Booleans keep [.expected] files backend-stable. *)
-let p name b = Stdio.printf "%s: %b\n" name b
+(** Asserts a named boolean claim, printing [name: b]. Booleans keep [.expected] files
+    backend-stable; {!Verdict.p} is what keeps a [false] from being [dune promote]d into the golden
+    as the expected output, so every claim has to be phrased so that [true] is the passing reading
+    — a fact whose desired value is [false] gets renamed, not recorded (gh-ocannl-601). *)
+let p = Verdict.p
 
 (** {1 Structural probes}
 

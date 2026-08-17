@@ -25,7 +25,7 @@
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND))
- (libraries base stdio unix arrayjit.ir)
+ (libraries base stdio unix arrayjit.ir verdict)
  (preprocess
   (pps ppx_here)))
 
