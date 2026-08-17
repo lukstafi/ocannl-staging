@@ -698,6 +698,19 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   `#pragma GCC unroll 1` does NOT fix it. When a narrow cc GEMM benches absurdly slow, try
   `cc_backend_optimization_level=2` before suspecting the rendering; the tuner's measured search
   routes around it on its own.
+- **A "packmma" timing is not evidence that anything tensorized.** A `Tile_mma` whose register-tile
+  preconditions fail renders the scalar fallback and the run still reports under whatever the
+  variant was named — the column extent below the compute vector width is the easiest way in (at
+  f32/16-byte vectors the crossover is n = 4; at f16 it is n = 8), but a narrow `vector_bytes`,
+  mixed operand compute precisions, transposed-B storage, and `debug_log_from_routines` all decline
+  too. Check `C_syntax.mma_census` (flip `mma_census_enabled` around the compile) rather than
+  trusting the label; `bin/narrow_gebp_bench` prints the census per line and warns when any
+  statement declined, and `schedule_log_declines=true` gives the per-rule reason. This is the same
+  "timed is not tensorized" hazard the seeding note above raises, seen from the bench side.
+- `bin/narrow_gebp_bench` takes its blocking factors as arguments (`[bm] [bk]` positionally, or
+  `--bm=`/`--bk=`), defaulting to 64/256. The packed variants need `n mod bm = 0` and `n mod bk = 0`
+  — an n meeting neither still runs the unblocked naive variant, so an arbitrary extent (the sort a
+  register-tiling review actually asks about) can be measured against something.
 - Computing fp16 in fp16 on a *promoted* target is a ~18x loss against f32-compute-over-fp16
   (measured, same bench) — the reason `fp16_arithmetic` is ignored off-native and pure-f16 seeds
   gate on `hardware_limits.native_fp16_arithmetic`. The decisive pure-f16-vs-f32-GEBP measurement
