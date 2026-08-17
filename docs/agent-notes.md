@@ -498,7 +498,7 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
 - A per-kernel profile's sum may only be validated against the step time of **the compile it came
   from**. Each search rep crowns a different artifact with different tile sizes, so holding one rep's
   profile against another rep's step p50 measures the search lottery, not the reconstruction — on
-  gpt2_mini/HIP that turns a genuine 0.7% agreement into an apparent 1.9% disagreement, and the error
+  gpt2_mini/HIP that turns a genuine 0.9% agreement into an apparent 2.3% disagreement, and the error
   is invisible because both numbers are real. Quote the paired p50 from the same cell's **pass-2**
   `replay2.out` and nothing else: `search.out`'s p50 is a pass-1 timing carrying the search process's
   own overhead, which `benchmarks/README.md`'s two-pass protocol excludes, and `snap`'s `replay.out`

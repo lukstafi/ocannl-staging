@@ -109,9 +109,16 @@ cmd_search() { (
   # skips the cleanup branch entirely and leaves search.out and a populated cache in their accepted
   # locations, where a later replay uses the cache and the artifact gates certify the cell. Writing
   # into a staging dir means an interrupted run publishes nothing at all.
-  local stage="$out.staging"
-  rm -rf "$out" "$stage"; mkdir -p "$stage"
-  trap 'rm -rf '"$stage"'' EXIT INT TERM
+  # Staging lives OUTSIDE the `<label>/r<rep>` namespace: as a sibling `<cell>.staging` its
+  # search.out sat at the same depth as a real cell's and matched parity's `*/r*/search.out`
+  # discovery, so a leftover staging dir counted as an accepted search record -- and a parity run
+  # could pass on staging directories alone. One level under OUT_ROOT cannot match that glob.
+  local stage="$OUT_ROOT/.staging-$label-r$rep"
+  rm -rf "$out" "$stage"; mkdir -p "$stage" || exit 2
+  # STAGE is referenced by the handler at trap time, NOT interpolated into it: an OUT_ROOT
+  # containing whitespace would otherwise be word-split by `rm -rf` and delete a sibling path.
+  STAGE=$stage
+  trap 'rm -rf "$STAGE"' EXIT INT TERM
   tree=$(require_dir "$tree")
   case ${tree:-} in /?*) ;; *) exit 2;; esac
   cd "$tree/benchmarks" || exit 1
@@ -650,6 +657,8 @@ seqs=collections.defaultdict(list)
 # scanning search.out alone would never see it.
 for kind in ("search.out","replay2.out"):
   for f in sorted(glob.glob(os.path.join(root,"*","r*",kind))):
+    # belt and braces alongside the staging-dir naming: never count a staging artifact as a cell
+    if os.sep + ".staging" in f: continue
     t=[l for l in open(f).read().splitlines() if l.startswith("{")]
     if not t: continue
     d=json.loads(t[-1])

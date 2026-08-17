@@ -173,12 +173,12 @@ mixed in.
 `rocprofv3` still collects nothing on this box (no `/dev/kfd` under WSL2); the per-kernel
 reconstruction and its caveats are gh-569's and are not re-argued. Its validation is re-run:
 **the sum of the 136 per-kernel medians is 18.880 / 18.876 / 18.891 ms against the step p50 of the
-cell those kernels were emitted by — 19.015 ms in that cell's pass-2 replay — so agreement is
-0.7%**, against gh-569's 1.6–2.0%.
+cell those kernels were emitted by — 19.054 ms in that cell's pass-2 replay — so agreement is
+0.9%**, against gh-569's 1.6–2.0%.
 
 The pairing is the load-bearing part of that sentence and it is worth being explicit about, because
 the looser reading is available and wrong. Across the three pass-2 replays of this arm the step p50
-spans 18.53–19.02 ms, and holding the r1 profile against r3's 18.53 would read a 1.9% discrepancy — but
+spans 18.45–19.05 ms, and holding the r1 profile against r3's 18.45 would read a 2.3% discrepancy — but
 that is not a weaker validation of the same thing, it is not a validation at all: each rep crowns a
 different artifact with different tile sizes, and this profile is a profile of r1's. A per-kernel
 sum may only be checked against the step time of the compile it came from. Validation got tighter
@@ -269,10 +269,10 @@ two built trees.
 | | BASE | FEAT | |
 |---|---:|---:|---|
 | **arm A per-kernel profile** | **32.33 ms** / 117 kernels | **24.79 ms** / 135 kernels | **1.30x** |
-| shipped step p50, 3 reps (pass 2) | 24.97 / 25.65 / 26.22 | 18.91 / 19.80 / 19.88 | **1.30x** (medians) |
+| shipped step p50, 3 reps (pass 2, replay-balanced) | 24.85 / 25.69 / 26.17 | 18.91 / 19.73 / 19.84 | **1.30x** (medians) |
 | untuned-default pipeline, 3 reps | 65.47 / 65.67 / 65.81 | 65.66 / 65.63 / 65.77 | 1.00x |
 
-The shipped-step ranges do **not** overlap (BASE min 24.97 > FEAT max 19.88), so this one survives
+The shipped-step ranges do **not** overlap (BASE min 24.85 > FEAT max 19.84), so this one survives
 the gh-481 objection without needing the per-kernel instrument — and the two instruments agree on
 1.30x to two digits.
 
@@ -814,7 +814,15 @@ done
 # `search`'s JSON. A fresh process replays the cached winner, because the search process is measurably
 # slower from accumulated modules. Run these ONLY on a quiet box -- a concurrent CPU build corrupted a
 # whole batch mid-session (47-64 ms instead of ~19) with nothing in the output flagging it.
-for r in 1 2 3; do $D replay ../wt-gh612-base base574 $r; $D replay ../wt-gh612-feat feat574 $r; done
+# BASE/FEAT alternate too: the shipped-step 1.30x uses these pass-2 timings, and balancing the
+# searches does not balance these.
+for r in 1 2 3; do
+  if [ $(( (r-1) % 2 )) -eq 0 ]; then order="b f"; else order="f b"; fi
+  for c in $order; do
+    if [ "$c" = b ]; then $D replay ../wt-gh612-base base574 $r
+    else $D replay ../wt-gh612-feat feat574 $r; fi
+  done
+done
 # cap 8 lives under TWO labels by design: Part 3 made r1-r3 as `master-cap8`, the balanced block made
 # r4-r6 as `sweep-cap8`. And the cap-8-vs-cap-off pass-2 replays feed the 1.116x factor of the
 # chained 1.18x, so they need the same alternation their searches had -- balancing the searches does
