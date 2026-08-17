@@ -28,6 +28,20 @@ The two predictions in detail, because the distinction between "the absolute cos
 
 So both payoffs are larger than predicted, and for gh-573 larger in absolute terms too.
 
+**The ratios' load-bearing caveat, stated here rather than only in Provenance.** Both are measured on
+the **default-placement arm A**, and in three of the four cells (`base574`, `feat574`,
+`master-capoff`) the search shipped arm B — so those arm A routines were compiled, dispatched and
+timed on the real lineage but **never executed against an independent reference**. The per-kernel
+harness cannot supply one: it times kernels in isolation on synthetic buffers and never checks their
+outputs. `AGENTS.md` requires an executed-output check for passes that change cell values, and this
+report does not have one for those three artifacts; `master-cap8`'s arm A did ship and is covered, so
+gh-573's ratio has one verified endpoint and gh-574's has none. A value-changing codegen regression in
+a discarded arm A would leave every structural and timing figure here plausible while invalidating the
+ratio it supports. Closing this needs a way to ship a chosen arm on demand, which does not exist
+today — filed rather than worked around, and the reason it is stated in the verdict is that
+acknowledging a limitation in the provenance section does not make the headline numbers less
+dependent on it.
+
 One prediction needs a caveat and one needs a correction. The caveat: at its shipped default cap of
 8, gh-573's payoff on the *end-to-end* step is inside this box's search-noise floor, for an
 identifiable reason given in Part 3 — without the guard the search ships materialize-all instead,

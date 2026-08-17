@@ -69,6 +69,29 @@ ROUTINE=cross_entropy_loss_fwd
 # A label is caller input and feeds `rm -rf`: `../../../home/me/data` would escape OUT_ROOT entirely.
 # Two independent checks, because either alone is bypassable: a character whitelist, and a
 # containment test on the resolved parent.
+# Configuration is searched from the invocation directory UPWARDS (Utils.config_file_args), and the
+# root `ocannl_config` is gitignored -- so a reused worktree can carry one that `git status
+# --porcelain` never reports, and it silently overrides defaults. A stray
+# `virtualize_max_inline_fanin=4` would make every nominal cap-8 cell measure cap 4 while the report
+# labels it by the verified commit. Refuse rather than measure through it.
+check_config() {
+  local tree=$1 d="$1" found=""
+  while :; do
+    [ -f "$d/ocannl_config" ] && found="$found $d/ocannl_config"
+    [ "$d" = "/" ] && break
+    d=$(dirname "$d")
+  done
+  [ -z "$found" ] || {
+    echo "gh612_cells: local ocannl_config found -- it overrides defaults silently and is gitignored:" >&2
+    for f in $found; do echo "    $f" >&2; done
+    echo "  Remove it (or measure elsewhere) before running cells." >&2; return 2; }
+  # the tracked benchmarks/ocannl_config must also match HEAD: it is the config the cells actually
+  # run under, and an edit to it is invisible to the worktree-cleanliness check if it is staged away.
+  git -C "$tree" diff --quiet HEAD -- benchmarks/ocannl_config 2>/dev/null || {
+    echo "gh612_cells: $tree/benchmarks/ocannl_config differs from HEAD -- refusing to measure" >&2; return 2; }
+  return 0
+}
+
 cell_dir() {
   local label=$1 rep=$2
   case $label in
@@ -126,6 +149,7 @@ cmd_search() { (
   trap 'rm -rf "$STAGE"' EXIT INT TERM
   tree=$(require_dir "$tree")
   case ${tree:-} in /?*) ;; *) exit 2;; esac
+  check_config "$tree" || exit 2
   cd "$tree/benchmarks" || exit 1
   local t0=$SECONDS
   BENCH_FIXTURE=$FIXTURE BENCH_TUNE=1 $PIN "$EXE" --ocannl_backend=hip \
@@ -172,6 +196,7 @@ cmd_snap() { (
   rm -f "$out/armA.path"
   tree=$(require_dir "$tree")
   case ${tree:-} in /?*) ;; *) exit 2;; esac
+  check_config "$tree" || exit 2
   # A cell with no populated cache cannot be replayed: with BENCH_TUNE=1 and an empty cache dir this
   # would run a NEW cold search and crown a different artifact, so a structural diff would compare
   # something the report never measured. Refuse instead.
@@ -622,6 +647,7 @@ cmd_replay() { (
   rm -f "$out/replay2.out"
   tree=$(require_dir "$tree")
   case ${tree:-} in /?*) ;; *) exit 2;; esac
+  check_config "$tree" || exit 2
   [ -d "$out/cache" ] && [ -n "$(ls -A "$out/cache" 2>/dev/null)" ] || {
     echo "gh612_cells: $label r$rep has no populated cache -- run \`search\` first" >&2; exit 2; }
   cd "$tree/benchmarks" || exit 1
@@ -734,7 +760,9 @@ got=lens.pop() if len(lens)==1 else None
 if got is not None and steps and got != steps:
     bad.append(f"loss vectors have {got} samples, expected EXPECT_STEPS={steps}")
 if got == 0: bad.append("loss vectors are EMPTY: the gate would compare nothing")
-if tot < 2: bad.append("fewer than 2 runs: nothing to compare")
+# `tot` counts records, and a search plus ITS OWN pass-2 replay is two records of one cached winner --
+# a codegen error shared by both is then compared only with itself. Require two independent searches.
+if searched < 2: bad.append(f"only {searched} independent search cell(s): nothing to compare against")
 if bad:
     for b in bad: print("PARITY GATE FAILED: "+b, file=sys.stderr)
     sys.exit(1)
