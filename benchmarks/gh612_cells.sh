@@ -229,8 +229,15 @@ cmd_profile() { (
   # describe different routines and printing them together would invite exactly the wrong inference.
   local shipped; shipped=$(grep -ho '"shipped":"[AB]"' "$out/search.out" 2>/dev/null | head -1 | grep -o '[AB]')
   if [ "${shipped:-}" = "A" ]; then
-    echo "  paired step p50 (this cell shipped arm A, so the pairing is valid):"
-    grep -ho '"p50":[0-9.]*' "$out/search.out" "$out/replay.out" 2>/dev/null
+    # ONLY the pass-2 replay. search.out's p50 is a pass-1 timing carrying search-process residue,
+    # which the protocol rejects -- printing it here would re-offer it as valid paired evidence.
+    if [ -s "$out/replay2.out" ]; then
+      echo "  paired step p50 (pass-2 replay2.out; this cell shipped arm A, so the pairing is valid):"
+      grep -ho '"p50":[0-9.]*' "$out/replay2.out" 2>/dev/null
+    else
+      echo "  NO paired step p50 yet: run \`replay\` (pass 2) for this cell. The pass-1 p50 in"
+      echo "  search.out is not a valid comparand -- it carries the search process's own overhead."
+    fi
   else
     echo "  NO paired step p50: this cell shipped arm ${shipped:-?}, and the profile above is arm A."
     echo "  An arm-B step time is not a validation of an arm-A kernel sum; they are different routines."
@@ -454,10 +461,20 @@ def hdr(n,per,sg,r):
 hdr(na,pa,sa,ra); hdr(nb,pb,sb,rb)
 onlya=[k for k in pa if k not in pb]; onlyb=[k for k in pb if k not in pa]
 sh_a=sum(pa[k] for k in pa if k in pb); sh_b=sum(pb[k] for k in pb if k in pa)
-print(f"\nsignatures only in {na}: {sum(ca[k] for k in onlya)} kernels, {sum(pa[k] for k in onlya):.3f} ms")
-for k in sorted(onlya, key=lambda k:-pa[k])[:8]: print(f"  {pa[k]:7.3f} ms  {', '.join(k)[:120]}")
-print(f"signatures only in {nb}: {sum(cb[k] for k in onlyb)} kernels, {sum(pb[k] for k in onlyb):.3f} ms")
-for k in sorted(onlyb, key=lambda k:-pb[k])[:8]: print(f"  {pb[k]:7.3f} ms  {', '.join(k)[:120]}")
+# Timing fields ONLY when BOTH sides are profiled. An unprofiled kernel contributes 0 ms, so a
+# profiled-vs-unprofiled comparison would print real times against zeros and read as a huge
+# regression -- plausible, meaningless, and contradicting the "ms omitted without profile" note.
+TIMED = ra > 0 and rb > 0
+def msf(v): return f", {v:.3f} ms" if TIMED else ""
+print(f"\nsignatures only in {na}: {sum(ca[k] for k in onlya)} kernels{msf(sum(pa[k] for k in onlya))}")
+for k in sorted(onlya, key=lambda k:-pa[k])[:8]:
+    print(f"  {pa[k]:7.3f} ms  {', '.join(k)[:120]}" if TIMED else f"  {', '.join(k)[:128]}")
+print(f"signatures only in {nb}: {sum(cb[k] for k in onlyb)} kernels{msf(sum(pb[k] for k in onlyb))}")
+for k in sorted(onlyb, key=lambda k:-pb[k])[:8]:
+    print(f"  {pb[k]:7.3f} ms  {', '.join(k)[:120]}" if TIMED else f"  {', '.join(k)[:128]}")
+if not TIMED:
+    print(f"  (timings omitted: {na} has {ra} profile run(s), {nb} has {rb} -- run `profile` on both"
+          "\n   for ms columns; the structural verdict below does not need them)")
 # MULTISET, not set: a signature present in both cells but a different NUMBER of times is not
 # "shared". Without this, `only in` counts of 0/0 could still describe differing kernel multisets and
 # the negative-control reading would be wrong while looking right.
@@ -476,8 +493,9 @@ else:
     print("\nIDENTICAL kernel sets: no exclusive signatures on either side and no differing "
           "multiplicity\n-- the two cells emit the same kernel multiset. This is the negative-control "
           "reading.")
-print(f"\nshared signatures: {sh_a:.3f} -> {sh_b:.3f} ms ({sh_b-sh_a:+.3f}); "
-      f"NET {sum(pb.values())-sum(pa.values()):+.3f} ms")
+if TIMED:
+    print(f"\nshared signatures: {sh_a:.3f} -> {sh_b:.3f} ms ({sh_b-sh_a:+.3f}); "
+          f"NET {sum(pb.values())-sum(pa.values()):+.3f} ms")
 # What a signature multiset does and does not settle. A kernel's POINTER PARAMETERS are exactly the
 # materialized nodes it touches, so signature-multiset equality is the right invariant for the
 # PLACEMENT question and is deliberately insensitive to the crowned tile. Bodies are not: they move
@@ -522,8 +540,13 @@ cmd_replay() { (
     > "$out/replay2.out" 2> "$out/replay2.err"
   local st=$?
   echo -n "$label r$rep pass-2 replay: exit $st  "
-  grep -h '^{' "$out/replay2.out" | tail -1 | grep -o '"step_ms":{[^}]*}'
-  return "$st"
+  local timing; timing=$(grep -h '^{' "$out/replay2.out" 2>/dev/null | tail -1 | grep -o '"step_ms":{[^}]*}')
+  echo "${timing:-<no step_ms record>}"
+  # Producing the timing IS this subcommand's purpose: a zero exit with no record would let the
+  # pass-2 loop look successful while yielding nothing for the cell.
+  [ "$st" -eq 0 ] || return "$st"
+  [ -n "${timing:-}" ] || { echo "gh612_cells: $label r$rep produced no step_ms record" >&2; return 1; }
+  return 0
 ) }
 
 cmd_roofline() { (

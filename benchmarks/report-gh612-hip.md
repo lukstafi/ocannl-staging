@@ -347,7 +347,7 @@ the fission is finer. The interaction is not hypothetical; it is 2.6 ms in both 
 
 A config flip on one tree. Code-borne, so each value is a fresh compile. The rows below are this
 arm's **three order-balanced reps**; Part 4 pools all six reps of cap 8 and so quotes slightly
-different medians (60.93 untuned, 18.67 step) from the same runs plus three more.
+different medians (60.93 untuned, 18.72 step) from the same runs plus three more.
 
 | | cap −1 (before) | cap 8 (after) | |
 |---|---:|---:|---|
@@ -565,10 +565,10 @@ materialized in the table, which is the direction where the guard starts costing
 recomputation it no longer had to avoid.
 
 **What the balanced evidence does and does not chain.** Two comparisons were run as balanced blocks:
-cap 8 vs cap −1 (overlapping, 1.11x — Part 3's unclaimed row) and cap 4 vs cap 8 (disjoint,
-**1.059x** = 18.61/17.58, i.e. the 5.5% time reduction; the two are different numbers and only the
-ratio is a speedup).
-"Cap 4 against cap −1" is a **chain of those two blocks, 1.108 × 1.061 = 1.18x**, not a balanced
+cap 8 vs cap −1 (overlapping, **1.112x** = 20.94/18.83 — Part 3's unclaimed row) and cap 4 vs cap 8
+(disjoint, **1.059x** = 18.61/17.58, i.e. the 5.5% time reduction; the two are different numbers and
+only the ratio is a speedup).
+"Cap 4 against cap −1" is a **chain of those two blocks, 1.112 × 1.059 = 1.18x**, not a balanced
 measurement of its own. An earlier revision put it at 1.19x, which is the ratio of the *unpaired*
 endpoint medians (20.94 / 17.58) and silently includes cap 8's shift between the two blocks (18.83 ms
 in the cap −1 block against 18.61 ms in the cap 4 block) — so 1.18x is the chained value and 1.19x is
@@ -754,7 +754,11 @@ done
 # whole batch mid-session (47-64 ms instead of ~19) with nothing in the output flagging it.
 for r in 1 2 3; do $D replay ../wt-gh612-base base574 $r; $D replay ../wt-gh612-feat feat574 $r; done
 for r in 1 2 3; do $D replay $M master-capoff $r --ocannl_virtualize_max_inline_fanin=-1; done
-for r in 1 2 3 4 5 6; do $D replay $M master-cap8 $r; done
+# cap 8 lives under TWO labels by design: Part 3 made r1-r3 as `master-cap8`, and the balanced block
+# made r4-r6 as `sweep-cap8`. Replaying `master-cap8/r4-r6` would refuse (no such cache) while the
+# claim-bearing artifacts went unreplayed.
+for r in 1 2 3; do $D replay $M master-cap8 $r; done
+for r in 4 5 6; do $D replay $M sweep-cap8 $r; done
 for r in 1 2 3 4 5 6; do $D replay $M sweep-cap4 $r --ocannl_virtualize_max_inline_fanin=4; done
 for r in 1 2 3; do $D replay $M sweep-cap2 $r --ocannl_virtualize_max_inline_fanin=2; done
 for c in 16 32; do $D replay $M sweep-cap$c 1 --ocannl_virtualize_max_inline_fanin=$c; done
