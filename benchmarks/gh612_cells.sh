@@ -114,6 +114,13 @@ cmd_search() { (
     --ocannl_autotune_log=true --ocannl_schedule_log_declines=true "$@" \
     > "$out/search.out" 2> "$out/search.err"
   local st=$?
+  # A nonzero exit can still leave a complete search.out and a populated cache, and the parity /
+  # replays / profiles gates validate ARTIFACTS rather than this status -- so a failed search would
+  # be certified as a completed cell. Publish only on success.
+  if [ "$st" -ne 0 ]; then
+    echo "$label r$rep: exit $st, $((SECONDS - t0))s -- discarding the cell" >&2
+    rm -rf "$out"; return "$st"
+  fi
   echo "$label r$rep: exit $st, $((SECONDS - t0))s"
   grep -h '^{' "$out/search.out" | tail -1
   # The three claim-bearing lines: the deterministic untuned baseline, the crowned artifact per
@@ -159,6 +166,10 @@ cmd_snap() { (
         [ -n "$h" ] && [ ! -f "$snap/$h.hip" ] && cp "$f" "$snap/$h.hip"; fi
       sleep 0.02
     done ) & local w=$!
+  # An interrupted `snap` would otherwise orphan this poller, and a later retry that recreates
+  # armsnap would have the stray copying sources from the earlier run into it -- contaminating the
+  # candidate set pick_armA chooses from. Kill it on any exit or signal, not only the normal path.
+  trap 'kill '"$w"' 2>/dev/null' EXIT INT TERM
   # Same hole `replay` had: a populated cache DIRECTORY is not a hit, so a differing tree or
   # cache-key flag would let this search afresh and `pick_armA` would snapshot a NEWLY crowned
   # artifact instead of the measured one -- silently corrupting every structural diff built on it.
@@ -169,7 +180,7 @@ cmd_snap() { (
     --ocannl_schedule_log_launches=true "$@" \
     > "$out/replay.out" 2> "$out/launches.err"
   local st=$?
-  kill $w 2>/dev/null; wait $w 2>/dev/null
+  kill $w 2>/dev/null; wait $w 2>/dev/null; trap - EXIT INT TERM
   echo "$label r$rep replay: exit $st"
   local hits; hits=$(grep -c 'cache hit:' "$out/launches.err" 2>/dev/null || echo 0)
   [ "${hits:-0}" -ge 2 ] || {
@@ -644,6 +655,10 @@ for L,ks in sorted(seqs.items(), key=lambda kv:-len(kv[1])):
     print(f"  n={len(ks):2}  {L[0]!r} ...  e.g. {ks[0]}")
 def ulp32(x):
     return 2.0**((math.frexp(x)[1]-1)-23)
+# NaN/inf must be rejected BEFORE any span arithmetic: `max(0, nan)` is 0 in Python, so a run whose
+# losses are all NaN would leave `worst` at zero and print PASSED -- a correctness gate certifying
+# the precise outcome it exists to catch.
+nonfinite=sorted({c for L,ks in seqs.items() for c in ks if not all(math.isfinite(v) for v in L)})
 worst=0.0
 print("per-step agreement across ALL runs:")
 for i in range(len(next(iter(seqs)))):
@@ -654,6 +669,7 @@ maxulp=float(sys.argv[2]); expect=int(sys.argv[3])
 print(f"WORST: {worst:.0f} f32 ulp (threshold {maxulp:.0f}). NOT bit-identity -- state it as"
       "\n       agreement to within that many ulp.")
 bad=[]
+if nonfinite: bad.append(f"non-finite losses (NaN/inf) in: {' '.join(nonfinite)}")
 if worst > maxulp: bad.append(f"loss divergence {worst:.0f} ulp exceeds PARITY_MAX_ULP={maxulp:.0f}")
 # EXPECT_RUNS counts SEARCH cells; pass-2 records are extra coverage, not extra cells.
 searched=sum(1 for ks in seqs.values() for c in ks if not c.endswith("[pass2]"))
@@ -670,8 +686,9 @@ if want:
     # `replays` accepts a replay2.out on step_ms alone, and a record without `losses` is simply not
     # seen by the loop above -- so the gate could pass with a timed artifact never output-verified.
     havep2={c[:-len(" [pass2]")] for ks in seqs.values() for c in ks if c.endswith("[pass2]")}
-    m2=sorted(want-havep2)
+    m2=sorted(want-havep2); x2=sorted(havep2-want)
     if m2: bad.append(f"pass-2 replays missing loss vectors (timed but unverified): {' '.join(m2)}")
+    if x2: bad.append(f"unexpected pass-2 replays (stale OUT_ROOT?): {' '.join(x2)}")
 lens={len(L) for L in seqs}
 if len(lens) != 1: bad.append(f"loss vectors have differing lengths {sorted(lens)}")
 # Consistent lengths are not enough: 26 records of `"losses":[]` share a length, skip the comparison

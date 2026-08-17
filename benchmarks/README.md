@@ -221,7 +221,9 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   time 32.33 → 18.88 ms — also the reference for why a share is a share of a placement and a tree,
   for the fact that equal kernel counts can absorb a changed materialization decision (on the
   `gpt2_mini` graph `virtualize_max_inline_fanin` 16 shows one node's worth of placement difference
-  behind an unchanged 135-kernel arm A, and only cap 32 and above are placement-identical), and for
+  behind an unchanged 135-kernel arm A, and cap 32 is the only measured cap matching cap −1's
+  placement — equality there does not extrapolate, since a zero placement diff cannot show whether
+  the guard fired), and for
   the three-instrument discipline (per-kernel profile 0.08–1.6%, untuned-default 0.2–0.7%, shipped
   tuned p50 2.6–18.7%) that a tuned-cell A/B on that box needs),
   [report-cifar-cuda.md](report-cifar-cuda.md) (Linux/CUDA, the cifar-scale conv baseline

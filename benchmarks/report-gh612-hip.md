@@ -543,9 +543,8 @@ its 20-parameter signature becomes 21 while the kernel count stays at 135. Read 
 a firing log, that confines the cap-16 placement difference to `lnf`, the deepest site and the one
 with the largest accumulated prefix, and is *consistent with* `lnf` being the only chain on this graph
 whose transitive fan-in exceeds 16 — consistent with, not established by, since nothing logs the
-decisions themselves. Corrected conclusions: the maximum transitive inline fan-in on this graph is
-the first cap at which placement changes at all is 16, not 8, and 16-versus-8 is one node's worth of
-difference against **four**.
+decisions themselves. Corrected conclusions: the first cap at which placement changes at all is 16,
+not 8, and 16-versus-8 is one node's worth of difference against **four**.
 
 **What this cannot establish, and an earlier revision claimed:** that the guard is *silent* at cap 32,
 and hence that the graph's maximum transitive fan-in lies in (16, 32]. A zero placement difference
