@@ -1156,8 +1156,13 @@
 ; warned about by nobody and read by nobody -- the halfway one is still not read, deliberately
 ; (see `Utils.cmdline_var_names`), and now says so.
 ;
-; stderr alone is the subject; the executable's own stdout goes nowhere. The chatter is turned off
-; on the commandline, so the golden is the warnings and nothing else.
+; stderr alone is the subject; the executable's own stdout goes nowhere. Every key that shapes
+; stderr is pinned on the commandline, which no environment variable can outrank -- the five of
+; `startup_streams.ml`'s `stderr_shaping_keys` less `profile`, whose only route to this stream is
+; through the four that are pinned (a profile cannot beat an explicit key of equal immediacy, and
+; an unknown ambient profile name aborts every OCANNL executable loudly rather than rewriting a
+; golden). Pinning the whole list, not just the reported `log_config_sourcing` (Codex P2 on PR
+; #363): the rule captures a stream, so it depends on every key that can write to it.
 
 (rule
  (target config_var_warnings.actual)
@@ -1170,6 +1175,8 @@
      %{dep:config_var_spellings.exe}
      --ocannl_no_config_file=true
      --ocannl_suppress_welcome_message=true
+     --ocannl_log_config_sourcing=false
+     --ocannl_log_level=0
      --ocannl-print-decimals-precision-7
      --ocannl-print_decimals_precision=7
      --ocannl_log_level_0
