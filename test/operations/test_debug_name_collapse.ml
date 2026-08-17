@@ -8,7 +8,7 @@ let gdn label = Ir.Tnode.get_debug_name ~id:0 ~label ()
 let check desc expected label =
   let got = gdn label in
   if String.equal got expected then printf "%s: PASS (%s)\n" desc got
-  else printf "%s: FAIL\n  expected %s\n  got      %s\n" desc expected got
+  else Verdict.fail (Printf.sprintf "%s\n  expected %s\n  got      %s" desc expected got)
 
 let () =
   check "single component, no suffix" "attention" [ "attention" ];

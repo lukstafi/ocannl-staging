@@ -24,8 +24,8 @@ let () =
   printf "printed ids equal across reinitialize: %b (%s = %s)\n"
     (String.equal (Tn.id tn1) (Tn.id tn2))
     (Tn.id tn1) (Tn.id tn2);
-  printf "stale node still hits its own table entry: %b\n" (Option.is_some (Hashtbl.find table tn1));
-  printf "fresh same-id node misses the stale table entry: %b\n"
+  Verdict.p "stale node still hits its own table entry" (Option.is_some (Hashtbl.find table tn1));
+  Verdict.p "fresh same-id node misses the stale table entry"
     (Option.is_none (Hashtbl.find table tn2));
-  printf "fresh same-id node is not Tn.equal to the stale node: %b\n" (not (Tn.equal tn1 tn2));
-  printf "fresh same-id node is not a member of the stale set: %b\n" (not (Set.mem set1 tn2))
+  Verdict.p "fresh same-id node is not Tn.equal to the stale node" (not (Tn.equal tn1 tn2));
+  Verdict.p "fresh same-id node is not a member of the stale set" (not (Set.mem set1 tn2))

@@ -464,6 +464,6 @@ let () =
      with Invalid_argument msg -> Some msg
    with
   | Some msg ->
-      Stdio.printf "alias parameter rejected: %b\n" (String.is_substring msg ~substring:"restrict")
+      Verdict.p "alias parameter rejected" (String.is_substring msg ~substring:"restrict")
   | None -> Stdio.printf "alias parameter rejected: false\n");
   Stdio.printf "%!"

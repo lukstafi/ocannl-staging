@@ -148,7 +148,7 @@ let tree_section name ~is_gpu ~is_cpu ~limits opt seeds =
             (String.concat ~sep:" > "
                (List.map path ~f:(fun (level, label) -> level ^ "=" ^ label)))
       | None -> Stdio.printf "no leaves\n");
-      Stdio.printf "tree leaves = flat enumeration: %b\n"
+      Verdict.p "tree leaves = flat enumeration"
         (List.equal
            (fun a b -> String.equal (show a) (show b))
            (Sspace.leaves tree) seeds)
@@ -162,7 +162,7 @@ let awkward_section name ~is_gpu ~is_cpu ~limits opt =
   | Some tree ->
       let seeds = Autotune.sketch_seed_params ~is_gpu ~is_cpu ~limits opt in
       Stdio.printf "== %s: %d seeds ==\n" name (List.length seeds);
-      Stdio.printf "tree leaves = flat enumeration: %b\n"
+      Verdict.p "tree leaves = flat enumeration"
         (List.equal
            (fun a b -> String.equal (show a) (show b))
            (Sspace.leaves tree) seeds);
@@ -437,7 +437,7 @@ let () =
       Stdio.printf "== lattice (64^3, tile 8x8x8) ==\n";
       Stdio.printf "curated leaves %d, lifted leaves %d (+%d lattice singletons), depth %d -> %d\n"
         curated lifted_leaves (lifted_leaves - curated) (Sspace.depth tree) (Sspace.depth lifted);
-      Stdio.printf "the lattice exclusion carries the lift instructions: %b\n"
+      Verdict.p "the lattice exclusion carries the lift instructions"
         (List.exists (Sspace.exclusions tree) ~f:(fun (_, w) ->
              String.equal w Autotune.geometry_lattice_witness));
       (* The certain-traffic increments that make the bound non-uniform: a committed staged

@@ -78,5 +78,5 @@ let () =
       ~report:(fun r -> report2 := Some r)
       hctx comp bindings
   in
-  printf "second tune hits the extent-value-independent cache entry: %b\n"
+  Verdict.p "second tune hits the extent-value-independent cache entry"
     (match !report2 with Some r -> r.Autotune.cache_hit | None -> false)

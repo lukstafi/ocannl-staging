@@ -397,7 +397,7 @@ let () =
      Stdio.printf "ERROR: should have raised\n"
    with Failure msg ->
      (* The message embeds the machine-dependent path. *)
-     Stdio.printf "Caught a payload-past-end-of-file failure: %b\n"
+     Verdict.p "Caught a payload-past-end-of-file failure"
        (String.is_suffix msg ~suffix:"extends past the end of the file"));
   cleanup "truncated";
 

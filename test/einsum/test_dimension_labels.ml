@@ -2,6 +2,10 @@ open! Base
 open Ocannl
 open Ocannl.Nn_blocks.DSL_modules
 
+(* Failures go through [Verdict], so that a regression exits nonzero instead of being
+   `dune promote`d into the golden as the expected output (gh-ocannl-601). *)
+let fail fmt = Printf.ksprintf Verdict.fail fmt
+
 let dummy_origin : Row.constraint_origin list =
   [
     {
@@ -50,8 +54,8 @@ let test_same_basis_same_size () =
     Stdio.printf "  Result bases: [%s]\n" basis_str;
     if Array.exists bases ~f:(fun b -> String.equal b "batch") then
       Stdio.printf "  PASS: basis preserved in result\n"
-    else Stdio.printf "  FAIL: basis not preserved in result\n"
-  with Row.Shape_error (msg, _) -> Stdio.printf "  FAIL: unexpected Shape_error: %s\n" msg
+    else fail "basis not preserved in result"
+  with Row.Shape_error (msg, _) -> fail "unexpected Shape_error: %s" msg
 
 let test_conflicting_bases_same_size () =
   Stdio.printf "Test 2: Conflicting bases, same size -- raises\n";
@@ -62,11 +66,11 @@ let test_conflicting_bases_same_size () =
     let%op result = t1 + t2 in
     let ctx = Train.forward_once (Context.auto ()) result in
     ignore (ctx : Context.t);
-    Stdio.printf "  FAIL: should have raised Shape_error\n"
+    fail "should have raised Shape_error"
   with Row.Shape_error (msg, _) ->
     if String.is_substring msg ~substring:"different bases" then
       Stdio.printf "  PASS: got expected Shape_error: %s\n" msg
-    else Stdio.printf "  FAIL: wrong error message: %s\n" msg
+    else fail "wrong error message: %s" msg
 
 (* AC#5 frontend strictness: an unannotated ([default]) axis no longer silently fuses with a named
    ([batch]) axis of the same size. This previously "passed" via the [None] wildcard; under the
@@ -81,11 +85,11 @@ let test_one_based_one_unbased () =
     let%op result = t1 + t2 in
     let ctx = Train.forward_once (Context.auto ()) result in
     ignore (ctx : Context.t);
-    Stdio.printf "  FAIL: should have raised Shape_error (default must not fuse with batch)\n"
+    fail "should have raised Shape_error (default must not fuse with batch)"
   with Row.Shape_error (msg, _) ->
     if String.is_substring msg ~substring:"bases" then
       Stdio.printf "  PASS: default no longer fuses with a named basis: %s\n" msg
-    else Stdio.printf "  FAIL: wrong error message: %s\n" msg
+    else fail "wrong error message: %s" msg
 
 (* Variable-mediated dual of Test 3: a variable solved to a [default] dim then meeting a named dim
    no longer silently upgrades (the old [unify_dim] basis propagation is gone — see brief
@@ -102,11 +106,11 @@ let test_variable_mediated_unbased_then_based () =
     let%cd result = step1 + based in
     let ctx = Train.forward_once (Context.auto ()) result in
     ignore (ctx : Context.t);
-    Stdio.printf "  FAIL: should have raised Shape_error (no silent basis upgrade)\n"
+    fail "should have raised Shape_error (no silent basis upgrade)"
   with Row.Shape_error (msg, _) ->
     if String.is_substring msg ~substring:"bases" then
       Stdio.printf "  PASS: no silent upgrade; default conflicts with batch: %s\n" msg
-    else Stdio.printf "  FAIL: wrong error message: %s\n" msg
+    else fail "wrong error message: %s" msg
 
 (* AC#4 / brief §Technical-issue-1 frontend regression: an EXPLICIT user size-1 output axis is
    [1_default] (an atom), so it does NOT stretch to a larger named axis. Under the old [None]
@@ -122,7 +126,7 @@ let test_explicit_one_does_not_stretch () =
     let%op result = one + five in
     let ctx = Train.forward_once (Context.auto ()) result in
     ignore (ctx : Context.t);
-    Stdio.printf "  FAIL: should have raised (explicit 1_default must not broadcast to 5_rgb)\n"
+    fail "should have raised (explicit 1_default must not broadcast to 5_rgb)"
   with Row.Shape_error (msg, _) ->
     Stdio.printf "  PASS: explicit user 1 did not stretch: %s\n" msg
 
@@ -141,11 +145,11 @@ let test_variable_mediated_conflicting () =
       ]
     in
     let _remaining, _env = Row.solve_inequalities ~stage:Stage1 constraints Row.empty_env in
-    Stdio.printf "  FAIL: should have raised Shape_error\n"
+    fail "should have raised Shape_error"
   with Row.Shape_error (msg, _) ->
     if String.is_substring msg ~substring:"bases" then
       Stdio.printf "  PASS: got expected Shape_error: %s\n" msg
-    else Stdio.printf "  FAIL: wrong error message: %s\n" msg
+    else fail "wrong error message: %s" msg
 
 let test_variable_mediated_basis_upgrade () =
   Stdio.printf "Test 5b: Variable solving records the total Dim's tag exactly\n";
@@ -166,8 +170,8 @@ let test_variable_mediated_basis_upgrade () =
     Stdio.printf "  Var v basis after solving: \"%s\"\n" basis;
     if String.equal basis "batch" then
       Stdio.printf "  PASS: variable solved-dim tag recorded as \"batch\"\n"
-    else Stdio.printf "  FAIL: expected basis \"batch\", got \"%s\"\n" basis
-  with Row.Shape_error (msg, _) -> Stdio.printf "  FAIL: unexpected Shape_error: %s\n" msg
+    else fail "expected basis \"batch\", got \"%s\"" basis
+  with Row.Shape_error (msg, _) -> fail "unexpected Shape_error: %s" msg
 
 let test_shape_to_bases () =
   Stdio.printf "Test 6: Shape.to_bases after inference\n";
@@ -181,8 +185,8 @@ let test_shape_to_bases () =
     Stdio.printf "  Bases: [%s]\n" basis_str;
     if Array.exists bases ~f:(fun b -> String.is_substring b ~substring:"batch") then
       Stdio.printf "  PASS: basis visible in Shape.to_bases\n"
-    else Stdio.printf "  FAIL: basis not found in Shape.to_bases\n"
-  with Row.Shape_error (msg, _) -> Stdio.printf "  FAIL: unexpected Shape_error: %s\n" msg
+    else fail "basis not found in Shape.to_bases"
+  with Row.Shape_error (msg, _) -> fail "unexpected Shape_error: %s" msg
 
 let test_number_axis_basis () =
   Stdio.printf "Test 7: Tensor.number ~axis_basis\n";
@@ -194,10 +198,10 @@ let test_number_axis_basis () =
     Stdio.printf "  Bases: [%s]\n" basis_str;
     if Array.exists bases ~f:(fun b -> String.equal b "count") then
       Stdio.printf "  PASS: axis_basis survives inference\n"
-    else Stdio.printf "  FAIL: axis_basis not found\n"
+    else fail "axis_basis not found"
   with
-  | Row.Shape_error (msg, _) -> Stdio.printf "  FAIL: unexpected Shape_error: %s\n" msg
-  | exn -> Stdio.printf "  FAIL: unexpected exception: %s\n" (Exn.to_string exn)
+  | Row.Shape_error (msg, _) -> fail "unexpected Shape_error: %s" msg
+  | exn -> fail "unexpected exception: %s" (Exn.to_string exn)
 
 let test_bits_axis_basis () =
   Stdio.printf "Test 7b: Tensor.bits ~axis_basis\n";
@@ -209,10 +213,10 @@ let test_bits_axis_basis () =
     Stdio.printf "  Bases: [%s]\n" basis_str;
     if Array.exists bases ~f:(fun b -> String.equal b "word") then
       Stdio.printf "  PASS: bits axis_basis survives inference\n"
-    else Stdio.printf "  FAIL: bits axis_basis not found\n"
+    else fail "bits axis_basis not found"
   with
-  | Row.Shape_error (msg, _) -> Stdio.printf "  FAIL: unexpected Shape_error: %s\n" msg
-  | exn -> Stdio.printf "  FAIL: unexpected exception: %s\n" (Exn.to_string exn)
+  | Row.Shape_error (msg, _) -> fail "unexpected Shape_error: %s" msg
+  | exn -> fail "unexpected exception: %s" (Exn.to_string exn)
 
 let test_range_axis_basis () =
   Stdio.printf "Test 8: Operation.range ~axis_basis\n";
@@ -225,10 +229,10 @@ let test_range_axis_basis () =
     Stdio.printf "  Bases: [%s]\n" basis_str;
     if Array.exists bases ~f:(fun b -> String.equal b "idx") then
       Stdio.printf "  PASS: range axis_basis survives inference\n"
-    else Stdio.printf "  FAIL: range axis_basis not found\n"
+    else fail "range axis_basis not found"
   with
-  | Row.Shape_error (msg, _) -> Stdio.printf "  FAIL: unexpected Shape_error: %s\n" msg
-  | exn -> Stdio.printf "  FAIL: unexpected exception: %s\n" (Exn.to_string exn)
+  | Row.Shape_error (msg, _) -> fail "unexpected Shape_error: %s" msg
+  | exn -> fail "unexpected exception: %s" (Exn.to_string exn)
 
 let test_number_int_axis_basis () =
   Stdio.printf "Test 8b: NTDSL.number_int ~axis_basis\n";
@@ -240,10 +244,10 @@ let test_number_int_axis_basis () =
     Stdio.printf "  Bases: [%s]\n" basis_str;
     if Array.exists bases ~f:(fun b -> String.equal b "k") then
       Stdio.printf "  PASS: number_int axis_basis survives inference\n"
-    else Stdio.printf "  FAIL: number_int axis_basis not found\n"
+    else fail "number_int axis_basis not found"
   with
-  | Row.Shape_error (msg, _) -> Stdio.printf "  FAIL: unexpected Shape_error: %s\n" msg
-  | exn -> Stdio.printf "  FAIL: unexpected exception: %s\n" (Exn.to_string exn)
+  | Row.Shape_error (msg, _) -> fail "unexpected Shape_error: %s" msg
+  | exn -> fail "unexpected exception: %s" (Exn.to_string exn)
 
 (* ================================================================ *)
 (* Direct Row construction tests (internal paths)                   *)
@@ -274,8 +278,8 @@ let test_concat_consistent_bases () =
       basis;
     if Option.equal Int.equal d (Some 5) && String.equal basis "x" then
       Stdio.printf "  PASS: concat preserved basis \"x\" with d=5\n"
-    else Stdio.printf "  FAIL: expected d=5, basis=\"x\"\n"
-  with Row.Shape_error (msg, _) -> Stdio.printf "  FAIL: unexpected Shape_error: %s\n" msg
+    else fail "expected d=5, basis=\"x\""
+  with Row.Shape_error (msg, _) -> fail "unexpected Shape_error: %s" msg
 
 let test_concat_conflicting_bases () =
   Stdio.printf "Test 10: Concat, conflicting bases -- raises\n";
@@ -292,11 +296,11 @@ let test_concat_conflicting_bases () =
       ]
     in
     let _remaining, _env = Row.solve_inequalities ~stage:Stage1 constraints Row.empty_env in
-    Stdio.printf "  FAIL: should have raised Shape_error\n"
+    fail "should have raised Shape_error"
   with Row.Shape_error (msg, _) ->
     if String.is_substring msg ~substring:"conflicting dimension bases" then
       Stdio.printf "  PASS: got expected Shape_error: %s\n" msg
-    else Stdio.printf "  FAIL: wrong error message: %s\n" msg
+    else fail "wrong error message: %s" msg
 
 let test_concat_mixed_based_unbased () =
   Stdio.printf "Test 11: Concat, mix based/unbased -- basis preserved\n";
@@ -322,8 +326,8 @@ let test_concat_mixed_based_unbased () =
       basis;
     if Option.equal Int.equal d (Some 5) && String.equal basis "x" then
       Stdio.printf "  PASS: concat preserved basis \"x\" from based component\n"
-    else Stdio.printf "  FAIL: expected d=5, basis=\"x\"\n"
-  with Row.Shape_error (msg, _) -> Stdio.printf "  FAIL: unexpected Shape_error: %s\n" msg
+    else fail "expected d=5, basis=\"x\""
+  with Row.Shape_error (msg, _) -> fail "unexpected Shape_error: %s" msg
 
 let test_affine_matching_bases () =
   Stdio.printf "Test 12: Affine, matching bases -- preserved\n";
@@ -356,8 +360,8 @@ let test_affine_matching_bases () =
       basis;
     if Option.equal Int.equal d (Some 6) && String.equal basis "x" then
       Stdio.printf "  PASS: affine preserved basis \"x\" with d=6\n"
-    else Stdio.printf "  FAIL: expected d=6, basis=\"x\"\n"
-  with Row.Shape_error (msg, _) -> Stdio.printf "  FAIL: unexpected Shape_error: %s\n" msg
+    else fail "expected d=6, basis=\"x\""
+  with Row.Shape_error (msg, _) -> fail "unexpected Shape_error: %s" msg
 
 let test_affine_conflicting_bases () =
   Stdio.printf "Test 13: Affine, conflicting bases -- raises\n";
@@ -382,11 +386,11 @@ let test_affine_conflicting_bases () =
       ]
     in
     let _remaining, _env = Row.solve_inequalities ~stage:Stage1 constraints Row.empty_env in
-    Stdio.printf "  FAIL: should have raised Shape_error\n"
+    fail "should have raised Shape_error"
   with Row.Shape_error (msg, _) ->
     if String.is_substring msg ~substring:"conflicting dimension bases" then
       Stdio.printf "  PASS: got expected Shape_error: %s\n" msg
-    else Stdio.printf "  FAIL: wrong error message: %s\n" msg
+    else fail "wrong error message: %s" msg
 
 let test_stride_noconv_forward () =
   Stdio.printf "Test 14: Stride no-conv forward -- basis propagated\n";
@@ -407,8 +411,8 @@ let test_stride_noconv_forward () =
       basis;
     if Option.equal Int.equal d (Some 8) && String.equal basis "x" then
       Stdio.printf "  PASS: stride forward propagated basis \"x\"\n"
-    else Stdio.printf "  FAIL: expected d=8, basis=\"x\"\n"
-  with Row.Shape_error (msg, _) -> Stdio.printf "  FAIL: unexpected Shape_error: %s\n" msg
+    else fail "expected d=8, basis=\"x\""
+  with Row.Shape_error (msg, _) -> fail "unexpected Shape_error: %s" msg
 
 let test_stride_noconv_reverse () =
   Stdio.printf "Test 15: Stride no-conv reverse -- basis propagated\n";
@@ -428,8 +432,8 @@ let test_stride_noconv_reverse () =
       basis;
     if Option.equal Int.equal d (Some 4) && String.equal basis "x" then
       Stdio.printf "  PASS: stride reverse propagated basis \"x\" to over\n"
-    else Stdio.printf "  FAIL: expected d=4, basis=\"x\"\n"
-  with Row.Shape_error (msg, _) -> Stdio.printf "  FAIL: unexpected Shape_error: %s\n" msg
+    else fail "expected d=4, basis=\"x\""
+  with Row.Shape_error (msg, _) -> fail "unexpected Shape_error: %s" msg
 
 let test_conv_nopadding_forward () =
   Stdio.printf "Test 16: Conv no-padding forward -- basis propagated\n";
@@ -455,8 +459,8 @@ let test_conv_nopadding_forward () =
       basis;
     if Option.equal Int.equal d (Some 6) && String.equal basis "x" then
       Stdio.printf "  PASS: conv forward propagated basis \"x\"\n"
-    else Stdio.printf "  FAIL: expected d=6, basis=\"x\"\n"
-  with Row.Shape_error (msg, _) -> Stdio.printf "  FAIL: unexpected Shape_error: %s\n" msg
+    else fail "expected d=6, basis=\"x\""
+  with Row.Shape_error (msg, _) -> fail "unexpected Shape_error: %s" msg
 
 let test_conv_nopadding_reverse () =
   Stdio.printf "Test 17: Conv no-padding reverse -- basis propagated\n";
@@ -483,8 +487,8 @@ let test_conv_nopadding_reverse () =
       basis;
     if Option.equal Int.equal d (Some 4) && String.equal basis "x" then
       Stdio.printf "  PASS: conv reverse propagated basis \"x\" to over\n"
-    else Stdio.printf "  FAIL: expected d=4, basis=\"x\"\n"
-  with Row.Shape_error (msg, _) -> Stdio.printf "  FAIL: unexpected Shape_error: %s\n" msg
+    else fail "expected d=4, basis=\"x\""
+  with Row.Shape_error (msg, _) -> fail "unexpected Shape_error: %s" msg
 
 let test_glb_conflicting_bases () =
   Stdio.printf "Test 18: GLB with conflicting bases -- strict equality raises\n";
@@ -509,11 +513,11 @@ let test_glb_conflicting_bases () =
       ]
     in
     let _remaining, _env = Row.solve_inequalities ~stage:Stage1 constraints Row.empty_env in
-    Stdio.printf "  FAIL: should have raised Shape_error for conflicting bases\n"
+    fail "should have raised Shape_error for conflicting bases"
   with Row.Shape_error (msg, _) ->
     if String.is_substring msg ~substring:"different bases" then
       Stdio.printf "  PASS: conflicting bases in mutual inequality correctly raises: %s\n" msg
-    else Stdio.printf "  FAIL: wrong error message: %s\n" msg
+    else fail "wrong error message: %s" msg
 
 (* ================================================================ *)
 (* Main                                                             *)

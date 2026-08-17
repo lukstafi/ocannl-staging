@@ -98,19 +98,15 @@ let () =
     |> Set.of_list (module String)
   in
   if List.is_empty dune_files then (
-    printf "FAIL: no dune files among the arguments -- the rule's globs match nothing\n";
+    Verdict.fail "no dune files among the arguments -- the rule's globs match nothing";
     Stdlib.exit 1);
-  let ok = ref true in
-  (* Reported on both channels, and the run exits nonzero. A golden-diff test that prints its
-     failures and exits 0 can be `dune promote`d into passing, blessing the FAIL text as the
-     expected output (Codex P2, round 10) -- so the exit status carries the verdict. Since a
-     nonzero exit means dune never writes the redirected stdout, the same lines go to stderr, where
-     they survive to be read. *)
-  let fail msg =
-    ok := false;
-    printf "FAIL: %s\n" msg;
-    eprintf "FAIL: %s\n" msg
-  in
+  (* Failures go through [Verdict]: reported on both channels, and the run exits nonzero from its
+     teardown -- so the exit status, not the promotable golden diff, carries the verdict. A
+     golden-diff test that prints its failures and exits 0 can be `dune promote`d into passing,
+     blessing the FAIL text as the expected output (Codex P2, round 10); since a nonzero exit means
+     dune never writes the redirected stdout, the same lines go to stderr, where they survive to be
+     read (gh-ocannl-601). *)
+  let fail = Verdict.fail in
   (* Every directory any dune file copies a config into, gathered before anything is checked: a
      stanza in one directory may run something in another, whose config a THIRD file materializes
      (Codex P2, round 14). Read from the stanzas rather than from the glob, which matches sources
@@ -299,10 +295,9 @@ let () =
   printf "\nExempt from the dependency, running an executable that reads no configuration:\n";
   List.iter exempt_sites ~f:(fun (key, why) -> printf "  %s -- %s\n" key why);
   let count kind = Option.value (Hashtbl.find counts kind) ~default:0 in
-  if !ok then
+  if not (Verdict.any_failed ()) then
     printf
       "\nOK: %d dune files; %d test stanzas, %d inline-test libraries and %d exe-running rules \
        declare %s; %d exempt.\n"
       (List.length dune_files) (count "test") (count "inline tests") (count "rule running")
       Scan.config_file (count "exempt")
-  else Stdlib.exit 1

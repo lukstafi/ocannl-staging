@@ -108,9 +108,9 @@ let () =
      shrinks, so the floor is monotone in refinement — here, committing D (the only open node)
      recovers the closed floor exactly, and both legs are monotone. *)
   let committed = CM.completion_floor ~open_placement:(fun _ -> false) matmul in
-  Stdio.printf "  commitment (narrowed open set) recovers the closed floor: %b\n"
+  Verdict.p "  commitment (narrowed open set) recovers the closed floor"
     (committed.CM.fr_bytes = closed.CM.fr_bytes && committed.CM.fr_flops = closed.CM.fr_flops);
-  Stdio.printf "  floors are monotone in refinement: %b\n"
+  Verdict.p "  floors are monotone in refinement"
     (opened.CM.fr_bytes <= committed.CM.fr_bytes && opened.CM.fr_flops <= committed.CM.fr_flops);
   (* Guarded write: if (E[i] > 0) F[i] = E[i] * 2. Upper counts guards-taken (cmp + mul per
      iteration, F written); the floor counts only the certain condition ops and no F traffic. *)
@@ -319,5 +319,5 @@ let () =
     Ir.C_syntax.operand_conditionality_violations ~ternop_syntax:C_config.ternop_syntax
       ~binop_syntax:C_config.binop_syntax
   in
-  Stdio.printf "  plain-C renderings agree: %b\n" (List.is_empty violations);
+  Verdict.p "  plain-C renderings agree" (List.is_empty violations);
   List.iter violations ~f:(fun v -> Stdio.printf "  VIOLATION %s\n" v)

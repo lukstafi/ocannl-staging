@@ -96,10 +96,10 @@ let () =
   let bref = IDX.find_exn (Context.bindings routine) batch_n in
 
   (* --- AC1: the alias view owns no buffer; the parent does. --- *)
-  Stdio.printf "slice is an alias view: %b\n" (Ir.Tnode.is_alias bv.value);
-  Stdio.printf "slice absent from ctx_buffers (no fresh alloc): %b\n"
+  Verdict.p "slice is an alias view" (Ir.Tnode.is_alias bv.value);
+  Verdict.p "slice absent from ctx_buffers (no fresh alloc)"
     (not (Context.mem ctx bv.value));
-  Stdio.printf "parent present in ctx_buffers: %b\n" (Context.mem ctx images.value);
+  Verdict.p "parent present in ctx_buffers" (Context.mem ctx images.value);
 
   (* --- AC2 read-through: the slice reads the parent row selected by the runtime batch index.
      --- *)
@@ -128,9 +128,9 @@ let () =
       false
     with Utils.User_error _ -> true
   in
-  Stdio.printf "host get_values on alias raises: %b\n" raised_get;
-  Stdio.printf "host set_values on alias raises: %b\n" raised_set;
-  Stdio.printf "alias still absent from ctx_buffers after rejected host access: %b\n"
+  Verdict.p "host get_values on alias raises" raised_get;
+  Verdict.p "host set_values on alias raises" raised_set;
+  Verdict.p "alias still absent from ctx_buffers after rejected host access"
     (not (Context.mem ctx bv.value));
 
   (* --- AC2 write-through: a kernel write THROUGH the slice mutates the parent's buffer. The
@@ -158,8 +158,8 @@ let () =
   let%op elig = parent2 @| elig_n in
   let elig_fwd = Train.forward elig in
   let elig_llc = Ir.Assignments.to_low_level elig_fwd.Ir.Assignments.asgns in
-  Stdio.printf "eligible slice is aliased: %b\n" (Ir.Tnode.is_alias elig.value);
-  Stdio.printf "eligible slice lowered with NO copy loop (0 writes to slice): %b\n"
+  Verdict.p "eligible slice is aliased" (Ir.Tnode.is_alias elig.value);
+  Verdict.p "eligible slice lowered with NO copy loop (0 writes to slice)"
     (count_writes_to elig_llc elig.value.Ir.Tnode.id = 0);
 
   (* --- AC3 (virtual-parent fallback): a slice of a KNOWN-VIRTUAL parent is ineligible -- it is NOT
@@ -172,9 +172,9 @@ let () =
   let%op vslice = vparent @| virt_n in
   let virt_fwd = Train.forward vslice in
   let virt_llc = Ir.Assignments.to_low_level virt_fwd.Ir.Assignments.asgns in
-  Stdio.printf "virtual-parent known_virtual: %b\n" (Ir.Tnode.known_virtual vparent.value);
-  Stdio.printf "virtual-parent slice NOT aliased: %b\n" (not (Ir.Tnode.is_alias vslice.value));
-  Stdio.printf "virtual-parent slice falls back to copy loop (writes to slice > 0): %b\n"
+  Verdict.p "virtual-parent known_virtual" (Ir.Tnode.known_virtual vparent.value);
+  Verdict.p "virtual-parent slice NOT aliased" (not (Ir.Tnode.is_alias vslice.value));
+  Verdict.p "virtual-parent slice falls back to copy loop (writes to slice > 0)"
     (count_writes_to virt_llc vslice.value.Ir.Tnode.id > 0);
 
   (* --- Finding 1 (Codex): a VECTOR store (e.g. `slice =: uniform ()`, a `uint4x32_to_prec_uniform`
@@ -193,10 +193,10 @@ let () =
   let vec_llc =
     Ir.Assignments.to_low_level (Ir.Assignments.sequence [ vec_fwd; vecwrite ]).Ir.Assignments.asgns
   in
-  Stdio.printf "vec-store slice is aliased: %b\n" (Ir.Tnode.is_alias vs.value);
-  Stdio.printf "vec-store redirected: 0 vector writes to slice: %b\n"
+  Verdict.p "vec-store slice is aliased" (Ir.Tnode.is_alias vs.value);
+  Verdict.p "vec-store redirected: 0 vector writes to slice"
     (count_writes_to vec_llc vs.value.Ir.Tnode.id = 0);
-  Stdio.printf "vec-store redirected: parent receives the vector write (>0): %b\n"
+  Verdict.p "vec-store redirected: parent receives the vector write (>0)"
     (count_writes_to vec_llc vecp.value.Ir.Tnode.id > 0);
 
   (* --- Finding 2 (Codex): host write/read of a FRESHLY built slice, before any lowering has marked
@@ -206,8 +206,8 @@ let () =
   let freshp = make_parent "freshp" [| 1.; 2.; 3.; 4.; 5.; 6. |] ~batch:2 ~out:3 in
   let%op fresh_s = freshp @| fresh_n in
   let fresh_ctx = Context.auto () in
-  Stdio.printf "fresh slice marked is_slice before lowering: %b\n" (Ir.Tnode.is_slice fresh_s.value);
-  Stdio.printf "fresh slice has no alias_of yet (pre-lowering): %b\n"
+  Verdict.p "fresh slice marked is_slice before lowering" (Ir.Tnode.is_slice fresh_s.value);
+  Verdict.p "fresh slice has no alias_of yet (pre-lowering)"
     (not (Ir.Tnode.is_alias fresh_s.value));
   let fresh_set_raises =
     try
@@ -221,8 +221,8 @@ let () =
       false
     with Utils.User_error _ -> true
   in
-  Stdio.printf "fresh-slice host set_values rejected (no detached buffer): %b\n" fresh_set_raises;
-  Stdio.printf "fresh-slice host get_values rejected: %b\n" fresh_get_raises;
-  Stdio.printf "fresh slice never allocated (absent from ctx_buffers): %b\n"
+  Verdict.p "fresh-slice host set_values rejected (no detached buffer)" fresh_set_raises;
+  Verdict.p "fresh-slice host get_values rejected" fresh_get_raises;
+  Verdict.p "fresh slice never allocated (absent from ctx_buffers)"
     (not (Context.mem fresh_ctx fresh_s.value));
   ()

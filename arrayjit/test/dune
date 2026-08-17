@@ -36,7 +36,7 @@
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND))
- (libraries base stdio arrayjit.ir))
+ (libraries base stdio arrayjit.ir verdict))
 
 (test
  (name tree_map_test)
@@ -56,7 +56,7 @@
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND))
- (libraries base stdio arrayjit.ir))
+ (libraries base stdio arrayjit.ir verdict))
 
 (test
  (name test_one_hot_gather_rewrite)
@@ -92,7 +92,7 @@
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND))
- (libraries base stdio arrayjit.ir))
+ (libraries base stdio arrayjit.ir verdict))
 
 (test
  (name test_local_scope_init)

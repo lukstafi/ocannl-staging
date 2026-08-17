@@ -13,9 +13,12 @@ let mk label = Tensor.term ~label:[ label ] ~grad_spec:Prohibit_grad ~output_dim
 let print_code_name label tn =
   match tn.Tn.code_name with
   | Some name ->
-      let bare = String.equal name label in
-      Stdio.printf "%s -> %s%s\n" label name (if bare then " [FAIL: bare name used]" else "")
-  | None -> Stdio.printf "%s -> <not compiled>\n" label
+      Stdio.printf "%s -> %s\n" label name;
+      if String.equal name label then
+        Verdict.fail (Printf.sprintf "%s -> %s: bare name used" label name)
+  | None ->
+      Stdio.printf "%s -> <not compiled>\n" label;
+      Verdict.fail (Printf.sprintf "%s: no code name -- the tensor was not compiled" label)
 
 let () =
   (* ── Test 1: C keyword labels ── *)
@@ -96,6 +99,7 @@ let () =
   List.iter [ t_tanh; bf_a; bf_b; bf_sum; result3 ] ~f:(fun t ->
       Train.set_materialized t.Tensor.value);
   let _ctx3 = Train.forward_once ctx3 result3 in
-  Stdio.printf "tanh -> %s\n" (if Option.is_some t_tanh.value.Tn.code_name then "compiled" else "?");
+  if Option.is_some t_tanh.value.Tn.code_name then Stdio.printf "tanh -> compiled\n"
+  else Verdict.fail "tanh -> no code name: the kernel that collides with the callee did not compile";
   List.iter [ bf_a; bf_b ] ~f:(fun t ->
       Stdio.printf "%s -> compiled\n" (List.hd_exn t.Tensor.value.Tn.label))

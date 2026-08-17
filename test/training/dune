@@ -23,7 +23,7 @@
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND))
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -62,7 +62,7 @@
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND))
- (libraries ocannl dataprep)
+ (libraries ocannl dataprep verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -283,6 +283,6 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules mixed_prec_parity)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))

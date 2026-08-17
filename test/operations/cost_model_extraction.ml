@@ -228,4 +228,4 @@ let () =
               ]
               ~f:(fun t -> Float.(Option.value_exn t <= t0))))
   in
-  Stdio.printf "  monotone in the envelope constants: %b\n" monotone
+  Verdict.p "  monotone in the envelope constants" monotone

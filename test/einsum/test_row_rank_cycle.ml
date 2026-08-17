@@ -27,7 +27,7 @@ let dim d = Row.get_default_dim ~d ()
 
 let check name ineqs =
   match Row.solve_inequalities ~stage:Stage1 ineqs Row.empty_env with
-  | _ -> Stdio.printf "%s: FAILED, solve_inequalities returned without an error\n" name
+  | _ -> Verdict.fail (Printf.sprintf "%s: solve_inequalities returned without an error" name)
   | exception Row.Shape_error (msg, _) -> Stdio.printf "%s: Shape_error: %s\n" name msg
 
 let () =

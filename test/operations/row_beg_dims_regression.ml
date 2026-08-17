@@ -10,6 +10,10 @@
 open! Base
 open Ocannl
 
+(* Failures go through [Verdict], so that a regression exits nonzero instead of being
+   `dune promote`d into the golden as the expected output (gh-ocannl-601). *)
+let fail fmt = Printf.ksprintf Verdict.fail fmt
+
 let dummy_origin : Row.constraint_origin list =
   [
     {
@@ -38,7 +42,7 @@ let test_1_outer_left_alignment () =
   let ineq = Row.Row_ineq { res; opnd; origin = dummy_origin } in
   try
     let _remaining, _env = Row.solve_inequalities ~stage:Stage1 [ ineq ] Row.empty_env in
-    Stdio.printf "  FAIL: inequality should have raised Shape_error (5 ≠ 2)\n"
+    fail "inequality should have raised Shape_error (5 ≠ 2)"
   with Row.Shape_error (msg, _) -> Stdio.printf "  PASS: got Shape_error: %s\n" msg
 
 (* Test 2: substitution preserves beg_dims via uniform composition. in_ = { beg_dims = [Dim 3]; dims
@@ -57,7 +61,7 @@ let test_2_substitution_preserves_beg_dims () =
   let expected : Row.t = { beg_dims = [ dim 3 ]; dims = [ dim 4 ]; bcast = Broadcastable; prov } in
   if Row.equal result expected then Stdio.printf "  PASS\n"
   else
-    Stdio.printf "  FAIL: expected %s got %s\n"
+    fail "expected %s got %s"
       (Sexp.to_string_hum (Row.sexp_of_t expected))
       (Sexp.to_string_hum (Row.sexp_of_t result))
 
@@ -78,7 +82,7 @@ let test_3_closing_preserves_beg_dims () =
   match result with
   | { beg_dims = [ Dim { d = 7; _ } ]; dims = []; bcast = Broadcastable; _ } ->
       Stdio.printf "  PASS\n"
-  | _ -> Stdio.printf "  FAIL: got %s\n" (Sexp.to_string_hum (Row.sexp_of_t result))
+  | _ -> fail "got %s" (Sexp.to_string_hum (Row.sexp_of_t result))
 
 (* Test 4: GLB merge symmetric across both flanks. First inequality: res1 = { beg_dims=[Dim 3; Dim
    5]; dims=[Dim 7]; Broadcastable } opnd = rho_row (open) Second inequality: res2 = { beg_dims=[Dim
@@ -109,7 +113,7 @@ let test_4_glb_merge_symmetric () =
   | { beg_dims = [ Dim { d = 3; _ } ]; dims = [ Dim { d = 7; _ } ]; bcast = Broadcastable; _ } ->
       Stdio.printf "  PASS\n"
   | _ ->
-      Stdio.printf "  FAIL: expected {beg_dims=[Dim 3]; dims=[Dim 7]; Broadcastable}, got %s\n"
+      fail "expected {beg_dims=[Dim 3]; dims=[Dim 7]; Broadcastable}, got %s"
         (Sexp.to_string_hum (Row.sexp_of_t result))
 
 (* Test 4b: leading-flank CONFLICT demotes to unbased Dim 1. Two upper bounds on the same rho with
@@ -141,7 +145,7 @@ let test_4b_glb_leading_conflict_demotes_to_one () =
     when String.equal basis Row.bcast_if_1 ->
       Stdio.printf "  PASS\n"
   | _ ->
-      Stdio.printf "  FAIL: expected leading flank demoted to broadcast-top Dim 1; got %s\n"
+      fail "expected leading flank demoted to broadcast-top Dim 1; got %s"
         (Sexp.to_string_hum (Row.sexp_of_t result))
 
 (* Test 4c: trailing-flank CONFLICT demotes to unbased Dim 1. Mirror of Test 4b: same leading flank
@@ -172,7 +176,7 @@ let test_4c_glb_trailing_conflict_demotes_to_one () =
     when String.equal basis Row.bcast_if_1 ->
       Stdio.printf "  PASS\n"
   | _ ->
-      Stdio.printf "  FAIL: expected trailing flank demoted to broadcast-top Dim 1; got %s\n"
+      fail "expected trailing flank demoted to broadcast-top Dim 1; got %s"
         (Sexp.to_string_hum (Row.sexp_of_t result))
 
 (* Test 5: monotonicity via re-firing (success case). First: solve res ⊑ b with b = rho_row, c =
@@ -194,7 +198,7 @@ let test_5_monotonicity_via_refiring () =
     let _remaining, _env = Row.solve_inequalities ~stage:Stage1 [ eq ] env in
     Stdio.printf "  PASS\n"
   with Row.Shape_error (msg, _) ->
-    Stdio.printf "  FAIL: substitution should not retract; got Shape_error: %s\n" msg
+    fail "substitution should not retract; got Shape_error: %s" msg
 
 (* Test 5b: monotonicity via re-firing (negative mutation). Same setup as Test 5 but the substituted
    leading axis CONFLICTS with the banked GLB's leading axis (banked Dim 4 vs substituted Dim 5).
@@ -256,8 +260,7 @@ let test_5b_monotonicity_negative_mutation () =
           Stdio.printf "  PASS: closed row preserved banked Dim 4 (or demoted to Dim 1): %s\n"
             (Sexp.to_string_hum (Row.sexp_of_t result))
         else
-          Stdio.printf
-            "  FAIL: closed row dropped banked fact (no Dim 4 or Dim 1 demotion present): %s\n"
+          fail "closed row dropped banked fact (no Dim 4 or Dim 1 demotion present): %s"
             (Sexp.to_string_hum (Row.sexp_of_t result))
 
 let () =

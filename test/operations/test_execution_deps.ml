@@ -23,8 +23,8 @@ let test_raw_dependency () =
   let sgd_routine = Train.to_routine (Context.context grad_routine) IDX.empty sgd in
   let grad_id = Context.routine_id grad_routine in
   let sgd_deps = Context.execution_deps sgd_routine in
-  printf "sgd depends on grad: %b\n" (List.mem sgd_deps grad_id ~equal:Int.equal);
-  printf "sgd has deps: %b\n" (not (List.is_empty sgd_deps));
+  Verdict.p "sgd depends on grad" (List.mem sgd_deps grad_id ~equal:Int.equal);
+  Verdict.p "sgd has deps" (not (List.is_empty sgd_deps));
   (* Correct order: grad then sgd *)
   let ctx' = Context.run ctx grad_routine in
   let _ctx' = Context.run ctx' sgd_routine in
@@ -51,11 +51,11 @@ let test_disjoint () =
   let x_deps = Context.execution_deps routine_x in
   let y_deps = Context.execution_deps routine_y in
   (* Neither should depend on the other — they may have deps on init_params routines *)
-  printf "x depends on y: %b\n" (List.mem x_deps y_id ~equal:Int.equal);
-  printf "y depends on x: %b\n" (List.mem y_deps x_id ~equal:Int.equal);
+  Verdict.p "x does not depend on y" (not (List.mem x_deps y_id ~equal:Int.equal));
+  Verdict.p "y does not depend on x" (not (List.mem y_deps x_id ~equal:Int.equal));
   (* Both should be runnable since init_params already executed *)
-  printf "can_run x: %b\n" (Context.can_run ctx routine_x);
-  printf "can_run y: %b\n" (Context.can_run ctx routine_y);
+  Verdict.p "can_run x" (Context.can_run ctx routine_x);
+  Verdict.p "can_run y" (Context.can_run ctx routine_y);
   (* Either order should work *)
   let ctx' = Context.run ctx routine_y in
   let _ctx' = Context.run ctx' routine_x in
@@ -75,10 +75,10 @@ let test_can_run () =
   let ctx = Train.init_params ctx IDX.empty l in
   let grad_routine = Train.to_routine ctx IDX.empty grad in
   let sgd_routine = Train.to_routine (Context.context grad_routine) IDX.empty sgd in
-  printf "can_run grad (before execution): %b\n" (Context.can_run ctx grad_routine);
-  printf "can_run sgd (before grad): %b\n" (Context.can_run ctx sgd_routine);
+  Verdict.p "can_run grad (before execution)" (Context.can_run ctx grad_routine);
+  Verdict.p "cannot run sgd (before grad)" (not (Context.can_run ctx sgd_routine));
   let ctx' = Context.run ctx grad_routine in
-  printf "can_run sgd (after grad): %b\n" (Context.can_run ctx' sgd_routine)
+  Verdict.p "can_run sgd (after grad)" (Context.can_run ctx' sgd_routine)
 
 (* Test 4: Negative test — running a dependent routine out of order raises Failure *)
 let test_wrong_order_raises () =
@@ -102,7 +102,7 @@ let test_wrong_order_raises () =
     printf "Wrong order (sgd before grad): no error (BUG)\n"
   with Failure msg ->
     let is_enforcement = String.is_substring msg ~substring:"Context.run:" in
-    printf "Wrong order raises Failure from Context.run: %b\n" is_enforcement
+    Verdict.p "Wrong order raises Failure from Context.run" is_enforcement
 
 (* Test 5: Re-execution pattern — grad -> sgd -> grad succeeds without reset *)
 let test_reexecution () =
@@ -141,13 +141,13 @@ let test_rollback_execution () =
   let grad_routine = Train.to_routine ctx IDX.empty grad in
   let sgd_routine = Train.to_routine (Context.context grad_routine) IDX.empty sgd in
   let ctx' = Context.run ctx grad_routine in
-  printf "can_run sgd (after grad): %b\n" (Context.can_run ctx' sgd_routine);
+  Verdict.p "can_run sgd (after grad)" (Context.can_run ctx' sgd_routine);
   Context.rollback_execution ctx' (Context.routine_id grad_routine);
-  printf "can_run sgd (after rollback): %b\n" (Context.can_run ctx' sgd_routine);
+  Verdict.p "cannot run sgd (after rollback)" (not (Context.can_run ctx' sgd_routine));
   (* The ledger is shared by reference across the lineage, so the rollback is visible from the
      context the routine was compiled from as well. *)
   let ctx' = Context.run ctx' grad_routine in
-  printf "re-running grad restores it: %b\n" (Context.can_run ctx' sgd_routine)
+  Verdict.p "re-running grad restores it" (Context.can_run ctx' sgd_routine)
 
 (* Test 7: poisoning condemns the lineage (gh-ocannl-536). A launch or sync failure that may have
    left device buffers partially written has no restore path, so continuing to time candidates on

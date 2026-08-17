@@ -12,6 +12,10 @@
 open! Base
 open Ocannl
 
+(* Failures go through [Verdict], so that a regression exits nonzero instead of being
+   `dune promote`d into the golden as the expected output (gh-ocannl-601). *)
+let fail fmt = Printf.ksprintf Verdict.fail fmt
+
 let dummy_origin : Row.constraint_origin list =
   [
     {
@@ -62,9 +66,9 @@ let test_parser_places_leading_in_beg_dims () =
   | Row.Row_var _ -> (
       match row_has_structure row ~expected_beg:[ 3 ] ~expected_trailing:[ 7 ] with
       | Ok () -> Stdio.printf "  PASS\n"
-      | Error msg -> Stdio.printf "  FAIL: %s\n" msg)
+      | Error msg -> fail "%s" msg)
   | Row.Broadcastable ->
-      Stdio.printf "  FAIL: bcast should be Row_var (named row var rho), got Broadcastable\n"
+      fail "bcast should be Row_var (named row var rho), got Broadcastable"
 
 (* Test 2: spec-driven outer-left mismatch raises Shape_error. Build two rows from specs that share
    the same row variable but disagree on the outer-left leading axis. After unification, the
@@ -98,7 +102,7 @@ let test_spec_outer_left_mismatch () =
   let ineq = Row.Row_ineq { res; opnd; origin = dummy_origin } in
   try
     let _remaining, _env = Row.solve_inequalities ~stage:Stage1 [ ineq ] Row.empty_env in
-    Stdio.printf "  FAIL: inequality should have raised Shape_error (5 vs 2 outer-left)\n"
+    fail "inequality should have raised Shape_error (5 vs 2 outer-left)"
   with Row.Shape_error (msg, _) -> Stdio.printf "  PASS: got Shape_error: %s\n" msg
 
 (* Test 3: when the spec parser populates beg_dims, downstream subst preserves them. Spec "3,
@@ -135,8 +139,8 @@ let test_spec_substitution_preserves_leading () =
       match result.bcast with
       | Row.Broadcastable -> Stdio.printf "  PASS\n"
       | Row.Row_var _ ->
-          Stdio.printf "  FAIL: expected Broadcastable after substitution, got Row_var\n")
-  | Error msg -> Stdio.printf "  FAIL: %s\n" msg
+          fail "expected Broadcastable after substitution, got Row_var")
+  | Error msg -> fail "%s" msg
 
 let () =
   test_parser_places_leading_in_beg_dims ();

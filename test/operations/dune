@@ -101,7 +101,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules threefry4x32_demo)
- (libraries base ocannl)
+ (libraries base ocannl verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -134,7 +134,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_default_init_std)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -154,7 +154,7 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules row_beg_dims_regression)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio verdict)
  (preprocess
   (pps ppx_here)))
 
@@ -163,7 +163,7 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules test_concat_dim_solver)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio verdict)
  (preprocess
   (pps ppx_here)))
 
@@ -207,7 +207,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules half_softmax)
- (libraries base ocannl stdio test_utils)
+ (libraries base ocannl stdio test_utils verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -270,7 +270,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules precision_policy_parity)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -315,7 +315,7 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules context_host_access)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -324,7 +324,7 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules for_print_test)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -626,7 +626,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_uniform1)
- (libraries base ocannl)
+ (libraries base ocannl verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -637,7 +637,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_axis_labels)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -846,7 +846,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_slice_alias)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -934,7 +934,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules context_copy)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -945,7 +945,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules tnode_uid_identity)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -967,7 +967,7 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules test_tensor_persistence)
- (libraries base ocannl sexplib stdio)
+ (libraries base ocannl sexplib stdio verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -987,7 +987,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_execution_deps)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1038,7 +1038,7 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules test_debug_name_collapse)
- (libraries base arrayjit.ir stdio))
+ (libraries base arrayjit.ir stdio verdict))
 
 (test
  (name test_ident_blacklist)
@@ -1047,7 +1047,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_ident_blacklist)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1069,7 +1069,7 @@
   (deps
    ocannl_config
    (env_var OCANNL_BACKEND)))
- (libraries base dynlink ocannl stdio)
+ (libraries base dynlink ocannl stdio verdict)
  (modules hello_world_op zero2hero_1of7 primitive_ops test_threefry4x32)
  (preprocess
   (pps ppx_here ppx_expect ppx_inline_test ppx_ocannl))
@@ -1085,7 +1085,7 @@
 (executable
  (name test_config_consistency)
  (modules test_config_consistency)
- (libraries base arrayjit.utils stdio test_utils))
+ (libraries base arrayjit.utils stdio test_utils verdict))
 
 ; The sources are globbed, not enumerated (gh-ocannl-592): a hand-written list cannot report the
 ; file that falls off it, and three did -- each staying green because the same keys were read from
@@ -1125,7 +1125,7 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules config_scan_lexing)
- (libraries base stdio test_utils))
+ (libraries base stdio test_utils verdict))
 
 ; How the dune-file scan behind config_dep_completeness reads a stanza, on input built to break
 ; it rather than on whatever the repository's dune files happen to say today.
@@ -1135,12 +1135,12 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules dune_scan_cases)
- (libraries base stdio test_utils))
+ (libraries base stdio test_utils verdict))
 
 (executable
  (name digest_completeness)
  (modules digest_completeness)
- (libraries base arrayjit.utils arrayjit.ir stdio test_utils))
+ (libraries base arrayjit.utils arrayjit.ir stdio test_utils verdict))
 
 ; Same globs as test_config_consistency above, for the same reason: the second scanner inherited
 ; the first one's list, so it inherited the blind spot too.
@@ -1174,7 +1174,7 @@
 (executable
  (name config_dep_completeness)
  (modules config_dep_completeness)
- (libraries base stdio test_utils))
+ (libraries base stdio test_utils verdict))
 
 (rule
  (target config_dep_completeness.actual)
@@ -1701,7 +1701,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_safetensors)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1712,7 +1712,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules forward_fragment_order)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1734,7 +1734,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules scalar_rmw_accumulation)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1840,7 +1840,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules symbolic_extent_launch)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1862,7 +1862,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules affine_extraction)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1873,7 +1873,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules cost_model_extraction)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1916,7 +1916,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules cost_model_floor)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1927,7 +1927,7 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules envelope_fitting)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1940,7 +1940,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules sketch_family_tree)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2251,7 +2251,7 @@
  (package neural_nets_lib)
  (modules test_cpu_topology)
  (deps ocannl_config test_cpu_topology.expected)
- (libraries base arrayjit.utils stdio)
+ (libraries base arrayjit.utils stdio verdict)
  (preprocess
   (pps ppx_sexp_conv)))
 

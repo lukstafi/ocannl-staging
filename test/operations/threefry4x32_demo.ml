@@ -25,9 +25,7 @@ let () =
   let ctx = Ocannl.Train.forward_once ctx uniform_floats in
   let result = Context.get_values ctx uniform_floats.value in
 
-  let print_check name passed =
-    Stdio.printf "  %s: %s\n" name (if passed then "PASS" else "FAIL")
-  in
+  let print_check name passed = Verdict.pass_fail ("  " ^ name) passed in
   let expected =
     [|
       0.443;

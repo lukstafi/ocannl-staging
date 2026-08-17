@@ -276,7 +276,7 @@ let () =
   (match Base.Hashtbl.find opt.LL.traced_store x with
   | None -> Stdio.printf "decide_placements: X not traced: UNSOUND\n"
   | Some traced ->
-      Stdio.printf "decide_placements classifies X as read-before-write: %b\n"
+      Verdict.p "decide_placements classifies X as read-before-write"
         traced.LL.read_before_write);
   let (inputs, _outputs), _merge = LL.input_and_output_nodes opt in
-  Stdio.printf "X is a routine input (incoming buffer preserved): %b\n" (Base.Set.mem inputs x)
+  Verdict.p "X is a routine input (incoming buffer preserved)" (Base.Set.mem inputs x)

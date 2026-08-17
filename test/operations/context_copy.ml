@@ -32,9 +32,9 @@ let scenario_on_device () =
   let%op t = [ 1.; 2.; 3. ] + [ 10.; 20.; 30. ] in
   let src = Train.forward_once ctx t in
   let dst = Context.cpu () in
-  printf "destination has the node before copy: %b\n" (Context.mem dst t.Tensor.value);
+  Verdict.p "destination lacks the node before copy" (not (Context.mem dst t.Tensor.value));
   let dst = Context.copy ~src ~dst t.Tensor.value in
-  printf "destination has the node after copy: %b\n" (Context.mem dst t.Tensor.value);
+  Verdict.p "destination has the node after copy" (Context.mem dst t.Tensor.value);
   show "copied (expect 11 22 33)" dst t.Tensor.value;
   (* Both contexts hold the node now: the second copy goes through the transfer routine. *)
   let src = Context.set_values src t.Tensor.value [| 100.; 200.; 300. |] in
@@ -52,7 +52,7 @@ let scenario_host_init_fallback () =
   in
   let c = TDSL.wrap ~l:"c" nd () in
   (* [c] was never computed in [src]; its value lives in host-init data only. *)
-  printf "source has the node: %b\n" (Context.mem src c.Tensor.value);
+  Verdict.p "source lacks the node (host-init data only)" (not (Context.mem src c.Tensor.value));
   let dst = Context.copy ~src ~dst c.Tensor.value in
   show "copied (expect 5 6)" dst c.Tensor.value
 
