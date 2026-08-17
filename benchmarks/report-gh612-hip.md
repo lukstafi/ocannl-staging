@@ -706,6 +706,10 @@ for c in "../wt-gh612-base base574" "../wt-gh612-feat feat574" "$M master-cap8";
 done
 $D snap $M master-capoff 1 --ocannl_virtualize_max_inline_fanin=-1
 $D profile $M master-capoff 1 3; $D finger master-capoff 1
+# These are separate commands too, so one failing snap/profile does not stop the block and `diff`
+# deliberately succeeds without CSVs by omitting milliseconds -- a cell could go unprofiled while the
+# block reported success and the chain/exclusive-signature timings silently vanished. Assert the set.
+$D profiles base574/r1 feat574/r1 master-cap8/r1 master-capoff/r1
 ```
 
 `finger` prints the two acceptance fingerprints directly: for gh-573 the LayerNorm sites with their

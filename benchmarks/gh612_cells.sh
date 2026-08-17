@@ -13,6 +13,7 @@
 #   gh612_cells.sh finger  <label> <rep>
 #   gh612_cells.sh parity                       # the correctness gate over every cell
 #   gh612_cells.sh replays <label/rep>...       # assert every cell has an accepted pass-2 replay
+#   gh612_cells.sh profiles <label/rep>...      # assert every cell has a complete profile
 #   gh612_cells.sh diff    <labelA> <repA> <labelB> <repB>
 #   gh612_cells.sh sweep   <tree> <reps> <cap>...      # balanced cap order, see below
 #   gh612_cells.sh roofline <tree>
@@ -129,15 +130,16 @@ cmd_search() { (
 # Arm A compiles first and arm B overwrites the same path, so snapshot by polling on content.
 cmd_snap() { (
   local tree=$1 label=$2 rep=$3; shift 3
-  tree=$(require_dir "$tree")
-  case ${tree:-} in /?*) ;; *) exit 2;; esac
+  # ORDER IS THE RULE, and it has now been got wrong three times (after the cache check, after the
+  # tree check, in two functions): resolve the cell and RETRACT its published artifacts before ANY
+  # other validation. Every exit from that point is a rejection, and a stale armA.path would let
+  # `diff`/`finger`/`profile` keep consuming the previous accepted source as this cell's evidence --
+  # and the `replays`/`profiles` gates would count it as coverage. Publish-on-success only.
   local out; out=$(cell_dir "$label" "$rep")
   case ${out:-} in /?*) ;; *) exit 2;; esac
-  # Retract the published selector FIRST, before any validation that can exit: every path out of
-  # this function from here on is a rejection, and a stale armA.path would let `diff`/`finger`/
-  # `profile` keep consuming the PREVIOUS accepted source as this cell's structural evidence.
-  # Publish-on-success only, the same rule replay2.out follows.
   rm -f "$out/armA.path"
+  tree=$(require_dir "$tree")
+  case ${tree:-} in /?*) ;; *) exit 2;; esac
   # A cell with no populated cache cannot be replayed: with BENCH_TUNE=1 and an empty cache dir this
   # would run a NEW cold search and crown a different artifact, so a structural diff would compare
   # something the report never measured. Refuse instead.
@@ -474,9 +476,17 @@ def load(name, out):
         for r in csv.DictReader(open(f)):
             t[int(r["Name"].rsplit("__seg",1)[1])].append(float(r["TotalDurationNs"])/1e6)
     ms={i:statistics.median(v) for i,v in t.items()}
+    # A CSV SET IS NOT A PROFILE unless every emitted segment is timed in every run: an interrupted
+    # profile can leave one complete CSV beside a partial one, and `ms.get(i, 0.0)` below would then
+    # fill the gaps with zeros while the file count still reads as N successful runs. Treat an
+    # incomplete set as unprofiled rather than silently comparing inconsistent sample counts.
+    complete = bool(csvs) and all(len(t.get(i,[])) == len(csvs) for i in sigs)
+    if csvs and not complete:
+        print(f"  {name}: WARNING incomplete profile ({len(csvs)} CSVs but not every segment timed in"
+              " each) -- treating as unprofiled", file=sys.stderr)
     per=collections.defaultdict(float); n=collections.defaultdict(int)
     for i,sg in sigs.items(): per[sg]+=ms.get(i,0.0); n[sg]+=1
-    return name, sigs, per, n, len(csvs)
+    return name, sigs, per, n, (len(csvs) if complete else 0)
 (na,sa,pa,ca,ra)=load(sys.argv[1],sys.argv[2]); (nb,sb,pb,cb,rb)=load(sys.argv[3],sys.argv[4])
 BODY_A=LOADED[na]; BODY_B=LOADED[nb]
 def hdr(n,per,sg,r):
@@ -552,15 +562,14 @@ EOF
 # the step numbers a report quotes must come from here.
 cmd_replay() { (
   local tree=$1 label=$2 rep=$3; shift 3
-  tree=$(require_dir "$tree")
-  case ${tree:-} in /?*) ;; *) exit 2;; esac
+  # Same rule as `snap`: resolve the cell and retract before ANY other validation, tree check
+  # included. `profile` accepts any nonempty replay2.out as an accepted timing and the `replays`
+  # gate counts it as coverage, so a stale one survives a rejected replay in both.
   local out; out=$(cell_dir "$label" "$rep")
   case ${out:-} in /?*) ;; *) exit 2;; esac
-  # Retract the published pass-2 result FIRST -- same rule, same reason, as `snap`'s armA.path: every
-  # exit from here on is a rejection, and `profile` accepts any nonempty replay2.out as an accepted
-  # timing, so a stale one would be paired with this cell's arm-A profile after the latest replay was
-  # refused.
   rm -f "$out/replay2.out"
+  tree=$(require_dir "$tree")
+  case ${tree:-} in /?*) ;; *) exit 2;; esac
   [ -d "$out/cache" ] && [ -n "$(ls -A "$out/cache" 2>/dev/null)" ] || {
     echo "gh612_cells: $label r$rep has no populated cache -- run \`search\` first" >&2; exit 2; }
   cd "$tree/benchmarks" || exit 1
@@ -665,6 +674,23 @@ cmd_replays() { (
   echo "all $# cells have an accepted pass-2 replay"
 ) }
 
+# Mirrors `replays` for the profile artifacts: the reproduction's profile block is separate commands
+# whose individual failures do not stop it, and `diff` deliberately succeeds without CSVs by omitting
+# milliseconds -- so a cell could silently never be profiled while the block reported success.
+cmd_profiles() { (
+  local missing=0 c
+  for c in "$@"; do
+    local d="$OUT_ROOT/$c"
+    if [ ! -s "$d/armA.path" ]; then echo "MISSING armA.path: $c" >&2; missing=$((missing+1)); continue; fi
+    local k; k=$(ls "$d"/kernels-*.csv 2>/dev/null | wc -l)
+    [ "$k" -ge 1 ] || { echo "MISSING kernels-*.csv: $c" >&2; missing=$((missing+1)); continue; }
+    local b; b=$(ls "$d"/bucket-*.txt 2>/dev/null | wc -l)
+    [ "$b" -eq "$k" ] || { echo "profile artifact mismatch: $c has $k CSVs but $b bucket files" >&2; missing=$((missing+1)); }
+  done
+  [ "$missing" -eq 0 ] || { echo "gh612_cells: $missing cell(s) lack a complete profile" >&2; exit 1; }
+  echo "all $# cells have a complete profile"
+) }
+
 cmd_roofline() { (
   local tree=$1
   tree=$(require_dir "$tree")
@@ -684,6 +710,7 @@ case $sub in
   finger)   cmd_finger   "$@" ;;
   parity)   cmd_parity   "$@" ;;
   replays)  cmd_replays  "$@" ;;
+  profiles) cmd_profiles "$@" ;;
   replay)   cmd_replay   "$@" ;;
   diff)     cmd_diff     "$@" ;;
   sweep)    cmd_sweep    "$@" ;;
