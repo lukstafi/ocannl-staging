@@ -395,11 +395,15 @@ module Impl = struct
               numerics policy, all of which the cache key already covers. *)
            codegen_tag = None;
            (* Advisory roofline envelope (gh-ocannl-491): documented rough constants for the
-              Apple-silicon class ([Device.attributes] exposes no throughput numbers — mid-range
-              M-series: ~5 fp32 TFLOP/s, ~200 GB/s unified memory). The model only ranks, so
-              class-level numbers suffice. *)
+              Apple-silicon class ([Device.attributes] exposes no throughput numbers). Flops:
+              mid-range M-series ~5 fp32 TFLOP/s — the model only ranks, so a class-typical
+              number suffices. Bandwidth is a class CEILING per the [hardware_limits] contract
+              (gh-ocannl-578): Ultra-tier unified memory reaches ~819 GB/s, and the previous
+              mid-range 2.0e11 was demonstrably understated (a 4e11 B/s streaming rate is
+              routine on an M4 Max), tripping the gh-514 agreement warning on every exact
+              streaming row. *)
            peak_flops = Some 5.0e12;
-           peak_memory_bandwidth = Some 2.0e11;
+           peak_memory_bandwidth = Some 1.0e12;
          })
     in
     fun () -> Lazy.force limits

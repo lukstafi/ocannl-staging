@@ -6,7 +6,13 @@
    strided/gapped access: the image cardinality counts the touched cells, not the node size; - rmw
    reduction: the accumulator's read/write/rmw split; - guarded write: guards-taken op count
    ([flops_approx]) and a never-definite write; - dynamic gather: the uninterpretable-component
-   fallback to whole-node bytes; - overlapping writes: the union bound capped by the node's size.
+   fallback to whole-node bytes; - overlapping writes: the union bound capped by the node's size;
+   - multi-read exactness (gh-ocannl-578): pairwise provably-disjoint exact reads sum exactly,
+   overlapping ones stay a flagged union bound, and conditionally-evaluated reads (Where arms)
+   stay a flagged bound even when disjoint — with the op count flagged too when the arms' costs
+   differ; - vectorized runs (gh-ocannl-578): bases spaced by at least the run length (or on
+   distinct in-bounds rows) count exactly, close-spaced or row-spilling bases stay a flagged
+   upper bound.
 
    The tail asserts the roofline bound is monotone in the envelope constants. *)
 
@@ -197,6 +203,153 @@ let () =
       ]
   in
   show_summary "zero-out then overwrite (union bound capped)" (CM.analyze overlap);
+
+  (* Disjoint multi-read exactness (gh-ocannl-578): C2[i] = A16[i] + A16[i+8] reads two disjoint
+     4-cell slices — the union is their sum, 8 cells = 32 rd bytes, exact. *)
+  let a16 = fresh_tn "A16" [| 16 |] in
+  let c2 = fresh_tn "C2" [| 4 |] in
+  let shift8 s = Idx.Affine { symbols = [ (1, s) ]; offset = 8 } in
+  let disjoint_slices =
+    for_over i
+      (LL.Set
+         {
+           tn = c2;
+           idcs = [| it i |];
+           llsc = LL.Binop (Ops.Add, (get a16 [| it i |], sp), (get a16 [| shift8 i |], sp));
+           debug = "";
+         })
+  in
+  show_summary "disjoint slice reads (exact union)" (CM.analyze disjoint_slices);
+
+  (* Overlapping shifted reads: C2[i] = A16[i] + A16[i+1] — images {0..3} and {1..4} can share a
+     cell, so the sum stays a flagged union bound. *)
+  let shift1 s = Idx.Affine { symbols = [ (1, s) ]; offset = 1 } in
+  let overlapping_slices =
+    for_over i
+      (LL.Set
+         {
+           tn = c2;
+           idcs = [| it i |];
+           llsc = LL.Binop (Ops.Add, (get a16 [| it i |], sp), (get a16 [| shift1 i |], sp));
+           debug = "";
+         })
+  in
+  show_summary "overlapping slice reads (union bound)" (CM.analyze overlapping_slices);
+
+  (* Parity-disjoint reads: C2[i] = A16[2i] * A16[2i+1] — evens and odds never collide (the gcd
+     argument), 8 cells = 32 rd bytes, exact. *)
+  let even s = Idx.Affine { symbols = [ (2, s) ]; offset = 0 } in
+  let odd s = Idx.Affine { symbols = [ (2, s) ]; offset = 1 } in
+  let parity =
+    for_over i
+      (LL.Set
+         {
+           tn = c2;
+           idcs = [| it i |];
+           llsc = LL.Binop (Ops.Mul, (get a16 [| even i |], sp), (get a16 [| odd i |], sp));
+           debug = "";
+         })
+  in
+  show_summary "parity-disjoint reads (exact union)" (CM.analyze parity);
+
+  (* Conditionally-evaluated reads stay approximate even when disjoint (gh-ocannl-578 round 1):
+     C2[i] = where(K4[i], A16[i] * 2, A16[i+8]) — only one arm executes per iteration, so A16's
+     8-cell union is an upper bound, and charging both arms (unequal costs: 1 vs 0) makes the op
+     count an upper bound too. *)
+  let k4 = fresh_tn "K4" [| 4 |] in
+  let where_arms =
+    for_over i
+      (LL.Set
+         {
+           tn = c2;
+           idcs = [| it i |];
+           llsc =
+             LL.Ternop
+               ( Ops.Where,
+                 (get k4 [| it i |], sp),
+                 (LL.Binop (Ops.Mul, (get a16 [| it i |], sp), (LL.Constant 2., sp)), sp),
+                 (get a16 [| shift8 i |], sp) );
+           debug = "";
+         })
+  in
+  show_summary "where-arm reads (conditional, stays a bound)" (CM.analyze where_arms);
+
+  (* Equal-cost arms are charged in full but execute singly, so the op count is still a flagged
+     bound (gh-ocannl-578 round 2): C2[i] = where(K4[i], A16[i] * 2, A16[i+8] * 3) charges both
+     multiplications while one runs. *)
+  let where_equal_arms =
+    for_over i
+      (LL.Set
+         {
+           tn = c2;
+           idcs = [| it i |];
+           llsc =
+             LL.Ternop
+               ( Ops.Where,
+                 (get k4 [| it i |], sp),
+                 (LL.Binop (Ops.Mul, (get a16 [| it i |], sp), (LL.Constant 2., sp)), sp),
+                 (LL.Binop (Ops.Mul, (get a16 [| shift8 i |], sp), (LL.Constant 3., sp)), sp) );
+           debug = "";
+         })
+  in
+  show_summary "where equal-cost arms (op count stays a bound)" (CM.analyze where_equal_arms);
+
+  (* Vectorized runs (gh-ocannl-578), strip-mined: setv4 V16[4*i] — bases 4 apart tile the node,
+     16 cells written exactly. The random-bits source is read once per run. *)
+  let v16 = fresh_tn "V16" [| 16 |] in
+  let src = fresh_tn "U" [| 4 |] in
+  let base4 s = Idx.Affine { symbols = [ (4, s) ]; offset = 0 } in
+  let vec_of idcs =
+    for_over i
+      (LL.Set_from_vec
+         {
+           tn = v16;
+           idcs;
+           length = 4;
+           vec_unop = Ops.Uint4x32_to_prec_uniform;
+           arg = (get src [| it i |], sp);
+           debug = "";
+         })
+  in
+  show_summary "vectorized writes, disjoint runs (exact)" (CM.analyze (vec_of [| base4 i |]));
+
+  (* Close-spaced vec bases: setv4 V16[i] — runs from bases 1 apart may overlap, so the product
+     stays a flagged upper bound (claims 16 cells where 7 distinct are touched). *)
+  show_summary "vectorized writes, overlapping runs (bound)" (CM.analyze (vec_of [| it i |]));
+
+  (* Row-spilling vec runs: setv4 W46[i][4] on a 4x6 node — each run crosses into the next row,
+     where it could meet that row's base, so exactness is declined. *)
+  let w46 = fresh_tn "W46" [| 4; 6 |] in
+  let vec_spill =
+    for_over i
+      (LL.Set_from_vec
+         {
+           tn = w46;
+           idcs = [| it i; Idx.Fixed_idx 4 |];
+           length = 4;
+           vec_unop = Ops.Uint4x32_to_prec_uniform;
+           arg = (get src [| it i |], sp);
+           debug = "";
+         })
+  in
+  show_summary "vectorized writes, row-spilling runs (bound)" (CM.analyze vec_spill);
+
+  (* Constant minor base on distinct rows: setv4 W44[i][0] on a 4x4 node — one in-bounds run per
+     row, disjoint by rows, 16 cells exact. *)
+  let w44 = fresh_tn "W44" [| 4; 4 |] in
+  let vec_rows =
+    for_over i
+      (LL.Set_from_vec
+         {
+           tn = w44;
+           idcs = [| it i; Idx.Fixed_idx 0 |];
+           length = 4;
+           vec_unop = Ops.Uint4x32_to_prec_uniform;
+           arg = (get src [| it i |], sp);
+           debug = "";
+         })
+  in
+  show_summary "vectorized writes, one run per row (exact)" (CM.analyze vec_rows);
 
   (* Roofline: monotone in the envelope constants, bandwidth- vs. compute-bound flips. *)
   Stdio.printf "\n== roofline over the matmul (flops=%d, bytes=%d) ==\n" mm.CM.flops

@@ -493,15 +493,39 @@ let cmdline_var_prefixes ?qualified_only n =
   List.concat_map (cmdline_var_names ?qualified_only n) ~f:(fun n ->
       [ n ^ "_"; n ^ "-"; n ^ "="; n ])
 
+(* Keys whose prefix-free command-line spellings are never claimed: common application flags a host
+   executable is likely to own ({!cmdline_var_names}' [qualified_only] doc; Codex P2 on PR #291).
+   The single source of the policy — {!read_cmdline_var}'s default and
+   {!cmdline_arg_is_config_key} both derive from it, so a spelling the resolver would ignore is
+   never mistaken for a claimed argument (gh-ocannl-578). *)
+let qualified_only_config_keys = Set.of_list (module String) [ "profile" ]
+
 (** The commandline sublevel of {!get_global_arg}: returns the setting's value and the [Sys.argv]
     element it came from. Pure -- the sourcing log lives at the resolution seam, which is the only
-    place that knows which sublevel actually won. *)
+    place that knows which sublevel actually won.
+
+    [qualified_only] defaults per key from {!qualified_only_config_keys}, so a caller need not
+    remember which keys renounce their prefix-free spellings. *)
 let read_cmdline_var ?qualified_only n =
-  let cmd_variants = cmdline_var_prefixes ?qualified_only n in
+  let qualified_only =
+    Option.value qualified_only ~default:(Set.mem qualified_only_config_keys n)
+  in
+  let cmd_variants = cmdline_var_prefixes ~qualified_only n in
   Array.find_map Stdlib.Sys.argv ~f:(fun arg ->
       List.find_map cmd_variants ~f:(fun p ->
           Option.some_if (String.is_prefix ~prefix:p arg)
             (String.drop_prefix arg (String.length p), arg)))
+
+(** Whether a raw command-line argument addresses a known configuration key under {e any} spelling
+    {!read_cmdline_var} accepts — prefixed or prefix-free, dashed or underscored, any separator.
+    For executables that parse their own flags (tools/): such an argument belongs to the config
+    machinery and should be passed over rather than rejected as unknown, while an argument matching
+    no known key under any spelling can still be flagged as a probable typo. *)
+let cmdline_arg_is_config_key arg =
+  Set.exists known_config_keys ~f:(fun k ->
+      let qualified_only = Set.mem qualified_only_config_keys k in
+      List.exists (cmdline_var_prefixes ~qualified_only k) ~f:(fun p ->
+          String.is_prefix arg ~prefix:p))
 
 (** The environment sublevel of {!get_global_arg}: returns the setting's value and the variable it
     came from. An empty value counts as unset. *)
@@ -1262,13 +1286,12 @@ let () =
     let lower = String.lowercase arg in
     List.exists ocannl_prefixes ~f:(fun p -> String.is_prefix ~prefix:p lower)
   in
-  let some_key_reads arg =
-    Set.exists known_config_keys ~f:(fun key ->
-        List.exists (cmdline_var_prefixes ~qualified_only:true key) ~f:(fun p ->
-            String.is_prefix ~prefix:p arg))
-  in
+  (* On an [ocannl]-prefixed argument the per-key [qualified_only] of {!cmdline_arg_is_config_key}
+     coincides with matching every key's qualified spellings — unqualified spellings cannot match a
+     prefixed argument — so the warning and the tools' pass-through share one predicate and cannot
+     drift apart. *)
   Array.iter Stdlib.Sys.argv ~f:(fun arg ->
-      if addresses_ocannl arg && not (some_key_reads arg) then
+      if addresses_ocannl arg && not (cmdline_arg_is_config_key arg) then
         Stdio.eprintf "OCANNL warning: unknown commandline argument %S\n%!" arg)
 
 let with_runtime_debug () = settings.output_debug_files_in_build_directory && settings.log_level > 1

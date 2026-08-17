@@ -1913,11 +1913,13 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
               record is memoized (Codex P1 on PR #337). *)
            codegen_tag = None;
            (* Advisory roofline envelope (gh-ocannl-491): documented rough constants for the
-              RDNA3-class targets this backend is exercised on (dGPU/APU: ~10 fp32 TFLOP/s, ~250
-              GB/s — Strix-Halo-class LPDDR5X). Per-device queries are calibration follow-up work;
-              the model only ranks, so class-level numbers suffice. *)
+              targets this backend runs on. Flops: RDNA3-class dGPU/APU ~10 fp32 TFLOP/s — the
+              model only ranks, so a class-typical number suffices. Bandwidth is a class CEILING
+              per the [hardware_limits] contract (gh-ocannl-578): the previous 2.5e11
+              (Strix-Halo-class LPDDR5X) sat below what CDNA parts sustain — MI300-family HBM3/3e
+              reaches ~5.3-6 TB/s. Per-device queries remain calibration follow-up work. *)
            peak_flops = Some 1.0e13;
-           peak_memory_bandwidth = Some 2.5e11;
+           peak_memory_bandwidth = Some 6.0e12;
          })
     in
     (* gh-ocannl-572: the kernel source is a function of the lowered code, the device capabilities

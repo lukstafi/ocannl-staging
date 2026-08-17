@@ -8,7 +8,7 @@ tensor/dune: nothing that runs a test executable
 test/einsum/dune: 29 tests, 1 inline-test library, 2 exe-running rules
 test/gpt2/dune: 1 test, 1 exe-running rule
 test/operations/config/dune: nothing that runs a test executable
-test/operations/dune: 157 tests, 1 inline-test library, 21 exe-running rules
+test/operations/dune: 157 tests, 1 inline-test library, 22 exe-running rules
 test/operations/profiles/dune: 6 exe-running rules
 test/operations/startup_streams/dune: 3 exe-running rules
 test/ppx/dune: 2 tests, 3 exempt rules (pp.exe)
@@ -25,4 +25,4 @@ Exempt from the dependency, running an executable that reads no configuration:
   test/ppx:pp.exe -- the ppx driver, run to expand a source file and diff the expansion: `ppx_ocannl` links base, ppxlib, str and einsum_parser -- no configuration reader -- so no `ocannl_config` can reach its output
   benchmarks:python3, handed %{dep:test_orchestrate.py} -- the benchmark orchestrator's own unit tests, in Python: the interpreter runs a script that imports orchestrate.py and runners/bench_common.py and calls no OCANNL executable, so there is no configuration in reach -- and a Python process would not read one anyway
 
-OK: 17 dune files; 220 test stanzas, 2 inline-test libraries and 37 exe-running rules declare ocannl_config; 4 exempt.
+OK: 17 dune files; 220 test stanzas, 2 inline-test libraries and 38 exe-running rules declare ocannl_config; 4 exempt.

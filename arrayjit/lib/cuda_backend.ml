@@ -2368,11 +2368,14 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
               record is memoized (Codex P1 on PR #337). *)
            codegen_tag = None;
            (* Advisory roofline envelope (gh-ocannl-491): documented rough constants for the sm_70+
-              discrete-GPU class (RTX-30/40 mid-range: ~15 fp32 TFLOP/s, ~450 GB/s). Per-device
-              queries (SM count x clock, memory clock x bus width) are calibration follow-up work;
-              the model only ranks, so class-level numbers suffice. *)
+              class. Flops: RTX-30/40 mid-range ~15 fp32 TFLOP/s — the model only ranks, so a
+              class-typical number suffices. Bandwidth is a class CEILING per the
+              [hardware_limits] contract (gh-ocannl-578): an RTX 4090 already sustains ~1 TB/s
+              (above the previous 4.5e11) and HBM3e datacenter parts reach ~8 TB/s. Per-device
+              queries (SM count x clock, memory clock x bus width) remain calibration follow-up
+              work. *)
            peak_flops = Some 1.5e13;
-           peak_memory_bandwidth = Some 4.5e11;
+           peak_memory_bandwidth = Some 8.0e12;
          })
     in
     (* gh-ocannl-572: the kernel source is a function of the lowered code, the device capabilities

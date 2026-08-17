@@ -45,149 +45,29 @@ let access_cells (a : Tn.t Affine.access) : int * bool =
       | `At_least f -> (box / max 1 f, false)
     in
     if a.a_vec_last then
-      (* Each map instance is the base of a run along the minor axis: runs may overlap for strided
-         bases, so the product is an upper bound. *)
-      (min node_cells (image * max 1 a.a_vec_len), true)
+      (* Each map instance is the base of a run along the minor axis. When the base image is exact
+         and the runs are provably pairwise disjoint ({!Affine.vec_runs_disjoint}), the product is
+         the exact distinct-cell count (gh-ocannl-578); otherwise runs may overlap for strided
+         bases, so it is an upper bound. *)
+      let dims = Lazy.force a.a_tn.Tn.dims in
+      let minor_dim = if Array.length dims = 0 then 0 else dims.(Array.length dims - 1) in
+      let disjoint_runs = Affine.vec_runs_disjoint ~minor_dim a in
+      ( min node_cells (image * max 1 a.a_vec_len),
+        (not (exact_image && disjoint_runs)) || a.a_guarded )
     else (min node_cells image, (not exact_image) || a.a_guarded)
 
-let footprints (accesses : Tn.t Affine.access list) : (Tn.t * node_footprint) list =
-  (* Per node and direction: sum of per-access cell counts (a union upper bound, capped by the
-     node's size); exact only for a single exact access in the direction. *)
-  let tbl = Hashtbl.create (module Tn) in
-  let order = ref [] in
-  List.iter accesses ~f:(fun a ->
-      let cells, approx = access_cells a in
-      let cur =
-        Hashtbl.find_or_add tbl a.a_tn ~default:(fun () ->
-            order := a.a_tn :: !order;
-            (0, 0, 0, 0, 0, false))
-      in
-      let reads, writes, rmws, nreads, nwrites, apx = cur in
-      let next =
-        if a.a_write then
-          ( reads,
-            writes + cells,
-            (rmws + if a.a_rmw then cells else 0),
-            nreads,
-            nwrites + 1,
-            apx || approx )
-        else (reads + cells, writes, rmws, nreads + 1, nwrites, apx || approx)
-      in
-      Hashtbl.set tbl ~key:a.a_tn ~data:next);
-  List.rev_map !order ~f:(fun tn ->
-      let reads, writes, rmws, nreads, nwrites, apx = Hashtbl.find_exn tbl tn in
-      let width = Ops.prec_in_bytes (Lazy.force tn.Tn.storage_prec) in
-      let node_bytes = Tn.num_elems tn * width in
-      let cap n = min node_bytes (n * width) in
-      ( tn,
-        {
-          fp_read_bytes = cap reads;
-          fp_write_bytes = cap writes;
-          fp_rmw_bytes = cap rmws;
-          fp_approx = apx || nreads > 1 || nwrites > 1;
-        } ))
+(* Same-node accesses whose images provably share no cell: the union of their images is then the
+   sum of their cardinalities. *)
+let rec pairwise_disjoint = function
+  | [] -> true
+  | a :: tl ->
+      List.for_all tl ~f:(fun b -> not (Affine.may_touch_same_cell a b)) && pairwise_disjoint tl
 
-let analyze (code : Low_level.t) : summary =
-  let flops_approx = ref false and opaque = ref false in
-  (* [scale] is the product of enclosing loop extents, [env] their (symbol, extent) bindings —
-     needed by [Tile_mma], whose 2*m*n*k multiply-adds are cooperative across its [lane] loop, not
-     repeated per lane. *)
-  let rec go ~scale ~env (c : Low_level.t) : int =
-    match c with
-    | Low_level.Noop | Comment _ | Zero_out _ | Declare_local _ | Workgroup_barrier -> 0
-    | Staged_compilation _ ->
-        opaque := true;
-        0
-    | Seq (c1, c2) -> go ~scale ~env c1 + go ~scale ~env c2
-    | For_loop { index; from_; to_; body; _ } ->
-        let extent = max 0 (to_ - from_ + 1) in
-        go ~scale:(scale * extent) ~env:((index, extent) :: env) body
-    | Set { llsc; _ } -> scale * sc_flops llsc
-    | Set_dynamic { dyn_value = dv, _; llsc; _ } -> scale * (sc_flops dv + sc_flops llsc)
-    | Set_from_vec { length; arg = a, _; _ } -> scale * (length + sc_flops a)
-    | Set_local (_, llsc) -> scale * sc_flops llsc
-    | If { cond = cnd, _; body } ->
-        (* Guards-taken: the body is charged as if the guard always passes. *)
-        flops_approx := true;
-        (scale * sc_flops cnd) + go ~scale ~env body
-    | Tile_mma { m; n; k; lane; _ } ->
-        let lane_extent =
-          List.Assoc.find env lane ~equal:Idx.equal_symbol |> Option.value ~default:1
-        in
-        scale / max 1 lane_extent * (2 * m * n * k)
-  and sc_flops (sc : Low_level.scalar_t) : int =
-    match sc with
-    | Low_level.Local_scope { body; _ } -> go ~scale:1 ~env:[] body
-    | Get_local _ | Get _ | Constant _ | Constant_bits _ | Embed_index _ -> 0
-    | Get_merge_buffer _ ->
-        (* Merge-buffer traffic is not represented by [affine_accesses] either: flag the
-           under-count. *)
-        opaque := true;
-        0
-    | Get_dynamic { dyn_value = dv, _; _ } -> sc_flops dv
-    | Ternop (op, a1, a2, a3) ->
-        (* FMA and Mul3 count as two arithmetic operations each — matching [peak_flops]'
-           FMA-counted-as-two convention, so an FMA-form kernel scores the same compute leg as its
-           mul+add form; the select is one.
-
-           The upper walk charges every operand that is {e rendered}, which for a conditional one is
-           more than {!Ops.ternop_conditionality} says can execute: a [Where] arm's [Local_scope]
-           renders as statements hoisted OUT of the conditional expression ([C_syntax.pp_scalar]
-           returns its definitions separately), so both arms' scope bodies do run. Only an operand
-           no renderer emits at all — a projection's discarded one, below — may be dropped. The
-           floor's [Int.min] stays sound under the same hoisting: it only loosens. *)
-        let ops = match op with Ops.FMA | Ops.Mul3 -> 2 | Ops.Where -> 1 in
-        ops + arg a1 + arg a2 + arg a3
-    | Binop (op, a1, a2) -> (
-        match Ops.binop_conditionality op with
-        (* A projection is not an operation: it renders as its selected operand alone, and the
-           discarded one is not rendered at all, hoisted definitions included. *)
-        | Ops.Only_first -> arg a1
-        | Ops.Only_second -> arg a2
-        (* Guards-taken: a gated operand is charged as if the gate always passes. *)
-        | Ops.Both_operands | Ops.Gated_second -> 1 + arg a1 + arg a2)
-    | Unop (Ops.Identity, a1) -> arg a1
-    | Unop (_, a1) -> 1 + arg a1
-  and arg (sc, _prec) = sc_flops sc in
-  let flops = go ~scale:1 ~env:[] code in
-  let per_node = footprints (Low_level.affine_accesses code) in
-  {
-    per_node;
-    read_bytes = List.fold per_node ~init:0 ~f:(fun acc (_, fp) -> acc + fp.fp_read_bytes);
-    write_bytes = List.fold per_node ~init:0 ~f:(fun acc (_, fp) -> acc + fp.fp_write_bytes);
-    flops;
-    flops_approx = !flops_approx;
-    opaque = !opaque;
-  }
-
-let total_bytes s = s.read_bytes + s.write_bytes
-let arithmetic_intensity s = Float.of_int s.flops /. Float.of_int (max 1 (total_bytes s))
-
-(* {2 The floor (dual) extraction — gh-ocannl-514 phase 3}
-
-   Lower bounds where [analyze] gives upper bounds, for bounding every completion of a partial
-   placement vector. The duality is exact: every approximation that biases the upper extraction UP
-   flips direction here — guarded ([If]) work floors to zero (guards-never-taken), a
-   conditionally-evaluated operand ({!Ops.binop_conditionality} / {!Ops.ternop_conditionality})
-   counts at its cheapest instead of its dearest, so [Where] charges its condition plus the cheaper
-   arm where the upper walk charges the dearer one and a gated right operand floors away, a
-   node's multiple same-direction accesses take the MAX of the exact images (a union is at least
-   its largest member) instead of the capped sum, non-exact images contribute zero, and opaque
-   code ([Staged_compilation], merge-buffer reads) — the upper contract's one escape hatch —
-   merely loosens a floor without breaking it. [fr_exact] is [false] when any flooring occurred:
-   the floor is then sound but not tight. *)
-
-type floor = { fr_flops : int; fr_bytes : int; fr_exact : bool } [@@deriving sexp_of]
-
-(* An access's certain distinct-cell count: the exact image, or zero when only an upper bound is
-   known. Reuses [access_cells]' exactness verdict. *)
-let access_cells_floor a =
-  let cells, approx = access_cells a in
-  if approx then 0 else cells
-
-(* The certainty pre-pass: which nodes' reads (or any accesses) are not certain to happen in
-   every completion. Node-granular and therefore conservative — one uncertain read of a node
-   floors that node's whole read contribution to zero, which only loosens the floor.
+(* The certainty pre-pass shared by both extractions (gh-ocannl-578): which nodes' reads (or any
+   accesses) are not certain to execute as the access list says. Node-granular and therefore
+   conservative in both directions of use — the floor zeroes an uncertain node's whole read
+   contribution (only loosening the floor), and the upper extraction refuses exactness for it
+   (only widening the approximation flag).
 
    - [gated_reads]: read by an operand the renderers evaluate conditionally
      ({!Ops.binop_conditionality} / {!Ops.ternop_conditionality}): a [Where] arm, of which at most
@@ -196,9 +76,10 @@ let access_cells_floor a =
      instantiates the producer only at surviving consumer sites and [cleanup_virtual_llc] drops
      the setter loop, its reads included (an open producer computing a larger domain than its
      consumers demand makes "recomputation only adds ops" false, so its whole effect attributes
-     to the open placement);
+     to the open placement); the upper extraction has no open placements and passes a vacuous
+     [open_placement];
    - [dead]: any access under a dead loop ([to_ < from_]) — the body never executes. *)
-let floor_uncertainty ~open_placement (code : Low_level.t) =
+let access_uncertainty ~open_placement (code : Low_level.t) =
   let gated_reads = Hashtbl.create (module Tn) in
   let open_reads = Hashtbl.create (module Tn) in
   let dead = Hashtbl.create (module Tn) in
@@ -319,6 +200,172 @@ let floor_uncertainty ~open_placement (code : Low_level.t) =
   let any_uncertain tn = Hashtbl.mem dead tn in
   (read_uncertain, any_uncertain)
 
+let footprints ~read_uncertain ~any_uncertain (accesses : Tn.t Affine.access list) :
+    (Tn.t * node_footprint) list =
+  (* Per node and direction: sum of per-access cell counts (a union upper bound, capped by the
+     node's size); exact when every access in the direction is individually exact, the accesses
+     are pairwise provably disjoint ({!Affine.may_touch_same_cell} — the union of disjoint images
+     is their sum, gh-ocannl-578; subsumes the single-exact-access case), and the direction is
+     certain to execute as listed ({!access_uncertainty}): a conditionally-evaluated read (a
+     [Where] arm, a gated right operand) or any dead-loop access may touch fewer cells than its
+     image, so its direction stays an upper bound. *)
+  let tbl = Hashtbl.create (module Tn) in
+  let order = ref [] in
+  List.iter accesses ~f:(fun a ->
+      let cell =
+        Hashtbl.find_or_add tbl a.a_tn ~default:(fun () ->
+            order := a.a_tn :: !order;
+            ref [])
+      in
+      cell := a :: !cell);
+  List.rev_map !order ~f:(fun tn ->
+      let accs = List.rev !(Hashtbl.find_exn tbl tn) in
+      let writes, reads = List.partition_tf accs ~f:(fun a -> a.Affine.a_write) in
+      let direction ~certain accs =
+        let counted = List.map accs ~f:(fun a -> (a, access_cells a)) in
+        let cells = List.sum (module Int) counted ~f:(fun (_, (c, _)) -> c) in
+        let exact =
+          certain
+          && List.for_all counted ~f:(fun (_, (_, approx)) -> not approx)
+          && (match counted with [] | [ _ ] -> true | _ -> pairwise_disjoint accs)
+        in
+        (cells, not exact)
+      in
+      let read_cells, reads_approx = direction ~certain:(not (read_uncertain tn)) reads in
+      let write_cells, writes_approx = direction ~certain:(not (any_uncertain tn)) writes in
+      let rmw_cells =
+        List.sum (module Int) writes ~f:(fun a ->
+            if a.Affine.a_rmw then fst (access_cells a) else 0)
+      in
+      let width = Ops.prec_in_bytes (Lazy.force tn.Tn.storage_prec) in
+      let node_bytes = Tn.num_elems tn * width in
+      let cap n = min node_bytes (n * width) in
+      ( tn,
+        {
+          fp_read_bytes = cap read_cells;
+          fp_write_bytes = cap write_cells;
+          fp_rmw_bytes = cap rmw_cells;
+          fp_approx = reads_approx || writes_approx;
+        } ))
+
+let analyze (code : Low_level.t) : summary =
+  let flops_approx = ref false and opaque = ref false in
+  (* [scale] is the product of enclosing loop extents, [env] their (symbol, extent) bindings —
+     needed by [Tile_mma], whose 2*m*n*k multiply-adds are cooperative across its [lane] loop, not
+     repeated per lane. *)
+  let rec go ~scale ~env (c : Low_level.t) : int =
+    match c with
+    | Low_level.Noop | Comment _ | Zero_out _ | Declare_local _ | Workgroup_barrier -> 0
+    | Staged_compilation _ ->
+        opaque := true;
+        0
+    | Seq (c1, c2) -> go ~scale ~env c1 + go ~scale ~env c2
+    | For_loop { index; from_; to_; body; _ } ->
+        let extent = max 0 (to_ - from_ + 1) in
+        go ~scale:(scale * extent) ~env:((index, extent) :: env) body
+    | Set { llsc; _ } -> scale * sc_flops llsc
+    | Set_dynamic { dyn_value = dv, _; llsc; _ } -> scale * (sc_flops dv + sc_flops llsc)
+    | Set_from_vec { length; arg = a, _; _ } -> scale * (length + sc_flops a)
+    | Set_local (_, llsc) -> scale * sc_flops llsc
+    | If { cond = cnd, _; body } ->
+        (* Guards-taken: the body is charged as if the guard always passes. *)
+        flops_approx := true;
+        (scale * sc_flops cnd) + go ~scale ~env body
+    | Tile_mma { m; n; k; lane; _ } ->
+        let lane_extent =
+          List.Assoc.find env lane ~equal:Idx.equal_symbol |> Option.value ~default:1
+        in
+        scale / max 1 lane_extent * (2 * m * n * k)
+  and sc_flops (sc : Low_level.scalar_t) : int =
+    match sc with
+    | Low_level.Local_scope { body; _ } -> go ~scale:1 ~env:[] body
+    | Get_local _ | Get _ | Constant _ | Constant_bits _ | Embed_index _ -> 0
+    | Get_merge_buffer _ ->
+        (* Merge-buffer traffic is not represented by [affine_accesses] either: flag the
+           under-count. *)
+        opaque := true;
+        0
+    | Get_dynamic { dyn_value = dv, _; _ } -> sc_flops dv
+    | Ternop (op, a1, a2, a3) ->
+        (* FMA and Mul3 count as two arithmetic operations each — matching [peak_flops]'
+           FMA-counted-as-two convention, so an FMA-form kernel scores the same compute leg as its
+           mul+add form; the select is one.
+
+           The upper walk charges every operand that is {e rendered}, which for a conditional one is
+           more than {!Ops.ternop_conditionality} says can execute: a [Where] arm's [Local_scope]
+           renders as statements hoisted OUT of the conditional expression ([C_syntax.pp_scalar]
+           returns its definitions separately), so both arms' scope bodies do run. Only an operand
+           no renderer emits at all — a projection's discarded one, below — may be dropped. The
+           floor's [Int.min] stays sound under the same hoisting: it only loosens. Charging both
+           arms of a short-circuiting [?:] is an over-count whenever either arm contributes any
+           work — only one arm's inline ops execute, equal costs notwithstanding — so any nonzero
+           arm flags the op count approximate (gh-ocannl-578; a cost residing entirely in hoisted
+           scope bodies does execute, so this conservatively over-flags such arms — the sound
+           direction). Only a zero-cost arm pair keeps the count exact. *)
+        let ops = match op with Ops.FMA | Ops.Mul3 -> 2 | Ops.Where -> 1 in
+        let c2 = arg a2 and c3 = arg a3 in
+        (match Ops.ternop_conditionality op with
+        | Ops.All_three -> ()
+        | Ops.Cond_and_one_arm -> if c2 <> 0 || c3 <> 0 then flops_approx := true);
+        ops + arg a1 + c2 + c3
+    | Binop (op, a1, a2) -> (
+        match Ops.binop_conditionality op with
+        (* A projection is not an operation: it renders as its selected operand alone, and the
+           discarded one is not rendered at all, hoisted definitions included. *)
+        | Ops.Only_first -> arg a1
+        | Ops.Only_second -> arg a2
+        | Ops.Gated_second ->
+            (* Gates-taken: the right operand is charged as if the gate always passes — an
+               over-count whenever it costs anything (gh-ocannl-578). *)
+            let c2 = arg a2 in
+            if c2 <> 0 then flops_approx := true;
+            1 + arg a1 + c2
+        | Ops.Both_operands -> 1 + arg a1 + arg a2)
+    | Unop (Ops.Identity, a1) -> arg a1
+    | Unop (_, a1) -> 1 + arg a1
+  and arg (sc, _prec) = sc_flops sc in
+  let flops = go ~scale:1 ~env:[] code in
+  let read_uncertain, any_uncertain =
+    access_uncertainty ~open_placement:(fun _ -> false) code
+  in
+  let per_node = footprints ~read_uncertain ~any_uncertain (Low_level.affine_accesses code) in
+  {
+    per_node;
+    read_bytes = List.fold per_node ~init:0 ~f:(fun acc (_, fp) -> acc + fp.fp_read_bytes);
+    write_bytes = List.fold per_node ~init:0 ~f:(fun acc (_, fp) -> acc + fp.fp_write_bytes);
+    flops;
+    flops_approx = !flops_approx;
+    opaque = !opaque;
+  }
+
+let total_bytes s = s.read_bytes + s.write_bytes
+let arithmetic_intensity s = Float.of_int s.flops /. Float.of_int (max 1 (total_bytes s))
+
+(* {2 The floor (dual) extraction — gh-ocannl-514 phase 3}
+
+   Lower bounds where [analyze] gives upper bounds, for bounding every completion of a partial
+   placement vector. The duality is exact: every approximation that biases the upper extraction UP
+   flips direction here — guarded ([If]) work floors to zero (guards-never-taken), a
+   conditionally-evaluated operand ({!Ops.binop_conditionality} / {!Ops.ternop_conditionality})
+   counts at its cheapest instead of its dearest, so [Where] charges its condition plus the cheaper
+   arm where the upper walk charges the dearer one and a gated right operand floors away, a
+   node's multiple same-direction accesses sum only when the exact images are pairwise provably
+   disjoint (both extractions then agree the union is the sum) and otherwise take their MAX (a
+   union is at least its largest member) instead of the capped sum, non-exact images contribute
+   zero, and opaque
+   code ([Staged_compilation], merge-buffer reads) — the upper contract's one escape hatch —
+   merely loosens a floor without breaking it. [fr_exact] is [false] when any flooring occurred:
+   the floor is then sound but not tight. *)
+
+type floor = { fr_flops : int; fr_bytes : int; fr_exact : bool } [@@deriving sexp_of]
+
+(* An access's certain distinct-cell count: the exact image, or zero when only an upper bound is
+   known. Reuses [access_cells]' exactness verdict. *)
+let access_cells_floor a =
+  let cells, approx = access_cells a in
+  if approx then 0 else cells
+
+
 let floor_flops ~open_placement (code : Low_level.t) : int * bool =
   let exact = ref true in
   let rec go ~scale ~env (c : Low_level.t) : int =
@@ -404,33 +451,45 @@ let under_dead_loop (a : Tn.t Affine.access) =
 
 let completion_floor ?(open_placement = fun _ -> false) (code : Low_level.t) : floor =
   let flops, flops_exact = floor_flops ~open_placement code in
-  let read_uncertain, any_uncertain = floor_uncertainty ~open_placement code in
-  (* Per node and direction, the certain traffic is the largest exact single-access image (a
-     union is at least its largest member). Nodes with an open placement level contribute zero:
-     their fully-inlined completion moves no bytes for them, and the floor quantifies over every
-     completion. Committing such a node to Materialize adds back {!node_floor_bytes} — the
-     monotone refinement delta. Reads that are not certain in every completion (Where arms, open
-     producers\' operands, dead code) floor to zero, as do guarded and non-exact accesses. *)
+  let read_uncertain, any_uncertain = access_uncertainty ~open_placement code in
+  (* Per node and direction, the certain traffic: the sum of the exact images when they are
+     pairwise provably disjoint (a disjoint union attains its sum, gh-ocannl-578), otherwise the
+     largest exact image (a union is at least its largest member). Nodes with an open placement
+     level contribute zero: their fully-inlined completion moves no bytes for them, and the floor
+     quantifies over every completion. Committing such a node to Materialize adds back
+     {!node_floor_bytes} — the monotone refinement delta. Reads that are not certain in every
+     completion (Where arms, open producers\' operands, dead code) floor to zero, as do guarded
+     and non-exact accesses. *)
   let tbl = Hashtbl.create (module Tn) in
   let inexact = ref (not flops_exact) in
   List.iter (Low_level.affine_accesses code) ~f:(fun a ->
       if open_placement a.Affine.a_tn || under_dead_loop a || any_uncertain a.a_tn then
         inexact := true
-      else begin
-        let cells = access_cells_floor a in
-        let cells = if (not a.a_write) && read_uncertain a.a_tn then 0 else cells in
-        if cells = 0 then inexact := true;
-        let reads, writes = Hashtbl.find tbl a.a_tn |> Option.value ~default:(0, 0) in
-        (* A second nonzero contribution in a direction means the union exceeds the retained
-           maximum unless the images coincide — which is not proved, so the floor is loose. *)
-        (if cells > 0 && (if a.a_write then writes > 0 else reads > 0) then inexact := true);
-        let next = if a.a_write then (reads, max writes cells) else (max reads cells, writes) in
-        Hashtbl.set tbl ~key:a.a_tn ~data:next
-      end);
+      else
+        let cell = Hashtbl.find_or_add tbl a.a_tn ~default:(fun () -> ref []) in
+        cell := a :: !cell);
   let bytes =
-    Hashtbl.fold tbl ~init:0 ~f:(fun ~key:tn ~data:(reads, writes) acc ->
+    Hashtbl.fold tbl ~init:0 ~f:(fun ~key:tn ~data:accs acc ->
+        let direction accs =
+          let counted =
+            List.map accs ~f:(fun a ->
+                let cells = access_cells_floor a in
+                let cells = if (not a.a_write) && read_uncertain a.a_tn then 0 else cells in
+                if cells = 0 then inexact := true;
+                (a, cells))
+          in
+          let nz = List.filter counted ~f:(fun (_, c) -> c > 0) in
+          if pairwise_disjoint (List.map nz ~f:fst) then List.sum (module Int) nz ~f:snd
+          else begin
+            (* The union exceeds the retained maximum unless the images coincide — which is not
+               proved, so the floor is loose. *)
+            (if List.length nz > 1 then inexact := true);
+            List.fold nz ~init:0 ~f:(fun m (_, c) -> max m c)
+          end
+        in
+        let writes, reads = List.partition_tf !accs ~f:(fun a -> a.Affine.a_write) in
         let width = Ops.prec_in_bytes (Lazy.force tn.Tn.storage_prec) in
-        acc + ((reads + writes) * width))
+        acc + ((direction reads + direction writes) * width))
   in
   { fr_flops = flops; fr_bytes = bytes; fr_exact = not !inexact }
 

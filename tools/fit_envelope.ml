@@ -13,9 +13,9 @@
    looser bounds. Files from several tuning runs on the same machine can be concatenated or
    passed together — the fit only tightens with more rows.
 
-   Linking [ir] makes this a config consumer like any OCANNL executable, so [--ocannl_*] flags
-   are left to the config machinery; its startup chatter goes to stderr, leaving stdout a clean
-   redirectable data channel. *)
+   Linking [ir] makes this a config consumer like any OCANNL executable, so config flags (any
+   spelling the config machinery accepts, e.g. [--ocannl_backend=...] or [--backend=...]) are left
+   to it; its startup chatter goes to stderr, leaving stdout a clean redirectable data channel. *)
 
 open Base
 module Cal = Ir.Cost_model.Calibration
@@ -25,10 +25,7 @@ let usage () =
   Stdlib.exit 2
 
 let () =
-  let args =
-    List.tl_exn (Array.to_list Stdlib.Sys.argv)
-    |> List.filter ~f:(fun a -> not (String.is_prefix a ~prefix:"--ocannl_"))
-  in
+  let args = List.tl_exn (Array.to_list Stdlib.Sys.argv) in
   let backend = ref None and margin = ref 1.0 and files = ref [] in
   List.iter args ~f:(fun a ->
       match String.chop_prefix a ~prefix:"--backend=" with
@@ -44,7 +41,12 @@ let () =
                   Stdio.eprintf "fit_envelope: --margin needs a float >= 1.0, got %s\n" m;
                   Stdlib.exit 2)
           | None ->
-              if String.is_prefix a ~prefix:"--" then usage () else files := a :: !files));
+              (* A known config key under any accepted spelling belongs to the config machinery
+                 (see [Utils.cmdline_arg_is_config_key]); an unrecognized dash argument is a
+                 probable typo. *)
+              if String.is_prefix a ~prefix:"-" then (
+                if not (Utils.cmdline_arg_is_config_key a) then usage ())
+              else files := a :: !files));
   let files = List.rev !files in
   if List.is_empty files then usage ();
   let malformed = ref 0 and legacy = ref 0 in

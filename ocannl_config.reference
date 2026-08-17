@@ -464,6 +464,12 @@
 # keys are global), `--margin=F` (F >= 1) adds headroom for candidates faster than any yet
 # measured. Rows recorded before the approx column (9-column schema) are skipped with a
 # warning — prefer re-recording calibration data with the current build.
+# Ordinary (matmul-family) tuning data cannot constrain the memory leg: those rows are
+# compute-bound and usually carry approximate byte counts (gh-ocannl-578). To make
+# model_peak_memory_bandwidth fittable, run the STREAM-style footprint-exact calibration pass
+# `tools/calibrate_bandwidth.exe --ocannl_autotune_calibration_file=<file>` once per machine and
+# backend: it appends bytes-exact streaming rows through the same emission path (verifying they
+# came out exact), then refits the whole file and prints the config-pasteable constants.
 # Relative paths resolve against the working directory. With autotune_log=true the same
 # calibration lines also go to stderr, human-readable.
 #autotune_calibration_file=
@@ -526,7 +532,10 @@
 #model_peak_flops=
 
 # Overrides the backend's advisory peak main-memory bandwidth, in bytes/s — the memory leg of
-# the roofline envelope. Same contract as model_peak_flops.
+# the roofline envelope. Same contract as model_peak_flops. Tuning workloads rarely demonstrate
+# achievable bandwidth (compute-bound, approximate byte counts): fit this leg from the
+# streaming rows of `tools/calibrate_bandwidth.exe` (gh-ocannl-578; see
+# autotune_calibration_file).
 #model_peak_memory_bandwidth=
 
 # If true, stdout capturing is disabled, so some logs meant for the ppx_minidebug log files
