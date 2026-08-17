@@ -69,6 +69,35 @@ Pinned by `test/operations/sketch_family_tree.ml`'s half-precision scenarios: de
 native-fp16 limits + the `fp16_arithmetic` policy seed pure-f16 (no pack precision, doubled
 lanes); the policy on a merely-promoted target stays f32-compute.
 
+### Tile width follows the extent, not the register cap
+
+The C-tile is `rm` rows of `rn` vectors, and `rn` is chosen against the *actual* column extent rather
+than pinned at the register-pressure cap. The columns `bw = rn * lanes` does not cover are peeled to
+the scalar fallback, and a peeled column costs roughly a whole vector slot — so a cap that leaves a
+fat remainder loses far more than the extra A-reuse it buys. This is invisible at f32 lane counts and
+brutal at doubled ones: at n = 512 a pure-fp16 `bw = 48` peels 32 columns, 6.25% of the work at
+scalar speed, and that alone turned the NEON measurement below upside down (37 vs 133 GFLOP/s).
+Power-of-two extents — what deep learning actually runs — are never multiples of 48.
+
+The ranking model: per unit of `m*k`, a tile pass issues one vector FMA per lane-column plus the B
+row loads (1/`rm` per FMA) and the A splats (1/`rn`), while each peeled column costs about `lanes`
+lane-slots. The constant is an empirical fit (~8 at 8 lanes, ~10 at 4) that only has to *rank*
+candidates, not predict times; it reproduces the measured order at n = 512 within a few percent
+across `rn = 2..6`, and where several widths divide the extent evenly it lands on the largest
+affordable one. Measured on the M4 Max (10 repeats, GFLOP/s, `packmma`):
+
+| rn (bw at 4/8 lanes) | 2 | 3 | 4 | 5 | 6 |
+|---|---|---|---|---|---|
+| pure-f16, n=512 | 92.0 | 78.7 | **132.6** | 36.9 | 36.9 |
+| pure-f16, n=1024 | 136.0 | 96.7 | **203.4** | 89.0 | 111.2 |
+| f16→f32, n=512 | 55.4 | 47.5 | **75.3** | 48.3 | 55.7 |
+| f16→f32, n=1024 | 66.4 | 65.9 | **100.9** | 80.6 | 62.0 |
+
+The cap itself was never the problem: isolated at extents both widths divide (n = 576, 768),
+`rn = 4` and `rn = 6` land within ±10% of each other. The peel is the whole story. The fixed cap had
+been the geometry since gh-ocannl-469, so this lifts the f32 register tiling too (n = 512: 55.9 →
+74.3 GFLOP/s standalone) — 16-bit operands are what made it visible, not what made it true.
+
 ### Cost model
 
 Nothing to change structurally: per-node footprint widths already come off each node's own

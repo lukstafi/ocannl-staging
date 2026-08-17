@@ -3816,7 +3816,36 @@ module C_syntax (B : C_syntax_config) = struct
               (lanes < 2 || n < lanes)
           in
           let rm = min 4 m in
-          let rn = min (if B.vector_bytes = 32 then 3 else 6) (n / lanes) in
+          (* The C-tile is [rm] rows of [rn] vectors; [rn] is chosen against the ACTUAL [n], not
+             fixed at the register-pressure cap (gh-ocannl-575). The columns [bw = rn * lanes] does
+             not cover are peeled to the scalar fallback, and a scalar column is roughly a whole
+             vector slot's worth of work — so a cap that leaves a fat remainder loses far more than
+             the extra A-reuse it buys. Concretely on NEON at n = 512: the pure-fp16 [bw = 48] peels
+             32 of 512 columns and runs 3.6x slower than the peel-free [bw = 32] (37 vs 133
+             GFLOP/s), and the f32 tiling gains 1.35x the same way.
+
+             The ranking model: per unit of m*k, a tile pass issues one vector FMA per lane-column
+             plus the B row loads (1/rm of them per FMA) and the A splats (1/rn), while each peeled
+             column costs about [lanes] lane-slots — the constant is an empirical fit (~8 at
+             lanes = 8, ~10 at lanes = 4) that only has to RANK candidates, not predict times. It
+             reproduces the measured order at n = 512 within a few percent across rn = 2..6, and
+             where several widths divide [n] evenly it lands on the largest affordable one. *)
+          let rn =
+            let cap = min (if B.vector_bytes = 32 then 3 else 6) (n / lanes) in
+            let cost rn =
+              let bw = rn * lanes in
+              let n_full = n - (n % bw) in
+              (Float.of_int (n_full / lanes)
+              *. (1. +. (1. /. Float.of_int rm) +. (1. /. Float.of_int rn)))
+              +. Float.of_int ((n - n_full) * lanes)
+            in
+            List.range 1 (cap + 1)
+            |> List.min_elt ~compare:(fun x y ->
+                   (* Ties (an exactly-dividing [bw] repeated at a multiple) go to the larger tile:
+                      more A-reuse at equal modelled cost. *)
+                   match Float.compare (cost x) (cost y) with 0 -> Int.compare y x | c -> c)
+            |> Option.value ~default:cap
+          in
           let bw = rn * lanes in
           let m_full = m - (m % rm) in
           let n_full = n - (n % bw) in
