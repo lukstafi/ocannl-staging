@@ -104,23 +104,32 @@ cmd_search() { (
   # the parity/replays/profiles gates would then certify the rejected retry from them.
   local out; out=$(cell_dir "$label" "$rep")
   case ${out:-} in /?*) ;; *) exit 2;; esac
-  rm -rf "$out"; mkdir -p "$out"            # mkdir BEFORE any redirection into it
+  # STAGE, then publish atomically on success. Cleaning up after a nonzero child is not enough: a
+  # signal to the wrapper (SIGTERM to the process group after the benchmark has emitted its JSON)
+  # skips the cleanup branch entirely and leaves search.out and a populated cache in their accepted
+  # locations, where a later replay uses the cache and the artifact gates certify the cell. Writing
+  # into a staging dir means an interrupted run publishes nothing at all.
+  local stage="$out.staging"
+  rm -rf "$out" "$stage"; mkdir -p "$stage"
+  trap 'rm -rf '"$stage"'' EXIT INT TERM
   tree=$(require_dir "$tree")
   case ${tree:-} in /?*) ;; *) exit 2;; esac
   cd "$tree/benchmarks" || exit 1
   local t0=$SECONDS
   BENCH_FIXTURE=$FIXTURE BENCH_TUNE=1 $PIN "$EXE" --ocannl_backend=hip \
-    --ocannl_autotune_cache_dir="$out/cache" \
+    --ocannl_autotune_cache_dir="$stage/cache" \
     --ocannl_autotune_log=true --ocannl_schedule_log_declines=true "$@" \
-    > "$out/search.out" 2> "$out/search.err"
+    > "$stage/search.out" 2> "$stage/search.err"
   local st=$?
   # A nonzero exit can still leave a complete search.out and a populated cache, and the parity /
   # replays / profiles gates validate ARTIFACTS rather than this status -- so a failed search would
   # be certified as a completed cell. Publish only on success.
   if [ "$st" -ne 0 ]; then
     echo "$label r$rep: exit $st, $((SECONDS - t0))s -- discarding the cell" >&2
-    rm -rf "$out"; return "$st"
+    rm -rf "$stage"; trap - EXIT INT TERM; return "$st"
   fi
+  rm -rf "$out" && mv "$stage" "$out" || { echo "gh612_cells: could not publish $label r$rep" >&2; return 1; }
+  trap - EXIT INT TERM
   echo "$label r$rep: exit $st, $((SECONDS - t0))s"
   grep -h '^{' "$out/search.out" | tail -1
   # The three claim-bearing lines: the deterministic untuned baseline, the crowned artifact per

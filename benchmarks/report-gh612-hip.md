@@ -815,11 +815,17 @@ done
 # slower from accumulated modules. Run these ONLY on a quiet box -- a concurrent CPU build corrupted a
 # whole batch mid-session (47-64 ms instead of ~19) with nothing in the output flagging it.
 for r in 1 2 3; do $D replay ../wt-gh612-base base574 $r; $D replay ../wt-gh612-feat feat574 $r; done
-for r in 1 2 3; do $D replay $M master-capoff $r --ocannl_virtualize_max_inline_fanin=-1; done
-# cap 8 lives under TWO labels by design: Part 3 made r1-r3 as `master-cap8`, and the balanced block
-# made r4-r6 as `sweep-cap8`. Replaying `master-cap8/r4-r6` would refuse (no such cache) while the
-# claim-bearing artifacts went unreplayed.
-for r in 1 2 3; do $D replay $M master-cap8 $r; done
+# cap 8 lives under TWO labels by design: Part 3 made r1-r3 as `master-cap8`, the balanced block made
+# r4-r6 as `sweep-cap8`. And the cap-8-vs-cap-off pass-2 replays feed the 1.116x factor of the
+# chained 1.18x, so they need the same alternation their searches had -- balancing the searches does
+# not balance these timings.
+for r in 1 2 3; do
+  if [ $(( (r-1) % 2 )) -eq 0 ]; then order="8 off"; else order="off 8"; fi
+  for c in $order; do
+    if [ "$c" = 8 ]; then $D replay $M master-cap8 $r
+    else $D replay $M master-capoff $r --ocannl_virtualize_max_inline_fanin=-1; fi
+  done
+done
 for r in 1 2 3; do $D replay $M sweep-cap4 $r --ocannl_virtualize_max_inline_fanin=4; done
 # the claim-bearing r4-r6 replays must be ORDER-BALANCED too: balancing the searches does not
 # balance these, and once every quoted timing is a pass-2 number the replay order is what can
