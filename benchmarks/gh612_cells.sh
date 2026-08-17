@@ -615,7 +615,8 @@ cmd_replay() { (
 # noise that different schedules produce, far below anything a real correctness regression shows.
 # EXPECT_RUNS, if set, additionally pins how many cells the gate must have covered.
 cmd_parity() { (
-  python3 - "$OUT_ROOT" "${PARITY_MAX_ULP:-64}" "${EXPECT_RUNS:-0}" "${EXPECT_CELLS:-}" <<'EOF'
+  python3 - "$OUT_ROOT" "${PARITY_MAX_ULP:-64}" "${EXPECT_RUNS:-0}" "${EXPECT_CELLS:-}" \
+           "${EXPECT_STEPS:-8}" <<'EOF'
 import json,glob,os,sys,math,collections
 root=sys.argv[1]
 seqs=collections.defaultdict(list)
@@ -654,6 +655,14 @@ if want:
     if extra: bad.append(f"unexpected cells present (stale OUT_ROOT?): {' '.join(extra)}")
 lens={len(L) for L in seqs}
 if len(lens) != 1: bad.append(f"loss vectors have differing lengths {sorted(lens)}")
+# Consistent lengths are not enough: 26 records of `"losses":[]` share a length, skip the comparison
+# loop entirely, leave worst at 0 and would print PASSED having checked no executed value at all.
+# Require the expected sample count so a truncated or empty vector fails instead of certifying.
+steps=int(sys.argv[5]) if len(sys.argv)>5 and sys.argv[5] else 8
+got=lens.pop() if len(lens)==1 else None
+if got is not None and steps and got != steps:
+    bad.append(f"loss vectors have {got} samples, expected EXPECT_STEPS={steps}")
+if got == 0: bad.append("loss vectors are EMPTY: the gate would compare nothing")
 if tot < 2: bad.append("fewer than 2 runs: nothing to compare")
 if bad:
     for b in bad: print("PARITY GATE FAILED: "+b, file=sys.stderr)

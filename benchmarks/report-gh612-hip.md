@@ -669,12 +669,21 @@ what produced the numbers; one that restates commands always can.
 # three trees, ONE fixture file. The fixture must be the same file in every tree -- symlink it
 # rather than regenerating, so the input cannot differ between arms.
 cd ocannl-staging
+# `git worktree add` exits 128 if the path exists, and a bare loop would then build and MEASURE a
+# stale checkout (and its stale _build) under the BASE/FEAT/master label -- which corrupts the whole
+# comparison silently. Fail on the add, and verify the commit even when the worktree already exists.
 for w in master:5d0c86d8 base:6d14f401 feat:76f50dcd; do
-  git worktree add --detach ../wt-gh612-${w%%:*} ${w##*:}
-  mkdir -p ../wt-gh612-${w%%:*}/benchmarks/fixtures
+  d=../wt-gh612-${w%%:*}; want=${w##*:}
+  if [ -e "$d" ]; then
+    have=$(git -C "$d" rev-parse --short HEAD) || exit 1
+    [ "$have" = "$want" ] || { echo "$d is at $have, want $want -- refusing to measure it" >&2; exit 1; }
+  else
+    git worktree add --detach "$d" "$want" || exit 1
+  fi
+  mkdir -p "$d/benchmarks/fixtures" || exit 1
   ln -sf "$PWD/benchmarks/fixtures/gpt2_mini.safetensors" \
-         ../wt-gh612-${w%%:*}/benchmarks/fixtures/gpt2_mini.safetensors
-  (cd ../wt-gh612-${w%%:*} && dune build @check bin/ benchmarks/)
+         "$d/benchmarks/fixtures/gpt2_mini.safetensors" || exit 1
+  (cd "$d" && dune build @check bin/ benchmarks/) || exit 1
 done
 D=benchmarks/gh612_cells.sh   # from the tree root; results land under $OUT_ROOT (default /tmp/gh612)
 ```
@@ -766,10 +775,16 @@ $D sweep $M 1 16 32                        # the shape of the curve (structural,
 # not fail loudly: `snap` with BENCH_TUNE=1 and an empty cache would run a NEW cold search and crown a
 # different artifact, so the diff would compare something the report never measured. (`snap` now
 # refuses an uncached cell for exactly that reason.)
-$D snap $M master-capoff 1 --ocannl_virtualize_max_inline_fanin=-1
-for cap in 32 16 4 2; do $D snap $M sweep-cap$cap 1 --ocannl_virtualize_max_inline_fanin=$cap; done
+# && / || exit throughout: a failed snapshot or diff here would otherwise be skipped over and the
+# block would still exit zero, omitting the evidence for "cap 32 is placement-identical" or "cap 16
+# differs by one node" while looking like it produced them.
+$D snap $M master-capoff 1 --ocannl_virtualize_max_inline_fanin=-1 || exit 1
+for cap in 32 16 4 2; do
+  $D snap $M sweep-cap$cap 1 --ocannl_virtualize_max_inline_fanin=$cap || exit 1
+done
 for cell in sweep-cap32 sweep-cap16 master-cap8 sweep-cap4 sweep-cap2; do
-  echo "== master-capoff vs $cell =="; $D diff master-capoff 1 "$cell" 1
+  echo "== master-capoff vs $cell =="
+  $D diff master-capoff 1 "$cell" 1 || exit 1
 done
 ```
 
