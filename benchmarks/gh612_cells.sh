@@ -12,6 +12,7 @@
 #   gh612_cells.sh profile <tree> <label> <rep> [n-harness-runs]
 #   gh612_cells.sh finger  <label> <rep>
 #   gh612_cells.sh parity                       # the correctness gate over every cell
+#   gh612_cells.sh replays <label/rep>...       # assert every cell has an accepted pass-2 replay
 #   gh612_cells.sh diff    <labelA> <repA> <labelB> <repB>
 #   gh612_cells.sh sweep   <tree> <reps> <cap>...      # balanced cap order, see below
 #   gh612_cells.sh roofline <tree>
@@ -68,7 +69,7 @@ ROUTINE=cross_entropy_loss_fwd
 # Two independent checks, because either alone is bypassable: a character whitelist, and a
 # containment test on the resolved parent.
 cell_dir() {
-  local label=$1 rep=$2 parent
+  local label=$1 rep=$2
   case $label in
     ""|*/*|*..*) echo "gh612_cells: bad label '$label' (no '/', no '..')" >&2; exit 2;;
     *[!A-Za-z0-9._-]*) echo "gh612_cells: bad label '$label' (allowed: A-Za-z0-9._-)" >&2; exit 2;;
@@ -79,14 +80,19 @@ cell_dir() {
   # A pre-existing SYMLINK at $OUT_ROOT/<label> passes a logical-path check -- `cd`+`pwd` reports the
   # path beneath OUT_ROOT -- while `rm -rf` follows it and deletes inside the link's target. Resolve
   # physically (`pwd -P`) and require the physical parent beneath the physical root.
+  # BOTH components must be checked, not just the label: `$OUT_ROOT/<label>/r<rep>` can itself be a
+  # symlink, and every caller then deletes through it (armA.path, armsnap, the profile artifacts).
+  # So resolve the FULL cell directory physically and require the result under the physical root.
   [ -L "$OUT_ROOT/$label" ] && { echo "gh612_cells: refusing symlinked cell parent: $OUT_ROOT/$label" >&2; exit 2; }
-  parent=$(mkdir -p "$OUT_ROOT/$label" 2>/dev/null && cd "$OUT_ROOT/$label" && pwd -P) || parent=""
+  [ -L "$OUT_ROOT/$label/r$rep" ] && { echo "gh612_cells: refusing symlinked cell dir: $OUT_ROOT/$label/r$rep" >&2; exit 2; }
   [ -n "${OUT_ROOT_P:-}" ] || { echo "gh612_cells: OUT_ROOT has no physical path" >&2; exit 2; }
-  case ${parent:-} in
+  local cell
+  cell=$(mkdir -p "$OUT_ROOT/$label/r$rep" 2>/dev/null && cd "$OUT_ROOT/$label/r$rep" && pwd -P) || cell=""
+  case ${cell:-} in
     "$OUT_ROOT_P"/*) ;;
-    *) echo "gh612_cells: cell path escaped OUT_ROOT physically: '$OUT_ROOT/$label' -> '$parent'" >&2; exit 2;;
+    *) echo "gh612_cells: cell path escaped OUT_ROOT physically: '$OUT_ROOT/$label/r$rep' -> '$cell'" >&2; exit 2;;
   esac
-  printf '%s\n' "$parent/r$rep"
+  printf '%s\n' "$cell"
 }
 
 cmd_search() { (
@@ -550,6 +556,11 @@ cmd_replay() { (
   case ${tree:-} in /?*) ;; *) exit 2;; esac
   local out; out=$(cell_dir "$label" "$rep")
   case ${out:-} in /?*) ;; *) exit 2;; esac
+  # Retract the published pass-2 result FIRST -- same rule, same reason, as `snap`'s armA.path: every
+  # exit from here on is a rejection, and `profile` accepts any nonempty replay2.out as an accepted
+  # timing, so a stale one would be paired with this cell's arm-A profile after the latest replay was
+  # refused.
+  rm -f "$out/replay2.out"
   [ -d "$out/cache" ] && [ -n "$(ls -A "$out/cache" 2>/dev/null)" ] || {
     echo "gh612_cells: $label r$rep has no populated cache -- run \`search\` first" >&2; exit 2; }
   cd "$tree/benchmarks" || exit 1
@@ -563,9 +574,6 @@ cmd_replay() { (
     --ocannl_autotune_log=true "$@" \
     > "$out/replay2.tmp" 2> "$out/replay2.err"
   local st=$?
-  # Publish replay2.out ONLY after validation: `profile` treats any nonempty replay2.out as an
-  # accepted pass-2 result, so a rejected run left on disk would be re-offered as paired evidence.
-  rm -f "$out/replay2.out"
   echo -n "$label r$rep pass-2 replay: exit $st  "
   local timing; timing=$(grep -h '^{' "$out/replay2.tmp" 2>/dev/null | tail -1 | grep -o '"step_ms":{[^}]*}')
   echo "${timing:-<no step_ms record>}"
@@ -641,6 +649,22 @@ print("parity gate PASSED")
 EOF
 ) }
 
+# Every quoted tuned p50 comes from an accepted replay2.out, but the reproduction runs its replays as
+# separate commands whose individual failures do not stop the block -- so a missing pass-2 timing
+# would otherwise go unnoticed while the workflow reported success. This asserts the exact set.
+cmd_replays() { (
+  local missing=0 c
+  for c in "$@"; do
+    local f="$OUT_ROOT/$c/replay2.out"
+    if [ ! -s "$f" ]; then echo "MISSING accepted pass-2 replay: $c" >&2; missing=$((missing+1))
+    elif ! grep -q '"step_ms"' "$f" 2>/dev/null; then
+      echo "replay2.out without step_ms: $c" >&2; missing=$((missing+1))
+    fi
+  done
+  [ "$missing" -eq 0 ] || { echo "gh612_cells: $missing cell(s) lack an accepted pass-2 replay" >&2; exit 1; }
+  echo "all $# cells have an accepted pass-2 replay"
+) }
+
 cmd_roofline() { (
   local tree=$1
   tree=$(require_dir "$tree")
@@ -659,6 +683,7 @@ case $sub in
   profile)  cmd_profile  "$@" ;;
   finger)   cmd_finger   "$@" ;;
   parity)   cmd_parity   "$@" ;;
+  replays)  cmd_replays  "$@" ;;
   replay)   cmd_replay   "$@" ;;
   diff)     cmd_diff     "$@" ;;
   sweep)    cmd_sweep    "$@" ;;

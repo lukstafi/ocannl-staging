@@ -788,6 +788,15 @@ for r in 4 5 6; do
 done
 for r in 1 2 3; do $D replay $M sweep-cap2 $r --ocannl_virtualize_max_inline_fanin=2; done
 for c in 16 32; do $D replay $M sweep-cap$c 1 --ocannl_virtualize_max_inline_fanin=$c; done
+# These are separate commands, so one failing replay does not stop the block and its status is only
+# the last command's -- and the parity gate checks search.out losses, not replay presence. Assert the
+# exact set of accepted pass-2 replays, or a missing tuned p50 would go unnoticed.
+$D replays $(for c in base574 feat574 master-capoff; do for r in 1 2 3; do echo -n "$c/r$r "; done; done
+  for r in 1 2 3; do echo -n "master-cap8/r$r "; done
+  for r in 4 5 6; do echo -n "sweep-cap8/r$r "; done
+  for r in 1 2 3 4 5 6; do echo -n "sweep-cap4/r$r "; done
+  for r in 1 2 3; do echo -n "sweep-cap2/r$r "; done
+  echo -n "sweep-cap16/r1 sweep-cap32/r1")
 ```
 
 ```bash
