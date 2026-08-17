@@ -23,9 +23,10 @@
    Usage: dune exec bin/schedule_bench.exe -- [n] [repeats] [m] [k] [naive_repeats] (defaults 256,
    20, n, n, repeats; the output is m x n, the reduction depth k — deep-K gradient-GEMM geometries
    are m,n << k). Each scheduled variant needs its own [Sched.split] factors to divide the extents
-   they split (i over m, j over n, k over k); a variant whose factors do not divide is skipped by
-   name with the reason, while the naive kernel and the C-backend [tensorize] variant have no
-   blocking at all and run at any size, so an arbitrary extent still gets something to measure.
+   they split (i over m, j over n, k over k), and every one of them needs a non-degenerate nest to
+   address; a variant whose requirement fails is skipped by name with the reason. The C-backend
+   [tensorize] variant has no blocking at all, so an arbitrary (non-degenerate) extent still gets a
+   scheduled measurement, and the naive kernel runs at any size whatsoever.
    Run with OCANNL_BACKEND=metal (or cuda); the C backends reject the shared schedules. Timing
    includes kernel executions and one device-to-host transfer per variant (runs queue on the
    stream; get_values synchronizes). *)
@@ -109,17 +110,32 @@ let () =
   let mma_bm, mma_bn, mma_bk, mma_w = (32, 32, 32, 32) in
   let cpu_bm, cpu_bn, cpu_bk = (64, 64, 16) in
   let gebp_bm, gebp_bk = (64, 64) in
+  (* Every scheduled variant addresses the i/j/k nest, so an extent of 1 makes ALL of them
+     unschedulable — [tensorize] and the unblocked ones included: the extent-1 loop is simplified
+     away before the transform runs, leaving [accum_syms] no 3-deep nest to find. That is a
+     precondition of the gate, not a requirement of any one variant's blocking, so it is folded into
+     [unmet] rather than listed per variant. *)
+  let degenerate =
+    List.filter_map [ ("m", m); ("n", n); ("k", k) ] ~f:(fun (name, e) ->
+        if e >= 2 then None
+        else
+          Some
+            (Printf.sprintf
+               "%s = %d leaves no i/j/k loop nest to schedule (an extent-1 loop is simplified away)"
+               name e))
+  in
   (* A [Sched.split] of factor [f] over an axis of extent [e] needs [e mod f = 0]: the remainder
      guard it constructs otherwise survives into the staged/tensorized micro-kernels these schedules
      build on top of it. Report which factor does not divide which extent, per variant, instead of
      tripping one bare assert for all of them. *)
   let unmet reqs =
-    List.filter_map reqs ~f:(fun (fname, f, ename, e) ->
-        if e % f = 0 then None
-        else
-          Some
-            (Printf.sprintf "%s = %d does not divide %s = %d (remainder %d)" fname f ename e
-               (e % f)))
+    degenerate
+    @ List.filter_map reqs ~f:(fun (fname, f, ename, e) ->
+          if e % f = 0 then None
+          else
+            Some
+              (Printf.sprintf "%s = %d does not divide %s = %d (remainder %d)" fname f ename e
+                 (e % f)))
     |> List.dedup_and_sort ~compare:String.compare
   in
   let mav = Array.init (m * k) ~f:(fun i -> Float.of_int (i % 13) *. 0.25) in
@@ -443,12 +459,29 @@ let () =
       (flops /. secs /. 1e9) spot values.(spot);
     secs
   in
-  (* A variant runs when its blocking divides the extents, and is skipped by name with the reasons
-     when it does not, so an unschedulable size still measures everything that is schedulable at
-     it. A skipped variant times as nan, like the naive leg under [naive_repeats = 0]. *)
+  (* A static gate cannot enumerate every way a schedule can be rejected at a given size —
+     [validate_parallel]'s coverage rules, per-kernel hardware limits and backend declines all
+     surface as exceptions out of [Context.compile], and small operands bring in whole new
+     interactions (below m,n,k = 5 the constants are initialized in-kernel, which the [tensorize]
+     variant's Workgroup retype of the zeroing loop then makes illegal). Charge such a failure to
+     the variant, not to the run: name it, keep measuring the rest, and exit nonzero at the end so a
+     scripted run still sees that something failed. *)
+  let failures = ref 0 in
+  let attempt ?repeats ~variant ~schedule () =
+    try bench ?repeats ~variant ~schedule ()
+    with e ->
+      Int.incr failures;
+      p "%-10s FAILED at this size: %s\n" variant
+        (List.hd_exn (String.split_lines (Exn.to_string e)));
+      Float.nan
+  in
+  (* A variant runs when the gate is satisfied, and is skipped by name with every reason it found
+     when it is not, so an unschedulable size still measures everything that is schedulable at it. A
+     skipped variant times as nan, like the naive leg under [naive_repeats = 0]. The naive leg needs
+     no gate — it addresses no loop nest at all, so it runs at any size, degenerate included. *)
   let bench_v ?repeats ~variant ~reqs ~schedule () =
     match unmet reqs with
-    | [] -> bench ?repeats ~variant ~schedule ()
+    | [] -> attempt ?repeats ~variant ~schedule ()
     | reasons ->
         p "%-10s skipped — this size is not schedulable with this blocking:\n" variant;
         List.iter reasons ~f:(fun reason -> p "             %s\n" reason);
@@ -466,10 +499,10 @@ let () =
     || String.is_substring backend ~substring:"hip"
   in
   let t_naive =
-    if naive_repeats > 0 then bench ~repeats:naive_repeats ~variant:"naive" ~schedule:None ()
+    if naive_repeats > 0 then attempt ~repeats:naive_repeats ~variant:"naive" ~schedule:None ()
     else Float.nan
   in
-  if has_shared then
+  (if has_shared then
     let mma_reqs =
       [
         ("bm", mma_bm, "m", m); ("bn", mma_bn, "n", n); ("w", mma_w, "n", n);
@@ -502,8 +535,8 @@ let () =
       (t_naive /. t_mma2)
   else
     (* The GEBP family blocks i and k only — j is left whole — so it asks nothing of n. The
-       [tensorize] variant has no blocking at all: the whole triple becomes one [Tile_mma], so it
-       runs at any size and an arbitrary extent still gets a scheduled measurement. *)
+       [tensorize] variant has no blocking at all: the whole triple becomes one [Tile_mma], so any
+       non-degenerate extent still gets a scheduled measurement. *)
     let gebp_reqs = [ ("bm", gebp_bm, "m", m); ("bk", gebp_bk, "k", k) ] in
     let t_pack =
       bench_v ~variant:"cpupack"
@@ -528,4 +561,7 @@ let () =
       "speedups vs naive: cpupack %.1fx, tensorize %.1fx, packmma %.1fx, packmma_par %.1fx, \
        pm_hoist %.1fx, pm_mixed %.1fx, pm_bpk %.1fx\n"
       (t_naive /. t_pack) (t_naive /. t_tmma) (t_naive /. t_pmma) (t_naive /. t_pmmap)
-      (t_naive /. t_hoist) (t_naive /. t_mixed) (t_naive /. t_bpk)
+      (t_naive /. t_hoist) (t_naive /. t_mixed) (t_naive /. t_bpk));
+  if !failures > 0 then (
+    p "%d variant(s) failed at m=%d n=%d k=%d — see the FAILED lines above.\n" !failures m n k;
+    Stdlib.exit 1)
