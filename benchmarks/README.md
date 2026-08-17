@@ -214,6 +214,18 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   5.6%/2.5% of a measured local peak rather than 1.3%; also the reference for the fact that
   `rocprofv3` collects nothing under WSL2 for want of `/dev/kfd`, and for the profiler-free
   per-kernel reconstruction that replaces it),
+  [report-gh612-hip.md](report-gh612-hip.md) (WSL2/HIP on gfx1151 — its successor, and the
+  measurement of gh-ocannl-573's fanin guard and gh-ocannl-574's `arity_cuts` finer fission in one
+  session against a re-established denominator: both predicted line items reproduce to ~1% in
+  absolute terms while neither share survives, 1.30x and 1.31x on the default-placement arm, kernel
+  time 32.33 → 18.88 ms — also the reference for why a share is a share of a placement and a tree,
+  for the fact that equal kernel counts can absorb a changed materialization decision (on the
+  `gpt2_mini` graph `virtualize_max_inline_fanin` 16 shows one node's worth of placement difference
+  behind an unchanged 135-kernel arm A, and cap 32 is the only measured cap matching cap −1's
+  placement — equality there does not extrapolate, since a zero placement diff cannot show whether
+  the guard fired), and for
+  the three-instrument discipline (per-kernel profile 0.08–1.6%, untuned-default 0.2–0.7%, shipped
+  tuned p50 2.6–19.1%) that a tuned-cell A/B on that box needs),
   [report-cifar-cuda.md](report-cifar-cuda.md) (Linux/CUDA, the cifar-scale conv baseline
   for gh-ocannl-500/502 with a per-layer breakdown) and
   [report-gh537-metal.md](report-gh537-metal.md) (macOS/Metal, the paired before/after A/B of

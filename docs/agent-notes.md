@@ -389,7 +389,33 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   (per-cell multiplicity passes the visit cap because copy-position reads are rmw-exempt, yet each
   consumer re-sums the whole prefix); a structural expectation assuming a deep all-virtual chain
   must disable it (`Low_level.virtualize_settings.max_inline_fanin <- -1`). Like the other caps it
-  is a flippable policy prior, not legality (`test/operations/virtual_chain_fanin.ml`).
+  is a flippable policy prior, not legality (`test/operations/virtual_chain_fanin.ml`). **The cap's
+  bite depends on how many distinct transitive materialized inputs a chain accumulates — which varies
+  with depth AND with graph shape at constant depth — so a cap conclusion holds for the graph it was
+  measured on and not for a size class.** On gpt2_mini specifically (4 layers, gfx1151,
+  `report-gh612-hip.md`), caps 16, 32 and −1 all emit a **135-kernel** arm A, yet only cap 32 is
+  actually placement-identical: at cap 16 one node's worth of placement difference appears (the final
+  layer norm gains a materialized `n792`) *behind an unchanged kernel count*. Node counts proxy guard
+  firings; nothing logs provenance-41 decisions, so they are not firing counts. **Equal fission width can absorb a changed
+  materialization decision, so a kernel count cannot establish that a cap did nothing — compare the
+  emitted PARAMETER-SIGNATURE multisets and the materialized-node sets** (`benchmarks/gh612_cells.sh
+  diff`, which needs only a snapshot). Three distinct levels, and conflating them is easy: a kernel's
+  pointer parameters are exactly the materialized nodes it touches, so signature multisets track
+  PLACEMENT and are insensitive to the crowned tile; kernel BODIES also move with the tile, so a body
+  diff is not evidence of a placement change; and the count of newly materialized NODES is the proxy
+  for guard firings, not the count of changed signatures — one materialization changes several
+  consumers' parameter lists (on gpt2_mini, cap 8's 16/17 exclusive signatures come from 4 nodes:
+  0/1/4/9/23 for caps 32/16/8/4/2). **A zero placement difference does NOT prove the guard was silent,
+  so no fan-in bound follows from it**: `decide_placements` assigns provenance 41 only to a node not
+  already placed, and `virtual_llc` afterwards rejects inlining for its own legality reasons, so with
+  the cap disabled a different mechanism can materialize the same node and yield an identical source.
+  The observable statement is all there is, and only at the caps actually swept (2, 4, 8, 16, 32, −1):
+  placement differed from cap −1 at 2, 4, 8 and 16, and matched at 32. Nothing is established for
+  caps between or above those. Cap 4 beat the default 8 by a
+  non-overlapping 5.7% in a block order-balanced in BOTH the searches and the pass-2 replays (5.5%
+  was the same six artifacts replayed in an unbalanced order; three replay sets of them spanned
+  5.5-6.5%, so an identical schedule varies ~1pp run to run -- all three non-overlapping), and balancing that order matters: a fixed order
+  confounds the cap with session position, which was worth ~1.4pp of an apparent 7.1%.
 - `check_half_prec_constants_cutoff` (`Ops.exceeds_fp16_cutoff`, enforced from
   `Low_level.simplify_llc.check_constant` during lowering, hence backend-independently) is a
   HEADROOM policy, not a representability check: its default 2^14 sits far below fp16's 65504 max
@@ -432,8 +458,18 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   kernels at a 1024-thread launch, 70% of the CUDA step at 1.3% of fp32 peak (gh-ocannl-569). A
   companion that reduces OVER the site's minor axis (the lm_head's max-logits row) trims the common
   prefix below the site's arity and correctly still declines — that one needs fission, not coverage:
-  `fission_scheduled ~arity_cuts:true` (gh-ocannl-574) cuts it apart. Why such a pair merges in the
-  first place: the fission pass's no-parallelism-loss guard compares chains under the presets'
+  `fission_scheduled ~arity_cuts:true` (gh-ocannl-574) cuts it apart — measured on HIP/gfx1151 at
+  1.30x on gpt2_mini (`report-gh612-hip.md`). **Size a fission's payoff over the WHOLE CHAIN, never
+  over the fragment that keeps the site's name**: post-fission the mask, row-max and softmax work runs
+  in separate downstream kernels, so dividing a standalone QKᵀ by a fused QKᵀ+mask+row-max reports a
+  meaningless 5.2x. Like-for-like, summing every fragment on both sides: the lm_head/CE chain goes 4
+  kernels / 8.136 ms → 5 / 0.357 ms (22.8x) and the four QKᵀ chains 8 kernels / 3.666 ms → 16 /
+  2.038 ms (1.80x), so the QKᵀ sites are ~17% of what the two freed line items give against the
+  lm_head's ~83%. Anchor the CE chain on `logits`, NOT on `wte`: the input token-embedding gather
+  reads `wte` too (the embedding is `wte * onehot_x`) and is not part of the head. **The finer fission also COSTS +2.57 ms in the FFN bucket** -- it splits
+  residual adds into more separately launched kernels, each re-deriving the running sum -- which the gh-573 fanin guard is what
+  recovers, so the two must be measured together or each is mis-attributed. Why such a
+  pair merges in the first place: the fission pass's no-parallelism-loss guard compares chains under the presets'
   `max_chain=2` cap, so trimming a rank-3 GEMM's minor axis reads as lossless; and a max-reduce is
   the shape that hits it because its `-inf` init is a `Set` nest, not a `Zero_out` — a sum-reduce's
   `Zero_out` already separates the statements. The arity_cuts mode analyzes uncapped AND requires
@@ -451,7 +487,11 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   would build (or vice versa) — keep the invariant, or re-derive the witness. The fused
   (`Fuse_epilogue`) flavor is judged separately: skipping the epilogue tail can empty the
   coverage demand before the alignment analysis is consulted, so twins can survive a routine the
-  unfused family is refuted on.
+  unfused family is refuted on. **Consequence for diagnostics: since gh-577 a companion-coverage
+  DECLINE CENSUS is empty, and that is not evidence the rule stopped firing** — a refuted family is
+  never seeded, so it never reaches the decline log. gh-569's Part 3 read 25 coverage declines out of
+  `schedule_log_declines`; the same workload on current master logs zero
+  (`report-gh612-hip.md`). Ask the emitted source and the launch geometry instead.
 - "`Tile_mma` is a barrier" is only half true, and the half that fails is the one barrier elision
   wants. Every rendering form ENDS the intrinsic block with a workgroup barrier, so a staging
   barrier that follows one is always redundant (`Schedule.elide_staged_barriers` drops it, and the
@@ -509,6 +549,25 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   candidate compile, and a count of proposals then reads as coverage it does not have — assert on
   the *timed* counter (`report.mma_timed`, `fiss_sketch_timed`, `split_reduce_timed`), and follow it
   with an executed value check, since a candidate that compiles is not yet one that computes.
+- The `N segs` in an autotune label such as `F_saved[fine 77 segs]` counts the SAVED PER-SEGMENT
+  PLACEMENT ENTRIES, not kernels: the arm that reports `fine 77 segs` emitted 136 `__global__`s
+  (gpt2_mini on HIP, `report-gh612-hip.md`), and `[58 segs]` emitted 117. Take kernel counts from
+  the launch log (`schedule_log_launches`, whose `seg i/N` names the real fission width) or from the
+  emitted source; a report that quotes the label as a kernel count is wrong by ~1.8x. The launch
+  log's FIRST fissioned `seg 0/N` (skipping the `N=1` whole-routine probe) is arm A, the next is
+  arm B — which is also how to pick the right file out of a content-polling snapshot of
+  `<routine>__seg.hip`. The watcher can catch a partially written file, and the kernel count alone
+  does NOT identify a usable capture: a torn file can already carry every `__global__` line while its
+  last body is incomplete, and glob order is hash order. Require balanced braces AND a clean `hipcc`
+  compile before accepting a snapshot (`benchmarks/gh612_cells.sh pick_armA`).
+- A per-kernel profile's sum may only be validated against the step time of **the compile it came
+  from**. Each search rep crowns a different artifact with different tile sizes, so holding one rep's
+  profile against another rep's step p50 measures the search lottery, not the reconstruction — on
+  gpt2_mini/HIP that turns a genuine 0.9% agreement into an apparent 2.3% disagreement, and the error
+  is invisible because both numbers are real. Quote the paired p50 from the same cell's **pass-2**
+  `replay2.out` and nothing else: `search.out`'s p50 is a pass-1 timing carrying the search process's
+  own overhead, which `benchmarks/README.md`'s two-pass protocol excludes, and `snap`'s `replay.out`
+  is a debug-file run rather than a clean timing pass.
 - "Timed" is not "tensorized" either, and that failure is worse: a declined `Tile_mma` renders its
   scalar fallback, which compiles and runs, so the candidate is timed, ranked and possibly crowned
   under an `mma-*` label (gh-ocannl-545: 20 of 20 timed bf16 candidates on CUDA were scalar). The
