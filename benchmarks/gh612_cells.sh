@@ -101,7 +101,7 @@ cmd_search() { (
   # The crowned arm A candidate's calibration line: analytic FLOPs and bytes at the emitted kernel
   # count. The report's constant-FLOPs check and its 528 -> 472 MB traffic figure are read from here.
   local lbl; lbl=$(sed -n '1,/arm A (default placements) best/p' "$out/search.err" \
-    | grep -o 'best: [0-9.]* ms (F_sketch\[[^]]*\]' | sed 's/.*(//')
+    | grep -o 'best: [0-9.]* ms ([A-Za-z_]*\[[^]]*\]' | sed 's/.*(//')
   [ -n "${lbl:-}" ] && grep -F "calibration: $lbl" "$out/search.err" | head -1
 ) }
 
@@ -193,8 +193,13 @@ cmd_profile() { (
   done
   echo "  paired step p50 for this cell:"
   grep -ho '"p50":[0-9.]*' "$out/search.out" "$out/replay.out" 2>/dev/null
-  echo "--- bucket table (run 1; the report quotes all runs' shares) ---"
-  sed -n '/| bucket/,/directly seeded/p' "$out/bucket-1.txt"
+  # Every run, not just the first: Part 1 quotes run-1/2/3 shares as its stability evidence, so a
+  # transcript that shows only run 1 cannot expose it.
+  local bf
+  for bf in "$out"/bucket-*.txt; do
+    echo "--- $(basename "$bf") ---"
+    sed -n '/| bucket/,/directly seeded/p' "$bf"
+  done
 ) }
 
 # The acceptance fingerprints, read off the emitted source. Kernel parameter lists span multiple
@@ -326,10 +331,22 @@ print(f"\nsignatures only in {na}: {sum(ca[k] for k in onlya)} kernels, {sum(pa[
 for k in sorted(onlya, key=lambda k:-pa[k])[:8]: print(f"  {pa[k]:7.3f} ms  {', '.join(k)[:120]}")
 print(f"signatures only in {nb}: {sum(cb[k] for k in onlyb)} kernels, {sum(pb[k] for k in onlyb):.3f} ms")
 for k in sorted(onlyb, key=lambda k:-pb[k])[:8]: print(f"  {pb[k]:7.3f} ms  {', '.join(k)[:120]}")
+# MULTISET, not set: a signature present in both cells but a different NUMBER of times is not
+# "shared". Without this, `only in` counts of 0/0 could still describe differing kernel multisets and
+# the negative-control reading would be wrong while looking right.
+remult=[(k,ca[k],cb[k]) for k in sorted(set(ca)&set(cb)) if ca[k]!=cb[k]]
+if remult:
+    print(f"\nshared signatures with DIFFERING multiplicity: {len(remult)} "
+          f"({sum(x for _,x,_ in remult)} occurrences in {na} vs {sum(y for _,_,y in remult)} in {nb})")
+    for k,x,y in sorted(remult, key=lambda t:-abs(t[1]-t[2]))[:8]:
+        print(f"  x{x} -> x{y}  {', '.join(k)[:110]}")
+else:
+    print("\nshared signatures with differing multiplicity: 0 (the kernel MULTISETS agree, not just "
+          "the sets)")
 print(f"\nshared signatures: {sh_a:.3f} -> {sh_b:.3f} ms ({sh_b-sh_a:+.3f}); "
       f"NET {sum(pb.values())-sum(pa.values()):+.3f} ms")
-print("A zero-differing-signatures result means the two cells emit the same kernel set -- that is the"
-      "\nnegative-control reading, and it is stronger than any timing agreement.")
+print("The negative-control reading requires BOTH `only in` sides at 0 AND zero differing "
+      "multiplicities;\neither alone leaves the kernel sets possibly unequal.")
 EOF
 }
 

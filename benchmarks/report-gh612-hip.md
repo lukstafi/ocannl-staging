@@ -369,11 +369,15 @@ isolation of gh-573 but of gh-573 plus whatever else landed in between. It does:
 |---|---:|---:|
 | arm A kernels | 135 | 135 |
 | **kernel signatures differing** | — | **0** |
+| **shared signatures with differing multiplicity** | — | **0** (the multisets agree, not just the sets) |
 | arm A per-kernel profile | 24.794 ms | 24.817 ms (**0.09%**) |
 | untuned-default pipeline (median) | 65.66 ms | 65.59 ms (0.1%) |
 | analytic bytes, arm A winner | 528 215 820 | 528 209 196 (0.001%) |
 
-**Zero signature differences over 135 kernels.** Everything between `76f50dcd` and `5d0c86d8`
+**Zero signature differences over 135 kernels, and the kernel *multisets* agree too** — set equality
+alone would permit the same signature appearing a different number of times on each side, so the
+multiplicity check is part of the claim rather than a refinement of it. Everything between `76f50dcd`
+and `5d0c86d8`
 other than the fanin guard is worth 0.1% on this workload, so the flip isolates gh-573 cleanly.
 The largest single per-kernel difference between the two is the lm_head GEMM (0.230 vs 0.350 ms) —
 same signature, different crowned tile size, i.e. the search lottery, which is the same reason the
