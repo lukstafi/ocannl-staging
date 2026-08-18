@@ -942,11 +942,16 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   single store), sees through the pure-index guard shape `If (i < bound)` (gh-490
   symbolic extents — data-dependent guards are NOT transparent), hoists through a scope-form base
   (a `Set` whose value is already the accumulation `Local_scope`, reusing its id — accepted ONLY
-  when every update fits the mint grammar, `Low_level.valid_scope_updates`: hoisting is licensed
-  by the reduction shape, and a general recurrence like `local := local - x` must keep its
-  per-iteration narrowing), and also serves
+  when every update fits the mint grammar under ONE reduction operator,
+  `Low_level.scope_updates_reduce_op`: hoisting is licensed by the reduction shape, and both a
+  general recurrence like `local := local - x` and an individually-valid-but-MIXED sequence like
+  `local += x; local *= y` must keep their per-iteration narrowing), and also serves
   hardware-annotated loops the backend serializes for lack of a hardware index (cc's
-  `Workgroup_reduce`). `Schedule.Partition` of a recognized nest mints ONE scope spanning its
+  `Workgroup_reduce`) — standalone via the dispatch fallback, and NESTED via the peel's
+  `extra_level` predicate, which is codegen-only (a schedule mint wrapping a hardware-annotated
+  loop in a scope would break backends that bind the dimension). A merge-buffer read
+  (`Get_merge_buffer`) is NOT self-dependence of its node — it is a separate read-only staging
+  buffer — so `p =+ p.merge`-style updates stay recognizable accumulations. `Schedule.Partition` of a recognized nest mints ONE scope spanning its
   segment loops (an index-set specialization is not a partial-reduction boundary), and
   `rewrite_loop` descends into `Local_scope` bodies so minted-scope interiors (partition segments,
   an outer materialized unroll's inner loops) stay addressable by later schedule ops. A MATERIALIZED unroll never reaches codegen as bare copies:

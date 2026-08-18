@@ -91,6 +91,9 @@ let fb idcs = (Float.of_int (((idcs.(0) * n) + idcs.(1)) % 5) -. 1.5) *. 0.625
 let claim_parity = "bf16 naive matmul equals the once-narrowed wide-accumulation reference"
 let claim_shape = "the emitted serial k-loop narrows the accumulator once per cell, not per step"
 
+let claim_merge_shape =
+  "a merge-buffer read is not the accumulator's own cell (the update shape is recognized)"
+
 let claim_off_value =
   "narrow_compute_f32=false recovers per-operator rounding: the result differs from the widened \
    default"
@@ -134,6 +137,14 @@ let claim_vec_nested =
   "a vectorized inner reduction axis folds into the whole-nest wide accumulator (equals the \
    serial result)"
 
+let claim_wgr_nested =
+  "a serialized nested Workgroup_reduce keeps the whole-nest accumulator (equals the serial \
+   result)"
+
+let claim_mixed_scope =
+  "a mixed-operator scope is not a reduction and keeps its per-iteration narrowing (256 +1 *1 \
+   stays 256 at bf16)"
+
 let claim_simd_tail =
   "the SIMD reduction folds its non-divisible tail into the wide total (equals the serial result)"
 
@@ -157,6 +168,7 @@ let all_claims =
   [
     claim_parity;
     claim_shape;
+    claim_merge_shape;
     claim_unroll_annot;
     claim_unroll_mat;
     claim_partition;
@@ -169,9 +181,11 @@ let all_claims =
     claim_2ax_pad_mat;
     claim_mat_then_inner;
     claim_vec_nested;
+    claim_wgr_nested;
     claim_adjacent;
     claim_guarded;
     claim_scope_recurrence;
+    claim_mixed_scope;
     claim_wgreduce;
     claim_simd_tail;
     claim_off_value;
@@ -210,6 +224,21 @@ let () =
     | Some src ->
         let has s = String.is_substring src ~substring:s in
         p claim_shape ((not (has "single_to_bfloat16(fmaf(")) && has "fmaf("));
+    (* Structural: a merge-buffer read is a separate read-only staging buffer, so [p =+ p.merge]
+       stays a recognizable accumulation (no same-node merge REDUCTION is constructible — merge
+       buffers are node-shaped — so the recognizer shape is the whole reachable surface). *)
+    (let pmrg =
+       Ll_test.node_factory ~prec:Ir.Ops.bfloat16 ~first_id:9600 ~dims:[| 4 |] () "aw_mrg"
+     in
+     let km = Ll_test.sym () in
+     let mllsc =
+       LL.Binop
+         ( Ir.Ops.Add,
+           (LL.Get (pmrg, [| Ll_test.fixed 0 |]), Ir.Ops.bfloat16),
+           (LL.Get_merge_buffer (pmrg, [| Ll_test.iter km |]), Ir.Ops.bfloat16) )
+     in
+     p claim_merge_shape
+       (Option.is_some (LL.accum_update_parts ~tn:pmrg ~idcs:[| Ll_test.fixed 0 |] mllsc)));
     (* Both unroll representations autotune proposes over small reduction loops (annotated:
        codegen repeats the body; materialized: the IR carries one copy per step and no loop)
        must keep the wide accumulator — the reduction is exact in f32 and narrows at the same
@@ -347,6 +376,33 @@ let () =
       | None -> false
     in
     p claim_vec_nested (vecn_fired && Array.for_all2_exn got_vnv got_vn ~f:Float.equal);
+    (* A hardware-annotated inner reduction axis the backend serializes (cc binds no workgroup
+       dimension) is a serial level to the peel, so the whole nest keeps one accumulator instead
+       of narrowing once per outer iteration. The [=+]-into-pre-zeroed form again: the einsum
+       lowering's whole-node init nest fails [validate_parallel] under a hardware annotation. *)
+    let run_sum2 ~name ?schedule () =
+      let xw = NTDSL.init ~l:(name ^ "_x") ~prec:Ir.Ops.bfloat16 ~o:[ ni; nr; ns ] ~f:fx () in
+      let outw =
+        NTDSL.init ~l:(name ^ "_out") ~prec:Ir.Ops.bfloat16 ~o:[ ni ] ~f:(fun _ -> 0.0) ()
+      in
+      Train.set_materialized outw.Tensor.value;
+      let comp = named name [%cd outw =+ id xw ~logic:"irs => i"] in
+      let transform opt =
+        match schedule with None -> opt | Some sched -> Sched.apply (sched opt) opt
+      in
+      let ctx = Context.auto () in
+      let ctx, routine = Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty in
+      let ctx = Context.run ctx routine in
+      Context.get_values ctx outw.Tensor.value
+    in
+    let got_wn = run_sum2 ~name:"aw2_wgr_serial" () in
+    let got_wnn =
+      run_sum2 ~name:"aw2_wgr_hw"
+        ~schedule:
+          (two_axis_sched ~f:(fun ~r:_ ~s -> [ Sched.Retype { axis = s; ty = LL.Workgroup_reduce } ]))
+        ()
+    in
+    p claim_wgr_nested (Array.for_all2_exn got_wnn got_wn ~f:Float.equal);
     (* === adjacent accumulations: two SOURCE assignments into one cell are two stores, and each
        store narrows — they must NOT share an accumulator residency (that is the provenance
        boundary: only unrolled copies of one assignment may). 256 + 1 rounds to 256 at bf16
@@ -423,6 +479,41 @@ let () =
       Ll_test.execute ~name:"aw_recurrence" ro ~seed:[ (gacc2, [| 256.0 |]) ] ~read:[ gacc2 ]
     in
     p claim_scope_recurrence (Float.equal (List.hd_exn rvals).(0) 256.0);
+    (* === individually reduce-shaped updates under MIXED operators are not a reduction === *)
+    (* [local += 1; local *= 1] per iteration: 256 + 1 = 257 in f32, times 1, narrows back to
+       256 — twice over. A hoisted scope would hold 257 then 258. [scope_updates_reduce_op]
+       requires one uniform operator, so the base declines. *)
+    let macc = node ~dims:[| 1 |] "aw_mix" in
+    Ll_test.materialize macc;
+    let mi = Ll_test.sym () in
+    let mid = LL.get_scope macc in
+    let mix_scope_body =
+      LL.Seq
+        ( LL.Set_local (mid, LL.Get (macc, [| Ll_test.fixed 0 |])),
+          LL.Seq
+            ( LL.Set_local
+                (mid, LL.Binop (Ir.Ops.Add, (LL.Get_local mid, bf16), (LL.Constant 1.0, bf16))),
+              LL.Set_local
+                (mid, LL.Binop (Ir.Ops.Mul, (LL.Get_local mid, bf16), (LL.Constant 1.0, bf16))) )
+        )
+    in
+    let mix_llc =
+      Ll_test.loop_n mi 2
+        (LL.Set
+           {
+             tn = macc;
+             idcs = [| Ll_test.fixed 0 |];
+             llsc =
+               LL.Local_scope
+                 { id = mid; body = mix_scope_body; orig_indices = [| Ll_test.fixed 0 |] };
+             debug = "";
+           })
+    in
+    let mo = Ll_test.optimize ~materialized:[ macc ] ~name:"aw_mixed" mix_llc in
+    let mvals =
+      Ll_test.execute ~name:"aw_mixed" mo ~seed:[ (macc, [| 256.0 |]) ] ~read:[ macc ]
+    in
+    p claim_mixed_scope (Float.equal (List.hd_exn mvals).(0) 256.0);
     (* === Workgroup_reduce serialized on cc: retyping the reduction axis to a hardware kind the
        backend cannot bind must not change the accumulator width relative to the Serial spelling.
        16 terms push the running sums past 4, where bf16 can no longer represent the 1/64

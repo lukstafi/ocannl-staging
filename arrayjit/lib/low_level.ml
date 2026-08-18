@@ -4878,7 +4878,12 @@ let strip_zero_init_for_local (id : scope_id) (body : t) : t option =
    reduction. *)
 let rec scalar_touches_tn tn (llsc : scalar_t) =
   match llsc with
-  | Get (tn2, _) | Get_merge_buffer (tn2, _) -> Tn.equal tn tn2
+  | Get (tn2, _) -> Tn.equal tn tn2
+  | Get_merge_buffer _ ->
+      (* A node's merge buffer is a SEPARATE read-only staging buffer (the transfer source's
+         copy), never the node's own storage — reading it is independent of the accumulator's
+         cell, so [p =+ p.merge]-style updates stay recognizable as accumulations. *)
+      false
   | Get_dynamic { tn = tn2; dyn_value = v, _; _ } -> Tn.equal tn tn2 || scalar_touches_tn tn v
   | Local_scope { body; _ } -> code_touches_tn tn body
   | Get_local _ | Constant _ | Constant_bits _ | Embed_index _ -> false
@@ -4985,18 +4990,29 @@ let accum_local_update_parts ~id (llsc : scalar_t) =
   | _ -> None
 
 (* Whether a scope body's update statements (everything after the opening init) fit the grammar
-   the scope-form mint emits: Serial/[Unrolled] loops, pure-index-guarded [If]s, comments, and
-   reduce-shaped [Set_local]s of the scope's own local. Anything else — another node's write, a
-   nested scope, a non-reduction recurrence — disqualifies the base from hoisting. *)
-let rec valid_scope_updates ~id (llc : t) =
-  match llc with
-  | Noop | Comment _ -> true
-  | Seq (a, b) -> valid_scope_updates ~id a && valid_scope_updates ~id b
-  | For_loop { body; axis = Serial | Unrolled | Vectorized; _ } -> valid_scope_updates ~id body
-  | If { cond = gc, _; body } -> pure_index_guard gc && valid_scope_updates ~id body
-  | Set_local (id', v) ->
-      Scope_id.equal id id' && Option.is_some (accum_local_update_parts ~id v)
-  | _ -> false
+   the scope-form mint emits: Serial/[Unrolled]/[Vectorized] loops, pure-index-guarded [If]s,
+   comments, and reduce-shaped [Set_local]s of the scope's own local — all carrying ONE reduction
+   operator (the FMA form counting as [Add]). Anything else — another node's write, a nested
+   scope, a non-reduction recurrence, or individually-valid updates under MIXED operators (e.g.
+   [local += x; local *= y], which is not a reduction and whose per-iteration narrowing is the
+   source's semantics) — disqualifies the base from hoisting. Returns the uniform operator. *)
+let scope_updates_reduce_op ~id (llc : t) : Ops.binop option =
+  let rec go op_acc llc =
+    match llc with
+    | Noop | Comment _ -> Some op_acc
+    | Seq (a, b) -> Option.bind (go op_acc a) ~f:(fun acc -> go acc b)
+    | For_loop { body; axis = Serial | Unrolled | Vectorized; _ } -> go op_acc body
+    | If { cond = gc, _; body } -> if pure_index_guard gc then go op_acc body else None
+    | Set_local (id', v) when Scope_id.equal id id' -> (
+        match accum_local_update_parts ~id v with
+        | Some (op, _) -> (
+            match op_acc with
+            | None -> Some (Some op)
+            | Some op0 -> if Ops.equal_binop op0 op then Some op_acc else None)
+        | None -> None)
+    | _ -> None
+  in
+  match go None llc with Some (Some op) -> Some op | _ -> None
 
 (* gh-ocannl-639: peel a single-statement reduction nest down to its accumulation base. Levels are
    Serial/[Unrolled] loops and {!pure_index_guard}ed [If]s, each containing nothing else (comments
@@ -5018,7 +5034,7 @@ let rec valid_scope_updates ~id (llc : t) =
    (scope purity forbids a sibling [Set] inside a scope body) — it would need the [Declare_local]
    statement form. A transform that starts minting fused reduction bodies must extend this peel
    alongside. *)
-let peel_accum_nest ~free_of body :
+let peel_accum_nest ?(extra_level = fun _ _ -> false) ~free_of body :
     (Tn.t
     * Indexing.axis_index array
     * [ `Update of scalar_t | `Scope of scope_id * t list ]
@@ -5047,6 +5063,16 @@ let peel_accum_nest ~free_of body :
         peel ~free_of:(index :: free_of)
           ~rebuild:(fun b -> rebuild (For_loop { r with body = b }))
           ibody
+    | [ For_loop ({ index; body = ibody; axis; _ } as r) ] when extra_level index axis ->
+        (* Levels the CALLER vouches for beyond the annotation-free kinds — codegen passes a
+           predicate accepting a hardware-annotated reduction loop its backend will serialize
+           (no hardware index for the slot), so e.g. a nested [Workgroup_reduce] on cc keeps the
+           whole-nest residency. The schedule mints pass nothing: wrapping a hardware-annotated
+           loop in a scope at transform time would break the schedule on backends that do bind
+           the hardware dimension. *)
+        peel ~free_of:(index :: free_of)
+          ~rebuild:(fun b -> rebuild (For_loop { r with body = b }))
+          ibody
     | [ If { cond = gc, gp; body = gbody } ] when pure_index_guard gc ->
         peel ~free_of ~rebuild:(fun b -> rebuild (If { cond = (gc, gp); body = b })) gbody
     | [ Set { tn; idcs; llsc = Local_scope { id; body = sbody; orig_indices = _ }; debug } ]
@@ -5057,7 +5083,7 @@ let peel_accum_nest ~free_of body :
                && Array.length idcs = Array.length idcs'
                && Array.for_all2_exn idcs idcs' ~f:Indexing.equal_axis_index
                && (not (List.exists rest ~f:(code_touches_tn tn)))
-               && List.for_all rest ~f:(valid_scope_updates ~id) ->
+               && Option.is_some (scope_updates_reduce_op ~id (unflat_lines rest)) ->
             Some (tn, idcs, `Scope (id, rest), debug, rebuild)
         | _ -> None)
     | [ Set { tn; idcs; llsc; debug } ]

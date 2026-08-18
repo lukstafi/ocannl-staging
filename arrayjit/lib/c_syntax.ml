@@ -3424,7 +3424,23 @@ module C_syntax (B : C_syntax_config) = struct
                               debug;
                             }))
             in
-            Option.bind (Low_level.peel_accum_nest ~free_of:[ i ] body) ~f:widen
+            (* A hardware-annotated reduction loop this backend serializes (no hardware index for
+               its slot) is a serial level like any other — without this, retyping an INNER
+               reduction axis to [Workgroup_reduce] on cc would stop the peel and narrow the
+               accumulator once per remaining outer iteration. *)
+            let serialized_hardware index = function
+              | Low_level.Workgroup_reduce -> (
+                  match
+                    List.find !current_hardware_axes ~f:(fun a ->
+                        Indexing.equal_symbol a.Low_level.ha_index index)
+                  with
+                  | Some a -> Option.is_none (B.hardware_index ~kind:`Workgroup ~slot:a.ha_slot)
+                  | None -> false)
+              | _ -> false
+            in
+            Option.bind
+              (Low_level.peel_accum_nest ~extra_level:serialized_hardware ~free_of:[ i ] body)
+              ~f:widen
         in
         let widen_or_serial () =
           match try_widen_serial_reduce () with Some doc -> doc | None -> serial_loop ()

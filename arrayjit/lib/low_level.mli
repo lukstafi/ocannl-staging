@@ -269,6 +269,7 @@ val accum_local_update_parts : id:scope_id -> scalar_t -> (Ops.binop * scalar_t)
     local (gh-ocannl-639), and {!peel_accum_nest}'s scope-form validation is built on it. *)
 
 val peel_accum_nest :
+  ?extra_level:(Indexing.symbol -> axis_type -> bool) ->
   free_of:Indexing.symbol list ->
   t ->
   (Tnode.t
@@ -278,14 +279,19 @@ val peel_accum_nest :
   * (t -> t))
   option
 (** Peel a single-statement reduction nest down to its accumulation base (gh-ocannl-639). Levels
-    are Serial/[Unrolled] loops and pure-index-guarded [If]s (the gh-490 [If (i < s)] shape and
+    are Serial/[Unrolled]/[Vectorized] loops, loops [extra_level] vouches for (codegen passes a
+    predicate accepting hardware-annotated reduction loops its backend serializes — the schedule
+    mints pass nothing, since wrapping a hardware-annotated loop in a scope at transform time
+    would break the schedule on backends that do bind the hardware dimension), and
+    pure-index-guarded [If]s (the gh-490 [If (i < s)] shape and
     its constant-bound sibling — data-dependent guards stay opaque), each containing nothing else;
     the base is a raw {!accum_update_parts}-shaped update ([`Update]) or the scope form a previous
-    rewrite minted ([`Scope]: the scope id and the update statements after the opening init),
-    with the accumulated cell invariant across the peeled levels ([free_of] seeds the invariance
-    check with the caller's own loop). [rebuild] re-wraps a replacement base statement in the
-    peeled levels. The ONE definition shared by [C_syntax]'s widened serial fallback and
-    [Schedule.Unroll ~materialize:true], so transform and emission cannot drift. *)
+    rewrite minted ([`Scope]: the scope id and the update statements after the opening init,
+    validated to carry ONE reduction operator — mixed-operator sequences are not reductions and
+    keep their per-iteration narrowing), with the accumulated cell invariant across the peeled
+    levels ([free_of] seeds the invariance check with the caller's own loop). [rebuild] re-wraps a
+    replacement base statement in the peeled levels. The ONE definition shared by [C_syntax]'s
+    widened serial fallback and the schedule mints, so transform and emission cannot drift. *)
 
 (** {2 Hardware axis analyses}
 
