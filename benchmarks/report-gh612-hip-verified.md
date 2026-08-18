@@ -68,8 +68,12 @@ selects which arm's routine the process keeps — it does not change what either
   provides the timings. All 18 cells have an accepted pass-2 replay, and the gate covers those
   replays as well as the searches.
 - Driver: [`gh612_cells.sh`](gh612_cells.sh) unchanged, driven by
-  [`gh612v_session.sh`](gh612v_session.sh), which declares each cell's treatment **once** so that
-  `search`, `snap`, `replay` and `profile` cannot drift apart on the arm flag. That is not
+  [`gh612v_session.sh`](gh612v_session.sh), which validates each tree before dispatching a cell —
+  pinned base commit, at most the backport commit on top, clean worktree, the selector present in
+  `lib/train.ml`, and a `bench_gpt.exe` not older than the sources the backport touches (a
+  half-backported tree, sources patched and binary stale, is the quiet failure: it would ignore the
+  flag while every downstream gate still passed) — and which declares each cell's treatment **once**
+  so that `search`, `snap`, `replay` and `profile` cannot drift apart on the arm flag. That is not
   tidiness: a `replay` that omitted `--ocannl_tune_ship_arm=a` would still replay from the cache,
   still emit a `step_ms` record and still pass the driver's two-cache-hit gate — while shipping arm
   B, i.e. producing an arm B timing under an arm A label, which is the exact confusion this session

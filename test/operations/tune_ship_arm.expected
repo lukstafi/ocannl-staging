@@ -14,5 +14,7 @@ the two forced runs ship different placements, so the arms are distinguishable a
 a flip budget under a forced arm still ships that arm, not a refined vector: true
 the flip-budgeted forced run also matches the plain compile: true
 an exception from on_ship propagates to the caller unchanged: true
+with both arms failed, forcing arm A propagates arm A's failure: true
+with both arms failed, forcing arm B propagates arm B's failure: true
 the default run ships and matches the plain compile: true
 with no forcing, the shipped arm is the faster-measured one: true

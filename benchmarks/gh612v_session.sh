@@ -57,6 +57,59 @@ cell_flags() {
     *) echo "gh612v_session: unknown cell '$1'" >&2; return 2 ;;
   esac
 }
+# The commit each tree is pinned to in the report's Provenance. A tree carries that commit plus ONE
+# commit, the gh-ocannl-638 backport -- so the pin is checked as an ancestor with a bounded distance,
+# not as HEAD.
+tree_pin() {
+  case $1 in
+    "$BASE") printf '%s\n' "${BASE_COMMIT:-6d14f401}" ;;
+    "$FEAT") printf '%s\n' "${FEAT_COMMIT:-76f50dcd}" ;;
+    "$MASTER") printf '%s\n' "${MASTER_COMMIT:-5d0c86d8}" ;;
+    *) return 1 ;;
+  esac
+}
+
+# What `gh612_cells.sh` checks per cell is the local configuration and the fixture -- the inputs. It
+# does NOT check the tree, and it cannot: it takes the checkout it is handed. So a tree at the wrong
+# commit, with edited sources, or with a stale binary built before the backport, is measured under
+# the trusted `base574A` / `feat574A` / cap label and every gate downstream passes -- parity compares
+# loss vectors, replays checks timings and cache hits, and even the arm-A premise check reads what
+# the binary REPORTED. A pre-backport binary ignores the flag, ships arm B and reports "B", which
+# fails loudly; a HALF-backported one (sources patched, binary stale) is the quiet case, and the
+# mtime check below is what catches it.
+#
+# Validated here rather than in the optional `trees` block, because the measurement blocks are
+# independently runnable and a printed DIRTY protects nothing. Memoized: once per tree per run.
+validate_tree() {
+  local t=$1 pin base extra src
+  case " ${TREES_VALIDATED:-} " in *" $t "*) return 0 ;; esac
+  [ -d "$t/.git" ] || [ -f "$t/.git" ] || { echo "gh612v_session: not a git checkout: $t" >&2; return 1; }
+  pin=$(tree_pin "$t") || { echo "gh612v_session: tree $t is not one of BASE/FEAT/MASTER" >&2; return 1; }
+  base=$(git -C "$t" rev-parse --verify --quiet "$pin^{commit}") || {
+    echo "gh612v_session: $t does not contain the pinned commit $pin" >&2; return 1; }
+  git -C "$t" merge-base --is-ancestor "$base" HEAD 2>/dev/null || {
+    echo "gh612v_session: $t is not descended from its pinned commit $pin" >&2; return 1; }
+  extra=$(git -C "$t" rev-list --count "$base..HEAD" 2>/dev/null) || extra=99
+  [ "${extra:-99}" -le 1 ] || {
+    echo "gh612v_session: $t carries $extra commits on top of $pin; expected at most the backport" >&2
+    echo "  -- an unaccounted commit changes what the label 'the report's tree' means." >&2; return 1; }
+  [ -z "$(git -C "$t" status --porcelain)" ] || {
+    echo "gh612v_session: $t has uncommitted changes -- refusing to measure it" >&2; return 1; }
+  grep -q 'tune_ship_arm' "$t/lib/train.ml" 2>/dev/null || {
+    echo "gh612v_session: $t has no gh-ocannl-638 selector in lib/train.ml" >&2; return 1; }
+  local exe="$t/_build/default/benchmarks/runners/ocannl/bench_gpt.exe"
+  [ -x "$exe" ] || { echo "gh612v_session: $t has no built bench_gpt.exe -- build it first" >&2; return 1; }
+  # The stale-binary case, stated as an mtime comparison because that is what is checkable here.
+  for src in lib/train.ml arrayjit/lib/utils.ml benchmarks/runners/ocannl/bench_gpt.ml \
+             benchmarks/runners/ocannl/bench_harness.ml; do
+    [ ! "$t/$src" -nt "$exe" ] || {
+      echo "gh612v_session: $t/$src is newer than the built bench_gpt.exe -- rebuild before" >&2
+      echo "  measuring; a stale binary would ignore the arm selector." >&2; return 1; }
+  done
+  TREES_VALIDATED="${TREES_VALIDATED:-} $t"
+  echo "tree ok: $t at $(git -C "$t" rev-parse --short=8 HEAD) (pinned base $pin, clean, selector present, binary current)"
+}
+
 # Unquoted on purpose: the flag string is word-split into separate arguments. It is built here, not
 # taken from the caller.
 run_cell() {  # <subcommand> <label> <rep> [extra driver args before the flags]
@@ -64,6 +117,7 @@ run_cell() {  # <subcommand> <label> <rep> [extra driver args before the flags]
   local tree flags
   tree=$(cell_tree "$label") || return 2
   flags=$(cell_flags "$label") || return 2
+  validate_tree "$tree" || return 1
   echo "--- $sub $label r$rep [$flags]"
   "$D" "$sub" "$tree" "$label" "$rep" "$@" $flags
 }
@@ -90,12 +144,13 @@ balanced_block() {  # <first-rep> <reps> <label>...
 }
 
 block_trees() {
-  local t
+  local t rc=0
   for t in "$BASE" "$FEAT" "$MASTER"; do
-    [ -d "$t" ] || { echo "gh612v_session: missing tree $t" >&2; return 2; }
-    printf '%-40s %s %s\n' "$t" "$(git -C "$t" rev-parse --short=8 HEAD)" \
-      "$([ -z "$(git -C "$t" status --porcelain)" ] && echo clean || echo DIRTY)"
+    # The same validation every cell runs, so `trees` is a dry run of the gate rather than a
+    # cosmetic listing that a measurement block could then contradict.
+    validate_tree "$t" || rc=1
   done
+  return $rc
 }
 
 block_replays() {  # every searched cell of every block, pass 2

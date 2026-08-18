@@ -545,10 +545,26 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
      cascaded from — a device the other arm's failure exhausted or a lineage it poisoned would
      otherwise be reported as the cause. *)
   (match (a, b) with
-  | Error (a_exn, a_backtrace), Error (b_exn, _) ->
-      logf "both arms failed, nothing to ship (A: %s; B: %s)" (Exn.to_string a_exn)
-        (Exn.to_string b_exn);
-      Stdlib.Printexc.raise_with_backtrace a_exn a_backtrace
+  | Error (a_exn, a_backtrace), Error (b_exn, b_backtrace) ->
+      (* gh-ocannl-638: which failure to propagate is the selector's question too. With an arm
+         forced, the caller asked for THAT artifact and its failure is the answer — handing back the
+         other arm's exception would report a search the caller did not select, and contradict the
+         documented promise that a forced arm's failure propagates rather than being replaced. With
+         no arm forced the first failure still wins, for the original reason: it is the one that has
+         not been cascaded from (a device the other arm exhausted, or a lineage it poisoned, would
+         otherwise be reported as the cause). *)
+      let exn, backtrace =
+        match ship_arm with
+        | Measured_winner | Force_arm_a -> (a_exn, a_backtrace)
+        | Force_arm_b -> (b_exn, b_backtrace)
+      in
+      logf "both arms failed, nothing to ship (A: %s; B: %s); propagating %s" (Exn.to_string a_exn)
+        (Exn.to_string b_exn)
+        (match ship_arm with
+        | Measured_winner -> "arm A's, the failure that has not been cascaded from"
+        | Force_arm_a -> "arm A's, the forced arm"
+        | Force_arm_b -> "arm B's, the forced arm");
+      Stdlib.Printexc.raise_with_backtrace exn backtrace
   | _ -> ());
   let measured_a_wins =
     match (a, b) with

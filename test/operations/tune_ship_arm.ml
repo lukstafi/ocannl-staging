@@ -108,6 +108,35 @@ let () =
     | exception _ -> false
   in
   p "an exception from on_ship propagates to the caller unchanged" raised;
+  (* --- Both arms failed, with an arm forced: the forced arm's failure is the one that propagates.
+         The caller asked for that artifact, so reporting the other search's exception would name a
+         search it did not select. Injected through [Autotune.on_candidate_attempt] and told apart
+         by the arm-report count, the way autotune_arm_containment.ml does: arm A's search is the
+         one running before any arm has reported. --- *)
+  let both_arms_fail ship_arm =
+    let reported = ref 0 in
+    (Autotune.on_candidate_attempt :=
+       fun _ -> failwith (Printf.sprintf "tsa arm %s" (if !reported = 0 then "A" else "B")));
+    Exn.protect
+      ~f:(fun () ->
+        match
+          Train.tune_placements ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:""
+            ~report:(fun _ -> Int.incr reported)
+            ~ship_arm (Context.auto ()) t2 comp Ir.Indexing.Empty
+        with
+        | _ -> "no failure"
+        | exception Failure msg -> msg
+        | exception exn -> Exn.to_string exn)
+      ~finally:(fun () -> Autotune.on_candidate_attempt := fun _ -> ())
+  in
+  (* Discriminating, not merely nonzero: the two settings must name DIFFERENT arms, or the claim
+     would hold for a [tune_placements] that always propagated arm A. *)
+  let failed_a = both_arms_fail Train.Force_arm_a in
+  let failed_b = both_arms_fail Train.Force_arm_b in
+  p "with both arms failed, forcing arm A propagates arm A's failure"
+    (String.is_substring failed_a ~substring:"tsa arm A");
+  p "with both arms failed, forcing arm B propagates arm B's failure"
+    (String.is_substring failed_b ~substring:"tsa arm B");
   let d_reports, d_shipped, _, d_got = run () in
   p "the default run ships and matches the plain compile" (Array.for_all2_exn d_got expected ~f:approx);
   (match d_reports with
