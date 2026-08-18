@@ -20,7 +20,10 @@ command -v dune >/dev/null 2>&1 || . tools/opam-env.sh
 dune promotion apply --root . "$@"
 
 # Strip trailing CRs from any promoted golden that now differs from the index.
+# perl -i, not sed -i: BSD sed (macOS) requires a backup-suffix argument for
+# -i, so GNU-style `sed -i` errors there; perl is portable (and already a
+# dependency of tools/test-run.sh).
 git diff --name-only -z -- '*.expected' 'test/ppx/*_expected.ml' \
   | while IFS= read -r -d '' f; do
-      [ -f "$f" ] && sed -i 's/\r$//' "$f"
+      [ -f "$f" ] && perl -i -pe 's/\r$//' "$f"
     done

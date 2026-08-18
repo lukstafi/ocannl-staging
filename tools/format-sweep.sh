@@ -200,9 +200,13 @@ git fetch origin
 # --ff-only alone is not enough: merging an OLDER origin/master into a local
 # master that is ahead succeeds as "already up to date", and the end-of-sweep
 # race check would then reset --hard over the unpushed local commits. Require
-# strict equality after the ff-pull.
+# strict equality after the ff-pull. The ff-pull rewrites tracked sources
+# when origin is ahead, so it too runs under the held test-run lock.
+hold_test_run_lock \
+  || die "a tools/test-run.sh run held its lock past the bound; giving up"
 git merge --ff-only origin/master >/dev/null \
-  || die "master diverged from origin/master; resolve that first"
+  || { release_test_run_lock; die "master diverged from origin/master; resolve that first"; }
+release_test_run_lock
 [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/master)" ] \
   || die "master has local commits not on origin/master; push them first"
 
@@ -327,13 +331,17 @@ git commit -q -m "Automated formatting sweep
 
 Produced by tools/format-sweep.sh: repo-wide dune fmt plus the %expect
 re-promotions its line shifts require. Recorded in .git-blame-ignore-revs
-by the follow-up commit."
+by the follow-up commit.
+
+Co-authored-by: OCANNL format sweep <format-sweep@users.noreply.github.com>"
 SWEEP_SHA=$(git rev-parse HEAD)
 
 # `date +%F`, not `date -I`: BSD date on the supported macOS hosts has no -I.
 printf '\n# %s formatting sweep\n%s\n' "$(date +%F)" "$SWEEP_SHA" >> .git-blame-ignore-revs
 git add .git-blame-ignore-revs
-git commit -q -m "Record formatting sweep in .git-blame-ignore-revs"
+git commit -q -m "Record formatting sweep in .git-blame-ignore-revs
+
+Co-authored-by: OCANNL format sweep <format-sweep@users.noreply.github.com>"
 
 if [ "$NO_PUSH" -eq 1 ]; then
   KEEP=1
