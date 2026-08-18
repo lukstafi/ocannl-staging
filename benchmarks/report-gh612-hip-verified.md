@@ -51,12 +51,36 @@ selects which arm's routine the process keeps — it does not change what either
   | FEAT | `76f50dcd` | `e6b7b415` | present | absent |
   | master | `5d0c86d8` | `4d1ebb11` | present | present |
 
-  **Why the backport is not a confound, stated as a checkable fact rather than a claim of intent.**
-  The five files it changes (`lib/train.ml` and the four benchmark runners) were **byte-identical**
-  in all three trees and on master before it was applied, so the same patch applies verbatim to each;
-  it touches the shipping decision and the shipped-arm attribution, and no lowering, scheduling or
-  codegen path. The measured artifacts corroborate it: the per-kernel profiles, kernel counts,
-  crowned-candidate traffic and named node sets reproduce the pre-#638 session's (Part 5).
+  **Why the backport is not a confound, stated as checkable facts rather than as a claim of intent.**
+  The five files it copies (`lib/train.ml` and the four benchmark runners) were **byte-identical** in
+  all three trees and on master before it was applied, so the same patch applies verbatim to each; it
+  touches the shipping decision and the shipped-arm attribution, and no lowering, scheduling or
+  codegen path. `arrayjit/lib/utils.ml` is patched rather than copied — its base content legitimately
+  differs between these commits — and the patch only registers and classifies the key.
+
+  What "verbatim" means here is pinned by digest rather than asserted, and `gh612v_session.sh`
+  refuses a tree whose files do not match, so the claim is checked before each cell rather than
+  argued afterwards:
+
+  | file | sha256 (all three trees) |
+  |---|---|
+  | `lib/train.ml` | `5d98ac818c547662…52195fcd` |
+  | `benchmarks/runners/ocannl/bench_gpt.ml` | `de3cb8b4d56cac22…b548a1e` |
+  | `benchmarks/runners/ocannl/bench_harness.ml` | `f51ef550c7146425…aaa7d2c1` |
+  | `benchmarks/runners/ocannl/bench_conv.ml` | `77dea492448dd317…53dfe0f3` |
+  | `benchmarks/runners/ocannl/bench_mlp.ml` | `328c1dcc51a016ee…eb2df44b` |
+
+  **Which revision of the selector, precisely.** That `lib/train.ml` is the selector as it first
+  landed (staging commit `ffc428d2`), *before* two review-round fixes made on the PR branch
+  afterwards. Both fixes are on failure paths this session never took: releasing the shipped context
+  when a caller's `on_ship` callback raises (this session's callback is the benchmark harness's
+  recorder, which did not raise), and which arm's failure propagates when *both* arms fail (no cell
+  here had a failing arm — all 18 shipped a successful arm A). Neither changes what an arm compiles
+  or which arm ships on a successful run, which is why the measurements stand as taken; stated
+  because "verbatim backport of the selector" would otherwise read as "of the selector as merged".
+
+  The measured artifacts corroborate the whole argument: the per-kernel profiles, kernel counts,
+  crowned-candidate traffic and named node sets reproduce the pre-#638 session's (Part 6).
 - Cache discipline: one **cold** search into a fresh `--ocannl_autotune_cache_dir` per cell per rep,
   never shared — the [`report-gh481-cuda.md`](report-gh481-cuda.md) rule, since a warm cache makes an
   A/B vacuous by replaying the other arm's crowned schedule.
@@ -286,8 +310,9 @@ across three reps.
   quotes a number for.
 - **`cap4A` was profiled at r4 only** (one cell, three harness runs), like the earlier report's
   single-cell caps. Its step timings are the full balanced block.
-- **The backport is argued from file identity and corroborated by reproduction, not proven inert.**
-  A reader who rejects that argument should read Part 6 as the evidence: fifteen quantities across
+- **The backport is pinned by digest and corroborated by reproduction, not proven inert.** The
+  digests establish *which* code ran, not that it cannot matter; the argument that it cannot is the
+  file-identity one in Provenance, and the evidence for it is Part 6 — fifteen quantities across
   three trees reproduce, including named node sets and exact signature counts.
 - The compile-time discrepancy in Provenance is unexplained. It does not enter any claim.
 

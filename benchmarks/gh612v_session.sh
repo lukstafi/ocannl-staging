@@ -57,6 +57,17 @@ cell_flags() {
     *) echo "gh612v_session: unknown cell '$1'" >&2; return 2 ;;
   esac
 }
+# The exact bytes of the backported files, as measured. All three trees carry the same five copied
+# files, and `lib/train.ml` here is the selector as it landed in ffc428d2 -- BEFORE the two
+# review-round fixes on the PR branch, which touch failure paths (a raising `on_ship`; which arm's
+# failure propagates when both arms fail) that no cell in this session took: every cell shipped a
+# successful arm A. Recorded so the claim "verbatim backport" is checkable rather than asserted.
+SHA_TRAIN=${SHA_TRAIN:-5d98ac818c547662608d7ef379c8ea6ecb0e5bc91be663a26c1b818c52195fcd}
+SHA_GPT=${SHA_GPT:-de3cb8b4d56cac22885f014f6532a170a4b69c5ab1561f7bda7061289b548a1e}
+SHA_HARNESS=${SHA_HARNESS:-f51ef550c714642594e7eb633745a60ee4bd1e6c3c94d716702aa666aaa7d2c1}
+SHA_CONV=${SHA_CONV:-77dea492448dd31781ab28e34a2a29c5266af07548fb523a3d8d015253dfe0f3}
+SHA_MLP=${SHA_MLP:-328c1dcc51a016eef36ad6142c9003315e8e62111c502d77da68b534eb2df44b}
+
 # The commit each tree is pinned to in the report's Provenance. A tree carries that commit plus ONE
 # commit, the gh-ocannl-638 backport -- so the pin is checked as an ancestor with a bounded distance,
 # not as HEAD.
@@ -95,8 +106,33 @@ validate_tree() {
     echo "  -- an unaccounted commit changes what the label 'the report's tree' means." >&2; return 1; }
   [ -z "$(git -C "$t" status --porcelain)" ] || {
     echo "gh612v_session: $t has uncommitted changes -- refusing to measure it" >&2; return 1; }
-  grep -q 'tune_ship_arm' "$t/lib/train.ml" 2>/dev/null || {
-    echo "gh612v_session: $t has no gh-ocannl-638 selector in lib/train.ml" >&2; return 1; }
+  # CONTENT, not shape. "One clean commit on top of the pinned base, and train.ml mentions
+  # tune_ship_arm" accepts a commit that also changes lowering, scheduling or the runners -- and the
+  # measurements would still be certified under the report's label. What the report actually claims
+  # is that five files were copied VERBATIM, so that is what is checked: their exact digests, which
+  # are identical in all three trees and equal to the selector as it landed in ffc428d2. A tree
+  # carrying a different revision of those files is not the tree these numbers were measured on, and
+  # says so rather than being silently measured. (The tree HEADs themselves -- ca4db3bf, e6b7b415,
+  # 4d1ebb11 -- are local commits that no reproduction can match, which is why the pin is content.)
+  local want got
+  for src in "$SHA_TRAIN lib/train.ml" "$SHA_GPT benchmarks/runners/ocannl/bench_gpt.ml" \
+             "$SHA_HARNESS benchmarks/runners/ocannl/bench_harness.ml" \
+             "$SHA_CONV benchmarks/runners/ocannl/bench_conv.ml" \
+             "$SHA_MLP benchmarks/runners/ocannl/bench_mlp.ml"; do
+    want=${src%% *}; src=${src#* }
+    got=$(sha256sum "$t/$src" 2>/dev/null | cut -d' ' -f1)
+    [ "$got" = "$want" ] || {
+      echo "gh612v_session: $t/$src is not the backported revision this session measured" >&2
+      echo "    got  ${got:-<unreadable>}" >&2; echo "    want $want" >&2; return 1; }
+  done
+  # utils.ml is the ONE backported file whose base content legitimately differs per tree (the config
+  # machinery moved between these commits), so it is checked by what the backport adds rather than by
+  # a digest: the key registered AND classified, which is what the runs depend on.
+  grep -q '"tune_ship_arm"' "$t/arrayjit/lib/utils.ml" 2>/dev/null || {
+    echo "gh612v_session: $t/arrayjit/lib/utils.ml does not register tune_ship_arm" >&2; return 1; }
+  [ "$(grep -c '"tune_ship_arm"' "$t/arrayjit/lib/utils.ml")" -ge 2 ] || {
+    echo "gh612v_session: $t/arrayjit/lib/utils.ml registers tune_ship_arm but does not classify it" >&2
+    return 1; }
   local exe="$t/_build/default/benchmarks/runners/ocannl/bench_gpt.exe"
   [ -x "$exe" ] || { echo "gh612v_session: $t has no built bench_gpt.exe -- build it first" >&2; return 1; }
   # The stale-binary case, stated as an mtime comparison because that is what is checkable here.
