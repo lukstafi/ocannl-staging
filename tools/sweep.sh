@@ -24,16 +24,21 @@
 
 set -uo pipefail
 
-STATE=${OCANNL_SWEEP_STATE:-$HOME/.ocannl-sweep}
+# The knobs below live in the OCANNL_TOOL_ namespace, which the library reserves for
+# names that address OCANNL without being configuration: every OCANNL executable this
+# script launches walks the environment at startup and warns about an `OCANNL_...` name
+# that is not a config key (gh-ocannl-629), and a warning nobody can act on is how a
+# useful one gets ignored.
+STATE=${OCANNL_TOOL_SWEEP_STATE:-$HOME/.ocannl-sweep}
 HISTORY=$STATE/history.tsv
 LOGS=$STATE/logs
-MAIN=${OCANNL_SWEEP_REPO:-$HOME/ocannl-staging}
+MAIN=${OCANNL_TOOL_SWEEP_REPO:-$HOME/ocannl-staging}
 REF=origin/master
 TARGET=
 SLOW=0
 ONLY=()
 # Per-unit wall-clock cap. macOS has no timeout(1), hence the perl alarm.
-CAP=${OCANNL_SWEEP_CAP:-5400}
+CAP=${OCANNL_TOOL_SWEEP_CAP:-5400}
 
 while [ $# -gt 0 ]; do
   case $1 in
@@ -88,7 +93,7 @@ printf '' >>"$HISTORY" || die "cannot append to $HISTORY"
 # layout this project uses constantly -- `.git` is a regular file, and a -d test
 # rejects a repository every later `git -C` call would have handled fine.
 git -C "$MAIN" rev-parse --git-dir >/dev/null 2>&1 ||
-  die "no git repository at $MAIN (set OCANNL_SWEEP_REPO)"
+  die "no git repository at $MAIN (set OCANNL_TOOL_SWEEP_REPO)"
 
 # An --only typo must not look like a clean sweep: without this, `--only cudaa`
 # selects nothing, records nothing, and exits 0 having tested nothing.
@@ -124,7 +129,7 @@ fi
 # mid-build, the orphaned dune keeps the lock, which is right -- the worktree
 # really is still in use -- and the lock clears by itself when that orphan exits.
 #
-# It lives beside the WORKTREE, not under $STATE. OCANNL_SWEEP_STATE is a
+# It lives beside the WORKTREE, not under $STATE. OCANNL_TOOL_SWEEP_STATE is a
 # supported override -- it is how this script gets tested against a throwaway
 # history -- and keying the lock there would split the lock namespace while
 # leaving the worktree shared, so a run with its own state directory would walk

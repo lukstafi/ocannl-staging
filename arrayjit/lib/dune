@@ -4,7 +4,8 @@
  (preprocessor_deps
   (env_var OCANNL_LOG_LEVEL))
  (modules utils datatypes cpu_topology)
- (libraries base stdio pprint ppx_minidebug.runtime ppx_minidebug.db)
+ ; `unix` for `Unix.environment`, which the unknown-environment-variable warning walks.
+ (libraries base stdio unix pprint ppx_minidebug.runtime ppx_minidebug.db)
  (foreign_stubs
   (language c)
   (names utils_stubs))

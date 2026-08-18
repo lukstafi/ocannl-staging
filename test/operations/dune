@@ -1119,40 +1119,45 @@
  (target config_var_spellings.actual)
  (deps ocannl_config)
  (action
-  (setenv
-   OCANNL_DEMO_KEY
-   ""
+  ; The synthetic keys this fixture sets are, by construction, names no configuration key reads --
+  ; so since gh-ocannl-629 each one draws the startup warning that the sibling
+  ; `config_var_warnings` rule captures and pins. Here that stream is not the subject, and letting
+  ; it through would only put four warnings in the build log on every rebuild of this target.
+  (ignore-stderr
    (setenv
-    ocannl_demo_key
-    kept-spelling
+    OCANNL_DEMO_KEY
+    ""
     (setenv
-     OCANNL-DEMO_KEY
-     dropped-spelling
+     ocannl_demo_key
+     kept-spelling
      (setenv
-      ocannl-demo_key
+      OCANNL-DEMO_KEY
       dropped-spelling
       (setenv
-       ocannl-demo-key
+       ocannl-demo_key
        dropped-spelling
        (setenv
-        ocannl_dashed_only_key
-        ""
+        ocannl-demo-key
+        dropped-spelling
         (setenv
-         OCANNL_DASHED_ONLY_KEY
+         ocannl_dashed_only_key
          ""
          (setenv
-          OCANNL-DASHED_ONLY_KEY
-          dropped-spelling
+          OCANNL_DASHED_ONLY_KEY
+          ""
           (setenv
-           ocannl-dashed_only_key
+           OCANNL-DASHED_ONLY_KEY
            dropped-spelling
-           (with-stdout-to
-            %{target}
-            (run
-             %{dep:config_var_spellings.exe}
-             ocannl_print_decimals_precision=9
-             --ocannl-print-decimals-precision=7
-             --ocannl_log_level_0)))))))))))))
+           (setenv
+            ocannl-dashed_only_key
+            dropped-spelling
+            (with-stdout-to
+             %{target}
+             (run
+              %{dep:config_var_spellings.exe}
+              ocannl_print_decimals_precision=9
+              --ocannl-print-decimals-precision=7
+              --ocannl_log_level_0))))))))))))))
 
 (rule
  (alias runtest)
@@ -1180,26 +1185,62 @@
 ; an unknown ambient profile name aborts every OCANNL executable loudly rather than rewriting a
 ; golden). Pinning the whole list, not just the reported `log_config_sourcing` (Codex P2 on PR
 ; #363): the rule captures a stream, so it depends on every key that can write to it.
+;
+; Since gh-ocannl-629 the environment writes to this stream too, which is why the rule sets four
+; variables of its own: an `ocannl_config` file rejects an unknown key by name and the commandline
+; warns about an unknown argument, while a mistyped `OCANNL_...` used to be the one source that
+; said nothing at all -- `OCANNL_BACKEDN=cuda dune runtest` ran the whole suite on the default
+; backend and reported success. The two reserved namespaces are set as well, and their silence is
+; as much of the policy as the warnings are: without them the walk would warn about `tools/`' own
+; variables and about ppx_minidebug's per-module gates, on every OCANNL executable those workflows
+; launch.
 
 (rule
  (target config_var_warnings.actual)
- (deps ocannl_config)
+ (deps
+  ocannl_config
+  ; Every name below is one this rule SETS, so the deps are not what makes them arrive. What they
+  ; make the rule notice is an ambient one arriving or leaving: since gh-ocannl-629 the environment
+  ; writes to the stream this target captures, and an untracked variable would leave a stale golden
+  ; passing. Both spellings of each, as `Utils.env_var_names` builds them; the reserved namespaces
+  ; are not configuration and have no second spelling.
+  (env_var ocannl_backedn)
+  (env_var OCANNL_BACKEDN)
+  (env_var ocannl-log_level)
+  (env_var OCANNL_TOOL_SWEEP_STATE)
+  (env_var OCANNL_LOG_LEVEL_ROW))
  (action
-  (with-stderr-to
-   %{target}
-   (ignore-stdout
-    (run
-     %{dep:config_var_spellings.exe}
-     --ocannl_no_config_file=true
-     --ocannl_suppress_welcome_message=true
-     --ocannl_log_config_sourcing=false
-     --ocannl_log_level=0
-     --ocannl-print-decimals-precision-7
-     --ocannl-print_decimals_precision=7
-     --ocannl_log_level_0
-     ocannl_config
-     --ocannl-print_decimals-precision=7
-     --ocannl-not-a-real-key=7)))))
+  ; The environment half of the same claim (gh-ocannl-629): a name that is no key, a known key in a
+  ; spelling nothing reads, and the two reserved namespaces whose silence is the other half of the
+  ; policy -- the tooling's and ppx_minidebug's per-module gates, either of which would otherwise
+  ; warn on every OCANNL executable a `tools/sweep.sh` run launches.
+  (setenv
+   OCANNL_BACKEDN
+   cuda
+   (setenv
+    ocannl-log_level
+    1
+    (setenv
+     OCANNL_TOOL_SWEEP_STATE
+     the-tooling-owns-this
+     (setenv
+      OCANNL_LOG_LEVEL_ROW
+      9
+      (with-stderr-to
+       %{target}
+       (ignore-stdout
+        (run
+         %{dep:config_var_spellings.exe}
+         --ocannl_no_config_file=true
+         --ocannl_suppress_welcome_message=true
+         --ocannl_log_config_sourcing=false
+         --ocannl_log_level=0
+         --ocannl-print-decimals-precision-7
+         --ocannl-print_decimals_precision=7
+         --ocannl_log_level_0
+         ocannl_config
+         --ocannl-print_decimals-precision=7
+         --ocannl-not-a-real-key=7)))))))))
 
 (rule
  (alias runtest)

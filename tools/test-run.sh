@@ -43,7 +43,7 @@
 # Prefer `run`. In an agent harness, launch `run` through the harness's own
 # background mode and let the harness notify on exit -- that already removes
 # every reason to write a waiter. `start`/`wait` exist only for a run that must
-# outlive the launching session. The cap defaults to $OCANNL_TEST_CAP or 3600s;
+# outlive the launching session. The cap defaults to $OCANNL_TOOL_TEST_CAP or 3600s;
 # `--cap 0` disables it (then supply your own bound).
 #
 # One run at a time per worktree, enforced with an flock: a second `run`/`start`
@@ -65,7 +65,11 @@ die() { echo "test-run: $*" >&2; exit 2; }
 # through its real path derive the same key, lock file, and recorded wt.
 cd -P "$(dirname "$0")/.." || die "cannot cd to repo root"
 
-RUNS=${OCANNL_TEST_RUNS:-$HOME/.ocannl-test-runs}
+# OCANNL_TOOL_ is the namespace the library reserves for names that address OCANNL
+# without being configuration: an OCANNL executable warns at startup about any other
+# `OCANNL_...` variable it finds (gh-ocannl-629), and these are exported into the
+# environment of every test this script runs.
+RUNS=${OCANNL_TOOL_TEST_RUNS:-$HOME/.ocannl-test-runs}
 mkdir -p "$RUNS" || die "cannot create $RUNS"
 # Canonicalized: run identities (owner pointer, `last`, wt cross-references)
 # are compared as strings, so a relative override must not record a
@@ -83,7 +87,7 @@ wt_key=$(basename "$PWD" | tr -c 'A-Za-z0-9' '_')$(printf %s "$PWD" | cksum | aw
 # exec ...'` alone is not enough: alarm survives exec, so SIGALRM would reach
 # only dune while every compiler it spawned kept running and holding _build
 # locks. Exits 142 on expiry; forwards INT/TERM to the group and reaps it.
-# HUP: a foreground run treats it like TERM; a detached run (OCANNL_TESTRUN_BG)
+# HUP: a foreground run treats it like TERM; a detached run (OCANNL_TOOL_TESTRUN_BG)
 # ignores it, since surviving the launching session is its whole point.
 # setpgrp is eval-guarded and the group kill falls back to a plain kill, for
 # MSYS perl where process groups are shaky. The child deliberately KEEPS
@@ -154,7 +158,7 @@ capped_perl='
   $SIG{ALRM} = sub { $reap->(142) };
   $SIG{INT} = sub { $reap->(130) };
   $SIG{TERM} = sub { $reap->(143) };
-  $SIG{HUP} = $ENV{OCANNL_TESTRUN_BG} ? "IGNORE" : sub { $reap->(129) };
+  $SIG{HUP} = $ENV{OCANNL_TOOL_TESTRUN_BG} ? "IGNORE" : sub { $reap->(129) };
   $pid = fork();
   die "fork: $!" unless defined $pid;
   if (!$pid) {
@@ -164,8 +168,8 @@ capped_perl='
     $SIG{TERM} = "DEFAULT"; $SIG{INT} = "DEFAULT"; $SIG{HUP} = "DEFAULT";
     eval { setpgrp(0, 0) };
     eval {
-      if ($ENV{OCANNL_TESTRUN_RD} && getpgrp(0) == $$) {
-        open my $fh, ">", "$ENV{OCANNL_TESTRUN_RD}/pgid" or die;
+      if ($ENV{OCANNL_TOOL_TESTRUN_RD} && getpgrp(0) == $$) {
+        open my $fh, ">", "$ENV{OCANNL_TOOL_TESTRUN_RD}/pgid" or die;
         print $fh $$;
         close $fh;
         # The leader publishes its OWN start token before exec: a token
@@ -188,7 +192,7 @@ capped_perl='
           $tok =~ s/ +/ /g;
         }
         if ($tok ne "") {
-          open my $gf, ">", "$ENV{OCANNL_TESTRUN_RD}/gtoken" or die;
+          open my $gf, ">", "$ENV{OCANNL_TOOL_TESTRUN_RD}/gtoken" or die;
           print $gf "$tok\n";
           close $gf;
         }
@@ -216,7 +220,7 @@ capped_perl='
 # process exits, with nothing to reclaim after a crash (see sweep.sh).
 #
 # The lock file sits BESIDE the worktree it protects (a gitignored dotfile
-# dune's scanner also ignores), not under $RUNS: OCANNL_TEST_RUNS is a
+# dune's scanner also ignores), not under $RUNS: OCANNL_TOOL_TEST_RUNS is a
 # supported override for diagnostics storage, and keying the lock there would
 # split the lock namespace while leaving _build shared -- two sessions with
 # different overrides would both "acquire" their lock and collide on dune's.
@@ -255,7 +259,7 @@ take_lock() {
       ;;
     2) die "cannot clear the stale lock owner pointer (worktree not writable?)" ;;
     *)
-      # The owner pointer, not `last`: with OCANNL_TEST_RUNS overridden, the
+      # The owner pointer, not `last`: with OCANNL_TOOL_TEST_RUNS overridden, the
       # refused invocation's `last` can resolve in a DIFFERENT state
       # directory (or nowhere), leaving the lock holder uninspectable.
       # %q, so a runs directory containing spaces or metacharacters survives
@@ -626,7 +630,7 @@ shift
 
 case $sub in
   run | start)
-    cap=${OCANNL_TEST_CAP:-3600}
+    cap=${OCANNL_TOOL_TEST_CAP:-3600}
     while [ $# -gt 0 ]; do
       case $1 in
         --cap) [ $# -ge 2 ] || die "--cap requires a value"; cap=$2; shift 2 ;;
@@ -709,7 +713,7 @@ case $sub in
       # wrapper must survive those extra seconds to publish that verdict.
       # It exits naturally right after, and KILL remains available.
       trap '' HUP TERM INT
-      OCANNL_TESTRUN_BG=1 OCANNL_TESTRUN_RD=$run_dir \
+      OCANNL_TOOL_TESTRUN_BG=1 OCANNL_TOOL_TESTRUN_RD=$run_dir \
         perl -e "$capped_perl" -- "$cap" "$DUNE" "$@" >>"$run_dir/log" 2>&1 &
       sup=$!
       # Checked: a run whose supervisor identity cannot be recorded would be

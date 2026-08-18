@@ -66,3 +66,36 @@ let () =
   (* The `_` value separator, on the spelling the old validator called unknown while the reader
      applied it. *)
   show_lookup "read_cmdline_var" "log_level" (Utils.read_cmdline_var "log_level")
+
+(* Which names the library considers addressed to its configuration (gh-ocannl-629). The two halves
+   of the answer are here rather than only in the sibling `config_var_warnings` golden, where the
+   reserved namespaces could only appear as an ABSENCE of warnings -- and an absence reads the same
+   whether the namespace is honoured or the walk never ran.
+
+   No case-only variant is listed: `Ocannl_Backend` is one variable with `OCANNL_BACKEND` on
+   Windows and a different one everywhere else, so its classification is correct and different per
+   platform, which is not something a golden can hold. The dashed spellings, which are unread on
+   every platform, carry that leg instead. *)
+let describe = function
+  | Utils.Env_not_addressed -> "not addressed to OCANNL"
+  | Utils.Env_reserved prefix -> "reserved namespace " ^ prefix
+  | Utils.Env_config_key key -> "configuration key " ^ key
+  | Utils.Env_unread_spelling key -> "unread spelling of " ^ key
+  | Utils.Env_unknown_key key -> "addressed to OCANNL, unknown key " ^ key
+
+let () =
+  printf "\nEnvironment variable names, as classified by `Utils.classify_env_var`:\n";
+  List.iter
+    [
+      "ocannl_backend";
+      "OCANNL_BACKEND";
+      "ocannl-backend";
+      "OCANNL-BACKEND";
+      "OCANNL_BACKEDN";
+      "OCANNL_TOOL_SWEEP_STATE";
+      "OCANNL_LOG_LEVEL";
+      "OCANNL_LOG_LEVEL_ROW";
+      "PATH";
+    ]
+    ~f:(fun name ->
+      printf "  %-26s %s\n" ("\"" ^ name ^ "\"") (describe (Utils.classify_env_var name)))
