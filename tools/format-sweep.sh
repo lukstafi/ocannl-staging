@@ -264,6 +264,11 @@ hold_test_run_lock \
   || die "a tools/test-run.sh run held its lock past the bound; giving up"
 git merge --ff-only origin/master >/dev/null \
   || { release_test_run_lock; die "master diverged from origin/master; resolve that first"; }
+# The lock wait above can be long: an edit made during it must not become
+# part of the sweep baseline recorded below (BASE/SNAP_TREE). A die, not an
+# abort -- BASE is unset, so cleanup will not reset over the foreign edit.
+[ -z "$(git status --porcelain)" ] \
+  || { release_test_run_lock; die "working tree changed while waiting for the test-run lock; resolve that first"; }
 release_test_run_lock
 [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/master)" ] \
   || die "master has local commits not on origin/master; push them first"
