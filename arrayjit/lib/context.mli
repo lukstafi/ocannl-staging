@@ -329,12 +329,12 @@ val backend_name : t -> string
 (** Get the name of the backend. *)
 
 val device_id : t -> int
+(** Get the device ID. *)
 
 val get_used_memory : t -> int
 (** (An upper bound of) the memory used for arrays on the context's device, in bytes. Device-wide:
     covers all contexts sharing the device. Useful for asserting the footprint effect of the
     liveness memory planner (config [buffer_aliasing], gh-ocannl-489). *)
-(** Get the device ID. *)
 
 val release : t -> unit
 (** Eagerly frees the device buffers this context owns — the pools holding nodes it allocated that
