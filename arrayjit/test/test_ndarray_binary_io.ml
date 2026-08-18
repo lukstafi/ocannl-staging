@@ -2,9 +2,16 @@ open Base
 module Nd = Ir.Ndarray
 module Ops = Ir.Ops
 
-let tmp_file = Stdlib.Filename.temp_file "ndarray_binary_io_test" ".bin"
+(* One temp file PER test, not one shared path: each mapped read below leaves a live mapping of
+   the file, and Windows refuses to truncate a file some section still maps (the section pins the
+   file's size), so reusing the path would fail the next test's [open_out_bin] there with
+   EINVAL (gh-ocannl-588). Deleting the file under a live mapping is fine on every platform --
+   modern Windows uses POSIX delete semantics, the same fact that lets a checkpoint save rename
+   over a mapped file -- so each test removes its own file while its mapping is still alive. *)
+let fresh_tmp_file () = Stdlib.Filename.temp_file "ndarray_binary_io_test" ".bin"
 
 let test_round_trip_prec prec_name prec init_f =
+  let tmp_file = fresh_tmp_file () in
   let dims = [| 3; 4 |] in
   let nd1 = Nd.create_array ~debug:"test" prec ~dims ~padding:None in
   (* Initialize with known values *)
@@ -33,9 +40,11 @@ let test_round_trip_prec prec_name prec init_f =
   let fd = Unix.openfile tmp_file [ Unix.O_RDONLY ] 0 in
   let nd3 = Nd.map_file_array prec ~dims ~byte_offset:0 fd in
   Unix.close fd;
+  Stdlib.Sys.remove tmp_file;
   Verdict.pass_fail (Printf.sprintf "%s mapped" prec_name) (Nd.payloads_equal nd1 nd3)
 
 let test_padded () =
+  let tmp_file = fresh_tmp_file () in
   let prec = Ops.single in
   let padding = Some ([| Ops.{ left = 1; right = 1 }; Ops.{ left = 0; right = 2 } |], 0.0) in
   (* Padded dims: 2+1+1=4 x 3+0+2=5, logical: 2x3 *)
@@ -61,6 +70,7 @@ let test_padded () =
   Nd.read_payload_from_channel ~padding:padding_arr nd2 ic n_bytes;
   Stdlib.close_in ic;
   (* Compare logical payloads *)
+  Stdlib.Sys.remove tmp_file;
   Verdict.pass_fail "padded round trip" (Nd.payloads_equal ~padding:padding_arr nd1 nd2)
 
 (* A payload does not start at the beginning of the file, and its offset is not page aligned: the
@@ -115,6 +125,4 @@ let () =
       Nd.set_from_float nd idx (Float.of_int ((i * 7) + 3)));
   (* Test padded tensor *)
   test_padded ();
-  test_mapped_at_offset ();
-  (* Clean up *)
-  Stdlib.Sys.remove tmp_file
+  test_mapped_at_offset ()

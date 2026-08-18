@@ -151,6 +151,13 @@ module Calibration : sig
   type row = {
     backend : string;
     digest : string;  (** The candidate's digest tag, already shortened at emission. *)
+    routine : string;
+        (** The tuned computation's name (gh-ocannl-635) — the routine name [Autotune.tune]'s
+            candidate compiles derive from the comp's block comment, so it also names the
+            candidate's generated sources. Without it a row (and every fit witness quoting one)
+            identifies the candidate but not the kernel it measured, which is what forced
+            [tools/calibrate_bandwidth.exe] to reconstruct per-kernel rates outside the schema.
+            Empty for rows recorded before the column existed; see {!of_line}. *)
     label : string;
     measured_ms : float;
     model_ms : float option;
@@ -174,10 +181,22 @@ module Calibration : sig
       formatting: [measured_ms] and [model_ms] record 6 decimals, {e floored} rather than
       rounded — a stored time never exceeds the true measurement, so constants fit from a file
       remain conservative with respect to the original in-process measurement (round-to-nearest
-      could overstate a 5 us kernel's time by a fitting-relevant 1e-4 relative). *)
+      could overstate a 5 us kernel's time by a fitting-relevant 1e-4 relative). Tabs and
+      newlines in the free-text [routine] and [label] columns become spaces: a name carrying one
+      would otherwise split its row into fragments no reader can parse. *)
 
   val of_line : string -> row option
-  (** [None] on malformed lines (wrong column count, unparseable numbers). *)
+  (** [None] on malformed lines (wrong column count, unparseable numbers). Rows in the
+      11-column schema that predates {!field-routine} (gh-ocannl-635) still parse, with an empty
+      [routine]: they carry every exactness flag the fit needs, so a file accumulated across
+      builds keeps its old rows — they merely cannot name their computation. *)
+
+  val qualified : routine:string -> label:string -> string
+  (** How a row names itself in a report: ["routine/label"], or just the label when the routine
+      is unknown (a legacy row). *)
+
+  val row_name : row -> string
+  (** {!qualified} of the row's own fields — the naming used by the {!fit} witnesses. *)
 
   type fit = {
     fit_backend : string;
@@ -202,7 +221,8 @@ module Calibration : sig
             the per-leg maxima already suffice (or a leg is absent). *)
     fit_peak_flops : (float * string) option;
         (** The fitted constant (fission slack included) and the binding row's
-            [label (digest)]; [None] when no scoreable row has a positive count for the leg. *)
+            [routine/label (digest)] ({!row_name}); [None] when no scoreable row has a positive
+            count for the leg. *)
     fit_peak_memory_bandwidth : (float * string) option;
   }
   [@@deriving sexp_of]

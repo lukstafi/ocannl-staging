@@ -17,6 +17,35 @@
   sliding-window z-score monitor for loss/grad-norm with skip-update loops. Executed-parity
   coverage in `test/training/loop_utils.ml`: clipped SGD against a host oracle, and two
   accumulation micro-steps reproducing a single big-batch step's gradients and parameters.
+- **Safetensors payloads are mapped, not decoded** (gh-ocannl-587): `Safetensors.to_ndarray` wraps
+  each payload as a private, copy-on-write `Unix.map_file` region through `Ndarray.map_file_array`,
+  the way checkpoint loading has since gh-ocannl-467 — the format fixes little-endian order and
+  contiguous, unpadded payloads, and `read` had already checked that the ranges tile the byte
+  buffer, so the staging `Bytes` buffer and the element-by-element decode loop had nothing left to
+  do. Three things came with it. The reader now *owns* the descriptor it parsed the header
+  through and maps from that, never from a fresh open of the path, so a concurrent replacement of
+  the file cannot pair one file's metadata with another's bytes (the gh-ocannl-467 review's trap);
+  `Safetensors.close` releases it, the GC does so otherwise, and payloads already handed out —
+  mappings included — stay valid. `to_ndarray` returns the payload's own precision instead of
+  forcing F32, for every dtype that *names* an OCANNL precision (F64/F32/F16/BF16/F8_E5M2,
+  I64/I32, U64/U32/U16/U8, BOOL), with `?prec` for callers that want one precision regardless;
+  I8/I16/F8_E4M3 are refused rather than reinterpreted, and `to_float32` keeps its F32-only
+  contract. And one thing the format does not guarantee is checked per payload: a payload whose
+  file offset is not a multiple of its element size — which happens to a wide dtype sitting behind
+  narrow ones even in a header padded to 8 bytes — is decoded instead of mapped, an unaligned
+  mapping being undefined behaviour. `Safetensors.ingestion_counts` reports the split.
+
+- **Mapped checkpoint loading is no longer conditional on the platform** (gh-ocannl-588):
+  `checkpoint_load_mmap` defaults to true on Windows too. The exception it had there was asserted
+  from documented Win32 semantics and never run: a mapped view keeps the file object referenced, so
+  `save`'s replacing rename over a path this process has loaded from was expected to fail with a
+  sharing violation, breaking a load-then-save workflow. Measured on a Windows 11 box, it does not
+  — the rename succeeds, and, which a succeeding rename alone would not have settled, the live
+  mapping goes on reading the bytes it was taken from rather than the replacing file's. Test 15 of
+  `test/operations/test_tensor_persistence.ml` is that measurement, holding the mapped ndarray in a
+  local across a save that writes different values, and it makes the same claims on every platform.
+  Windows users get the same lazy, copy-free loads as everyone else; the setting stays for a
+  filesystem that does refuse, and a rename that fails now cleans up its temp file.
 
 - **The gh-573 / gh-574 HIP measurement is verified end to end** (gh-ocannl-612,
   `benchmarks/report-gh612-hip-verified.md`): the first session's ratios rested on default-placement
@@ -119,6 +148,27 @@
   doctrine reach regressions whose subject is the analysis layer on IR shapes the `Assignments`
   pipeline never emits; `test/operations/prelowered_seam` pins the sibling-`Local_scope`
   read-before-write case that motivated it.
+
+### Fixed
+
+- **`uint32` and `uint64` ndarrays convert to and from floats as unsigned.** They are stored in
+  *signed* int32/int64 bigarrays, and every float-facing conversion in `Ndarray` — `get_as_float`,
+  the folds behind `retrieve_flat_values`, `set_from_float`, `fill_from_float` — went through the
+  host's signed conversion, so a u32 `0xffffffff` read back as `-1.` and writing `4294967295.`
+  raised outright. Found by review on the new `Safetensors.to_ndarray ?prec` path, but the defect
+  was in the conversions, so the fix is there: four reinterpreting helpers all four sites now use,
+  with out-of-range floats wrapping as C's unsigned conversion does. A u64 too large to be a double
+  now rounds once, to the nearest: halving it to dodge the sign bit and doubling back rounds twice,
+  which cost an ulp on values just past a midpoint.
+
+- **Unaligned checkpoint payloads are decoded rather than mapped.** `Persistence`'s mappability test
+  never checked that a payload's file offset is a multiple of its element size — which a checkpoint
+  written with a small `?alignment`, or a packed pre-alignment-field one, does not give: a byte
+  payload ahead of a float one leaves the float at an odd offset, and mapping it handed out a
+  misaligned typed pointer. Undefined behaviour on any platform, not only the Windows one this
+  release turns mapping on for. The rule now lives as `Ndarray.mappable_file_region` next to
+  `map_file_array`, so the checkpoint and safetensors readers share one predicate rather than each
+  carrying its own.
 
 ### Changed
 

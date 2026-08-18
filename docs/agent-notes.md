@@ -962,7 +962,21 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   buffer — so `p =+ p.merge`-style updates stay recognizable accumulations. `Schedule.Partition` of a recognized nest mints ONE scope spanning its
   segment loops (an index-set specialization is not a partial-reduction boundary), and
   `rewrite_loop` descends into `Local_scope` bodies so minted-scope interiors (partition segments,
-  an outer materialized unroll's inner loops) stay addressable by later schedule ops. A MATERIALIZED unroll never reaches codegen as bare copies:
+  an outer materialized unroll's inner loops) stay addressable by later schedule ops. The walk that
+  LOCATES a loop has to reach exactly as far as the one that REWRITES it, or a probe reports absent
+  a loop the very next op happily rewrites (`partition_breakpoints` did, gh-ocannl-668): both come
+  from one walker, `Schedule.find_loops_env` — `find_loop`/`find_loops` are its unit-environment
+  instances and `partition_breakpoints` threads the enclosing loop ranges through it — and the
+  reach has TWO dimensions, both of which cost a review round. As deep: `~in_scopes` (default true)
+  descends into scopes. As WIDE: `rewrite_loop` rewrites every copy, so a first-match probe speaks
+  for a fraction of the op — a materializing `Unroll` leaves one copy of the inner loop per step,
+  each with the outer index substituted by a different constant, so copies of ONE source guard flip
+  at different points and `partition_breakpoints` must return their union (a first-copy answer
+  leaves the siblings' guards mixed after the `Partition` rewrites them all). Same rule for
+  legality: `loops_independent` combines the verdicts of every binding, worst-of.
+  `apply_split_reduce` is the one caller taking the first statement-level match, and for a contract
+  reason: it inserts its combine statement at statement level, which only sequences correctly if
+  the reduction runs there too. A MATERIALIZED unroll never reaches codegen as bare copies:
   `Sched.Unroll ~materialize:true` itself rewrites a recognized accumulation nest into the scope
   form — that is where the provenance lives, since a codegen pass looking at adjacent same-cell
   `Set`s cannot tell unrolled copies of one assignment from two user-authored assignments, whose
@@ -1317,7 +1331,14 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   `BENCH_TUNE_REPORT=1`) before concluding a GPU search "found nothing".
 - The calibration TSV schema (`autotune_calibration_file`) is owned by
   `Ir.Cost_model.Calibration` — writer (`Autotune.emit_calibration`) and reader
-  (`tools/fit_envelope.exe`) share `to_line`/`of_line`, so change it in one place only. The
+  (`tools/fit_envelope.exe`) share `to_line`/`of_line`, so change it in one place only. A row
+  names both the tuned computation (the routine name derived from its block comment, as the
+  candidate's generated sources are named) and the candidate, and every report quotes them as
+  `routine/label (digest)` — a fitted constant has to say which kernel demonstrated it. Evolving
+  the schema means keeping the older column counts parseable: rows accumulate in one file across
+  builds, so `of_line` still accepts the 11-column rows that predate the routine column (they fit,
+  unnamed), while the 9-column rows predating the approx flags cannot prove exactness and the
+  fitter skips them with a warning. The
   fitter's constants are the tightest envelope respecting every row a leg can be audited on:
   per-leg max achieved counts/time (per backend), where each leg uses the rows whose counts are
   exact FOR THAT LEG (flops-approx and bytes-approx are independent flags — a multi-read

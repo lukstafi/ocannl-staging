@@ -1,5 +1,7 @@
 kernels tuned: stream_copy stream_scale stream_add stream_triad
 rows appended: true
+every row names its routine: true
+routines named, in order: stream_copy stream_scale stream_add stream_triad
 bytes-exact rows present: true
 single-backend fit: true
 memory leg fitted from these rows: true

@@ -243,6 +243,34 @@ let compute_end_idx ?padding dims axis =
       dims.(axis) - padding_arr.(axis).Ops.left - padding_arr.(axis).Ops.right - 1
   | Some _ -> dims.(axis) - 1
 
+(* [uint32] and [uint64] are stored in {e signed} int32/int64 bigarrays (see {!Ops.precision}), so
+   the host's own conversions read and write them wrong at the top of their range: [Int32.to_float]
+   turns the u32 0xffffffff into -1., and [Int32.of_float] cannot take 4294967295. back. Every
+   float-facing conversion below goes through these four instead. Out-of-range floats wrap, which is
+   C's unsigned conversion. *)
+let uint32_to_float (x : int32) =
+  Stdlib.Int64.to_float (Stdlib.Int64.logand (Stdlib.Int64.of_int32 x) 0xFFFFFFFFL)
+
+let float_to_uint32 v = Stdlib.Int64.to_int32 (Stdlib.Int64.of_float v)
+let two_pow_63 = 9_223_372_036_854_775_808.0
+
+let uint64_to_float (x : int64) =
+  if Stdlib.Int64.compare x 0L >= 0 then Stdlib.Int64.to_float x
+  else
+    (* [Int64.to_float] would read a value with the top bit set as negative, so halve it first and
+       double the result. The halving must not round separately, or the doubling rounds a second
+       time and the two together can land an ulp low (u64 [2^63 + 1025] converting to [2^63] rather
+       than [2^63 + 2048]). OR-ing the discarded bit back in makes the halved value odd whenever
+       anything was dropped, which keeps it off the tie the single rounding would then resolve the
+       wrong way -- the standard round-to-odd step. *)
+    Stdlib.Int64.to_float
+      (Stdlib.Int64.logor (Stdlib.Int64.shift_right_logical x 1) (Stdlib.Int64.logand x 1L))
+    *. 2.0
+
+let float_to_uint64 v =
+  if Float.(v < two_pow_63) then Stdlib.Int64.of_float v
+  else Stdlib.Int64.add (Stdlib.Int64.of_float (v -. two_pow_63)) Stdlib.Int64.min_int
+
 let set_from_float ?padding arr idx v =
   (* NOTE: Bigarray requires the length of indices to be the same as the number of dimensions. *)
   let idx = if Array.is_empty (dims arr) then [||] else idx in
@@ -251,9 +279,9 @@ let set_from_float ?padding arr idx v =
   | Byte_nd arr -> A.set arr adjusted_idx @@ Char.of_int_exn @@ Int.of_float v
   | Uint16_nd arr -> A.set arr adjusted_idx @@ Int.of_float v
   | Int32_nd arr -> A.set arr adjusted_idx @@ Int32.of_float v
-  | Uint32_nd arr -> A.set arr adjusted_idx @@ Int32.of_float v
+  | Uint32_nd arr -> A.set arr adjusted_idx @@ float_to_uint32 v
   | Int64_nd arr -> A.set arr adjusted_idx @@ Int64.of_float v
-  | Uint64_nd arr -> A.set arr adjusted_idx @@ Int64.of_float v
+  | Uint64_nd arr -> A.set arr adjusted_idx @@ float_to_uint64 v
   | Uint4x32_nd arr -> A.set arr adjusted_idx @@ Stdlib.Complex.{ re = v; im = 0.0 }
   | Half_nd arr -> A.set arr adjusted_idx v
   | Bfloat16_nd arr -> A.set arr adjusted_idx @@ Ops.single_to_bfloat16 v
@@ -266,9 +294,9 @@ let fill_from_float arr v =
   | Byte_nd arr -> A.fill arr @@ Char.of_int_exn @@ Int.of_float v
   | Uint16_nd arr -> A.fill arr @@ Int.of_float v
   | Int32_nd arr -> A.fill arr @@ Int32.of_float v
-  | Uint32_nd arr -> A.fill arr @@ Int32.of_float v
+  | Uint32_nd arr -> A.fill arr @@ float_to_uint32 v
   | Int64_nd arr -> A.fill arr @@ Int64.of_float v
-  | Uint64_nd arr -> A.fill arr @@ Int64.of_float v
+  | Uint64_nd arr -> A.fill arr @@ float_to_uint64 v
   | Uint4x32_nd arr -> A.fill arr @@ Stdlib.Complex.{ re = v; im = 0.0 }
   | Half_nd arr -> A.fill arr v
   | Bfloat16_nd arr -> A.fill arr @@ Ops.single_to_bfloat16 v
@@ -305,11 +333,11 @@ let fold_as_float ?padding ~init ~f arr =
   | Int32_nd arr ->
       fold_bigarray ?padding ~init ~f:(fun accu idx v -> f accu idx @@ Int32.to_float v) arr
   | Uint32_nd arr ->
-      fold_bigarray ?padding ~init ~f:(fun accu idx v -> f accu idx @@ Int32.to_float v) arr
+      fold_bigarray ?padding ~init ~f:(fun accu idx v -> f accu idx @@ uint32_to_float v) arr
   | Int64_nd arr ->
       fold_bigarray ?padding ~init ~f:(fun accu idx v -> f accu idx @@ Int64.to_float v) arr
   | Uint64_nd arr ->
-      fold_bigarray ?padding ~init ~f:(fun accu idx v -> f accu idx @@ Int64.to_float v) arr
+      fold_bigarray ?padding ~init ~f:(fun accu idx v -> f accu idx @@ uint64_to_float v) arr
   | Uint4x32_nd arr ->
       fold_bigarray ?padding ~init ~f:(fun accu idx c -> f accu idx c.Stdlib.Complex.re) arr
   | Half_nd arr -> fold_bigarray ?padding ~init ~f arr
@@ -333,9 +361,9 @@ let get_as_float ?padding arr idx =
   | Byte_nd arr -> Float.of_int @@ Char.to_int @@ A.get arr adjusted_idx
   | Uint16_nd arr -> Float.of_int @@ A.get arr adjusted_idx
   | Int32_nd arr -> Int32.to_float @@ A.get arr adjusted_idx
-  | Uint32_nd arr -> Int32.to_float @@ A.get arr adjusted_idx
+  | Uint32_nd arr -> uint32_to_float @@ A.get arr adjusted_idx
   | Int64_nd arr -> Int64.to_float @@ A.get arr adjusted_idx
-  | Uint64_nd arr -> Int64.to_float @@ A.get arr adjusted_idx
+  | Uint64_nd arr -> uint64_to_float @@ A.get arr adjusted_idx
   | Uint4x32_nd arr -> (A.get arr adjusted_idx).Stdlib.Complex.re
   | Half_nd arr -> A.get arr adjusted_idx
   | Bfloat16_nd arr -> Ops.bfloat16_to_single @@ A.get arr adjusted_idx
@@ -498,6 +526,18 @@ let%track7_sexp create_array ~debug:(_debug : string) (prec : Ops.prec) ~(dims :
     {!write_payload_to_channel} are little-endian, so the caller is responsible for checking
     {!Stdlib.Sys.big_endian} before mapping a payload. The mapping is not counted in
     {!get_used_memory}: its pages are file-backed, not heap. *)
+(** Whether a [prec]-typed region of [nbytes] bytes at [byte_offset] of a file may be wrapped by
+    {!map_file_array} rather than decoded (gh-ocannl-588). Three conditions, none of them about the
+    caller's format: a mapping is read in the {e host's} byte order while the payload formats here
+    are little-endian; {!Unix.map_file} has no empty mapping; and the data pointer it hands back
+    sits at [byte_offset] exactly, so an offset that is not a multiple of the element size would
+    make a misaligned typed pointer -- undefined behaviour, and a trap on strict targets. That last
+    one is easy to assume away: a format may align its payloads by construction and still put a wide
+    one at an odd offset once a narrow payload precedes it. Whether the file's bytes {e are} the
+    buffer's bytes (no padding, no re-layout) is the caller's half of the question. *)
+let mappable_file_region ~(prec : Ops.prec) ~(byte_offset : int) ~(nbytes : int) =
+  (not Stdlib.Sys.big_endian) && nbytes > 0 && byte_offset % Ops.prec_in_bytes prec = 0
+
 let map_file_array ?(shared = false) (prec : Ops.prec) ~(dims : int array) ~(byte_offset : int) fd =
   let f (type ocaml elt_t) (prec : (ocaml, elt_t) Ops.precision) : t =
     let kind = precision_to_bigarray_kind prec in

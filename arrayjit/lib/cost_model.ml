@@ -514,6 +514,12 @@ module Calibration = struct
   type row = {
     backend : string;
     digest : string;
+    routine : string;
+        (** The tuned computation's name (gh-ocannl-635): the routine name the candidate compiles
+            derive from the comp's block comment, the same name its generated sources carry. It is
+            what makes a row — and every fit witness quoting one — say WHICH kernel demonstrated a
+            rate, rather than only which candidate of an unnamed computation. Empty for rows
+            recorded before the column existed (the 11-column schema), which stay fittable. *)
     label : string;
     measured_ms : float;
     model_ms : float option;
@@ -534,34 +540,56 @@ module Calibration = struct
      the decimal, so ["%.6f"] prints [d] back exactly. *)
   let floor6 v = Float.round_down (v *. 1e6) /. 1e6
 
+  (* The routine and label columns are the only free text in a row, hence the only place a stray
+     tab or newline could split one line into fragments no reader can parse. A name carrying one
+     loses the character, not the row. *)
+  let cell = String.map ~f:(function '\t' | '\n' | '\r' -> ' ' | c -> c)
+
   let to_line r =
-    Printf.sprintf "%s\t%s\t%s\t%.6f\t%s\t%d\t%d\t%d\t%b\t%b\t%b" r.backend r.digest r.label
-      (floor6 r.measured_ms)
+    Printf.sprintf "%s\t%s\t%s\t%s\t%.6f\t%s\t%d\t%d\t%d\t%b\t%b\t%b" r.backend r.digest
+      (cell r.routine) (cell r.label) (floor6 r.measured_ms)
       (match r.model_ms with Some m -> Printf.sprintf "%.6f" (floor6 m) | None -> "")
       r.kernels r.flops r.bytes r.flops_approx r.bytes_approx r.opaque
 
   let of_line line =
+    let build backend digest routine label measured model kernels flops bytes flops_approx
+        bytes_approx opaque =
+      try
+        Some
+          {
+            backend;
+            digest;
+            routine;
+            label;
+            measured_ms = Float.of_string measured;
+            model_ms = (if String.is_empty model then None else Some (Float.of_string model));
+            kernels = Int.of_string kernels;
+            flops = Int.of_string flops;
+            bytes = Int.of_string bytes;
+            flops_approx = Bool.of_string flops_approx;
+            bytes_approx = Bool.of_string bytes_approx;
+            opaque = Bool.of_string opaque;
+          }
+      with _ -> None
+    in
     match String.split line ~on:'\t' with
-    | [ backend; digest; label; measured; model; kernels; flops; bytes; flops_approx; bytes_approx; opaque ]
-      -> (
-        try
-          Some
-            {
-              backend;
-              digest;
-              label;
-              measured_ms = Float.of_string measured;
-              model_ms =
-                (if String.is_empty model then None else Some (Float.of_string model));
-              kernels = Int.of_string kernels;
-              flops = Int.of_string flops;
-              bytes = Int.of_string bytes;
-              flops_approx = Bool.of_string flops_approx;
-              bytes_approx = Bool.of_string bytes_approx;
-              opaque = Bool.of_string opaque;
-            }
-        with _ -> None)
+    | [ backend; digest; routine; label; measured; model; kernels; flops; bytes; flops_approx;
+        bytes_approx; opaque ] ->
+        build backend digest routine label measured model kernels flops bytes flops_approx
+          bytes_approx opaque
+    (* Rows recorded before the routine column (gh-ocannl-635). Unlike the 9-column rows that
+       predate the approx flags, these carry everything a leg needs to prove its counts exact, so
+       they still fit — they just cannot name the computation they measured. *)
+    | [ backend; digest; label; measured; model; kernels; flops; bytes; flops_approx;
+        bytes_approx; opaque ] ->
+        build backend digest "" label measured model kernels flops bytes flops_approx bytes_approx
+          opaque
     | _ -> None
+
+  (* How a row names itself in a report: the tuned computation, then the candidate within it. *)
+  let qualified ~routine ~label = if String.is_empty routine then label else routine ^ "/" ^ label
+
+  let row_name r = qualified ~routine:r.routine ~label:r.label
 
   type fit = {
     fit_backend : string;
@@ -606,7 +634,7 @@ module Calibration = struct
                 let rate = Float.of_int c /. (r.measured_ms *. 1e-3) in
                 match acc with
                 | Some (best, _) when Float.(best >= rate) -> acc
-                | _ -> Some (rate, Printf.sprintf "%s (%s)" r.label r.digest))
+                | _ -> Some (rate, Printf.sprintf "%s (%s)" (row_name r) r.digest))
         in
         let peak_flops = leg ~exact:(fun r -> not r.flops_approx) (fun r -> r.flops) in
         let peak_bandwidth = leg ~exact:(fun r -> not r.bytes_approx) (fun r -> r.bytes) in
@@ -633,7 +661,7 @@ module Calibration = struct
                     match acc with
                     | Some (best, _) when Float.(best >= s) -> acc
                     | _ when Float.(s <= 1.) -> acc
-                    | _ -> Some (s, Printf.sprintf "%s (%s)" r.label r.digest))
+                    | _ -> Some (s, Printf.sprintf "%s (%s)" (row_name r) r.digest))
           | _ -> None
         in
         let apply_slack =

@@ -861,9 +861,13 @@ let bound_prunable = function
   | Whole (W_sketch _) | Fiss (F_sketch _) | Fiss (F_split _) -> true
   | _ -> false
 
-let emit_calibration ~backend ~device ~limits ~label ~digest ~measured_ms
+let emit_calibration ~backend ~device ~limits ~routine ~label ~digest ~measured_ms
     (opts : LL.optimized list) =
   let file = Lazy.force calibration_file in
+  (* Everything this emits names the computation as well as the candidate (gh-ocannl-635): a
+     process tunes several routines, and a row (or a stderr line, or a fit witness quoting one)
+     saying only [W_preset[bs=512]] cannot be traced back to the kernel it measured. *)
+  let named = CM.Calibration.qualified ~routine ~label in
   let peak_flops, peak_memory_bandwidth = envelope ~limits in
   let have_envelope = Option.is_some peak_flops || Option.is_some peak_memory_bandwidth in
   if Lazy.force log_enabled || (not (String.is_empty file)) || have_envelope then (
@@ -921,7 +925,7 @@ let emit_calibration ~backend ~device ~limits ~label ~digest ~measured_ms
              autotune_calibration_file data\n\
              %!"
             (match model_ms with Some m -> Printf.sprintf "%.6f" m | None -> "?")
-            measured_ms label dtag backend device minima)
+            measured_ms named dtag backend device minima)
      else if bound_exceeds then
        (* Only an approximate leg can explain the exceedance: possibly over-counting
           (guards-taken / union upper bounds), not the envelope — a diagnostic, no
@@ -930,9 +934,9 @@ let emit_calibration ~backend ~device ~limits ~label ~digest ~measured_ms
          "model bound %.6f ms > measured %.4f ms for %s (digest %s), but its counts are \
           approximate upper bounds (guarded/masked code) — possibly over-counting, not the \
           envelope"
-         (Option.value_exn model_ms) measured_ms label dtag);
+         (Option.value_exn model_ms) measured_ms named dtag);
     let n_kernels = List.length summaries in
-    logf "calibration: %s measured %.4f ms, model %s, %d kernel%s, flops %d, bytes %d%s" label
+    logf "calibration: %s measured %.4f ms, model %s, %d kernel%s, flops %d, bytes %d%s" named
       measured_ms
       (match model_ms with Some m -> Printf.sprintf "%.6f ms" m | None -> "n/a")
       n_kernels
@@ -945,6 +949,7 @@ let emit_calibration ~backend ~device ~limits ~label ~digest ~measured_ms
           {
             CM.Calibration.backend;
             digest = dtag;
+            routine;
             label;
             measured_ms;
             model_ms;
@@ -2188,6 +2193,18 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
   let static_indices = Idx.bound_symbols bindings in
   let backend = Context.backend_name ctx in
   let device = Context.device_id ctx in
+  (* The tuned computation's name, for the calibration rows and log lines of every candidate
+     (gh-ocannl-635). Derived exactly as the candidate compiles below derive theirs — none passes
+     [~name], so each lowers under [Assignments.get_name_exn] — hence a row names the code the way
+     its generated sources are named. Lazy and total on purpose: this is a diagnostic label, while
+     the "a comp must be named" contract belongs to the compiles, and deriving it eagerly would
+     move that failure ahead of them (and impose it on a search that emits nothing). *)
+  let routine_name =
+    lazy
+      (match Ir.Assignments.get_name_exn comp.Ir.Assignments.asgns with
+      | name -> name
+      | exception Invalid_argument _ -> "")
+  in
   let emit_report r = Option.iter report ~f:(fun f -> f r) in
   (* [tune] reports exactly once per call, on every path (gh-ocannl-550). The failures that happen
      before (or instead of) the search proper — the base compile failing before its lowering is
@@ -2679,8 +2696,8 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
       | None ->
           if baseline_dispatched then (
             logf "baseline: %.4f ms (digest %s)" baseline_ms (dshort base_digest);
-            emit_calibration ~backend ~device ~limits ~label:"baseline" ~digest:base_digest
-              ~measured_ms:baseline_ms [ base_opt ])
+            emit_calibration ~backend ~device ~limits ~routine:(Lazy.force routine_name)
+              ~label:"baseline" ~digest:base_digest ~measured_ms:baseline_ms [ base_opt ])
           else (
             (* No calibration row: the model column is only meaningful next to a measurement. *)
             logf
@@ -3015,8 +3032,8 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                   if saved_is_tensorized (flat_schedule c.form) && Float.(ms < !mma_best_ms) then
                     mma_best_ms := ms;
                   logf "%s: %.4f ms (digest %s)" (spec_label spec) ms (dshort c.digest_after);
-                  emit_calibration ~backend ~device ~limits ~label:(spec_label spec) ~digest:c.digest_after
-                    ~measured_ms:ms c.all_opts;
+                  emit_calibration ~backend ~device ~limits ~routine:(Lazy.force routine_name)
+                    ~label:(spec_label spec) ~digest:c.digest_after ~measured_ms:ms c.all_opts;
                   (* The rendering census next to the timing (gh-ocannl-479): a candidate labeled
                      tensorized whose [Tile_mma] statements all declined at emission timed the
                      scalar fallback — report it, or every number off this tuning run inherits the

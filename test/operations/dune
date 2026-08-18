@@ -1675,6 +1675,13 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name discriminating_values)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules discriminating_values)
+ (libraries base ocannl stdio arrayjit.verdict ll_test))
+
+(test
  (name accum_width)
  (package neural_nets_lib)
  (deps
@@ -2293,7 +2300,7 @@
 (executable
  (name bandwidth_calibration)
  (modules bandwidth_calibration)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 

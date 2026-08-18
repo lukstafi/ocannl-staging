@@ -1,0 +1,7 @@
+cycle rejects a modulus blind to an axis, which coprimality with the extent does not rule out: true
+cycle accepts the shapes the accumulator-width legs use: true
+drift varies with every index of every shape used: true
+every drift cell is exact in bf16: true
+a drift reduction leaves bf16 exactness within the extents these tests reduce: true
+every drift partial sum stays exact in f32: true
+the 16-wide row's first bf16-inexact partial sum is the eleventh, at 275/64: true
