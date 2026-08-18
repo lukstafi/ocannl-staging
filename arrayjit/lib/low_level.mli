@@ -262,6 +262,12 @@ val subst_accum_read :
 (** Retarget an {!accum_update_parts}-shaped update's read of [tn[idcs]] to the scope local [id].
     Raises on any other shape. *)
 
+val accum_local_update_parts : id:scope_id -> scalar_t -> (Ops.binop * scalar_t) option
+(** The reduce-shaped update of a scope LOCAL, [local = op(local, contrib)] (or its FMA form) with
+    [contrib] free of the local — [subst_accum_read]'s output shape; returns [(op, contrib)]. The
+    SIMD reduction rendering uses it to fold vector chains into a widened accumulator's scope
+    local (gh-ocannl-639), and {!peel_accum_nest}'s scope-form validation is built on it. *)
+
 val peel_accum_nest :
   free_of:Indexing.symbol list ->
   t ->

@@ -2977,13 +2977,27 @@ module C_syntax (B : C_syntax_config) = struct
           try
             (match B.vector_style with `Vec_extensions -> () | `Packed_struct -> raise Bail);
             if B.vector_bytes < 8 || from_ <> 0 || Utils.debug_log_from_routines () then raise Bail;
-            let acc_tn, acc_idcs, op, contrib =
+            (* Two accumulator targets: a memory cell (the ordinary form), or the scope LOCAL of a
+               widened reduction (gh-ocannl-639: the loop sits inside the accumulator's
+               [Local_scope], its update is a [Set_local] — recognizing it here is what lets a
+               vectorized inner reduction axis keep the whole nest's compute-precision residency,
+               its chains folding into the local with no storage round-trip at all). *)
+            let acc_target, op, contrib =
               match recognize_accumulation (nonempty_stmts body) with
-              | Some r -> r
-              | None -> raise Bail
+              | Some (tn, idcs, op, contrib) -> (`Cell (tn, idcs), op, contrib)
+              | None -> (
+                  match nonempty_stmts body with
+                  | [ Low_level.Set_local (id, llsc) ] -> (
+                      match Low_level.accum_local_update_parts ~id llsc with
+                      | Some (op, contrib) -> (`Local id, op, contrib)
+                      | None -> raise Bail)
+                  | _ -> raise Bail)
             in
-            let acc_store_prec = Lazy.force acc_tn.Tn.storage_prec in
-            let prec = comp_prec acc_store_prec in
+            let prec =
+              match acc_target with
+              | `Cell (tn, _) -> comp_prec (Lazy.force tn.Tn.storage_prec)
+              | `Local id -> scope_prec_of id
+            in
             if not (B.vector_prec_ok prec) then raise Bail;
             (* A loop-invariant contribution deserves strength reduction, not chains. *)
             if not (scalar_mentions contrib) then raise Bail;
@@ -3081,19 +3095,14 @@ module C_syntax (B : C_syntax_config) = struct
                     emit (vec_acc_combine ~prec ~lanes ~op ~dst:name ~src:nm));
             let update_docs = take () in
             let total = "vred_total_" ^ ivar ^ "__" in
-            let acc_cell () =
-              string (get_ident acc_tn)
-              ^^ brackets (pp_array_offset (acc_idcs, Lazy.force acc_tn.Tn.dims))
-            in
             (* The accumulator cell itself stays at its storage precision: the fold reads it
                widened and narrows the combined value once, exactly as the scalar path's [Set]
-               does (gh-ocannl-517). The scalar REMAINDER (a non-multiple extent's tail) folds
-               into the compute-precision [total] BEFORE that single store (gh-ocannl-639): the
-               original per-step body would narrow the vector partial mid-way and then narrow
-               again per tail step, splitting this rendering from the widened serial baseline on
-               exactly the non-dividing extents. *)
-            let widen = B.convert_precision ~from:acc_store_prec ~to_:prec in
-            let narrow = B.convert_precision ~from:prec ~to_:acc_store_prec in
+               does (gh-ocannl-517); a scope-local target is already at [prec] and takes the
+               combined value with no conversion. The scalar REMAINDER (a non-multiple extent's
+               tail) folds into the compute-precision [total] BEFORE that single store
+               (gh-ocannl-639): the original per-step body would narrow the vector partial
+               mid-way and then narrow again per tail step, splitting this rendering from the
+               widened serial baseline on exactly the non-dividing extents. *)
             let folds =
               vec_acc_grid_fold ~prec ~lanes ~op grid
               @ vec_acc_lane_fold ~prec ~lanes ~op ~vname:acc_regs.(0) ~out:total
@@ -3119,10 +3128,22 @@ module C_syntax (B : C_syntax_config) = struct
             in
             let tail_body = pp_local_defs tail_defs ^^ tail_update in
             let store =
-              acc_cell () ^^ string " = "
-              ^^ wrap_conversion narrow
-                   (B.binop_syntax prec op (wrap_conversion widen (acc_cell ())) (string total))
-              ^^ semi
+              match acc_target with
+              | `Cell (tn, idcs) ->
+                  let store_prec = Lazy.force tn.Tn.storage_prec in
+                  let widen = B.convert_precision ~from:store_prec ~to_:prec in
+                  let narrow = B.convert_precision ~from:prec ~to_:store_prec in
+                  let cell () =
+                    string (get_ident tn) ^^ brackets (pp_array_offset (idcs, Lazy.force tn.Tn.dims))
+                  in
+                  cell () ^^ string " = "
+                  ^^ wrap_conversion narrow
+                       (B.binop_syntax prec op (wrap_conversion widen (cell ())) (string total))
+                  ^^ semi
+              | `Local id ->
+                  pp_scope_id id ^^ string " = "
+                  ^^ B.binop_syntax prec op (pp_scope_id id) (string total)
+                  ^^ semi
             in
             let it = B.loop_index_type in
             Some

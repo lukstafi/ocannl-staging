@@ -4992,7 +4992,7 @@ let rec valid_scope_updates ~id (llc : t) =
   match llc with
   | Noop | Comment _ -> true
   | Seq (a, b) -> valid_scope_updates ~id a && valid_scope_updates ~id b
-  | For_loop { body; axis = Serial | Unrolled; _ } -> valid_scope_updates ~id body
+  | For_loop { body; axis = Serial | Unrolled | Vectorized; _ } -> valid_scope_updates ~id body
   | If { cond = gc, _; body } -> pure_index_guard gc && valid_scope_updates ~id body
   | Set_local (id', v) ->
       Scope_id.equal id id' && Option.is_some (accum_local_update_parts ~id v)
@@ -5038,7 +5038,12 @@ let peel_accum_nest ~free_of body :
   in
   let rec peel ~free_of ~rebuild body =
     match strip (flat_lines [ body ]) with
-    | [ For_loop ({ index; body = ibody; axis = Serial | Unrolled; _ } as r) ] ->
+    | [ For_loop ({ index; body = ibody; axis = Serial | Unrolled | Vectorized; _ } as r) ] ->
+        (* [Vectorized] levels ride into the scope: the SIMD reduction rendering recognizes the
+           [Set_local] update form and folds its chains into the scope local, so the whole nest
+           keeps one accumulator residency even when an inner reduction axis is vectorized
+           (autotune proposes Retype-[Vectorized] over reductions); where that rendering
+           declines, the loop renders serially over the scope local — same values either way. *)
         peel ~free_of:(index :: free_of)
           ~rebuild:(fun b -> rebuild (For_loop { r with body = b }))
           ibody

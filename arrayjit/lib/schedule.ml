@@ -218,9 +218,13 @@ let rec find_loop axis (llc : Low_level.t) : Low_level.t option =
   | If { body; _ } -> find_loop axis body
   | _ -> None
 
-(* Rewrites the unique statement-level [For_loop] whose index is [sym]. Loops inside [Local_scope]
-   bodies are deliberately out of scope: annotated loops there are rejected by [validate_parallel],
-   and splitting them has no v1 use case. *)
+(* Rewrites every [For_loop] whose index is [sym] (a materializing transform duplicates a loop
+   per copy, and a later op must reach all the copies). Loops inside [Local_scope] bodies are IN
+   scope since gh-ocannl-639: the accumulation mints of [Unroll ~materialize:true] and
+   [Partition] wrap segment/inner loops in the accumulator's scope, and those loops must stay
+   addressable by subsequent left-to-right schedule operations ([Schedule.partition] returns the
+   segment symbols precisely so callers can target them). Annotated loops inside scopes are still
+   rejected downstream by [validate_parallel], loudly. *)
 let rewrite_loop ~what ~sym ~(f : floop -> Low_level.t) (llc : Low_level.t) : Low_level.t =
   let open Low_level in
   let found = ref false in
@@ -232,7 +236,22 @@ let rewrite_loop ~what ~sym ~(f : floop -> Low_level.t) (llc : Low_level.t) : Lo
     | For_loop fc -> For_loop { fc with body = go fc.body }
     | Seq (a, b) -> Seq (go a, go b)
     | If { cond; body } -> If { cond; body = go body }
+    | Set s -> Set { s with llsc = go_scalar s.llsc }
+    | Set_dynamic ({ dyn_value = v, vp; llsc; _ } as s) ->
+        Set_dynamic { s with dyn_value = (go_scalar v, vp); llsc = go_scalar llsc }
+    | Set_local (id, llsc) -> Set_local (id, go_scalar llsc)
+    | Set_from_vec ({ arg = a, ap; _ } as s) -> Set_from_vec { s with arg = (go_scalar a, ap) }
     | other -> other
+  and go_scalar (llsc : scalar_t) : scalar_t =
+    match llsc with
+    | Local_scope ls -> Local_scope { ls with body = go ls.body }
+    | Get_dynamic ({ dyn_value = v, vp; _ } as g) -> Get_dynamic { g with dyn_value = (go_scalar v, vp) }
+    | Ternop (op, (a, pa), (b, pb), (c, pc)) ->
+        Ternop (op, (go_scalar a, pa), (go_scalar b, pb), (go_scalar c, pc))
+    | Binop (op, (a, pa), (b, pb)) -> Binop (op, (go_scalar a, pa), (go_scalar b, pb))
+    | Unop (op, (a, pa)) -> Unop (op, (go_scalar a, pa))
+    | Get_local _ | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ ->
+        llsc
   in
   let result = go llc in
   if not !found then

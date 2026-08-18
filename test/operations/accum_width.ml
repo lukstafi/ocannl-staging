@@ -122,6 +122,18 @@ let claim_2ax_pad_mat =
 let claim_partition =
   "Partition segments share one accumulator scope (equals the unsplit serial result)"
 
+let claim_partition_compose =
+  "a partition segment stays addressable by later schedule ops (unrolling a segment equals the \
+   serial result)"
+
+let claim_mat_then_inner =
+  "inner loops stay reachable after an outer materializing unroll (annotating them equals the \
+   serial result)"
+
+let claim_vec_nested =
+  "a vectorized inner reduction axis folds into the whole-nest wide accumulator (equals the \
+   serial result)"
+
 let claim_simd_tail =
   "the SIMD reduction folds its non-divisible tail into the wide total (equals the serial result)"
 
@@ -148,12 +160,15 @@ let all_claims =
     claim_unroll_annot;
     claim_unroll_mat;
     claim_partition;
+    claim_partition_compose;
     claim_2ax_ref;
     claim_2ax_inner;
     claim_2ax_outer;
     claim_2ax_annot;
     claim_2ax_both_mat;
     claim_2ax_pad_mat;
+    claim_mat_then_inner;
+    claim_vec_nested;
     claim_adjacent;
     claim_guarded;
     claim_scope_recurrence;
@@ -224,6 +239,17 @@ let () =
         in
         let pt, _segment_syms = Sched.partition ~axis:k ~breakpoints:[ 16; 40 ] in
         [ pt ]);
+    (* The segment symbols Schedule.partition returns must stay usable AFTER the accumulation
+       mint wrapped the segment loops in the scope: rewrite_loop descends into Local_scope
+       bodies since gh-ocannl-639. *)
+    matmul_leg ~claim:claim_partition_compose ~name:"aw_bf16_partition_compose" ~sched:(fun opt ->
+        let k =
+          match List.find_exn (nest_paths opt.LL.llc) ~f:(fun p -> List.length p = 3) with
+          | [ _; _; k ] -> k
+          | _ -> assert false
+        in
+        let pt, segment_syms = Sched.partition ~axis:k ~breakpoints:[ 16; 40 ] in
+        [ pt; Sched.Unroll { axis = List.hd_exn segment_syms; materialize = false } ]);
     (* === two-axis reduction out[i] = sum_{r,s} x[i,r,s]: unrolling EITHER reduction axis keeps
        the whole-nest accumulator. The inner-axis leg is the partial-materialization shape: the
        unroll mints a scope-form Set inside the still-serial outer reduction loop, and the
@@ -285,6 +311,42 @@ let () =
           Sched.Pad { axis = s; to_multiple_of = 4 };
           Sched.Unroll { axis = s; materialize = true };
         ]);
+    (* After an outer materializing unroll, the copied inner s loops live inside the scope and
+       keep their symbol: a later op targeting s must reach all of them. *)
+    leg2 ~claim:claim_mat_then_inner ~name:"aw2_mat_then_inner" ~sched:(fun ~r ~s ->
+        [
+          Sched.Unroll { axis = r; materialize = true };
+          Sched.Unroll { axis = s; materialize = false };
+        ]);
+    (* === a VECTORIZED inner reduction axis === *)
+    (* The nest peel rides through the Vectorized level, and the SIMD reduction rendering folds
+       its chains into the scope LOCAL (no storage round-trip): the whole nest keeps one wide
+       accumulator. Inner extent 32 clears the SIMD profitability gate; the reduction is exact in
+       f32, so the vector reassociation is harmless and the comparison is bitwise. The structural
+       conjunct asserts the vectorized rendering actually fired inside the scope. *)
+    let nvr, nvs = (4, 32) in
+    let fxv idcs =
+      Float.of_int ((((idcs.(0) * nvr * nvs) + (idcs.(1) * nvs) + idcs.(2)) % 13) + 20) *. 0.015625
+    in
+    let run2v ~name ?schedule () =
+      let xv = NTDSL.init ~l:(name ^ "_x") ~prec:Ir.Ops.bfloat16 ~o:[ ni; nvr; nvs ] ~f:fxv () in
+      let%op outv = xv ++ "irs => i" in
+      Tn.update_prec outv.Tensor.value Ir.Ops.bfloat16;
+      run ~name ?schedule outv
+    in
+    let got_vn = run2v ~name:"aw_vecnest_serial" () in
+    let got_vnv =
+      run2v ~name:"aw_vecnest_vec"
+        ~schedule:
+          (two_axis_sched ~f:(fun ~r:_ ~s -> [ Sched.Retype { axis = s; ty = LL.Vectorized } ]))
+        ()
+    in
+    let vecn_fired =
+      match read_generated "aw_vecnest_vec" with
+      | Some src -> String.is_substring src ~substring:"Vectorized reduction rendering"
+      | None -> false
+    in
+    p claim_vec_nested (vecn_fired && Array.for_all2_exn got_vnv got_vn ~f:Float.equal);
     (* === adjacent accumulations: two SOURCE assignments into one cell are two stores, and each
        store narrows — they must NOT share an accumulator residency (that is the provenance
        boundary: only unrolled copies of one assignment may). 256 + 1 rounds to 256 at bf16

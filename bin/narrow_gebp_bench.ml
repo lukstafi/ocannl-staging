@@ -287,15 +287,25 @@ let () =
     repeats bm bk (Ir.Ops.prec_string prec) (Ir.Ops.prec_string cprec)
     (Option.value_map tile_prec ~default:"(storage)" ~f:Ir.Ops.prec_string);
   (* Say it at runtime rather than only in a comment: since gh-ocannl-639 every variant
-     accumulates at compute precision (naive narrows once per cell, packed once per k block), so
-     with this bench's exact-by-design partial sums the checksums are comparable across the
-     board. *)
+     accumulates at compute precision (naive narrows once per cell, packed once per k block).
+     Whether the checksums are comparable depends on the extent: every rounding any variant
+     performs is exact as long as the per-k-block partial sums stay storage-exact, which for
+     these operands is measured through n = 512 at bf16 (max |partial| 31, multiples of 1/8);
+     beyond that an inexact block partial can legitimately split naive from packed. *)
   if Option.is_some tile_prec then
-    p
-      "note: all variants accumulate in %s (gh-ocannl-639): naive narrows to %s once per cell,\n\
-      \      packed variants once per k block — with this bench's operands the checksums are\n\
-      \      comparable across the board.\n"
-      (Ir.Ops.prec_string cprec) (Ir.Ops.prec_string prec);
+    if n <= 512 then
+      p
+        "note: all variants accumulate in %s (gh-ocannl-639): naive narrows to %s once per cell,\n\
+        \      packed variants once per k block — at this extent every such rounding is exact for\n\
+        \      this bench's operands, so the checksums are comparable across the board.\n"
+        (Ir.Ops.prec_string cprec) (Ir.Ops.prec_string prec)
+    else
+      p
+        "note: all variants accumulate in %s (gh-ocannl-639), but naive narrows to %s once per\n\
+        \      cell while packed variants narrow once per k block — at n = %d an inexact block\n\
+        \      partial can legitimately split naive from packed; the packed variants remain\n\
+        \      comparable with each other, and an f32 run is the cross-variant oracle.\n"
+        (Ir.Ops.prec_string cprec) (Ir.Ops.prec_string prec) n;
   let t_naive, _ = bench ~variant:"naive" ~schedule:None () in
   match unschedulable with
   | _ :: _ ->

@@ -935,12 +935,21 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   (`C_syntax.try_widen_serial_reduce`) and rendering that — `scope_prec_of` and the
   `Set_local`/`Get_local` arms already carry the widening. It joins virtual scopes,
   `try_vectorize_reduce`'s epilogue and `try_register_tile`'s C-tile. The peel accepts
-  Serial/`Unrolled` levels (autotune proposes `Unroll` over any Serial loop of extent <= 8,
-  reduction axes included), sees through the pure-index guard shape `If (i < bound)` (gh-490
+  Serial/`Unrolled`/`Vectorized` levels (autotune proposes `Unroll` over any Serial loop of extent
+  <= 8 and Retype-`Vectorized` over reductions; a `Vectorized` level rides into the scope and
+  `try_vectorize_reduce` recognizes the `Set_local` update form, folding its chains into the scope
+  local with no storage round-trip — its scalar TAIL also folds into the wide total before the
+  single store), sees through the pure-index guard shape `If (i < bound)` (gh-490
   symbolic extents — data-dependent guards are NOT transparent), hoists through a scope-form base
-  (a `Set` whose value is already the accumulation `Local_scope`, reusing its id), and also serves
+  (a `Set` whose value is already the accumulation `Local_scope`, reusing its id — accepted ONLY
+  when every update fits the mint grammar, `Low_level.valid_scope_updates`: hoisting is licensed
+  by the reduction shape, and a general recurrence like `local := local - x` must keep its
+  per-iteration narrowing), and also serves
   hardware-annotated loops the backend serializes for lack of a hardware index (cc's
-  `Workgroup_reduce`). A MATERIALIZED unroll never reaches codegen as bare copies:
+  `Workgroup_reduce`). `Schedule.Partition` of a recognized nest mints ONE scope spanning its
+  segment loops (an index-set specialization is not a partial-reduction boundary), and
+  `rewrite_loop` descends into `Local_scope` bodies so minted-scope interiors (partition segments,
+  an outer materialized unroll's inner loops) stay addressable by later schedule ops. A MATERIALIZED unroll never reaches codegen as bare copies:
   `Sched.Unroll ~materialize:true` itself rewrites a recognized accumulation nest into the scope
   form — that is where the provenance lives, since a codegen pass looking at adjacent same-cell
   `Set`s cannot tell unrolled copies of one assignment from two user-authored assignments, whose
