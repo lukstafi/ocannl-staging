@@ -487,12 +487,14 @@
 #autotune_bound_pruning=false
 
 # When non-empty, `Autotune.tune` appends one tab-separated calibration row per timed candidate
-# to this file: backend, digest tag, candidate label, measured ms, model-roofline ms (empty when
-# the model cannot score the candidate), kernel count, flops, bytes, flops-approx flag,
+# to this file: backend, digest tag, tuned routine name (the computation's block-comment name,
+# the one its generated sources carry), candidate label, measured ms, model-roofline ms (empty
+# when the model cannot score the candidate), kernel count, flops, bytes, flops-approx flag,
 # bytes-approx flag (the leg's counts are guards-taken/union upper bounds rather than exact),
-# opaque flag. Milliseconds are floored at the 6th decimal, so a stored time never exceeds the
-# measurement. The flops and bytes columns aggregate over the candidate's kernels while the
-# model column sums per-kernel roofline bounds. Every tuning run is free model-vs-measured
+# opaque flag. Reports name a row as `routine/label (digest)`, so a fitted constant says which
+# kernel demonstrated it. Milliseconds are floored at the 6th decimal, so a stored time never
+# exceeds the measurement. The flops and bytes columns aggregate over the candidate's kernels
+# while the model column sums per-kernel roofline bounds. Every tuning run is free model-vs-measured
 # divergence data for fitting the envelope constants (see model_peak_flops):
 # `tools/fit_envelope.exe <file>...` fits the tightest model_peak_* constants respecting every
 # row each leg can be audited on (a leg fits from the rows where that leg's counts are exact;
@@ -500,8 +502,9 @@
 # slack" on both legs) and prints
 # config-pasteable lines; `--backend=NAME` selects one backend when the data spans several (the
 # keys are global), `--margin=F` (F >= 1) adds headroom for candidates faster than any yet
-# measured. Rows recorded before the approx column (9-column schema) are skipped with a
-# warning — prefer re-recording calibration data with the current build.
+# measured. Rows recorded before the routine column (11-column schema) still fit, unnamed;
+# rows recorded before the approx column (9-column schema) are skipped with a warning — prefer
+# re-recording calibration data with the current build.
 # Ordinary (matmul-family) tuning data cannot constrain the memory leg: those rows are
 # compute-bound and usually carry approximate byte counts (gh-ocannl-578). To make
 # model_peak_memory_bandwidth fittable, run the STREAM-style footprint-exact calibration pass

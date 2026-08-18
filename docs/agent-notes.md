@@ -1293,7 +1293,14 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   `BENCH_TUNE_REPORT=1`) before concluding a GPU search "found nothing".
 - The calibration TSV schema (`autotune_calibration_file`) is owned by
   `Ir.Cost_model.Calibration` — writer (`Autotune.emit_calibration`) and reader
-  (`tools/fit_envelope.exe`) share `to_line`/`of_line`, so change it in one place only. The
+  (`tools/fit_envelope.exe`) share `to_line`/`of_line`, so change it in one place only. A row
+  names both the tuned computation (the routine name derived from its block comment, as the
+  candidate's generated sources are named) and the candidate, and every report quotes them as
+  `routine/label (digest)` — a fitted constant has to say which kernel demonstrated it. Evolving
+  the schema means keeping the older column counts parseable: rows accumulate in one file across
+  builds, so `of_line` still accepts the 11-column rows that predate the routine column (they fit,
+  unnamed), while the 9-column rows predating the approx flags cannot prove exactness and the
+  fitter skips them with a warning. The
   fitter's constants are the tightest envelope respecting every row a leg can be audited on:
   per-leg max achieved counts/time (per backend), where each leg uses the rows whose counts are
   exact FOR THAT LEG (flops-approx and bytes-approx are independent flags — a multi-read

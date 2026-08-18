@@ -29,14 +29,26 @@ let () =
       List.filter_map (Stdio.In_channel.read_lines file) ~f:Cal.of_line
     else []
   in
-  Stdio.printf "rows appended: %b\n" (not (List.is_empty rows));
+  Verdict.p "rows appended" (not (List.is_empty rows));
+  (* Every row names the computation it timed (gh-ocannl-635) — the writer-side half of the
+     schema, which only an end-to-end tuning run exercises: the name comes from the comp's block
+     comment through [Autotune.tune]'s compiles. Without it the fitted memory-leg floor cannot say
+     which stream kernel demonstrated it, and per-kernel rates have to be reconstructed outside
+     the rows. *)
+  let kernels = List.map reports ~f:fst in
+  Verdict.p "every row names its routine"
+    (List.for_all rows ~f:(fun r -> List.mem kernels r.Cal.routine ~equal:String.equal));
+  Stdio.printf "routines named, in order: %s\n"
+    (String.concat ~sep:" "
+       (List.filter kernels ~f:(fun k ->
+            List.exists rows ~f:(fun r -> String.equal r.Cal.routine k))));
   let exact_bytes =
     List.filter rows ~f:(fun r ->
         (not r.Cal.bytes_approx) && (not r.Cal.opaque) && r.Cal.bytes > 0
         && Float.(r.Cal.measured_ms > 0.))
   in
-  Stdio.printf "bytes-exact rows present: %b\n" (not (List.is_empty exact_bytes));
+  Verdict.p "bytes-exact rows present" (not (List.is_empty exact_bytes));
   let fits = Cal.fit rows in
-  Stdio.printf "single-backend fit: %b\n" (List.length fits = 1);
-  Stdio.printf "memory leg fitted from these rows: %b\n"
+  Verdict.p "single-backend fit" (List.length fits = 1);
+  Verdict.p "memory leg fitted from these rows"
     (List.exists fits ~f:(fun f -> Option.is_some f.Cal.fit_peak_memory_bandwidth))
