@@ -212,7 +212,91 @@ let phase1 () =
   in
   let o_guard = optimize ~name:"ssem_guardcov" llc_guard in
   p "guarded full write: raw guards-taken coverage keeps xg off read-before-write"
-    (not (read_before_write o_guard xg))
+    (not (read_before_write o_guard xg));
+  (* Cap-selected exemption-dependent producer (review round 4): the reduction cap materializes
+     r (Never_virtual 39) before the closing pass promotes it On_device -- the promotion must
+     not cost r its [`Inline] flip candidacy (a virtual reading has no interface to classify,
+     so the placement search remains free to try it), and the interface must say input. *)
+  assert (LL.virtualize_settings.max_inline_reduction = 16);
+  let r = mk "r" in
+  Tn.set_observable r;
+  let ar = mk ~dims:[| 2; 20 |] "ar" in
+  materialize ar;
+  let outr = mk "capout" in
+  materialize outr;
+  let llc_cap =
+    let s = sym () and k = sym () and t = sym () in
+    seq
+      (loop_n s 2
+         (loop_n k 20
+            (set r
+               [| aff [ (2, s) ] 0 |]
+               (add (get r [| aff [ (2, s) ] 0 |]) (get ar [| iter s; iter k |])))))
+      (loop_n t dim (set outr [| iter t |] (get r [| iter t |])))
+  in
+  let o_cap = optimize ~name:"ssem_cap" llc_cap in
+  p "cap-selected accumulator: read-before-write and an input"
+    (read_before_write o_cap r && Set.mem (inputs o_cap) r);
+  p "cap-selected accumulator: keeps its Inline flip candidacy"
+    (List.exists o_cap.LL.flip_candidates ~f:(fun fc ->
+         Tn.equal fc.LL.fc_tn r && (match fc.LL.fc_flip with `Inline -> true | _ -> false)));
+  let r_seed = [| 71.; 72.; 73.; 74. |] in
+  let ar_vals =
+    Array.init 40 ~f:(fun i ->
+        let s = i / 20 and k = i % 20 in
+        (10. *. Float.of_int (s + 1)) +. Float.of_int (k + 1))
+  in
+  let got_cap =
+    execute ~name:"ssem_cap" o_cap
+      ~seed:[ (r, r_seed); (ar, ar_vals); (outr, blank dim) ]
+      ~read:[ outr ]
+  in
+  (* Row sums: 20*10*(s+1) + 210; even cells accumulate over the seed, odd cells pass through. *)
+  p "cap-selected accumulator: accumulates over the incoming values"
+    (same got_cap [ [| 481.; 72.; 683.; 74. |] ]);
+  (* Inherited-Local rejection (review round 4): an earlier routine of the lineage commits tmp
+     as routine-local scratch; a later routine's in-place update consumes entry values a scratch
+     buffer does not carry, so the promotion is rejected with the materialize-before-first-use
+     error -- a User_error, not an internal placement-transition failure. *)
+  let ctx4 = LL.empty_optimize_ctx () in
+  let tmp = mk "tmp" in
+  let a4 = mk "a4" in
+  materialize a4;
+  let outa = mk ~dims:[| dim - 1 |] "scrout" in
+  materialize outa;
+  let llc_a4 =
+    let s = sym () and t = sym () in
+    seq
+      (loop_n s dim (set tmp [| iter s |] (add (get a4 [| iter s |]) (c 1000.))))
+      (loop_n t (dim - 1)
+         (set outa [| iter t |]
+            (add (get tmp [| aff [ (1, t) ] 1 |]) (get tmp [| aff [ (1, t) ] 1 |]))))
+  in
+  let o_a4 =
+    LL.optimize ctx4 ~unoptim_ll_source:None ~ll_source:None ~name:"ssem_scratch_a" [] llc_a4
+  in
+  let a4_vals = Array.init dim ~f:(fun i -> 81. +. Float.of_int i) in
+  let cctx4 = Context.auto () in
+  let _cctx4 = run ~ctx:cctx4 ~name:"ssem_scratch_a" o_a4 ~seed:[ (a4, a4_vals) ] in
+  p "scratch producer: tmp resolved to routine-local scratch"
+    (Tn.Placements.known_not_materialized ctx4.LL.placements tmp);
+  let b4 = mk "b4" in
+  materialize b4;
+  let llc_b4 =
+    let s = sym () in
+    loop_n s dim (set tmp [| iter s |] (add (get tmp [| iter s |]) (get b4 [| iter s |])))
+  in
+  let rejected_scratch =
+    try
+      ignore
+        (LL.optimize ctx4 ~unoptim_ll_source:None ~ll_source:None ~name:"ssem_scratch_b" []
+           llc_b4
+          : LL.optimized);
+      false
+    with Utils.User_error msg -> String.is_substring msg ~substring:"materialized"
+  in
+  p "in-place update of an earlier routine's Local scratch: materialize-first User_error"
+    rejected_scratch
 
 (* === Phase 2: gh-617 -- recompute-at-read, and the knobs that change the observation === *)
 

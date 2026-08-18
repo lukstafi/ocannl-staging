@@ -14,6 +14,11 @@ non-injective scatter, undecided: an input of the routine: true
 non-injective scatter, undecided: uncovered cells read the incoming values: true
 unobservable late input: promoted to a persistent buffer (an interface input, not scratch): true
 guarded full write: raw guards-taken coverage keeps xg off read-before-write: true
+cap-selected accumulator: read-before-write and an input: true
+cap-selected accumulator: keeps its Inline flip candidacy: true
+cap-selected accumulator: accumulates over the incoming values: true
+scratch producer: tmp resolved to routine-local scratch: true
+in-place update of an earlier routine's Local scratch: materialize-first User_error: true
 recompute-at-read: routine A defers v: true
 overwrite-then-consume: the full overwrite covers the spliced reads -- ell is not an input: true
 overwrite-then-consume: the splice observes the NEW ell (recompute-at-read): true
