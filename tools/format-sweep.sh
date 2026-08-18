@@ -81,6 +81,12 @@ hold_test_run_lock() {
            alarm 3900; $SIG{ALRM} = sub { exit 1 };
            exit(flock(STDIN, LOCK_EX) ? 0 : 1)' <&7 \
     || { exec 7>&- || true; return 1; }
+  # Clear stale ownership metadata now that WE hold the flock: a completed
+  # earlier phase leaves .owner naming its finished run, and test-run's
+  # `stop` would otherwise attribute our held lock to that run and TERM its
+  # recorded process group -- which the sweep shares, i.e. kill the sweep.
+  # With the metadata gone, stop refuses to reap and points a human here.
+  rm -f "$ROOT/.test-run.lock.owner" "$ROOT/.test-run.lock.launcher"
 }
 # NB: no redirection on `exec 7>&-`: exec with only redirections applies them
 # to the REST OF THE SCRIPT, so a onetime `2>/dev/null` here once swallowed
@@ -134,7 +140,26 @@ cleanup() {
   rmdir "$LOCKDIR" 2>/dev/null
 }
 trap cleanup EXIT
-trap 'exit 130' INT TERM
+
+# Run a test phase as a background child and wait for it: bash defers signal
+# traps while a foreground child runs, so a TERM arriving mid-phase would
+# otherwise sit until the phase ends -- past any scheduler's TERM-then-KILL
+# grace, and a KILL runs no cleanup at all. `wait` IS interruptible, so the
+# trap fires promptly, relays the TERM to the phase child, and exits into
+# cleanup (which waits on the dying run's flock before resetting). Sets RC.
+PHASE_PID=""
+run_phase() {
+  RC=0
+  tools/test-run.sh run "$@" &
+  PHASE_PID=$!
+  wait "$PHASE_PID" || RC=$?
+  PHASE_PID=""
+}
+on_sig() {
+  [ -n "$PHASE_PID" ] && kill -TERM "$PHASE_PID" 2>/dev/null
+  exit 130
+}
+trap on_sig INT TERM
 
 # --- Quiet-period gates -----------------------------------------------------
 
@@ -181,10 +206,13 @@ esac
 # --deps-only` does not provision it, so a fresh host would otherwise fail
 # @fmt in a way that reads as non-convergence. Require it up front, at the
 # exact version .ocamlformat pins (ocamlformat refuses other versions).
-OCF_PINNED=$(sed -n 's/^version *= *//p' .ocamlformat)
+# tr -d '\r' on both sides: ocamlformat.exe emits CRLF on Windows, and an
+# autocrlf checkout gives .ocamlformat CRLF line endings; command
+# substitution strips only the trailing LF.
+OCF_PINNED=$(sed -n 's/^version *= *//p' .ocamlformat | tr -d '\r')
 command -v ocamlformat >/dev/null 2>&1 \
   || die "ocamlformat is not installed; run: opam install ocamlformat.$OCF_PINNED"
-OCF_HAVE=$(ocamlformat --version 2>/dev/null || true)
+OCF_HAVE=$(ocamlformat --version 2>/dev/null | tr -d '\r' || true)
 [ "$OCF_HAVE" = "$OCF_PINNED" ] \
   || die "ocamlformat $OCF_HAVE does not match the .ocamlformat pin $OCF_PINNED; run: opam install ocamlformat.$OCF_PINNED"
 
@@ -273,15 +301,13 @@ likely an ocamlformat-hostile golden missing from .ocamlformat-ignore (see heade
   # what made the phase fail), and only then interpret the exit code, whose
   # abort paths reset.
   echo "format-sweep: round $iter: compiling (@check)"
-  RC=0
-  tools/test-run.sh run build @check || RC=$?
+  run_phase build @check
   assert_tree_unchanged
   [ "$RC" -ne 2 ] || abort "test-run refused the @check phase (external run started mid-sweep); rerun later"
   [ "$RC" -eq 0 ] || abort "@check failed after formatting"
 
   echo "format-sweep: round $iter: running the regular test suite"
-  RC=0
-  tools/test-run.sh run runtest || RC=$?
+  run_phase runtest
   assert_tree_unchanged
   [ "$RC" -ne 2 ] || abort "test-run refused the runtest phase (external run started mid-sweep); rerun later"
   if [ "$RC" -eq 0 ]; then
