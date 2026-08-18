@@ -327,11 +327,21 @@
 # carries that permission, like schedule Swap). A recognized accumulation body
 # (acc = op(acc, contrib(i)), op one of + * max min, or the FMA form) renders as independent
 # vector accumulator chains with a horizontal reduce at loop exit (ggml's vec_dot pattern).
-# Unset or -1 means automatic: 32 when the SIMD probe finds AVX2, else 16 (NEON). 0 disables
+# Unset or -1 means automatic: 64 when the target has AVX-512 (F, BW and VL — probed the same way
+# as the AVX2 stage, by asserting what the configured target already has rather than requesting
+# it), 32 when the SIMD probe finds AVX2, else 16 (NEON). 0 disables
 # explicit emission (pragma-hinted auto-vectorization remains). Ineligible bodies
 # (non-elementwise, non-contiguous, cross-lane flow) keep the pragma rendering; ineligible
 # ACCUMULATING bodies fall back to a plain serial loop instead (the pragmas would assert
 # iteration independence).
+# A loop or micro-kernel column extent too short to fill the configured vector degrades to the
+# widest width it can fill (never below 32 bytes, i.e. never below the pre-AVX-512 default), rather
+# than declining to a serial rendering — so raising the width cannot lose a vectorization.
+# On Zen 5 the 64-byte width measures 1.7x the 32-byte one on the packed f32 GEBP of
+# bin/narrow_gebp_bench (225.7 vs 130.5 GFLOP/s at n=512, identical checksums). Pin 32 where
+# sustained 512-bit work is unwanted (Intel server parts clock down under it). The width is part
+# of the schedule cache's key, so changing it re-tunes rather than replaying a crown from the
+# other width.
 #cc_vector_bytes=-1
 
 # Whether `Autotune.tune` searches at all. With false, no candidate is ever compiled or timed,
