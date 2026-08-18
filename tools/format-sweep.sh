@@ -268,17 +268,22 @@ likely an ocamlformat-hostile golden missing from .ocamlformat-ignore (see heade
   # test-run exits 2 on a lock refusal (an external run grabbed the lock in
   # the gap after our wait) -- report that as the benign race it is, not as a
   # test failure the operator would then hunt for.
+  # After each test phase: FIRST check the tree did not move (that abort
+  # disarms cleanup's reset, preserving a foreign edit -- which may even be
+  # what made the phase fail), and only then interpret the exit code, whose
+  # abort paths reset.
   echo "format-sweep: round $iter: compiling (@check)"
   RC=0
   tools/test-run.sh run build @check || RC=$?
+  assert_tree_unchanged
   [ "$RC" -ne 2 ] || abort "test-run refused the @check phase (external run started mid-sweep); rerun later"
   [ "$RC" -eq 0 ] || abort "@check failed after formatting"
 
   echo "format-sweep: round $iter: running the regular test suite"
   RC=0
   tools/test-run.sh run runtest || RC=$?
-  [ "$RC" -ne 2 ] || abort "test-run refused the runtest phase (external run started mid-sweep); rerun later"
   assert_tree_unchanged
+  [ "$RC" -ne 2 ] || abort "test-run refused the runtest phase (external run started mid-sweep); rerun later"
   if [ "$RC" -eq 0 ]; then
     break
   fi
