@@ -106,6 +106,22 @@ validate_tree() {
     echo "  -- an unaccounted commit changes what the label 'the report's tree' means." >&2; return 1; }
   [ -z "$(git -C "$t" status --porcelain)" ] || {
     echo "gh612v_session: $t has uncommitted changes -- refusing to measure it" >&2; return 1; }
+  # EXHAUSTIVE, then exact. The digests below pin the files the backport COPIES, but a commit that
+  # also touched `arrayjit/lib/schedule.ml` would still satisfy them -- so first bound the whole
+  # changed-path set to the backport's own, and only then check contents within it. Enumerated
+  # rather than sampled: the previous two rounds of this check each answered "what about file X?"
+  # with another named file, and a set equality answers every X at once.
+  local changed expected
+  expected=$(printf '%s\n' arrayjit/lib/utils.ml benchmarks/runners/ocannl/bench_conv.ml \
+    benchmarks/runners/ocannl/bench_gpt.ml benchmarks/runners/ocannl/bench_harness.ml \
+    benchmarks/runners/ocannl/bench_mlp.ml lib/train.ml ocannl_config.reference | sort)
+  changed=$(git -C "$t" diff --name-only "$base" HEAD 2>/dev/null | sort)
+  [ "$changed" = "$expected" ] || {
+    echo "gh612v_session: $t's commit on top of $pin touches files the backport does not:" >&2
+    diff <(printf '%s\n' "$expected") <(printf '%s\n' "$changed") | sed 's/^/    /' >&2
+    echo "  Anything outside this set can change lowering, scheduling or the runners, and the cells" >&2
+    echo "  would still be labelled as the report's tree." >&2; return 1; }
+
   # CONTENT, not shape. "One clean commit on top of the pinned base, and train.ml mentions
   # tune_ship_arm" accepts a commit that also changes lowering, scheduling or the runners -- and the
   # measurements would still be certified under the report's label. What the report actually claims
@@ -127,7 +143,9 @@ validate_tree() {
   done
   # utils.ml is the ONE backported file whose base content legitimately differs per tree (the config
   # machinery moved between these commits), so it is checked by what the backport adds rather than by
-  # a digest: the key registered AND classified, which is what the runs depend on.
+  # a digest: the key registered AND classified, which is what the runs depend on. Its remaining
+  # freedom is bounded by the path-set check above plus this one; `ocannl_config.reference` is
+  # documentation that nothing in a cell reads, so path-set membership is all it needs.
   grep -q '"tune_ship_arm"' "$t/arrayjit/lib/utils.ml" 2>/dev/null || {
     echo "gh612v_session: $t/arrayjit/lib/utils.ml does not register tune_ship_arm" >&2; return 1; }
   [ "$(grep -c '"tune_ship_arm"' "$t/arrayjit/lib/utils.ml")" -ge 2 ] || {

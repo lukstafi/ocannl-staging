@@ -58,9 +58,11 @@ selects which arm's routine the process keeps — it does not change what either
   codegen path. `arrayjit/lib/utils.ml` is patched rather than copied — its base content legitimately
   differs between these commits — and the patch only registers and classifies the key.
 
-  What "verbatim" means here is pinned by digest rather than asserted, and `gh612v_session.sh`
-  refuses a tree whose files do not match, so the claim is checked before each cell rather than
-  argued afterwards:
+  What "verbatim" means here is checked before each cell rather than argued afterwards, in two
+  steps because either alone is insufficient. First the backport commit's **whole changed-path set**
+  must equal the backport's own seven paths — a commit that also touched, say,
+  `arrayjit/lib/schedule.ml` would satisfy any number of per-file digests while changing what the
+  arms compile. Then, within that set, the five copied files must match these digests exactly:
 
   | file | sha256 (all three trees) |
   |---|---|
