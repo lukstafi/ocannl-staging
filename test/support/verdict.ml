@@ -51,6 +51,27 @@ let p name b =
   Stdio.printf "%s: %b\n%!" name b;
   claim name b
 
+(** [skipped ~backend name] reports a leg the run's backend cannot evaluate: a GPU intrinsic on a
+    CPU backend, a tf32 policy outside CUDA. It prints the same stdout line {!p} would — the
+    [.expected] goldens are backend-uniform, and a [(test)] stanza diffs stdout ONLY, so stderr is
+    free — and announces the skip on stderr, naming the claim. [grep SKIPPED] over a run then
+    enumerates exactly what that hardware did not verify.
+
+    Use it in place of a bare [p name true]: that line is byte-identical to a verified run's, so
+    neither the transcript nor a reviewer can tell the claim was never evaluated — which is how a
+    [Tensorize] leg came to "cover" the gh-ocannl-528 interior-batch bug without ever checking it.
+    The other honest form is putting the condition into the label itself ("… (skipped: non-C
+    backend)"), which distinguishes the golden line; only the indistinguishable bare [true] is the
+    one to reject.
+
+    [~backend] is the run's backend name, as each test already derives it for its own gating
+    ([String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")]). It is passed in
+    rather than read here so that this library keeps depending on nothing but [base] and [stdio]:
+    reporting a verdict is not a reason to link OCANNL's configuration machinery. *)
+let skipped ~backend name =
+  Stdio.eprintf "SKIPPED on %s (vacuous): %s\n%!" backend name;
+  p name true
+
 (** [pass_fail label b] prints [label: PASS] or [label: FAIL], and fails the run in the latter case.
     [?detail] is evaluated only on failure and appended in parentheses — the place for a machine-
     specific number (a measured value, a difference) that must stay out of a passing golden. *)
