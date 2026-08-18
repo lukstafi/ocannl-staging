@@ -135,10 +135,13 @@ let phase1 () =
      verdict must still reach it: the classification closes over the settled placements in
      [reconcile_traced_store]. The scatter writes cells 0..3 of a 6-cell node, so the consumer's
      copy-position reads of cells 4..5 are exemption-dependent, and a decide-time-only strict
-     verdict (which sees the node still undecided) would classify x2 output-only. Structural:
-     the undecided node may resolve to routine-scoped scratch, so the executed twins are the
-     declared-materialized cases above. *)
+     verdict (which sees the node still undecided) would classify x2 output-only. The flip also
+     promotes x2 [On_device] (review round 3): a late-rejected candidate is otherwise only
+     [Never_virtual], which would default to [Local] -- routine scratch with no incoming
+     contents, contradicting the entry values the reads consume. The executed leg is the pin: it
+     seeds x2 and reads back the preserved cells, which a [Local] placement cannot even seed. *)
   let x2 = mk ~dims:[| 6 |] "x2" in
+  Tn.set_observable x2;
   let a2 = mk ~dims:[| 3; 2 |] "a2" in
   materialize a2;
   let out2 = mk ~dims:[| 6 |] "lateout" in
@@ -155,6 +158,38 @@ let phase1 () =
   p "non-injective scatter, undecided: not virtualized" (not (known_virtual o_late x2));
   p "non-injective scatter, undecided: read-before-write despite deciding after the placement pass"
     (read_before_write o_late x2);
+  p "non-injective scatter, undecided: an input of the routine" (Set.mem (inputs o_late) x2);
+  (* Last-writer-wins over the s1-major, s2-minor iteration: cell c holds a2[s1_max, c - s1_max]
+     with s1_max = min (c, 2); cells 4..5 keep the seed. *)
+  let x2_old = Array.init 6 ~f:(fun i -> 61. +. Float.of_int i) in
+  let a2_vals = [| 11.; 12.; 21.; 22.; 31.; 32. |] in
+  let got_late =
+    execute ~name:"ssem_late" o_late
+      ~seed:[ (x2, x2_old); (a2, a2_vals); (out2, blank 6) ]
+      ~read:[ out2 ]
+  in
+  p "non-injective scatter, undecided: uncovered cells read the incoming values"
+    (same got_late [ [| 11.; 21.; 31.; 32.; x2_old.(4); x2_old.(5) |] ]);
+  (* The UNOBSERVABLE twin pins the promotion itself (x2's declared observability would rescue
+     its resolution on its own): without the [On_device] promotion the late-rejected candidate
+     stays [Never_virtual], resolves to [Local] scratch, and the interface drops an input whose
+     entry values the kernel consumes. *)
+  let x3 = mk ~dims:[| 6 |] "x3" in
+  let a3 = mk ~dims:[| 3; 2 |] "a3" in
+  materialize a3;
+  let out3 = mk ~dims:[| 6 |] "lateout2" in
+  materialize out3;
+  let llc_late2 =
+    let s1 = sym () and s2 = sym () and t = sym () in
+    seq
+      (loop_n s1 3
+         (loop_n s2 2
+            (set x3 [| aff [ (1, s1); (1, s2) ] 0 |] (get a3 [| iter s1; iter s2 |]))))
+      (loop_n t 6 (set out3 [| iter t |] (get x3 [| iter t |])))
+  in
+  let o_late2 = optimize ~name:"ssem_late2" llc_late2 in
+  p "unobservable late input: promoted to a persistent buffer (an interface input, not scratch)"
+    (Set.mem (inputs o_late2) x3);
   (* Guards-taken control: the closing pass judges raw-positioned reads with the raw contract's
      query, so a GUARDED full write still counts as coverage (round 6 of the gh-610/611 PR:
      routine-wide guard strictness broke flows whose initialization runs under a flag; the

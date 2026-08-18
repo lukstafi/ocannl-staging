@@ -251,8 +251,9 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   accumulation with no preceding definite initialization, consumes entry values raw or spliced
   alike (`splice_semantics.ml` phase 1; routine-complete lowered flows are unaffected because
   lowering emits the initialization first). The strict classification runs in
-  `reconcile_traced_store`, over the SETTLED placements — not in `decide_placements`, where two
-  wrong timings lurk: judging undecided nodes strictly destroys the virtualizer's partial-write
+  `reconcile_traced_store`, over the SETTLED placements, and promotes the flipped node
+  `On_device` (an entry-consuming node must not resolve to `Local` scratch — round 3) — not in
+  `decide_placements`, where two wrong timings lurk: judging undecided nodes strictly destroys the virtualizer's partial-write
   producers (an injective scatter emits no neutral init; inlining prepends the init fallback —
   `affine_lowering.ml` AC6 broke under that reading), while judging only already-decided nodes
   misses candidates flipped non-virtual AFTER the decider (the fan-in guard, a

@@ -345,9 +345,10 @@ type traced_array = {
           the exemption applies to the visit-counting placement heuristics, not to the interface.
           The strict classification closes over the SETTLED placements (in
           [reconcile_traced_store], since placement and legality decisions after
-          [decide_placements] can still flip a candidate non-virtual); a node that stays virtual
-          is exempt by construction — it has no interface, and the virtualizer's partial-write
-          producers depend on that freedom. *)
+          [decide_placements] can still flip a candidate non-virtual), and a flipped node is
+          promoted [On_device] — an entry-consuming node must own a persistent buffer, not
+          [Local] scratch; a node that stays virtual is exempt by construction — it has no
+          interface, and the virtualizer's partial-write producers depend on that freedom. *)
   mutable read_only : bool;
       (** Surprisingly, the notions of read-only and of constant memory mode come apart: small
           hosted constants are not read-only because they are initialized on devices by being

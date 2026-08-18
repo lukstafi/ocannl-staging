@@ -5753,9 +5753,17 @@ let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
      read-modify-write exemption consumes its entry values, so it must not classify output-only
      (aliasing-eligible, absent from link-time input verification). Judged with the raw
      contract's guards-taken query — the guard-filtered strictness above is for spliced reads
-     only — so guarded-initialization patterns keep their raw classification; genuinely
-     uncovered reads were already flipped by [decide_placements], making the [`Unknown] arm a
-     no-op re-flip for divergence corners. Deliberately NOT recorded in [flipped_rbw]: these are
+     only — so guarded-initialization patterns keep their raw classification. ONLY the
+     [`Covered_rmw_exempt] verdict flips: this pass closes the exemption split, it does not
+     re-litigate coverage — genuinely uncovered raw reads were already flipped by
+     [decide_placements], and a fresh final-code [`Unknown] is a post-virtualization rewrite
+     artifact, not evidence (review round 3 follow-through: [rewrite_one_hot_reductions] turns
+     covered affine one-hot reads into [Get_dynamic], whose coverage is uninterpretable —
+     flipping on it spuriously materialized every threefry chain intermediate). A flipped node
+     is also promoted [On_device], like [decide_placements]' own rule (same provenance 36): a
+     late-rejected candidate is otherwise only [Never_virtual], which [is_materialized_force]
+     would default to [Local] — routine scratch with no incoming contents, contradicting the
+     entry values the reads consume. Deliberately NOT recorded in [flipped_rbw]: these are
      raw-analysis-genre facts, and the prior-context demand override is for splice-created flips
      only (a raw pattern's entry values arrive through the assignments layer's curated flows). *)
   (let covered_raw = lazy (reads_covered_query static_indices (Lazy.force final_accs)) in
@@ -5766,8 +5774,10 @@ let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
          && not (Tn.Placements.known_virtual plc tn)
        then
          match (Lazy.force covered_raw) tn with
-         | `Covered -> ()
-         | `Covered_rmw_exempt _ | `Unknown _ -> traced.read_before_write <- true));
+         | `Covered | `Unknown _ -> ()
+         | `Covered_rmw_exempt _ ->
+             traced.read_before_write <- true;
+             Tn.Placements.update plc tn On_device 36));
   (* A node mentioned ONLY in dead code still needs a registry entry (its identifier renders, so
      a parameter must declare it and the prune must not drop it) but no interface flags: it
      neither reads nor writes at runtime, and advertising either would create phantom

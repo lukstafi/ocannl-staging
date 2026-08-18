@@ -10,6 +10,9 @@ zero-initialized accumulation: the sentinel seed is overwritten: true
 undecided partial-write producer: keeps its virtualization eligibility: true
 non-injective scatter, undecided: not virtualized: true
 non-injective scatter, undecided: read-before-write despite deciding after the placement pass: true
+non-injective scatter, undecided: an input of the routine: true
+non-injective scatter, undecided: uncovered cells read the incoming values: true
+unobservable late input: promoted to a persistent buffer (an interface input, not scratch): true
 guarded full write: raw guards-taken coverage keeps xg off read-before-write: true
 recompute-at-read: routine A defers v: true
 overwrite-then-consume: the full overwrite covers the spliced reads -- ell is not an input: true
