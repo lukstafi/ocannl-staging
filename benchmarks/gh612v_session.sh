@@ -50,9 +50,14 @@ export EXPECT_STEPS=8
 # session ran under `taskset -c 0-15` (the CPU/iGPU contention on this APU is what report-gh612-hip.md
 # had to discard a whole batch over), and gh612_cells.sh would otherwise take an inherited PIN.
 export PIN="taskset -c 0-15"
-BASE=${BASE:-/home/lukstafi/wt-gh612v-base}
-FEAT=${FEAT:-/home/lukstafi/wt-gh612v-feat}
-MASTER=${MASTER:-/home/lukstafi/wt-gh612v-master}
+# Defaults relative to THIS checkout, matching where the report's Reproduction block creates them
+# (`../wt-gh612v-*` from the repo root) -- author-absolute defaults made the published recipe fail on
+# its first command for anyone whose checkout is not at /home/lukstafi/ocannl-staging. Overridable,
+# since where the trees live is a property of the machine, not of the measurement.
+REPO_ROOT=$(cd "$HERE/.." && pwd -P)
+BASE=${BASE:-$(dirname "$REPO_ROOT")/wt-gh612v-base}
+FEAT=${FEAT:-$(dirname "$REPO_ROOT")/wt-gh612v-feat}
+MASTER=${MASTER:-$(dirname "$REPO_ROOT")/wt-gh612v-master}
 
 # The cell table, keyed by ROLE rather than by path. A label that is not listed is an error rather
 # than a default: with `MASTER` as a fallback, a typo would measure the wrong tree under a name the

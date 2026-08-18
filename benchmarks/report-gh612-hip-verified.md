@@ -42,8 +42,11 @@ selects which arm's routine the process keeps — it does not change what either
   pinned by digest: **md5 `5b3dfff860fc8c54af2a7d440f4cf202`**, 13 871 360 bytes — the same file the
   earlier session measured, symlinked into all three trees, and every cell refuses to run against
   anything else.
-- Trees. Each is the earlier report's commit plus a **verbatim backport of the #638 arm selector**,
-  committed so the checkout is clean and nameable:
+- Trees, at `../wt-gh612v-{base,feat,master}` relative to the checkout — which is where the
+  Reproduction block creates them and what `gh612v_session.sh` defaults to (`BASE`/`FEAT`/`MASTER`
+  override it; this session ran them from `/home/lukstafi/`). Each is the earlier report's commit
+  plus a **verbatim backport of the #638 arm selector**, committed so the checkout is clean and
+  nameable:
 
   | tree | base commit | with #638 | gh-574 `arity_cuts` | gh-573 fanin guard |
   |---|---|---|---|---|
