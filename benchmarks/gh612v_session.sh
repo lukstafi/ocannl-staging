@@ -46,6 +46,10 @@ export FIXTURE=fixtures/gpt2_mini.safetensors
 export FIXTURE_MD5=5b3dfff860fc8c54af2a7d440f4cf202
 export PARITY_MAX_ULP=64
 export EXPECT_STEPS=8
+# The execution discipline is part of what was measured, not a preference: every cell of this
+# session ran under `taskset -c 0-15` (the CPU/iGPU contention on this APU is what report-gh612-hip.md
+# had to discard a whole batch over), and gh612_cells.sh would otherwise take an inherited PIN.
+export PIN="taskset -c 0-15"
 BASE=${BASE:-/home/lukstafi/wt-gh612v-base}
 FEAT=${FEAT:-/home/lukstafi/wt-gh612v-feat}
 MASTER=${MASTER:-/home/lukstafi/wt-gh612v-master}
@@ -259,9 +263,9 @@ tree_fingerprint() {  # <role> -- role, path, HEAD, and the digests validate_tre
   local role=$1 t; t=$(role_tree "$role") || return 1
   # The fixture is part of what a cell measured, and it is gitignored -- no commit establishes it --
   # so its digest belongs in the provenance beside the sources'.
-  printf 'role=%s\ntree=%s\nhead=%s\npin=%s\nfixture_md5=%s\nsha_train=%s\nsha_utils=%s\nsha_gpt=%s\nsha_harness=%s\n' \
+  printf 'role=%s\ntree=%s\nhead=%s\npin=%s\nfixture_md5=%s\naffinity=%s\nsha_train=%s\nsha_utils=%s\nsha_gpt=%s\nsha_harness=%s\n' \
     "$role" "$(cd "$t" && pwd -P)" "$(git -C "$t" rev-parse HEAD)" "$(tree_pin "$role")" \
-    "$(md5sum "$(readlink -f "$t/benchmarks/$FIXTURE")" | cut -d' ' -f1)" \
+    "$(md5sum "$(readlink -f "$t/benchmarks/$FIXTURE")" | cut -d' ' -f1)" "$PIN" \
     "$(sha256sum "$t/lib/train.ml" | cut -d' ' -f1)" \
     "$(sha256sum "$t/arrayjit/lib/utils.ml" | cut -d' ' -f1)" \
     "$(sha256sum "$t/benchmarks/runners/ocannl/bench_gpt.ml" | cut -d' ' -f1)" \

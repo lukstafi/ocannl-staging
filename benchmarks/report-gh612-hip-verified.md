@@ -162,7 +162,12 @@ claim-bearing artifacts long after the search (the emitted arm A source, the per
 the pass-2 timings and losses every table here quotes), which a search manifest would go on matching
 — and the gate requires each manifest to match the tree it validates now. **These 18 cells' manifests were backfilled**, honestly and visibly: the check was added during
 review, after the session had run, so each manifest carries a `.backfilled` note and the gate counts
-them separately (`18 backfilled`). What they attest rather than record is that the cells came from
+them separately (`18 backfilled`). Two artifacts are the exception, recorded rather than attested
+because they were regenerated through the wrapper after the check existed: `cap4A/r4`'s snapshot and
+profile (Part 5's instrument, re-run for exactly this reason) and `cap8A/r1`'s pass-2 replay, which a
+verification probe of the driver's own manifest-retraction consumed and which was therefore re-run —
+moving that cell's p50 from 18.656 to 18.704 ms, inside the 2.6% reproducibility the instrument table
+quotes, and changing no ratio. What they attest rather than record is that the cells came from
 this session's driver against these roles' trees, which have validated unchanged before, during and
 after the run; a future session records them at search time and prints no such note.
 
@@ -238,7 +243,7 @@ One tree, a config flip, arm A forced on both sides.
 | | cap −1 (before) | cap 8 (after) | |
 |---|---:|---:|---|
 | **arm A per-kernel profile** | **24.93 ms** / 135 kernels | **18.51 ms** / 136 kernels | **1.35x** |
-| **step p50, 3 reps** (pass 2, order-balanced) | 23.009 / 23.782 / 24.256 | 18.495 / 18.579 / 18.656 | **1.28x**, non-overlapping |
+| **step p50, 3 reps** (pass 2, order-balanced) | 23.009 / 23.782 / 24.256 | 18.495 / 18.579 / 18.704 | **1.28x**, non-overlapping |
 | untuned-default pipeline, 3 reps | 65.52 / 65.70 / 65.98 | 60.94 / 61.25 / 61.68 | **1.072x** |
 | layernorm / elementwise bucket | 3.586 ms (14.4%) | **0.800 ms (4.3%)** | 4.48x |
 | LayerNorm sites (9) | 3.586 ms | 0.800 ms | — |
@@ -248,7 +253,7 @@ One tree, a config flip, arm A forced on both sides.
 ranges and explicitly declined to claim it, for an identified reason: without the guard the search
 shipped arm B — materialize-all, the crude form of the same transform — so the comparison was
 guard-vs-materialize-all rather than guard-vs-no-guard. With the arm held fixed the ranges do not
-overlap at all (worst cap 8 rep 18.656 < best cap −1 rep 23.009) and the ratio is **1.28x**, in
+overlap at all (worst cap 8 rep 18.704 < best cap −1 rep 23.009) and the ratio is **1.28x**, in
 agreement with the per-kernel instrument's 1.35x. That is the same mechanism the earlier report
 described, now measured instead of inferred.
 
