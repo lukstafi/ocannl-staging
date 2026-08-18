@@ -160,13 +160,19 @@ let link ?ctx ~name (o : LL.optimized) =
     ~lowered_transform:(fun x -> x)
     ctx Ir.Assignments.empty_comp Idx.Empty
 
-(** [run ~name o ~seed] is {!link}, then uploads [seed], runs, and returns the context the values
-    can be read from. Every node in [seed] must have been {!materialize}d: host access to a node
-    the pipeline placed [Local] raises (gh-ocannl-599). *)
-let run ?ctx ~name (o : LL.optimized) ~(seed : (Tn.t * float array) list) =
-  let ctx, routine = link ?ctx ~name o in
+(** [run_linked (ctx, routine) ~seed] drives the executed leg of an ALREADY-LINKED pair: uploads
+    [seed], runs, and returns the context the values can be read from. It is the half of {!run} that
+    survives keeping the routine — a test asserting on the [inputs]/[outputs] the link actually
+    computed (gh-ocannl-590) holds the pair {!link} returned, so it needs the execution without
+    compiling a second time. Every node in [seed] must have been {!materialize}d: host access to a
+    node the pipeline placed [Local] raises (gh-ocannl-599). *)
+let run_linked (ctx, routine) ~(seed : (Tn.t * float array) list) =
   let ctx = List.fold seed ~init:ctx ~f:(fun ctx (tn, vs) -> Context.set_values ctx tn vs) in
   Context.run ctx routine
+
+(** [run ~name o ~seed] is {!link} followed by {!run_linked}, for the tests that have no use for the
+    routine itself. Same materialization requirement on [seed]. *)
+let run ?ctx ~name (o : LL.optimized) ~seed = run_linked (link ?ctx ~name o) ~seed
 
 (** {!run}, then read back [read] in order. Same materialization requirement, on both lists. *)
 let execute ?ctx ~name (o : LL.optimized) ~seed ~(read : Tn.t list) =
