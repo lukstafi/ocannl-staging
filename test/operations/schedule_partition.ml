@@ -14,8 +14,10 @@
 
    The fresh segment symbols returned by [Sched.partition] make each segment individually
    addressable by subsequent ops (per-segment scheduling), demonstrated by unrolling just the tail
-   segment. Structural checks pair with executed-output parity against untransformed references on
-   every backend. *)
+   segment. Section 6 pins that this addressability survives an accumulation mint: a loop moved
+   into a [Local_scope] by a materializing [Unroll] is still located by [partition_breakpoints] and
+   still rewritten by the [Partition] its breakpoints feed (gh-ocannl-668). Structural checks pair
+   with executed-output parity against untransformed references on every backend. *)
 
 open Base
 open Ocannl
@@ -56,6 +58,38 @@ let find_loop_with_extent ~n (llc : LL.t) : Idx.symbol option =
   in
   go llc;
   !found
+
+(* Is a [For_loop] binding [sym] reachable through statement positions alone (the walk
+   [Schedule.find_loop] had before gh-ocannl-668), and is it reachable at all (descending into
+   [Local_scope] bodies, the way [rewrite_loop] reaches loops the accumulation mints wrapped in a
+   scope)? Section 6 uses both to pin that its construction really is the scope-nested one. *)
+let binds_loop ~in_scopes sym (llc : LL.t) : bool =
+  let rec go (llc : LL.t) =
+    match llc with
+    | LL.For_loop { index; _ } when Idx.equal_symbol index sym -> true
+    | LL.For_loop { body; _ } | LL.If { body; _ } -> go body
+    | LL.Seq (a, b) -> go a || go b
+    | LL.Tile_mma { fallback; _ } -> go fallback
+    | LL.Set { llsc; _ } | LL.Set_local (_, llsc) -> scan llsc
+    | LL.Set_dynamic { dyn_value = v, _; llsc; _ } -> scan v || scan llsc
+    | LL.Set_from_vec { arg = a, _; _ } -> scan a
+    | LL.Noop | LL.Comment _ | LL.Staged_compilation _ | LL.Zero_out _ | LL.Declare_local _
+    | LL.Workgroup_barrier ->
+        false
+  and scan (sc : LL.scalar_t) =
+    in_scopes
+    &&
+    match sc with
+    | LL.Local_scope { body; _ } -> go body
+    | LL.Ternop (_, (a, _), (b, _), (c, _)) -> scan a || scan b || scan c
+    | LL.Binop (_, (a, _), (b, _)) -> scan a || scan b
+    | LL.Unop (_, (a, _)) -> scan a
+    | LL.Get_dynamic { dyn_value = v, _; _ } -> scan v
+    | LL.Get_local _ | LL.Get _ | LL.Get_merge_buffer _ | LL.Constant _ | LL.Constant_bits _
+    | LL.Embed_index _ ->
+        false
+  in
+  go llc
 
 (* Structural census: statement [If] guards, scalar [Where] guards, and [For_loop]s. *)
 let census (llc : LL.t) : int * int * int =
@@ -283,5 +317,51 @@ let () =
   let lt_scaled = bps_of ~to_:9 (fun i -> LL.Binop (Ir.Ops.Cmplt, coef2 i, fixed 6)) in
   p "Cmple with a scaled axis rounds like its Cmplt encoding"
     (is le_scaled [ 3 ] && is lt_scaled [ 3 ]);
+
+  (* === 6: Loops inside a [Local_scope] (gh-ocannl-668) — the accumulation mint of a materializing
+     [Unroll] wraps the inner reduction loop in the accumulator's scope, and [Sched.apply] keeps
+     rewriting loops there. Every probe that LOCATES a loop must reach the same place, or it
+     reports absent a loop the very next op rewrites: here [partition_breakpoints] derives the pad
+     guard's flip point from the scope-nested [s] loop, and the [Partition] it feeds applies. === *)
+  let ni, nr, ns = (4, 6, 5) in
+  let xv6 =
+    Array.init (ni * nr * ns) ~f:(fun t -> Float.of_int ((t % 7) + 1) *. 0.25)
+  in
+  let make_graph6 () =
+    let x = TDSL.ndarray xv6 ~label:[ "sp_rx" ] ~output_dims:[ ni; nr; ns ] () in
+    let%op out = x ++ "irs => i" in
+    out
+  in
+  let want6 = nonzero "sp_ref6" (run_with "sp_ref6" (fun opt -> opt) (make_graph6 ())) in
+  (* [Pad] gives the inner loop a guard with a known flip point ([s < 5] over the padded range
+     [0, 8)); the materializing unroll of the OUTER reduction axis then moves the whole guarded
+     inner loop into the accumulator scope. *)
+  let stmt_level = ref true and in_scope = ref false in
+  let bps6 = ref [] in
+  let census6 = ref (-1, -1, -1) in
+  let transform_scope_nested (opt : LL.optimized) =
+    let r = Option.value_exn ~here:[%here] (find_loop_with_extent ~n:nr opt.LL.llc) in
+    let s = Option.value_exn ~here:[%here] (find_loop_with_extent ~n:ns opt.LL.llc) in
+    let opt =
+      Sched.apply
+        [ Sched.Pad { axis = s; to_multiple_of = 4 }; Sched.Unroll { axis = r; materialize = true } ]
+        opt
+    in
+    stmt_level := binds_loop ~in_scopes:false s opt.LL.llc;
+    in_scope := binds_loop ~in_scopes:true s opt.LL.llc;
+    bps6 := Sched.partition_breakpoints ~axis:s opt.LL.llc;
+    let op, _segs = Sched.partition ~axis:s ~breakpoints:!bps6 in
+    let opt = Sched.apply [ op ] opt in
+    census6 := census opt.LL.llc;
+    opt
+  in
+  let got6 = run_with "sp_scope_nested_partition" transform_scope_nested (make_graph6 ()) in
+  p "the materializing unroll left the inner loop only inside a Local_scope"
+    ((not !stmt_level) && !in_scope);
+  p "breakpoints of a scope-nested loop are the pad guard's flip point"
+    (List.equal Int.equal !bps6 [ ns ]);
+  let ifs6, wheres6, _ = !census6 in
+  p "partitioning the scope-nested loop folds the pad guard" (ifs6 = 0 && wheres6 = 0);
+  p "scope-nested partition matches reference" (close got6 want6);
 
   Stdio.printf "\nDone.\n%!"

@@ -209,14 +209,53 @@ type floop = {
 let for_loop { index; from_; to_; body; axis } =
   Low_level.For_loop { index; from_; to_; body; axis }
 
-let rec find_loop axis (llc : Low_level.t) : Low_level.t option =
+(* Locates the [For_loop] binding [axis], threading [~f] over each enclosing loop (outermost
+   first) so a caller can build an environment for the found subtree — e.g. the loop ranges
+   {!partition_breakpoints} needs to bound the non-axis symbols of a guard.
+
+   [in_scopes] (the default) also descends into [Local_scope] bodies reached from the scalar
+   positions of Set / Set_dynamic / Set_local / Set_from_vec, i.e. exactly [rewrite_loop]'s reach
+   since gh-ocannl-639. The two walks must agree: an op or validation that LOCATES a loop with a
+   narrower walk than the one that REWRITES it reports absent a loop that [rewrite_loop] would
+   happily rewrite — and the accumulation mints of [Unroll ~materialize:true] and [Partition] do
+   wrap segment/inner loops in the accumulator's scope (gh-ocannl-668). Pass [~in_scopes:false]
+   only where statement nesting is part of the caller's contract (see [apply_split_reduce]).
+   Neither walk enters [If] conditions or [Tile_mma] fallbacks. *)
+let find_loop_env ?(in_scopes = true) axis ~(init : 'a) ~(f : 'a -> floop -> 'a)
+    (llc : Low_level.t) : (Low_level.t * 'a) option =
   let open Low_level in
-  match llc with
-  | For_loop { index; _ } when Indexing.equal_symbol index axis -> Some llc
-  | For_loop { body; _ } -> find_loop axis body
-  | Seq (a, b) -> ( match find_loop axis a with Some _ as r -> r | None -> find_loop axis b)
-  | If { body; _ } -> find_loop axis body
-  | _ -> None
+  let rec go env llc =
+    match llc with
+    | For_loop { index; _ } when Indexing.equal_symbol index axis -> Some (llc, env)
+    | For_loop { index; from_; to_; body; axis = ty } ->
+        go (f env { index; from_; to_; body; axis = ty }) body
+    | Seq (a, b) -> ( match go env a with Some _ as r -> r | None -> go env b)
+    | If { body; _ } -> go env body
+    | Set { llsc; _ } | Set_local (_, llsc) -> scalar env llsc
+    | Set_dynamic { dyn_value = v, _; llsc; _ } -> (
+        match scalar env v with Some _ as r -> r | None -> scalar env llsc)
+    | Set_from_vec { arg = a, _; _ } -> scalar env a
+    | _ -> None
+  and scalar env (llsc : scalar_t) =
+    if not in_scopes then None
+    else
+      match llsc with
+      | Local_scope { body; _ } -> go env body
+      | Get_dynamic { dyn_value = v, _; _ } -> scalar env v
+      | Ternop (_, (a, _), (b, _), (c, _)) -> (
+          match scalar env a with
+          | Some _ as r -> r
+          | None -> ( match scalar env b with Some _ as r -> r | None -> scalar env c))
+      | Binop (_, (a, _), (b, _)) -> (
+          match scalar env a with Some _ as r -> r | None -> scalar env b)
+      | Unop (_, (a, _)) -> scalar env a
+      | Get_local _ | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ ->
+          None
+  in
+  go init llc
+
+let find_loop ?in_scopes axis (llc : Low_level.t) : Low_level.t option =
+  Option.map ~f:fst (find_loop_env ?in_scopes axis ~init:() ~f:(fun () _ -> ()) llc)
 
 (* Rewrites every [For_loop] whose index is [sym] (a materializing transform duplicates a loop
    per copy, and a later op must reach all the copies). Loops inside [Local_scope] bodies are IN
@@ -256,8 +295,7 @@ let rewrite_loop ~what ~sym ~(f : floop -> Low_level.t) (llc : Low_level.t) : Lo
   let result = go llc in
   if not !found then
     invalid_arg
-      (what ^ ": no statement-level For_loop with index " ^ Indexing.symbol_ident sym
-     ^ " in this routine");
+      (what ^ ": no For_loop with index " ^ Indexing.symbol_ident sym ^ " in this routine");
   result
 
 (* Fresh scope ids for scalar locals declared within [llc] (binders: [Declare_local],
@@ -2321,7 +2359,12 @@ let apply_split_reduce ~axis ~target ~num_blocks ~block_index ~inner_index ~comb
      it (and the scatter form's scratch zeroing right before it). *)
   let stmts = flat_lines [ opt.llc ] in
   let stmt =
-    match List.find stmts ~f:(fun s -> Option.is_some (find_loop axis s)) with
+    (* [~in_scopes:false]: the combine (and the scatter form's zeroing) are inserted at statement
+       level around [stmt], which only sequences correctly if the reduction itself runs there —
+       a reduction nested in a [Local_scope] is consumed within its own statement, before the
+       combine would run. So this op genuinely wants the statement-level walk, and its enclosing
+       path below assumes it. *)
+    match List.find stmts ~f:(fun s -> Option.is_some (find_loop ~in_scopes:false axis s)) with
     | Some s -> s
     | None ->
         invalid_arg
@@ -3797,23 +3840,14 @@ let mentions_axis axis (idx : Indexing.axis_index) =
    segments are exactly delimited and the decided segments fold their guards. *)
 let partition_breakpoints ~axis (llc : Low_level.t) : int list =
   let open Low_level in
-  (* Ranges of the statement-level loops enclosing the [axis] loop (same traversal as
-     [find_loop]): an inner axis's guards may mention enclosing-loop symbols. *)
-  let enclosing_ranges =
-    let rec collect env (llc : Low_level.t) =
-      match llc with
-      | For_loop { index; _ } when Indexing.equal_symbol index axis -> Some env
-      | For_loop { index; from_; to_; body; _ } ->
-          collect (Map.set env ~key:index ~data:(from_, to_)) body
-      | Seq (a, b) -> ( match collect env a with Some _ as r -> r | None -> collect env b)
-      | If { body; _ } -> collect env body
-      | _ -> None
-    in
-    Option.value ~default:(Map.empty (module Indexing.Symbol))
-    @@ collect (Map.empty (module Indexing.Symbol)) llc
-  in
-  match find_loop axis llc with
-  | Some (For_loop { from_; to_; body; _ }) ->
+  (* The ranges of the loops enclosing the [axis] loop come from the same walk that locates it: an
+     inner axis's guards may mention enclosing-loop symbols. *)
+  match
+    find_loop_env axis llc
+      ~init:(Map.empty (module Indexing.Symbol))
+      ~f:(fun env fc -> Map.set env ~key:fc.index ~data:(fc.from_, fc.to_))
+  with
+  | Some (For_loop { from_; to_; body; _ }, enclosing_ranges) ->
       let points = ref [] in
       (* Affine view [Some (k, off_lo, off_hi)] of a comparison operand as [k*axis + off] with
          [off] ranging over [off_lo, off_hi]: non-axis symbols with a known enclosing-loop range
@@ -3927,11 +3961,10 @@ let partition_breakpoints ~axis (llc : Low_level.t) : int list =
       go ~ranges:enclosing_ranges body;
       List.filter !points ~f:(fun b -> from_ < b && b <= to_)
       |> List.dedup_and_sort ~compare:Int.compare
-  | Some _ -> assert false (* [find_loop] only returns [For_loop]s. *)
+  | Some _ -> assert false (* [find_loop_env] only returns [For_loop]s. *)
   | None ->
       invalid_arg
-        ("Schedule.partition_breakpoints: no statement-level For_loop with index "
-       ^ Indexing.symbol_ident axis)
+        ("Schedule.partition_breakpoints: no For_loop with index " ^ Indexing.symbol_ident axis)
 
 let acc_interpretable (a : _ Affine.access) =
   (not a.Affine.a_dynamic) && (not a.a_whole) && (not a.a_vec_last)
@@ -4007,7 +4040,7 @@ let loops_independent (opt : Low_level.optimized) ~(syms : Indexing.symbol list)
   let open Low_level in
   let plc = opt.optimize_ctx.placements in
   match find_loop (List.hd_exn syms) opt.llc with
-  | None -> Op_unknown ("no statement-level loop binds " ^ Indexing.symbol_ident (List.hd_exn syms))
+  | None -> Op_unknown ("no loop binds " ^ Indexing.symbol_ident (List.hd_exn syms))
   | Some loop ->
       let accs = Low_level.affine_accesses loop in
       let env = Low_level.loop_bounds loop in
@@ -4197,7 +4230,7 @@ let op_legality (opt : Low_level.optimized) (op : optop) : op_verdict =
         ->
           loops_independent opt ~syms:[ outer; inner ] ~cross_nest:false ~licensed:rmw_license
       | Some _ -> Op_unknown "loops are not perfectly nested"
-      | None -> Op_unknown ("no statement-level loop binds " ^ Indexing.symbol_ident outer))
+      | None -> Op_unknown ("no loop binds " ^ Indexing.symbol_ident outer))
   | Tensorize { i; j; k; lane; simd_width } -> (
       (* Role-assignment validity first: the micro-kernel recognition in [tensorize_llc] is a pure
          function of the code (given the routine's zero-fringe tiles), so probing it decides
