@@ -514,4 +514,65 @@ using namespace metal;|}, []);
     return uint4(uint32_t(x), 0, 0, 0);
 }|},
       [] );
+    (* The e5m2 software codec. MSL has no fp8 type, so an fp8 tensor is stored as a byte and its
+       arithmetic runs in f32 ([Metal_backend.C_syntax_config.compute_prec]): these two are the
+       whole storage/compute seam for fp8 on Metal, called at every load and every store.
+
+       Bit manipulation rather than the [ldexp]/[frexp] arithmetic of the C twins in
+       [Builtins_cc]/[builtins.c]: Metal compiles with fast math by default, under which the
+       infinity and NaN branches of a float-arithmetic codec are not reliable. The results agree
+       with the C twins for all 256 codes and for every float — including their tie-away-from-zero
+       rounding, their flush of everything below the smallest subnormal, and their unsigned zero —
+       which is what lets an fp8 tensor written by one backend be read by another
+       ([test_fp8_codec_parity]). *)
+    ( "fp8_to_single",
+      {|/* FP8 E5M2 (1 sign, 5 exponent, 2 mantissa bits) to float. */
+inline float fp8_to_single(uint8_t v) {
+    uint32_t bits = uint32_t(v);
+    uint32_t sign = (bits & 0x80u) << 24;
+    uint32_t exp = (bits >> 2) & 0x1Fu;
+    uint32_t mant = bits & 0x3u;
+    if (exp == 0x1Fu) {
+        /* Infinity, or the positive quiet NaN the C codec returns for any nonzero payload. */
+        return as_type<float>(mant != 0u ? 0x7FC00000u : (sign | 0x7F800000u));
+    }
+    if (exp == 0u) {
+        /* Zero and subnormals: mant * 2^-16, exact in f32 (and the signed zero for mant = 0). */
+        return as_type<float>(sign | as_type<uint32_t>(float(mant) * 1.52587890625e-05f));
+    }
+    /* Normals share f32's field order: rebias 15 -> 127 and put the 2 mantissa bits on top. */
+    return as_type<float>(sign | ((exp + 112u) << 23) | (mant << 21));
+}|},
+      [] );
+    ( "single_to_fp8",
+      {|/* Float to FP8 E5M2, rounding ties away from zero like the C codec. */
+inline uint8_t single_to_fp8(float f) {
+    uint32_t bits = as_type<uint32_t>(f);
+    uint32_t sign = (bits >> 24) & 0x80u;
+    uint32_t e32 = (bits >> 23) & 0xFFu;
+    uint32_t m32 = bits & 0x7FFFFFu;
+    /* NaN takes the unsigned code: the C codec's sign test is a comparison, which is false for
+       a negative NaN. */
+    if (e32 == 0xFFu) { return uint8_t(m32 != 0u ? 0x7Fu : (sign | 0x7Cu)); }
+    /* Zero is unsigned (the C codec returns +0 for -0.0f); f32 subnormals are far below e5m2's
+       smallest subnormal and flush to the signed zero. */
+    if (e32 == 0u) { return uint8_t(m32 == 0u ? 0u : sign); }
+    int e = int(e32) - 112; /* the e5m2 exponent field, before rounding */
+    if (e < 0) { return uint8_t(sign); }
+    if (e > 30) { return uint8_t(sign | 0x7Cu); }
+    if (e == 0) {
+        /* [2^-15, 2^-14) lands on the top two subnormals; the C codec clamps rather than
+           carrying into the smallest normal. */
+        return uint8_t(sign | (m32 < 0x200000u ? 2u : 3u));
+    }
+    uint32_t mant = (m32 + 0x100000u) >> 21;
+    if (mant > 3u) {
+        /* The mantissa rounded past the top: carry into the exponent. */
+        mant = 0u;
+        e += 1;
+        if (e > 30) { return uint8_t(sign | 0x7Cu); }
+    }
+    return uint8_t(sign | (uint32_t(e) << 2) | mant);
+}|},
+      [] );
   ]

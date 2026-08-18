@@ -779,6 +779,16 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   evaluates BOTH branches, so any range guard's deliberately out-of-range read (clamped windows,
   inlined-concat component guards) would still be evaluated. Codegen pins:
   `test_where_precision.metal.expected`, `test_metal_guarded_gather_codegen`.
+- Metal has no fp8 *type* either, but fp8 works: e5m2 stores as a byte and computes in f32 through
+  the `Builtins_metal` software codec, i.e. Metal takes gh-ocannl-517's storage/compute seam for
+  that one format (`compute_prec`), the way `cc` takes it for every narrow float. The codec is
+  bit-identical to `builtins.c`'s for all 2^32 floats and all 256 codes — verified exhaustively
+  off-tree, which is how a hand-written float codec should be checked, not by sampling — and it is
+  written in integer/bitcast form on purpose: Metal compiles with fast math by default, under which
+  the infinity and NaN branches of a float-arithmetic codec are not reliable. fp8 ROUNDING is not
+  portable, though: the software codec (cc, Metal) rounds ties away from zero while the native GPU
+  fp8 types do not, so `test_fp8_roundtrip` pins only exactly-representable values and a golden
+  holding an inexact fp8 value would not survive a backend switch.
 - Metal buffer binding is the pooled slot-table (`__pools` + `__pool_slots`); raw `gpuAddress`
   casts segfault at dispatch and argument encoders don't fit the binding model. Same-queue
   command buffers overlap over untracked resources: back-to-back runs of the SAME routine need
@@ -786,8 +796,9 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   awaits by design.
 - A tensor node's precision is its **storage** precision; the precision its arithmetic runs at is a
   separate thing, `C_syntax_config.compute_prec` (gh-ocannl-517). They coincide on the GPU backends
-  (native `__nv_bfloat16` / MSL `bfloat`/`half`, and the 16-bit tensor-core shapes that consume
-  them) and diverge on `cc`, where every narrow-float operator was a widen/op/narrow round-trip
+  for the formats those have as types (native `__nv_bfloat16` / MSL `bfloat`/`half`, and the 16-bit
+  tensor-core shapes that consume them), and diverge on `cc`, where every narrow-float operator was
+  a widen/op/narrow round-trip
   anyway: there the narrow floats compute in f32 (`Ir.Numerics.narrow_compute_f32`, on by default),
   so a load widens once and a store narrows once, and an assignment's intermediates keep f32
   mantissa. The rule when touching `c_syntax.ml`: a **declaration**, a kernel parameter or a buffer
