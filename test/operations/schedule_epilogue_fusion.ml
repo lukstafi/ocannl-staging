@@ -287,11 +287,19 @@ let () =
   in
   let tctx = Context.run tctx troutine in
   let got_t = Context.get_values tctx mct.Tensor.value in
+  (* The two flavors are independently judged trees (gh-ocannl-577), so their leaf counts need not
+     match. On the C backends both enumerate and the twins double the seed list. On a
+     hardware-parallel backend the UNFUSED flavor is refuted whole at tree construction — the
+     companion-coverage rule (gh-ocannl-521) reports that the accumulation nest's aligned chain was
+     trimmed below its geometry, i.e. exactly this file's header: the two-kernel form is not
+     expressible as one kernel here, and fusion is what makes whole-routine sketches apply — so
+     every seed is a twin (gh-ocannl-632). *)
+  let flavors = if on_gpu then 1 else 2 in
   (match !reports with
   | [ r ] ->
       p "fused-epilogue sketch twins seeded"
         (r.Autotune.epilogue_sketch_candidates > 0
-        && r.Autotune.epilogue_sketch_candidates * 2 = r.Autotune.sketch_candidates)
+        && r.Autotune.epilogue_sketch_candidates * flavors = r.Autotune.sketch_candidates)
   | _ -> p "fused-epilogue sketch twins seeded" false);
   p "tuned matmul+tail matches two-kernel"
     (Array.for_all2_exn got_t want ~f:(fun a b -> Float.(abs (a - b) < 1e-2)));

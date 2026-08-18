@@ -1251,8 +1251,9 @@ that they earn a lookup rather than always-loaded space.
 - The GPU boxes are usually powered off, so `skip (unreachable)` is the normal outcome and a sweep
   of skips is not a failure. What IS a failure is silent non-coverage: track the age of the last
   `pass` per backend, because nothing else in the project tests CUDA or HIP at all.
-- Report changes in the failure set, not the presence of failures. Metal's `test/operations` is
-  known-red, so a sweep that shouts on every red is one that gets ignored inside a week;
+- Report changes in the failure set, not the presence of failures. A backend's suite goes red in
+  bursts and comes back (Metal's `test/operations` was red for a stretch, green again after
+  gh-ocannl-632), so a sweep that shouts on every red is one that gets ignored inside a week;
   `sweep.sh` writes a sorted `.fingerprint` next to each non-pass log precisely so the previous
   run's can be diffed against it.
 - The per-machine worktrees are reused, not recreated, so a sweep is incremental against an
