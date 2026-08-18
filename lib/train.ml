@@ -253,11 +253,16 @@ let placement_arm_name = function
     of [timing_ctx]), so the arms are hermetic and [tune_placements] leaves no trace on the graph or
     on the caller's contexts beyond the returned winner. See
     test/operations/materialize_after_compile.ml. [report], when given, observes both arms' reports
-    in order — arm A first, then arm B — and the arm with the smaller [best_ms] is the one that
-    ships, so a consumer holding both reports can attribute every per-arm fact to a shipping or a
-    discarded artifact without reading the log. That is how "a [Schedule.Tensorize] was crowned in
-    an arm that did not ship" becomes reportable (gh-ocannl-546): [best_tensorized] on the losing
-    arm's report, with [mma_best_ms] against [best_ms] for the margin. The same conclusion is
+    in order — arm A first, then arm B — so a consumer holding both reports can attribute every
+    per-arm fact to the arm that produced it. What the reports do {e not} determine is which arm
+    SHIPPED: read [on_ship] for that. The two came apart in stages — a winning flip refinement ships
+    a placement vector that is neither arm (gh-ocannl-555), and [ship_arm] (gh-ocannl-638) overrides
+    the time comparison outright — so "the smaller [best_ms] shipped" is no longer a rule a consumer
+    can apply, and applying it is exactly the misattribution [on_ship] exists to prevent. The reports
+    are measurements of two searches; [on_ship] is the identity of the returned artifact. That
+    separation is what makes "a [Schedule.Tensorize] was crowned in an arm that did not ship"
+    reportable (gh-ocannl-546): [best_tensorized] on the other arm's report, with [mma_best_ms]
+    against [best_ms] for the margin. The same conclusion is
     logged here under config [autotune_log]. Other arguments are forwarded to {!Autotune.tune}; the
     same caveats apply (notably [timing_ctx] and non-idempotent routines — both arms share
     [timing_ctx]'s device for their searches).

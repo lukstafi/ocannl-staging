@@ -149,7 +149,18 @@ parity gate PASSED
 all 18 cells have an accepted pass-2 replay
 ```
 
-The gate's **first** check is the session's premise, which neither of the driver's own gates can see:
+The gate's **first** check is provenance: `gate` is documented as independently runnable, and an
+artifact directory does not otherwise record what produced it — a stale `OUT_ROOT` populated from
+another checkout would pass every gate below under these labels, because all of them read artifacts
+and none of them knows their origin. So a search now writes the validated role, tree, HEAD and
+backport digests into the cell, and the gate requires that manifest to match the tree it validates
+now. **These 18 cells' manifests were backfilled**, honestly and visibly: the check was added during
+review, after the session had run, so each manifest carries a `.backfilled` note and the gate counts
+them separately (`18 backfilled`). What they attest rather than record is that the cells came from
+this session's driver against these roles' trees, which have validated unchanged before, during and
+after the run; a future session records them at search time and prints no such note.
+
+Then the session's premise, which neither of the driver's own gates can see:
 `parity` compares loss vectors and `replays` checks timings and cache hits, and both are satisfied by
 a perfectly good arm B session — so a stale binary in one worktree or a dropped flag in one
 subcommand would produce a green gate over exactly the artifacts this session exists to replace. So

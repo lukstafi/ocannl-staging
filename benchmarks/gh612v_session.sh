@@ -100,6 +100,21 @@ SHA_GPT=${SHA_GPT:-de3cb8b4d56cac22885f014f6532a170a4b69c5ab1561f7bda7061289b548
 SHA_HARNESS=${SHA_HARNESS:-f51ef550c714642594e7eb633745a60ee4bd1e6c3c94d716702aa666aaa7d2c1}
 SHA_CONV=${SHA_CONV:-77dea492448dd31781ab28e34a2a29c5266af07548fb523a3d8d015253dfe0f3}
 SHA_MLP=${SHA_MLP:-328c1dcc51a016eef36ad6142c9003315e8e62111c502d77da68b534eb2df44b}
+# utils.ml is patched rather than copied, so its digest is per ROLE: BASE and FEAT share one (the
+# config machinery is identical at those two commits) and MASTER has its own. Pinned exactly like
+# the copied files -- a structural "the key appears twice" check accepts any file that merely
+# mentions it, including one that also changed config parsing, the profiles, or an optimizer default.
+SHA_UTILS_BASE=${SHA_UTILS_BASE:-6c0aace0ea29fd3dea19737cded0c2e7308ed6d8b8f75a9123eae3137a0446ef}
+SHA_UTILS_FEAT=${SHA_UTILS_FEAT:-6c0aace0ea29fd3dea19737cded0c2e7308ed6d8b8f75a9123eae3137a0446ef}
+SHA_UTILS_MASTER=${SHA_UTILS_MASTER:-e13a7fd401f867e835aa2e8e3af9abd6a2ea8bc6f5ab7f9a77414ffeb53666bd}
+utils_pin() {
+  case $1 in
+    BASE) printf '%s\n' "$SHA_UTILS_BASE" ;;
+    FEAT) printf '%s\n' "$SHA_UTILS_FEAT" ;;
+    MASTER) printf '%s\n' "$SHA_UTILS_MASTER" ;;
+    *) return 1 ;;
+  esac
+}
 
 # The commit each tree is pinned to in the report's Provenance. A tree carries that commit plus ONE
 # commit, the gh-ocannl-638 backport -- so the pin is checked as an ancestor with a bounded distance,
@@ -179,10 +194,16 @@ validate_tree() {  # <role> -- the tree comes from the role, so the pin cannot b
       echo "    got  ${got:-<unreadable>}" >&2; echo "    want $want" >&2; return 1; }
   done
   # utils.ml is the ONE backported file whose base content legitimately differs per tree (the config
-  # machinery moved between these commits), so it is checked by what the backport adds rather than by
-  # a digest: the key registered AND classified, which is what the runs depend on. Its remaining
-  # freedom is bounded by the path-set check above plus this one; `ocannl_config.reference` is
-  # documentation that nothing in a cell reads, so path-set membership is all it needs.
+  # machinery moved between these commits), so its digest is pinned PER ROLE rather than shared. Both
+  # checks run: the digest says it is the measured file, and the structural pair says what makes it
+  # the backport -- registered AND classified -- so a future re-pin cannot quietly drop either.
+  # `ocannl_config.reference` is documentation that nothing in a cell reads, so the path-set
+  # membership above is all it needs.
+  want=$(utils_pin "$role") || return 1
+  got=$(sha256sum "$t/arrayjit/lib/utils.ml" 2>/dev/null | cut -d' ' -f1)
+  [ "$got" = "$want" ] || {
+    echo "gh612v_session: $t/arrayjit/lib/utils.ml is not the backported revision for role $role" >&2
+    echo "    got  ${got:-<unreadable>}" >&2; echo "    want $want" >&2; return 1; }
   grep -q '"tune_ship_arm"' "$t/arrayjit/lib/utils.ml" 2>/dev/null || {
     echo "gh612v_session: $t/arrayjit/lib/utils.ml does not register tune_ship_arm" >&2; return 1; }
   [ "$(grep -c '"tune_ship_arm"' "$t/arrayjit/lib/utils.ml")" -ge 2 ] || {
@@ -203,15 +224,39 @@ validate_tree() {  # <role> -- the tree comes from the role, so the pin cannot b
 
 # Unquoted on purpose: the flag string is word-split into separate arguments. It is built here, not
 # taken from the caller.
+# The provenance a cell carries with it. `gate` runs independently (that is the documented way to
+# use it), and an artifact directory does not otherwise record WHERE it came from: a stale OUT_ROOT
+# populated straight from `gh612_cells.sh` against some other checkout passes the arm-A, parity and
+# replay gates under the trusted labels, because all three read the artifacts and none of them knows
+# what produced them. So a search writes down the validated role, the tree, its HEAD and the backport
+# digest set, and the gate requires that manifest to match the tree it validates now.
+tree_fingerprint() {  # <role> -- role, path, HEAD, and the digests validate_tree just checked
+  local role=$1 t; t=$(role_tree "$role") || return 1
+  printf 'role=%s\ntree=%s\nhead=%s\npin=%s\nsha_train=%s\nsha_utils=%s\nsha_gpt=%s\nsha_harness=%s\n' \
+    "$role" "$(cd "$t" && pwd -P)" "$(git -C "$t" rev-parse HEAD)" "$(tree_pin "$role")" \
+    "$(sha256sum "$t/lib/train.ml" | cut -d' ' -f1)" \
+    "$(sha256sum "$t/arrayjit/lib/utils.ml" | cut -d' ' -f1)" \
+    "$(sha256sum "$t/benchmarks/runners/ocannl/bench_gpt.ml" | cut -d' ' -f1)" \
+    "$(sha256sum "$t/benchmarks/runners/ocannl/bench_harness.ml" | cut -d' ' -f1)"
+}
+
 run_cell() {  # <subcommand> <label> <rep> [extra driver args before the flags]
   local sub=$1 label=$2 rep=$3; shift 3
-  local role tree flags
+  local role tree flags rc
   role=$(cell_role "$label") || return 2
   tree=$(role_tree "$role") || return 2
   flags=$(cell_flags "$label") || return 2
   validate_tree "$role" || return 1
   echo "--- $sub $label r$rep [$flags]"
   "$D" "$sub" "$tree" "$label" "$rep" "$@" $flags
+  rc=$?
+  # Only a SEARCH creates the cell, and only after it publishes (the driver stages and moves on
+  # success), so the manifest is written here rather than by the driver -- and only on success, so a
+  # discarded cell leaves no provenance to be trusted later.
+  if [ "$sub" = search ] && [ $rc -eq 0 ]; then
+    tree_fingerprint "$role" > "$OUT_ROOT/$label/r$rep/tree.manifest" || return 1
+  fi
+  return $rc
 }
 
 CELLS_GH574="base574A feat574A"
@@ -296,13 +341,46 @@ assert_shipped_arm_A() {  # <cell>...
   echo "arm-A premise: $n records (search + pass-2) all shipped arm A"
 }
 
+# Every expected cell must carry the manifest its search wrote, and it must match the tree this run
+# validates for that cell's role. Without it the gate certifies artifacts, not measurements: the
+# labels are just directory names.
+assert_cell_provenance() {  # <cell>...
+  local bad=0 n=0 back=0 cell role f want
+  for cell in "$@"; do
+    role=$(cell_role "${cell%/*}") || return 1
+    validate_tree "$role" || return 1
+    f="$OUT_ROOT/${cell%/*}/${cell#*/}/tree.manifest"
+    [ -s "$f" ] || {
+      echo "gh612v_session: $cell has no tree.manifest -- it was not produced by this session's" >&2
+      echo "  driver, so nothing records which checkout measured it." >&2; bad=1; continue; }
+    want=$(tree_fingerprint "$role") || return 1
+    [ "$(cat "$f")" = "$want" ] || {
+      echo "gh612v_session: $cell was measured on a different tree than role $role resolves to now:" >&2
+      diff <(printf '%s\n' "$want") "$f" | sed 's/^/    /' >&2; bad=1; continue; }
+    n=$((n + 1))
+    # A manifest written after the fact attests the binding rather than recording it, so it is
+    # counted and reported separately rather than being indistinguishable from one a search wrote.
+    [ -e "$f.backfilled" ] && back=$((back + 1))
+  done
+  [ "$bad" -eq 0 ] || return 1
+  if [ "${back:-0}" -gt 0 ]; then
+    echo "provenance: $n cells carry a manifest matching their validated tree ($back backfilled --"
+    echo "  see the .backfilled note beside each; those cells predate this check)"
+  else
+    echo "provenance: $n cells carry a manifest matching their validated tree"
+  fi
+}
+
 block_gate() {
   local want=""
   local l r
   for l in base574A feat574A cap8A capoffA; do for r in 1 2 3; do want="$want $l/r$r"; done; done
   for l in cap8A cap4A; do for r in 4 5 6; do want="$want $l/r$r"; done; done
-  # FIRST, because it is the premise the other two gates presuppose and cannot test: a green parity
-  # gate over arm B artifacts is a correct answer to the wrong question.
+  # FIRST of all: the artifacts must come from the trees this run validates. `gate` is documented as
+  # independently runnable, so without this it reads whatever is in OUT_ROOT and certifies it.
+  assert_cell_provenance $(echo "$want") || return 1
+  # Then the premise the other two gates presuppose and cannot test: a green parity gate over arm B
+  # artifacts is a correct answer to the wrong question.
   assert_shipped_arm_A $(echo "$want") || return 1
   # EXPECT_CELLS pins the exact set, so a stale OUT_ROOT cannot substitute one cell for another, and
   # it requires a pass-2 loss vector per cell -- a timed artifact that was never output-verified is
