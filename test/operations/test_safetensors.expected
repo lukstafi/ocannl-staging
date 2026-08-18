@@ -6,3 +6,45 @@ b via tensor: [10; 20; 30; 40]
 missing tensor: Safetensors.to_float32 roundtrip.safetensors: no tensor named missing
 overlap rejected: Safetensors.read overlap.safetensors: tensor b starts at byte 8 but the previous payload ends at 16 (overlapping or non-contiguous data_offsets)
 trailing rejected: Safetensors.read trailing.safetensors: payloads end at byte 16 but the byte buffer has 24 bytes (trailing uncovered data)
+=== Payload ingestion: mapped and decoded ===
+  aligned empty: decoded
+  aligned f32: mapped
+  aligned f64: mapped
+  aligned f16: mapped
+  aligned bf16: mapped
+  aligned fp8: mapped
+  aligned i32: mapped
+  aligned i64: decoded
+  aligned u16: mapped
+  aligned u8: mapped
+  unaligned empty: decoded
+  unaligned f32: decoded
+  unaligned f64: decoded
+  unaligned f16: decoded
+  unaligned bf16: decoded
+  unaligned fp8: mapped
+  unaligned i32: decoded
+  unaligned i64: decoded
+  unaligned u16: decoded
+  unaligned u8: mapped
+ingestion maps exactly the element-aligned payloads: true
+the shifted file maps only its one-byte payloads: true
+  empty: []
+  f32: [1.0; 2.0; 4.0; 8.0]
+  f64: [1.0; 2.0; 4.0; 8.0]
+  f16: [1.0; 2.0; 4.0; 8.0]
+  bf16: [1.0; 2.0; 4.0; 8.0]
+  fp8: [1.0; 2.0; 4.0; 8.0]
+  i32: [1.0; 2.0; 4.0; 8.0]
+  i64: [1.0; 2.0; 4.0; 8.0]
+  u16: [1.0; 2.0; 4.0; 8.0]
+  u8: [1.0; 2.0; 4.0; 8.0]
+mapping and decoding agree on values: true
+=== Precision conversion, descriptor lifetime, rejections ===
+bf16 as single: [1.0; 2.0; 4.0; 8.0]
+converted payload has the requested precision: true
+a mapped payload is readable after the reader is closed: true
+closed reader: Safetensors.to_ndarray aligned.safetensors: the file has been closed
+I8 has no OCANNL precision: true
+BF16 maps to bfloat16: true
+I8 tensor: Safetensors.to_ndarray i8.safetensors: tensor q has dtype I8, which has no matching OCANNL precision

@@ -2,6 +2,24 @@
 
 ### Added
 
+- **Safetensors payloads are mapped, not decoded** (gh-ocannl-587): `Safetensors.to_ndarray` wraps
+  each payload as a private, copy-on-write `Unix.map_file` region through `Ndarray.map_file_array`,
+  the way checkpoint loading has since gh-ocannl-467 — the format fixes little-endian order and
+  contiguous, unpadded payloads, and `read` had already checked that the ranges tile the byte
+  buffer, so the staging `Bytes` buffer and the element-by-element decode loop had nothing left to
+  do. Three things came with it. The reader now *owns* the descriptor it parsed the header
+  through and maps from that, never from a fresh open of the path, so a concurrent replacement of
+  the file cannot pair one file's metadata with another's bytes (the gh-ocannl-467 review's trap);
+  `Safetensors.close` releases it, the GC does so otherwise, and payloads already handed out —
+  mappings included — stay valid. `to_ndarray` returns the payload's own precision instead of
+  forcing F32, for every dtype that *names* an OCANNL precision (F64/F32/F16/BF16/F8_E5M2,
+  I64/I32, U64/U32/U16/U8, BOOL), with `?prec` for callers that want one precision regardless;
+  I8/I16/F8_E4M3 are refused rather than reinterpreted, and `to_float32` keeps its F32-only
+  contract. And one thing the format does not guarantee is checked per payload: a payload whose
+  file offset is not a multiple of its element size — which happens to a wide dtype sitting behind
+  narrow ones even in a header padded to 8 bytes — is decoded instead of mapped, an unaligned
+  mapping being undefined behaviour. `Safetensors.ingestion_counts` reports the split.
+
 - **The gh-573 / gh-574 HIP measurement is verified end to end** (gh-ocannl-612,
   `benchmarks/report-gh612-hip-verified.md`): the first session's ratios rested on default-placement
   arm A routines that were profiled but, in three of four cells, never executed — the limitation it
