@@ -32,6 +32,16 @@
   Windows users get the same lazy, copy-free loads as everyone else; the setting stays for a
   filesystem that does refuse, and a rename that fails now cleans up its temp file.
 
+### Fixed
+
+- **`uint32` and `uint64` ndarrays convert to and from floats as unsigned.** They are stored in
+  {e signed} int32/int64 bigarrays, and every float-facing conversion in `Ndarray` — `get_as_float`,
+  the folds behind `retrieve_flat_values`, `set_from_float`, `fill_from_float` — went through the
+  host's signed conversion, so a u32 `0xffffffff` read back as `-1.` and writing `4294967295.`
+  raised outright. Found by review on the new `Safetensors.to_ndarray ?prec` path, but the defect
+  was in the conversions, so the fix is there: four reinterpreting helpers all four sites now use,
+  with out-of-range floats wrapping as C's unsigned conversion does.
+
 - **The gh-573 / gh-574 HIP measurement is verified end to end** (gh-ocannl-612,
   `benchmarks/report-gh612-hip-verified.md`): the first session's ratios rested on default-placement
   arm A routines that were profiled but, in three of four cells, never executed — the limitation it

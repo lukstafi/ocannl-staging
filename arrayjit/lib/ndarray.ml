@@ -243,6 +243,29 @@ let compute_end_idx ?padding dims axis =
       dims.(axis) - padding_arr.(axis).Ops.left - padding_arr.(axis).Ops.right - 1
   | Some _ -> dims.(axis) - 1
 
+(* [uint32] and [uint64] are stored in {e signed} int32/int64 bigarrays (see {!Ops.precision}), so
+   the host's own conversions read and write them wrong at the top of their range: [Int32.to_float]
+   turns the u32 0xffffffff into -1., and [Int32.of_float] cannot take 4294967295. back. Every
+   float-facing conversion below goes through these four instead. Out-of-range floats wrap, which is
+   C's unsigned conversion. *)
+let uint32_to_float (x : int32) =
+  Stdlib.Int64.to_float (Stdlib.Int64.logand (Stdlib.Int64.of_int32 x) 0xFFFFFFFFL)
+
+let float_to_uint32 v = Stdlib.Int64.to_int32 (Stdlib.Int64.of_float v)
+let two_pow_63 = 9_223_372_036_854_775_808.0
+
+let uint64_to_float (x : int64) =
+  if Stdlib.Int64.compare x 0L >= 0 then Stdlib.Int64.to_float x
+  else
+    (* Halve, convert, double, and add the low bit back: [Int64.to_float] of a value with the top
+       bit set would read it as negative. *)
+    (Stdlib.Int64.to_float (Stdlib.Int64.shift_right_logical x 1) *. 2.0)
+    +. Stdlib.Int64.to_float (Stdlib.Int64.logand x 1L)
+
+let float_to_uint64 v =
+  if Float.(v < two_pow_63) then Stdlib.Int64.of_float v
+  else Stdlib.Int64.add (Stdlib.Int64.of_float (v -. two_pow_63)) Stdlib.Int64.min_int
+
 let set_from_float ?padding arr idx v =
   (* NOTE: Bigarray requires the length of indices to be the same as the number of dimensions. *)
   let idx = if Array.is_empty (dims arr) then [||] else idx in
@@ -251,9 +274,9 @@ let set_from_float ?padding arr idx v =
   | Byte_nd arr -> A.set arr adjusted_idx @@ Char.of_int_exn @@ Int.of_float v
   | Uint16_nd arr -> A.set arr adjusted_idx @@ Int.of_float v
   | Int32_nd arr -> A.set arr adjusted_idx @@ Int32.of_float v
-  | Uint32_nd arr -> A.set arr adjusted_idx @@ Int32.of_float v
+  | Uint32_nd arr -> A.set arr adjusted_idx @@ float_to_uint32 v
   | Int64_nd arr -> A.set arr adjusted_idx @@ Int64.of_float v
-  | Uint64_nd arr -> A.set arr adjusted_idx @@ Int64.of_float v
+  | Uint64_nd arr -> A.set arr adjusted_idx @@ float_to_uint64 v
   | Uint4x32_nd arr -> A.set arr adjusted_idx @@ Stdlib.Complex.{ re = v; im = 0.0 }
   | Half_nd arr -> A.set arr adjusted_idx v
   | Bfloat16_nd arr -> A.set arr adjusted_idx @@ Ops.single_to_bfloat16 v
@@ -266,9 +289,9 @@ let fill_from_float arr v =
   | Byte_nd arr -> A.fill arr @@ Char.of_int_exn @@ Int.of_float v
   | Uint16_nd arr -> A.fill arr @@ Int.of_float v
   | Int32_nd arr -> A.fill arr @@ Int32.of_float v
-  | Uint32_nd arr -> A.fill arr @@ Int32.of_float v
+  | Uint32_nd arr -> A.fill arr @@ float_to_uint32 v
   | Int64_nd arr -> A.fill arr @@ Int64.of_float v
-  | Uint64_nd arr -> A.fill arr @@ Int64.of_float v
+  | Uint64_nd arr -> A.fill arr @@ float_to_uint64 v
   | Uint4x32_nd arr -> A.fill arr @@ Stdlib.Complex.{ re = v; im = 0.0 }
   | Half_nd arr -> A.fill arr v
   | Bfloat16_nd arr -> A.fill arr @@ Ops.single_to_bfloat16 v
@@ -305,11 +328,11 @@ let fold_as_float ?padding ~init ~f arr =
   | Int32_nd arr ->
       fold_bigarray ?padding ~init ~f:(fun accu idx v -> f accu idx @@ Int32.to_float v) arr
   | Uint32_nd arr ->
-      fold_bigarray ?padding ~init ~f:(fun accu idx v -> f accu idx @@ Int32.to_float v) arr
+      fold_bigarray ?padding ~init ~f:(fun accu idx v -> f accu idx @@ uint32_to_float v) arr
   | Int64_nd arr ->
       fold_bigarray ?padding ~init ~f:(fun accu idx v -> f accu idx @@ Int64.to_float v) arr
   | Uint64_nd arr ->
-      fold_bigarray ?padding ~init ~f:(fun accu idx v -> f accu idx @@ Int64.to_float v) arr
+      fold_bigarray ?padding ~init ~f:(fun accu idx v -> f accu idx @@ uint64_to_float v) arr
   | Uint4x32_nd arr ->
       fold_bigarray ?padding ~init ~f:(fun accu idx c -> f accu idx c.Stdlib.Complex.re) arr
   | Half_nd arr -> fold_bigarray ?padding ~init ~f arr
@@ -333,9 +356,9 @@ let get_as_float ?padding arr idx =
   | Byte_nd arr -> Float.of_int @@ Char.to_int @@ A.get arr adjusted_idx
   | Uint16_nd arr -> Float.of_int @@ A.get arr adjusted_idx
   | Int32_nd arr -> Int32.to_float @@ A.get arr adjusted_idx
-  | Uint32_nd arr -> Int32.to_float @@ A.get arr adjusted_idx
+  | Uint32_nd arr -> uint32_to_float @@ A.get arr adjusted_idx
   | Int64_nd arr -> Int64.to_float @@ A.get arr adjusted_idx
-  | Uint64_nd arr -> Int64.to_float @@ A.get arr adjusted_idx
+  | Uint64_nd arr -> uint64_to_float @@ A.get arr adjusted_idx
   | Uint4x32_nd arr -> (A.get arr adjusted_idx).Stdlib.Complex.re
   | Half_nd arr -> A.get arr adjusted_idx
   | Bfloat16_nd arr -> Ops.bfloat16_to_single @@ A.get arr adjusted_idx

@@ -45,6 +45,9 @@ bf16 as single: [1.0; 2.0; 4.0; 8.0]
 converted payload has the requested precision: true
 a mapped payload is readable after the reader is closed: true
 closed reader: Safetensors.to_ndarray aligned.safetensors: the file has been closed
+u32 payload: [0; 1; 2147483648; 4294967295]
+a mapped u32 payload keeps the values above 2^31: true
+converting a u32 payload to double keeps them: true
 I8 has no OCANNL precision: true
 BF16 maps to bfloat16: true
 I8 tensor: Safetensors.to_ndarray i8.safetensors: tensor q has dtype I8, which has no matching OCANNL precision

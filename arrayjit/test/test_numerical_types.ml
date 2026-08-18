@@ -70,7 +70,36 @@ let test_padding () =
   Stdio.printf
     "\nExpected: padding value (-999.0) in margins, data values (1.0-6.0) in center region\n"
 
+(* [uint32] and [uint64] are stored in signed int32/int64 bigarrays, so every float-facing
+   conversion has to reinterpret the bits: read through the host's signed conversion, the u32
+   0xffffffff is -1., and it cannot be written back at all. The values below straddle the sign bit,
+   and each is exactly representable as a double, so a round-trip that changes anything is the
+   conversion's doing. *)
+let test_unsigned_extremes () =
+  Stdio.printf "\n\nTesting unsigned values across the sign bit:\n";
+  let cases =
+    [
+      ("uint32", Ops.uint32, [| 0.0; 1.0; 2147483647.0; 2147483648.0; 4294967295.0 |]);
+      ( "uint64",
+        Ops.uint64,
+        [| 0.0; 1.0; 4294967296.0; 9223372036854775808.0; 18446744073709549568.0 |] );
+    ]
+  in
+  List.iter cases ~f:(fun (name, prec, values) ->
+      let arr =
+        Ndarray.create_array ~debug:name prec ~dims:[| Array.length values |] ~padding:None
+      in
+      Ndarray.set_flat_values arr values;
+      let back = Ndarray.retrieve_flat_values arr in
+      Stdio.printf "  %s: [%s]\n" name
+        (String.concat ~sep:"; " (Array.to_list (Array.map back ~f:(Printf.sprintf "%.1f"))));
+      Verdict.p (name ^ " round-trips through float") (Array.equal Float.equal back values);
+      (* The same conversion the ndarray-precision APIs go through when a caller asks for floats. *)
+      let widened = Ndarray.retrieve_flat_values (Ndarray.convert Ops.double arr) in
+      Verdict.p (name ^ " widens to double unchanged") (Array.equal Float.equal widened values))
+
 let () =
   test_bfloat16_conversions ();
   test_fp8_conversions ();
-  test_padding ()
+  test_padding ();
+  test_unsigned_extremes ()

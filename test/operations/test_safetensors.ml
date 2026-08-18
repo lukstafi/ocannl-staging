@@ -207,6 +207,24 @@ let () =
   (match Safetensors.to_float32 st "f32" with
   | exception Failure msg -> printf "closed reader: %s\n" msg
   | _ -> printf "closed reader: unexpectedly succeeded\n");
+  (* The upper half of an unsigned range survives ingestion and conversion: a U32 payload is stored
+     in a signed int32 bigarray, so both the mapping's reads and [?prec] have to reinterpret it. *)
+  let big = [| 0.0; 1.0; 2147483648.0; 4294967295.0 |] in
+  let _ : int =
+    build_file "u32.safetensors" ~extra_pad:0
+      [ ("big", "U32", [ 4 ], payload_bytes Ir.Ops.uint32 big) ]
+  in
+  let st32 = Safetensors.read "u32.safetensors" in
+  let mapped_u32 = Ir.Ndarray.retrieve_flat_values (Safetensors.to_ndarray st32 "big") in
+  let as_double =
+    Ir.Ndarray.retrieve_flat_values (Safetensors.to_ndarray ~prec:Ir.Ops.double st32 "big")
+  in
+  printf "u32 payload: [%s]\n"
+    (String.concat ~sep:"; " (Array.to_list (Array.map mapped_u32 ~f:(Printf.sprintf "%.0f"))));
+  Verdict.p "a mapped u32 payload keeps the values above 2^31"
+    (Array.equal Float.equal mapped_u32 big);
+  Verdict.p "converting a u32 payload to double keeps them" (Array.equal Float.equal as_double big);
+  Safetensors.close st32;
   (* A dtype OCANNL has no precision for is refused, rather than reinterpreted. *)
   Verdict.p "I8 has no OCANNL precision" (Option.is_none (Safetensors.prec_of_dtype "I8"));
   Verdict.p "BF16 maps to bfloat16"
