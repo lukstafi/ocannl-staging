@@ -1908,14 +1908,19 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
             && Ir.Ops.equal_prec (comp_prec (Lazy.force site.c_a.Ir.Tnode.storage_prec)) cprec
             && Ir.Ops.equal_prec (comp_prec (Lazy.force site.c_b.Ir.Tnode.storage_prec)) cprec
           in
+          (* The renderer fills the widest vector the out-channel extent allows, halving where it
+             must ({!Ir.Backend_intf.simd_lanes_for}); seeding asks the same question, or it would
+             withhold candidates the renderer would in fact tile. *)
           let lanes =
-            limits.Ir.Backend_intf.simd_vector_bytes / max 1 (Ir.Ops.prec_in_bytes cprec)
+            Ir.Backend_intf.simd_lanes_for
+              ~vector_bytes:limits.Ir.Backend_intf.simd_vector_bytes
+              ~elt_bytes:(max 1 (Ir.Ops.prec_in_bytes cprec))
+              ~extent:site.c_noc
           in
           if
             not
               (limits.Ir.Backend_intf.simd_vector_bytes >= 8
-              && lanes >= 2 && uniform_vec_capable && site.c_fma && site.c_noc >= lanes
-              && offset_free)
+              && Option.is_some lanes && uniform_vec_capable && site.c_fma && offset_free)
           then []
           else
             (* Grid flavors need every materialized write in the routine covered by the Grid axis
@@ -2554,7 +2559,18 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
           && Ir.Ops.equal_prec (comp_prec (Lazy.force site.m_a.Ir.Tnode.storage_prec)) prec
           && Ir.Ops.equal_prec (comp_prec (Lazy.force site.m_b.Ir.Tnode.storage_prec)) prec
         in
+        (* [lanes] is the widest the register file offers, which is what the decline messages
+           quote; whether a given extent can be tiled is [lanes_fit], which lets the renderer's
+           per-extent halving ({!Ir.Backend_intf.simd_lanes_for}) through instead of gating every
+           extent on the widest vector. *)
         let lanes = limits.Ir.Backend_intf.simd_vector_bytes / max 1 (Ir.Ops.prec_in_bytes prec) in
+        let lanes_fit extent =
+          Option.is_some
+            (Ir.Backend_intf.simd_lanes_for
+               ~vector_bytes:limits.Ir.Backend_intf.simd_vector_bytes
+               ~elt_bytes:(max 1 (Ir.Ops.prec_in_bytes prec))
+               ~extent)
+        in
         let tb_in_place = Option.value site.m_tb ~default:false in
         refute_unless
           [
@@ -2608,7 +2624,7 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                   ( not tb_in_place,
                     "stored B is transposed: whole-triple reads B in place, which the register \
                      tiling statically declines" );
-                  ( site.m_nj >= lanes,
+                  ( lanes_fit site.m_nj,
                     Printf.sprintf "column extent n=%d is below one vector of lanes (%d)"
                       site.m_nj lanes );
                 ]
@@ -2662,7 +2678,7 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                          L2 residency the blocking aims for — an oversized tile still compiles,
                          and a hoisted panel is not even a stack array), so it excludes rather
                          than refutes: a driver may lift it. *)
-                      if bn_eff < lanes then
+                      if not (lanes_fit bn_eff) then
                         Some
                           (`Refute
                             (Printf.sprintf

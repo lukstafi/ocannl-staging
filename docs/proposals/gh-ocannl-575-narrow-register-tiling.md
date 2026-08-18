@@ -245,6 +245,45 @@ The seam's x86 verdict — narrow storage pays for itself, landing ~30% off the 
 ARM with the gap closed entirely: the widened-panel arms match plain f32 at n = 512 and edge past it
 at n = 1024, because the packing copy reads half the bytes for the same micro-kernel.
 
+### The AVX-512 rows, executed (gh-ocannl-621 follow-up)
+
+The census above was taken where no AVX-512 exists — an Arrow Lake-HX part, where the hybrid
+topology fuses AVX-512 off entirely. The fleet's CPU-benchmarking machine is Zen 5, which has it,
+so both AVX-512 rows have since run for real (gcc 15: no `__builtin_elementwise_fma`, so the `#elif`
+chain does reach them). Nothing in the census needed revising; what changed is the width that
+reaches it.
+
+`vector_bytes_setting` capped the auto width at 32 — a 512-bit machine ran the codegen at half its
+register file — so the auto width is now 64 where the target has AVX-512 F/BW/VL. `bin/narrow_gebp_bench`
+at n = 512, packed GEBP / pool-parallel, GFLOP/s, `taskset -c 0-15`:
+
+| storage | 32 bytes | 64 bytes |
+|---|---|---|
+| f32 | 130.5 / 119.2 | **225.7 / 188.3** |
+| f16 | 108.1 / 85.3 | **189.6 / 130.0** |
+| bf16 | 95.1 / 48.6 | **140.6 / 57.9** |
+
+Checksums identical at both widths. The f64 × 8 row has no f64 path through the bench; a
+stand-in micro-kernel of the same tile shape measures the arm at 2.27x the per-lane loop
+(112.6 vs 49.5 GFLOP/s, bitwise-equal sums, per-lane censusing 192 instructions / 4 zmm FMAs /
+146 stack references against 290 / 16 / 0) — real hardware, but not the emitted kernel, so it
+corroborates the census rather than replacing it.
+
+Widening a width cannot be done by widening one number. Every rendering here declines below one
+full vector, so 64 bytes alone would drop f32 extents of 8..15 — loop and micro-kernel column
+extent alike — to the paths 32 bytes vectorizes; and an extent of 40 peels 8 columns at 16 lanes
+where 8 lanes divide it, which is how `schedule_mma_matmul`'s extent-adapted leg caught the naive
+version of this change. The width is therefore ranked over a ladder
+(`Backend_intf.simd_lane_ladder`, halving to a floor of `min vector_bytes 32`): loops minimize
+trips (vector steps plus scalar remainder iterations), and the register tiling extends its
+peel-cost search from `rn` alone to `(lanes, rn)`. The register-pressure cap stays keyed on the
+machine's width, so the wider machine still wins at n = 40 — 118.0 GFLOP/s at a 4x5 tile of 8-lane
+vectors against 103.3 at the 4x1 a 32-byte machine's cap allows. Seeding calls the same function,
+so it cannot be stricter than the renderer.
+
+The AVX512-FP16 rows stay compile-checked: no AMD part implements AVX512-FP16, and this fleet's
+only native-fp16 hardware is ARM, which takes the NEON rows.
+
 ## Executed coverage
 
 - `test/operations/tile_mma_narrow.ml`: bf16 in-kernel widened packing (f32 panels,

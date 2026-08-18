@@ -1893,6 +1893,13 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name simd_lane_choice)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules simd_lane_choice)
+ (libraries base arrayjit.ir arrayjit.verdict))
+
+(test
  (name schedule_mma_matmul)
  (package neural_nets_lib)
  (deps

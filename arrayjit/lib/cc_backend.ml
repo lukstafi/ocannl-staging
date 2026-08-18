@@ -505,14 +505,61 @@ let fp16_arithmetic_support =
 let has_native_fp16_arithmetic () =
   match fp16_arithmetic_support () with `Native -> true | `Promoted | `None -> false
 
+(* Whether the target the kernels are compiled for has 512-bit vectors, probed the same way as
+   [simd_flags]' first stage: under the flags a kernel actually gets, and asserting rather than
+   requesting, so the answer never escalates the ISA beyond the configured target.
+
+   [BW] and [VL] alongside [F] because a 64-byte vector here is routinely a vector of 16-bit
+   elements (narrow storage bridges through [ocannl_vec32h]/[ocannl_vec32u16]), which is what BW
+   makes a single-instruction affair; VL is what the 128/256-bit forms of the same instructions
+   need, and the emission mixes widths within one kernel. Every AVX-512 part that has ever shipped
+   outside Xeon Phi has all three, so the conjunction costs nothing real and keeps the width from
+   claiming hardware the narrow paths would then find missing. *)
+let avx512_target =
+  let probed =
+    lazy
+      (String.equal "true"
+         (cached_probe ~name:"avx512"
+            ~validate:(fun s -> String.equal s "true" || String.equal s "false")
+            ~compute:(fun () ->
+              let flags = String.strip (arch_flags () ^ " " ^ simd_flags ()) in
+              let guard =
+                "#if !defined(__AVX512F__) || !defined(__AVX512BW__) || !defined(__AVX512VL__)\n\
+                 #error \"target lacks AVX-512 F/BW/VL\"\n\
+                 #endif\n\
+                 int ocannl_avx512_probe;\n"
+              in
+              if probe_compiles ~flags ~data:guard () then "true" else "false")
+            ()))
+  in
+  fun () -> Lazy.force probed
+
 (* Explicit SIMD width for [Vectorized] loops (gh-ocannl-164 follow-up): vector register bytes for
-   the GCC/Clang vector-extension rendering in [C_syntax]. Auto (-1 or unset): 32 bytes when the
-   SIMD probe found AVX2, else 16 (NEON width; clang/gcc lower 16-byte vectors natively on ARM). 0
-   disables explicit emission (auto-vectorization pragmas remain). *)
+   the GCC/Clang vector-extension rendering in [C_syntax]. Auto (-1 or unset): 64 bytes where the
+   target has AVX-512 (gh-ocannl-621 follow-up), 32 where the SIMD probe found AVX2, else 16 (NEON
+   width; clang/gcc lower 16-byte vectors natively on ARM). 0 disables explicit emission
+   (auto-vectorization pragmas remain).
+
+   The 512-bit rung is measured, not inferred: on Zen 5 (Ryzen AI Max+ 395, gcc 15) the packed
+   f32 GEBP of [bin/narrow_gebp_bench] at n = 512 runs 225.7 GFLOP/s at 64 bytes against 130.5 at
+   32, f16 189.6 against 108.1 and bf16 140.6 against 95.1, with identical checksums. It is a
+   default rather than a hint because the alternative -- a machine that has the registers using
+   half of them -- is the more surprising of the two. Where 512-bit operation is not wanted (Intel
+   server parts clock down under sustained 512-bit work in a way Zen 5 does not), pin
+   [cc_vector_bytes=32]; and note the width is part of what a schedule-cache entry keys on, so
+   flipping it re-tunes rather than replaying a crown chosen at the other width.
+
+   Widening a *default* cannot narrow what already vectorizes: a loop too short to fill the wider
+   vector degrades to the width it can fill rather than declining, see [vec_lanes_for] in
+   [C_syntax]. *)
 let vector_bytes_setting () =
   match Int.of_string @@ Utils.get_global_arg ~default:"-1" ~arg_name:"cc_vector_bytes" with
   | n when n >= 0 -> n
-  | _ -> if String.is_substring (simd_flags ()) ~substring:"avx2" then 32 else 16
+  (* Gated on the AVX2 stage having fired, so that [cc_backend_simd_flags=none] -- pinned by a run
+     that must not depend on what this machine happens to have -- keeps answering 16 rather than
+     acquiring a wider vector through the arch flag's back door. *)
+  | _ when not (String.is_substring (simd_flags ()) ~substring:"avx2") -> 16
+  | _ -> if avx512_target () then 64 else 32
 
 (* Whether the kernel .so is a macOS bundle or an ELF/PE shared object. Distinguishing the two BSDs
    from Darwin needs [uname], and this used to shell out once per kernel compile -- on a machine

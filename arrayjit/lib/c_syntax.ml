@@ -1217,6 +1217,12 @@ module C_syntax (B : C_syntax_config) = struct
         (Printf.sprintf "typedef %s %s __attribute__((vector_size(%d)));" (B.typ_of_prec prec) vtyp
            (lanes * Ops.prec_in_bytes prec)) )
 
+  (* The widest vector this loop can fill, [None] where even the narrowest cannot: see
+     {!Backend_intf.simd_lanes_for} for why the width degrades per loop instead of being one
+     number per machine, and for what the floor protects. *)
+  let vec_lanes_for ~prec ~extent =
+    simd_lanes_for ~vector_bytes:B.vector_bytes ~elt_bytes:(Ops.prec_in_bytes prec) ~extent
+
   (* {4 Convert-on-load / convert-on-store for narrow storage (gh-ocannl-517)}
 
      A node stored at a narrow float precision but computed in f32 ({!C_syntax_config.compute_prec})
@@ -1390,13 +1396,22 @@ module C_syntax (B : C_syntax_config) = struct
      [_mm256_fmadd_ph] and [_mm512_fmadd_ph] expand to, so their semantics are the ISA's rather
      than something inferred here.
 
-     The AVX-512, AVX512-FP16 and aarch64 rows could not be RUN when they were added (no such
-     hardware; QEMU's TCG implements neither AVX-512 nor AVX512-FP16), so they carry a second guard
-     the AVX/AVX2 rows do not: [__has_builtin], which on gcc tracks the enabled target features
-     exactly. It cannot catch a wrong signature — that is what the compile checks are for — but it
-     turns "this compiler spells it differently" into a fall-through to the per-lane arm rather
-     than a failed kernel compile. The cost is that a gcc older than 10, which has no
-     [__has_builtin], takes the per-lane arm at those widths (the prelude shims the macro to 0). *)
+     The AVX-512, AVX512-FP16 and aarch64 rows could not be RUN on the machine they were added from
+     (an Arrow Lake-HX part, where AVX-512 is fused off entirely; QEMU's TCG implements neither
+     AVX-512 nor AVX512-FP16), so they carry a second guard the AVX/AVX2 rows do not:
+     [__has_builtin], which on gcc tracks the enabled target features exactly.
+
+     It cannot catch a wrong signature — that is what the compile checks are for — but it turns
+     "this compiler spells it differently" into a fall-through to the per-lane arm rather than a
+     failed kernel compile. The cost is that a gcc older than 10, which has no [__has_builtin],
+     takes the per-lane arm at those widths (the prelude shims the macro to 0).
+
+     The AVX-512 f32 x 16 row has since been executed, on Zen 5 (gcc 15, which has no
+     [__builtin_elementwise_fma], so the chain reaches this arm): correct to the bit against the
+     32-byte rendering, and 225.7 against 130.5 GFLOP/s on the packed f32 GEBP once
+     [cc_vector_bytes] stopped capping the width at 32. The AVX512-FP16 rows remain unexecuted and
+     will stay that way here — no AMD part implements AVX512-FP16, and this fleet's only
+     native-fp16 target is ARM, which takes the NEON rows instead. *)
   let vec_fma_builtin ~prec ~lanes : (string * (dst:string -> a:string -> b:string -> string)) list
       =
     let call name extra ~dst ~a ~b =
@@ -2809,8 +2824,7 @@ module C_syntax (B : C_syntax_config) = struct
               comp_prec (Lazy.force tn.Tn.storage_prec)
             in
             if not (B.vector_prec_ok prec) then raise Bail;
-            let lanes = B.vector_bytes / Ops.prec_in_bytes prec in
-            if lanes < 2 || extent < lanes then raise Bail;
+            let lanes = match vec_lanes_for ~prec ~extent with Some l -> l | None -> raise Bail in
             let written = Hashtbl.create (module Int) in
             List.iter sets ~f:(fun (tn, idcs, _) ->
                 if not (Ops.equal_prec (comp_prec (Lazy.force tn.Tn.storage_prec)) prec) then
@@ -2991,10 +3005,19 @@ module C_syntax (B : C_syntax_config) = struct
             if not (B.vector_prec_ok prec) then raise Bail;
             (* A loop-invariant contribution deserves strength reduction, not chains. *)
             if not (scalar_mentions contrib) then raise Bail;
-            let lanes = B.vector_bytes / Ops.prec_in_bytes prec in
             let extent = to_ + 1 in
-            if lanes < 2 || extent < lanes then raise Bail;
-            let chains = if 4 * lanes <= extent then 4 else if 2 * lanes <= extent then 2 else 1 in
+            (* Not [vec_lanes_for]: this rendering pays a horizontal fold as long as the lane count,
+               so the width is ranked against the update-plus-epilogue cost — see
+               {!Backend_intf.simd_reduce_lanes_for}. *)
+            let lanes =
+              match
+                simd_reduce_lanes_for ~vector_bytes:B.vector_bytes
+                  ~elt_bytes:(Ops.prec_in_bytes prec) ~extent
+              with
+              | Some l -> l
+              | None -> raise Bail
+            in
+            let chains = simd_reduce_chains ~lanes ~extent in
             let step = chains * lanes in
             let vtyp, typedef_doc = vec_ext_typ ~prec ~lanes in
             let extra_typedefs = Hashtbl.create (module String) in
@@ -3979,11 +4002,20 @@ module C_syntax (B : C_syntax_config) = struct
                   not (Tn.equal tn d_tn && Tn.equal tn2 d_tn)
               | _ -> true)
           in
-          let lanes = B.vector_bytes / Ops.prec_in_bytes prec in
+          (* The widths this register file can render, narrowed to those the column extent can
+             fill: an [n] between two rungs keeps its tiling instead of falling to the scalar loop,
+             and the cost model below picks among the rungs that remain. *)
+          let lane_ladder =
+            simd_lane_ladder ~vector_bytes:B.vector_bytes
+              ~elt_bytes:(Ops.prec_in_bytes prec)
+            |> List.filter ~f:(fun lanes -> n >= lanes)
+          in
           let* () =
             no_test
-              ~reason:(Printf.sprintf "n = %d below the vector width (lanes = %d)" n lanes)
-              (lanes < 2 || n < lanes)
+              ~reason:
+                (Printf.sprintf "n = %d below the vector width (lanes = %d)" n
+                   (B.vector_bytes / max 1 (Ops.prec_in_bytes prec)))
+              (List.is_empty lane_ladder)
           in
           let rm = min 4 m in
           (* The C-tile is [rm] rows of [rn] vectors; [rn] is chosen against the ACTUAL [n], not
@@ -4003,23 +4035,37 @@ module C_syntax (B : C_syntax_config) = struct
              percent across rn = 2..6, and where several widths divide [n] evenly it lands on the
              largest affordable one. Erring low is what costs choices — weighting a peeled column at
              [lanes] rather than the fit picked the peeling rn = 6 over a peel-free rn = 4 at
-             n = 2048, which measures 1.15x slower (Codex P2 on PR #357). *)
-          let rn =
-            let cap = min (if B.vector_bytes = 32 then 3 else 6) (n / lanes) in
+             n = 2048, which measures 1.15x slower (Codex P2 on PR #357).
+
+             The same model ranks the LANE COUNT, over the ladder of widths the register file can
+             render ({!Ir.Backend_intf.simd_lane_ladder}): the vector-FMA term is already per
+             lane-column, so a narrower vector simply issues more of them, and a width is worth
+             stepping down to exactly when its smaller peel outweighs that. It does at n = 40,
+             where 16 lanes cover 32 columns and peel 8 while 8 lanes divide the extent — the
+             wider register file otherwise running the narrower machine's kernel with a scalar
+             tail. The register-pressure cap stays keyed on the MACHINE's width, not the chosen
+             one: stepping down does not shrink the register file. *)
+          let lanes, rn =
             let peel_cost = 10. in
-            let cost rn =
+            let cost ~lanes ~rn =
               let bw = rn * lanes in
               let n_full = n - (n % bw) in
               (Float.of_int (n_full / lanes)
               *. (1. +. (1. /. Float.of_int rm) +. (1. /. Float.of_int rn)))
               +. (Float.of_int (n - n_full) *. peel_cost)
             in
-            List.range 1 (cap + 1)
-            |> List.min_elt ~compare:(fun x y ->
-                   (* Ties (an exactly-dividing [bw] repeated at a multiple) go to the larger tile:
-                      more A-reuse at equal modelled cost. *)
-                   match Float.compare (cost x) (cost y) with 0 -> Int.compare y x | c -> c)
-            |> Option.value ~default:cap
+            let candidates =
+              List.concat_map lane_ladder ~f:(fun lanes ->
+                  let cap = min (if B.vector_bytes = 32 then 3 else 6) (n / lanes) in
+                  List.range 1 (cap + 1) |> List.map ~f:(fun rn -> (lanes, rn)))
+            in
+            List.min_elt candidates ~compare:(fun (l1, r1) (l2, r2) ->
+                (* Ties (an exactly-dividing [bw] repeated at a multiple, or at two widths) go to
+                   the wider vector and then the larger tile: more work per issue, more A-reuse. *)
+                match Float.compare (cost ~lanes:l1 ~rn:r1) (cost ~lanes:l2 ~rn:r2) with
+                | 0 -> ( match Int.compare l2 l1 with 0 -> Int.compare r2 r1 | c -> c)
+                | c -> c)
+            |> Option.value_exn ~message:"C_syntax: mma tile shape"
           in
           let bw = rn * lanes in
           let m_full = m - (m % rm) in

@@ -887,8 +887,11 @@ let () =
           (has "Tile_mma register tiling"
           && has "__builtin_elementwise_fma"
           (* The gcc arm: a whole-vector builtin, not the per-lane subscripted loop the spill
-             lives in. The [#elif] guard is emitted target-independently. *)
-          && has "#elif defined(__FMA__)"
+             lives in. Every arm is emitted target-independently, behind an [#elif] — which one
+             carries the x86 builtin depends on the machine's lane count ([__FMA__] at 4 and 8
+             lanes, [__AVX512F__] at 16), so the pin is that an x86 whole-vector arm exists at
+             this width, not how its guard reads. *)
+          && has "#elif "
           && has "__builtin_ia32_vfmadd"))
   else (
     skipped "full-mantissa products are inexact in f32";
