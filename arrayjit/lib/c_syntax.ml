@@ -3993,15 +3993,18 @@ module C_syntax (B : C_syntax_config) = struct
           (* The widest vector the column extent can fill, which on a machine wider than the
              tiling's old fixed width is how [n] between the two widths keeps its tiling instead of
              falling to the scalar loop -- see [vec_lanes_for]. *)
-          let lanes_opt = vec_lanes_for ~prec ~extent:n in
+          let lane_ladder =
+            simd_lane_ladder ~vector_bytes:B.vector_bytes
+              ~elt_bytes:(Ops.prec_in_bytes prec)
+            |> List.filter ~f:(fun lanes -> n >= lanes)
+          in
           let* () =
             no_test
               ~reason:
                 (Printf.sprintf "n = %d below the vector width (lanes = %d)" n
                    (B.vector_bytes / max 1 (Ops.prec_in_bytes prec)))
-              (Option.is_none lanes_opt)
+              (List.is_empty lane_ladder)
           in
-          let lanes = Option.value_exn ~message:"C_syntax: mma lane count" lanes_opt in
           let rm = min 4 m in
           (* The C-tile is [rm] rows of [rn] vectors; [rn] is chosen against the ACTUAL [n], not
              fixed at the register-pressure cap (gh-ocannl-575). The columns [bw = rn * lanes] does
@@ -4020,23 +4023,37 @@ module C_syntax (B : C_syntax_config) = struct
              percent across rn = 2..6, and where several widths divide [n] evenly it lands on the
              largest affordable one. Erring low is what costs choices — weighting a peeled column at
              [lanes] rather than the fit picked the peeling rn = 6 over a peel-free rn = 4 at
-             n = 2048, which measures 1.15x slower (Codex P2 on PR #357). *)
-          let rn =
-            let cap = min (if B.vector_bytes = 32 then 3 else 6) (n / lanes) in
+             n = 2048, which measures 1.15x slower (Codex P2 on PR #357).
+
+             The same model ranks the LANE COUNT, over the ladder of widths the register file can
+             render ({!Ir.Backend_intf.simd_lane_ladder}): the vector-FMA term is already per
+             lane-column, so a narrower vector simply issues more of them, and a width is worth
+             stepping down to exactly when its smaller peel outweighs that. It does at n = 40,
+             where 16 lanes cover 32 columns and peel 8 while 8 lanes divide the extent — the
+             wider register file otherwise running the narrower machine's kernel with a scalar
+             tail. The register-pressure cap stays keyed on the MACHINE's width, not the chosen
+             one: stepping down does not shrink the register file. *)
+          let lanes, rn =
             let peel_cost = 10. in
-            let cost rn =
+            let cost ~lanes ~rn =
               let bw = rn * lanes in
               let n_full = n - (n % bw) in
               (Float.of_int (n_full / lanes)
               *. (1. +. (1. /. Float.of_int rm) +. (1. /. Float.of_int rn)))
               +. (Float.of_int (n - n_full) *. peel_cost)
             in
-            List.range 1 (cap + 1)
-            |> List.min_elt ~compare:(fun x y ->
-                   (* Ties (an exactly-dividing [bw] repeated at a multiple) go to the larger tile:
-                      more A-reuse at equal modelled cost. *)
-                   match Float.compare (cost x) (cost y) with 0 -> Int.compare y x | c -> c)
-            |> Option.value ~default:cap
+            let candidates =
+              List.concat_map lane_ladder ~f:(fun lanes ->
+                  let cap = min (if B.vector_bytes = 32 then 3 else 6) (n / lanes) in
+                  List.range 1 (cap + 1) |> List.map ~f:(fun rn -> (lanes, rn)))
+            in
+            List.min_elt candidates ~compare:(fun (l1, r1) (l2, r2) ->
+                (* Ties (an exactly-dividing [bw] repeated at a multiple, or at two widths) go to
+                   the wider vector and then the larger tile: more work per issue, more A-reuse. *)
+                match Float.compare (cost ~lanes:l1 ~rn:r1) (cost ~lanes:l2 ~rn:r2) with
+                | 0 -> ( match Int.compare l2 l1 with 0 -> Int.compare r2 r1 | c -> c)
+                | c -> c)
+            |> Option.value_exn ~message:"C_syntax: mma tile shape"
           in
           let bw = rn * lanes in
           let m_full = m - (m % rm) in

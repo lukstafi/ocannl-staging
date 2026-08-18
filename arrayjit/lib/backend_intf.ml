@@ -187,26 +187,45 @@ let no_hardware_limits =
     codegen_tag = None;
   }
 
-let simd_lanes_for ~vector_bytes ~elt_bytes ~extent =
-  let floor_bytes = min vector_bytes 32 in
-  let rec widest bytes =
-    let lanes = bytes / elt_bytes in
-    if lanes >= 2 && extent >= lanes then Some lanes
-    else if bytes / 2 >= floor_bytes then widest (bytes / 2)
-    else None
-  in
-  if elt_bytes <= 0 || vector_bytes < 8 then None else widest vector_bytes
+let simd_lane_ladder ~vector_bytes ~elt_bytes =
+  if elt_bytes <= 0 || vector_bytes < 8 then []
+  else
+    let floor_bytes = min vector_bytes 32 in
+    let rec ladder bytes =
+      let lanes = bytes / elt_bytes in
+      let rest = if bytes / 2 >= floor_bytes then ladder (bytes / 2) else [] in
+      if lanes >= 2 then lanes :: rest else rest
+    in
+    ladder vector_bytes
 
-(** The lane count an explicit-SIMD rendering should use for a loop (or micro-kernel column extent)
-    of [extent] iterations over [elt_bytes]-wide elements on a [vector_bytes]-wide register file:
-    the widest vector the extent can fill, [None] where even the narrowest cannot.
+let simd_lanes_for ~vector_bytes ~elt_bytes ~extent =
+  simd_lane_ladder ~vector_bytes ~elt_bytes
+  |> List.filter ~f:(fun lanes -> extent >= lanes)
+  (* Loop trips: [extent / lanes] vector steps plus [extent mod lanes] scalar remainder
+     iterations. Both issue one instruction per body operation, so the sum is comparable across
+     widths with no fitted constant -- and it is what makes the choice extent-shaped rather than
+     width-shaped: it takes the full width on a long loop (517 at 16 lanes is 32 + 5 trips against
+     8 lanes' 64 + 5), and steps down where the wider vector would leave a remainder the narrower
+     one divides away (40 is 2 + 8 against 5 + 0). *)
+  |> List.min_elt ~compare:(fun a b ->
+         let trips lanes = (extent / lanes) + (extent % lanes) in
+         match compare_int (trips a) (trips b) with
+         | 0 -> compare_int b a (* equal trips: the wider vector *)
+         | c -> c)
+
+(** The lane count an explicit-SIMD rendering should use for a loop of [extent] iterations over
+    [elt_bytes]-wide elements on a [vector_bytes]-wide register file: the width of {!simd_lane_ladder}
+    that minimizes loop trips, [None] where even the narrowest exceeds the extent. (The register-tiled
+    micro-kernel searches the ladder itself: its peel is a scalar column loop rather than a remainder
+    of the same body, and it has a fitted cost model for that.)
 
     A single width would make a wider machine emit {e less} vector code than a narrower one — the
     renderings decline outright below one full vector, so widening the auto [cc_vector_bytes] from
     32 to 64 on an AVX-512 target (gh-ocannl-621 follow-up) would drop every f32 loop of extent
     8..15 to the serial fallback, and an accumulating loop loses reassociation with it, which is
-    the whole point of the [Vectorized] retype. Halving instead leaves those loops exactly where
-    they were.
+    the whole point of the [Vectorized] retype. Nor is "the widest that fits" enough: at extent 40
+    a 16-lane vector covers 32 columns and leaves 8 to scalar code, where 8 lanes divide the extent
+    evenly — a wider register file made to run slower. Hence a ladder and a choice, not a number.
 
     The floor is [min vector_bytes 32] — never narrower than the width the machine used before any
     widening. Degrading past it would newly vectorize loops that used to render serially, and a
