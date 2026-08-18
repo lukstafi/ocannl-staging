@@ -20,7 +20,7 @@ the parity gate tightens from 5 loss sequences at 14 ulp to 3 sequences at 2 ulp
 earlier report could not make are now available, both because the arm is held fixed: gh-573's
 end-to-end step ratio (1.28x, non-overlapping, where it was 1.12x inside the noise floor and
 explicitly not claimed), and the cap-default comparison on a uniform arm A (cap 4 beats the default
-cap 8 by 7.1% end to end and 9.2% on the per-kernel instrument, both non-overlapping).**
+cap 8 by 7.1% end to end and 9.4% on the per-kernel instrument, both non-overlapping).**
 
 What forcing does *not* change is as important: the arm A artifacts measured here are the same
 artifacts. `base574A` profiles at 32.4 ms over 117 kernels against the earlier report's 32.33 ms over
@@ -153,9 +153,10 @@ The gate's **first** check is provenance: `gate` is documented as independently 
 artifact directory does not otherwise record what produced it — a stale `OUT_ROOT` populated from
 another checkout would pass every gate below under these labels, because all of them read artifacts
 and none of them knows their origin. So a search now writes the validated role, tree, HEAD and
-backport digests into the cell — and `snap` and `profile` write their own, since they regenerate
-claim-bearing artifacts long afterwards — and the gate requires each manifest to match the tree it
-validates now. **These 18 cells' manifests were backfilled**, honestly and visibly: the check was added during
+backport digests into the cell — and so do `snap`, `profile` and `replay`, each regenerating
+claim-bearing artifacts long after the search (the emitted arm A source, the per-kernel CSVs, and
+the pass-2 timings and losses every table here quotes), which a search manifest would go on matching
+— and the gate requires each manifest to match the tree it validates now. **These 18 cells' manifests were backfilled**, honestly and visibly: the check was added during
 review, after the session had run, so each manifest carries a `.backfilled` note and the gate counts
 them separately (`18 backfilled`). What they attest rather than record is that the cells came from
 this session's driver against these roles' trees, which have validated unchanged before, during and

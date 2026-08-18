@@ -254,6 +254,13 @@ run_cell() {  # <subcommand> <label> <rep> [extra driver args before the flags]
   tree=$(role_tree "$role") || return 2
   flags=$(cell_flags "$label") || return 2
   validate_tree "$role" || return 1
+  # Retract the manifest this subcommand is about to replace BEFORE dispatching: a failed or
+  # interrupted regeneration must not leave the previous run's provenance standing over artifacts
+  # that are now half-rewritten. The driver retracts the artifacts themselves the same way.
+  case $sub in
+    snap|profile|replay) rm -f "$OUT_ROOT/$label/r$rep/$sub.manifest" ;;
+    *) ;;
+  esac
   echo "--- $sub $label r$rep [$flags]"
   "$D" "$sub" "$tree" "$label" "$rep" "$@" $flags
   rc=$?
@@ -268,6 +275,10 @@ run_cell() {  # <subcommand> <label> <rep> [extra driver args before the flags]
       # accept a profile rebuilt from a different tree beside a search manifest that still matched.
       snap) tree_fingerprint "$role" > "$OUT_ROOT/$label/r$rep/snap.manifest" || return 1 ;;
       profile) tree_fingerprint "$role" > "$OUT_ROOT/$label/r$rep/profile.manifest" || return 1 ;;
+      # The pass-2 replay is where every quoted step p50 and every gated loss vector comes from, and
+      # it is regenerable long after the search from any checkout -- the search manifest would still
+      # match, because it attests the search.
+      replay) tree_fingerprint "$role" > "$OUT_ROOT/$label/r$rep/replay.manifest" || return 1 ;;
       *) ;;
     esac
   fi
@@ -380,7 +391,7 @@ assert_cell_provenance() {  # <cell>...
     # per-kernel profile can be regenerated from another checkout while the search manifest stays
     # true, and Part 5's per-kernel claim rests on exactly such a regeneration.
     local d="$OUT_ROOT/${cell%/*}/${cell#*/}" k
-    for k in snap:armA.path profile:kernels-1.csv; do
+    for k in snap:armA.path profile:kernels-1.csv replay:replay2.out; do
       [ -e "$d/${k#*:}" ] || continue
       [ -s "$d/${k%%:*}.manifest" ] || {
         echo "gh612v_session: $cell has ${k#*:} but no ${k%%:*}.manifest -- that artifact was not" >&2

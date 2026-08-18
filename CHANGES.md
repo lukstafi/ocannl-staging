@@ -14,7 +14,7 @@
   session could not make: gh-573 is worth **1.28x end to end** with non-overlapping ranges (it was
   1.12x inside the noise floor, because without the guard the search shipped materialize-all — the
   crude form of the same transform), and cap 4 beats the default cap 8 by **7.1%** end to end and
-  9.2% per-kernel. The default is still not proposed for change: one fixture, one depth, one device.
+  9.4% per-kernel. The default is still not proposed for change: one fixture, one depth, one device.
 
 - **A measurement can ship a chosen placement arm** (gh-ocannl-638): `Train.tune_placements`
   searches both arms and ships the faster one, so a report that profiles the default-placement arm
