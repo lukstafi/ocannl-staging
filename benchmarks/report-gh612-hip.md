@@ -176,6 +176,17 @@ where on CUDA they were the larger half.
   no such config today (both arms always run and the faster one ships), so it is filed rather than
   bodged.
 
+  **Closed since.** [#638](https://github.com/ahrefs/ocannl/issues/638) landed as config
+  `tune_ship_arm`, and [`report-gh612-hip-verified.md`](report-gh612-hip-verified.md) re-runs these
+  cells with arm A forced in all 18 of them: every artifact quoted below now shipped, executed and
+  passed the loss gate (3 sequences within 2 ulp, and within 14 ulp of THIS session's arm B), and
+  the coverage table above is `yes` in every row. Every load-bearing number here reproduces there —
+  the tied lm_head at 8.034 ms against 8.036, the triangle at 8.516 → 1.711 ms against 8.495 →
+  1.702, the same 14-vs-32 and 16-vs-17 signature counts, the same four newly materialized nodes by
+  name. Two claims this report could not make are made there: gh-573's end-to-end ratio (1.28x,
+  non-overlapping, where it was 1.12x inside the noise floor here for the reason Part 3 identifies)
+  and the cap comparison on a uniform arm-A basis.
+
 ### Three instruments, three noise floors
 
 The single most important methodological fact here is that the honest instrument is *not* the

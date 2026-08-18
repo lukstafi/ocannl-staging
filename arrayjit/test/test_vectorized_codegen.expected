@@ -460,4 +460,135 @@
     }
   }
 }
+
+/* --- whole-vector FMA arms by (compute precision, lanes) --- */
+
+/* f16 x 2 lanes */
+#if OCANNL_HAS_ELEMENTWISE_FMA
+acc__ = __builtin_elementwise_fma(lhs__, rhs__, acc__);
+#else
+for (int ocannl_l__ = 0; ocannl_l__ < 2; ++ocannl_l__) acc__[ocannl_l__] = OCANNL_HALF_FMA(lhs__[ocannl_l__], rhs__[ocannl_l__], acc__[ocannl_l__]);
+#endif
+
+/* f16 x 4 lanes */
+#if OCANNL_HAS_ELEMENTWISE_FMA
+acc__ = __builtin_elementwise_fma(lhs__, rhs__, acc__);
+#else
+for (int ocannl_l__ = 0; ocannl_l__ < 4; ++ocannl_l__) acc__[ocannl_l__] = OCANNL_HALF_FMA(lhs__[ocannl_l__], rhs__[ocannl_l__], acc__[ocannl_l__]);
+#endif
+
+/* f16 x 8 lanes */
+#if OCANNL_HAS_ELEMENTWISE_FMA
+acc__ = __builtin_elementwise_fma(lhs__, rhs__, acc__);
+#elif HAS_NATIVE_FLOAT16 && defined(__AVX512FP16__) && defined(__AVX512VL__) && __has_builtin(__builtin_ia32_vfmaddph128_mask)
+acc__ = __builtin_ia32_vfmaddph128_mask(lhs__, rhs__, acc__, (unsigned char)-1);
+#elif HAS_NATIVE_FLOAT16 && defined(__ARM_FEATURE_FP16_VECTOR_ARITHMETIC) && __has_builtin(__builtin_aarch64_fmav8hf)
+{ typedef __fp16 ocannl_hfv__ __attribute__((vector_size(16))); acc__ = (__typeof__(acc__))__builtin_aarch64_fmav8hf((ocannl_hfv__)lhs__, (ocannl_hfv__)rhs__, (ocannl_hfv__)acc__); }
+#else
+for (int ocannl_l__ = 0; ocannl_l__ < 8; ++ocannl_l__) acc__[ocannl_l__] = OCANNL_HALF_FMA(lhs__[ocannl_l__], rhs__[ocannl_l__], acc__[ocannl_l__]);
+#endif
+
+/* f16 x 16 lanes */
+#if OCANNL_HAS_ELEMENTWISE_FMA
+acc__ = __builtin_elementwise_fma(lhs__, rhs__, acc__);
+#elif HAS_NATIVE_FLOAT16 && defined(__AVX512FP16__) && defined(__AVX512VL__) && __has_builtin(__builtin_ia32_vfmaddph256_mask)
+acc__ = __builtin_ia32_vfmaddph256_mask(lhs__, rhs__, acc__, (unsigned short)-1);
+#else
+for (int ocannl_l__ = 0; ocannl_l__ < 16; ++ocannl_l__) acc__[ocannl_l__] = OCANNL_HALF_FMA(lhs__[ocannl_l__], rhs__[ocannl_l__], acc__[ocannl_l__]);
+#endif
+
+/* f16 x 32 lanes */
+#if OCANNL_HAS_ELEMENTWISE_FMA
+acc__ = __builtin_elementwise_fma(lhs__, rhs__, acc__);
+#elif HAS_NATIVE_FLOAT16 && defined(__AVX512FP16__) && __has_builtin(__builtin_ia32_vfmaddph512_mask)
+acc__ = __builtin_ia32_vfmaddph512_mask(lhs__, rhs__, acc__, (unsigned int)-1, 4);
+#else
+for (int ocannl_l__ = 0; ocannl_l__ < 32; ++ocannl_l__) acc__[ocannl_l__] = OCANNL_HALF_FMA(lhs__[ocannl_l__], rhs__[ocannl_l__], acc__[ocannl_l__]);
+#endif
+
+/* f32 x 2 lanes */
+#if OCANNL_HAS_ELEMENTWISE_FMA
+acc__ = __builtin_elementwise_fma(lhs__, rhs__, acc__);
+#else
+for (int ocannl_l__ = 0; ocannl_l__ < 2; ++ocannl_l__) acc__[ocannl_l__] = fmaf(lhs__[ocannl_l__], rhs__[ocannl_l__], acc__[ocannl_l__]);
+#endif
+
+/* f32 x 4 lanes */
+#if OCANNL_HAS_ELEMENTWISE_FMA
+acc__ = __builtin_elementwise_fma(lhs__, rhs__, acc__);
+#elif defined(__FMA__)
+acc__ = __builtin_ia32_vfmaddps(lhs__, rhs__, acc__);
+#elif defined(__aarch64__) && defined(__ARM_FEATURE_FMA) && __has_builtin(__builtin_aarch64_fmav4sf)
+acc__ = __builtin_aarch64_fmav4sf(lhs__, rhs__, acc__);
+#else
+for (int ocannl_l__ = 0; ocannl_l__ < 4; ++ocannl_l__) acc__[ocannl_l__] = fmaf(lhs__[ocannl_l__], rhs__[ocannl_l__], acc__[ocannl_l__]);
+#endif
+
+/* f32 x 8 lanes */
+#if OCANNL_HAS_ELEMENTWISE_FMA
+acc__ = __builtin_elementwise_fma(lhs__, rhs__, acc__);
+#elif defined(__FMA__)
+acc__ = __builtin_ia32_vfmaddps256(lhs__, rhs__, acc__);
+#else
+for (int ocannl_l__ = 0; ocannl_l__ < 8; ++ocannl_l__) acc__[ocannl_l__] = fmaf(lhs__[ocannl_l__], rhs__[ocannl_l__], acc__[ocannl_l__]);
+#endif
+
+/* f32 x 16 lanes */
+#if OCANNL_HAS_ELEMENTWISE_FMA
+acc__ = __builtin_elementwise_fma(lhs__, rhs__, acc__);
+#elif defined(__AVX512F__) && __has_builtin(__builtin_ia32_vfmaddps512_mask)
+acc__ = __builtin_ia32_vfmaddps512_mask(lhs__, rhs__, acc__, (unsigned short)-1, 4);
+#else
+for (int ocannl_l__ = 0; ocannl_l__ < 16; ++ocannl_l__) acc__[ocannl_l__] = fmaf(lhs__[ocannl_l__], rhs__[ocannl_l__], acc__[ocannl_l__]);
+#endif
+
+/* f32 x 32 lanes */
+#if OCANNL_HAS_ELEMENTWISE_FMA
+acc__ = __builtin_elementwise_fma(lhs__, rhs__, acc__);
+#else
+for (int ocannl_l__ = 0; ocannl_l__ < 32; ++ocannl_l__) acc__[ocannl_l__] = fmaf(lhs__[ocannl_l__], rhs__[ocannl_l__], acc__[ocannl_l__]);
+#endif
+
+/* f64 x 2 lanes */
+#if OCANNL_HAS_ELEMENTWISE_FMA
+acc__ = __builtin_elementwise_fma(lhs__, rhs__, acc__);
+#elif defined(__FMA__)
+acc__ = __builtin_ia32_vfmaddpd(lhs__, rhs__, acc__);
+#elif defined(__aarch64__) && defined(__ARM_FEATURE_FMA) && __has_builtin(__builtin_aarch64_fmav2df)
+acc__ = __builtin_aarch64_fmav2df(lhs__, rhs__, acc__);
+#else
+for (int ocannl_l__ = 0; ocannl_l__ < 2; ++ocannl_l__) acc__[ocannl_l__] = fma(lhs__[ocannl_l__], rhs__[ocannl_l__], acc__[ocannl_l__]);
+#endif
+
+/* f64 x 4 lanes */
+#if OCANNL_HAS_ELEMENTWISE_FMA
+acc__ = __builtin_elementwise_fma(lhs__, rhs__, acc__);
+#elif defined(__FMA__)
+acc__ = __builtin_ia32_vfmaddpd256(lhs__, rhs__, acc__);
+#else
+for (int ocannl_l__ = 0; ocannl_l__ < 4; ++ocannl_l__) acc__[ocannl_l__] = fma(lhs__[ocannl_l__], rhs__[ocannl_l__], acc__[ocannl_l__]);
+#endif
+
+/* f64 x 8 lanes */
+#if OCANNL_HAS_ELEMENTWISE_FMA
+acc__ = __builtin_elementwise_fma(lhs__, rhs__, acc__);
+#elif defined(__AVX512F__) && __has_builtin(__builtin_ia32_vfmaddpd512_mask)
+acc__ = __builtin_ia32_vfmaddpd512_mask(lhs__, rhs__, acc__, (unsigned char)-1, 4);
+#else
+for (int ocannl_l__ = 0; ocannl_l__ < 8; ++ocannl_l__) acc__[ocannl_l__] = fma(lhs__[ocannl_l__], rhs__[ocannl_l__], acc__[ocannl_l__]);
+#endif
+
+/* f64 x 16 lanes */
+#if OCANNL_HAS_ELEMENTWISE_FMA
+acc__ = __builtin_elementwise_fma(lhs__, rhs__, acc__);
+#else
+for (int ocannl_l__ = 0; ocannl_l__ < 16; ++ocannl_l__) acc__[ocannl_l__] = fma(lhs__[ocannl_l__], rhs__[ocannl_l__], acc__[ocannl_l__]);
+#endif
+
+/* f64 x 32 lanes */
+#if OCANNL_HAS_ELEMENTWISE_FMA
+acc__ = __builtin_elementwise_fma(lhs__, rhs__, acc__);
+#else
+for (int ocannl_l__ = 0; ocannl_l__ < 32; ++ocannl_l__) acc__[ocannl_l__] = fma(lhs__[ocannl_l__], rhs__[ocannl_l__], acc__[ocannl_l__]);
+#endif
 alias parameter rejected: true

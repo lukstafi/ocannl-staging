@@ -151,6 +151,7 @@ let known_config_keys =
       "autotune_log";
       "tune_inline_flips";
       "tune_flip_ordering";
+      "tune_ship_arm";
       "strict_failure_classification";
       (* Analytic cost model (gh-ocannl-491) *)
       "autotune_keep_fraction";
@@ -266,8 +267,10 @@ let config_key_classification : (config_key_class * string * string list) list =
        the CUDA and HIP compilers to debug compilation, in those two backends' own tags, since no \
        other compiler reads it. That is also why log_level belongs here, without an ordinary \
        verbosity bump churning cache keys. prefer_backend_uniformity does not pick a backend: it \
-       picks how the C-family backends spell their logging expressions, so it is hashed only once \
-       logging actually reaches the kernel",
+       picks how the C-family backends spell their logging expressions, so it is hashed here only \
+       once logging actually reaches the kernel -- its other effect, routing HIP's float-to-fp8 \
+       conversions through the guarded helper (gh-ocannl-647), is unconditional and is hashed in \
+       that backend's own codegen tag instead",
       [
         "large_models";
         "big_models";
@@ -319,6 +322,12 @@ let config_key_classification : (config_key_class * string * string list) list =
       "it makes the tuner try alternative inlining decisions; each alternative is a different \
        program and keys on its own digest",
       [ "tune_inline_flips"; "tune_flip_ordering" ] );
+    ( Search_shaping,
+      "it decides which of the two searched placement arms ships, overriding the measured \
+       comparison rather than changing either arm: each arm is a different program keyed on its \
+       own digest, each arm's crown is cached under that digest either way, and a schedule crowned \
+       under one setting is a valid crown under the other (gh-ocannl-638)",
+      [ "tune_ship_arm" ] );
     ( Execution_neutral,
       "startup and configuration-sourcing chatter",
       [ "suppress_welcome_message"; "log_config_sourcing"; "never_capture_stdout" ] );

@@ -608,6 +608,15 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   runs two searches and keeps one artifact, so a family can win the arm that is then discarded whole
   — read `report.best_label` / `best_tensorized` / `mma_best_ms` per arm (the A/B calls `?report`
   for arm A first and ships the smaller `best_ms`), never the fact that some search crowned it.
+  Since gh-ocannl-638, do not re-derive WHICH arm shipped from the reports' times either: config
+  `tune_ship_arm=a|b` overrides the comparison, and `?on_ship` (`"A"` / `"B"` / `"flip"`) is the
+  callback that says what actually shipped. That knob is what a measurement needs: the discarded
+  arm is never executed against anything (`?report` carries timing metadata, `winner replay ok` is
+  a dispatchability check, and a per-kernel harness times kernels on synthetic buffers without
+  checking results), so profiling arm A while arm B ships leaves the profiled routine
+  output-unverified — the limitation `benchmarks/report-gh612-hip.md` states in its verdict and
+  `report-gh612-hip-verified.md` closes by forcing the arm. Forcing does not skip the other arm's
+  search, so the A-vs-B numbers stay quotable; it does suppress the flip refinement.
   Below GEMM-dominated sizes the crown is a lottery: on `mlp_small`/metal five identical cold-cache
   searches crowned four different families in one arm with a 4.5% spread of best times, while the
   arm gap stayed at 57–95% (gh-ocannl-546, benchmarks/report-gh546-metal.md). Conclusions of the
@@ -790,10 +799,61 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   bit-identical to `builtins.c`'s for all 2^32 floats and all 256 codes — verified exhaustively
   off-tree, which is how a hand-written float codec should be checked, not by sampling — and it is
   written in integer/bitcast form on purpose: Metal compiles with fast math by default, under which
-  the infinity and NaN branches of a float-arithmetic codec are not reliable. fp8 ROUNDING is not
-  portable, though: the software codec (cc, Metal) rounds ties away from zero while the native GPU
-  fp8 types do not, so `test_fp8_roundtrip` pins only exactly-representable values and a golden
-  holding an inexact fp8 value would not survive a backend switch.
+  the infinity and NaN branches of a float-arithmetic codec are not reliable. fp8 rounding is portable
+  too, but only because ours was changed to theirs — see the next entry.
+- fp8 (e5m2) NARROWING is one rounding everywhere, and getting there meant changing ours, not
+  theirs (gh-ocannl-646). A float-to-e5m2 conversion decides four things, and the software codec
+  (`builtins.c`, `Builtins_cc`, `Builtins_metal` — and, through `Ops.single_to_fp8`, the HOST side
+  of every backend) decided all four differently from `__nv_fp8_e5m2` / `__hip_fp8_e5m2`: ties away
+  from zero instead of to even, subnormals flushed instead of rounded into (so code `0x01` was
+  unreachable by narrowing), the sign of a zero dropped, and finite overflow going to infinity
+  instead of saturating to 57344. Since the host side is backend-independent, CUDA and HIP each had
+  a host-vs-device split inside one tensor. The codec now does what both vendors do. They disagree
+  with each other on exactly two inputs — an already-infinite input (CUDA saturates, HIP keeps it
+  infinite) and the sign of a NaN (CUDA drops it) — so those are asserted only up to what all four
+  agree on.
+  Two reusable lessons from how this was settled. Verify a codec against the HARDWARE, not the
+  vendor docs: a kernel sweeping all 2^32 float bit patterns against a candidate runs in seconds on
+  either GPU box, and that is what turned "I believe both use RNE" into an exact difference set.
+  And when both sides of a parity check run the same code — cc and Metal narrow on the host and on
+  the device through this one codec — the check is vacuous by construction, so
+  `test_fp8_codec_parity` also pins a GOLDEN of the narrowed values, which is what those two
+  backends can actually fail.
+- A test that means to exercise a NARROWING conversion has to pin the source precision, or it
+  exercises nothing. Two separate mechanisms make the conversion disappear, and both were hit
+  writing `test_fp8_codec_parity`. Precision inference flows the destination's precision BACKWARDS
+  into the source, so `dst:fp8 =: src` lowers to a byte copy between two fp8 buffers with the
+  narrowing having happened on the host when the source was filled — pass `~top_down_prec:false`
+  AND `Tnode.update_prec src single`. And a virtualized source inlines its cells as literals, at
+  which point the conversion is a constant expression the BACKEND COMPILER folds on the host, so
+  a device-side defect cannot show — `Train.set_materialized` the source. Both failure modes look
+  identical from the outside: the test passes on every backend, which is what one wants to see.
+  The only reliable checks are to read the emitted kernel (`dst[i] = single_to_fp8(src[i])`, source
+  declared `float *`) and to run the mutation — with HIP's guard forced off the leg must FAIL, and
+  it did not until both mechanisms were closed.
+- Narrowing f64 to fp8 must not go through f32 (gh-ocannl-648). Rounding twice moves a double
+  that sits just off an f32 tie ONTO that tie, and the second rounding then breaks it by a rule the
+  first has already made wrong — so `single_to_fp8((float)x)` disagreed with the GPU fp8 types,
+  which convert straight from the double. Not a tie-rule question and not new: under the old
+  tie-away rule the same seam disagreed on the mirror inputs (`x-eps` instead of `x+eps`).
+  `Ops.double_to_fp8` is the one-step codec, used by the C backends' `Double_prec` arm and by the
+  host side — where it matters most, since an OCaml float IS a double, so every host-side fp8 write
+  was double-rounding. Verified against `__nv_fp8_e5m2` over 17.2 billion finite doubles (all 2^32
+  top-halves crossed with four low-half patterns, ties included) and against the f32 codec over all
+  2^32 f32-exact doubles. Metal needs none of it: its `double` is `float`.
+- ROCm miscompiles `(__hip_fp8_e5m2)(float)` for magnitudes around 4e-25 to 3.3e-24, returning up
+  to 2^-14 where the answer is zero (gh-ocannl-647) — an out-of-range shift, `shift mod 32` landing
+  back in range; the exhaustive sweep localizes it to exactly four f32 exponents. CUDA is correct
+  there, and so is our software codec. It IS guarded, but opt-in: under
+  `prefer_backend_uniformity` HIP's float-to-fp8 narrowings route through
+  `ocannl_single_to_fp8_uniform`, which pre-rounds everything below half the smallest subnormal to
+  a signed zero — exact, since those magnitudes round to zero anyway, so outside ROCm's window it
+  changes nothing. The default still emits the platform's own cast (working around a vendor bug in
+  our codegen means carrying it until someone remembers to remove it). `test/config/ocannl_config`
+  sets the flag, so `test_fp8_codec_parity`'s two underflow legs are REAL assertions in the suite,
+  announced as `SKIPPED on hip` only in a flag-off run. The guard covers both narrowing sites — the
+  conversions AND the operator bridges, which narrow an f32 result back to fp8 — through one funnel
+  (`fp8_from_float`); guarding only the conversions was the first version, and a review caught it.
 - Metal buffer binding is the pooled slot-table (`__pools` + `__pool_slots`); raw `gpuAddress`
   casts segfault at dispatch and argument encoders don't fit the binding model. Same-queue
   command buffers overlap over untracked resources: back-to-back runs of the SAME routine need
@@ -885,25 +945,87 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   why the callers bind the operand first. sNaN cannot be tested end to end — host values cross as
   OCaml doubles and the narrowing quiets it — so the structural pins keep both arithmetic spellings
   out by name.
+- **gcc rounded fp16 FMAs twice, and that is visible, not theoretical** (gh-ocannl-621).
+  `OCANNL_HALF_FMA` had two arms: clang's `__builtin_elementwise_fma`, which rounds once at fp16,
+  and everyone else's `FLOAT_TO_HALF(fmaf(...))`, which rounds at float and again at fp16 — so on a
+  target with genuine fp16 arithmetic, gcc disagreed with clang and with every GPU backend's
+  single-rounding `__hfma` / `fma(half, …)`. It now takes `__builtin_fmaf16` where the ISA has the
+  instruction (`__AVX512FP16__` or `__ARM_FEATURE_FP16_VECTOR_ARITHMETIC` — exactly what
+  `cc_backend`'s fp16 probe calls `Native`), which is also 3-5x fewer instructions, because the
+  promoting arm widens and narrows every lane inside the loop. The divergence is not a corner case:
+  a single-rounded fp16 FMA and one promoted through float differ on about one triple in ten
+  thousand (42039 of 4.1e8 searched), and on one in ~29000 even when all three operands are
+  *normal* (3393 of 9.9e7). The tempting dismissal is wrong — `float`'s 24 bits are the `2p + 2`
+  that makes double rounding innocuous for a single multiply or add, but an FMA's exact `a*b + c`
+  can need far more than 24 bits and the guarantee does not extend to it. A search over well-scaled
+  inputs near 1.0 finds zero divergences and reads as a false all-clear. Guard it on the ISA macro,
+  never on `__has_builtin`, which always answers yes for `__builtin_fmaf16`: without the
+  instruction gcc emits a call to `fmaf16()`, which a glibc need not export at all (verified here
+  as a link error).
 - **A vector accumulator update must reach the compiler as ONE vector operation** (gh-ocannl-614,
-  fixed). gcc -O3 register-allocated the per-lane `fmaf` loop catastrophically: on the packed GEBP
-  shape it unrolled the k-loop 7x and spilled the whole C-tile — 18 insns / 8 FMAs / 0 stack refs
-  per k step at `-O2` becoming 279 / 56 / 73 at `-O3`, a ~9x throughput loss at every storage
-  precision (`bin/narrow_gebp_bench` packmma: 112 → 12.6 GFLOP/s at f32, 94 → 10.4 at f16; the
-  earlier claim that f32/bf16 were spared predates the extent-adapted tile width). The cause is the
-  lane subscripting itself, not the unrolling: straight-line lane stores, a lane-indexed scratch
-  array, a `(vtyp){...}` constructor of per-lane `fmaf` calls, and `#pragma GCC unroll 1` all spill
-  the same way, while every form that arrives as one vector op costs the `-O2` count at `-O3`.
-  `C_syntax.vec_fma_builtin` therefore adds a middle arm to `vec_acc_fma` — a target whole-vector
-  FMA builtin (`__builtin_ia32_vfmadd{ps,pd}[256]` under `defined(__FMA__)`) mirroring clang's
-  `__builtin_elementwise_fma`, with the per-lane loop still last. Not `dst = a * b + dst`, which
-  allocates just as well but is only maybe-contracted: under `cc_backend_fp_contract=off` gcc
-  emits a mul and an add, and `schedule_mma_matmul`'s full-mantissa leg (the only bitwise leg whose
-  products are inexact, hence the only one that can see this) then fails. Residual: 512-bit widths
-  and native-fp16 lanes have no listed builtin and keep the per-lane arm, as does `vec_acc_combine`'s
-  `Max`/`Min` loop (no builtin matches `fmaxf`'s NaN semantics) — if a `Vectorized` reduction or a
-  wide-vector kernel benches ~10x off, this is the first thing to check, and
-  `cc_backend_optimization_level=2` still confirms it in one run.
+  gh-ocannl-621, fixed). gcc -O3 register-allocated the per-lane `fmaf` loop catastrophically: on
+  the packed GEBP shape it unrolled the k-loop and spilled the whole C-tile — 18 insns / 8 vector
+  FMAs / 0 stack refs per k step at `-O2` becoming 200 / 4 vector + 48 scalar / 8 at `-O3`, a ~9x
+  throughput loss at every storage precision (`bin/narrow_gebp_bench` packmma: 112 → 12.6 GFLOP/s
+  at f32, 94 → 10.4 at f16; the earlier claim that f32/bf16 were spared predates the extent-adapted
+  tile width). The cause is the lane subscripting itself, not the unrolling: straight-line lane
+  stores, a lane-indexed scratch array, a `(vtyp){...}` constructor of per-lane `fmaf` calls, and
+  `#pragma GCC unroll 1` all spill the same way, while every form that arrives as one vector op
+  costs the `-O2` count at `-O3`. `C_syntax.vec_fma_builtin` therefore adds middle arms to
+  `vec_acc_fma` — target whole-vector FMA builtins mirroring clang's `__builtin_elementwise_fma`,
+  with the per-lane loop still last. Not `dst = a * b + dst`, which allocates just as well but is
+  only maybe-contracted: under `cc_backend_fp_contract=off` gcc emits a mul and an add, and
+  `schedule_mma_matmul`'s full-mantissa leg (the only bitwise leg whose products are inexact, hence
+  the only one that can see this) then fails.
+- **The per-lane arm fails in TWO ways, and the second one is silent.** Besides spilling it can
+  SCALARIZE: SLP declines to reassemble the lane loop, so one lanes-wide FMA becomes `lanes` scalar
+  ones — a lane-count arithmetic loss with no stack traffic to give it away, which is why the
+  census below counts vector and scalar FMAs separately rather than "FMAs". gh-ocannl-621 swept
+  every reachable width this way (static census of the innermost FMA-carrying loop of the emitted
+  micro-kernel, `-O2` vs `-O3`, insns / vector FMAs / scalar FMAs / stack refs), and the verdict is
+  not uniform:
+  - **gcc/aarch64 is the worst-affected target and it is every Linux ARM box's default** (Apple
+    clang takes the `__builtin_elementwise_fma` arm and never sees any of this). f32 × 4 lanes:
+    294 / 8 / 48 / 58 at `-O3` against the builtin's 26 / 16 / 0. f64 × 2 lanes scalarizes
+    completely at *both* levels — 0 vector FMAs, 32 scalar.
+  - x86 f64 × 2 lanes (16-byte vectors) scalarizes the same way at both levels; f64 × 8 (AVX-512)
+    goes 28 / 16 / 0 → 417 / 8 / 96 at `-O3`.
+  - f32 × 16 (AVX-512) is the one width where the per-lane arm is *fine*: 31 insns against the
+    builtin's 28, no spill, no scalarization. Its row is robustness, not a measured win.
+  - At fp16 the vector arm is not where the cost was; see the `OCANNL_HALF_FMA` note below. Once
+    that macro rounds once, SLP reassembles the per-lane fp16 loop into exactly what the explicit
+    builtin emits, so the fp16 rows are robustness rather than a measured win — but their guards
+    have to be the *same* target question as the macro's, or the vector body would round once
+    against a scalar peel rounding twice.
+  - `vec_acc_combine`'s `Max`/`Min` loop still keeps the per-lane form (no builtin matches
+    `fmaxf`'s NaN semantics) — if a `Vectorized` reduction or a wide-vector kernel benches ~10x
+    off, this is the first thing to check, and `cc_backend_optimization_level=2` still confirms it
+    in one run.
+- **`-U__FMA__` does NOT disable the builtin arm of a generated kernel** — `<immintrin.h>`, which
+  the prelude includes under `__AVX2__`, re-defines `__FMA__` through `#pragma GCC target("fma")`
+  in `fmaintrin.h`, and the definition survives the matching `pop_options`. An A/B run that way
+  measures the same arm twice and reads as "the spill is gone"; it cost gh-ocannl-621 a false
+  negative before the preprocessed output was compared. Force the per-lane arm by deleting the
+  `#elif` lines from the emitted `.c` instead, and keep a positive control: building
+  `bin/narrow_gebp_bench` at 97e7d286 (gh-614's parent) still reproduces 12.57 GFLOP/s against
+  HEAD's ~128, and its kernel censuses 199 / 52 / 6 at `-O3`.
+- **Widths that no local hardware can execute still get checked, three ways.** gh-ocannl-621's
+  AVX-512, AVX512-FP16 and aarch64 rows were written on a machine with none of them (QEMU's TCG
+  implements neither AVX-512 nor AVX512-FP16 — `query-cpu-model-expansion` on `-cpu max` reports
+  every `avx512*` flag false — and no qemu-user was installable without root). What is checkable
+  without the hardware: (1) the arm compiles under the target its guard names, and renders exactly
+  one fused instruction at `-ffp-contract=off`, with the operand order readable off the asm;
+  (2) the builtin is the same call gcc's own `<immintrin.h>` inlines for `_mm512_fmadd_ps` and
+  friends, so its semantics are the ISA's; (3) the register-allocation census above, which is a
+  compile-time property and needs no hardware at all. A cross toolchain for (1) and (3) on ARM is
+  two commands without root: `apt-get download gcc-aarch64-linux-gnu …` then `dpkg-deb -x` into a
+  prefix. What that leaves unverified is a wrong *signature*, which is why the new rows carry a
+  second guard the shipped AVX/AVX2 rows do not — `__has_builtin`, which on gcc tracks enabled
+  target features exactly, so a compiler that spells the builtin differently falls through to the
+  per-lane arm instead of failing the kernel compile. (`__has_builtin` is useless for
+  `__builtin_fmaf16`: it always answers yes, and without the ISA feature gcc emits a call to
+  `fmaf16()`, a symbol glibc does not necessarily export — verified here as a link error. That one
+  is guarded on the feature macro.)
 - Computing fp16 in fp16 on a *promoted* target is a ~18x loss against f32-compute-over-fp16
   (measured, same bench) — the reason `fp16_arithmetic` is ignored off-native and pure-f16 seeds
   gate on `hardware_limits.native_fp16_arithmetic`. The decisive pure-f16-vs-f32-GEBP measurement

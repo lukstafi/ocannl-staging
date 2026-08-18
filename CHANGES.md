@@ -2,6 +2,36 @@
 
 ### Added
 
+- **The gh-573 / gh-574 HIP measurement is verified end to end** (gh-ocannl-612,
+  `benchmarks/report-gh612-hip-verified.md`): the first session's ratios rested on default-placement
+  arm A routines that were profiled but, in three of four cells, never executed — the limitation it
+  stated in its own verdict. Re-run on the same box, same commits and same fixture with
+  `tune_ship_arm=a` forcing arm A in all 18 cells, every quoted artifact now shipped and executed:
+  the loss gate covers 36 records at 3 sequences within **2 f32 ulp** (and within 14 ulp of the
+  earlier session's independently executed arm B), and every load-bearing number reproduces — the
+  8.034 ms tied lm_head, the 8.516 → 1.711 ms triangle, the 14-vs-32 and 16-vs-17 signature counts,
+  the same four newly materialized nodes. Holding the arm fixed also yields two claims the first
+  session could not make: gh-573 is worth **1.28x end to end** with non-overlapping ranges (it was
+  1.12x inside the noise floor, because without the guard the search shipped materialize-all — the
+  crude form of the same transform), and cap 4 beats the default cap 8 by **7.1%** end to end and
+  9.4% per-kernel. The default is still not proposed for change: one fixture, one depth, one device.
+
+- **A measurement can ship a chosen placement arm** (gh-ocannl-638): `Train.tune_placements`
+  searches both arms and ships the faster one, so a report that profiles the default-placement arm
+  can rest on routines that were compiled, dispatched and timed but never executed against a
+  reference — `benchmarks/report-gh612-hip.md` had to state exactly that for three of its four
+  cells. Config `tune_ship_arm` (`auto` | `a` | `b`, argument `?ship_arm`) now selects the arm that
+  ships, whatever the timings said, so the profiled artifact is the one whose losses the run
+  reports. Deliberately measurement-only: it announces itself on stderr regardless of
+  `autotune_log`, once when it resolves and once at the decision it changes; it does not skip the
+  other arm's search (the A-vs-B comparison a report quotes is unaffected, and both arms still
+  report in position); it suppresses the `tune_inline_flips` refinement, whose result is neither
+  arm; and a forced arm whose search failed propagates that failure instead of falling back. The
+  shipped artifact is now also reported directly, through the new `?on_ship` callback — the
+  benchmark runners record it in `results.jsonl` instead of re-deriving it from the arms' times,
+  which was only ever valid while nothing could override the comparison, and never described a
+  flip-refined result.
+
 - **The CPU register tiling reaches 16-bit GEMMs** (gh-ocannl-575, the gh-ocannl-516/517
   remainder): `try_register_tile` joined the storage/compute-precision seam — its gates, lane
   geometry and accumulator registers follow the compute precision, narrow-storage operands widen

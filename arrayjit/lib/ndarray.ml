@@ -170,7 +170,7 @@ let create_bigarray (type ocaml elt_t) (prec : (ocaml, elt_t) Ops.precision) ~di
       | Ops.Uint4x32 -> A.fill arr Stdlib.Complex.{ re = pad_value; im = 0.0 }
       | Ops.Half -> A.fill arr pad_value
       | Ops.Bfloat16 -> A.fill arr (Ops.single_to_bfloat16 pad_value)
-      | Ops.Fp8 -> A.fill arr (Char.of_int_exn @@ Ops.single_to_fp8 pad_value)
+      | Ops.Fp8 -> A.fill arr (Char.of_int_exn @@ Ops.double_to_fp8 pad_value)
       | Ops.Single -> A.fill arr pad_value
       | Ops.Double -> A.fill arr pad_value));
   arr
@@ -257,7 +257,7 @@ let set_from_float ?padding arr idx v =
   | Uint4x32_nd arr -> A.set arr adjusted_idx @@ Stdlib.Complex.{ re = v; im = 0.0 }
   | Half_nd arr -> A.set arr adjusted_idx v
   | Bfloat16_nd arr -> A.set arr adjusted_idx @@ Ops.single_to_bfloat16 v
-  | Fp8_nd arr -> A.set arr adjusted_idx @@ Char.of_int_exn @@ Ops.single_to_fp8 v
+  | Fp8_nd arr -> A.set arr adjusted_idx @@ Char.of_int_exn @@ Ops.double_to_fp8 v
   | Single_nd arr -> A.set arr adjusted_idx v
   | Double_nd arr -> A.set arr adjusted_idx v
 
@@ -272,7 +272,7 @@ let fill_from_float arr v =
   | Uint4x32_nd arr -> A.fill arr @@ Stdlib.Complex.{ re = v; im = 0.0 }
   | Half_nd arr -> A.fill arr v
   | Bfloat16_nd arr -> A.fill arr @@ Ops.single_to_bfloat16 v
-  | Fp8_nd arr -> A.fill arr @@ Char.of_int_exn @@ Ops.single_to_fp8 v
+  | Fp8_nd arr -> A.fill arr @@ Char.of_int_exn @@ Ops.double_to_fp8 v
   | Single_nd arr -> A.fill arr v
   | Double_nd arr -> A.fill arr v
 

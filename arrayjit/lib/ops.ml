@@ -939,7 +939,8 @@ let c_convert_precision ~from ~to_ =
   | Fp8_prec _, Single_prec _ -> ("fp8_to_single(", ")")
   | Single_prec _, Fp8_prec _ -> ("single_to_fp8(", ")")
   | Fp8_prec _, Double_prec _ -> ("(double)fp8_to_single(", ")")
-  | Double_prec _, Fp8_prec _ -> ("single_to_fp8((float)", ")")
+  (* One step, not via f32: see [double_to_fp8]. *)
+  | Double_prec _, Fp8_prec _ -> ("double_to_fp8(", ")")
   (* Conversions involving BFloat16 and other types *)
   | Bfloat16_prec _, Half_prec _ -> ("FLOAT_TO_HALF(bfloat16_to_single(", "))")
   | Half_prec _, Bfloat16_prec _ -> ("single_to_bfloat16(HALF_TO_FLOAT(", "))")
@@ -1013,6 +1014,11 @@ external half_to_single : int -> float = "arrayjit_half_to_single"
 external single_to_half : float -> int = "arrayjit_single_to_half"
 external fp8_to_single : int -> float = "arrayjit_fp8_to_single"
 external single_to_fp8 : float -> int = "arrayjit_single_to_fp8"
+
+(** One-step f64 -> e5m2, for the host side (an OCaml float is a double) and for the C backends'
+    [Double_prec] sources. Narrowing via f32 first rounds twice, which disagrees with the GPU fp8
+    types for values just off an f32 tie (gh-ocannl-648). *)
+external double_to_fp8 : float -> int = "arrayjit_double_to_fp8"
 
 external copy_with_padding_c :
   ('a, 'b, Bigarray.c_layout) Bigarray.Genarray.t ->
