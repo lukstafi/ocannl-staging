@@ -17,7 +17,7 @@ open Base
 open Ocannl
 open Stdio
 module IDX = Train.IDX
-open Nn_blocks.DSL_modules
+open Ocannl.Operation.DSL_modules
 
 (* ----- 1. Learning-rate schedules ----- *)
 
@@ -54,7 +54,19 @@ let schedules () =
   Verdict.p "wsd decays below base_lr after the decay point" Float.(lr wsd_s 21 < 1.0);
   Verdict.p "cosine decay is nonincreasing"
     (List.for_all (List.range 5 30) ~f:(fun s ->
-         Float.(lr cos_s Int.(s + 1) <= lr cos_s s +. 1e-12)))
+         Float.(lr cos_s Int.(s + 1) <= lr cos_s s +. 1e-12)));
+  (* Degenerate config: a warmup longer than the horizon must not keep ramping past it. *)
+  let over =
+    {
+      Train.Lr_schedule.kind = Train.Lr_schedule.Cosine;
+      base_lr = 1.0;
+      warmup_steps = 10;
+      total_steps = 5;
+      final_frac = 0.1;
+    }
+  in
+  Verdict.p "the total_steps clamp outranks a longer warmup"
+    Float.(abs (lr over 6 -. 0.1) < 1e-12)
 
 (* ----- Shared deterministic model: logits = b + w*x, mean squared error ----- *)
 

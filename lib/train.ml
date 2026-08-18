@@ -319,8 +319,12 @@ module Lr_schedule = struct
       else Float.max 0.0 @@ Float.min 1.0 @@ (Float.of_int (step - from) /. Float.of_int denom)
     in
     let min_lr = t.base_lr *. t.final_frac in
+    (* The [total_steps] clamp outranks warmup: a warmup longer than the horizon (a degenerate but
+       constructible config — the record is transparent and unvalidated) must not keep ramping past
+       the documented endpoint, so past [total_steps] the decay branch answers (its clamped ratio
+       is 1 there, i.e. the final value). *)
     let with_warmup decayed =
-      if step < t.warmup_steps then
+      if step < t.warmup_steps && step < t.total_steps then
         t.base_lr *. Float.of_int (step + 1) /. Float.of_int t.warmup_steps
       else decayed ()
     in
@@ -429,9 +433,15 @@ type grad_clipping = {
     the AdamW launch): the returned scale leaves gradient buffers untouched and multiplies the
     gradients as the optimizer reads them ({!sgd_update}[ ~grad_scale]).
 
-    Note: clipping does not gate non-finite gradients — a [nan] norm fails the ordered comparison
-    and selects scale 1. Combine with {!grad_checksum} or [Mixed_prec.gated_scaled_update] when
-    inf/nan defense is needed. *)
+    Behavior at the edges of the finite range, deliberately (matching llm.c's
+    [grad_scale = grad_clip / grad_norm], which shares both properties): a [nan] norm fails the
+    ordered comparison and selects scale 1 — clipping does not gate non-finite gradients, combine
+    with {!grad_checksum} or [Mixed_prec.gated_scaled_update] for inf/nan defense. An {e infinite}
+    norm — including the overflow of squaring a finite f32 gradient component above ~1.8e19 (the
+    accumulator is f32 and narrow-storage gradients widen at load, so storage precision does not
+    lower that threshold) — makes the ratio 0, suppressing the gradient term entirely: the step
+    degrades to weight decay alone, strictly more conservative than rescaling an explosion of that
+    magnitude to [max_norm], and self-recovering since the buffers are untouched. *)
 let clip_by_global_norm ?grad_unscale ?(label = "grad_clip") ~max_norm loss =
   let grad_norm, norm_comp = grad_l2_norm ?grad_unscale ~label:(label ^ "_norm") loss in
   let grad_scale = host_scalar ~l:(label ^ "_scale") 1. in
