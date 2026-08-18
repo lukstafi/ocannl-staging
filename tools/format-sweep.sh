@@ -65,19 +65,24 @@ die() { echo "format-sweep: $*" >&2; exit 1; }
 # A failure after formatting started: the EXIT trap resets the checkout.
 abort() { echo "format-sweep: $*" >&2; exit 1; }
 
-# Bounded blocking wait for tools/test-run.sh's per-worktree flock; returns 1
-# (without side effects) if the lock stays held past the bound, which sits
-# just above test-run's default 3600s cap. Used before every source rewrite,
-# INCLUDING the cleanup reset -- see cleanup().
-wait_test_run_idle() {
-  [ -e "$ROOT/.test-run.lock" ] || return 0
+# Acquire tools/test-run.sh's per-worktree flock on fd 7 and HOLD it: the
+# lock lives on the open file description, which bash's fd 7 keeps alive
+# after the probing perl exits (test-run's own take_lock uses this same
+# exec-then-flock(STDIN) pattern). Every source rewrite in this script runs
+# under the held lock, so a test-run invocation arriving mid-rewrite refuses
+# loudly (its designed behavior) instead of starting dune under the rewrite;
+# the lock is released around the sweep's own test phases, which take it
+# themselves. Waits up to just above test-run's 3600s cap; returns 1 past it.
+hold_test_run_lock() {
+  exec 7>>"$ROOT/.test-run.lock" || return 1
   perl -e 'use Fcntl ":flock";
-           open(my $fh, ">>", $ARGV[0]) or exit 0;
-           exit 0 if flock($fh, LOCK_EX | LOCK_NB);
+           exit 0 if flock(STDIN, LOCK_EX | LOCK_NB);
            print STDERR "format-sweep: waiting for the active tools/test-run.sh run to finish...\n";
            alarm 3900; $SIG{ALRM} = sub { exit 1 };
-           exit(flock($fh, LOCK_EX) ? 0 : 1)' "$ROOT/.test-run.lock"
+           exit(flock(STDIN, LOCK_EX) ? 0 : 1)' <&7 \
+    || { exec 7>&- 2>/dev/null || true; return 1; }
 }
+release_test_run_lock() { exec 7>&- 2>/dev/null || true; }
 
 # One sweep at a time per checkout: a second invocation racing the first past
 # the clean-tree gate would format/restore the sources underneath the first
@@ -100,9 +105,12 @@ KEEP=0
 BASE=""
 cleanup() {
   if [ -n "$BASE" ] && [ "$KEEP" = "0" ]; then
-    wait_test_run_idle \
-      || echo "format-sweep: warning: resetting despite a test-run lock held past the bound" >&2
+    # Hold the test-run lock THROUGH the reset -- releasing between waiting
+    # and resetting would let a fresh run start dune exactly then.
+    hold_test_run_lock \
+      || echo "format-sweep: warning: resetting without the test-run lock (held past the bound)" >&2
     git reset -q --hard "$BASE"
+    release_test_run_lock
   fi
   rmdir "$LOCKDIR" 2>/dev/null
 }
@@ -173,16 +181,14 @@ BRANCH=$(git symbolic-ref --quiet --short HEAD || echo "(detached)")
 
 # Never rewrite sources under a live dune: at entry, refuse while a
 # tools/test-run.sh run is active in this checkout (probe its per-worktree
-# flock, the same way its own lock_held does); once underway, WAIT for any
-# run that slipped into a phase gap before each source-rewriting step (see
-# wait_test_run_idle). Holding the flock across the whole sweep would be
-# stronger but is not possible from here -- the sweep's own test phases go
+# flock, the same way its own lock_held does); once underway, every source
+# rewrite -- each fmt round, the promotion, the cleanup reset -- runs WITH
+# the flock held (hold_test_run_lock above), so a test-run invocation
+# arriving mid-rewrite refuses loudly instead of starting dune under it.
+# The lock cannot be held across the sweep's OWN test phases -- they go
 # through test-run.sh, whose take_lock opens its own file description and
-# would deadlock against ours; a cooperative re-entrant protocol would mean
-# changing test-run.sh itself. What remains after the entry probe and the
-# per-rewrite waits is the moment between a wait returning and dune starting
-# to write -- at that point test-run.sh's own lock refuses external runs
-# loudly, so both sides fail safe.
+# would refuse against ours -- so it is released around them and re-acquired
+# (waiting for any run that slipped in) before the next rewrite.
 if [ -e "$ROOT/.test-run.lock" ] \
   && perl -e 'use Fcntl ":flock";
               open(my $fh, ">>", $ARGV[0]) or exit 1;
@@ -219,7 +225,7 @@ while :; do
   iter=$((iter + 1))
   [ "$iter" -le "$MAX_ITER" ] || abort "no fixed point after $MAX_ITER rounds; \
 likely an ocamlformat-hostile golden missing from .ocamlformat-ignore (see header)"
-  wait_test_run_idle \
+  hold_test_run_lock \
     || abort "a tools/test-run.sh run held its lock past the bound; giving up"
   echo "format-sweep: round $iter: formatting"
 
@@ -233,6 +239,7 @@ likely an ocamlformat-hostile golden missing from .ocamlformat-ignore (see heade
     echo "format-sweep: repository already formatted; nothing to do"
     exit 0
   fi
+  release_test_run_lock # our own test phases take the lock themselves
 
   # test-run exits 2 on a lock refusal (an external run grabbed the lock in
   # the gap after our wait) -- report that as the benign race it is, not as a
@@ -259,7 +266,7 @@ likely an ocamlformat-hostile golden missing from .ocamlformat-ignore (see heade
   # modified leaves the status lines identical. tools/promote.sh rather than
   # plain `dune promote`, so a sweep run from Windows Git Bash does not copy
   # CRLF into the goldens.
-  wait_test_run_idle \
+  hold_test_run_lock \
     || abort "a tools/test-run.sh run held its lock past the bound; giving up"
   # -u, not -A: the baseline must not stage untracked artifacts a failing
   # test may have left, or they would ride the final `git add -u` unnoticed.
@@ -291,6 +298,7 @@ likely an ocamlformat-hostile golden missing from .ocamlformat-ignore (see heade
   done < <(git diff --name-only)
   [ -z "$BAD" ] \
     || abort "promotion changed more than source locations in:$BAD -- a real output change, not formatting drift"
+  release_test_run_lock # the next round's test phases take it themselves
 done
 
 if [ -z "$(git status --porcelain)" ]; then
