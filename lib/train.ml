@@ -489,13 +489,14 @@ module Outlier_detector = struct
       healthy baseline; and the moments are recomputed from the stored window on normalized values
       instead of llm.c's running [sum]/[sum_sq] — the [E[x^2] - E[x]^2] form cancels
       catastrophically for a window with a large common offset and small variance, and even a
-      centered sum can overflow its squares once a huge finite spike has been recorded, turning
-      the variance into [infinity] and scoring the {e next} spike 0. Every intermediate here is
-      bounded ([mean] accumulates [x/n]; deviations are taken between [x/mag] and [mean/mag]
-      with [mag = max (abs mean) (max_i (abs x_i))], so they lie in [[-2, 2]]), which no finite
-      window can overflow; O(window) per step is free on the host where llm.c needed O(1) in a
-      kernel-adjacent loop. A genuinely constant-valued window has standard deviation 0, making
-      the z-score of any deviation [infinity] (and of [v = mean], 0). *)
+      centered sum can overflow once samples near the float maximum have been recorded, turning
+      later scores into 0 or [nan] — false passes. Normalization goes first so every intermediate
+      is bounded: [mag = max_i (abs x_i)] is a pure maximum (cannot overflow), the mean is
+      accumulated as [x /. mag /. n] (partial sums within [[-1, 1]]), and deviations
+      [x/mag - mean/mag] lie in [[-2, 2]] — no finite window can overflow any of it; O(window) per
+      step is free on the host where llm.c needed O(1) in a kernel-adjacent loop. A genuinely
+      constant-valued window has standard deviation 0, making the z-score of any deviation
+      [infinity] (and of [v = mean], 0). *)
   let update t v =
     if not (Float.is_finite v) then Float.infinity
     else
@@ -506,16 +507,15 @@ module Outlier_detector = struct
         Float.nan)
       else
         let nf = Float.of_int n in
-        let mean = Array.fold t.window ~init:0. ~f:(fun acc x -> acc +. (x /. nf)) in
-        let mag =
-          Array.fold t.window ~init:(Float.abs mean) ~f:(fun acc x -> Float.max acc (Float.abs x))
-        in
+        let mag = Array.fold t.window ~init:0. ~f:(fun acc x -> Float.max acc (Float.abs x)) in
         let z =
           if Float.(mag = 0.) then
             (* All-zero window: any nonzero [v] is infinitely surprising. *)
             if Float.(v = 0.) then 0. else Float.copysign Float.infinity v
           else
-            let smean = mean /. mag in
+            let smean =
+              Array.fold t.window ~init:0. ~f:(fun acc x -> acc +. (x /. mag /. nf))
+            in
             let s =
               Array.fold t.window ~init:0. ~f:(fun acc x ->
                   let d = (x /. mag) -. smean in

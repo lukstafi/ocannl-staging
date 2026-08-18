@@ -32,3 +32,4 @@ the window survives a nan sample (later scores stay finite): true
 a large-offset window keeps a finite variance (no cancellation): true
 a spike off a constant baseline scores +infinity: true
 a recorded huge spike does not overflow the variance (second spike scores sqrt 3): true
+a maxed-out window still scores (no nan from mean overflow): true

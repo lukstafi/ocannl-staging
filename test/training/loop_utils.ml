@@ -315,7 +315,16 @@ let outlier_detector () =
   let z_spike2 = Train.Outlier_detector.update det 1e308 in
   Verdict.p "a spike off a constant baseline scores +infinity" Float.(z_spike1 = infinity);
   Verdict.p "a recorded huge spike does not overflow the variance (second spike scores sqrt 3)"
-    Float.(abs (z_spike2 -. Float.sqrt 3.) < 1e-6)
+    Float.(abs (z_spike2 -. Float.sqrt 3.) < 1e-6);
+  (* Mean accumulation: a window saturated at the float maximum must not overflow the x/n partial
+     sums into a nan mean -- a sample far below that constant-at-max baseline must score decisively
+     negative (nan fails this comparison, so a poisoned mean fails the claim). *)
+  let det = Train.Outlier_detector.create ~window_size:3 () in
+  List.iter [ Float.max_finite_value; Float.max_finite_value; Float.max_finite_value ] ~f:(fun v ->
+      ignore (Train.Outlier_detector.update det v : float));
+  let z_below_max = Train.Outlier_detector.update det 1.0 in
+  Verdict.p "a maxed-out window still scores (no nan from mean overflow)"
+    Float.(z_below_max < -1e6)
 
 let () =
   schedules ();
