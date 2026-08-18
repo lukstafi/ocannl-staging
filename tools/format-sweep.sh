@@ -254,7 +254,8 @@ if [ -e "$ROOT/.test-run.lock" ] \
   die "a tools/test-run.sh run is active in this checkout; not formatting under it"
 fi
 
-git fetch origin
+run_interruptible git fetch origin
+[ "$RC" -eq 0 ] || die "git fetch failed"
 # --ff-only alone is not enough: merging an OLDER origin/master into a local
 # master that is ahead succeeds as "already up to date", and the end-of-sweep
 # race check would then reset --hard over the unpushed local commits. Require
@@ -280,6 +281,13 @@ if [ "$FORCE" -eq 0 ]; then
   [ -z "$STALE" ] && : || echo "format-sweep: note: unmerged remote branches (no open PR, so proceeding):
 $STALE" >&2
 fi
+
+# Last cleanliness check before the baselines: quiet_gates above waits on
+# the network (gh) and scans worktrees, and an edit made during that must
+# not be recorded as authorized sweep content. A die: BASE is still unset,
+# so cleanup performs no reset over the foreign edit.
+[ -z "$(git status --porcelain)" ] \
+  || die "working tree changed during the entry gates; resolve that first"
 
 BASE=$(git rev-parse HEAD) # arms cleanup()'s reset from here on
 SNAP_TREE=$(tree_hash)     # clean at BASE; every rewrite re-baselines it
@@ -431,14 +439,20 @@ fi
 # exactly the conflict the quiet-period policy exists to prevent. On any
 # failure from here on, the EXIT trap drops the sweep (reset to BASE) -- it is
 # cheap to regenerate, and leaving the commits behind would wedge every later
-# run at the in-sync gate.
-if [ "$FORCE" -eq 0 ] && ! quiet_gates; then
-  die "quiet period ended during the sweep; dropped the sweep (rerun later)"
+# run at the in-sync gate. These network children (gh, fetch, push) go
+# through run_interruptible like every other potentially long child: a TERM
+# during a hung network call must reach cleanup, not sit deferred until KILL
+# leaves the commits and lock behind.
+if [ "$FORCE" -eq 0 ]; then
+  run_interruptible quiet_gates
+  [ "$RC" -eq 0 ] || die "quiet period ended during the sweep; dropped the sweep (rerun later)"
 fi
 
-git fetch origin
+run_interruptible git fetch origin
+[ "$RC" -eq 0 ] || die "git fetch failed; dropped the sweep (rerun later)"
 [ "$(git rev-parse origin/master)" = "$BASE" ] \
   || die "origin/master moved during the sweep; dropped the sweep (rerun later)"
-git push origin master || die "push failed; dropped the sweep (rerun later)"
+run_interruptible git push origin master
+[ "$RC" -eq 0 ] || die "push failed; dropped the sweep (rerun later)"
 KEEP=1
 echo "format-sweep: pushed $SWEEP_SHA"
