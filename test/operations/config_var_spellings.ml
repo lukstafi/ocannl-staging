@@ -66,3 +66,61 @@ let () =
   (* The `_` value separator, on the spelling the old validator called unknown while the reader
      applied it. *)
   show_lookup "read_cmdline_var" "log_level" (Utils.read_cmdline_var "log_level")
+
+(* Which names the library considers addressed to its configuration (gh-ocannl-629). The two halves
+   of the answer are here rather than only in the sibling `config_var_warnings` golden, where the
+   reserved namespaces could only appear as an ABSENCE of warnings -- and an absence reads the same
+   whether the namespace is honoured or the walk never ran.
+
+   No case-only variant is listed: `Ocannl_Backend` is one variable with `OCANNL_BACKEND` on
+   Windows and a different one everywhere else, so its classification is correct and different per
+   platform, which is not something a golden can hold. The dashed spellings, which are unread on
+   every platform, carry that leg instead. *)
+let describe = function
+  | Utils.Env_not_addressed -> "not addressed to OCANNL"
+  | Utils.Env_reserved prefix -> "reserved namespace " ^ prefix
+  | Utils.Env_config_key key -> "configuration key " ^ key
+  | Utils.Env_unread_spelling key -> "unread spelling of " ^ key
+  | Utils.Env_unread_reserved prefix -> "unread casing in the " ^ prefix ^ " namespace"
+  | Utils.Env_unknown_key key -> "addressed to OCANNL, unknown key " ^ key
+
+let () =
+  printf "\nEnvironment variable names, as classified by `Utils.classify_env_var`:\n";
+  List.iter
+    [
+      "ocannl_backend";
+      "OCANNL_BACKEND";
+      "ocannl-backend";
+      "OCANNL-BACKEND";
+      "OCANNL_BACKEDN";
+      "OCANNL_TOOL_SWEEP_STATE";
+      "OCANNL_LOG_LEVEL";
+      "OCANNL_LOG_LEVEL_ROW";
+      "PATH";
+    ]
+    ~f:(fun name ->
+      printf "  %-26s %s\n" ("\"" ^ name ^ "\"") (describe (Utils.classify_env_var name)))
+
+(* The casing leg of the reserved namespaces, as a CLAIM rather than as two more lines above, for
+   the reason that list states: `ocannl_log_level_row` and `OCANNL_LOG_LEVEL_ROW` are one variable
+   on Windows and two here, so the classification is correctly different per platform and a golden
+   cannot hold it. The equivalence holds everywhere -- a lowercase reserved name is read exactly
+   where the environment is case-insensitive -- so that is what is pinned.
+
+   The leg exists because waving reserved names through on the strength of their prefix alone
+   suppressed the warning where the mistake looks most like a success: `ocannl_tool_test_cap=10`
+   and `ocannl_log_level_row=9` are read by nobody -- the shell scripts and the ppx gates spell
+   their names in uppercase -- while looking exactly like the settings they are not (Codex P2 on
+   PR #371). *)
+let read_as_reserved name =
+  match Utils.classify_env_var name with
+  | Utils.Env_reserved _ -> Some true
+  | Utils.Env_unread_reserved _ -> Some false
+  | _ -> None
+
+let () =
+  printf "\n";
+  List.iter [ "ocannl_log_level_row"; "ocannl_tool_test_cap" ] ~f:(fun name ->
+      Verdict.p
+        (Printf.sprintf "%S is read exactly where the environment is case-insensitive" name)
+        (Option.equal Bool.equal (read_as_reserved name) (Some Utils.env_names_case_insensitive)))

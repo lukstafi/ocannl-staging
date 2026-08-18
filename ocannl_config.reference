@@ -45,6 +45,18 @@
 # Repeating fields are disallowed. If the value is an empty string, the default value
 # is used (as if the config was not present).
 
+# A mistake is reported by every source, and by name: an unknown key in an `ocannl_config`
+# file draws `OCANNL warning: unknown config key "..." in <file>` and the run continues on
+# the defaults, an `--ocannl_`-prefixed commandline argument no key would read draws a
+# warning, and so does an `ocannl_`-prefixed environment variable that names no key or is
+# spelled in a way nothing reads (`ocannl-log_level`). Only a built-in profile's payload is
+# fatal about an unknown key, that being this file's own mistake rather than yours. Two
+# environment namespaces are reserved for names that address OCANNL without being
+# configuration, and are never reported: `OCANNL_TOOL_...`, which this repository's scripts
+# and test harnesses use (`OCANNL_TOOL_SWEEP_STATE`, `OCANNL_TOOL_TEST_CAP`), and
+# `OCANNL_LOG_LEVEL_<MODULE>`, the per-module tracing gates that ppx_minidebug reads at
+# preprocessing time. Anything else set under the prefix is taken to be addressed here.
+
 # Bootstrap configurations (read before the config file search begins):
 
 # If true, suppresses the "Welcome to OCANNL!" startup message (printed to stderr).

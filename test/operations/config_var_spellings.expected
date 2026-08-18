@@ -42,3 +42,17 @@ Live lookups, against the environment and commandline the dune rule builds:
     (control) ocannl-dashed_only_key is set to dropped-spelling
   read_cmdline_var "print_decimals_precision": 7, from --ocannl-print-decimals-precision=7
   read_cmdline_var "log_level":         0, from --ocannl_log_level_0
+
+Environment variable names, as classified by `Utils.classify_env_var`:
+  "ocannl_backend"           configuration key backend
+  "OCANNL_BACKEND"           configuration key backend
+  "ocannl-backend"           unread spelling of backend
+  "OCANNL-BACKEND"           unread spelling of backend
+  "OCANNL_BACKEDN"           addressed to OCANNL, unknown key backedn
+  "OCANNL_TOOL_SWEEP_STATE"  reserved namespace ocannl_tool_
+  "OCANNL_LOG_LEVEL"         configuration key log_level
+  "OCANNL_LOG_LEVEL_ROW"     reserved namespace ocannl_log_level_
+  "PATH"                     not addressed to OCANNL
+
+"ocannl_log_level_row" is read exactly where the environment is case-insensitive: true
+"ocannl_tool_test_cap" is read exactly where the environment is case-insensitive: true

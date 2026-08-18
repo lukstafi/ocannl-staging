@@ -22,6 +22,7 @@
  (locks ocannl_training_test)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
@@ -34,6 +35,7 @@
  (locks ocannl_training_test)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (libraries ocannl dataprep)
  (preprocess
@@ -48,6 +50,7 @@
  (locks ocannl_training_test)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules bigram)
  (libraries ocannl dataprep)
@@ -61,6 +64,7 @@
  (locks ocannl_training_test)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (libraries ocannl dataprep arrayjit.verdict)
  (preprocess
@@ -82,6 +86,7 @@
  (deps
   mlp_names.expected
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  ; no-infer keeps mlp_names.actual from becoming a build target, so plain
  ; `dune build` (@all) does not run this slow exe -- only `dune build @slow` does.
@@ -109,6 +114,7 @@
  (deps
   mlp_bn_names.expected
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  ; no-infer keeps mlp_bn_names.actual from becoming a build target (see mlp_names).
  (action
@@ -132,6 +138,7 @@
  (locks ocannl_training_test)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules circles_conv)
  (libraries ocannl dataprep)
@@ -160,6 +167,7 @@
  (deps
   mnist_conv.expected
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  ; no-infer keeps mnist_conv.actual from becoming a build target (see mlp_names).
  (action
@@ -188,6 +196,7 @@
  (deps
   cifar_conv.expected
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  ; no-infer keeps cifar_conv.actual from becoming a build target (see mlp_names).
  (action
@@ -207,6 +216,7 @@
  (locks ocannl_training_test)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules fsm_transformer)
  (libraries ocannl)
@@ -225,6 +235,7 @@
  (locks ocannl_training_test)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules transformer_names)
  (libraries ocannl dataprep)
@@ -240,6 +251,7 @@
  (locks ocannl_training_test)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules tokenizer_roundtrip)
  (libraries base ocannl stdio dataprep)
@@ -265,6 +277,7 @@
  (locks ocannl_training_test)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules virtual_grads_parity)
  (libraries base ocannl stdio)
@@ -281,6 +294,7 @@
  (locks ocannl_training_test)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules mixed_prec_parity)
  (libraries base ocannl stdio arrayjit.verdict)

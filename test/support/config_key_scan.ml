@@ -58,6 +58,57 @@ let longident_of expr =
     report an empty census. *)
 let structure_of content = Parse.implementation (Lexing.from_string content)
 
+(** The ppx_minidebug extension whose argument names a module's compile-time tracing gate. *)
+let tracing_gate_extension = "global_debug_log_level_from_env_var"
+
+(** The environment variables [content] reads at RUN time by name: the string literal argument of
+    a [Sys.getenv] / [Sys.getenv_opt], under any receiver path ([Stdlib.Sys.getenv_opt], [Sys.getenv]
+    with [Base] in scope). A dynamic argument is deliberately not reported -- the reader that takes
+    the name as a parameter is {!Utils.read_env_var} itself, whose keys are a different question
+    (gh-ocannl-628, Codex P2 round 2 on PR #371).
+
+    Walks expressions, not just structure items, because these reads sit anywhere in a function
+    body. *)
+let env_var_reads_in_source content =
+  let found = ref [] in
+  let iterator =
+    {
+      Ast_iterator.default_iterator with
+      expr =
+        (fun self expr ->
+          (match expr.pexp_desc with
+          | Pexp_apply (callee, [ (Asttypes.Nolabel, argument) ]) -> (
+              match (longident_of callee, string_literal argument) with
+              | Some path, Some name -> (
+                  match List.last path with
+                  | Some ("getenv" | "getenv_opt") -> found := name :: !found
+                  | _ -> ())
+              | _ -> ())
+          | _ -> ());
+          Ast_iterator.default_iterator.expr self expr);
+    }
+  in
+  iterator.structure iterator (structure_of content);
+  List.rev !found
+
+(** The environment variables ppx_minidebug reads while preprocessing [content]: the argument of
+    each [%%global_debug_log_level_from_env_var] at the top of the file. What a library must declare
+    in its [preprocessor_deps] for the gate to invalidate anything (gh-ocannl-628).
+
+    Parsed like everything else here rather than grepped: this file's own doc comments name the
+    extension, and a text scan would read a mention as a declaration -- exactly the class of defect
+    that made this module parse in the first place. *)
+let tracing_gates_in_source content =
+  structure_of content
+  |> List.filter_map ~f:(fun item ->
+         match item.pstr_desc with
+         | Pstr_extension (({ txt; _ }, payload), _) when String.equal txt tracing_gate_extension
+           -> (
+             match payload with
+             | PStr [ { pstr_desc = Pstr_eval (expr, _); _ } ] -> string_literal expr
+             | _ -> None)
+         | _ -> None)
+
 (** Every place the [arg_name] label names a configuration key, and what it names it with. [key] is
     [Some k] when the argument is a string literal — the convention both consistency tests rely on
     to find a read — and [None] when it is anything else: a variable, a punned parameter, an

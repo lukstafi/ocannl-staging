@@ -66,11 +66,17 @@ Testing notes:
   `_build/default/<test dir>` when it runs, which makes the result order-dependent (gh-ocannl-586).
   `test/operations/config_dep_completeness` checks this over every `dune` file (gh-ocannl-597).
 - Avoid `dune exec test/.../<name>.exe` for standalone tests: its working directory bypasses the
-  copied `test/config/ocannl_config`, so a test may fail or silently select another backend.
-  Build `test/<dir>/<name>.exe.output`, inspect `_build/default/test/<dir>/<name>.exe.output`,
-  then run `dune runtest test/<dir>/` and promote. Pin `OCANNL_BACKEND` for bin executables.
+  copied `test/config/ocannl_config`, so a test may fail or silently select another backend. On
+  dune >= 3.20 run the one test by its own alias, `dune build @test/<dir>/runtest-<name>`, which
+  applies the `.expected` diff as well as running the test (`dune promote` accepts it). On an
+  older dune, or for a test written as an `(executable)` plus a diffing `(rule)`, build
+  `test/<dir>/<name>.exe.output` (or `<name>.actual`), inspect it under `_build/default/`, then
+  run `dune runtest test/<dir>/` and promote. Pin `OCANNL_BACKEND` for bin executables.
   Check that build's exit status (or let its stderr through): if it fails, the previous
   `.exe.output` stays in place and the stale content reads as a green probe.
+  A backend-uniform golden cannot tell you WHICH backend ran: a test that announces
+  `SKIPPED on <backend>` writes that to stderr while printing the same `<claim>: true` on stdout
+  (gh-ocannl-622).
 - A `(test)` stanza already diffs an adjacent `<name>.expected` against the test's output during
   `dune runtest`; the explicit `rule` + `diff` pattern (as in `test_config_consistency`) is only
   needed for tests not run by a `(test)` stanza, such as the `@slow` rules.
@@ -85,8 +91,12 @@ Testing notes:
   with `pgrep -f`, which can match the waiter itself.
 - Do not judge a Dune test through a pipe unless `pipefail` is set; otherwise the consumer's exit
   status can hide expectation diffs.
-- `OCANNL_BACKEND` is special-cased by tests; other env vars may not retrigger tests without
-  touching sources or cleaning.
+- Dune re-runs a rule for an environment variable only where the stanza DECLARES it, in BOTH
+  spellings `Utils.env_var_names` builds (`ocannl_<key>` and `OCANNL_<KEY>` — the lowercase one is
+  what `read_env_var` consults first). Every test stanza declares `backend`; to pin any other key
+  on a probe, add both spellings to that stanza's deps first. `test/operations/env_var_deps`
+  checks the pairing, and that each library declares the `OCANNL_LOG_LEVEL_<MODULE>` tracing gates
+  its modules read (gh-ocannl-628).
 - Tests read `test/config/ocannl_config` and can emit .ll/.c/.cu/.metal into build_files/.
 - Config startup chatter (the welcome message, the `log_config_sourcing` trace, the profile
   banner) goes to stderr, so an OCANNL-linked executable's stdout stays a clean data channel and

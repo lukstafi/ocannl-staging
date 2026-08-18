@@ -1310,6 +1310,17 @@ that they earn a lookup rather than always-loaded space.
   With it in place, `--root .` and `dune promotion apply` are no longer needed from a worktree;
   `tools/promote.sh` remains the Windows path, for the CRLF stripping. Worktrees placed outside the
   repo need none of this, but see no `ocannl_config` on their ancestor path.
+- Dune tracks an environment variable only where a stanza declares it, and the tracking reaches
+  further than the stanza: `dune rules test/operations/<name>.exe.output` shows the `(Env
+  OCANNL_BACKEND)` dependency travelling from the `(test)` stanza's `(deps ...)` into the
+  `.exe.output` rule dune generates from it, so `OCANNL_BACKEND=cuda dune build …exe.output`
+  really does re-run the test on cuda. What it does NOT do is tell you it ran there: a
+  backend-uniform golden (GPU legs announcing themselves on stderr while printing the same
+  `<claim>: true` on stdout) makes the cuda `.exe.output` byte-identical to the cc one, which is
+  how gh-ocannl-622 came to read a cc-looking file as proof the recipe was broken. It was the
+  inference that was broken; the recipe holds for DECLARED variables, and gh-ocannl-628 is the
+  hole that was real — the lowercase spelling `read_env_var` consults first was declared nowhere,
+  so `ocannl_backend=metal` decided the backend while invalidating nothing.
 - Deleting a file target out from under dune is not a way to force it to re-run: `dune build
   <that target>` afterwards exits 0 having produced nothing (observed on dune 3.23.1 with
   `test/operations/<name>.exe.output`), and `-f/--force` does not rescue it — `--force` only
