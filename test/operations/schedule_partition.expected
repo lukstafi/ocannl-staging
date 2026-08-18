@@ -22,5 +22,10 @@ the materializing unroll left the inner loop only inside a Local_scope: true
 breakpoints of a scope-nested loop are the pad guard's flip point: true
 partitioning the scope-nested loop folds the pad guard: true
 scope-nested partition matches reference: true
+the materializing unroll left one copy of the inner loop per step: true
+the copies' guards flip at different points, and the union is what the copies need: true
+partitioning at the union folds every copy's guard: true
+partition over many bindings matches reference: true
+copies inside a Local_scope contribute their breakpoints too: true
 
 Done.

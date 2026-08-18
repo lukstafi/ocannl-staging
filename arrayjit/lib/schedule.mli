@@ -403,10 +403,14 @@ val partition_breakpoints : axis:Indexing.symbol -> Low_level.t -> int list
     points that fall strictly inside the loop range, sorted and deduplicated (possibly empty — e.g.
     when every guard is already interval-decided); partitioning at them makes every such guard
     interval-decided within each segment (for interval-ranged comparisons: outside the mixed
-    segments), so {!apply}'s trailing simplify erases them. The [axis] loop is located the way
-    {!apply} rewrites it — including inside a [Local_scope] body, where the accumulation mints of a
+    segments), so {!apply}'s trailing simplify erases them. Loops are located the way {!apply}
+    rewrites them (gh-ocannl-668): inside a [Local_scope] body, where the accumulation mints of a
     materializing {!constructor-Unroll} or a {!constructor-Partition} put the segment and inner
-    loops (gh-ocannl-668). Raises [Invalid_argument] when no loop binds [axis]. *)
+    loops; and over EVERY loop binding [axis], not the first — a materializing
+    {!constructor-Unroll} leaves one copy per unrolled step with a different constant substituted
+    for the unrolled index, so one source guard's copies flip at different points and the result is
+    their union (each copy filtered by its own range). Raises [Invalid_argument] when no loop binds
+    [axis]. *)
 
 val expand_zero : tn:Tn.t -> optop * Indexing.symbol list
 (** Builds an {!constructor-Expand_zero} with one fresh symbol per axis of [tn] (forcing [tn]'s
