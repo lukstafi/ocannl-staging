@@ -710,15 +710,74 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
           for_loop { fc with axis = Unrolled })
   | Unroll { axis; materialize = true } ->
       rewrite_loop ~what:"Schedule.Unroll" ~sym:axis llc ~f:(fun fc ->
-          unflat_lines
-            (List.init
-               (fc.to_ - fc.from_ + 1)
-               ~f:(fun k ->
-                 let v = fc.from_ + k in
-                 refresh_scopes
-                 @@ map_code
-                      ~fidx:(subst_axis_index ~sym:axis ~by:{ terms = []; offset = v })
-                      fc.body)))
+          let copy k body =
+            refresh_scopes
+            @@ map_code
+                 ~fidx:(subst_axis_index ~sym:axis ~by:{ terms = []; offset = fc.from_ + k })
+                 body
+          in
+          (* gh-ocannl-639: when the unrolled loop is (a nest ending in) a single accumulation
+             statement, unroll into the scope-local form virtualization gives virtual accumulators
+             — one [Local_scope] holding the running value, one copy of the update per iteration,
+             one store — instead of one read-modify-write [Set] per copy. This is where the
+             provenance lives: only genuine unrolled copies of ONE source assignment may share an
+             accumulator residency (a codegen pass looking at adjacent same-cell [Set]s cannot
+             tell them apart from two user-authored assignments, whose separate stores are their
+             semantics). The rewrite is numerics-neutral relative to the not-unrolled loop under
+             every compute-precision policy: the scope renders at the same precision the policy
+             gives a serial reduction's accumulator ([C_syntax.scope_prec_of], including the
+             rng-census and storage=compute cases where that is the storage precision), so the
+             unrolled candidate computes exactly what the serial baseline computes — which is the
+             invariant autotune's menu depends on (candidates compete on speed, never numerics). *)
+          let strip stmts =
+            List.filter stmts ~f:(function Low_level.Noop | Comment _ -> false | _ -> true)
+          in
+          let idx_mentions sym (idx : Indexing.axis_index) =
+            match idx with
+            | Indexing.Iterator s -> Indexing.equal_symbol s sym
+            | Indexing.Affine { symbols; _ } ->
+                List.exists symbols ~f:(fun (_, s) -> Indexing.equal_symbol s sym)
+            | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
+          in
+          let rec peel ~free ~rebuild body =
+            match strip (flat_lines [ body ]) with
+            | [ For_loop ({ index; body = ibody; axis = Serial | Unrolled; _ } as r) ] ->
+                peel ~free:(index :: free)
+                  ~rebuild:(fun b -> rebuild (For_loop { r with body = b }))
+                  ibody
+            | [ Set { tn; idcs; llsc; debug } ]
+              when (not
+                      (Array.exists idcs ~f:(fun idx ->
+                           List.exists free ~f:(fun s -> idx_mentions s idx))))
+                   && Option.is_some (Low_level.accum_update_parts ~tn ~idcs llsc) ->
+                Some (tn, idcs, llsc, debug, rebuild)
+            | _ -> None
+          in
+          match peel ~free:[ axis ] ~rebuild:(fun b -> b) fc.body with
+          | Some (tn, idcs, llsc, debug, rebuild) ->
+              let id = Low_level.get_scope tn in
+              let update = Low_level.subst_accum_read ~tn ~idcs ~id llsc in
+              let copies =
+                List.init
+                  (fc.to_ - fc.from_ + 1)
+                  ~f:(fun k -> copy k (rebuild (Low_level.Set_local (id, update))))
+              in
+              Set
+                {
+                  tn;
+                  idcs;
+                  llsc =
+                    Local_scope
+                      {
+                        id;
+                        body =
+                          unflat_lines (Low_level.Set_local (id, Low_level.Get (tn, idcs)) :: copies);
+                        orig_indices = idcs;
+                      };
+                  debug;
+                }
+          | None ->
+              unflat_lines (List.init (fc.to_ - fc.from_ + 1) ~f:(fun k -> copy k fc.body)))
   | Pad { axis; to_multiple_of } ->
       (* gh-ocannl-485 (PADTO): extend the loop extent to the next multiple of [to_multiple_of] and
          guard each effectful leaf statement of the body with [If (axis < N)] — the pad iterations

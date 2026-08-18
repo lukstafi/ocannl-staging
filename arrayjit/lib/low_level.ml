@@ -4872,6 +4872,69 @@ let strip_zero_init_for_local (id : scope_id) (body : t) : t option =
   | For_loop _ -> Some body
   | _ -> None
 
+(* gh-ocannl-639: whether a scalar (resp. a statement body) reads or writes [tn] anywhere — the
+   accumulation recognizers below use it to certify that an update's contribution is free of the
+   accumulator's node, which is what licenses holding the accumulator out of memory across a
+   reduction. *)
+let rec scalar_touches_tn tn (llsc : scalar_t) =
+  match llsc with
+  | Get (tn2, _) | Get_merge_buffer (tn2, _) -> Tn.equal tn tn2
+  | Get_dynamic { tn = tn2; dyn_value = v, _; _ } -> Tn.equal tn tn2 || scalar_touches_tn tn v
+  | Local_scope { body; _ } -> code_touches_tn tn body
+  | Get_local _ | Constant _ | Constant_bits _ | Embed_index _ -> false
+  | Ternop (_, (a, _), (b, _), (c, _)) ->
+      scalar_touches_tn tn a || scalar_touches_tn tn b || scalar_touches_tn tn c
+  | Binop (_, (a, _), (b, _)) -> scalar_touches_tn tn a || scalar_touches_tn tn b
+  | Unop (_, (a, _)) -> scalar_touches_tn tn a
+
+and code_touches_tn tn (llc : t) =
+  match llc with
+  | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ -> false
+  | Seq (a, b) -> code_touches_tn tn a || code_touches_tn tn b
+  | For_loop { body; _ } -> code_touches_tn tn body
+  | If { cond = c, _; body } -> scalar_touches_tn tn c || code_touches_tn tn body
+  | Zero_out tn2 -> Tn.equal tn tn2
+  | Set { tn = tn2; llsc; _ } -> Tn.equal tn tn2 || scalar_touches_tn tn llsc
+  | Set_dynamic { tn = tn2; dyn_value = v, _; llsc; _ } ->
+      Tn.equal tn tn2 || scalar_touches_tn tn v || scalar_touches_tn tn llsc
+  | Set_from_vec { tn = tn2; arg = a, _; _ } -> Tn.equal tn tn2 || scalar_touches_tn tn a
+  | Set_local (_, llsc) -> scalar_touches_tn tn llsc
+  | Tile_mma { d = d_tn, _; a = a_tn, _; b = b_tn, _; _ } ->
+      Tn.equal tn d_tn || Tn.equal tn a_tn || Tn.equal tn b_tn
+
+(* gh-ocannl-639: the accumulation-update statement shape [tn[idcs] = op(tn[idcs], contrib)] (or
+   its FMA form) over an associative-commutative [op], with [contrib] free of [tn]. The single
+   source of truth for [C_syntax]'s widened renderings (the serial-fallback nest rewrite and its
+   siblings) and for [Schedule.Unroll ~materialize:true]'s scope-form unrolling — sharing it is
+   what keeps "what counts as an accumulation" from drifting between the schedule transform and
+   the emission that must honor it. *)
+let accum_update_parts ~tn ~idcs (llsc : scalar_t) : (Ops.binop * scalar_t) option =
+  let is_acc s = equal_scalar_t s (Get (tn, idcs)) in
+  let reduce_op = function Ops.Add | Ops.Mul | Ops.Max | Ops.Min -> true | _ -> false in
+  match llsc with
+  | Binop (op, (a, _), (b, _)) when reduce_op op && is_acc a && not (scalar_touches_tn tn b) ->
+      Some (op, b)
+  | Binop (op, (a, _), (b, _)) when reduce_op op && is_acc b && not (scalar_touches_tn tn a) ->
+      Some (op, a)
+  | Ternop (Ops.FMA, (a, pa), (b, pb), (c, _))
+    when is_acc c && (not (scalar_touches_tn tn a)) && not (scalar_touches_tn tn b) ->
+      Some (Ops.Add, Binop (Ops.Mul, (a, pa), (b, pb)))
+  | _ -> None
+
+(* Retarget an accumulation update's read of [tn[idcs]] to the scope local [id] — the shapes
+   [accum_update_parts] admits only carry the accumulator read as a direct operand of the top
+   operator. *)
+let subst_accum_read ~tn ~idcs ~id (llsc : scalar_t) : scalar_t =
+  let subst ((s, p) : scalar_arg) : scalar_arg =
+    if equal_scalar_t s (Get (tn, idcs)) then (Get_local id, p) else (s, p)
+  in
+  match llsc with
+  | Binop (op, a, b) -> Binop (op, subst a, subst b)
+  | Ternop (op, a, b, c) -> Ternop (op, subst a, subst b, subst c)
+  | _ ->
+      (* [accum_update_parts] admits only the two shapes above. *)
+      assert false
+
 (* gh-343: extract the per-iteration one-hot contribution from an accumulation [acc] in which the
    running total is recognized by [acc_is]. Handles the [Binop (Add, total, contribution)] form
    (either operand order) and the fused [Ternop (FMA, a, b, total)] form, where FMA(a,b,total) = a*b

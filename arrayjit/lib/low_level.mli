@@ -241,6 +241,27 @@ val has_accumulation : t -> bool
     by codegen fallbacks that must not assert iteration independence (e.g. vectorization pragmas)
     over an accumulating body (gh-ocannl-468). *)
 
+val scalar_touches_tn : Tnode.t -> scalar_t -> bool
+(** Whether the scalar reads the node anywhere (gh-ocannl-639) — certifies that an accumulation's
+    contribution is free of the accumulator's node, which licenses holding the accumulator out of
+    memory across the reduction. *)
+
+val code_touches_tn : Tnode.t -> t -> bool
+(** The statement-body counterpart of {!scalar_touches_tn}: any read or write of the node. *)
+
+val accum_update_parts :
+  tn:Tnode.t -> idcs:Indexing.axis_index array -> scalar_t -> (Ops.binop * scalar_t) option
+(** The accumulation-update statement shape [tn[idcs] = op(tn[idcs], contrib)] (or its FMA form)
+    over an associative-commutative [op], with [contrib] free of [tn]; returns [(op, contrib)].
+    The single source of truth shared by [C_syntax]'s widened renderings and
+    [Schedule.Unroll ~materialize:true]'s scope-form unrolling (gh-ocannl-639), so "what counts as
+    an accumulation" cannot drift between the schedule transform and the emission. *)
+
+val subst_accum_read :
+  tn:Tnode.t -> idcs:Indexing.axis_index array -> id:scope_id -> scalar_t -> scalar_t
+(** Retarget an {!accum_update_parts}-shaped update's read of [tn[idcs]] to the scope local [id].
+    Raises on any other shape. *)
+
 (** {2 Hardware axis analyses}
 
     Phase B of docs/proposals/axis-types-for-loops.md. Hardware slot assignment is positional, not

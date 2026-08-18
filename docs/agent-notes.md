@@ -934,11 +934,20 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   codegen into the `Local_scope` form virtualization gives virtual accumulators
   (`C_syntax.try_widen_serial_reduce`) and rendering that — `scope_prec_of` and the
   `Set_local`/`Get_local` arms already carry the widening. It joins virtual scopes,
-  `try_vectorize_reduce`'s epilogue and `try_register_tile`'s C-tile, and covers BOTH unroll
-  representations (autotune proposes `Unroll` over any Serial loop of extent <= 8, reduction axes
-  included): an `Unrolled`-annotated reduction loop widens like a serial one, and a materialized
-  unroll — a run of consecutive accumulating `Set`s, no loop left — collapses per maximal
-  adjacent run in the `Seq` rendering. It is inert wherever `comp_prec` is the identity (f32/f64,
+  `try_vectorize_reduce`'s epilogue and `try_register_tile`'s C-tile. The peel accepts
+  Serial/`Unrolled` levels (autotune proposes `Unroll` over any Serial loop of extent <= 8,
+  reduction axes included), sees through the pure-index guard shape `If (i < bound)` (gh-490
+  symbolic extents — data-dependent guards are NOT transparent), hoists through a scope-form base
+  (a `Set` whose value is already the accumulation `Local_scope`, reusing its id), and also serves
+  hardware-annotated loops the backend serializes for lack of a hardware index (cc's
+  `Workgroup_reduce`). A MATERIALIZED unroll never reaches codegen as bare copies:
+  `Sched.Unroll ~materialize:true` itself rewrites a recognized accumulation nest into the scope
+  form — that is where the provenance lives, since a codegen pass looking at adjacent same-cell
+  `Set`s cannot tell unrolled copies of one assignment from two user-authored assignments, whose
+  separate stores (and separate narrowings) are their semantics (`accum_width`'s 256+1+1 leg pins
+  the boundary). The shared statement recognizer is `Low_level.accum_update_parts` — change "what
+  counts as an accumulation" only there, or the schedule transform and the emission drift. The
+  widening is inert wherever `comp_prec` is the identity (f32/f64,
   GPU backends, `narrow_compute_f32=false`, native fp16), and it declines twice more: under
   `debug_log_from_routines` (a `Local_scope` body renders with `log_set_locals:false`, so the
   rewrite would silence the per-iteration trace — the per-step `Set` form is the traceable one,
