@@ -106,17 +106,17 @@ let () =
      segment as its own routine. Mirrors bench_conv_diag; the gpt graph is forward-only, so the
      populating run is the same [fwd] routine that is then decomposed. *)
   (if H.env_flag "BENCH_SEG_TIMES" then (
-     let batch_ref = IDX.find_exn (Context.bindings routine) batch_n in
+     let batch_ref = IDX.find_exn routine.Context.bindings batch_n in
      batch_ref := 0;
      Train.run ctx routine;
      Context.sync ctx;
      H.time_segments ?promote_locals ~backend ~limits ~static_indices:[ batch_n ] ~ctx ~comp:fwd
        ~bindings
-       ~bind:(fun r -> IDX.find_exn (Context.bindings r) batch_n := 0)
+       ~bind:(fun r -> IDX.find_exn r.Context.bindings batch_n := 0)
        opt));
   (* Time a few individual steps with a full sync each. *)
   if H.env_flag "BENCH_STEPS" then
-    let batch_ref = IDX.find_exn (Context.bindings routine) batch_n in
+    let batch_ref = IDX.find_exn routine.Context.bindings batch_n in
     for step = 0 to 2 do
       batch_ref := step % n_batches;
       let t0 = Unix.gettimeofday () in

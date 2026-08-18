@@ -188,9 +188,9 @@ let () =
   let ctx, infer_routine = Context.compile ctx infer_comp infer_bindings in
 
   let open Operation.At in
-  let step_ref = IDX.find_exn (Context.bindings sgd_step) step_n in
-  let batch_ref = IDX.find_exn (Context.bindings sgd_step) batch_n in
-  let counter_ref = IDX.find_exn (Context.bindings infer_routine) counter_n in
+  let step_ref = IDX.find_exn sgd_step.Context.bindings step_n in
+  let batch_ref = IDX.find_exn sgd_step.Context.bindings batch_n in
+  let counter_ref = IDX.find_exn infer_routine.Context.bindings counter_n in
   counter_ref := 0;
   Train.set_materialized batch_loss.value;
 

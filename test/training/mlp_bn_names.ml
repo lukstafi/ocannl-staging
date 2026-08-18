@@ -183,9 +183,9 @@ let () =
   let ctx = Train.init_params ctx bindings batch_loss in
 
   let sgd_step = Train.to_routine ctx bindings (Asgns.sequence [ update; sgd ]) in
-  let ctx = Context.context sgd_step in
+  let ctx = sgd_step.Context.context in
   let open Operation.At in
-  let step_ref = IDX.find_exn (Context.bindings sgd_step) step_n in
+  let step_ref = IDX.find_exn sgd_step.Context.bindings step_n in
   Train.set_materialized batch_loss.value;
 
   let ctx_buf = Array.create ~len:(batch_size * block_size * vocab_size) 0. in
@@ -248,8 +248,8 @@ let () =
     ~~("mlp_names eval";
        eval_loss.forward)
   in
-  let eval_step = Train.to_routine (Context.context sgd_step) IDX.empty eval_comp in
-  let ctx = Context.context eval_step in
+  let eval_step = Train.to_routine sgd_step.Context.context IDX.empty eval_comp in
+  let ctx = eval_step.Context.context in
   let mean_loss_over (ctx_arr, tgt_arr, n) =
     let nb = n / batch_size in
     if nb = 0 then 0.0
@@ -302,9 +302,9 @@ let () =
   in
   Train.set_materialized infer_logits.value;
   Train.set_materialized infer_input.value;
-  let infer_step = Train.to_routine (Context.context eval_step) infer_bindings infer_comp in
-  let ctx = Context.context infer_step in
-  let counter_ref = IDX.find_exn (Context.bindings infer_step) counter_n in
+  let infer_step = Train.to_routine eval_step.Context.context infer_bindings infer_comp in
+  let ctx = infer_step.Context.context in
+  let counter_ref = IDX.find_exn infer_step.Context.bindings counter_n in
   counter_ref := 0;
 
   let dot_idx = Dataprep.Names.char_index '.' in

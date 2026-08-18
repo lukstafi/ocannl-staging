@@ -20,11 +20,11 @@ let test_raw_dependency () =
   let sgd = Train.sgd_update ~learning_rate l in
   let ctx = Train.init_params ctx IDX.empty l in
   let grad_routine = Train.to_routine ctx IDX.empty grad in
-  let sgd_routine = Train.to_routine (Context.context grad_routine) IDX.empty sgd in
-  let grad_id = Context.routine_id grad_routine in
-  let sgd_deps = Context.execution_deps sgd_routine in
-  Verdict.p "sgd depends on grad" (List.mem sgd_deps grad_id ~equal:Int.equal);
-  Verdict.p "sgd has deps" (not (List.is_empty sgd_deps));
+  let sgd_routine = Train.to_routine grad_routine.Context.context IDX.empty sgd in
+  let grad_id = grad_routine.Context.routine_id in
+  let sgd_deps = sgd_routine.Context.execution_deps in
+  Verdict.p "sgd depends on grad" (Set.mem sgd_deps grad_id);
+  Verdict.p "sgd has deps" (not (Set.is_empty sgd_deps));
   (* Correct order: grad then sgd *)
   let ctx' = Context.run ctx grad_routine in
   let _ctx' = Context.run ctx' sgd_routine in
@@ -46,13 +46,13 @@ let test_disjoint () =
   (* Compile from same context — sibling branches, should be independent *)
   let routine_x = Train.to_routine ctx IDX.empty grad_x in
   let routine_y = Train.to_routine ctx IDX.empty grad_y in
-  let x_id = Context.routine_id routine_x in
-  let y_id = Context.routine_id routine_y in
-  let x_deps = Context.execution_deps routine_x in
-  let y_deps = Context.execution_deps routine_y in
+  let x_id = routine_x.Context.routine_id in
+  let y_id = routine_y.Context.routine_id in
+  let x_deps = routine_x.Context.execution_deps in
+  let y_deps = routine_y.Context.execution_deps in
   (* Neither should depend on the other — they may have deps on init_params routines *)
-  Verdict.p "x does not depend on y" (not (List.mem x_deps y_id ~equal:Int.equal));
-  Verdict.p "y does not depend on x" (not (List.mem y_deps x_id ~equal:Int.equal));
+  Verdict.p "x does not depend on y" (not (Set.mem x_deps y_id));
+  Verdict.p "y does not depend on x" (not (Set.mem y_deps x_id));
   (* Both should be runnable since init_params already executed *)
   Verdict.p "can_run x" (Context.can_run ctx routine_x);
   Verdict.p "can_run y" (Context.can_run ctx routine_y);
@@ -74,7 +74,7 @@ let test_can_run () =
   let sgd = Train.sgd_update ~learning_rate l in
   let ctx = Train.init_params ctx IDX.empty l in
   let grad_routine = Train.to_routine ctx IDX.empty grad in
-  let sgd_routine = Train.to_routine (Context.context grad_routine) IDX.empty sgd in
+  let sgd_routine = Train.to_routine grad_routine.Context.context IDX.empty sgd in
   Verdict.p "can_run grad (before execution)" (Context.can_run ctx grad_routine);
   Verdict.p "cannot run sgd (before grad)" (not (Context.can_run ctx sgd_routine));
   let ctx' = Context.run ctx grad_routine in
@@ -95,7 +95,7 @@ let test_wrong_order_raises () =
   let sgd = Train.sgd_update ~learning_rate l in
   let ctx = Train.init_params ctx IDX.empty l in
   let grad_routine = Train.to_routine ctx IDX.empty grad in
-  let sgd_routine = Train.to_routine (Context.context grad_routine) IDX.empty sgd in
+  let sgd_routine = Train.to_routine grad_routine.Context.context IDX.empty sgd in
   (* sgd depends on grad — running sgd first must fail *)
   try
     ignore (Context.run ctx sgd_routine);
@@ -117,7 +117,7 @@ let test_reexecution () =
   let sgd = Train.sgd_update ~learning_rate l in
   let ctx = Train.init_params ctx IDX.empty l in
   let grad_routine = Train.to_routine ctx IDX.empty grad in
-  let sgd_routine = Train.to_routine (Context.context grad_routine) IDX.empty sgd in
+  let sgd_routine = Train.to_routine grad_routine.Context.context IDX.empty sgd in
   let ctx' = Context.run ctx grad_routine in
   let ctx' = Context.run ctx' sgd_routine in
   let _ctx' = Context.run ctx' grad_routine in
@@ -139,10 +139,10 @@ let test_rollback_execution () =
   let sgd = Train.sgd_update ~learning_rate l in
   let ctx = Train.init_params ctx IDX.empty l in
   let grad_routine = Train.to_routine ctx IDX.empty grad in
-  let sgd_routine = Train.to_routine (Context.context grad_routine) IDX.empty sgd in
+  let sgd_routine = Train.to_routine grad_routine.Context.context IDX.empty sgd in
   let ctx' = Context.run ctx grad_routine in
   Verdict.p "can_run sgd (after grad)" (Context.can_run ctx' sgd_routine);
-  Context.rollback_execution ctx' (Context.routine_id grad_routine);
+  Context.rollback_execution ctx' grad_routine.Context.routine_id;
   Verdict.p "cannot run sgd (after rollback)" (not (Context.can_run ctx' sgd_routine));
   (* The ledger is shared by reference across the lineage, so the rollback is visible from the
      context the routine was compiled from as well. *)
@@ -164,14 +164,14 @@ let test_poisoned_lineage () =
   let routine = Train.to_routine ctx IDX.empty grad in
   let ctx = Context.run ctx routine in
   Context.poison_lineage ctx
-    ~routine_name:(Context.routine_name routine)
+    ~routine_name:routine.Context.name
     (Failure "synthetic device failure");
   let refuses what f =
     match f () with
     | _ -> printf "%s: not refused (BUG)\n" what
     | exception Failure msg ->
         printf "%s refused, names the routine: %b, names the cause: %b\n" what
-          (String.is_substring msg ~substring:(Context.routine_name routine))
+          (String.is_substring msg ~substring:routine.Context.name)
           (String.is_substring msg ~substring:"synthetic device failure")
   in
   refuses "run" (fun () -> ignore (Context.run ctx routine));

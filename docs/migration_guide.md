@@ -364,10 +364,10 @@ let train_with_schedule get_batch model input_tensor target_tensor steps =
   let routine = Train.to_routine ctx bindings 
     (Asgns.sequence [update; sgd]) in
   (* Value access is context-mediated (gh-ocannl-333): read/write through the routine's context. *)
-  let ctx = Context.context routine in
+  let ctx = routine.Context.context in
   
   (* Get reference to step counter *)
-  let step_ref = IDX.find_exn (Context.bindings routine) step_n in
+  let step_ref = IDX.find_exn routine.Context.bindings step_n in
   step_ref := 0;
   
   (* Training loop - update input data each step *)
@@ -433,7 +433,7 @@ let train_batched data labels batch_size epochs =
     (Asgns.sequence [update; sgd]) in
   
   (* Get batch counter reference *)
-  let batch_ref = IDX.find_exn (Context.bindings routine) batch_n in
+  let batch_ref = IDX.find_exn routine.Context.bindings batch_n in
   
   (* Training epochs *)
   let num_batches = Array.length data / batch_size in

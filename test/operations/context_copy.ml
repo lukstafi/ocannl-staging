@@ -75,9 +75,9 @@ let scenario_merge_buffer () =
   let%op t = [ 1.; 2.; 3. ] + [ 10.; 20.; 30. ] in
   let fwd = Train.forward t in
   let ctx_a = Train.to_routine (Context.cpu ()) IDX.empty fwd in
-  let ctx_a = Context.run (Context.context ctx_a) ctx_a in
+  let ctx_a = Context.run ctx_a.Context.context ctx_a in
   let routine_b = Train.to_routine (Context.cpu ()) IDX.empty fwd in
-  let ctx_b = Context.run (Context.context routine_b) routine_b in
+  let ctx_b = Context.run routine_b.Context.context routine_b in
   let ctx_a = Context.set_values ctx_a t.Tensor.value [| 1.; 1.; 1. |] in
   (* Consuming the merge buffer without a prior transfer must fail the static check. *)
   let consumer = [%cd t =+ t.merge] in

@@ -47,7 +47,7 @@ let () =
   Train.set_materialized ids.Tensor.value;
   let ctx = Context.auto () in
   let _ctx, routine = Context.compile ctx comp Train.IDX.empty in
-  let ctx = Context.context routine in
+  let ctx = routine.Context.context in
   let current = Array.append prompt_ids (Array.create ~len:num_tokens eos) in
   printf "%s%!" prompt;
   let rec step len ctx =

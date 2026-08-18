@@ -127,13 +127,13 @@ let () =
     Autotune.tune ~rounds:0 ~seed_block_sizes:[] ~timing_ctx:scratch ctx
       (Asgns.sequence [ update; sgd ]) bindings
   in
-  let step_ref = IDX.find_exn (Context.bindings sgd_routine) step_n in
+  let step_ref = IDX.find_exn sgd_routine.Context.bindings step_n in
   step_ref := 0;
 
   printf "\nStarting training for %d epochs (%d steps)...\n%!" epochs total_steps;
 
   for epoch = 1 to epochs do
-    Train.sequential_loop (Context.bindings sgd_routine) ~f:(fun () ->
+    Train.sequential_loop sgd_routine.Context.bindings ~f:(fun () ->
         Train.run ctx sgd_routine;
         Int.incr step_ref);
     (* The only device sync of the epoch: read the accumulated loss sum, then reset it. *)

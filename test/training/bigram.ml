@@ -81,7 +81,7 @@ let () =
   (* Train.printf w ~with_grad:false; *)
 
   let open Operation.At in
-  let batch_ref = IDX.find_exn (Context.bindings sgd_step) batch_n in
+  let batch_ref = IDX.find_exn sgd_step.Context.bindings batch_n in
   for epoch = 0 to 10 do
     let epoch_loss = ref 0. in
     for batch = 0 to n_batches - 1 do
@@ -102,9 +102,9 @@ let () =
     { dice } =: uniform_at !@counter_n
   in
   Train.set_materialized infer_probs.value;
-  let infer_step = Train.to_routine (Context.context sgd_step) bindings infer_step in
-  let ctx = Context.context infer_step in
-  let counter_ref = IDX.find_exn (Context.bindings infer_step) counter_n in
+  let infer_step = Train.to_routine sgd_step.Context.context bindings infer_step in
+  let ctx = infer_step.Context.context in
+  let counter_ref = IDX.find_exn infer_step.Context.bindings counter_n in
   counter_ref := 0;
 
   let infer c =

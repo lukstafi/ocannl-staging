@@ -38,7 +38,7 @@ let () =
   let ctx = Context.auto () in
   let ctx = Train.init_params ctx IDX.empty batch_loss in
   let sgd_step = Train.to_routine ctx IDX.empty (Asgns.sequence [ update; sgd ]) in
-  let ctx = Context.context sgd_step in
+  let ctx = sgd_step.Context.context in
   let open Operation.At in
   Train.run ctx sgd_step;
   let initial = (ctx, batch_loss).@[0] in

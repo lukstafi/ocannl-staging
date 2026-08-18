@@ -146,20 +146,25 @@ let known_non_virtual (o : LL.optimized) tn =
    sibling executions do not observe each other's decisions. *)
 let base_ctx = lazy (Context.auto ())
 
-(** [run ~name o ~seed] compiles the optimized record AS WRITTEN through the [?prelowered] seam,
-    uploads [seed], runs, and returns the context the values can be read from.
+(** [link ~name o] compiles the optimized record AS WRITTEN through the [?prelowered] seam,
+    returning the advanced context and the compiled routine — so a test can assert on the
+    [inputs]/[outputs] the link actually computed, read straight off the routine record, instead of
+    re-deriving them via [input_and_output_nodes] (gh-ocannl-590).
 
     The identity [lowered_transform] takes the place of the default schedule annotator, which would
     otherwise parallelize or fission the hand-built loop nest — the point of the case is usually the
-    nest's exact shape. Every node in [seed] must have been {!materialize}d: host access to a node
+    nest's exact shape. *)
+let link ?ctx ~name (o : LL.optimized) =
+  let ctx = match ctx with Some ctx -> ctx | None -> Lazy.force base_ctx in
+  Context.compile ~name ~prelowered:o
+    ~lowered_transform:(fun x -> x)
+    ctx Ir.Assignments.empty_comp Idx.Empty
+
+(** [run ~name o ~seed] is {!link}, then uploads [seed], runs, and returns the context the values
+    can be read from. Every node in [seed] must have been {!materialize}d: host access to a node
     the pipeline placed [Local] raises (gh-ocannl-599). *)
 let run ?ctx ~name (o : LL.optimized) ~(seed : (Tn.t * float array) list) =
-  let ctx = match ctx with Some ctx -> ctx | None -> Lazy.force base_ctx in
-  let ctx, routine =
-    Context.compile ~name ~prelowered:o
-      ~lowered_transform:(fun x -> x)
-      ctx Ir.Assignments.empty_comp Idx.Empty
-  in
+  let ctx, routine = link ?ctx ~name o in
   let ctx = List.fold seed ~init:ctx ~f:(fun ctx (tn, vs) -> Context.set_values ctx tn vs) in
   Context.run ctx routine
 

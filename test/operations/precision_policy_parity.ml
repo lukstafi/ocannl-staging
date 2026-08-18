@@ -52,7 +52,7 @@ let run_leg base_ctx ~input_l ~prepare ~w_vals =
   Train.set_materialized y.Tensor.value;
   let ctx = Train.init_params base_ctx IDX.empty loss in
   let routine = Train.to_routine ctx IDX.empty (Train.grad_update loss) in
-  let ctx = Context.context routine in
+  let ctx = routine.Context.context in
   let w1 = find_param loss "w1" and w2 = find_param loss "w2" in
   let ctx =
     match w_vals with

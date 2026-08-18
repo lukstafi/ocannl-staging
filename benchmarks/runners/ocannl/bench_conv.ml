@@ -108,7 +108,7 @@ let () =
   let compile_s = Unix.gettimeofday () -. t0 in
   (* Autotune's timing context re-ran param inits on [ctx]; restore fixture weights. *)
   let ctx = if tune then H.inject ctx st batch_loss mapping else ctx in
-  let batch_ref = IDX.find_exn (Context.bindings routine) batch_n in
+  let batch_ref = IDX.find_exn routine.Context.bindings batch_n in
   let step_count = ref 0 in
   let run_step () =
     batch_ref := !step_count % n_batches;

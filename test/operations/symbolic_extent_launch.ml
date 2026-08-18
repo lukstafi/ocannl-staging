@@ -24,8 +24,8 @@ let () =
   let ctx = Train.init_params ctx bindings total in
   let fwd_comp = Train.forward total in
   let routine = Train.to_routine ctx bindings fwd_comp in
-  let ctx = Context.context routine in
-  let seq_ref = IDX.find_exn (Context.bindings routine) seq in
+  let ctx = routine.Context.context in
+  let seq_ref = IDX.find_exn routine.Context.bindings seq in
   printf "y dims (buffer sized at the declared maximum): %s\n" (Ir.Tnode.dims_to_string y.value);
   let ctx =
     List.fold [ 6; 4; 1; 0 ] ~init:ctx ~f:(fun ctx extent ->
@@ -59,7 +59,7 @@ let () =
       ~report:(fun r -> report1 := Some r)
       tctx comp bindings
   in
-  let tseq_ref = IDX.find_exn (Context.bindings troutine) seq in
+  let tseq_ref = IDX.find_exn troutine.Context.bindings seq in
   Autotune.set_test_bindings troutine;
   printf "timing measurement binds the extent at its upper bound: %d\n" !tseq_ref;
   let _tctx =

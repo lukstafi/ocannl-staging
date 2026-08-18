@@ -6,11 +6,40 @@ module Backends_deprecated = Backends
 type t [@@deriving sexp_of]
 (** Execution context managing device, compilation, and buffers *)
 
-type routine
-(** A compiled computational routine ready for execution *)
+type task_handle
+(** The routine's executable schedule (its backend task). Abstract on purpose: dispatch goes
+    through {!run}, which validates the lineage and launch bindings before running and records the
+    execution in the ledger afterwards — a directly runnable task would be a one-field-access
+    bypass of those checks. *)
 
-val bindings : routine -> Ir.Indexing.lowered_bindings
-val context : routine -> t
+type routine = private {
+  context : t;
+      (** The context the routine was compiled from, carrying the compilation frontier advanced
+          past this routine (see {!section:execution_deps}). *)
+  task : task_handle;
+  bindings : Ir.Indexing.lowered_bindings;
+  name : string;  (** The name of the routine, derived from the backend compilation. *)
+  inputs : Set.M(Ir.Tnode).t;
+      (** The externally required initialization set — what {!run}'s initialization check requires
+          to be initialized: the materialized nodes the routine reads before writing them, if at
+          all (read-only nodes included), {i minus} those whose initialization the routine itself
+          carries — the computation's embedded nodes, and nodes with registered host initialization
+          data, which self-initialize at link time from [Ir.Host_inits] (gh-ocannl-333). Not the
+          backend's raw read set: the execution-dependency frontier is built from the unfiltered
+          backend inputs before these exclusions. *)
+  outputs : Set.M(Ir.Tnode).t;
+      (** The materialized nodes the routine writes — what {!run} marks initialized. *)
+  routine_id : int;
+      (** A unique integer identifying the routine within its root context's lifetime. *)
+  execution_deps : Set.M(Int).t;
+      (** The routine IDs that must execute before this routine, derived from RAW, WAR, and WAW
+          hazards on tensor nodes at compile time. An empty set means the routine is independent of
+          all previously compiled routines in its lineage. *)
+}
+(** A compiled computational routine ready for execution. The record is [private]: only {!compile}
+    constructs routines — the ledger's identity and dependency tracking rely on that — while every
+    field stays readable, so tests can assert on the [inputs]/[outputs] the link actually computed
+    instead of re-deriving them (gh-ocannl-590). *)
 
 (** {2 Context creation} *)
 
@@ -196,18 +225,10 @@ val hardware_limits : t -> Ir.Backend_intf.hardware_limits
     Dependencies are scoped to compilation lineage: two routines compiled from the {i same}
     [Context.t] are independent siblings, even if they access the same nodes. Only routines compiled
     from the {i returned} (child) context of a prior [compile] call can depend on that prior
-    routine. This matches how [compile] advances backend state only in the returned context. *)
+    routine. This matches how [compile] advances backend state only in the returned context.
 
-val routine_id : routine -> int
-(** A unique integer identifying the routine within its root context's lifetime. *)
-
-val routine_name : routine -> string
-(** The name of the routine, derived from the backend compilation. *)
-
-val execution_deps : routine -> int list
-(** The routine IDs that must execute before this routine, derived from RAW, WAR, and WAW hazards on
-    tensor nodes at compile time. An empty list means the routine is independent of all previously
-    compiled routines in its lineage. *)
+    The per-routine data — [routine_id], [name], [execution_deps], [inputs], [outputs] — is read
+    directly off the {!routine} record. *)
 
 val can_run : t -> routine -> bool
 (** Whether all execution dependencies of the routine have been satisfied (i.e., all prerequisite

@@ -20,5 +20,5 @@ let () =
   let%op learning_rate = 0.01 in
   let sgd = Train.sgd_update ~learning_rate loss in
   let step = Train.to_routine ctx Train.IDX.empty (Ir.Assignments.sequence [ update; sgd ]) in
-  let ctx = Context.context step in
+  let ctx = step.Context.context in
   ignore (Context.run ctx step : Context.t)

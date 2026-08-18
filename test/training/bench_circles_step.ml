@@ -111,8 +111,8 @@ let () =
   | None -> printf "tune: no report\n");
 
   (* --- Steady-state stepping, as the training loop does it. --- *)
-  let step_ref = IDX.find_exn (Context.bindings sgd_routine) step_n in
-  let batch_ref = IDX.find_exn (Context.bindings sgd_routine) batch_n in
+  let step_ref = IDX.find_exn sgd_routine.Context.bindings step_n in
+  let batch_ref = IDX.find_exn sgd_routine.Context.bindings batch_n in
   step_ref := 0;
   batch_ref := 0;
   let open Operation.At in

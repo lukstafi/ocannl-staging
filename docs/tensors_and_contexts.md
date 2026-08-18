@@ -292,9 +292,9 @@ let ctx, routine = Context.compile ctx computation bindings
 (* Execute the routine *)
 let ctx = Context.run ctx routine
 
-(* Access routine metadata *)
-let bindings = Context.bindings routine
-let ctx = Context.context routine
+(* Routine metadata is read straight off the record (private: readable, not constructible) *)
+let bindings = routine.Context.bindings
+let ctx = routine.Context.context
 ```
 
 ### Node Initialization Tracking
@@ -339,23 +339,23 @@ let ctx2, routine_b = Context.compile ctx1 comp_b bindings in
 let ctx1, routine_a = Context.compile ctx0 comp_a bindings in
 let ctx2, routine_b = Context.compile ctx0 comp_b bindings in
 
-(* Via Train.to_routine: chains through Context.context *)
+(* Via Train.to_routine: chains through the routine's stored context *)
 let routine_a = Train.to_routine ctx bindings comp_a in
-let routine_b = Train.to_routine (Context.context routine_a) bindings comp_b in
+let routine_b = Train.to_routine routine_a.Context.context bindings comp_b in
 (* routine_b depends on routine_a — sequential via stored child context *)
 ```
 
 #### API
 
+`Context.routine` is a `private` record: only `Context.compile` constructs routines, but every
+field is readable, including the per-routine metadata:
+
 ```ocaml
-(* Unique integer identifying the routine *)
-val routine_id : routine -> int
-
-(* Name of the routine, from backend compilation *)
-val routine_name : routine -> string
-
-(* Routine IDs that must execute before this routine *)
-val execution_deps : routine -> int list
+routine.Context.routine_id      (* unique integer identifying the routine *)
+routine.Context.name            (* name of the routine, from backend compilation *)
+routine.Context.execution_deps  (* Set of routine IDs that must execute before this routine *)
+routine.Context.inputs          (* materialized nodes read before written, if written at all *)
+routine.Context.outputs         (* materialized nodes the routine writes *)
 
 (* Whether all execution dependencies have been satisfied *)
 val can_run : t -> routine -> bool
@@ -370,7 +370,7 @@ Re-running a routine that has already executed is allowed — its dependencies r
 ```ocaml
 (* Typical pattern: grad_update then sgd_update *)
 let grad_routine = Train.to_routine ctx bindings grad_comp in
-let sgd_routine = Train.to_routine (Context.context grad_routine) bindings sgd_comp in
+let sgd_routine = Train.to_routine grad_routine.Context.context bindings sgd_comp in
 
 (* grad has no deps (first in lineage), sgd depends on grad *)
 assert (Context.can_run ctx grad_routine);
@@ -443,7 +443,7 @@ let routine = Train.to_routine ctx bindings
   (Asgns.sequence [update; sgd]) in
 
 (* Training loop *)
-let step_ref = IDX.find_exn (Context.bindings routine) step_n in
+let step_ref = IDX.find_exn routine.Context.bindings step_n in
 for step = 1 to num_steps do
   step_ref := step;
   Train.run ctx routine;

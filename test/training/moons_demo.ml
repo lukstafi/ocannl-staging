@@ -62,13 +62,13 @@ let train_once ~seed () : run_result =
   let sgd = Train.sgd_update ~learning_rate ~weight_decay scalar_loss in
   let ctx = Train.init_params ctx bindings scalar_loss in
   let sgd_routine = Train.to_routine ctx bindings (Asgns.sequence [ update; sgd ]) in
-  let ctx = Context.context sgd_routine in
-  let step_ref = IDX.find_exn (Context.bindings sgd_routine) step_n in
+  let ctx = sgd_routine.Context.context in
+  let step_ref = IDX.find_exn sgd_routine.Context.bindings step_n in
   step_ref := 0;
   let final_loss = ref 0. in
   for _ = 1 to epochs do
     let epoch_loss = ref 0. in
-    Train.sequential_loop (Context.bindings sgd_routine) ~f:(fun () ->
+    Train.sequential_loop sgd_routine.Context.bindings ~f:(fun () ->
         Train.run ctx sgd_routine;
         epoch_loss := !epoch_loss +. (ctx, scalar_loss).@[0];
         learning_rates := ~-.((ctx, learning_rate).@[0]) :: !learning_rates;

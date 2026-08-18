@@ -182,7 +182,7 @@ let () =
   let ctx, infer_routine = Context.compile ctx infer_comp IDX.empty in
 
   let open Operation.At in
-  let step_ref = IDX.find_exn (Context.bindings sgd_step) step_n in
+  let step_ref = IDX.find_exn sgd_step.Context.bindings step_n in
   Train.set_materialized batch_loss.value;
 
   (* === Training loop === Per-token random baseline: ln(8) ≈ 2.08, epoch sum ≈ 2.08 * n_batches ≈

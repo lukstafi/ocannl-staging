@@ -171,7 +171,7 @@ let timed_winner_exists = "Autotune.tune: a finite best time without a compiled 
 (** {2 Timing} *)
 
 let set_test_bindings routine =
-  List.iter (Context.bindings routine) ~f:(fun (ss, r) ->
+  List.iter routine.Context.bindings ~f:(fun (ss, r) ->
       match ss.Idx.static_range with
       | Some range when range > 0 && ss.Idx.used_as_extent ->
           (* gh-490 symbolic extents: tune at the upper bound. The schedule digest is
@@ -198,10 +198,10 @@ let max_timing_runs = 64
    and cannot express "this one declined, the search went on". *)
 let on_candidate_preflight : (string -> unit) ref = ref (fun _routine_name -> ())
 
-(* [Context.bindings] exposes the routine's live binding refs — restore them after timing (Codex P2
+(* [routine.bindings] exposes the routine's live binding refs — restore them after timing (Codex P2
    on PR #103), or the returned winner would stay bound to the tuner's midpoint test values. *)
 let time_routine ?(tag_failures = false) ~repeats cctx routine =
-  let saved_bindings = List.map (Context.bindings routine) ~f:(fun (_ss, r) -> (r, !r)) in
+  let saved_bindings = List.map routine.Context.bindings ~f:(fun (_ss, r) -> (r, !r)) in
   let run ctx =
     if tag_failures then Outcome.tag Outcome.Launch (fun () -> Context.run ctx routine)
     else Context.run ctx routine
@@ -224,7 +224,7 @@ let time_routine ?(tag_failures = false) ~repeats cctx routine =
          see the comments at those two sites (gh-ocannl-569). *)
       if tag_failures then
         Outcome.tag Outcome.Preflight (fun () ->
-            !on_candidate_preflight (Context.routine_name routine);
+            !on_candidate_preflight routine.Context.name;
             Context.check_launch_bindings routine);
       (* Warmup run: absorbs lazy initialization and fills caches like a steady-state iteration. *)
       let ctx = ref (run cctx) in
@@ -2634,10 +2634,10 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
               | _ -> (
                   match Context.failure_classifier b.cctx phase exn with
                   | Some { Ir.Schedule_outcome.execution_effect = Outcome.No_device_writes; _ } ->
-                      Context.rollback_execution b.cctx (Context.routine_id b.routine)
+                      Context.rollback_execution b.cctx b.routine.Context.routine_id
                   | Some _ | None ->
                       Context.poison_lineage b.cctx
-                        ~routine_name:(Context.routine_name b.routine)
+                        ~routine_name:b.routine.Context.name
                         exn)
             in
             match
@@ -3049,7 +3049,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                          withdraws that claim, so the next candidate compiled in this lineage does
                          not wait on a routine that never completed. A no-op for a [Preflight]
                          decline, which precedes the dispatch that makes the claim. *)
-                      Context.rollback_execution c.cctx (Context.routine_id c.routine);
+                      Context.rollback_execution c.cctx c.routine.Context.routine_id;
                       (* gh-ocannl-550: a candidate that failed to run is as dead as one that lost,
                          and on the failure that motivated all of this it is deader — an
                          out-of-memory decline is exactly when the freed buffers are worth most. *)
@@ -3061,7 +3061,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                          and there is no restore API to rebuild its inputs and parameters, so
                          timing the next candidate on it would score suspect data. *)
                       Context.poison_lineage c.cctx
-                        ~routine_name:(Context.routine_name c.routine)
+                        ~routine_name:c.routine.Context.name
                         (Outcome.exception_of_cause classified.cause);
                       (* gh-ocannl-550: the exit sweep in [emit_partial_and_raise] can only reach
                          what the beam or [best_so_far] holds, and this candidate is in neither — it
@@ -3076,7 +3076,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                   (* An unattributed launch/sync failure says nothing about what the device did, so
                      the lineage is condemned before the exception unwinds — a caller that catches
                      it cannot reuse a ledger claiming the failed routine completed. *)
-                  Context.poison_lineage c.cctx ~routine_name:(Context.routine_name c.routine)
+                  Context.poison_lineage c.cctx ~routine_name:c.routine.Context.name
                     fatal.Outcome.exn;
                   (* Not in the beam either (see above). *)
                   release_candidate c;

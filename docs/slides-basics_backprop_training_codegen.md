@@ -175,14 +175,14 @@ let sgd_update ~learning_rate ?momentum ?weight_decay ?nesterov
 
 {pause focus=train-loop}
 ```ocaml
-  let step_ref = IDX.find_exn (Context.bindings sgd_routine) step_n in
+  let step_ref = IDX.find_exn sgd_routine.Context.bindings step_n in
   step_ref := 0;
   for epoch = 1 to epochs do
     let epoch_loss = ref 0. in
     Train.sequential_loop sgd_routine.bindings ~f:(fun () ->
         Train.run ctx sgd_routine;
         let batch_ref =
-          IDX.find_exn (Context.bindings sgd_routine) batch_n in
+          IDX.find_exn sgd_routine.Context.bindings batch_n in
         (* Value access is context-mediated (gh-ocannl-333): the [At] accessors take a
            [(context, tensor)] pair and read on demand from the routine's context. *)
         epoch_loss := !epoch_loss +. (ctx, scalar_loss).@[0];
