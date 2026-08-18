@@ -47,12 +47,20 @@
   <span><span class="label">op</span>:<a href="../../Ops/index.html#type-binop">Ops.binop</a> <span class="arrow">&#45;&gt;</span></span>
   <span><span class="label">dst</span>:<span class="xref-unresolved">Base</span>.String.t <span class="arrow">&#45;&gt;</span></span>
   <span><span class="label">src</span>:<span class="xref-unresolved">Base</span>.String.t <span class="arrow">&#45;&gt;</span></span>
-  <span class="xref-unresolved">PPrint</span>.document</span></code></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-vec_fma_builtin"><a href="#val-vec_fma_builtin" class="anchor"></a><code><span><span class="keyword">val</span> vec_fma_builtin : <span><span class="label">prec</span>:<a href="../../Ops/index.html#type-prec">Ops.prec</a> <span class="arrow">&#45;&gt;</span></span> <span><span class="label">lanes</span>:int <span class="arrow">&#45;&gt;</span></span> <span><span>(string * string)</span> option</span></span></code></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-vec_acc_fma"><a href="#val-vec_acc_fma" class="anchor"></a><code><span><span class="keyword">val</span> vec_acc_fma : 
+  <span class="xref-unresolved">PPrint</span>.document</span></code></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-vec_fma_builtin"><a href="#val-vec_fma_builtin" class="anchor"></a><code><span><span class="keyword">val</span> vec_fma_builtin : 
   <span><span class="label">prec</span>:<a href="../../Ops/index.html#type-prec">Ops.prec</a> <span class="arrow">&#45;&gt;</span></span>
   <span><span class="label">lanes</span>:int <span class="arrow">&#45;&gt;</span></span>
-  <span><span class="label">dst</span>:string <span class="arrow">&#45;&gt;</span></span>
-  <span><span class="label">a</span>:string <span class="arrow">&#45;&gt;</span></span>
-  <span><span class="label">b</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><span>(<span class="xref-unresolved">Base</span>.string
+   * <span>(<span><span class="label">dst</span>:<span class="xref-unresolved">Base</span>.string <span class="arrow">&#45;&gt;</span></span>
+   <span><span class="label">a</span>:<span class="xref-unresolved">Base</span>.string <span class="arrow">&#45;&gt;</span></span>
+   <span><span class="label">b</span>:<span class="xref-unresolved">Base</span>.string <span class="arrow">&#45;&gt;</span></span>
+   <span class="xref-unresolved">Base</span>.string)</span>)</span>
+    <span class="xref-unresolved">Base</span>.list</span></span></code></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-vec_acc_fma"><a href="#val-vec_acc_fma" class="anchor"></a><code><span><span class="keyword">val</span> vec_acc_fma : 
+  <span><span class="label">prec</span>:<a href="../../Ops/index.html#type-prec">Ops.prec</a> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">lanes</span>:int <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">dst</span>:<span class="xref-unresolved">Base</span>.string <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">a</span>:<span class="xref-unresolved">Base</span>.string <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">b</span>:<span class="xref-unresolved">Base</span>.string <span class="arrow">&#45;&gt;</span></span>
   <span class="xref-unresolved">PPrint</span>.document</span></code></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-vec_acc_grid_fold"><a href="#val-vec_acc_grid_fold" class="anchor"></a><code><span><span class="keyword">val</span> vec_acc_grid_fold : 
   <span><span class="label">prec</span>:<a href="../../Ops/index.html#type-prec">Ops.prec</a> <span class="arrow">&#45;&gt;</span></span>
   <span><span class="label">lanes</span>:int <span class="arrow">&#45;&gt;</span></span>
