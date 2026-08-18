@@ -34,6 +34,18 @@ set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 D=$HERE/gh612_cells.sh
 export OUT_ROOT=${OUT_ROOT:-/tmp/gh612v}
+
+# WHAT certification means is pinned here; only WHERE to run it is inherited. OUT_ROOT and the three
+# tree paths say where; everything below says what the report claims, and each was separately
+# overridable until review found them one at a time: the workload (FIXTURE, and FIXTURE_MD5, which
+# gh612_cells.sh treats as "skip the check" when empty), the correctness threshold (PARITY_MAX_ULP)
+# and the sample count (EXPECT_STEPS). An exported value could weaken any of them while every
+# provenance, arm and replay check stayed green -- `PARITY_MAX_ULP=1e12` certifying real divergence
+# being the sharpest case. They are exported, not defaulted, so an inherited value is REPLACED.
+export FIXTURE=fixtures/gpt2_mini.safetensors
+export FIXTURE_MD5=5b3dfff860fc8c54af2a7d440f4cf202
+export PARITY_MAX_ULP=64
+export EXPECT_STEPS=8
 BASE=${BASE:-/home/lukstafi/wt-gh612v-base}
 FEAT=${FEAT:-/home/lukstafi/wt-gh612v-feat}
 MASTER=${MASTER:-/home/lukstafi/wt-gh612v-master}
@@ -245,8 +257,11 @@ validate_tree() {  # <role> -- the tree comes from the role, so the pin cannot b
 # digest set, and the gate requires that manifest to match the tree it validates now.
 tree_fingerprint() {  # <role> -- role, path, HEAD, and the digests validate_tree just checked
   local role=$1 t; t=$(role_tree "$role") || return 1
-  printf 'role=%s\ntree=%s\nhead=%s\npin=%s\nsha_train=%s\nsha_utils=%s\nsha_gpt=%s\nsha_harness=%s\n' \
+  # The fixture is part of what a cell measured, and it is gitignored -- no commit establishes it --
+  # so its digest belongs in the provenance beside the sources'.
+  printf 'role=%s\ntree=%s\nhead=%s\npin=%s\nfixture_md5=%s\nsha_train=%s\nsha_utils=%s\nsha_gpt=%s\nsha_harness=%s\n' \
     "$role" "$(cd "$t" && pwd -P)" "$(git -C "$t" rev-parse HEAD)" "$(tree_pin "$role")" \
+    "$(md5sum "$(readlink -f "$t/benchmarks/$FIXTURE")" | cut -d' ' -f1)" \
     "$(sha256sum "$t/lib/train.ml" | cut -d' ' -f1)" \
     "$(sha256sum "$t/arrayjit/lib/utils.ml" | cut -d' ' -f1)" \
     "$(sha256sum "$t/benchmarks/runners/ocannl/bench_gpt.ml" | cut -d' ' -f1)" \
@@ -422,6 +437,13 @@ assert_cell_provenance() {  # <cell>...
         bad=1; }
     done
   done
+  # Three harness runs, not one: every profile total the report quotes is a three-run median, and a
+  # profile regenerated with a smaller count leaves the earlier CSVs' manifest matching while the
+  # readers (finger, diff) silently median over whatever they discover. The driver's own gate counts
+  # them, so use it rather than re-deriving the rule here.
+  [ "$bad" -eq 0 ] && { "$D" profiles base574A/r1 feat574A/r1 cap8A/r1 capoffA/r1 cap4A/r4 \
+    > /dev/null || { echo "gh612v_session: the claim-bearing profiles are incomplete (three harness" >&2
+      echo "  runs each are required; run 'structure' and 'capprofile')" >&2; bad=1; }; }
   [ "$bad" -eq 0 ] || return 1
   if [ "${back:-0}" -gt 0 ]; then
     echo "provenance: $n cells carry a manifest matching their validated tree ($back backfilled --"

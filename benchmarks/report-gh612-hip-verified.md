@@ -94,7 +94,11 @@ selects which arm's routine the process keeps — it does not change what either
   provides the timings. All 18 cells have an accepted pass-2 replay, and the gate covers those
   replays as well as the searches.
 - Driver: [`gh612_cells.sh`](gh612_cells.sh) unchanged, driven by
-  [`gh612v_session.sh`](gh612v_session.sh), which validates each tree before dispatching a cell —
+  [`gh612v_session.sh`](gh612v_session.sh), which pins **what certification means** rather than
+  inheriting it — the workload and its digest, the parity threshold (64 ulp) and the expected sample
+  count are set by the wrapper, so an exported `PARITY_MAX_ULP=1e12` or an emptied `FIXTURE_MD5`
+  cannot weaken the gate while every other check stays green (only `OUT_ROOT` and the tree paths,
+  which say *where* to run, are inherited) — and which validates each tree before dispatching a cell —
   pinned base commit, at most the backport commit on top, clean worktree, the selector present in
   `lib/train.ml`, and a `bench_gpt.exe` not older than the sources the backport touches (a
   half-backported tree, sources patched and binary stale, is the quiet failure: it would ignore the
@@ -346,7 +350,8 @@ for w in master:5d0c86d8 base:6d14f401 feat:76f50dcd; do
   d=../wt-gh612v-${w%%:*}; want=${w##*:}
   [ -e "$d" ] || git worktree add --detach "$d" "$want" || exit 1
   # (1) the five files, copied verbatim -- these are what the digests in gh612v_session.sh pin
-  git -C "$d" checkout <the-gh638-commit> -- lib/train.ml benchmarks/runners/ocannl/bench_harness.ml \
+  # ffc428d2 is the selector as it first landed -- the revision these trees carry (see Provenance)
+  git -C "$d" checkout ffc428d2 -- lib/train.ml benchmarks/runners/ocannl/bench_harness.ml \
     benchmarks/runners/ocannl/bench_gpt.ml benchmarks/runners/ocannl/bench_conv.ml \
     benchmarks/runners/ocannl/bench_mlp.ml || exit 1
   # (2) utils.ml is PATCHED, not copied: its base content differs between these commits, so the key
