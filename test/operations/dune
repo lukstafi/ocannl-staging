@@ -1186,7 +1186,7 @@
 (executable
  (name config_var_spellings)
  (modules config_var_spellings)
- (libraries base arrayjit.utils stdio))
+ (libraries base arrayjit.utils stdio arrayjit.verdict))
 
 (rule
  (target config_var_spellings.actual)

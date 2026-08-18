@@ -139,15 +139,23 @@ let () =
               (* A reserved namespace has no second spelling to pair with. The gates are checked
                  below, against the modules that read them. *)
               | Utils.Env_reserved _ -> ()
-              | Utils.Env_unread_spelling _ | Utils.Env_unknown_key _ ->
+              | Utils.Env_unread_spelling _ | Utils.Env_unknown_key _
+              | Utils.Env_unread_reserved _ ->
                   if Map.mem exemptions key then exemptions_used := Set.add !exemptions_used key
                   else
+                    let what =
+                      match Utils.classify_env_var name with
+                      | Utils.Env_unread_reserved prefix ->
+                          "is in the reserved " ^ prefix
+                          ^ " namespace in a casing its reader does not consult"
+                      | _ -> "addresses OCANNL and names no configuration key it reads"
+                    in
                     fail
                       (Printf.sprintf
-                         "%s declares `(env_var %s)`, which addresses OCANNL and names no \
-                          configuration key it reads -- a variable nothing consults invalidates \
-                          nothing; fix the spelling, or exempt it by name with the reason"
-                         dune_file name)));
+                         "%s declares `(env_var %s)`, which %s -- a variable nothing consults \
+                          invalidates nothing; fix the spelling, or exempt it by name with the \
+                          reason"
+                         dune_file name what)));
       (* The gates: what a library's modules read while being preprocessed, against what its
          `preprocessor_deps` declares. *)
       List.iter stanzas ~f:(fun stanza ->

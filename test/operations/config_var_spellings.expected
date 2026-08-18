@@ -53,3 +53,6 @@ Environment variable names, as classified by `Utils.classify_env_var`:
   "OCANNL_LOG_LEVEL"         configuration key log_level
   "OCANNL_LOG_LEVEL_ROW"     reserved namespace ocannl_log_level_
   "PATH"                     not addressed to OCANNL
+
+"ocannl_log_level_row" is read exactly where the environment is case-insensitive: true
+"ocannl_tool_test_cap" is read exactly where the environment is case-insensitive: true

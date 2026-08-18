@@ -472,10 +472,23 @@ type env_var_class =
   | Env_config_key of string  (** a spelling {!read_env_var} reads, of that key *)
   | Env_unread_spelling of string
       (** a known key, spelled in a way nothing reads: dashed, or mixed-case where case matters *)
+  | Env_unread_reserved of string
+      (** in a reserved namespace, in a casing its reader does not consult *)
   | Env_unknown_key of string  (** addressed to the configuration, naming no key *)
 
+(** Which family a name is in, and then -- for both families alike -- whether THIS spelling of it
+    is one its reader actually consults. The second question is the one that carries the feature:
+    an unread spelling is invisible in exactly the way a typo is, and answering it for keys while
+    waving reserved names through would suppress the warning precisely where the name looks most
+    like it should work (Codex P2 on PR #371). Each family has its own reader, so each answers it
+    its own way -- {!env_var_names} for a key, and uppercase for a reserved name, which is what the
+    shell scripts and the [%%global_debug_log_level_from_env_var] arguments spell.
+
+    Both answers collapse on Windows, where the environment is case-insensitive and every casing of
+    a name is the same variable. *)
 let classify_env_var name =
   let lower = String.lowercase name in
+  let reads spellings = env_names_case_insensitive || List.mem spellings name ~equal:String.equal in
   let addressed =
     List.find_map [ "ocannl_"; "ocannl-" ] ~f:(fun prefix -> String.chop_prefix lower ~prefix)
   in
@@ -485,16 +498,13 @@ let classify_env_var name =
       match
         List.find env_var_reserved_prefixes ~f:(fun prefix -> String.is_prefix lower ~prefix)
       with
-      | Some prefix -> Env_reserved prefix
+      | Some prefix ->
+          if reads [ String.uppercase name ] then Env_reserved prefix
+          else Env_unread_reserved (String.uppercase prefix)
       | None ->
           if not (Set.mem known_config_keys key) then Env_unknown_key key
-          else
-            let read =
-              List.mem (env_var_names key)
-                (if env_names_case_insensitive then lower else name)
-                ~equal:String.equal
-            in
-            if read then Env_config_key key else Env_unread_spelling key)
+          else if reads (env_var_names key) then Env_config_key key
+          else Env_unread_spelling key)
 
 (** Every environment variable that addresses OCANNL's configuration and that nothing reads, with
     the reason, in the order the names sort.
@@ -517,7 +527,10 @@ let unread_env_vars () =
              Some
                ( name,
                  "is not a spelling OCANNL reads; the environment spellings of " ^ key ^ " are "
-                 ^ String.concat ~sep:" and " (env_var_names key) ))
+                 ^ String.concat ~sep:" and " (env_var_names key) )
+         | Env_unread_reserved prefix ->
+             Some (name, "is not a spelling anything reads; " ^ prefix ^ " names are read in \
+                          uppercase only"))
 
 (** The commandline spellings of a config key, up to the value separator: the [ocannl_]-qualified
     ones -- then, unless [qualified_only], the prefix-free ones.

@@ -81,6 +81,7 @@ let describe = function
   | Utils.Env_reserved prefix -> "reserved namespace " ^ prefix
   | Utils.Env_config_key key -> "configuration key " ^ key
   | Utils.Env_unread_spelling key -> "unread spelling of " ^ key
+  | Utils.Env_unread_reserved prefix -> "unread casing in the " ^ prefix ^ " namespace"
   | Utils.Env_unknown_key key -> "addressed to OCANNL, unknown key " ^ key
 
 let () =
@@ -99,3 +100,27 @@ let () =
     ]
     ~f:(fun name ->
       printf "  %-26s %s\n" ("\"" ^ name ^ "\"") (describe (Utils.classify_env_var name)))
+
+(* The casing leg of the reserved namespaces, as a CLAIM rather than as two more lines above, for
+   the reason that list states: `ocannl_log_level_row` and `OCANNL_LOG_LEVEL_ROW` are one variable
+   on Windows and two here, so the classification is correctly different per platform and a golden
+   cannot hold it. The equivalence holds everywhere -- a lowercase reserved name is read exactly
+   where the environment is case-insensitive -- so that is what is pinned.
+
+   The leg exists because waving reserved names through on the strength of their prefix alone
+   suppressed the warning where the mistake looks most like a success: `ocannl_tool_test_cap=10`
+   and `ocannl_log_level_row=9` are read by nobody -- the shell scripts and the ppx gates spell
+   their names in uppercase -- while looking exactly like the settings they are not (Codex P2 on
+   PR #371). *)
+let read_as_reserved name =
+  match Utils.classify_env_var name with
+  | Utils.Env_reserved _ -> Some true
+  | Utils.Env_unread_reserved _ -> Some false
+  | _ -> None
+
+let () =
+  printf "\n";
+  List.iter [ "ocannl_log_level_row"; "ocannl_tool_test_cap" ] ~f:(fun name ->
+      Verdict.p
+        (Printf.sprintf "%S is read exactly where the environment is case-insensitive" name)
+        (Option.equal Bool.equal (read_as_reserved name) (Some Utils.env_names_case_insensitive)))
