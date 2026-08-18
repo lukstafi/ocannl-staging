@@ -1,0 +1,39 @@
+Configuration keys tracked as ambient dependencies, in both spellings everywhere:
+  backend
+  buffer_aliasing
+  cc_fp16_arithmetic
+  log_config_sourcing
+  log_level
+  memory_budget
+  model_default_schedule
+  no_config_file
+  profile
+  suppress_welcome_message
+
+Per-module tracing gates, and the library whose preprocessor_deps declares each:
+  OCANNL_LOG_LEVEL_ASSIGNMENTS   arrayjit/lib/dune, library ir (arrayjit/lib/assignments.ml)
+  OCANNL_LOG_LEVEL_BACKENDS      arrayjit/lib/dune, library context (arrayjit/lib/backends.ml)
+  OCANNL_LOG_LEVEL_BACKEND_IMPL  arrayjit/lib/dune, library ir (arrayjit/lib/backend_impl.ml)
+  OCANNL_LOG_LEVEL_CC_BACKEND    arrayjit/lib/dune, library context (arrayjit/lib/cc_backend.ml)
+  OCANNL_LOG_LEVEL_CUDA_BACKEND  arrayjit/lib/dune, library cuda_backend (arrayjit/lib/cuda_backend.ml)
+  OCANNL_LOG_LEVEL_C_SYNTAX      arrayjit/lib/dune, library ir (arrayjit/lib/c_syntax.ml)
+  OCANNL_LOG_LEVEL_HIP_BACKEND   arrayjit/lib/dune, library hip_backend (arrayjit/lib/hip_backend.ml)
+  OCANNL_LOG_LEVEL_INDEXING      arrayjit/lib/dune, library ir (arrayjit/lib/indexing.ml)
+  OCANNL_LOG_LEVEL_LOW_LEVEL     arrayjit/lib/dune, library ir (arrayjit/lib/low_level.ml)
+  OCANNL_LOG_LEVEL_METAL_BACKEND arrayjit/lib/dune, library metal_backend (arrayjit/lib/metal_backend.ml)
+  OCANNL_LOG_LEVEL_NDARRAY       arrayjit/lib/dune, library ir (arrayjit/lib/ndarray.ml)
+  OCANNL_LOG_LEVEL_ROW           tensor/dune, library ocannl_tensor (tensor/row.ml)
+  OCANNL_LOG_LEVEL_SCHEDULERS    arrayjit/lib/dune, library context (arrayjit/lib/schedulers.ml)
+  OCANNL_LOG_LEVEL_SHAPE         tensor/dune, library ocannl_tensor (tensor/shape.ml)
+  OCANNL_LOG_LEVEL_TASK          arrayjit/lib/dune, library ir (arrayjit/lib/task.ml)
+  OCANNL_LOG_LEVEL_TENSOR        tensor/dune, library ocannl_tensor (tensor/tensor.ml)
+  OCANNL_LOG_LEVEL_TNODE         arrayjit/lib/dune, library ir (arrayjit/lib/tnode.ml)
+  OCANNL_LOG_LEVEL_TRAIN         lib/dune, library ocannl (lib/train.ml)
+  OCANNL_LOG_LEVEL_UTILS         arrayjit/lib/dune, library utils (arrayjit/lib/utils.ml)
+
+Declarations of a name OCANNL does not read as a configuration key, exempt by design:
+  test/operations/dune:ocannl_backedn -- the fixture behind the `config_var_warnings` golden, which captures the warning a mistyped key draws; the rule tracks the name so that an ambient one arriving does not leave the golden stale
+  test/operations/dune:OCANNL_BACKEDN -- the same fixture, in the other spelling
+  test/operations/dune:ocannl-log_level -- the same fixture's second case: a known key in the dashed spelling that gh-ocannl-605 dropped, which draws the other of the two warnings
+
+OK: every `(env_var ...)` naming a configuration key declares both spellings in the same field, and every per-module tracing gate is declared by the library whose modules read it.

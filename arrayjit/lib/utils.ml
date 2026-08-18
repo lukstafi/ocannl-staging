@@ -446,9 +446,9 @@ let env_var_names n =
       [test/operations/test_cpu_topology.ml]. None of them is a library setting, and every one of
       them is exported into the environment of processes that link OCANNL.
     - [ocannl_log_level_…] is read by ppx_minidebug at PREPROCESSING time: the per-module tracing
-      gates ([%%global_debug_log_level_from_env_var "OCANNL_LOG_LEVEL_ROW"] at the top of
-      [tensor/row.ml] and its eighteen siblings). The name after the prefix is a module, not a
-      setting, and it is consumed before this file's initialization exists to have an opinion.
+      gates, one [%%global_debug_log_level_from_env_var] at the top of [tensor/row.ml] and of its
+      eighteen siblings. The name after the prefix is a module, not a setting, and it is consumed
+      before this file's initialization exists to have an opinion.
 
     A reserved prefix rather than a list of exempt names: a list is a second place to update when a
     tool grows a variable, nothing forces the update, and the failure mode is a warning the reader

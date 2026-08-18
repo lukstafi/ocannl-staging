@@ -60,6 +60,7 @@
  (modules test_ppx_op)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (libraries ocannl)
  (preprocess
@@ -71,5 +72,6 @@
  (modules test_ppx_op_expected)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (libraries ocannl))
