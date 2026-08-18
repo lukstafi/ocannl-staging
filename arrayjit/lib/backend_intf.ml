@@ -187,6 +187,36 @@ let no_hardware_limits =
     codegen_tag = None;
   }
 
+let simd_lanes_for ~vector_bytes ~elt_bytes ~extent =
+  let floor_bytes = min vector_bytes 32 in
+  let rec widest bytes =
+    let lanes = bytes / elt_bytes in
+    if lanes >= 2 && extent >= lanes then Some lanes
+    else if bytes / 2 >= floor_bytes then widest (bytes / 2)
+    else None
+  in
+  if elt_bytes <= 0 || vector_bytes < 8 then None else widest vector_bytes
+
+(** The lane count an explicit-SIMD rendering should use for a loop (or micro-kernel column extent)
+    of [extent] iterations over [elt_bytes]-wide elements on a [vector_bytes]-wide register file:
+    the widest vector the extent can fill, [None] where even the narrowest cannot.
+
+    A single width would make a wider machine emit {e less} vector code than a narrower one — the
+    renderings decline outright below one full vector, so widening the auto [cc_vector_bytes] from
+    32 to 64 on an AVX-512 target (gh-ocannl-621 follow-up) would drop every f32 loop of extent
+    8..15 to the serial fallback, and an accumulating loop loses reassociation with it, which is
+    the whole point of the [Vectorized] retype. Halving instead leaves those loops exactly where
+    they were.
+
+    The floor is [min vector_bytes 32] — never narrower than the width the machine used before any
+    widening. Degrading past it would newly vectorize loops that used to render serially, and a
+    vector accumulation reassociates, so that is a numerics change rather than a scheduling one and
+    does not belong in a width default.
+
+    Shared by the renderer ({!C_syntax}) and autotune's seeding pre-filter ({!Sketch_families}) so
+    the two agree on which extents are vectorizable: a stricter seeding rule would withhold
+    candidates the renderer would in fact tile. *)
+
 (** The backend slab allocator, replacing the per-tnode [Alloc_buffer] interface. The shared
     allocator seam (see {!Backends}) mints deterministic per-device [pool_id]s and calls these
     int-in / int-out primitives; the backend keeps the [pool_id -> 'base] table private. The

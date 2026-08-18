@@ -1217,6 +1217,12 @@ module C_syntax (B : C_syntax_config) = struct
         (Printf.sprintf "typedef %s %s __attribute__((vector_size(%d)));" (B.typ_of_prec prec) vtyp
            (lanes * Ops.prec_in_bytes prec)) )
 
+  (* The widest vector this loop can fill, [None] where even the narrowest cannot: see
+     {!Backend_intf.simd_lanes_for} for why the width degrades per loop instead of being one
+     number per machine, and for what the floor protects. *)
+  let vec_lanes_for ~prec ~extent =
+    simd_lanes_for ~vector_bytes:B.vector_bytes ~elt_bytes:(Ops.prec_in_bytes prec) ~extent
+
   (* {4 Convert-on-load / convert-on-store for narrow storage (gh-ocannl-517)}
 
      A node stored at a narrow float precision but computed in f32 ({!C_syntax_config.compute_prec})
@@ -2809,8 +2815,7 @@ module C_syntax (B : C_syntax_config) = struct
               comp_prec (Lazy.force tn.Tn.storage_prec)
             in
             if not (B.vector_prec_ok prec) then raise Bail;
-            let lanes = B.vector_bytes / Ops.prec_in_bytes prec in
-            if lanes < 2 || extent < lanes then raise Bail;
+            let lanes = match vec_lanes_for ~prec ~extent with Some l -> l | None -> raise Bail in
             let written = Hashtbl.create (module Int) in
             List.iter sets ~f:(fun (tn, idcs, _) ->
                 if not (Ops.equal_prec (comp_prec (Lazy.force tn.Tn.storage_prec)) prec) then
@@ -2991,9 +2996,8 @@ module C_syntax (B : C_syntax_config) = struct
             if not (B.vector_prec_ok prec) then raise Bail;
             (* A loop-invariant contribution deserves strength reduction, not chains. *)
             if not (scalar_mentions contrib) then raise Bail;
-            let lanes = B.vector_bytes / Ops.prec_in_bytes prec in
             let extent = to_ + 1 in
-            if lanes < 2 || extent < lanes then raise Bail;
+            let lanes = match vec_lanes_for ~prec ~extent with Some l -> l | None -> raise Bail in
             let chains = if 4 * lanes <= extent then 4 else if 2 * lanes <= extent then 2 else 1 in
             let step = chains * lanes in
             let vtyp, typedef_doc = vec_ext_typ ~prec ~lanes in
@@ -3979,12 +3983,18 @@ module C_syntax (B : C_syntax_config) = struct
                   not (Tn.equal tn d_tn && Tn.equal tn2 d_tn)
               | _ -> true)
           in
-          let lanes = B.vector_bytes / Ops.prec_in_bytes prec in
+          (* The widest vector the column extent can fill, which on a machine wider than the
+             tiling's old fixed width is how [n] between the two widths keeps its tiling instead of
+             falling to the scalar loop -- see [vec_lanes_for]. *)
+          let lanes_opt = vec_lanes_for ~prec ~extent:n in
           let* () =
             no_test
-              ~reason:(Printf.sprintf "n = %d below the vector width (lanes = %d)" n lanes)
-              (lanes < 2 || n < lanes)
+              ~reason:
+                (Printf.sprintf "n = %d below the vector width (lanes = %d)" n
+                   (B.vector_bytes / max 1 (Ops.prec_in_bytes prec)))
+              (Option.is_none lanes_opt)
           in
+          let lanes = Option.value_exn ~message:"C_syntax: mma lane count" lanes_opt in
           let rm = min 4 m in
           (* The C-tile is [rm] rows of [rn] vectors; [rn] is chosen against the ACTUAL [n], not
              fixed at the register-pressure cap (gh-ocannl-575). The columns [bw = rn * lanes] does
