@@ -93,6 +93,14 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   form is not generative: `let%op f x = ...` closes over ONE shared param created at definition
   time. Use `let%op mk_f () x = ...` and apply `mk_f ()` when each model instance needs fresh
   parameters; the `()` idiom makes that construction point explicit.
+- `%cd` composition seams verified by ppx expansion (gh-465, `Train.sgd_one`/`grad_update`): an
+  OCaml variable of `Asgns.comp` type in statement position splices verbatim (so a
+  programmatically built fragment can sit inside a `%cd` body); an inline declaration `{ x }`
+  hoists its let-binding to the top of the quotation, so declaring inside ONE `match` arm and
+  referencing plain `x` from the other arms typechecks — but declaring the same name in two arms
+  is a ppx-level "name clash" error. Gradients (`p.grad`) are readable only as DIRECT operands of
+  an assignment: nested `(p.grad * s) + t` expands to `Option.map p.diff ... * s`, which does not
+  typecheck — give the scaled read its own statement into an intermediate.
 
 ## Graph construction and autodiff
 
@@ -1275,6 +1283,22 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
 
 ## Training and performance
 
+- `t.params` contains only `Tensor.param`-registered tensors (`{ w }` in `%op`, `TDSL.param`,
+  `reshape_param`/`wrap_param`). A leaf built with `Operation.init ~grad_spec:Require_grad` (the
+  deterministic-values test idiom) gets a gradient but does NOT join `params` — so
+  `Train.sgd_update`, `grad_l2_norm`, `grad_checksum` and `zero_params_grads` iterate an empty
+  set and silently emit empty routines (the gh-465 test initially "passed" parameter parity
+  because no optimizer step ran on either side). For deterministic real params use
+  `TDSL.reshape_param ~l ~i ~o ndarray ()` / `TDSL.param ~values l ()`.
+- Training-loop utilities (gh-465, `lib/train.ml`): `Lr_schedule` (host floats; feed via
+  `scheduled_learning_rate`'s data-backed `host_scalar` — a fetch-defined constant would be
+  re-fetched each step, undoing `set_values`), `grad_l2_norm`/`clip_by_global_norm` +
+  `sgd_update ~grad_scale` (scale folded into the gradient read; buffers untouched — the norm
+  can be recomputed on the host from the buffers to cross-check), `grad_update ~accum_steps` +
+  `zero_params_grads` (param zeroing is filtered OUT of the micro-step's `zero_grads` tree by
+  matching the params' grad `Fetch`es; intermediate grads must keep their per-micro-step zeroing
+  since backprop `=+` relies on it), `Outlier_detector` (z-score vs sliding window; nan during
+  warmup, and a constant window gives std 0 → infinite z). Executed parity: `loop_utils.ml`.
 - Metal training recipe: `Train.every_non_literal_materialized loss` (kernel fission then cuts
   every cross-nest edge) + `Autotune.tune ~rounds:0 ~timing_ctx:scratch`. `~rounds:0` keeps
   .expected files schedule-invariant (preset seeds preserve reduction order); `?timing_ctx` on a

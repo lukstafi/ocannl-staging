@@ -1,0 +1,25 @@
+lr at steps [0 2 4 5 10 15 19 20 24 30] (base 1.0, warmup 5, total 25, final_frac 0.1):
+constant 1.0000 1.0000 1.0000 1.0000 1.0000 1.0000 1.0000 1.0000 1.0000 1.0000
+cosine   0.2000 0.6000 1.0000 1.0000 0.8682 0.5500 0.2855 0.2318 0.1055 0.1000
+linear   0.2000 0.6000 1.0000 1.0000 0.7750 0.5500 0.3700 0.3250 0.1450 0.1000
+wsd      0.2000 0.6000 1.0000 1.0000 1.0000 1.0000 1.0000 1.0000 0.1950 0.1000
+warmup starts at base_lr/warmup_steps: true
+warmup reaches base_lr on its last step: true
+cosine reaches final_frac * base_lr past total_steps: true
+linear reaches final_frac * base_lr past total_steps: true
+wsd holds base_lr between warmup and the decay point: true
+wsd decays below base_lr after the decay point: true
+cosine decay is nonincreasing: true
+gradient norm exceeds max_norm (clipping engaged): true
+device grad_norm matches host norm over unclipped buffers: PASS
+device grad_scale is min(1, max_norm/norm): PASS
+clipped sgd step matches host oracle (step 0): PASS
+scheduled lr differs between the probed steps: true
+clipped sgd step matches host oracle at the rescheduled lr (step 8): PASS
+second micro-step changed the accumulated gradients: true
+accumulated micro-batch gradients match the single big-batch gradients: PASS
+post-sgd parameters match between accumulation and big batch: PASS
+z-score is nan while the window fills: true
+ordinary z: 0.507, spike z: 1.732
+an in-family value scores |z| < 1: true
+a spike scores z > 1.5: true

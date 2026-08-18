@@ -13,7 +13,7 @@ test/operations/profiles/dune: 6 exe-running rules
 test/operations/startup_streams/dune: 3 exe-running rules
 test/ppx/dune: 2 tests, 3 exempt rules (pp.exe)
 test/support/dune: nothing that runs a test executable
-test/training/dune: 11 tests, 4 exe-running rules
+test/training/dune: 12 tests, 4 exe-running rules
 tools/dune: nothing that runs a test executable
 
 Stanza kinds that can run a test executable: rule, alias (plus `test`, `tests` and a `library`'s `inline_tests`, which dune runs itself).
@@ -25,4 +25,4 @@ Exempt from the dependency, running an executable that reads no configuration:
   test/ppx:pp.exe -- the ppx driver, run to expand a source file and diff the expansion: `ppx_ocannl` links base, ppxlib, str and einsum_parser -- no configuration reader -- so no `ocannl_config` can reach its output
   benchmarks:python3, handed %{dep:test_orchestrate.py} -- the benchmark orchestrator's own unit tests, in Python: the interpreter runs a script that imports orchestrate.py and runners/bench_common.py and calls no OCANNL executable, so there is no configuration in reach -- and a Python process would not read one anyway
 
-OK: 17 dune files; 227 test stanzas, 2 inline-test libraries and 39 exe-running rules declare ocannl_config; 4 exempt.
+OK: 17 dune files; 228 test stanzas, 2 inline-test libraries and 39 exe-running rules declare ocannl_config; 4 exempt.

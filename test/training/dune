@@ -300,3 +300,20 @@
  (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
+
+; loop_utils is the executed oracle for the gh-ocannl-465 training-loop utilities: LR schedules,
+; global-norm clipping folded into the SGD step, gradient accumulation vs. a single big batch, and
+; the z-score outlier detector.
+
+(test
+ (name loop_utils)
+ (package neural_nets_lib)
+ (locks ocannl_training_test)
+ (deps
+  ocannl_config
+  (env_var ocannl_backend)
+  (env_var OCANNL_BACKEND))
+ (modules loop_utils)
+ (libraries base ocannl stdio arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))

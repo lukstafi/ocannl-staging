@@ -63,6 +63,21 @@ let loss_accumulator ?(label = "loss_accum") () =
   set_materialized t.Tensor.value;
   t
 
+(** Replaces the zeroing of the given gradient nodes with [Noop] inside a [zero_grads] code tree
+    (each per-tensor zeroing is a [Fetch] of zeros — see [Tensor.raw]'s [fetch_zeros]). Used by the
+    gradient-accumulation variant of {!grad_update}, which must keep zeroing the {e intermediate}
+    gradients every micro-step (their backprop contributions are plain [=+] accumulations relying on
+    a same-routine reset) while the {e parameter} gradients accumulate across micro-steps. *)
+let filter_out_grad_zeroing ~grads asgns =
+  let rec loop = function
+    | Asgns.Noop -> Asgns.Noop
+    | Asgns.Seq (t1, t2) -> Asgns.Seq (loop t1, loop t2)
+    | Asgns.Block_comment (s, t) -> Asgns.Block_comment (s, loop t)
+    | Asgns.Fetch { array; _ } when Set.mem grads array -> Asgns.Noop
+    | (Asgns.Accum_op _ | Asgns.Set_vec_unop _ | Asgns.Fetch _) as t -> t
+  in
+  loop asgns
+
 (** Returns the tensor's forward, zeroing gradients, and backprop code wrapped with label-derived
     comments. Sets the tensor's value as materialized. If [setup_for_parallel] is true (false by
     default), sets the parameters and their gradients as "non-local" (on-device). When [accum_loss]
@@ -73,16 +88,45 @@ let loss_accumulator ?(label = "loss_accum") () =
     scheduling. When [loss_scale] is given (see {!Mixed_prec.Loss_scaler}), the backprop is seeded
     with the scale's value instead of 1 ([loss.grad =: loss_scale]), so all gradients come out
     multiplied by the scale — unscale them before the optimizer update (the [grad_unscale] argument
-    of {!sgd_update}). *)
-let grad_update ?(setup_for_parallel = false) ?accum_loss ?loss_scale loss =
+    of {!sgd_update}).
+
+    When [accum_steps] is given (gh-ocannl-465), the returned code is a {e micro-step} of gradient
+    accumulation, llm.c-style: parameter gradients are NOT zeroed here (they are materialized so
+    they persist across runs, and each micro-step's backprop [=+]-accumulates into them — run
+    {!zero_params_grads} at the start of each accumulation cycle instead), while intermediate
+    gradients are still zeroed every micro-step; and the backprop seed is pre-scaled by
+    [1/accum_steps] (folded with [loss_scale] if both are given), so after [accum_steps] runs the
+    parameter gradients hold the mean of the micro-batch gradients — matching a single batch
+    [accum_steps] times larger under a mean-reduced loss. Run the optimizer step once per cycle,
+    after the last micro-step. *)
+let grad_update ?(setup_for_parallel = false) ?accum_steps ?accum_loss ?loss_scale loss =
+  Option.iter accum_steps ~f:(fun k ->
+      if k <= 0 then invalid_arg "Train.grad_update: accum_steps must be positive");
   set_materialized loss.Tensor.value;
   (* Training loops read the loss from the host; declare the intent so the liveness memory planner
      (config [buffer_aliasing], gh-ocannl-489) never aliases the loss buffer -- like param
      gradients' observation intent declared in [Tensor.param]. *)
   Tn.set_observable loss.Tensor.value;
-  if setup_for_parallel then
+  if setup_for_parallel || Option.is_some accum_steps then
     Set.iter loss.Tensor.params ~f:(fun p ->
         set_materialized (Option.value_exn ~here:[%here] p.diff).grad);
+  let zero_grads =
+    match loss.Tensor.diff with
+    | None ->
+        raise @@ Tensor.Session_error ("Train.grad_update: loss is not differentiable", Some loss)
+    | Some diff -> (
+        match accum_steps with
+        | None -> Asgns.to_comp diff.zero_grads
+        | Some _ ->
+            let grads =
+              Set.filter_map
+                (module Tn)
+                loss.Tensor.params
+                ~f:(fun p -> Option.map p.Tensor.diff ~f:(fun d -> d.Tensor.grad))
+            in
+            Asgns.to_comp (filter_out_grad_zeroing ~grads diff.zero_grads))
+  in
+  let inv_accum = 1. /. Float.of_int (Option.value accum_steps ~default:1) in
   (* Note: the %cd syntax for [loss.grad] does not modify roots. *)
   [%cd
     ~~(loss "forward and gradient update";
@@ -92,11 +136,29 @@ let grad_update ?(setup_for_parallel = false) ?accum_loss ?loss_scale loss =
        | Some acc -> acc =+ loss
        | None -> loss.forward);
        ~~(loss "zero grads and backprop";
-          loss.zero_grads;
-          (match loss_scale with
-          | Some scale -> loss.grad =: scale
-          | None -> loss.grad =: 1);
+          zero_grads;
+          (match (loss_scale, accum_steps) with
+          | Some scale, None -> loss.grad =: scale
+          | Some scale, Some _ -> loss.grad =: scale * !.inv_accum ~logic:"."
+          | None, Some _ -> loss.grad =: !.inv_accum
+          | None, None -> loss.grad =: 1);
           loss.backprop))]
+
+(** Code zeroing all parameter gradients of [loss], as a standalone computation: the
+    gradient-accumulation counterpart of {!grad_update}[ ~accum_steps] (which deliberately does not
+    zero them). Compile it as its own routine and run it at the start of each accumulation cycle —
+    before the first micro-step, llm.c-style ("we're about to += accumulate into them"). *)
+let zero_params_grads loss =
+  let one_param p =
+    match p.Tensor.diff with
+    | None -> raise @@ Tensor.Session_error ("Train.zero_params_grads: not differentiable", Some p)
+    | Some diff ->
+        (* The gradients are embedded nodes: this routine may be the first to touch them, so linking
+           it must be able to allocate them rather than require them of a prior context. *)
+        { Asgns.asgns = diff.zero_grads; embedded_nodes = Set.singleton (module Tn) diff.grad }
+  in
+  let comp = Set.to_list loss.Tensor.params |> List.map ~f:one_param |> Asgns.sequence in
+  { comp with asgns = Asgns.Block_comment ("zero_params_grads", comp.asgns) }
 
 (** A scalar checksum over all parameter gradients of [loss]: returns the flag tensor and the code
     that resets it to 0 and accumulates the sum of every gradient cell into it. The sum is
@@ -135,13 +197,20 @@ let grad_checksum loss =
     first multiplied in place by it, so the optimizer math below — including the momentum buffer —
     sees unscaled gradients, and so does any later reader of [p.grad] (e.g. gradient clipping).
 
+    When [grad_scale] is given (a broadcastable scalar, e.g. {!field-grad_clipping.grad_scale} of
+    {!clip_by_global_norm}, gh-ocannl-465), the gradient is multiplied by it {e as read} into the
+    update — the gradient buffer itself is left untouched (llm.c folds its clipping scale into the
+    optimizer kernel the same way): later readers, the next accumulation cycle, and logged gradient
+    norms all see the unclipped values, and no extra per-parameter sweep is emitted. The scale
+    applies to the gradient only, before weight decay's [p] term joins the delta.
+
     When [update_gate] is given (a broadcastable scalar holding 1 to apply the step and 0 to skip
     it, computed on device — see [Mixed_prec.gated_scaled_update], gh-ocannl-492 task 5), every
     optimizer-state mutation is gated by [Where] {e selection}: on a skipped step the parameter and
     the momentum buffer keep their previous values exactly. Selection, not multiplication — the
     skipped steps are the ones whose gradients hold [inf]/[nan], and [0 * inf] is [nan]. *)
 let sgd_one ~learning_rate ?(momentum = 0.0) ?(weight_decay = 0.0) ?(nesterov = false) ?grad_unscale
-    ?update_gate p =
+    ?grad_scale ?update_gate p =
   if Option.is_none p.Tensor.diff then
     raise @@ Tensor.Session_error ("Train.sgd_one: not differentiable", Some p);
   match update_gate with
@@ -153,7 +222,14 @@ let sgd_one ~learning_rate ?(momentum = 0.0) ?(weight_decay = 0.0) ?(nesterov = 
               broadcast the scalar's closed rows against parameters with input axes. *)
            | Some unscale -> p.grad =: p.grad * unscale ~logic:"."
            | None -> Asgns.empty_comp);
-           { sgd_delta } =: p.grad + (!.weight_decay *. p);
+           (* The [Some] arm's inline declaration of [sgd_delta] is hoisted above the match, so the
+              [None] arm references the same tensor. Gradients can only be read as direct operands
+              (not inside subexpressions), hence the scaled read is its own statement. *)
+           (match grad_scale with
+           | Some scale ->
+               ({ sgd_delta } =: p.grad * scale ~logic:".";
+                sgd_delta =+ !.weight_decay *. p)
+           | None -> sgd_delta =: p.grad + (!.weight_decay *. p));
            if Float.(momentum > 0.0) then (
              { sgd_momentum } =: (!.momentum *. sgd_momentum) + sgd_delta;
              if nesterov then sgd_delta =+ !.momentum *. sgd_momentum
@@ -165,7 +241,11 @@ let sgd_one ~learning_rate ?(momentum = 0.0) ?(weight_decay = 0.0) ?(nesterov = 
            (match grad_unscale with
            | Some unscale -> p.grad =: p.grad * unscale ~logic:"."
            | None -> Asgns.empty_comp);
-           { sgd_delta } =: p.grad + (!.weight_decay *. p);
+           (match grad_scale with
+           | Some scale ->
+               ({ sgd_delta } =: p.grad * scale ~logic:".";
+                sgd_delta =+ !.weight_decay *. p)
+           | None -> sgd_delta =: p.grad + (!.weight_decay *. p));
            if Float.(momentum > 0.0) then (
              { sgd_momentum } =: where gate ((!.momentum *. sgd_momentum) + sgd_delta) sgd_momentum;
              if nesterov then sgd_delta =+ !.momentum *. sgd_momentum
@@ -176,8 +256,11 @@ let sgd_one ~learning_rate ?(momentum = 0.0) ?(weight_decay = 0.0) ?(nesterov = 
            sgd_delta =: where gate sgd_delta 0;
            p =- learning_rate * sgd_delta ~logic:".")]
 
-let sgd_update ~learning_rate ?momentum ?weight_decay ?nesterov ?grad_unscale ?update_gate loss =
-  let f = sgd_one ~learning_rate ?momentum ?weight_decay ?nesterov ?grad_unscale ?update_gate in
+let sgd_update ~learning_rate ?momentum ?weight_decay ?nesterov ?grad_unscale ?grad_scale
+    ?update_gate loss =
+  let f =
+    sgd_one ~learning_rate ?momentum ?weight_decay ?nesterov ?grad_unscale ?grad_scale ?update_gate
+  in
   let comp = Set.to_list loss.Tensor.params |> List.map ~f |> Asgns.sequence in
   { comp with asgns = Asgns.Block_comment ("sgd_update", comp.asgns) }
 
@@ -198,6 +281,215 @@ let%track3_sexp sequential_loop ~f lowered_bindings =
         idx := old_idx
   in
   loop lowered_bindings
+
+(** {2 Training-loop utilities (gh-ocannl-465)}
+
+    Host-side learning-rate schedules, global-norm gradient clipping, and a loss/grad-norm outlier
+    detector — ports of llm.c's loop scaffolding ([llmc/schedulers.h], [llmc/global_norm.cuh],
+    [llmc/outlier_detector.h]); the gradient-accumulation piece is {!grad_update}[ ~accum_steps] +
+    {!zero_params_grads} above. *)
+
+(** Host-side learning-rate schedules: pure functions from the step number to a float, fed to the
+    device via {!scheduled_learning_rate} (or any host-written scalar). All schedules except
+    [Constant] start with a linear warmup over [warmup_steps] steps ([base_lr * (step+1) /
+    warmup_steps]; no warmup when 0) and decay toward [base_lr *. final_frac] at [total_steps].
+    Steps beyond [total_steps] clamp to the final value. *)
+module Lr_schedule = struct
+  type kind =
+    | Constant  (** Always [base_lr]; no warmup, [final_frac] is ignored. *)
+    | Cosine  (** Half-cosine from [base_lr] down to [base_lr *. final_frac]. *)
+    | Linear  (** Straight line from [base_lr] down to [base_lr *. final_frac]. *)
+    | Wsd of { decay_frac : float }
+        (** Warmup-stable-decay (arXiv:2405.18392): hold [base_lr] until the final [decay_frac]
+            fraction of [total_steps] (llm.c uses 0.2), then decay as [1 - sqrt(ratio)]. *)
+
+  type t = {
+    kind : kind;
+    base_lr : float;
+    warmup_steps : int;
+    total_steps : int;
+    final_frac : float;  (** The final learning rate as a fraction of [base_lr]. *)
+  }
+
+  (** The learning rate at [step] (0-based). *)
+  let learning_rate t ~step =
+    let clamped_frac ~from =
+      let denom = t.total_steps - from in
+      if denom <= 0 then 1.0
+      else Float.max 0.0 @@ Float.min 1.0 @@ (Float.of_int (step - from) /. Float.of_int denom)
+    in
+    let min_lr = t.base_lr *. t.final_frac in
+    let with_warmup decayed =
+      if step < t.warmup_steps then
+        t.base_lr *. Float.of_int (step + 1) /. Float.of_int t.warmup_steps
+      else decayed ()
+    in
+    match t.kind with
+    | Constant -> t.base_lr
+    | Cosine ->
+        with_warmup (fun () ->
+            let ratio = clamped_frac ~from:t.warmup_steps in
+            min_lr +. (0.5 *. (1.0 +. Float.cos (Float.pi *. ratio)) *. (t.base_lr -. min_lr)))
+    | Linear ->
+        with_warmup (fun () ->
+            let ratio = clamped_frac ~from:t.warmup_steps in
+            min_lr +. ((1.0 -. ratio) *. (t.base_lr -. min_lr)))
+    | Wsd { decay_frac } ->
+        with_warmup (fun () ->
+            let decay_point =
+              Float.to_int ((1.0 -. decay_frac) *. Float.of_int t.total_steps)
+            in
+            if step < decay_point then t.base_lr
+            else
+              let ratio = clamped_frac ~from:decay_point in
+              min_lr +. ((1.0 -. Float.sqrt ratio) *. (t.base_lr -. min_lr)))
+end
+
+(** A device-resident, broadcastable scalar the host can overwrite with [Context.set_values].
+    Data-backed on purpose: a 1-element [term_init] would come out as a [Constant] fetch, re-fetched
+    by every step's forward code, silently undoing [Context.set_values]. The [bcast_if_1] axis basis
+    (as in [Tensor.number]) lets the scalar broadcast into tensors of any shape. *)
+let host_scalar ~l v =
+  let ndarray =
+    Ir.Ndarray.init_array ~debug:l Ir.Ops.single ~dims:[| 1 |] ~padding:None ~f:(fun _ -> v)
+  in
+  let t =
+    (* Reshape rather than Keep_shape_no_padding: the latter pins the data axis at the default
+       basis, which conflicts with the [bcast_if_1] tag (bases are incompatible atoms). *)
+    Tensor.term ~grad_spec:Tensor.Prohibit_grad ~init_data:(Asgns.Reshape ndarray) ~label:[ l ]
+      ~batch_dims:[] ~input_dims:[]
+      ~output_axes:[ (Row.bcast_if_1, 1) ]
+      ()
+  in
+  set_materialized t.Tensor.value;
+  Tn.set_observable t.Tensor.value;
+  t
+
+(** A learning-rate scalar driven by a host-side schedule: returns the tensor (pass it as
+    {!sgd_update}'s [~learning_rate]) and a setter overwriting it with the schedule's value at
+    [step] — call the setter once per step, before running the optimizer routine. The overwrite is
+    a tiny host-to-device transfer, not a recompilation. *)
+let scheduled_learning_rate ?(label = "learning_rate") schedule =
+  let lr = host_scalar ~l:label (Lr_schedule.learning_rate schedule ~step:0) in
+  let set_step ctx ~step =
+    Context.set_values ctx lr.Tensor.value [| Lr_schedule.learning_rate schedule ~step |]
+  in
+  (lr, set_step)
+
+(** A scalar holding the global L2 norm over all parameter gradients of [loss]: returns the norm
+    tensor (materialized and observable — read it with [Context.get_values] for logging or
+    {!Outlier_detector} feeding) and the code that computes it: per-parameter sum-of-squares einsum
+    reductions (deterministic by construction — OCANNL emits no atomics) followed by a square root.
+    Sequence it after {!grad_update} in the same routine or a later one. Like {!grad_checksum}, it
+    must be called only after the model and the loss are fully constructed.
+
+    When [grad_unscale] is given (the reciprocal of a {!Mixed_prec.Loss_scaler}'s scale), the norm
+    is multiplied by it after the square root, so the result is the true-magnitude norm even when
+    backprop was seeded with a loss scale (the buffers themselves still hold scaled gradients at
+    this point — {!sgd_one} unscales them in place later). *)
+let grad_l2_norm ?grad_unscale ?(label = "grad_norm") loss =
+  let norm = NTDSL.init ~l:label ~prec:Ir.Ops.single ~o:[ 1 ] ~f:(fun _ -> 0.) () in
+  set_materialized norm.Tensor.value;
+  Tn.set_observable norm.Tensor.value;
+  (* Settle shape inference for the parameters first — same reason as in {!grad_checksum}: a
+     parameter row still unsolved at settlement would be refused the close-to-empty guess once the
+     einsum spec's row variables touch it. *)
+  Set.iter loss.Tensor.params ~f:(fun p ->
+      ignore (Lazy.force p.Tensor.value.Tn.dims : int array));
+  let one_param p =
+    if Option.is_none p.Tensor.diff then
+      raise @@ Tensor.Session_error ("Train.grad_l2_norm: not differentiable", Some p);
+    [%cd norm =+ p.grad * p.grad ~logic:"...|...->...; ...|...->... => |->0"]
+  in
+  let comps = Set.to_list loss.Tensor.params |> List.map ~f:one_param in
+  let reset = [%cd norm =: 0] in
+  let root =
+    match grad_unscale with
+    | Some unscale ->
+        [%cd
+          norm =: sqrt norm;
+          norm =: norm * unscale ~logic:"."]
+    | None -> [%cd norm =: sqrt norm]
+  in
+  let comp = Asgns.sequence ((reset :: comps) @ [ root ]) in
+  (norm, { comp with asgns = Asgns.Block_comment (label, comp.asgns) })
+
+type grad_clipping = {
+  grad_norm : Tensor.t;
+      (** The pre-clip global L2 norm (observable — read it for logging or outlier detection). *)
+  grad_scale : Tensor.t;
+      (** The clipping scale, computed on device: [min(1, max_norm / grad_norm)]. Pass it as
+          {!sgd_update}'s [~grad_scale] so it folds into the update. *)
+  clip_comp : Asgns.comp;
+      (** Sequence it after the gradient update and before the optimizer step (all three can be one
+          routine — no host round-trip is involved). *)
+}
+
+(** Global-norm gradient clipping, llm.c-style ([llmc/global_norm.cuh] feeding [grad_scale] into
+    the AdamW launch): the returned scale leaves gradient buffers untouched and multiplies the
+    gradients as the optimizer reads them ({!sgd_update}[ ~grad_scale]).
+
+    Note: clipping does not gate non-finite gradients — a [nan] norm fails the ordered comparison
+    and selects scale 1. Combine with {!grad_checksum} or [Mixed_prec.gated_scaled_update] when
+    inf/nan defense is needed. *)
+let clip_by_global_norm ?grad_unscale ?(label = "grad_clip") ~max_norm loss =
+  let grad_norm, norm_comp = grad_l2_norm ?grad_unscale ~label:(label ^ "_norm") loss in
+  let grad_scale = host_scalar ~l:(label ^ "_scale") 1. in
+  let scale_comp =
+    (* Ordered comparison and selection: norm = 0 selects 1 (the division's [inf] is discarded by
+       the [Where] selection). The [i => j] copy bridges the axis bases — [clip_sel] inherits the
+       norm's default-basis axis while [grad_scale] carries the broadcastable [bcast_if_1] axis
+       (distinct spec variables keep the two from unifying — incompatible basis atoms). *)
+    [%cd
+      { clip_ratio } =: !.max_norm /. grad_norm;
+      { clip_sel } =: where (!.max_norm < grad_norm) clip_ratio 1;
+      grad_scale =: id clip_sel ~logic:"i => j"]
+  in
+  let comp = Asgns.sequence [ norm_comp; scale_comp ] in
+  { grad_norm; grad_scale; clip_comp = { comp with asgns = Asgns.Block_comment (label, comp.asgns) } }
+
+(** A sliding-window z-score outlier detector for host-observed scalars (per llm.c's
+    [llmc/outlier_detector.h]): feed it the per-step loss and/or {!grad_l2_norm} values and skip the
+    optimizer step when the returned z-score exceeds a threshold. Pure host-side state; use one
+    detector per monitored quantity. *)
+module Outlier_detector = struct
+  type t = {
+    window : float array;
+    mutable count : int;  (** Number of recorded values while the window is still filling. *)
+    mutable index : int;  (** Replacement position once the window is full. *)
+    mutable sum : float;
+    mutable sum_sq : float;
+  }
+
+  let create ?(window_size = 128) () =
+    if window_size <= 0 then
+      invalid_arg "Train.Outlier_detector.create: window_size must be positive";
+    { window = Array.create ~len:window_size 0.; count = 0; index = 0; sum = 0.; sum_sq = 0. }
+
+  (** Records [v] and returns its z-score against the sliding window (including [v] itself):
+      [Float.nan] until the window has filled — treat that as "not an outlier" (llm.c does). A
+      constant-valued window has standard deviation 0, making the z-score of any deviation
+      [infinity]. *)
+  let update t v =
+    let n = Array.length t.window in
+    if t.count < n then (
+      t.window.(t.count) <- v;
+      t.count <- t.count + 1;
+      t.sum <- t.sum +. v;
+      t.sum_sq <- t.sum_sq +. (v *. v);
+      Float.nan)
+    else (
+      let old = t.window.(t.index) in
+      t.sum <- t.sum -. old +. v;
+      t.sum_sq <- t.sum_sq -. (old *. old) +. (v *. v);
+      t.window.(t.index) <- v;
+      t.index <- (t.index + 1) % n;
+      let nf = Float.of_int n in
+      let mean = t.sum /. nf in
+      let variance = (t.sum_sq /. nf) -. (mean *. mean) in
+      let std = Float.sqrt (Float.max 0. variance) in
+      (v -. mean) /. std)
+end
 
 let set_virtual (a : Tn.t) = Tn.update_memory_mode a Virtual 29
 
