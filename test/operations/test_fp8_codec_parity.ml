@@ -133,14 +133,42 @@ let () =
     (Float.(sdev.(0) >= 57344.) && Float.(sdev.(1) <= -57344.));
   p "a NaN input narrows to a NaN" (Float.is_nan sdev.(2));
 
+  (* The same underflow, but reached through fp8 ARITHMETIC rather than a conversion: an fp8
+     operator computes in f32 and narrows its RESULT, which is a second narrowing site, and one a
+     guard on the conversions alone would miss (Codex P2 on PR #372). [(2^-16) **. 5] is 2^-80,
+     squarely inside ROCm's broken window, and reachable from fp8 operands — a product of two
+     cannot get below 2^-32, so the power is what gets there. *)
+  let pow_narrowed =
+    Tensor.unsafe_reinitialize ();
+    let ctx = Context.auto () in
+    let base =
+      TDSL.ndarray [| two_pow (-16) |] ~label:[ "codec_pow" ] ~output_dims:[ 1 ] ()
+    in
+    Ir.Tnode.update_prec base.Tensor.value Ir.Ops.fp8;
+    Train.set_materialized base.Tensor.value;
+    (* Named, so its debug artifacts do not collide with the narrowing routine's: a same-named
+       routine silently overwrites the earlier one's .c/.ll (CLAUDE.md), and reading the emitted
+       kernel is how this leg was checked to be non-vacuous. *)
+    let%op fp8pow = base **. 5.0 in
+    Ir.Tnode.update_prec fp8pow.Tensor.value Ir.Ops.fp8;
+    Train.set_materialized fp8pow.Tensor.value;
+    let ctx = Train.forward_once ctx fp8pow in
+    (Context.get_values ctx fp8pow.Tensor.value).(0)
+  in
+  Stdio.printf "fp8 arithmetic underflow: (2^-16) **. 5 -> %h\n" pow_narrowed;
+
   (* Magnitudes far below the smallest subnormal must vanish. HIP miscompiles exactly this range
      (gh-ocannl-647: an out-of-range shift returns values as large as 2^-14), so on HIP this holds
      only when [prefer_backend_uniformity] routes the conversion through the guarded helper — which
      is what the test configuration does, so this is a real check here rather than a skip. Left
      skipped, loudly, in the configuration that asks for the platform's own cast. *)
   let claim = "magnitudes far below the smallest subnormal narrow to zero" in
-  if on_hip && not fp8_guarded then skipped claim
-  else
+  let arith_claim = "an fp8 operator's underflowing result narrows to zero too" in
+  if on_hip && not fp8_guarded then (
+    skipped claim;
+    skipped arith_claim)
+  else (
     let tiny = [| 4.1359e-25; 8.27e-25; 1.65e-24; 3.31e-24; -4.1359e-25 |] in
     let tdev = narrow_on_device tiny in
-    p claim (Array.for_all tdev ~f:(fun x -> Float.(x = 0.)))
+    p claim (Array.for_all tdev ~f:(fun x -> Float.(x = 0.)));
+    p arith_claim Float.(pow_narrowed = 0.))
