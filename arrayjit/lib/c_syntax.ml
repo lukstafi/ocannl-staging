@@ -1401,15 +1401,17 @@ module C_syntax (B : C_syntax_config) = struct
      AVX-512 nor AVX512-FP16), so they carry a second guard the AVX/AVX2 rows do not:
      [__has_builtin], which on gcc tracks the enabled target features exactly.
 
+     It cannot catch a wrong signature — that is what the compile checks are for — but it turns
+     "this compiler spells it differently" into a fall-through to the per-lane arm rather than a
+     failed kernel compile. The cost is that a gcc older than 10, which has no [__has_builtin],
+     takes the per-lane arm at those widths (the prelude shims the macro to 0).
+
      The AVX-512 f32 x 16 row has since been executed, on Zen 5 (gcc 15, which has no
      [__builtin_elementwise_fma], so the chain reaches this arm): correct to the bit against the
      32-byte rendering, and 225.7 against 130.5 GFLOP/s on the packed f32 GEBP once
      [cc_vector_bytes] stopped capping the width at 32. The AVX512-FP16 rows remain unexecuted and
-     will stay that way here — no AMD part implements AVX512-FP16, and this fleet's only native-fp16
-     target is ARM, which takes the NEON rows instead. It cannot catch a wrong signature — that is what the compile checks are for — but it
-     turns "this compiler spells it differently" into a fall-through to the per-lane arm rather
-     than a failed kernel compile. The cost is that a gcc older than 10, which has no
-     [__has_builtin], takes the per-lane arm at those widths (the prelude shims the macro to 0). *)
+     will stay that way here — no AMD part implements AVX512-FP16, and this fleet's only
+     native-fp16 target is ARM, which takes the NEON rows instead. *)
   let vec_fma_builtin ~prec ~lanes : (string * (dst:string -> a:string -> b:string -> string)) list
       =
     let call name extra ~dst ~a ~b =
@@ -3990,9 +3992,9 @@ module C_syntax (B : C_syntax_config) = struct
                   not (Tn.equal tn d_tn && Tn.equal tn2 d_tn)
               | _ -> true)
           in
-          (* The widest vector the column extent can fill, which on a machine wider than the
-             tiling's old fixed width is how [n] between the two widths keeps its tiling instead of
-             falling to the scalar loop -- see [vec_lanes_for]. *)
+          (* The widths this register file can render, narrowed to those the column extent can
+             fill: an [n] between two rungs keeps its tiling instead of falling to the scalar loop,
+             and the cost model below picks among the rungs that remain. *)
           let lane_ladder =
             simd_lane_ladder ~vector_bytes:B.vector_bytes
               ~elt_bytes:(Ops.prec_in_bytes prec)
