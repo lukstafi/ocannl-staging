@@ -36,15 +36,48 @@ BASE=${BASE:-/home/lukstafi/wt-gh612v-base}
 FEAT=${FEAT:-/home/lukstafi/wt-gh612v-feat}
 MASTER=${MASTER:-/home/lukstafi/wt-gh612v-master}
 
-# The cell table. A label that is not listed is an error rather than a default: with `MASTER` as a
-# fallback, a typo would measure the wrong tree under a name the report trusts.
-cell_tree() {
+# The cell table, keyed by ROLE rather than by path. A label that is not listed is an error rather
+# than a default: with `MASTER` as a fallback, a typo would measure the wrong tree under a name the
+# report trusts.
+cell_role() {
   case $1 in
-    base574A) printf '%s\n' "$BASE" ;;
-    feat574A) printf '%s\n' "$FEAT" ;;
-    cap8A|capoffA|cap4A) printf '%s\n' "$MASTER" ;;
+    base574A) printf 'BASE\n' ;;
+    feat574A) printf 'FEAT\n' ;;
+    cap8A|capoffA|cap4A) printf 'MASTER\n' ;;
     *) echo "gh612v_session: unknown cell '$1'" >&2; return 2 ;;
   esac
+}
+role_tree() {
+  case $1 in
+    BASE) printf '%s\n' "$BASE" ;;
+    FEAT) printf '%s\n' "$FEAT" ;;
+    MASTER) printf '%s\n' "$MASTER" ;;
+    *) echo "gh612v_session: unknown role '$1'" >&2; return 2 ;;
+  esac
+}
+cell_tree() { role_tree "$(cell_role "$1")" ; }
+
+# The three roles are three DIFFERENT commits by construction, so two of them resolving to one
+# checkout is never a configuration worth honoring -- and it is not a harmless one: with BASE=FEAT
+# the gh-574 comparison becomes a tree against itself, and the arm, parity and replay gates all pass
+# on it, under two trusted labels. Checked on physical paths (a symlinked alias resolves to the same
+# checkout) and once per run.
+assert_distinct_roles() {
+  [ -z "${ROLES_CHECKED:-}" ] || return 0
+  local r p seen="" phys
+  for r in BASE FEAT MASTER; do
+    p=$(role_tree "$r") || return 2
+    phys=$(cd "$p" 2>/dev/null && pwd -P) || phys=""
+    [ -n "$phys" ] || { echo "gh612v_session: role $r ($p) is not a usable directory" >&2; return 1; }
+    case " $seen " in
+      *" $phys "*)
+        echo "gh612v_session: two roles resolve to the same checkout ($phys)" >&2
+        echo "  BASE, FEAT and MASTER are three different commits; aliasing them would compare a" >&2
+        echo "  tree with itself while every gate passed under two labels." >&2; return 1 ;;
+    esac
+    seen="$seen $phys"
+  done
+  ROLES_CHECKED=1
 }
 # Arm A is forced in EVERY cell, including the two that shipped it anyway in the original session:
 # the point is that the treatment is uniform, so a cross-cell comparison is not conditioned on which
@@ -71,11 +104,13 @@ SHA_MLP=${SHA_MLP:-328c1dcc51a016eef36ad6142c9003315e8e62111c502d77da68b534eb2df
 # The commit each tree is pinned to in the report's Provenance. A tree carries that commit plus ONE
 # commit, the gh-ocannl-638 backport -- so the pin is checked as an ancestor with a bounded distance,
 # not as HEAD.
+# Keyed by ROLE, not by path: a path-keyed lookup returns the FIRST role whose path matches, so two
+# roles sharing a checkout would silently be pinned to one commit.
 tree_pin() {
   case $1 in
-    "$BASE") printf '%s\n' "${BASE_COMMIT:-6d14f401}" ;;
-    "$FEAT") printf '%s\n' "${FEAT_COMMIT:-76f50dcd}" ;;
-    "$MASTER") printf '%s\n' "${MASTER_COMMIT:-5d0c86d8}" ;;
+    BASE) printf '%s\n' "${BASE_COMMIT:-6d14f401}" ;;
+    FEAT) printf '%s\n' "${FEAT_COMMIT:-76f50dcd}" ;;
+    MASTER) printf '%s\n' "${MASTER_COMMIT:-5d0c86d8}" ;;
     *) return 1 ;;
   esac
 }
@@ -91,11 +126,13 @@ tree_pin() {
 #
 # Validated here rather than in the optional `trees` block, because the measurement blocks are
 # independently runnable and a printed DIRTY protects nothing. Memoized: once per tree per run.
-validate_tree() {
-  local t=$1 pin base extra src
-  case " ${TREES_VALIDATED:-} " in *" $t "*) return 0 ;; esac
+validate_tree() {  # <role> -- the tree comes from the role, so the pin cannot be picked by path
+  local role=$1 t pin base extra src
+  assert_distinct_roles || return 1
+  t=$(role_tree "$role") || return 1
+  case " ${TREES_VALIDATED:-} " in *" $role:$t "*) return 0 ;; esac
   [ -d "$t/.git" ] || [ -f "$t/.git" ] || { echo "gh612v_session: not a git checkout: $t" >&2; return 1; }
-  pin=$(tree_pin "$t") || { echo "gh612v_session: tree $t is not one of BASE/FEAT/MASTER" >&2; return 1; }
+  pin=$(tree_pin "$role") || { echo "gh612v_session: unknown role '$role'" >&2; return 1; }
   base=$(git -C "$t" rev-parse --verify --quiet "$pin^{commit}") || {
     echo "gh612v_session: $t does not contain the pinned commit $pin" >&2; return 1; }
   git -C "$t" merge-base --is-ancestor "$base" HEAD 2>/dev/null || {
@@ -160,18 +197,19 @@ validate_tree() {
       echo "gh612v_session: $t/$src is newer than the built bench_gpt.exe -- rebuild before" >&2
       echo "  measuring; a stale binary would ignore the arm selector." >&2; return 1; }
   done
-  TREES_VALIDATED="${TREES_VALIDATED:-} $t"
-  echo "tree ok: $t at $(git -C "$t" rev-parse --short=8 HEAD) (pinned base $pin, clean, selector present, binary current)"
+  TREES_VALIDATED="${TREES_VALIDATED:-} $role:$t"
+  echo "tree ok: $role = $t at $(git -C "$t" rev-parse --short=8 HEAD) (pinned base $pin, only the backport's paths, digests match, clean, binary current)"
 }
 
 # Unquoted on purpose: the flag string is word-split into separate arguments. It is built here, not
 # taken from the caller.
 run_cell() {  # <subcommand> <label> <rep> [extra driver args before the flags]
   local sub=$1 label=$2 rep=$3; shift 3
-  local tree flags
-  tree=$(cell_tree "$label") || return 2
+  local role tree flags
+  role=$(cell_role "$label") || return 2
+  tree=$(role_tree "$role") || return 2
   flags=$(cell_flags "$label") || return 2
-  validate_tree "$tree" || return 1
+  validate_tree "$role" || return 1
   echo "--- $sub $label r$rep [$flags]"
   "$D" "$sub" "$tree" "$label" "$rep" "$@" $flags
 }
@@ -198,11 +236,11 @@ balanced_block() {  # <first-rep> <reps> <label>...
 }
 
 block_trees() {
-  local t rc=0
-  for t in "$BASE" "$FEAT" "$MASTER"; do
+  local r rc=0
+  for r in BASE FEAT MASTER; do
     # The same validation every cell runs, so `trees` is a dry run of the gate rather than a
     # cosmetic listing that a measurement block could then contradict.
-    validate_tree "$t" || rc=1
+    validate_tree "$r" || rc=1
   done
   return $rc
 }
