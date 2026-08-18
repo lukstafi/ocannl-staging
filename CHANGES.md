@@ -32,16 +32,6 @@
   Windows users get the same lazy, copy-free loads as everyone else; the setting stays for a
   filesystem that does refuse, and a rename that fails now cleans up its temp file.
 
-### Fixed
-
-- **`uint32` and `uint64` ndarrays convert to and from floats as unsigned.** They are stored in
-  {e signed} int32/int64 bigarrays, and every float-facing conversion in `Ndarray` — `get_as_float`,
-  the folds behind `retrieve_flat_values`, `set_from_float`, `fill_from_float` — went through the
-  host's signed conversion, so a u32 `0xffffffff` read back as `-1.` and writing `4294967295.`
-  raised outright. Found by review on the new `Safetensors.to_ndarray ?prec` path, but the defect
-  was in the conversions, so the fix is there: four reinterpreting helpers all four sites now use,
-  with out-of-range floats wrapping as C's unsigned conversion does.
-
 - **The gh-573 / gh-574 HIP measurement is verified end to end** (gh-ocannl-612,
   `benchmarks/report-gh612-hip-verified.md`): the first session's ratios rested on default-placement
   arm A routines that were profiled but, in three of four cells, never executed — the limitation it
@@ -143,6 +133,27 @@
   doctrine reach regressions whose subject is the analysis layer on IR shapes the `Assignments`
   pipeline never emits; `test/operations/prelowered_seam` pins the sibling-`Local_scope`
   read-before-write case that motivated it.
+
+### Fixed
+
+- **`uint32` and `uint64` ndarrays convert to and from floats as unsigned.** They are stored in
+  *signed* int32/int64 bigarrays, and every float-facing conversion in `Ndarray` — `get_as_float`,
+  the folds behind `retrieve_flat_values`, `set_from_float`, `fill_from_float` — went through the
+  host's signed conversion, so a u32 `0xffffffff` read back as `-1.` and writing `4294967295.`
+  raised outright. Found by review on the new `Safetensors.to_ndarray ?prec` path, but the defect
+  was in the conversions, so the fix is there: four reinterpreting helpers all four sites now use,
+  with out-of-range floats wrapping as C's unsigned conversion does. A u64 too large to be a double
+  now rounds once, to the nearest: halving it to dodge the sign bit and doubling back rounds twice,
+  which cost an ulp on values just past a midpoint.
+
+- **Unaligned checkpoint payloads are decoded rather than mapped.** `Persistence`'s mappability test
+  never checked that a payload's file offset is a multiple of its element size — which a checkpoint
+  written with a small `?alignment`, or a packed pre-alignment-field one, does not give: a byte
+  payload ahead of a float one leaves the float at an odd offset, and mapping it handed out a
+  misaligned typed pointer. Undefined behaviour on any platform, not only the Windows one this
+  release turns mapping on for. The rule now lives as `Ndarray.mappable_file_region` next to
+  `map_file_array`, so the checkpoint and safetensors readers share one predicate rather than each
+  carrying its own.
 
 ### Changed
 
