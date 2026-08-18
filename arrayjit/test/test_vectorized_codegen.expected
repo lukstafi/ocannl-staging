@@ -209,10 +209,10 @@
     vred_total_i7__ = (vred_total_i7__ + vred_i7_0_0__[5]);
     vred_total_i7__ = (vred_total_i7__ + vred_i7_0_0__[6]);
     vred_total_i7__ = (vred_total_i7__ + vred_i7_0_0__[7]);
-    dacc[0] = (dacc[0] + vred_total_i7__);
     for (; i7 <= 71; ++i7) {
-      dacc[0] = fmaf(da[i7], db[i7], dacc[0]);
+      vred_total_i7__ = fmaf(da[i7], db[i7], vred_total_i7__);
     }
+    dacc[0] = (dacc[0] + vred_total_i7__);
   }
 }
  void vec_max_reduce_kernel(
@@ -253,10 +253,10 @@
     vred_total_i8__ = fmaxf(vred_total_i8__, vred_i8_0_0__[5]);
     vred_total_i8__ = fmaxf(vred_total_i8__, vred_i8_0_0__[6]);
     vred_total_i8__ = fmaxf(vred_total_i8__, vred_i8_0_0__[7]);
-    macc[0] = fmaxf(macc[0], vred_total_i8__);
     for (; i8 <= 15; ++i8) {
-      macc[0] = fmaxf(macc[0], ma[i8]);
+      vred_total_i8__ = fmaxf(vred_total_i8__, ma[i8]);
     }
+    macc[0] = fmaxf(macc[0], vred_total_i8__);
   }
 }
  void vec_strided_reduce_kernel(

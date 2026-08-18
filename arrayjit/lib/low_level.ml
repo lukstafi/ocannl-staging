@@ -4872,6 +4872,227 @@ let strip_zero_init_for_local (id : scope_id) (body : t) : t option =
   | For_loop _ -> Some body
   | _ -> None
 
+(* gh-ocannl-639: whether a scalar (resp. a statement body) reads or writes [tn] anywhere — the
+   accumulation recognizers below use it to certify that an update's contribution is free of the
+   accumulator's node, which is what licenses holding the accumulator out of memory across a
+   reduction. *)
+let rec scalar_touches_tn tn (llsc : scalar_t) =
+  match llsc with
+  | Get (tn2, _) -> Tn.equal tn tn2
+  | Get_merge_buffer _ ->
+      (* A node's merge buffer is a SEPARATE read-only staging buffer (the transfer source's
+         copy), never the node's own storage — reading it is independent of the accumulator's
+         cell, so [p =+ p.merge]-style updates stay recognizable as accumulations. *)
+      false
+  | Get_dynamic { tn = tn2; dyn_value = v, _; _ } -> Tn.equal tn tn2 || scalar_touches_tn tn v
+  | Local_scope { body; _ } -> code_touches_tn tn body
+  | Get_local _ | Constant _ | Constant_bits _ | Embed_index _ -> false
+  | Ternop (_, (a, _), (b, _), (c, _)) ->
+      scalar_touches_tn tn a || scalar_touches_tn tn b || scalar_touches_tn tn c
+  | Binop (_, (a, _), (b, _)) -> scalar_touches_tn tn a || scalar_touches_tn tn b
+  | Unop (_, (a, _)) -> scalar_touches_tn tn a
+
+and code_touches_tn tn (llc : t) =
+  match llc with
+  | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ -> false
+  | Seq (a, b) -> code_touches_tn tn a || code_touches_tn tn b
+  | For_loop { body; _ } -> code_touches_tn tn body
+  | If { cond = c, _; body } -> scalar_touches_tn tn c || code_touches_tn tn body
+  | Zero_out tn2 -> Tn.equal tn tn2
+  | Set { tn = tn2; llsc; _ } -> Tn.equal tn tn2 || scalar_touches_tn tn llsc
+  | Set_dynamic { tn = tn2; dyn_value = v, _; llsc; _ } ->
+      Tn.equal tn tn2 || scalar_touches_tn tn v || scalar_touches_tn tn llsc
+  | Set_from_vec { tn = tn2; arg = a, _; _ } -> Tn.equal tn tn2 || scalar_touches_tn tn a
+  | Set_local (_, llsc) -> scalar_touches_tn tn llsc
+  | Tile_mma { d = d_tn, _; a = a_tn, _; b = b_tn, _; _ } ->
+      Tn.equal tn d_tn || Tn.equal tn a_tn || Tn.equal tn b_tn
+
+(* gh-ocannl-639: the accumulation-update statement shape [tn[idcs] = op(tn[idcs], contrib)] (or
+   its FMA form) over an associative-commutative [op], with [contrib] free of [tn]. The single
+   source of truth for [C_syntax]'s widened renderings (the serial-fallback nest rewrite and its
+   siblings) and for [Schedule.Unroll ~materialize:true]'s scope-form unrolling — sharing it is
+   what keeps "what counts as an accumulation" from drifting between the schedule transform and
+   the emission that must honor it. *)
+let accum_update_parts ~tn ~idcs (llsc : scalar_t) : (Ops.binop * scalar_t) option =
+  let is_acc s = equal_scalar_t s (Get (tn, idcs)) in
+  let reduce_op = function Ops.Add | Ops.Mul | Ops.Max | Ops.Min -> true | _ -> false in
+  match llsc with
+  | Binop (op, (a, _), (b, _)) when reduce_op op && is_acc a && not (scalar_touches_tn tn b) ->
+      Some (op, b)
+  | Binop (op, (a, _), (b, _)) when reduce_op op && is_acc b && not (scalar_touches_tn tn a) ->
+      Some (op, a)
+  | Ternop (Ops.FMA, (a, pa), (b, pb), (c, _))
+    when is_acc c && (not (scalar_touches_tn tn a)) && not (scalar_touches_tn tn b) ->
+      Some (Ops.Add, Binop (Ops.Mul, (a, pa), (b, pb)))
+  | _ -> None
+
+(* Retarget an accumulation update's read of [tn[idcs]] to the scope local [id] — the shapes
+   [accum_update_parts] admits only carry the accumulator read as a direct operand of the top
+   operator. *)
+let subst_accum_read ~tn ~idcs ~id (llsc : scalar_t) : scalar_t =
+  let subst ((s, p) : scalar_arg) : scalar_arg =
+    if equal_scalar_t s (Get (tn, idcs)) then (Get_local id, p) else (s, p)
+  in
+  match llsc with
+  | Binop (op, a, b) -> Binop (op, subst a, subst b)
+  | Ternop (op, a, b, c) -> Ternop (op, subst a, subst b, subst c)
+  | _ ->
+      (* [accum_update_parts] admits only the two shapes above. *)
+      assert false
+
+(* A guard reading only embedded indices and constants — the gh-490 symbolic-extent shape
+   [If (i < s)] and its constant-bound sibling (Schedule.Pad's leaf guards). Such a guard commutes
+   with an accumulator's init and store: it gates which updates run, and for a cell whose guard
+   never fires a widen/narrow round-trip is exact on every narrow-float value. Data-dependent
+   guards are NOT of this shape and stay opaque to the peel below. *)
+let pure_index_guard (llsc : scalar_t) =
+  let operand = function Embed_index _ | Constant _ -> true | _ -> false in
+  match llsc with
+  | Binop ((Ops.Cmplt | Ops.Cmple), (a, _), (b, _)) -> operand a && operand b
+  | _ -> false
+
+(* The reduce-shaped update of a scope LOCAL: [local = op(local, contrib)] (or its FMA form) with
+   [contrib] free of the local — [subst_accum_read]'s output shape. The [`Scope] arm of the peel
+   below accepts a base only when every update fits this grammar, because hoisting an enclosing
+   loop into a scope is licensed by the reduction reading alone: a general recurrence through the
+   local (a subtraction, a scaled update) narrows per enclosing iteration by the source's own
+   semantics, and holding it wide would change values outside the accumulator-width policy. *)
+let accum_local_update_parts ~id (llsc : scalar_t) =
+  let is_acc = function Get_local id' -> Scope_id.equal id id' | _ -> false in
+  let rec reads_local (s : scalar_t) =
+    match s with
+    | Get_local id' -> Scope_id.equal id id'
+    | Local_scope { body; _ } -> code_reads_local body
+    | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> false
+    | Get_dynamic { dyn_value = v, _; _ } -> reads_local v
+    | Ternop (_, (a, _), (b, _), (c, _)) -> reads_local a || reads_local b || reads_local c
+    | Binop (_, (a, _), (b, _)) -> reads_local a || reads_local b
+    | Unop (_, (a, _)) -> reads_local a
+  and code_reads_local (llc : t) =
+    match llc with
+    | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _ ->
+        false
+    | Seq (a, b) -> code_reads_local a || code_reads_local b
+    | For_loop { body; _ } -> code_reads_local body
+    | If { cond = c, _; body } -> reads_local c || code_reads_local body
+    | Set { llsc; _ } | Set_local (_, llsc) -> reads_local llsc
+    | Set_dynamic { dyn_value = v, _; llsc; _ } -> reads_local v || reads_local llsc
+    | Set_from_vec { arg = a, _; _ } -> reads_local a
+    | Tile_mma _ -> false
+  in
+  let reduce_op = function Ops.Add | Ops.Mul | Ops.Max | Ops.Min -> true | _ -> false in
+  match llsc with
+  | Binop (op, (a, _), (b, _)) when reduce_op op && is_acc a && not (reads_local b) -> Some (op, b)
+  | Binop (op, (a, _), (b, _)) when reduce_op op && is_acc b && not (reads_local a) -> Some (op, a)
+  | Ternop (Ops.FMA, (a, pa), (b, pb), (c, _))
+    when is_acc c && (not (reads_local a)) && not (reads_local b) ->
+      Some (Ops.Add, Binop (Ops.Mul, (a, pa), (b, pb)))
+  | _ -> None
+
+(* Whether a scope body's update statements (everything after the opening init) fit the grammar
+   the scope-form mint emits: Serial/[Unrolled]/[Vectorized] loops, pure-index-guarded [If]s,
+   comments, and reduce-shaped [Set_local]s of the scope's own local — all carrying ONE reduction
+   operator (the FMA form counting as [Add]). Anything else — another node's write, a nested
+   scope, a non-reduction recurrence, or individually-valid updates under MIXED operators (e.g.
+   [local += x; local *= y], which is not a reduction and whose per-iteration narrowing is the
+   source's semantics) — disqualifies the base from hoisting. Returns the uniform operator. *)
+let scope_updates_reduce_op ~id (llc : t) : Ops.binop option =
+  let rec go op_acc llc =
+    match llc with
+    | Noop | Comment _ -> Some op_acc
+    | Seq (a, b) -> Option.bind (go op_acc a) ~f:(fun acc -> go acc b)
+    | For_loop { body; axis = Serial | Unrolled | Vectorized; _ } -> go op_acc body
+    | If { cond = gc, _; body } -> if pure_index_guard gc then go op_acc body else None
+    | Set_local (id', v) when Scope_id.equal id id' -> (
+        match accum_local_update_parts ~id v with
+        | Some (op, _) -> (
+            match op_acc with
+            | None -> Some (Some op)
+            | Some op0 -> if Ops.equal_binop op0 op then Some op_acc else None)
+        | None -> None)
+    | _ -> None
+  in
+  match go None llc with Some (Some op) -> Some op | _ -> None
+
+(* gh-ocannl-639: peel a single-statement reduction nest down to its accumulation base. Levels are
+   Serial/[Unrolled] loops and {!pure_index_guard}ed [If]s, each containing nothing else (comments
+   aside); the base is either a raw accumulation update ([`Update]: an
+   {!accum_update_parts}-shaped [Set] whose cell is invariant across the peeled levels) or the
+   scope form a previous rewrite minted ([`Scope]: a [Set] whose value is a [Local_scope] opening
+   with the init [Set_local (id, Get (tn, idcs))], returned as the id and the update statements
+   after the init — reusing the id is what lets a consumer hoist the scope through further
+   levels). Returns [(tn, idcs, base, debug, rebuild)] where [rebuild] re-wraps a replacement base
+   statement in the peeled levels. The ONE definition shared by [C_syntax]'s widened serial
+   fallback and the scope-form mints of [Schedule.Unroll ~materialize:true] and
+   [Schedule.Partition], so the transforms and the emission cannot drift in what nests they
+   recognize.
+
+   Deliberately single-statement: a fused body updating several distinct accumulators is out of
+   scope — no lowering or schedule op produces one (each [Assignments] accumulation lowers to its
+   own nest; [Fuse_epilogue] folds elementwise tails, not sibling reductions), so no candidate
+   pair can diverge on it; and a multi-accumulator hoist could not be a [Local_scope] value at all
+   (scope purity forbids a sibling [Set] inside a scope body) — it would need the [Declare_local]
+   statement form. A transform that starts minting fused reduction bodies must extend this peel
+   alongside. *)
+let peel_accum_nest ?(extra_level = fun _ _ -> false) ~free_of body :
+    (Tn.t
+    * Indexing.axis_index array
+    * [ `Update of scalar_t | `Scope of scope_id * t list ]
+    * string
+    * (t -> t))
+    option =
+  let strip stmts = List.filter stmts ~f:(function Noop | Comment _ -> false | _ -> true) in
+  let idx_mentions sym (idx : Indexing.axis_index) =
+    match idx with
+    | Indexing.Iterator s -> Indexing.equal_symbol s sym
+    | Indexing.Affine { symbols; _ } ->
+        List.exists symbols ~f:(fun (_, s) -> Indexing.equal_symbol s sym)
+    | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
+  in
+  let cell_invariant ~free_of idcs =
+    not (Array.exists idcs ~f:(fun idx -> List.exists free_of ~f:(fun s -> idx_mentions s idx)))
+  in
+  let rec peel ~free_of ~rebuild body =
+    match strip (flat_lines [ body ]) with
+    | [ For_loop ({ index; body = ibody; axis = Serial | Unrolled | Vectorized; _ } as r) ] ->
+        (* [Vectorized] levels ride into the scope: the SIMD reduction rendering recognizes the
+           [Set_local] update form and folds its chains into the scope local, so the whole nest
+           keeps one accumulator residency even when an inner reduction axis is vectorized
+           (autotune proposes Retype-[Vectorized] over reductions); where that rendering
+           declines, the loop renders serially over the scope local — same values either way. *)
+        peel ~free_of:(index :: free_of)
+          ~rebuild:(fun b -> rebuild (For_loop { r with body = b }))
+          ibody
+    | [ For_loop ({ index; body = ibody; axis; _ } as r) ] when extra_level index axis ->
+        (* Levels the CALLER vouches for beyond the annotation-free kinds — codegen passes a
+           predicate accepting a hardware-annotated reduction loop its backend will serialize
+           (no hardware index for the slot), so e.g. a nested [Workgroup_reduce] on cc keeps the
+           whole-nest residency. The schedule mints pass nothing: wrapping a hardware-annotated
+           loop in a scope at transform time would break the schedule on backends that do bind
+           the hardware dimension. *)
+        peel ~free_of:(index :: free_of)
+          ~rebuild:(fun b -> rebuild (For_loop { r with body = b }))
+          ibody
+    | [ If { cond = gc, gp; body = gbody } ] when pure_index_guard gc ->
+        peel ~free_of ~rebuild:(fun b -> rebuild (If { cond = (gc, gp); body = b })) gbody
+    | [ Set { tn; idcs; llsc = Local_scope { id; body = sbody; orig_indices = _ }; debug } ]
+      when cell_invariant ~free_of idcs -> (
+        match strip (flat_lines [ sbody ]) with
+        | Set_local (id', Get (tn', idcs')) :: (_ :: _ as rest)
+          when Scope_id.equal id id' && Tn.equal tn tn'
+               && Array.length idcs = Array.length idcs'
+               && Array.for_all2_exn idcs idcs' ~f:Indexing.equal_axis_index
+               && (not (List.exists rest ~f:(code_touches_tn tn)))
+               && Option.is_some (scope_updates_reduce_op ~id (unflat_lines rest)) ->
+            Some (tn, idcs, `Scope (id, rest), debug, rebuild)
+        | _ -> None)
+    | [ Set { tn; idcs; llsc; debug } ]
+      when cell_invariant ~free_of idcs && Option.is_some (accum_update_parts ~tn ~idcs llsc) ->
+        Some (tn, idcs, `Update llsc, debug, rebuild)
+    | _ -> None
+  in
+  peel ~free_of ~rebuild:(fun b -> b) body
+
 (* gh-343: extract the per-iteration one-hot contribution from an accumulation [acc] in which the
    running total is recognized by [acc_is]. Handles the [Binop (Add, total, contribution)] form
    (either operand order) and the fused [Ternop (FMA, a, b, total)] form, where FMA(a,b,total) = a*b

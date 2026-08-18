@@ -218,9 +218,13 @@ let rec find_loop axis (llc : Low_level.t) : Low_level.t option =
   | If { body; _ } -> find_loop axis body
   | _ -> None
 
-(* Rewrites the unique statement-level [For_loop] whose index is [sym]. Loops inside [Local_scope]
-   bodies are deliberately out of scope: annotated loops there are rejected by [validate_parallel],
-   and splitting them has no v1 use case. *)
+(* Rewrites every [For_loop] whose index is [sym] (a materializing transform duplicates a loop
+   per copy, and a later op must reach all the copies). Loops inside [Local_scope] bodies are IN
+   scope since gh-ocannl-639: the accumulation mints of [Unroll ~materialize:true] and
+   [Partition] wrap segment/inner loops in the accumulator's scope, and those loops must stay
+   addressable by subsequent left-to-right schedule operations ([Schedule.partition] returns the
+   segment symbols precisely so callers can target them). Annotated loops inside scopes are still
+   rejected downstream by [validate_parallel], loudly. *)
 let rewrite_loop ~what ~sym ~(f : floop -> Low_level.t) (llc : Low_level.t) : Low_level.t =
   let open Low_level in
   let found = ref false in
@@ -232,7 +236,22 @@ let rewrite_loop ~what ~sym ~(f : floop -> Low_level.t) (llc : Low_level.t) : Lo
     | For_loop fc -> For_loop { fc with body = go fc.body }
     | Seq (a, b) -> Seq (go a, go b)
     | If { cond; body } -> If { cond; body = go body }
+    | Set s -> Set { s with llsc = go_scalar s.llsc }
+    | Set_dynamic ({ dyn_value = v, vp; llsc; _ } as s) ->
+        Set_dynamic { s with dyn_value = (go_scalar v, vp); llsc = go_scalar llsc }
+    | Set_local (id, llsc) -> Set_local (id, go_scalar llsc)
+    | Set_from_vec ({ arg = a, ap; _ } as s) -> Set_from_vec { s with arg = (go_scalar a, ap) }
     | other -> other
+  and go_scalar (llsc : scalar_t) : scalar_t =
+    match llsc with
+    | Local_scope ls -> Local_scope { ls with body = go ls.body }
+    | Get_dynamic ({ dyn_value = v, vp; _ } as g) -> Get_dynamic { g with dyn_value = (go_scalar v, vp) }
+    | Ternop (op, (a, pa), (b, pb), (c, pc)) ->
+        Ternop (op, (go_scalar a, pa), (go_scalar b, pb), (go_scalar c, pc))
+    | Binop (op, (a, pa), (b, pb)) -> Binop (op, (go_scalar a, pa), (go_scalar b, pb))
+    | Unop (op, (a, pa)) -> Unop (op, (go_scalar a, pa))
+    | Get_local _ | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ ->
+        llsc
   in
   let result = go llc in
   if not !found then
@@ -710,15 +729,67 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
           for_loop { fc with axis = Unrolled })
   | Unroll { axis; materialize = true } ->
       rewrite_loop ~what:"Schedule.Unroll" ~sym:axis llc ~f:(fun fc ->
-          unflat_lines
-            (List.init
-               (fc.to_ - fc.from_ + 1)
-               ~f:(fun k ->
-                 let v = fc.from_ + k in
-                 refresh_scopes
-                 @@ map_code
-                      ~fidx:(subst_axis_index ~sym:axis ~by:{ terms = []; offset = v })
-                      fc.body)))
+          let copy k body =
+            refresh_scopes
+            @@ map_code
+                 ~fidx:(subst_axis_index ~sym:axis ~by:{ terms = []; offset = fc.from_ + k })
+                 body
+          in
+          (* gh-ocannl-639: when the unrolled loop is (a nest ending in) a single accumulation
+             statement, unroll into the scope-local form virtualization gives virtual accumulators
+             — one [Local_scope] holding the running value, one copy of the update per iteration,
+             one store — instead of one read-modify-write [Set] per copy. This is where the
+             provenance lives: only genuine unrolled copies of ONE source assignment may share an
+             accumulator residency (a codegen pass looking at adjacent same-cell [Set]s cannot
+             tell them apart from two user-authored assignments, whose separate stores are their
+             semantics). The rewrite is numerics-neutral relative to the not-unrolled loop under
+             every compute-precision policy: the scope renders at the same precision the policy
+             gives a serial reduction's accumulator ([C_syntax.scope_prec_of], including the
+             rng-census and storage=compute cases where that is the storage precision), so the
+             unrolled candidate computes exactly what the serial baseline computes — which is the
+             invariant autotune's menu depends on (candidates compete on speed, never numerics). *)
+          let mint =
+            (* Under routine logging the per-iteration [Set] copies ARE the trace: a [Local_scope]
+               body renders with [log_set_locals:false], so minting the scope would silence every
+               update. The serial baseline's widening declines under logging for the same reason
+               (C_syntax.try_widen_serial_reduce), so within a logged regime the unrolled and
+               serial candidates still agree — both per-step. *)
+            if Utils.debug_log_from_routines () then None
+            else Low_level.peel_accum_nest ~free_of:[ axis ] fc.body
+          in
+          match mint with
+          | Some (tn, idcs, base, debug, rebuild) ->
+              let id, update_code =
+                match base with
+                | `Update llsc ->
+                    let id = Low_level.get_scope tn in
+                    (id, Low_level.Set_local (id, Low_level.subst_accum_read ~tn ~idcs ~id llsc))
+                | `Scope (id, rest) ->
+                    (* A previous materializing unroll (of a deeper reduction axis) already minted
+                       the scope form: reuse its accumulator across this axis's copies too, or the
+                       whole-nest residency is lost — the enclosing loop is about to disappear, so
+                       codegen's scope-base hoist could not recover it. *)
+                    (id, unflat_lines rest)
+              in
+              let copies =
+                List.init (fc.to_ - fc.from_ + 1) ~f:(fun k -> copy k (rebuild update_code))
+              in
+              Set
+                {
+                  tn;
+                  idcs;
+                  llsc =
+                    Local_scope
+                      {
+                        id;
+                        body =
+                          unflat_lines (Low_level.Set_local (id, Low_level.Get (tn, idcs)) :: copies);
+                        orig_indices = idcs;
+                      };
+                  debug;
+                }
+          | None ->
+              unflat_lines (List.init (fc.to_ - fc.from_ + 1) ~f:(fun k -> copy k fc.body)))
   | Pad { axis; to_multiple_of } ->
       (* gh-ocannl-485 (PADTO): extend the loop extent to the next multiple of [to_multiple_of] and
          guard each effectful leaf statement of the body with [If (axis < N)] — the pad iterations
@@ -791,18 +862,58 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
                  "Schedule.Partition: breakpoints must be strictly increasing and strictly inside \
                   the loop range [%d, %d]"
                  fc.from_ fc.to_);
-          unflat_lines
-            (List.map3_exn segment_indices starts stops ~f:(fun s lo hi ->
-                 (* Sibling segments duplicate the body: refresh scalar-local scope ids exactly as
-                    materializing [Unroll] does, so copies do not redeclare the same scope id. *)
-                 let body =
-                   refresh_scopes
-                   @@ map_code
-                        ~fidx:(subst_axis_index ~sym:axis ~by:{ terms = [ (1, s) ]; offset = 0 })
-                        fc.body
-                 in
-                 For_loop
-                   { index = s; from_ = lo; to_ = hi; body; axis = Serial })))
+          let segment s lo hi body =
+            (* Sibling segments duplicate the body: refresh scalar-local scope ids exactly as
+               materializing [Unroll] does, so copies do not redeclare the same scope id. *)
+            let body =
+              refresh_scopes
+              @@ map_code
+                   ~fidx:(subst_axis_index ~sym:axis ~by:{ terms = [ (1, s) ]; offset = 0 })
+                   body
+            in
+            For_loop { index = s; from_ = lo; to_ = hi; body; axis = Serial }
+          in
+          (* gh-ocannl-639: partitioning a recognized accumulation nest carries ONE accumulator
+             scope across all the segments — Partition is an index-set specialization, not a
+             partial-reduction boundary, so the segment seams must not become narrowing points
+             (unlike a Split, whose halves stay one nest the widening covers whole). Same
+             recognizer and same declines as [Unroll ~materialize:true] above. *)
+          let mint =
+            if Utils.debug_log_from_routines () then None
+            else Low_level.peel_accum_nest ~free_of:[ axis ] fc.body
+          in
+          match mint with
+          | Some (tn, idcs, base, debug, rebuild) ->
+              let id, update_code =
+                match base with
+                | `Update llsc ->
+                    let id = Low_level.get_scope tn in
+                    (id, Low_level.Set_local (id, Low_level.subst_accum_read ~tn ~idcs ~id llsc))
+                | `Scope (id, rest) -> (id, unflat_lines rest)
+              in
+              let segments =
+                List.map3_exn segment_indices starts stops ~f:(fun s lo hi ->
+                    segment s lo hi (rebuild update_code))
+              in
+              Set
+                {
+                  tn;
+                  idcs;
+                  llsc =
+                    Local_scope
+                      {
+                        id;
+                        body =
+                          unflat_lines
+                            (Low_level.Set_local (id, Low_level.Get (tn, idcs)) :: segments);
+                        orig_indices = idcs;
+                      };
+                  debug;
+                }
+          | None ->
+              unflat_lines
+                (List.map3_exn segment_indices starts stops ~f:(fun s lo hi ->
+                     segment s lo hi fc.body)))
   | Expand_zero { tn; indices } ->
       (* Whole-node [Zero_out] is never distributed across hardware threads ([validate_parallel]
          rejects it in multi-threaded kernels); expand it into an ordinary loop nest — over the

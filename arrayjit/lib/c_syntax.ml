@@ -882,7 +882,13 @@ module C_syntax (B : C_syntax_config) = struct
      expression is {e rendered} at is a different thing -- it decides which operator spellings and
      which conversions appear -- and on backends without native narrow arithmetic the two diverge.
      [comp_prec] is the one-way map between them, and the rule is: declarations and buffer element
-     types take the storage precision, rendered arithmetic takes [comp_prec] of it. *)
+     types take the storage precision, rendered arithmetic takes [comp_prec] of it.
+
+     A corollary (gh-ocannl-639): a reduction accumulator RESIDES at [comp_prec] across its whole
+     reduction nest and narrows once at the store, in every rendering — virtual scopes
+     ([scope_prec_of]), [try_vectorize_reduce]'s epilogue, [try_register_tile]'s C-tile, and the
+     plain serial fallback ([try_widen_serial_reduce]) — so the effective accumulation width is
+     the numerics policy's, never an artifact of which rendering or schedule ran. *)
 
   let comp_prec = B.compute_prec
 
@@ -2384,6 +2390,12 @@ module C_syntax (B : C_syntax_config) = struct
     match c with
     | Low_level.Noop -> empty
     | Seq (c1, c2) -> (
+        (* Note (gh-ocannl-639): a MATERIALIZED unroll of a reduction never reaches this arm as a
+           run of adjacent same-cell [Set]s — [Sched.Unroll ~materialize:true] rewrites a
+           recognized accumulation nest into the scope-local form at unroll time, where the
+           provenance lives. A codegen-side run collapse here was tried and rejected: it could not
+           tell unrolled copies of one source assignment from two user-authored adjacent
+           accumulations, whose separate stores (and separate narrowings) are their semantics. *)
         match
           try_mma_fragment_scope ~render:(fun body -> pp_ll ~log_set_locals ~in_loop body) c
         with
@@ -2495,7 +2507,11 @@ module C_syntax (B : C_syntax_config) = struct
             ^^ nest 2 (hardline ^^ async_prefix ^^ body)
             ^^ hardline ^^ rbrace)
         in
-        let hardware_binding kind =
+        (* [fallback] renders the loop when the backend binds no hardware register for it — the
+           dispatch passes the gh-ocannl-639 widening-then-serial fallback, so a hardware-annotated
+           reduction serialized for lack of a hardware index (cc's [Workgroup_reduce] among
+           others) keeps the same accumulator width as the [Serial] spelling of the same loop. *)
+        let hardware_binding ?(fallback = serial_loop) kind =
           let slot =
             match
               List.find !current_hardware_axes ~f:(fun a ->
@@ -2508,7 +2524,7 @@ module C_syntax (B : C_syntax_config) = struct
                  ^ " missing from the slot table (pp_ll called outside compile_proc?)")
           in
           match B.hardware_index ~kind ~slot with
-          | None -> serial_loop ()
+          | None -> fallback ()
           | Some reg ->
               let cast = "(" ^ String.strip B.loop_index_type ^ ")" in
               let binding =
@@ -2591,68 +2607,34 @@ module C_syntax (B : C_syntax_config) = struct
         in
         (* --- Shared analysis for the explicit-SIMD ([Vectorized]) and warp-shuffle
            ([Workgroup_reduce]) renderings below. --- *)
-        let mentions_comp (idx : Indexing.axis_index) =
+        let mentions_sym sym (idx : Indexing.axis_index) =
           match idx with
-          | Indexing.Iterator s -> Indexing.equal_symbol s i
+          | Indexing.Iterator s -> Indexing.equal_symbol s sym
           | Indexing.Affine { symbols; _ } ->
-              List.exists symbols ~f:(fun (_, s) -> Indexing.equal_symbol s i)
+              List.exists symbols ~f:(fun (_, s) -> Indexing.equal_symbol s sym)
           | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
         in
-        let rec touches_tn tn (llsc : Low_level.scalar_t) =
-          match llsc with
-          | Low_level.Get (tn2, _) | Get_merge_buffer (tn2, _) -> Tn.equal tn tn2
-          | Get_dynamic { tn = tn2; dyn_value = v, _; _ } -> Tn.equal tn tn2 || touches_tn tn v
-          | Local_scope { body; _ } -> body_touches tn body
-          | Get_local _ | Constant _ | Constant_bits _ | Embed_index _ -> false
-          | Ternop (_, (a, _), (b, _), (c, _)) ->
-              touches_tn tn a || touches_tn tn b || touches_tn tn c
-          | Binop (_, (a, _), (b, _)) -> touches_tn tn a || touches_tn tn b
-          | Unop (_, (a, _)) -> touches_tn tn a
-        and body_touches tn (llc : Low_level.t) =
-          match llc with
-          | Low_level.Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _
-            ->
-              false
-          | Seq (a, b) -> body_touches tn a || body_touches tn b
-          | For_loop { body; _ } -> body_touches tn body
-          | If { cond = c, _; body } -> touches_tn tn c || body_touches tn body
-          | Zero_out tn2 -> Tn.equal tn tn2
-          | Set { tn = tn2; llsc; _ } -> Tn.equal tn tn2 || touches_tn tn llsc
-          | Set_dynamic { tn = tn2; dyn_value = v, _; llsc; _ } ->
-              Tn.equal tn tn2 || touches_tn tn v || touches_tn tn llsc
-          | Set_from_vec { tn = tn2; arg = a, _; _ } -> Tn.equal tn tn2 || touches_tn tn a
-          | Set_local (_, llsc) -> touches_tn tn llsc
-          | Tile_mma { d = d_tn, _; a = a_tn, _; b = b_tn, _; _ } ->
-              Tn.equal tn d_tn || Tn.equal tn a_tn || Tn.equal tn b_tn
-        in
+        let mentions_comp = mentions_sym i in
         let nonempty_stmts body =
           List.filter (Low_level.flat_lines [ body ]) ~f:(function
             | Low_level.Noop | Comment _ -> false
             | _ -> true)
         in
         (* A body that is a single accumulation statement [acc[idcs] = op(acc[idcs], contrib)] (or
-           its FMA form [acc = FMA(a, b, acc)]) where [idcs] does not mention the loop index and
-           [op] is an associative-commutative reduction — such a body IS the loop's serial meaning.
-           Recognized by the warp-shuffle rendering of [Workgroup_reduce] loops (gh-ocannl-462) and
-           by the SIMD reduction rendering of [Vectorized] loops (gh-ocannl-468). *)
-        let recognize_accumulation stmts =
+           its FMA form [acc = FMA(a, b, acc)]) where [idcs] does not mention the loop index (more
+           generally: any index in [free_of], for recognizing whole nests) and [op] is an
+           associative-commutative reduction — such a body IS the loop's serial meaning. Recognized
+           by the warp-shuffle rendering of [Workgroup_reduce] loops (gh-ocannl-462), by the SIMD
+           reduction rendering of [Vectorized] loops (gh-ocannl-468), and by the widened serial
+           fallback of reduction nests (gh-ocannl-639). *)
+        let recognize_accumulation ?(free_of = [ i ]) stmts =
           match stmts with
-          | [ Low_level.Set { tn; idcs; llsc; _ } ] when not (Array.exists idcs ~f:mentions_comp)
-            -> (
-              let is_acc s = Low_level.equal_scalar_t s (Low_level.Get (tn, idcs)) in
-              let reduce_op = function
-                | Ops.Add | Ops.Mul | Ops.Max | Ops.Min -> true
-                | _ -> false
-              in
-              match llsc with
-              | Binop (op, (a, _), (b, _)) when reduce_op op && is_acc a && not (touches_tn tn b) ->
-                  Some (tn, idcs, op, b)
-              | Binop (op, (a, _), (b, _)) when reduce_op op && is_acc b && not (touches_tn tn a) ->
-                  Some (tn, idcs, op, a)
-              | Ternop (Ops.FMA, (a, pa), (b, pb), (c, _))
-                when is_acc c && (not (touches_tn tn a)) && not (touches_tn tn b) ->
-                  Some (tn, idcs, Ops.Add, Low_level.Binop (Ops.Mul, (a, pa), (b, pb)))
-              | _ -> None)
+          | [ Low_level.Set { tn; idcs; llsc; _ } ]
+            when not
+                   (Array.exists idcs ~f:(fun idx ->
+                        List.exists free_of ~f:(fun s -> mentions_sym s idx))) ->
+              Option.map (Low_level.accum_update_parts ~tn ~idcs llsc) ~f:(fun (op, contrib) ->
+                  (tn, idcs, op, contrib))
           | _ -> None
         in
         (* Eligibility bail-out of the explicit-SIMD renderings ([try_vectorize] /
@@ -2995,13 +2977,27 @@ module C_syntax (B : C_syntax_config) = struct
           try
             (match B.vector_style with `Vec_extensions -> () | `Packed_struct -> raise Bail);
             if B.vector_bytes < 8 || from_ <> 0 || Utils.debug_log_from_routines () then raise Bail;
-            let acc_tn, acc_idcs, op, contrib =
+            (* Two accumulator targets: a memory cell (the ordinary form), or the scope LOCAL of a
+               widened reduction (gh-ocannl-639: the loop sits inside the accumulator's
+               [Local_scope], its update is a [Set_local] — recognizing it here is what lets a
+               vectorized inner reduction axis keep the whole nest's compute-precision residency,
+               its chains folding into the local with no storage round-trip at all). *)
+            let acc_target, op, contrib =
               match recognize_accumulation (nonempty_stmts body) with
-              | Some r -> r
-              | None -> raise Bail
+              | Some (tn, idcs, op, contrib) -> (`Cell (tn, idcs), op, contrib)
+              | None -> (
+                  match nonempty_stmts body with
+                  | [ Low_level.Set_local (id, llsc) ] -> (
+                      match Low_level.accum_local_update_parts ~id llsc with
+                      | Some (op, contrib) -> (`Local id, op, contrib)
+                      | None -> raise Bail)
+                  | _ -> raise Bail)
             in
-            let acc_store_prec = Lazy.force acc_tn.Tn.storage_prec in
-            let prec = comp_prec acc_store_prec in
+            let prec =
+              match acc_target with
+              | `Cell (tn, _) -> comp_prec (Lazy.force tn.Tn.storage_prec)
+              | `Local id -> scope_prec_of id
+            in
             if not (B.vector_prec_ok prec) then raise Bail;
             (* A loop-invariant contribution deserves strength reduction, not chains. *)
             if not (scalar_mentions contrib) then raise Bail;
@@ -3099,24 +3095,55 @@ module C_syntax (B : C_syntax_config) = struct
                     emit (vec_acc_combine ~prec ~lanes ~op ~dst:name ~src:nm));
             let update_docs = take () in
             let total = "vred_total_" ^ ivar ^ "__" in
-            let acc_cell () =
-              string (get_ident acc_tn)
-              ^^ brackets (pp_array_offset (acc_idcs, Lazy.force acc_tn.Tn.dims))
-            in
             (* The accumulator cell itself stays at its storage precision: the fold reads it
                widened and narrows the combined value once, exactly as the scalar path's [Set]
-               does (gh-ocannl-517). *)
-            let widen = B.convert_precision ~from:acc_store_prec ~to_:prec in
-            let narrow = B.convert_precision ~from:prec ~to_:acc_store_prec in
-            let epilogue =
+               does (gh-ocannl-517); a scope-local target is already at [prec] and takes the
+               combined value with no conversion. The scalar REMAINDER (a non-multiple extent's
+               tail) folds into the compute-precision [total] BEFORE that single store
+               (gh-ocannl-639): the original per-step body would narrow the vector partial
+               mid-way and then narrow again per tail step, splitting this rendering from the
+               widened serial baseline on exactly the non-dividing extents. *)
+            let folds =
               vec_acc_grid_fold ~prec ~lanes ~op grid
               @ vec_acc_lane_fold ~prec ~lanes ~op ~vname:acc_regs.(0) ~out:total
-              @ [
-                  acc_cell () ^^ string " = "
+            in
+            let tail_defs, tail_update =
+              match (op, contrib) with
+              | Ops.Add, Low_level.Binop (Ops.Mul, (a, _), (b, _)) ->
+                  (* Mirror the widened serial baseline's fused update ([pp_scalar]'s homogeneous
+                     FMA), or the tail's mul-then-add would round differently from the serial
+                     candidate's fmaf on the same steps. *)
+                  let da, ea = pp_scalar prec a in
+                  let db, eb = pp_scalar prec b in
+                  ( da @ db,
+                    string total ^^ string " = "
+                    ^^ B.ternop_syntax prec Ops.FMA ea eb (string total)
+                    ^^ semi )
+              | _ ->
+                  let dc, ec = pp_scalar prec contrib in
+                  ( dc,
+                    string total ^^ string " = "
+                    ^^ B.binop_syntax prec op (string total) ec
+                    ^^ semi )
+            in
+            let tail_body = pp_local_defs tail_defs ^^ tail_update in
+            let store =
+              match acc_target with
+              | `Cell (tn, idcs) ->
+                  let store_prec = Lazy.force tn.Tn.storage_prec in
+                  let widen = B.convert_precision ~from:store_prec ~to_:prec in
+                  let narrow = B.convert_precision ~from:prec ~to_:store_prec in
+                  let cell () =
+                    string (get_ident tn) ^^ brackets (pp_array_offset (idcs, Lazy.force tn.Tn.dims))
+                  in
+                  cell () ^^ string " = "
                   ^^ wrap_conversion narrow
-                       (B.binop_syntax prec op (wrap_conversion widen (acc_cell ())) (string total))
-                  ^^ semi;
-                ]
+                       (B.binop_syntax prec op (wrap_conversion widen (cell ())) (string total))
+                  ^^ semi
+              | `Local id ->
+                  pp_scope_id id ^^ string " = "
+                  ^^ B.binop_syntax prec op (pp_scope_id id) (string total)
+                  ^^ semi
             in
             let it = B.loop_index_type in
             Some
@@ -3134,10 +3161,10 @@ module C_syntax (B : C_syntax_config) = struct
                         (Printf.sprintf "for (%s = %d; %s + %d <= %d; %s += %d) {" ivar step ivar
                            step extent ivar step)
                    ^^ nest 2 (hardline ^^ separate hardline update_docs)
-                   ^^ hardline ^^ string "}" ^^ hardline ^^ separate hardline epilogue ^^ hardline
+                   ^^ hardline ^^ string "}" ^^ hardline ^^ separate hardline folds ^^ hardline
                    ^^ string (Printf.sprintf "for (; %s <= %d; ++%s) {" ivar to_ ivar)
-                   ^^ nest 2 (hardline ^^ body_doc ())
-                   ^^ hardline ^^ string "}")
+                   ^^ nest 2 (hardline ^^ tail_body)
+                   ^^ hardline ^^ string "}" ^^ hardline ^^ store)
               ^^ hardline ^^ string "}")
           with Bail -> None
         in
@@ -3328,13 +3355,105 @@ module C_syntax (B : C_syntax_config) = struct
                        ^^ hardline ^^ tail)
                   ^^ hardline ^^ rbrace)
         in
+        (* gh-ocannl-639: the plain-serial fallback of a reduction nest holds its accumulator at
+           compute precision across the whole nest and narrows once at the store — the same
+           once-per-cell narrowing as [try_vectorize_reduce]'s epilogue, [try_register_tile]'s
+           C-tile and virtual scopes ([scope_prec_of]) — so a reduction's effective accumulation
+           width is set by the numerics policy, never by which schedule happened to place the
+           accumulator in a register. Implemented as a local rewrite into exactly the [Local_scope]
+           form virtualization gives virtual accumulators, rendered recursively: [scope_prec_of]
+           and the [Set_local]/[Get_local]/[Local_scope] arms already carry the widening and the
+           single narrowing, so nothing new is emitted. Inert ([None]) where [comp_prec] is the
+           identity on the target's storage precision — f32/f64/integers, the GPU backends' native
+           narrow arithmetic, [narrow_compute_f32 = false], native fp16 — those render the plain
+           serial loop unchanged. The nest is peeled through Serial/Unrolled single-statement loop
+           levels ([Unrolled] so a [Sched.Unroll ~materialize:false] over a reduction axis keeps
+           the wide local, its repeated bodies updating the scope local); a guard ([If]), a
+           sibling statement, or any other inner loop stops the widening at that level (the
+           recognizer then fails or the round-trip shrinks to that sub-nest). Two more declines:
+           under [debug_log_from_routines] the per-step [Set] form is kept — a [Local_scope] body
+           renders with [log_set_locals:false], so the rewrite would silence the per-iteration
+           trace; the SIMD renderings bail there for the same reason, and logged narrow runs
+           already differ numerically from plain runs (every tensorized rendering declines under
+           logging). And an update mentioning an RNG conversion is never widened: the conversion
+           picks its result type AND which random bits it consumes from the precision it renders
+           at (gh-ocannl-517's carve-out, [renders_at_store_prec]), so rendering it inside an
+           f32-precision scope would change the draw, not just widen it. *)
+        let try_widen_serial_reduce () : PPrint.document option =
+          if Utils.debug_log_from_routines () then None
+          else
+            let widen (tn, idcs, base, debug, rebuild) =
+              let store_prec = Lazy.force tn.Tn.storage_prec in
+              if Ops.equal_prec (comp_prec store_prec) store_prec then None
+              else
+                match base with
+                | `Update llsc when mentions_rng_conversion llsc -> None
+                | _ ->
+                    let id, update_code =
+                      match base with
+                      | `Update llsc ->
+                          let id = Low_level.get_scope tn in
+                          ( id,
+                            Low_level.Set_local
+                              (id, Low_level.subst_accum_read ~tn ~idcs ~id llsc) )
+                      | `Scope (id, rest) ->
+                          (* The scope-form base [Sched.Unroll ~materialize:true] minted (or a
+                             previous level of this very rewrite): hoist it through the enclosing
+                             reduction levels by moving its init above them and keeping its
+                             updates inside — otherwise a partially materialized nest would store
+                             and narrow the accumulator once per remaining outer iteration. The
+                             scope id is reused, so the rng census's storage-precision marking
+                             still applies; at storage precision the hoist is value-neutral. *)
+                          (id, Low_level.unflat_lines rest)
+                    in
+                    let rebuild_hook b =
+                      Low_level.For_loop { index = i; from_; to_; body = b; axis }
+                    in
+                    let scope_body =
+                      Low_level.Seq
+                        ( Low_level.Set_local (id, Low_level.Get (tn, idcs)),
+                          rebuild_hook (rebuild update_code) )
+                    in
+                    Some
+                      (pp_ll ~log_set_locals ~in_loop
+                         (Low_level.Set
+                            {
+                              tn;
+                              idcs;
+                              llsc = Local_scope { id; body = scope_body; orig_indices = idcs };
+                              debug;
+                            }))
+            in
+            (* A hardware-annotated reduction loop this backend serializes (no hardware index for
+               its slot) is a serial level like any other — without this, retyping an INNER
+               reduction axis to [Workgroup_reduce] on cc would stop the peel and narrow the
+               accumulator once per remaining outer iteration. *)
+            let serialized_hardware index = function
+              | Low_level.Workgroup_reduce -> (
+                  match
+                    List.find !current_hardware_axes ~f:(fun a ->
+                        Indexing.equal_symbol a.Low_level.ha_index index)
+                  with
+                  | Some a -> Option.is_none (B.hardware_index ~kind:`Workgroup ~slot:a.ha_slot)
+                  | None -> false)
+              | _ -> false
+            in
+            Option.bind
+              (Low_level.peel_accum_nest ~extra_level:serialized_hardware ~free_of:[ i ] body)
+              ~f:widen
+        in
+        let widen_or_serial () =
+          match try_widen_serial_reduce () with Some doc -> doc | None -> serial_loop ()
+        in
         match axis with
-        | Low_level.Serial -> serial_loop ()
+        | Low_level.Serial -> widen_or_serial ()
         | Grid when Set.mem !current_parallel_grid i -> parallel_grid_loop ()
         | Grid -> hardware_binding `Grid
-        | Workgroup -> hardware_binding `Workgroup
+        | Workgroup -> hardware_binding ~fallback:widen_or_serial `Workgroup
         | Workgroup_reduce -> (
-            match try_warp_reduce () with Some doc -> doc | None -> hardware_binding `Workgroup)
+            match try_warp_reduce () with
+            | Some doc -> doc
+            | None -> hardware_binding ~fallback:widen_or_serial `Workgroup)
         | Vectorized -> (
             match try_vectorize_reduce () with
             | Some doc -> doc
@@ -3351,25 +3470,36 @@ module C_syntax (B : C_syntax_config) = struct
                          back to the plain serial loop (gh-ocannl-468: this is what lets the
                          autotune menu propose Retype-[Vectorized] over reductions). *)
                       Low_level.has_accumulation body
-                    then serial_loop ()
+                    then
+                      match try_widen_serial_reduce () with
+                      | Some doc -> doc
+                      | None -> serial_loop ()
                     else
                       match B.vectorize_pragma with
                       | [] -> serial_loop ()
                       | lines -> separate_map hardline string lines ^^ hardline ^^ serial_loop ())))
-        | Unrolled ->
-            separate hardline
-            @@ List.init
-                 (to_ - from_ + 1)
-                 ~f:(fun k ->
-                   let binding =
-                     string ("const " ^ B.loop_index_type)
-                     ^^ pp_symbol i
-                     ^^ string (" = " ^ Int.to_string (from_ + k) ^ ";")
-                   in
-                   group
-                     (lbrace
-                     ^^ nest 2 (hardline ^^ binding ^^ hardline ^^ body_doc ())
-                     ^^ hardline ^^ rbrace)))
+        | Unrolled -> (
+            (* An [Unrolled] reduction axis holds the wide local across the repeated bodies
+               (gh-ocannl-639): autotune proposes [Unroll] over any small Serial loop, reduction
+               loops included, and without this hook the unrolled candidate would round-trip the
+               accumulator through storage on every repetition while the serial baseline widens —
+               numerics-divergent candidates in one search. *)
+            match try_widen_serial_reduce () with
+            | Some doc -> doc
+            | None ->
+                separate hardline
+                @@ List.init
+                     (to_ - from_ + 1)
+                     ~f:(fun k ->
+                       let binding =
+                         string ("const " ^ B.loop_index_type)
+                         ^^ pp_symbol i
+                         ^^ string (" = " ^ Int.to_string (from_ + k) ^ ";")
+                       in
+                       group
+                         (lbrace
+                         ^^ nest 2 (hardline ^^ binding ^^ hardline ^^ body_doc ())
+                         ^^ hardline ^^ rbrace))))
     | Zero_out tn ->
         let first_touch = not (Hash_set.mem zero_out_seen tn.Tn.uid) in
         Hash_set.add zero_out_seen tn.Tn.uid;

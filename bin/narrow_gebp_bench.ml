@@ -17,8 +17,9 @@
    something to compare against. Each line carries a position-weighted checksum of the whole
    output, which is what makes a mishandled edge region visible — the register-tiled micro-kernel
    peels row and column edges whenever its block shape does not cover the extent, and a single
-   interior cell sees none of that. In a narrow-storage run the naive and packed legs accumulate
-   at different widths, so the run says outright which checksums are comparable. Each packed line
+   interior cell sees none of that. Since gh-ocannl-639 every leg (the naive serial fallback
+   included) accumulates at compute precision, so with this bench's exact-by-design partial sums
+   the checksums are comparable across the board even in a narrow-storage run. Each packed line
    carries its
    [C_syntax.mma_census] rendering, because a [Tile_mma] whose preconditions fail (a column extent
    below the compute vector width is one of several ways in) renders the scalar fallback while
@@ -237,20 +238,21 @@ let () =
        in with the port. Weights stay capped at 251 so that products of these exact-in-binary
        operands stay exact in the double accumulator.
 
-       Cross-variant equality is therefore EXACT in an f32 run, at every extent: the products are
-       multiples of 1/8 bounded by 0.75n, so the whole reduction is exact in the f32 accumulator
-       and independent of the order the variants sum in. It is NOT unconditional in a narrow
-       storage run, and the difference is a property of the bench rather than of this check. The
-       naive variant accumulates in the storage precision while the packed ones accumulate through
-       a wider register tile, so once a partial sum outgrows the storage mantissa (bf16 carries 8
-       significant bits, i.e. multiples of 1/8 up to 32) the two round at different points and
-       legitimately disagree. It predates this checksum — the pre-existing operands already split
-       the legs at bf16 n = 320 — which is why the run announces the non-comparability outright
-       when storage is narrower than compute, rather than leaving a reader to mistake it for a bad
-       transform. The near-mean-zero mb keeps partial sums random-walking (max 31 at n = 512),
-       which buys exactness to roughly n = 512 in bf16 rather than n = 320, but buys it only up to
-       a size: an f32 run is the cross-variant oracle, and in a narrow run only the packed
-       variants are comparable with each other. Both checks are outside the timed region. *)
+       Cross-variant equality is EXACT in an f32 run, at every extent: the products are multiples
+       of 1/8 bounded by 0.75n, so the whole reduction is exact in the f32 accumulator and
+       independent of the order the variants sum in. Since gh-ocannl-639 it holds in narrow
+       storage runs too, at every extent where the per-k-block partial sums stay exact at storage
+       precision: the naive serial fallback now holds its accumulator at compute precision across
+       the whole k extent and narrows once at the store (before gh-ocannl-639 it narrowed at
+       EVERY k step, which split it from the packed legs at bf16 n = 320 and forced the run to
+       announce the non-comparability outright), while the packed variants narrow once per k
+       block (the C-tile stores back at [bk] boundaries — the narrowing points remain a property
+       of the schedule's reduction structure; only the accumulator's WIDTH is policy). The
+       near-mean-zero mb keeps partial sums random-walking (max 31 at n = 512, multiples of 1/8 —
+       bf16-exact), so every rounding any variant performs is exact and the checksums agree
+       bitwise; well beyond that extent an inexact block-boundary partial could split naive from
+       packed again, far more rarely than the per-step narrowing did. Both checks are outside the
+       timed region. *)
     let checksum =
       Array.foldi values ~init:0.0 ~f:(fun t acc v ->
           let w = 1 + (mix ~salt:0x7E51 (t / n) (t % n) % 251) in
@@ -284,16 +286,26 @@ let () =
   p "GEBP n=%d, %d repeats, blocking bm=%d bk=%d, storage %s, compute %s, packed panels %s\n" n
     repeats bm bk (Ir.Ops.prec_string prec) (Ir.Ops.prec_string cprec)
     (Option.value_map tile_prec ~default:"(storage)" ~f:Ir.Ops.prec_string);
-  (* Say it at runtime rather than only in a comment: with storage narrower than compute the naive
-     variant reduces in %s while the packed ones reduce through the wider register tile, so a
-     checksum difference between them is expected arithmetic, not evidence of a bad transform. A
-     reader comparing the column has to be told which comparisons are meaningful. *)
+  (* Say it at runtime rather than only in a comment: since gh-ocannl-639 every variant
+     accumulates at compute precision (naive narrows once per cell, packed once per k block).
+     Whether the checksums are comparable depends on the extent: every rounding any variant
+     performs is exact as long as the per-k-block partial sums stay storage-exact, which for
+     these operands is measured through n = 512 at bf16 (max |partial| 31, multiples of 1/8);
+     beyond that an inexact block partial can legitimately split naive from packed. *)
   if Option.is_some tile_prec then
-    p
-      "note: naive accumulates in %s (storage), packed variants in %s (register tile) — their\n\
-      \      checksums are NOT comparable; the packed variants remain comparable with each other.\n\
-      \      Use an f32 run as the cross-variant oracle.\n"
-      (Ir.Ops.prec_string prec) (Ir.Ops.prec_string cprec);
+    if n <= 512 then
+      p
+        "note: all variants accumulate in %s (gh-ocannl-639): naive narrows to %s once per cell,\n\
+        \      packed variants once per k block — at this extent every such rounding is exact for\n\
+        \      this bench's operands, so the checksums are comparable across the board.\n"
+        (Ir.Ops.prec_string cprec) (Ir.Ops.prec_string prec)
+    else
+      p
+        "note: all variants accumulate in %s (gh-ocannl-639), but naive narrows to %s once per\n\
+        \      cell while packed variants narrow once per k block — at n = %d an inexact block\n\
+        \      partial can legitimately split naive from packed; the packed variants remain\n\
+        \      comparable with each other, and an f32 run is the cross-variant oracle.\n"
+        (Ir.Ops.prec_string cprec) (Ir.Ops.prec_string prec) n;
   let t_naive, _ = bench ~variant:"naive" ~schedule:None () in
   match unschedulable with
   | _ :: _ ->

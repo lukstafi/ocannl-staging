@@ -241,6 +241,58 @@ val has_accumulation : t -> bool
     by codegen fallbacks that must not assert iteration independence (e.g. vectorization pragmas)
     over an accumulating body (gh-ocannl-468). *)
 
+val scalar_touches_tn : Tnode.t -> scalar_t -> bool
+(** Whether the scalar reads the node anywhere (gh-ocannl-639) — certifies that an accumulation's
+    contribution is free of the accumulator's node, which licenses holding the accumulator out of
+    memory across the reduction. *)
+
+val code_touches_tn : Tnode.t -> t -> bool
+(** The statement-body counterpart of {!scalar_touches_tn}: any read or write of the node. *)
+
+val accum_update_parts :
+  tn:Tnode.t -> idcs:Indexing.axis_index array -> scalar_t -> (Ops.binop * scalar_t) option
+(** The accumulation-update statement shape [tn[idcs] = op(tn[idcs], contrib)] (or its FMA form)
+    over an associative-commutative [op], with [contrib] free of [tn]; returns [(op, contrib)].
+    The single source of truth shared by [C_syntax]'s widened renderings and
+    [Schedule.Unroll ~materialize:true]'s scope-form unrolling (gh-ocannl-639), so "what counts as
+    an accumulation" cannot drift between the schedule transform and the emission. *)
+
+val subst_accum_read :
+  tn:Tnode.t -> idcs:Indexing.axis_index array -> id:scope_id -> scalar_t -> scalar_t
+(** Retarget an {!accum_update_parts}-shaped update's read of [tn[idcs]] to the scope local [id].
+    Raises on any other shape. *)
+
+val accum_local_update_parts : id:scope_id -> scalar_t -> (Ops.binop * scalar_t) option
+(** The reduce-shaped update of a scope LOCAL, [local = op(local, contrib)] (or its FMA form) with
+    [contrib] free of the local — [subst_accum_read]'s output shape; returns [(op, contrib)]. The
+    SIMD reduction rendering uses it to fold vector chains into a widened accumulator's scope
+    local (gh-ocannl-639), and {!peel_accum_nest}'s scope-form validation is built on it. *)
+
+val peel_accum_nest :
+  ?extra_level:(Indexing.symbol -> axis_type -> bool) ->
+  free_of:Indexing.symbol list ->
+  t ->
+  (Tnode.t
+  * Indexing.axis_index array
+  * [ `Update of scalar_t | `Scope of scope_id * t list ]
+  * string
+  * (t -> t))
+  option
+(** Peel a single-statement reduction nest down to its accumulation base (gh-ocannl-639). Levels
+    are Serial/[Unrolled]/[Vectorized] loops, loops [extra_level] vouches for (codegen passes a
+    predicate accepting hardware-annotated reduction loops its backend serializes — the schedule
+    mints pass nothing, since wrapping a hardware-annotated loop in a scope at transform time
+    would break the schedule on backends that do bind the hardware dimension), and
+    pure-index-guarded [If]s (the gh-490 [If (i < s)] shape and
+    its constant-bound sibling — data-dependent guards stay opaque), each containing nothing else;
+    the base is a raw {!accum_update_parts}-shaped update ([`Update]) or the scope form a previous
+    rewrite minted ([`Scope]: the scope id and the update statements after the opening init,
+    validated to carry ONE reduction operator — mixed-operator sequences are not reductions and
+    keep their per-iteration narrowing), with the accumulated cell invariant across the peeled
+    levels ([free_of] seeds the invariance check with the caller's own loop). [rebuild] re-wraps a
+    replacement base statement in the peeled levels. The ONE definition shared by [C_syntax]'s
+    widened serial fallback and the schedule mints, so transform and emission cannot drift. *)
+
 (** {2 Hardware axis analyses}
 
     Phase B of docs/proposals/axis-types-for-loops.md. Hardware slot assignment is positional, not

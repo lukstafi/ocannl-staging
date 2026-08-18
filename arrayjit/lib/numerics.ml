@@ -27,6 +27,14 @@ type t = {
           faithful reading of "16-bit storage with f32 compute" and what makes the vectorized
           renderings — which are f32/f64 shaped — reachable for narrow-storage kernels.
 
+          A reduction accumulator is such an intermediate (gh-ocannl-639): every rendering of an
+          accumulation nest — the plain serial fallback included — holds the accumulator at the
+          resolved compute precision across the whole nest and narrows it once at the store, so
+          the effective accumulation width is this policy's, never a property of which schedule
+          happened to place the accumulator in a register. (Narrowing POINTS beyond that single
+          one remain a property of a schedule's reduction structure: a k-blocked schedule stores
+          storage-precision partials at its block boundaries by construction.)
+
           On by default: it strictly increases accuracy relative to per-operator rounding and is the
           precondition for narrow storage being a speedup rather than a pessimization on CPU. Turn
           it off to recover the pre-gh-517 semantics, where every operator rounds to the target

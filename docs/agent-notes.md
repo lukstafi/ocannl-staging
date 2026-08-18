@@ -922,12 +922,65 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
 - The register-tiled `Tile_mma` rendering is on the same seam (gh-ocannl-575): gates, lane count
   and the C-tile registers follow `comp_prec`, operands bridge at the memory boundary
   (`vec_bridge` identity = the old memcpys, so f32 emission is unchanged), and the accumulator
-  narrows ONCE per cell after the whole k extent — strictly better rounding than the fallback's
-  per-k-step narrowing, so narrow-storage parity tests need narrow-exact inputs while
-  storage-=-compute renderings (pure-fp16 included) stay bitwise vs the fallback. Packing `Stage`s
+  narrows ONCE per cell after the whole k extent. Since gh-ocannl-639 the serial fallback narrows
+  once per nest too (below), so narrow-storage parity vs the fallback no longer needs narrow-exact
+  inputs when the reduction scopes coincide. Packing `Stage`s
   take `tile_prec` (exact widenings only) to fold the widening into the pack; seeding resolves the
   same `Numerics.cpu_compute_prec` the emission uses — change either side only through that
   helper, or "timed is not tensorized" returns for narrow sites.
+- **A reduction accumulator's WIDTH is policy; its narrowing POINTS are schedule** (gh-ocannl-639).
+  The plain serial fallback of an accumulation nest holds the accumulator at `comp_prec` and
+  narrows once at the store, implemented not by new emission but by locally rewriting the nest at
+  codegen into the `Local_scope` form virtualization gives virtual accumulators
+  (`C_syntax.try_widen_serial_reduce`) and rendering that — `scope_prec_of` and the
+  `Set_local`/`Get_local` arms already carry the widening. It joins virtual scopes,
+  `try_vectorize_reduce`'s epilogue and `try_register_tile`'s C-tile. The peel accepts
+  Serial/`Unrolled`/`Vectorized` levels (autotune proposes `Unroll` over any Serial loop of extent
+  <= 8 and Retype-`Vectorized` over reductions; a `Vectorized` level rides into the scope and
+  `try_vectorize_reduce` recognizes the `Set_local` update form, folding its chains into the scope
+  local with no storage round-trip — its scalar TAIL also folds into the wide total before the
+  single store), sees through the pure-index guard shape `If (i < bound)` (gh-490
+  symbolic extents — data-dependent guards are NOT transparent), hoists through a scope-form base
+  (a `Set` whose value is already the accumulation `Local_scope`, reusing its id — accepted ONLY
+  when every update fits the mint grammar under ONE reduction operator,
+  `Low_level.scope_updates_reduce_op`: hoisting is licensed by the reduction shape, and both a
+  general recurrence like `local := local - x` and an individually-valid-but-MIXED sequence like
+  `local += x; local *= y` must keep their per-iteration narrowing), and also serves
+  hardware-annotated loops the backend serializes for lack of a hardware index (cc's
+  `Workgroup_reduce`) — standalone via the dispatch fallback, and NESTED via the peel's
+  `extra_level` predicate, which is codegen-only (a schedule mint wrapping a hardware-annotated
+  loop in a scope would break backends that bind the dimension). A merge-buffer read
+  (`Get_merge_buffer`) is NOT self-dependence of its node — it is a separate read-only staging
+  buffer — so `p =+ p.merge`-style updates stay recognizable accumulations. `Schedule.Partition` of a recognized nest mints ONE scope spanning its
+  segment loops (an index-set specialization is not a partial-reduction boundary), and
+  `rewrite_loop` descends into `Local_scope` bodies so minted-scope interiors (partition segments,
+  an outer materialized unroll's inner loops) stay addressable by later schedule ops. A MATERIALIZED unroll never reaches codegen as bare copies:
+  `Sched.Unroll ~materialize:true` itself rewrites a recognized accumulation nest into the scope
+  form — that is where the provenance lives, since a codegen pass looking at adjacent same-cell
+  `Set`s cannot tell unrolled copies of one assignment from two user-authored assignments, whose
+  separate stores (and separate narrowings) are their semantics (`accum_width`'s 256+1+1 leg pins
+  the boundary). The whole nest recognition — Serial/Unrolled levels, pure-index guards,
+  raw-update or scope-form base — is ONE function, `Low_level.peel_accum_nest` (over
+  `accum_update_parts`), shared by the transform and the emission precisely because three review
+  rounds found them drifting one capability at a time (guards, scope-form bases, the logging
+  decline); extend nest recognition only there. The
+  widening is inert wherever `comp_prec` is the identity (f32/f64,
+  GPU backends, `narrow_compute_f32=false`, native fp16), and it declines twice more: under
+  `debug_log_from_routines` (a `Local_scope` body renders with `log_set_locals:false`, so the
+  rewrite would silence the per-iteration trace — the per-step `Set` form is the traceable one,
+  and every tensorized rendering already declines under logging), and on updates mentioning an
+  RNG conversion (the conversion picks its result type AND which random bits it consumes from the
+  precision it renders at, so an f32-precision scope would change the draw, not widen it —
+  `narrow_rng_nesting`'s reduced-uniform leg pins this). Two traps for tests in this area: (1) cross-schedule BITWISE parity on
+  non-storage-exact sums additionally needs the same narrowing points — a k-blocked schedule
+  stores storage-precision partials at every `bk` boundary by construction, so give the packed
+  leg a whole-k tile (`tile_mma_narrow`'s gh-639 leg uses `bk = n`); (2) discriminating inputs
+  must DRIFT out of storage exactness — a zero-mean operand random-walks small enough that every
+  bf16 partial sum stays exact and per-step narrowing is invisible (`accum_width.ml`'s policy-off
+  negative control is the canary). GPU serial legs keep storage-precision accumulation (their
+  `compute_prec` is the identity) while their mma legs accumulate per the seeded format triple —
+  at narrow storage, cross-schedule numerics on GPU remain schedule-dependent, stated scope of
+  gh-ocannl-639.
 - **A "packmma" timing is not evidence that anything tensorized.** A `Tile_mma` whose register-tile
   preconditions fail renders the scalar fallback and the run still reports under whatever the
   variant was named — the column extent below the compute vector width is the easiest way in (at
