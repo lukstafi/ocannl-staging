@@ -79,6 +79,9 @@ let narrow_on_host values =
 
 let two_pow n = Float.(2. ** of_int n)
 
+let named name (comp : Ir.Assignments.comp) : Ir.Assignments.comp =
+  { comp with asgns = Ir.Assignments.Block_comment (name, comp.asgns) }
+
 let decisive =
   [|
     (* Ties between adjacent e5m2 values: to even, not away from zero. *)
@@ -144,18 +147,27 @@ let () =
     let base =
       TDSL.ndarray [| two_pow (-16) |] ~label:[ "codec_pow" ] ~output_dims:[ 1 ] ()
     in
-    Ir.Tnode.update_prec base.Tensor.value Ir.Ops.fp8;
-    Train.set_materialized base.Tensor.value;
+    (* The exponent is a materialized TENSOR, not the literal [**. 5.0] takes. With a literal the
+       optimizer expands the power into a multiplication chain, and on a backend that narrows every
+       intermediate to fp8 (HIP: its arithmetic renders AT fp8, unlike cc's f32 compute seam) the
+       first product already underflows to zero — the chain never reaches the window and the leg
+       passes for the wrong reason. One [powf] over runtime operands is what puts a single
+       operator's f32 result at 2^-80. *)
+    let expo = TDSL.ndarray [| 5.0 |] ~label:[ "codec_exp" ] ~output_dims:[ 1 ] () in
+    List.iter [ base; expo ] ~f:(fun t ->
+        Ir.Tnode.update_prec t.Tensor.value Ir.Ops.fp8;
+        Train.set_materialized t.Tensor.value);
     (* Named, so its debug artifacts do not collide with the narrowing routine's: a same-named
        routine silently overwrites the earlier one's .c/.ll (CLAUDE.md), and reading the emitted
        kernel is how this leg was checked to be non-vacuous. *)
-    let%op fp8pow = base **. 5.0 in
+    let%cd fp8pow_asn = { fp8pow } =: base ** expo in
     Ir.Tnode.update_prec fp8pow.Tensor.value Ir.Ops.fp8;
     Train.set_materialized fp8pow.Tensor.value;
-    let ctx = Train.forward_once ctx fp8pow in
+    let ctx, routine = Context.compile ctx (named "fp8pow" fp8pow_asn) Ir.Indexing.Empty in
+    let ctx = Context.run ctx routine in
     (Context.get_values ctx fp8pow.Tensor.value).(0)
   in
-  Stdio.printf "fp8 arithmetic underflow: (2^-16) **. 5 -> %h\n" pow_narrowed;
+  Stdio.printf "fp8 arithmetic underflow: (2^-16) ** 5 -> %h\n" pow_narrowed;
 
   (* Magnitudes far below the smallest subnormal must vanish. HIP miscompiles exactly this range
      (gh-ocannl-647: an out-of-range shift returns values as large as 2^-14), so on HIP this holds
