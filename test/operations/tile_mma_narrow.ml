@@ -18,11 +18,15 @@
      all — the forced-native kernel then fails to compile.
 
    Inputs are exactly representable at their storage precision with all partial sums exact (the
-   [schedule_mma_matmul] discipline), so every parity check is BITWISE — in particular it cannot
-   tell apart the fallback's per-k-step narrowing from the register tiling's whole-k compute-
-   precision residency, both being exact on these inputs; the structural pins are what assert the
-   rendering. On GPU backends the trailing [Tensorize] is dropped (a unit-lane [Tile_mma] must not
-   reach hardware intrinsics): the widened packing is still exercised for value parity. *)
+   [schedule_mma_matmul] discipline), so every parity check is BITWISE; the structural pins are
+   what assert the rendering. Since gh-ocannl-639 the bitwise parity no longer depends on that
+   input discipline for the accumulator: the serial fallback holds its accumulator at compute
+   precision across the whole k extent and narrows once, exactly like the register tiling — the
+   final bf16 section checks the parity on inputs whose partial sums are NOT bf16-exact, which
+   the pre-639 per-k-step narrowing would visibly split (test/operations/accum_width.ml pins that
+   divergence as its policy-off negative control). On GPU backends the trailing [Tensorize] is
+   dropped (a unit-lane [Tile_mma] must not reach hardware intrinsics): the widened packing is
+   still exercised for value parity. *)
 
 open Base
 open Ocannl
@@ -87,8 +91,10 @@ let half_vec_typ =
        (Ir.Backend_intf.simd_lanes_for ~vector_bytes:simd_vector_bytes
           ~elt_bytes:(Ir.Ops.prec_in_bytes Ir.Ops.half) ~extent:n))
 
-(* The composed packed pipeline, parameterized by the packed tiles' precision override. *)
-let composed_schedule ~hoist_b ~tile_prec ~a ~b (opt : LL.optimized) : Sched.schedule =
+(* The composed packed pipeline, parameterized by the packed tiles' precision override (and, for
+   the gh-ocannl-639 section, by the k blocking — [bk = n] makes the single register tile cover
+   the whole k extent, so the C-tile narrows once per cell like the serial fallback). *)
+let composed_schedule ?(bk = bk) ~hoist_b ~tile_prec ~a ~b (opt : LL.optimized) : Sched.schedule =
   let paths = nest_paths opt.LL.llc in
   let i, j, k =
     match List.find_exn paths ~f:(fun p -> List.length p = 3) with
@@ -175,6 +181,43 @@ let () =
            && has "OCANNL_VEC_WIDEN_BFLOAT16"
            && has "OCANNL_VEC_NARROW_BFLOAT16"
          else count_sub "float tile_" = 2 && not (has "tmma_")));
+
+  (* === gh-ocannl-639: bf16 with partial sums that are NOT bf16-exact === *)
+  (* Products are multiples of 15/128 with a nonzero mean (~0.23 drift per k step), so the running
+     sums outgrow bf16's 8 significand bits and per-k-step narrowing would visibly split these
+     legs. They stay bitwise equal because the accumulation width is policy, not schedule: the
+     serial fallback holds its accumulator at compute precision across the whole k extent and
+     narrows once at the store, exactly like the register tiling. The reduction is exact in f32
+     (multiples of 1/128, magnitude far below 2^16), so both legs compute the same exact sums —
+     and [bk = n] gives the packed leg a single whole-k tile, so both narrow at the same single
+     point. (The narrowing POINTS remain a property of the schedule's reduction structure: a
+     k-blocked schedule, [bk < k], stores bf16 partials at every block boundary by construction,
+     which on these inputs would round where the serial fallback does not — gh-ocannl-639 unifies
+     the accumulator's width, not the blocking.) *)
+  let mai =
+    NTDSL.init ~l:"mai" ~prec:Ir.Ops.bfloat16 ~i:[ n ] ~o:[ n ]
+      ~f:(fun idcs -> Float.of_int ((((idcs.(0) * n) + idcs.(1)) % 3) + 1) *. 0.375)
+      ()
+  in
+  let mbi =
+    NTDSL.init ~l:"mbi" ~prec:Ir.Ops.bfloat16 ~i:[ n ] ~o:[ n ]
+      ~f:(fun idcs -> (Float.of_int (((idcs.(0) * n) + idcs.(1)) % 5) -. 1.5) *. 0.625)
+      ()
+  in
+  let%op ic0 = mai * mbi in
+  Tn.update_prec ic0.Tensor.value Ir.Ops.bfloat16;
+  let want_i = nonzero "nrw_bf16_inexact_serial" (run ~name:"nrw_bf16_inexact_serial" ic0) in
+  let%op ic1 = mai * mbi in
+  Tn.update_prec ic1.Tensor.value Ir.Ops.bfloat16;
+  let got_i =
+    run ~name:"nrw_bf16_inexact_packed"
+      ~schedule:
+        (composed_schedule ~bk:n ~hoist_b:false ~tile_prec:(Some Ir.Ops.single)
+           ~a:mai.Tensor.value ~b:mbi.Tensor.value)
+      ic1
+  in
+  p "bf16 matmul with inexact partial sums matches the serial twin bitwise (gh-ocannl-639)"
+    (Array.for_all2_exn got_i want_i ~f:Float.equal);
 
   (* === half storage, hoisted f32 B~ panel (host-side converting pack) + in-kernel f32 A~ === *)
   (* Half leaves are minted at their precision ([ndarray] settles a leaf as [Specified] single);

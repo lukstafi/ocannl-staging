@@ -1675,6 +1675,18 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name accum_width)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var ocannl_backend)
+  (env_var OCANNL_BACKEND))
+ (modules accum_width)
+ (libraries base ocannl stdio arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name cpu_simd_reduction)
  (package neural_nets_lib)
  (deps
