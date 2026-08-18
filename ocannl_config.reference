@@ -853,10 +853,12 @@
 # Whether Persistence.load / Persistence.restore wrap a checkpoint's payloads as private
 # (copy-on-write) memory mappings of the file instead of decoding them into fresh host buffers.
 # Only payloads whose file bytes are already their buffer's bytes are mapped; padded tensor nodes
-# always take the decoding path. Defaults to true, except on Windows, where a mapped view holds
-# the file open, so saving over a path this process has loaded from would fail (the atomic rename
-# cannot replace the directory entry of a mapped file); POSIX renames leave the mapped inode
-# alone. Per-call override: the `?mmap` argument of `load` / `restore`.
+# always take the decoding path. Defaults to true on every platform. Windows was expected to need
+# an exception -- a mapped view keeps the file object referenced, so save's replacing rename over a
+# path this process has loaded from should fail with a sharing violation -- but measured on Windows
+# 11 (gh-ocannl-588) the rename succeeds and the live mappings go on reading the bytes they were
+# taken from, just as a POSIX rename leaves the mapped inode alone. Turn this off if you meet a
+# filesystem that does refuse. Per-call override: the `?mmap` argument of `load` / `restore`.
 #checkpoint_load_mmap=true
 
 # ---------------------------------------------------------------------------

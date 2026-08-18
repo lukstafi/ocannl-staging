@@ -224,11 +224,16 @@ let validate_header header =
 (** {2 Payload ingestion: mapped or copied (gh-ocannl-467)} *)
 
 (* Whether a payload is wrapped as a mapping of the file instead of being decoded into a fresh host
-   buffer. Off by default on Windows: a mapped view holds the file open there, so a later [save]
-   over the same path fails -- its rename cannot replace a directory entry whose file is mapped --
-   whereas on POSIX the rename leaves the mapped inode alone. *)
-let mmap_by_default =
-  lazy (Utils.get_global_flag ~default:(not Stdlib.Sys.win32) ~arg_name:"checkpoint_load_mmap")
+   buffer. On by default everywhere, Windows included (gh-ocannl-588). Windows was the platform
+   this was expected to break on: a mapped view keeps the file object referenced, so [save]'s
+   replacing rename over a path it has loaded from should fail with a sharing violation. Measured
+   instead of assumed, it does not -- the rename succeeds, and the live mapping goes on reading the
+   bytes it was taken from, exactly as a POSIX rename leaves the mapped inode alone -- presumably
+   because the descriptor the section was created from carries delete sharing, though what was
+   measured is the behaviour, not the mechanism. Test 15 of
+   test/operations/test_tensor_persistence.ml is that measurement, and it makes the same claims on
+   every platform. The setting stays, for a filesystem that does refuse. *)
+let mmap_by_default = lazy (Utils.get_global_flag ~default:true ~arg_name:"checkpoint_load_mmap")
 
 let use_mmap = function Some flag -> flag | None -> Lazy.force mmap_by_default
 
@@ -421,7 +426,12 @@ let save ~ctx ~appending ?(alignment = default_alignment) t_set path =
   with
   | () ->
       Stdlib.close_out oc;
-      Stdlib.Sys.rename tmp_path path
+      (* A rename that fails -- a filesystem that does refuse to replace a file this process still
+         has mapped, say -- must not leave the temp file behind either. *)
+      (try Stdlib.Sys.rename tmp_path path
+       with exn ->
+         (try Stdlib.Sys.remove tmp_path with _ -> ());
+         raise exn)
   | exception exn ->
       Stdlib.close_out_noerr oc;
       (try Stdlib.Sys.remove tmp_path with _ -> ());

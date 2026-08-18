@@ -20,6 +20,18 @@
   narrow ones even in a header padded to 8 bytes — is decoded instead of mapped, an unaligned
   mapping being undefined behaviour. `Safetensors.ingestion_counts` reports the split.
 
+- **Mapped checkpoint loading is no longer conditional on the platform** (gh-ocannl-588):
+  `checkpoint_load_mmap` defaults to true on Windows too. The exception it had there was asserted
+  from documented Win32 semantics and never run: a mapped view keeps the file object referenced, so
+  `save`'s replacing rename over a path this process has loaded from was expected to fail with a
+  sharing violation, breaking a load-then-save workflow. Measured on a Windows 11 box, it does not
+  — the rename succeeds, and, which a succeeding rename alone would not have settled, the live
+  mapping goes on reading the bytes it was taken from rather than the replacing file's. Test 15 of
+  `test/operations/test_tensor_persistence.ml` is that measurement, holding the mapped ndarray in a
+  local across a save that writes different values, and it makes the same claims on every platform.
+  Windows users get the same lazy, copy-free loads as everyone else; the setting stays for a
+  filesystem that does refuse, and a rename that fails now cleans up its temp file.
+
 - **The gh-573 / gh-574 HIP measurement is verified end to end** (gh-ocannl-612,
   `benchmarks/report-gh612-hip-verified.md`): the first session's ratios rested on default-placement
   arm A routines that were profiled but, in three of four cells, never executed — the limitation it
