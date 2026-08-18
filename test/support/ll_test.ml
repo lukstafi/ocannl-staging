@@ -127,30 +127,74 @@ let ramp base s = add (c base) (embed s)
     the leg passes for the wrong reason. A zero-mean operand random-walks small enough that every
     bf16 partial sum stays bf16-exact, so per-step narrowing is invisible and a schedule-dependent
     accumulator width reads as parity — the zero-mean trap that docs/agent-notes.md's gh-ocannl-639
-    entry records (trap 2), found the hard way by this test's first draft. Hence a nonzero-mean
-    cycle: the cell values repeat with a period coprime to the extents (so the value varies with
-    every index), and the sum DRIFTS out of the storage format's exactness range. *)
+    entry records (trap 2), found the hard way by this test's first draft. Hence a cycle whose cells
+    are exact and whose running sums DRIFT out of the storage format's exactness range.
+
+    Both halves of that are arithmetic, not rules of thumb, and {!cycle} states each as a condition
+    a caller has to check rather than assume. *)
 
 (** [flat ~dims idcs] is the row-major flat index of [idcs] in a [dims]-shaped array. The leading
     dimension does not enter, so [dims.(0)] may be any extent the caller finds convenient. *)
 let flat ~dims idcs =
   Array.foldi idcs ~init:0 ~f:(fun ax acc i -> if ax = 0 then i else (acc * dims.(ax)) + i)
 
-(** [cycle ~dims ~modulus ~offset ~stride idcs] is [(flat idcs mod modulus + offset) * stride]: a
-    period-[modulus] cycle of multiples of [stride]. Pick [stride] a negative power of two and
-    [offset] an integer, and every cell is exact in any format with enough significand bits for
-    [offset + modulus]; pick [modulus] coprime to the reduction extent and the mean nonzero, and the
-    running sums are not. *)
+(** [blind_axis ~dims ~modulus] is the outermost axis whose index {!cycle} would ignore, if any:
+    stepping along axis [ax] moves {!flat} by that axis's row-major stride, so the cycle is constant
+    along [ax] exactly when [modulus] divides that stride. *)
+let blind_axis ~dims ~modulus =
+  let found = ref None and stride = ref 1 in
+  for ax = Array.length dims - 1 downto 0 do
+    if !stride % modulus = 0 then found := Some (ax, !stride);
+    stride := !stride * dims.(ax)
+  done;
+  !found
+
+(** [cycle ~dims ~modulus ~offset ~stride idcs] is [(flat idcs mod modulus + offset) * stride]: the
+    values [k * stride] for [k] cycling through [offset .. offset + modulus - 1] with period
+    [modulus]. Reusing it means checking two conditions, neither of which the obvious phrasings
+    imply:
+
+    - {b It must vary with every index.} Coprimality with the reduction EXTENT is not the condition
+      — [dims = [|2; 4; 3|]] with [modulus = 3] has row-major strides [12; 3; 1], so despite 3 and 4
+      being coprime the value depends on the innermost index alone and a wrong substitution on
+      either other axis stays invisible. The condition is on the STRIDES: no axis's stride may be a
+      multiple of [modulus] ({!blind_axis}, which this function raises on — a [modulus] coprime to
+      every [dims.(1 ..)] satisfies it, since the strides are their products).
+    - {b The partial sums must actually leave exactness.} Count in units of [stride], which makes
+      every cell and every partial sum an integer [k]: with [stride] a negative power of two, a
+      format with [p] significand bits holds [k * stride] exactly for every [|k| <= 2^p], and above
+      that only for the [k] whose trailing zeros make up the difference. So cells are exact when the
+      whole range [offset .. offset + modulus - 1] fits within [2^p], and a reduction of [n] terms
+      leaves exactness only once its running [k] clears [2^p] (and lands off the sparser multiples
+      still representable above it) — a statement about the extent, not just about the mean being
+      nonzero. A test relying on inexact partials has to EXHIBIT that crossing rather than infer it;
+      [test/operations/discriminating_values] does so for {!drift}, and a nonzero mean over too few
+      terms is the zero-mean trap wearing a different hat. *)
 let cycle ~dims ~modulus ~offset ~stride idcs =
+  (match blind_axis ~dims ~modulus with
+  | Some (ax, s) ->
+      raise
+        (Invalid_argument
+           (Printf.sprintf
+              "Ll_test.cycle: modulus %d is blind to axis %d of %s (row-major stride %d is a \
+               multiple of it), so the value would not vary with that index"
+              modulus ax
+              (Sexp.to_string (Array.sexp_of_t Int.sexp_of_t dims))
+              s))
+  | None -> ());
   (Float.of_int (flat ~dims idcs % modulus) +. offset) *. stride
 
-(** [drift ~dims idcs] is {!cycle} at [13/20/(1/64)]: cells are the multiples of 1/64 between 0.3125
-    and 0.5, hence exact in bf16 (5 significand bits suffice), with mean ~0.41. Sixteen or more
-    terms push the running sum past 4, where bf16's 8 significand bits can no longer hold a multiple
-    of 1/64 — so an accumulator that narrows per reduction step visibly diverges from one that
-    narrows once at the store. The whole reduction stays exact in f32 (multiples of 1/64, far below
-    2^18), which is what makes an f64 host-side reference reproduce the widened kernel bitwise.
-    Period 13 is coprime to the extents these tests use, so the value varies with every index. *)
+(** [drift ~dims idcs] is {!cycle} at [13/20/(1/64)], the accumulator-width tests' operand: cells
+    are the multiples of 1/64 between 0.3125 and 0.5, i.e. [k * (1/64)] for [k] in [20 .. 32], with
+    mean [k = 26]. In {!cycle}'s units: cells are exact in bf16 ([p = 8], [32 < 256]) and stay exact
+    in f32 ([p = 24]) along with every partial sum a test of this size can build, which is what lets
+    an f64 host-side reference reproduce the widened kernel bitwise; while the running sum passes
+    [2^8 = 256] units — the value 4, bf16's last guaranteed-exact multiple of 1/64 — at the eleventh
+    term, landing on the bf16-unrepresentable [275/64], so a reduction longer than that visibly
+    diverges if the accumulator narrows per step instead of once at the store (the legs using this
+    reduce 16 and 36 terms). 13 is prime and divides none of those shapes' strides, so every index
+    discriminates — and {!cycle} raises rather than let a later [~dims] silently break that.
+    [test/operations/discriminating_values] pins each of those numbers. *)
 let drift ~dims = cycle ~dims ~modulus:13 ~offset:20. ~stride:0.015625
 
 (** {1 Optimization} *)
