@@ -144,11 +144,74 @@ section first carried (the note below says by how much):
     `dst = a * b + dst`.
 - The forced pure-f16 row is the negative control for the gating: computing in f16 where the
   compiler promotes is a ~40x loss against f32-compute — exactly why `fp16_arithmetic` is ignored
-  off-native and why the pure-f16 seeds fire only where the probe reports native. Its 16
-  `_Float16` lanes are also the width with no whole-vector FMA builtin, so this row alone still
-  carries the per-lane update; the direction is not in doubt either way — the promoted arm does f32
-  arithmetic with extra per-value conversions, so it cannot come out ahead of computing in f32
-  directly.
+  off-native and why the pure-f16 seeds fire only where the probe reports native. The direction is
+  not in doubt: the promoted arm does f32 arithmetic with extra per-value conversions, so it cannot
+  come out ahead of computing in f32 directly. gh-ocannl-621 left this row alone deliberately —
+  its cost is the promotion, and the machine it was measured on is the one where the promotion is
+  unavoidable.
+
+### gh-ocannl-621: gcc's fp16 FMA now rounds once
+
+`OCANNL_HALF_FMA` — shared by the scalar rendering, the register tiling's scalar peel and the
+per-lane arm of the vector rendering, so the three cannot round differently — had only clang's
+single-rounding `__builtin_elementwise_fma` and a promoting `FLOAT_TO_HALF(fmaf(...))` fallback. On
+a target with genuine fp16 arithmetic that meant gcc alone rounded twice, disagreeing with clang
+and with every GPU backend's `__hfma` / `fma(half, …)`. It now reaches `__builtin_fmaf16` wherever
+the ISA has the instruction (`__AVX512FP16__` or `__ARM_FEATURE_FP16_VECTOR_ARITHMETIC` — exactly
+the condition `cc_backend`'s fp16 probe calls `Native`); on a promoted target nothing changes.
+
+- The two spellings really do disagree: 42039 of 4.1e8 fp16 triples searched, and 3393 of 9.9e7
+  with all three operands normal — not a subnormal-corner effect, and not something `float`'s
+  `2p + 2` bits retire, since an FMA's exact `a*b + c` can need far more than 24 of them.
+- It is also the larger of the two speedups this seam had left at fp16: the promoting arm widens
+  and narrows every lane *inside* the k-loop, costing 5–10 instructions per FMA on both AVX512-FP16
+  and ARMv8.2-FP16 against under 2 with the native one.
+- Guarded on the ISA macro, never on `__has_builtin`, which always answers yes for
+  `__builtin_fmaf16`: without the instruction gcc emits a call to `fmaf16()`, which a glibc need
+  not export at all.
+
+### gh-ocannl-621: the widths gh-614 left on the per-lane arm
+
+gh-614 covered the AVX/AVX2 widths and listed three residuals: AVX-512 lanes, native-fp16 lanes,
+and gcc on aarch64 (unmeasured in either direction). None could be *run* where they were written —
+no AVX-512 or AVX512-FP16 hardware, QEMU's TCG implements neither, and no ARM execution — so they
+were measured as a compile-time property instead: a census of the innermost FMA-carrying loop of
+the emitted micro-kernel, in instructions / vector FMAs / scalar FMAs / stack references per k
+step, at `-O2` and `-O3` (the fp16 rows' per-lane figures are with the promoting
+`OCANNL_HALF_FMA`, which is what those widths emitted before the section above; the vector-FMA
+counts there are doubled because each fp16 lane pair promotes to an f32 vector op). That census is
+validated by a positive control — the pre-gh-614 kernel, rebuilt at 97e7d286, reads 18 / 8 / 0 / 0 at `-O2` and 199 / 52 / 6 at `-O3`, and measures 12.57
+against ~128 GFLOP/s end to end — so a width reading like the second row is a width that would
+lose about an order of magnitude.
+
+| compute × lanes | target | per-lane `-O3` | whole-vector arm |
+|---|---|---|---|
+| f32 × 8 | x86 AVX2 (shipped) | 200 / 4 vec + 48 scalar / 8 | 18 / 8 / 0 |
+| f32 × 4 | x86 SSE (shipped) | 281 / 8 + 48 / 64 | 33 / 16 / 10 |
+| f64 × 2 | x86 SSE (shipped) | 99 / **0 + 32** / 18 (also at `-O2`) | 33 / 16 / 10 |
+| f32 × 16 | x86 AVX-512 | 31 / 16 / 0 — *no degradation* | 28 / 16 / 0 |
+| f64 × 8 | x86 AVX-512 | 417 / **8 + 96** / 0 | 28 / 16 / 0 |
+| f16 × 16 | x86 AVX512-FP16 | 81 / 8 / 0 with the promoting macro | 18 / 8 / 0 |
+| f16 × 8, × 32 | x86 AVX512-FP16 | 96–165 / 16–32 / 0, likewise | 28 / 16 / 0 |
+| f32 × 4 | gcc aarch64 | 294 / **8 + 48** / 58 | 26 / 16 / 0 |
+| f64 × 2 | gcc aarch64 | 77 / **0 + 32** / 0 (also at `-O2`) | 26 / 16 / 0 |
+| f16 × 8 | gcc aarch64 | 238 / 32 / 45 with the promoting macro | 26 / 16 / 0 |
+
+- **The gap that mattered was gcc on aarch64**, the one the issue called a possible non-issue: it
+  is the worst measured case of all, and it is the default on every Linux ARM box (Apple clang
+  takes the `__builtin_elementwise_fma` arm and never sees it).
+- **Spilling is not the only failure.** Several widths *scalarize* instead — SLP declines to
+  reassemble the lane loop, so a lanes-wide FMA becomes `lanes` scalar ones with no stack traffic
+  to give it away. f64 × 2 does this on both x86 and aarch64 at both `-O2` and `-O3`, so
+  `cc_backend_optimization_level=2` does not diagnose it the way it diagnoses a spill.
+- **f32 × 16 under AVX-512 is the one width gcc handles**, which is also the width the issue
+  guessed was most at risk. Its row is robustness, not a measured win.
+- **At fp16 the vector arm is not where the cost was** — the scalar macro above is. Once
+  `OCANNL_HALF_FMA` rounds once, the per-lane fp16 loop censuses at parity with the explicit
+  builtin (SLP emits the same `vfmaddph` / `fmla .8h`), so the fp16 rows are robustness rather than
+  a measured win. Their guards are the same target question as the macro's, and deliberately so: a
+  vector body rounding once against a scalar peel rounding twice would break the bitwise-equality
+  promise the rendering makes.
 
 ## The NEON decision: pure-f16 wins (M4 Max, Apple clang, `-O3 -mcpu=native`, cc)
 
@@ -188,6 +251,11 @@ at n = 1024, because the packing copy reads half the bytes for the same micro-ke
   `narrow storage bridged: d:bfloat16` only), half hoisted host-converting pack, and a pure-f16
   leg (probe forced native via `OCANNL_CC_FP16_ARITHMETIC`; per-op rounding is unchanged under
   promotion, so parity stays bitwise) — all bitwise against serial twins, with emission pins.
+- `arrayjit/test/test_vectorized_codegen.ml`: the whole-vector FMA arms at every (compute
+  precision, lane count) the emission can reach (gh-ocannl-621) — which widths have an arm at all,
+  the guard each sits behind, the operand order, and the AVX-512 forms' mask and rounding
+  arguments. A kernel pins only the width its own `cc_vector_bytes` selects, and the setting is
+  read once per process, so the table is printed directly.
 - `test/operations/schedule_mma_matmul.ml`: a full-mantissa f32 leg pins that the accumulator
   update stays fused (gh-ocannl-614) — the only bitwise leg whose products are inexact, hence the
   only one that can tell a fused update from a multiply and an add; the half/bf16/fp8 whole-triple

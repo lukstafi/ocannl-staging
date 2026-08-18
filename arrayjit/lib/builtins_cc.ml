@@ -603,16 +603,44 @@ uint16_t single_to_bfloat16(float f)
     ( "OCANNL_HALF_FMA",
       {|
 /* The fused multiply-add of fp16 arithmetic (gh-ocannl-516), shared by the scalar rendering and
-   the per-lane fallback of the vector rendering so the two cannot round differently: the builtin
-   rounds once at fp16, while promoting to fmaf rounds at float and then again at fp16. Accepts
-   scalars and vectors alike.
+   the per-lane fallback of the vector rendering so the two cannot round differently: a native fp16
+   FMA rounds once, while promoting to fmaf rounds at float and then again at fp16.
 
-   The fallback goes through HALF_TO_FLOAT / FLOAT_TO_HALF rather than plain casts, and the builtin
-   arm additionally requires the native type: under narrow_compute_f32=false on a target without
-   _Float16, HALF_T is uint16_t, where a cast would compute on the raw half bit pattern (0x3c00
-   instead of 1.0) and the builtin would not compile at all. */
+   Which arm is taken is the SAME target question that decides whether C_syntax.vec_acc_fma has a
+   single-rounding whole-vector arm to offer, and the guards are kept in step deliberately
+   (gh-ocannl-621): the second arm's condition is the one cc_backend's fp16 probe calls `Native`,
+   which is also what the AVX512-FP16 and NEON rows of vec_fma_builtin key off. Were the vector
+   body to round once while this macro rounded twice, the vector rendering would stop matching the
+   scalar peel and the serial fallback it promises to equal bit for bit -- and the two spellings do
+   NOT agree: over 4.1e8 fp16 triples they differ on roughly one in ten thousand. Not only in the
+   corners, either -- restricted to triples whose three operands are all NORMAL fp16 values, they
+   still differ once in ~29000 (3393 of 9.9e7), so no input-range argument retires the question.
+   float's 24 bits are 2p+2 for fp16, which makes double rounding innocuous for a single
+   multiplication or addition, but an FMA's exact a*b+c can need far more than 24 bits and the
+   guarantee does not extend to it.
+
+   So on a native target the second arm changes gcc's fp16 results -- toward clang's, and toward
+   the GPU backends' single-rounding __hfma / fma(half,...): before it, gcc alone rounded fp16 FMAs
+   twice. It is also the larger of the two speedups this seam had left, on both AVX512-FP16 and
+   ARMv8.2-FP16 taking the emitted micro-kernel from 5-10 instructions per FMA to under 2, because
+   the promoting arm widens and narrows every lane inside the k-loop. On a promoted target nothing
+   changes: the guard is false there.
+
+   __builtin_fmaf16 is guarded on the ISA feature rather than on __has_builtin, which always
+   answers yes for it: where the hardware instruction is absent gcc emits a call to fmaf16(), which
+   a glibc need not export at all -- on the machine this was written on, linking one fails.
+
+   The first arm additionally requires the native type, and the fallback goes through
+   HALF_TO_FLOAT / FLOAT_TO_HALF rather than plain casts: under narrow_compute_f32=false on a
+   target without _Float16, HALF_T is uint16_t, where a cast would compute on the raw half bit
+   pattern (0x3c00 instead of 1.0) and the builtins would not compile at all.
+
+   Only the first arm accepts vectors as well as scalars; every caller passes scalars. */
 #if HAS_NATIVE_FLOAT16 && OCANNL_HAS_ELEMENTWISE_FMA
   #define OCANNL_HALF_FMA(a, b, c) __builtin_elementwise_fma((a), (b), (c))
+#elif HAS_NATIVE_FLOAT16 && \
+    (defined(__AVX512FP16__) || defined(__ARM_FEATURE_FP16_VECTOR_ARITHMETIC))
+  #define OCANNL_HALF_FMA(a, b, c) __builtin_fmaf16((a), (b), (c))
 #else
   #define OCANNL_HALF_FMA(a, b, c) \
     FLOAT_TO_HALF(fmaf(HALF_TO_FLOAT(a), HALF_TO_FLOAT(b), HALF_TO_FLOAT(c)))
