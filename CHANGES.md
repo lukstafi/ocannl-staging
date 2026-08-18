@@ -2,6 +2,21 @@
 
 ### Added
 
+- **Training-loop utilities** (gh-ocannl-465), ports of llm.c's loop scaffolding sized for the
+  GPT-2 training example: `Train.Lr_schedule` (cosine / linear / constant / WSD host-side
+  learning-rate schedules with linear warmup, fed to the device through the new
+  `Train.host_scalar` — moved from `Mixed_prec.Loss_scaler` — via
+  `Train.scheduled_learning_rate`); global-norm gradient clipping (`Train.grad_l2_norm`, a
+  deterministic per-parameter sum-of-squares einsum reduction, and `Train.clip_by_global_norm`
+  computing `scale = min(1, max_norm/norm)` on device, consumed by the new
+  `Train.sgd_update ~grad_scale`, which folds the scale into the update as the gradient is read —
+  gradient buffers stay untouched, llm.c-style); a gradient-accumulation recipe
+  (`Train.grad_update ~accum_steps` seeds backprop with `1/accum_steps` and keeps zeroing
+  intermediate gradients while parameter gradients accumulate across micro-steps, paired with the
+  standalone `Train.zero_params_grads` run at each cycle start); and `Train.Outlier_detector`, the
+  sliding-window z-score monitor for loss/grad-norm with skip-update loops. Executed-parity
+  coverage in `test/training/loop_utils.ml`: clipped SGD against a host oracle, and two
+  accumulation micro-steps reproducing a single big-batch step's gradients and parameters.
 - **Safetensors payloads are mapped, not decoded** (gh-ocannl-587): `Safetensors.to_ndarray` wraps
   each payload as a private, copy-on-write `Unix.map_file` region through `Ndarray.map_file_array`,
   the way checkpoint loading has since gh-ocannl-467 — the format fixes little-endian order and

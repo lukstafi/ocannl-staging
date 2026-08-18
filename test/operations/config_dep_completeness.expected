@@ -13,7 +13,7 @@ test/operations/profiles/dune: 6 exe-running rules
 test/operations/startup_streams/dune: 3 exe-running rules
 test/ppx/dune: 2 tests, 3 exempt rules (pp.exe)
 test/support/dune: nothing that runs a test executable
-test/training/dune: 11 tests, 4 exe-running rules
+test/training/dune: 12 tests, 4 exe-running rules
 tools/dune: nothing that runs a test executable
 
 Stanza kinds that can run a test executable: rule, alias (plus `test`, `tests` and a `library`'s `inline_tests`, which dune runs itself).

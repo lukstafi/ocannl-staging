@@ -97,25 +97,9 @@ module Loss_scaler = struct
     growth_interval : int;
   }
 
-  (* A device-resident, broadcastable scalar the host can overwrite. Data-backed on purpose: a
-     1-element [term_init] would come out as a [Constant] fetch, re-fetched by every step's forward
-     code, silently undoing [Context.set_values]. The [bcast_if_1] axis basis (as in
-     [Tensor.number]) lets the reciprocal broadcast into gradients of any shape. *)
-  let host_scalar ~l v =
-    let ndarray =
-      Ir.Ndarray.init_array ~debug:l Ops.single ~dims:[| 1 |] ~padding:None ~f:(fun _ -> v)
-    in
-    let t =
-      (* Reshape rather than Keep_shape_no_padding: the latter pins the data axis at the default
-         basis, which conflicts with the [bcast_if_1] tag (bases are incompatible atoms). *)
-      Tensor.term ~grad_spec:Tensor.Prohibit_grad ~init_data:(Asgns.Reshape ndarray) ~label:[ l ]
-        ~batch_dims:[] ~input_dims:[]
-        ~output_axes:[ (Row.bcast_if_1, 1) ]
-        ()
-    in
-    Train.set_materialized t.Tensor.value;
-    Tn.set_observable t.Tensor.value;
-    t
+  (* A device-resident, broadcastable scalar the host can overwrite — see {!Train.host_scalar}
+     (moved there by gh-ocannl-465 so learning-rate feeding and clipping scales share it). *)
+  let host_scalar = Train.host_scalar
 
   let create ?(init_scale = 65536.) ?(growth_factor = 2.) ?(backoff_factor = 0.5)
       ?(growth_interval = 200) () =
