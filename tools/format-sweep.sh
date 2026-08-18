@@ -54,7 +54,10 @@ for arg in "$@"; do
 done
 
 cd "$(dirname "$0")/.."
-ROOT=$(pwd)
+# Physical path: `git worktree list` reports physical paths, and the self-skip
+# comparison below must survive being invoked through a symlink (or Git Bash's
+# /c/ vs C:/ forms — both sides are computed by the shell here).
+ROOT=$(pwd -P)
 MAX_ITER=4
 
 # A gate failure before we touch anything: report and leave the tree alone.
@@ -87,8 +90,11 @@ quiet_gates() {
 
   busy=""
   while IFS= read -r wt; do
+    # Canonicalize before comparing with ROOT: a stale/foreign path fails the
+    # cd and is skipped; the sweep's own checkout must be skipped by identity,
+    # or the final recheck would see its own sweep commits as "ahead".
+    wt=$(cd "$wt" 2>/dev/null && pwd -P) || continue
     [ "$wt" = "$ROOT" ] && continue
-    [ -d "$wt" ] || continue
     if [ -n "$(git -C "$wt" status --porcelain)" ]; then
       busy="$busy  $wt (dirty)\n"
     elif [ "$(git -C "$wt" rev-list --count origin/master..HEAD)" != "0" ]; then
@@ -106,6 +112,20 @@ quiet_gates() {
 BRANCH=$(git symbolic-ref --quiet --short HEAD || echo "(detached)")
 [ "$BRANCH" = "master" ] || die "not on master (on $BRANCH); the sweep only runs on master"
 [ -z "$(git status --porcelain)" ] || die "working tree not clean"
+
+# Never start rewriting sources under a live dune: refuse while a
+# tools/test-run.sh run is active in this checkout (probe its per-worktree
+# flock, the same way its own lock_held does). Full mutual exclusion is not
+# possible from here — the sweep's test phases go through test-run.sh and
+# would deadlock on that flock — but once the sweep's first test phase runs,
+# test-run.sh's own lock refuses external runs loudly, so the exposure is
+# this entry window plus the seconds-wide gaps between the sweep's phases.
+if [ -e "$ROOT/.test-run.lock" ] \
+  && perl -e 'use Fcntl ":flock";
+              open(my $fh, ">>", $ARGV[0]) or exit 1;
+              exit(flock($fh, LOCK_EX | LOCK_NB) ? 1 : 0)' "$ROOT/.test-run.lock" 2>/dev/null; then
+  die "a tools/test-run.sh run is active in this checkout; not formatting under it"
+fi
 
 git fetch origin
 # --ff-only alone is not enough: merging an OLDER origin/master into a local
