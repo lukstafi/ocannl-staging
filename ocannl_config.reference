@@ -407,7 +407,9 @@
 #tune_inline_flips=0
 
 # gh-ocannl-638: which placement arm `Train.tune_placements` ships. `auto` (the default) ships the
-# measured winner of the A/B. `a` (alias `default`) forces the default-placement arm and `b` (alias
+# measured winner of the A/B — or, when tune_inline_flips is positive and the greedy refinement
+# beats that winner, the refined placement vector, which is neither arm (reported as "flip" through
+# the `on_ship` callback; read that, not the arms' times, to identify the returned routine). `a` (alias `default`) forces the default-placement arm and `b` (alias
 # `materialize-all`) forces the materialize-all arm, whatever the timings said. MEASUREMENT-ONLY:
 # this is the optimizer's shipping path, so a non-default setting announces itself on stderr
 # regardless of autotune_log, once when it is resolved and once at the decision it changes. It
