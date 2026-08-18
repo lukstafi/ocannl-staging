@@ -2808,3 +2808,15 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
+
+; gh-ocannl-634: the commandline split the bin/ tools share. It links `bench_args` alone -- no
+; backend, no configuration reader -- and drives the parser through its `?argv` parameter, so it
+; declares no backend environment variable (`ocannl_config` is what every test stanza owes
+; config_dep_completeness).
+
+(test
+ (name bench_args_parsing)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules bench_args_parsing)
+ (libraries base stdio bench_args arrayjit.verdict))

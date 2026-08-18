@@ -1,0 +1,26 @@
+a negative positional keeps every later argument in its slot: true
+the trailing argument is still read from slot 3: true
+a negative extent is refused, naming the tool, the argument and the value: true
+--ocannl_backend=cc    option: true
+--bm=64                option: true
+--                     option: true
+-v                     option: true
+-64                    option: false
+-0                     option: false
+-                      option: false
+512                    option: false
+f32                    option: false
+guard                  option: false
+after a lone [--] a flag-looking argument is the positional: true
+positionals after [--] keep their slots: true
+an ordinary post-[--] argument shadows no setting: true
+a post-[--] argument that spells a setting is reported as shadowing it: true
+and is still this tool's positional: true
+a word positional is read as itself: true
+a missing positional falls back to the default: true
+a --flag= overrides the positional it duplicates, first spelling winning as in the library: true
+without the flag the same slot is still read: true
+a documented zero passes under least:0: true
+the same zero is refused as an extent: true
+a non-integer positional is refused by name: true
+a default outside the domain is refused too: true

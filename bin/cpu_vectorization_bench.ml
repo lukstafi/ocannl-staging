@@ -34,12 +34,12 @@ open Ocannl.Operation.DSL_modules
 let p = Stdio.printf
 
 let () =
-  let argv = Sys.get_argv () in
-  let pos_args =
-    Array.filteri argv ~f:(fun i a -> i > 0 && not (String.is_prefix a ~prefix:"--"))
-  in
-  let n = if Array.length pos_args > 0 then Int.of_string pos_args.(0) else 1 lsl 20 in
-  let repeats = if Array.length pos_args > 1 then Int.of_string pos_args.(1) else 100 in
+  (* Positional args beside the [--ocannl_*] config flags, split and range-checked by [Bench_args]
+     (gh-ocannl-634): a negative or zero extent is reported by name rather than reaching
+     [Array.init] below. *)
+  let args = Bench_args.create "cpu_vectorization_bench" in
+  let n = Bench_args.int args 0 ~name:"n" ~default:(1 lsl 20) in
+  let repeats = Bench_args.int args 1 ~name:"repeats" ~default:100 in
   (* Positive, O(1) values: a float32 dot product over ~10^6 elements accumulates rounding error;
      keeping all products positive avoids cancellation so a loose relative tolerance suffices. *)
   let av = Array.init n ~f:(fun i -> Float.of_int (i % 1009) /. 1009.) in

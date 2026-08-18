@@ -61,6 +61,6 @@
 (executable
  (name gpt2_generate)
  (modules gpt2_generate)
- (libraries base ocannl stdio dataprep gpt2_model)
+ (libraries base ocannl stdio dataprep gpt2_model bench_args)
  (preprocess
   (pps ppx_here ppx_ocannl ppx_string)))

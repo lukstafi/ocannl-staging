@@ -79,15 +79,15 @@ let rec innermost_loop (llc : LL.t) : Ir.Indexing.symbol option =
   | _ -> None
 
 let () =
-  let argv = Sys.get_argv () in
-  let pos_args =
-    Array.filteri argv ~f:(fun i a -> i > 0 && not (String.is_prefix a ~prefix:"--"))
-  in
-  let n = if Array.length pos_args > 0 then Int.of_string pos_args.(0) else 1 lsl 22 in
-  let repeats = if Array.length pos_args > 1 then Int.of_string pos_args.(1) else 50 in
+  (* Positional args beside the [--ocannl_*] config flags, split and range-checked by [Bench_args]
+     (gh-ocannl-634): a negative extent is a positional here too, so it is reported by name rather
+     than reaching [Array.init] below. *)
+  let args = Bench_args.create "narrow_storage_bench" in
+  let n = Bench_args.int args 0 ~name:"n" ~default:(1 lsl 22) in
+  let repeats = Bench_args.int args 1 ~name:"repeats" ~default:50 in
   (* Threads: 1 (the default) measures one core's stream; 0 uses the whole pool, which is where a
      CPU actually reaches its memory ceiling and where a traffic win can show at all. *)
-  let threads = if Array.length pos_args > 2 then Int.of_string pos_args.(2) else 1 in
+  let threads = Bench_args.int args 2 ~name:"threads" ~least:0 ~default:1 in
   (* O(1) magnitudes so bf16's ~3 significant decimal digits still leave the result recognizable. *)
   let av = Array.init n ~f:(fun i -> 0.5 +. (Float.of_int (i % 1009) /. 1009.)) in
   let bv = Array.init n ~f:(fun i -> 0.5 +. (Float.of_int (i % 997) /. 997.)) in

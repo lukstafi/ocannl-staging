@@ -6,7 +6,7 @@
 (executable
  (name startup_streams)
  (modules startup_streams)
- (libraries base arrayjit.utils stdio))
+ (libraries base arrayjit.utils stdio bench_args))
 
 ; The stdout half, with the chatter turned all the way UP: `no_config_file` picks the
 ; "Configuration defaults file is disabled" welcome arm, and the sourcing trace reports every key

@@ -71,44 +71,21 @@ let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
 let () =
-  (* Positional integer args only — --ocannl_* config flags share the argv. An option is
-     [--]-prefixed (theirs, and any of ours) or a [-] followed by a non-digit; a bare [-64] is
-     therefore a positional, not an option. Dropping it would be worse here than in a one-argument
-     bench: with five positionals, a negative in any slot loses its own value AND shifts every later
-     argument into the wrong slot (`schedule_bench 256 20 -64 512` would run with m defaulting to n
-     and k = 512 read as m), hiding the invalid value from the validation below. *)
-  let is_option s =
-    String.is_prefix s ~prefix:"--"
-    || (String.is_prefix s ~prefix:"-" && String.length s > 1 && not (Char.is_digit s.[1]))
-  in
-  let pos_args =
-    Array.to_list (Sys.get_argv ()) |> List.tl_exn |> List.filter ~f:(fun s -> not (is_option s))
-  in
-  let arg i default =
-    match List.nth pos_args i with Some s -> Int.of_string s | None -> default
-  in
-  let n = arg 0 256 in
-  let repeats = arg 1 20 in
-  let m = arg 2 n in
-  let k = arg 3 n in
+  (* Positional integer args only — the --ocannl_* config flags share the argv, and [Bench_args]
+     holds the split (gh-ocannl-634). Getting it wrong is worse here than in a one-argument bench:
+     with five positionals, an argument silently dropped loses its own value AND shifts every later
+     one into the wrong slot (`schedule_bench 256 20 -64 512` would run with m defaulting to n and
+     k = 512 read as m), so the bad value never reaches the range check that names it. Every
+     argument is a positive extent or count, except [naive_repeats]. *)
+  let args = Bench_args.create "schedule_bench" in
+  let n = Bench_args.int args 0 ~name:"n" ~default:256 in
+  let repeats = Bench_args.int args 1 ~name:"repeats" ~default:20 in
+  let m = Bench_args.int args 2 ~name:"m" ~default:n in
+  let k = Bench_args.int args 3 ~name:"k" ~default:n in
   (* The naive 1x1-launch kernel is minutes per run at large sizes (a single GPU thread); cap its
      repeats separately so the scheduled variants can be timed at scale (arg 5, default = repeats;
      0 skips the naive leg entirely, including its warmup run — speedups then print as nan). *)
-  let naive_repeats = arg 4 repeats in
-  (* Every integer argument is a positive extent or count — except [naive_repeats], whose 0 is the
-     documented "skip the naive leg" value. Validate them as one domain rather than leaving each use
-     site to discover its own bad input. *)
-  List.iter
-    [
-      ("n", n, 1); ("repeats", repeats, 1); ("m", m, 1); ("k", k, 1);
-      ("naive_repeats", naive_repeats, 0);
-    ]
-    ~f:(fun (name, v, least) ->
-      if v < least then
-        invalid_arg
-          (Printf.sprintf "schedule_bench: %s must be %s, got %d" name
-             (if least = 0 then "nonnegative" else "positive")
-             v));
+  let naive_repeats = Bench_args.int args 4 ~name:"naive_repeats" ~least:0 ~default:repeats in
   (* Blocking factors, named once and shared between each schedule below and the divisibility gate
      at the bottom, so the requirement and what is actually scheduled cannot drift apart. *)
   let par_b = 16 in
