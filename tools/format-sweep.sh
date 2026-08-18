@@ -60,31 +60,50 @@ abort() {
 
 # --- Quiet-period gates -----------------------------------------------------
 
+# The dynamic gates (open PRs, other worktrees) are a function because they run
+# twice: before the sweep, and again right before the push — the test rounds
+# take long enough for a PR to open or a worktree to wake up in between.
+quiet_gates() {
+  local open_prs busy wt
+  open_prs=$(gh pr list --state open --json number --jq 'length') \
+    || { echo "format-sweep: gh failed (auth/network?); failing closed — use --force to override" >&2; return 1; }
+  [ "$open_prs" = "0" ] \
+    || { echo "format-sweep: $open_prs open PR(s); not a quiet period" >&2; return 1; }
+
+  busy=""
+  while IFS= read -r wt; do
+    [ "$wt" = "$ROOT" ] && continue
+    [ -d "$wt" ] || continue
+    if [ -n "$(git -C "$wt" status --porcelain)" ]; then
+      busy="$busy  $wt (dirty)\n"
+    elif [ "$(git -C "$wt" rev-list --count origin/master..HEAD)" != "0" ]; then
+      busy="$busy  $wt (commits ahead of origin/master)\n"
+    fi
+  done < <(git worktree list --porcelain | sed -n 's/^worktree //p')
+  [ -z "$busy" ] || {
+    echo "format-sweep: active worktree(s); not a quiet period:"
+    printf '%b' "$busy"
+    return 1
+  } >&2
+  return 0
+}
+
 BRANCH=$(git symbolic-ref --quiet --short HEAD || echo "(detached)")
 [ "$BRANCH" = "master" ] || die "not on master (on $BRANCH); the sweep only runs on master"
 [ -z "$(git status --porcelain)" ] || die "working tree not clean"
 
 git fetch origin
-git merge --ff-only origin/master \
-  || die "master has local commits not on origin/master; resolve that first"
+# --ff-only alone is not enough: merging an OLDER origin/master into a local
+# master that is ahead succeeds as "already up to date", and the end-of-sweep
+# race check would then reset --hard over the unpushed local commits. Require
+# strict equality after the ff-pull.
+git merge --ff-only origin/master >/dev/null \
+  || die "master diverged from origin/master; resolve that first"
+[ "$(git rev-parse HEAD)" = "$(git rev-parse origin/master)" ] \
+  || die "master has local commits not on origin/master; push them first"
 
 if [ "$FORCE" -eq 0 ]; then
-  OPEN_PRS=$(gh pr list --state open --json number --jq 'length') \
-    || die "gh failed (auth/network?); failing closed — use --force to override"
-  [ "$OPEN_PRS" = "0" ] || die "$OPEN_PRS open PR(s); not a quiet period"
-
-  BUSY=""
-  while IFS= read -r wt; do
-    [ "$wt" = "$ROOT" ] && continue
-    [ -d "$wt" ] || continue
-    if [ -n "$(git -C "$wt" status --porcelain)" ]; then
-      BUSY="$BUSY  $wt (dirty)\n"
-    elif [ "$(git -C "$wt" rev-list --count origin/master..HEAD)" != "0" ]; then
-      BUSY="$BUSY  $wt (commits ahead of origin/master)\n"
-    fi
-  done < <(git worktree list --porcelain | sed -n 's/^worktree //p')
-  [ -z "$BUSY" ] || die "active worktree(s); not a quiet period:
-$(printf '%b' "$BUSY")"
+  quiet_gates || die "quiet-period gate failed (above)"
 
   STALE=$(git branch -r --no-merged origin/master | grep -v ' -> ' || true)
   [ -z "$STALE" ] && : || echo "format-sweep: note: unmerged remote branches (no open PR, so proceeding):
@@ -124,10 +143,14 @@ likely an ocamlformat-hostile golden missing from .ocamlformat-ignore (see heade
 
   # Formatting can only break goldens that pin source text (%expect blocks
   # embedding file:line); promote them and go around again — the promoted
-  # source may need reformatting, which shifts lines once more.
-  SNAP_BEFORE=$(git status --porcelain | git hash-object --stdin)
-  dune promote || abort "test suite failed and 'dune promote' errored"
-  SNAP_AFTER=$(git status --porcelain | git hash-object --stdin)
+  # source may need reformatting, which shifts lines once more. The snapshots
+  # hash CONTENT (git diff), not `status --porcelain`: a promotion that
+  # rewrites a file formatting already modified leaves the status lines
+  # identical. tools/promote.sh rather than plain `dune promote`, so a sweep
+  # run from Windows Git Bash does not copy CRLF into the goldens.
+  SNAP_BEFORE=$(git diff HEAD | git hash-object --stdin)
+  tools/promote.sh || abort "test suite failed and promotion errored"
+  SNAP_AFTER=$(git diff HEAD | git hash-object --stdin)
   [ "$SNAP_BEFORE" != "$SNAP_AFTER" ] \
     || abort "test suite failed with nothing to promote — a real failure, not golden drift"
 done
@@ -155,6 +178,13 @@ git commit -q -m "Record formatting sweep in .git-blame-ignore-revs"
 if [ "$NO_PUSH" -eq 1 ]; then
   echo "format-sweep: --no-push: sweep committed locally as $SWEEP_SHA (+ blame-ignore commit); not pushing"
   exit 0
+fi
+
+# Recheck the dynamic gates: a PR opened or a worktree woken mid-sweep is
+# exactly the conflict the quiet-period policy exists to prevent.
+if [ "$FORCE" -eq 0 ] && ! quiet_gates; then
+  git reset --hard "$BASE" >/dev/null
+  die "quiet period ended during the sweep; dropped the sweep (rerun later)"
 fi
 
 git fetch origin
