@@ -18,7 +18,8 @@
       and stay off the init value, or a too-wide range guard replays an identical assignment, a
       wrong substitution stays invisible along the axis whose symbol the value omits, and a dropped
       first iteration hides in the zero-init. Hence {!tick} / {!tag} / {!ramp} rather than
-      constants.
+      constants, and {!drift} where what has to discriminate is numeric (a narrow storage precision
+      the running sums must leave behind) rather than which iteration wrote the cell.
     - Cells no writer covers must carry a {!sentinel}, so "wrote the wrong cells" fails the value
       check instead of reading whatever the buffer happened to hold.
     - A claim must be able to FAIL. Every {!p} is an assertion, not a recorded observation: a run
@@ -114,6 +115,43 @@ let tag outer inner = add (c 1.) (add (mul (c 10.) (embed outer)) (embed inner))
     providers by [base]. [Embed_index] is not an array access, so this does not make the provider
     [is_complex]. *)
 let ramp base s = add (c base) (embed s)
+
+(** {1 Discriminating storage values}
+
+    The counterpart of {!tick} / {!tag} / {!ramp} for tests that seed real tensor nodes rather than
+    build producers: host-side [~f] initializers for [NTDSL.init], indexed by the cell's
+    multi-index.
+
+    Narrow-storage accumulator tests (gh-ocannl-639) need a sharper property than "varies with every
+    symbol": the cells must be EXACT in the storage precision while their running sums are not, or
+    the leg passes for the wrong reason. A zero-mean operand random-walks small enough that every
+    bf16 partial sum stays bf16-exact, so per-step narrowing is invisible and a schedule-dependent
+    accumulator width reads as parity — the zero-mean trap that docs/agent-notes.md's gh-ocannl-639
+    entry records (trap 2), found the hard way by this test's first draft. Hence a nonzero-mean
+    cycle: the cell values repeat with a period coprime to the extents (so the value varies with
+    every index), and the sum DRIFTS out of the storage format's exactness range. *)
+
+(** [flat ~dims idcs] is the row-major flat index of [idcs] in a [dims]-shaped array. The leading
+    dimension does not enter, so [dims.(0)] may be any extent the caller finds convenient. *)
+let flat ~dims idcs =
+  Array.foldi idcs ~init:0 ~f:(fun ax acc i -> if ax = 0 then i else (acc * dims.(ax)) + i)
+
+(** [cycle ~dims ~modulus ~offset ~stride idcs] is [(flat idcs mod modulus + offset) * stride]: a
+    period-[modulus] cycle of multiples of [stride]. Pick [stride] a negative power of two and
+    [offset] an integer, and every cell is exact in any format with enough significand bits for
+    [offset + modulus]; pick [modulus] coprime to the reduction extent and the mean nonzero, and the
+    running sums are not. *)
+let cycle ~dims ~modulus ~offset ~stride idcs =
+  (Float.of_int (flat ~dims idcs % modulus) +. offset) *. stride
+
+(** [drift ~dims idcs] is {!cycle} at [13/20/(1/64)]: cells are the multiples of 1/64 between 0.3125
+    and 0.5, hence exact in bf16 (5 significand bits suffice), with mean ~0.41. Sixteen or more
+    terms push the running sum past 4, where bf16's 8 significand bits can no longer hold a multiple
+    of 1/64 — so an accumulator that narrows per reduction step visibly diverges from one that
+    narrows once at the store. The whole reduction stays exact in f32 (multiples of 1/64, far below
+    2^18), which is what makes an f64 host-side reference reproduce the widened kernel bitwise.
+    Period 13 is coprime to the extents these tests use, so the value varies with every index. *)
+let drift ~dims = cycle ~dims ~modulus:13 ~offset:20. ~stride:0.015625
 
 (** {1 Optimization} *)
 
