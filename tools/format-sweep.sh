@@ -65,6 +65,20 @@ die() { echo "format-sweep: $*" >&2; exit 1; }
 # A failure after formatting started: the EXIT trap resets the checkout.
 abort() { echo "format-sweep: $*" >&2; exit 1; }
 
+# Bounded blocking wait for tools/test-run.sh's per-worktree flock; returns 1
+# (without side effects) if the lock stays held past the bound, which sits
+# just above test-run's default 3600s cap. Used before every source rewrite,
+# INCLUDING the cleanup reset -- see cleanup().
+wait_test_run_idle() {
+  [ -e "$ROOT/.test-run.lock" ] || return 0
+  perl -e 'use Fcntl ":flock";
+           open(my $fh, ">>", $ARGV[0]) or exit 0;
+           exit 0 if flock($fh, LOCK_EX | LOCK_NB);
+           print STDERR "format-sweep: waiting for the active tools/test-run.sh run to finish...\n";
+           alarm 3900; $SIG{ALRM} = sub { exit 1 };
+           exit(flock($fh, LOCK_EX) ? 0 : 1)' "$ROOT/.test-run.lock"
+}
+
 # One sweep at a time per checkout: a second invocation racing the first past
 # the clean-tree gate would format/restore the sources underneath the first
 # one's running dune. mkdir is the portable atomic lock (same reason
@@ -73,7 +87,26 @@ mkdir -p "$ROOT/_build"
 LOCKDIR="$ROOT/_build/format-sweep.lock"
 mkdir "$LOCKDIR" 2>/dev/null \
   || die "another format-sweep is running (or a stale lock after a hard kill: $LOCKDIR)"
-trap 'rmdir "$LOCKDIR" 2>/dev/null' EXIT
+
+# Any exit that did not deliberately keep its result (KEEP=1: pushed, or
+# --no-push retained) resets the checkout to BASE (once BASE is recorded) --
+# a sweep killed by the scheduler or failed mid-way must not leave master
+# dirty or ahead, or every later scheduled run dies at the entry gates. The
+# reset itself must not rewrite sources under a live dune either: when the
+# abort CAME from an external test-run grabbing the lock ahead of one of the
+# sweep's own test phases, cleanup waits for that run before resetting; past
+# the bound it resets anyway, since leaving master dirty wedges everything.
+KEEP=0
+BASE=""
+cleanup() {
+  if [ -n "$BASE" ] && [ "$KEEP" = "0" ]; then
+    wait_test_run_idle \
+      || echo "format-sweep: warning: resetting despite a test-run lock held past the bound" >&2
+    git reset -q --hard "$BASE"
+  fi
+  rmdir "$LOCKDIR" 2>/dev/null
+}
+trap cleanup EXIT
 trap 'exit 130' INT TERM
 
 # --- Quiet-period gates -----------------------------------------------------
@@ -117,6 +150,17 @@ case "$(uname -s 2>/dev/null)" in
   *) command -v dune >/dev/null 2>&1 || . tools/opam-env.sh ;;
 esac
 
+# ocamlformat is a dev tool, not a package dependency: `opam install .
+# --deps-only` does not provision it, so a fresh host would otherwise fail
+# @fmt in a way that reads as non-convergence. Require it up front, at the
+# exact version .ocamlformat pins (ocamlformat refuses other versions).
+OCF_PINNED=$(sed -n 's/^version *= *//p' .ocamlformat)
+command -v ocamlformat >/dev/null 2>&1 \
+  || die "ocamlformat is not installed; run: opam install ocamlformat.$OCF_PINNED"
+OCF_HAVE=$(ocamlformat --version 2>/dev/null || true)
+[ "$OCF_HAVE" = "$OCF_PINNED" ] \
+  || die "ocamlformat $OCF_HAVE does not match the .ocamlformat pin $OCF_PINNED; run: opam install ocamlformat.$OCF_PINNED"
+
 BRANCH=$(git symbolic-ref --quiet --short HEAD || echo "(detached)")
 [ "$BRANCH" = "master" ] || die "not on master (on $BRANCH); the sweep only runs on master"
 # Require the MAIN checkout, not master checked out in a linked worktree: a
@@ -146,21 +190,6 @@ if [ -e "$ROOT/.test-run.lock" ] \
   die "a tools/test-run.sh run is active in this checkout; not formatting under it"
 fi
 
-# Bounded blocking wait used before each source-rewriting step once the sweep
-# is underway. Aborting instead would not help -- the abort path resets the
-# tree, which rewrites sources too -- so waiting for the run to finish is the
-# only safe move. The bound sits just above test-run's default 3600s cap.
-wait_test_run_idle() {
-  [ -e "$ROOT/.test-run.lock" ] || return 0
-  perl -e 'use Fcntl ":flock";
-           open(my $fh, ">>", $ARGV[0]) or exit 0;
-           exit 0 if flock($fh, LOCK_EX | LOCK_NB);
-           print STDERR "format-sweep: waiting for the active tools/test-run.sh run to finish...\n";
-           alarm 3900; $SIG{ALRM} = sub { exit 1 };
-           exit(flock($fh, LOCK_EX) ? 0 : 1)' "$ROOT/.test-run.lock" \
-    || abort "a tools/test-run.sh run held its lock past the 65 min bound; giving up"
-}
-
 git fetch origin
 # --ff-only alone is not enough: merging an OLDER origin/master into a local
 # master that is ahead succeeds as "already up to date", and the end-of-sweep
@@ -179,14 +208,7 @@ if [ "$FORCE" -eq 0 ]; then
 $STALE" >&2
 fi
 
-BASE=$(git rev-parse HEAD)
-
-# From here on, ANY exit that did not deliberately keep its result (KEEP=1:
-# pushed, or --no-push retained) resets the checkout to BASE -- a sweep killed
-# by the scheduler or failed mid-way must not leave master dirty or ahead, or
-# every later scheduled run dies at the clean-tree/in-sync gates.
-KEEP=0
-trap 'if [ "$KEEP" = "0" ]; then git reset -q --hard "$BASE"; fi; rmdir "$LOCKDIR" 2>/dev/null' EXIT
+BASE=$(git rev-parse HEAD) # arms cleanup()'s reset from here on
 
 # --- Format / test / promote to a fixed point --------------------------------
 
@@ -197,7 +219,8 @@ while :; do
   iter=$((iter + 1))
   [ "$iter" -le "$MAX_ITER" ] || abort "no fixed point after $MAX_ITER rounds; \
 likely an ocamlformat-hostile golden missing from .ocamlformat-ignore (see header)"
-  wait_test_run_idle # about to rewrite sources
+  wait_test_run_idle \
+    || abort "a tools/test-run.sh run held its lock past the bound; giving up"
   echo "format-sweep: round $iter: formatting"
 
   if ! fmt_clean; then
@@ -211,11 +234,20 @@ likely an ocamlformat-hostile golden missing from .ocamlformat-ignore (see heade
     exit 0
   fi
 
+  # test-run exits 2 on a lock refusal (an external run grabbed the lock in
+  # the gap after our wait) -- report that as the benign race it is, not as a
+  # test failure the operator would then hunt for.
   echo "format-sweep: round $iter: compiling (@check)"
-  tools/test-run.sh run build @check || abort "@check failed after formatting"
+  RC=0
+  tools/test-run.sh run build @check || RC=$?
+  [ "$RC" -ne 2 ] || abort "test-run refused the @check phase (external run started mid-sweep); rerun later"
+  [ "$RC" -eq 0 ] || abort "@check failed after formatting"
 
   echo "format-sweep: round $iter: running the regular test suite"
-  if tools/test-run.sh run runtest; then
+  RC=0
+  tools/test-run.sh run runtest || RC=$?
+  [ "$RC" -ne 2 ] || abort "test-run refused the runtest phase (external run started mid-sweep); rerun later"
+  if [ "$RC" -eq 0 ]; then
     break
   fi
 
@@ -227,7 +259,8 @@ likely an ocamlformat-hostile golden missing from .ocamlformat-ignore (see heade
   # modified leaves the status lines identical. tools/promote.sh rather than
   # plain `dune promote`, so a sweep run from Windows Git Bash does not copy
   # CRLF into the goldens.
-  wait_test_run_idle # promotion rewrites sources too
+  wait_test_run_idle \
+    || abort "a tools/test-run.sh run held its lock past the bound; giving up"
   # -u, not -A: the baseline must not stage untracked artifacts a failing
   # test may have left, or they would ride the final `git add -u` unnoticed.
   git add -u # stage the post-format pre-promote state, the validation baseline
