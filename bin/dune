@@ -7,7 +7,9 @@
  (name bench_args)
  (package neural_nets_lib)
  (modules bench_args)
- (libraries base))
+ ; arrayjit.utils only for `cmdline_arg_is_config_key`: the split has to be able to say when a
+ ; post-`--` positional is one the library's own argv scan has already applied as configuration.
+ (libraries base stdio arrayjit.utils))
 
 (executable
  (package neural_nets_lib)

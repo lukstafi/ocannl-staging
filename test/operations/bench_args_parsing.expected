@@ -13,9 +13,12 @@ f32                    option: false
 guard                  option: false
 after a lone [--] a flag-looking argument is the positional: true
 positionals after [--] keep their slots: true
+an ordinary post-[--] argument shadows no setting: true
+a post-[--] argument that spells a setting is reported as shadowing it: true
+and is still this tool's positional: true
 a word positional is read as itself: true
 a missing positional falls back to the default: true
-a --flag= overrides the positional it duplicates, last spelling winning: true
+a --flag= overrides the positional it duplicates, first spelling winning as in the library: true
 without the flag the same slot is still read: true
 a documented zero passes under least:0: true
 the same zero is refused as an extent: true

@@ -8,8 +8,11 @@
    that now happens where each argument is read.
 
    The tool is driven through [?argv] rather than by running a bench: this is a parsing test, and a
-   real bench would need a backend, a compilation and minutes of measurement to say the same
-   thing. *)
+   real bench would need a backend, a compilation and minutes of measurement to say the same thing.
+
+   One line of stderr in a passing run is deliberate: the shadowing check below hands [Bench_args]
+   a post-[--] argument that spells a configuration key, and the warning that draws is the thing
+   being tested. *)
 
 open Base
 open Stdio
@@ -69,7 +72,20 @@ let () =
   p "after a lone [--] a flag-looking argument is the positional"
     (String.equal (Bench_args.string args 0 ~default:"") "--why the long face");
   p "positionals after [--] keep their slots"
-    (Bench_args.int args 1 ~name:"num_tokens" ~default:20 = 5)
+    (Bench_args.int args 1 ~name:"num_tokens" ~default:20 = 5);
+  (* The escape governs this split only: the library reads its own settings in a separate pass over
+     the whole argv, with no terminator and prefix-free spellings accepted, so a post-[--] argument
+     that spells a setting has already been applied by the time a tool sees it. Unfixable from here
+     -- what is fixable is the silence, so the collision is reported. *)
+  p "an ordinary post-[--] argument shadows no setting"
+    (List.is_empty (Bench_args.shadowing_config args));
+  let shadowing =
+    Bench_args.create ~argv:[| "gpt2_generate"; "--"; "--backend=cuda" |] "gpt2_generate"
+  in
+  p "a post-[--] argument that spells a setting is reported as shadowing it"
+    (List.equal String.equal (Bench_args.shadowing_config shadowing) [ "--backend=cuda" ]);
+  p "and is still this tool's positional"
+    (String.equal (Bench_args.string shadowing 0 ~default:"") "--backend=cuda")
 
 let () =
   let args = Bench_args.create ~argv:[| "narrow_gebp_bench"; "bf16"; "512" |] "narrow_gebp_bench" in
@@ -77,14 +93,16 @@ let () =
     (String.equal (Bench_args.string args 0 ~default:"f32") "bf16");
   p "a missing positional falls back to the default"
     (Bench_args.int args 2 ~name:"repeats" ~default:20 = 20);
-  (* [--bm=]/[--bk=] beat the positional they duplicate, and the last spelling wins. *)
+  (* [--bm=]/[--bk=] beat the positional they duplicate, and a repeated flag resolves the way the
+     library resolves a repeated setting: [Utils.read_cmdline_var] is an [Array.find_map] over argv,
+     so the FIRST spelling wins, here as there. *)
   let args =
     Bench_args.create
       ~argv:[| "narrow_gebp_bench"; "f32"; "512"; "20"; "32"; "--bm=16"; "--bm=64" |]
       "narrow_gebp_bench"
   in
-  p "a --flag= overrides the positional it duplicates, last spelling winning"
-    (Bench_args.int args 3 ~flag:"bm" ~name:"bm" ~default:64 = 64);
+  p "a --flag= overrides the positional it duplicates, first spelling winning as in the library"
+    (Bench_args.int args 3 ~flag:"bm" ~name:"bm" ~default:64 = 16);
   p "without the flag the same slot is still read"
     (Bench_args.int
        (Bench_args.create

@@ -1476,7 +1476,12 @@ that they earn a lookup rather than always-loaded space.
   `--ocannl_*` settings, so every one of them splits argv the same way — through `Bench_args`
   (`bin/bench_args.ml`, gh-ocannl-634), not a hand-rolled filter. An option is `--`-prefixed or a
   `-` followed by a non-digit, a lone `--` ends the options, and `Bench_args.int` range-checks each
-  argument where it is read (`~least:0` for a documented zero). The filter that reads naturally —
+  argument where it is read (`~least:0` for a documented zero); a repeated `--flag=` resolves to the
+  FIRST spelling, as `Utils.read_cmdline_var` does. The `--` terminator governs that split only —
+  the library scans the whole of `Sys.argv` for its own settings with no terminator and prefix-free
+  spellings accepted, so a post-`--` positional spelling a known key (`-- --backend=cuda` as a
+  prompt) has already been applied as configuration and cannot be unset from a tool; `Bench_args`
+  cannot fix that, so it warns (`shadowing_config`) rather than letting it pass silently. The filter that reads naturally —
   drop everything starting with `-` — is the bug this replaced: it eats a negative extent, and with
   several positionals that shifts every later argument one slot left, so the bench measures a
   geometry nobody asked for and reports a plausible number for it. Review found that same defect in
