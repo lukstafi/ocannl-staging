@@ -85,8 +85,11 @@ let run ~name ?schedule (out : Tensor.t) =
   Context.get_values ctx out.Tensor.value
 
 let n = 64
-let fa idcs = Float.of_int ((((idcs.(0) * n) + idcs.(1)) % 3) + 1) *. 0.375
-let fb idcs = (Float.of_int (((idcs.(0) * n) + idcs.(1)) % 5) -. 1.5) *. 0.625
+(* The operands' cells are exact in bf16 while the k-sum's partials are not: see {!Ll_test.cycle}
+   for why the cycles are shaped this way, and the header above for this pair's own arithmetic
+   (products are multiples of 15/128, mean ~0.23). *)
+let fa = Ll_test.cycle ~dims:[| n; n |] ~modulus:3 ~offset:1. ~stride:0.375
+let fb = Ll_test.cycle ~dims:[| n; n |] ~modulus:5 ~offset:(-1.5) ~stride:0.625
 
 let claim_parity = "bf16 naive matmul equals the once-narrowed wide-accumulation reference"
 let claim_shape = "the emitted serial k-loop narrows the accumulator once per cell, not per step"
@@ -279,16 +282,14 @@ let () =
         in
         let pt, segment_syms = Sched.partition ~axis:k ~breakpoints:[ 16; 40 ] in
         [ pt; Sched.Unroll { axis = List.hd_exn segment_syms; materialize = false } ]);
-    (* === two-axis reduction out[i] = sum_{r,s} x[i,r,s]: unrolling EITHER reduction axis keeps
-       the whole-nest accumulator. The inner-axis leg is the partial-materialization shape: the
-       unroll mints a scope-form Set inside the still-serial outer reduction loop, and the
-       codegen peel hoists that scope through it — without the hoist the accumulator would store
-       and narrow once per outer iteration. Cell values are multiples of 1/64 in [0.3125, 0.5]
-       (bf16-exact); the running sums (~14.6) are not, and the whole reduction is exact in f32. *)
+    (* === two-axis reduction out[i] = sum_{r,s} x[i,r,s]: unrolling EITHER reduction axis keeps the
+       whole-nest accumulator. The inner-axis leg is the partial-materialization shape: the unroll
+       mints a scope-form Set inside the still-serial outer reduction loop, and the codegen peel
+       hoists that scope through it — without the hoist the accumulator would store and narrow once
+       per outer iteration. Cell values are {!Ll_test.drift}: bf16-exact, while the running sums
+       (~14.6) are not, and the whole reduction is exact in f32. *)
     let ni, nr, ns = (4, 6, 6) in
-    let fx idcs =
-      Float.of_int ((((idcs.(0) * nr * ns) + (idcs.(1) * ns) + idcs.(2)) % 13) + 20) *. 0.015625
-    in
+    let fx = Ll_test.drift ~dims:[| ni; nr; ns |] in
     let run2 ~name ?schedule () =
       let x2 = NTDSL.init ~l:(name ^ "_x") ~prec:Ir.Ops.bfloat16 ~o:[ ni; nr; ns ] ~f:fx () in
       let%op out2 = x2 ++ "irs => i" in
@@ -354,9 +355,7 @@ let () =
        f32, so the vector reassociation is harmless and the comparison is bitwise. The structural
        conjunct asserts the vectorized rendering actually fired inside the scope. *)
     let nvr, nvs = (4, 32) in
-    let fxv idcs =
-      Float.of_int ((((idcs.(0) * nvr * nvs) + (idcs.(1) * nvs) + idcs.(2)) % 13) + 20) *. 0.015625
-    in
+    let fxv = Ll_test.drift ~dims:[| ni; nvr; nvs |] in
     let run2v ~name ?schedule () =
       let xv = NTDSL.init ~l:(name ^ "_x") ~prec:Ir.Ops.bfloat16 ~o:[ ni; nvr; nvs ] ~f:fxv () in
       let%op outv = xv ++ "irs => i" in
@@ -523,7 +522,7 @@ let () =
        hardware kind (whole-node zeroing is not distributed), and the init is not what these legs
        are about. *)
     let run_sum ~cols ~name ?schedule () =
-      let fv idcs = Float.of_int ((((idcs.(0) * cols) + idcs.(1)) % 13) + 20) *. 0.015625 in
+      let fv = Ll_test.drift ~dims:[| ni; cols |] in
       let xw = NTDSL.init ~l:(name ^ "_x") ~prec:Ir.Ops.bfloat16 ~o:[ ni; cols ] ~f:fv () in
       let outw =
         NTDSL.init ~l:(name ^ "_out") ~prec:Ir.Ops.bfloat16 ~o:[ ni ] ~f:(fun _ -> 0.0) ()
