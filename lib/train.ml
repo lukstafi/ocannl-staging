@@ -67,16 +67,32 @@ let loss_accumulator ?(label = "loss_accum") () =
     (each per-tensor zeroing is a [Fetch] of zeros — see [Tensor.raw]'s [fetch_zeros]). Used by the
     gradient-accumulation variant of {!grad_update}, which must keep zeroing the {e intermediate}
     gradients every micro-step (their backprop contributions are plain [=+] accumulations relying on
-    a same-routine reset) while the {e parameter} gradients accumulate across micro-steps. *)
+    a same-routine reset) while the {e parameter} gradients accumulate across micro-steps.
+
+    The match is by [Fetch] constructor and tnode identity, so a change to how zeroing is emitted
+    (a different constructor, or a parameter gradient dropping out of the tree) would silently keep
+    zeroing parameter gradients — corrupting the accumulation. Every parameter is a backprop root,
+    so each [grads] member's [fetch_zeros] must occur in the tree: we raise when one had nothing
+    removed rather than let the drift through. *)
 let filter_out_grad_zeroing ~grads asgns =
+  let removed = Hash_set.create (module Tn) in
   let rec loop = function
     | Asgns.Noop -> Asgns.Noop
     | Asgns.Seq (t1, t2) -> Asgns.Seq (loop t1, loop t2)
     | Asgns.Block_comment (s, t) -> Asgns.Block_comment (s, loop t)
-    | Asgns.Fetch { array; _ } when Set.mem grads array -> Asgns.Noop
+    | Asgns.Fetch { array; _ } when Set.mem grads array ->
+        Hash_set.add removed array;
+        Asgns.Noop
     | (Asgns.Accum_op _ | Asgns.Set_vec_unop _ | Asgns.Fetch _) as t -> t
   in
-  loop asgns
+  let result = loop asgns in
+  let missing = Set.filter grads ~f:(fun g -> not (Hash_set.mem removed g)) in
+  if not (Set.is_empty missing) then
+    invalid_arg
+    @@ "Train.filter_out_grad_zeroing: no zeroing found for parameter gradient(s): "
+    ^ String.concat ~sep:", " (List.map (Set.to_list missing) ~f:Tn.debug_name)
+    ^ " -- the shape of the zero_grads code changed, gradient accumulation would be corrupted";
+  result
 
 (** Returns the tensor's forward, zeroing gradients, and backprop code wrapped with label-derived
     comments. Sets the tensor's value as materialized. If [setup_for_parallel] is true (false by
