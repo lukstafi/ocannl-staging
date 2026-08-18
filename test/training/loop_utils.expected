@@ -13,6 +13,7 @@ wsd holds base_lr between warmup and the decay point: true
 wsd decays below base_lr after the decay point: true
 cosine decay is nonincreasing: true
 the total_steps clamp outranks a longer warmup: true
+a negative max_norm is rejected (it would reverse gradients): true
 gradient norm exceeds max_norm (clipping engaged): true
 device grad_norm matches host norm over unclipped buffers: PASS
 device grad_scale is min(1, max_norm/norm): PASS

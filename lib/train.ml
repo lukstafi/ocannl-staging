@@ -443,6 +443,11 @@ type grad_clipping = {
     degrades to weight decay alone, strictly more conservative than rescaling an explosion of that
     magnitude to [max_norm], and self-recovering since the buffers are untouched. *)
 let clip_by_global_norm ?grad_unscale ?(label = "grad_clip") ~max_norm loss =
+  (* Validated because this is where configuration-derived floats arrive: a negative threshold
+     would REVERSE gradients (negative ratio), and a nan one fails the ordered comparison and
+     silently disables clipping. 0 stays legal — "clip to zero" freezes the gradient term. *)
+  if (not (Float.is_finite max_norm)) || Float.(max_norm < 0.) then
+    invalid_arg "Train.clip_by_global_norm: max_norm must be finite and nonnegative";
   let grad_norm, norm_comp = grad_l2_norm ?grad_unscale ~label:(label ^ "_norm") loss in
   let grad_scale = host_scalar ~l:(label ^ "_scale") 1. in
   let scale_comp =

@@ -139,6 +139,11 @@ let clipping () =
   let _x, _targets, w, b_p, loss = build_model ~batch ~x_row in
   let update = Train.grad_update loss in
   let max_norm = 0.5 in
+  Verdict.p "a negative max_norm is rejected (it would reverse gradients)"
+    (try
+       ignore (Train.clip_by_global_norm ~max_norm:(-1.) loss : Train.grad_clipping);
+       false
+     with Invalid_argument _ -> true);
   let clip = Train.clip_by_global_norm ~max_norm loss in
   let sched =
     {
