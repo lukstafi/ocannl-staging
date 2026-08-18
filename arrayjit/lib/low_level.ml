@@ -4946,6 +4946,58 @@ let pure_index_guard (llsc : scalar_t) =
   | Binop ((Ops.Cmplt | Ops.Cmple), (a, _), (b, _)) -> operand a && operand b
   | _ -> false
 
+(* The reduce-shaped update of a scope LOCAL: [local = op(local, contrib)] (or its FMA form) with
+   [contrib] free of the local — [subst_accum_read]'s output shape. The [`Scope] arm of the peel
+   below accepts a base only when every update fits this grammar, because hoisting an enclosing
+   loop into a scope is licensed by the reduction reading alone: a general recurrence through the
+   local (a subtraction, a scaled update) narrows per enclosing iteration by the source's own
+   semantics, and holding it wide would change values outside the accumulator-width policy. *)
+let accum_local_update_parts ~id (llsc : scalar_t) =
+  let is_acc = function Get_local id' -> Scope_id.equal id id' | _ -> false in
+  let rec reads_local (s : scalar_t) =
+    match s with
+    | Get_local id' -> Scope_id.equal id id'
+    | Local_scope { body; _ } -> code_reads_local body
+    | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> false
+    | Get_dynamic { dyn_value = v, _; _ } -> reads_local v
+    | Ternop (_, (a, _), (b, _), (c, _)) -> reads_local a || reads_local b || reads_local c
+    | Binop (_, (a, _), (b, _)) -> reads_local a || reads_local b
+    | Unop (_, (a, _)) -> reads_local a
+  and code_reads_local (llc : t) =
+    match llc with
+    | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _ ->
+        false
+    | Seq (a, b) -> code_reads_local a || code_reads_local b
+    | For_loop { body; _ } -> code_reads_local body
+    | If { cond = c, _; body } -> reads_local c || code_reads_local body
+    | Set { llsc; _ } | Set_local (_, llsc) -> reads_local llsc
+    | Set_dynamic { dyn_value = v, _; llsc; _ } -> reads_local v || reads_local llsc
+    | Set_from_vec { arg = a, _; _ } -> reads_local a
+    | Tile_mma _ -> false
+  in
+  let reduce_op = function Ops.Add | Ops.Mul | Ops.Max | Ops.Min -> true | _ -> false in
+  match llsc with
+  | Binop (op, (a, _), (b, _)) when reduce_op op && is_acc a && not (reads_local b) -> Some (op, b)
+  | Binop (op, (a, _), (b, _)) when reduce_op op && is_acc b && not (reads_local a) -> Some (op, a)
+  | Ternop (Ops.FMA, (a, pa), (b, pb), (c, _))
+    when is_acc c && (not (reads_local a)) && not (reads_local b) ->
+      Some (Ops.Add, Binop (Ops.Mul, (a, pa), (b, pb)))
+  | _ -> None
+
+(* Whether a scope body's update statements (everything after the opening init) fit the grammar
+   the scope-form mint emits: Serial/[Unrolled] loops, pure-index-guarded [If]s, comments, and
+   reduce-shaped [Set_local]s of the scope's own local. Anything else — another node's write, a
+   nested scope, a non-reduction recurrence — disqualifies the base from hoisting. *)
+let rec valid_scope_updates ~id (llc : t) =
+  match llc with
+  | Noop | Comment _ -> true
+  | Seq (a, b) -> valid_scope_updates ~id a && valid_scope_updates ~id b
+  | For_loop { body; axis = Serial | Unrolled; _ } -> valid_scope_updates ~id body
+  | If { cond = gc, _; body } -> pure_index_guard gc && valid_scope_updates ~id body
+  | Set_local (id', v) ->
+      Scope_id.equal id id' && Option.is_some (accum_local_update_parts ~id v)
+  | _ -> false
+
 (* gh-ocannl-639: peel a single-statement reduction nest down to its accumulation base. Levels are
    Serial/[Unrolled] loops and {!pure_index_guard}ed [If]s, each containing nothing else (comments
    aside); the base is either a raw accumulation update ([`Update]: an
@@ -4955,8 +5007,17 @@ let pure_index_guard (llsc : scalar_t) =
    after the init — reusing the id is what lets a consumer hoist the scope through further
    levels). Returns [(tn, idcs, base, debug, rebuild)] where [rebuild] re-wraps a replacement base
    statement in the peeled levels. The ONE definition shared by [C_syntax]'s widened serial
-   fallback and [Schedule.Unroll ~materialize:true]'s scope-form unrolling, so the transform and
-   the emission cannot drift in what nests they recognize. *)
+   fallback and the scope-form mints of [Schedule.Unroll ~materialize:true] and
+   [Schedule.Partition], so the transforms and the emission cannot drift in what nests they
+   recognize.
+
+   Deliberately single-statement: a fused body updating several distinct accumulators is out of
+   scope — no lowering or schedule op produces one (each [Assignments] accumulation lowers to its
+   own nest; [Fuse_epilogue] folds elementwise tails, not sibling reductions), so no candidate
+   pair can diverge on it; and a multi-accumulator hoist could not be a [Local_scope] value at all
+   (scope purity forbids a sibling [Set] inside a scope body) — it would need the [Declare_local]
+   statement form. A transform that starts minting fused reduction bodies must extend this peel
+   alongside. *)
 let peel_accum_nest ~free_of body :
     (Tn.t
     * Indexing.axis_index array
@@ -4990,7 +5051,8 @@ let peel_accum_nest ~free_of body :
           when Scope_id.equal id id' && Tn.equal tn tn'
                && Array.length idcs = Array.length idcs'
                && Array.for_all2_exn idcs idcs' ~f:Indexing.equal_axis_index
-               && not (List.exists rest ~f:(code_touches_tn tn)) ->
+               && (not (List.exists rest ~f:(code_touches_tn tn)))
+               && List.for_all rest ~f:(valid_scope_updates ~id) ->
             Some (tn, idcs, `Scope (id, rest), debug, rebuild)
         | _ -> None)
     | [ Set { tn; idcs; llsc; debug } ]

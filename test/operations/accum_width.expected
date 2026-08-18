@@ -2,6 +2,7 @@ bf16 naive matmul equals the once-narrowed wide-accumulation reference: true
 the emitted serial k-loop narrows the accumulator once per cell, not per step: true
 Unroll-annotated bf16 reduction keeps the wide accumulator (equals the serial result): true
 materialized-unroll bf16 reduction keeps the wide accumulator (equals the serial result): true
+Partition segments share one accumulator scope (equals the unsplit serial result): true
 two-axis bf16 reduction equals the once-narrowed wide-accumulation reference: true
 materialized-unrolled INNER reduction axis equals the serial result (the scope hoists through the outer reduction loop): true
 materialized-unrolled OUTER reduction axis equals the serial result: true
@@ -10,6 +11,8 @@ BOTH reduction axes materialized sequentially keep the whole-nest accumulator (e
 Pad-guarded materialized unroll equals the serial result (the guard peels into the scope): true
 adjacent accumulations into one cell keep their per-assignment narrowing (256 +1 +1 stays 256 at bf16): true
 index-guarded bf16 reduction accumulates wide across the guard (256 +1x5 narrows once to 260): true
+a non-reduction recurrence through a pre-existing scope keeps its per-iteration narrowing (256 -0.5 -0.5 stays 256 at bf16): true
 a Workgroup_reduce loop serialized on cc keeps the Serial accumulator width (equals the serial result): true
+the SIMD reduction folds its non-divisible tail into the wide total (equals the serial result): true
 narrow_compute_f32=false recovers per-operator rounding: the result differs from the widened default: true
 narrow_compute_f32=false brings back the per-k-step narrowing in the k-loop: true

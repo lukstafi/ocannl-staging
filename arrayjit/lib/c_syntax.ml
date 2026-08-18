@@ -3087,18 +3087,42 @@ module C_syntax (B : C_syntax_config) = struct
             in
             (* The accumulator cell itself stays at its storage precision: the fold reads it
                widened and narrows the combined value once, exactly as the scalar path's [Set]
-               does (gh-ocannl-517). *)
+               does (gh-ocannl-517). The scalar REMAINDER (a non-multiple extent's tail) folds
+               into the compute-precision [total] BEFORE that single store (gh-ocannl-639): the
+               original per-step body would narrow the vector partial mid-way and then narrow
+               again per tail step, splitting this rendering from the widened serial baseline on
+               exactly the non-dividing extents. *)
             let widen = B.convert_precision ~from:acc_store_prec ~to_:prec in
             let narrow = B.convert_precision ~from:prec ~to_:acc_store_prec in
-            let epilogue =
+            let folds =
               vec_acc_grid_fold ~prec ~lanes ~op grid
               @ vec_acc_lane_fold ~prec ~lanes ~op ~vname:acc_regs.(0) ~out:total
-              @ [
-                  acc_cell () ^^ string " = "
-                  ^^ wrap_conversion narrow
-                       (B.binop_syntax prec op (wrap_conversion widen (acc_cell ())) (string total))
-                  ^^ semi;
-                ]
+            in
+            let tail_defs, tail_update =
+              match (op, contrib) with
+              | Ops.Add, Low_level.Binop (Ops.Mul, (a, _), (b, _)) ->
+                  (* Mirror the widened serial baseline's fused update ([pp_scalar]'s homogeneous
+                     FMA), or the tail's mul-then-add would round differently from the serial
+                     candidate's fmaf on the same steps. *)
+                  let da, ea = pp_scalar prec a in
+                  let db, eb = pp_scalar prec b in
+                  ( da @ db,
+                    string total ^^ string " = "
+                    ^^ B.ternop_syntax prec Ops.FMA ea eb (string total)
+                    ^^ semi )
+              | _ ->
+                  let dc, ec = pp_scalar prec contrib in
+                  ( dc,
+                    string total ^^ string " = "
+                    ^^ B.binop_syntax prec op (string total) ec
+                    ^^ semi )
+            in
+            let tail_body = pp_local_defs tail_defs ^^ tail_update in
+            let store =
+              acc_cell () ^^ string " = "
+              ^^ wrap_conversion narrow
+                   (B.binop_syntax prec op (wrap_conversion widen (acc_cell ())) (string total))
+              ^^ semi
             in
             let it = B.loop_index_type in
             Some
@@ -3116,10 +3140,10 @@ module C_syntax (B : C_syntax_config) = struct
                         (Printf.sprintf "for (%s = %d; %s + %d <= %d; %s += %d) {" ivar step ivar
                            step extent ivar step)
                    ^^ nest 2 (hardline ^^ separate hardline update_docs)
-                   ^^ hardline ^^ string "}" ^^ hardline ^^ separate hardline epilogue ^^ hardline
+                   ^^ hardline ^^ string "}" ^^ hardline ^^ separate hardline folds ^^ hardline
                    ^^ string (Printf.sprintf "for (; %s <= %d; ++%s) {" ivar to_ ivar)
-                   ^^ nest 2 (hardline ^^ body_doc ())
-                   ^^ hardline ^^ string "}")
+                   ^^ nest 2 (hardline ^^ tail_body)
+                   ^^ hardline ^^ string "}" ^^ hardline ^^ store)
               ^^ hardline ^^ string "}")
           with Bail -> None
         in

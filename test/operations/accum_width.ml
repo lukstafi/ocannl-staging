@@ -119,6 +119,16 @@ let claim_2ax_both_mat =
 let claim_2ax_pad_mat =
   "Pad-guarded materialized unroll equals the serial result (the guard peels into the scope)"
 
+let claim_partition =
+  "Partition segments share one accumulator scope (equals the unsplit serial result)"
+
+let claim_simd_tail =
+  "the SIMD reduction folds its non-divisible tail into the wide total (equals the serial result)"
+
+let claim_scope_recurrence =
+  "a non-reduction recurrence through a pre-existing scope keeps its per-iteration narrowing (256 \
+   -0.5 -0.5 stays 256 at bf16)"
+
 let claim_adjacent =
   "adjacent accumulations into one cell keep their per-assignment narrowing (256 +1 +1 stays 256 \
    at bf16)"
@@ -130,12 +140,14 @@ let claim_wgreduce =
   "a Workgroup_reduce loop serialized on cc keeps the Serial accumulator width (equals the serial \
    result)"
 
+(* In execution order — the GPU skip lines must match the cc run's golden line for line. *)
 let all_claims =
   [
     claim_parity;
     claim_shape;
     claim_unroll_annot;
     claim_unroll_mat;
+    claim_partition;
     claim_2ax_ref;
     claim_2ax_inner;
     claim_2ax_outer;
@@ -144,7 +156,9 @@ let all_claims =
     claim_2ax_pad_mat;
     claim_adjacent;
     claim_guarded;
+    claim_scope_recurrence;
     claim_wgreduce;
+    claim_simd_tail;
     claim_off_value;
     claim_off_shape;
   ]
@@ -186,16 +200,30 @@ let () =
        must keep the wide accumulator — the reduction is exact in f32 and narrows at the same
        single point, so both are bitwise equal to the serial leg; per-repetition narrowing
        would visibly diverge on these inputs (the same discrimination as the policy-off arm). *)
-    let unroll_leg ~claim ~name ~materialize =
+    let matmul_leg ~claim ~name ~sched =
       let ma_u = NTDSL.init ~l:(name ^ "_a") ~prec:Ir.Ops.bfloat16 ~i:[ n ] ~o:[ n ] ~f:fa () in
       let mb_u = NTDSL.init ~l:(name ^ "_b") ~prec:Ir.Ops.bfloat16 ~i:[ n ] ~o:[ n ] ~f:fb () in
       let%op mc_u = ma_u * mb_u in
       Tn.update_prec mc_u.Tensor.value Ir.Ops.bfloat16;
-      let got_u = run ~name ~schedule:(unroll_k ~materialize) mc_u in
+      let got_u = run ~name ~schedule:sched mc_u in
       p claim (Array.for_all2_exn got_u got ~f:Float.equal)
     in
-    unroll_leg ~claim:claim_unroll_annot ~name:"aw_bf16_unroll_annot" ~materialize:false;
-    unroll_leg ~claim:claim_unroll_mat ~name:"aw_bf16_unroll_mat" ~materialize:true;
+    matmul_leg ~claim:claim_unroll_annot ~name:"aw_bf16_unroll_annot"
+      ~sched:(unroll_k ~materialize:false);
+    matmul_leg ~claim:claim_unroll_mat ~name:"aw_bf16_unroll_mat"
+      ~sched:(unroll_k ~materialize:true);
+    (* Partition is an index-set specialization of one reduction: its segment seams must not
+       become narrowing points, so one accumulator scope spans all the segments (unlike the naive
+       reading where each sibling segment loop would widen separately and narrow at every
+       breakpoint — visibly on these drifting sums). *)
+    matmul_leg ~claim:claim_partition ~name:"aw_bf16_partition" ~sched:(fun opt ->
+        let k =
+          match List.find_exn (nest_paths opt.LL.llc) ~f:(fun p -> List.length p = 3) with
+          | [ _; _; k ] -> k
+          | _ -> assert false
+        in
+        let pt, _segment_syms = Sched.partition ~axis:k ~breakpoints:[ 16; 40 ] in
+        [ pt ]);
     (* === two-axis reduction out[i] = sum_{r,s} x[i,r,s]: unrolling EITHER reduction axis keeps
        the whole-nest accumulator. The inner-axis leg is the partial-materialization shape: the
        unroll mints a scope-form Set inside the still-serial outer reduction loop, and the
@@ -301,19 +329,52 @@ let () =
         ~read:[ gacc ]
     in
     p claim_guarded (Float.equal (List.hd_exn gvals).(0) 260.0);
+    (* === a pre-existing scope carrying a NON-reduction recurrence must not be hoisted === *)
+    (* The scope-base arm of the peel is licensed by the reduction reading alone: [local :=
+       local - 0.5] narrows per enclosing iteration by the source's own semantics (256 - 0.5
+       rounds back to 256 at bf16, twice over), and hoisting the enclosing loop into the scope
+       would hold 255 instead. [valid_scope_updates] rejects the base. *)
+    let gacc2 = node ~dims:[| 1 |] "aw_rec" in
+    Ll_test.materialize gacc2;
+    let ri = Ll_test.sym () in
+    let rid = LL.get_scope gacc2 in
+    let rec_scope_body =
+      LL.Seq
+        ( LL.Set_local (rid, LL.Get (gacc2, [| Ll_test.fixed 0 |])),
+          LL.Set_local
+            (rid, LL.Binop (Ir.Ops.Sub, (LL.Get_local rid, bf16), (LL.Constant 0.5, bf16))) )
+    in
+    let rec_llc =
+      Ll_test.loop_n ri 2
+        (LL.Set
+           {
+             tn = gacc2;
+             idcs = [| Ll_test.fixed 0 |];
+             llsc =
+               LL.Local_scope
+                 { id = rid; body = rec_scope_body; orig_indices = [| Ll_test.fixed 0 |] };
+             debug = "";
+           })
+    in
+    let ro = Ll_test.optimize ~materialized:[ gacc2 ] ~name:"aw_recurrence" rec_llc in
+    let rvals =
+      Ll_test.execute ~name:"aw_recurrence" ro ~seed:[ (gacc2, [| 256.0 |]) ] ~read:[ gacc2 ]
+    in
+    p claim_scope_recurrence (Float.equal (List.hd_exn rvals).(0) 256.0);
     (* === Workgroup_reduce serialized on cc: retyping the reduction axis to a hardware kind the
        backend cannot bind must not change the accumulator width relative to the Serial spelling.
        16 terms push the running sums past 4, where bf16 can no longer represent the 1/64
        increments, so a per-step regression in the serialized fallback would diverge. *)
-    let nw = 16 in
-    let fw idcs = Float.of_int ((((idcs.(0) * nw) + idcs.(1)) % 13) + 20) *. 0.015625 in
     (* An explicit [=+] into a pre-zeroed materialized accumulator: an einsum-lowered sum's
        whole-node init nest would fail [validate_parallel] once the reduction axis is retyped to a
-       hardware kind (whole-node zeroing is not distributed), and the init is not what this leg
-       is about. *)
-    let run_w ~name ?schedule () =
-      let xw = NTDSL.init ~l:(name ^ "_x") ~prec:Ir.Ops.bfloat16 ~o:[ ni; nw ] ~f:fw () in
-      let outw = NTDSL.init ~l:(name ^ "_out") ~prec:Ir.Ops.bfloat16 ~o:[ ni ] ~f:(fun _ -> 0.0) () in
+       hardware kind (whole-node zeroing is not distributed), and the init is not what these legs
+       are about. *)
+    let run_sum ~cols ~name ?schedule () =
+      let fv idcs = Float.of_int ((((idcs.(0) * cols) + idcs.(1)) % 13) + 20) *. 0.015625 in
+      let xw = NTDSL.init ~l:(name ^ "_x") ~prec:Ir.Ops.bfloat16 ~o:[ ni; cols ] ~f:fv () in
+      let outw =
+        NTDSL.init ~l:(name ^ "_out") ~prec:Ir.Ops.bfloat16 ~o:[ ni ] ~f:(fun _ -> 0.0) ()
+      in
       Train.set_materialized outw.Tensor.value;
       let comp = named name [%cd outw =+ id xw ~logic:"is => i"] in
       let transform opt =
@@ -324,16 +385,34 @@ let () =
       let ctx = Context.run ctx routine in
       Context.get_values ctx outw.Tensor.value
     in
-    let got_w = run_w ~name:"aw_wgr_serial" () in
+    let retype_reduction ty opt =
+      match List.find_exn (nest_paths opt.LL.llc) ~f:(fun p -> List.length p = 2) with
+      | [ _; s ] -> [ Sched.Retype { axis = s; ty } ]
+      | _ -> assert false
+    in
+    let got_w = run_sum ~cols:16 ~name:"aw_wgr_serial" () in
     let got_wg =
-      run_w ~name:"aw_wgr_hw"
-        ~schedule:(fun opt ->
-          match List.find_exn (nest_paths opt.LL.llc) ~f:(fun p -> List.length p = 2) with
-          | [ _; s ] -> [ Sched.Retype { axis = s; ty = LL.Workgroup_reduce } ]
-          | _ -> assert false)
+      run_sum ~cols:16 ~name:"aw_wgr_hw"
+        ~schedule:(retype_reduction LL.Workgroup_reduce)
         ()
     in
     p claim_wgreduce (Array.for_all2_exn got_wg got_w ~f:Float.equal);
+    (* === the SIMD reduction's scalar remainder === *)
+    (* 67 is no multiple of any chains*lanes step, so the vector partial must fold into the wide
+       total together with the tail contributions and narrow once — the pre-fix rendering stored
+       the partial to bf16 mid-way (at running sums ~25, where 1/64 increments are lost) and then
+       narrowed per tail step. The structural conjunct keeps the leg honest: if the vectorized
+       rendering declines, serial-equals-serial would be a false green. *)
+    let got_v = run_sum ~cols:67 ~name:"aw_vec_serial" () in
+    let got_vt =
+      run_sum ~cols:67 ~name:"aw_vec_tail" ~schedule:(retype_reduction LL.Vectorized) ()
+    in
+    let vec_fired =
+      match read_generated "aw_vec_tail" with
+      | Some src -> String.is_substring src ~substring:"Vectorized reduction rendering"
+      | None -> false
+    in
+    p claim_simd_tail (vec_fired && Array.for_all2_exn got_vt got_v ~f:Float.equal);
     (* Negative control: turning the policy off recovers the pre-gh-517/pre-gh-639 semantics —
        every operator, the accumulation update included, rounds to storage precision — which on
        these inputs must visibly differ from the widened default, proving the inputs discriminate

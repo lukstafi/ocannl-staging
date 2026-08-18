@@ -843,18 +843,58 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
                  "Schedule.Partition: breakpoints must be strictly increasing and strictly inside \
                   the loop range [%d, %d]"
                  fc.from_ fc.to_);
-          unflat_lines
-            (List.map3_exn segment_indices starts stops ~f:(fun s lo hi ->
-                 (* Sibling segments duplicate the body: refresh scalar-local scope ids exactly as
-                    materializing [Unroll] does, so copies do not redeclare the same scope id. *)
-                 let body =
-                   refresh_scopes
-                   @@ map_code
-                        ~fidx:(subst_axis_index ~sym:axis ~by:{ terms = [ (1, s) ]; offset = 0 })
-                        fc.body
-                 in
-                 For_loop
-                   { index = s; from_ = lo; to_ = hi; body; axis = Serial })))
+          let segment s lo hi body =
+            (* Sibling segments duplicate the body: refresh scalar-local scope ids exactly as
+               materializing [Unroll] does, so copies do not redeclare the same scope id. *)
+            let body =
+              refresh_scopes
+              @@ map_code
+                   ~fidx:(subst_axis_index ~sym:axis ~by:{ terms = [ (1, s) ]; offset = 0 })
+                   body
+            in
+            For_loop { index = s; from_ = lo; to_ = hi; body; axis = Serial }
+          in
+          (* gh-ocannl-639: partitioning a recognized accumulation nest carries ONE accumulator
+             scope across all the segments — Partition is an index-set specialization, not a
+             partial-reduction boundary, so the segment seams must not become narrowing points
+             (unlike a Split, whose halves stay one nest the widening covers whole). Same
+             recognizer and same declines as [Unroll ~materialize:true] above. *)
+          let mint =
+            if Utils.debug_log_from_routines () then None
+            else Low_level.peel_accum_nest ~free_of:[ axis ] fc.body
+          in
+          match mint with
+          | Some (tn, idcs, base, debug, rebuild) ->
+              let id, update_code =
+                match base with
+                | `Update llsc ->
+                    let id = Low_level.get_scope tn in
+                    (id, Low_level.Set_local (id, Low_level.subst_accum_read ~tn ~idcs ~id llsc))
+                | `Scope (id, rest) -> (id, unflat_lines rest)
+              in
+              let segments =
+                List.map3_exn segment_indices starts stops ~f:(fun s lo hi ->
+                    segment s lo hi (rebuild update_code))
+              in
+              Set
+                {
+                  tn;
+                  idcs;
+                  llsc =
+                    Local_scope
+                      {
+                        id;
+                        body =
+                          unflat_lines
+                            (Low_level.Set_local (id, Low_level.Get (tn, idcs)) :: segments);
+                        orig_indices = idcs;
+                      };
+                  debug;
+                }
+          | None ->
+              unflat_lines
+                (List.map3_exn segment_indices starts stops ~f:(fun s lo hi ->
+                     segment s lo hi fc.body)))
   | Expand_zero { tn; indices } ->
       (* Whole-node [Zero_out] is never distributed across hardware threads ([validate_parallel]
          rejects it in multi-threaded kernels); expand it into an ordinary loop nest — over the
