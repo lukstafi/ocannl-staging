@@ -93,8 +93,9 @@ Testing notes:
   status can hide expectation diffs.
 - Dune re-runs a rule for an environment variable only where the stanza DECLARES it, in BOTH
   spellings `Utils.env_var_names` builds (`ocannl_<key>` and `OCANNL_<KEY>` — the lowercase one is
-  what `read_env_var` consults first). Every test stanza declares `backend`; to pin any other key
-  on a probe, add both spellings to that stanza's deps first. `test/operations/env_var_deps`
+  what `read_env_var` consults first). Every test stanza that can select a backend declares `backend`; one that names its backend or
+  links none declares neither spelling. To pin any other key on a probe, add both spellings to
+  that stanza's deps first. `test/operations/env_var_deps`
   checks the pairing, and that each library declares the `OCANNL_LOG_LEVEL_<MODULE>` tracing gates
   its modules read (gh-ocannl-628).
 - Tests read `test/config/ocannl_config` and can emit .ll/.c/.cu/.metal into build_files/.
