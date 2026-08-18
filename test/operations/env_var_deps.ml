@@ -136,7 +136,8 @@ let () =
                               field -- `Utils.read_env_var` reads both spellings of %s, and the \
                               undeclared one invalidates nothing"
                              dune_file name spelling field config_key))
-              | Utils.Env_reserved prefix when String.equal prefix gate_prefix -> ()
+              (* A reserved namespace has no second spelling to pair with. The gates are checked
+                 below, against the modules that read them. *)
               | Utils.Env_reserved _ -> ()
               | Utils.Env_unread_spelling _ | Utils.Env_unknown_key _ ->
                   if Map.mem exemptions key then exemptions_used := Set.add !exemptions_used key
@@ -212,7 +213,14 @@ let () =
          "exempted declarations no dune file makes any more -- drop them from the exemption list: \
           %s"
          (String.concat ~sep:", " (Set.to_list stale)));
-  printf "Configuration keys tracked as ambient dependencies, in both spellings everywhere:\n";
+  (* The coverage of the gate half, stated rather than assumed: a library outside these
+     directories has no sources here to check its `preprocessor_deps` against, and says so above
+     if it declares a gate at all -- but a gate it FAILS to declare is invisible from here, so the
+     boundary belongs in the golden where widening it is a reviewable diff. *)
+  printf "Directories whose sources this scan reads:\n";
+  Set.iter scanned_dirs ~f:(fun dir ->
+      printf "  %s\n" (if String.is_empty dir then "." else dir));
+  printf "\nConfiguration keys tracked as ambient dependencies, in both spellings everywhere:\n";
   Set.iter !tracked_keys ~f:(printf "  %s\n");
   printf "\nPer-module tracing gates, and the library whose preprocessor_deps declares each:\n";
   List.sort !gate_table ~compare:(fun (_, a, _) (_, b, _) -> String.compare a b)

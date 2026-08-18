@@ -499,9 +499,11 @@ let classify_env_var name =
 (** Every environment variable that addresses OCANNL's configuration and that nothing reads, with
     the reason, in the order the names sort.
 
-    Exported because a golden that captures stderr has to refuse to run rather than diff: the
-    warnings below land in the capture, and an ambient variable is not something the rule can pin
-    away the way it pins a commandline flag (see [test/operations/startup_streams]). *)
+    Separate from the warning loop that consumes it (at the foot of this file) so that the walk is
+    a value rather than an effect: what is warned about is then a list something else -- a test, a
+    tool refusing to run under a misconfigured environment -- can also ask for. Sorted so that a
+    stream capturing the warnings does not depend on the order the C library hands the environment
+    over. *)
 let unread_env_vars () =
   Unix.environment () |> Array.to_list
   |> List.map ~f:(fun binding ->

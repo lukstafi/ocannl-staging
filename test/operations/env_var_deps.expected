@@ -1,3 +1,11 @@
+Directories whose sources this scan reads:
+  arrayjit/lib
+  benchmarks/runners/ocannl
+  bin
+  lib
+  tensor
+  tools
+
 Configuration keys tracked as ambient dependencies, in both spellings everywhere:
   backend
   buffer_aliasing
