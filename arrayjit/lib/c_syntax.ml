@@ -1351,72 +1351,143 @@ module C_syntax (B : C_syntax_config) = struct
         ^^ semi
     | _ -> invalid_arg "C_syntax.vec_acc_combine: not an accumulation operator"
 
-  (* A target builtin spelling a WHOLE-VECTOR fused multiply-add for this (compute precision, lane
-     count), with the preprocessor condition under which it exists — [None] where none is known.
+  (* The target builtins spelling a WHOLE-VECTOR fused multiply-add for this (compute precision,
+     lane count), most preferred first: each is the preprocessor condition under which the arm
+     exists, paired with a rendering of the statement [dst = fma(a, b, dst)]. Empty where nothing
+     is known; the guards within one entry are mutually exclusive, so the list becomes a chain of
+     [#elif]s.
 
      Why this table exists at all: gcc has no generic vector [fma] builtin (clang's
      [__builtin_elementwise_fma], the first arm of [vec_acc_fma], is a clang extension), so on gcc
-     the accumulator update fell to the per-lane loop, whose lane-indexed reads and stores gcc -O3
-     mis-register-allocates — on the packed GEBP shape it unrolls the k-loop 7x and spills the whole
-     C-tile, 18 instructions / 8 FMAs / 0 stack references per k step becoming 279 / 56 / 73, a ~9x
-     throughput loss against -O2 at every storage precision (gh-ocannl-614; the issue's report of an
-     f16-only effect predates the extent-adapted tile width). The cause is the lane subscripting
-     itself:
-     straight-line lane stores, a lane-indexed scratch array, and a [(vtyp){...}] constructor of
-     per-lane [fmaf] calls all spill the same way, while ANY form that reaches gcc as one vector
-     operation costs the -O2 instruction count at -O3.
+     the accumulator update falls to the per-lane loop — which gcc mis-compiles in two distinct
+     ways, both measured per width on the emitted micro-kernel (gh-ocannl-614, gh-ocannl-621):
 
-     Which is why it is a builtin and not the obvious [dst = a * b + dst]: that would reach gcc as
-     one vector operation too, and does allocate perfectly, but it is only MAYBE contracted into an
-     FMA — under [cc_backend_fp_contract=off] it measurably is not (a mul and an add, two roundings,
-     verified against these builtins), and then the vector body would round differently from the
-     scalar peel and the serial fallback it promises to equal bit for bit. These builtins are fused
-     by definition, so the promise holds under every flag.
+     - it SPILLS. -O3 unrolls the k-loop and puts the C-tile in memory: at f32/8 lanes, 18
+       instructions / 8 vector FMAs / 0 stack references per k step become 200 / 4 vector + 48
+       scalar / 8, which [bin/narrow_gebp_bench] measures as 12.6 GFLOP/s against 128
+       (gh-ocannl-614). The cause is the lane subscripting itself — straight-line lane stores, a
+       lane-indexed scratch array, a [(vtyp){...}] constructor of per-lane [fmaf] calls and
+       [#pragma GCC unroll 1] all spill the same way, while ANY form reaching gcc as one vector
+       operation costs the -O2 instruction count at -O3. Worst at f32/4 lanes on aarch64: 294
+       instructions / 8 vector + 48 scalar FMAs / 58 stack references against the builtin's 26 / 16
+       / 0.
+     - or it SCALARIZES. SLP does not reassemble the lane loop at all, so one lanes-wide FMA
+       becomes [lanes] scalar ones — a lane-count arithmetic loss with no spill to give it away.
+       gcc does this to f64/2 lanes on x86 AND aarch64 at both -O2 and -O3, so
+       [cc_backend_optimization_level=2] does not diagnose it the way it diagnoses a spill, and to
+       f64/8 lanes under AVX-512 at -O3.
 
-     Only widths validated on real hardware are listed. The 512-bit forms ([..._mask] with an
-     all-ones mask and a rounding argument) exist but are unexercised here, and a wrong signature
-     would fail the kernel compile outright rather than merely run slow; [cc_vector_bytes] resolves
-     to 32 or 16 unless set by hand, so nothing reaches them by default. Native-fp16 compute (16
-     [_Float16] lanes) has no gcc builtin at all and keeps the per-lane arm. *)
-  let vec_fma_builtin ~prec ~lanes =
-    (* [__FMA__] is x86-only, so the arm self-selects away on every other target. *)
-    let x86 name = Some ("defined(__FMA__)", name) in
+     Which is why these are builtins and not the obvious [dst = a * b + dst]: that reaches gcc as
+     one vector operation too, and allocates perfectly, but it is only MAYBE contracted into an
+     FMA — under [cc_backend_fp_contract=off] it measurably is not (a mul and an add, two
+     roundings, verified against these builtins), and then the vector body would round differently
+     from the scalar peel and the serial fallback it promises to equal bit for bit. Every builtin
+     here is fused by definition, so the promise holds under every flag; each was checked to render
+     exactly one fused instruction at [-ffp-contract=off], computing [a * b + dst]. The masked
+     forms are spelled the way gcc's own [<immintrin.h>] spells them: with an all-ones mask and
+     [_MM_FROUND_CUR_DIRECTION] (= 4, i.e. obey MXCSR rather than an embedded rounding mode) these
+     calls are character for character what [_mm512_fmadd_ps], [_mm512_fmadd_pd], [_mm_fmadd_ph],
+     [_mm256_fmadd_ph] and [_mm512_fmadd_ph] expand to, so their semantics are the ISA's rather
+     than something inferred here.
+
+     The AVX-512, AVX512-FP16 and aarch64 rows could not be RUN when they were added (no such
+     hardware; QEMU's TCG implements neither AVX-512 nor AVX512-FP16), so they carry a second guard
+     the AVX/AVX2 rows do not: [__has_builtin], which on gcc tracks the enabled target features
+     exactly. It cannot catch a wrong signature — that is what the compile checks are for — but it
+     turns "this compiler spells it differently" into a fall-through to the per-lane arm rather
+     than a failed kernel compile. The cost is that a gcc older than 10, which has no
+     [__has_builtin], takes the per-lane arm at those widths (the prelude shims the macro to 0). *)
+  let vec_fma_builtin ~prec ~lanes : (string * (dst:string -> a:string -> b:string -> string)) list
+      =
+    let call name extra ~dst ~a ~b =
+      Printf.sprintf "%s = %s(%s, %s, %s%s);" dst name a b dst extra
+    in
+    let has name = Printf.sprintf "__has_builtin(%s)" name in
+    (* [__FMA__] is x86-only, so these arms self-select away on every other target. The AVX/AVX2
+       widths are the shipped, hardware-measured ones (gh-ocannl-614). *)
+    let x86 name = ("defined(__FMA__)", call name "") in
+    (* AVX-512F: the 512-bit forms take an all-ones write mask and a rounding mode
+       ([_MM_FROUND_CUR_DIRECTION] = 4). [__mmask16]/[__mmask8] are [<immintrin.h>] names for plain
+       integer types, which is what a kernel writes — it includes no intrinsics header. *)
+    let avx512 name mask =
+      ( Printf.sprintf "defined(__AVX512F__) && %s" (has name),
+        call name (Printf.sprintf ", (%s)-1, 4" mask) )
+    in
+    (* AVX512-FP16: the VL (128/256-bit) forms take a mask and no rounding argument, the 512-bit
+       one takes both. *)
+    let avx512fp16 ?(vl = true) ?(round = false) name mask =
+      ( Printf.sprintf "HAS_NATIVE_FLOAT16 && defined(__AVX512FP16__)%s && %s"
+          (if vl then " && defined(__AVX512VL__)" else "")
+          (has name),
+        call name (Printf.sprintf ", (%s)-1%s" mask (if round then ", 4" else "")) )
+    in
+    (* aarch64: gcc's internal NEON [fma] builtins. Undocumented, which is the whole reason for the
+       [__has_builtin] guard — [<arm_neon.h>]'s [vfmaq_f32] would be the documented spelling but
+       the header cannot be included (its native vector typedefs collide with the emitted
+       pack-struct typedefs; see [Builtins_cc.includes]). Inline [fmla] asm was the other candidate
+       and censused three instructions per k step worse, so the builtin wins on both counts. *)
+    let neon name =
+      ( Printf.sprintf "defined(__aarch64__) && defined(__ARM_FEATURE_FMA) && %s" (has name),
+        call name "" )
+    in
+    (* The fp16 NEON builtin is typed in [__fp16], a DISTINCT type from the [_Float16] the emitted
+       vectors carry, so its arm casts both ways through a block-local typedef rather than being a
+       plain call. (The f32/f64 builtins take the element types the emission already uses.) *)
+    let neon_half_render name ~bytes ~dst ~a ~b =
+      Printf.sprintf
+        "{ typedef __fp16 ocannl_hfv__ __attribute__((vector_size(%d))); %s = \
+         (__typeof__(%s))%s((ocannl_hfv__)%s, (ocannl_hfv__)%s, (ocannl_hfv__)%s); }"
+        bytes dst dst name a b dst
+    in
+    let neon_half name ~bytes =
+      ( Printf.sprintf
+          "HAS_NATIVE_FLOAT16 && defined(__ARM_FEATURE_FP16_VECTOR_ARITHMETIC) && %s" (has name),
+        neon_half_render name ~bytes )
+    in
     match (prec, lanes) with
-    | Ops.Single_prec _, 4 -> x86 "__builtin_ia32_vfmaddps"
-    | Ops.Single_prec _, 8 -> x86 "__builtin_ia32_vfmaddps256"
-    | Ops.Double_prec _, 2 -> x86 "__builtin_ia32_vfmaddpd"
-    | Ops.Double_prec _, 4 -> x86 "__builtin_ia32_vfmaddpd256"
-    | _ -> None
+    | Ops.Single_prec _, 4 -> [ x86 "__builtin_ia32_vfmaddps"; neon "__builtin_aarch64_fmav4sf" ]
+    | Ops.Single_prec _, 8 -> [ x86 "__builtin_ia32_vfmaddps256" ]
+    | Ops.Single_prec _, 16 -> [ avx512 "__builtin_ia32_vfmaddps512_mask" "unsigned short" ]
+    | Ops.Double_prec _, 2 -> [ x86 "__builtin_ia32_vfmaddpd"; neon "__builtin_aarch64_fmav2df" ]
+    | Ops.Double_prec _, 4 -> [ x86 "__builtin_ia32_vfmaddpd256" ]
+    | Ops.Double_prec _, 8 -> [ avx512 "__builtin_ia32_vfmaddpd512_mask" "unsigned char" ]
+    | Ops.Half_prec _, 8 ->
+        [
+          avx512fp16 "__builtin_ia32_vfmaddph128_mask" "unsigned char";
+          neon_half "__builtin_aarch64_fmav8hf" ~bytes:16;
+        ]
+    | Ops.Half_prec _, 16 -> [ avx512fp16 "__builtin_ia32_vfmaddph256_mask" "unsigned short" ]
+    | Ops.Half_prec _, 32 ->
+        [ avx512fp16 ~vl:false ~round:true "__builtin_ia32_vfmaddph512_mask" "unsigned int" ]
+    | _ -> []
 
   (* [dst = fma(a, b, dst)] elementwise-fused on vector registers (single rounding, matching the
-     scalar path's [fmaf]/[fma]): clang's [__builtin_elementwise_fma] where available, else a
-     target's whole-vector builtin ({!vec_fma_builtin}), else the per-lane fused loop. *)
+     scalar path's [fmaf]/[fma]): clang's [__builtin_elementwise_fma] where available, else the
+     target's whole-vector builtins ({!vec_fma_builtin}), else the per-lane fused loop. *)
   let vec_acc_fma ~prec ~lanes ~dst ~a ~b =
     let open PPrint in
     (* At fp16 the per-lane fallback must be the *same* fused multiply-add the scalar path emits,
-       or the two arms of the [#if] -- and the vector rendering and its serial remainder -- would
-       round differently: [fmaf] on [_Float16] operands promotes to float and rounds twice, while
-       [__builtin_elementwise_fma] on an fp16 vector rounds once. [OCANNL_HALF_FMA] is defined by
-       the same [#if], so both configurations agree by construction (gh-ocannl-516). *)
+       or the arms of the [#if] -- and the vector rendering and its serial remainder -- would
+       round differently: promoting to [fmaf] rounds at float and again at fp16, while a native
+       fp16 FMA rounds once. [OCANNL_HALF_FMA] switches on the same target facts as the arms below
+       (clang's elementwise builtin, then a native [__builtin_fmaf16]), so every configuration
+       agrees by construction (gh-ocannl-516, gh-ocannl-621). *)
     let fma_fn =
       match prec with
       | Ops.Double_prec _ -> "fma"
       | Ops.Half_prec _ -> "OCANNL_HALF_FMA"
       | _ -> "fmaf"
     in
-    let builtin_arm =
-      match vec_fma_builtin ~prec ~lanes with
-      | None -> empty
-      | Some (guard, builtin) ->
-          string ("#elif " ^ guard)
-          ^^ hardline
-          ^^ string (Printf.sprintf "%s = %s(%s, %s, %s);" dst builtin a b dst)
-          ^^ hardline
+    let builtin_arms =
+      vec_fma_builtin ~prec ~lanes
+      |> List.map ~f:(fun (guard, render) ->
+             string ("#elif " ^ guard) ^^ hardline ^^ string (render ~dst ~a ~b) ^^ hardline)
+      |> concat
     in
     string "#if OCANNL_HAS_ELEMENTWISE_FMA"
     ^^ hardline
     ^^ string (Printf.sprintf "%s = __builtin_elementwise_fma(%s, %s, %s);" dst a b dst)
-    ^^ hardline ^^ builtin_arm ^^ string "#else" ^^ hardline
+    ^^ hardline ^^ builtin_arms ^^ string "#else" ^^ hardline
     ^^ string
          (Printf.sprintf
             "for (int ocannl_l__ = 0; ocannl_l__ < %d; ++ocannl_l__) %s[ocannl_l__] = \

@@ -887,24 +887,69 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   instruction gcc emits a call to `fmaf16()`, which a glibc need not export at all (verified here
   as a link error).
 - **A vector accumulator update must reach the compiler as ONE vector operation** (gh-ocannl-614,
-  fixed). gcc -O3 register-allocated the per-lane `fmaf` loop catastrophically: on the packed GEBP
-  shape it unrolled the k-loop 7x and spilled the whole C-tile — 18 insns / 8 FMAs / 0 stack refs
-  per k step at `-O2` becoming 279 / 56 / 73 at `-O3`, a ~9x throughput loss at every storage
-  precision (`bin/narrow_gebp_bench` packmma: 112 → 12.6 GFLOP/s at f32, 94 → 10.4 at f16; the
-  earlier claim that f32/bf16 were spared predates the extent-adapted tile width). The cause is the
-  lane subscripting itself, not the unrolling: straight-line lane stores, a lane-indexed scratch
-  array, a `(vtyp){...}` constructor of per-lane `fmaf` calls, and `#pragma GCC unroll 1` all spill
-  the same way, while every form that arrives as one vector op costs the `-O2` count at `-O3`.
-  `C_syntax.vec_fma_builtin` therefore adds a middle arm to `vec_acc_fma` — a target whole-vector
-  FMA builtin (`__builtin_ia32_vfmadd{ps,pd}[256]` under `defined(__FMA__)`) mirroring clang's
-  `__builtin_elementwise_fma`, with the per-lane loop still last. Not `dst = a * b + dst`, which
-  allocates just as well but is only maybe-contracted: under `cc_backend_fp_contract=off` gcc
-  emits a mul and an add, and `schedule_mma_matmul`'s full-mantissa leg (the only bitwise leg whose
-  products are inexact, hence the only one that can see this) then fails. Residual: 512-bit widths
-  and native-fp16 lanes have no listed builtin and keep the per-lane arm, as does `vec_acc_combine`'s
-  `Max`/`Min` loop (no builtin matches `fmaxf`'s NaN semantics) — if a `Vectorized` reduction or a
-  wide-vector kernel benches ~10x off, this is the first thing to check, and
-  `cc_backend_optimization_level=2` still confirms it in one run.
+  gh-ocannl-621, fixed). gcc -O3 register-allocated the per-lane `fmaf` loop catastrophically: on
+  the packed GEBP shape it unrolled the k-loop and spilled the whole C-tile — 18 insns / 8 vector
+  FMAs / 0 stack refs per k step at `-O2` becoming 200 / 4 vector + 48 scalar / 8 at `-O3`, a ~9x
+  throughput loss at every storage precision (`bin/narrow_gebp_bench` packmma: 112 → 12.6 GFLOP/s
+  at f32, 94 → 10.4 at f16; the earlier claim that f32/bf16 were spared predates the extent-adapted
+  tile width). The cause is the lane subscripting itself, not the unrolling: straight-line lane
+  stores, a lane-indexed scratch array, a `(vtyp){...}` constructor of per-lane `fmaf` calls, and
+  `#pragma GCC unroll 1` all spill the same way, while every form that arrives as one vector op
+  costs the `-O2` count at `-O3`. `C_syntax.vec_fma_builtin` therefore adds middle arms to
+  `vec_acc_fma` — target whole-vector FMA builtins mirroring clang's `__builtin_elementwise_fma`,
+  with the per-lane loop still last. Not `dst = a * b + dst`, which allocates just as well but is
+  only maybe-contracted: under `cc_backend_fp_contract=off` gcc emits a mul and an add, and
+  `schedule_mma_matmul`'s full-mantissa leg (the only bitwise leg whose products are inexact, hence
+  the only one that can see this) then fails.
+- **The per-lane arm fails in TWO ways, and the second one is silent.** Besides spilling it can
+  SCALARIZE: SLP declines to reassemble the lane loop, so one lanes-wide FMA becomes `lanes` scalar
+  ones — a lane-count arithmetic loss with no stack traffic to give it away, which is why the
+  census below counts vector and scalar FMAs separately rather than "FMAs". gh-ocannl-621 swept
+  every reachable width this way (static census of the innermost FMA-carrying loop of the emitted
+  micro-kernel, `-O2` vs `-O3`, insns / vector FMAs / scalar FMAs / stack refs), and the verdict is
+  not uniform:
+  - **gcc/aarch64 is the worst-affected target and it is every Linux ARM box's default** (Apple
+    clang takes the `__builtin_elementwise_fma` arm and never sees any of this). f32 × 4 lanes:
+    294 / 8 / 48 / 58 at `-O3` against the builtin's 26 / 16 / 0. f64 × 2 lanes scalarizes
+    completely at *both* levels — 0 vector FMAs, 32 scalar.
+  - x86 f64 × 2 lanes (16-byte vectors) scalarizes the same way at both levels; f64 × 8 (AVX-512)
+    goes 28 / 16 / 0 → 417 / 8 / 96 at `-O3`.
+  - f32 × 16 (AVX-512) is the one width where the per-lane arm is *fine*: 31 insns against the
+    builtin's 28, no spill, no scalarization. Its row is robustness, not a measured win.
+  - At fp16 the vector arm is not where the cost was; see the `OCANNL_HALF_FMA` note below. Once
+    that macro rounds once, SLP reassembles the per-lane fp16 loop into exactly what the explicit
+    builtin emits, so the fp16 rows are robustness rather than a measured win — but their guards
+    have to be the *same* target question as the macro's, or the vector body would round once
+    against a scalar peel rounding twice.
+  - `vec_acc_combine`'s `Max`/`Min` loop still keeps the per-lane form (no builtin matches
+    `fmaxf`'s NaN semantics) — if a `Vectorized` reduction or a wide-vector kernel benches ~10x
+    off, this is the first thing to check, and `cc_backend_optimization_level=2` still confirms it
+    in one run.
+- **`-U__FMA__` does NOT disable the builtin arm of a generated kernel** — `<immintrin.h>`, which
+  the prelude includes under `__AVX2__`, re-defines `__FMA__` through `#pragma GCC target("fma")`
+  in `fmaintrin.h`, and the definition survives the matching `pop_options`. An A/B run that way
+  measures the same arm twice and reads as "the spill is gone"; it cost gh-ocannl-621 a false
+  negative before the preprocessed output was compared. Force the per-lane arm by deleting the
+  `#elif` lines from the emitted `.c` instead, and keep a positive control: building
+  `bin/narrow_gebp_bench` at 97e7d286 (gh-614's parent) still reproduces 12.57 GFLOP/s against
+  HEAD's ~128, and its kernel censuses 199 / 52 / 6 at `-O3`.
+- **Widths that no local hardware can execute still get checked, three ways.** gh-ocannl-621's
+  AVX-512, AVX512-FP16 and aarch64 rows were written on a machine with none of them (QEMU's TCG
+  implements neither AVX-512 nor AVX512-FP16 — `query-cpu-model-expansion` on `-cpu max` reports
+  every `avx512*` flag false — and no qemu-user was installable without root). What is checkable
+  without the hardware: (1) the arm compiles under the target its guard names, and renders exactly
+  one fused instruction at `-ffp-contract=off`, with the operand order readable off the asm;
+  (2) the builtin is the same call gcc's own `<immintrin.h>` inlines for `_mm512_fmadd_ps` and
+  friends, so its semantics are the ISA's; (3) the register-allocation census above, which is a
+  compile-time property and needs no hardware at all. A cross toolchain for (1) and (3) on ARM is
+  two commands without root: `apt-get download gcc-aarch64-linux-gnu …` then `dpkg-deb -x` into a
+  prefix. What that leaves unverified is a wrong *signature*, which is why the new rows carry a
+  second guard the shipped AVX/AVX2 rows do not — `__has_builtin`, which on gcc tracks enabled
+  target features exactly, so a compiler that spells the builtin differently falls through to the
+  per-lane arm instead of failing the kernel compile. (`__has_builtin` is useless for
+  `__builtin_fmaf16`: it always answers yes, and without the ISA feature gcc emits a call to
+  `fmaf16()`, a symbol glibc does not necessarily export — verified here as a link error. That one
+  is guarded on the feature macro.)
 - Computing fp16 in fp16 on a *promoted* target is a ~18x loss against f32-compute-over-fp16
   (measured, same bench) — the reason `fp16_arithmetic` is ignored off-native and pure-f16 seeds
   gate on `hardware_limits.native_fp16_arithmetic`. The decisive pure-f16-vs-f32-GEBP measurement
