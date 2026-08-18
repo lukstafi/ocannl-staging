@@ -869,6 +869,23 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   why the callers bind the operand first. sNaN cannot be tested end to end — host values cross as
   OCaml doubles and the narrowing quiets it — so the structural pins keep both arithmetic spellings
   out by name.
+- **gcc rounded fp16 FMAs twice, and that is visible, not theoretical** (gh-ocannl-621).
+  `OCANNL_HALF_FMA` had two arms: clang's `__builtin_elementwise_fma`, which rounds once at fp16,
+  and everyone else's `FLOAT_TO_HALF(fmaf(...))`, which rounds at float and again at fp16 — so on a
+  target with genuine fp16 arithmetic, gcc disagreed with clang and with every GPU backend's
+  single-rounding `__hfma` / `fma(half, …)`. It now takes `__builtin_fmaf16` where the ISA has the
+  instruction (`__AVX512FP16__` or `__ARM_FEATURE_FP16_VECTOR_ARITHMETIC` — exactly what
+  `cc_backend`'s fp16 probe calls `Native`), which is also 3-5x fewer instructions, because the
+  promoting arm widens and narrows every lane inside the loop. The divergence is not a corner case:
+  a single-rounded fp16 FMA and one promoted through float differ on about one triple in ten
+  thousand (42039 of 4.1e8 searched), and on one in ~29000 even when all three operands are
+  *normal* (3393 of 9.9e7). The tempting dismissal is wrong — `float`'s 24 bits are the `2p + 2`
+  that makes double rounding innocuous for a single multiply or add, but an FMA's exact `a*b + c`
+  can need far more than 24 bits and the guarantee does not extend to it. A search over well-scaled
+  inputs near 1.0 finds zero divergences and reads as a false all-clear. Guard it on the ISA macro,
+  never on `__has_builtin`, which always answers yes for `__builtin_fmaf16`: without the
+  instruction gcc emits a call to `fmaf16()`, which a glibc need not export at all (verified here
+  as a link error).
 - **A vector accumulator update must reach the compiler as ONE vector operation** (gh-ocannl-614,
   fixed). gcc -O3 register-allocated the per-lane `fmaf` loop catastrophically: on the packed GEBP
   shape it unrolled the k-loop 7x and spilled the whole C-tile — 18 insns / 8 FMAs / 0 stack refs

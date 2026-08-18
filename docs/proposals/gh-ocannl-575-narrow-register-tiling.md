@@ -150,6 +150,26 @@ section first carried (the note below says by how much):
   arithmetic with extra per-value conversions, so it cannot come out ahead of computing in f32
   directly.
 
+### gh-ocannl-621: gcc's fp16 FMA now rounds once
+
+`OCANNL_HALF_FMA` — shared by the scalar rendering, the register tiling's scalar peel and the
+per-lane arm of the vector rendering, so the three cannot round differently — had only clang's
+single-rounding `__builtin_elementwise_fma` and a promoting `FLOAT_TO_HALF(fmaf(...))` fallback. On
+a target with genuine fp16 arithmetic that meant gcc alone rounded twice, disagreeing with clang
+and with every GPU backend's `__hfma` / `fma(half, …)`. It now reaches `__builtin_fmaf16` wherever
+the ISA has the instruction (`__AVX512FP16__` or `__ARM_FEATURE_FP16_VECTOR_ARITHMETIC` — exactly
+the condition `cc_backend`'s fp16 probe calls `Native`); on a promoted target nothing changes.
+
+- The two spellings really do disagree: 42039 of 4.1e8 fp16 triples searched, and 3393 of 9.9e7
+  with all three operands normal — not a subnormal-corner effect, and not something `float`'s
+  `2p + 2` bits retire, since an FMA's exact `a*b + c` can need far more than 24 of them.
+- It is also the larger of the two speedups this seam had left at fp16: the promoting arm widens
+  and narrows every lane *inside* the k-loop, costing 5–10 instructions per FMA on both AVX512-FP16
+  and ARMv8.2-FP16 against under 2 with the native one.
+- Guarded on the ISA macro, never on `__has_builtin`, which always answers yes for
+  `__builtin_fmaf16`: without the instruction gcc emits a call to `fmaf16()`, which a glibc need
+  not export at all.
+
 ## The NEON decision: pure-f16 wins (M4 Max, Apple clang, `-O3 -mcpu=native`, cc)
 
 The issue's reserved decision point — pure-f16 GEBP vs f32-GEBP-over-narrow-storage on a target
