@@ -259,10 +259,16 @@ let outlier_detector () =
   let zs = List.map [ 1.0; 1.1; 0.9; 1.0 ] ~f:(Train.Outlier_detector.update det) in
   Verdict.p "z-score is nan while the window fills" (List.for_all zs ~f:Float.is_nan);
   let z_ordinary = Train.Outlier_detector.update det 1.05 in
+  let z_nan = Train.Outlier_detector.update det Float.nan in
   let z_spike = Train.Outlier_detector.update det 10.0 in
   printf "ordinary z: %.3f, spike z: %.3f\n" z_ordinary z_spike;
   Verdict.p "an in-family value scores |z| < 1" Float.(abs z_ordinary < 1.0);
-  Verdict.p "a spike scores z > 1.5" Float.(z_spike > 1.5)
+  (* Scored against the previous window only — self-inclusion would cap this at sqrt 3. *)
+  Verdict.p "a spike scores z > 10 (no self-dilution)" Float.(z_spike > 10.0);
+  Verdict.p "a nan sample scores infinite (skip-forcing)" Float.(z_nan = infinity);
+  let z_after_nan = Train.Outlier_detector.update det 1.0 in
+  Verdict.p "the window survives a nan sample (later scores stay finite)"
+    (Float.is_finite z_after_nan)
 
 let () =
   schedules ();

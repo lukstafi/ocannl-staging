@@ -466,29 +466,37 @@ module Outlier_detector = struct
       invalid_arg "Train.Outlier_detector.create: window_size must be positive";
     { window = Array.create ~len:window_size 0.; count = 0; index = 0; sum = 0.; sum_sq = 0. }
 
-  (** Records [v] and returns its z-score against the sliding window (including [v] itself):
-      [Float.nan] until the window has filled — treat that as "not an outlier" (llm.c does). A
-      constant-valued window has standard deviation 0, making the z-score of any deviation
-      [infinity]. *)
+  (** Returns [v]'s z-score against the sliding window of the {e previously} recorded values, then
+      records [v] (replacing the oldest sample): [Float.nan] until the window has filled — treat
+      that as "not an outlier". Two deliberate departures from llm.c's [update_detector]: the score
+      is computed {e before} [v] joins the window, since self-inclusion dilutes the baseline and
+      caps any finite spike's score at [sqrt (n - 1)] — for a small window that bound sits below
+      reasonable thresholds; and a non-finite [v] never enters the window (a nan sample would
+      poison the running moments permanently — [nan - nan] is [nan]) and scores [infinity], so any
+      finite threshold flags it and the update is skipped. A constant-valued window has standard
+      deviation 0, making the z-score of any deviation [infinity]. *)
   let update t v =
-    let n = Array.length t.window in
-    if t.count < n then (
-      t.window.(t.count) <- v;
-      t.count <- t.count + 1;
-      t.sum <- t.sum +. v;
-      t.sum_sq <- t.sum_sq +. (v *. v);
-      Float.nan)
-    else (
-      let old = t.window.(t.index) in
-      t.sum <- t.sum -. old +. v;
-      t.sum_sq <- t.sum_sq -. (old *. old) +. (v *. v);
-      t.window.(t.index) <- v;
-      t.index <- (t.index + 1) % n;
-      let nf = Float.of_int n in
-      let mean = t.sum /. nf in
-      let variance = (t.sum_sq /. nf) -. (mean *. mean) in
-      let std = Float.sqrt (Float.max 0. variance) in
-      (v -. mean) /. std)
+    if not (Float.is_finite v) then Float.infinity
+    else
+      let n = Array.length t.window in
+      if t.count < n then (
+        t.window.(t.count) <- v;
+        t.count <- t.count + 1;
+        t.sum <- t.sum +. v;
+        t.sum_sq <- t.sum_sq +. (v *. v);
+        Float.nan)
+      else
+        let nf = Float.of_int n in
+        let mean = t.sum /. nf in
+        let variance = (t.sum_sq /. nf) -. (mean *. mean) in
+        let std = Float.sqrt (Float.max 0. variance) in
+        let z = (v -. mean) /. std in
+        let old = t.window.(t.index) in
+        t.sum <- t.sum -. old +. v;
+        t.sum_sq <- t.sum_sq -. (old *. old) +. (v *. v);
+        t.window.(t.index) <- v;
+        t.index <- (t.index + 1) % n;
+        z
 end
 
 let set_virtual (a : Tn.t) = Tn.update_memory_mode a Virtual 29
