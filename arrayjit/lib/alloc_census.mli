@@ -68,5 +68,6 @@ val unreleased_contexts : t -> int
     those pools ARE rooted. Compare {!live_pools}, {!live_modules}: those two are genuinely live,
     the former because the table is the authority and the latter because unloads are counted from
     the GC finalizer that performs them. *)
+
 val live_modules : t -> int
 val to_string : t -> string

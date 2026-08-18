@@ -37,9 +37,11 @@ Key reference files:
 - Run an example: `dune exec bin/hello_world.exe`.
 - Run the regular suite: `dune runtest` (`cc` is the default backend).
 - Run regular + slow training tests: `dune build @runtest @slow`.
-- Do not run `dune fmt` during feature work: the repository is not fully ocamlformat-clean and a
-  formatting sweep pollutes the diff. Match surrounding style; formatting-state changes are
-  standalone commits paired with `.ocamlformat-ignore` updates.
+- Do not run `dune fmt` during feature work: formatting is automated — the scheduled
+  `tools/format-sweep.sh` reformats the repository in standalone commits at quiet periods (no
+  open PRs, no active worktrees), recorded in `.git-blame-ignore-revs`. Type in your own style.
+  The one duty left: new ppx-expectation goldens (`test/ppx/*_expected.ml`) must be added to
+  `.ocamlformat-ignore`, or the unattended sweep fails to converge and aborts.
 
 Worktree and shell notes:
 - Put worktrees outside the repository when possible. For a nested worktree, run
