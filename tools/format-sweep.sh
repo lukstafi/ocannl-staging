@@ -137,13 +137,23 @@ KEEP=0
 BASE=""
 cleanup() {
   if [ -n "$BASE" ] && [ "$KEEP" = "0" ]; then
-    # Hold the test-run lock THROUGH the reset -- releasing between waiting
-    # and resetting would let a fresh run start dune exactly then. Short
-    # bound: a KILL chasing the TERM must not find us still waiting here.
-    hold_test_run_lock 60 \
-      || echo "format-sweep: warning: resetting without the test-run lock (held past the bound)" >&2
-    git reset -q --hard "$BASE"
-    release_test_run_lock
+    if [ "$(git rev-parse HEAD)" != "$BASE" ] && [ -n "$(git diff HEAD --name-only)" ]; then
+      # Commits exist AND tracked files changed on top of them: a foreign
+      # edit landed after the sweep committed (the last tree assert runs
+      # before the commits). Resetting would destroy it -- leave the sweep
+      # commits and the edit in place; the entry gates block later sweeps
+      # until a human resolves the state.
+      echo "format-sweep: warning: tracked files changed after the sweep committed; leaving the commits and the changes in place -- resolve before the next sweep" >&2
+    else
+      # Hold the test-run lock THROUGH the reset -- releasing between
+      # waiting and resetting would let a fresh run start dune exactly
+      # then. Short bound: a KILL chasing the TERM must not find us still
+      # waiting here.
+      hold_test_run_lock 60 \
+        || echo "format-sweep: warning: resetting without the test-run lock (held past the bound)" >&2
+      git reset -q --hard "$BASE"
+      release_test_run_lock
+    fi
   fi
   rmdir "$LOCKDIR" 2>/dev/null
 }
@@ -275,7 +285,8 @@ release_test_run_lock
   || die "master has local commits not on origin/master; push them first"
 
 if [ "$FORCE" -eq 0 ]; then
-  quiet_gates || die "quiet-period gate failed (above)"
+  run_interruptible quiet_gates # gh can hang on network/auth; stay killable
+  [ "$RC" -eq 0 ] || die "quiet-period gate failed (above)"
 
   STALE=$(git branch -r --no-merged origin/master | grep -v ' -> ' || true)
   [ -z "$STALE" ] && : || echo "format-sweep: note: unmerged remote branches (no open PR, so proceeding):
@@ -372,9 +383,13 @@ likely an ocamlformat-hostile golden missing from .ocamlformat-ignore (see heade
   # trap), so the sweep aborts instead.
   # Mask ONLY the numeric coordinates, keeping filenames and keywords:
   # formatting can move a location within its file, never to another file,
-  # so "a.ml:3" -> "b.ml:3" must NOT compare equal after masking.
+  # so "a.ml:3" -> "b.ml:3" must NOT compare equal after masking. Also strip
+  # trailing CRs: on an autocrlf checkout the worktree side is CRLF while
+  # the staged blob `git show` reads is LF-normalized, and a raw comparison
+  # would report every line as changed.
   strip_locs() {
-    sed -E -e 's|([[:alnum:]_./-]+\.mli?):[0-9]+(:[0-9]+)?|\1:<LOC>|g' \
+    sed -E -e 's|\r$||' \
+      -e 's|([[:alnum:]_./-]+\.mli?):[0-9]+(:[0-9]+)?|\1:<LOC>|g' \
       -e 's|([Ll]ines?) [0-9]+([-,][0-9]+)?|\1 <LOC>|g' \
       -e 's|characters [0-9]+-[0-9]+|characters <LOC>|g'
   }
