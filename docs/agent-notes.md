@@ -922,12 +922,31 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
 - The register-tiled `Tile_mma` rendering is on the same seam (gh-ocannl-575): gates, lane count
   and the C-tile registers follow `comp_prec`, operands bridge at the memory boundary
   (`vec_bridge` identity = the old memcpys, so f32 emission is unchanged), and the accumulator
-  narrows ONCE per cell after the whole k extent — strictly better rounding than the fallback's
-  per-k-step narrowing, so narrow-storage parity tests need narrow-exact inputs while
-  storage-=-compute renderings (pure-fp16 included) stay bitwise vs the fallback. Packing `Stage`s
+  narrows ONCE per cell after the whole k extent. Since gh-ocannl-639 the serial fallback narrows
+  once per nest too (below), so narrow-storage parity vs the fallback no longer needs narrow-exact
+  inputs when the reduction scopes coincide. Packing `Stage`s
   take `tile_prec` (exact widenings only) to fold the widening into the pack; seeding resolves the
   same `Numerics.cpu_compute_prec` the emission uses — change either side only through that
   helper, or "timed is not tensorized" returns for narrow sites.
+- **A reduction accumulator's WIDTH is policy; its narrowing POINTS are schedule** (gh-ocannl-639).
+  The plain serial fallback of an accumulation nest holds the accumulator at `comp_prec` and
+  narrows once at the store, implemented not by new emission but by locally rewriting the nest at
+  codegen into the `Local_scope` form virtualization gives virtual accumulators
+  (`C_syntax.try_widen_serial_reduce`) and rendering that — `scope_prec_of` and the
+  `Set_local`/`Get_local` arms already carry the widening. It joins virtual scopes,
+  `try_vectorize_reduce`'s epilogue and `try_register_tile`'s C-tile; it is inert wherever
+  `comp_prec` is the identity (f32/f64, GPU backends, `narrow_compute_f32=false`, native fp16),
+  and it deliberately does NOT bail under `debug_log_from_routines`, so logged runs keep plain
+  runs' numerics. Two traps for tests in this area: (1) cross-schedule BITWISE parity on
+  non-storage-exact sums additionally needs the same narrowing points — a k-blocked schedule
+  stores storage-precision partials at every `bk` boundary by construction, so give the packed
+  leg a whole-k tile (`tile_mma_narrow`'s gh-639 leg uses `bk = n`); (2) discriminating inputs
+  must DRIFT out of storage exactness — a zero-mean operand random-walks small enough that every
+  bf16 partial sum stays exact and per-step narrowing is invisible (`accum_width.ml`'s policy-off
+  negative control is the canary). GPU serial legs keep storage-precision accumulation (their
+  `compute_prec` is the identity) while their mma legs accumulate per the seeded format triple —
+  at narrow storage, cross-schedule numerics on GPU remain schedule-dependent, stated scope of
+  gh-ocannl-639.
 - **A "packmma" timing is not evidence that anything tensorized.** A `Tile_mma` whose register-tile
   preconditions fail renders the scalar fallback and the run still reports under whatever the
   variant was named — the column extent below the compute vector width is the easiest way in (at

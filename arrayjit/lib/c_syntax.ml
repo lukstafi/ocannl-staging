@@ -882,7 +882,13 @@ module C_syntax (B : C_syntax_config) = struct
      expression is {e rendered} at is a different thing -- it decides which operator spellings and
      which conversions appear -- and on backends without native narrow arithmetic the two diverge.
      [comp_prec] is the one-way map between them, and the rule is: declarations and buffer element
-     types take the storage precision, rendered arithmetic takes [comp_prec] of it. *)
+     types take the storage precision, rendered arithmetic takes [comp_prec] of it.
+
+     A corollary (gh-ocannl-639): a reduction accumulator RESIDES at [comp_prec] across its whole
+     reduction nest and narrows once at the store, in every rendering — virtual scopes
+     ([scope_prec_of]), [try_vectorize_reduce]'s epilogue, [try_register_tile]'s C-tile, and the
+     plain serial fallback ([try_widen_serial_reduce]) — so the effective accumulation width is
+     the numerics policy's, never an artifact of which rendering or schedule ran. *)
 
   let comp_prec = B.compute_prec
 
@@ -2591,13 +2597,14 @@ module C_syntax (B : C_syntax_config) = struct
         in
         (* --- Shared analysis for the explicit-SIMD ([Vectorized]) and warp-shuffle
            ([Workgroup_reduce]) renderings below. --- *)
-        let mentions_comp (idx : Indexing.axis_index) =
+        let mentions_sym sym (idx : Indexing.axis_index) =
           match idx with
-          | Indexing.Iterator s -> Indexing.equal_symbol s i
+          | Indexing.Iterator s -> Indexing.equal_symbol s sym
           | Indexing.Affine { symbols; _ } ->
-              List.exists symbols ~f:(fun (_, s) -> Indexing.equal_symbol s i)
+              List.exists symbols ~f:(fun (_, s) -> Indexing.equal_symbol s sym)
           | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
         in
+        let mentions_comp = mentions_sym i in
         let rec touches_tn tn (llsc : Low_level.scalar_t) =
           match llsc with
           | Low_level.Get (tn2, _) | Get_merge_buffer (tn2, _) -> Tn.equal tn tn2
@@ -2631,14 +2638,18 @@ module C_syntax (B : C_syntax_config) = struct
             | _ -> true)
         in
         (* A body that is a single accumulation statement [acc[idcs] = op(acc[idcs], contrib)] (or
-           its FMA form [acc = FMA(a, b, acc)]) where [idcs] does not mention the loop index and
-           [op] is an associative-commutative reduction — such a body IS the loop's serial meaning.
-           Recognized by the warp-shuffle rendering of [Workgroup_reduce] loops (gh-ocannl-462) and
-           by the SIMD reduction rendering of [Vectorized] loops (gh-ocannl-468). *)
-        let recognize_accumulation stmts =
+           its FMA form [acc = FMA(a, b, acc)]) where [idcs] does not mention the loop index (more
+           generally: any index in [free_of], for recognizing whole nests) and [op] is an
+           associative-commutative reduction — such a body IS the loop's serial meaning. Recognized
+           by the warp-shuffle rendering of [Workgroup_reduce] loops (gh-ocannl-462), by the SIMD
+           reduction rendering of [Vectorized] loops (gh-ocannl-468), and by the widened serial
+           fallback of reduction nests (gh-ocannl-639). *)
+        let recognize_accumulation ?(free_of = [ i ]) stmts =
           match stmts with
-          | [ Low_level.Set { tn; idcs; llsc; _ } ] when not (Array.exists idcs ~f:mentions_comp)
-            -> (
+          | [ Low_level.Set { tn; idcs; llsc; _ } ]
+            when not
+                   (Array.exists idcs ~f:(fun idx ->
+                        List.exists free_of ~f:(fun s -> mentions_sym s idx))) -> (
               let is_acc s = Low_level.equal_scalar_t s (Low_level.Get (tn, idcs)) in
               let reduce_op = function
                 | Ops.Add | Ops.Mul | Ops.Max | Ops.Min -> true
@@ -3328,8 +3339,73 @@ module C_syntax (B : C_syntax_config) = struct
                        ^^ hardline ^^ tail)
                   ^^ hardline ^^ rbrace)
         in
+        (* gh-ocannl-639: the plain-serial fallback of a reduction nest holds its accumulator at
+           compute precision across the whole nest and narrows once at the store — the same
+           once-per-cell narrowing as [try_vectorize_reduce]'s epilogue, [try_register_tile]'s
+           C-tile and virtual scopes ([scope_prec_of]) — so a reduction's effective accumulation
+           width is set by the numerics policy, never by which schedule happened to place the
+           accumulator in a register. Implemented as a local rewrite into exactly the [Local_scope]
+           form virtualization gives virtual accumulators, rendered recursively: [scope_prec_of]
+           and the [Set_local]/[Get_local]/[Local_scope] arms already carry the widening and the
+           single narrowing, so nothing new is emitted. Inert ([None]) where [comp_prec] is the
+           identity on the target's storage precision — f32/f64/integers, the GPU backends' native
+           narrow arithmetic, [narrow_compute_f32 = false], native fp16 — those render the plain
+           serial loop unchanged. The nest is peeled through Serial-only single-statement loop
+           levels; a guard ([If]), a sibling statement, or a non-serial inner loop stops the
+           widening at that level (the recognizer then fails or the round-trip shrinks to that
+           sub-nest). Unlike the SIMD renderings this does not bail under
+           [debug_log_from_routines]: the rewrite is exactly the virtual form, which logs, so
+           logged runs keep the same numerics as plain runs. *)
+        let try_widen_serial_reduce () : PPrint.document option =
+          let rec peel ~free_of ~rebuild body =
+            match nonempty_stmts body with
+            | [ Low_level.For_loop ({ index; body = ibody; axis = Low_level.Serial; _ } as r) ] ->
+                peel
+                  ~free_of:(index :: free_of)
+                  ~rebuild:(fun b -> rebuild (Low_level.For_loop { r with body = b }))
+                  ibody
+            | [ Low_level.Set { tn; idcs; llsc; debug } ] as stmts ->
+                let store_prec = Lazy.force tn.Tn.storage_prec in
+                if Ops.equal_prec (comp_prec store_prec) store_prec then None
+                else
+                  Option.map (recognize_accumulation ~free_of stmts) ~f:(fun _ ->
+                      (tn, idcs, llsc, debug, rebuild))
+            | _ -> None
+          in
+          let rebuild_hook b = Low_level.For_loop { index = i; from_; to_; body = b; axis } in
+          Option.map (peel ~free_of:[ i ] ~rebuild:rebuild_hook body)
+            ~f:(fun (tn, idcs, llsc, debug, rebuild) ->
+              let id = Low_level.get_scope tn in
+              let subst ((s, p) : Low_level.scalar_arg) : Low_level.scalar_arg =
+                if Low_level.equal_scalar_t s (Low_level.Get (tn, idcs)) then
+                  (Low_level.Get_local id, p)
+                else (s, p)
+              in
+              let update =
+                match llsc with
+                | Low_level.Binop (op, a, b) -> Low_level.Binop (op, subst a, subst b)
+                | Low_level.Ternop (op, a, b, c) -> Low_level.Ternop (op, subst a, subst b, subst c)
+                | _ ->
+                    (* [recognize_accumulation] admits only the two shapes above. *)
+                    assert false
+              in
+              let scope_body =
+                Low_level.Seq
+                  ( Low_level.Set_local (id, Low_level.Get (tn, idcs)),
+                    rebuild (Low_level.Set_local (id, update)) )
+              in
+              pp_ll ~log_set_locals ~in_loop
+                (Low_level.Set
+                   {
+                     tn;
+                     idcs;
+                     llsc = Local_scope { id; body = scope_body; orig_indices = idcs };
+                     debug;
+                   }))
+        in
         match axis with
-        | Low_level.Serial -> serial_loop ()
+        | Low_level.Serial -> (
+            match try_widen_serial_reduce () with Some doc -> doc | None -> serial_loop ())
         | Grid when Set.mem !current_parallel_grid i -> parallel_grid_loop ()
         | Grid -> hardware_binding `Grid
         | Workgroup -> hardware_binding `Workgroup
@@ -3351,7 +3427,10 @@ module C_syntax (B : C_syntax_config) = struct
                          back to the plain serial loop (gh-ocannl-468: this is what lets the
                          autotune menu propose Retype-[Vectorized] over reductions). *)
                       Low_level.has_accumulation body
-                    then serial_loop ()
+                    then
+                      match try_widen_serial_reduce () with
+                      | Some doc -> doc
+                      | None -> serial_loop ()
                     else
                       match B.vectorize_pragma with
                       | [] -> serial_loop ()
