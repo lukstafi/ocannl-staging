@@ -1,5 +1,5 @@
 (* The fp8 (e5m2) narrowing codec is ONE rounding, on the host and in every backend's kernels
-   (gh-ocannl-638).
+   (gh-ocannl-646).
 
    A tensor's fp8 cells get written from two places: the host, through [Ndarray]'s
    [Ops.single_to_fp8] (the C stub compiled from builtins.c), and a kernel, through whatever the
@@ -26,6 +26,11 @@ open Ocannl.Operation.DSL_modules
 let p = Verdict.p
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_hip = String.is_substring backend_name ~substring:"hip"
+
+(* On HIP the underflow leg below is only a claim about OCANNL when the guarded conversion is
+   emitted; with the platform's own cast it is a claim about ROCm, which fails it (gh-ocannl-647).
+   The test configuration turns this on, so the leg is genuinely checked in the suite. *)
+let fp8_guarded = Utils.get_global_flag ~default:false ~arg_name:"prefer_backend_uniformity"
 
 (* A leg this backend cannot run still prints its line, so the golden stays backend-uniform, and
    the skip is announced on stderr (the convention of schedule_mma_matmul.ml). *)
@@ -111,10 +116,12 @@ let () =
   p "a NaN input narrows to a NaN" (Float.is_nan sdev.(2));
 
   (* Magnitudes far below the smallest subnormal must vanish. HIP miscompiles exactly this range
-     (gh-ocannl-639: an out-of-range shift returns values as large as 2^-14), so the leg is
-     announced as skipped there rather than pinning the defect as expected behavior. *)
+     (gh-ocannl-647: an out-of-range shift returns values as large as 2^-14), so on HIP this holds
+     only when [prefer_backend_uniformity] routes the conversion through the guarded helper — which
+     is what the test configuration does, so this is a real check here rather than a skip. Left
+     skipped, loudly, in the configuration that asks for the platform's own cast. *)
   let claim = "magnitudes far below the smallest subnormal narrow to zero" in
-  if on_hip then skipped claim
+  if on_hip && not fp8_guarded then skipped claim
   else
     let tiny = [| 4.1359e-25; 8.27e-25; 1.65e-24; 3.31e-24; -4.1359e-25 |] in
     let tdev = narrow_on_device tiny in

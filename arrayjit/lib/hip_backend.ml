@@ -1381,6 +1381,13 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | FMA, _ -> func "fma"
       | Mul3, _ -> fun v1 v2 v3 -> group (parens (v1 ^^ string " * " ^^ v2 ^^ string " * " ^^ v3))
 
+    (* gh-ocannl-647: whether float-to-fp8 conversions go through the guarded helper. The knob is
+       [prefer_backend_uniformity] — "more uniform across backends even if that cripples some
+       backends" is exactly this trade — and it must reach [codegen_tag] below, or two runs
+       differing only in the flag could share a compiled artifact. *)
+    let fp8_uniform_guard () =
+      Utils.get_global_flag ~default:false ~arg_name:"prefer_backend_uniformity"
+
     let convert_precision ~from ~to_ =
       match (from, to_) with
       | Ops.Double_prec _, Ops.Double_prec _
@@ -1427,6 +1434,17 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Bfloat16_prec _, Half_prec _ -> ("__float2half(__bfloat162float(", "))")
       | _, Bfloat16_prec _ -> ("__float2bfloat16((float)(", "))")
       | Bfloat16_prec _, _ -> ("(" ^ typ_of_prec to_ ^ ")(__bfloat162float(", "))")
+      (* Under [prefer_backend_uniformity] the float-to-fp8 conversions route through
+         [ocannl_single_to_fp8_uniform], which pre-rounds the range ROCm miscompiles
+         (gh-ocannl-647). A helper rather than a ternary wrapped around the operand: a
+         [convert_precision] pair brackets ONE occurrence of its expression, and a ternary would
+         name it twice. Off by default — the platform's own conversion is what a HIP user gets,
+         and being silently more correct than the platform is its own kind of surprise. *)
+      | _, Fp8_prec _ when fp8_uniform_guard () -> (
+          match from with
+          | Ops.Half_prec _ -> ("ocannl_single_to_fp8_uniform(__half2float(", "))")
+          | Ops.Single_prec _ | Ops.Double_prec _ -> ("ocannl_single_to_fp8_uniform(", ")")
+          | _ -> ("ocannl_single_to_fp8_uniform((float)(", "))"))
       | Half_prec _, Fp8_prec _ -> ("(__hip_fp8_e5m2)(__half2float(", "))")
       | Fp8_prec _, Half_prec _ -> ("__float2half((float)(", "))")
       | ( Fp8_prec _,
@@ -1936,7 +1954,17 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
          && not (Utils.debug_log_from_routines ())
        then "graph-capture"
        else "no-graph-capture")
-      ^ if Utils.with_runtime_debug () then "/device-debug" else "/no-device-debug"
+      ^ (if Utils.with_runtime_debug () then "/device-debug" else "/no-device-debug")
+      (* The fp8 conversion guard (gh-ocannl-647) changes emitted code, so the regimes must not
+         share a cache entry. It sits in this backend's own tag rather than the shared codegen
+         gates, like [with_runtime_debug] above and for the same reason: no other backend reads
+         it this way. It does re-key HIP kernels that emit no fp8 conversion at all — the same
+         over-approximation the debug tag makes, and a constant one. *)
+      ^
+      if
+        Utils.get_global_flag ~default:false ~arg_name:"prefer_backend_uniformity"
+      then "/fp8-guard"
+      else "/fp8-native"
     in
     fun () -> { (Lazy.force limits) with Backend_intf.codegen_tag = Some (codegen_tag ()) }
 

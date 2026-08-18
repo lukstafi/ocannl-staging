@@ -790,10 +790,33 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   bit-identical to `builtins.c`'s for all 2^32 floats and all 256 codes — verified exhaustively
   off-tree, which is how a hand-written float codec should be checked, not by sampling — and it is
   written in integer/bitcast form on purpose: Metal compiles with fast math by default, under which
-  the infinity and NaN branches of a float-arithmetic codec are not reliable. fp8 ROUNDING is not
-  portable, though: the software codec (cc, Metal) rounds ties away from zero while the native GPU
-  fp8 types do not, so `test_fp8_roundtrip` pins only exactly-representable values and a golden
-  holding an inexact fp8 value would not survive a backend switch.
+  the infinity and NaN branches of a float-arithmetic codec are not reliable. fp8 rounding is portable
+  too, but only because ours was changed to theirs — see the next entry.
+- fp8 (e5m2) NARROWING is one rounding everywhere, and getting there meant changing ours, not
+  theirs (gh-ocannl-646). A float-to-e5m2 conversion decides four things, and the software codec
+  (`builtins.c`, `Builtins_cc`, `Builtins_metal` — and, through `Ops.single_to_fp8`, the HOST side
+  of every backend) decided all four differently from `__nv_fp8_e5m2` / `__hip_fp8_e5m2`: ties away
+  from zero instead of to even, subnormals flushed instead of rounded into (so code `0x01` was
+  unreachable by narrowing), the sign of a zero dropped, and finite overflow going to infinity
+  instead of saturating to 57344. Since the host side is backend-independent, CUDA and HIP each had
+  a host-vs-device split inside one tensor. The codec now does what both vendors do. They disagree
+  with each other on exactly two inputs — an already-infinite input (CUDA saturates, HIP keeps it
+  infinite) and the sign of a NaN (CUDA drops it) — so those are asserted only up to what all four
+  agree on.
+  Two reusable lessons from how this was settled. Verify a codec against the HARDWARE, not the
+  vendor docs: a kernel sweeping all 2^32 float bit patterns against a candidate runs in seconds on
+  either GPU box, and that is what turned "I believe both use RNE" into an exact difference set.
+  And when both sides of a parity check run the same code — cc and Metal narrow on the host and on
+  the device through this one codec — the check is vacuous by construction, so
+  `test_fp8_codec_parity` also pins a GOLDEN of the narrowed values, which is what those two
+  backends can actually fail.
+- ROCm miscompiles `(__hip_fp8_e5m2)(float)` for magnitudes around 4e-25 to 3.3e-24, returning up
+  to 2^-14 where the answer is zero (gh-ocannl-647) — an out-of-range shift, `shift mod 32` landing
+  back in range; the exhaustive sweep localizes it to exactly four f32 exponents. CUDA is correct
+  there, and so is our software codec. `test_fp8_codec_parity` announces that leg as `SKIPPED on
+  hip` rather than pinning the defect. A guard (`fabsf(x) < 2^-17 ? 0 : cast(x)`, exact because
+  everything below half the smallest subnormal rounds to zero) would fix it for a compare and a
+  select on every fp8 store; not taken.
 - Metal buffer binding is the pooled slot-table (`__pools` + `__pool_slots`); raw `gpuAddress`
   casts segfault at dispatch and argument encoders don't fit the binding model. Same-queue
   command buffers overlap over untracked resources: back-to-back runs of the SAME routine need

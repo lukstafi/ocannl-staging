@@ -592,4 +592,17 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
     return arrayjit_threefry4x32_light(key, counter);
 }|},
       [ "uint4x32_t"; "arrayjit_threefry4x32_light" ] );
+    (* Emitted in place of a bare cast under [prefer_backend_uniformity] (gh-ocannl-647): ROCm's
+       float-to-e5m2 conversion returns values as large as 2^-14 for magnitudes around 4e-25 to
+       3.3e-24, where every other implementation returns zero — an out-of-range shift, confined to
+       four f32 exponents. Everything below half the smallest subnormal (2^-17) rounds to a signed
+       zero anyway, so pre-rounding that range here is exact, not an approximation: outside the
+       broken window the guard changes nothing at all. [copysignf] rather than [0.0f] because the
+       sign of the zero is part of what the conversion is supposed to preserve. *)
+    ( "ocannl_single_to_fp8_uniform",
+      {|__device__ __hip_fp8_e5m2 ocannl_single_to_fp8_uniform(float x) {
+    float y = (fabsf(x) < 7.62939453125e-6f) ? copysignf(0.0f, x) : x;
+    return (__hip_fp8_e5m2)(y);
+}|},
+      [] );
   ]
