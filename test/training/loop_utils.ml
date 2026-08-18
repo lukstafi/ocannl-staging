@@ -80,9 +80,11 @@ let w_val c d = (Float.of_int (((c * 17) + (d * 29)) % 13) /. 6.5) -. 1.0
 let b_val c = (Float.of_int (c * 7 % 5) /. 5.0) -. 0.4
 
 (** Builds the model over a [batch]-sized input; [x_row b] gives the dataset row backing batch
-    position [b], so accumulation cases can window the same dataset. Returns
-    [(x, targets, w, b_p, loss)]; the loss is mean-reduced over the batch. *)
-let build_model ~batch ~x_row =
+    position [b], so accumulation cases can window the same dataset. With [freeze_w] set, the [w]
+    branch goes through {!Operation.stop_gradient}: [w] stays in [loss.params] (and keeps its
+    gradient node) while the backprop never reaches it. Returns [(x, targets, w, b_p, loss)]; the
+    loss is mean-reduced over the batch. *)
+let build_model ~freeze_w ~batch ~x_row =
   let x =
     NTDSL.init ~l:"x" ~prec:Ir.Ops.single ~b:[ batch ] ~o:[ din ]
       ~f:(function [| b; d |] -> x_val (x_row b) d | _ -> assert false)
@@ -106,7 +108,7 @@ let build_model ~batch ~x_row =
   let b_p = TDSL.param ~values:(Array.init classes ~f:b_val) "b" () in
   Train.set_materialized x.Tensor.value;
   Train.set_materialized targets.Tensor.value;
-  let logits = TDSL.O.(b_p + (w * x)) in
+  let logits = TDSL.O.(b_p + ((if freeze_w then TDSL.O.stop_gradient w else w) * x)) in
   let loss =
     let diff = TDSL.O.(logits - targets) in
     let%op sq_err = (diff *. diff) ++ "...|... => |->0" in
@@ -124,6 +126,12 @@ let read_params_and_grads ctx w b_p =
   let bg = Array.init classes ~f:(fun c -> (ctx, b_p).@%[c]) in
   (wv, bv, wg, bg)
 
+(* The frozen-backbone case reads only the trainable gradient: a detached parameter's gradient is
+   never written, hence never allocated into the context. *)
+let bias_grads ctx b_p =
+  let open Operation.At in
+  Array.init classes ~f:(fun c -> (ctx, b_p).@%[c])
+
 let global_norm_of wg bg =
   let acc = ref 0. in
   Array.iter wg ~f:(Array.iter ~f:(fun g -> acc := !acc +. (g *. g)));
@@ -136,7 +144,7 @@ let clipping () =
   Tensor.unsafe_reinitialize ();
   let batch = 4 in
   let x_row b = b in
-  let _x, _targets, w, b_p, loss = build_model ~batch ~x_row in
+  let _x, _targets, w, b_p, loss = build_model ~freeze_w:false ~batch ~x_row in
   let update = Train.grad_update loss in
   let max_norm = 0.5 in
   Verdict.p "a negative max_norm is rejected (it would reverse gradients)"
@@ -211,7 +219,7 @@ let clipping () =
 let accumulation () =
   (* Case A: one batch-4 step. *)
   Tensor.unsafe_reinitialize ();
-  let _x, _targets, w, b_p, loss = build_model ~batch:4 ~x_row:(fun b -> b) in
+  let _x, _targets, w, b_p, loss = build_model ~freeze_w:false ~batch:4 ~x_row:(fun b -> b) in
   let learning_rate = Train.host_scalar ~l:"lr" 0.05 in
   let update = Train.grad_update loss in
   let sgd = Train.sgd_update ~learning_rate loss in
@@ -225,7 +233,7 @@ let accumulation () =
   let wv_a, bv_a, _, _ = read_params_and_grads ctx w b_p in
   (* Case B: two batch-2 micro-steps with accum_steps = 2 over the same 4 dataset rows. *)
   Tensor.unsafe_reinitialize ();
-  let x, targets, w, b_p, loss = build_model ~batch:2 ~x_row:(fun b -> b) in
+  let x, targets, w, b_p, loss = build_model ~freeze_w:false ~batch:2 ~x_row:(fun b -> b) in
   let learning_rate = Train.host_scalar ~l:"lr" 0.05 in
   let micro = Train.grad_update ~accum_steps:2 loss in
   let zero = Train.zero_params_grads loss in
@@ -275,6 +283,59 @@ let accumulation () =
   Verdict.pass_fail "post-sgd parameters match between accumulation and big batch"
     Float.(params_err < 1e-5)
     ~detail:(fun () -> Printf.sprintf "max abs err %.8f" params_err)
+
+(* ----- 3b. Accumulation with a frozen backbone -----
+
+   A parameter detached behind [stop_gradient] stays in [loss.params] and keeps its gradient node,
+   but the loss's zero_grads tree does not zero it and the backprop does not accumulate into it.
+   [grad_update ~accum_steps] must accept such a model (the documented freezing flow) and leave the
+   frozen gradient untouched, while the trainable parameter still accumulates. *)
+
+let frozen_backbone_accumulation () =
+  (* Case A: one batch-4 step over the frozen-backbone model. *)
+  Tensor.unsafe_reinitialize ();
+  let _x, _targets, _w, b_p, loss = build_model ~freeze_w:true ~batch:4 ~x_row:(fun b -> b) in
+  let update = Train.grad_update loss in
+  let ctx = Context.auto () in
+  let ctx = Train.init_params ctx IDX.empty loss in
+  let ctx, grad_routine = Context.compile ctx update IDX.empty in
+  let ctx = Context.run ctx grad_routine in
+  let bg_a = bias_grads ctx b_p in
+  (* Case B: two batch-2 micro-steps with accum_steps = 2 over the same 4 dataset rows. *)
+  Tensor.unsafe_reinitialize ();
+  let x, targets, _w, b_p, loss = build_model ~freeze_w:true ~batch:2 ~x_row:(fun b -> b) in
+  let micro =
+    try Some (Train.grad_update ~accum_steps:2 loss) with Invalid_argument _ -> None
+  in
+  Verdict.p "a frozen parameter does not reject the accumulating grad_update"
+    (Option.is_some micro);
+  match micro with
+  | None -> ()
+  | Some micro ->
+      let zero = Train.zero_params_grads loss in
+      let ctx = Context.auto () in
+      let ctx = Train.init_params ctx IDX.empty loss in
+      let ctx, zero_routine = Context.compile ctx zero IDX.empty in
+      let ctx, micro_routine = Context.compile ctx micro IDX.empty in
+      let ctx = Context.run ctx zero_routine in
+      let ctx = Context.run ctx micro_routine in
+      (* Second micro-batch: dataset rows 2 and 3. *)
+      let x_data = Array.init (2 * din) ~f:(fun i -> x_val (2 + (i / din)) (i % din)) in
+      let target_data =
+        Array.init (2 * classes) ~f:(fun i -> target_val (2 + (i / classes)) (i % classes))
+      in
+      let ctx = Context.set_values ctx x.Tensor.value x_data in
+      let ctx = Context.set_values ctx targets.Tensor.value target_data in
+      let ctx = Context.run ctx micro_routine in
+      let bg_b = bias_grads ctx b_p in
+      let bias_err =
+        Array.fold2_exn bg_a bg_b ~init:0. ~f:(fun acc x y -> Float.max acc (Float.abs (x -. y)))
+      in
+      Verdict.p "the frozen model's micro-steps move the trainable gradient"
+        Float.(Array.fold bg_b ~init:0. ~f:(fun acc g -> Float.max acc (Float.abs g)) > 1e-4);
+      Verdict.pass_fail "the trainable gradient accumulates the same as the big batch"
+        Float.(bias_err < 1e-5)
+        ~detail:(fun () -> Printf.sprintf "max abs err %.8f" bias_err)
 
 (* ----- 4. Outlier detector ----- *)
 
@@ -330,4 +391,5 @@ let () =
   schedules ();
   clipping ();
   accumulation ();
+  frozen_backbone_accumulation ();
   outlier_detector ()
