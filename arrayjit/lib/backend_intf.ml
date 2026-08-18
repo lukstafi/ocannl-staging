@@ -213,6 +213,34 @@ let simd_lanes_for ~vector_bytes ~elt_bytes ~extent =
          | 0 -> compare_int b a (* equal trips: the wider vector *)
          | c -> c)
 
+let simd_reduce_chains ~lanes ~extent =
+  if 4 * lanes <= extent then 4 else if 2 * lanes <= extent then 2 else 1
+
+let simd_reduce_lanes_for ~vector_bytes ~elt_bytes ~extent =
+  let cost lanes =
+    let chains = simd_reduce_chains ~lanes ~extent in
+    let step = chains * lanes in
+    let steps = extent / step in
+    (* One vector update per chain per step (the first step is the chains' initialization), the
+       leftover iterations serially, then the epilogue: [chains - 1] whole-vector combines and the
+       [lanes - 1] scalar operations of the horizontal fold. *)
+    (steps * chains) + (extent - (steps * step)) + (chains - 1) + (lanes - 1)
+  in
+  simd_lane_ladder ~vector_bytes ~elt_bytes
+  |> List.filter ~f:(fun lanes -> extent >= lanes)
+  |> List.min_elt ~compare:(fun a b ->
+         match compare_int (cost a) (cost b) with
+         | 0 -> compare_int b a (* equal cost: the wider vector *)
+         | c -> c)
+
+(** The lane count for an ACCUMULATING [Vectorized] loop, which {!simd_lanes_for} would get wrong at
+    short extents: that rendering ends in a horizontal fold whose length is the lane count itself, so
+    a wider vector buys fewer updates and pays a longer dependent tail. At an f32 extent of 64, 16
+    lanes save four vector updates over 8 and add eight operations to the fold — the wider width
+    losing on a loop the elementwise metric would hand it. The cost mirrors the emission term for
+    term, so the two cannot drift: chains and step as {!C_syntax} computes them, the serial
+    leftover, and the epilogue's vector combines and scalar fold. *)
+
 (** The lane count an explicit-SIMD rendering should use for a loop of [extent] iterations over
     [elt_bytes]-wide elements on a [vector_bytes]-wide register file: the width of {!simd_lane_ladder}
     that minimizes loop trips, [None] where even the narrowest exceeds the extent. (The register-tiled

@@ -11,6 +11,7 @@ open Base
 let p = Verdict.p
 let ladder = Ir.Backend_intf.simd_lane_ladder
 let lanes_for = Ir.Backend_intf.simd_lanes_for
+let reduce_lanes_for = Ir.Backend_intf.simd_reduce_lanes_for
 
 (* Vector steps plus scalar remainder iterations, the quantity the choice minimizes; an extent no
    width can fill runs serially, which is [extent] trips. *)
@@ -66,4 +67,17 @@ let () =
     (List.for_all extents ~f:(fun extent ->
          List.for_all [ 2; 4; 8 ] ~f:(fun elt_bytes ->
              Option.is_none (lanes_for ~vector_bytes:32 ~elt_bytes ~extent)
-             || Option.is_some (lanes_for ~vector_bytes:64 ~elt_bytes ~extent))))
+             || Option.is_some (lanes_for ~vector_bytes:64 ~elt_bytes ~extent))));
+
+  (* An accumulating loop ends in a horizontal fold as long as the lane count, so the width that
+     minimizes updates is not always the width that minimizes the whole rendering. *)
+  p "a short reduction takes the narrower width the elementwise metric would not (64 -> 8 lanes)"
+    (Option.equal Int.equal (lanes_for ~vector_bytes:64 ~elt_bytes:4 ~extent:64) (Some 16)
+    && Option.equal Int.equal (reduce_lanes_for ~vector_bytes:64 ~elt_bytes:4 ~extent:64) (Some 8));
+  p "a long reduction still takes the full width (4096 -> 16 lanes)"
+    (Option.equal Int.equal (reduce_lanes_for ~vector_bytes:64 ~elt_bytes:4 ~extent:4096) (Some 16));
+  p "the reduction width offers the same rungs, so it too never declines where 32 bytes would not"
+    (List.for_all extents ~f:(fun extent ->
+         List.for_all [ 2; 4; 8 ] ~f:(fun elt_bytes ->
+             Option.is_none (reduce_lanes_for ~vector_bytes:32 ~elt_bytes ~extent)
+             || Option.is_some (reduce_lanes_for ~vector_bytes:64 ~elt_bytes ~extent))))

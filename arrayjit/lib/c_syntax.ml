@@ -3006,8 +3006,18 @@ module C_syntax (B : C_syntax_config) = struct
             (* A loop-invariant contribution deserves strength reduction, not chains. *)
             if not (scalar_mentions contrib) then raise Bail;
             let extent = to_ + 1 in
-            let lanes = match vec_lanes_for ~prec ~extent with Some l -> l | None -> raise Bail in
-            let chains = if 4 * lanes <= extent then 4 else if 2 * lanes <= extent then 2 else 1 in
+            (* Not [vec_lanes_for]: this rendering pays a horizontal fold as long as the lane count,
+               so the width is ranked against the update-plus-epilogue cost — see
+               {!Backend_intf.simd_reduce_lanes_for}. *)
+            let lanes =
+              match
+                simd_reduce_lanes_for ~vector_bytes:B.vector_bytes
+                  ~elt_bytes:(Ops.prec_in_bytes prec) ~extent
+              with
+              | Some l -> l
+              | None -> raise Bail
+            in
+            let chains = simd_reduce_chains ~lanes ~extent in
             let step = chains * lanes in
             let vtyp, typedef_doc = vec_ext_typ ~prec ~lanes in
             let extra_typedefs = Hashtbl.create (module String) in

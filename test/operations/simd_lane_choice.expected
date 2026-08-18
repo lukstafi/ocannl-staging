@@ -10,3 +10,6 @@ a 64-byte register file never renders more trips than a 32-byte one, f32: true
 likewise at f16 and f64: true
 and strictly fewer on some extents: true
 widening never turns a vectorized extent into a serial one: true
+a short reduction takes the narrower width the elementwise metric would not (64 -> 8 lanes): true
+a long reduction still takes the full width (4096 -> 16 lanes): true
+the reduction width offers the same rungs, so it too never declines where 32 bytes would not: true
