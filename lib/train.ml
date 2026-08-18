@@ -67,16 +67,34 @@ let loss_accumulator ?(label = "loss_accum") () =
     (each per-tensor zeroing is a [Fetch] of zeros — see [Tensor.raw]'s [fetch_zeros]). Used by the
     gradient-accumulation variant of {!grad_update}, which must keep zeroing the {e intermediate}
     gradients every micro-step (their backprop contributions are plain [=+] accumulations relying on
-    a same-routine reset) while the {e parameter} gradients accumulate across micro-steps. *)
+    a same-routine reset) while the {e parameter} gradients accumulate across micro-steps.
+
+    The match is by [Fetch] constructor and tnode identity, so a change to how zeroing is emitted
+    (a different constructor, or a parameter gradient dropping out of the tree) would silently keep
+    zeroing parameter gradients — corrupting the accumulation. A gradient that the backprop writes
+    is accumulated into, so it is zeroed in the tree: we raise when such a [grads] member had
+    nothing removed rather than let the drift through. Pass only the gradients backprop reaches —
+    a parameter detached from the loss (behind {!Operation.stop_gradient}, say) stays in
+    [loss.params] while its gradient is neither zeroed nor accumulated. *)
 let filter_out_grad_zeroing ~grads asgns =
+  let removed = Hash_set.create (module Tn) in
   let rec loop = function
     | Asgns.Noop -> Asgns.Noop
     | Asgns.Seq (t1, t2) -> Asgns.Seq (loop t1, loop t2)
     | Asgns.Block_comment (s, t) -> Asgns.Block_comment (s, loop t)
-    | Asgns.Fetch { array; _ } when Set.mem grads array -> Asgns.Noop
+    | Asgns.Fetch { array; _ } when Set.mem grads array ->
+        Hash_set.add removed array;
+        Asgns.Noop
     | (Asgns.Accum_op _ | Asgns.Set_vec_unop _ | Asgns.Fetch _) as t -> t
   in
-  loop asgns
+  let result = loop asgns in
+  let missing = Set.filter grads ~f:(fun g -> not (Hash_set.mem removed g)) in
+  if not (Set.is_empty missing) then
+    invalid_arg
+    @@ "Train.filter_out_grad_zeroing: no zeroing found for accumulated gradient(s): "
+    ^ String.concat ~sep:", " (List.map (Set.to_list missing) ~f:Tn.debug_name)
+    ^ " -- the shape of the zero_grads code changed, gradient accumulation would be corrupted";
+  result
 
 (** Returns the tensor's forward, zeroing gradients, and backprop code wrapped with label-derived
     comments. Sets the tensor's value as materialized. If [setup_for_parallel] is true (false by
@@ -118,11 +136,17 @@ let grad_update ?(setup_for_parallel = false) ?accum_steps ?accum_loss ?loss_sca
         match accum_steps with
         | None -> Asgns.to_comp diff.zero_grads
         | Some _ ->
+            (* Only the parameters the backprop reaches: one detached behind
+               {!Operation.stop_gradient} (a frozen backbone) is still in [loss.params], but its
+               gradient is neither zeroed here nor accumulated into, so it is not ours to strip --
+               and demanding a zeroing for it would reject the freezing flow outright. *)
+            let accumulated = Asgns.collect_written diff.backprop.Asgns.asgns in
             let grads =
               Set.filter_map
                 (module Tn)
                 loss.Tensor.params
                 ~f:(fun p -> Option.map p.Tensor.diff ~f:(fun d -> d.Tensor.grad))
+              |> Set.filter ~f:(Set.mem accumulated)
             in
             Asgns.to_comp (filter_out_grad_zeroing ~grads diff.zero_grads))
   in
