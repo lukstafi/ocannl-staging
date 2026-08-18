@@ -243,10 +243,14 @@ let placement_arm_name = function
 (** Placement A/B autotuning: {!Autotune.tune} on [comp] under the graph's current (default)
     placements — virtual intermediates plus the compiler's promotions — and again with every
     embedded node of [loss] materialized, keeping the measured winner (the arms' [best_ms] are
-    min-of-N timings on the same device, so directly comparable). By construction the result is at
-    least as fast as the better of the default and materialize-all placements, whichever the search
-    would find; this generalizes the old "materialize everything before tuning" recipe instead of
-    replacing one fixed placement policy with another. Respecting the two-level memory-mode split
+    min-of-N timings on the same device, so directly comparable). Under the default
+    [ship_arm = Measured_winner] the result is by construction at least as fast as the better of the
+    default and materialize-all placements, whichever the search would find; this generalizes the
+    old "materialize everything before tuning" recipe instead of replacing one fixed placement
+    policy with another. {b That guarantee is exactly what the other [ship_arm] settings give up}
+    (gh-ocannl-638): a forced arm ships whether or not it was the faster one, which is the point —
+    they exist so a measurement can execute the artifact it profiles — so every "keeps the winner"
+    and "at least as fast" statement here is about [Measured_winner] alone. Respecting the two-level memory-mode split
     (docs/proposals/context-scoped-memory-modes.md) — tnode-level [memory_mode] is declared,
     semantics-bearing intent, while placement {e decisions} are context-level and functional — the B
     arm does not touch intent: it tunes from {!Context.decide_materialized} siblings of [ctx] (and

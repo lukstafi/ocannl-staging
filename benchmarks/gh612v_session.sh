@@ -23,6 +23,7 @@
 #   caps       the cap-default pair, reps 4-6, alternated:    cap8A vs cap4A
 #   replays    pass-2 replay (the protocol's step timings) of every cell of every block above
 #   structure  snap + profile + finger on rep 1 of the four structural cells, then the diffs
+#   capprofile Part 5's per-kernel profile of cap 4, plus the cap-8-vs-cap-4 structural diff
 #   gate       the parity gate over exactly this session's cells, and the artifact gates
 #
 # Environment: BASE FEAT MASTER are the three built trees (see the report's Provenance for the
@@ -209,17 +210,23 @@ validate_tree() {  # <role> -- the tree comes from the role, so the pin cannot b
   [ "$(grep -c '"tune_ship_arm"' "$t/arrayjit/lib/utils.ml")" -ge 2 ] || {
     echo "gh612v_session: $t/arrayjit/lib/utils.ml registers tune_ship_arm but does not classify it" >&2
     return 1; }
+  # BUILD it, rather than reasoning about its timestamp. An mtime ordering says the binary is not
+  # older than the sources; it does not say it was built FROM them -- a `_build` copied or restored
+  # from another checkout, or produced by a dune invocation that resolved to a different root, is
+  # newer and unrelated. Building here makes the provenance true instead of plausible, and costs
+  # nothing when the tree is already current.
+  #
+  # `--root .` is not decoration: dune resolves its root by walking UP, so an invocation inside a
+  # checkout nested under another dune project builds the PARENT (the trap CLAUDE.md documents for
+  # .claude/worktrees). Pinning the root makes "built from this tree" mean this tree.
   local exe="$t/_build/default/benchmarks/runners/ocannl/bench_gpt.exe"
-  [ -x "$exe" ] || { echo "gh612v_session: $t has no built bench_gpt.exe -- build it first" >&2; return 1; }
-  # The stale-binary case, stated as an mtime comparison because that is what is checkable here.
-  for src in lib/train.ml arrayjit/lib/utils.ml benchmarks/runners/ocannl/bench_gpt.ml \
-             benchmarks/runners/ocannl/bench_harness.ml; do
-    [ ! "$t/$src" -nt "$exe" ] || {
-      echo "gh612v_session: $t/$src is newer than the built bench_gpt.exe -- rebuild before" >&2
-      echo "  measuring; a stale binary would ignore the arm selector." >&2; return 1; }
-  done
+  ( cd "$t" && dune build --root . benchmarks/runners/ocannl/bench_gpt.exe ) >/dev/null 2>&1 || {
+    echo "gh612v_session: $t failed to build benchmarks/runners/ocannl/bench_gpt.exe" >&2
+    echo "  (run 'cd $t && dune build --root . @check bin/ benchmarks/' to see the errors)" >&2
+    return 1; }
+  [ -x "$exe" ] || { echo "gh612v_session: $t built no bench_gpt.exe at $exe" >&2; return 1; }
   TREES_VALIDATED="${TREES_VALIDATED:-} $role:$t"
-  echo "tree ok: $role = $t at $(git -C "$t" rev-parse --short=8 HEAD) (pinned base $pin, only the backport's paths, digests match, clean, binary current)"
+  echo "tree ok: $role = $t at $(git -C "$t" rev-parse --short=8 HEAD) (pinned base $pin, only the backport's paths, digests match, clean, rebuilt from this tree)"
 }
 
 # Unquoted on purpose: the flag string is word-split into separate arguments. It is built here, not
@@ -253,8 +260,16 @@ run_cell() {  # <subcommand> <label> <rep> [extra driver args before the flags]
   # Only a SEARCH creates the cell, and only after it publishes (the driver stages and moves on
   # success), so the manifest is written here rather than by the driver -- and only on success, so a
   # discarded cell leaves no provenance to be trusted later.
-  if [ "$sub" = search ] && [ $rc -eq 0 ]; then
-    tree_fingerprint "$role" > "$OUT_ROOT/$label/r$rep/tree.manifest" || return 1
+  if [ $rc -eq 0 ] && [ -d "$OUT_ROOT/$label/r$rep" ]; then
+    case $sub in
+      search) tree_fingerprint "$role" > "$OUT_ROOT/$label/r$rep/tree.manifest" || return 1 ;;
+      # snap and profile regenerate claim-bearing artifacts (the emitted arm A source, the per-kernel
+      # CSVs) LONG after the search, so they carry their own provenance: the gate would otherwise
+      # accept a profile rebuilt from a different tree beside a search manifest that still matched.
+      snap) tree_fingerprint "$role" > "$OUT_ROOT/$label/r$rep/snap.manifest" || return 1 ;;
+      profile) tree_fingerprint "$role" > "$OUT_ROOT/$label/r$rep/profile.manifest" || return 1 ;;
+      *) ;;
+    esac
   fi
   return $rc
 }
@@ -361,6 +376,19 @@ assert_cell_provenance() {  # <cell>...
     # A manifest written after the fact attests the binding rather than recording it, so it is
     # counted and reported separately rather than being indistinguishable from one a search wrote.
     [ -e "$f.backfilled" ] && back=$((back + 1))
+    # The derived artifacts, each against its own manifest: an emitted source (snap) and a
+    # per-kernel profile can be regenerated from another checkout while the search manifest stays
+    # true, and Part 5's per-kernel claim rests on exactly such a regeneration.
+    local d="$OUT_ROOT/${cell%/*}/${cell#*/}" k
+    for k in snap:armA.path profile:kernels-1.csv; do
+      [ -e "$d/${k#*:}" ] || continue
+      [ -s "$d/${k%%:*}.manifest" ] || {
+        echo "gh612v_session: $cell has ${k#*:} but no ${k%%:*}.manifest -- that artifact was not" >&2
+        echo "  produced through this session's wrapper, so its tree is unrecorded." >&2; bad=1; continue; }
+      [ "$(cat "$d/${k%%:*}.manifest")" = "$want" ] || {
+        echo "gh612v_session: $cell's ${k%%:*} artifacts come from a different tree than role $role" >&2
+        bad=1; }
+    done
   done
   [ "$bad" -eq 0 ] || return 1
   if [ "${back:-0}" -gt 0 ]; then
@@ -369,6 +397,16 @@ assert_cell_provenance() {  # <cell>...
   else
     echo "provenance: $n cells carry a manifest matching their validated tree"
   fi
+}
+
+# Part 5's per-kernel instrument for cap 4, which `structure` does not cover (it profiles the four
+# cells the ratios are built from). Routed through `run_cell` like everything else: the earlier
+# revision of the report told the reader to call `gh612_cells.sh` directly here, which skipped tree
+# validation and left the profile without provenance -- while the gate stayed green, because it only
+# knew about searches.
+block_capprofile() {
+  run_cell snap cap4A 4 && run_cell profile cap4A 4 3 && "$D" finger cap4A 4 || return 1
+  "$D" diff cap8A 1 cap4A 4 || return 1
 }
 
 block_gate() {
@@ -400,6 +438,7 @@ for block in "$@"; do
     caps)      balanced_block 4 3 $CELLS_CAPS  || rc=1 ;;
     replays)   block_replays   || rc=1 ;;
     structure) block_structure || rc=1 ;;
+    capprofile) block_capprofile || rc=1 ;;
     gate)      block_gate      || rc=1 ;;
     *) echo "gh612v_session: unknown block '$block'" >&2; rc=2 ;;
   esac

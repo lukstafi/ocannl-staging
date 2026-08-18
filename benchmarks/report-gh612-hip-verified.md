@@ -153,8 +153,9 @@ The gate's **first** check is provenance: `gate` is documented as independently 
 artifact directory does not otherwise record what produced it — a stale `OUT_ROOT` populated from
 another checkout would pass every gate below under these labels, because all of them read artifacts
 and none of them knows their origin. So a search now writes the validated role, tree, HEAD and
-backport digests into the cell, and the gate requires that manifest to match the tree it validates
-now. **These 18 cells' manifests were backfilled**, honestly and visibly: the check was added during
+backport digests into the cell — and `snap` and `profile` write their own, since they regenerate
+claim-bearing artifacts long afterwards — and the gate requires each manifest to match the tree it
+validates now. **These 18 cells' manifests were backfilled**, honestly and visibly: the check was added during
 review, after the session had run, so each manifest carries a `.backfilled` note and the gate counts
 them separately (`18 backfilled`). What they attest rather than record is that the cells came from
 this session's driver against these roles' trees, which have validated unchanged before, during and
@@ -269,19 +270,19 @@ the timing half is new, and it is only available because both sides now ship the
 
 | | cap 8 (default) | cap 4 | |
 |---|---:|---:|---|
-| **arm A per-kernel profile** | 18.51 ms / 136 kernels | **16.80 ms / 137 kernels** | **1.10x** (−9.2%) |
+| **arm A per-kernel profile** | 18.51 ms / 136 kernels | **16.76 ms / 137 kernels** | **1.10x** (−9.4%) |
 | **step p50** (pass 2, the balanced block) | 18.577 / 18.636 / 18.755 | 17.204 / 17.322 / 17.393 | **7.1%**, non-overlapping |
 | untuned-default pipeline | 60.91 / 60.91 / 61.05 | 60.42 / 60.46 / 60.47 | 0.8% |
-| layernorm / elementwise | 0.800 ms | **0.325 ms** | 2.5x |
+| layernorm / elementwise | 0.800 ms | **0.313 ms** | 2.6x |
 | crowned arm A analytic traffic | 472.2 MB | 454.3 MB | −3.8% |
 
-`diff cap8A 1 cap4A 4`: 21 exclusive signatures (3.100 ms) against 22 (1.936 ms); materialized nodes
+`diff cap8A 1 cap4A 4`: 21 exclusive signatures (3.100 ms) against 22 (1.928 ms); materialized nodes
 159 → 164, with +7 at cap 4 and +2 at cap 8 (the two are not nested — lowering a cap changes which
 consumers reset, not only how many nodes are forced).
 
 The earlier report measured 5.7% for the same comparison and declined to propose a default change;
 this session measures **7.1%** on a uniform arm-A basis with a second, deterministic instrument
-agreeing at 9.2%. **The recommendation is unchanged: do not change the default on this evidence.**
+agreeing at 9.4%. **The recommendation is unchanged: do not change the default on this evidence.**
 One fixture, one depth, one device — `gpt2_mini` at 4 layers is exactly the workload whose residual
 fan-in is small enough for a tighter cap to be free, and the cap is a global policy prior. What has
 changed is the quality of the evidence, not its breadth: the claim is now about two artifacts that
@@ -322,7 +323,12 @@ across three reps.
   graph makes identically. What it now covers, and did not before, is every artifact this report
   quotes a number for.
 - **`cap4A` was profiled at r4 only** (one cell, three harness runs), like the earlier report's
-  single-cell caps. Its step timings are the full balanced block.
+  single-cell caps. Its step timings are the full balanced block. That profile was re-run through
+  the session wrapper during review — an earlier revision produced it by calling `gh612_cells.sh`
+  directly, which skipped tree validation and left it without provenance. The re-run emitted the
+  *same* arm A source (identical snapshot digest) and moved the per-kernel total by 0.2% (16.80 →
+  16.76 ms), which is this instrument's own reproducibility; the structural results are unchanged
+  (21-vs-22 exclusive signatures, 159 → 164 materialized nodes).
 - **The backport is pinned by digest and corroborated by reproduction, not proven inert.** The
   digests establish *which* code ran, not that it cannot matter; the argument that it cannot is the
   file-identity one in Provenance, and the evidence for it is Part 6 — fifteen quantities across
@@ -362,11 +368,10 @@ bash $S gate                      # the arm-A premise, the parity gate over exac
 ```
 
 ```bash
-# Part 5's per-kernel instrument for cap 4, which the structure block does not cover:
-D=benchmarks/gh612_cells.sh; M=../wt-gh612v-master
-F="--ocannl_tune_ship_arm=a --ocannl_virtualize_max_inline_fanin=4"
-OUT_ROOT=/tmp/gh612v $D snap $M cap4A 4 $F && OUT_ROOT=/tmp/gh612v $D profile $M cap4A 4 3 \
-  && OUT_ROOT=/tmp/gh612v $D finger cap4A 4 && OUT_ROOT=/tmp/gh612v $D diff cap8A 1 cap4A 4
+# Part 5's per-kernel instrument for cap 4, which the structure block does not cover. Through the
+# wrapper, not through gh612_cells.sh directly: a hand-run profile skips tree validation and records
+# no provenance, and the gate cannot see that it is missing.
+bash $S capprofile
 ```
 
 A cell's stderr carries the two `Train.tune_placements:` announcements that make the treatment
