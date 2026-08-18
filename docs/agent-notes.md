@@ -854,7 +854,9 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
 - **A "packmma" timing is not evidence that anything tensorized.** A `Tile_mma` whose register-tile
   preconditions fail renders the scalar fallback and the run still reports under whatever the
   variant was named — the column extent below the compute vector width is the easiest way in (at
-  f32/16-byte vectors the crossover is n = 4; at f16 it is n = 8), but a narrow `vector_bytes`,
+  f32/16-byte vectors the crossover is n = 4; at f16 it is n = 8; on a wider machine the crossover
+  follows the DEGRADED width, i.e. the 32-byte floor, not the configured one), but a narrow
+  `vector_bytes`,
   mixed operand compute precisions, transposed-B storage, and `debug_log_from_routines` all decline
   too. Check `C_syntax.mma_census` (flip `mma_census_enabled` around the compile) rather than
   trusting the label; `bin/narrow_gebp_bench` prints the census per line and warns when any
@@ -966,6 +968,31 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   `__builtin_fmaf16`: it always answers yes, and without the ISA feature gcc emits a call to
   `fmaf16()`, a symbol glibc does not necessarily export — verified here as a link error. That one
   is guarded on the feature macro.)
+- **"No such hardware" is a claim about a machine, not about the project — so name the machine.**
+  The rows above were written from an Arrow Lake-HX box, where AVX-512 is fused off across the
+  whole hybrid part, and the note recorded that as if it held everywhere; the machine that actually
+  benchmarks CPU work here is Zen 5, which has AVX-512 F/VL/BW/DQ/BF16 and ran both AVX-512 rows
+  correctly on the first attempt. Agents work in worktrees on several boxes, and this file
+  deliberately carries no machine facts, so an unqualified "cannot be run here" reads as a
+  project-wide limit and suppresses exactly the check it should have prompted. Check with
+  `gcc -march=native -E -dM -x c /dev/null | grep AVX512` and say which host answered. What DOES
+  hold fleet-wide: no AMD part implements AVX512-FP16, so those rows stay compile-checked until an
+  Intel Sapphire-Rapids-or-newer P-core part joins the fleet — ARM reaches native fp16 through the
+  NEON rows instead.
+- **The auto SIMD width is 64 bytes on an AVX-512 target** (gh-ocannl-621 follow-up), probed the
+  way `simd_flags`' first stage probes AVX2 — asserting what the configured target already has,
+  never requesting more — and gated on that AVX2 stage having fired, so `cc_backend_simd_flags=none`
+  still answers 16. Worth 1.7x on the packed f32 GEBP of `bin/narrow_gebp_bench` at n = 512 on
+  Zen 5 (225.7 vs 130.5 GFLOP/s; f16 189.6 vs 108.1, bf16 140.6 vs 95.1), checksums identical.
+- **A single width per machine would make a wider machine emit LESS vector code.** Every
+  explicit-SIMD rendering declines below one full vector, so at 64 bytes an f32 loop of extent
+  8..15 — and a `Tile_mma` column extent in that range — falls to the serial or scalar path that
+  the same code vectorizes at 32. `Backend_intf.simd_lanes_for` is therefore what picks a lane
+  count: the widest vector the extent can fill, halving to a floor of `min vector_bytes 32`. The
+  floor is not cosmetic — degrading below the machine's pre-widening width would newly vectorize
+  loops that render serially today, and a vector accumulation reassociates, so that is a numerics
+  change rather than a scheduling one. Autotune's seeding pre-filter calls the same function, or it
+  would withhold candidates the renderer would in fact tile.
 - Computing fp16 in fp16 on a *promoted* target is a ~18x loss against f32-compute-over-fp16
   (measured, same bench) — the reason `fp16_arithmetic` is ignored off-native and pure-f16 seeds
   gate on `hardware_limits.native_fp16_arithmetic`. The decisive pure-f16-vs-f32-GEBP measurement

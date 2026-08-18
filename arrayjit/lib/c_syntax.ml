@@ -1396,10 +1396,17 @@ module C_syntax (B : C_syntax_config) = struct
      [_mm256_fmadd_ph] and [_mm512_fmadd_ph] expand to, so their semantics are the ISA's rather
      than something inferred here.
 
-     The AVX-512, AVX512-FP16 and aarch64 rows could not be RUN when they were added (no such
-     hardware; QEMU's TCG implements neither AVX-512 nor AVX512-FP16), so they carry a second guard
-     the AVX/AVX2 rows do not: [__has_builtin], which on gcc tracks the enabled target features
-     exactly. It cannot catch a wrong signature — that is what the compile checks are for — but it
+     The AVX-512, AVX512-FP16 and aarch64 rows could not be RUN on the machine they were added from
+     (an Arrow Lake-HX part, where AVX-512 is fused off entirely; QEMU's TCG implements neither
+     AVX-512 nor AVX512-FP16), so they carry a second guard the AVX/AVX2 rows do not:
+     [__has_builtin], which on gcc tracks the enabled target features exactly.
+
+     The AVX-512 f32 x 16 row has since been executed, on Zen 5 (gcc 15, which has no
+     [__builtin_elementwise_fma], so the chain reaches this arm): correct to the bit against the
+     32-byte rendering, and 225.7 against 130.5 GFLOP/s on the packed f32 GEBP once
+     [cc_vector_bytes] stopped capping the width at 32. The AVX512-FP16 rows remain unexecuted and
+     will stay that way here — no AMD part implements AVX512-FP16, and this fleet's only native-fp16
+     target is ARM, which takes the NEON rows instead. It cannot catch a wrong signature — that is what the compile checks are for — but it
      turns "this compiler spells it differently" into a fall-through to the per-lane arm rather
      than a failed kernel compile. The cost is that a gcc older than 10, which has no
      [__has_builtin], takes the per-lane arm at those widths (the prelude shims the macro to 0). *)
