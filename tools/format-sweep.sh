@@ -109,23 +109,57 @@ quiet_gates() {
   return 0
 }
 
+# The toolchain may not be on a scheduled process's PATH, and MSYS shells need
+# opam-env.sh's path rewriting even when dune is discoverable (AGENTS.md; same
+# pattern as tools/promote.sh, strengthened for Windows).
+case "$(uname -s 2>/dev/null)" in
+  MINGW* | MSYS* | CYGWIN*) . tools/opam-env.sh ;;
+  *) command -v dune >/dev/null 2>&1 || . tools/opam-env.sh ;;
+esac
+
 BRANCH=$(git symbolic-ref --quiet --short HEAD || echo "(detached)")
 [ "$BRANCH" = "master" ] || die "not on master (on $BRANCH); the sweep only runs on master"
+# Require the MAIN checkout, not master checked out in a linked worktree: a
+# nested linked worktree without its generated dune-workspace would make the
+# unqualified dune commands root at the parent checkout and sweep the wrong
+# tree. The main checkout is the one whose git-dir IS the common git-dir.
+[ "$(git rev-parse --path-format=absolute --git-dir)" = "$(git rev-parse --path-format=absolute --git-common-dir)" ] \
+  || die "not the main checkout (master is checked out in a linked worktree); the sweep only runs from the main checkout"
 [ -z "$(git status --porcelain)" ] || die "working tree not clean"
 
-# Never start rewriting sources under a live dune: refuse while a
+# Never rewrite sources under a live dune: at entry, refuse while a
 # tools/test-run.sh run is active in this checkout (probe its per-worktree
-# flock, the same way its own lock_held does). Full mutual exclusion is not
-# possible from here — the sweep's test phases go through test-run.sh and
-# would deadlock on that flock — but once the sweep's first test phase runs,
-# test-run.sh's own lock refuses external runs loudly, so the exposure is
-# this entry window plus the seconds-wide gaps between the sweep's phases.
+# flock, the same way its own lock_held does); once underway, WAIT for any
+# run that slipped into a phase gap before each source-rewriting step (see
+# wait_test_run_idle). Holding the flock across the whole sweep would be
+# stronger but is not possible from here — the sweep's own test phases go
+# through test-run.sh, whose take_lock opens its own file description and
+# would deadlock against ours; a cooperative re-entrant protocol would mean
+# changing test-run.sh itself. What remains after the entry probe and the
+# per-rewrite waits is the moment between a wait returning and dune starting
+# to write — at that point test-run.sh's own lock refuses external runs
+# loudly, so both sides fail safe.
 if [ -e "$ROOT/.test-run.lock" ] \
   && perl -e 'use Fcntl ":flock";
               open(my $fh, ">>", $ARGV[0]) or exit 1;
               exit(flock($fh, LOCK_EX | LOCK_NB) ? 1 : 0)' "$ROOT/.test-run.lock" 2>/dev/null; then
   die "a tools/test-run.sh run is active in this checkout; not formatting under it"
 fi
+
+# Bounded blocking wait used before each source-rewriting step once the sweep
+# is underway. Aborting instead would not help — the abort path resets the
+# tree, which rewrites sources too — so waiting for the run to finish is the
+# only safe move. The bound sits just above test-run's default 3600s cap.
+wait_test_run_idle() {
+  [ -e "$ROOT/.test-run.lock" ] || return 0
+  perl -e 'use Fcntl ":flock";
+           open(my $fh, ">>", $ARGV[0]) or exit 0;
+           exit 0 if flock($fh, LOCK_EX | LOCK_NB);
+           print STDERR "format-sweep: waiting for the active tools/test-run.sh run to finish...\n";
+           alarm 3900; $SIG{ALRM} = sub { exit 1 };
+           exit(flock($fh, LOCK_EX) ? 0 : 1)' "$ROOT/.test-run.lock" \
+    || abort "a tools/test-run.sh run held its lock past the 65 min bound; giving up"
+}
 
 git fetch origin
 # --ff-only alone is not enough: merging an OLDER origin/master into a local
@@ -163,6 +197,7 @@ while :; do
   iter=$((iter + 1))
   [ "$iter" -le "$MAX_ITER" ] || abort "no fixed point after $MAX_ITER rounds; \
 likely an ocamlformat-hostile golden missing from .ocamlformat-ignore (see header)"
+  wait_test_run_idle # about to rewrite sources
   echo "format-sweep: round $iter: formatting"
 
   if ! fmt_clean; then
@@ -192,6 +227,7 @@ likely an ocamlformat-hostile golden missing from .ocamlformat-ignore (see heade
   # modified leaves the status lines identical. tools/promote.sh rather than
   # plain `dune promote`, so a sweep run from Windows Git Bash does not copy
   # CRLF into the goldens.
+  wait_test_run_idle # promotion rewrites sources too
   git add -A # stage the post-format pre-promote state, the validation baseline
   SNAP_BEFORE=$(git diff HEAD | git hash-object --stdin)
   tools/promote.sh || abort "test suite failed and promotion errored"
@@ -228,7 +264,9 @@ fi
 # --- Land -------------------------------------------------------------------
 
 echo "format-sweep: committing"
-git add -A
+# -u, not -A: formatting and promotion only modify tracked files, and -A
+# would swallow any non-ignored stray a test process left in the tree.
+git add -u
 git commit -q -m "Automated formatting sweep
 
 Produced by tools/format-sweep.sh: repo-wide dune fmt plus the %expect
