@@ -74,9 +74,10 @@ let () =
   (* Code-borne: the default precision shapes every fresh tensor the front end builds, hence the
      code they lower to. Mutated in the ref, not the config file: the key is copied into
      [Tensor.default_value_prec] at startup, so a config poke would flip nothing (the Codex P2
-     caution below). *)
+     caution below). The flip must be to a precision EVERY backend can store — this test is
+     backend-agnostic and Metal has no f64 — so it is half, not double (gh-ocannl-632). *)
   let prec0 = !Tensor.default_value_prec in
-  Tensor.default_value_prec := Ir.Ops.double;
+  Tensor.default_value_prec := Ir.Ops.half;
   let digest_v, key_v = identity_of ctx in
   Tensor.default_value_prec := prec0;
   p "a code-borne knob (default_prec) changes the digest" (not (String.equal digest0 digest_v));

@@ -779,6 +779,11 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   evaluates BOTH branches, so any range guard's deliberately out-of-range read (clamped windows,
   inlined-concat component guards) would still be evaluated. Codegen pins:
   `test_where_precision.metal.expected`, `test_metal_guarded_gather_codegen`.
+- Metal has no `double`, and f64 stays rejected in `typ_of_prec` — a declared double buffer must
+  fail rather than be silently degraded; only scalar expression casts render as `float`. So a
+  backend-agnostic test must never reach for `double` just to have a second precision:
+  `digest_identity_flips` flipped `default_value_prec` to f64 to probe a code-borne cache-key knob,
+  and aborted the whole metal `test/operations` run (gh-ocannl-632). Half is the portable choice.
 - Metal has no fp8 *type* either, but fp8 works: e5m2 stores as a byte and computes in f32 through
   the `Builtins_metal` software codec, i.e. Metal takes gh-ocannl-517's storage/compute seam for
   that one format (`compute_prec`), the way `cc` takes it for every narrow float. The codec is
