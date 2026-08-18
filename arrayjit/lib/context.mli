@@ -20,8 +20,13 @@ type routine = private {
   bindings : Ir.Indexing.lowered_bindings;
   name : string;  (** The name of the routine, derived from the backend compilation. *)
   inputs : Set.M(Ir.Tnode).t;
-      (** The materialized nodes the routine reads before writing them, if at all (so read-only
-          nodes included) — what {!run}'s initialization check requires to be initialized. *)
+      (** The externally required initialization set — what {!run}'s initialization check requires
+          to be initialized: the materialized nodes the routine reads before writing them, if at
+          all (read-only nodes included), {i minus} those whose initialization the routine itself
+          carries — the computation's embedded nodes, and nodes with registered host initialization
+          data, which self-initialize at link time from [Ir.Host_inits] (gh-ocannl-333). Not the
+          backend's raw read set: the execution-dependency frontier is built from the unfiltered
+          backend inputs before these exclusions. *)
   outputs : Set.M(Ir.Tnode).t;
       (** The materialized nodes the routine writes — what {!run} marks initialized. *)
   routine_id : int;

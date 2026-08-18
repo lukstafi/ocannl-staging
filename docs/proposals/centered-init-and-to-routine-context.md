@@ -14,7 +14,7 @@
 >   superseded by the root fix — composite init expressions can no longer leak
 >   `zero_grads`/backprop into training.
 > - **The `Train.to_routine` API-return concern (part 2) is RESOLVED by investigation — no API
->   break.** The updated context is already recoverable via `Context.context : routine -> t`
+>   break.** The updated context is already readable off the routine (`routine.Context.context`)
 >   (PR #70's new `test/operations/test_composite_param_init.ml` uses exactly this idiom).
 >
 > **What remains live of this proposal is the ergonomic centered/scaled init API only** —
@@ -43,7 +43,7 @@ Two improvements discovered during the Karpathy FSM transformer tutorial (gh-oca
 
 1. Neural networks need centered parameter initialization (values in [-0.5, 0.5) or [-1, 1) rather than [0, 1)). Users who try to build centered init from existing primitives (e.g., `2 * uniform1 - 1`) inadvertently create gradient-carrying intermediate nodes that cause NaN during SGD updates, because `sgd_update` iterates over all `loss.Tensor.params` including those stale intermediates. *(Update 2026-06-12: mechanism corrected — the intermediates do not enter `loss.Tensor.params`; instead, their `zero_grads` get baked into the param's `diff.zero_grads` at construction, so the training step references grad tnodes the init context never created, and `Train.to_routine` fails with `User_error "The linked context lacks node _N.grad"` (verified by repro). The fix direction — grad-free init subgraphs — is unchanged.)*
 
-2. `Train.to_routine` discards the updated `Context.t` returned by `Context.compile`, preventing users from threading context through multiple routine compilations that share tensor nodes. *(Update 2026-06-12: overstated — the routine itself carries the updated context, recoverable via `Context.context : routine -> t` (in `context.mli` since 2025-09), and in-tree callers already thread it that way, e.g. `Train.to_routine (Context.context sgd_step) ...` in `test/training/mlp_names.ml`, `bigram.ml`, `cifar_conv.ml`, `moons_demo.ml`. See the Design review section.)*
+2. `Train.to_routine` discards the updated `Context.t` returned by `Context.compile`, preventing users from threading context through multiple routine compilations that share tensor nodes. *(Update 2026-06-12: overstated — the routine itself carries the updated context, readable as `routine.Context.context` (stored in the routine since 2025-09; a `Context.context` accessor until gh-ocannl-590 exposed the record), and in-tree callers already thread it that way, e.g. `Train.to_routine sgd_step.Context.context ...` in `test/training/mlp_names.ml`, `bigram.ml`, `cifar_conv.ml`, `moons_demo.ml`. See the Design review section.)*
 
 Related: gh-ocannl-116, task-28c898b7.
 
@@ -59,7 +59,7 @@ Related: gh-ocannl-116, task-28c898b7.
 **~~Superseded / resolved by PR #70 (kept for record):~~**
 
 - ~~The centered init function does not create gradient-carrying intermediate nodes -- only the final param tensor itself should have `Require_grad`.~~ **RESOLVED at the root by PR #70** (`Tensor.param ~require_grad` is the sole grad path; init expressions are forward-only `NTDSL`/`Prohibit_grad`; PDSL retired). Any composite init is now grad-safe regardless.
-- ~~`Train.to_routine` returns `Context.t * Context.routine`; all in-tree callers updated.~~ **DROPPED — no API break.** The updated context is recoverable via `Context.context : routine -> t`.
+- ~~`Train.to_routine` returns `Context.t * Context.routine`; all in-tree callers updated.~~ **DROPPED — no API break.** The updated context is readable off the routine (`routine.Context.context`).
 
 ## Context
 
@@ -71,11 +71,11 @@ Related: gh-ocannl-116, task-28c898b7.
 - `lib/train.ml` lines 110-113: `sgd_update` iterates `loss.Tensor.params` and calls `sgd_one` on every param with a `diff` field, including init-time intermediates if they carry `Require_grad`. *(Update 2026-06-12: incorrect — `params` is populated only by `Tensor.param` (`tensor/tensor.ml:678` sets `params = Set.singleton t`); op nodes merely union subtensor `params` (`tensor.ml:372`), so init intermediates never appear there. The real leak is via `zero_grads`: `Tensor.op` folds subtensor `zero_grads` into the new node's `diff.zero_grads` (`tensor.ml:438-446`), so a composite param's training-step zeroing references the intermediates' grad tnodes, which fail `verify_prior_context` at link (`arrayjit/lib/backends.ml:301-306`).)*
 - The key insight: init-time arithmetic intermediates should use `Prohibit_grad`; only the outermost param tensor needs `Require_grad`.
 
-### ~~to_routine context threading~~ (SUPERSEDED — no API change, use `Context.context`)
+### ~~to_routine context threading~~ (SUPERSEDED — no API change, use the routine's stored context)
 
 > **(2026-06-24) RESOLVED by investigation, confirmed by PR #70.** No `to_routine` API break:
-> the updated context is already stored in the routine and recoverable via
-> `Context.context : routine -> t`. The section below is retained for the historical record.
+> the updated context is already stored in the routine and readable as
+> `routine.Context.context`. The section below is retained for the historical record.
 
 - `lib/train.ml` lines 139-155 *(Update 2026-06-12: was 186-203)*: `to_routine` calls `Context.compile ctx comp bindings` which returns `(Context.t * Context.routine)`, but discards the context with `let _ctx, routine = ...`.
 - `lib/train.ml` line 161 *(Update 2026-06-12: was 208)*: `init_params` already returns `Context.t` after compile+run, showing the pattern.
@@ -99,7 +99,7 @@ Related: gh-ocannl-116, task-28c898b7.
 
 **Centered init**: Add `centered_uniform1` (and optionally a range-parameterized `uniform1 ~low ~high`) in `operation.ml`, building on `uniform1` plus the affine recentering, exposed through `Make_DSL` so the `%op` record syntax picks it up. Then replace the host-side recentering loops in `test/training/fsm_transformer.ml` and `test/training/transformer_names.ml`.
 
-**~~to_routine~~**: ~~Change return type from `Context.routine` to `Context.t * Context.routine`.~~ **DROPPED — no API change** (use `Context.context : routine -> t`).
+**~~to_routine~~**: ~~Change return type from `Context.routine` to `Context.t * Context.routine`.~~ **DROPPED — no API change** (read `routine.Context.context`).
 
 ## Scope
 
@@ -164,9 +164,8 @@ should be dropped — its motivating gap does not exist.
    into the PRNG conversion; with `sub` as the new outermost node that flow
    changes. Either put the affine transform inside the final op's `op_asn` or
    add a non-default-precision param test.
-5. *Part (b): no breaking change.* `Context.context : routine -> t` returns
-   exactly the updated context (`context.ml:201` stores `updated_ctx` in the
-   routine), and the idiom `Train.to_routine (Context.context prev_routine)
+5. *Part (b): no breaking change.* `routine.Context.context` is exactly the updated context (`context.ml:201` stores `updated_ctx` in the
+   routine), and the idiom `Train.to_routine prev_routine.Context.context
    ...` is already standard in-tree (16 caller files checked). Returning
    `Context.t * routine` would churn all of them to expose redundant
    information. Do instead: fix the misleading comment at `lib/train.ml:155`
@@ -182,5 +181,5 @@ should be dropped — its motivating gap does not exist.
 - Surface choice: range-parameterized `uniform1 ~low ~high` vs a separate
   `centered_uniform1`; and should the *default* `default_param_init` become
   centered (standard for transformers, but churns many `.expected` files)?
-- Part (b): accept "document `Context.context`, no API change", or still
+- Part (b): accept "document the stored-context idiom, no API change", or still
   prefer the tuple return for discoverability despite the redundancy?
