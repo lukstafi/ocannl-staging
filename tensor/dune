@@ -31,8 +31,13 @@
   ppx_minidebug.runtime
   arrayjit.ir
   arrayjit.context)
+ ; The per-module tracing gates ppx_minidebug reads while PREPROCESSING row.ml, shape.ml and
+ ; tensor.ml, so that `OCANNL_LOG_LEVEL_ROW=9 dune build ...` re-preprocesses them instead of
+ ; returning the stripped modules built without it (gh-ocannl-628).
  (preprocessor_deps
-  (env_var OCANNL_LOG_LEVEL))
+  (env_var OCANNL_LOG_LEVEL_ROW)
+  (env_var OCANNL_LOG_LEVEL_SHAPE)
+  (env_var OCANNL_LOG_LEVEL_TENSOR))
  (preprocess
   (pps
    ppx_compare
