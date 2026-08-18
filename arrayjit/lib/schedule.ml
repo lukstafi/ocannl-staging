@@ -209,14 +209,69 @@ type floop = {
 let for_loop { index; from_; to_; body; axis } =
   Low_level.For_loop { index; from_; to_; body; axis }
 
-let rec find_loop axis (llc : Low_level.t) : Low_level.t option =
+(* EVERY [For_loop] binding [axis] (in preorder), each paired with an environment [~f] threaded
+   over its enclosing loops (outermost first) — e.g. the loop ranges {!partition_breakpoints} needs
+   to bound the non-axis symbols of a guard. Like [rewrite_loop] this does not descend into a
+   match's own body (a loop cannot rebind the symbol it is nested in).
+
+   Locating must cover exactly what rewriting covers, in BOTH directions, or a probe disagrees
+   with the op it informs (gh-ocannl-668):
+
+   - As deep. [in_scopes] (the default) descends into [Local_scope] bodies reached from the scalar
+     positions of Set / Set_dynamic / Set_local / Set_from_vec, matching [rewrite_loop]'s reach
+     since gh-ocannl-639 — the accumulation mints of [Unroll ~materialize:true] and [Partition]
+     wrap segment/inner loops in the accumulator's scope, and a statement-only walk reports those
+     absent. Pass [~in_scopes:false] only where statement nesting is part of the caller's contract
+     (see [apply_split_reduce]).
+   - As wide. [rewrite_loop] rewrites every copy, so a probe that stops at the first one speaks
+     for a fraction of what the op does: a materializing [Unroll] leaves one copy of the inner
+     loop per unrolled step, each with the outer index substituted by a different constant, so
+     copies of one guard flip at different points.
+
+   Neither walk enters [If] conditions or [Tile_mma] fallbacks. *)
+let find_loops_env ?(in_scopes = true) axis ~(init : 'a) ~(f : 'a -> floop -> 'a)
+    (llc : Low_level.t) : (Low_level.t * 'a) list =
   let open Low_level in
-  match llc with
-  | For_loop { index; _ } when Indexing.equal_symbol index axis -> Some llc
-  | For_loop { body; _ } -> find_loop axis body
-  | Seq (a, b) -> ( match find_loop axis a with Some _ as r -> r | None -> find_loop axis b)
-  | If { body; _ } -> find_loop axis body
-  | _ -> None
+  let found = ref [] in
+  let rec go env llc =
+    match llc with
+    | For_loop { index; _ } when Indexing.equal_symbol index axis -> found := (llc, env) :: !found
+    | For_loop { index; from_; to_; body; axis = ty } ->
+        go (f env { index; from_; to_; body; axis = ty }) body
+    | Seq (a, b) ->
+        go env a;
+        go env b
+    | If { body; _ } -> go env body
+    | Set { llsc; _ } | Set_local (_, llsc) -> scalar env llsc
+    | Set_dynamic { dyn_value = v, _; llsc; _ } ->
+        scalar env v;
+        scalar env llsc
+    | Set_from_vec { arg = a, _; _ } -> scalar env a
+    | _ -> ()
+  and scalar env (llsc : scalar_t) =
+    if in_scopes then
+      match llsc with
+      | Local_scope { body; _ } -> go env body
+      | Get_dynamic { dyn_value = v, _; _ } -> scalar env v
+      | Ternop (_, (a, _), (b, _), (c, _)) ->
+          scalar env a;
+          scalar env b;
+          scalar env c
+      | Binop (_, (a, _), (b, _)) ->
+          scalar env a;
+          scalar env b
+      | Unop (_, (a, _)) -> scalar env a
+      | Get_local _ | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ ->
+          ()
+  in
+  go init llc;
+  List.rev !found
+
+let find_loops ?in_scopes axis (llc : Low_level.t) : Low_level.t list =
+  List.map ~f:fst (find_loops_env ?in_scopes axis ~init:() ~f:(fun () _ -> ()) llc)
+
+let find_loop ?in_scopes axis (llc : Low_level.t) : Low_level.t option =
+  List.hd (find_loops ?in_scopes axis llc)
 
 (* Rewrites every [For_loop] whose index is [sym] (a materializing transform duplicates a loop
    per copy, and a later op must reach all the copies). Loops inside [Local_scope] bodies are IN
@@ -256,8 +311,7 @@ let rewrite_loop ~what ~sym ~(f : floop -> Low_level.t) (llc : Low_level.t) : Lo
   let result = go llc in
   if not !found then
     invalid_arg
-      (what ^ ": no statement-level For_loop with index " ^ Indexing.symbol_ident sym
-     ^ " in this routine");
+      (what ^ ": no For_loop with index " ^ Indexing.symbol_ident sym ^ " in this routine");
   result
 
 (* Fresh scope ids for scalar locals declared within [llc] (binders: [Declare_local],
@@ -2321,7 +2375,12 @@ let apply_split_reduce ~axis ~target ~num_blocks ~block_index ~inner_index ~comb
      it (and the scatter form's scratch zeroing right before it). *)
   let stmts = flat_lines [ opt.llc ] in
   let stmt =
-    match List.find stmts ~f:(fun s -> Option.is_some (find_loop axis s)) with
+    (* [~in_scopes:false]: the combine (and the scatter form's zeroing) are inserted at statement
+       level around [stmt], which only sequences correctly if the reduction itself runs there —
+       a reduction nested in a [Local_scope] is consumed within its own statement, before the
+       combine would run. So this op genuinely wants the statement-level walk, and its enclosing
+       path below assumes it. *)
+    match List.find stmts ~f:(fun s -> Option.is_some (find_loop ~in_scopes:false axis s)) with
     | Some s -> s
     | None ->
         invalid_arg
@@ -3797,23 +3856,13 @@ let mentions_axis axis (idx : Indexing.axis_index) =
    segments are exactly delimited and the decided segments fold their guards. *)
 let partition_breakpoints ~axis (llc : Low_level.t) : int list =
   let open Low_level in
-  (* Ranges of the statement-level loops enclosing the [axis] loop (same traversal as
-     [find_loop]): an inner axis's guards may mention enclosing-loop symbols. *)
-  let enclosing_ranges =
-    let rec collect env (llc : Low_level.t) =
-      match llc with
-      | For_loop { index; _ } when Indexing.equal_symbol index axis -> Some env
-      | For_loop { index; from_; to_; body; _ } ->
-          collect (Map.set env ~key:index ~data:(from_, to_)) body
-      | Seq (a, b) -> ( match collect env a with Some _ as r -> r | None -> collect env b)
-      | If { body; _ } -> collect env body
-      | _ -> None
-    in
-    Option.value ~default:(Map.empty (module Indexing.Symbol))
-    @@ collect (Map.empty (module Indexing.Symbol)) llc
-  in
-  match find_loop axis llc with
-  | Some (For_loop { from_; to_; body; _ }) ->
+  (* Every loop binding [axis] contributes, because [Partition] rewrites every one of them: the
+     copies a materializing [Unroll] left behind carry the same guard with different constants
+     substituted for the unrolled index, so their flip points differ and the union is what makes
+     each copy's guard interval-decided. The ranges of the loops enclosing each occurrence come
+     from the same walk that locates it: an inner axis's guards may mention enclosing-loop
+     symbols. *)
+  let breakpoints_of ~enclosing_ranges ~from_ ~to_ body =
       let points = ref [] in
       (* Affine view [Some (k, off_lo, off_hi)] of a comparison operand as [k*axis + off] with
          [off] ranging over [off_lo, off_hi]: non-axis symbols with a known enclosing-loop range
@@ -3926,12 +3975,20 @@ let partition_breakpoints ~axis (llc : Low_level.t) : int list =
       in
       go ~ranges:enclosing_ranges body;
       List.filter !points ~f:(fun b -> from_ < b && b <= to_)
-      |> List.dedup_and_sort ~compare:Int.compare
-  | Some _ -> assert false (* [find_loop] only returns [For_loop]s. *)
-  | None ->
-      invalid_arg
-        ("Schedule.partition_breakpoints: no statement-level For_loop with index "
-       ^ Indexing.symbol_ident axis)
+  in
+  let occurrences =
+    find_loops_env axis llc
+      ~init:(Map.empty (module Indexing.Symbol))
+      ~f:(fun env fc -> Map.set env ~key:fc.index ~data:(fc.from_, fc.to_))
+  in
+  if List.is_empty occurrences then
+    invalid_arg
+      ("Schedule.partition_breakpoints: no For_loop with index " ^ Indexing.symbol_ident axis);
+  List.concat_map occurrences ~f:(function
+    | For_loop { from_; to_; body; _ }, enclosing_ranges ->
+        breakpoints_of ~enclosing_ranges ~from_ ~to_ body
+    | _ -> assert false (* [find_loops_env] only returns [For_loop]s. *))
+  |> List.dedup_and_sort ~compare:Int.compare
 
 let acc_interpretable (a : _ Affine.access) =
   (not a.Affine.a_dynamic) && (not a.a_whole) && (not a.a_vec_last)
@@ -4006,9 +4063,7 @@ let loops_independent (opt : Low_level.optimized) ~(syms : Indexing.symbol list)
     ~licensed : op_verdict =
   let open Low_level in
   let plc = opt.optimize_ctx.placements in
-  match find_loop (List.hd_exn syms) opt.llc with
-  | None -> Op_unknown ("no statement-level loop binds " ^ Indexing.symbol_ident (List.hd_exn syms))
-  | Some loop ->
+  let verdict_of loop =
       let accs = Low_level.affine_accesses loop in
       let env = Low_level.loop_bounds loop in
       let range s = List.Assoc.find env s ~equal:Indexing.equal_symbol in
@@ -4078,6 +4133,12 @@ let loops_independent (opt : Low_level.optimized) ~(syms : Indexing.symbol list)
                 else node_v
               in
               combine_verdicts v node_v)
+  in
+  (* The op annotates or rewrites EVERY loop binding the symbol (a materializing [Unroll] leaves
+     one copy per step), so the obligation is the worst of their verdicts, not the first one's. *)
+  match find_loops (List.hd_exn syms) opt.llc with
+  | [] -> Op_unknown ("no loop binds " ^ Indexing.symbol_ident (List.hd_exn syms))
+  | loops -> List.fold loops ~init:Op_legal ~f:(fun v loop -> combine_verdicts v (verdict_of loop))
 
 (* [Stage] legality: apply the op on a hermetic copy — [apply_stage]'s precondition surface (source
    unwritten and statically read through one index vector, tile loops enclosing/occurring with
@@ -4192,12 +4253,18 @@ let op_legality (opt : Low_level.optimized) (op : optop) : op_verdict =
          associative-commutative accumulation patterns lowering emits (the rmw self-pairs). Beyond
          that license, prove that no write-involving pair can touch a common cell across different
          (outer, inner) iterations at all — then any order computes the same values. *)
-      match find_loop outer opt.llc with
-      | Some (For_loop { body = For_loop { index; _ }; _ }) when Indexing.equal_symbol index inner
-        ->
-          loops_independent opt ~syms:[ outer; inner ] ~cross_nest:false ~licensed:rmw_license
-      | Some _ -> Op_unknown "loops are not perfectly nested"
-      | None -> Op_unknown ("no statement-level loop binds " ^ Indexing.symbol_ident outer))
+      (* Interchange rewrites every copy of the outer loop, so every one of them must be the
+         perfect nest the swap assumes. *)
+      match find_loops outer opt.llc with
+      | [] -> Op_unknown ("no loop binds " ^ Indexing.symbol_ident outer)
+      | loops ->
+          if
+            List.for_all loops ~f:(function
+              | Low_level.For_loop { body = Low_level.For_loop { index; _ }; _ } ->
+                  Indexing.equal_symbol index inner
+              | _ -> false)
+          then loops_independent opt ~syms:[ outer; inner ] ~cross_nest:false ~licensed:rmw_license
+          else Op_unknown "loops are not perfectly nested")
   | Tensorize { i; j; k; lane; simd_width } -> (
       (* Role-assignment validity first: the micro-kernel recognition in [tensorize_llc] is a pure
          function of the code (given the routine's zero-fringe tiles), so probing it decides

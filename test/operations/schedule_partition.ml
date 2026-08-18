@@ -14,8 +14,10 @@
 
    The fresh segment symbols returned by [Sched.partition] make each segment individually
    addressable by subsequent ops (per-segment scheduling), demonstrated by unrolling just the tail
-   segment. Structural checks pair with executed-output parity against untransformed references on
-   every backend. *)
+   segment. Section 6 pins that this addressability survives an accumulation mint: a loop moved
+   into a [Local_scope] by a materializing [Unroll] is still located by [partition_breakpoints] and
+   still rewritten by the [Partition] its breakpoints feed (gh-ocannl-668). Structural checks pair
+   with executed-output parity against untransformed references on every backend. *)
 
 open Base
 open Ocannl
@@ -56,6 +58,136 @@ let find_loop_with_extent ~n (llc : LL.t) : Idx.symbol option =
   in
   go llc;
   !found
+
+(* Is a [For_loop] binding [sym] reachable through statement positions alone (the walk
+   [Schedule.find_loop] had before gh-ocannl-668), and is it reachable at all (descending into
+   [Local_scope] bodies, the way [rewrite_loop] reaches loops the accumulation mints wrapped in a
+   scope)? Section 6 uses both to pin that its construction really is the scope-nested one. *)
+let binds_loop ~in_scopes sym (llc : LL.t) : bool =
+  let rec go (llc : LL.t) =
+    match llc with
+    | LL.For_loop { index; _ } when Idx.equal_symbol index sym -> true
+    | LL.For_loop { body; _ } | LL.If { body; _ } -> go body
+    | LL.Seq (a, b) -> go a || go b
+    | LL.Tile_mma { fallback; _ } -> go fallback
+    | LL.Set { llsc; _ } | LL.Set_local (_, llsc) -> scan llsc
+    | LL.Set_dynamic { dyn_value = v, _; llsc; _ } -> scan v || scan llsc
+    | LL.Set_from_vec { arg = a, _; _ } -> scan a
+    | LL.Noop | LL.Comment _ | LL.Staged_compilation _ | LL.Zero_out _ | LL.Declare_local _
+    | LL.Workgroup_barrier ->
+        false
+  and scan (sc : LL.scalar_t) =
+    in_scopes
+    &&
+    match sc with
+    | LL.Local_scope { body; _ } -> go body
+    | LL.Ternop (_, (a, _), (b, _), (c, _)) -> scan a || scan b || scan c
+    | LL.Binop (_, (a, _), (b, _)) -> scan a || scan b
+    | LL.Unop (_, (a, _)) -> scan a
+    | LL.Get_dynamic { dyn_value = v, _; _ } -> scan v
+    | LL.Get_local _ | LL.Get _ | LL.Get_merge_buffer _ | LL.Constant _ | LL.Constant_bits _
+    | LL.Embed_index _ ->
+        false
+  in
+  go llc
+
+(* The first [For_loop] of extent [outer_n] enclosing one of extent [inner_n], as a symbol pair —
+   the reduction nest of a pooling forward, past the initialization loop over the same extent. *)
+let find_nest ~outer_n ~inner_n (llc : LL.t) : (Idx.symbol * Idx.symbol) option =
+  let found = ref None in
+  let rec go ~enclosing (llc : LL.t) =
+    if Option.is_none !found then
+      match llc with
+      | LL.For_loop { index; from_; to_; body; _ } ->
+          let extent = to_ - from_ + 1 in
+          (match enclosing with
+          | Some outer when extent = inner_n -> found := Some (outer, index)
+          | _ -> ());
+          go ~enclosing:(if extent = outer_n then Some index else enclosing) body
+      | LL.Seq (a, b) ->
+          go ~enclosing a;
+          go ~enclosing b
+      | LL.If { body; _ } -> go ~enclosing body
+      | _ -> ()
+  in
+  go ~enclosing:None llc;
+  !found
+
+(* How many [For_loop]s bind [sym] — the copies a materializing [Unroll] leaves behind, all of
+   which [Sched.apply] rewrites. *)
+let count_loops sym (llc : LL.t) : int =
+  let n = ref 0 in
+  let rec go (llc : LL.t) =
+    match llc with
+    | LL.For_loop { index; body; _ } ->
+        if Idx.equal_symbol index sym then Int.incr n else go body
+    | LL.If { body; _ } -> go body
+    | LL.Seq (a, b) ->
+        go a;
+        go b
+    | LL.Tile_mma { fallback; _ } -> go fallback
+    | LL.Set { llsc; _ } | LL.Set_local (_, llsc) -> scan llsc
+    | LL.Set_dynamic { dyn_value = v, _; llsc; _ } ->
+        scan v;
+        scan llsc
+    | LL.Set_from_vec { arg = a, _; _ } -> scan a
+    | LL.Noop | LL.Comment _ | LL.Staged_compilation _ | LL.Zero_out _ | LL.Declare_local _
+    | LL.Workgroup_barrier ->
+        ()
+  and scan (sc : LL.scalar_t) =
+    match sc with
+    | LL.Local_scope { body; _ } -> go body
+    | LL.Ternop (_, (a, _), (b, _), (c, _)) ->
+        scan a;
+        scan b;
+        scan c
+    | LL.Binop (_, (a, _), (b, _)) ->
+        scan a;
+        scan b
+    | LL.Unop (_, (a, _)) -> scan a
+    | LL.Get_dynamic { dyn_value = v, _; _ } -> scan v
+    | LL.Get_local _ | LL.Get _ | LL.Get_merge_buffer _ | LL.Constant _ | LL.Constant_bits _
+    | LL.Embed_index _ ->
+        ()
+  in
+  go llc;
+  !n
+
+(* The first [For_loop] binding [sym] in preorder, as a standalone routine — the slice of the code
+   a first-match probe used to speak for. *)
+let first_binding sym (llc : LL.t) : LL.t =
+  let found = ref None in
+  let rec go (llc : LL.t) =
+    if Option.is_none !found then
+      match llc with
+      | LL.For_loop { index; body; _ } ->
+          if Idx.equal_symbol index sym then found := Some llc else go body
+      | LL.If { body; _ } -> go body
+      | LL.Seq (a, b) ->
+          go a;
+          go b
+      | LL.Set { llsc; _ } | LL.Set_local (_, llsc) -> scan llsc
+      | LL.Set_dynamic { dyn_value = v, _; llsc; _ } ->
+          scan v;
+          scan llsc
+      | LL.Set_from_vec { arg = a, _; _ } -> scan a
+      | _ -> ()
+  and scan (sc : LL.scalar_t) =
+    match sc with
+    | LL.Local_scope { body; _ } -> go body
+    | LL.Ternop (_, (a, _), (b, _), (c, _)) ->
+        scan a;
+        scan b;
+        scan c
+    | LL.Binop (_, (a, _), (b, _)) ->
+        scan a;
+        scan b
+    | LL.Unop (_, (a, _)) -> scan a
+    | LL.Get_dynamic { dyn_value = v, _; _ } -> scan v
+    | _ -> ()
+  in
+  go llc;
+  Option.value_exn ~here:[%here] !found
 
 (* Structural census: statement [If] guards, scalar [Where] guards, and [For_loop]s. *)
 let census (llc : LL.t) : int * int * int =
@@ -283,5 +415,145 @@ let () =
   let lt_scaled = bps_of ~to_:9 (fun i -> LL.Binop (Ir.Ops.Cmplt, coef2 i, fixed 6)) in
   p "Cmple with a scaled axis rounds like its Cmplt encoding"
     (is le_scaled [ 3 ] && is lt_scaled [ 3 ]);
+
+  (* === 6: Loops inside a [Local_scope] (gh-ocannl-668) — the accumulation mint of a materializing
+     [Unroll] wraps the inner reduction loop in the accumulator's scope, and [Sched.apply] keeps
+     rewriting loops there. Every probe that LOCATES a loop must reach the same place, or it
+     reports absent a loop the very next op rewrites: here [partition_breakpoints] derives the pad
+     guard's flip point from the scope-nested [s] loop, and the [Partition] it feeds applies. === *)
+  let ni, nr, ns = (4, 6, 5) in
+  let xv6 =
+    Array.init (ni * nr * ns) ~f:(fun t -> Float.of_int ((t % 7) + 1) *. 0.25)
+  in
+  let make_graph6 () =
+    let x = TDSL.ndarray xv6 ~label:[ "sp_rx" ] ~output_dims:[ ni; nr; ns ] () in
+    let%op out = x ++ "irs => i" in
+    out
+  in
+  let want6 = nonzero "sp_ref6" (run_with "sp_ref6" (fun opt -> opt) (make_graph6 ())) in
+  (* [Pad] gives the inner loop a guard with a known flip point ([s < 5] over the padded range
+     [0, 8)); the materializing unroll of the OUTER reduction axis then moves the whole guarded
+     inner loop into the accumulator scope. *)
+  let stmt_level = ref true and in_scope = ref false in
+  let bps6 = ref [] in
+  let census6 = ref (-1, -1, -1) in
+  let transform_scope_nested (opt : LL.optimized) =
+    let r = Option.value_exn ~here:[%here] (find_loop_with_extent ~n:nr opt.LL.llc) in
+    let s = Option.value_exn ~here:[%here] (find_loop_with_extent ~n:ns opt.LL.llc) in
+    let opt =
+      Sched.apply
+        [ Sched.Pad { axis = s; to_multiple_of = 4 }; Sched.Unroll { axis = r; materialize = true } ]
+        opt
+    in
+    stmt_level := binds_loop ~in_scopes:false s opt.LL.llc;
+    in_scope := binds_loop ~in_scopes:true s opt.LL.llc;
+    bps6 := Sched.partition_breakpoints ~axis:s opt.LL.llc;
+    let op, _segs = Sched.partition ~axis:s ~breakpoints:!bps6 in
+    let opt = Sched.apply [ op ] opt in
+    census6 := census opt.LL.llc;
+    opt
+  in
+  let got6 = run_with "sp_scope_nested_partition" transform_scope_nested (make_graph6 ()) in
+  p "the materializing unroll left the inner loop only inside a Local_scope"
+    ((not !stmt_level) && !in_scope);
+  p "breakpoints of a scope-nested loop are the pad guard's flip point"
+    (List.equal Int.equal !bps6 [ ns ]);
+  let ifs6, wheres6, _ = !census6 in
+  p "partitioning the scope-nested loop folds the pad guard" (ifs6 = 0 && wheres6 = 0);
+  p "scope-nested partition matches reference" (close got6 want6);
+
+  (* === 7: MANY bindings of one symbol (gh-ocannl-668, review round 1) — a materializing [Unroll]
+     leaves one copy of the inner loop per unrolled step, each carrying the same guard with a
+     different constant substituted for the unrolled index, and [Partition] rewrites every copy.
+     So the breakpoints are the UNION over the copies: stopping at the first one folds that copy's
+     guard and leaves its siblings mixed (or reports no breakpoint at all when the first copy's
+     guard happens to be already decided).
+
+     The clamped max-pool of gh-ocannl-504 is the natural shape: N=8, stride 2, window 5, so the
+     window guard [0 <= 2o + w - 2 < 8] mentions both loops. Unrolling the OUTPUT loop [o] (whose
+     index the accumulator carries, so no scope is minted — the copies are siblings) leaves four
+     copies of the [w] loop guarded [w >= 2], [w >= 0], [w >= -2], [w < 4]: the first copy alone
+     yields [2], the copies together [2; 4]. === *)
+  Tensor.unsafe_reinitialize ();
+  let make_pool () =
+    let x = TDSL.ndarray (Array.init 8 ~f:(fun i -> Float.of_int i -. 16.)) ~label:[ "sp_px" ]
+        ~output_dims:[ 8 ] ()
+    in
+    let%op y = x @^+ "2*o=+w; w => o" [ "w" ] (stretch 0.0) in
+    Shape.set_dim w 5;
+    y
+  in
+  let want7 = nonzero "sp_ref7" (run_with "sp_ref7" (fun opt -> opt) (make_pool ())) in
+  let first_only = ref [] and all_copies = ref [] in
+  let copies = ref 0 in
+  let census7 = ref (-1, -1, -1) in
+  let transform_copies (opt : LL.optimized) =
+    let o, w =
+      Option.value_exn ~here:[%here] (find_nest ~outer_n:4 ~inner_n:5 opt.LL.llc)
+    in
+    let opt = Sched.apply [ Sched.Unroll { axis = o; materialize = true } ] opt in
+    copies := count_loops w opt.LL.llc;
+    (* What the first copy alone would have contributed, isolated the way the pre-fix walk saw it:
+       the breakpoints of the subtree cut off after the first binding. *)
+    first_only := Sched.partition_breakpoints ~axis:w (first_binding w opt.LL.llc);
+    all_copies := Sched.partition_breakpoints ~axis:w opt.LL.llc;
+    let op, _segs = Sched.partition ~axis:w ~breakpoints:!all_copies in
+    let opt = Sched.apply [ op ] opt in
+    census7 := census opt.LL.llc;
+    opt
+  in
+  let got7 = run_with "sp_copies_partition" transform_copies (make_pool ()) in
+  p "the materializing unroll left one copy of the inner loop per step" (!copies = 4);
+  p "the copies' guards flip at different points, and the union is what the copies need"
+    (List.equal Int.equal !first_only [ 2 ] && List.equal Int.equal !all_copies [ 2; 4 ]);
+  (* Every copy's guard is decided within every segment: the clamp [Where]s are gone. *)
+  let ifs7, wheres7, _ = !census7 in
+  p "partitioning at the union folds every copy's guard" (ifs7 = 0 && wheres7 = 0);
+  p "partition over many bindings matches reference" (close got7 want7);
+
+  (* The two dimensions meet when the copies live inside an accumulator scope — the shape a
+     materializing [Unroll] of an outer reduction axis mints. Hand-built so the copies carry
+     visibly different guards ([i < 3] and [i < 6]) whatever a lowering happens to produce. *)
+  let scoped_copies =
+    let axis = Idx.get_symbol () in
+    let tn =
+      Ir.Tnode.create (Ir.Tnode.Specified Ir.Ops.single) ~id:9701 ~label:[ "sp_agg" ]
+        ~unpadded_dims:(lazy [| 1 |]) ~padding:(lazy None) ()
+    in
+    let guarded k =
+      LL.For_loop
+        {
+          index = axis;
+          from_ = 0;
+          to_ = 9;
+          body =
+            LL.If
+              {
+                cond = (LL.Binop (Ir.Ops.Cmplt, ivar axis, fixed k), iprec);
+                body = LL.Noop;
+              };
+          axis = LL.Serial;
+        }
+    in
+    let idcs = [| Idx.Fixed_idx 0 |] in
+    let llc =
+      LL.Set
+        {
+          tn;
+          idcs;
+          llsc =
+            LL.Local_scope
+              {
+                id = LL.get_scope tn;
+                body = LL.Seq (guarded 3, guarded 6);
+                orig_indices = idcs;
+              };
+          debug = "";
+        }
+    in
+    Sched.partition_breakpoints ~axis llc
+  in
+  p "copies inside a Local_scope contribute their breakpoints too"
+    (List.equal Int.equal scoped_copies [ 3; 6 ]);
 
   Stdio.printf "\nDone.\n%!"
