@@ -4064,7 +4064,9 @@ let validate_parallel plc (llc : t) : unit =
             invalid_arg
               ("Low_level.validate_parallel: Zero_out of materialized node " ^ Tn.debug_name tn
              ^ " in a multi-threaded kernel: whole-node zeroing is not distributed across hardware \
-                threads; zero via per-element writes under the annotated loops instead")
+                threads; zero via per-element writes under the annotated loops instead \
+                (Schedule.Expand_zero expands the init into a loop nest the same geometry ops can \
+                annotate)")
       | Set { tn; _ } | Set_dynamic { tn; _ } | Set_from_vec { tn; _ } ->
           check_covered_write ~covered tn
       | Tile_mma { d = d_tn, d_idcs; a = _, a_idcs; b = _, b_idcs; lane; _ } ->
