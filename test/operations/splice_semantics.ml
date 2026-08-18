@@ -2,15 +2,15 @@
 
    Phase 1 (gh-618) pins the raw-side split of the read-modify-write exemption by consumer. A read
    at its enclosing statement's write position is exempt from the visit-counting placement
-   heuristics ([rmw_exempt] — the statement's own store is not a visit, and virtual_chain_fanin
+   heuristics ([rmw_exempt] -- the statement's own store is not a visit, and virtual_chain_fanin
    relies on it for residual chains), but for a node that owns a buffer it is NOT interface
    coverage: in [ell[0] = 5000; out[i] = ell[i]] the copy-position reads consume ell's incoming
    cells 1.., and an accumulation with no preceding definite initialization consumes its own entry
-   values. Both must classify [read_before_write] — a routine input, excluded from buffer
-   aliasing — where pre-split they read as output-only. The strict classification closes over the
+   values. Both must classify [read_before_write] -- a routine input, excluded from buffer
+   aliasing -- where pre-split they read as output-only. The strict classification closes over the
    SETTLED placements ([reconcile_traced_store], review round 1): a node that stays virtual is
-   exempt by construction — no interface, and exemption-dependent coverage is exactly the shape
-   of the virtualizer's partial-write producers (affine_lowering.ml AC6) — while a node decided
+   exempt by construction -- no interface, and exemption-dependent coverage is exactly the shape
+   of the virtualizer's partial-write producers (affine_lowering.ml AC6) -- while a node decided
    non-virtual AFTER [decide_placements] (a [check_and_store_virtual] legality rejection, the
    fan-in guard) is still reached. Controls pin the boundaries: coverage by a real prior write
    still suppresses the flag (routine-complete lowered flows emit the initialization before
@@ -18,13 +18,13 @@
    (the guards-taken contract; guard strictness is splice-only).
 
    Phase 2 (gh-617, decided as option 1) pins recompute-at-read as the semantics of deferred
-   (virtual) computations: a virtual node is a named computation, not a snapshot — inlining
+   (virtual) computations: a virtual node is a named computation, not a snapshot -- inlining
    evaluates it at the consumption site with whatever its materialized inputs hold AT THAT MOMENT.
    At the arrayjit level the recompute-vs-materialize semantics is deliberately not fixed; the
    executed legs pin both readings of one program text: the virtual arm observes the consumer's
    (or an intervening routine's) overwrite of the leaf, while the materialized twin snapshots the
-   leaf as of the deferring routine's execution. The two knobs users have — the memory-mode intent
-   and the choice of routine boundaries (routine execution is manual) — are exactly what the arms
+   leaf as of the deferring routine's execution. The two knobs users have -- the memory-mode intent
+   and the choice of routine boundaries (routine execution is manual) -- are exactly what the arms
    toggle. See "Recompute-at-read" in docs/lowering_and_inlining.md. *)
 
 open Base
@@ -38,13 +38,13 @@ let inputs (o : LL.optimized) =
   let (ins, _), _ = LL.input_and_output_nodes o in
   ins
 
-(* === Phase 1: gh-618 — the rmw exemption is not interface coverage (raw reads) === *)
+(* === Phase 1: gh-618 -- the rmw exemption is not interface coverage (raw reads) === *)
 
 let phase1 () =
   let mk = node_factory ~first_id:3600 ~dims:[| dim |] () in
   (* Copy-position reads of a DIFFERENT node after a partial write: the exemption matches on the
      index map alone, whichever nodes are involved, so pre-split ell read as covered and
-     classified output-only — its incoming cells 1.. feed out yet the interface said the entry
+     classified output-only -- its incoming cells 1.. feed out yet the interface said the entry
      value was ignorable (aliasing-eligible, dropped from link-time input verification). *)
   let ell = mk "ell" in
   materialize ell;
@@ -67,7 +67,7 @@ let phase1 () =
   p "copy-position raw reads: the uncovered cells read the incoming values"
     (same got [ Array.init dim ~f:(fun i -> if i = 0 then 5000. else ell_old.(i)) ]);
   (* True read-modify-write with no preceding initialization: x[i] = x[i] + a[i] consumes x's
-     entry values, so x is an input — the tracer-mirroring exemption must not classify it
+     entry values, so x is an input -- the tracer-mirroring exemption must not classify it
      output-only. *)
   let x = mk "x" in
   materialize x;
@@ -87,7 +87,7 @@ let phase1 () =
   in
   p "uninitialized accumulation: updated in place over the incoming values"
     (same got_rmw [ Array.init dim ~f:(fun i -> x_old.(i) +. a_vals.(i)) ]);
-  (* Control: coverage by a real prior write still suppresses the flag — the strict interface
+  (* Control: coverage by a real prior write still suppresses the flag -- the strict interface
      verdict must not overreach onto routine-complete accumulations, whose lowering emits the
      initialization first. *)
   let y = mk "y" in
@@ -108,8 +108,8 @@ let phase1 () =
   in
   p "zero-initialized accumulation: the sentinel seed is overwritten" (same got_ctrl [ b_vals ]);
   (* Placement-freedom control: an UNDECIDED partial-write producer consumed at the copy position
-     — the triangular-scatter genre of affine_lowering.ml's AC6 (injective, so no neutral init is
-     emitted; off-region cells fall back to the init the INLINING prepends) — must keep its
+     -- the triangular-scatter genre of affine_lowering.ml's AC6 (injective, so no neutral init is
+     emitted; off-region cells fall back to the init the INLINING prepends) -- must keep its
      virtualization eligibility: a virtual node has no interface, so the strict verdict binds
      only once a node is known non-virtual. The materialized reading of this genre is ell above;
      AC6 executes both readings. *)
@@ -130,8 +130,8 @@ let phase1 () =
   p "undecided partial-write producer: keeps its virtualization eligibility"
     (known_virtual o_und z);
   (* Late placement decision (review round 1, P1): an UNDECIDED node can become non-virtual
-     AFTER [decide_placements] — here [check_and_store_virtual] rejects the non-injective
-     multi-affine scatter map [s1+s2] during [virtual_llc] ([Non_virtual 51]) — and the strict
+     AFTER [decide_placements] -- here [check_and_store_virtual] rejects the non-injective
+     multi-affine scatter map [s1+s2] during [virtual_llc] ([Non_virtual 51]) -- and the strict
      verdict must still reach it: the classification closes over the settled placements in
      [reconcile_traced_store]. The scatter writes cells 0..3 of a 6-cell node, so the consumer's
      copy-position reads of cells 4..5 are exemption-dependent, and a decide-time-only strict
@@ -179,13 +179,13 @@ let phase1 () =
   p "guarded full write: raw guards-taken coverage keeps xg off read-before-write"
     (not (read_before_write o_guard xg))
 
-(* === Phase 2: gh-617 — recompute-at-read, and the knobs that change the observation === *)
+(* === Phase 2: gh-617 -- recompute-at-read, and the knobs that change the observation === *)
 
 let phase2 () =
   let mk = node_factory ~first_id:3700 ~dims:[| dim |] () in
   (* Virtual arm, consumer's own overwrite: routine A defers v := ell + 100 (deferral-only, so A
      optimizes away); routine B overwrites ell in full and THEN consumes v. The splice evaluates
-     f(ell) at the read — B's new values — and the full overwrite covers the spliced reads, so
+     f(ell) at the read -- B's new values -- and the full overwrite covers the spliced reads, so
      ell is not even an input of B. *)
   let ell = mk "ell2" in
   materialize ell;
@@ -206,7 +206,7 @@ let phase2 () =
       (loop_n s2 dim (set out [| iter s2 |] (get v [| iter s2 |])))
   in
   let o_b = LL.optimize ctx ~unoptim_ll_source:None ~ll_source:None ~name:"ssem_rar_b" [] llc_b in
-  p "overwrite-then-consume: the full overwrite covers the spliced reads — ell is not an input"
+  p "overwrite-then-consume: the full overwrite covers the spliced reads -- ell is not an input"
     ((not (read_before_write o_b ell)) && not (Set.mem (inputs o_b) ell));
   let ell_old = Array.init dim ~f:(fun i -> 41. +. Float.of_int i) in
   let got =
@@ -220,7 +220,7 @@ let phase2 () =
        ]);
   (* Virtual arm, intervening routine: A defers v2 := ell3 + 100; routine C (between A and the
      consumer, sharing the lineage and the execution context) overwrites ell3; routine B consumes
-     v2 and observes C's values — the deferred computation is index-parametric code, evaluated
+     v2 and observes C's values -- the deferred computation is index-parametric code, evaluated
      where it is read. *)
   let ell3 = mk "ell3" in
   materialize ell3;
@@ -260,9 +260,9 @@ let phase2 () =
   in
   p "intervening write: the consumer observes the intervening routine's values"
     (same got2 [ Array.init dim ~f:(fun i -> 3100. +. Float.of_int i) ]);
-  (* Materialized twin — the memory-mode-intent knob: the SAME program text with v3 declared
+  (* Materialized twin -- the memory-mode-intent knob: the SAME program text with v3 declared
      materialized computes it in routine A, so the consumer observes the snapshot of ell4 as of
-     A's execution, unaffected by B's overwrite. Placement selects which reading — both are
+     A's execution, unaffected by B's overwrite. Placement selects which reading -- both are
      legal, which is exactly the option-1 stance: arrayjit does not fix the semantics. *)
   let ell4 = mk "ell4" in
   materialize ell4;

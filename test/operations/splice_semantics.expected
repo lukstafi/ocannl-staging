@@ -12,7 +12,7 @@ non-injective scatter, undecided: not virtualized: true
 non-injective scatter, undecided: read-before-write despite deciding after the placement pass: true
 guarded full write: raw guards-taken coverage keeps xg off read-before-write: true
 recompute-at-read: routine A defers v: true
-overwrite-then-consume: the full overwrite covers the spliced reads — ell is not an input: true
+overwrite-then-consume: the full overwrite covers the spliced reads -- ell is not an input: true
 overwrite-then-consume: the splice observes the NEW ell (recompute-at-read): true
 intervening write: routine A defers v2: true
 intervening write: ell3 is an input of the consuming routine: true
