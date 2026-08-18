@@ -920,8 +920,18 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     let fp8_uniform_guard () =
       Utils.get_global_flag ~default:false ~arg_name:"prefer_backend_uniformity"
 
-    let fp8_from_float_fn () =
-      if fp8_uniform_guard () then "ocannl_single_to_fp8_uniform" else "(__hip_fp8_e5m2)"
+    (* Which spelling narrows a value of precision [from] to fp8. The guarded helpers are
+       per-source-width on purpose: a double handed to the float helper would narrow at the call
+       and round twice (gh-ocannl-648), which the platform's own cast does not do. *)
+    let fp8_from_prec_fn from =
+      if not (fp8_uniform_guard ()) then "(__hip_fp8_e5m2)"
+      else
+        match from with
+        | Ops.Double_prec _ -> "ocannl_double_to_fp8_uniform"
+        | _ -> "ocannl_single_to_fp8_uniform"
+
+    (* The operator bridges below compute in float, whatever the operands were stored at. *)
+    let fp8_from_float_fn () = fp8_from_prec_fn Ops.single
 
     let fp8_from_float doc =
       let open PPrint in
@@ -1447,7 +1457,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
          and a ternary would name it twice. With the guard off both arms are spelled exactly as
          before. *)
       | _, Fp8_prec _ -> (
-          let fn = fp8_from_float_fn () in
+          let fn = fp8_from_prec_fn from in
           match from with
           | Ops.Half_prec _ -> (fn ^ "(__half2float(", "))")
           | _ -> (fn ^ "(", ")"))

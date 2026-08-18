@@ -605,4 +605,14 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
     return (__hip_fp8_e5m2)(y);
 }|},
       [] );
+    (* The f64 source needs its own helper, not the one above: passing a double to a float
+       parameter narrows at the call, and narrowing twice breaks ties the platform's own one-step
+       cast gets right (gh-ocannl-648). The guard is otherwise identical — it must be
+       semantics-preserving everywhere except ROCm's broken window. *)
+    ( "ocannl_double_to_fp8_uniform",
+      {|__device__ __hip_fp8_e5m2 ocannl_double_to_fp8_uniform(double x) {
+    double y = (fabs(x) < 7.62939453125e-6) ? copysign(0.0, x) : x;
+    return (__hip_fp8_e5m2)(y);
+}|},
+      [] );
   ]
