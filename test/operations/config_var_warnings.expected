@@ -1,2 +1,4 @@
 OCANNL warning: unknown commandline argument "--ocannl-print_decimals-precision=7"
 OCANNL warning: unknown commandline argument "--ocannl-not-a-real-key=7"
+OCANNL warning: environment variable "OCANNL_BACKEDN" names no configuration key
+OCANNL warning: environment variable "ocannl-log_level" is not a spelling OCANNL reads; the environment spellings of log_level are ocannl_log_level and OCANNL_LOG_LEVEL

@@ -907,6 +907,36 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                    ^^ hardline ^^ rbrace))
           | _ -> None)
 
+    (* THE float-to-fp8 narrowing this backend emits — the three operator bridges below, which
+       compute in float and narrow the result, and [convert_precision]'s conversions. Under
+       [prefer_backend_uniformity] it is the guarded helper (gh-ocannl-647), otherwise the
+       platform's own cast; the two spellings are both [NAME(expr)], so one string serves.
+
+       One funnel rather than four call sites, because the first version of this guarded
+       [convert_precision] alone and left fp8 ARITHMETIC results narrowing through bare casts —
+       an fp8 [**.] whose f32 result lands in ROCm's broken window still produced a spurious
+       value with uniformity on (Codex P2 on PR #372). A fifth narrowing site cannot repeat that
+       without going through here. *)
+    let fp8_uniform_guard () =
+      Utils.get_global_flag ~default:false ~arg_name:"prefer_backend_uniformity"
+
+    (* Which spelling narrows a value of precision [from] to fp8. The guarded helpers are
+       per-source-width on purpose: a double handed to the float helper would narrow at the call
+       and round twice (gh-ocannl-648), which the platform's own cast does not do. *)
+    let fp8_from_prec_fn from =
+      if not (fp8_uniform_guard ()) then "(__hip_fp8_e5m2)"
+      else
+        match from with
+        | Ops.Double_prec _ -> "ocannl_double_to_fp8_uniform"
+        | _ -> "ocannl_single_to_fp8_uniform"
+
+    (* The operator bridges below compute in float, whatever the operands were stored at. *)
+    let fp8_from_float_fn () = fp8_from_prec_fn Ops.single
+
+    let fp8_from_float doc =
+      let open PPrint in
+      group (string (fp8_from_float_fn ()) ^^ parens doc)
+
     let rec binop_syntax prec v =
       (* The match stays exhaustive over (op, prec) -- that is what catches a newly added operator
          here -- but arms whose spelling is plain C delegate to {!C_syntax.default_binop_syntax}
@@ -935,7 +965,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
              so bridge fp8 math through float, mirroring the CC backend's fp8 handling. *)
           fun v1 v2 ->
             let fl v = string "(float)" ^^ parens v in
-            group (string "(__hip_fp8_e5m2)" ^^ parens (binop_syntax Ops.single v (fl v1) (fl v2)))
+            fp8_from_float (binop_syntax Ops.single v (fl v1) (fl v2))
       | Add, Half_prec _ -> func "__hadd"
       | Sub, Half_prec _ -> func "__hsub"
       | Mul, Half_prec _ -> func "__hmul"
@@ -1262,10 +1292,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           (* __hip_fp8_e5m2 defines no arithmetic operators, and its implicit conversion operators
              (float, double, int, char, ... in amd_hip_fp8.h) make the built-in operators ambiguous,
              so bridge fp8 math through float, mirroring the CC backend's fp8 handling. *)
-          fun expr ->
-            group
-              (string "(__hip_fp8_e5m2)"
-              ^^ parens (unop_syntax Ops.single v (string "(float)" ^^ parens expr)))
+          fun expr -> fp8_from_float (unop_syntax Ops.single v (string "(float)" ^^ parens expr))
       | Relu, Ops.Single_prec _ -> f "fmaxf(0.0, " ")"
       | Relu, Ops.Half_prec _ -> f "__hmax_nan(__ushort_as_half((unsigned short)0x0000U), " ")"
       | Relu, Ops.Byte_prec _ -> f "fmax(0, " ")"
@@ -1361,9 +1388,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
              so bridge fp8 math through float, mirroring the CC backend's fp8 handling. *)
           fun v1 v2 v3 ->
             let fl v = string "(float)" ^^ parens v in
-            group
-              (string "(__hip_fp8_e5m2)"
-              ^^ parens (ternop_syntax Ops.single v (fl v1) (fl v2) (fl v3)))
+            fp8_from_float (ternop_syntax Ops.single v (fl v1) (fl v2) (fl v3))
       | Ops.Where, _ ->
           (* The whole ternary must be parenthesized, not just the condition: C's [?:] binds looser
              than the surrounding arithmetic, so for an expression like [where(c,a,b) + 1] the
@@ -1427,7 +1452,15 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Bfloat16_prec _, Half_prec _ -> ("__float2half(__bfloat162float(", "))")
       | _, Bfloat16_prec _ -> ("__float2bfloat16((float)(", "))")
       | Bfloat16_prec _, _ -> ("(" ^ typ_of_prec to_ ^ ")(__bfloat162float(", "))")
-      | Half_prec _, Fp8_prec _ -> ("(__hip_fp8_e5m2)(__half2float(", "))")
+      (* Through the same funnel as the operator bridges. A helper and not a ternary wrapped
+         around the operand: a [convert_precision] pair brackets ONE occurrence of its expression,
+         and a ternary would name it twice. With the guard off both arms are spelled exactly as
+         before. *)
+      | _, Fp8_prec _ -> (
+          let fn = fp8_from_prec_fn from in
+          match from with
+          | Ops.Half_prec _ -> (fn ^ "(__half2float(", "))")
+          | _ -> (fn ^ "(", ")"))
       | Fp8_prec _, Half_prec _ -> ("__float2half((float)(", "))")
       | ( Fp8_prec _,
           (Byte_prec _ | Uint16_prec _ | Int32_prec _ | Uint32_prec _ | Int64_prec _ | Uint64_prec _)
@@ -1936,7 +1969,17 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
          && not (Utils.debug_log_from_routines ())
        then "graph-capture"
        else "no-graph-capture")
-      ^ if Utils.with_runtime_debug () then "/device-debug" else "/no-device-debug"
+      ^ (if Utils.with_runtime_debug () then "/device-debug" else "/no-device-debug")
+      (* The fp8 conversion guard (gh-ocannl-647) changes emitted code, so the regimes must not
+         share a cache entry. It sits in this backend's own tag rather than the shared codegen
+         gates, like [with_runtime_debug] above and for the same reason: no other backend reads
+         it this way. It does re-key HIP kernels that emit no fp8 conversion at all — the same
+         over-approximation the debug tag makes, and a constant one. *)
+      ^
+      if
+        Utils.get_global_flag ~default:false ~arg_name:"prefer_backend_uniformity"
+      then "/fp8-guard"
+      else "/fp8-native"
     in
     fun () -> { (Lazy.force limits) with Backend_intf.codegen_tag = Some (codegen_tag ()) }
 

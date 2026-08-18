@@ -31,6 +31,29 @@ open Base
 
 let config_file = "ocannl_config"
 
+(* Dune runs a scanning rule from the rule's own directory inside the build tree and hands it paths
+   relative to that directory. [%{workspace_root}] arrives as the way back out ("../.."), so the
+   number of its components says how many of the working directory's trailing components name the
+   rule's directory -- which turns those paths into repository-relative ones without a scan having
+   to assume what the build directory is called. Shared by the checks that read dune files, so that
+   two of them cannot disagree about what a path names. *)
+let split_path path = String.split_on_chars path ~on:[ '/'; '\\' ]
+
+let base_dir workspace_root =
+  let depth = List.count (split_path workspace_root) ~f:(String.equal "..") in
+  let cwd = List.filter (split_path (Stdlib.Sys.getcwd ())) ~f:(Fn.non String.is_empty) in
+  List.drop cwd (max 0 (List.length cwd - depth))
+
+let repo_relative base path =
+  let components =
+    List.fold (base @ split_path path) ~init:[] ~f:(fun acc component ->
+        match component with
+        | "" | "." -> acc
+        | ".." -> ( match acc with _ :: rest -> rest | [] -> [])
+        | component -> component :: acc)
+  in
+  String.concat ~sep:"/" (List.rev components)
+
 (** [in_subdir parent child] joins two relative directories, either of which may be empty or [.] —
     [(chdir . …)] and a plain [./] say "here", and saying it must not make a directory look like a
     different one. *)

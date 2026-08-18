@@ -125,11 +125,11 @@ let () =
   eprintf "machine effective_cpu_count: %d\n" effective;
   eprintf "machine hypervisor: %s\n"
     (match CT.hypervisor_present () with `Yes -> "yes" | `No -> "no" | `Unknown -> "unknown");
-  (* Hardware-effect hook, off in golden runs: with OCANNL_TEST_RESTRICT_MASK=<hex> set, apply
+  (* Hardware-effect hook, off in golden runs: with OCANNL_TOOL_TEST_RESTRICT_MASK=<hex> set, apply
      the process restriction and report (stderr) the affinity-respecting count before/after —
      verifying the setter stub end-to-end on a real machine, e.g. w8P on the gh-530 rog box via
-     OCANNL_TEST_RESTRICT_MASK=c03c03. *)
-  match Stdlib.Sys.getenv_opt "OCANNL_TEST_RESTRICT_MASK" with
+     OCANNL_TOOL_TEST_RESTRICT_MASK=c03c03. *)
+  match Stdlib.Sys.getenv_opt "OCANNL_TOOL_TEST_RESTRICT_MASK" with
   | None | Some "" -> ()
   | Some hex -> (
       let mask = Int64.of_string ("0x" ^ hex) in
