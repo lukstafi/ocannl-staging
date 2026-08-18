@@ -58,17 +58,17 @@ let phase1 () =
     loop ~upto:3 i (set y [| iter i |] (add (mul (get x [| iter i |]) (c 2.)) (c 1.)))
   in
   let xv = [| 1.5; 2.5; 3.5; 4.5 |] in
-  let opt, results =
-    optimize_and_execute ~name:"pls_pointwise" llc ~seed:[ (x, xv) ] ~read:[ y ]
-  in
-  let (inputs, outputs), _merge = LL.input_and_output_nodes opt in
-  p "phase1: the hand-built read-only node is a routine input" (Set.mem inputs x);
-  p "phase1: the written node is a routine output" (Set.mem outputs y);
-  match results with
-  | [ yv ] ->
-      p "phase1: executed values match the hand-built formula"
-        (close yv (Array.map xv ~f:(fun v -> (v *. 2.) +. 1.)))
-  | _ -> assert false
+  let opt = optimize ~name:"pls_pointwise" llc in
+  (* The I/O claims read [inputs]/[outputs] off the compiled routine itself, so they pin the
+     classification the link actually consumed, not a re-derivation of it (gh-ocannl-590). *)
+  let ctx, routine = link ~name:"pls_pointwise" opt in
+  p "phase1: the hand-built read-only node is a routine input" (Set.mem routine.Context.inputs x);
+  p "phase1: the written node is a routine output" (Set.mem routine.Context.outputs y);
+  let ctx = Context.set_values ctx x xv in
+  let ctx = Context.run ctx routine in
+  let yv = Context.get_values ctx y in
+  p "phase1: executed values match the hand-built formula"
+    (close yv (Array.map xv ~f:(fun v -> (v *. 2.) +. 1.)))
 
 (* The two sibling [Local_scope] operands of the gh-ocannl-561 sketch, with the overwrite of X where
    the scope-purity contract puts it — a statement of its own, after the reading statement:
@@ -118,22 +118,22 @@ let phase2 () =
       (loop ~upto:3 j (set x [| iter j |] (c 5.)))
   in
   let xv = [| 1.5; 2.5; 3.5; 4.5 |] in
-  let opt, results =
-    optimize_and_execute ~name:"pls_sibling_scopes" llc ~seed:[ (x, xv) ] ~read:[ y; x ]
-  in
+  let opt = optimize ~name:"pls_sibling_scopes" llc in
   (match Hashtbl.find opt.LL.traced_store x with
   | None -> p "phase2: X traced" false
   | Some traced -> p "phase2: X is classified read-before-write" traced.LL.read_before_write);
-  let (inputs, outputs), _merge = LL.input_and_output_nodes opt in
-  p "phase2: X is a routine input" (Set.mem inputs x);
-  p "phase2: X is also a routine output" (Set.mem outputs x);
-  match results with
-  | [ yv; xv_out ] ->
-      (* Both scopes' reads see X's INCOMING value; the later statement's write lands. *)
-      p "phase2: Y = 5*X_in (both scope operands read the input)"
-        (close yv (Array.map xv ~f:(fun v -> 5. *. v)));
-      p "phase2: X was overwritten by the following statement" (close xv_out [| 5.; 5.; 5.; 5. |])
-  | _ -> assert false
+  (* As in phase 1, the routine's own [inputs]/[outputs] carry the classification under test:
+     read-before-write is what keeps X a materialized input (gh-ocannl-590). *)
+  let ctx, routine = link ~name:"pls_sibling_scopes" opt in
+  p "phase2: X is a routine input" (Set.mem routine.Context.inputs x);
+  p "phase2: X is also a routine output" (Set.mem routine.Context.outputs x);
+  let ctx = Context.set_values ctx x xv in
+  let ctx = Context.run ctx routine in
+  let yv = Context.get_values ctx y and xv_out = Context.get_values ctx x in
+  (* Both scopes' reads see X's INCOMING value; the later statement's write lands. *)
+  p "phase2: Y = 5*X_in (both scope operands read the input)"
+    (close yv (Array.map xv ~f:(fun v -> 5. *. v)));
+  p "phase2: X was overwritten by the following statement" (close xv_out [| 5.; 5.; 5.; 5. |])
 
 (* gh-ocannl-584: the same program with the overwrite moved INTO [scopeB]'s body,
 
