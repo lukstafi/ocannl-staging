@@ -407,7 +407,17 @@ type optimize_ctx = {
           that would happen up till that point. Within the code blocks paired with an index tuple,
           all assignments and accesses must happen via the index tuple; if this is not the case for
           some assignment, the node cannot be virtual. Currently, we only allow for-loop symbols in
-          assignment indices of virtual nodes. *)
+          assignment indices of virtual nodes.
+
+          A stored computation is a NAMED COMPUTATION, NOT A SNAPSHOT (gh-617, decided as
+          recompute-at-read): inlining evaluates it at the consumption site with whatever its
+          materialized inputs hold at that moment, so a write to one of its leaves between the
+          deferring routine and a consuming read is observed by the splice — whereas the
+          materialized reading of the same program snapshots the leaf at the deferring routine's
+          execution point. The recompute-vs-materialize semantics is deliberately not fixed at
+          this level; users select the reading via the memory-mode intent and via routine
+          boundaries (routine execution is manual). See "Recompute-at-read" in
+          docs/lowering_and_inlining.md. *)
   placements : Tnode.Placements.t;
       (** Per-compilation-lineage memory-mode resolution
           (docs/proposals/context-scoped-memory-modes.md): the pipeline's placement decisions

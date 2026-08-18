@@ -274,9 +274,13 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   Corollary (gh-ocannl-611): a routine whose every statement virtualizes away is LEGAL —
   cleanup's top-level elision degenerates to `Noop`, with an EMPTY interface — its stored
   computations persist in the lineage for later consumers, so "compile a deferral-only routine"
-  is a supported incremental-compilation move. Whether deferred computations should observe
-  inputs mutated between deferral and consumption is gh-ocannl-617. The acceptance pins are
-  `test/operations/virtual_chain_fanin.ml` phases 3–5.
+  is a supported incremental-compilation move. Deferred computations DO observe inputs mutated
+  between deferral and consumption — recompute-at-read is the decided semantics (gh-ocannl-617,
+  option 1): a virtual node is a named computation, not a snapshot, and at the arrayjit level
+  the recompute-vs-materialize semantics is deliberately not fixed — the memory-mode intent and
+  the choice of routine boundaries are the user's knobs (see "Recompute-at-read" in
+  docs/lowering_and_inlining.md; `splice_semantics.ml` phase 2 pins both readings of one
+  program text). The acceptance pins are `test/operations/virtual_chain_fanin.ml` phases 3–5.
 - **A knob read after lowering cannot reach a digest over lowered code** — it must be carried by a
   cache-key component or the cache replays across regimes (gh-ocannl-568: 5.9x). So every config
   key is classified in `Utils.config_key_classification` as code-borne / `Keyed <component>` /

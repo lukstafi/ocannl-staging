@@ -12,7 +12,17 @@
    initialization before accumulations, so they are unaffected), and an UNDECIDED node keeps its
    virtualization eligibility — a virtual node has no interface, and exemption-dependent coverage
    is exactly the shape of the virtualizer's partial-write producers (affine_lowering.ml AC6), so
-   the strict verdict binds only once a node is known non-virtual. *)
+   the strict verdict binds only once a node is known non-virtual.
+
+   Phase 2 (gh-617, decided as option 1) pins recompute-at-read as the semantics of deferred
+   (virtual) computations: a virtual node is a named computation, not a snapshot — inlining
+   evaluates it at the consumption site with whatever its materialized inputs hold AT THAT MOMENT.
+   At the arrayjit level the recompute-vs-materialize semantics is deliberately not fixed; the
+   executed legs pin both readings of one program text: the virtual arm observes the consumer's
+   (or an intervening routine's) overwrite of the leaf, while the materialized twin snapshots the
+   leaf as of the deferring routine's execution. The two knobs users have — the memory-mode intent
+   and the choice of routine boundaries (routine execution is manual) — are exactly what the arms
+   toggle. See "Recompute-at-read" in docs/lowering_and_inlining.md. *)
 
 open Base
 open Ll_test
@@ -117,4 +127,130 @@ let phase1 () =
   p "undecided partial-write producer: keeps its virtualization eligibility"
     (known_virtual o_und z)
 
-let () = phase1 ()
+(* === Phase 2: gh-617 — recompute-at-read, and the knobs that change the observation === *)
+
+let phase2 () =
+  let mk = node_factory ~first_id:3700 ~dims:[| dim |] () in
+  (* Virtual arm, consumer's own overwrite: routine A defers v := ell + 100 (deferral-only, so A
+     optimizes away); routine B overwrites ell in full and THEN consumes v. The splice evaluates
+     f(ell) at the read — B's new values — and the full overwrite covers the spliced reads, so
+     ell is not even an input of B. *)
+  let ell = mk "ell2" in
+  materialize ell;
+  let v = mk "v" in
+  let out = mk "rarout" in
+  materialize out;
+  let ctx = LL.empty_optimize_ctx () in
+  let llc_a =
+    let s = sym () in
+    loop_n s dim (set v [| iter s |] (add (get ell [| iter s |]) (c 100.)))
+  in
+  let o_a = LL.optimize ctx ~unoptim_ll_source:None ~ll_source:None ~name:"ssem_rar_a" [] llc_a in
+  p "recompute-at-read: routine A defers v" (known_virtual o_a v);
+  let llc_b =
+    let s = sym () and s2 = sym () in
+    seq
+      (loop_n s dim (set ell [| iter s |] (ramp 2000. s)))
+      (loop_n s2 dim (set out [| iter s2 |] (get v [| iter s2 |])))
+  in
+  let o_b = LL.optimize ctx ~unoptim_ll_source:None ~ll_source:None ~name:"ssem_rar_b" [] llc_b in
+  p "overwrite-then-consume: the full overwrite covers the spliced reads — ell is not an input"
+    ((not (read_before_write o_b ell)) && not (Set.mem (inputs o_b) ell));
+  let ell_old = Array.init dim ~f:(fun i -> 41. +. Float.of_int i) in
+  let got =
+    execute ~name:"ssem_rar_b" o_b ~seed:[ (ell, ell_old); (out, blank dim) ] ~read:[ out; ell ]
+  in
+  p "overwrite-then-consume: the splice observes the NEW ell (recompute-at-read)"
+    (same got
+       [
+         Array.init dim ~f:(fun i -> 2100. +. Float.of_int i);
+         Array.init dim ~f:(fun i -> 2000. +. Float.of_int i);
+       ]);
+  (* Virtual arm, intervening routine: A defers v2 := ell3 + 100; routine C (between A and the
+     consumer, sharing the lineage and the execution context) overwrites ell3; routine B consumes
+     v2 and observes C's values — the deferred computation is index-parametric code, evaluated
+     where it is read. *)
+  let ell3 = mk "ell3" in
+  materialize ell3;
+  let v2 = mk "v2" in
+  let out2 = mk "interout" in
+  materialize out2;
+  let ctx2 = LL.empty_optimize_ctx () in
+  let llc_a2 =
+    let s = sym () in
+    loop_n s dim (set v2 [| iter s |] (add (get ell3 [| iter s |]) (c 100.)))
+  in
+  let o_a2 =
+    LL.optimize ctx2 ~unoptim_ll_source:None ~ll_source:None ~name:"ssem_inter_a" [] llc_a2
+  in
+  p "intervening write: routine A defers v2" (known_virtual o_a2 v2);
+  let llc_c =
+    let s = sym () in
+    loop_n s dim (set ell3 [| iter s |] (ramp 3000. s))
+  in
+  let o_c =
+    LL.optimize ctx2 ~unoptim_ll_source:None ~ll_source:None ~name:"ssem_inter_c" [] llc_c
+  in
+  let llc_b2 =
+    let s = sym () in
+    loop_n s dim (set out2 [| iter s |] (get v2 [| iter s |]))
+  in
+  let o_b2 =
+    LL.optimize ctx2 ~unoptim_ll_source:None ~ll_source:None ~name:"ssem_inter_b" [] llc_b2
+  in
+  p "intervening write: ell3 is an input of the consuming routine"
+    (Set.mem (inputs o_b2) ell3);
+  let ell3_old = Array.init dim ~f:(fun i -> 51. +. Float.of_int i) in
+  let cctx = Context.auto () in
+  let cctx = run ~ctx:cctx ~name:"ssem_inter_c" o_c ~seed:[ (ell3, ell3_old) ] in
+  let got2 =
+    execute ~ctx:cctx ~name:"ssem_inter_b" o_b2 ~seed:[ (out2, blank dim) ] ~read:[ out2 ]
+  in
+  p "intervening write: the consumer observes the intervening routine's values"
+    (same got2 [ Array.init dim ~f:(fun i -> 3100. +. Float.of_int i) ]);
+  (* Materialized twin — the memory-mode-intent knob: the SAME program text with v3 declared
+     materialized computes it in routine A, so the consumer observes the snapshot of ell4 as of
+     A's execution, unaffected by B's overwrite. Placement selects which reading — both are
+     legal, which is exactly the option-1 stance: arrayjit does not fix the semantics. *)
+  let ell4 = mk "ell4" in
+  materialize ell4;
+  let v3 = mk "v3" in
+  materialize v3;
+  let out3 = mk "snapout" in
+  materialize out3;
+  let ctx3 = LL.empty_optimize_ctx () in
+  let llc_a3 =
+    let s = sym () in
+    loop_n s dim (set v3 [| iter s |] (add (get ell4 [| iter s |]) (c 100.)))
+  in
+  let o_a3 =
+    LL.optimize ctx3 ~unoptim_ll_source:None ~ll_source:None ~name:"ssem_snap_a" [] llc_a3
+  in
+  p "materialized twin: v3 stays non-virtual" (known_non_virtual o_a3 v3);
+  let llc_b3 =
+    let s = sym () and s2 = sym () in
+    seq
+      (loop_n s dim (set ell4 [| iter s |] (ramp 4000. s)))
+      (loop_n s2 dim (set out3 [| iter s2 |] (get v3 [| iter s2 |])))
+  in
+  let o_b3 =
+    LL.optimize ctx3 ~unoptim_ll_source:None ~ll_source:None ~name:"ssem_snap_b" [] llc_b3
+  in
+  let ell4_old = Array.init dim ~f:(fun i -> 61. +. Float.of_int i) in
+  let cctx3 = Context.auto () in
+  let cctx3 = run ~ctx:cctx3 ~name:"ssem_snap_a" o_a3 ~seed:[ (ell4, ell4_old) ] in
+  let got3 =
+    execute ~ctx:cctx3 ~name:"ssem_snap_b" o_b3
+      ~seed:[ (out3, blank dim) ]
+      ~read:[ out3; ell4 ]
+  in
+  p "materialized twin: the consumer observes the deferring routine's snapshot"
+    (same got3
+       [
+         Array.map ell4_old ~f:(fun e -> e +. 100.);
+         Array.init dim ~f:(fun i -> 4000. +. Float.of_int i);
+       ])
+
+let () =
+  phase1 ();
+  phase2 ()
