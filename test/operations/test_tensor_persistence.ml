@@ -404,12 +404,16 @@ let () =
 (* === Test 15: Saving over a checkpoint whose mappings are still live (gh-ocannl-588) === *)
 
 (* [save] writes a temp file and renames it over the target. On POSIX that replaces the directory
-   entry and leaves the inode any live mapping was taken from alone; Windows keeps the file object
-   referenced for as long as a view of it exists, so the replacing rename is expected to fail there
-   -- which is why [checkpoint_load_mmap] defaults off on Windows. The platform-specific half of the
-   observation goes to stderr; what stdout claims is that the platform behaves the way the default
-   for it assumes. *)
+   entry and leaves the inode the mapping was taken from alone, so a live mapping keeps reading what
+   it read before. Windows was expected not to allow it at all -- a mapped view keeps the file
+   object referenced, so the replacing rename should fail with a sharing violation -- which is why
+   [checkpoint_load_mmap] defaulted off there. This measures both halves: whether the save succeeds,
+   and, since a successful rename could equally mean the mapping now sees the new bytes, whether the
+   mapping still reads the values it was taken from. The platform-specific detail goes to stderr, so
+   the golden says the same thing everywhere. *)
 let live_mapping_path = tmp_file "live_mapping"
+let v1 = [| 1.0; 2.0; 3.0; 4.0 |]
+let v2 = [| 9.0; 8.0; 7.0; 6.0 |]
 
 let attempt what f =
   match f () with
@@ -425,7 +429,7 @@ let () =
   let path = live_mapping_path in
   Tensor.unsafe_reinitialize ();
   let ctx = Context.cpu () in
-  let ctx, tn = make_tn ctx ~id:0 ~label:[ "w" ] Ops.single [| 4 |] [| 1.0; 2.0; 3.0; 4.0 |] in
+  let ctx, tn = make_tn ctx ~id:0 ~label:[ "w" ] Ops.single [| 4 |] v1 in
   Persistence.save ~ctx ~appending:false (Set.of_list (module Tn) [ tn ]) path;
   Tensor.unsafe_reinitialize ();
   let ctx = Context.cpu () in
@@ -434,34 +438,34 @@ let () =
   let mapped_after, _ = Persistence.ingestion_counts () in
   Verdict.p "the reloaded payload is mapped, whatever the platform default"
     (mapped_after - mapped_before = 1);
-  (* [loaded] is the argument of the save, so its mappings are live across it by construction. *)
-  let live_ok =
+  let tn = List.hd_exn (Set.to_list loaded) in
+  (* The mapping itself, held in a local across the save below -- reading it afterwards is what
+     makes this an experiment about a *live* mapping, not one the GC may already have dropped. *)
+  let mapping = Lazy.force (Option.value_exn (Ir.Host_inits.find tn)) in
+  Verdict.p "the mapping reads the checkpoint's values"
+    (Array.equal Float.equal (Nd.retrieve_flat_values mapping) v1);
+  (* Save different values over the same path. [set_values] goes through a fresh host buffer, so it
+     does not disturb the mapping. *)
+  let ctx = Context.set_values ctx tn v2 in
+  let saved =
     attempt "save over a live mapping" (fun () ->
         Persistence.save ~ctx ~appending:false loaded path)
   in
-  Verdict.p "saving over live mappings matches this platform's checkpoint_load_mmap default"
-    (Bool.equal live_ok (not Stdlib.Sys.win32));
-  Stdio.printf "  values after the save attempt: [%s]\n"
-    (String.concat ~sep:" | " (List.map (Set.to_list loaded) ~f:(fun tn -> show ctx tn)))
+  Verdict.p "saving over a checkpoint with a live mapping succeeds" saved;
+  Verdict.p "the live mapping still reads the values it was taken from"
+    (Array.equal Float.equal (Nd.retrieve_flat_values mapping) v1)
 
-(* A fresh top-level block, so the previous one's context and loaded nodes are out of scope and the
-   collection below can actually unmap. Whether dropping them is enough to make the rename succeed
-   is what separates "no mapped loads on Windows" from the narrower "do not save over a path whose
-   mapped nodes are still reachable". *)
+(* A fresh top-level block, so the previous one's mapping, context and nodes are out of scope. *)
 let () =
   Tensor.unsafe_reinitialize ();
   Stdlib.Gc.full_major ();
-  Stdlib.Gc.full_major ();
   let ctx = Context.cpu () in
-  let ctx, tn = make_tn ctx ~id:0 ~label:[ "w" ] Ops.single [| 4 |] [| 5.0; 6.0; 7.0; 8.0 |] in
-  let dropped_ok =
-    attempt "save after dropping the mapped nodes" (fun () ->
-        Persistence.save ~ctx ~appending:false (Set.of_list (module Tn) [ tn ]) live_mapping_path)
-  in
-  Verdict.p "saving over a path whose mapped nodes were dropped succeeds" dropped_ok;
-  if Stdlib.Sys.file_exists live_mapping_path then Stdlib.Sys.remove live_mapping_path;
-  (* A save whose rename fails leaves its temp file behind. *)
-  let tmp = live_mapping_path ^ ".tmp" in
-  if Stdlib.Sys.file_exists tmp then Stdlib.Sys.remove tmp;
+  let ctx, reloaded = Persistence.load ~ctx ~mmap:true live_mapping_path in
+  let tn = List.hd_exn (Set.to_list reloaded) in
+  Verdict.p "the file on disk holds what the save wrote"
+    (Array.equal Float.equal (Context.get_values ctx tn) v2);
+  (* A save whose rename fails leaves its temp file behind, so clean up both. *)
+  List.iter [ live_mapping_path; live_mapping_path ^ ".tmp" ] ~f:(fun path ->
+      if Stdlib.Sys.file_exists path then Stdlib.Sys.remove path);
 
   Stdio.printf "=== All persistence tests completed ===\n"

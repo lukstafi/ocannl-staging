@@ -68,7 +68,8 @@ Caught: restore: padding mismatch for tensor n0
 Caught a payload-past-end-of-file failure: true
 === Test 15: Save over a live mapped checkpoint ===
 the reloaded payload is mapped, whatever the platform default: true
-saving over live mappings matches this platform's checkpoint_load_mmap default: true
-  values after the save attempt: [1.0; 2.0; 3.0; 4.0]
-saving over a path whose mapped nodes were dropped succeeds: true
+the mapping reads the checkpoint's values: true
+saving over a checkpoint with a live mapping succeeds: true
+the live mapping still reads the values it was taken from: true
+the file on disk holds what the save wrote: true
 === All persistence tests completed ===
