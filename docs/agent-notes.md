@@ -984,15 +984,23 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   never requesting more — and gated on that AVX2 stage having fired, so `cc_backend_simd_flags=none`
   still answers 16. Worth 1.7x on the packed f32 GEBP of `bin/narrow_gebp_bench` at n = 512 on
   Zen 5 (225.7 vs 130.5 GFLOP/s; f16 189.6 vs 108.1, bf16 140.6 vs 95.1), checksums identical.
-- **A single width per machine would make a wider machine emit LESS vector code.** Every
-  explicit-SIMD rendering declines below one full vector, so at 64 bytes an f32 loop of extent
-  8..15 — and a `Tile_mma` column extent in that range — falls to the serial or scalar path that
-  the same code vectorizes at 32. `Backend_intf.simd_lanes_for` is therefore what picks a lane
-  count: the widest vector the extent can fill, halving to a floor of `min vector_bytes 32`. The
-  floor is not cosmetic — degrading below the machine's pre-widening width would newly vectorize
-  loops that render serially today, and a vector accumulation reassociates, so that is a numerics
-  change rather than a scheduling one. Autotune's seeding pre-filter calls the same function, or it
-  would withhold candidates the renderer would in fact tile.
+- **A single width per machine would make a wider machine emit LESS vector code, and "the widest
+  that fits" is still not enough.** Every explicit-SIMD rendering declines below one full vector,
+  so at 64 bytes an f32 loop of extent 8..15 — and a `Tile_mma` column extent in that range — falls
+  to the serial or scalar path that the same code vectorizes at 32. And at extent 40, 16 lanes
+  cover 32 columns and peel 8 while 8 lanes divide it evenly: the wide machine running the narrow
+  one's kernel plus a scalar tail. So the width is RANKED over a ladder
+  (`Backend_intf.simd_lane_ladder`, halving to a floor of `min vector_bytes 32`): the loop
+  renderings minimize trips (`extent / lanes` vector steps plus `extent mod lanes` scalar
+  iterations — one instruction per body op either way, so no fitted constant is needed), and the
+  register tiling folds the ladder into the peel-cost search it already ran over `rn`. The
+  register-pressure cap stays keyed on the MACHINE's width: stepping down does not shrink the
+  register file, which is why n = 40 still comes out ahead on the wider machine (118.0 GFLOP/s at
+  a 4x5 tile of 8-lane vectors against the 32-byte machine's 103.3 at 4x1). The floor is not
+  cosmetic — degrading below the machine's pre-widening width would newly vectorize loops that
+  render serially today, and a vector accumulation reassociates, so that is a numerics change
+  rather than a scheduling one. Autotune's seeding pre-filter calls the same function, or it would
+  withhold candidates the renderer would in fact tile.
 - Computing fp16 in fp16 on a *promoted* target is a ~18x loss against f32-compute-over-fp16
   (measured, same bench) — the reason `fp16_arithmetic` is ignored off-native and pure-f16 seeds
   gate on `hardware_limits.native_fp16_arithmetic`. The decisive pure-f16-vs-f32-GEBP measurement

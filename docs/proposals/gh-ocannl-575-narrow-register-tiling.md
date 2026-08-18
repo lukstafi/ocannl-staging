@@ -269,11 +269,17 @@ stand-in micro-kernel of the same tile shape measures the arm at 2.27x the per-l
 146 stack references against 290 / 16 / 0) — real hardware, but not the emitted kernel, so it
 corroborates the census rather than replacing it.
 
-Widening a width cannot be done by widening one number: every rendering here declines below one
+Widening a width cannot be done by widening one number. Every rendering here declines below one
 full vector, so 64 bytes alone would drop f32 extents of 8..15 — loop and micro-kernel column
-extent alike — to the paths 32 bytes vectorizes. `Backend_intf.simd_lanes_for` picks the widest
-vector the extent can fill instead, halving to a floor of `min vector_bytes 32`, and seeding calls
-the same function so it cannot be stricter than the renderer.
+extent alike — to the paths 32 bytes vectorizes; and an extent of 40 peels 8 columns at 16 lanes
+where 8 lanes divide it, which is how `schedule_mma_matmul`'s extent-adapted leg caught the naive
+version of this change. The width is therefore ranked over a ladder
+(`Backend_intf.simd_lane_ladder`, halving to a floor of `min vector_bytes 32`): loops minimize
+trips (vector steps plus scalar remainder iterations), and the register tiling extends its
+peel-cost search from `rn` alone to `(lanes, rn)`. The register-pressure cap stays keyed on the
+machine's width, so the wider machine still wins at n = 40 — 118.0 GFLOP/s at a 4x5 tile of 8-lane
+vectors against 103.3 at the 4x1 a 32-byte machine's cap allows. Seeding calls the same function,
+so it cannot be stricter than the renderer.
 
 The AVX512-FP16 rows stay compile-checked: no AMD part implements AVX512-FP16, and this fleet's
 only native-fp16 hardware is ARM, which takes the NEON rows.
