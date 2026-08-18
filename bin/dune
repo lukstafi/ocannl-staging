@@ -1,3 +1,14 @@
+; The commandline split every tool here needs: positional geometry beside the library's
+; --ocannl_* configuration flags (gh-ocannl-634). A library rather than a module shared by
+; (modules ...) lists, because dune allows a module in only one stanza, and because two test
+; executables outside this directory parse their arguments the same way.
+
+(library
+ (name bench_args)
+ (package neural_nets_lib)
+ (modules bench_args)
+ (libraries base))
+
 (executable
  (package neural_nets_lib)
  (public_name compilation_speed_benchmark)
@@ -13,7 +24,7 @@
  (public_name schedule_bench)
  (name schedule_bench)
  (modules schedule_bench)
- (libraries ocannl base stdio time_now)
+ (libraries ocannl base stdio time_now bench_args)
  (preprocess
   (pps ppx_here ppx_ocannl))
  (modes exe))
@@ -23,7 +34,7 @@
  (public_name cpu_vectorization_bench)
  (name cpu_vectorization_bench)
  (modules cpu_vectorization_bench)
- (libraries ocannl base stdio time_now)
+ (libraries ocannl base stdio time_now bench_args)
  (preprocess
   (pps ppx_here ppx_ocannl))
  (modes exe))
@@ -33,7 +44,7 @@
  (public_name narrow_storage_bench)
  (name narrow_storage_bench)
  (modules narrow_storage_bench)
- (libraries ocannl base stdio time_now)
+ (libraries ocannl base stdio time_now bench_args)
  (preprocess
   (pps ppx_here ppx_ocannl))
  (modes exe))
@@ -43,7 +54,7 @@
  (public_name narrow_gebp_bench)
  (name narrow_gebp_bench)
  (modules narrow_gebp_bench)
- (libraries ocannl base stdio time_now)
+ (libraries ocannl base stdio time_now bench_args)
  (preprocess
   (pps ppx_here ppx_ocannl))
  (modes exe))

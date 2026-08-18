@@ -1472,6 +1472,16 @@ that they earn a lookup rather than always-loaded space.
   (`Utils.cmdline_var_prefixes`) is also what the unknown-argument warning matches against — do not
   give it a parser of its own, which is how it came to warn about arguments the reader applied and
   stay silent about ones it ignored.
+- A `bin/` tool's own arguments are POSITIONAL and share the commandline with the library's
+  `--ocannl_*` settings, so every one of them splits argv the same way — through `Bench_args`
+  (`bin/bench_args.ml`, gh-ocannl-634), not a hand-rolled filter. An option is `--`-prefixed or a
+  `-` followed by a non-digit, a lone `--` ends the options, and `Bench_args.int` range-checks each
+  argument where it is read (`~least:0` for a documented zero). The filter that reads naturally —
+  drop everything starting with `-` — is the bug this replaced: it eats a negative extent, and with
+  several positionals that shifts every later argument one slot left, so the bench measures a
+  geometry nobody asked for and reports a plausible number for it. Review found that same defect in
+  two separate copies of the idiom. `test/operations/bench_args_parsing` pins the predicate, the
+  slot alignment and the refusals; it links `bench_args` alone, no backend.
 - An OCANNL-linked executable's stdout belongs to the program, not to the library: the config
   startup chatter (welcome message, `log_config_sourcing` trace, profile banner) and every other
   library diagnostic go to stderr. That is what lets a tool make stdout a data channel — the
