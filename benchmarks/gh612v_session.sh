@@ -50,6 +50,22 @@ export EXPECT_STEPS=8
 # session ran under `taskset -c 0-15` (the CPU/iGPU contention on this APU is what report-gh612-hip.md
 # had to discard a whole batch over), and gh612_cells.sh would otherwise take an inherited PIN.
 export PIN="taskset -c 0-15"
+export ARCH=gfx1151
+export PROFILE_RUNS=3
+# EXPECT_RUNS/EXPECT_CELLS/FIRST_REP are set per invocation below, so they are cleared rather than
+# pinned: an inherited value must not leak into a block that does not set one.
+unset EXPECT_RUNS EXPECT_CELLS FIRST_REP
+# The wrapper's own memo state, which is caller-controllable otherwise: an exported TREES_VALIDATED
+# naming a role and path skips that tree's entire validation, and the manifests are then written
+# from an unvalidated checkout. Internal state gets initialized, not defaulted.
+TREES_VALIDATED=""
+ROLES_CHECKED=""
+# Every variable gh612_cells.sh reads is now either pinned above (what the report claims) or set per
+# invocation. That enumeration is the point: three review rounds each found "one more inherited
+# value", so the list is closed against the driver's own reads rather than extended one name at a
+# time -- `grep -o '\${[A-Z_]*[:-]' gh612_cells.sh` is how it was checked, and OUT_ROOT plus the
+# three tree paths are the deliberate remainder, since they say where to run rather than what is
+# being certified.
 # Defaults relative to THIS checkout, matching where the report's Reproduction block creates them
 # (`../wt-gh612v-*` from the repo root) -- author-absolute defaults made the published recipe fail on
 # its first command for anyone whose checkout is not at /home/lukstafi/ocannl-staging. Overridable,
