@@ -73,14 +73,24 @@ abort() { echo "format-sweep: $*" >&2; exit 1; }
 # loudly (its designed behavior) instead of starting dune under the rewrite;
 # the lock is released around the sweep's own test phases, which take it
 # themselves. Waits up to just above test-run's 3600s cap; returns 1 past it.
+# $1 (optional): wait bound in seconds; defaults to just above test-run's
+# 3600s cap. cleanup passes a short bound instead -- a scheduler's
+# TERM-to-KILL grace would not survive a long wait there.
 hold_test_run_lock() {
+  local bound=${1:-3900} rc=0
   exec 7>>"$ROOT/.test-run.lock" || return 1
-  perl -e 'use Fcntl ":flock";
-           exit 0 if flock(STDIN, LOCK_EX | LOCK_NB);
-           print STDERR "format-sweep: waiting for the active tools/test-run.sh run to finish...\n";
-           alarm 3900; $SIG{ALRM} = sub { exit 1 };
-           exit(flock(STDIN, LOCK_EX) ? 0 : 1)' <&7 \
-    || { exec 7>&- || true; return 1; }
+  if ! perl -e 'use Fcntl ":flock"; exit(flock(STDIN, LOCK_EX | LOCK_NB) ? 0 : 1)' <&7; then
+    # The waiter runs as a background child under an interruptible `wait`:
+    # a foreground perl would defer INT/TERM for the whole wait (see
+    # run_phase below for the same pattern and why).
+    echo "format-sweep: waiting for the active tools/test-run.sh run to finish..." >&2
+    perl -e 'use Fcntl ":flock"; alarm '"$bound"'; $SIG{ALRM} = sub { exit 1 };
+             exit(flock(STDIN, LOCK_EX) ? 0 : 1)' <&7 &
+    PHASE_PID=$!
+    wait "$PHASE_PID" || rc=$?
+    PHASE_PID=""
+    [ "$rc" -eq 0 ] || { exec 7>&- || true; return 1; }
+  fi
   # Clear stale ownership metadata now that WE hold the flock: a completed
   # earlier phase leaves .owner naming its finished run, and test-run's
   # `stop` would otherwise attribute our held lock to that run and TERM its
@@ -131,8 +141,9 @@ BASE=""
 cleanup() {
   if [ -n "$BASE" ] && [ "$KEEP" = "0" ]; then
     # Hold the test-run lock THROUGH the reset -- releasing between waiting
-    # and resetting would let a fresh run start dune exactly then.
-    hold_test_run_lock \
+    # and resetting would let a fresh run start dune exactly then. Short
+    # bound: a KILL chasing the TERM must not find us still waiting here.
+    hold_test_run_lock 60 \
       || echo "format-sweep: warning: resetting without the test-run lock (held past the bound)" >&2
     git reset -q --hard "$BASE"
     release_test_run_lock
@@ -266,6 +277,7 @@ $STALE" >&2
 fi
 
 BASE=$(git rev-parse HEAD) # arms cleanup()'s reset from here on
+SNAP_TREE=$(tree_hash)     # clean at BASE; every rewrite re-baselines it
 
 # --- Format / test / promote to a fixed point --------------------------------
 
@@ -278,6 +290,9 @@ while :; do
 likely an ocamlformat-hostile golden missing from .ocamlformat-ignore (see header)"
   hold_test_run_lock \
     || abort "a tools/test-run.sh run held its lock past the bound; giving up"
+  # The lock wait can be long; a foreign edit made during it must not be
+  # swept into the formatting about to run.
+  assert_tree_unchanged
   echo "format-sweep: round $iter: formatting"
 
   if ! fmt_clean; then
@@ -324,6 +339,7 @@ likely an ocamlformat-hostile golden missing from .ocamlformat-ignore (see heade
   # CRLF into the goldens.
   hold_test_run_lock \
     || abort "a tools/test-run.sh run held its lock past the bound; giving up"
+  assert_tree_unchanged # same long-wait window as the pre-fmt hold
   # -u, not -A: the baseline must not stage untracked artifacts a failing
   # test may have left, or they would ride the final `git add -u` unnoticed.
   git add -u # stage the post-format pre-promote state, the validation baseline
@@ -354,6 +370,7 @@ likely an ocamlformat-hostile golden missing from .ocamlformat-ignore (see heade
   done < <(git diff --name-only)
   [ -z "$BAD" ] \
     || abort "promotion changed more than source locations in:$BAD -- a real output change, not formatting drift"
+  SNAP_TREE=$SNAP_AFTER # the promoted state is the next pre-rewrite baseline
   release_test_run_lock # the next round's test phases take it themselves
 done
 
