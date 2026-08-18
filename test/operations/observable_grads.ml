@@ -50,7 +50,7 @@ let fused () =
   let sgd = Train.sgd_update ~learning_rate l in
   let ctx = Train.init_params ctx IDX.empty l in
   let routine = Train.to_routine ctx IDX.empty (Asgns.sequence [ update; sgd ]) in
-  let ctx = Context.run (Context.context routine) routine in
+  let ctx = Context.run routine.Context.context routine in
   let p = param_by_label l "p" in
   show_placement "fused grad" ctx (grad_of p);
   show_values "param after one fused step (expect p - 0.1*xin = 1.6 2.5)" ctx p.Tensor.value
@@ -87,10 +87,10 @@ let split_to_routine () =
   let sgd = Train.sgd_update ~learning_rate l in
   let ctx = Train.init_params ctx IDX.empty l in
   let gu_routine = Train.to_routine ctx IDX.empty update in
-  let sgd_routine = Train.to_routine (Context.context gu_routine) IDX.empty sgd in
+  let sgd_routine = Train.to_routine gu_routine.Context.context IDX.empty sgd in
   (* Run and probe through the routines' own contexts: those carry the allocations. *)
-  let (_ : Context.t) = Context.run (Context.context gu_routine) gu_routine in
-  let ctx = Context.run (Context.context sgd_routine) sgd_routine in
+  let (_ : Context.t) = Context.run gu_routine.Context.context gu_routine in
+  let ctx = Context.run sgd_routine.Context.context sgd_routine in
   let r = param_by_label l "r" in
   show_placement "split(to_routine) grad" ctx (grad_of r);
   show_values "grad values (= zin)" ctx (grad_of r);

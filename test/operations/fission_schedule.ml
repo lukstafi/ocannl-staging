@@ -508,7 +508,7 @@ let () =
   let update = named "fission_bwd" (Train.grad_update l) in
   let ctx = Train.init_params (Context.auto ()) IDX.empty l in
   let routine = Train.to_routine ctx IDX.empty update in
-  let ctx = Context.run (Context.context routine) routine in
+  let ctx = Context.run routine.Context.context routine in
   let w =
     List.find_exn (Set.to_list l.Tensor.params) ~f:(fun t ->
         String.equal (Tn.debug_name t.Tensor.value) "w")

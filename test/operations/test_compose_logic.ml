@@ -23,7 +23,7 @@ let () =
   let%cd fwd = { c } =:+ a * b ~logic:"@" in
   Train.set_materialized c.value;
   let routine = Train.to_routine ctx Train.IDX.empty fwd in
-  let ctx = Context.context routine in
+  let ctx = routine.Context.context in
   Train.run ctx routine;
   let vals = Context.get_values ctx c.value in
   (* a = [[1,2,3],[4,5,6]], b col-vec [1;0;1], c = [1*1+2*0+3*1, 4*1+5*0+6*1] = [4, 10] *)

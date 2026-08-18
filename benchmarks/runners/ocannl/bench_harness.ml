@@ -185,9 +185,9 @@ let compile_train_step ~tune ~tuned ctx bindings parts =
       (ctx, Device_gate (scaler, wflag, routine, interval))
 
 let train_step_bindings = function
-  | Plain routine -> Context.bindings routine
-  | Host_gate (_, _, grad_routine, _) -> Context.bindings grad_routine
-  | Device_gate (_, _, routine, _) -> Context.bindings routine
+  | Plain routine -> routine.Context.bindings
+  | Host_gate (_, _, grad_routine, _) -> grad_routine.Context.bindings
+  | Device_gate (_, _, routine, _) -> routine.Context.bindings
 
 (** Runs one step of [routines] — a training step, or a forward pass when the runner compiled its
     forward code as [Plain]. The scaled legs thread the context (the scaler overwrites the scale

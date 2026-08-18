@@ -204,7 +204,7 @@ let () =
   Train.set_materialized out.value;
   let ctx = Train.init_params ctx Train.IDX.empty out in
   let routine = Train.to_routine ctx Train.IDX.empty fwd in
-  let ctx = Context.context routine in
+  let ctx = routine.Context.context in
   Train.run ctx routine;
   Stdio.printf "%%cd mul3 einsum (identity*swap*identity) = %s\n" (fmt_arr (get_vals ctx out));
   Stdio.printf "%%cd dispatch fix: OK\n"

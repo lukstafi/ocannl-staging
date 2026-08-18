@@ -44,7 +44,7 @@ let%expect_test "Graph drawing recompile" =
   let f_upd = Train.grad_update f in
   let ctx = Train.init_params ctx IDX.empty f in
   let f_bprop = Train.to_routine ctx IDX.empty f_upd in
-  let ctx = Context.context f_bprop in
+  let ctx = f_bprop.Context.context in
   Train.run ctx f_bprop;
   Train.printf_tree ~with_grad:true ~depth:9 ctx f;
   [%expect
@@ -75,7 +75,7 @@ let%expect_test "Graph drawing recompile" =
     Array.map xs ~f:(fun v ->
         (* This is inefficient because it compiles the argument update inside the loop. *)
         let assign_x =
-          Train.to_routine (Context.context f_bprop) IDX.empty
+          Train.to_routine f_bprop.Context.context IDX.empty
             [%cd
               ~~("assign_x";
                  x =: !.v)]
@@ -172,8 +172,8 @@ let%expect_test "Graph drawing fetch" =
   Train.set_materialized (Option.value_exn ~here:[%here] x.diff).grad;
   let update = Train.grad_update fx in
   let fx_routine = Train.to_routine ctx bindings update in
-  let ctx = Context.context fx_routine in
-  let step_ref = IDX.find_exn (Context.bindings fx_routine) step_sym in
+  let ctx = fx_routine.Context.context in
+  let step_ref = IDX.find_exn fx_routine.Context.bindings step_sym in
   let ys, dys =
     Array.unzip
     @@ Array.mapi xs ~f:(fun i _ ->
@@ -255,9 +255,9 @@ let%expect_test "Simple gradients hosted" =
   let sgd = Train.sgd_update ~learning_rate l in
   let ctx = Train.init_params ctx IDX.empty l in
   let grad_routine = Train.to_routine ctx IDX.empty grad in
-  let _ctx = Context.context grad_routine in
-  let sgd_routine = Train.to_routine (Context.context grad_routine) IDX.empty sgd in
-  let ctx = Context.context sgd_routine in
+  let _ctx = grad_routine.Context.context in
+  let sgd_routine = Train.to_routine grad_routine.Context.context IDX.empty sgd in
+  let ctx = sgd_routine.Context.context in
   (* Note the initial state without running an init or forward pass can contain garbage. *)
   (* Train.printf_tree ~with_grad:true ~depth:9 l; *)
   (* Do not update the params: all values and gradients will be at initial points, which are
@@ -346,7 +346,7 @@ let%expect_test "Simple gradients virtual" =
   let sgd = Train.sgd_update ~learning_rate l in
   let ctx = Train.init_params ctx IDX.empty l in
   let grad_routine = Train.to_routine ctx IDX.empty grad in
-  let ctx = Context.context grad_routine in
+  let ctx = grad_routine.Context.context in
   (* Note the state without running initialization can contain garbage. *)
   (* Train.printf_tree ~with_grad:true ~depth:9 l; *)
   (* Do not update the params: all values and gradients will be at initial points, which are
@@ -373,8 +373,8 @@ let%expect_test "Simple gradients virtual" =
      6.00       │ -4.00      │            │
     |}];
   (* Only now compile the SGD update. *)
-  let sgd_routine = Train.to_routine (Context.context grad_routine) IDX.empty sgd in
-  let ctx = Context.context sgd_routine in
+  let sgd_routine = Train.to_routine grad_routine.Context.context IDX.empty sgd in
+  let ctx = sgd_routine.Context.context in
   (* Now we update the params, but are not doing the forward and backward passes: only params values
      will change, compared to the above. Since virtual tensors are computed by-need, they will
      always be recomputed using the latest parameter state. *)
@@ -436,7 +436,7 @@ let%expect_test "2D neuron hosted" =
   let update = Train.grad_update v in
   let ctx = Train.init_params ctx IDX.empty v in
   let routine = Train.to_routine ctx IDX.empty update in
-  let ctx = Context.context routine in
+  let ctx = routine.Context.context in
   Train.run ctx routine;
   Train.printf_tree ~with_grad:true ~depth:9 ctx v;
   [%expect
@@ -462,7 +462,7 @@ let%expect_test "2D neuron virtual" =
   let update = Train.grad_update v in
   let ctx = Train.init_params ctx IDX.empty v in
   let routine = Train.to_routine ctx IDX.empty update in
-  let ctx = Context.context routine in
+  let ctx = routine.Context.context in
   Train.run ctx routine;
   Train.printf_tree ~with_grad:true ~depth:9 ctx v;
   [%expect

@@ -59,9 +59,11 @@ type t = {
 
 let backend_name ctx = Backends.backend_name (Backends.wrapped_backend ctx.wrapped)
 
+type task_handle = Ir.Task.t
+
 type routine = {
   context : t;
-  task : Ir.Task.t;
+  task : task_handle;
   bindings : Idx.lowered_bindings;
   name : string;
   inputs : Set.M(Tn).t;
@@ -70,11 +72,6 @@ type routine = {
   execution_deps : Set.M(Int).t;
 }
 
-let bindings r = r.bindings
-let context r = r.context
-let routine_id r = r.routine_id
-let routine_name r = r.name
-let execution_deps r = Set.to_list r.execution_deps
 let can_run ctx routine = Set.is_subset routine.execution_deps ~of_:ctx.ledger.executed
 
 (** Create a context from a backend name *)

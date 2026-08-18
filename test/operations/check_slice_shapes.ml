@@ -29,7 +29,7 @@ let () =
   let ctx = Context.auto () in
   let ctx = Train.init_params ctx bindings processed_images in
   let routine = Train.to_routine ctx bindings forward in
-  let batch_n_ref = IDX.find_exn (Context.bindings routine) batch_n in
+  let batch_n_ref = IDX.find_exn routine.Context.bindings batch_n in
   batch_n_ref := 0;
   Train.run ctx routine;
 

@@ -141,16 +141,16 @@ let () =
   (* Per-segment (per-layer) times: populate intermediates with one full step, then time each
      fission segment as its own routine. *)
   (if H.env_flag "BENCH_SEG_TIMES" then (
-     let batch_ref = IDX.find_exn (Context.bindings routine) batch_n in
+     let batch_ref = IDX.find_exn routine.Context.bindings batch_n in
      batch_ref := 0;
      Train.run ctx routine;
      Context.sync ctx;
      H.time_segments ?promote_locals ~backend ~limits ~static_indices:[ batch_n ] ~ctx
        ~comp:step_comp ~bindings
-       ~bind:(fun r -> IDX.find_exn (Context.bindings r) batch_n := 0)
+       ~bind:(fun r -> IDX.find_exn r.Context.bindings batch_n := 0)
        opt));
   (if H.env_flag "BENCH_STEPS" then
-     let batch_ref = IDX.find_exn (Context.bindings routine) batch_n in
+     let batch_ref = IDX.find_exn routine.Context.bindings batch_n in
      for step = 0 to 2 do
        batch_ref := step % n_batches;
        let t0 = Unix.gettimeofday () in
@@ -160,7 +160,7 @@ let () =
        Stdio.Out_channel.flush Stdio.stdout
      done);
   if H.env_flag "BENCH_PROBE" then (
-    let batch_ref = IDX.find_exn (Context.bindings routine) batch_n in
+    let batch_ref = IDX.find_exn routine.Context.bindings batch_n in
     batch_ref := 0;
     Train.run ctx routine;
     Context.sync ctx;

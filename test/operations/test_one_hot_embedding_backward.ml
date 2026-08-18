@@ -139,7 +139,7 @@ let run_backward ?name ids =
   let ctx = Context.cpu () in
   let ctx = Train.init_params ctx IDX.empty loss in
   let routine = Train.to_routine ctx IDX.empty update in
-  let ctx = Context.run (Context.context routine) routine in
+  let ctx = Context.run routine.Context.context routine in
   let c = param_by_label loss "c" in
   (Context.get_values ctx (grad_of c), update)
 
@@ -200,7 +200,7 @@ let () =
   let ctx = Context.cpu () in
   let ctx = Train.init_params ctx IDX.empty loss_int in
   let routine = Train.to_routine ctx IDX.empty update_int in
-  let ctx = Context.run (Context.context routine) routine in
+  let ctx = Context.run routine.Context.context routine in
   let c_int = param_by_label loss_int "c_int" in
   let grads_int = Context.get_values ctx (grad_of c_int) in
   let expected_int = expected_grads (Array.of_list_map id_ints ~f:Float.of_int) in
@@ -223,6 +223,6 @@ let () =
   let ctx = Context.cpu () in
   let ctx = Train.init_params ctx IDX.empty loss_mm in
   let routine = Train.to_routine ctx IDX.empty update_mm in
-  ignore (Context.run (Context.context routine) routine : Context.t);
+  ignore (Context.run routine.Context.context routine : Context.t);
   let dyn_mm, _, _ = inspect update_mm in
   p "ordinary matmul backward is not rewritten to a scatter" (dyn_mm = 0)

@@ -162,7 +162,7 @@ let train_phase ?budget ~label () =
   let routine =
     Train.to_routine ctx ?budget ~budget_report:(fun r -> plan := Some r) IDX.empty comp
   in
-  let ctx = Context.context routine in
+  let ctx = routine.Context.context in
   let open Operation.At in
   let losses = ref [] in
   for _ = 1 to 6 do

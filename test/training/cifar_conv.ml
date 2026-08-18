@@ -130,8 +130,8 @@ let () =
   let ctx = Context.auto () in
   let ctx = Train.init_params ctx bindings batch_loss in
   let sgd_routine = Train.to_routine ctx bindings (Asgns.sequence [ update; sgd ]) in
-  let ctx = Context.context sgd_routine in
-  let step_ref = IDX.find_exn (Context.bindings sgd_routine) step_n in
+  let ctx = sgd_routine.Context.context in
+  let step_ref = IDX.find_exn sgd_routine.Context.bindings step_n in
   step_ref := 0;
 
   printf "\nStarting training for %d epochs (%d steps)...\n%!" epochs total_steps;
@@ -140,7 +140,7 @@ let () =
   let open Operation.At in
   for epoch = 1 to epochs do
     let epoch_loss = ref 0. in
-    Train.sequential_loop (Context.bindings sgd_routine) ~f:(fun () ->
+    Train.sequential_loop sgd_routine.Context.bindings ~f:(fun () ->
         Train.run ctx sgd_routine;
         epoch_loss := !epoch_loss +. (ctx, batch_loss).@[0];
         Int.incr step_ref);
@@ -179,18 +179,18 @@ let () =
 
   (* Forward-only routine via %cd .forward -- no grad_update, no sgd_update *)
   let eval_routine =
-    Train.to_routine (Context.context sgd_routine) eval_bindings
+    Train.to_routine sgd_routine.Context.context eval_bindings
       [%cd
         ~~("eval forward";
            eval_batch_loss.forward)]
   in
-  let ctx = Context.context eval_routine in
+  let ctx = eval_routine.Context.context in
 
   (* Compute test loss and accuracy across all test batches *)
   let test_loss = ref 0. in
   let correct = ref 0 in
   let batch_idx = ref 0 in
-  Train.sequential_loop (Context.bindings eval_routine) ~f:(fun () ->
+  Train.sequential_loop eval_routine.Context.bindings ~f:(fun () ->
       Train.run ctx eval_routine;
       test_loss := !test_loss +. (ctx, eval_batch_loss).@[0];
       (* Read all logit values for this batch as a flat array, then compute argmax per sample in
