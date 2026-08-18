@@ -219,15 +219,27 @@ let percentile sorted p =
     and how the best {e timed} tensorized candidate compares — is collected here and emitted with
     the measurement, where `results.jsonl` keeps it.
 
-    {!Train.tune_placements} calls [report] once per arm, arm A (default placements) first, and
-    ships the arm with the smaller [best_ms]; that is the whole attribution rule and it is applied
-    below rather than guessed at. Arms are named in arrival order, so one collector describes one
-    placement A/B — every step shape in {!compile_train_step} tunes exactly one routine. *)
+    {!Train.tune_placements} calls [report] once per arm, arm A (default placements) first. Arms are
+    named in arrival order, so one collector describes one placement A/B — every step shape in
+    {!compile_train_step} tunes exactly one routine.
 
-type tune_arms = { mutable arm_reports : Autotune.report list (* reverse order *) }
+    Which arm {e shipped} is recorded from {!Train.tune_placements}' own [on_ship] callback
+    (gh-ocannl-638) rather than re-derived from the arms' [best_ms]. The derivation was only ever
+    valid while nothing could override the timing comparison — config [tune_ship_arm] now can, and
+    under it the derived answer would name the arm the search preferred while the result line's
+    losses came from the other one, which is the single fact a forced-arm measurement is run to
+    establish. It also never described a flip-refined result (["flip"]), which is not an arm at all.
+    The derivation is kept as the fallback for a caller that reports arms without wiring
+    [on_ship]. *)
 
-let tune_arms () = { arm_reports = [] }
+type tune_arms = {
+  mutable arm_reports : Autotune.report list; (* reverse order *)
+  mutable shipped : string option;
+}
+
+let tune_arms () = { arm_reports = []; shipped = None }
 let collect_arm t (r : Autotune.report) = t.arm_reports <- r :: t.arm_reports
+let collect_ship t what = t.shipped <- Some what
 
 (** The [tune] JSON object, or [None] when no arm reported (an untuned cell). Times are milliseconds,
     and a time that was never measured is [null], not [inf]: [best_ms] is [infinity] when an arm
@@ -258,13 +270,16 @@ let tune_json t =
   | reports ->
       let named = List.mapi reports ~f:(fun i r -> (Printf.sprintf "%c" (Char.of_int_exn (65 + i)), r)) in
       let shipped =
-        List.fold named ~init:None ~f:(fun acc (name, (r : Autotune.report)) ->
-            if Option.is_some r.terminal_failure then acc
-            else
-              match acc with
-              | Some (_, best) when Float.( <= ) best r.best_ms -> acc
-              | _ -> Some (name, r.best_ms))
-        |> Option.value_map ~default:"?" ~f:fst
+        match t.shipped with
+        | Some what -> what
+        | None ->
+            List.fold named ~init:None ~f:(fun acc (name, (r : Autotune.report)) ->
+                if Option.is_some r.terminal_failure then acc
+                else
+                  match acc with
+                  | Some (_, best) when Float.( <= ) best r.best_ms -> acc
+                  | _ -> Some (name, r.best_ms))
+            |> Option.value_map ~default:"?" ~f:fst
       in
       let arm (name, (r : Autotune.report)) =
         Printf.sprintf

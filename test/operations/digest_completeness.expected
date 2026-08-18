@@ -89,6 +89,9 @@ search-shaping -- it makes the tuner try alternative inlining decisions; each al
   tune_flip_ordering
   tune_inline_flips
 
+search-shaping -- it decides which of the two searched placement arms ships, overriding the measured comparison rather than changing either arm: each arm is a different program keyed on its own digest, each arm's crown is cached under that digest either way, and a schedule crowned under one setting is a valid crown under the other (gh-ocannl-638)
+  tune_ship_arm
+
 execution-neutral -- startup and configuration-sourcing chatter
   log_config_sourcing
   never_capture_stdout
@@ -153,4 +156,4 @@ execution-neutral -- host-side execution mechanics: where buffers sit, how many 
 execution-neutral -- memoization of toolchain probes: it changes how long resolving a setting takes, not what it resolves to -- and the resolved values are what the codegen tag records
   cc_backend_probe_cache [read at codegen]
 
-OK: 111 config keys classified against 5 cache-key components.
+OK: 112 config keys classified against 5 cache-key components.

@@ -406,6 +406,20 @@
 # alone, its cost being a full search per candidate.
 #tune_inline_flips=0
 
+# gh-ocannl-638: which placement arm `Train.tune_placements` ships. `auto` (the default) ships the
+# measured winner of the A/B. `a` (alias `default`) forces the default-placement arm and `b` (alias
+# `materialize-all`) forces the materialize-all arm, whatever the timings said. MEASUREMENT-ONLY:
+# this is the optimizer's shipping path, so a non-default setting announces itself on stderr
+# regardless of autotune_log, once when it is resolved and once at the decision it changes. It
+# exists because a profile of one arm's kernels is evidence about that arm's routine, and until
+# that routine is the one that ships nothing ever executes it against a reference — the gap
+# benchmarks/report-gh612-hip.md had to state in its verdict. Both arms are still searched, so the
+# A-vs-B comparison a report quotes is unaffected and both arms still report in position; forcing
+# additionally skips the tune_inline_flips refinement (a refined placement vector is neither arm),
+# and a forced arm whose search failed propagates that failure instead of falling back to the other
+# arm.
+#tune_ship_arm=auto
+
 # gh-ocannl-514: the ranking of the flip chain's candidates. `enablement` (the default) sorts the
 # decision surface family-first: a `materialize` flip whose node is an operand or destination of
 # an mma-eligible matmul site that exists only in the all-materialized specialization — so its

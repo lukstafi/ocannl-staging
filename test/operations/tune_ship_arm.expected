@@ -1,0 +1,17 @@
+"auto" parses as the measured winner: true
+"a" and "default" parse as arm A: true
+"B" and "materialize-all" parse as arm B (case-insensitively): true
+an unknown spelling is rejected rather than defaulted: true
+forcing arm A ships arm A: true
+the forced arm A routine executes and matches the plain compile: true
+the shipped arm A context leaves the intermediate virtual: true
+forcing arm A still searched both arms: true
+forcing arm B ships arm B: true
+the forced arm B routine executes and matches the plain compile: true
+the shipped arm B context materializes the intermediate: true
+forcing arm B still searched both arms: true
+the two forced runs ship different placements, so the arms are distinguishable artifacts: true
+a flip budget under a forced arm still ships that arm, not a refined vector: true
+the flip-budgeted forced run also matches the plain compile: true
+the default run ships and matches the plain compile: true
+with no forcing, the shipped arm is the faster-measured one: true

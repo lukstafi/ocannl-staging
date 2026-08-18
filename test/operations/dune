@@ -2213,6 +2213,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name tune_ship_arm)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules tune_ship_arm)
+ (libraries base ocannl stdio arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name inline_flip_tune)
  (package neural_nets_lib)
  (deps

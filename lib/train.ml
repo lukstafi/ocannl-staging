@@ -208,6 +208,38 @@ let every_non_literal_materialized =
   Tensor.iter_embedded ~f:(fun a ->
       if Tn.mode_is_unspecified a && not (Tn.known_constant a) then set_materialized a)
 
+(** Which placement arm {!tune_placements} ships (gh-ocannl-638).
+
+    [Measured_winner] is the default and the only setting a normal run should use: both arms are
+    timed and the faster one ships. The two forcing settings are {e measurement-only}. They ship a
+    chosen arm whatever the timings said, which is how a measurement gets {e executed} values out of
+    the artifact it profiles rather than out of whichever artifact happened to win — the gap
+    benchmarks/report-gh612-hip.md had to state in its verdict, where three of four cells shipped
+    arm B while every ratio was computed on arm A's never-executed routines.
+
+    Forcing changes what ships, not what is measured: both arms are still searched, so the A-vs-B
+    comparison a report quotes stays available and the positional [?report] contract is untouched. A
+    forced arm that {e failed} has no fallback — its failure propagates rather than the other arm
+    shipping in its place, since the caller asked for that artifact and there is none. *)
+type placement_arm = Measured_winner | Force_arm_a | Force_arm_b
+
+(** Parses the [tune_ship_arm] spelling of a {!placement_arm}. [source] names what is being parsed,
+    for the error message. *)
+let placement_arm_of_string ~source s =
+  match String.lowercase (String.strip s) with
+  | "auto" | "measured" -> Measured_winner
+  | "a" | "default" -> Force_arm_a
+  | "b" | "materialize-all" | "materialize_all" -> Force_arm_b
+  | other ->
+      invalid_arg
+        (source ^ " should be auto | a | b (aliases: measured, default, materialize-all); found: "
+       ^ other)
+
+let placement_arm_name = function
+  | Measured_winner -> "the measured winner"
+  | Force_arm_a -> "A (default placements)"
+  | Force_arm_b -> "B (materialize-all)"
+
 (** Placement A/B autotuning: {!Autotune.tune} on [comp] under the graph's current (default)
     placements — virtual intermediates plus the compiler's promotions — and again with every
     embedded node of [loss] materialized, keeping the measured winner (the arms' [best_ms] are
@@ -281,9 +313,25 @@ let every_non_literal_materialized =
     fathoms a [Materialize] flip pre-search when the roofline floor of the chain's partial
     placement vector extended by it already meets the best measured time (admissible: the floor
     lower-bounds every completion, so the flip cannot win). Fathomed flips do not consume the
-    budget, which counts measured flips. *)
+    budget, which counts measured flips.
+
+    gh-ocannl-638, [ship_arm] (config [tune_ship_arm], default [Measured_winner]): ship a chosen
+    {!placement_arm} instead of the measured winner. It exists for measurement — a profile of arm
+    A's kernels is evidence about arm A's routine, and until that routine is the one that ships,
+    nothing ever executes it against a reference, so a value-changing regression inside it leaves
+    every structural and timing figure plausible. Deliberately loud: a non-default setting announces
+    itself on stderr regardless of [autotune_log], both when it is resolved and at the decision it
+    changes, because it is the optimizer's shipping path. Forcing also skips the flip refinement
+    (which walks away from the chosen arm one node at a time, so its result is neither arm), and a
+    forced arm that failed propagates its failure rather than falling back to the other arm.
+
+    [on_ship] is called exactly once with ["A"], ["B"] or ["flip"] on the path that returns a
+    routine, and not at all when nothing ships. It is what a consumer should attribute the returned
+    artifact by: deriving the shipped arm from the reports' [best_ms] is only valid while nothing
+    can override the comparison, which [ship_arm] now can, and it never described a flip-refined
+    result at all. *)
 let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report ?flip_report
-    ?inline_flips ctx loss comp bindings =
+    ?inline_flips ?ship_arm ?on_ship ctx loss comp bindings =
   (* Arm attribution on the same stderr trace as Autotune's config [autotune_log] — winner-arm
      ambiguity misdirected the CUDA benchmark debugging on PR #140. *)
   let log_arms =
@@ -297,6 +345,25 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
   let logf fmt =
     Stdlib.Printf.ksprintf (fun s -> if log_arms then Stdio.eprintf "tune_placements: %s\n%!" s) fmt
   in
+  (* gh-ocannl-638. Resolved before the first search, and announced there rather than only at the
+     decision it changes: a search is minutes to hours, and a measurement that set this on the wrong
+     cell should learn it from the head of the log, not from the summary of a run it has finished
+     paying for. Unconditional on stderr, not through [logf]: this overrides the optimizer's
+     shipping path, which is not something a run should have to have enabled [autotune_log] to
+     find out about. *)
+  let ship_arm =
+    match ship_arm with
+    | Some a -> a
+    | None ->
+        placement_arm_of_string ~source:"ocannl_tune_ship_arm"
+          (Utils.get_global_arg ~arg_name:"tune_ship_arm" ~default:"auto")
+  in
+  let forced = match ship_arm with Measured_winner -> false | Force_arm_a | Force_arm_b -> true in
+  if forced then
+    Stdio.eprintf
+      "Train.tune_placements: tune_ship_arm selects arm %s, which will ship whatever the timings \
+       say. This is a measurement-only setting; a normal run ships the measured winner.\n%!"
+      (placement_arm_name ship_arm);
   let last = ref None in
   (* The public [?report] contract is positional — arm A's report then arm B's, which consumers
      (e.g. the benchmark harness) attribute by arrival order — so flip-refinement searches report
@@ -483,7 +550,7 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
         (Exn.to_string b_exn);
       Stdlib.Printexc.raise_with_backtrace a_exn a_backtrace
   | _ -> ());
-  let a_wins =
+  let measured_a_wins =
     match (a, b) with
     (* A failed arm never wins, whatever the other arm's time is — including [infinity], which a
        completed search that timed nothing legitimately reports. *)
@@ -491,9 +558,37 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
     | Error _, Ok _ -> false
     | Ok _, Ok _ | Error _, Error _ -> Float.( <= ) a_ms b_ms
   in
+  (* gh-ocannl-638: the measured comparison is still computed and still logged under a forced arm —
+     it is the number the measurement reports — but it no longer decides. *)
+  let a_wins =
+    match ship_arm with
+    | Measured_winner -> measured_a_wins
+    | Force_arm_a -> true
+    | Force_arm_b -> false
+  in
   let arm_ms r ms = match r with Error _ -> "FAILED" | Ok _ -> Printf.sprintf "%.4f ms" ms in
-  logf "winner: arm %s (A %s vs B %s)" (if a_wins then "A" else "B") (arm_ms a a_ms)
+  logf "winner: arm %s (A %s vs B %s)" (if measured_a_wins then "A" else "B") (arm_ms a a_ms)
     (arm_ms b b_ms);
+  if forced then (
+    Stdio.eprintf
+      "Train.tune_placements: shipping arm %s by tune_ship_arm; the measured winner is arm %s (A \
+       %s vs B %s)%s.\n%!"
+      (if a_wins then "A" else "B")
+      (if measured_a_wins then "A" else "B")
+      (arm_ms a a_ms) (arm_ms b b_ms)
+      (if Bool.equal a_wins measured_a_wins then ", so the override changed nothing"
+       else ", so the override changed what ships");
+    (* A forced arm has no fallback: shipping the other one would return an artifact the caller did
+       not ask for, under a setting whose whole purpose is that the returned routine IS the
+       profiled one. Said here because the propagation below is otherwise indistinguishable from an
+       ordinary both-arms-failed run. *)
+    match if a_wins then a else b with
+    | Ok _ -> ()
+    | Error (exn, _) ->
+        Stdio.eprintf
+          "Train.tune_placements: the arm tune_ship_arm selected failed, so its failure propagates \
+           rather than the other arm shipping in its place: %s\n%!"
+          (Exn.to_string exn));
   (* gh-ocannl-546: a tensorized winner of the arm that is then discarded reaches no artifact and no
      end-to-end number, so the placement A/B is where it has to be said. Stated as the margin it
      lost by, not as a bare flag: on a small routine the arms can be separated by less than the
@@ -503,12 +598,14 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
       if d.Autotune.best_tensorized then
         logf
           "NOTE arm %s crowned a tensorized candidate (%s at %.4f ms%s) and did NOT ship: arm %s \
-           wins the placement A/B at %.4f ms%s"
+           %s at %.4f ms%s"
           (if a_wins then "B" else "A")
           d.Autotune.best_label d.Autotune.best_ms
           (* A partial arm's crown is mid-search: it lost the A/B by failing, not by its time. *)
           (if Option.is_some d.Autotune.terminal_failure then ", before that arm failed" else "")
           (if a_wins then "A" else "B")
+          (* Under a forced arm the shipped one need not have won anything (gh-ocannl-638). *)
+          (if forced then "ships by tune_ship_arm" else "wins the placement A/B")
           (if a_wins then a_ms else b_ms)
           (Option.value_map shipped ~default:"" ~f:(fun s ->
                if s.Autotune.best_tensorized then " (which is tensorized too)"
@@ -523,10 +620,23 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
     | Some n -> n
     | None -> Int.of_string (Utils.get_global_arg ~arg_name:"tune_inline_flips" ~default:"0")
   in
+  (* gh-ocannl-638: the chain walks from arm A toward arm B one node at a time, so a refined result
+     is neither arm — which is exactly what a forced arm asks not to ship. Skipped rather than
+     rejected: the combination arises from configuration (a config file's flip budget plus a
+     commandline arm), so it is a request to resolve, not a caller error to fail. *)
+  let inline_flips =
+    if forced && inline_flips > 0 then (
+      Stdio.eprintf
+        "Train.tune_placements: tune_ship_arm forces an arm, so the %d-flip inline refinement is \
+         skipped -- a refined placement vector is neither arm.\n%!"
+        inline_flips;
+      0)
+    else inline_flips
+  in
   (* The unwrap is the type-level statement of an invariant already established above: both arms
      [Error] propagated, [a_wins] never picks a failed arm, and the flip chain only ever replaces
      its incumbent with a strictly faster {e completed} search ([infinity] ranks a failed one). *)
-  let ship = function
+  let ship ~what = function
     | Ok compiled -> (
         (* The poisoned check comes FIRST, and the retention decision after it (gh-ocannl-550,
            round-four review): retaining [compiled] and then raising would leave the one artifact
@@ -540,6 +650,8 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
         match if Option.is_none timing_ctx then Context.poisoned_failure ctx else None with
         | None ->
             release_unshipped ~keep:compiled ();
+            (* gh-ocannl-638: the one place that knows what shipped, on the one path that ships. *)
+            Option.iter on_ship ~f:(fun f -> f what);
             compiled
         | Some poisoned ->
             logf "the winner cannot ship: a later arm poisoned the caller's lineage";
@@ -551,7 +663,8 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
         release_unshipped ();
         Stdlib.Printexc.raise_with_backtrace exn backtrace
   in
-  if inline_flips <= 0 then ship winner
+  let winner_arm = if a_wins then "A" else "B" in
+  if inline_flips <= 0 then ship ~what:winner_arm winner
   else (
     (* gh-555: greedy per-node refinement over the inlining decision vector. The vector lives on
        the default-policy arm (arm B's placements are caller-seeded wholesale, so its compile
@@ -581,7 +694,7 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
           None
     in
     match surface with
-    | None -> ship winner
+    | None -> ship ~what:winner_arm winner
     | Some surface ->
         let bound_pruning =
           Utils.get_global_flag ~default:false ~arg_name:"autotune_bound_pruning"
@@ -656,11 +769,11 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
     if Float.(chain_ms < winner_ms) then (
       logf "flip refinement ships: %.4f ms (the placement A/B winner was %.4f ms)" chain_ms
         winner_ms;
-      ship chain_result)
+      ship ~what:"flip" chain_result)
     else (
       logf "flip refinement did not improve on the A/B winner (%.4f ms vs %.4f ms)" chain_ms
         winner_ms;
-      ship winner))
+      ship ~what:winner_arm winner))
 
 module Lazy = Utils.Lazy
 
