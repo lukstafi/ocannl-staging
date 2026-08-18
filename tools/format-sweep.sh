@@ -80,15 +80,12 @@ hold_test_run_lock() {
   local bound=${1:-3900} rc=0
   exec 7>>"$ROOT/.test-run.lock" || return 1
   if ! perl -e 'use Fcntl ":flock"; exit(flock(STDIN, LOCK_EX | LOCK_NB) ? 0 : 1)' <&7; then
-    # The waiter runs as a background child under an interruptible `wait`:
-    # a foreground perl would defer INT/TERM for the whole wait (see
-    # run_phase below for the same pattern and why).
+    # The waiter goes through run_interruptible (see below): a foreground
+    # perl would defer INT/TERM for the whole wait.
     echo "format-sweep: waiting for the active tools/test-run.sh run to finish..." >&2
-    perl -e 'use Fcntl ":flock"; alarm '"$bound"'; $SIG{ALRM} = sub { exit 1 };
-             exit(flock(STDIN, LOCK_EX) ? 0 : 1)' <&7 &
-    PHASE_PID=$!
-    wait "$PHASE_PID" || rc=$?
-    PHASE_PID=""
+    run_interruptible perl -e 'use Fcntl ":flock"; alarm '"$bound"'; $SIG{ALRM} = sub { exit 1 };
+             exit(flock(STDIN, LOCK_EX) ? 0 : 1)' <&7
+    rc=$RC
     [ "$rc" -eq 0 ] || { exec 7>&- || true; return 1; }
   fi
   # Clear stale ownership metadata now that WE hold the flock: a completed
@@ -152,20 +149,23 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Run a test phase as a background child and wait for it: bash defers signal
-# traps while a foreground child runs, so a TERM arriving mid-phase would
-# otherwise sit until the phase ends -- past any scheduler's TERM-then-KILL
-# grace, and a KILL runs no cleanup at all. `wait` IS interruptible, so the
-# trap fires promptly, relays the TERM to the phase child, and exits into
-# cleanup (which waits on the dying run's flock before resetting). Sets RC.
+# Run a long-lived child in the background under an interruptible `wait`:
+# bash defers signal traps while a foreground child runs, so a TERM arriving
+# mid-child would otherwise sit until the child ends -- past any scheduler's
+# TERM-then-KILL grace, and a KILL runs no cleanup at all. `wait` IS
+# interruptible, so the trap fires promptly, relays the TERM to the child,
+# and exits into cleanup. Every potentially long child goes through this:
+# the test phases, the flock waiter, and both dune fmt commands. The child's
+# status lands in RC; the function itself returns 0.
 PHASE_PID=""
-run_phase() {
+run_interruptible() {
   RC=0
-  tools/test-run.sh run "$@" &
+  "$@" &
   PHASE_PID=$!
   wait "$PHASE_PID" || RC=$?
   PHASE_PID=""
 }
+run_phase() { run_interruptible tools/test-run.sh run "$@"; }
 on_sig() {
   [ -n "$PHASE_PID" ] && kill -TERM "$PHASE_PID" 2>/dev/null
   exit 130
@@ -281,7 +281,10 @@ SNAP_TREE=$(tree_hash)     # clean at BASE; every rewrite re-baselines it
 
 # --- Format / test / promote to a fixed point --------------------------------
 
-fmt_clean() { dune build @fmt >/dev/null 2>&1; }
+fmt_clean() {
+  run_interruptible dune build @fmt >/dev/null 2>&1
+  [ "$RC" -eq 0 ]
+}
 
 iter=0
 while :; do
@@ -296,7 +299,7 @@ likely an ocamlformat-hostile golden missing from .ocamlformat-ignore (see heade
   echo "format-sweep: round $iter: formatting"
 
   if ! fmt_clean; then
-    dune fmt >/dev/null 2>&1 || true # promotes; exit status is not informative
+    run_interruptible dune fmt >/dev/null 2>&1 # promotes; RC not informative
     fmt_clean || abort "dune fmt did not converge (ocamlformat error? run 'dune build @fmt')"
   fi
 
