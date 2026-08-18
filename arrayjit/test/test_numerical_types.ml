@@ -98,8 +98,39 @@ let test_unsigned_extremes () =
       let widened = Ndarray.retrieve_flat_values (Ndarray.convert Ops.double arr) in
       Verdict.p (name ^ " widens to double unchanged") (Array.equal Float.equal widened values))
 
+(* A u64 whose value is not representable as a double must round ONCE, to the nearest double. The
+   values below are raw bit patterns rather than floats -- a test built from already-representable
+   floats cannot see a rounding bug at all -- and the oracle is [Float.of_string] on the exact
+   decimal, i.e. the C library's correctly-rounded strtod rather than a hand-computed constant. *)
+let test_unsigned_rounding () =
+  Stdio.printf "\n\nTesting u64 values that a double cannot hold exactly:\n";
+  let cases =
+    [
+      (* 2^63 + 1025: halving it lands exactly on a tie, so a conversion that rounds the half and
+         then doubles gives 2^63, an ulp below the nearest double. *)
+      (0x8000000000000401L, "9223372036854776833");
+      (0xFFFFFFFFFFFFFFFFL, "18446744073709551615");
+      (0x8000000000000801L, "9223372036854777857");
+      (0x7FFFFFFFFFFFFFFFL, "9223372036854775807");
+    ]
+  in
+  let arr =
+    Ndarray.create_array ~debug:"u64_bits" Ops.uint64 ~dims:[| List.length cases |] ~padding:None
+  in
+  (match arr with
+  | Ndarray.Uint64_nd ba ->
+      List.iteri cases ~f:(fun i (bits, _) -> Bigarray.Genarray.set ba [| i |] bits)
+  | _ -> Verdict.fail "uint64 array is not Uint64_nd");
+  let got = Ndarray.retrieve_flat_values arr in
+  List.iteri cases ~f:(fun i (_, decimal) ->
+      let expected = Float.of_string decimal in
+      let ok = Float.equal got.(i) expected in
+      Stdio.printf "  %s -> %s\n" decimal (if ok then "nearest" else "OFF");
+      Verdict.p ("u64 " ^ decimal ^ " converts to the nearest double") ok)
+
 let () =
   test_bfloat16_conversions ();
   test_fp8_conversions ();
   test_padding ();
-  test_unsigned_extremes ()
+  test_unsigned_extremes ();
+  test_unsigned_rounding ()

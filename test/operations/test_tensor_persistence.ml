@@ -283,8 +283,29 @@ let () =
   report path;
   Tensor.unsafe_reinitialize ();
   let ctx = Context.cpu () in
-  let ctx, loaded = Persistence.load ~ctx path in
+  let mapped_before, copied_before = Persistence.ingestion_counts () in
+  let ctx, loaded = Persistence.load ~ctx ~mmap:true path in
+  let mapped_after, copied_after = Persistence.ingestion_counts () in
   Set.iter loaded ~f:(fun tn -> Stdio.printf "  id=%d values=[%s]\n" tn.Tn.id (show ctx tn));
+  (* Packed, nothing keeps a payload on its element's boundary: the header is not padded out, and
+     each offset is just the sum of the preceding payloads. A mapping at such an offset would hand
+     out a misaligned float pointer, so those payloads are decoded even with mapping on. The
+     expectation is computed from the layout rather than written down, so it stays right if the
+     header's length changes. *)
+  let _, data_start, layout = file_layout path in
+  let prec_of_id id = if id = 1 then Ops.byte else Ops.single in
+  let expected_mapped =
+    List.count layout ~f:(fun (id, offset) ->
+        (data_start + offset) % Ops.prec_in_bytes (prec_of_id id) = 0)
+  in
+  Stdio.printf "  packed load: %d mapped, %d decoded\n"
+    (mapped_after - mapped_before)
+    (copied_after - copied_before);
+  Verdict.p "a payload at an offset its precision cannot be mapped at is decoded"
+    (mapped_after - mapped_before = expected_mapped
+    && copied_after - copied_before = List.length layout - expected_mapped);
+  Verdict.p "the packed layout really does leave a payload unmappable"
+    (expected_mapped < List.length layout);
   (* And a checkpoint written before the field existed -- the same layout with the field deleted
      from the header -- must still read back. *)
   let legacy_path = tmp_file "legacy" in

@@ -51,3 +51,14 @@ uint32 widens to double unchanged: true
   uint64: [0.0; 1.0; 4294967296.0; 9223372036854775808.0; 18446744073709549568.0]
 uint64 round-trips through float: true
 uint64 widens to double unchanged: true
+
+
+Testing u64 values that a double cannot hold exactly:
+  9223372036854776833 -> nearest
+u64 9223372036854776833 converts to the nearest double: true
+  18446744073709551615 -> nearest
+u64 18446744073709551615 converts to the nearest double: true
+  9223372036854777857 -> nearest
+u64 9223372036854777857 converts to the nearest double: true
+  9223372036854775807 -> nearest
+u64 9223372036854775807 converts to the nearest double: true

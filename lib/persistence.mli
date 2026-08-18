@@ -46,9 +46,11 @@ val load :
     [?mmap] overrides the [checkpoint_load_mmap] setting for this call: with mapping on (the
     default), a payload whose file bytes are already its host buffer's bytes is wrapped as a
     private, copy-on-write {!Unix.map_file} region instead of being decoded element by element into
-    a fresh buffer (gh-ocannl-467). Padded nodes keep the decoding path: their payload stores only
-    the logical region, which has to be scattered into the padded buffer. The mapping outlives the
-    call, so the values are the same either way but the pages are read from the file lazily.
+    a fresh buffer (gh-ocannl-467). Two kinds of payload keep the decoding path: padded nodes, whose
+    payload stores only the logical region and has to be scattered into the padded buffer, and
+    payloads whose file offset is not a multiple of their element size, which a checkpoint written
+    with a small [?alignment] can produce. The mapping outlives the call, so the values are the same
+    either way but the pages are read from the file lazily.
 
     A later {!save} over the same path is safe while those mappings are live, on every platform
     (gh-ocannl-588): the rename succeeds and the mappings keep reading the file they were taken

@@ -181,16 +181,12 @@ let mapped_count = Atomic.make 0
 let copied_count = Atomic.make 0
 let ingestion_counts () = (Atomic.get mapped_count, Atomic.get copied_count)
 
-(* A payload can be mapped when the file's bytes ARE the host buffer's bytes. The format does the
-   hard part -- it fixes little-endian order and contiguous, unpadded payloads, and [read] has
-   already checked that the ranges tile the byte buffer -- so what is left is the host's byte order
-   and the payload's alignment. Alignment is the one the format does not guarantee: the byte buffer
-   starts at [8 + header_len] for a header length the producer chooses, and the reference
-   implementation's space padding to a multiple of 8 is a convention, not a validity rule. A mapping
-   whose data pointer is not element-aligned is undefined behaviour (and traps on strict targets),
-   so an unaligned payload is decoded instead. *)
-let is_mappable ~prec ~byte_offset ~nbytes =
-  (not Stdlib.Sys.big_endian) && nbytes > 0 && byte_offset % Ir.Ops.prec_in_bytes prec = 0
+(* A payload can be mapped when the file's bytes ARE the host buffer's bytes. The format does that
+   half: it fixes little-endian order and contiguous, unpadded payloads, and [read] has already
+   checked that the ranges tile the byte buffer. The rest is {!Ir.Ndarray.mappable_file_region}'s --
+   and the alignment it checks is the condition this format does not guarantee, the byte buffer
+   starting at [8 + header_len] for a header length the producer chooses, with payload offsets then
+   accumulating the preceding payloads' sizes. *)
 
 let payload_info t what name =
   match info t name with
@@ -221,7 +217,7 @@ let to_ndarray ?prec t name =
          %{(numel * Ir.Ops.prec_in_bytes payload_prec)#Int}"];
   let byte_offset = t.buffer_start + offset in
   let nd =
-    if is_mappable ~prec:payload_prec ~byte_offset ~nbytes then begin
+    if Ir.Ndarray.mappable_file_region ~prec:payload_prec ~byte_offset ~nbytes then begin
       Atomic.incr mapped_count;
       (* The descriptor the header was read through, not a fresh open of [t.path]: the offsets and
          extents being mapped describe the file this read started on. The mapping outlives the
@@ -236,7 +232,12 @@ let to_ndarray ?prec t name =
       nd
     end
   in
-  match prec with None -> nd | Some prec -> Ir.Ndarray.convert prec nd
+  let result = match prec with None -> nd | Some prec -> Ir.Ndarray.convert prec nd in
+  (* [t] is dead, as far as the compiler is concerned, once [ic] and [buffer_start] have been read
+     out of it -- and its finaliser closes that very channel, which the allocation-heavy paths above
+     are still using. So it has to be held past them. *)
+  ignore (Stdlib.Sys.opaque_identity t : t);
+  result
 
 let to_float32 t name =
   let { dtype; _ } = payload_info t "to_float32" name in

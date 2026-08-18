@@ -44,6 +44,9 @@ Caught: restore: padding mismatch for tensor n0
   id=0 values=[1.0; 2.0; 3.0]
   id=1 values=[1.0; 2.0; 3.0; 4.0; 5.0]
   id=2 values=[7.0]
+  packed load: 1 mapped, 2 decoded
+a payload at an offset its precision cannot be mapped at is decoded: true
+the packed layout really does leave a payload unmappable: true
   no-alignment-field checkpoint:
   id=0 values=[1.0; 2.0; 3.0]
   id=1 values=[1.0; 2.0; 3.0; 4.0; 5.0]

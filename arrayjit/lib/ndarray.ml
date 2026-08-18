@@ -257,10 +257,15 @@ let two_pow_63 = 9_223_372_036_854_775_808.0
 let uint64_to_float (x : int64) =
   if Stdlib.Int64.compare x 0L >= 0 then Stdlib.Int64.to_float x
   else
-    (* Halve, convert, double, and add the low bit back: [Int64.to_float] of a value with the top
-       bit set would read it as negative. *)
-    (Stdlib.Int64.to_float (Stdlib.Int64.shift_right_logical x 1) *. 2.0)
-    +. Stdlib.Int64.to_float (Stdlib.Int64.logand x 1L)
+    (* [Int64.to_float] would read a value with the top bit set as negative, so halve it first and
+       double the result. The halving must not round separately, or the doubling rounds a second
+       time and the two together can land an ulp low (u64 [2^63 + 1025] converting to [2^63] rather
+       than [2^63 + 2048]). OR-ing the discarded bit back in makes the halved value odd whenever
+       anything was dropped, which keeps it off the tie the single rounding would then resolve the
+       wrong way -- the standard round-to-odd step. *)
+    Stdlib.Int64.to_float
+      (Stdlib.Int64.logor (Stdlib.Int64.shift_right_logical x 1) (Stdlib.Int64.logand x 1L))
+    *. 2.0
 
 let float_to_uint64 v =
   if Float.(v < two_pow_63) then Stdlib.Int64.of_float v
@@ -521,6 +526,18 @@ let%track7_sexp create_array ~debug:(_debug : string) (prec : Ops.prec) ~(dims :
     {!write_payload_to_channel} are little-endian, so the caller is responsible for checking
     {!Stdlib.Sys.big_endian} before mapping a payload. The mapping is not counted in
     {!get_used_memory}: its pages are file-backed, not heap. *)
+(** Whether a [prec]-typed region of [nbytes] bytes at [byte_offset] of a file may be wrapped by
+    {!map_file_array} rather than decoded (gh-ocannl-588). Three conditions, none of them about the
+    caller's format: a mapping is read in the {e host's} byte order while the payload formats here
+    are little-endian; {!Unix.map_file} has no empty mapping; and the data pointer it hands back
+    sits at [byte_offset] exactly, so an offset that is not a multiple of the element size would
+    make a misaligned typed pointer -- undefined behaviour, and a trap on strict targets. That last
+    one is easy to assume away: a format may align its payloads by construction and still put a wide
+    one at an odd offset once a narrow payload precedes it. Whether the file's bytes {e are} the
+    buffer's bytes (no padding, no re-layout) is the caller's half of the question. *)
+let mappable_file_region ~(prec : Ops.prec) ~(byte_offset : int) ~(nbytes : int) =
+  (not Stdlib.Sys.big_endian) && nbytes > 0 && byte_offset % Ops.prec_in_bytes prec = 0
+
 let map_file_array ?(shared = false) (prec : Ops.prec) ~(dims : int array) ~(byte_offset : int) fd =
   let f (type ocaml elt_t) (prec : (ocaml, elt_t) Ops.precision) : t =
     let kind = precision_to_bigarray_kind prec in

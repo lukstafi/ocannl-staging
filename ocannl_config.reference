@@ -853,7 +853,8 @@
 # Whether Persistence.load / Persistence.restore wrap a checkpoint's payloads as private
 # (copy-on-write) memory mappings of the file instead of decoding them into fresh host buffers.
 # Only payloads whose file bytes are already their buffer's bytes are mapped; padded tensor nodes
-# always take the decoding path. Defaults to true on every platform. Windows was expected to need
+# always take the decoding path, as do payloads whose file offset is not a multiple of their
+# element size (which a checkpoint written with a small `alignment` can produce). Defaults to true on every platform. Windows was expected to need
 # an exception -- a mapped view keeps the file object referenced, so save's replacing rename over a
 # path this process has loaded from should fail with a sharing violation -- but measured on Windows
 # 11 (gh-ocannl-588) the rename succeeds and the live mappings go on reading the bytes they were
