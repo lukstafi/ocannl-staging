@@ -2,6 +2,20 @@
 
 ### Added
 
+- **The gh-573 / gh-574 HIP measurement is verified end to end** (gh-ocannl-612,
+  `benchmarks/report-gh612-hip-verified.md`): the first session's ratios rested on default-placement
+  arm A routines that were profiled but, in three of four cells, never executed — the limitation it
+  stated in its own verdict. Re-run on the same box, same commits and same fixture with
+  `tune_ship_arm=a` forcing arm A in all 18 cells, every quoted artifact now shipped and executed:
+  the loss gate covers 36 records at 3 sequences within **2 f32 ulp** (and within 14 ulp of the
+  earlier session's independently executed arm B), and every load-bearing number reproduces — the
+  8.034 ms tied lm_head, the 8.516 → 1.711 ms triangle, the 14-vs-32 and 16-vs-17 signature counts,
+  the same four newly materialized nodes. Holding the arm fixed also yields two claims the first
+  session could not make: gh-573 is worth **1.28x end to end** with non-overlapping ranges (it was
+  1.12x inside the noise floor, because without the guard the search shipped materialize-all — the
+  crude form of the same transform), and cap 4 beats the default cap 8 by **7.1%** end to end and
+  9.2% per-kernel. The default is still not proposed for change: one fixture, one depth, one device.
+
 - **A measurement can ship a chosen placement arm** (gh-ocannl-638): `Train.tune_placements`
   searches both arms and ships the faster one, so a report that profiles the default-placement arm
   can rest on routines that were compiled, dispatched and timed but never executed against a
