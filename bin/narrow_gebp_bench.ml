@@ -67,18 +67,12 @@ let mix ~salt a b =
   x lxor (x lsr 7)
 
 let () =
-  (* An option is [--]-prefixed (ours, and the [--ocannl_*] config flags) or a [-] followed by a
-     non-digit. A bare [-64] is therefore a positional, not an option: dropping it would silently
-     shift every later positional into the wrong slot and hide the invalid value from the
-     validation below. *)
-  let is_option s =
-    String.is_prefix s ~prefix:"--"
-    || (String.is_prefix s ~prefix:"-" && String.length s > 1 && not (Char.is_digit s.[1]))
-  in
-  let pos_args =
-    Array.to_list (Sys.get_argv ()) |> List.tl_exn |> List.filter ~f:(fun s -> not (is_option s))
-  in
-  let prec_name = Option.value (List.nth pos_args 0) ~default:"f32" in
+  (* Positional geometry beside the [--ocannl_*] config flags, split by [Bench_args]
+     (gh-ocannl-634): a bare [-64] is a positional, not an option, so it reaches the range check
+     that names it instead of silently shifting every later positional into the wrong slot. Each
+     integer is a positive extent or count, checked where it is read. *)
+  let args = Bench_args.create "narrow_gebp_bench" in
+  let prec_name = Bench_args.string args 0 ~default:"f32" in
   let prec =
     match prec_name with
     | "f32" -> Ir.Ops.single
@@ -86,25 +80,10 @@ let () =
     | "f16" -> Ir.Ops.half
     | s -> invalid_arg ("narrow_gebp_bench: precision f32|bf16|f16 expected, got " ^ s)
   in
-  let arg i default =
-    match List.nth pos_args i with Some s -> Int.of_string s | None -> default
-  in
-  let flag name =
-    let prefix = "--" ^ name ^ "=" in
-    Array.to_list (Sys.get_argv ())
-    |> List.find_map ~f:(fun s -> Option.map (String.chop_prefix s ~prefix) ~f:Int.of_string)
-  in
-  let n = arg 1 512 in
-  let repeats = arg 2 20 in
-  let bm = Option.value (flag "bm") ~default:(arg 3 64) in
-  let bk = Option.value (flag "bk") ~default:(arg 4 256) in
-  (* Every integer argument is a positive extent or count; validate them as one domain rather than
-     leaving each use site to discover its own bad input. *)
-  List.iter
-    [ ("n", n); ("repeats", repeats); ("bm", bm); ("bk", bk) ]
-    ~f:(fun (name, v) ->
-      if v < 1 then
-        invalid_arg (Printf.sprintf "narrow_gebp_bench: %s must be positive, got %d" name v));
+  let n = Bench_args.int args 1 ~name:"n" ~default:512 in
+  let repeats = Bench_args.int args 2 ~name:"repeats" ~default:20 in
+  let bm = Bench_args.int args 3 ~flag:"bm" ~name:"bm" ~default:64 in
+  let bk = Bench_args.int args 4 ~flag:"bk" ~name:"bk" ~default:256 in
   (* What the packed variants require of n, in one place: an i/j/k nest to address (extent-1 loops
      are simplified away before the transform runs, leaving nothing to schedule), and extents
      divisible by the [Sched.split] factors. The naive variant has no blocking at all, so it runs

@@ -76,10 +76,7 @@ let normalize () =
 let () =
   (* The configuration flags a rule passes are addressed to the library, which read them during
      initialization; the mode is whatever else is on the commandline. *)
-  match
-    Array.to_list (Array.subo Stdlib.Sys.argv ~pos:1)
-    |> List.filter ~f:(Fn.non (String.is_prefix ~prefix:"-"))
-  with
+  match Bench_args.positional (Bench_args.create "startup_streams") with
   (* The stdout half: the library has already spoken by the time this runs. *)
   | [] -> ()
   | "guard" :: _ -> guard ()

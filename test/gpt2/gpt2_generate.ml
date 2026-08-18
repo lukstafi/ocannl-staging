@@ -6,7 +6,8 @@
    each step (no KV cache): with a causal mask, logits at position [len - 1] are unaffected by the
    padding that follows, so one compiled routine serves the whole generation.
 
-   Run: dune exec test/gpt2/gpt2_generate.exe -- "Your prompt here" [num_tokens] *)
+   Run: dune exec test/gpt2/gpt2_generate.exe -- "Your prompt here" [num_tokens] (--ocannl_*
+   settings may share the commandline; a prompt beginning with a dash goes after a lone [--]). *)
 
 open Base
 open Ocannl
@@ -23,9 +24,12 @@ let fetch_weights () =
   Safetensors.read dest
 
 let () =
-  let argv = Sys.get_argv () in
-  let prompt = if Array.length argv > 1 then argv.(1) else "The capital of France is" in
-  let num_tokens = if Array.length argv > 2 then Int.of_string argv.(2) else 20 in
+  (* Positional args beside the [--ocannl_*] config flags ([Bench_args], gh-ocannl-634), so a
+     configured backend can share the commandline with the prompt. A prompt that itself begins with
+     a dash goes after a lone [--], which ends the options. *)
+  let args = Bench_args.create "gpt2_generate" in
+  let prompt = Bench_args.string args 0 ~default:"The capital of France is" in
+  let num_tokens = Bench_args.int args 1 ~name:"num_tokens" ~default:20 in
   let tokenizer = Dataprep.Bpe.from_pretrained model_id in
   let prompt_ids = Dataprep.Bpe.encode tokenizer prompt in
   let prompt_len = Array.length prompt_ids in
