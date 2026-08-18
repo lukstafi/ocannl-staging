@@ -61,6 +61,36 @@ let structure_of content = Parse.implementation (Lexing.from_string content)
 (** The ppx_minidebug extension whose argument names a module's compile-time tracing gate. *)
 let tracing_gate_extension = "global_debug_log_level_from_env_var"
 
+(** The environment variables [content] reads at RUN time by name: the string literal argument of
+    a [Sys.getenv] / [Sys.getenv_opt], under any receiver path ([Stdlib.Sys.getenv_opt], [Sys.getenv]
+    with [Base] in scope). A dynamic argument is deliberately not reported -- the reader that takes
+    the name as a parameter is {!Utils.read_env_var} itself, whose keys are a different question
+    (gh-ocannl-628, Codex P2 round 2 on PR #371).
+
+    Walks expressions, not just structure items, because these reads sit anywhere in a function
+    body. *)
+let env_var_reads_in_source content =
+  let found = ref [] in
+  let iterator =
+    {
+      Ast_iterator.default_iterator with
+      expr =
+        (fun self expr ->
+          (match expr.pexp_desc with
+          | Pexp_apply (callee, [ (Asttypes.Nolabel, argument) ]) -> (
+              match (longident_of callee, string_literal argument) with
+              | Some path, Some name -> (
+                  match List.last path with
+                  | Some ("getenv" | "getenv_opt") -> found := name :: !found
+                  | _ -> ())
+              | _ -> ())
+          | _ -> ());
+          Ast_iterator.default_iterator.expr self expr);
+    }
+  in
+  iterator.structure iterator (structure_of content);
+  List.rev !found
+
 (** The environment variables ppx_minidebug reads while preprocessing [content]: the argument of
     each [%%global_debug_log_level_from_env_var] at the top of the file. What a library must declare
     in its [preprocessor_deps] for the gate to invalidate anything (gh-ocannl-628).

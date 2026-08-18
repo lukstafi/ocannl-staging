@@ -1,9 +1,19 @@
 Directories whose sources this scan reads:
   arrayjit/lib
+  arrayjit/test
   benchmarks/runners/ocannl
   bin
   lib
   tensor
+  test/einsum
+  test/gpt2
+  test/operations
+  test/operations/config
+  test/operations/profiles
+  test/operations/startup_streams
+  test/ppx
+  test/support
+  test/training
   tools
 
 Configuration keys tracked as ambient dependencies, in both spellings everywhere:
@@ -38,6 +48,9 @@ Per-module tracing gates, and the library whose preprocessor_deps declares each:
   OCANNL_LOG_LEVEL_TNODE         arrayjit/lib/dune, library ir (arrayjit/lib/tnode.ml)
   OCANNL_LOG_LEVEL_TRAIN         lib/dune, library ocannl (lib/train.ml)
   OCANNL_LOG_LEVEL_UTILS         arrayjit/lib/dune, library utils (arrayjit/lib/utils.ml)
+
+Ambient variables a module reads by name at run time, and the stanza that declares each:
+  OCANNL_TOOL_TEST_RESTRICT_MASK test/operations/dune, test test_cpu_topology (test/operations/test_cpu_topology.ml)
 
 Declarations of a name OCANNL does not read as a configuration key, exempt by design:
   test/operations/dune:ocannl_backedn -- the fixture behind the `config_var_warnings` golden, which captures the warning a mistyped key draws; the rule tracks the name so that an ambient one arriving does not leave the golden stale

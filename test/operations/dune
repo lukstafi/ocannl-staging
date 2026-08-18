@@ -1260,7 +1260,7 @@
 ; #363): the rule captures a stream, so it depends on every key that can write to it.
 ;
 ; Since gh-ocannl-629 the environment writes to this stream too, which is why the rule sets four
-; variables of its own: an `ocannl_config` file rejects an unknown key by name and the commandline
+; variables of its own: an `ocannl_config` file names the unknown key it holds and the commandline
 ; warns about an unknown argument, while a mistyped `OCANNL_...` used to be the one source that
 ; said nothing at all -- `OCANNL_BACKEDN=cuda dune runtest` ran the whole suite on the default
 ; backend and reported success. The two reserved namespaces are set as well, and their silence is
@@ -1432,7 +1432,12 @@
   (glob_files_rec ../../lib/*.ml)
   (glob_files_rec ../../bin/*.ml)
   (glob_files_rec ../../tools/*.ml)
-  (glob_files_rec ../../benchmarks/runners/ocannl/*.ml))
+  (glob_files_rec ../../benchmarks/runners/ocannl/*.ml)
+  ; The test sources too, unlike the sibling scans: what this check asks of a source is which
+  ; ambient variables it reads by name, and a test reading one is exactly the case that goes
+  ; stale unnoticed -- `test_cpu_topology` and its hardware hook (Codex P2, round 2 on PR #371).
+  (glob_files_rec ../../test/*.ml)
+  (glob_files_rec ../../arrayjit/test/*.ml))
  (action
   (with-stdout-to
    %{target}
@@ -2644,7 +2649,13 @@
  (name test_cpu_topology)
  (package neural_nets_lib)
  (modules test_cpu_topology)
- (deps ocannl_config test_cpu_topology.expected)
+ ; The hardware hook the test reads by name: without the dep, dune reuses the previous result
+ ; across a change of the mask that decides whether the restriction is applied at all. One
+ ; spelling, the reserved namespace having no second one (gh-ocannl-628).
+ (deps
+  ocannl_config
+  test_cpu_topology.expected
+  (env_var OCANNL_TOOL_TEST_RESTRICT_MASK))
  (libraries base arrayjit.utils stdio arrayjit.verdict)
  (preprocess
   (pps ppx_sexp_conv)))

@@ -55,6 +55,9 @@ let exempt_declarations =
 (* The prefix `Utils.classify_env_var` reports for a per-module tracing gate. *)
 let gate_prefix = "ocannl_log_level_"
 
+(* The stanza kinds that name their own modules, and so can be asked what those modules read. *)
+let module_stanzas = [ "library"; "test"; "tests"; "executable"; "executables" ]
+
 let () =
   if Array.length Stdlib.Sys.argv < 2 then (
     eprintf "Usage: %s <workspace_root> <dune file or .ml source...>\n" Stdlib.Sys.argv.(0);
@@ -90,6 +93,7 @@ let () =
   let exemptions_used = ref (Set.empty (module String)) in
   let tracked_keys = ref (Set.empty (module String)) in
   let gate_table = ref [] in
+  let read_table = ref [] in
   (* Every `(env_var ...)` under a sexp, at any depth. *)
   let rec env_vars_in = function
     | Sexp.List [ Sexp.Atom "env_var"; Sexp.Atom name ] -> [ name ]
@@ -156,41 +160,41 @@ let () =
                           invalidates nothing; fix the spelling, or exempt it by name with the \
                           reason"
                          dune_file name what)));
-      (* The gates: what a library's modules read while being preprocessed, against what its
-         `preprocessor_deps` declares. *)
+      (* What a stanza's own modules read, against what the stanza declares: the gates, read
+         while PREPROCESSING them, and the ambient variables they read by name at RUN time. *)
       List.iter stanzas ~f:(fun stanza ->
           match (Scan.head stanza, Scan.field stanza "modules") with
-          | Some "library", Some modules ->
-              let library =
-                match Scan.names_of stanza with name :: _ -> name | [] -> "<unnamed>"
-              in
-              let where = Printf.sprintf "%s, library %s" dune_file library in
-              let declared_gates =
-                match Scan.field stanza "preprocessor_deps" with
+          | Some kind, Some modules when List.mem module_stanzas kind ~equal:String.equal ->
+              let name = match Scan.names_of stanza with name :: _ -> name | [] -> "<unnamed>" in
+              let where = Printf.sprintf "%s, %s %s" dune_file kind name in
+              let env_vars_of field =
+                match Scan.field stanza field with
                 | None -> []
-                | Some args ->
-                    List.concat_map args ~f:env_vars_in
-                    |> List.filter ~f:(fun name ->
-                           match Utils.classify_env_var name with
-                           | Utils.Env_reserved prefix -> String.equal prefix gate_prefix
-                           | _ -> false)
+                | Some args -> List.concat_map args ~f:env_vars_in
               in
-              let modules =
-                List.filter_map modules ~f:(function Sexp.Atom m -> Some m | _ -> None)
+              let declared_gates =
+                List.filter (env_vars_of "preprocessor_deps") ~f:(fun name ->
+                    match Utils.classify_env_var name with
+                    | Utils.Env_reserved prefix -> String.equal prefix gate_prefix
+                    | _ -> false)
+              in
+              let sources =
+                List.filter_map modules ~f:(function
+                  | Sexp.Atom module_name ->
+                      Option.map (source_of ~dir module_name) ~f:(fun on_disk ->
+                          (module_name ^ ".ml", In_channel.read_all on_disk))
+                  | _ -> None)
               in
               let read_gates =
-                List.concat_map modules ~f:(fun module_name ->
-                    match source_of ~dir module_name with
-                    | None -> []
-                    | Some on_disk ->
-                        Sources.tracing_gates_in_source (In_channel.read_all on_disk)
-                        |> List.map ~f:(fun gate -> (gate, module_name ^ ".ml")))
+                List.concat_map sources ~f:(fun (source, content) ->
+                    Sources.tracing_gates_in_source content
+                    |> List.map ~f:(fun gate -> (gate, source)))
               in
               if (not (List.is_empty declared_gates)) && not (Set.mem scanned_dirs dir) then
                 fail
                   (Printf.sprintf
                      "%s declares tracing gates, and this check was handed no sources from %s to \
-                      check them against -- add the directory to the rule's globs"
+                      check them against -- add the directory to the rule\'s globs"
                      where (if String.is_empty dir then "the repository root" else dir))
               else (
                 List.iter read_gates ~f:(fun (gate, source) ->
@@ -208,7 +212,36 @@ let () =
                         (Printf.sprintf
                            "%s declares the tracing gate %s, which none of its modules reads -- \
                             drop it, or move it to the library whose modules do"
-                           where gate)))
+                           where gate)));
+              (* The run-time half (Codex P2, round 2). A gate is read while the module is built;
+                 `Sys.getenv "OCANNL_TOOL_TEST_RESTRICT_MASK"` is read while it RUNS, and the
+                 consequence of not declaring it is the same one this whole check is about --
+                 `test_cpu_topology` was reusable across a change of the mask that decides what it
+                 does. Presence is checkable here and not for configuration keys at large, which a
+                 test reaches through the library rather than by name: what makes the difference is
+                 the literal in the source, which says exactly which variable this module reads.
+
+                 An `(executable)` stanza has no `deps` field at all -- its companion rule carries
+                 them -- so for those the declaration is looked for anywhere in the dune file, the
+                 same latitude `config_dep_completeness` gives the `ocannl_config` dep. *)
+              let declared_for_stanza =
+                match Scan.field stanza "deps" with Some _ -> env_vars_of "deps" | None -> declared
+              in
+              List.iter sources ~f:(fun (source, content) ->
+                  Sources.env_var_reads_in_source content
+                  |> List.iter ~f:(fun read ->
+                         match Utils.classify_env_var read with
+                         | Utils.Env_not_addressed -> ()
+                         | _ ->
+                             if not (List.mem declared_for_stanza read ~equal:String.equal) then
+                               fail
+                                 (Printf.sprintf
+                                    "%s/%s reads the environment variable %s by name, and %s does \
+                                     not declare it -- dune then reuses the previous result across \
+                                     a change of the variable that decides what the run does"
+                                    dir source read where)
+                             else
+                               read_table := (where, read, dir ^ "/" ^ source) :: !read_table))
           | _ -> ()));
   let stale =
     Set.diff
@@ -233,6 +266,9 @@ let () =
   printf "\nPer-module tracing gates, and the library whose preprocessor_deps declares each:\n";
   List.sort !gate_table ~compare:(fun (_, a, _) (_, b, _) -> String.compare a b)
   |> List.iter ~f:(fun (where, gate, source) -> printf "  %-30s %s (%s)\n" gate where source);
+  printf "\nAmbient variables a module reads by name at run time, and the stanza that declares each:\n";
+  List.sort !read_table ~compare:(fun (_, a, _) (_, b, _) -> String.compare a b)
+  |> List.iter ~f:(fun (where, read, source) -> printf "  %-30s %s (%s)\n" read where source);
   printf "\nDeclarations of a name OCANNL does not read as a configuration key, exempt by design:\n";
   List.iter exempt_declarations ~f:(fun (key, why) -> printf "  %s -- %s\n" key why);
   if not (Verdict.any_failed ()) then

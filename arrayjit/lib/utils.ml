@@ -1392,7 +1392,8 @@ let () =
 
 (* The same check on the other silent source (gh-ocannl-629). Of the three ways to set a
    configuration key, the environment was the one that said nothing about a mistake: a config file
-   rejects an unknown key by name and fatally, the commandline warns just above, and
+   names the unknown key it holds (the warning at {!config_file_args}, which
+   [test/operations/startup_streams] pins), the commandline warns just above, and
    `OCANNL_BACKEDN=cuda dune runtest` ran the whole suite on the default backend and reported
    success. It is also the source people reach for in CI and in one-off shell invocations, where a
    typo has no reviewer.
