@@ -36,13 +36,7 @@ let nonzero name (a : float array) =
 let approx a b = Float.(abs (a - b) < 1e-2)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 
-(* A leg this backend cannot run still prints its line, so the golden stays backend-uniform — but
-   the skip is announced on stderr and marked in the source. A bare [p name true] is
-   indistinguishable, both in the transcript and in review, from a verified run: that is how a
-   Tensorize leg came to "cover" the gh-ocannl-528 interior-batch bug without ever checking it. *)
-let skipped name =
-  Stdio.eprintf "SKIPPED on %s (vacuous): %s\n%!" backend_name name;
-  p name true
+let skipped = Verdict.skipped ~backend:backend_name
 
 let has_shared =
   String.is_substring backend_name ~substring:"metal"

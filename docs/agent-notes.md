@@ -1472,10 +1472,12 @@ that they earn a lookup rather than always-loaded space.
 - A backend-gated leg must never print a bare `p "<claim>" true` on the backend that cannot run it:
   the golden line is then byte-identical to a verified run's, so neither the transcript nor a
   reviewer can tell the claim was never evaluated (this is how a `Tensorize` leg came to "cover" the
-  gh-528 interior-batch bug). The scheduling tests use a file-local `skipped name`, which prints the
+  gh-528 interior-batch bug). Report it with `Verdict.skipped ~backend "claim"`, which prints the
   same stdout line — the golden must stay backend-uniform, and dune's `(test)` stanza diffs stdout
   ONLY, so stderr is free — and announces the skip on stderr. `grep SKIPPED` over a run then
-  enumerates exactly what that hardware did not verify. The other honest form is putting the
+  enumerates exactly what that hardware did not verify. Backend-specific goldens are the wrong tool
+  for this: the leg is *absent* on that backend rather than differently-valued, and a golden per
+  backend would have to be regenerated on hardware the author usually does not have. The other honest form is putting the
   condition in the label itself (`"… (skipped: non-C backend)"`), which distinguishes the golden
   line; a bare `true` whose label is indistinguishable is the one to reject.
 - Executed parity checks need a nonzero guard on the REFERENCE, not just the comparison: a fragment

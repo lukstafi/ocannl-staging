@@ -38,16 +38,13 @@ let () = Unix.putenv "OCANNL_CC_FP16_ARITHMETIC" "native"
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
 
-let skipped name =
-  Stdio.eprintf "SKIPPED (vacuous): %s\n%!" name;
-  p name true
-
 let nonzero name (a : float array) =
   if not (Array.exists a ~f:(fun x -> Float.(x <> 0.))) then
     failwith (name ^ ": the reference is all zeros — the parity checks against it are vacuous");
   a
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
+let skipped = Verdict.skipped ~backend:backend_name
 let on_cpu = String.is_substring backend_name ~substring:"cc"
 
 let read_generated base_name =

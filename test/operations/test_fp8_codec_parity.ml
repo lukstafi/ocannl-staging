@@ -33,11 +33,7 @@ let on_metal = String.is_substring backend_name ~substring:"metal"
    The test configuration turns this on, so the leg is genuinely checked in the suite. *)
 let fp8_guarded = Utils.get_global_flag ~default:false ~arg_name:"prefer_backend_uniformity"
 
-(* A leg this backend cannot run still prints its line, so the golden stays backend-uniform, and
-   the skip is announced on stderr (the convention of schedule_mma_matmul.ml). *)
-let skipped name =
-  Stdio.eprintf "SKIPPED on %s (vacuous): %s\n%!" backend_name name;
-  p name true
+let skipped = Verdict.skipped ~backend:backend_name
 
 (* Narrow on the DEVICE. [*. 1.] is the exact identity on every value below — signed zeros,
    infinities and NaNs included — so the only thing between the source and the fp8 buffer is the
