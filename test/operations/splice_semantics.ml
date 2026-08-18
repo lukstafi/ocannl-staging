@@ -7,12 +7,15 @@
    coverage: in [ell[0] = 5000; out[i] = ell[i]] the copy-position reads consume ell's incoming
    cells 1.., and an accumulation with no preceding definite initialization consumes its own entry
    values. Both must classify [read_before_write] — a routine input, excluded from buffer
-   aliasing — where pre-split they read as output-only. Two controls pin the boundaries: coverage
-   by a real prior write still suppresses the flag (routine-complete lowered flows emit the
-   initialization before accumulations, so they are unaffected), and an UNDECIDED node keeps its
-   virtualization eligibility — a virtual node has no interface, and exemption-dependent coverage
-   is exactly the shape of the virtualizer's partial-write producers (affine_lowering.ml AC6), so
-   the strict verdict binds only once a node is known non-virtual.
+   aliasing — where pre-split they read as output-only. The strict classification closes over the
+   SETTLED placements ([reconcile_traced_store], review round 1): a node that stays virtual is
+   exempt by construction — no interface, and exemption-dependent coverage is exactly the shape
+   of the virtualizer's partial-write producers (affine_lowering.ml AC6) — while a node decided
+   non-virtual AFTER [decide_placements] (a [check_and_store_virtual] legality rejection, the
+   fan-in guard) is still reached. Controls pin the boundaries: coverage by a real prior write
+   still suppresses the flag (routine-complete lowered flows emit the initialization before
+   accumulations, so they are unaffected), and a GUARDED full write still counts as raw coverage
+   (the guards-taken contract; guard strictness is splice-only).
 
    Phase 2 (gh-617, decided as option 1) pins recompute-at-read as the semantics of deferred
    (virtual) computations: a virtual node is a named computation, not a snapshot — inlining
@@ -125,7 +128,56 @@ let phase1 () =
   in
   let o_und = optimize ~name:"ssem_undecided" llc_und in
   p "undecided partial-write producer: keeps its virtualization eligibility"
-    (known_virtual o_und z)
+    (known_virtual o_und z);
+  (* Late placement decision (review round 1, P1): an UNDECIDED node can become non-virtual
+     AFTER [decide_placements] — here [check_and_store_virtual] rejects the non-injective
+     multi-affine scatter map [s1+s2] during [virtual_llc] ([Non_virtual 51]) — and the strict
+     verdict must still reach it: the classification closes over the settled placements in
+     [reconcile_traced_store]. The scatter writes cells 0..3 of a 6-cell node, so the consumer's
+     copy-position reads of cells 4..5 are exemption-dependent, and a decide-time-only strict
+     verdict (which sees the node still undecided) would classify x2 output-only. Structural:
+     the undecided node may resolve to routine-scoped scratch, so the executed twins are the
+     declared-materialized cases above. *)
+  let x2 = mk ~dims:[| 6 |] "x2" in
+  let a2 = mk ~dims:[| 3; 2 |] "a2" in
+  materialize a2;
+  let out2 = mk ~dims:[| 6 |] "lateout" in
+  materialize out2;
+  let llc_late =
+    let s1 = sym () and s2 = sym () and t = sym () in
+    seq
+      (loop_n s1 3
+         (loop_n s2 2
+            (set x2 [| aff [ (1, s1); (1, s2) ] 0 |] (get a2 [| iter s1; iter s2 |]))))
+      (loop_n t 6 (set out2 [| iter t |] (get x2 [| iter t |])))
+  in
+  let o_late = optimize ~name:"ssem_late" llc_late in
+  p "non-injective scatter, undecided: not virtualized" (not (known_virtual o_late x2));
+  p "non-injective scatter, undecided: read-before-write despite deciding after the placement pass"
+    (read_before_write o_late x2);
+  (* Guards-taken control: the closing pass judges raw-positioned reads with the raw contract's
+     query, so a GUARDED full write still counts as coverage (round 6 of the gh-610/611 PR:
+     routine-wide guard strictness broke flows whose initialization runs under a flag; the
+     guard-filtered strict query is for spliced reads only). *)
+  let flag = mk ~dims:[| 1 |] "flag" in
+  materialize flag;
+  let xg = mk "xg" in
+  materialize xg;
+  let outg = mk "guardout" in
+  materialize outg;
+  let llc_guard =
+    let s = sym () and t = sym () in
+    seq
+      (LL.If
+         {
+           cond = (get flag [| fixed 0 |], single);
+           body = loop_n s dim (set xg [| iter s |] (ramp 100. s));
+         })
+      (loop_n t dim (set outg [| iter t |] (get xg [| iter t |])))
+  in
+  let o_guard = optimize ~name:"ssem_guardcov" llc_guard in
+  p "guarded full write: raw guards-taken coverage keeps xg off read-before-write"
+    (not (read_before_write o_guard xg))
 
 (* === Phase 2: gh-617 — recompute-at-read, and the knobs that change the observation === *)
 

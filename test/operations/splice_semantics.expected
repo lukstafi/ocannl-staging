@@ -8,6 +8,9 @@ zero-initialized accumulation: covered by the real write, not read-before-write:
 zero-initialized accumulation: y is not an input: true
 zero-initialized accumulation: the sentinel seed is overwritten: true
 undecided partial-write producer: keeps its virtualization eligibility: true
+non-injective scatter, undecided: not virtualized: true
+non-injective scatter, undecided: read-before-write despite deciding after the placement pass: true
+guarded full write: raw guards-taken coverage keeps xg off read-before-write: true
 recompute-at-read: routine A defers v: true
 overwrite-then-consume: the full overwrite covers the spliced reads — ell is not an input: true
 overwrite-then-consume: the splice observes the NEW ell (recompute-at-read): true

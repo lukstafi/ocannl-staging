@@ -247,14 +247,17 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   `reads_covered_query` returns a three-way verdict, and exemption-dependent coverage
   (`` `Covered_rmw_exempt ``) counts as covered for the tracer-mirroring placement heuristics
   (the visit cap) but as uncovered for the `read_before_write` interface classification of a
-  node ALREADY KNOWN NON-VIRTUAL — a copy-position read after a partial write, or an
-  accumulation with no preceding definite initialization, consumes a buffer-owning node's entry
-  values raw or spliced alike (`splice_semantics.ml` phase 1; routine-complete lowered flows are
-  unaffected because lowering emits the initialization first). An UNDECIDED node keeps the
-  lenient reading — a virtual node has no interface, and exemption-dependent coverage is
-  exactly the shape of the virtualizer's partial-write producers (an injective scatter emits no
-  neutral init; inlining prepends the init fallback — `affine_lowering.ml` AC6 broke under
-  unconditional strictness, which is how the conditioning was found). `from_prior_context` (both `Backends.compile` and `from_prior_context_batch`)
+  node that ends up owning a buffer — a copy-position read after a partial write, or an
+  accumulation with no preceding definite initialization, consumes entry values raw or spliced
+  alike (`splice_semantics.ml` phase 1; routine-complete lowered flows are unaffected because
+  lowering emits the initialization first). The strict classification runs in
+  `reconcile_traced_store`, over the SETTLED placements — not in `decide_placements`, where two
+  wrong timings lurk: judging undecided nodes strictly destroys the virtualizer's partial-write
+  producers (an injective scatter emits no neutral init; inlining prepends the init fallback —
+  `affine_lowering.ml` AC6 broke under that reading), while judging only already-decided nodes
+  misses candidates flipped non-virtual AFTER the decider (the fan-in guard, a
+  `check_and_store_virtual` legality rejection such as a guarded RMW — the PR's round-1 P1).
+  A node that stays virtual is exempt by construction: it has no interface. `from_prior_context` (both `Backends.compile` and `from_prior_context_batch`)
   reconciles in BOTH directions: the raw-assignments set is filtered by the reconciled traced
   store (raw over-approximates the residual schedule — a deferral-only routine must link on a
   fresh context) and, for routines carrying an assignments program, unioned with the reconciled

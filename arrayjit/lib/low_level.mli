@@ -339,13 +339,15 @@ type traced_array = {
   mutable read_before_write : bool;
       (** The node is read before it is written (i.e. it is recurrent): its entry values are
           consumed, so it is an input of the routine ([input_and_output_nodes]) and not eligible
-          for buffer aliasing. For a node that owns a buffer (known non-virtual when classified),
-          the verdict is strict of the read-modify-write exemption (gh-ocannl-618): a read at its
-          enclosing statement's write position still consumes the entry value unless a prior
-          definite write covers its cells — the exemption applies to the visit-counting placement
-          heuristics, not to the interface of a buffer-owning node. A node still eligible for
-          virtualization keeps the lenient reading (a virtual node has no interface, and the
-          virtualizer's partial-write producers depend on the freedom). *)
+          for buffer aliasing. For a node that owns a buffer, the verdict is strict of the
+          read-modify-write exemption (gh-ocannl-618): a read at its enclosing statement's write
+          position still consumes the entry value unless a prior definite write covers its cells —
+          the exemption applies to the visit-counting placement heuristics, not to the interface.
+          The strict classification closes over the SETTLED placements (in
+          [reconcile_traced_store], since placement and legality decisions after
+          [decide_placements] can still flip a candidate non-virtual); a node that stays virtual
+          is exempt by construction — it has no interface, and the virtualizer's partial-write
+          producers depend on that freedom. *)
   mutable read_only : bool;
       (** Surprisingly, the notions of read-only and of constant memory mode come apart: small
           hosted constants are not read-only because they are initialized on devices by being
