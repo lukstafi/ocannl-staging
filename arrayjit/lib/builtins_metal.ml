@@ -545,32 +545,39 @@ inline float fp8_to_single(uint8_t v) {
 }|},
       [] );
     ( "single_to_fp8",
-      {|/* Float to FP8 E5M2, rounding ties away from zero like the C codec. */
+      {|/* Float to FP8 E5M2: round to nearest even, subnormals rounded rather than flushed,
+   signed zero preserved, finite overflow saturating to the max finite. Matches the C twins in
+   builtins.c / Builtins_cc, and the native GPU fp8 types they were aligned to. */
 inline uint8_t single_to_fp8(float f) {
     uint32_t bits = as_type<uint32_t>(f);
     uint32_t sign = (bits >> 24) & 0x80u;
     uint32_t e32 = (bits >> 23) & 0xFFu;
     uint32_t m32 = bits & 0x7FFFFFu;
-    /* NaN takes the unsigned code: the C codec's sign test is a comparison, which is false for
-       a negative NaN. */
-    if (e32 == 0xFFu) { return uint8_t(m32 != 0u ? 0x7Fu : (sign | 0x7Cu)); }
-    /* Zero is unsigned (the C codec returns +0 for -0.0f); f32 subnormals are far below e5m2's
-       smallest subnormal and flush to the signed zero. */
-    if (e32 == 0u) { return uint8_t(m32 == 0u ? 0u : sign); }
-    int e = int(e32) - 112; /* the e5m2 exponent field, before rounding */
-    if (e < 0) { return uint8_t(sign); }
-    if (e > 30) { return uint8_t(sign | 0x7Cu); }
-    if (e == 0) {
-        /* [2^-15, 2^-14) lands on the top two subnormals; the C codec clamps rather than
-           carrying into the smallest normal. */
-        return uint8_t(sign | (m32 < 0x200000u ? 2u : 3u));
+    /* Infinity and NaN keep their sign; a NaN takes the all-mantissa code. */
+    if (e32 == 0xFFu) { return uint8_t(sign | (m32 != 0u ? 0x7Fu : 0x7Cu)); }
+    /* Zero, and f32 subnormals, which are far below e5m2's smallest subnormal. */
+    if (e32 == 0u) { return uint8_t(sign); }
+    int e = int(e32) - 112; /* the e5m2 exponent field: rebias 127 -> 15 */
+    if (e >= 31) { return uint8_t(sign | 0x7Bu); } /* saturate to the largest finite, 57344 */
+    if (e <= 0) {
+        /* Subnormal target: the value is q * 2^-16 with q in [0, 4), rounded to nearest even. */
+        uint32_t sig = 0x800000u | m32;
+        int shift = 22 - e;
+        if (shift > 24) { return uint8_t(sign); } /* below half the smallest subnormal */
+        uint32_t q = sig >> shift;
+        uint32_t rest = sig & ((1u << shift) - 1u);
+        uint32_t tie = 1u << (shift - 1);
+        if (rest > tie || (rest == tie && (q & 1u))) { q++; }
+        if (q > 3u) { return uint8_t(sign | 0x04u); } /* carried into the smallest normal */
+        return uint8_t(sign | q);
     }
-    uint32_t mant = (m32 + 0x100000u) >> 21;
+    uint32_t mant = m32 >> 21;
+    uint32_t rest = m32 & 0x1FFFFFu;
+    if (rest > 0x100000u || (rest == 0x100000u && (mant & 1u))) { mant++; }
     if (mant > 3u) {
-        /* The mantissa rounded past the top: carry into the exponent. */
         mant = 0u;
         e += 1;
-        if (e > 30) { return uint8_t(sign | 0x7Cu); }
+        if (e >= 31) { return uint8_t(sign | 0x7Bu); }
     }
     return uint8_t(sign | (uint32_t(e) << 2) | mant);
 }|},

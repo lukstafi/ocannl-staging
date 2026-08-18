@@ -753,71 +753,79 @@ float fp8_to_single(uint8_t fp8)
   return result;
 }
 
-/* Float to FP8 E5M2 conversion (C function) */
+/* Float to FP8 E5M2 conversion (C function).
+
+   IEEE round-to-nearest-even, subnormals rounded rather than flushed, signed zero preserved,
+   and finite overflow saturating to the max finite magnitude. Every one of those is the behavior
+   of the native GPU fp8 types (CUDA __nv_fp8_e5m2, HIP __hip_fp8_e5m2), verified against both
+   over all 2^32 float bit patterns, so a value narrowed on the host, on cc or on Metal lands on
+   the same code a CUDA or HIP kernel would produce. See docs/agent-notes.md for the two inputs
+   where the vendors themselves disagree (an already-infinite input, and the sign of a NaN). */
 uint8_t single_to_fp8(float f)
 {
-  /* Handle zero */
-  if (f == 0.0f)
+  uint32_t bits;
+  memcpy(&bits, &f, sizeof(bits));
+  uint32_t sign = (bits >> 24) & 0x80u;
+  uint32_t e32 = (bits >> 23) & 0xFFu;
+  uint32_t m32 = bits & 0x7FFFFFu;
+
+  /* Infinity and NaN keep their sign; a NaN takes the all-mantissa code. */
+  if (e32 == 0xFFu)
   {
-    return 0;
+    return (uint8_t)(sign | (m32 != 0u ? 0x7Fu : 0x7Cu));
+  }
+  /* Zero, and f32 subnormals, which are far below e5m2's smallest subnormal. */
+  if (e32 == 0u)
+  {
+    return (uint8_t)sign;
   }
 
-  uint32_t sign = (f < 0) ? 1 : 0;
-  f = fabsf(f);
-
-  /* Handle special cases */
-  if (isinf(f))
+  int exp = (int)e32 - 112; /* the e5m2 exponent field: rebias 127 -> 15 */
+  if (exp >= 31)
   {
-    return (sign << 7) | 0x7C; /* Infinity: exp=0x1F, mant=0 */
+    return (uint8_t)(sign | 0x7Bu); /* saturate to the largest finite, 57344 */
   }
-  if (isnan(f))
+  if (exp <= 0)
   {
-    return (sign << 7) | 0x7F; /* NaN: exp=0x1F, mant!=0 */
-  }
-
-  /* Get exponent and mantissa */
-  int exp_val;
-  float mant_f = frexpf(f, &exp_val);
-  int exp = exp_val + 14; /* Bias is 15, but frexp gives us mantissa in [0.5, 1) */
-
-  /* Clamp to representable range */
-  if (exp < 0)
-  {
-    /* Underflow to zero */
-    return sign << 7;
-  }
-  if (exp > 30)
-  {
-    /* Overflow to infinity */
-    return (sign << 7) | 0x7C;
-  }
-
-  /* Handle denormalized numbers */
-  if (exp == 0)
-  {
-    float denorm_mant = f * ldexpf(1.0f, 14) * 4.0f;
-    uint32_t mant_bits = (uint32_t)(denorm_mant + 0.5f);
-    if (mant_bits > 3)
-      mant_bits = 3;
-    return (sign << 7) | mant_bits;
-  }
-
-  /* Normalized numbers: frexp mantissa is in [0.5, 1); map it to the 2-bit fraction in
-     [0, 4) (value = (1 + mant/4) * 2^(exp-15), so mant = (mant_f * 2 - 1) * 4). */
-  mant_f = (mant_f - 0.5f) * 8.0f;
-  uint32_t mant_bits = (uint32_t)(mant_f + 0.5f); /* Round to nearest */
-  if (mant_bits > 3)
-  {
-    /* Mantissa rounded up past the top: carry into the exponent. */
-    mant_bits = 0;
-    exp++;
-    if (exp > 30)
+    /* Subnormal target: the value is q * 2^-16 with q in [0, 4), rounded to nearest even. */
+    uint32_t sig = 0x800000u | m32; /* make the implicit leading bit explicit */
+    int shift = 22 - exp;           /* >= 22 */
+    if (shift > 24)
     {
-      return (sign << 7) | 0x7C; /* Overflow to infinity */
+      return (uint8_t)sign; /* below half the smallest subnormal: signed zero */
+    }
+    uint32_t q = sig >> shift;
+    uint32_t rest = sig & ((1u << shift) - 1u);
+    uint32_t tie = 1u << (shift - 1);
+    if (rest > tie || (rest == tie && (q & 1u)))
+    {
+      q++;
+    }
+    if (q > 3u)
+    {
+      return (uint8_t)(sign | 0x04u); /* rounded up into the smallest normal, 2^-14 */
+    }
+    return (uint8_t)(sign | q);
+  }
+
+  uint32_t mant = m32 >> 21;
+  uint32_t rest = m32 & 0x1FFFFFu;
+  uint32_t tie = 0x100000u;
+  if (rest > tie || (rest == tie && (mant & 1u)))
+  {
+    mant++;
+  }
+  if (mant > 3u)
+  {
+    /* The mantissa rounded past the top: carry into the exponent. */
+    mant = 0u;
+    exp++;
+    if (exp >= 31)
+    {
+      return (uint8_t)(sign | 0x7Bu);
     }
   }
-
-  return (uint8_t)((sign << 7) | ((exp & 0x1F) << 2) | (mant_bits & 0x3));
+  return (uint8_t)(sign | ((uint32_t)exp << 2) | mant);
 }
 
 /* OCaml wrapper functions */

@@ -543,6 +543,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name test_fp8_codec_parity)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules test_fp8_codec_parity)
+ (libraries base ocannl stdio arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name test_fp8_roundtrip)
  (package neural_nets_lib)
  (deps
