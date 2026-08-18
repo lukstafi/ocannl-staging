@@ -235,14 +235,30 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   discarded operand is never rendered, so its reads are not parameters and its merge read must
   not taint; the taint scan is `~self`-filtered like `inline_computation`'s own setter filter, or
   a shared-loop sibling's merge read rejects valid sharing. The STRICT coverage verdicts —
-  guarded writes filtered (never definite), rmw exemption off (a same-position spliced read is a
-  genuine RMW), `zeroed_out` counted as written — apply PER NODE, to exactly the nodes read
-  inside INLINED bodies (`virtual_llc` records them at each `inline_computation` splice and
-  returns the set): splicing is what moves reads to positions the raw analysis never judged.
-  Raw-positioned reads keep the raw verdicts, whose lenient contracts deliberately classify
-  patterns initialized by an earlier routine of the program — routine-wide strictness broke
-  real flows across the suite, and a has-local-assignment provenance test for "inherited"
-  missed consumption through an update of an inherited virtual (rounds 6-7). `from_prior_context` (both `Backends.compile` and `from_prior_context_batch`)
+  guarded writes filtered (never definite), rmw exemption not counted as coverage (a
+  same-position read is a genuine RMW), `zeroed_out` counted as written — apply PER NODE, to
+  exactly the nodes read inside INLINED bodies (`virtual_llc` records them at each
+  `inline_computation` splice and returns the set): splicing is what moves reads to positions the
+  raw analysis never judged. Raw-positioned reads keep the raw GUARDS-TAKEN contract, which
+  deliberately classifies patterns initialized by an earlier routine of the program —
+  routine-wide guard strictness broke real flows across the suite, and a has-local-assignment
+  provenance test for "inherited" missed consumption through an update of an inherited virtual
+  (rounds 6-7). The rmw part is split more finely (gh-ocannl-618):
+  `reads_covered_query` returns a three-way verdict, and exemption-dependent coverage
+  (`` `Covered_rmw_exempt ``) counts as covered for the tracer-mirroring placement heuristics
+  (the visit cap) but as uncovered for the `read_before_write` interface classification of a
+  node that ends up owning a buffer — a copy-position read after a partial write, or an
+  accumulation with no preceding definite initialization, consumes entry values raw or spliced
+  alike (`splice_semantics.ml` phase 1; routine-complete lowered flows are unaffected because
+  lowering emits the initialization first). The strict classification runs in
+  `reconcile_traced_store`, over the SETTLED placements, and promotes the flipped node
+  `On_device` (an entry-consuming node must not resolve to `Local` scratch — round 3) — not in
+  `decide_placements`, where two wrong timings lurk: judging undecided nodes strictly destroys the virtualizer's partial-write
+  producers (an injective scatter emits no neutral init; inlining prepends the init fallback —
+  `affine_lowering.ml` AC6 broke under that reading), while judging only already-decided nodes
+  misses candidates flipped non-virtual AFTER the decider (the fan-in guard, a
+  `check_and_store_virtual` legality rejection such as a guarded RMW — the PR's round-1 P1).
+  A node that stays virtual is exempt by construction: it has no interface. `from_prior_context` (both `Backends.compile` and `from_prior_context_batch`)
   reconciles in BOTH directions: the raw-assignments set is filtered by the reconciled traced
   store (raw over-approximates the residual schedule — a deferral-only routine must link on a
   fresh context) and, for routines carrying an assignments program, unioned with the reconciled
@@ -259,15 +275,16 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   every pure input (uncovered reads), and demanding those broke ndarray-literal flows. The merge SOURCE never gets an ordinary traced
   entry (the merge buffer is the parameter; a source entry would double the transfer buffer's
   allocation).
-  Related pre-existing quirk: `rmw_exempt` excuses copy-position reads from the coverage verdict
-  that feeds `read_before_write` (fine for multiplicity, questionable for the interface) —
-  gh-ocannl-618; the phase-5 partial-write test reads at an offset position to stay off it.
   Corollary (gh-ocannl-611): a routine whose every statement virtualizes away is LEGAL —
   cleanup's top-level elision degenerates to `Noop`, with an EMPTY interface — its stored
   computations persist in the lineage for later consumers, so "compile a deferral-only routine"
-  is a supported incremental-compilation move. Whether deferred computations should observe
-  inputs mutated between deferral and consumption is gh-ocannl-617. The acceptance pins are
-  `test/operations/virtual_chain_fanin.ml` phases 3–5.
+  is a supported incremental-compilation move. Deferred computations DO observe inputs mutated
+  between deferral and consumption — recompute-at-read is the decided semantics (gh-ocannl-617,
+  option 1): a virtual node is a named computation, not a snapshot, and at the arrayjit level
+  the recompute-vs-materialize semantics is deliberately not fixed — the memory-mode intent and
+  the choice of routine boundaries are the user's knobs (see "Recompute-at-read" in
+  docs/lowering_and_inlining.md; `splice_semantics.ml` phase 2 pins both readings of one
+  program text). The acceptance pins are `test/operations/virtual_chain_fanin.ml` phases 3–5.
 - **A knob read after lowering cannot reach a digest over lowered code** — it must be carried by a
   cache-key component or the cache replays across regimes (gh-ocannl-568: 5.9x). So every config
   key is classified in `Utils.config_key_classification` as code-borne / `Keyed <component>` /

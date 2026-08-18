@@ -337,7 +337,18 @@ type traced_array = {
   mutable zero_initialized_by_code : bool;
   mutable zeroed_out : bool;
   mutable read_before_write : bool;
-      (** The node is read before it is written (i.e. it is recurrent). *)
+      (** The node is read before it is written (i.e. it is recurrent): its entry values are
+          consumed, so it is an input of the routine ([input_and_output_nodes]) and not eligible
+          for buffer aliasing. For a node that owns a buffer, the verdict is strict of the
+          read-modify-write exemption (gh-ocannl-618): a read at its enclosing statement's write
+          position still consumes the entry value unless a prior definite write covers its cells —
+          the exemption applies to the visit-counting placement heuristics, not to the interface.
+          The strict classification closes over the SETTLED placements (in
+          [reconcile_traced_store], since placement and legality decisions after
+          [decide_placements] can still flip a candidate non-virtual), and a flipped node is
+          promoted [On_device] — an entry-consuming node must own a persistent buffer, not
+          [Local] scratch; a node that stays virtual is exempt by construction — it has no
+          interface, and the virtualizer's partial-write producers depend on that freedom. *)
   mutable read_only : bool;
       (** Surprisingly, the notions of read-only and of constant memory mode come apart: small
           hosted constants are not read-only because they are initialized on devices by being
@@ -399,7 +410,17 @@ type optimize_ctx = {
           that would happen up till that point. Within the code blocks paired with an index tuple,
           all assignments and accesses must happen via the index tuple; if this is not the case for
           some assignment, the node cannot be virtual. Currently, we only allow for-loop symbols in
-          assignment indices of virtual nodes. *)
+          assignment indices of virtual nodes.
+
+          A stored computation is a NAMED COMPUTATION, NOT A SNAPSHOT (gh-617, decided as
+          recompute-at-read): inlining evaluates it at the consumption site with whatever its
+          materialized inputs hold at that moment, so a write to one of its leaves between the
+          deferring routine and a consuming read is observed by the splice — whereas the
+          materialized reading of the same program snapshots the leaf at the deferring routine's
+          execution point. The recompute-vs-materialize semantics is deliberately not fixed at
+          this level; users select the reading via the memory-mode intent and via routine
+          boundaries (routine execution is manual). See "Recompute-at-read" in
+          docs/lowering_and_inlining.md. *)
   placements : Tnode.Placements.t;
       (** Per-compilation-lineage memory-mode resolution
           (docs/proposals/context-scoped-memory-modes.md): the pipeline's placement decisions

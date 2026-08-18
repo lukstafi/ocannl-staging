@@ -486,6 +486,38 @@ The optimizer uses provenance tracking (the `int` in memory mode updates) to deb
 memory mode decisions. The cleanup-phase provenances (151/152 for default-to-Virtual, 17 for
 finalize-to-Never_virtual, 16/18 for local scopes) are the most commonly observed in practice.
 
+### Recompute-at-read: the semantics of Virtual (gh-617)
+
+A virtual node is a **named computation, not a snapshot**: its stored (index-parametric)
+computation is evaluated at each consumption site, with whatever its materialized inputs hold at
+that moment. Within a single routine's lowering the distinction rarely surfaces — high-level code
+is effectively single-assignment per step — but cross-routine sharing (a later routine consuming a
+computation an earlier routine committed **Virtual**) and hand-built incremental flows
+(`Context.decide_inline`, the `?prelowered` seam) make it observable: when something writes one of
+the computation's leaves between the deferring routine and the consuming read, the consumer
+observes the *new* value, whereas the materialized reading of the same program text snapshots the
+leaf as of the deferring routine's execution point.
+
+This is deliberate: **at the arrayjit level, the recompute-vs-materialize semantics of a deferred
+computation is not fixed** — a placement decision selects which reading executes, and both are
+legal. Users control the choice with two knobs:
+
+- **Memory-mode intent**: declaring the node materialized (`Tnode.update_memory_mode`, or
+  `Train.set_materialized` at the framework level) pins the snapshot reading — the value is
+  computed and stored where the deferring routine runs.
+- **Routine boundaries**: routine execution is manual, so the schedule decides what a deferred
+  read observes — keep leaf writes out of the window between the deferring routine and the
+  consuming read (or place them there on purpose, for incremental-update flows that *want* the
+  fresh values).
+
+A framework layer that wants placement to be a pure performance choice must maintain the
+no-intervening-writes discipline itself; `test/operations/splice_semantics.ml` pins both readings
+of one program text. Two adjacent guardrails do exist: a deferred computation that reads the
+**merge buffer** is rejected at reconcile time (`User_error` — merge-buffer contents are transient
+to the routine receiving the transfer, so deferral would change *which transfer* is observed), and
+footprint-scoped materialization (gh-616) is the eventual mechanism for a strict mode that
+materializes a deferred node before an intervening write (gh-617 option 2, not implemented).
+
 ## Loop-Generation Utilities
 
 A few helpers generate loop nests for backends and for the optimizer itself. They are conceptual

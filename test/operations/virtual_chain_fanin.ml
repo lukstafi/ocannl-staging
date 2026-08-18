@@ -586,9 +586,9 @@ let phase5 () =
      not by syntactic write-before-read order. Routine B writes ell2[0] only, then consumes
      v2 = ell2 + 100 at an OFFSET position (out2[i] = v2[i+1]): the spliced reads touch cells
      the write never covers, so ell2 must stay a routine input. The offset also keeps the read
-     off the enclosing write's index position: a copy-position read is [rmw_exempt] from the
-     coverage query — pre-existing query semantics that treats raw reads identically, tracked
-     separately (see the round-2 review thread). *)
+     off the enclosing write's index position, so this case does not depend on how the
+     [rmw_exempt] copy-position reads are judged — that split is gh-ocannl-618's, pinned in
+     splice_semantics.ml (raw side) and by the same-position splice below (round 6). *)
   let ell2 = mk "ell2" in
   materialize ell2;
   let v2 = mk "v2" and out2 = mk "pout" in
