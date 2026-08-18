@@ -7,8 +7,8 @@
       host oracle folding scale = min(1, max_norm/norm) into the update. Also exercises
       [scheduled_learning_rate]: a second step at a different schedule point must move parameters
       by the NEW rate (the data-backed scalar must not be undone by a re-fetch).
-   3. Gradient accumulation: two micro-steps at batch 2 with [~accum_steps:2] must reproduce — in
-      executed values, per the structural-vs-executable rule — the gradients and the post-SGD
+   3. Gradient accumulation: two micro-steps at batch 2 with [~accum_steps:2] must reproduce -- in
+      executed values, per the structural-vs-executable rule -- the gradients and the post-SGD
       parameters of a single batch-4 step.
    4. The z-score outlier detector (llmc/outlier_detector.h): warmup returns nan, in-family values
       score small, a spike scores large. *)
@@ -19,7 +19,7 @@ open Stdio
 module IDX = Train.IDX
 open Nn_blocks.DSL_modules
 
-(* ————— 1. Learning-rate schedules ————— *)
+(* ----- 1. Learning-rate schedules ----- *)
 
 let schedules () =
   let show name kind =
@@ -33,11 +33,16 @@ let schedules () =
     sched
   in
   printf "lr at steps [0 2 4 5 10 15 19 20 24 30] (base 1.0, warmup 5, total 25, final_frac 0.1):\n";
-  let _c = show "constant" Train.Lr_schedule.Constant in
+  let con_s = show "constant" Train.Lr_schedule.Constant in
   let cos_s = show "cosine" Train.Lr_schedule.Cosine in
   let lin_s = show "linear" Train.Lr_schedule.Linear in
   let wsd_s = show "wsd" (Train.Lr_schedule.Wsd { decay_frac = 0.2 }) in
   let lr sched step = Train.Lr_schedule.learning_rate sched ~step in
+  Verdict.p "warmup applies to every kind, constant included"
+    (List.for_all [ con_s; cos_s; lin_s; wsd_s ] ~f:(fun s ->
+         Float.(abs (lr s 0 -. 0.2) < 1e-12)));
+  Verdict.p "constant holds base_lr after warmup"
+    (List.for_all [ 5; 15; 30 ] ~f:(fun s -> Float.(abs (lr con_s s -. 1.0) < 1e-12)));
   Verdict.p "warmup starts at base_lr/warmup_steps" Float.(abs (lr cos_s 0 -. 0.2) < 1e-12);
   Verdict.p "warmup reaches base_lr on its last step" Float.(abs (lr cos_s 4 -. 1.0) < 1e-12);
   Verdict.p "cosine reaches final_frac * base_lr past total_steps"
@@ -51,7 +56,7 @@ let schedules () =
     (List.for_all (List.range 5 30) ~f:(fun s ->
          Float.(lr cos_s Int.(s + 1) <= lr cos_s s +. 1e-12)))
 
-(* ————— Shared deterministic model: logits = b + w*x, mean squared error ————— *)
+(* ----- Shared deterministic model: logits = b + w*x, mean squared error ----- *)
 
 let din = 3
 let classes = 2
@@ -111,7 +116,7 @@ let global_norm_of wg bg =
   Array.iter bg ~f:(fun g -> acc := !acc +. (g *. g));
   Float.sqrt !acc
 
-(* ————— 2. Global-norm clipping + scheduled learning rate ————— *)
+(* ----- 2. Global-norm clipping + scheduled learning rate ----- *)
 
 let clipping () =
   Tensor.unsafe_reinitialize ();
@@ -182,7 +187,7 @@ let clipping () =
     Float.(max_err < 1e-5)
     ~detail:(fun () -> Printf.sprintf "max abs err %.8f" max_err)
 
-(* ————— 3. Gradient accumulation ————— *)
+(* ----- 3. Gradient accumulation ----- *)
 
 let accumulation () =
   (* Case A: one batch-4 step. *)
@@ -252,7 +257,7 @@ let accumulation () =
     Float.(params_err < 1e-5)
     ~detail:(fun () -> Printf.sprintf "max abs err %.8f" params_err)
 
-(* ————— 4. Outlier detector ————— *)
+(* ----- 4. Outlier detector ----- *)
 
 let outlier_detector () =
   let det = Train.Outlier_detector.create ~window_size:4 () in
@@ -263,12 +268,20 @@ let outlier_detector () =
   let z_spike = Train.Outlier_detector.update det 10.0 in
   printf "ordinary z: %.3f, spike z: %.3f\n" z_ordinary z_spike;
   Verdict.p "an in-family value scores |z| < 1" Float.(abs z_ordinary < 1.0);
-  (* Scored against the previous window only — self-inclusion would cap this at sqrt 3. *)
+  (* Scored against the previous window only -- self-inclusion would cap this at sqrt 3. *)
   Verdict.p "a spike scores z > 10 (no self-dilution)" Float.(z_spike > 10.0);
   Verdict.p "a nan sample scores infinite (skip-forcing)" Float.(z_nan = infinity);
   let z_after_nan = Train.Outlier_detector.update det 1.0 in
   Verdict.p "the window survives a nan sample (later scores stay finite)"
-    (Float.is_finite z_after_nan)
+    (Float.is_finite z_after_nan);
+  (* Centered variance: a large common offset with small real variance must not cancel to a zero
+     std (the running E[x^2] - E[x]^2 form scored this window's next deviation as infinity). *)
+  let det = Train.Outlier_detector.create ~window_size:4 () in
+  List.iter [ 1e8; 1e8 +. 1.; 1e8 -. 1.; 1e8 ] ~f:(fun v ->
+      ignore (Train.Outlier_detector.update det v : float));
+  let z_offset = Train.Outlier_detector.update det (1e8 +. 1.) in
+  Verdict.p "a large-offset window keeps a finite variance (no cancellation)"
+    (Float.is_finite z_offset && Float.(abs (z_offset -. Float.sqrt 2.) < 1e-6))
 
 let () =
   schedules ();

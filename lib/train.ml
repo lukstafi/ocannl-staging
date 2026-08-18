@@ -290,13 +290,13 @@ let%track3_sexp sequential_loop ~f lowered_bindings =
     {!zero_params_grads} above. *)
 
 (** Host-side learning-rate schedules: pure functions from the step number to a float, fed to the
-    device via {!scheduled_learning_rate} (or any host-written scalar). All schedules except
-    [Constant] start with a linear warmup over [warmup_steps] steps ([base_lr * (step+1) /
-    warmup_steps]; no warmup when 0) and decay toward [base_lr *. final_frac] at [total_steps].
-    Steps beyond [total_steps] clamp to the final value. *)
+    device via {!scheduled_learning_rate} (or any host-written scalar). All schedules start with a
+    linear warmup over [warmup_steps] steps ([base_lr * (step+1) / warmup_steps]; no warmup when 0)
+    and decay toward [base_lr *. final_frac] at [total_steps]. Steps beyond [total_steps] clamp to
+    the final value. *)
 module Lr_schedule = struct
   type kind =
-    | Constant  (** Always [base_lr]; no warmup, [final_frac] is ignored. *)
+    | Constant  (** [base_lr] after warmup; [final_frac] is ignored. *)
     | Cosine  (** Half-cosine from [base_lr] down to [base_lr *. final_frac]. *)
     | Linear  (** Straight line from [base_lr] down to [base_lr *. final_frac]. *)
     | Wsd of { decay_frac : float }
@@ -325,7 +325,7 @@ module Lr_schedule = struct
       else decayed ()
     in
     match t.kind with
-    | Constant -> t.base_lr
+    | Constant -> with_warmup (fun () -> t.base_lr)
     | Cosine ->
         with_warmup (fun () ->
             let ratio = clamped_frac ~from:t.warmup_steps in
@@ -457,24 +457,26 @@ module Outlier_detector = struct
     window : float array;
     mutable count : int;  (** Number of recorded values while the window is still filling. *)
     mutable index : int;  (** Replacement position once the window is full. *)
-    mutable sum : float;
-    mutable sum_sq : float;
   }
 
   let create ?(window_size = 128) () =
     if window_size <= 0 then
       invalid_arg "Train.Outlier_detector.create: window_size must be positive";
-    { window = Array.create ~len:window_size 0.; count = 0; index = 0; sum = 0.; sum_sq = 0. }
+    { window = Array.create ~len:window_size 0.; count = 0; index = 0 }
 
   (** Returns [v]'s z-score against the sliding window of the {e previously} recorded values, then
       records [v] (replacing the oldest sample): [Float.nan] until the window has filled — treat
-      that as "not an outlier". Two deliberate departures from llm.c's [update_detector]: the score
-      is computed {e before} [v] joins the window, since self-inclusion dilutes the baseline and
-      caps any finite spike's score at [sqrt (n - 1)] — for a small window that bound sits below
-      reasonable thresholds; and a non-finite [v] never enters the window (a nan sample would
-      poison the running moments permanently — [nan - nan] is [nan]) and scores [infinity], so any
-      finite threshold flags it and the update is skipped. A constant-valued window has standard
-      deviation 0, making the z-score of any deviation [infinity]. *)
+      that as "not an outlier". Three deliberate departures from llm.c's [update_detector]: the
+      score is computed {e before} [v] joins the window, since self-inclusion dilutes the baseline
+      and caps any finite spike's score at [sqrt (n - 1)] — for a small window that bound sits
+      below reasonable thresholds; a non-finite [v] never enters the window and scores [infinity],
+      so any finite threshold flags it and the update is skipped, while later samples still get a
+      healthy baseline; and the moments are recomputed from the stored window with a centered
+      two-pass sum instead of llm.c's running [sum]/[sum_sq] — the [E[x^2] - E[x]^2] form cancels
+      catastrophically for a window with a large common offset and small variance (a zero std then
+      turns every ordinary deviation into a spurious [infinity]), and O(window) per step is free
+      on the host where llm.c needed O(1) in a kernel-adjacent loop. A genuinely constant-valued
+      window has standard deviation 0, making the z-score of any deviation [infinity]. *)
   let update t v =
     if not (Float.is_finite v) then Float.infinity
     else
@@ -482,18 +484,14 @@ module Outlier_detector = struct
       if t.count < n then (
         t.window.(t.count) <- v;
         t.count <- t.count + 1;
-        t.sum <- t.sum +. v;
-        t.sum_sq <- t.sum_sq +. (v *. v);
         Float.nan)
       else
         let nf = Float.of_int n in
-        let mean = t.sum /. nf in
-        let variance = (t.sum_sq /. nf) -. (mean *. mean) in
-        let std = Float.sqrt (Float.max 0. variance) in
-        let z = (v -. mean) /. std in
-        let old = t.window.(t.index) in
-        t.sum <- t.sum -. old +. v;
-        t.sum_sq <- t.sum_sq -. (old *. old) +. (v *. v);
+        let mean = Array.fold t.window ~init:0. ~f:( +. ) /. nf in
+        let variance =
+          Array.fold t.window ~init:0. ~f:(fun acc x -> acc +. ((x -. mean) *. (x -. mean))) /. nf
+        in
+        let z = (v -. mean) /. Float.sqrt variance in
         t.window.(t.index) <- v;
         t.index <- (t.index + 1) % n;
         z

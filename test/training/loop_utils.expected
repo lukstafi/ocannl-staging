@@ -1,8 +1,10 @@
 lr at steps [0 2 4 5 10 15 19 20 24 30] (base 1.0, warmup 5, total 25, final_frac 0.1):
-constant 1.0000 1.0000 1.0000 1.0000 1.0000 1.0000 1.0000 1.0000 1.0000 1.0000
+constant 0.2000 0.6000 1.0000 1.0000 1.0000 1.0000 1.0000 1.0000 1.0000 1.0000
 cosine   0.2000 0.6000 1.0000 1.0000 0.8682 0.5500 0.2855 0.2318 0.1055 0.1000
 linear   0.2000 0.6000 1.0000 1.0000 0.7750 0.5500 0.3700 0.3250 0.1450 0.1000
 wsd      0.2000 0.6000 1.0000 1.0000 1.0000 1.0000 1.0000 1.0000 0.1950 0.1000
+warmup applies to every kind, constant included: true
+constant holds base_lr after warmup: true
 warmup starts at base_lr/warmup_steps: true
 warmup reaches base_lr on its last step: true
 cosine reaches final_frac * base_lr past total_steps: true
@@ -25,3 +27,4 @@ an in-family value scores |z| < 1: true
 a spike scores z > 10 (no self-dilution): true
 a nan sample scores infinite (skip-forcing): true
 the window survives a nan sample (later scores stay finite): true
+a large-offset window keeps a finite variance (no cancellation): true
