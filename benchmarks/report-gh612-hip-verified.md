@@ -119,6 +119,16 @@ parity gate PASSED
 all 18 cells have an accepted pass-2 replay
 ```
 
+The gate's **first** check is the session's premise, which neither of the driver's own gates can see:
+`parity` compares loss vectors and `replays` checks timings and cache hits, and both are satisfied by
+a perfectly good arm B session — so a stale binary in one worktree or a dropped flag in one
+subcommand would produce a green gate over exactly the artifacts this session exists to replace. So
+each expected record is parsed for the shipped arm directly, over both passes:
+
+```
+arm-A premise: 36 records (search + pass-2) all shipped arm A
+```
+
 The coverage table the earlier report had to print with three `no` rows:
 
 | artifact | shipped? | covered by the loss gate |
@@ -306,7 +316,7 @@ bash $S gh574                     # base574A vs feat574A, 3 reps, order alternat
 bash $S caps                      # cap8A vs cap4A, reps 4-6, order alternated
 bash $S replays                   # pass 2: the step timings every table above quotes
 bash $S structure                 # snap + profile + finger on r1, then the three claim-bearing diffs
-bash $S gate                      # the parity gate over exactly these cells, and the artifact gates
+bash $S gate                      # the arm-A premise, the parity gate over exactly these cells, the artifact gates
 ```
 
 ```bash

@@ -92,6 +92,22 @@ let () =
     (Array.for_all2_exn f_got expected ~f:approx);
   (* --- The default: [on_ship] describes what actually shipped, which the measured comparison
          decides. This is what a benchmark attributes its losses by (gh-ocannl-546's arms JSON). --- *)
+  (* --- A raising [on_ship] is the caller's failure and propagates unchanged, like [report]'s: it is
+         not reclassified as an arm failure (which would hide it and ship something anyway). The
+         other half of that path -- releasing the routine the caller never received a handle to, so
+         a repeatedly-failing callback cannot accumulate one rooted footprint per call -- is not
+         observable from here; this pins the half that is. --- *)
+  let raised =
+    match
+      Train.tune_placements ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:""
+        ~on_ship:(fun _ -> failwith "tsa: on_ship says no")
+        ~ship_arm:Train.Force_arm_a (Context.auto ()) t2 comp Ir.Indexing.Empty
+    with
+    | _ -> false
+    | exception Failure msg -> String.is_substring msg ~substring:"tsa: on_ship says no"
+    | exception _ -> false
+  in
+  p "an exception from on_ship propagates to the caller unchanged" raised;
   let d_reports, d_shipped, _, d_got = run () in
   p "the default run ships and matches the plain compile" (Array.for_all2_exn d_got expected ~f:approx);
   (match d_reports with

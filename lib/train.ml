@@ -650,8 +650,25 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
         match if Option.is_none timing_ctx then Context.poisoned_failure ctx else None with
         | None ->
             release_unshipped ~keep:compiled ();
-            (* gh-ocannl-638: the one place that knows what shipped, on the one path that ships. *)
-            Option.iter on_ship ~f:(fun f -> f what);
+            (* gh-ocannl-638: the one place that knows what shipped, on the one path that ships.
+
+               A raising callback is the caller's failure and propagates, like [report]'s — but it
+               propagates INSTEAD of returning [compiled], and by then [compiled] is the one result
+               deliberately not released. Dropping the OCaml value frees nothing (the backend's pool
+               table roots the slabs), and the caller never received a handle, so the routine would
+               be permanently unreachable and unreleasable: a repeatedly-tuning process with a
+               flaky callback accumulates one routine footprint per call. Release it here, then
+               re-raise the caller's own exception with its original backtrace. *)
+            (match on_ship with
+            | None -> ()
+            | Some f -> (
+                try f what
+                with exn ->
+                  let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+                  (try Context.release (fst compiled)
+                   with exn2 when not (must_propagate exn2) ->
+                     logf "release after a failing on_ship callback failed: %s" (Exn.to_string exn2));
+                  Stdlib.Printexc.raise_with_backtrace exn backtrace));
             compiled
         | Some poisoned ->
             logf "the winner cannot ship: a later arm poisoned the caller's lineage";

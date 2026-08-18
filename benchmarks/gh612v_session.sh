@@ -122,11 +122,41 @@ block_structure() {  # rep 1 of the four structural cells: emitted source, per-k
   "$D" diff feat574A 1 capoffA 1  || return 1   # negative control: the guard is silent without a cap
 }
 
+# The premise of the whole session, and the one thing none of the driver's gates can see: `parity`
+# compares loss vectors, `replays` checks timings and cache hits, and BOTH are satisfied by a
+# perfectly good arm B session. A stale pre-backport binary in one worktree, a dropped flag in one
+# subcommand, or a future driver that forgets to forward it, would then produce a green gate over
+# exactly the arm-B artifacts this session exists to replace -- the original limitation, recreated
+# and certified. So assert it directly, over BOTH passes: the searches say which arm was kept, and
+# the pass-2 replays say which arm was kept AGAIN in the process whose timings are quoted.
+assert_shipped_arm_A() {  # <cell>...
+  local bad=0 n=0 cell kind f arm
+  for cell in "$@"; do
+    for kind in search.out replay2.out; do
+      f="$OUT_ROOT/${cell%/*}/${cell#*/}/$kind"
+      [ -s "$f" ] || { echo "gh612v_session: missing record $f" >&2; bad=1; continue; }
+      # The LAST JSON line, matching what `parity` reads: a cell's stdout can carry earlier records.
+      arm=$(grep -h '^{' "$f" | tail -1 | grep -o '"shipped":"[AB?]"' | grep -o '[AB?]')
+      n=$((n + 1))
+      [ "${arm:-?}" = "A" ] || {
+        echo "gh612v_session: $cell $kind shipped arm ${arm:-?}, not A -- the profiled arm is NOT the" >&2
+        echo "  executed one, which is the exact gap this session closes. Refusing to certify it." >&2
+        bad=1; }
+    done
+  done
+  [ "$n" -gt 0 ] || { echo "gh612v_session: no records to check" >&2; return 1; }
+  [ "$bad" -eq 0 ] || return 1
+  echo "arm-A premise: $n records (search + pass-2) all shipped arm A"
+}
+
 block_gate() {
   local want=""
   local l r
   for l in base574A feat574A cap8A capoffA; do for r in 1 2 3; do want="$want $l/r$r"; done; done
   for l in cap8A cap4A; do for r in 4 5 6; do want="$want $l/r$r"; done; done
+  # FIRST, because it is the premise the other two gates presuppose and cannot test: a green parity
+  # gate over arm B artifacts is a correct answer to the wrong question.
+  assert_shipped_arm_A $(echo "$want") || return 1
   # EXPECT_CELLS pins the exact set, so a stale OUT_ROOT cannot substitute one cell for another, and
   # it requires a pass-2 loss vector per cell -- a timed artifact that was never output-verified is
   # exactly what this session exists to eliminate.
