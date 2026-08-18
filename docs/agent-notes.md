@@ -608,6 +608,15 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   runs two searches and keeps one artifact, so a family can win the arm that is then discarded whole
   — read `report.best_label` / `best_tensorized` / `mma_best_ms` per arm (the A/B calls `?report`
   for arm A first and ships the smaller `best_ms`), never the fact that some search crowned it.
+  Since gh-ocannl-638, do not re-derive WHICH arm shipped from the reports' times either: config
+  `tune_ship_arm=a|b` overrides the comparison, and `?on_ship` (`"A"` / `"B"` / `"flip"`) is the
+  callback that says what actually shipped. That knob is what a measurement needs: the discarded
+  arm is never executed against anything (`?report` carries timing metadata, `winner replay ok` is
+  a dispatchability check, and a per-kernel harness times kernels on synthetic buffers without
+  checking results), so profiling arm A while arm B ships leaves the profiled routine
+  output-unverified — the limitation `benchmarks/report-gh612-hip.md` states in its verdict and
+  `report-gh612-hip-verified.md` closes by forcing the arm. Forcing does not skip the other arm's
+  search, so the A-vs-B numbers stay quotable; it does suppress the flip refinement.
   Below GEMM-dominated sizes the crown is a lottery: on `mlp_small`/metal five identical cold-cache
   searches crowned four different families in one arm with a 4.5% spread of best times, while the
   arm gap stayed at 57–95% (gh-ocannl-546, benchmarks/report-gh546-metal.md). Conclusions of the
