@@ -1,8 +1,8 @@
 lr at steps [0 2 4 5 10 15 19 20 24 30] (base 1.0, warmup 5, total 25, final_frac 0.1):
-constant 0.2000 0.6000 1.0000 1.0000 1.0000 1.0000 1.0000 1.0000 1.0000 1.0000
-cosine   0.2000 0.6000 1.0000 1.0000 0.8682 0.5500 0.2855 0.2318 0.1055 0.1000
-linear   0.2000 0.6000 1.0000 1.0000 0.7750 0.5500 0.3700 0.3250 0.1450 0.1000
-wsd      0.2000 0.6000 1.0000 1.0000 1.0000 1.0000 1.0000 1.0000 0.1950 0.1000
+constant 2.0000e-1 6.0000e-1 1.0000 1.0000 1.0000 1.0000 1.0000 1.0000 1.0000 1.0000
+cosine   2.0000e-1 6.0000e-1 1.0000 1.0000 8.6819e-1 5.5000e-1 2.8549e-1 2.3180e-1 1.0554e-1 1.0000e-1
+linear   2.0000e-1 6.0000e-1 1.0000 1.0000 7.7500e-1 5.5000e-1 3.7000e-1 3.2500e-1 1.4500e-1 1.0000e-1
+wsd      2.0000e-1 6.0000e-1 1.0000 1.0000 1.0000 1.0000 1.0000 1.0000 1.9501e-1 1.0000e-1
 warmup applies to every kind, constant included: true
 constant holds base_lr after warmup: true
 warmup starts at base_lr/warmup_steps: true
@@ -23,9 +23,11 @@ second micro-step changed the accumulated gradients: true
 accumulated micro-batch gradients match the single big-batch gradients: PASS
 post-sgd parameters match between accumulation and big batch: PASS
 z-score is nan while the window fills: true
-ordinary z: 0.707, spike z: 121.533
+ordinary z: 7.071e-1, spike z: 1.215e+2
 an in-family value scores |z| < 1: true
 a spike scores z > 10 (no self-dilution): true
 a nan sample scores infinite (skip-forcing): true
 the window survives a nan sample (later scores stay finite): true
 a large-offset window keeps a finite variance (no cancellation): true
+a spike off a constant baseline scores +infinity: true
+a recorded huge spike does not overflow the variance (second spike scores sqrt 3): true

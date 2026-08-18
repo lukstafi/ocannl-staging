@@ -314,6 +314,6 @@
   (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules loop_utils)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))

@@ -28,7 +28,9 @@ let schedules () =
     in
     let lr step = Train.Lr_schedule.learning_rate sched ~step in
     printf "%-8s" name;
-    List.iter [ 0; 2; 4; 5; 10; 15; 19; 20; 24; 30 ] ~f:(fun step -> printf " %.4f" (lr step));
+    List.iter [ 0; 2; 4; 5; 10; 15; 19; 20; 24; 30 ] ~f:(fun step ->
+        printf " ";
+        Test_utils.print_float ~prec:4 (lr step));
     printf "\n";
     sched
   in
@@ -278,7 +280,11 @@ let outlier_detector () =
   let z_ordinary = Train.Outlier_detector.update det 1.05 in
   let z_nan = Train.Outlier_detector.update det Float.nan in
   let z_spike = Train.Outlier_detector.update det 10.0 in
-  printf "ordinary z: %.3f, spike z: %.3f\n" z_ordinary z_spike;
+  printf "ordinary z: ";
+  Test_utils.print_float ~prec:3 z_ordinary;
+  printf ", spike z: ";
+  Test_utils.print_float ~prec:3 z_spike;
+  printf "\n";
   Verdict.p "an in-family value scores |z| < 1" Float.(abs z_ordinary < 1.0);
   (* Scored against the previous window only -- self-inclusion would cap this at sqrt 3. *)
   Verdict.p "a spike scores z > 10 (no self-dilution)" Float.(z_spike > 10.0);
@@ -293,7 +299,18 @@ let outlier_detector () =
       ignore (Train.Outlier_detector.update det v : float));
   let z_offset = Train.Outlier_detector.update det (1e8 +. 1.) in
   Verdict.p "a large-offset window keeps a finite variance (no cancellation)"
-    (Float.is_finite z_offset && Float.(abs (z_offset -. Float.sqrt 2.) < 1e-6))
+    (Float.is_finite z_offset && Float.(abs (z_offset -. Float.sqrt 2.) < 1e-6));
+  (* Normalized moments: a huge finite spike, once recorded, must not overflow the variance to
+     infinity -- which would score the NEXT spike 0 and let it through. Against the post-spike
+     window [1e308; 1; 1; 1] the correct z of a second 1e308 is (0.75 / sqrt 0.1875) = sqrt 3. *)
+  let det = Train.Outlier_detector.create ~window_size:4 () in
+  List.iter [ 1.0; 1.0; 1.0; 1.0 ] ~f:(fun v ->
+      ignore (Train.Outlier_detector.update det v : float));
+  let z_spike1 = Train.Outlier_detector.update det 1e308 in
+  let z_spike2 = Train.Outlier_detector.update det 1e308 in
+  Verdict.p "a spike off a constant baseline scores +infinity" Float.(z_spike1 = infinity);
+  Verdict.p "a recorded huge spike does not overflow the variance (second spike scores sqrt 3)"
+    Float.(abs (z_spike2 -. Float.sqrt 3.) < 1e-6)
 
 let () =
   schedules ();

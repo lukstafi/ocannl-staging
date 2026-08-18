@@ -481,12 +481,16 @@ module Outlier_detector = struct
       and caps any finite spike's score at [sqrt (n - 1)] — for a small window that bound sits
       below reasonable thresholds; a non-finite [v] never enters the window and scores [infinity],
       so any finite threshold flags it and the update is skipped, while later samples still get a
-      healthy baseline; and the moments are recomputed from the stored window with a centered
-      two-pass sum instead of llm.c's running [sum]/[sum_sq] — the [E[x^2] - E[x]^2] form cancels
-      catastrophically for a window with a large common offset and small variance (a zero std then
-      turns every ordinary deviation into a spurious [infinity]), and O(window) per step is free
-      on the host where llm.c needed O(1) in a kernel-adjacent loop. A genuinely constant-valued
-      window has standard deviation 0, making the z-score of any deviation [infinity]. *)
+      healthy baseline; and the moments are recomputed from the stored window on normalized values
+      instead of llm.c's running [sum]/[sum_sq] — the [E[x^2] - E[x]^2] form cancels
+      catastrophically for a window with a large common offset and small variance, and even a
+      centered sum can overflow its squares once a huge finite spike has been recorded, turning
+      the variance into [infinity] and scoring the {e next} spike 0. Every intermediate here is
+      bounded ([mean] accumulates [x/n]; deviations are taken between [x/mag] and [mean/mag]
+      with [mag = max (abs mean) (max_i (abs x_i))], so they lie in [[-2, 2]]), which no finite
+      window can overflow; O(window) per step is free on the host where llm.c needed O(1) in a
+      kernel-adjacent loop. A genuinely constant-valued window has standard deviation 0, making
+      the z-score of any deviation [infinity] (and of [v = mean], 0). *)
   let update t v =
     if not (Float.is_finite v) then Float.infinity
     else
@@ -497,11 +501,27 @@ module Outlier_detector = struct
         Float.nan)
       else
         let nf = Float.of_int n in
-        let mean = Array.fold t.window ~init:0. ~f:( +. ) /. nf in
-        let variance =
-          Array.fold t.window ~init:0. ~f:(fun acc x -> acc +. ((x -. mean) *. (x -. mean))) /. nf
+        let mean = Array.fold t.window ~init:0. ~f:(fun acc x -> acc +. (x /. nf)) in
+        let mag =
+          Array.fold t.window ~init:(Float.abs mean) ~f:(fun acc x -> Float.max acc (Float.abs x))
         in
-        let z = (v -. mean) /. Float.sqrt variance in
+        let z =
+          if Float.(mag = 0.) then
+            (* All-zero window: any nonzero [v] is infinitely surprising. *)
+            if Float.(v = 0.) then 0. else Float.copysign Float.infinity v
+          else
+            let smean = mean /. mag in
+            let s =
+              Array.fold t.window ~init:0. ~f:(fun acc x ->
+                  let d = (x /. mag) -. smean in
+                  acc +. (d *. d))
+            in
+            let rstd = Float.sqrt (s /. nf) in
+            let num = (v /. mag) -. smean in
+            if Float.(rstd = 0.) then
+              if Float.(num = 0.) then 0. else Float.copysign Float.infinity num
+            else num /. rstd
+        in
         t.window.(t.index) <- v;
         t.index <- (t.index + 1) % n;
         z
