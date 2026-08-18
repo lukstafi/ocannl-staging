@@ -945,8 +945,11 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   form — that is where the provenance lives, since a codegen pass looking at adjacent same-cell
   `Set`s cannot tell unrolled copies of one assignment from two user-authored assignments, whose
   separate stores (and separate narrowings) are their semantics (`accum_width`'s 256+1+1 leg pins
-  the boundary). The shared statement recognizer is `Low_level.accum_update_parts` — change "what
-  counts as an accumulation" only there, or the schedule transform and the emission drift. The
+  the boundary). The whole nest recognition — Serial/Unrolled levels, pure-index guards,
+  raw-update or scope-form base — is ONE function, `Low_level.peel_accum_nest` (over
+  `accum_update_parts`), shared by the transform and the emission precisely because three review
+  rounds found them drifting one capability at a time (guards, scope-form bases, the logging
+  decline); extend nest recognition only there. The
   widening is inert wherever `comp_prec` is the identity (f32/f64,
   GPU backends, `narrow_compute_f32=false`, native fp16), and it declines twice more: under
   `debug_log_from_routines` (a `Local_scope` body renders with `log_set_locals:false`, so the

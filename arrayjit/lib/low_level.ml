@@ -4935,6 +4935,71 @@ let subst_accum_read ~tn ~idcs ~id (llsc : scalar_t) : scalar_t =
       (* [accum_update_parts] admits only the two shapes above. *)
       assert false
 
+(* A guard reading only embedded indices and constants — the gh-490 symbolic-extent shape
+   [If (i < s)] and its constant-bound sibling (Schedule.Pad's leaf guards). Such a guard commutes
+   with an accumulator's init and store: it gates which updates run, and for a cell whose guard
+   never fires a widen/narrow round-trip is exact on every narrow-float value. Data-dependent
+   guards are NOT of this shape and stay opaque to the peel below. *)
+let pure_index_guard (llsc : scalar_t) =
+  let operand = function Embed_index _ | Constant _ -> true | _ -> false in
+  match llsc with
+  | Binop ((Ops.Cmplt | Ops.Cmple), (a, _), (b, _)) -> operand a && operand b
+  | _ -> false
+
+(* gh-ocannl-639: peel a single-statement reduction nest down to its accumulation base. Levels are
+   Serial/[Unrolled] loops and {!pure_index_guard}ed [If]s, each containing nothing else (comments
+   aside); the base is either a raw accumulation update ([`Update]: an
+   {!accum_update_parts}-shaped [Set] whose cell is invariant across the peeled levels) or the
+   scope form a previous rewrite minted ([`Scope]: a [Set] whose value is a [Local_scope] opening
+   with the init [Set_local (id, Get (tn, idcs))], returned as the id and the update statements
+   after the init — reusing the id is what lets a consumer hoist the scope through further
+   levels). Returns [(tn, idcs, base, debug, rebuild)] where [rebuild] re-wraps a replacement base
+   statement in the peeled levels. The ONE definition shared by [C_syntax]'s widened serial
+   fallback and [Schedule.Unroll ~materialize:true]'s scope-form unrolling, so the transform and
+   the emission cannot drift in what nests they recognize. *)
+let peel_accum_nest ~free_of body :
+    (Tn.t
+    * Indexing.axis_index array
+    * [ `Update of scalar_t | `Scope of scope_id * t list ]
+    * string
+    * (t -> t))
+    option =
+  let strip stmts = List.filter stmts ~f:(function Noop | Comment _ -> false | _ -> true) in
+  let idx_mentions sym (idx : Indexing.axis_index) =
+    match idx with
+    | Indexing.Iterator s -> Indexing.equal_symbol s sym
+    | Indexing.Affine { symbols; _ } ->
+        List.exists symbols ~f:(fun (_, s) -> Indexing.equal_symbol s sym)
+    | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
+  in
+  let cell_invariant ~free_of idcs =
+    not (Array.exists idcs ~f:(fun idx -> List.exists free_of ~f:(fun s -> idx_mentions s idx)))
+  in
+  let rec peel ~free_of ~rebuild body =
+    match strip (flat_lines [ body ]) with
+    | [ For_loop ({ index; body = ibody; axis = Serial | Unrolled; _ } as r) ] ->
+        peel ~free_of:(index :: free_of)
+          ~rebuild:(fun b -> rebuild (For_loop { r with body = b }))
+          ibody
+    | [ If { cond = gc, gp; body = gbody } ] when pure_index_guard gc ->
+        peel ~free_of ~rebuild:(fun b -> rebuild (If { cond = (gc, gp); body = b })) gbody
+    | [ Set { tn; idcs; llsc = Local_scope { id; body = sbody; orig_indices = _ }; debug } ]
+      when cell_invariant ~free_of idcs -> (
+        match strip (flat_lines [ sbody ]) with
+        | Set_local (id', Get (tn', idcs')) :: (_ :: _ as rest)
+          when Scope_id.equal id id' && Tn.equal tn tn'
+               && Array.length idcs = Array.length idcs'
+               && Array.for_all2_exn idcs idcs' ~f:Indexing.equal_axis_index
+               && not (List.exists rest ~f:(code_touches_tn tn)) ->
+            Some (tn, idcs, `Scope (id, rest), debug, rebuild)
+        | _ -> None)
+    | [ Set { tn; idcs; llsc; debug } ]
+      when cell_invariant ~free_of idcs && Option.is_some (accum_update_parts ~tn ~idcs llsc) ->
+        Some (tn, idcs, `Update llsc, debug, rebuild)
+    | _ -> None
+  in
+  peel ~free_of ~rebuild:(fun b -> b) body
+
 (* gh-343: extract the per-iteration one-hot contribution from an accumulation [acc] in which the
    running total is recognized by [acc_is]. Handles the [Binop (Add, total, contribution)] form
    (either operand order) and the fused [Ternop (FMA, a, b, total)] form, where FMA(a,b,total) = a*b

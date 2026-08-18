@@ -729,38 +729,31 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
              rng-census and storage=compute cases where that is the storage precision), so the
              unrolled candidate computes exactly what the serial baseline computes — which is the
              invariant autotune's menu depends on (candidates compete on speed, never numerics). *)
-          let strip stmts =
-            List.filter stmts ~f:(function Low_level.Noop | Comment _ -> false | _ -> true)
+          let mint =
+            (* Under routine logging the per-iteration [Set] copies ARE the trace: a [Local_scope]
+               body renders with [log_set_locals:false], so minting the scope would silence every
+               update. The serial baseline's widening declines under logging for the same reason
+               (C_syntax.try_widen_serial_reduce), so within a logged regime the unrolled and
+               serial candidates still agree — both per-step. *)
+            if Utils.debug_log_from_routines () then None
+            else Low_level.peel_accum_nest ~free_of:[ axis ] fc.body
           in
-          let idx_mentions sym (idx : Indexing.axis_index) =
-            match idx with
-            | Indexing.Iterator s -> Indexing.equal_symbol s sym
-            | Indexing.Affine { symbols; _ } ->
-                List.exists symbols ~f:(fun (_, s) -> Indexing.equal_symbol s sym)
-            | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
-          in
-          let rec peel ~free ~rebuild body =
-            match strip (flat_lines [ body ]) with
-            | [ For_loop ({ index; body = ibody; axis = Serial | Unrolled; _ } as r) ] ->
-                peel ~free:(index :: free)
-                  ~rebuild:(fun b -> rebuild (For_loop { r with body = b }))
-                  ibody
-            | [ Set { tn; idcs; llsc; debug } ]
-              when (not
-                      (Array.exists idcs ~f:(fun idx ->
-                           List.exists free ~f:(fun s -> idx_mentions s idx))))
-                   && Option.is_some (Low_level.accum_update_parts ~tn ~idcs llsc) ->
-                Some (tn, idcs, llsc, debug, rebuild)
-            | _ -> None
-          in
-          match peel ~free:[ axis ] ~rebuild:(fun b -> b) fc.body with
-          | Some (tn, idcs, llsc, debug, rebuild) ->
-              let id = Low_level.get_scope tn in
-              let update = Low_level.subst_accum_read ~tn ~idcs ~id llsc in
+          match mint with
+          | Some (tn, idcs, base, debug, rebuild) ->
+              let id, update_code =
+                match base with
+                | `Update llsc ->
+                    let id = Low_level.get_scope tn in
+                    (id, Low_level.Set_local (id, Low_level.subst_accum_read ~tn ~idcs ~id llsc))
+                | `Scope (id, rest) ->
+                    (* A previous materializing unroll (of a deeper reduction axis) already minted
+                       the scope form: reuse its accumulator across this axis's copies too, or the
+                       whole-nest residency is lost — the enclosing loop is about to disappear, so
+                       codegen's scope-base hoist could not recover it. *)
+                    (id, unflat_lines rest)
+              in
               let copies =
-                List.init
-                  (fc.to_ - fc.from_ + 1)
-                  ~f:(fun k -> copy k (rebuild (Low_level.Set_local (id, update))))
+                List.init (fc.to_ - fc.from_ + 1) ~f:(fun k -> copy k (rebuild update_code))
               in
               Set
                 {

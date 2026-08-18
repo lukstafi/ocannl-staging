@@ -262,6 +262,25 @@ val subst_accum_read :
 (** Retarget an {!accum_update_parts}-shaped update's read of [tn[idcs]] to the scope local [id].
     Raises on any other shape. *)
 
+val peel_accum_nest :
+  free_of:Indexing.symbol list ->
+  t ->
+  (Tnode.t
+  * Indexing.axis_index array
+  * [ `Update of scalar_t | `Scope of scope_id * t list ]
+  * string
+  * (t -> t))
+  option
+(** Peel a single-statement reduction nest down to its accumulation base (gh-ocannl-639). Levels
+    are Serial/[Unrolled] loops and pure-index-guarded [If]s (the gh-490 [If (i < s)] shape and
+    its constant-bound sibling — data-dependent guards stay opaque), each containing nothing else;
+    the base is a raw {!accum_update_parts}-shaped update ([`Update]) or the scope form a previous
+    rewrite minted ([`Scope]: the scope id and the update statements after the opening init),
+    with the accumulated cell invariant across the peeled levels ([free_of] seeds the invariance
+    check with the caller's own loop). [rebuild] re-wraps a replacement base statement in the
+    peeled levels. The ONE definition shared by [C_syntax]'s widened serial fallback and
+    [Schedule.Unroll ~materialize:true], so transform and emission cannot drift. *)
+
 (** {2 Hardware axis analyses}
 
     Phase B of docs/proposals/axis-types-for-loops.md. Hardware slot assignment is positional, not

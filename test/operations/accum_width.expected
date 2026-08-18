@@ -6,6 +6,8 @@ two-axis bf16 reduction equals the once-narrowed wide-accumulation reference: tr
 materialized-unrolled INNER reduction axis equals the serial result (the scope hoists through the outer reduction loop): true
 materialized-unrolled OUTER reduction axis equals the serial result: true
 Unroll-annotated both reduction axes equals the serial result: true
+BOTH reduction axes materialized sequentially keep the whole-nest accumulator (equals the serial result): true
+Pad-guarded materialized unroll equals the serial result (the guard peels into the scope): true
 adjacent accumulations into one cell keep their per-assignment narrowing (256 +1 +1 stays 256 at bf16): true
 index-guarded bf16 reduction accumulates wide across the guard (256 +1x5 narrows once to 260): true
 a Workgroup_reduce loop serialized on cc keeps the Serial accumulator width (equals the serial result): true

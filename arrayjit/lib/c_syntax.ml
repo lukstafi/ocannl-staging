@@ -3337,94 +3337,49 @@ module C_syntax (B : C_syntax_config) = struct
         let try_widen_serial_reduce () : PPrint.document option =
           if Utils.debug_log_from_routines () then None
           else
-            (* A guard that reads only embedded indices (the gh-490 symbolic-extent shape
-               [If (i < s)] that [serial_loop] fuses, and its constant-bound sibling) is
-               transparent to the peel: it gates which updates run, and the hoisted accumulator's
-               init/store commute with it — for a cell whose guard never fires the rewrite
-               reads and writes back the identical narrow value (a widen/narrow round-trip is
-               exact on every narrow-float value). Data-dependent guards are NOT transparent. *)
-            let pure_index_operand = function
-              | Low_level.Embed_index _ | Low_level.Constant _ -> true
-              | _ -> false
+            let widen (tn, idcs, base, debug, rebuild) =
+              let store_prec = Lazy.force tn.Tn.storage_prec in
+              if Ops.equal_prec (comp_prec store_prec) store_prec then None
+              else
+                match base with
+                | `Update llsc when mentions_rng_conversion llsc -> None
+                | _ ->
+                    let id, update_code =
+                      match base with
+                      | `Update llsc ->
+                          let id = Low_level.get_scope tn in
+                          ( id,
+                            Low_level.Set_local
+                              (id, Low_level.subst_accum_read ~tn ~idcs ~id llsc) )
+                      | `Scope (id, rest) ->
+                          (* The scope-form base [Sched.Unroll ~materialize:true] minted (or a
+                             previous level of this very rewrite): hoist it through the enclosing
+                             reduction levels by moving its init above them and keeping its
+                             updates inside — otherwise a partially materialized nest would store
+                             and narrow the accumulator once per remaining outer iteration. The
+                             scope id is reused, so the rng census's storage-precision marking
+                             still applies; at storage precision the hoist is value-neutral. *)
+                          (id, Low_level.unflat_lines rest)
+                    in
+                    let rebuild_hook b =
+                      Low_level.For_loop { index = i; from_; to_; body = b; axis }
+                    in
+                    let scope_body =
+                      Low_level.Seq
+                        ( Low_level.Set_local (id, Low_level.Get (tn, idcs)),
+                          rebuild_hook (rebuild update_code) )
+                    in
+                    Some
+                      (pp_ll ~log_set_locals ~in_loop
+                         (Low_level.Set
+                            {
+                              tn;
+                              idcs;
+                              llsc = Local_scope { id; body = scope_body; orig_indices = idcs };
+                              debug;
+                            }))
             in
-            let pure_index_guard = function
-              | Low_level.Binop ((Ops.Cmplt | Ops.Cmple), (a, _), (b, _)) ->
-                  pure_index_operand a && pure_index_operand b
-              | _ -> false
-            in
-            let rec peel ~free_of ~rebuild body =
-              match nonempty_stmts body with
-              | [
-               Low_level.For_loop
-                 ({ index; body = ibody; axis = Low_level.Serial | Low_level.Unrolled; _ } as r);
-              ] ->
-                  peel
-                    ~free_of:(index :: free_of)
-                    ~rebuild:(fun b -> rebuild (Low_level.For_loop { r with body = b }))
-                    ibody
-              | [ Low_level.If { cond = gc, gprec; body = gbody } ] when pure_index_guard gc ->
-                  peel ~free_of
-                    ~rebuild:(fun b -> rebuild (Low_level.If { cond = (gc, gprec); body = b }))
-                    gbody
-              | [
-               Low_level.Set
-                 { tn; idcs; llsc = Local_scope { id; body = sbody; orig_indices = _ }; debug };
-              ]
-                when not
-                       (Array.exists idcs ~f:(fun idx ->
-                            List.exists free_of ~f:(fun s -> mentions_sym s idx))) -> (
-                  (* The scope-form base [Sched.Unroll ~materialize:true] mints for a recognized
-                     accumulation nest (or a previous level of this very rewrite): hoist it
-                     through the enclosing reduction loops by moving its init above them and
-                     keeping its updates (which touch nothing but the scope local) inside —
-                     otherwise a partially materialized nest would store and narrow the
-                     accumulator once per remaining outer iteration. The scope id is reused, so
-                     the rng census's storage-precision marking still applies; at storage
-                     precision the hoist is value-neutral (each update already rounds there). *)
-                  let store_prec = Lazy.force tn.Tn.storage_prec in
-                  if Ops.equal_prec (comp_prec store_prec) store_prec then None
-                  else
-                    match nonempty_stmts sbody with
-                    | Low_level.Set_local (id', Low_level.Get (tn', idcs')) :: (_ :: _ as rest)
-                      when Low_level.Scope_id.equal id id' && Tn.equal tn tn'
-                           && Array.length idcs = Array.length idcs'
-                           && Array.for_all2_exn idcs idcs' ~f:Indexing.equal_axis_index
-                           && not (List.exists rest ~f:(Low_level.code_touches_tn tn)) ->
-                        Some (tn, idcs, `Scope (id, rest), debug, rebuild)
-                    | _ -> None)
-              | [ Low_level.Set { tn; idcs; llsc; debug } ] as stmts ->
-                  let store_prec = Lazy.force tn.Tn.storage_prec in
-                  if
-                    Ops.equal_prec (comp_prec store_prec) store_prec
-                    || mentions_rng_conversion llsc
-                  then None
-                  else
-                    Option.map (recognize_accumulation ~free_of stmts) ~f:(fun _ ->
-                        (tn, idcs, `Update llsc, debug, rebuild))
-              | _ -> None
-            in
-            let rebuild_hook b = Low_level.For_loop { index = i; from_; to_; body = b; axis } in
-            Option.map (peel ~free_of:[ i ] ~rebuild:rebuild_hook body)
-              ~f:(fun (tn, idcs, base, debug, rebuild) ->
-                let id, update_code =
-                  match base with
-                  | `Update llsc ->
-                      let id = Low_level.get_scope tn in
-                      (id, Low_level.Set_local (id, Low_level.subst_accum_read ~tn ~idcs ~id llsc))
-                  | `Scope (id, rest) -> (id, Low_level.unflat_lines rest)
-                in
-                let scope_body =
-                  Low_level.Seq
-                    (Low_level.Set_local (id, Low_level.Get (tn, idcs)), rebuild update_code)
-                in
-                pp_ll ~log_set_locals ~in_loop
-                  (Low_level.Set
-                     {
-                       tn;
-                       idcs;
-                       llsc = Local_scope { id; body = scope_body; orig_indices = idcs };
-                       debug;
-                     }))
+            Option.bind (Low_level.peel_accum_nest ~free_of:[ i ] body) ~f:widen
         in
         let widen_or_serial () =
           match try_widen_serial_reduce () with Some doc -> doc | None -> serial_loop ()

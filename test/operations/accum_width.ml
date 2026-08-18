@@ -112,6 +112,13 @@ let claim_2ax_inner =
 let claim_2ax_outer = "materialized-unrolled OUTER reduction axis equals the serial result"
 let claim_2ax_annot = "Unroll-annotated both reduction axes equals the serial result"
 
+let claim_2ax_both_mat =
+  "BOTH reduction axes materialized sequentially keep the whole-nest accumulator (equals the \
+   serial result)"
+
+let claim_2ax_pad_mat =
+  "Pad-guarded materialized unroll equals the serial result (the guard peels into the scope)"
+
 let claim_adjacent =
   "adjacent accumulations into one cell keep their per-assignment narrowing (256 +1 +1 stays 256 \
    at bf16)"
@@ -133,6 +140,8 @@ let all_claims =
     claim_2ax_inner;
     claim_2ax_outer;
     claim_2ax_annot;
+    claim_2ax_both_mat;
+    claim_2ax_pad_mat;
     claim_adjacent;
     claim_guarded;
     claim_wgreduce;
@@ -231,6 +240,22 @@ let () =
         [
           Sched.Unroll { axis = r; materialize = false };
           Sched.Unroll { axis = s; materialize = false };
+        ]);
+    (* Sequential materialization of both axes: the second unroll must recognize the scope form
+       the first one minted and reuse its accumulator — the outer loop is gone afterwards, so
+       codegen's scope-base hoist could not recover a per-outer-iteration narrowing. *)
+    leg2 ~claim:claim_2ax_both_mat ~name:"aw2_unroll_both_mat" ~sched:(fun ~r ~s ->
+        [
+          Sched.Unroll { axis = s; materialize = true };
+          Sched.Unroll { axis = r; materialize = true };
+        ]);
+    (* Pad puts an [If (s < 6)] index guard on the leaf, then the materializing unroll must peel
+       it into the scope: without that, the unroll would emit guarded per-copy Sets with no loop
+       left, and every copy would narrow through storage. *)
+    leg2 ~claim:claim_2ax_pad_mat ~name:"aw2_unroll_pad_mat" ~sched:(fun ~r:_ ~s ->
+        [
+          Sched.Pad { axis = s; to_multiple_of = 4 };
+          Sched.Unroll { axis = s; materialize = true };
         ]);
     (* === adjacent accumulations: two SOURCE assignments into one cell are two stores, and each
        store narrows — they must NOT share an accumulator residency (that is the provenance
