@@ -283,8 +283,29 @@ let () =
   report path;
   Tensor.unsafe_reinitialize ();
   let ctx = Context.cpu () in
-  let ctx, loaded = Persistence.load ~ctx path in
+  let mapped_before, copied_before = Persistence.ingestion_counts () in
+  let ctx, loaded = Persistence.load ~ctx ~mmap:true path in
+  let mapped_after, copied_after = Persistence.ingestion_counts () in
   Set.iter loaded ~f:(fun tn -> Stdio.printf "  id=%d values=[%s]\n" tn.Tn.id (show ctx tn));
+  (* Packed, nothing keeps a payload on its element's boundary: the header is not padded out, and
+     each offset is just the sum of the preceding payloads. A mapping at such an offset would hand
+     out a misaligned float pointer, so those payloads are decoded even with mapping on. The
+     expectation is computed from the layout rather than written down, so it stays right if the
+     header's length changes. *)
+  let _, data_start, layout = file_layout path in
+  let prec_of_id id = if id = 1 then Ops.byte else Ops.single in
+  let expected_mapped =
+    List.count layout ~f:(fun (id, offset) ->
+        (data_start + offset) % Ops.prec_in_bytes (prec_of_id id) = 0)
+  in
+  Stdio.printf "  packed load: %d mapped, %d decoded\n"
+    (mapped_after - mapped_before)
+    (copied_after - copied_before);
+  Verdict.p "a payload at an offset its precision cannot be mapped at is decoded"
+    (mapped_after - mapped_before = expected_mapped
+    && copied_after - copied_before = List.length layout - expected_mapped);
+  Verdict.p "the packed layout really does leave a payload unmappable"
+    (expected_mapped < List.length layout);
   (* And a checkpoint written before the field existed -- the same layout with the field deleted
      from the header -- must still read back. *)
   let legacy_path = tmp_file "legacy" in
@@ -399,6 +420,73 @@ let () =
      (* The message embeds the machine-dependent path. *)
      Verdict.p "Caught a payload-past-end-of-file failure"
        (String.is_suffix msg ~suffix:"extends past the end of the file"));
-  cleanup "truncated";
+  cleanup "truncated"
+
+(* === Test 15: Saving over a checkpoint whose mappings are still live (gh-ocannl-588) === *)
+
+(* [save] writes a temp file and renames it over the target. On POSIX that replaces the directory
+   entry and leaves the inode the mapping was taken from alone, so a live mapping keeps reading what
+   it read before. Windows was expected not to allow it at all -- a mapped view keeps the file
+   object referenced, so the replacing rename should fail with a sharing violation -- which is why
+   [checkpoint_load_mmap] defaulted off there. This measures both halves: whether the save succeeds,
+   and, since a successful rename could equally mean the mapping now sees the new bytes, whether the
+   mapping still reads the values it was taken from. The platform-specific detail goes to stderr, so
+   the golden says the same thing everywhere. *)
+let live_mapping_path = tmp_file "live_mapping"
+let v1 = [| 1.0; 2.0; 3.0; 4.0 |]
+let v2 = [| 9.0; 8.0; 7.0; 6.0 |]
+
+let attempt what f =
+  match f () with
+  | () ->
+      Stdio.eprintf "  %s: succeeded\n" what;
+      true
+  | exception exn ->
+      Stdio.eprintf "  %s: raised %s\n" what (Exn.to_string exn);
+      false
+
+let () =
+  Stdio.printf "=== Test 15: Save over a live mapped checkpoint ===\n";
+  let path = live_mapping_path in
+  Tensor.unsafe_reinitialize ();
+  let ctx = Context.cpu () in
+  let ctx, tn = make_tn ctx ~id:0 ~label:[ "w" ] Ops.single [| 4 |] v1 in
+  Persistence.save ~ctx ~appending:false (Set.of_list (module Tn) [ tn ]) path;
+  Tensor.unsafe_reinitialize ();
+  let ctx = Context.cpu () in
+  let mapped_before, _ = Persistence.ingestion_counts () in
+  let ctx, loaded = Persistence.load ~ctx ~mmap:true path in
+  let mapped_after, _ = Persistence.ingestion_counts () in
+  Verdict.p "the reloaded payload is mapped, whatever the platform default"
+    (mapped_after - mapped_before = 1);
+  let tn = List.hd_exn (Set.to_list loaded) in
+  (* The mapping itself, held in a local across the save below -- reading it afterwards is what
+     makes this an experiment about a *live* mapping, not one the GC may already have dropped. *)
+  let mapping = Lazy.force (Option.value_exn (Ir.Host_inits.find tn)) in
+  Verdict.p "the mapping reads the checkpoint's values"
+    (Array.equal Float.equal (Nd.retrieve_flat_values mapping) v1);
+  (* Save different values over the same path. [set_values] goes through a fresh host buffer, so it
+     does not disturb the mapping. *)
+  let ctx = Context.set_values ctx tn v2 in
+  let saved =
+    attempt "save over a live mapping" (fun () ->
+        Persistence.save ~ctx ~appending:false loaded path)
+  in
+  Verdict.p "saving over a checkpoint with a live mapping succeeds" saved;
+  Verdict.p "the live mapping still reads the values it was taken from"
+    (Array.equal Float.equal (Nd.retrieve_flat_values mapping) v1)
+
+(* A fresh top-level block, so the previous one's mapping, context and nodes are out of scope. *)
+let () =
+  Tensor.unsafe_reinitialize ();
+  Stdlib.Gc.full_major ();
+  let ctx = Context.cpu () in
+  let ctx, reloaded = Persistence.load ~ctx ~mmap:true live_mapping_path in
+  let tn = List.hd_exn (Set.to_list reloaded) in
+  Verdict.p "the file on disk holds what the save wrote"
+    (Array.equal Float.equal (Context.get_values ctx tn) v2);
+  (* A save whose rename fails leaves its temp file behind, so clean up both. *)
+  List.iter [ live_mapping_path; live_mapping_path ^ ".tmp" ] ~f:(fun path ->
+      if Stdlib.Sys.file_exists path then Stdlib.Sys.remove path);
 
   Stdio.printf "=== All persistence tests completed ===\n"

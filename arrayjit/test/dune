@@ -6,7 +6,7 @@
   ocannl_config
   (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
- (libraries base stdio arrayjit.ir)
+ (libraries base stdio arrayjit.ir arrayjit.verdict)
  (preprocess
   (pps ppx_here)))
 
