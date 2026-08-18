@@ -24,7 +24,8 @@
 #   replays    pass-2 replay (the protocol's step timings) of every cell of every block above
 #   structure  snap + profile + finger on rep 1 of the four structural cells, then the diffs
 #   capprofile Part 5's per-kernel profile of cap 4, plus the cap-8-vs-cap-4 structural diff
-#   gate       the parity gate over exactly this session's cells, and the artifact gates
+#   gate       LAST: provenance, the arm-A premise, parity over exactly these cells, artifacts.
+#              It requires the structural and cap-4 profiles, so run it after structure/capprofile.
 #
 # Environment: BASE FEAT MASTER are the three built trees (see the report's Provenance for the
 # commits); OUT_ROOT defaults to /tmp/gh612v. Blocks are independent and resumable -- a rerun of a
@@ -96,18 +97,23 @@ cell_flags() {
 # review-round fixes on the PR branch, which touch failure paths (a raising `on_ship`; which arm's
 # failure propagates when both arms fail) that no cell in this session took: every cell shipped a
 # successful arm A. Recorded so the claim "verbatim backport" is checkable rather than asserted.
-SHA_TRAIN=${SHA_TRAIN:-5d98ac818c547662608d7ef379c8ea6ecb0e5bc91be663a26c1b818c52195fcd}
-SHA_GPT=${SHA_GPT:-de3cb8b4d56cac22885f014f6532a170a4b69c5ab1561f7bda7061289b548a1e}
-SHA_HARNESS=${SHA_HARNESS:-f51ef550c714642594e7eb633745a60ee4bd1e6c3c94d716702aa666aaa7d2c1}
-SHA_CONV=${SHA_CONV:-77dea492448dd31781ab28e34a2a29c5266af07548fb523a3d8d015253dfe0f3}
-SHA_MLP=${SHA_MLP:-328c1dcc51a016eef36ad6142c9003315e8e62111c502d77da68b534eb2df44b}
+# NOT overridable from the environment, unlike OUT_ROOT or the tree paths. These digests and the
+# commits below do not configure the session -- they IDENTIFY the measurement the report publishes,
+# and a run that supplies its own is measuring something else while inheriting the labels, the
+# manifests and the gate's certification. Changing them is a source edit, which is reviewable;
+# exporting a variable is not.
+SHA_TRAIN=5d98ac818c547662608d7ef379c8ea6ecb0e5bc91be663a26c1b818c52195fcd
+SHA_GPT=de3cb8b4d56cac22885f014f6532a170a4b69c5ab1561f7bda7061289b548a1e
+SHA_HARNESS=f51ef550c714642594e7eb633745a60ee4bd1e6c3c94d716702aa666aaa7d2c1
+SHA_CONV=77dea492448dd31781ab28e34a2a29c5266af07548fb523a3d8d015253dfe0f3
+SHA_MLP=328c1dcc51a016eef36ad6142c9003315e8e62111c502d77da68b534eb2df44b
 # utils.ml is patched rather than copied, so its digest is per ROLE: BASE and FEAT share one (the
 # config machinery is identical at those two commits) and MASTER has its own. Pinned exactly like
 # the copied files -- a structural "the key appears twice" check accepts any file that merely
 # mentions it, including one that also changed config parsing, the profiles, or an optimizer default.
-SHA_UTILS_BASE=${SHA_UTILS_BASE:-6c0aace0ea29fd3dea19737cded0c2e7308ed6d8b8f75a9123eae3137a0446ef}
-SHA_UTILS_FEAT=${SHA_UTILS_FEAT:-6c0aace0ea29fd3dea19737cded0c2e7308ed6d8b8f75a9123eae3137a0446ef}
-SHA_UTILS_MASTER=${SHA_UTILS_MASTER:-e13a7fd401f867e835aa2e8e3af9abd6a2ea8bc6f5ab7f9a77414ffeb53666bd}
+SHA_UTILS_BASE=6c0aace0ea29fd3dea19737cded0c2e7308ed6d8b8f75a9123eae3137a0446ef
+SHA_UTILS_FEAT=6c0aace0ea29fd3dea19737cded0c2e7308ed6d8b8f75a9123eae3137a0446ef
+SHA_UTILS_MASTER=e13a7fd401f867e835aa2e8e3af9abd6a2ea8bc6f5ab7f9a77414ffeb53666bd
 utils_pin() {
   case $1 in
     BASE) printf '%s\n' "$SHA_UTILS_BASE" ;;
@@ -124,9 +130,9 @@ utils_pin() {
 # roles sharing a checkout would silently be pinned to one commit.
 tree_pin() {
   case $1 in
-    BASE) printf '%s\n' "${BASE_COMMIT:-6d14f401}" ;;
-    FEAT) printf '%s\n' "${FEAT_COMMIT:-76f50dcd}" ;;
-    MASTER) printf '%s\n' "${MASTER_COMMIT:-5d0c86d8}" ;;
+    BASE) printf '%s\n' 6d14f401 ;;
+    FEAT) printf '%s\n' 76f50dcd ;;
+    MASTER) printf '%s\n' 5d0c86d8 ;;
     *) return 1 ;;
   esac
 }
@@ -391,8 +397,23 @@ assert_cell_provenance() {  # <cell>...
     # per-kernel profile can be regenerated from another checkout while the search manifest stays
     # true, and Part 5's per-kernel claim rests on exactly such a regeneration.
     local d="$OUT_ROOT/${cell%/*}/${cell#*/}" k
+    # The four structural cells and cap4A/r4 MUST carry the derived artifacts: Parts 3-5 quote their
+    # per-kernel numbers and their diffs. Elsewhere the artifacts are optional (only the searched
+    # cells' replays are universal), but where a claim rests on one, absent is a failure, not a skip
+    # -- otherwise `gate` certifies a session whose profiles were never produced.
+    local required=""
+    case $cell in
+      base574A/r1|feat574A/r1|cap8A/r1|capoffA/r1|cap4A/r4) required="snap profile" ;;
+    esac
     for k in snap:armA.path profile:kernels-1.csv replay:replay2.out; do
-      [ -e "$d/${k#*:}" ] || continue
+      if [ ! -e "$d/${k#*:}" ]; then
+        case " $required " in
+          *" ${k%%:*} "*)
+            echo "gh612v_session: $cell is missing ${k#*:}, which a claim in the report rests on --" >&2
+            echo "  run the 'structure' and 'capprofile' blocks before the gate." >&2; bad=1 ;;
+        esac
+        continue
+      fi
       [ -s "$d/${k%%:*}.manifest" ] || {
         echo "gh612v_session: $cell has ${k#*:} but no ${k%%:*}.manifest -- that artifact was not" >&2
         echo "  produced through this session's wrapper, so its tree is unrecorded." >&2; bad=1; continue; }

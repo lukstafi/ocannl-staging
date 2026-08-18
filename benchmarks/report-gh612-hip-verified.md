@@ -345,10 +345,29 @@ cd ocannl-staging
 for w in master:5d0c86d8 base:6d14f401 feat:76f50dcd; do
   d=../wt-gh612v-${w%%:*}; want=${w##*:}
   [ -e "$d" ] || git worktree add --detach "$d" "$want" || exit 1
+  # (1) the five files, copied verbatim -- these are what the digests in gh612v_session.sh pin
   git -C "$d" checkout <the-gh638-commit> -- lib/train.ml benchmarks/runners/ocannl/bench_harness.ml \
     benchmarks/runners/ocannl/bench_gpt.ml benchmarks/runners/ocannl/bench_conv.ml \
     benchmarks/runners/ocannl/bench_mlp.ml || exit 1
-  # plus tune_ship_arm in Utils.known_config_keys / config_key_classification and the reference file
+  # (2) utils.ml is PATCHED, not copied: its base content differs between these commits, so the key
+  # is registered and classified in place. Both edits are required and the exact text matters --
+  # validate_tree pins the resulting digest per role. This recipe was checked against both pins.
+  awk '{ print }
+       /^      "tune_flip_ordering";$/ && !r { print "      \"tune_ship_arm\";"; r = 1 }
+       /^      \[ "tune_inline_flips"; "tune_flip_ordering" \] \);$/ && !c {
+         print "    ( Search_shaping,"
+         print "      \"it decides which of the two searched placement arms ships, overriding the measured \\"
+         print "       comparison rather than changing either arm (gh-ocannl-638)\","
+         print "      [ \"tune_ship_arm\" ] );"
+         c = 1
+       }' "$d/arrayjit/lib/utils.ml" > "$d/utils.patched" \
+    && mv "$d/utils.patched" "$d/arrayjit/lib/utils.ml" || exit 1
+  # (3) the reference file, which the seven-path check expects the backport to touch
+  printf '%s\n' '' \
+    '# gh-ocannl-638 (backported onto this measurement tree): which placement arm' \
+    '# `Train.tune_placements` ships -- auto (the measured winner), a (default placements),' \
+    '# b (materialize-all). Measurement-only; announces itself on stderr.' \
+    '#tune_ship_arm=auto' >> "$d/ocannl_config.reference" || exit 1
   mkdir -p "$d/benchmarks/fixtures"
   ln -sf "$PWD/benchmarks/fixtures/gpt2_mini.safetensors" "$d/benchmarks/fixtures/gpt2_mini.safetensors"
   (cd "$d" && git add -A && git commit -m "Backport the gh-ocannl-638 arm selector" && dune build @check bin/ benchmarks/) || exit 1
@@ -365,15 +384,14 @@ bash $S gh574                     # base574A vs feat574A, 3 reps, order alternat
 bash $S caps                      # cap8A vs cap4A, reps 4-6, order alternated
 bash $S replays                   # pass 2: the step timings every table above quotes
 bash $S structure                 # snap + profile + finger on r1, then the three claim-bearing diffs
-bash $S gate                      # the arm-A premise, the parity gate over exactly these cells, the artifact gates
+bash $S capprofile                # Part 5's per-kernel profile of cap 4, and the cap-8-vs-cap-4 diff
+bash $S gate                      # LAST: provenance, the arm-A premise, parity, the artifact gates
 ```
 
-```bash
-# Part 5's per-kernel instrument for cap 4, which the structure block does not cover. Through the
-# wrapper, not through gh612_cells.sh directly: a hand-run profile skips tree validation and records
-# no provenance, and the gate cannot see that it is missing.
-bash $S capprofile
-```
+`gate` runs last because it *requires* the artifacts the two blocks before it produce: the four
+structural cells' and cap-4's snapshots and profiles are what Parts 3–5 quote, so a missing one is a
+failure rather than something to skip. Verified by removing `cap4A/r4`'s first CSV, which makes the
+gate name it and refuse.
 
 A cell's stderr carries the two `Train.tune_placements:` announcements that make the treatment
 auditable after the fact — the resolution line and the decision line, the latter naming both the arm
