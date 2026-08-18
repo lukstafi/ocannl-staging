@@ -91,8 +91,10 @@ let test_unsigned_extremes () =
       in
       Ndarray.set_flat_values arr values;
       let back = Ndarray.retrieve_flat_values arr in
+      (* %h, not %.1f: these exceed the ~17 significant digits the Windows C runtime formats, so a
+         decimal print of 2^63 diverges between platforms; OCaml's hex-float formatting does not. *)
       Stdio.printf "  %s: [%s]\n" name
-        (String.concat ~sep:"; " (Array.to_list (Array.map back ~f:(Printf.sprintf "%.1f"))));
+        (String.concat ~sep:"; " (Array.to_list (Array.map back ~f:(Printf.sprintf "%h"))));
       Verdict.p (name ^ " round-trips through float") (Array.equal Float.equal back values);
       (* The same conversion the ndarray-precision APIs go through when a caller asks for floats. *)
       let widened = Ndarray.retrieve_flat_values (Ndarray.convert Ops.double arr) in

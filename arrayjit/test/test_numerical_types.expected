@@ -45,10 +45,10 @@ Expected: padding value (-999.0) in margins, data values (1.0-6.0) in center reg
 
 
 Testing unsigned values across the sign bit:
-  uint32: [0.0; 1.0; 2147483647.0; 2147483648.0; 4294967295.0]
+  uint32: [0x0p+0; 0x1p+0; 0x1.fffffffcp+30; 0x1p+31; 0x1.fffffffep+31]
 uint32 round-trips through float: true
 uint32 widens to double unchanged: true
-  uint64: [0.0; 1.0; 4294967296.0; 9223372036854775808.0; 18446744073709549568.0]
+  uint64: [0x0p+0; 0x1p+0; 0x1p+32; 0x1p+63; 0x1.fffffffffffffp+63]
 uint64 round-trips through float: true
 uint64 widens to double unchanged: true
 
