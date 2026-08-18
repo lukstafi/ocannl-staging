@@ -61,11 +61,10 @@ let phase1 () =
   let opt = optimize ~name:"pls_pointwise" llc in
   (* The I/O claims read [inputs]/[outputs] off the compiled routine itself, so they pin the
      classification the link actually consumed, not a re-derivation of it (gh-ocannl-590). *)
-  let ctx, routine = link ~name:"pls_pointwise" opt in
+  let ((_, routine) as linked) = link ~name:"pls_pointwise" opt in
   p "phase1: the hand-built read-only node is a routine input" (Set.mem routine.Context.inputs x);
   p "phase1: the written node is a routine output" (Set.mem routine.Context.outputs y);
-  let ctx = Context.set_values ctx x xv in
-  let ctx = Context.run ctx routine in
+  let ctx = run_linked linked ~seed:[ (x, xv) ] in
   let yv = Context.get_values ctx y in
   p "phase1: executed values match the hand-built formula"
     (close yv (Array.map xv ~f:(fun v -> (v *. 2.) +. 1.)))
@@ -124,11 +123,10 @@ let phase2 () =
   | Some traced -> p "phase2: X is classified read-before-write" traced.LL.read_before_write);
   (* As in phase 1, the routine's own [inputs]/[outputs] carry the classification under test:
      read-before-write is what keeps X a materialized input (gh-ocannl-590). *)
-  let ctx, routine = link ~name:"pls_sibling_scopes" opt in
+  let ((_, routine) as linked) = link ~name:"pls_sibling_scopes" opt in
   p "phase2: X is a routine input" (Set.mem routine.Context.inputs x);
   p "phase2: X is also a routine output" (Set.mem routine.Context.outputs x);
-  let ctx = Context.set_values ctx x xv in
-  let ctx = Context.run ctx routine in
+  let ctx = run_linked linked ~seed:[ (x, xv) ] in
   let yv = Context.get_values ctx y and xv_out = Context.get_values ctx x in
   (* Both scopes' reads see X's INCOMING value; the later statement's write lands. *)
   p "phase2: Y = 5*X_in (both scope operands read the input)"
