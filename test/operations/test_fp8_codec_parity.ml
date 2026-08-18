@@ -26,6 +26,7 @@ open Ocannl.Operation.DSL_modules
 let p = Verdict.p
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_hip = String.is_substring backend_name ~substring:"hip"
+let on_metal = String.is_substring backend_name ~substring:"metal"
 
 (* On HIP the underflow leg below is only a claim about OCANNL when the guarded conversion is
    emitted; with the platform's own cast it is a claim about ROCm, which fails it (gh-ocannl-647).
@@ -51,7 +52,7 @@ let skipped name =
    than assumed: with the source materialized, HIP's underflow defect (gh-ocannl-647) is
    reproducible through this test and its guard is observable; without it, the leg passes in both
    regimes and pins nothing. *)
-let narrow_on_device values =
+let narrow_on_device ?(src_prec = Ir.Ops.single) values =
   Tensor.unsafe_reinitialize ();
   let ctx = Context.auto () in
   let src =
@@ -65,7 +66,7 @@ let narrow_on_device values =
      conversion at all. [~top_down_prec:false] and the explicit [update_prec] together are what
      make the emitted statement a conversion; the generated source is the check
      ([dst[i] = (fp8)(src[i])], src declared [float *]). *)
-  Ir.Tnode.update_prec src.Tensor.value Ir.Ops.single;
+  Ir.Tnode.update_prec src.Tensor.value src_prec;
   Train.set_materialized src.Tensor.value;
   let dst = TDSL.O.( *. ) src (TDSL.number 1.0) in
   Ir.Tnode.update_prec dst.Tensor.value Ir.Ops.fp8;
@@ -135,6 +136,22 @@ let () =
   p "an infinite input narrows to the largest finite magnitude or beyond, keeping its sign"
     (Float.(sdev.(0) >= 57344.) && Float.(sdev.(1) <= -57344.));
   p "a NaN input narrows to a NaN" (Float.is_nan sdev.(2));
+
+  (* f64 -> fp8, which must not round twice (gh-ocannl-648). Each value sits one f64 ulp off an
+     f32 tie, so a conversion that goes through f32 first lands ON the tie and then breaks it by
+     the wrong rule; a one-step conversion sees which side of the midpoint the double is on. The
+     GPU fp8 types convert straight from the double, so this is the same "match the hardware"
+     question as the tie rule itself. Skipped on Metal, which has no f64 storage at all. *)
+  let f64_claim = "narrowing f64 to fp8 rounds once, not twice" in
+  (if on_metal then skipped f64_claim
+   else
+     let eps = Float.(2. ** -40.) in
+     let vals = [| 1.125 +. eps; 1.125 -. eps; 1.625 +. eps; 1.625 -. eps |] in
+     let dev = narrow_on_device ~src_prec:Ir.Ops.double vals in
+     let host = Array.map vals ~f:(fun v -> Ir.Ops.fp8_to_single (Ir.Ops.double_to_fp8 v)) in
+     Array.iteri vals ~f:(fun i v ->
+         Stdio.printf "  f64 %h -> %h\n" v dev.(i));
+     p f64_claim (Array.for_all2_exn dev host ~f:(fun a b -> Float.equal a b)));
 
   (* The same underflow, but reached through fp8 ARITHMETIC rather than a conversion: an fp8
      operator computes in f32 and narrows its RESULT, which is a second narrowing site, and one a

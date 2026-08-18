@@ -828,6 +828,78 @@ uint8_t single_to_fp8(float f)
   return (uint8_t)(sign | ((uint32_t)exp << 2) | mant);
 }
 
+/* Double to FP8 E5M2 conversion (C function).
+
+   One step, not double(f64 -> f32 -> e5m2): rounding twice moves a value that is just off an f32
+   tie onto it, and the second rounding then breaks that tie by a rule the first rounding has
+   already made wrong. The CUDA and HIP fp8 types convert straight from the double, so a
+   two-step host or cc conversion disagreed with them for exactly those inputs (gh-ocannl-648).
+   Same rules as [single_to_fp8], read off f64's fields. */
+uint8_t double_to_fp8(double f)
+{
+  uint64_t bits;
+  memcpy(&bits, &f, sizeof(bits));
+  uint32_t sign = (uint32_t)((bits >> 56) & 0x80u);
+  uint32_t e64 = (uint32_t)((bits >> 52) & 0x7FFu);
+  uint64_t m64 = bits & 0xFFFFFFFFFFFFFULL;
+
+  /* Infinity and NaN keep their sign, exactly as [single_to_fp8] does — the two codecs must not
+     differ from each other, whatever the vendors do (CUDA drops a NaN's sign, HIP keeps it). */
+  if (e64 == 0x7FFu)
+  {
+    return (uint8_t)(sign | (m64 != 0ULL ? 0x7Fu : 0x7Cu));
+  }
+  if (e64 == 0u)
+  {
+    return (uint8_t)sign; /* zero, and f64 subnormals, far below e5m2's smallest */
+  }
+
+  int exp = (int)e64 - 1008; /* the e5m2 exponent field: rebias 1023 -> 15 */
+  if (exp >= 31)
+  {
+    return (uint8_t)(sign | 0x7Bu); /* saturate to the largest finite, 57344 */
+  }
+  if (exp <= 0)
+  {
+    uint64_t sig = 0x10000000000000ULL | m64; /* the implicit leading bit, made explicit */
+    int shift = 51 - exp;                     /* >= 51 */
+    if (shift > 53)
+    {
+      return (uint8_t)sign; /* below half the smallest subnormal: signed zero */
+    }
+    uint64_t q = sig >> shift;
+    uint64_t rest = sig & ((1ULL << shift) - 1ULL);
+    uint64_t tie = 1ULL << (shift - 1);
+    if (rest > tie || (rest == tie && (q & 1ULL)))
+    {
+      q++;
+    }
+    if (q > 3ULL)
+    {
+      return (uint8_t)(sign | 0x04u); /* rounded up into the smallest normal, 2^-14 */
+    }
+    return (uint8_t)(sign | (uint32_t)q);
+  }
+
+  uint32_t mant = (uint32_t)(m64 >> 50);
+  uint64_t rest = m64 & 0x3FFFFFFFFFFFFULL;
+  uint64_t tie = 0x2000000000000ULL;
+  if (rest > tie || (rest == tie && (mant & 1u)))
+  {
+    mant++;
+  }
+  if (mant > 3u)
+  {
+    mant = 0u;
+    exp++;
+    if (exp >= 31)
+    {
+      return (uint8_t)(sign | 0x7Bu);
+    }
+  }
+  return (uint8_t)(sign | ((uint32_t)exp << 2) | mant);
+}
+
 /* OCaml wrapper functions */
 
 /* Helper functions to convert between OCaml and C uint4x32_t */
@@ -1108,6 +1180,16 @@ CAMLprim value arrayjit_single_to_fp8(value v_float)
   CAMLparam1(v_float);
   float f = (float)Double_val(v_float);
   uint8_t fp8 = single_to_fp8(f);
+  CAMLreturn(Val_int(fp8));
+}
+
+/* An OCaml float IS a double, so the host side narrows from f64 — through the one-step codec, or
+   it would double-round where the GPU backends do not (gh-ocannl-648). */
+CAMLprim value arrayjit_double_to_fp8(value v_float)
+{
+  CAMLparam1(v_float);
+  double f = Double_val(v_float);
+  uint8_t fp8 = double_to_fp8(f);
   CAMLreturn(Val_int(fp8));
 }
 

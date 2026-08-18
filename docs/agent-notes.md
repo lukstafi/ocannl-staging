@@ -822,13 +822,29 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   The only reliable checks are to read the emitted kernel (`dst[i] = single_to_fp8(src[i])`, source
   declared `float *`) and to run the mutation — with HIP's guard forced off the leg must FAIL, and
   it did not until both mechanisms were closed.
+- Narrowing f64 to fp8 must not go through f32 (gh-ocannl-648). Rounding twice moves a double
+  that sits just off an f32 tie ONTO that tie, and the second rounding then breaks it by a rule the
+  first has already made wrong — so `single_to_fp8((float)x)` disagreed with the GPU fp8 types,
+  which convert straight from the double. Not a tie-rule question and not new: under the old
+  tie-away rule the same seam disagreed on the mirror inputs (`x-eps` instead of `x+eps`).
+  `Ops.double_to_fp8` is the one-step codec, used by the C backends' `Double_prec` arm and by the
+  host side — where it matters most, since an OCaml float IS a double, so every host-side fp8 write
+  was double-rounding. Verified against `__nv_fp8_e5m2` over 17.2 billion finite doubles (all 2^32
+  top-halves crossed with four low-half patterns, ties included) and against the f32 codec over all
+  2^32 f32-exact doubles. Metal needs none of it: its `double` is `float`.
 - ROCm miscompiles `(__hip_fp8_e5m2)(float)` for magnitudes around 4e-25 to 3.3e-24, returning up
   to 2^-14 where the answer is zero (gh-ocannl-647) — an out-of-range shift, `shift mod 32` landing
   back in range; the exhaustive sweep localizes it to exactly four f32 exponents. CUDA is correct
-  there, and so is our software codec. `test_fp8_codec_parity` announces that leg as `SKIPPED on
-  hip` rather than pinning the defect. A guard (`fabsf(x) < 2^-17 ? 0 : cast(x)`, exact because
-  everything below half the smallest subnormal rounds to zero) would fix it for a compare and a
-  select on every fp8 store; not taken.
+  there, and so is our software codec. It IS guarded, but opt-in: under
+  `prefer_backend_uniformity` HIP's float-to-fp8 narrowings route through
+  `ocannl_single_to_fp8_uniform`, which pre-rounds everything below half the smallest subnormal to
+  a signed zero — exact, since those magnitudes round to zero anyway, so outside ROCm's window it
+  changes nothing. The default still emits the platform's own cast (working around a vendor bug in
+  our codegen means carrying it until someone remembers to remove it). `test/config/ocannl_config`
+  sets the flag, so `test_fp8_codec_parity`'s two underflow legs are REAL assertions in the suite,
+  announced as `SKIPPED on hip` only in a flag-off run. The guard covers both narrowing sites — the
+  conversions AND the operator bridges, which narrow an f32 result back to fp8 — through one funnel
+  (`fp8_from_float`); guarding only the conversions was the first version, and a review caught it.
 - Metal buffer binding is the pooled slot-table (`__pools` + `__pool_slots`); raw `gpuAddress`
   casts segfault at dispatch and argument encoders don't fit the binding model. Same-queue
   command buffers overlap over untracked resources: back-to-back runs of the SAME routine need

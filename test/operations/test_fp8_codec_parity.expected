@@ -32,6 +32,11 @@ a finite input above the range saturates rather than going infinite: true
 the sign of a zero survives narrowing: true
 an infinite input narrows to the largest finite magnitude or beyond, keeping its sign: true
 a NaN input narrows to a NaN: true
+  f64 0x1.2000000001p+0 -> 0x1.4p+0
+  f64 0x1.1fffffffffp+0 -> 0x1p+0
+  f64 0x1.a000000001p+0 -> 0x1.cp+0
+  f64 0x1.9fffffffffp+0 -> 0x1.8p+0
+narrowing f64 to fp8 rounds once, not twice: true
 fp8 arithmetic underflow: (2^-16) ** 5 -> 0x0p+0
 magnitudes far below the smallest subnormal narrow to zero: true
 an fp8 operator's underflowing result narrows to zero too: true
