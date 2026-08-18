@@ -1,4 +1,6 @@
 bf16 nested uniform is independent of the compute-precision policy: true
 bf16 draws are distinct: true
+bf16 reduced uniform is independent of the compute-precision policy: true
 half nested uniform is independent of the compute-precision policy: true
 half draws are distinct: true
+half reduced uniform is independent of the compute-precision policy: true

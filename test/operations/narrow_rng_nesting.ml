@@ -33,10 +33,24 @@ let run ~prec =
   let ctx = Train.forward_once (Context.auto ()) y in
   Context.get_values ctx y.Tensor.value
 
+(* A REDUCTION over a virtual narrow uniform: the conversion sits in the accumulation's
+   contribution, so the whole update renders at storage precision (the carve-out), and the
+   gh-ocannl-639 accumulator widening must decline rather than move the conversion into an
+   f32-precision scope — which would change which random bits each draw consumes, not merely
+   widen the sum. Pinned as: the reduced value does not depend on the compute-precision policy. *)
+let run_sum ~prec =
+  Tensor.unsafe_reinitialize ();
+  let u = TDSL.uniform () ~output_dims:[ 8 ] () in
+  let%op y = u ++ "i => 0" in
+  Tn.update_prec y.Tensor.value prec;
+  Train.set_materialized y.Tensor.value;
+  let ctx = Train.forward_once (Context.auto ()) y in
+  Context.get_values ctx y.Tensor.value
+
 let () =
   Tensor.unsafe_reinitialize ();
   let base = Ir.Numerics.get () in
-  let leg policy prec =
+  let leg policy prec ?(run = run) () =
     Ir.Numerics.set_policy policy;
     let v = run ~prec in
     Ir.Numerics.set_policy base;
@@ -45,10 +59,14 @@ let () =
   List.iter
     [ ("bf16", Ir.Ops.bfloat16); ("half", Ir.Ops.half) ]
     ~f:(fun (label, prec) ->
-      let wide = leg { base with narrow_compute_f32 = true } prec in
-      let per_op = leg { base with narrow_compute_f32 = false } prec in
+      let wide = leg { base with narrow_compute_f32 = true } prec () in
+      let per_op = leg { base with narrow_compute_f32 = false } prec () in
       p (label ^ " nested uniform is independent of the compute-precision policy")
         (Array.length wide = 8 && Array.for_all2_exn wide per_op ~f:Float.equal);
       (* All eight draws distinct rules out the degenerate way the check above could pass. *)
       p (label ^ " draws are distinct")
-        (Set.length (Set.of_array (module Float) wide) = 8))
+        (Set.length (Set.of_array (module Float) wide) = 8);
+      let sum_wide = leg { base with narrow_compute_f32 = true } prec ~run:run_sum () in
+      let sum_per_op = leg { base with narrow_compute_f32 = false } prec ~run:run_sum () in
+      p (label ^ " reduced uniform is independent of the compute-precision policy")
+        (Array.length sum_wide = 1 && Array.for_all2_exn sum_wide sum_per_op ~f:Float.equal))

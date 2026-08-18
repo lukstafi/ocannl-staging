@@ -934,10 +934,18 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   codegen into the `Local_scope` form virtualization gives virtual accumulators
   (`C_syntax.try_widen_serial_reduce`) and rendering that — `scope_prec_of` and the
   `Set_local`/`Get_local` arms already carry the widening. It joins virtual scopes,
-  `try_vectorize_reduce`'s epilogue and `try_register_tile`'s C-tile; it is inert wherever
-  `comp_prec` is the identity (f32/f64, GPU backends, `narrow_compute_f32=false`, native fp16),
-  and it deliberately does NOT bail under `debug_log_from_routines`, so logged runs keep plain
-  runs' numerics. Two traps for tests in this area: (1) cross-schedule BITWISE parity on
+  `try_vectorize_reduce`'s epilogue and `try_register_tile`'s C-tile, and covers BOTH unroll
+  representations (autotune proposes `Unroll` over any Serial loop of extent <= 8, reduction axes
+  included): an `Unrolled`-annotated reduction loop widens like a serial one, and a materialized
+  unroll — a run of consecutive accumulating `Set`s, no loop left — collapses per maximal
+  adjacent run in the `Seq` rendering. It is inert wherever `comp_prec` is the identity (f32/f64,
+  GPU backends, `narrow_compute_f32=false`, native fp16), and it declines twice more: under
+  `debug_log_from_routines` (a `Local_scope` body renders with `log_set_locals:false`, so the
+  rewrite would silence the per-iteration trace — the per-step `Set` form is the traceable one,
+  and every tensorized rendering already declines under logging), and on updates mentioning an
+  RNG conversion (the conversion picks its result type AND which random bits it consumes from the
+  precision it renders at, so an f32-precision scope would change the draw, not widen it —
+  `narrow_rng_nesting`'s reduced-uniform leg pins this). Two traps for tests in this area: (1) cross-schedule BITWISE parity on
   non-storage-exact sums additionally needs the same narrowing points — a k-blocked schedule
   stores storage-precision partials at every `bk` boundary by construction, so give the packed
   leg a whole-k tile (`tile_mma_narrow`'s gh-639 leg uses `bk = n`); (2) discriminating inputs

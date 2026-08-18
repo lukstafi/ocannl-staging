@@ -25,6 +25,8 @@ open Base
 open Ocannl
 open Ocannl.Operation.DSL_modules
 module Tn = Ir.Tnode
+module LL = Ir.Low_level
+module Sched = Ir.Schedule
 module Asgns = Ir.Assignments
 module Numerics = Ir.Numerics
 
@@ -41,9 +43,38 @@ let read_generated base_name =
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
-let run ~name (out : Tensor.t) =
+(* The single-child chain of loops from the top of each top-level nest (tile_mma_narrow's
+   helper): used to address the reduction axis for the unroll legs. *)
+let nest_paths (llc : LL.t) : Ir.Indexing.symbol list list =
+  let strip stmts = List.filter stmts ~f:(function LL.Noop | LL.Comment _ -> false | _ -> true) in
+  let rec path (llc : LL.t) : Ir.Indexing.symbol list =
+    match llc with
+    | LL.For_loop { index; body; _ } ->
+        index :: (match strip (LL.flat_lines [ body ]) with [ single ] -> path single | _ -> [])
+    | LL.If { body; _ } -> path body
+    | _ -> []
+  in
+  List.filter_map (LL.flat_lines [ llc ]) ~f:(fun stmt ->
+      match path stmt with [] -> None | p -> Some p)
+
+(* [Sched.Unroll] over the k axis of the matmul's i/j/k nest, in either representation. *)
+let unroll_k ~materialize (opt : LL.optimized) : Sched.schedule =
+  let k =
+    match List.find_exn (nest_paths opt.LL.llc) ~f:(fun p -> List.length p = 3) with
+    | [ _; _; k ] -> k
+    | _ -> assert false
+  in
+  [ Sched.Unroll { axis = k; materialize } ]
+
+let run ~name ?schedule (out : Tensor.t) =
+  let transform opt =
+    match schedule with None -> opt | Some sched -> Sched.apply (sched opt) opt
+  in
   let ctx = Context.auto () in
-  let ctx, routine = Context.compile ctx (named name (Train.forward out)) Ir.Indexing.Empty in
+  let ctx, routine =
+    Context.compile ~lowered_transform:transform ctx (named name (Train.forward out))
+      Ir.Indexing.Empty
+  in
   let ctx = Context.run ctx routine in
   Context.get_values ctx out.Tensor.value
 
@@ -60,10 +91,18 @@ let claim_off_value =
 
 let claim_off_shape = "narrow_compute_f32=false brings back the per-k-step narrowing in the k-loop"
 
+let claim_unroll_annot =
+  "Unroll-annotated bf16 reduction keeps the wide accumulator (equals the serial result)"
+
+let claim_unroll_mat =
+  "materialized-unroll bf16 reduction keeps the wide accumulator (equals the serial result)"
+
 let () =
   if not on_cpu then (
     skipped claim_parity;
     skipped claim_shape;
+    skipped claim_unroll_annot;
+    skipped claim_unroll_mat;
     skipped claim_off_value;
     skipped claim_off_shape)
   else begin
@@ -96,6 +135,21 @@ let () =
     | Some src ->
         let has s = String.is_substring src ~substring:s in
         p claim_shape ((not (has "single_to_bfloat16(fmaf(")) && has "fmaf("));
+    (* Both unroll representations autotune proposes over small reduction loops (annotated:
+       codegen repeats the body; materialized: the IR carries one copy per step and no loop)
+       must keep the wide accumulator — the reduction is exact in f32 and narrows at the same
+       single point, so both are bitwise equal to the serial leg; per-repetition narrowing
+       would visibly diverge on these inputs (the same discrimination as the policy-off arm). *)
+    let unroll_leg ~claim ~name ~materialize =
+      let ma_u = NTDSL.init ~l:(name ^ "_a") ~prec:Ir.Ops.bfloat16 ~i:[ n ] ~o:[ n ] ~f:fa () in
+      let mb_u = NTDSL.init ~l:(name ^ "_b") ~prec:Ir.Ops.bfloat16 ~i:[ n ] ~o:[ n ] ~f:fb () in
+      let%op mc_u = ma_u * mb_u in
+      Tn.update_prec mc_u.Tensor.value Ir.Ops.bfloat16;
+      let got_u = run ~name ~schedule:(unroll_k ~materialize) mc_u in
+      p claim (Array.for_all2_exn got_u got ~f:Float.equal)
+    in
+    unroll_leg ~claim:claim_unroll_annot ~name:"aw_bf16_unroll_annot" ~materialize:false;
+    unroll_leg ~claim:claim_unroll_mat ~name:"aw_bf16_unroll_mat" ~materialize:true;
     (* Negative control: turning the policy off recovers the pre-gh-517/pre-gh-639 semantics —
        every operator, the accumulation update included, rounds to storage precision — which on
        these inputs must visibly differ from the widened default, proving the inputs discriminate

@@ -1,4 +1,6 @@
 bf16 naive matmul equals the once-narrowed wide-accumulation reference: true
 the emitted serial k-loop narrows the accumulator once per cell, not per step: true
+Unroll-annotated bf16 reduction keeps the wide accumulator (equals the serial result): true
+materialized-unroll bf16 reduction keeps the wide accumulator (equals the serial result): true
 narrow_compute_f32=false recovers per-operator rounding: the result differs from the widened default: true
 narrow_compute_f32=false brings back the per-k-step narrowing in the k-loop: true

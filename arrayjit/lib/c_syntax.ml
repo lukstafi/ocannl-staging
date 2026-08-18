@@ -2385,22 +2385,152 @@ module C_syntax (B : C_syntax_config) = struct
   let try_mma_fragment_scope ~render c =
     if Set.is_empty !current_simdgroup_fragments then None else render_mma_fragment_scope ~render c
 
+  (* Whether a scalar (resp. a statement body) reads [tn] anywhere — the recognizers below use it
+     to certify that an accumulation's contribution is free of the accumulator's node, which is
+     what licenses holding the accumulator out of memory across the reduction. *)
+  let rec touches_tn tn (llsc : Low_level.scalar_t) =
+    match llsc with
+    | Low_level.Get (tn2, _) | Get_merge_buffer (tn2, _) -> Tn.equal tn tn2
+    | Get_dynamic { tn = tn2; dyn_value = v, _; _ } -> Tn.equal tn tn2 || touches_tn tn v
+    | Local_scope { body; _ } -> body_touches tn body
+    | Get_local _ | Constant _ | Constant_bits _ | Embed_index _ -> false
+    | Ternop (_, (a, _), (b, _), (c, _)) -> touches_tn tn a || touches_tn tn b || touches_tn tn c
+    | Binop (_, (a, _), (b, _)) -> touches_tn tn a || touches_tn tn b
+    | Unop (_, (a, _)) -> touches_tn tn a
+
+  and body_touches tn (llc : Low_level.t) =
+    match llc with
+    | Low_level.Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ ->
+        false
+    | Seq (a, b) -> body_touches tn a || body_touches tn b
+    | For_loop { body; _ } -> body_touches tn body
+    | If { cond = c, _; body } -> touches_tn tn c || body_touches tn body
+    | Zero_out tn2 -> Tn.equal tn tn2
+    | Set { tn = tn2; llsc; _ } -> Tn.equal tn tn2 || touches_tn tn llsc
+    | Set_dynamic { tn = tn2; dyn_value = v, _; llsc; _ } ->
+        Tn.equal tn tn2 || touches_tn tn v || touches_tn tn llsc
+    | Set_from_vec { tn = tn2; arg = a, _; _ } -> Tn.equal tn tn2 || touches_tn tn a
+    | Set_local (_, llsc) -> touches_tn tn llsc
+    | Tile_mma { d = d_tn, _; a = a_tn, _; b = b_tn, _; _ } ->
+        Tn.equal tn d_tn || Tn.equal tn a_tn || Tn.equal tn b_tn
+
+  (* The per-statement half of the accumulation recognizer: [tn[idcs] = op(tn[idcs], contrib)] (or
+     its FMA form) over an associative-commutative [op], with [contrib] free of [tn]. Shared by
+     [recognize_accumulation] (which adds the loop-index-freeness check) and by the
+     materialized-unroll run rewrite (gh-ocannl-639), which has no loop context. *)
+  let accum_parts ~tn ~idcs (llsc : Low_level.scalar_t) =
+    let is_acc s = Low_level.equal_scalar_t s (Low_level.Get (tn, idcs)) in
+    let reduce_op = function Ops.Add | Ops.Mul | Ops.Max | Ops.Min -> true | _ -> false in
+    match llsc with
+    | Low_level.Binop (op, (a, _), (b, _)) when reduce_op op && is_acc a && not (touches_tn tn b)
+      ->
+        Some (op, b)
+    | Binop (op, (a, _), (b, _)) when reduce_op op && is_acc b && not (touches_tn tn a) ->
+        Some (op, a)
+    | Ternop (Ops.FMA, (a, pa), (b, pb), (c, _))
+      when is_acc c && (not (touches_tn tn a)) && not (touches_tn tn b) ->
+        Some (Ops.Add, Low_level.Binop (Ops.Mul, (a, pa), (b, pb)))
+    | _ -> None
+
+  (* Retarget an accumulation update's read of [tn[idcs]] to the scope local [id] — the recognized
+     shapes only carry the accumulator read as a direct operand of the top operator. *)
+  let subst_acc_read ~tn ~idcs ~id (llsc : Low_level.scalar_t) : Low_level.scalar_t =
+    let subst ((s, p) : Low_level.scalar_arg) : Low_level.scalar_arg =
+      if Low_level.equal_scalar_t s (Low_level.Get (tn, idcs)) then (Low_level.Get_local id, p)
+      else (s, p)
+    in
+    match llsc with
+    | Low_level.Binop (op, a, b) -> Low_level.Binop (op, subst a, subst b)
+    | Low_level.Ternop (op, a, b, c) -> Low_level.Ternop (op, subst a, subst b, subst c)
+    | _ ->
+        (* [accum_parts] admits only the two shapes above. *)
+        assert false
+
   let rec pp_ll ?(log_set_locals = true) ?(in_loop = false) (c : Low_level.t) : PPrint.document =
     let open PPrint in
     match c with
     | Low_level.Noop -> empty
     | Seq (c1, c2) -> (
+        (* gh-ocannl-639 for MATERIALIZED unrolls ([Sched.Unroll ~materialize:true]): the unrolled
+           reduction is a run of consecutive accumulating [Set]s into one cell — no loop remains
+           for [try_widen_serial_reduce] to see — so each maximal run (length >= 2) collapses into
+           the same [Local_scope] form: init from the cell, one [Set_local] per copy, one
+           narrowing store. Adjacency is the soundness argument: nothing sits between the members,
+           and [accum_parts] certifies no member's contribution reads the accumulator's node. The
+           collapsed statement no longer matches (its value is a [Local_scope]), so re-rendering
+           terminates. Same declines as the nest rewrite: identity [comp_prec], logged runs, and
+           rng-bearing updates keep the per-step form. *)
+        let try_widen_unrolled_run () : PPrint.document option =
+          if Utils.debug_log_from_routines () then None
+          else
+            let qualifies tn idcs llsc =
+              let store_prec = Lazy.force tn.Tn.storage_prec in
+              (not (Ops.equal_prec (comp_prec store_prec) store_prec))
+              && (not (mentions_rng_conversion llsc))
+              && Option.is_some (accum_parts ~tn ~idcs llsc)
+            in
+            let same_cell tn idcs = function
+              | Low_level.Set { tn = tn2; idcs = idcs2; llsc; _ } ->
+                  Tn.equal tn tn2
+                  && Array.length idcs = Array.length idcs2
+                  && Array.for_all2_exn idcs idcs2 ~f:Indexing.equal_axis_index
+                  && qualifies tn2 idcs2 llsc
+              | _ -> false
+            in
+            let collapse tn idcs (run : Low_level.t list) =
+              let id = Low_level.get_scope tn in
+              let updates =
+                List.map run ~f:(function
+                  | Low_level.Set { llsc; _ } ->
+                      Low_level.Set_local (id, subst_acc_read ~tn ~idcs ~id llsc)
+                  | _ -> assert false)
+              in
+              let debug = match run with Low_level.Set { debug; _ } :: _ -> debug | _ -> "" in
+              Low_level.Set
+                {
+                  tn;
+                  idcs;
+                  llsc =
+                    Local_scope
+                      {
+                        id;
+                        body =
+                          Low_level.unflat_lines
+                            (Low_level.Set_local (id, Low_level.Get (tn, idcs)) :: updates);
+                        orig_indices = idcs;
+                      };
+                  debug;
+                }
+            in
+            let changed = ref false in
+            let rec scan = function
+              | [] -> []
+              | (Low_level.Set { tn; idcs; llsc; _ } as s) :: rest when qualifies tn idcs llsc ->
+                  let run, rest' = List.split_while rest ~f:(same_cell tn idcs) in
+                  if List.is_empty run then s :: scan rest'
+                  else (
+                    changed := true;
+                    collapse tn idcs (s :: run) :: scan rest')
+              | s :: rest -> s :: scan rest
+            in
+            let stmts' = scan (Low_level.flat_lines [ c ]) in
+            if !changed then Some (pp_ll ~log_set_locals ~in_loop (Low_level.unflat_lines stmts'))
+            else None
+        in
         match
           try_mma_fragment_scope ~render:(fun body -> pp_ll ~log_set_locals ~in_loop body) c
         with
         | Some doc -> doc
-        | None ->
-            let d1 = pp_ll ~log_set_locals ~in_loop c1 in
-            let d2 = pp_ll ~log_set_locals ~in_loop c2 in
-            (* Avoid extra hardlines if one side is empty *)
-            if PPrint.is_empty d1 then d2
-            else if PPrint.is_empty d2 then d1
-            else d1 ^^ hardline ^^ d2)
+        | None -> (
+            match try_widen_unrolled_run () with
+            | Some doc -> doc
+            | None ->
+                let d1 = pp_ll ~log_set_locals ~in_loop c1 in
+                let d2 = pp_ll ~log_set_locals ~in_loop c2 in
+                (* Avoid extra hardlines if one side is empty *)
+                if PPrint.is_empty d1 then d2
+                else if PPrint.is_empty d2 then d1
+                else d1 ^^ hardline ^^ d2))
     | For_loop { index = i; from_; to_; body; axis } -> (
         (* Rendering phase of docs/proposals/axis-types-for-loops.md (§5): [Serial] loops render as
            C [for] statements; [Grid]/[Workgroup]/[Workgroup_reduce] loops bind their index to the
@@ -2605,33 +2735,6 @@ module C_syntax (B : C_syntax_config) = struct
           | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
         in
         let mentions_comp = mentions_sym i in
-        let rec touches_tn tn (llsc : Low_level.scalar_t) =
-          match llsc with
-          | Low_level.Get (tn2, _) | Get_merge_buffer (tn2, _) -> Tn.equal tn tn2
-          | Get_dynamic { tn = tn2; dyn_value = v, _; _ } -> Tn.equal tn tn2 || touches_tn tn v
-          | Local_scope { body; _ } -> body_touches tn body
-          | Get_local _ | Constant _ | Constant_bits _ | Embed_index _ -> false
-          | Ternop (_, (a, _), (b, _), (c, _)) ->
-              touches_tn tn a || touches_tn tn b || touches_tn tn c
-          | Binop (_, (a, _), (b, _)) -> touches_tn tn a || touches_tn tn b
-          | Unop (_, (a, _)) -> touches_tn tn a
-        and body_touches tn (llc : Low_level.t) =
-          match llc with
-          | Low_level.Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _
-            ->
-              false
-          | Seq (a, b) -> body_touches tn a || body_touches tn b
-          | For_loop { body; _ } -> body_touches tn body
-          | If { cond = c, _; body } -> touches_tn tn c || body_touches tn body
-          | Zero_out tn2 -> Tn.equal tn tn2
-          | Set { tn = tn2; llsc; _ } -> Tn.equal tn tn2 || touches_tn tn llsc
-          | Set_dynamic { tn = tn2; dyn_value = v, _; llsc; _ } ->
-              Tn.equal tn tn2 || touches_tn tn v || touches_tn tn llsc
-          | Set_from_vec { tn = tn2; arg = a, _; _ } -> Tn.equal tn tn2 || touches_tn tn a
-          | Set_local (_, llsc) -> touches_tn tn llsc
-          | Tile_mma { d = d_tn, _; a = a_tn, _; b = b_tn, _; _ } ->
-              Tn.equal tn d_tn || Tn.equal tn a_tn || Tn.equal tn b_tn
-        in
         let nonempty_stmts body =
           List.filter (Low_level.flat_lines [ body ]) ~f:(function
             | Low_level.Noop | Comment _ -> false
@@ -2649,21 +2752,9 @@ module C_syntax (B : C_syntax_config) = struct
           | [ Low_level.Set { tn; idcs; llsc; _ } ]
             when not
                    (Array.exists idcs ~f:(fun idx ->
-                        List.exists free_of ~f:(fun s -> mentions_sym s idx))) -> (
-              let is_acc s = Low_level.equal_scalar_t s (Low_level.Get (tn, idcs)) in
-              let reduce_op = function
-                | Ops.Add | Ops.Mul | Ops.Max | Ops.Min -> true
-                | _ -> false
-              in
-              match llsc with
-              | Binop (op, (a, _), (b, _)) when reduce_op op && is_acc a && not (touches_tn tn b) ->
-                  Some (tn, idcs, op, b)
-              | Binop (op, (a, _), (b, _)) when reduce_op op && is_acc b && not (touches_tn tn a) ->
-                  Some (tn, idcs, op, a)
-              | Ternop (Ops.FMA, (a, pa), (b, pb), (c, _))
-                when is_acc c && (not (touches_tn tn a)) && not (touches_tn tn b) ->
-                  Some (tn, idcs, Ops.Add, Low_level.Binop (Ops.Mul, (a, pa), (b, pb)))
-              | _ -> None)
+                        List.exists free_of ~f:(fun s -> mentions_sym s idx))) ->
+              Option.map (accum_parts ~tn ~idcs llsc) ~f:(fun (op, contrib) ->
+                  (tn, idcs, op, contrib))
           | _ -> None
         in
         (* Eligibility bail-out of the explicit-SIMD renderings ([try_vectorize] /
@@ -3350,58 +3441,60 @@ module C_syntax (B : C_syntax_config) = struct
            single narrowing, so nothing new is emitted. Inert ([None]) where [comp_prec] is the
            identity on the target's storage precision — f32/f64/integers, the GPU backends' native
            narrow arithmetic, [narrow_compute_f32 = false], native fp16 — those render the plain
-           serial loop unchanged. The nest is peeled through Serial-only single-statement loop
-           levels; a guard ([If]), a sibling statement, or a non-serial inner loop stops the
-           widening at that level (the recognizer then fails or the round-trip shrinks to that
-           sub-nest). Unlike the SIMD renderings this does not bail under
-           [debug_log_from_routines]: the rewrite is exactly the virtual form, which logs, so
-           logged runs keep the same numerics as plain runs. *)
+           serial loop unchanged. The nest is peeled through Serial/Unrolled single-statement loop
+           levels ([Unrolled] so a [Sched.Unroll ~materialize:false] over a reduction axis keeps
+           the wide local, its repeated bodies updating the scope local); a guard ([If]), a
+           sibling statement, or any other inner loop stops the widening at that level (the
+           recognizer then fails or the round-trip shrinks to that sub-nest). Two more declines:
+           under [debug_log_from_routines] the per-step [Set] form is kept — a [Local_scope] body
+           renders with [log_set_locals:false], so the rewrite would silence the per-iteration
+           trace; the SIMD renderings bail there for the same reason, and logged narrow runs
+           already differ numerically from plain runs (every tensorized rendering declines under
+           logging). And an update mentioning an RNG conversion is never widened: the conversion
+           picks its result type AND which random bits it consumes from the precision it renders
+           at (gh-ocannl-517's carve-out, [renders_at_store_prec]), so rendering it inside an
+           f32-precision scope would change the draw, not just widen it. *)
         let try_widen_serial_reduce () : PPrint.document option =
-          let rec peel ~free_of ~rebuild body =
-            match nonempty_stmts body with
-            | [ Low_level.For_loop ({ index; body = ibody; axis = Low_level.Serial; _ } as r) ] ->
-                peel
-                  ~free_of:(index :: free_of)
-                  ~rebuild:(fun b -> rebuild (Low_level.For_loop { r with body = b }))
-                  ibody
-            | [ Low_level.Set { tn; idcs; llsc; debug } ] as stmts ->
-                let store_prec = Lazy.force tn.Tn.storage_prec in
-                if Ops.equal_prec (comp_prec store_prec) store_prec then None
-                else
-                  Option.map (recognize_accumulation ~free_of stmts) ~f:(fun _ ->
-                      (tn, idcs, llsc, debug, rebuild))
-            | _ -> None
-          in
-          let rebuild_hook b = Low_level.For_loop { index = i; from_; to_; body = b; axis } in
-          Option.map (peel ~free_of:[ i ] ~rebuild:rebuild_hook body)
-            ~f:(fun (tn, idcs, llsc, debug, rebuild) ->
-              let id = Low_level.get_scope tn in
-              let subst ((s, p) : Low_level.scalar_arg) : Low_level.scalar_arg =
-                if Low_level.equal_scalar_t s (Low_level.Get (tn, idcs)) then
-                  (Low_level.Get_local id, p)
-                else (s, p)
-              in
-              let update =
-                match llsc with
-                | Low_level.Binop (op, a, b) -> Low_level.Binop (op, subst a, subst b)
-                | Low_level.Ternop (op, a, b, c) -> Low_level.Ternop (op, subst a, subst b, subst c)
-                | _ ->
-                    (* [recognize_accumulation] admits only the two shapes above. *)
-                    assert false
-              in
-              let scope_body =
-                Low_level.Seq
-                  ( Low_level.Set_local (id, Low_level.Get (tn, idcs)),
-                    rebuild (Low_level.Set_local (id, update)) )
-              in
-              pp_ll ~log_set_locals ~in_loop
-                (Low_level.Set
-                   {
-                     tn;
-                     idcs;
-                     llsc = Local_scope { id; body = scope_body; orig_indices = idcs };
-                     debug;
-                   }))
+          if Utils.debug_log_from_routines () then None
+          else
+            let rec peel ~free_of ~rebuild body =
+              match nonempty_stmts body with
+              | [
+               Low_level.For_loop
+                 ({ index; body = ibody; axis = Low_level.Serial | Low_level.Unrolled; _ } as r);
+              ] ->
+                  peel
+                    ~free_of:(index :: free_of)
+                    ~rebuild:(fun b -> rebuild (Low_level.For_loop { r with body = b }))
+                    ibody
+              | [ Low_level.Set { tn; idcs; llsc; debug } ] as stmts ->
+                  let store_prec = Lazy.force tn.Tn.storage_prec in
+                  if
+                    Ops.equal_prec (comp_prec store_prec) store_prec
+                    || mentions_rng_conversion llsc
+                  then None
+                  else
+                    Option.map (recognize_accumulation ~free_of stmts) ~f:(fun _ ->
+                        (tn, idcs, llsc, debug, rebuild))
+              | _ -> None
+            in
+            let rebuild_hook b = Low_level.For_loop { index = i; from_; to_; body = b; axis } in
+            Option.map (peel ~free_of:[ i ] ~rebuild:rebuild_hook body)
+              ~f:(fun (tn, idcs, llsc, debug, rebuild) ->
+                let id = Low_level.get_scope tn in
+                let scope_body =
+                  Low_level.Seq
+                    ( Low_level.Set_local (id, Low_level.Get (tn, idcs)),
+                      rebuild (Low_level.Set_local (id, subst_acc_read ~tn ~idcs ~id llsc)) )
+                in
+                pp_ll ~log_set_locals ~in_loop
+                  (Low_level.Set
+                     {
+                       tn;
+                       idcs;
+                       llsc = Local_scope { id; body = scope_body; orig_indices = idcs };
+                       debug;
+                     }))
         in
         match axis with
         | Low_level.Serial -> (
@@ -3435,20 +3528,28 @@ module C_syntax (B : C_syntax_config) = struct
                       match B.vectorize_pragma with
                       | [] -> serial_loop ()
                       | lines -> separate_map hardline string lines ^^ hardline ^^ serial_loop ())))
-        | Unrolled ->
-            separate hardline
-            @@ List.init
-                 (to_ - from_ + 1)
-                 ~f:(fun k ->
-                   let binding =
-                     string ("const " ^ B.loop_index_type)
-                     ^^ pp_symbol i
-                     ^^ string (" = " ^ Int.to_string (from_ + k) ^ ";")
-                   in
-                   group
-                     (lbrace
-                     ^^ nest 2 (hardline ^^ binding ^^ hardline ^^ body_doc ())
-                     ^^ hardline ^^ rbrace)))
+        | Unrolled -> (
+            (* An [Unrolled] reduction axis holds the wide local across the repeated bodies
+               (gh-ocannl-639): autotune proposes [Unroll] over any small Serial loop, reduction
+               loops included, and without this hook the unrolled candidate would round-trip the
+               accumulator through storage on every repetition while the serial baseline widens —
+               numerics-divergent candidates in one search. *)
+            match try_widen_serial_reduce () with
+            | Some doc -> doc
+            | None ->
+                separate hardline
+                @@ List.init
+                     (to_ - from_ + 1)
+                     ~f:(fun k ->
+                       let binding =
+                         string ("const " ^ B.loop_index_type)
+                         ^^ pp_symbol i
+                         ^^ string (" = " ^ Int.to_string (from_ + k) ^ ";")
+                       in
+                       group
+                         (lbrace
+                         ^^ nest 2 (hardline ^^ binding ^^ hardline ^^ body_doc ())
+                         ^^ hardline ^^ rbrace))))
     | Zero_out tn ->
         let first_touch = not (Hash_set.mem zero_out_seen tn.Tn.uid) in
         Hash_set.add zero_out_seen tn.Tn.uid;
