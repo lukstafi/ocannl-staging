@@ -8,8 +8,8 @@ open Ocannl.Nn_blocks.DSL_modules
    tensor forced materialized, once left to virtualize -- and compare the consumer's values
    bit-for-bit (NaN-safe: fp8 random bit patterns can be NaN). The generated source is also
    checked structurally: the materialized run stores via the vectorized builtin, the virtual run
-   reads via the lane builtin and emits no vectorized store. (Test disabled on Metal only because
-   the fp8 section needs FP8 support; the lane path itself is backend-generic.) *)
+   reads via the lane builtin and emits no vectorized store. (Test disabled on Metal because of the
+   double section — Metal has no f64; the lane path itself is backend-generic, fp8 included.) *)
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")

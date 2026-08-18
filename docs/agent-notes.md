@@ -779,6 +779,21 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   evaluates BOTH branches, so any range guard's deliberately out-of-range read (clamped windows,
   inlined-concat component guards) would still be evaluated. Codegen pins:
   `test_where_precision.metal.expected`, `test_metal_guarded_gather_codegen`.
+- Metal has no `double`, and f64 stays rejected in `typ_of_prec` — a declared double buffer must
+  fail rather than be silently degraded; only scalar expression casts render as `float`. So a
+  backend-agnostic test must never reach for `double` just to have a second precision:
+  `digest_identity_flips` flipped `default_value_prec` to f64 to probe a code-borne cache-key knob,
+  and aborted the whole metal `test/operations` run (gh-ocannl-632). Half is the portable choice.
+- Metal has no fp8 *type* either, but fp8 works: e5m2 stores as a byte and computes in f32 through
+  the `Builtins_metal` software codec, i.e. Metal takes gh-ocannl-517's storage/compute seam for
+  that one format (`compute_prec`), the way `cc` takes it for every narrow float. The codec is
+  bit-identical to `builtins.c`'s for all 2^32 floats and all 256 codes — verified exhaustively
+  off-tree, which is how a hand-written float codec should be checked, not by sampling — and it is
+  written in integer/bitcast form on purpose: Metal compiles with fast math by default, under which
+  the infinity and NaN branches of a float-arithmetic codec are not reliable. fp8 ROUNDING is not
+  portable, though: the software codec (cc, Metal) rounds ties away from zero while the native GPU
+  fp8 types do not, so `test_fp8_roundtrip` pins only exactly-representable values and a golden
+  holding an inexact fp8 value would not survive a backend switch.
 - Metal buffer binding is the pooled slot-table (`__pools` + `__pool_slots`); raw `gpuAddress`
   casts segfault at dispatch and argument encoders don't fit the binding model. Same-queue
   command buffers overlap over untracked resources: back-to-back runs of the SAME routine need
@@ -786,8 +801,9 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   awaits by design.
 - A tensor node's precision is its **storage** precision; the precision its arithmetic runs at is a
   separate thing, `C_syntax_config.compute_prec` (gh-ocannl-517). They coincide on the GPU backends
-  (native `__nv_bfloat16` / MSL `bfloat`/`half`, and the 16-bit tensor-core shapes that consume
-  them) and diverge on `cc`, where every narrow-float operator was a widen/op/narrow round-trip
+  for the formats those have as types (native `__nv_bfloat16` / MSL `bfloat`/`half`, and the 16-bit
+  tensor-core shapes that consume them), and diverge on `cc`, where every narrow-float operator was
+  a widen/op/narrow round-trip
   anyway: there the narrow floats compute in f32 (`Ir.Numerics.narrow_compute_f32`, on by default),
   so a load widens once and a store narrows once, and an assignment's intermediates keep f32
   mantissa. The rule when touching `c_syntax.ml`: a **declaration**, a kernel parameter or a buffer
@@ -1235,8 +1251,9 @@ that they earn a lookup rather than always-loaded space.
 - The GPU boxes are usually powered off, so `skip (unreachable)` is the normal outcome and a sweep
   of skips is not a failure. What IS a failure is silent non-coverage: track the age of the last
   `pass` per backend, because nothing else in the project tests CUDA or HIP at all.
-- Report changes in the failure set, not the presence of failures. Metal's `test/operations` is
-  known-red, so a sweep that shouts on every red is one that gets ignored inside a week;
+- Report changes in the failure set, not the presence of failures. A backend's suite goes red in
+  bursts and comes back (Metal's `test/operations` was red for a stretch, green again after
+  gh-ocannl-632), so a sweep that shouts on every red is one that gets ignored inside a week;
   `sweep.sh` writes a sorted `.fingerprint` next to each non-pass log precisely so the previous
   run's can be diffed against it.
 - The per-machine worktrees are reused, not recreated, so a sweep is incremental against an

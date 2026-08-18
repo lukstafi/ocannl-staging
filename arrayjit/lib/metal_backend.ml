@@ -610,7 +610,9 @@ module Impl = struct
       | Ops.Uint4x32_prec _ -> "uint4" (* Metal's uint4 type - 128-bit *)
       | Ops.Half_prec _ -> "half"
       | Ops.Bfloat16_prec _ -> "bfloat" (* Metal supports bfloat16 natively *)
-      | Ops.Fp8_prec _ -> invalid_arg "Metal backend does not support FP8 precision"
+      (* MSL has no fp8 type: an e5m2 node is stored as a byte, and [Builtins_metal]'s software
+         codec bridges every load and store (see [compute_prec]). *)
+      | Ops.Fp8_prec _ -> "uchar"
       | Ops.Single_prec _ -> "float"
       | Ops.Double_prec _ ->
           raise @@ Utils.User_error "Metal backend does not support double precision"
@@ -915,7 +917,10 @@ module Impl = struct
       | Ops.Uint4x32_prec _ -> "" (* No specific suffix for uint4 *)
       | Ops.Half_prec _ -> "h"
       | Ops.Bfloat16_prec _ -> "bf" (* Verified: [0.0bf] is a bfloat literal MSL accepts. *)
-      | Ops.Fp8_prec _ -> invalid_arg "Metal backend does not support FP8 precision"
+      (* Not a capability limit but an invariant: [compute_prec] maps fp8 to f32, so no operator
+         is ever rendered at fp8 and no fp8 literal is ever spelled. *)
+      | Ops.Fp8_prec _ ->
+          invalid_arg "Metal_backend: fp8 arithmetic renders at single precision (compute_prec)"
       | Ops.Single_prec _ -> "f"
       | Ops.Double_prec _ ->
           raise @@ Utils.User_error "Metal backend does not support double precision"
@@ -1098,6 +1103,14 @@ module Impl = struct
       (* Uint4x32 conversions - special handling *)
       | Ops.Uint4x32_prec _, _ -> ("uint4x32_to_" ^ Ops.prec_string to_ ^ "_uniform(", ")")
       | _, Ops.Uint4x32_prec _ -> (Ops.prec_string from ^ "_to_uint4x32(", ")")
+      (* fp8 conversions go through the software codec, which is where the storage/compute seam
+         lands for e5m2 on Metal: a load widens once, a store narrows once, and the arithmetic in
+         between is f32 ([compute_prec]). The spellings mirror {!Ops.c_convert_precision}'s fp8
+         arms, so a tensor written by a C backend reads back identically here. *)
+      | Ops.Fp8_prec _, (Ops.Single_prec _ | Ops.Double_prec _) -> ("fp8_to_single(", ")")
+      | (Ops.Single_prec _ | Ops.Double_prec _), Ops.Fp8_prec _ -> ("single_to_fp8(", ")")
+      | Ops.Fp8_prec _, _ -> ("(" ^ typ_of_prec to_ ^ ")(fp8_to_single(", "))")
+      | _, Ops.Fp8_prec _ -> ("single_to_fp8((float)(", "))")
       (* Metal has no native double. Keep double tensor storage unsupported in [typ_of_prec], so a
          declared double buffer/local still fails instead of being silently degraded. This
          conversion case is only for scalar expression casts emitted by the shared lowering;
@@ -1108,6 +1121,13 @@ module Impl = struct
       | _, Ops.Double_prec _ -> ("(float)(", ")")
       (* Default case for all other conversions *)
       | _ -> ("(" ^ typ_of_prec to_ ^ ")(", ")")
+
+    (* [half] and [bfloat] are native MSL scalars and compute where they store; fp8 is not a type
+       at all here, so it takes gh-ocannl-517's seam instead — stored as a byte, computed in f32,
+       converted once per load and once per store by [convert_precision] above. The same
+       resolution [Numerics.cpu_compute_prec] gives fp8 on the CPU backends, and a function of the
+       storage precision alone, as the signature requires. *)
+    let compute_prec = function Ops.Fp8_prec _ -> Ops.single | prec -> prec
 
     (* If we wanted to reintroduce the log_id parameter: [Some ("const int&", "log_id")]. *)
     let kernel_log_param = None

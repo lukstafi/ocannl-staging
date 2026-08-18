@@ -599,88 +599,84 @@ let () =
      mantissa bits: inputs from {-1,-0.5,0,0.5,1} and {-1.5..1.5 step 0.5} are exact, every product
      is a multiple of 0.25 bounded by 1.5, and a 32-term f32 sum of such products is exact
      regardless of accumulation order — so parity is bitwise on every backend and either rendering
-     path. Skipped on Metal, which has no fp8 storage precision at all ([typ_of_prec] rejects
-     [Fp8_prec]) — even the serial twin cannot compile there.
+     path. Metal runs these too (gh-ocannl-632): it has no fp8 type, but it stores e5m2 as a byte
+     and computes in f32, and its [simdgroup_matrix] has no fp8 format tile, so the legs land on
+     the lane-0 fallback the GPU arm of the structural check already admits.
 
      All three operand orientations are covered (gh-ocannl-481 item 1): the arm's per-lane byte
      gathers now address every fragment element at its transposed (col, row) offset under
      [ta]/[tb], so the gradient GEMMs' layouts ([dA = g.B^T], [dB = A^T.g]) tensorize instead of
      silently scalar-falling-back. A mis-mapped gather computes a different product, so the bitwise
      parity is what pins the per-lane layout. --- *)
-  (if on_metal then
-     List.iter [ "f8"; "f8_ta"; "f8_tb" ] ~f:(fun tag ->
-         skipped (Printf.sprintf "%s tensorized matmul matches the serial twin bitwise" tag);
-         skipped (Printf.sprintf "%s tensorized structure as expected" tag))
-   else
-     let fp8_a ~l ~o ~i =
-       NTDSL.init ~l ~prec:Ir.Ops.fp8 ?i ~o
-         ~f:(fun idcs -> (Float.of_int (((idcs.(0) * n) + idcs.(1)) % 5) *. 0.5) -. 1.)
-         ()
+  (let fp8_a ~l ~o ~i =
+     NTDSL.init ~l ~prec:Ir.Ops.fp8 ?i ~o
+       ~f:(fun idcs -> (Float.of_int (((idcs.(0) * n) + idcs.(1)) % 5) *. 0.5) -. 1.)
+       ()
+   in
+   let fp8_b ~l ~o ~i =
+     NTDSL.init ~l ~prec:Ir.Ops.fp8 ?i ~o
+       ~f:(fun idcs -> (Float.of_int (((idcs.(0) * n) + idcs.(1)) % 7) -. 3.) *. 0.5)
+       ()
+   in
+   let maf = fp8_a ~l:"maf" ~i:(Some [ n ]) ~o:[ n ] in
+   let mbf = fp8_b ~l:"mbf" ~i:(Some [ n ]) ~o:[ n ] in
+   let mtaf = fp8_a ~l:"mtaf" ~i:None ~o:[ n; n ] in
+   let mtbf = fp8_b ~l:"mtbf" ~i:None ~o:[ n; n ] in
+   let fp8_leg ~tag ~build =
+     let mcf0 = build () in
+     Tn.update_prec mcf0.Tensor.value Ir.Ops.single;
+     let ctx_fs = Context.auto () in
+     let ctx_fs, routine_fs =
+       Context.compile
+         ~lowered_transform:(fun opt -> opt)
+         ctx_fs
+         (named ("mm_" ^ tag ^ "_serial") (Train.forward mcf0))
+         Ir.Indexing.Empty
      in
-     let fp8_b ~l ~o ~i =
-       NTDSL.init ~l ~prec:Ir.Ops.fp8 ?i ~o
-         ~f:(fun idcs -> (Float.of_int (((idcs.(0) * n) + idcs.(1)) % 7) -. 3.) *. 0.5)
-         ()
+     let ctx_fs = Context.run ctx_fs routine_fs in
+     let want = nonzero "mm_fp8_serial" (Context.get_values ctx_fs mcf0.Tensor.value) in
+     let mcf1 = build () in
+     Tn.update_prec mcf1.Tensor.value Ir.Ops.single;
+     let transform_f8 opt = Sched.apply (mma_schedule ~out:mcf1.Tensor.value opt) opt in
+     let ctx_f8 = Context.auto () in
+     let ctx_f8, routine_f8 =
+       Context.compile ~lowered_transform:transform_f8 ctx_f8
+         (named ("mm_" ^ tag ^ "_mma") (Train.forward mcf1))
+         Ir.Indexing.Empty
      in
-     let maf = fp8_a ~l:"maf" ~i:(Some [ n ]) ~o:[ n ] in
-     let mbf = fp8_b ~l:"mbf" ~i:(Some [ n ]) ~o:[ n ] in
-     let mtaf = fp8_a ~l:"mtaf" ~i:None ~o:[ n; n ] in
-     let mtbf = fp8_b ~l:"mtbf" ~i:None ~o:[ n; n ] in
-     let fp8_leg ~tag ~build =
-       let mcf0 = build () in
-       Tn.update_prec mcf0.Tensor.value Ir.Ops.single;
-       let ctx_fs = Context.auto () in
-       let ctx_fs, routine_fs =
-         Context.compile
-           ~lowered_transform:(fun opt -> opt)
-           ctx_fs
-           (named ("mm_" ^ tag ^ "_serial") (Train.forward mcf0))
-           Ir.Indexing.Empty
-       in
-       let ctx_fs = Context.run ctx_fs routine_fs in
-       let want = nonzero "mm_fp8_serial" (Context.get_values ctx_fs mcf0.Tensor.value) in
-       let mcf1 = build () in
-       Tn.update_prec mcf1.Tensor.value Ir.Ops.single;
-       let transform_f8 opt = Sched.apply (mma_schedule ~out:mcf1.Tensor.value opt) opt in
-       let ctx_f8 = Context.auto () in
-       let ctx_f8, routine_f8 =
-         Context.compile ~lowered_transform:transform_f8 ctx_f8
-           (named ("mm_" ^ tag ^ "_mma") (Train.forward mcf1))
-           Ir.Indexing.Empty
-       in
-       let ctx_f8 = Context.run ctx_f8 routine_f8 in
-       let got = Context.get_values ctx_f8 mcf1.Tensor.value in
-       p
-         (Printf.sprintf "%s tensorized matmul matches the serial twin bitwise" tag)
-         (Array.for_all2_exn got want ~f:Float.equal);
-       match read_generated ("mm_" ^ tag ^ "_mma") with
-       | None -> p (Printf.sprintf "%s tensorized structure as expected" tag) false
-       | Some src ->
-           let has s = String.is_substring src ~substring:s in
-           let ok =
-             if on_gpu then
-               (* CUDA sm_89+: the inline-PTX path; the lane-0 fallback on older devices. *)
-               has "mma.sync.aligned.m16n8k32" || has "== 0)"
-             else if String.equal tag "f8_tb" then
-               (* Transposed B declines the register tiling on the C backends. *)
-               has "== 0)" && (not (has "simdgroup")) && not (has "Tile_mma register tiling")
-             else
-               (* gh-ocannl-575: fp8 storage register-tiles at the f32 accumulator precision;
-                  fp8 has no whole-vector conversion, so the operand loads convert per lane
-                  (the [vec_bridge] fallback arm) while the arithmetic stays vectorized. *)
-               has "Tile_mma register tiling" && has "narrow storage bridged: a:fp8 b:fp8"
-           in
-           p (Printf.sprintf "%s tensorized structure as expected" tag) ok
-     in
-     fp8_leg ~tag:"f8" ~build:(fun () ->
-         let%op t = maf * mbf in
-         t);
-     fp8_leg ~tag:"f8_ta" ~build:(fun () ->
-         let%op t = mtaf +* "ki;kj=>ij" mtbf in
-         t);
-     fp8_leg ~tag:"f8_tb" ~build:(fun () ->
-         let%op t = mtaf +* "ik;jk=>ij" mtbf in
-         t));
+     let ctx_f8 = Context.run ctx_f8 routine_f8 in
+     let got = Context.get_values ctx_f8 mcf1.Tensor.value in
+     p
+       (Printf.sprintf "%s tensorized matmul matches the serial twin bitwise" tag)
+       (Array.for_all2_exn got want ~f:Float.equal);
+     match read_generated ("mm_" ^ tag ^ "_mma") with
+     | None -> p (Printf.sprintf "%s tensorized structure as expected" tag) false
+     | Some src ->
+         let has s = String.is_substring src ~substring:s in
+         let ok =
+           if on_gpu then
+             (* CUDA sm_89+: the inline-PTX path; the lane-0 fallback on older devices. *)
+             has "mma.sync.aligned.m16n8k32" || has "== 0)"
+           else if String.equal tag "f8_tb" then
+             (* Transposed B declines the register tiling on the C backends. *)
+             has "== 0)" && (not (has "simdgroup")) && not (has "Tile_mma register tiling")
+           else
+             (* gh-ocannl-575: fp8 storage register-tiles at the f32 accumulator precision;
+                fp8 has no whole-vector conversion, so the operand loads convert per lane
+                (the [vec_bridge] fallback arm) while the arithmetic stays vectorized. *)
+             has "Tile_mma register tiling" && has "narrow storage bridged: a:fp8 b:fp8"
+         in
+         p (Printf.sprintf "%s tensorized structure as expected" tag) ok
+   in
+   fp8_leg ~tag:"f8" ~build:(fun () ->
+       let%op t = maf * mbf in
+       t);
+   fp8_leg ~tag:"f8_ta" ~build:(fun () ->
+       let%op t = mtaf +* "ki;kj=>ij" mtbf in
+       t);
+   fp8_leg ~tag:"f8_tb" ~build:(fun () ->
+       let%op t = mtaf +* "ik;jk=>ij" mtbf in
+       t));
 
   (* --- Edge extents (gh-ocannl-469): a 7x19 output of a 7x13 by 13x19 matmul, tensorized over the
      whole triple. The register tiling covers the full 4x(RN*lanes) blocks and peels the partial row

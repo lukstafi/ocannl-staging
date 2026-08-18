@@ -64,7 +64,7 @@ let () =
   test_prec ~name:"half" Ir.Ops.half [ 1; 3; 9; 12 ];
   test_prec ~name:"double" Ir.Ops.double [ 1; 3 ];
   (* fp8 is the stress case: 16 lanes per block. Its conversion does not target [0,1), so only
-     count, prefix stability and the golden reference values are checked. (Test disabled on Metal,
-     which lacks FP8.) *)
+     count, prefix stability and the golden reference values are checked. (The test is disabled on
+     Metal for the double case above, not for this one.) *)
   test_prec ~check_range:false ~name:"fp8" Ir.Ops.fp8 [ 1; 7; 15; 17; 33 ];
   test_multi_axis ()
