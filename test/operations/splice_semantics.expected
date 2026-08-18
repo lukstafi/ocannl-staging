@@ -1,0 +1,10 @@
+copy-position raw reads after a partial write: ell is read-before-write: true
+copy-position raw reads: ell is an input of the routine: true
+copy-position raw reads: the uncovered cells read the incoming values: true
+uninitialized accumulation: x is read-before-write: true
+uninitialized accumulation: x is an input of the routine: true
+uninitialized accumulation: updated in place over the incoming values: true
+zero-initialized accumulation: covered by the real write, not read-before-write: true
+zero-initialized accumulation: y is not an input: true
+zero-initialized accumulation: the sentinel seed is overwritten: true
+undecided partial-write producer: keeps its virtualization eligibility: true

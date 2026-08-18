@@ -5142,7 +5142,12 @@ let statics_set_of static_indices =
    statement's own store, not a visit — exactly the reads the retired concrete tracer never
    recorded. Statement subordination, not program-path matching: an [If] condition's read shares
    its path with the guarded body's write but executes before it, so it is never exempt. Shared by
-   {!reads_covered_query} and {!read_multiplicity_query}. *)
+   {!reads_covered_query} and {!read_multiplicity_query} — but the two consumers read it
+   differently (gh-ocannl-618): for per-cell visit counting the exemption is always right (the
+   statement's own store is not a visit), while for the routine INTERFACE it is not a coverage
+   fact — the cells an exempt read touches still carry their incoming values unless a prior write
+   definitely covers them, so the coverage query reports exemption-dependent coverage as its own
+   verdict rather than folding it into [`Covered]. *)
 (* Inclusive value bounds of a static symbol, matching the runtime validation of static bindings
    ([Indexing]): a symbol [used_as_extent] takes values in [0, r] (extents size buffers), while a
    plain static is a strict index in [0, r) — universalizing a read over the impossible cell [r]
@@ -5186,37 +5191,44 @@ let write_guards_dominate ~(write : Tn.t Affine.access) ~(read : Tn.t Affine.acc
       let prefix = List.take write.Affine.a_path (i + 1) in
       List.is_prefix read.Affine.a_path ~prefix ~equal:Affine.equal_path_comp
 
-let reads_covered_query ?(exempt_rmw = true)
-    ?(write_eligible = fun ~read:_ ~write:_ -> true) (static_indices : Indexing.static_symbol list)
-    (accs : Tn.t Affine.access list) : Tn.t -> [ `Covered | `Unknown of string ] =
+let reads_covered_query ?(write_eligible = fun ~read:_ ~write:_ -> true)
+    (static_indices : Indexing.static_symbol list) (accs : Tn.t Affine.access list) :
+    Tn.t -> [ `Covered | `Covered_rmw_exempt of string | `Unknown of string ] =
   let by_tn = Hashtbl.create (module Tn) in
   List.iter accs ~f:(fun a -> Hashtbl.add_multi by_tn ~key:a.Affine.a_tn ~data:a);
   let statics_set = statics_set_of static_indices in
   let static_range = static_bounds static_indices in
-  (* [exempt_rmw:false] is the routine-INTERFACE reading (review round 6): a same-position read
-     is a genuine read-modify-write, so unless a prior definite write covers its cells the entry
-     value is required — the exemption stays for the placement/multiplicity consumers, which
-     mirror the retired tracer (gh-ocannl-618 tracks splitting the raw-side verdicts too). *)
-  let exempt r = exempt_rmw && rmw_exempt ~statics_set r in
+  (* The three-way verdict is the gh-ocannl-618 split, decided in one pass: [`Covered] holds
+     without leaning on the read-modify-write exemption; [`Covered_rmw_exempt] means the only
+     uncovered reads are {!rmw_exempt} ones — covered for the tracer-mirroring placement and
+     multiplicity consumers, NOT covered for the routine interface ([read_before_write]), where a
+     same-position read is a genuine read-modify-write whose cells require their entry values
+     unless a prior definite write covers them (review round 6 of the gh-610/611 PR established
+     this reading for spliced reads; the raw-side split followed). A strictly-uncovered read
+     dominates an exemption-dependent one. *)
   fun tn ->
     match Hashtbl.find by_tn tn with
     | None -> `Covered
     | Some accs ->
         let accs = List.rev accs in
         let writes = List.filter accs ~f:(fun a -> a.Affine.a_write) in
-        let witness = ref "" in
-        let covered =
-          List.for_all accs ~f:(fun r ->
-              r.Affine.a_write || exempt r
-              ||
+        let exempt_witness = ref None in
+        let rec go = function
+          | [] -> (
+              match !exempt_witness with
+              | None -> `Covered
+              | Some w -> `Covered_rmw_exempt w)
+          | r :: rest when r.Affine.a_write -> go rest
+          | r :: rest -> (
               let writes = List.filter writes ~f:(fun w -> write_eligible ~read:r ~write:w) in
               match Affine.read_covered_before ~static_range ~read:r ~writes () with
-              | `Covered -> true
-              | `Unknown w ->
-                  witness := w;
-                  false)
+              | `Covered -> go rest
+              | `Unknown w when rmw_exempt ~statics_set r ->
+                  if Option.is_none !exempt_witness then exempt_witness := Some w;
+                  go rest
+              | `Unknown w -> `Unknown w)
         in
-        if covered then `Covered else `Unknown !witness
+        go accs
 
 (* gh-554: per-cell read multiplicity upper bound — the abstract replacement for the retired
    tracer's sampled per-cell visit counts ([Visits i > max_visits]). A read site's own per-cell
@@ -5285,8 +5297,23 @@ let decide_placements (optim_ctx : optimize_ctx) traced_store ~max_visits ~reads
   in
   Hashtbl.iter traced_store ~f:(fun traced ->
       let tn = traced.tn in
+      let coverage = lazy ((Lazy.force reads_covered) tn) in
+      (* The gh-ocannl-618 split of the read-modify-write exemption by consumer: the tracer-
+         mirroring placement decisions (the visit cap below) accept exemption-dependent coverage —
+         a statement's read of its own store position is not a visit — while the routine-INTERFACE
+         classification ([read_before_write]) accepts it only while the node retains its
+         virtualization eligibility (see the input-classification comment below). *)
       let covered =
-        lazy (match (Lazy.force reads_covered) tn with `Covered -> true | `Unknown _ -> false)
+        lazy
+          (match Lazy.force coverage with
+          | `Covered | `Covered_rmw_exempt _ -> true
+          | `Unknown _ -> false)
+      in
+      let covered_strict =
+        lazy
+          (match Lazy.force coverage with
+          | `Covered -> true
+          | `Covered_rmw_exempt _ | `Unknown _ -> false)
       in
       let cap_exempt = cap_exempt traced in
       if
@@ -5336,10 +5363,28 @@ let decide_placements (optim_ctx : optimize_ctx) traced_store ~max_visits ~reads
         else if Tn.Placements.known_non_virtual plc tn then Tn.Placements.update plc tn On_device 35);
       (* We allow sharing virtual nodes across routines. A node with an uncovered read (read before
          write within this routine — the tracer's [Recurrent]) must own a device buffer whose prior
-         contents are preserved: it is an input of the routine. *)
-      if (not (Tn.Placements.known_virtual plc tn)) && not (Lazy.force covered) then (
-        traced.read_before_write <- true;
-        Tn.Placements.update plc tn On_device 36));
+         contents are preserved: it is an input of the routine. The gh-ocannl-618 refinement: for
+         a node ALREADY known non-virtual (declared intent, or decided by the caps above), the
+         verdict is STRICT — a read-modify-write-exempt read still consumes the entry value
+         ([ell[0] = 5000; out[i] = ell[i]] reads ell's incoming cells 1.. at the copy position,
+         and an accumulation with no preceding definite initialization reads its own entry
+         values), so exemption-dependent coverage must not classify a buffer-owning node
+         output-only (aliasing-eligible, absent from link-time input verification). An UNDECIDED
+         node keeps the lenient reading: a virtual node has no interface, and exemption-dependent
+         coverage is exactly the shape of the virtualizer's partial-write producers (an injective
+         scatter emits no neutral init — its inlining prepends the init fallback, see
+         affine_lowering.ml's AC6), so strictness here would cost their placement freedom.
+         Lowering emits the initialization before accumulations, so routine-complete flows read as
+         covered by the real write under either verdict. *)
+      if not (Tn.Placements.known_virtual plc tn) then (
+        if not (Lazy.force covered) then (
+          traced.read_before_write <- true;
+          Tn.Placements.update plc tn On_device 36)
+        else if
+          Tn.Placements.known_non_virtual plc tn && not (Lazy.force covered_strict)
+        then (
+          traced.read_before_write <- true;
+          Tn.Placements.update plc tn On_device 36)));
   (* Transitive inline-fanin guard (gh-573): the per-node caps above cannot see chains. A running
      sum such as a transformer's residual stream has per-cell read multiplicity within the visit
      cap (its consumers' copy-position reads are read-modify-write-exempt) and no reduction loops,
@@ -5492,7 +5537,8 @@ type analysis = {
           [read_before_write] flags under the candidate's own placements. *)
   an_reverse_node_map : (Indexing.symbol, Tnode.t list) Hashtbl.t;
   an_merge_node : Tnode.t option;
-  an_reads_covered : (Tn.t -> [ `Covered | `Unknown of string ]) Lazy.t;
+  an_reads_covered :
+    (Tn.t -> [ `Covered | `Covered_rmw_exempt of string | `Unknown of string ]) Lazy.t;
   an_read_multiplicity : (Tn.t -> int) Lazy.t;
 }
 
@@ -5693,7 +5739,7 @@ let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
         guards-taken contract stays for its placement-decision consumers). Guarded READS still
         demand coverage — conservative in the same direction. *)
      let covered =
-       reads_covered_query ~exempt_rmw:false
+       reads_covered_query
          ~write_eligible:(fun ~read ~write ->
            (not write.Affine.a_guarded) || write_guards_dominate ~write ~read)
          static_indices
@@ -5704,7 +5750,7 @@ let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
          if not traced.read_before_write then
            match covered tn with
            | `Covered -> ()
-           | `Unknown _ ->
+           | `Covered_rmw_exempt _ | `Unknown _ ->
                traced.read_before_write <- true;
                Hash_set.add flipped_rbw tn));
   Hash_set.iter fresh_written ~f:(fun tn -> (get_node traced_store tn).has_assignment <- true);

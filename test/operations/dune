@@ -2203,6 +2203,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name splice_semantics)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules splice_semantics)
+ (libraries base ocannl stdio ll_test)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name inline_flip_tune)
  (package neural_nets_lib)
  (deps

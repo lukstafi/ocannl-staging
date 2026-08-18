@@ -235,14 +235,26 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   discarded operand is never rendered, so its reads are not parameters and its merge read must
   not taint; the taint scan is `~self`-filtered like `inline_computation`'s own setter filter, or
   a shared-loop sibling's merge read rejects valid sharing. The STRICT coverage verdicts —
-  guarded writes filtered (never definite), rmw exemption off (a same-position spliced read is a
-  genuine RMW), `zeroed_out` counted as written — apply PER NODE, to exactly the nodes read
-  inside INLINED bodies (`virtual_llc` records them at each `inline_computation` splice and
-  returns the set): splicing is what moves reads to positions the raw analysis never judged.
-  Raw-positioned reads keep the raw verdicts, whose lenient contracts deliberately classify
-  patterns initialized by an earlier routine of the program — routine-wide strictness broke
-  real flows across the suite, and a has-local-assignment provenance test for "inherited"
-  missed consumption through an update of an inherited virtual (rounds 6-7). `from_prior_context` (both `Backends.compile` and `from_prior_context_batch`)
+  guarded writes filtered (never definite), rmw exemption not counted as coverage (a
+  same-position read is a genuine RMW), `zeroed_out` counted as written — apply PER NODE, to
+  exactly the nodes read inside INLINED bodies (`virtual_llc` records them at each
+  `inline_computation` splice and returns the set): splicing is what moves reads to positions the
+  raw analysis never judged. Raw-positioned reads keep the raw GUARDS-TAKEN contract, which
+  deliberately classifies patterns initialized by an earlier routine of the program —
+  routine-wide guard strictness broke real flows across the suite, and a has-local-assignment
+  provenance test for "inherited" missed consumption through an update of an inherited virtual
+  (rounds 6-7). The rmw part is split more finely (gh-ocannl-618):
+  `reads_covered_query` returns a three-way verdict, and exemption-dependent coverage
+  (`` `Covered_rmw_exempt ``) counts as covered for the tracer-mirroring placement heuristics
+  (the visit cap) but as uncovered for the `read_before_write` interface classification of a
+  node ALREADY KNOWN NON-VIRTUAL — a copy-position read after a partial write, or an
+  accumulation with no preceding definite initialization, consumes a buffer-owning node's entry
+  values raw or spliced alike (`splice_semantics.ml` phase 1; routine-complete lowered flows are
+  unaffected because lowering emits the initialization first). An UNDECIDED node keeps the
+  lenient reading — a virtual node has no interface, and exemption-dependent coverage is
+  exactly the shape of the virtualizer's partial-write producers (an injective scatter emits no
+  neutral init; inlining prepends the init fallback — `affine_lowering.ml` AC6 broke under
+  unconditional strictness, which is how the conditioning was found). `from_prior_context` (both `Backends.compile` and `from_prior_context_batch`)
   reconciles in BOTH directions: the raw-assignments set is filtered by the reconciled traced
   store (raw over-approximates the residual schedule — a deferral-only routine must link on a
   fresh context) and, for routines carrying an assignments program, unioned with the reconciled
@@ -259,9 +271,6 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   every pure input (uncovered reads), and demanding those broke ndarray-literal flows. The merge SOURCE never gets an ordinary traced
   entry (the merge buffer is the parameter; a source entry would double the transfer buffer's
   allocation).
-  Related pre-existing quirk: `rmw_exempt` excuses copy-position reads from the coverage verdict
-  that feeds `read_before_write` (fine for multiplicity, questionable for the interface) —
-  gh-ocannl-618; the phase-5 partial-write test reads at an offset position to stay off it.
   Corollary (gh-ocannl-611): a routine whose every statement virtualizes away is LEGAL —
   cleanup's top-level elision degenerates to `Noop`, with an EMPTY interface — its stored
   computations persist in the lineage for later consumers, so "compile a deferral-only routine"
