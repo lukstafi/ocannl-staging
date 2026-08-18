@@ -80,9 +80,28 @@ hold_test_run_lock() {
            print STDERR "format-sweep: waiting for the active tools/test-run.sh run to finish...\n";
            alarm 3900; $SIG{ALRM} = sub { exit 1 };
            exit(flock(STDIN, LOCK_EX) ? 0 : 1)' <&7 \
-    || { exec 7>&- 2>/dev/null || true; return 1; }
+    || { exec 7>&- || true; return 1; }
 }
-release_test_run_lock() { exec 7>&- 2>/dev/null || true; }
+# NB: no redirection on `exec 7>&-`: exec with only redirections applies them
+# to the REST OF THE SCRIPT, so a onetime `2>/dev/null` here once swallowed
+# every later stderr message, abort messages included (closing an unopened fd
+# is already silent).
+release_test_run_lock() { exec 7>&- || true; }
+
+# Content hash of every tracked difference from HEAD (staged and unstaged).
+tree_hash() { git diff HEAD | git hash-object --stdin; }
+
+# The tracked tree may only change in the sweep's own rewrite steps. A
+# mismatch here means someone edited the main checkout mid-sweep; committing
+# it (git add -u) would smuggle unrelated work into the formatting commit,
+# and resetting would DESTROY that work -- so leave everything in place and
+# abort; the entry gates then block further sweeps until a human resolves it.
+assert_tree_unchanged() {
+  [ "$(tree_hash)" = "$SNAP_TREE" ] || {
+    KEEP=1 # disarm cleanup's reset: it would destroy the foreign edits
+    abort "tracked files changed outside the sweep's own rewrites (mid-sweep edit in the main checkout?); leaving the tree as is -- resolve it before the next sweep"
+  }
+}
 
 # One sweep at a time per checkout: a second invocation racing the first past
 # the clean-tree gate would format/restore the sources underneath the first
@@ -244,6 +263,7 @@ likely an ocamlformat-hostile golden missing from .ocamlformat-ignore (see heade
     exit 0
   fi
   release_test_run_lock # our own test phases take the lock themselves
+  SNAP_TREE=$(tree_hash) # the test phases must not move this
 
   # test-run exits 2 on a lock refusal (an external run grabbed the lock in
   # the gap after our wait) -- report that as the benign race it is, not as a
@@ -258,6 +278,7 @@ likely an ocamlformat-hostile golden missing from .ocamlformat-ignore (see heade
   RC=0
   tools/test-run.sh run runtest || RC=$?
   [ "$RC" -ne 2 ] || abort "test-run refused the runtest phase (external run started mid-sweep); rerun later"
+  assert_tree_unchanged
   if [ "$RC" -eq 0 ]; then
     break
   fi
@@ -275,9 +296,9 @@ likely an ocamlformat-hostile golden missing from .ocamlformat-ignore (see heade
   # -u, not -A: the baseline must not stage untracked artifacts a failing
   # test may have left, or they would ride the final `git add -u` unnoticed.
   git add -u # stage the post-format pre-promote state, the validation baseline
-  SNAP_BEFORE=$(git diff HEAD | git hash-object --stdin)
+  SNAP_BEFORE=$(tree_hash)
   tools/promote.sh || abort "test suite failed and promotion errored"
-  SNAP_AFTER=$(git diff HEAD | git hash-object --stdin)
+  SNAP_AFTER=$(tree_hash)
   [ "$SNAP_BEFORE" != "$SNAP_AFTER" ] \
     || abort "test suite failed with nothing to promote -- a real failure, not golden drift"
 
@@ -322,6 +343,7 @@ fi
 STRAYS=$(git status --porcelain | sed -n 's/^?? //p')
 [ -z "$STRAYS" ] \
   || abort "untracked file(s) appeared during the sweep; inspect and remove them: $STRAYS"
+assert_tree_unchanged # nothing may have moved since the passing round's fmt
 
 echo "format-sweep: committing"
 # -u, not -A: formatting and promotion only modify tracked files, and -A
