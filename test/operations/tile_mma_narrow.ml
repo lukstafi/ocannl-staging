@@ -77,6 +77,19 @@ let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; i
 let n = 64
 let bm, bk = (16, 16)
 
+(* Pure-f16 compute runs the register file at the machine's full vector width in 2-byte elements,
+   so the typedef the kernel mints is per-machine (8 lanes on NEON, 16 on AVX2, 32 on AVX-512) and
+   is computed rather than spelled — a hardcoded list of widths reads as a failure on the first
+   machine wider than the ones it lists. GPU backends report 0 bytes and never reach this. *)
+let half_vec_typ =
+  let simd_vector_bytes =
+    (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.simd_vector_bytes
+  in
+  Printf.sprintf "ocannl_vec%dh"
+    (Option.value ~default:0
+       (Ir.Backend_intf.simd_lanes_for ~vector_bytes:simd_vector_bytes
+          ~elt_bytes:(Ir.Ops.prec_in_bytes Ir.Ops.half) ~extent:n))
+
 (* The composed packed pipeline, parameterized by the packed tiles' precision override. *)
 let composed_schedule ~hoist_b ~tile_prec ~a ~b (opt : LL.optimized) : Sched.schedule =
   let paths = nest_paths opt.LL.llc in
@@ -249,7 +262,7 @@ let () =
                 count_sub "HALF_T tile_" = 2
                 && has "Tile_mma register tiling"
                 && (not (has "narrow storage bridged"))
-                && (has "ocannl_vec16h" || has "ocannl_vec8h")
+                && has half_vec_typ
               else not (has "tmma_")))
    | exception e ->
        (* The one condition verified to warrant a skip: the generated kernel failed to COMPILE
