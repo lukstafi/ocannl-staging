@@ -46,27 +46,10 @@ let exempt_sites =
        there is no configuration in reach -- and a Python process would not read one anyway" );
   ]
 
-(* Dune runs this from the rule's own directory inside the build tree and hands it paths relative
-   to that directory. `%{workspace_root}` arrives as the way back out ("../.."), so the number of
-   its components says how many of the working directory's trailing components name the rule's
-   directory -- which turns those paths into repository-relative ones without this test having to
-   assume what the build directory is called. *)
-let split_path path = String.split_on_chars path ~on:[ '/'; '\\' ]
-
-let base_dir workspace_root =
-  let depth = List.count (split_path workspace_root) ~f:(String.equal "..") in
-  let cwd = List.filter (split_path (Stdlib.Sys.getcwd ())) ~f:(Fn.non String.is_empty) in
-  List.drop cwd (max 0 (List.length cwd - depth))
-
-let repo_relative base path =
-  let components =
-    List.fold (base @ split_path path) ~init:[] ~f:(fun acc component ->
-        match component with
-        | "" | "." -> acc
-        | ".." -> ( match acc with _ :: rest -> rest | [] -> [])
-        | component -> component :: acc)
-  in
-  String.concat ~sep:"/" (List.rev components)
+(* Paths arrive relative to the rule's directory deep in the build tree; [Scan.base_dir] and
+   [Scan.repo_relative] turn them into repository-relative ones (see their comment there). *)
+let base_dir = Scan.base_dir
+let repo_relative = Scan.repo_relative
 
 let () =
   if Array.length Stdlib.Sys.argv < 2 then (

@@ -222,7 +222,11 @@ cmd_snap() { (
   # and the `replays`/`profiles` gates would count it as coverage. Publish-on-success only.
   local out; out=$(cell_dir "$label" "$rep")
   case ${out:-} in /?*) ;; *) exit 2;; esac
-  rm -f "$out/armA.path"
+  # ...including any provenance manifest describing them (gh612v_session.sh writes one per
+  # producing subcommand). Retracted HERE rather than only in that wrapper: this entry point stays
+  # public, and a direct invocation that rewrites the artifacts while a matching manifest survives
+  # is exactly a foreign artifact wearing the previous run's provenance.
+  rm -f "$out/armA.path" "$out/snap.manifest"
   tree=$(require_dir "$tree")
   case ${tree:-} in /?*) ;; *) exit 2;; esac
   check_config "$tree" || exit 2
@@ -313,7 +317,7 @@ cmd_profile() { (
   # the rejected run using stale measurements.
   local out; out=$(cell_dir "$label" "$rep")
   case ${out:-} in /?*) ;; *) exit 2;; esac
-  rm -f "$out"/kernels-*.csv "$out"/kernels-*.err "$out"/bucket-*.txt
+  rm -f "$out"/kernels-*.csv "$out"/kernels-*.err "$out"/bucket-*.txt "$out/profile.manifest"
   tree=$(require_dir "$tree")
   case ${tree:-} in /?*) ;; *) exit 2;; esac
   local src; src=$(cat "$out/armA.path")
@@ -674,7 +678,7 @@ cmd_replay() { (
   # gate counts it as coverage, so a stale one survives a rejected replay in both.
   local out; out=$(cell_dir "$label" "$rep")
   case ${out:-} in /?*) ;; *) exit 2;; esac
-  rm -f "$out/replay2.out"
+  rm -f "$out/replay2.out" "$out/replay.manifest"
   tree=$(require_dir "$tree")
   case ${tree:-} in /?*) ;; *) exit 2;; esac
   check_config "$tree" || exit 2

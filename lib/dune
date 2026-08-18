@@ -14,7 +14,7 @@
   ocannl_tensor
   yojson)
  (preprocessor_deps
-  (env_var OCANNL_LOG_LEVEL))
+  (env_var OCANNL_LOG_LEVEL_TRAIN))
  (preprocess
   (pps
    ppx_compare

@@ -272,7 +272,8 @@ let () =
     dump_flip_candidates ctx comp;
     let scratch = Train.init_params (Context.auto ()) bindings batch_loss in
     let scratch = if preseed_twins then Context.decide_materialized scratch twin_tns else scratch in
-    Train.tune_placements ?report ?flip_report ~rounds:0 ~timing_ctx:scratch ctx batch_loss comp
+    Train.tune_placements ?report ?flip_report ~on_ship:(H.collect_ship arms) ~rounds:0
+      ~timing_ctx:scratch ctx batch_loss comp
       bindings
   in
   let ctx, routines = H.compile_train_step ~tune ~tuned ctx bindings parts in

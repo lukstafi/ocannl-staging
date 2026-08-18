@@ -248,8 +248,8 @@ let () =
   let arms = H.tune_arms () in
   let tuned ctx comp =
     let scratch = Train.init_params (Context.auto ()) bindings batch_loss in
-    Train.tune_placements ~report:(H.collect_arm arms) ~rounds:0 ~timing_ctx:scratch ctx batch_loss
-      comp bindings
+    Train.tune_placements ~report:(H.collect_arm arms) ~on_ship:(H.collect_ship arms) ~rounds:0
+      ~timing_ctx:scratch ctx batch_loss comp bindings
   in
   let ctx, routines =
     match step_shape with

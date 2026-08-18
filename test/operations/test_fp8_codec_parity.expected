@@ -1,0 +1,42 @@
+narrowed (input -> e5m2):
+  0x1.2p+0 -> 0x1p+0
+  0x1.6p+0 -> 0x1.8p+0
+  0x1.ap+0 -> 0x1.8p+0
+  0x1.2p+1 -> 0x1p+1
+  -0x1.2p+0 -> -0x1p+0
+  -0x1.ap+0 -> -0x1.8p+0
+  0x1.2p-3 -> 0x1p-3
+  0x1p-14 -> 0x1p-14
+  0x1p-15 -> 0x1p-15
+  0x1p-16 -> 0x1p-16
+  0x1.4p-15 -> 0x1p-15
+  0x1.4f8b588e368f1p-17 -> 0x1p-16
+  -0x1.4f8b588e368f1p-17 -> -0x1p-16
+  0x1p-17 -> 0x0p+0
+  0x0p+0 -> 0x0p+0
+  -0x0p+0 -> -0x0p+0
+  0x1.cp+15 -> 0x1.cp+15
+  0x1.d4cp+15 -> 0x1.cp+15
+  0x1.ep+15 -> 0x1.cp+15
+  0x1.ffcp+15 -> 0x1.cp+15
+  0x1.93e5939a08ceap+99 -> 0x1.cp+15
+  -0x1.93e5939a08ceap+99 -> -0x1.cp+15
+  0x1p+0 -> 0x1p+0
+  -0x1p+1 -> -0x1p+1
+  0x1p-1 -> 0x1p-1
+  0x1.9p+6 -> 0x1.8p+6
+  -0x1.0624dd2f1a9fcp-10 -> -0x1p-10
+the device narrows every decisive value exactly as the host does: true
+narrowing reaches the smallest e5m2 subnormal: true
+a finite input above the range saturates rather than going infinite: true
+the sign of a zero survives narrowing: true
+an infinite input narrows to the largest finite magnitude or beyond, keeping its sign: true
+a NaN input narrows to a NaN: true
+  f64 0x1.2000000001p+0 -> 0x1.4p+0
+  f64 0x1.1fffffffffp+0 -> 0x1p+0
+  f64 0x1.a000000001p+0 -> 0x1.cp+0
+  f64 0x1.9fffffffffp+0 -> 0x1.8p+0
+narrowing f64 to fp8 rounds once, not twice: true
+fp8 arithmetic underflow: (2^-16) ** 5 -> 0x0p+0
+magnitudes far below the smallest subnormal narrow to zero: true
+an fp8 operator's underflowing result narrows to zero too: true

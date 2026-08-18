@@ -151,6 +151,7 @@ let known_config_keys =
       "autotune_log";
       "tune_inline_flips";
       "tune_flip_ordering";
+      "tune_ship_arm";
       "strict_failure_classification";
       (* Analytic cost model (gh-ocannl-491) *)
       "autotune_keep_fraction";
@@ -266,8 +267,10 @@ let config_key_classification : (config_key_class * string * string list) list =
        the CUDA and HIP compilers to debug compilation, in those two backends' own tags, since no \
        other compiler reads it. That is also why log_level belongs here, without an ordinary \
        verbosity bump churning cache keys. prefer_backend_uniformity does not pick a backend: it \
-       picks how the C-family backends spell their logging expressions, so it is hashed only once \
-       logging actually reaches the kernel",
+       picks how the C-family backends spell their logging expressions, so it is hashed here only \
+       once logging actually reaches the kernel -- its other effect, routing HIP's float-to-fp8 \
+       conversions through the guarded helper (gh-ocannl-647), is unconditional and is hashed in \
+       that backend's own codegen tag instead",
       [
         "large_models";
         "big_models";
@@ -319,6 +322,12 @@ let config_key_classification : (config_key_class * string * string list) list =
       "it makes the tuner try alternative inlining decisions; each alternative is a different \
        program and keys on its own digest",
       [ "tune_inline_flips"; "tune_flip_ordering" ] );
+    ( Search_shaping,
+      "it decides which of the two searched placement arms ships, overriding the measured \
+       comparison rather than changing either arm: each arm is a different program keyed on its \
+       own digest, each arm's crown is cached under that digest either way, and a schedule crowned \
+       under one setting is a valid crown under the other (gh-ocannl-638)",
+      [ "tune_ship_arm" ] );
     ( Execution_neutral,
       "startup and configuration-sourcing chatter",
       [ "suppress_welcome_message"; "log_config_sourcing"; "never_capture_stdout" ] );
@@ -435,6 +444,102 @@ let log_config_sourcing = ref false
 let env_var_names n =
   let prefixed = "ocannl_" ^ n in
   [ prefixed; String.uppercase prefixed ]
+
+(** The [ocannl]-prefixed environment namespaces that are deliberately NOT configuration, so that a
+    name in one of them is never reported as a misspelt key (gh-ocannl-629).
+
+    Two of them, and each is a namespace someone else reads:
+
+    - [ocannl_tool_…] belongs to this repository's own tooling and test harnesses --
+      [tools/sweep.sh]'s state directory, [tools/test-run.sh]'s time cap, the hardware hook in
+      [test/operations/test_cpu_topology.ml]. None of them is a library setting, and every one of
+      them is exported into the environment of processes that link OCANNL.
+    - [ocannl_log_level_…] is read by ppx_minidebug at PREPROCESSING time: the per-module tracing
+      gates, one [%%global_debug_log_level_from_env_var] at the top of [tensor/row.ml] and of its
+      eighteen siblings. The name after the prefix is a module, not a setting, and it is consumed
+      before this file's initialization exists to have an opinion.
+
+    A reserved prefix rather than a list of exempt names: a list is a second place to update when a
+    tool grows a variable, nothing forces the update, and the failure mode is a warning the reader
+    cannot act on -- which trains people to ignore the warning that matters, the exact outcome
+    gh-ocannl-595 was fixed to prevent. A prefix costs the tooling a rename once and nothing
+    thereafter. *)
+let env_var_reserved_prefixes = [ "ocannl_tool_"; "ocannl_log_level_" ]
+
+(** Whether the platform resolves environment variable names case-insensitively. On Windows
+    [ocannl_Log_level] and [OCANNL_LOG_LEVEL] are ONE variable, so a spelling this file would call
+    unread there is in fact read, and warning about it would be wrong on that platform only. *)
+let env_names_case_insensitive = Stdlib.Sys.win32 || Stdlib.Sys.cygwin
+
+(** What an environment variable name is, to OCANNL. The classification is shared by the startup
+    warning at the foot of this file and by [test/operations/env_var_deps], which asks it of every
+    [(env_var …)] a dune file declares -- so a name a rule tracks and a name a run warns about are
+    decided by one function. *)
+type env_var_class =
+  | Env_not_addressed  (** not [ocannl]-prefixed: someone else's variable entirely *)
+  | Env_reserved of string  (** in a reserved non-configuration namespace, named by its prefix *)
+  | Env_config_key of string  (** a spelling {!read_env_var} reads, of that key *)
+  | Env_unread_spelling of string
+      (** a known key, spelled in a way nothing reads: dashed, or mixed-case where case matters *)
+  | Env_unread_reserved of string
+      (** in a reserved namespace, in a casing its reader does not consult *)
+  | Env_unknown_key of string  (** addressed to the configuration, naming no key *)
+
+(** Which family a name is in, and then -- for both families alike -- whether THIS spelling of it
+    is one its reader actually consults. The second question is the one that carries the feature:
+    an unread spelling is invisible in exactly the way a typo is, and answering it for keys while
+    waving reserved names through would suppress the warning precisely where the name looks most
+    like it should work (Codex P2 on PR #371). Each family has its own reader, so each answers it
+    its own way -- {!env_var_names} for a key, and uppercase for a reserved name, which is what the
+    shell scripts and the [%%global_debug_log_level_from_env_var] arguments spell.
+
+    Both answers collapse on Windows, where the environment is case-insensitive and every casing of
+    a name is the same variable. *)
+let classify_env_var name =
+  let lower = String.lowercase name in
+  let reads spellings = env_names_case_insensitive || List.mem spellings name ~equal:String.equal in
+  let addressed =
+    List.find_map [ "ocannl_"; "ocannl-" ] ~f:(fun prefix -> String.chop_prefix lower ~prefix)
+  in
+  match addressed with
+  | None -> Env_not_addressed
+  | Some key -> (
+      match
+        List.find env_var_reserved_prefixes ~f:(fun prefix -> String.is_prefix lower ~prefix)
+      with
+      | Some prefix ->
+          if reads [ String.uppercase name ] then Env_reserved prefix
+          else Env_unread_reserved (String.uppercase prefix)
+      | None ->
+          if not (Set.mem known_config_keys key) then Env_unknown_key key
+          else if reads (env_var_names key) then Env_config_key key
+          else Env_unread_spelling key)
+
+(** Every environment variable that addresses OCANNL's configuration and that nothing reads, with
+    the reason, in the order the names sort.
+
+    Separate from the warning loop that consumes it (at the foot of this file) so that the walk is
+    a value rather than an effect: what is warned about is then a list something else -- a test, a
+    tool refusing to run under a misconfigured environment -- can also ask for. Sorted so that a
+    stream capturing the warnings does not depend on the order the C library hands the environment
+    over. *)
+let unread_env_vars () =
+  Unix.environment () |> Array.to_list
+  |> List.map ~f:(fun binding ->
+         match String.lsplit2 binding ~on:'=' with Some (name, _) -> name | None -> binding)
+  |> List.dedup_and_sort ~compare:String.compare
+  |> List.filter_map ~f:(fun name ->
+         match classify_env_var name with
+         | Env_not_addressed | Env_reserved _ | Env_config_key _ -> None
+         | Env_unknown_key _ -> Some (name, "names no configuration key")
+         | Env_unread_spelling key ->
+             Some
+               ( name,
+                 "is not a spelling OCANNL reads; the environment spellings of " ^ key ^ " are "
+                 ^ String.concat ~sep:" and " (env_var_names key) )
+         | Env_unread_reserved prefix ->
+             Some (name, "is not a spelling anything reads; " ^ prefix ^ " names are read in \
+                          uppercase only"))
 
 (** The commandline spellings of a config key, up to the value separator: the [ocannl_]-qualified
     ones -- then, unless [qualified_only], the prefix-free ones.
@@ -1293,6 +1398,22 @@ let () =
   Array.iter Stdlib.Sys.argv ~f:(fun arg ->
       if addresses_ocannl arg && not (cmdline_arg_is_config_key arg) then
         Stdio.eprintf "OCANNL warning: unknown commandline argument %S\n%!" arg)
+
+(* The same check on the other silent source (gh-ocannl-629). Of the three ways to set a
+   configuration key, the environment was the one that said nothing about a mistake: a config file
+   names the unknown key it holds (the warning at {!config_file_args}, which
+   [test/operations/startup_streams] pins), the commandline warns just above, and
+   `OCANNL_BACKEDN=cuda dune runtest` ran the whole suite on the default backend and reported
+   success. It is also the source people reach for in CI and in one-off shell invocations, where a
+   typo has no reviewer.
+
+   Reading it costs one walk over the environment, and what makes the walk safe is
+   {!env_var_reserved_prefixes}: without a namespace for the variables that are addressed to OCANNL
+   without being configuration -- the tooling's, and ppx_minidebug's per-module gates -- this
+   warning would fire on every run of every OCANNL executable under `tools/sweep.sh`. *)
+let () =
+  List.iter (unread_env_vars ()) ~f:(fun (name, reason) ->
+      Stdio.eprintf "OCANNL warning: environment variable %S %s\n%!" name reason)
 
 let with_runtime_debug () = settings.output_debug_files_in_build_directory && settings.log_level > 1
 let debug_log_from_routines () = settings.debug_log_from_routines && settings.log_level > 1

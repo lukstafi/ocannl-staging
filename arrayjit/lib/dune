@@ -1,10 +1,19 @@
+; Each library below declares, as preprocessor dependencies, the per-module tracing gates
+; ppx_minidebug reads while PREPROCESSING its modules: one `OCANNL_LOG_LEVEL_<MODULE>` per
+; `[%%global_debug_log_level_from_env_var]` at the top of a source file. Declaring them is what
+; makes changing one re-preprocess the modules that read it. Until gh-ocannl-628 what was declared
+; instead was the runtime `OCANNL_LOG_LEVEL`, which no ppx reads: `OCANNL_LOG_LEVEL_ROW=9 dune
+; build` then returned the already-built stripped modules, and the documented recipe had to
+; `touch` the sources to force re-preprocessing.
+
 (library
  (name utils)
  (public_name arrayjit.utils)
  (preprocessor_deps
-  (env_var OCANNL_LOG_LEVEL))
+  (env_var OCANNL_LOG_LEVEL_UTILS))
  (modules utils datatypes cpu_topology)
- (libraries base stdio pprint ppx_minidebug.runtime ppx_minidebug.db)
+ ; `unix` for `Unix.environment`, which the unknown-environment-variable warning walks.
+ (libraries base stdio unix pprint ppx_minidebug.runtime ppx_minidebug.db)
  (foreign_stubs
   (language c)
   (names utils_stubs))
@@ -22,7 +31,14 @@
  (name ir)
  (public_name arrayjit.ir)
  (preprocessor_deps
-  (env_var OCANNL_LOG_LEVEL))
+  (env_var OCANNL_LOG_LEVEL_NDARRAY)
+  (env_var OCANNL_LOG_LEVEL_INDEXING)
+  (env_var OCANNL_LOG_LEVEL_TNODE)
+  (env_var OCANNL_LOG_LEVEL_LOW_LEVEL)
+  (env_var OCANNL_LOG_LEVEL_ASSIGNMENTS)
+  (env_var OCANNL_LOG_LEVEL_TASK)
+  (env_var OCANNL_LOG_LEVEL_BACKEND_IMPL)
+  (env_var OCANNL_LOG_LEVEL_C_SYNTAX))
  (libraries
   base
   printbox
@@ -77,6 +93,8 @@
  (name cuda_backend)
  (public_name arrayjit.cuda_backend)
  (optional)
+ (preprocessor_deps
+  (env_var OCANNL_LOG_LEVEL_CUDA_BACKEND))
  (modules cuda_backend builtins_cuda)
  (libraries base cudajit.cuda cudajit.nvrtc utils ir)
  (preprocess
@@ -93,6 +111,8 @@
  (name hip_backend)
  (public_name arrayjit.hip_backend)
  (optional)
+ (preprocessor_deps
+  (env_var OCANNL_LOG_LEVEL_HIP_BACKEND))
  (modules hip_backend builtins_hip)
  (libraries base hipjit.hip hipjit.hiprtc utils ir)
  (preprocess
@@ -109,6 +129,8 @@
  (name metal_backend)
  (public_name arrayjit.metal_backend)
  (optional)
+ (preprocessor_deps
+  (env_var OCANNL_LOG_LEVEL_METAL_BACKEND))
  (modules metal_backend builtins_metal)
  (libraries base metal utils ir)
  (preprocess
@@ -125,7 +147,9 @@
  (name context)
  (public_name arrayjit.context)
  (preprocessor_deps
-  (env_var OCANNL_LOG_LEVEL))
+  (env_var OCANNL_LOG_LEVEL_CC_BACKEND)
+  (env_var OCANNL_LOG_LEVEL_SCHEDULERS)
+  (env_var OCANNL_LOG_LEVEL_BACKENDS))
  (libraries
   base
   printbox

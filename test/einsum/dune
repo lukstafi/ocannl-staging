@@ -6,6 +6,7 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules moons_demo_variant)
  (libraries ocannl dataprep)
@@ -17,6 +18,7 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules einsum_trivia_exec)
  (libraries ocannl)
@@ -28,6 +30,7 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules test_conv_syntax)
  (libraries base einsum_parser stdio))
@@ -37,6 +40,7 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules test_inference_counterexamples)
  (libraries base ocannl stdio)
@@ -48,6 +52,7 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules test_beg_dims_alignment)
  (libraries base ocannl stdio arrayjit.verdict)
@@ -59,6 +64,7 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules test_print_style)
  (libraries ocannl)
@@ -70,6 +76,7 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules test_surjectivity)
  (libraries ocannl)
@@ -81,6 +88,7 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules test_virtual_diagonal)
  (libraries ocannl)
@@ -92,6 +100,7 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules test_accumulation_semantics)
  (libraries ocannl)
@@ -104,6 +113,7 @@
  (inline_tests
   (deps
    ocannl_config
+   (env_var ocannl_backend)
    (env_var OCANNL_BACKEND)))
  (libraries base dynlink ocannl)
  (modules einsum_trivia surjectivity)
@@ -116,6 +126,7 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules inline_permuted_view)
  (libraries base ocannl)
@@ -128,6 +139,7 @@
  (target inline_permuted_view-c_fwd.ll.actual)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (action
   (no-infer
@@ -151,6 +163,7 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules test_cse)
  (libraries base ocannl)
@@ -163,6 +176,7 @@
  (target test_cse-cse_d_fwd.ll.actual)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (action
   (no-infer
@@ -184,6 +198,7 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules test_einsum_capture)
  (libraries base ocannl stdio arrayjit.verdict)
@@ -195,6 +210,7 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules test_interleave)
  (libraries base ocannl stdio)
@@ -213,6 +229,7 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules test_conv_padding)
  (libraries base arrayjit.ir ocannl stdio)
@@ -224,6 +241,7 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules test_max_pool2d)
  (libraries base ocannl stdio arrayjit.verdict)
@@ -235,6 +253,7 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules test_tropical_kernel)
  (libraries base ocannl stdio)
@@ -246,6 +265,7 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules test_padding_reset)
  (libraries base ocannl stdio arrayjit.verdict)
@@ -257,6 +277,7 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules test_dimension_labels)
  (libraries base ocannl stdio arrayjit.verdict)
@@ -268,6 +289,7 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules test_set_scale)
  (libraries base ocannl stdio arrayjit.verdict)
@@ -279,6 +301,7 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules test_row_rank_cycle)
  (libraries base ocannl stdio arrayjit.verdict))
@@ -288,6 +311,7 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules test_row_self_reference)
  (libraries base ocannl stdio))
@@ -297,6 +321,7 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules test_closing_order)
  (libraries base ocannl stdio))
@@ -306,6 +331,7 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules test_basis_total_order)
  (libraries base ocannl stdio arrayjit.verdict))
@@ -315,6 +341,7 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules test_concat_dim_solver)
  (libraries base ocannl stdio arrayjit.verdict))
@@ -324,6 +351,7 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules tensor_puzzles)
  (libraries base ocannl stdio)
@@ -335,6 +363,7 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules test_omitted_row_specs)
  (libraries base ocannl stdio)
@@ -346,6 +375,7 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules test_conv_output_only)
  (libraries base ocannl stdio)
@@ -357,6 +387,7 @@
  (package neural_nets_lib)
  (deps
   ocannl_config
+  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules test_symbolic_extents)
  (libraries base ocannl stdio)
