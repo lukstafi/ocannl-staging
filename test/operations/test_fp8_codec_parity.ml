@@ -42,13 +42,31 @@ let skipped name =
    infinities and NaNs included — so the only thing between the source and the fp8 buffer is the
    backend's float-to-fp8 conversion. Reading back applies the HOST's widening, which is exact and
    agrees everywhere (all 256 codes, checked against both GPUs), so a difference in what comes
-   back is a difference in the narrowing. *)
+   back is a difference in the narrowing.
+
+   The source is MATERIALIZED, and that is the whole test. Left to virtualize, its cells inline
+   into the consumer as literals, the conversion becomes a compile-time constant expression, and
+   the backend compiler folds it on the HOST — so the test would compare the host codec against
+   the host half of the vendor header and never emit a device conversion at all. Verified rather
+   than assumed: with the source materialized, HIP's underflow defect (gh-ocannl-647) is
+   reproducible through this test and its guard is observable; without it, the leg passes in both
+   regimes and pins nothing. *)
 let narrow_on_device values =
   Tensor.unsafe_reinitialize ();
   let ctx = Context.auto () in
   let src =
-    TDSL.ndarray values ~label:[ "codec_src" ] ~output_dims:[ Array.length values ] ()
+    TDSL.ndarray values ~label:[ "codec_src" ] ~output_dims:[ Array.length values ]
+      ~top_down_prec:false ()
   in
+  (* The source stays f32, EXPLICITLY. Precision inference otherwise flows the destination's fp8
+     backwards into it, and then the kernel is [dst[i] = src[i]] over two fp8 buffers — a byte
+     copy, with the narrowing having happened on the host when the source was filled. The test
+     then compares the host codec with itself and passes on every backend while emitting no
+     conversion at all. [~top_down_prec:false] and the explicit [update_prec] together are what
+     make the emitted statement a conversion; the generated source is the check
+     ([dst[i] = (fp8)(src[i])], src declared [float *]). *)
+  Ir.Tnode.update_prec src.Tensor.value Ir.Ops.single;
+  Train.set_materialized src.Tensor.value;
   let dst = TDSL.O.( *. ) src (TDSL.number 1.0) in
   Ir.Tnode.update_prec dst.Tensor.value Ir.Ops.fp8;
   Train.set_materialized dst.Tensor.value;

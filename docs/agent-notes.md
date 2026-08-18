@@ -810,6 +810,18 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   the device through this one codec — the check is vacuous by construction, so
   `test_fp8_codec_parity` also pins a GOLDEN of the narrowed values, which is what those two
   backends can actually fail.
+- A test that means to exercise a NARROWING conversion has to pin the source precision, or it
+  exercises nothing. Two separate mechanisms make the conversion disappear, and both were hit
+  writing `test_fp8_codec_parity`. Precision inference flows the destination's precision BACKWARDS
+  into the source, so `dst:fp8 =: src` lowers to a byte copy between two fp8 buffers with the
+  narrowing having happened on the host when the source was filled — pass `~top_down_prec:false`
+  AND `Tnode.update_prec src single`. And a virtualized source inlines its cells as literals, at
+  which point the conversion is a constant expression the BACKEND COMPILER folds on the host, so
+  a device-side defect cannot show — `Train.set_materialized` the source. Both failure modes look
+  identical from the outside: the test passes on every backend, which is what one wants to see.
+  The only reliable checks are to read the emitted kernel (`dst[i] = single_to_fp8(src[i])`, source
+  declared `float *`) and to run the mutation — with HIP's guard forced off the leg must FAIL, and
+  it did not until both mechanisms were closed.
 - ROCm miscompiles `(__hip_fp8_e5m2)(float)` for magnitudes around 4e-25 to 3.3e-24, returning up
   to 2^-14 where the answer is zero (gh-ocannl-647) — an out-of-range shift, `shift mod 32` landing
   back in range; the exhaustive sweep localizes it to exactly four f32 exponents. CUDA is correct
