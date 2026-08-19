@@ -59,7 +59,16 @@ let () =
     cross_entropy_loss ~spec:"...|v" ~normalize_by:!..batch () ~logits ~targets:batch_y
   in
   let update = Train.grad_update batch_loss in
-  let sgd = Train.sgd_update ~learning_rate:(TDSL.O.( !. ) 0.01) batch_loss in
+  (* [w1]/[w2] are deliberately unregistered ([Operation.init ~grad_spec:Require_grad] leaves do
+     not join [loss.params]), so the derived trainable set is empty — pass the parameter set
+     explicitly so the workload really contains its SGD step (gh-ocannl-670: before the
+     params-driven helpers grew this guard, this [sgd_update] silently compiled an empty block). *)
+  let sgd =
+    Train.sgd_update
+      ~learning_rate:(TDSL.O.( !. ) 0.01)
+      ~params:(Set.of_list (module Tensor) [ w1; w2 ])
+      batch_loss
+  in
   let step = Asgns.sequence [ update; sgd ] in
   let static_indices = Ir.Indexing.bound_symbols bindings in
   let capture cctx =
