@@ -53,15 +53,10 @@
  (target default_stderr.raw)
  (deps
   ocannl_config
-  (env_var ocannl_suppress_welcome_message)
   (env_var OCANNL_SUPPRESS_WELCOME_MESSAGE)
-  (env_var ocannl_log_config_sourcing)
   (env_var OCANNL_LOG_CONFIG_SOURCING)
-  (env_var ocannl_log_level)
   (env_var OCANNL_LOG_LEVEL)
-  (env_var ocannl_no_config_file)
   (env_var OCANNL_NO_CONFIG_FILE)
-  (env_var ocannl_profile)
   (env_var OCANNL_PROFILE))
  (action
   (with-stderr-to

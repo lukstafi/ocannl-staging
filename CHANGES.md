@@ -1,5 +1,20 @@
 ## [Unreleased]
 
+### Changed
+
+- **One environment spelling, and no silent demotion** (gh-ocannl-652): a configuration key is read
+  from `OCANNL_<KEY>` and from nothing else. The lowercase `ocannl_<key>`, which `read_env_var`
+  used to consult FIRST, is gone — no caller in the repository spelled a variable that way and no
+  documentation recommended it, while every dune rule declaring the ambient variables it is
+  invalidated by paid two lines per key (228 of them; gh-ocannl-628 had just swept them in).
+  Dropping a spelling someone may have exported would be a silent demotion, so it is not merely
+  ignored: an environment variable naming a KNOWN key in a spelling nothing reads is now a FATAL
+  startup error that names the spelling that works, rather than a warning. Names that address
+  OCANNL without naming a key, and lowercase names in the reserved `OCANNL_TOOL_` /
+  `OCANNL_LOG_LEVEL_` namespaces, keep their warnings; an empty value counts as unset everywhere
+  and is never reported. Commandline spellings are untouched — `--ocannl_backend=cuda` and
+  `--backend=cuda` still work, dashes and all. `Utils.env_var_names` became `Utils.env_var_name`.
+
 ### Added
 
 - **Training-loop utilities** (gh-ocannl-465), ports of llm.c's loop scaffolding sized for the

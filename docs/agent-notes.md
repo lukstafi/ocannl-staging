@@ -1474,8 +1474,11 @@ that they earn a lookup rather than always-loaded space.
   `<claim>: true` on stdout) makes the cuda `.exe.output` byte-identical to the cc one, which is
   how gh-ocannl-622 came to read a cc-looking file as proof the recipe was broken. It was the
   inference that was broken; the recipe holds for DECLARED variables, and gh-ocannl-628 is the
-  hole that was real — the lowercase spelling `read_env_var` consults first was declared nowhere,
-  so `ocannl_backend=metal` decided the backend while invalidating nothing.
+  hole that was real — the lowercase spelling `read_env_var` consulted first was declared nowhere,
+  so `ocannl_backend=metal` decided the backend while invalidating nothing. gh-ocannl-652 closed it
+  from the other end: the environment has ONE spelling, `OCANNL_<KEY>`, and setting a lowercase or
+  dashed spelling of a known key aborts the run with a message naming the spelling that works, so
+  the variable cannot quietly decide nothing either.
 - Deleting a file target out from under dune is not a way to force it to re-run: `dune build
   <that target>` afterwards exits 0 having produced nothing (observed on dune 3.23.1 with
   `test/operations/<name>.exe.output`), and `-f/--force` does not rescue it — `--force` only

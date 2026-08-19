@@ -4,7 +4,6 @@
  (modules test_numerical_types)
  (deps
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (libraries base stdio arrayjit.ir arrayjit.verdict)
  (preprocess
@@ -25,7 +24,6 @@
  (modules test_ndarray_binary_io)
  (deps
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (libraries base stdio unix arrayjit.ir arrayjit.verdict)
  (preprocess
@@ -37,7 +35,6 @@
  (modules test_ndarray_used_memory)
  (deps
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (libraries base stdio arrayjit.ir arrayjit.verdict))
 
@@ -47,7 +44,6 @@
  (modules tree_map_test)
  (deps
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (libraries base stdio arrayjit.utils)
  (preprocess
@@ -59,7 +55,6 @@
  (modules test_cross_cse)
  (deps
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (libraries base stdio arrayjit.ir arrayjit.verdict))
 
@@ -69,7 +64,6 @@
  (modules test_one_hot_gather_rewrite)
  (deps
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (libraries base stdio arrayjit.ir arrayjit.verdict))
 
@@ -79,7 +73,6 @@
  (modules test_zero_out_codegen)
  (deps
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (libraries base stdio arrayjit.ir))
 
@@ -89,7 +82,6 @@
  (modules test_aligned_alloc)
  (deps
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (libraries base stdio ctypes arrayjit.ir))
 
@@ -99,7 +91,6 @@
  (modules test_vectorized_codegen)
  (deps
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (libraries base stdio arrayjit.ir arrayjit.verdict))
 
@@ -109,7 +100,6 @@
  (modules test_local_scope_init)
  (deps
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (libraries base stdio arrayjit.ir))
 
@@ -119,7 +109,6 @@
  (modules test_slab_free_on_grow)
  (deps
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (libraries base stdio arrayjit.ir))
 
@@ -221,7 +210,6 @@
  (modules test_stage_b_where_debug)
  (deps
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (libraries base stdio arrayjit.ir arrayjit.verdict))
 
@@ -231,7 +219,6 @@
  (modules test_backend_selection)
  (deps
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (libraries base arrayjit.ir arrayjit.context))
 
@@ -241,6 +228,5 @@
  (modules test_multidev_error_propagation)
  (deps
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (libraries base stdio arrayjit.ir arrayjit.context))

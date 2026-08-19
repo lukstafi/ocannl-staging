@@ -30,7 +30,6 @@
  (modules gpt2_tiny_dry_run)
  (deps
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (libraries base ocannl stdio gpt2_model arrayjit.verdict)
  (preprocess
@@ -42,7 +41,6 @@
  (deps
   gpt2_dry_run.expected
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  ; no-infer keeps gpt2_dry_run.actual from becoming a build target, so plain
  ; `dune build` (@all) does not run this slow exe -- only `dune build @slow` does.

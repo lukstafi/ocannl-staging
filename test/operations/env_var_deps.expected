@@ -16,7 +16,7 @@ Directories whose sources this scan reads:
   test/training
   tools
 
-Configuration keys tracked as ambient dependencies, in both spellings everywhere:
+Configuration keys tracked as ambient dependencies, in the one spelling OCANNL reads:
   backend
   buffer_aliasing
   cc_fp16_arithmetic
@@ -54,7 +54,7 @@ Ambient variables a module reads by name at run time, and the stanza that declar
 
 Declarations of a name OCANNL does not read as a configuration key, exempt by design:
   test/operations/dune:ocannl_backedn -- the fixture behind the `config_var_warnings` golden, which captures the warning a mistyped key draws; the rule tracks the name so that an ambient one arriving does not leave the golden stale
-  test/operations/dune:OCANNL_BACKEDN -- the same fixture, in the other spelling
-  test/operations/dune:ocannl-log_level -- the same fixture's second case: a known key in the dashed spelling that gh-ocannl-605 dropped, which draws the other of the two warnings
+  test/operations/dune:OCANNL_BACKEDN -- the same fixture, in the casing OCANNL reads -- a lowercase one is reported rather than read, so both write to the stream the golden holds
+  test/operations/dune:ocannl-log_level -- the `config_var_fatal_spelling` fixture: a known key in the dashed spelling that gh-ocannl-605 dropped, which since gh-ocannl-652 aborts the run rather than warning
 
-OK: every `(env_var ...)` naming a configuration key declares both spellings in the same field, and every per-module tracing gate is declared by the library whose modules read it.
+OK: every `(env_var ...)` addressed to OCANNL names a spelling a run reads, and every per-module tracing gate is declared by the library whose modules read it.

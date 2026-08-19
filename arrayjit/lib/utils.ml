@@ -428,22 +428,29 @@ let bool_of_config_string ~arg_name s =
     is not a useful reading of it. *)
 let log_config_sourcing = ref false
 
-(** The environment spellings of a config key: the [ocannl_]-prefixed key, in lowercase and in
-    uppercase, and nothing else. The prefix is mandatory here (unlike on the commandline and in a
-    config file) so that OCANNL does not read an unrelated tool's variable.
+(** The environment spelling of a config key: [OCANNL_] followed by the key in uppercase, and
+    nothing else. The prefix is mandatory here (unlike on the commandline and in a config file) so
+    that OCANNL does not read an unrelated tool's variable.
 
-    Both spellings are load-bearing, and the lowercase one comes FIRST: it beats [OCANNL_PROFILE],
-    which [test/operations/profiles/dune] documents as a real precedence trap.
+    ONE spelling (gh-ocannl-652). A lowercase [ocannl_<key>] used to be read as well, and won over
+    the uppercase one besides -- which [test/operations/profiles/dune] had to document as a real
+    precedence trap. It bought nothing anyone could name: no caller in this repository spelled a
+    variable that way and no documentation recommended it, while every dune rule that has to
+    declare the ambient variables it is invalidated by paid two lines per key, 228 of them, forever
+    (gh-ocannl-628). The reserved namespaces this file introduced alongside them ([OCANNL_TOOL_...],
+    [OCANNL_LOG_LEVEL_<MODULE>]) were uppercase-only from the start, for the same reason: uppercase
+    is what the shell convention is unambiguous about.
 
-    Dashes are not a spelling: [ocannl-log_level] and its uppercase form used to be accepted, and
-    were dropped in gh-ocannl-605. They were documented nowhere, no caller used them, and a shell
-    cannot set them without [env "ocannl-log_level=1" cmd] -- while every dune rule that has to
-    declare the ambient variables it is invalidated by had to enumerate four spellings per key, of
-    which the natural-looking all-dashed [ocannl-log-level] was never one of them. Dashes remain
-    idiomatic on the commandline, where {!cmdline_var_names} accepts them. *)
-let env_var_names n =
-  let prefixed = "ocannl_" ^ n in
-  [ prefixed; String.uppercase prefixed ]
+    Dropping a spelling someone may have exported is a silent demotion, so the spellings this file
+    no longer reads are not merely ignored: {!classify_env_var} reports one as
+    {!Env_unread_spelling}, and the check at the foot of this file makes it FATAL when it names a
+    known key. See {!unread_env_vars}.
+
+    Dashes are not a spelling either: [ocannl-log_level] and its uppercase form were dropped in
+    gh-ocannl-605, documented nowhere and used by nobody, while costing every such dune rule four
+    spellings per key -- of which the natural-looking all-dashed [ocannl-log-level] was never one.
+    Dashes remain idiomatic on the commandline, where {!cmdline_var_names} accepts them. *)
+let env_var_name n = "OCANNL_" ^ String.uppercase n
 
 (** The [ocannl]-prefixed environment namespaces that are deliberately NOT configuration, so that a
     name in one of them is never reported as a misspelt key (gh-ocannl-629).
@@ -480,7 +487,8 @@ type env_var_class =
   | Env_reserved of string  (** in a reserved non-configuration namespace, named by its prefix *)
   | Env_config_key of string  (** a spelling {!read_env_var} reads, of that key *)
   | Env_unread_spelling of string
-      (** a known key, spelled in a way nothing reads: dashed, or mixed-case where case matters *)
+      (** a known key, spelled in a way nothing reads: dashed, or not fully uppercase where case
+          matters. A configuration ERROR rather than a warning -- see {!unread_env_vars}. *)
   | Env_unread_reserved of string
       (** in a reserved namespace, in a casing its reader does not consult *)
   | Env_unknown_key of string  (** addressed to the configuration, naming no key *)
@@ -490,8 +498,9 @@ type env_var_class =
     an unread spelling is invisible in exactly the way a typo is, and answering it for keys while
     waving reserved names through would suppress the warning precisely where the name looks most
     like it should work (Codex P2 on PR #371). Each family has its own reader, so each answers it
-    its own way -- {!env_var_names} for a key, and uppercase for a reserved name, which is what the
-    shell scripts and the [%%global_debug_log_level_from_env_var] arguments spell.
+    its own way -- {!env_var_name} for a key, and uppercase for a reserved name, which is what the
+    shell scripts and the [%%global_debug_log_level_from_env_var] arguments spell. Since
+    gh-ocannl-652 those two answers are the same one: uppercase, everywhere under the prefix.
 
     Both answers collapse on Windows, where the environment is case-insensitive and every casing of
     a name is the same variable. *)
@@ -512,34 +521,50 @@ let classify_env_var name =
           else Env_unread_reserved (String.uppercase prefix)
       | None ->
           if not (Set.mem known_config_keys key) then Env_unknown_key key
-          else if reads (env_var_names key) then Env_config_key key
+          else if reads [ env_var_name key ] then Env_config_key key
           else Env_unread_spelling key)
 
-(** Every environment variable that addresses OCANNL's configuration and that nothing reads, with
-    the reason, in the order the names sort.
+(** Every environment variable that addresses OCANNL's configuration and that nothing reads: the
+    name, whether it is fatal, and the reason, in the order the names sort.
 
-    Separate from the warning loop that consumes it (at the foot of this file) so that the walk is
-    a value rather than an effect: what is warned about is then a list something else -- a test, a
-    tool refusing to run under a misconfigured environment -- can also ask for. Sorted so that a
-    stream capturing the warnings does not depend on the order the C library hands the environment
-    over. *)
+    {b Fatal} for a known key spelled in a way nothing reads, and a warning for everything else
+    (gh-ocannl-652). The distinction is whether a VALUE that was meant to decide something is being
+    dropped: [ocannl_backend=cuda] names a real key, so somebody wrote it to choose a backend, and
+    silently running on the default instead is the failure mode this whole check exists to prevent
+    -- it is also what dropping the lowercase spelling would otherwise have inflicted on anyone
+    who had exported one. A name that matches no key ([OCANNL_BACKEDN]) never decided anything to
+    begin with, and a lowercase name in a reserved namespace belongs to a tool rather than to the
+    configuration; both stay warnings, as they were.
+
+    An EMPTY value is not reported at all, in either class: "" counts as unset at every source
+    (see {!read_env_var}), a dune rule clears a variable by setting it empty, and a launcher
+    expanding [$OCANNL_BACKEND] with nothing set must not thereby abort the run.
+
+    Separate from the loop that consumes it (at the foot of this file) so that the walk is a value
+    rather than an effect: what is reported is then a list something else -- a test, a tool
+    refusing to run under a misconfigured environment -- can also ask for. Sorted so that a stream
+    capturing the messages does not depend on the order the C library hands the environment over. *)
 let unread_env_vars () =
   Unix.environment () |> Array.to_list
-  |> List.map ~f:(fun binding ->
-         match String.lsplit2 binding ~on:'=' with Some (name, _) -> name | None -> binding)
+  |> List.filter_map ~f:(fun binding ->
+         match String.lsplit2 binding ~on:'=' with
+         | Some (_, "") -> None
+         | Some (name, _) -> Some name
+         | None -> Some binding)
   |> List.dedup_and_sort ~compare:String.compare
   |> List.filter_map ~f:(fun name ->
          match classify_env_var name with
          | Env_not_addressed | Env_reserved _ | Env_config_key _ -> None
-         | Env_unknown_key _ -> Some (name, "names no configuration key")
+         | Env_unknown_key _ -> Some (name, false, "names no configuration key")
          | Env_unread_spelling key ->
              Some
                ( name,
-                 "is not a spelling OCANNL reads; the environment spellings of " ^ key ^ " are "
-                 ^ String.concat ~sep:" and " (env_var_names key) )
+                 true,
+                 "is not a spelling OCANNL reads; the environment spelling of " ^ key ^ " is "
+                 ^ env_var_name key )
          | Env_unread_reserved prefix ->
-             Some (name, "is not a spelling anything reads; " ^ prefix ^ " names are read in \
-                          uppercase only"))
+             Some (name, false, "is not a spelling anything reads; " ^ prefix ^ " names are read \
+                                 in uppercase only"))
 
 (** The commandline spellings of a config key, up to the value separator: the [ocannl_]-qualified
     ones -- then, unless [qualified_only], the prefix-free ones.
@@ -635,10 +660,8 @@ let cmdline_arg_is_config_key arg =
 (** The environment sublevel of {!get_global_arg}: returns the setting's value and the variable it
     came from. An empty value counts as unset. *)
 let read_env_var n =
-  match
-    List.find_map (env_var_names n) ~f:(fun env_n ->
-        Option.(join @@ map (Stdlib.Sys.getenv_opt env_n) ~f:(str_nonempty ~f:(pair env_n))))
-  with
+  let env_n = env_var_name n in
+  match Option.(join @@ map (Stdlib.Sys.getenv_opt env_n) ~f:(str_nonempty ~f:(pair env_n))) with
   | None | Some (_, "") -> None
   | Some (env_n, result) -> Some (result, env_n)
 
@@ -1410,10 +1433,26 @@ let () =
    Reading it costs one walk over the environment, and what makes the walk safe is
    {!env_var_reserved_prefixes}: without a namespace for the variables that are addressed to OCANNL
    without being configuration -- the tooling's, and ppx_minidebug's per-module gates -- this
-   warning would fire on every run of every OCANNL executable under `tools/sweep.sh`. *)
+   check would fire on every run of every OCANNL executable under `tools/sweep.sh`.
+
+   Since gh-ocannl-652 the strongest case is fatal rather than merely reported, and the exit is
+   here rather than inside {!unread_env_vars} so that the walk stays a value: every offending name
+   is printed before the process ends, so one run fixes the whole environment instead of one
+   variable per attempt. `Stdlib.exit` rather than an exception, this being the user's mistake and
+   not a bug to hand a backtrace for -- the same shape as the fatal unknown profile name, whose
+   `invalid_arg` predates the policy. *)
 let () =
-  List.iter (unread_env_vars ()) ~f:(fun (name, reason) ->
-      Stdio.eprintf "OCANNL warning: environment variable %S %s\n%!" name reason)
+  let fatal = ref false in
+  List.iter (unread_env_vars ()) ~f:(fun (name, is_fatal, reason) ->
+      Stdio.eprintf "OCANNL %s: environment variable %S %s\n%!"
+        (if is_fatal then "error" else "warning")
+        name reason;
+      fatal := !fatal || is_fatal);
+  if !fatal then (
+    Stdio.eprintf
+      "OCANNL: aborting -- a configuration key set under a spelling nothing reads decides \
+       nothing, and continuing would run on the default as if it had never been set\n%!";
+    Stdlib.exit 1)
 
 let with_runtime_debug () = settings.output_debug_files_in_build_directory && settings.log_level > 1
 let debug_log_from_routines () = settings.debug_log_from_routines && settings.log_level > 1

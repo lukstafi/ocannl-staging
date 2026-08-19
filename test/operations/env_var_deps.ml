@@ -6,14 +6,17 @@
 
    Two ways that goes wrong, both silent, both checked here.
 
-   {1 One spelling of two}
+   {1 A spelling nothing reads}
 
-   `Utils.read_env_var` consults the LOWERCASE spelling FIRST: `ocannl_backend=cuda` outranks
-   `OCANNL_BACKEND` and decides which backend every test compiles and runs on. Before gh-ocannl-628
-   not one dune file in the repository declared it -- all 213 declared the uppercase spelling
-   alone, the one that loses -- so a developer who exported the lowercase form got stale targets
-   served as passes, from rules written precisely to prevent that. A sweep fixes the 213; only a
-   check keeps the 214th, copied next month from a neighbour, from reintroducing the hole.
+   `Utils.read_env_var` consults ONE name per key, `OCANNL_<KEY>` (gh-ocannl-652). Before that it
+   consulted the lowercase `ocannl_<key>` FIRST -- so `ocannl_backend=cuda` outranked
+   `OCANNL_BACKEND` and decided which backend every test compiled and ran on, while not one dune
+   file in the repository declared it: a developer who exported the lowercase form got stale
+   targets served as passes, from rules written precisely to prevent that. gh-ocannl-628 swept the
+   second spelling INTO 213 stanzas; gh-ocannl-652 dropped the spelling instead, and made setting
+   one fatal so that the demotion could not be silent. What is left to check here is that a
+   declaration names the spelling that is read -- a stanza declaring `(env_var ocannl_backend)`
+   tracks a variable no run will consult, and invalidates nothing.
 
    {2 Gates the build does not see}
 
@@ -26,10 +29,11 @@
 
    {1 What decides "addressed to the configuration"}
 
-   `Utils.classify_env_var`, the same function the startup warning uses (gh-ocannl-629), so a name
-   a rule tracks and a name a run warns about cannot be classified two ways. It also supplies the
-   reserved namespaces: `OCANNL_TOOL_...` is the tooling's and has no second spelling to pair with,
-   and `OCANNL_LOG_LEVEL_<MODULE>` is a gate, checked by the other half of this test. *)
+   `Utils.classify_env_var`, the same function the startup check uses (gh-ocannl-629), so a name a
+   rule tracks and a name a run reports cannot be classified two ways. It also supplies the
+   reserved namespaces: `OCANNL_TOOL_...` is the tooling's, and `OCANNL_LOG_LEVEL_<MODULE>` is a
+   gate, checked by the other half of this test. Both are uppercase-only, as configuration keys now
+   are too. *)
 
 open Base
 open Stdio
@@ -46,10 +50,12 @@ let exempt_declarations =
       "the fixture behind the `config_var_warnings` golden, which captures the warning a mistyped \
        key draws; the rule tracks the name so that an ambient one arriving does not leave the \
        golden stale" );
-    ("test/operations/dune:OCANNL_BACKEDN", "the same fixture, in the other spelling");
+    ( "test/operations/dune:OCANNL_BACKEDN",
+      "the same fixture, in the casing OCANNL reads -- a lowercase one is reported rather than \
+       read, so both write to the stream the golden holds" );
     ( "test/operations/dune:ocannl-log_level",
-      "the same fixture's second case: a known key in the dashed spelling that gh-ocannl-605 \
-       dropped, which draws the other of the two warnings" );
+      "the `config_var_fatal_spelling` fixture: a known key in the dashed spelling that \
+       gh-ocannl-605 dropped, which since gh-ocannl-652 aborts the run rather than warning" );
   ]
 
 (* The prefix `Utils.classify_env_var` reports for a per-module tracing gate. *)
@@ -123,25 +129,15 @@ let () =
              "%s declares %d `(env_var ...)` dependencies but only %d of them are in a `deps` or \
               `preprocessor_deps` field -- teach this check the field that holds the others"
              dune_file (List.length all) (List.length declared));
-      List.iter fields ~f:(fun (field, args) ->
+      List.iter fields ~f:(fun (_field, args) ->
           let names = List.concat_map args ~f:env_vars_in in
           List.iter names ~f:(fun name ->
               let key = dune_file ^ ":" ^ name in
               match Utils.classify_env_var name with
               (* Someone else's variable entirely (`PATH`, `HOME`): not this check's business. *)
               | Utils.Env_not_addressed -> ()
-              | Utils.Env_config_key config_key ->
-                  tracked_keys := Set.add !tracked_keys config_key;
-                  List.iter (Utils.env_var_names config_key) ~f:(fun spelling ->
-                      if not (List.mem names spelling ~equal:String.equal) then
-                        fail
-                          (Printf.sprintf
-                             "%s declares `(env_var %s)` without `(env_var %s)` in the same `%s` \
-                              field -- `Utils.read_env_var` reads both spellings of %s, and the \
-                              undeclared one invalidates nothing"
-                             dune_file name spelling field config_key))
-              (* A reserved namespace has no second spelling to pair with. The gates are checked
-                 below, against the modules that read them. *)
+              | Utils.Env_config_key config_key -> tracked_keys := Set.add !tracked_keys config_key
+              (* The gates are checked below, against the modules that read them. *)
               | Utils.Env_reserved _ -> ()
               | Utils.Env_unread_spelling _ | Utils.Env_unknown_key _
               | Utils.Env_unread_reserved _ ->
@@ -261,7 +257,7 @@ let () =
   printf "Directories whose sources this scan reads:\n";
   Set.iter scanned_dirs ~f:(fun dir ->
       printf "  %s\n" (if String.is_empty dir then "." else dir));
-  printf "\nConfiguration keys tracked as ambient dependencies, in both spellings everywhere:\n";
+  printf "\nConfiguration keys tracked as ambient dependencies, in the one spelling OCANNL reads:\n";
   Set.iter !tracked_keys ~f:(printf "  %s\n");
   printf "\nPer-module tracing gates, and the library whose preprocessor_deps declares each:\n";
   List.sort !gate_table ~compare:(fun (_, a, _) (_, b, _) -> String.compare a b)
@@ -274,5 +270,5 @@ let () =
   if not (Verdict.any_failed ()) then
     printf
       "\n\
-       OK: every `(env_var ...)` naming a configuration key declares both spellings in the same \
-       field, and every per-module tracing gate is declared by the library whose modules read it.\n"
+       OK: every `(env_var ...)` addressed to OCANNL names a spelling a run reads, and every \
+       per-module tracing gate is declared by the library whose modules read it.\n"
