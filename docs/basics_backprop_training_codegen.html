@@ -1227,7 +1227,9 @@ let sgd_update ~learning_rate ?momentum ?weight_decay ?nesterov
     loss =
   let f =
     sgd_one ~learning_rate ?momentum ?weight_decay ?nesterov in
-  Set.to_list loss.Tensor.params |&amp;gt; List.map ~f |&amp;gt; Asgns.sequence
+  (* the params of [loss] whose gradient its backprop writes *)
+  Set.to_list (trainable_params loss)
+  |&amp;gt; List.map ~f |&amp;gt; Asgns.sequence
 
 ...
   let step_n, bindings =
