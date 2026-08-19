@@ -159,7 +159,7 @@ end
     ({!scaled_sgd_update}) is compiled as a separate routine — the host must read the checksum in
     between — and reads them across the routine boundary. *)
 let scaled_grad_update ?setup_for_parallel ?accum_loss (scaler : Loss_scaler.t) loss =
-  Set.iter loss.Tensor.params ~f:(fun p ->
+  Set.iter (Train.trainable_params loss) ~f:(fun p ->
       Train.set_materialized (Option.value_exn ~here:[%here] p.Tensor.diff).grad);
   let update =
     Train.grad_update ?setup_for_parallel ?accum_loss ~loss_scale:scaler.Loss_scaler.scale loss
@@ -218,7 +218,7 @@ let gated_scaled_update ?setup_for_parallel ?accum_loss (scaler : Loss_scaler.t)
   (* Materialized like {!scaled_grad_update}'s: overflow detection depends on gradients being
      STORED at their (reduced) precision — a virtualized gradient recomputed at the consumer could
      bypass the f16 rounding that produces the inf the gate exists to catch. *)
-  Set.iter loss.Tensor.params ~f:(fun p ->
+  Set.iter (Train.trainable_params loss) ~f:(fun p ->
       Train.set_materialized (Option.value_exn ~here:[%here] p.Tensor.diff).grad);
   let update =
     Train.grad_update ?setup_for_parallel ?accum_loss ~loss_scale:scaler.Loss_scaler.scale loss

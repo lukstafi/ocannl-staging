@@ -63,6 +63,49 @@ let loss_accumulator ?(label = "loss_accum") () =
   set_materialized t.Tensor.value;
   t
 
+(** The subset of [loss.params] that [loss]'s backprop actually trains: the parameters whose
+    gradient the backprop code writes ([Asgns.collect_written]). [t.params] deliberately answers a
+    broader question — which parameter leaves the forward graph reads, hence what {!init_params}
+    must initialize and {!Persistence} must save — so a parameter detached behind
+    {!Operation.stop_gradient} (a frozen backbone) stays in [loss.params] while its gradient is
+    neither zeroed nor written. Stepping it anyway would apply weight decay to weights the user
+    froze (gh-ocannl-673); the optimizer-side helpers ({!sgd_update}, {!grad_l2_norm},
+    {!clip_by_global_norm}, {!grad_checksum}, {!zero_params_grads}) therefore derive this set
+    instead of trusting [loss.params]. Empty when [loss] is not differentiable. *)
+let trainable_params loss =
+  match loss.Tensor.diff with
+  | None -> Set.empty (module Tensor)
+  | Some diff ->
+      let written = Asgns.collect_written diff.Tensor.backprop.Asgns.asgns in
+      Set.filter loss.Tensor.params ~f:(fun p ->
+          match p.Tensor.diff with
+          | None -> false
+          | Some d -> Set.mem written d.Tensor.grad)
+
+(* The parameter set an optimizer-side helper operates on: [?params] when given (the escape hatch
+   for exotic flows, e.g. a gradient written outside this loss's backprop), the derived
+   {!trainable_params} otherwise. An empty derived set fails loudly: a differentiable loss that
+   trains no registered parameters has no legitimate use for these helpers, and the failure is
+   otherwise silent at every stage — the helpers compile empty or vacuous routines that run as
+   no-ops (gh-ocannl-670). *)
+let params_for ~fn_name ?params loss =
+  match params with
+  | Some ps -> ps
+  | None ->
+      if Option.is_none loss.Tensor.diff then
+        raise @@ Tensor.Session_error (fn_name ^ ": loss is not differentiable", Some loss);
+      let ps = trainable_params loss in
+      if Set.is_empty ps then
+        raise
+        @@ Tensor.Session_error
+             ( fn_name
+               ^ ": the loss trains no parameters -- no [loss.params] member's gradient is \
+                  written by the backprop code. Note that only [Tensor.param]-registered tensors \
+                  join [params] ([Operation.init ~grad_spec:Require_grad] leaves do not), and a \
+                  parameter behind [stop_gradient] is not trained",
+               Some loss );
+      ps
+
 (** Replaces the zeroing of the given gradient nodes with [Noop] inside a [zero_grads] code tree
     (each per-tensor zeroing is a [Fetch] of zeros — see [Tensor.raw]'s [fetch_zeros]). Used by the
     gradient-accumulation variant of {!grad_update}, which must keep zeroing the {e intermediate}
@@ -98,7 +141,7 @@ let filter_out_grad_zeroing ~grads asgns =
 
 (** Returns the tensor's forward, zeroing gradients, and backprop code wrapped with label-derived
     comments. Sets the tensor's value as materialized. If [setup_for_parallel] is true (false by
-    default), sets the parameters and their gradients as "non-local" (on-device). When [accum_loss]
+    default), sets the trained parameters' gradients as "non-local" (on-device). When [accum_loss]
     is given (see {!loss_accumulator}), the update also accumulates the loss value into it
     ([accum_loss =+ loss]): training loops can then read the loss sum once per epoch instead of once
     per step — on GPU backends a per-step [Context.get_values] awaits the whole device, serializing
@@ -126,7 +169,9 @@ let grad_update ?(setup_for_parallel = false) ?accum_steps ?accum_loss ?loss_sca
      gradients' observation intent declared in [Tensor.param]. *)
   Tn.set_observable loss.Tensor.value;
   if setup_for_parallel || Option.is_some accum_steps then
-    Set.iter loss.Tensor.params ~f:(fun p ->
+    (* Only the trained parameters' gradients: a frozen parameter's gradient is never written, so
+       declaring it materialized would demand a buffer nothing computes (gh-ocannl-673). *)
+    Set.iter (trainable_params loss) ~f:(fun p ->
         set_materialized (Option.value_exn ~here:[%here] p.diff).grad);
   let zero_grads =
     match loss.Tensor.diff with
@@ -136,17 +181,15 @@ let grad_update ?(setup_for_parallel = false) ?accum_steps ?accum_loss ?loss_sca
         match accum_steps with
         | None -> Asgns.to_comp diff.zero_grads
         | Some _ ->
-            (* Only the parameters the backprop reaches: one detached behind
+            (* Only the parameters the backprop reaches ({!trainable_params}): one detached behind
                {!Operation.stop_gradient} (a frozen backbone) is still in [loss.params], but its
                gradient is neither zeroed here nor accumulated into, so it is not ours to strip --
                and demanding a zeroing for it would reject the freezing flow outright. *)
-            let accumulated = Asgns.collect_written diff.backprop.Asgns.asgns in
             let grads =
               Set.filter_map
                 (module Tn)
-                loss.Tensor.params
+                (trainable_params loss)
                 ~f:(fun p -> Option.map p.Tensor.diff ~f:(fun d -> d.Tensor.grad))
-              |> Set.filter ~f:(Set.mem accumulated)
             in
             Asgns.to_comp (filter_out_grad_zeroing ~grads diff.zero_grads))
   in
@@ -168,11 +211,12 @@ let grad_update ?(setup_for_parallel = false) ?accum_steps ?accum_loss ?loss_sca
           | None, None -> loss.grad =: 1);
           loss.backprop))]
 
-(** Code zeroing all parameter gradients of [loss], as a standalone computation: the
-    gradient-accumulation counterpart of {!grad_update}[ ~accum_steps] (which deliberately does not
-    zero them). Compile it as its own routine and run it at the start of each accumulation cycle —
-    before the first micro-step, llm.c-style ("we're about to += accumulate into them"). *)
-let zero_params_grads loss =
+(** Code zeroing the trained parameters' gradients ({!trainable_params}, or [?params]), as a
+    standalone computation: the gradient-accumulation counterpart of {!grad_update}[ ~accum_steps]
+    (which deliberately does not zero them). Compile it as its own routine and run it at the start
+    of each accumulation cycle — before the first micro-step, llm.c-style ("we're about to +=
+    accumulate into them"). *)
+let zero_params_grads ?params loss =
   let one_param p =
     match p.Tensor.diff with
     | None -> raise @@ Tensor.Session_error ("Train.zero_params_grads: not differentiable", Some p)
@@ -181,10 +225,14 @@ let zero_params_grads loss =
            it must be able to allocate them rather than require them of a prior context. *)
         { Asgns.asgns = diff.zero_grads; embedded_nodes = Set.singleton (module Tn) diff.grad }
   in
-  let comp = Set.to_list loss.Tensor.params |> List.map ~f:one_param |> Asgns.sequence in
+  let comp =
+    Set.to_list (params_for ~fn_name:"Train.zero_params_grads" ?params loss)
+    |> List.map ~f:one_param |> Asgns.sequence
+  in
   { comp with asgns = Asgns.Block_comment ("zero_params_grads", comp.asgns) }
 
-(** A scalar checksum over all parameter gradients of [loss]: returns the flag tensor and the code
+(** A scalar checksum over the trained parameters' gradients ({!trainable_params}, or [?params])
+    of [loss]: returns the flag tensor and the code
     that resets it to 0 and accumulates the sum of every gradient cell into it. The sum is
     non-finite if and only if some gradient cell is non-finite (a finite sum cannot arise from
     non-finite cells: same-sign infinities stay infinite, opposite-sign infinities and NaNs produce
@@ -192,7 +240,8 @@ let zero_params_grads loss =
     Sequence it after {!grad_update} in the same routine, read the flag with [Context.get_values]
     and gate the optimizer step on [Float.is_finite] — the dynamic loss scaling recipe
     ({!Mixed_prec.step}) does exactly this. *)
-let grad_checksum loss =
+let grad_checksum ?params loss =
+  let params = params_for ~fn_name:"Train.grad_checksum" ?params loss in
   let flag = NTDSL.init ~l:"grad_checksum" ~prec:Ir.Ops.single ~o:[ 1 ] ~f:(fun _ -> 0.) () in
   set_materialized flag.Tensor.value;
   Tn.set_observable flag.Tensor.value;
@@ -203,14 +252,13 @@ let grad_checksum loss =
      Forcing dims here closes e.g. a bias's inferred-empty input row before the spec touches it —
      which is also why [grad_checksum] must be called only after the model and the loss are fully
      constructed. *)
-  Set.iter loss.Tensor.params ~f:(fun p ->
-      ignore (Lazy.force p.Tensor.value.Tn.dims : int array));
+  Set.iter params ~f:(fun p -> ignore (Lazy.force p.Tensor.value.Tn.dims : int array));
   let one_param p =
     if Option.is_none p.Tensor.diff then
       raise @@ Tensor.Session_error ("Train.grad_checksum: not differentiable", Some p);
     [%cd flag =+ id p.grad ~logic:"...|...->... => |->0"]
   in
-  let comps = Set.to_list loss.Tensor.params |> List.map ~f:one_param in
+  let comps = Set.to_list params |> List.map ~f:one_param in
   let reset = [%cd flag =: 0] in
   let comp = Asgns.sequence (reset :: comps) in
   (flag, { comp with asgns = Asgns.Block_comment ("grad_checksum", comp.asgns) })
@@ -280,12 +328,18 @@ let sgd_one ~learning_rate ?(momentum = 0.0) ?(weight_decay = 0.0) ?(nesterov = 
            sgd_delta =: where gate sgd_delta 0;
            p =- learning_rate * sgd_delta ~logic:".")]
 
+(** Maps {!sgd_one} over the parameters [loss] trains ({!trainable_params}, or [?params]): a
+    parameter frozen behind {!Operation.stop_gradient} takes no step — in particular no weight
+    decay (gh-ocannl-673). *)
 let sgd_update ~learning_rate ?momentum ?weight_decay ?nesterov ?grad_unscale ?grad_scale
-    ?update_gate loss =
+    ?update_gate ?params loss =
   let f =
     sgd_one ~learning_rate ?momentum ?weight_decay ?nesterov ?grad_unscale ?grad_scale ?update_gate
   in
-  let comp = Set.to_list loss.Tensor.params |> List.map ~f |> Asgns.sequence in
+  let comp =
+    Set.to_list (params_for ~fn_name:"Train.sgd_update" ?params loss)
+    |> List.map ~f |> Asgns.sequence
+  in
   { comp with asgns = Asgns.Block_comment ("sgd_update", comp.asgns) }
 
 (** All and only bindings with associated ranges are iterated, with the binding's initial value
@@ -404,7 +458,8 @@ let scheduled_learning_rate ?(label = "learning_rate") schedule =
   in
   (lr, set_step)
 
-(** A scalar holding the global L2 norm over all parameter gradients of [loss]: returns the norm
+(** A scalar holding the global L2 norm over the gradients of the parameters [loss] trains
+    ({!trainable_params}, or [?params]): returns the norm
     tensor (materialized and observable — read it with [Context.get_values] for logging or
     {!Outlier_detector} feeding) and the code that computes it: per-parameter sum-of-squares einsum
     reductions (deterministic by construction — OCANNL emits no atomics) followed by a square root.
@@ -415,21 +470,21 @@ let scheduled_learning_rate ?(label = "learning_rate") schedule =
     is multiplied by it after the square root, so the result is the true-magnitude norm even when
     backprop was seeded with a loss scale (the buffers themselves still hold scaled gradients at
     this point — {!sgd_one} unscales them in place later). *)
-let grad_l2_norm ?grad_unscale ?(label = "grad_norm") loss =
+let grad_l2_norm ?grad_unscale ?(label = "grad_norm") ?params loss =
+  let params = params_for ~fn_name:"Train.grad_l2_norm" ?params loss in
   let norm = NTDSL.init ~l:label ~prec:Ir.Ops.single ~o:[ 1 ] ~f:(fun _ -> 0.) () in
   set_materialized norm.Tensor.value;
   Tn.set_observable norm.Tensor.value;
   (* Settle shape inference for the parameters first — same reason as in {!grad_checksum}: a
      parameter row still unsolved at settlement would be refused the close-to-empty guess once the
      einsum spec's row variables touch it. *)
-  Set.iter loss.Tensor.params ~f:(fun p ->
-      ignore (Lazy.force p.Tensor.value.Tn.dims : int array));
+  Set.iter params ~f:(fun p -> ignore (Lazy.force p.Tensor.value.Tn.dims : int array));
   let one_param p =
     if Option.is_none p.Tensor.diff then
       raise @@ Tensor.Session_error ("Train.grad_l2_norm: not differentiable", Some p);
     [%cd norm =+ p.grad * p.grad ~logic:"...|...->...; ...|...->... => |->0"]
   in
-  let comps = Set.to_list loss.Tensor.params |> List.map ~f:one_param in
+  let comps = Set.to_list params |> List.map ~f:one_param in
   let reset = [%cd norm =: 0] in
   let root =
     match grad_unscale with
@@ -466,13 +521,13 @@ type grad_clipping = {
     lower that threshold) — makes the ratio 0, suppressing the gradient term entirely: the step
     degrades to weight decay alone, strictly more conservative than rescaling an explosion of that
     magnitude to [max_norm], and self-recovering since the buffers are untouched. *)
-let clip_by_global_norm ?grad_unscale ?(label = "grad_clip") ~max_norm loss =
+let clip_by_global_norm ?grad_unscale ?(label = "grad_clip") ?params ~max_norm loss =
   (* Validated because this is where configuration-derived floats arrive: a negative threshold
      would REVERSE gradients (negative ratio), and a nan one fails the ordered comparison and
      silently disables clipping. 0 stays legal — "clip to zero" freezes the gradient term. *)
   if (not (Float.is_finite max_norm)) || Float.(max_norm < 0.) then
     invalid_arg "Train.clip_by_global_norm: max_norm must be finite and nonnegative";
-  let grad_norm, norm_comp = grad_l2_norm ?grad_unscale ~label:(label ^ "_norm") loss in
+  let grad_norm, norm_comp = grad_l2_norm ?grad_unscale ~label:(label ^ "_norm") ?params loss in
   let grad_scale = host_scalar ~l:(label ^ "_scale") 1. in
   let scale_comp =
     (* Ordered comparison and selection: norm = 0 selects 1 (the division's [inf] is discarded by
