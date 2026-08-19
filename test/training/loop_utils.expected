@@ -23,9 +23,19 @@ clipped sgd step matches host oracle at the rescheduled lr (step 8): PASS
 second micro-step changed the accumulated gradients: true
 accumulated micro-batch gradients match the single big-batch gradients: PASS
 post-sgd parameters match between accumulation and big batch: PASS
+trainable_params excludes the frozen parameter and keeps the trained one: true
+a frozen parameter does not move under ~weight_decay: true
+the trained parameter still takes the optimizer step: true
 a frozen parameter does not reject the accumulating grad_update: true
 the frozen model's micro-steps move the trainable gradient: true
 the trainable gradient accumulates the same as the big batch: PASS
+an unregistered differentiable leaf does not join loss.params: true
+trainable_params is empty for the paramless loss: true
+sgd_update rejects a loss that trains no registered parameters: true
+grad_l2_norm rejects a loss that trains no registered parameters: true
+grad_checksum rejects a loss that trains no registered parameters: true
+zero_params_grads rejects a loss that trains no registered parameters: true
+an explicit ?params override bypasses the derivation: true
 z-score is nan while the window fills: true
 ordinary z: 7.071e-1, spike z: 1.215e+2
 an in-family value scores |z| < 1: true

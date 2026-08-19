@@ -595,9 +595,10 @@ let sgd_one ~learning_rate ?(momentum = 0.0) ?(weight_decay = 0.0) ?(nesterov = 
     p =- learning_rate * sgd_delta]
 
 let sgd_update ~learning_rate ?momentum ?weight_decay ?nesterov loss =
-  (* Apply sgd_one to all parameters *)
+  (* Apply sgd_one to the parameters the loss trains: those of [loss.params] whose gradient the
+     backprop code writes (so e.g. a backbone frozen behind [stop_gradient] takes no step) *)
   let f = sgd_one ~learning_rate ?momentum ?weight_decay ?nesterov in
-  Set.to_list loss.Tensor.params 
+  Set.to_list (trainable_params loss)
   |> List.map ~f 
   |> Asgns.sequence  (* Combine into single computation *)
 ```

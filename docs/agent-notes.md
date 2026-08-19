@@ -1298,12 +1298,17 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
 ## Training and performance
 
 - `t.params` contains only `Tensor.param`-registered tensors (`{ w }` in `%op`, `TDSL.param`,
-  `reshape_param`/`wrap_param`). A leaf built with `Operation.init ~grad_spec:Require_grad` (the
-  deterministic-values test idiom) gets a gradient but does NOT join `params` — so
-  `Train.sgd_update`, `grad_l2_norm`, `grad_checksum` and `zero_params_grads` iterate an empty
-  set and silently emit empty routines (the gh-465 test initially "passed" parameter parity
-  because no optimizer step ran on either side). For deterministic real params use
-  `TDSL.reshape_param ~l ~i ~o ndarray ()` / `TDSL.param ~values l ()`.
+  `reshape_param`/`wrap_param`) — a leaf built with `Operation.init ~grad_spec:Require_grad` (the
+  deterministic-values test idiom) gets a gradient but does NOT join it; for deterministic real
+  params use `TDSL.reshape_param ~l ~i ~o ndarray ()` / `TDSL.param ~values l ()`. `params` is the
+  *state* set (what `init_params` initializes and `Persistence` saves — a frozen backbone behind
+  `stop_gradient` included), NOT the trained set: the optimizer-side helpers (`Train.sgd_update`,
+  `grad_l2_norm`/`clip_by_global_norm`, `grad_checksum`, `zero_params_grads`) operate on
+  `Train.trainable_params` — the params whose gradient the backprop writes
+  (gh-ocannl-673: a frozen parameter takes no step, in particular no weight decay) — and raise
+  `Session_error` when that set is empty rather than silently compiling empty routines
+  (gh-ocannl-670: the gh-465 test initially "passed" parameter parity because no optimizer step
+  ran on either side). `?params` on each helper overrides the derivation.
 - Training-loop utilities (gh-465, `lib/train.ml`): `Lr_schedule` (host floats; feed via
   `scheduled_learning_rate`'s data-backed `host_scalar` — a fetch-defined constant would be
   re-fetched each step, undoing `set_values`), `grad_l2_norm`/`clip_by_global_norm` +

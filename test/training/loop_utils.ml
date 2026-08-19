@@ -95,9 +95,10 @@ let build_model ~freeze_w ~batch ~x_row =
       ~f:(function [| b; c |] -> target_val (x_row b) c | _ -> assert false)
       ()
   in
-  (* Real parameters ([Tensor.param]-registered, deterministic values): [loss.params] drives
-     {!Train.sgd_update}, {!Train.grad_l2_norm} and {!Train.zero_params_grads}, and tensors built
-     with [Operation.init ~grad_spec:Require_grad] do not join it. *)
+  (* Real parameters ([Tensor.param]-registered, deterministic values): {!Train.sgd_update},
+     {!Train.grad_l2_norm} and {!Train.zero_params_grads} derive their set from [loss.params]
+     (via {!Train.trainable_params}), and tensors built with
+     [Operation.init ~grad_spec:Require_grad] do not join it. *)
   let w =
     let nd =
       Ir.Ndarray.init_array ~debug:"w" Ir.Ops.single ~dims:[| classes; din |] ~padding:None
@@ -289,18 +290,44 @@ let accumulation () =
    A parameter detached behind [stop_gradient] stays in [loss.params] and keeps its gradient node,
    but the loss's zero_grads tree does not zero it and the backprop does not accumulate into it.
    [grad_update ~accum_steps] must accept such a model (the documented freezing flow) and leave the
-   frozen gradient untouched, while the trainable parameter still accumulates. *)
+   frozen gradient untouched, while the trainable parameter still accumulates. The optimizer-side
+   helpers derive their set from the backprop ([Train.trainable_params], gh-ocannl-673), so a
+   frozen parameter takes no step at all -- in particular no weight decay. *)
 
 let frozen_backbone_accumulation () =
   (* Case A: one batch-4 step over the frozen-backbone model. *)
   Tensor.unsafe_reinitialize ();
-  let _x, _targets, _w, b_p, loss = build_model ~freeze_w:true ~batch:4 ~x_row:(fun b -> b) in
+  let _x, _targets, w, b_p, loss = build_model ~freeze_w:true ~batch:4 ~x_row:(fun b -> b) in
+  let trainable = Train.trainable_params loss in
+  Verdict.p "trainable_params excludes the frozen parameter and keeps the trained one"
+    ((not (Set.mem trainable w)) && Set.mem trainable b_p);
   let update = Train.grad_update loss in
   let ctx = Context.auto () in
   let ctx = Train.init_params ctx IDX.empty loss in
   let ctx, grad_routine = Context.compile ctx update IDX.empty in
   let ctx = Context.run ctx grad_routine in
   let bg_a = bias_grads ctx b_p in
+  (* Frozen means frozen: with a decoupled-decay term in the delta, an [sgd_update] over all of
+     [loss.params] would decay [w] every step even though no gradient reaches it. The derived set
+     emits no step for [w], so its values stay bitwise identical. *)
+  let open Operation.At in
+  let w_vals ctx =
+    Array.init classes ~f:(fun c -> Array.init din ~f:(fun d -> (ctx, w).@{[| c; d |]}))
+  in
+  let b_vals ctx = Array.init classes ~f:(fun c -> (ctx, b_p).@[c]) in
+  let w_before = w_vals ctx and b_before = b_vals ctx in
+  let learning_rate = Train.host_scalar ~l:"lr" 0.1 in
+  let sgd = Train.sgd_update ~learning_rate ~weight_decay:0.5 loss in
+  let ctx, sgd_routine = Context.compile ctx sgd IDX.empty in
+  let ctx = Context.run ctx sgd_routine in
+  let w_after = w_vals ctx and b_after = b_vals ctx in
+  let w_moved =
+    Array.exists2_exn w_before w_after ~f:(fun r r' ->
+        Array.exists2_exn r r' ~f:(fun v v' -> not (Float.equal v v')))
+  in
+  let b_moved = Array.exists2_exn b_before b_after ~f:(fun v v' -> not (Float.equal v v')) in
+  Verdict.p "a frozen parameter does not move under ~weight_decay" (not w_moved);
+  Verdict.p "the trained parameter still takes the optimizer step" b_moved;
   (* Case B: two batch-2 micro-steps with accum_steps = 2 over the same 4 dataset rows. *)
   Tensor.unsafe_reinitialize ();
   let x, targets, _w, b_p, loss = build_model ~freeze_w:true ~batch:2 ~x_row:(fun b -> b) in
@@ -336,6 +363,43 @@ let frozen_backbone_accumulation () =
       Verdict.pass_fail "the trainable gradient accumulates the same as the big batch"
         Float.(bias_err < 1e-5)
         ~detail:(fun () -> Printf.sprintf "max abs err %.8f" bias_err)
+
+(* ----- 3c. Params-driven helpers over a paramless differentiable loss (gh-ocannl-670) -----
+
+   A leaf built with [Operation.init ~grad_spec:Require_grad] (the deterministic-values test idiom)
+   gets a gradient but never joins [t.params], so the params-driven helpers used to compile empty
+   routines: the optimizer step was a silent no-op and this file's own executed-parity claims once
+   passed vacuously. They now raise [Session_error] when the loss trains no registered parameters;
+   [?params] remains as the explicit escape hatch. *)
+
+let paramless_guard () =
+  Tensor.unsafe_reinitialize ();
+  let w =
+    Operation.init ~l:"w_unregistered" ~prec:Ir.Ops.single ~o:[ din ]
+      ~f:(function [| d |] -> w_val 0 d | _ -> assert false)
+      ~grad_spec:Tensor.Require_grad ()
+  in
+  let%op loss = (w *. w) ++ "...|... => |->0" in
+  Verdict.p "an unregistered differentiable leaf does not join loss.params"
+    (Set.is_empty loss.Tensor.params);
+  Verdict.p "trainable_params is empty for the paramless loss"
+    (Set.is_empty (Train.trainable_params loss));
+  let learning_rate = Train.host_scalar ~l:"lr" 0.1 in
+  let raises f = match f () with () -> false | exception Tensor.Session_error _ -> true in
+  Verdict.p "sgd_update rejects a loss that trains no registered parameters"
+    (raises (fun () -> ignore (Train.sgd_update ~learning_rate loss : Ir.Assignments.comp)));
+  Verdict.p "grad_l2_norm rejects a loss that trains no registered parameters"
+    (raises (fun () -> ignore (Train.grad_l2_norm loss : Tensor.t * Ir.Assignments.comp)));
+  Verdict.p "grad_checksum rejects a loss that trains no registered parameters"
+    (raises (fun () -> ignore (Train.grad_checksum loss : Tensor.t * Ir.Assignments.comp)));
+  Verdict.p "zero_params_grads rejects a loss that trains no registered parameters"
+    (raises (fun () -> ignore (Train.zero_params_grads loss : Ir.Assignments.comp)));
+  Verdict.p "an explicit ?params override bypasses the derivation"
+    (not
+       (raises (fun () ->
+            ignore
+              (Train.sgd_update ~learning_rate ~params:(Set.singleton (module Tensor) w) loss
+                : Ir.Assignments.comp))))
 
 (* ----- 4. Outlier detector ----- *)
 
@@ -392,4 +456,5 @@ let () =
   clipping ();
   accumulation ();
   frozen_backbone_accumulation ();
+  paramless_guard ();
   outlier_detector ()
