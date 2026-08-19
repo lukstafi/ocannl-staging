@@ -139,15 +139,19 @@ let () =
      GPU fp8 types convert straight from the double, so this is the same "match the hardware"
      question as the tie rule itself. Skipped on Metal, which has no f64 storage at all. *)
   let f64_claim = "narrowing f64 to fp8 rounds once, not twice" in
+  let eps = Float.(2. ** -40.) in
+  let f64_vals = [| 1.125 +. eps; 1.125 -. eps; 1.625 +. eps; 1.625 -. eps |] in
+  let f64_host = Array.map f64_vals ~f:(fun v -> Ir.Ops.fp8_to_single (Ir.Ops.double_to_fp8 v)) in
+  (* The dump is of the HOST codec, which runs everywhere, so the golden stays backend-uniform:
+     [Verdict.skipped] keeps the CLAIM line uniform, it does not cover descriptive output beside
+     it, and a dump printed only off Metal is a golden diff on Metal. What the device computed is
+     what the claim below compares against these same values, so nothing is lost by printing the
+     host side. *)
+  Array.iteri f64_vals ~f:(fun i v -> Stdio.printf "  f64 %h -> %h\n" v f64_host.(i));
   (if on_metal then skipped f64_claim
    else
-     let eps = Float.(2. ** -40.) in
-     let vals = [| 1.125 +. eps; 1.125 -. eps; 1.625 +. eps; 1.625 -. eps |] in
-     let dev = narrow_on_device ~src_prec:Ir.Ops.double vals in
-     let host = Array.map vals ~f:(fun v -> Ir.Ops.fp8_to_single (Ir.Ops.double_to_fp8 v)) in
-     Array.iteri vals ~f:(fun i v ->
-         Stdio.printf "  f64 %h -> %h\n" v dev.(i));
-     p f64_claim (Array.for_all2_exn dev host ~f:(fun a b -> Float.equal a b)));
+     let dev = narrow_on_device ~src_prec:Ir.Ops.double f64_vals in
+     p f64_claim (Array.for_all2_exn dev f64_host ~f:(fun a b -> Float.equal a b)));
 
   (* The same underflow, but reached through fp8 ARITHMETIC rather than a conversion: an fp8
      operator computes in f32 and narrows its RESULT, which is a second narrowing site, and one a
