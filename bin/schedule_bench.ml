@@ -47,10 +47,10 @@ module Numerics = Ir.Numerics
 
 (* CUDA's uniform-f32 MMA arm is gated on tf32 (the Numerics policy): without it the [Tile_mma]s of
    the mma_pd* variants render the lane-0 scalar fallback and the labels would time a kernel that
-   never tensorizes ("timed is not tensorized", docs/agent-notes.md). Metal's f32 [simdgroup_matrix]
-   path has no such gate and is unaffected. This bench asserts no parity, so the tf32 rounding is
-   free; cross-check a new backend's emission with --ocannl_schedule_log_declines=true before
-   trusting the labels. *)
+   never tensorizes ("timed is not tensorized", docs/agent-notes/scheduling-and-autotune.md).
+   Metal's f32 [simdgroup_matrix] path has no such gate and is unaffected. This bench asserts no
+   parity, so the tf32 rounding is free; cross-check a new backend's emission with
+   --ocannl_schedule_log_declines=true before trusting the labels. *)
 let () = Numerics.set_policy { (Numerics.get ()) with tf32_matmuls = true }
 let p = Stdio.printf
 
@@ -455,8 +455,9 @@ let () =
     let ctx = Context.auto () in
     (* What codegen actually did with each [Tile_mma] (gh-ocannl-479). A [Tile_mma] whose
        preconditions fail renders the scalar fallback and still reports under its schedule's name —
-       "timed is not tensorized", docs/agent-notes.md — so a variant name is not evidence of
-       tensorization and every variant carrying one has to be read from the census instead. The
+       "timed is not tensorized", docs/agent-notes/scheduling-and-autotune.md — so a variant name
+       is not evidence of tensorization and every variant carrying one has to be read from the
+       census instead. The
        decline rules include a column extent below the compute vector width (which arbitrary extents
        now reach), a narrow [vector_bytes], mixed operand precisions, an accumulation not in FMA
        form, and [debug_log_from_routines]. Collecting the census only appends to a list, so it

@@ -24,7 +24,7 @@
    below the compute vector width is one of several ways in) renders the scalar fallback while still
    reporting as "packmma" — read the bracket, not the variant name, when deciding what a timing
    measured. Readbacks stay outside the timed region (the [Context.get_values] trap,
-   docs/agent-notes.md). *)
+   docs/agent-notes/backend-precision-and-simd.md). *)
 
 open Base
 open Ocannl
@@ -206,8 +206,9 @@ let () =
         ctx (Stdlib.Array.make repeats ())
     in
     let stop = Time_now.nanoseconds_since_unix_epoch () in
-    (* Readback OUTSIDE the timed region (the [Context.get_values] trap, docs/agent-notes.md): the
-       cc scheduler is synchronous, so the run loop needs no readback to complete. *)
+    (* Readback OUTSIDE the timed region (the [Context.get_values] trap,
+       docs/agent-notes/backend-precision-and-simd.md): the cc scheduler is synchronous, so the run
+       loop needs no readback to complete. *)
     let values = Context.get_values ctx mc.Tensor.value in
     (* Element [1][1] of the n*n result — an interior cell, away from the corners — except at n = 1,
        where the whole output is one element. One interior cell cannot see a remainder region, so

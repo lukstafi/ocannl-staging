@@ -46,8 +46,9 @@ opam exec -- dune build tools/fit_envelope.exe benchmarks/runners/ocannl/bench_m
   exit 1
 }
 cd benchmarks || exit 1
-# Fixtures are valid only while gen_fixtures.py and workloads/ are unchanged (docs/agent-notes),
-# so freshness is stamped by content hash, not existence: a revision switch regenerates.
+# Fixtures are valid only while gen_fixtures.py and workloads/ are unchanged
+# (docs/agent-notes/training-and-performance.md), so freshness is stamped by content hash, not
+# existence: a revision switch regenerates.
 STAMP_WANT=$(python3 - <<'PY'
 import hashlib, glob
 h = hashlib.sha256()

@@ -38,7 +38,7 @@ opam install cudajit  # for CUDA backend
 opam install hipjit   # for AMD HIP backend
 ```
 
-**Worktrees**: nested ones (`.claude/worktrees/`, the Claude Code default) need a `dune-workspace` at their root, or dune builds the PARENT checkout instead; the SessionStart hook writes it, so after a mid-session worktree switch run `scripts/setup-ocaml-env.sh` by hand. See docs/agent-notes.md for why.
+**Worktrees**: nested ones (`.claude/worktrees/`, the Claude Code default) need a `dune-workspace` at their root, or dune builds the PARENT checkout instead; the SessionStart hook writes it, so after a mid-session worktree switch run `scripts/setup-ocaml-env.sh` by hand. See docs/agent-notes/build-and-test.md for why.
 
 **Windows shells**: `opam env --shell=sh` emits cygwin-style paths that break under Git Bash (MSYS), so a Git Bash session without a primed environment gets a half-working toolchain (dune found but linking fails with `cygpath: error converting ... -lpthread`). Source `tools/opam-env.sh` first — it rewrites the paths for MSYS and works from any POSIX shell. On Windows, link steps also flood stderr with benign binutils warnings (`Warning: corrupt .drectve at end of def file`, from MSVC-produced import libraries like ROCm's/CUDA's); `tools/dune-quiet.sh <dune args>` runs dune with exactly those lines filtered, preserving the exit status. Use **Git Bash** specifically, not a Cygwin bash (opam's, or whatever `bash` resolves to once opam's cygwin is on PATH): the two are told apart by `uname -o` (`Msys` vs `Cygwin`, since both bashes report `OSTYPE=cygwin`), only the MSYS one gets `opam-env.sh`'s path rewrite, and Cygwin ships no `perl` — which `tools/test-run.sh` needs for its lock, cap and `last` pointer, and refuses without (gh-ocannl-662).
 
@@ -46,7 +46,8 @@ opam install hipjit   # for AMD HIP backend
 
 ## Architecture Overview
 
-**Before working on a subsystem, skim the matching section of `docs/agent-notes.md`** — distilled
+**Before working on a subsystem, read the matching file under `docs/agent-notes/`** (the index is
+`docs/agent-notes.md`) — distilled
 cross-session agent knowledge (solver/backend traps, known bugs with workarounds, debug recipes,
 design history) that is not derivable from the code alone.
 
