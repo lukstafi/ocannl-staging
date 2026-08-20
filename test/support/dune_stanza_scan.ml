@@ -121,53 +121,6 @@ let form_count content =
   done;
   !count
 
-(** [head_occurrences content ~head] counts the forms in [content] that OPEN with the atom [head] —
-    ["(test …"], ["(inline_tests …"] — read straight off the raw text, skipping [;] comments and
-    quoted strings the way {!form_count} does, and sharing none of the sexp machinery {!sites} is
-    built on.
-
-    It is a second opinion on the first. A check phrased in terms of the sexp walk cannot notice
-    that walk going blind: a stanza it stops recognising looks exactly like a stanza that is not
-    there, and a caller counting sites sees a smaller number with nothing to compare it against.
-    This is the number to compare it against.
-
-    What it yields is a LOWER bound on the sites those stanzas produce, in both directions it can be
-    wrong: [(tests (names a b c))] is one occurrence and three sites, and a form written [( test …]
-    — legal sexp, unheard of in dune — reads here as an empty head and is not counted at all. Both
-    errors make the floor smaller, which is the safe direction: blindness makes sites DISAPPEAR, so
-    a floor that under-counts still fails on it and never fails on a correct scan. *)
-let head_occurrences content ~head =
-  let count = ref 0 in
-  let i = ref 0 in
-  let length = String.length content in
-  let delimiter c = Char.is_whitespace c || List.mem [ '('; ')'; ';'; '"' ] c ~equal:Char.equal in
-  while !i < length do
-    (match content.[!i] with
-    | ';' ->
-        while !i < length && not (Char.equal content.[!i] '\n') do
-          Int.incr i
-        done
-    | '"' ->
-        Int.incr i;
-        let closed = ref false in
-        while (not !closed) && !i < length do
-          (match content.[!i] with '\\' -> Int.incr i | '"' -> closed := true | _ -> ());
-          Int.incr i
-        done;
-        Int.decr i
-    | '(' ->
-        let start = !i + 1 in
-        let stop = ref start in
-        while !stop < length && not (delimiter content.[!stop]) do
-          Int.incr stop
-        done;
-        if String.equal (String.sub content ~pos:start ~len:(!stop - start)) head then
-          Int.incr count
-    | _ -> ());
-    Int.incr i
-  done;
-  !count
-
 (** Raises if [content] is not something both readers agree on: a scan that cannot read its input
     must say so rather than report a file with a hole in it. *)
 let stanzas content =
@@ -696,37 +649,58 @@ let inert_heads =
     "deprecated_library_name";
   ]
 
-(** [run_executables content] groups the executables [content] runs BY THE STANZA that runs them:
-    one entry per stanza that runs at least one, each entry that stanza's executables, read straight
-    off the raw text and sharing none of the sexp machinery {!sites} is built on.
+(** One stanza as a SECOND reader sees it, reading the raw text and sharing none of the sexp
+    machinery {!sites} is built on. *)
+type raw_stanza = {
+  raw_head : string;  (** the atom the stanza opens with *)
+  raw_inline_tests : bool;  (** whether it has an [(inline_tests …)] field of its own *)
+  raw_runs : (string * string) list;
+      (** the executables it runs, each with the working directory the [chdir] actions around it put
+          the process in — deduplicated within this stanza, since {!sites} reports one site per
+          distinct executable per directory. Named as {!classify_command} names a [Runs]. *)
+}
 
-    The independent opinion on {!sites} for the exe-running rules, and it has to agree with the walk
-    about three things, or it fails a correct scan rather than a blind one.
+(** [raw_stanzas content] reads [content] as a second opinion on {!sites}: the stanzas it declares,
+    with what each of them runs.
 
-    - WHICH stanzas run things. A [(run …)] inside [(library … (preprocess (action (run …))))] is a
-      build-time action, and {!sites} deliberately makes a site of no such thing — only of [test],
-      [tests] and the {!action_heads}. So this tracks the forms it is inside as it descends and
-      attributes a command to the nearest enclosing STANZA, keeping it only when that stanza is one
-      of those (Codex P2, round 2). A [(subdir …)] is transparent: the stanza within it is the
-      nearest one.
-    - GROUPING. A flat set would lose the six separate rules of [test/operations/profiles/dune] that
-      each run [profile_precedence.exe] — dropping five would leave the sixth answering for all six.
-      Grouped per stanza, the caller can require as many placements as there are stanzas. WITHIN a
-      stanza the names are deduplicated, because {!sites} reports one site per distinct executable:
-      a [progn] running one executable twice is one site, and counting it twice would fail a correct
-      scan.
-    - IDENTITY. The names are normalised as {!classify_command} normalises a [Runs] name, so they
-      compare against a site's {!site.executables} — the structured field, never the display [name].
+    This is the independent floor the checks are held to. A check phrased in terms of the sexp walk
+    cannot notice that walk going blind — a stanza it stops recognising looks exactly like a stanza
+    that is not there — so the numbers it reports need a source that cannot go blind with it. This
+    reader is a paren-depth scan over the raw text: no sexp parse, no shared code.
 
-    It under-reports by design, which is the safe direction for a floor: a program named through
-    [%{test}], a [(bash …)] line, or a [%{name}] bound by a named dependency is not counted, because
-    the text alone does not say what those resolve to. *)
-let run_executables content =
-  let stanza_heads = "test" :: "tests" :: "library" :: "subdir" :: (action_heads @ inert_heads) in
+    Independent, but not naive. It has to agree with the walk about SCOPE, or it fails correct scans
+    instead of blind ones, and three review rounds of gh-ocannl-665 were spent finding the places
+    where a scope-blind reader disagrees:
+
+    - STANZA POSITION. Only a form at the top level is a stanza — or one inside a [(subdir …)],
+      recursively, which is the one form that contains stanzas. Counting matching atoms at every
+      depth misreads [(env (test (flags …)))], where [test] names a build PROFILE and {!sites}
+      rightly makes no test site of it (Codex P2, round 3). [inline_tests] is counted only as a
+      direct field of its stanza, for the same reason.
+    - WHAT RUNS THINGS. A [(run …)] under a library's [(preprocess …)] is a build-time action, and
+      {!sites} makes a site of no such thing — only of [test], [tests] and the {!action_heads}. Each
+      command is attributed to its nearest enclosing STANZA, and kept only when that stanza is one
+      of those (round 2).
+    - WHERE IT RUNS. [(chdir …)] moves the process, and {!sites} emits one site per working
+      directory because each location resolves a different config — so a rule running one executable
+      under two [chdir]s is two sites, and collapsing them to one would let either be dropped
+      unnoticed (round 3). The directories compose through {!in_subdir} exactly as the walk composes
+      them.
+    - IDENTITY. Commands are recognised as {!classify_command} recognises them — a [.exe], any
+      explicit relative path such as [./probe], and the pforms that name a path in this workspace —
+      and normalised to the same string, so they compare against a site's {!site.executables}.
+
+    What it still declines to read, because the text alone does not say what they resolve to, is
+    [%{test}], a [(bash …)] line, and a [%{name}] bound by a named dependency. Those under-report,
+    which is the safe direction for a floor: blindness makes things DISAPPEAR, so a floor that
+    under-counts still fails on it and never fails on a correct scan. *)
+let raw_stanzas content =
   let counted_heads = "test" :: "tests" :: action_heads in
   let results = ref [] in
-  (* The forms enclosing the point being read, innermost first, each with what has been attributed
-     to it. Only the frames of counted stanzas ever collect anything. *)
+  (* One frame per open paren, innermost first:
+     (head, children_are_stanzas, is_stanza, cwd, what this stanza runs, has an inline_tests field).
+     [children_are_stanzas] holds at the top level and inside a `subdir` stanza and nowhere else,
+     which is what makes a nested `(test …)` -- a build profile under `(env …)` -- not a stanza. *)
   let stack = ref [] in
   let i = ref 0 in
   let length = String.length content in
@@ -738,21 +712,34 @@ let run_executables content =
     done;
     String.sub content ~pos ~len:(!stop - pos)
   in
-  (* The program a command token names, when the text alone is enough to say: a bare path, or one of
-     the pforms that resolve to a path in this workspace. Anything else is left out. *)
+  (* The next atom after [pos], if the next thing is an atom rather than a form. *)
+  let token_after pos =
+    let pos = ref pos in
+    while !pos < length && Char.is_whitespace content.[!pos] do
+      Int.incr pos
+    done;
+    if !pos < length && not (delimiter content.[!pos]) then Some (token_at !pos) else None
+  in
+  (* The program a command token names, mirroring [classify_command] for the spellings the text can
+     resolve on its own: a `.exe`, any explicit relative path (`./probe` is ours whatever its
+     extension), and the pforms that name a path in this workspace. *)
   let program token =
-    let path =
-      match String.chop_prefix token ~prefix:"%{" with
-      | None -> Some token
-      | Some rest -> (
-          match String.chop_suffix rest ~suffix:"}" with
-          | None -> None
-          | Some inner -> (
-              match String.lsplit2 inner ~on:':' with
-              | Some (("dep" | "exe" | "path" | "file"), path) -> Some path
-              | _ -> None))
-    in
-    match path with Some path when is_executable path -> Some (program_path path) | _ -> None
+    match String.chop_prefix token ~prefix:"%{" with
+    (* A pform anywhere inside an otherwise literal token -- `./%{pp}`, bound by a `(:pp pp.exe)`
+       dependency -- names something only the deps say, so the text declines it rather than
+       reporting the unexpanded spelling as an executable. *)
+    | None when String.is_substring token ~substring:"%{" -> None
+    | None ->
+        if is_executable token || is_explicit_path token then Some (program_path token) else None
+    | Some rest -> (
+        match String.chop_suffix rest ~suffix:"}" with
+        | None -> None
+        | Some inner -> (
+            match String.lsplit2 inner ~on:':' with
+            | Some (("dep" | "exe" | "path" | "file"), path) ->
+                if is_executable path then Some (program_path path) else None
+            | Some ("bin", name) -> Some name
+            | _ -> None))
   in
   while !i < length do
     (match content.[!i] with
@@ -770,31 +757,59 @@ let run_executables content =
         Int.decr i
     | '(' ->
         let head = token_at (!i + 1) in
-        (if List.mem [ "run"; "dynamic-run" ] head ~equal:String.equal then (
-           (* The command position: the first token after the head, whitespace skipped. A form there
-              instead of a token says nothing this reader can use, so it is passed over. *)
-           let pos = ref (!i + 1 + String.length head) in
-           while !pos < length && Char.is_whitespace content.[!pos] do
-             Int.incr pos
-           done;
-           if !pos < length && not (delimiter content.[!pos]) then
-             match program (token_at !pos) with
-             | None -> ()
-             | Some path -> (
-                 match
-                   List.find !stack ~f:(fun (h, _) -> List.mem stanza_heads h ~equal:String.equal)
-                 with
-                 | Some (h, collected) when List.mem counted_heads h ~equal:String.equal ->
-                     collected := path :: !collected
-                 | _ -> ())));
-        stack := (head, ref []) :: !stack
+        let after_head = !i + 1 + String.length head in
+        let parent = List.hd !stack in
+        let is_stanza =
+          match parent with None -> true | Some (_, opens, _, _, _, _) -> opens
+        in
+        let inherited_cwd = match parent with None -> "" | Some (_, _, _, cwd, _, _) -> cwd in
+        (* A `chdir` moves the process, and the directories compose exactly as the walk composes
+           them -- one site per working directory, because each resolves a different config. *)
+        let cwd =
+          if String.equal head "chdir" then
+            match token_after after_head with
+            | Some dir -> in_subdir inherited_cwd dir
+            | None -> inherited_cwd
+          else inherited_cwd
+        in
+        (* An `inline_tests` field belongs to the stanza it sits DIRECTLY inside. *)
+        (match (String.equal head "inline_tests", parent) with
+        | true, Some (_, _, true, _, _, inline) -> inline := true
+        | _ -> ());
+        (if List.mem [ "run"; "dynamic-run" ] head ~equal:String.equal then
+           match token_after after_head with
+           | None -> ()
+           | Some token -> (
+               match program token with
+               | None -> ()
+               | Some path -> (
+                   (* Attributed to the nearest enclosing STANZA, and kept only when that stanza is
+                      one the walk makes sites of -- so a library's `(preprocess (action (run …)))`
+                      contributes nothing. *)
+                   match List.find !stack ~f:(fun (_, _, stanza, _, _, _) -> stanza) with
+                   | Some (h, _, _, _, runs, _) when List.mem counted_heads h ~equal:String.equal ->
+                       runs := (cwd, path) :: !runs
+                   | _ -> ())));
+        stack :=
+          (head, String.equal head "subdir" && is_stanza, is_stanza, cwd, ref [], ref false)
+          :: !stack
     | ')' -> (
         match !stack with
         | [] -> ()
-        | (head, collected) :: rest ->
+        | (head, _, is_stanza, _, runs, inline) :: rest ->
             stack := rest;
-            if List.mem counted_heads head ~equal:String.equal && not (List.is_empty !collected)
-            then results := List.dedup_and_sort !collected ~compare:String.compare :: !results)
+            if is_stanza then
+              results :=
+                {
+                  raw_head = head;
+                  raw_inline_tests = !inline;
+                  (* Deduplicated by (directory, executable), because that pair is what the walk
+                     makes one site of. *)
+                  raw_runs =
+                    List.dedup_and_sort !runs ~compare:(fun (c1, e1) (c2, e2) ->
+                        match String.compare c1 c2 with 0 -> String.compare e1 e2 | n -> n);
+                }
+                :: !results)
     | _ -> ());
     Int.incr i
   done;

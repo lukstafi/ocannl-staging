@@ -446,93 +446,101 @@ let accepted_marker_cases =
       [ "test t [declares]" ] );
   ]
 
-(* [head_occurrences] is the floor `config_dep_completeness` holds the sexp walk to: a count read
-   off the raw text, which a walk going blind cannot take down with it (gh-ocannl-665). It has to
-   be a LOWER bound on the sites the walk yields for the same file, so the cases that matter are
-   the ones where it could over-count -- a head named in a comment, in a string, or as the prefix
-   of a longer one -- since only over-counting can fail a correct scan. *)
-let head_occurrence_cases =
-  [
-    ("a stanza with that head", "test", {dune|(test (name t))|dune}, 1);
-    ("two of them", "test", {dune|(test (name a))
-(test (name b))|dune}, 2);
-    (* One occurrence, three sites: the floor is under the count, which is the point. *)
-    ("a plural stanza counts once", "tests", {dune|(tests (names a b c))|dune}, 1);
-    ("a field, not only a stanza", "inline_tests", {dune|(library (name l) (inline_tests))|dune}, 1);
-    ("a longer head is a different head", "test", {dune|(test_helper (name t))|dune}, 0);
-    ("nor is it the head when it is an argument", "test", {dune|(alias (name test))|dune}, 0);
-    ("a head inside a line comment is not there", "test", {dune|; (test (name t))|dune}, 0);
-    ( "nor is one inside a string",
-      "test",
-      {dune|(rule (action (echo "(test (name t))")))|dune},
-      0 );
-    ( "an escaped quote does not end the string early",
-      "test",
-      {dune|(rule (action (echo "a \" (test (name t))")))|dune},
-      0 );
-    ( "a comment does not swallow what follows it",
-      "test",
-      {dune|; (test (name hidden))
-(test (name t))|dune},
-      1 );
-  ]
+(* [raw_stanzas] is the independent floor `config_dep_completeness` holds the sexp walk to: a
+   paren-depth reading of the raw text, which a walk going blind cannot take down with it. It has to
+   agree with `sites` about SCOPE, or it fails a correct scan rather than a blind one, and each case
+   below pins one of the places where a scope-blind reader disagrees (Codex P2, rounds 1 to 3).
 
-(* [run_executables] is the floor for the exe-running RULES, and it has to agree with `sites` about
-   three things or it fails a correct scan rather than a blind one: which stanzas run anything (a
-   `(run …)` under a library's `(preprocess …)` is not a site), how the executables are GROUPED (per
-   stanza, so separate rules running one executable each need their own placement), and how a name
-   is spelled. Each case below pins one of those (Codex P2, rounds 1 and 2). *)
-let run_executable_cases =
+   Rendered as "<head>[+inline] {cwd:exe …}", one entry per stanza. *)
+let render_raw (r : Scan.raw_stanza) =
+  let runs =
+    List.map r.Scan.raw_runs ~f:(fun (cwd, exe) ->
+        if String.is_empty cwd then exe else cwd ^ ":" ^ exe)
+  in
+  Printf.sprintf "%s%s{%s}" r.Scan.raw_head
+    (if r.Scan.raw_inline_tests then "+inline" else "")
+    (String.concat ~sep:" " runs)
+
+let raw_stanza_cases =
   [
-    ("a dep pform", {dune|(rule (action (run %{dep:probe.exe})))|dune}, [ [ "probe.exe" ] ]);
-    ("a bare path", {dune|(rule (action (run ./probe.exe)))|dune}, [ [ "probe.exe" ] ]);
-    (* A path outside the directory keeps its path: reducing it to a basename would make
-       `../../tools/pp.exe` and a local `pp.exe` one identity. *)
-    ( "a path elsewhere keeps it",
+    (* Stanza position: only the top level, and inside `subdir`, which is the one form that contains
+       stanzas. A `test` nested anywhere else is not a stanza -- `(env (test …))` names a build
+       PROFILE, and `sites` rightly makes no test site of it. *)
+    ("a test stanza", {dune|(test (name t))|dune}, [ "test{}" ]);
+    ("two of them", {dune|(test (name a))
+(test (name b))|dune}, [ "test{}"; "test{}" ]);
+    ("a plural stanza is one stanza", {dune|(tests (names a b c))|dune}, [ "tests{}" ]);
+    ( "a build profile named test is not a test stanza",
+      {dune|(env (test (flags (:standard))))|dune},
+      [ "env{}" ] );
+    ( "a stanza inside a subdir is a stanza",
+      {dune|(subdir gen (test (name t)))|dune},
+      [ "test{}"; "subdir{}" ] );
+    (* An inline_tests field belongs to the stanza it sits directly inside. *)
+    ("a library with inline tests", {dune|(library (name l) (inline_tests))|dune}, [ "library+inline{}" ]);
+    ("a library without", {dune|(library (name l) (libraries base))|dune}, [ "library{}" ]);
+    ( "an inline_tests nested deeper is not the library's field",
+      {dune|(library (name l) (env (inline_tests)))|dune},
+      [ "library{}" ] );
+    (* What runs things, and where. *)
+    ("a rule running a dep pform", {dune|(rule (action (run %{dep:probe.exe})))|dune}, [ "rule{probe.exe}" ]);
+    ("a bare path", {dune|(rule (action (run ./probe.exe)))|dune}, [ "rule{probe.exe}" ]);
+    (* An explicit relative path names something this repository built whatever its extension --
+       `classify_command` treats `./probe` as a site, so the floor must too. *)
+    ("an extensionless explicit path", {dune|(rule (action (run ./probe)))|dune}, [ "rule{probe}" ]);
+    ("but a bare word is a tool on PATH", {dune|(rule (action (run python3 x.py)))|dune}, [ "rule{}" ]);
+    ( "a path elsewhere keeps its path",
       {dune|(rule (action (run %{dep:../../tools/minised.exe})))|dune},
-      [ [ "../../tools/minised.exe" ] ] );
-    ("the exe pform too", {dune|(rule (action (run %{exe:probe.exe})))|dune}, [ [ "probe.exe" ] ]);
-    (* A comma is legal in a path, and the identities survive it -- which they would not if they
-       were recovered by splitting a site's display name. *)
+      [ "rule{../../tools/minised.exe}" ] );
     ( "a comma in the path is part of it",
       {dune|(rule (action (run %{dep:helper,pp.exe})))|dune},
-      [ [ "helper,pp.exe" ] ] );
-    ( "several in one action, one stanza",
+      [ "rule{helper,pp.exe}" ] );
+    ( "several in one stanza",
       {dune|(rule (action (progn (run %{dep:a.exe} x) (run %{dep:b.exe}))))|dune},
-      [ [ "a.exe"; "b.exe" ] ] );
-    (* Within a stanza the same executable is ONE name, because `sites` reports one site per
-       distinct executable; across stanzas it is one entry each, because each of those rules needs
-       its own placement. *)
-    ( "the same one twice in a stanza is one name",
+      [ "rule{a.exe b.exe}" ] );
+    ( "the same one twice in a stanza is one entry",
       {dune|(rule (action (progn (run %{dep:a.exe} x) (run %{dep:a.exe} y))))|dune},
-      [ [ "a.exe" ] ] );
-    ( "the same one in two stanzas is two entries",
+      [ "rule{a.exe}" ] );
+    ( "the same one in two stanzas is two stanzas",
       {dune|(rule (action (run %{dep:a.exe} x)))
 (rule (action (run %{dep:a.exe} y)))|dune},
-      [ [ "a.exe" ]; [ "a.exe" ] ] );
-    ("an alias stanza runs things too", {dune|(alias (action (run %{dep:a.exe})))|dune}, [ [ "a.exe" ] ]);
-    ("a test's custom action", {dune|(test (name t) (action (run %{dep:helper.exe})))|dune}, [ [ "helper.exe" ] ]);
-    (* A stanza inside `(subdir …)` is still the nearest stanza. *)
-    ( "inside a subdir",
-      {dune|(subdir gen (rule (action (run %{dep:a.exe}))))|dune},
-      [ [ "a.exe" ] ] );
-    (* What `sites` makes no site of, this makes no entry of: a build-time action of a stanza that
-       is not a test, a rule or an alias. *)
+      [ "rule{a.exe}"; "rule{a.exe}" ] );
+    (* A chdir moves the process, and `sites` emits one site per working directory because each
+       resolves a different config -- so the same executable under two chdirs is two entries. *)
+    ( "a chdir names where it runs",
+      {dune|(rule (action (chdir ../sibling (run %{dep:a.exe}))))|dune},
+      [ "rule{../sibling:a.exe}" ] );
+    ( "one executable under two chdirs is two entries",
+      {dune|(rule (action (progn (chdir d1 (run %{dep:a.exe})) (chdir d2 (run %{dep:a.exe})))))|dune},
+      [ "rule{d1:a.exe d2:a.exe}" ] );
+    ( "nested chdirs compose",
+      {dune|(rule (action (chdir a (chdir b (run %{dep:x.exe})))))|dune},
+      [ "rule{a/b:x.exe}" ] );
+    ("an alias runs things too", {dune|(alias (action (run %{dep:a.exe})))|dune}, [ "alias{a.exe}" ]);
+    ("a test's custom action", {dune|(test (name t) (action (run %{dep:helper.exe})))|dune}, [ "test{helper.exe}" ]);
+    (* What `sites` makes no site of, this makes no entry of. *)
     ( "a library's preprocessor is not a test-running rule",
       {dune|(library (name l) (preprocess (action (run %{dep:pp.exe} x))))|dune},
-      [] );
+      [ "library{}" ] );
     ( "nor is an executable's",
       {dune|(executable (name e) (preprocess (action (run %{dep:pp.exe}))))|dune},
-      [] );
-    (* What it declines to read, each because the text alone does not say what runs: all of these
-       under-report, which is the safe direction for a floor. *)
-    ("a tool on PATH is not ours", {dune|(rule (action (run python3 x.py)))|dune}, []);
-    ("the test pform", {dune|(test (name t) (action (run %{test} --flag)))|dune}, []);
-    ("a shell line", {dune|(rule (action (bash "./probe.exe")))|dune}, []);
-    ("a name bound by a dep", {dune|(rule (deps (:pp pp.exe)) (action (run %{pp})))|dune}, []);
-    ("an executable only depended on", {dune|(rule (deps %{dep:probe.exe}))|dune}, []);
-    ("one named in a comment", {dune|; (run %{dep:probe.exe})|dune}, []);
-    ("one inside a string", {dune|(rule (action (echo "(run %{dep:probe.exe})")))|dune}, []);
+      [ "executable{}" ] );
+    (* Declined because the text alone does not say what they resolve to: all under-report, which is
+       the safe direction for a floor. *)
+    ("the test pform", {dune|(test (name t) (action (run %{test} --flag)))|dune}, [ "test{}" ]);
+    ("a shell line", {dune|(rule (action (bash "./probe.exe")))|dune}, [ "rule{}" ]);
+    ("a name bound by a dep", {dune|(rule (deps (:pp pp.exe)) (action (run %{pp})))|dune}, [ "rule{}" ]);
+    (* Nor one behind a `./`, which is an explicit path in form only: what it names is in the deps,
+       not in the text. *)
+    ( "nor one behind a ./",
+      {dune|(rule (deps (:pp pp.exe)) (action (run ./%{pp} --impl x)))|dune},
+      [ "rule{}" ] );
+    ("an executable only depended on", {dune|(rule (deps %{dep:probe.exe}))|dune}, [ "rule{}" ]);
+    ("one named in a comment", {dune|(rule (action (progn)))
+; (run %{dep:probe.exe})|dune}, [ "rule{}" ]);
+    ( "one inside a string",
+      {dune|(rule (action (echo "(run %{dep:probe.exe})")))|dune},
+      [ "rule{}" ] );
   ]
 
 let () =
@@ -551,13 +559,8 @@ let () =
           []
       in
       check name expected found);
-  List.iter head_occurrence_cases ~f:(fun (name, head, source, expected) ->
-      let found = Scan.head_occurrences source ~head in
-      if found = expected then printf "ok: head occurrences -- %s\n" name
-      else fail "head occurrences -- %s: expected %d `(%s`, found %d" name expected head found);
-  List.iter run_executable_cases ~f:(fun (name, source, expected) ->
-      let render lists = List.map lists ~f:(fun l -> "[" ^ String.concat ~sep:" " l ^ "]") in
-      check ("run executables -- " ^ name) (render expected) (render (Scan.run_executables source)));
+  List.iter raw_stanza_cases ~f:(fun (name, source, expected) ->
+      check ("raw stanzas -- " ^ name) expected (List.map (Scan.raw_stanzas source) ~f:render_raw));
   List.iter path_rewriting_cases ~f:(fun (name, source, expected) ->
       check ("path-rewriting stanzas -- " ^ name) expected (Scan.path_rewriting_stanzas source));
   List.iter declared_paths_cases ~f:(fun (name, source, expected) ->

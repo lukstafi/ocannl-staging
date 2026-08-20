@@ -69,36 +69,37 @@ ok: a subdir's stanzas are the same kinds of site
 ok: a nested subdir names the path it applies to
 ok: stanzas outside the subdir keep the dune file's own directory
 ok: stanzas are reported in file order
-ok: head occurrences -- a stanza with that head
-ok: head occurrences -- two of them
-ok: head occurrences -- a plural stanza counts once
-ok: head occurrences -- a field, not only a stanza
-ok: head occurrences -- a longer head is a different head
-ok: head occurrences -- nor is it the head when it is an argument
-ok: head occurrences -- a head inside a line comment is not there
-ok: head occurrences -- nor is one inside a string
-ok: head occurrences -- an escaped quote does not end the string early
-ok: head occurrences -- a comment does not swallow what follows it
-ok: run executables -- a dep pform
-ok: run executables -- a bare path
-ok: run executables -- a path elsewhere keeps it
-ok: run executables -- the exe pform too
-ok: run executables -- a comma in the path is part of it
-ok: run executables -- several in one action, one stanza
-ok: run executables -- the same one twice in a stanza is one name
-ok: run executables -- the same one in two stanzas is two entries
-ok: run executables -- an alias stanza runs things too
-ok: run executables -- a test's custom action
-ok: run executables -- inside a subdir
-ok: run executables -- a library's preprocessor is not a test-running rule
-ok: run executables -- nor is an executable's
-ok: run executables -- a tool on PATH is not ours
-ok: run executables -- the test pform
-ok: run executables -- a shell line
-ok: run executables -- a name bound by a dep
-ok: run executables -- an executable only depended on
-ok: run executables -- one named in a comment
-ok: run executables -- one inside a string
+ok: raw stanzas -- a test stanza
+ok: raw stanzas -- two of them
+ok: raw stanzas -- a plural stanza is one stanza
+ok: raw stanzas -- a build profile named test is not a test stanza
+ok: raw stanzas -- a stanza inside a subdir is a stanza
+ok: raw stanzas -- a library with inline tests
+ok: raw stanzas -- a library without
+ok: raw stanzas -- an inline_tests nested deeper is not the library's field
+ok: raw stanzas -- a rule running a dep pform
+ok: raw stanzas -- a bare path
+ok: raw stanzas -- an extensionless explicit path
+ok: raw stanzas -- but a bare word is a tool on PATH
+ok: raw stanzas -- a path elsewhere keeps its path
+ok: raw stanzas -- a comma in the path is part of it
+ok: raw stanzas -- several in one stanza
+ok: raw stanzas -- the same one twice in a stanza is one entry
+ok: raw stanzas -- the same one in two stanzas is two stanzas
+ok: raw stanzas -- a chdir names where it runs
+ok: raw stanzas -- one executable under two chdirs is two entries
+ok: raw stanzas -- nested chdirs compose
+ok: raw stanzas -- an alias runs things too
+ok: raw stanzas -- a test's custom action
+ok: raw stanzas -- a library's preprocessor is not a test-running rule
+ok: raw stanzas -- nor is an executable's
+ok: raw stanzas -- the test pform
+ok: raw stanzas -- a shell line
+ok: raw stanzas -- a name bound by a dep
+ok: raw stanzas -- nor one behind a ./
+ok: raw stanzas -- an executable only depended on
+ok: raw stanzas -- one named in a comment
+ok: raw stanzas -- one inside a string
 ok: path-rewriting stanzas -- an env stanza setting PATH
 ok: path-rewriting stanzas -- one setting something else to PATH
 ok: path-rewriting stanzas -- an env stanza that touches neither

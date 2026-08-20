@@ -26,20 +26,21 @@
    a promote indistinguishable from blessing a real regression here -- and one hot line collected a
    textual conflict from every parallel branch (gh-ocannl-665). The tallies were the "the scan did
    not go blind" signal, which survives in two churn-free forms: a directory that stops being read
-   loses its kinds from its line below, and within a directory a SECOND reader of the raw text --
-   sharing none of the sexp walk's machinery -- puts a floor under it. `Scan.head_occurrences`
-   counts the `(test`/`(tests`/`(inline_tests` forms, and `Scan.run_executables` names the
-   executables each stanza runs; the walk must place at least as many of each. The exact numbers go
-   to stderr, which a `(test)` stanza does not diff.
+   loses its kinds from its line below, and within a directory `Scan.raw_stanzas` -- a second reader
+   of the raw text, sharing none of the sexp walk's machinery -- puts a floor under it: the stanzas
+   it finds, and what each of them runs, are what the walk must place at least as many of. The exact
+   numbers go to stderr, which a `(test)` stanza does not diff.
 
    The two floors compare differently, and the asymmetry is forced by how the walk groups what it
-   finds. Tests compare as COUNTS: one site per name, so more forms than sites is a hole. Rules
-   compare as a MULTISET OVER STANZAS, because the walk emits one site per distinct executable per
-   stanza -- a `progn` running one executable twice is one site, so counting occurrences would fail
-   a correct scan, while a flat set would let five of the six rules that each run
-   `profile_precedence.exe` be dropped with the sixth answering for all six (Codex P2, round 2).
-   Those comparisons read a site's structured `executables`, never its display `name`, which joins
-   several with ", " and so cannot be taken apart again where a path contains a comma.
+   finds. Tests compare as COUNTS: one site per name, so more stanzas than sites is a hole. Rules
+   compare as a MULTISET OVER (working directory, executable), which is the pair the walk makes one
+   site of -- coarser fails to detect, finer fails a correct scan. A flat set would let five of the
+   six rules that each run `profile_precedence.exe` be answered for by the sixth; dropping the
+   directory would do the same to one rule running an executable under two `chdir`s, whose two sites
+   resolve two different configs; counting raw occurrences would fail a `progn` that runs one
+   executable twice, which is one site (Codex P2, rounds 1 to 3). Those comparisons read a site's
+   structured `executables`, never its display `name`, which joins several with ", " and so cannot
+   be taken apart again where a path contains a comma.
 
    An `(executable)` no rule runs is structurally not a site and needs no exemption: that is how the
    diagnostic and tutorial executables (`bench_circles_step`, `gpt2_generate`, the `@slow` runners'
@@ -283,18 +284,23 @@ let () =
         |> List.dedup_and_sort ~compare:String.compare
         |> String.concat ~sep:", "
       in
-      (* The floor the raw text puts under the sexp walk: every `(test …)` and `(tests …)` form is
-         at least one test site, every `(inline_tests …)` field at least one inline-test library.
-         Read by [Scan.head_occurrences], which shares nothing with the walk, so a walk that stops
-         seeing stanzas is caught here instead of quietly reporting a smaller number. Sites are
-         counted including exempt ones -- an exemption is about the config dependency, not about
-         whether the stanza was seen. *)
+      (* The floor the raw text puts under the sexp walk, read by [Scan.raw_stanzas]: a second
+         reader that shares none of the walk's machinery, so a walk that stops seeing stanzas is
+         caught here instead of quietly reporting a smaller number. Sites are counted including
+         exempt ones -- an exemption is about the config dependency, not about whether the stanza
+         was seen. *)
+      let raw = Scan.raw_stanzas content in
       let seen kind = List.count described ~f:(fun (_, k, _, _) -> Poly.equal k kind) in
-      let floor head = Scan.head_occurrences content ~head in
       let floors =
         [
-          (seen Scan.Test, floor "test" + floor "tests", "test stanzas");
-          (seen Scan.Inline_tests, floor "inline_tests", "inline-test libraries");
+          ( seen Scan.Test,
+            List.count raw ~f:(fun r ->
+                List.mem [ "test"; "tests" ] r.Scan.raw_head ~equal:String.equal),
+            "test stanzas" );
+          ( seen Scan.Inline_tests,
+            List.count raw ~f:(fun r ->
+                String.equal r.Scan.raw_head "library" && r.Scan.raw_inline_tests),
+            "inline-test libraries" );
         ]
       in
       List.iter floors ~f:(fun (seen, floor, what) ->
@@ -305,34 +311,36 @@ let () =
                  "%s: the raw text shows %d %s but the scan placed only %d -- it is reading the \
                   file with a hole in it"
                  dune_file floor what seen)));
-      (* The rules get the same guarantee, as a SET rather than a count: [sites] reports one site
-         per distinct executable per stanza, so a `progn` running one executable twice is two
-         occurrences and one site, and a count would fail a correct scan (Codex P2, round 1). Every
-         executable the raw text runs must be one the walk named -- which catches a regression in
-         `commands_in` / `classify_command` / `sites_for` that drops a rule, the failure the old
-         per-directory tally was the only guard against. *)
-      (* Executables are compared as a MULTISET over stanzas, not as a flat set: six separate rules
-         running one executable need six placements, and requiring only that the name appear
-         somewhere would let five of them be dropped with the sixth answering for all six (Codex P2,
-         round 2). Read from the site's structured [executables] rather than from its display name,
-         which joins them with ", " and so cannot be taken apart again where a path contains a
-         comma. *)
-      let occurrences lists =
-        List.concat lists
-        |> List.fold ~init:(Map.empty (module String)) ~f:(fun counts exe ->
-            Map.update counts exe ~f:(fun n -> 1 + Option.value n ~default:0))
+      (* The rules are compared as a MULTISET over (working directory, executable), which is the
+         pair [sites] makes one site of. Neither coarser comparison works: a flat set would let five
+         of the six rules that each run `profile_precedence.exe` be dropped with the sixth answering
+         for all six, and dropping the directory would do the same to one rule running an executable
+         under two `chdir`s, whose two sites resolve two different configs (Codex P2, rounds 2 and
+         3). Read from the site's structured [executables] rather than from its display name, which
+         joins several with ", " and so cannot be taken apart again where a path contains a comma. *)
+      let occurrences pairs =
+        List.fold pairs ~init:(Map.empty (module String)) ~f:(fun counts (cwd, exe) ->
+            let key = cwd ^ "\000" ^ exe in
+            Map.update counts key ~f:(fun n -> 1 + Option.value n ~default:0))
       in
-      let placed = occurrences (List.map described ~f:(fun (site, _, _, _) -> site.Scan.executables)) in
-      let run_floor = Scan.run_executables content in
-      Map.iteri (occurrences run_floor) ~f:(fun ~key:exe ~data:in_text ->
-          let in_walk = Option.value (Map.find placed exe) ~default:0 in
+      let placed =
+        occurrences
+          (List.concat_map described ~f:(fun (site, _, _, _) ->
+               List.map site.Scan.executables ~f:(fun exe -> (site.Scan.cwd, exe))))
+      in
+      let run_floor = List.concat_map raw ~f:(fun r -> r.Scan.raw_runs) in
+      Map.iteri (occurrences run_floor) ~f:(fun ~key ~data:in_text ->
+          let in_walk = Option.value (Map.find placed key) ~default:0 in
           if in_walk < in_text then (
             Int.incr floor_holes;
+            let cwd, exe = String.lsplit2_exn key ~on:'\000' in
             fail
               (Printf.sprintf
-                 "%s: the raw text runs `%s` in %d %s, and the scan placed it in only %d -- it is \
+                 "%s: the raw text runs `%s`%s in %d %s, and the scan placed it in only %d -- it is \
                   reading the file with a hole in it"
-                 dune_file exe in_text
+                 dune_file exe
+                 (if String.is_empty cwd then "" else " in " ^ cwd)
+                 in_text
                  (if in_text = 1 then "stanza" else "stanzas")
                  in_walk)));
       if List.exists floors ~f:(fun (_, floor, _) -> floor > 0) || not (List.is_empty run_floor)
@@ -360,8 +368,9 @@ let () =
           "  %s: %d tests (floor %d), %d inline-test libraries (floor %d), %d exe-running rules \
            (%d named in the text), %d exempt"
           dune_file (tally Scan.Test)
-          (floor "test" + floor "tests")
-          (tally Scan.Inline_tests) (floor "inline_tests")
+          (List.nth_exn (List.map floors ~f:(fun (_, f, _) -> f)) 0)
+          (tally Scan.Inline_tests)
+          (List.nth_exn (List.map floors ~f:(fun (_, f, _) -> f)) 1)
           (tally Scan.Runs_executable) (List.length run_floor) (List.length exempted)
         :: !inventory);
   let stale =
