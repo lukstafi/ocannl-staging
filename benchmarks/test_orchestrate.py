@@ -197,14 +197,17 @@ class PrecisionLegTest(unittest.TestCase):
 class ProvenanceTest(unittest.TestCase):
     """gh-ocannl-644: a tuned cell's result says which pass timed it."""
 
-    def tuned(self, searched):
+    def tuned(self, searched, searches=0, replays=0):
         r = result("ocannl", "hip", "tuned", [2.3, 2.2, 2.1])
         if searched is not None:
             r["searched"] = searched
+            r["tune"] = {
+                "shipped": "A", "searches": searches, "replays": replays, "arms": []
+            }
         return r
 
     def test_a_replay_is_the_compliant_case(self):
-        replay = self.tuned(False)
+        replay = self.tuned(False, replays=2)
 
         self.assertEqual(orchestrate.provenance_check([replay]), [])
         self.assertEqual(replay["provenance"], "REPLAY")
@@ -212,28 +215,47 @@ class ProvenanceTest(unittest.TestCase):
     def test_search_pass_timings_are_a_violation(self):
         # The failure this exists to catch: both passes emit the same framework/backend/variant/
         # precision, so before `searched` a report could quote pass-1 numbers indefinitely.
-        searching = self.tuned(True)
+        searching = self.tuned(True, searches=2)
 
         self.assertEqual(orchestrate.provenance_check([searching]), [searching])
         self.assertEqual(searching["provenance"], "SEARCH-PASS")
+
+    def test_one_classifier_reads_searched_for_every_consumer(self):
+        # The round-1 and round-2 findings were the same shape — a three-valued fact read through
+        # a boolean, wrong in a different place each time. There is now one reading of it, and the
+        # gate, the `pass` column and the carried-over compile_s label all go through it.
+        tune = lambda searches, replays: {  # noqa: E731
+            "shipped": "A", "searches": searches, "replays": replays, "arms": []
+        }
+        searched = {"searched": True, "tune": tune(2, 0)}
+        replay = {"searched": False, "tune": tune(0, 2)}
+        no_search = {"searched": False, "tune": tune(0, 0)}
+
+        self.assertEqual(orchestrate.search_provenance(searched), "SEARCHED")
+        self.assertEqual(orchestrate.search_provenance(replay), "REPLAY")
+        self.assertEqual(orchestrate.search_provenance(no_search), "NO-SEARCH")
+        self.assertEqual(orchestrate.search_provenance({"searched": None}), "UNKNOWN")
+        # No tune object: `searched: false` alone cannot separate a replay from a cell that
+        # searched nothing, and guessing either way has already been a bug.
+        self.assertEqual(orchestrate.search_provenance({"searched": False}), "UNKNOWN")
+
+    def test_only_a_real_replay_labels_the_carried_over_compile_cost_cached(self):
+        # A search pass under autotune_search=false hands over the cost of compiling the untuned
+        # default; calling that "(cached)" would claim a schedule cache it never touched.
+        self.assertEqual(orchestrate.COMPILE_S_NOTE.get("REPLAY"), " (cached)")
+        self.assertEqual(orchestrate.COMPILE_S_NOTE.get("NO-SEARCH"), " (no search)")
+        self.assertIsNone(orchestrate.COMPILE_S_NOTE.get("SEARCHED"))
+        self.assertIsNone(orchestrate.COMPILE_S_NOTE.get("UNKNOWN"))
 
     def test_a_disabled_search_is_neither_a_violation_nor_a_replay(self):
         # gh-ocannl-559's reproducible profile turns the search off: the cell ships the untuned
         # default, having neither searched nor replayed. Gating it would fail BOTH passes of every
         # tuned cell, and calling it a replay would credit the row with a tuned artifact it does
         # not have.
-        cell = self.tuned(False)
-        cell["tune"] = {"shipped": "A", "searches": 0, "replays": 0, "arms": []}
+        cell = self.tuned(False, searches=0, replays=0)
 
         self.assertEqual(orchestrate.provenance_check([cell]), [])
         self.assertEqual(cell["provenance"], "NO-SEARCH")
-
-    def test_a_replay_is_still_a_replay_when_the_arms_report_one(self):
-        cell = self.tuned(False)
-        cell["tune"] = {"shipped": "A", "searches": 0, "replays": 2, "arms": []}
-
-        self.assertEqual(orchestrate.provenance_check([cell]), [])
-        self.assertEqual(cell["provenance"], "REPLAY")
 
     def test_a_runner_without_the_field_is_unknown_not_a_violation(self):
         old = self.tuned(None)
@@ -296,14 +318,20 @@ class RunnerProvenanceProbeTest(unittest.TestCase):
         self.assertIs(bench_common.torch_searched(object(), compiled=False), False)
 
     def test_beam_counts_distinguish_a_search_from_a_kernel_cache_replay(self):
-        self.assertIs(bench_common.tinygrad_searched({"hit": 3, "put": 1}, beam=4), True)
-        self.assertIs(bench_common.tinygrad_searched({"hit": 3, "put": 0}, beam=4), False)
+        self.assertIs(
+            bench_common.tinygrad_searched({"call": 4, "hit": 3, "put": 1}, beam=4), True
+        )
+        self.assertIs(
+            bench_common.tinygrad_searched({"call": 3, "hit": 3, "put": 0}, beam=4), False
+        )
 
     def test_a_probe_that_saw_nothing_says_unknown_rather_than_no(self):
         # The internals moved under the probe. A wrong False is exactly the silent claim the
         # field exists to prevent, so this must not read as "replayed a cache".
         self.assertIsNone(bench_common.tinygrad_searched(None, beam=4))
-        self.assertIsNone(bench_common.tinygrad_searched({"hit": 0, "put": 0}, beam=4))
+        self.assertIsNone(
+            bench_common.tinygrad_searched({"call": 0, "hit": 0, "put": 0}, beam=4)
+        )
 
     def test_torch_reads_the_fx_graph_cache_counters(self):
         class Torch:
@@ -318,6 +346,28 @@ class RunnerProvenanceProbeTest(unittest.TestCase):
         )
         self.assertIsNone(bench_common.torch_searched(Torch(), compiled=True))
         self.assertIsNone(bench_common.torch_searched(object(), compiled=True))
+
+    def test_a_beam_search_that_writes_no_cache_entry_still_counts_as_a_search(self):
+        # CACHELEVEL=0 / IGNORE_BEAM_CACHE: the search runs and touches no cache. Counting cache
+        # traffic alone cannot see it, which is why the probe counts calls too.
+        self.assertIs(bench_common.tinygrad_searched({"call": 4, "hit": 0, "put": 0}, beam=4), True)
+        self.assertIs(bench_common.tinygrad_searched({"call": 4, "hit": 1, "put": 0}, beam=4), True)
+        self.assertIs(bench_common.tinygrad_searched({"call": 4, "hit": 4, "put": 0}, beam=4), False)
+
+    def test_a_bypassed_torch_graph_is_codegen_not_a_replay(self):
+        # A run with more than one graph is mixed: one served from the cache, one the cache
+        # refused, is still a graph compiled in the timing process.
+        class Torch:
+            def __init__(self, **counters):
+                self._dynamo = type(
+                    "d", (), {"utils": type("u", (), {"counters": {"inductor": counters}})}
+                )
+
+        mixed = Torch(fxgraph_cache_hit=3, fxgraph_cache_bypass=1)
+        self.assertIs(bench_common.torch_searched(mixed, compiled=True), True)
+        self.assertIs(
+            bench_common.torch_searched(Torch(fxgraph_cache_bypass=2), compiled=True), True
+        )
 
     def test_the_beam_instrument_counts_only_beam_entries_and_passes_values_through(self):
         stored = {("beam_search", "k1"): "winner"}
@@ -350,7 +400,7 @@ class RunnerProvenanceProbeTest(unittest.TestCase):
             module.diskcache_get("compile", "unrelated")
             module.diskcache_put("compile", "unrelated", "x")
 
-        self.assertEqual(counts, {"hit": 1, "put": 1})
+        self.assertEqual(counts, {"call": 0, "hit": 1, "put": 1})
         self.assertIn(("get", "compile", "unrelated"), calls)
 
     def test_an_uninstrumentable_tinygrad_is_not_an_error(self):

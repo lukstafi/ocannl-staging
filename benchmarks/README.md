@@ -362,9 +362,12 @@ than the driver (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION` at module load), run it wi
   of both: it shipped the untuned default, having neither searched nor replayed, and the report
   says `no search` rather than crediting the row with a tuned artifact it does not have. `orchestrate.py` gates on
   it — a tuned cell whose step times came from a searching process fails the **PROVENANCE
-  GATE** and is marked `SEARCH PASS` in the report's `pass` column — and stamps
-  `search_pass_searched`, so a `compile_s` that was itself a cache replay reads as
-  `(cached)` rather than as a from-scratch search cost. Before this, both passes emitted an
+  GATE** and is marked `SEARCH PASS` in the report's `pass` column — and stamps the search
+  pass's own verdict as `search_pass`, so a `compile_s` carried over from a process that
+  replayed the cache reads as `(cached)`, and one from a process that searched nothing at all as
+  `(no search)`, rather than either passing as a from-scratch search cost. One classifier
+  (`search_provenance`) reads `searched` for all three consumers: the fact is three-valued, and
+  every boolean spelling of it has been wrong somewhere. Before this, both passes emitted an
   identical `framework`/`backend`/`variant`/`precision`, and the only trace of the difference was
   a `cache hit:` line on the stderr of a run whose output a successful cell discards:
   `report-gh612-hip.md` quoted pass-1 step times for fifteen revisions, and it took a reviewer

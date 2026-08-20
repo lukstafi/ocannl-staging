@@ -334,6 +334,42 @@ def check_fixture_digests(fixtures, digests_path=None, allow_unpinned=False):
     return shas
 
 
+def search_provenance(result):
+    """What one OCANNL process did about searching: SEARCHED, REPLAY, NO-SEARCH or UNKNOWN.
+
+    The single reading of `searched`, shared by every consumer, because the fact is three-valued
+    and each boolean spelling of it has been wrong in a different place (gh-ocannl-644 review):
+    a process can run a search, replay cached winners, or — under `autotune_search=false`, the
+    reproducible profile — do neither and ship the untuned default. `not searched` therefore does
+    not mean "replayed", which is what a `(cached)` label on its compile cost would claim.
+
+    The `tune` object's totals are the evidence separating the second case from the third: an
+    OCANNL cell that tuned anything reports them, and without them there is nothing to tell those
+    two apart with, so the answer is UNKNOWN rather than a guess.
+    """
+    searched = result.get("searched")
+    if searched is None:
+        return "UNKNOWN"
+    if searched:
+        return "SEARCHED"
+    tune = result.get("tune")
+    if not tune:
+        return "UNKNOWN"
+    return "NO-SEARCH" if not tune.get("searches") and not tune.get("replays") else "REPLAY"
+
+
+# How a two-pass cell's own verdict maps to the report's `pass` column: only a searching process
+# is a protocol violation, and only a genuine replay may call the carried-over compile cost cached.
+TWO_PASS_VERDICT = {
+    "SEARCHED": "SEARCH-PASS",
+    "REPLAY": "REPLAY",
+    "NO-SEARCH": "NO-SEARCH",
+    "UNKNOWN": "UNKNOWN",
+}
+# What a search pass's verdict says about the `compile s` carried over from it.
+COMPILE_S_NOTE = {"REPLAY": " (cached)", "NO-SEARCH": " (no search)"}
+
+
 def provenance_check(results):
     """Annotate each searching cell with which process produced its step times (gh-ocannl-644).
 
@@ -366,14 +402,10 @@ def provenance_check(results):
         if searched is None:
             r["provenance"] = "UNKNOWN"
         elif two_pass:
-            tune = r.get("tune") or {}
-            if searched:
-                r["provenance"] = "SEARCH-PASS"
+            verdict = search_provenance(r)
+            r["provenance"] = TWO_PASS_VERDICT[verdict]
+            if verdict == "SEARCHED":
                 violations.append(r)
-            elif tune and not tune.get("searches") and not tune.get("replays"):
-                r["provenance"] = "NO-SEARCH"
-            else:
-                r["provenance"] = "REPLAY"
         else:
             r["provenance"] = "SAME-PROCESS" if searched else "CACHED"
     return violations
@@ -433,8 +465,9 @@ def report(results, out_dir, unavailable=()):
                 "default. For a tinygrad `beam` or a `torch.compile` cell, "
                 "which search in the timing process by protocol: `same-process` searched here, "
                 "`cached` replayed its framework's own cache (so its `compile s` is a replay cost). "
-                "A `compile s` marked `(cached)` is the same statement about a tuned cell's "
-                "carried-over search pass.\n"
+                "A tuned cell's `compile s` carries the same statement about the search pass it "
+                "came from: `(cached)` for one that replayed the schedule cache, `(no search)` "
+                "for one that searched nothing at all.\n"
             )
         header = "| framework | backend | variant | precision | step p50 ms | p10 | p90 | queued ms | compile s |"
         rule = "|---|---|---|---|---|---|---|---|---|"
@@ -460,8 +493,7 @@ def report(results, out_dir, unavailable=()):
                 tps = r.get("tokens_per_step")
                 tokens = f" {tps * 1000 / s['p50']:,.0f} |" if tps else " |"
             compile_s = f"{r['compile_s']:.2f}"
-            if r.get("search_pass_searched") is False:
-                compile_s += " (cached)"
+            compile_s += COMPILE_S_NOTE.get(r.get("search_pass"), "")
             provenance = ""
             if with_provenance:
                 provenance = " %s |" % PROVENANCE_MARK.get(r.get("provenance"), "—")
@@ -667,17 +699,18 @@ def main():
                             if pass1 is None:
                                 failures.append(f"{label} (search pass)")
                                 continue
-                            if pass1.get("searched") is False:
-                                # A warm autotune_cache makes pass 1 a replay too, so the
-                                # compile_s carried over is a replay cost, not the search cost the
-                                # report calls it. Legitimate (the README says to wipe the cache
-                                # when the number must be from scratch) but not derivable from the
-                                # number itself — stamped so the report can say so.
-                                print("    search pass hit the schedule cache: compile_s is a "
-                                      "replay cost, not a from-scratch search", flush=True)
+                            # What the search pass actually did, which is not derivable from the
+                            # compile_s it hands over: a warm autotune_cache makes it a replay, and
+                            # autotune_search=false makes it neither a search nor a replay. Both
+                            # are legitimate, and both would otherwise be published as a search
+                            # cost. Stamped so the report can say which.
+                            pass1_verdict = search_provenance(pass1)
+                            if pass1_verdict != "SEARCHED":
+                                print(f"    search pass verdict {pass1_verdict}: its compile_s is "
+                                      "not a from-scratch search cost", flush=True)
                             collect(label, cmd, env=env, cwd=HERE,
                                     override={**ident, "compile_s": pass1["compile_s"],
-                                              "search_pass_searched": pass1.get("searched")})
+                                              "search_pass": pass1_verdict})
                         else:
                             collect(label, cmd, env=env, cwd=HERE, override=ident)
         if "pytorch" in args.only:
