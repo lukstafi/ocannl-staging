@@ -297,10 +297,49 @@ jobs:
     # the runner's health would cost three days of signal for nothing. It is
     # last so that the converse cannot happen either -- a broken runner must
     # not abort the sweep's only Windows test coverage.
+    #
+    # Git Bash by absolute path, NOT `shell: bash` (gh-ocannl-662). `shell: bash`
+    # resolves whichever bash PATH offers first, and by this point in the job
+    # setup-ocaml has prepended opam's cygwin -- so the step ran under a Cygwin
+    # bash, where two things went wrong at once. It ships no perl, which carries
+    # the flock, the cap and the `last` pointer, so the first command refused
+    # with exit 2 (as a phantom lock conflict, until the preflight in that script
+    # was taught to say so). And a Cygwin runtime is not what the branches above
+    # are: `uname -o` reports Cygwin there, so `opam-env.sh` skips the MSYS path
+    # rewrite and `ps` carries the columns whose absence the liveness probe
+    # degrades for -- the step would have exercised neither, while its name
+    # claimed both. The path is fixed on every windows runner image.
+    #
+    # `Progra~1`, not `Program Files`, and the YAML quotes do not save it: the
+    # runner parses a custom `shell:` by splitting the string at the FIRST space
+    # into command and arguments, with no quote handling
+    # (ScriptHandlerHelpers.ParseShellOptionString), so the long form selects
+    # `C:\Program` as the executable and the step dies before bash starts -- on
+    # every Windows run, whatever the build did (Codex P1). The 8.3 alias is the
+    # space-free spelling of the same file.
+    #
+    # `bin\bash.exe`, NOT `usr\bin\bash.exe`: the former is Git's launcher, and
+    # it prepends its own `/mingw64/bin:/usr/bin` to whatever PATH it inherits.
+    # That is what makes choosing the executable sufficient -- `uname`, `perl`
+    # and the rest resolve to Git's copies even though setup-ocaml has put
+    # opam's cygwin `bin` on the inherited PATH, verified by launching it with
+    # exactly that PATH. The raw `usr\bin\bash.exe` provisions nothing and would
+    # need the prefix set by hand.
     - name: Smoke tools/test-run.sh (Git Bash)
       if: ${{ !cancelled() && runner.os == 'Windows' }}
-      shell: bash
+      shell: 'C:\Progra~1\Git\bin\bash.exe --noprofile --norc -eo pipefail {0}'
       run: |
+        # The shell pin above is the whole reason the branches below are the MSYS
+        # ones, and a shell declaration is exactly the kind of line a later edit
+        # "simplifies" back to `shell: bash`. `uname -o` is what tells the two
+        # runtimes apart (both bashes report OSTYPE=cygwin, MSYS2 being a cygwin
+        # fork), and it is the same question `tools/opam-env.sh` asks before
+        # rewriting paths -- so assert it here rather than discovering from a
+        # green step that nothing it names was exercised.
+        [ "$(uname -o)" = Msys ] || {
+          echo "::error::smoke step must run under Git Bash; uname -o says $(uname -o)"
+          exit 1
+        }
         expect() { # <expected-exit> <label> <command...>
           local want=$1 label=$2 got=0
           shift 2
