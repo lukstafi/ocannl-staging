@@ -436,6 +436,16 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   and extent guards for symbolic extents (gh-ocannl-490), both before virtualization. When adding a
   pass that captures a subtree for later replay, ask what context the subtree was captured FROM —
   a walk of the subtree alone cannot see it.
+- **The same question for loops: a candidate is captured at the outermost `For_loop` whose index
+  occurs in its assignment indices** (`track_symbol` / `reverse_node_map`), so a reduction loop
+  BELOW that point is part of the stored computation (the ordinary `x[t] += a[s]`, priced by
+  `virtualize_max_inline_reduction`) while a repetition loop ABOVE it is not — and a symbol-free
+  (all-`Fixed_idx`) index map has no capture site at all. Such a candidate is rejected as
+  `Non_virtual 147` (gh-ocannl-674); width-1 loops stay exempt, since replaying one iteration once
+  is exact. Two arms hide most of this shape and neither is a guarantee: an array reduction
+  `x[0] += a[s]` is rejected because the sibling read escapes (`Non_virtual 9`), and an accumulator
+  read more than `virtualize_max_visits` times is capped (`Non_virtual 1`) — a flippable policy
+  prior, decided in `decide_placements` before any legality question is asked.
 - Big-reduction producers are forced `Never_virtual` by `virtualize_max_inline_reduction`
   (default 16) — remember it when a structural expectation assumes inlining.
 - Wide-fanin producers are forced `Never_virtual 41` by `virtualize_max_inline_fanin` (default 8,

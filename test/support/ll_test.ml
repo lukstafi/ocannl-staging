@@ -228,6 +228,21 @@ let known_virtual (o : LL.optimized) tn =
 let known_non_virtual (o : LL.optimized) tn =
   Tn.Placements.known_non_virtual o.LL.optimize_ctx.placements tn
 
+(** The [Non_virtual] code the virtualizer recorded for [tn], as the leading factor of its
+    placement's provenance.
+
+    Provenances COMPOSE: {!Ir.Tnode.Placements.default_to_most_local} folds the prior provenance in
+    as [1000 * prior + its own] when it resolves a [Never_virtual] decision into a concrete
+    placement, so the rejection code is not the whole number. Stripping the trailing factors is
+    sound only while every code is below 1000, which they are — {!Ir.Low_level}'s two [Non_virtual]
+    exceptions use disjoint two- and three-digit codes, which is also what lets a reader tell the
+    store-time verdicts from the consumption-time ones. [None] means no decision was recorded (the
+    node is still undecided, which after a full {!optimize} means it was never a candidate). *)
+let rejection_code (o : LL.optimized) tn =
+  Option.map (Tn.Placements.get o.LL.optimize_ctx.placements tn) ~f:(fun (_, prov) ->
+      let rec strip p = if p >= 1000 then strip (p / 1000) else p in
+      strip prov)
+
 (** {1 The executed leg} *)
 
 (* One root context per executable: [Context.compile] forks the lineage for each compile, so sibling

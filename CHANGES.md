@@ -185,6 +185,21 @@
 
 ### Fixed
 
+- **A candidate's computation is no longer inlined without an enclosing repetition loop**
+  (gh-ocannl-674), the `For_loop` half of the defect below. `virtual_llc` captures a candidate's
+  computation at the outermost loop whose index appears in the candidate's assignment indices, so a
+  reduction loop BELOW that point rides along inside the stored subtree — the ordinary
+  `x[t] += a[s]` shape, whose replay cost `virtualize_max_inline_reduction` prices — while a
+  repetition loop ABOVE it does not, and a symbol-free (fixed-index) map makes no loop a capture
+  site at all. `inline_computation` then spliced the setter once and the fold lost every iteration
+  but one: `for k in 0..1: for t: x[t] += 1.` read back 1 per cell instead of 2. The walk now
+  carries the enclosing loops and rejects such a candidate as `Non_virtual 147`. Loops of width 1
+  stay exempt (replaying one iteration once is exact), and the array spelling of the same reduction
+  was already rejected for an unrelated reason — the sibling read `a[s]` escapes the captured
+  statement — so what reached the miscompile was a reduction whose right-hand side does not mention
+  the reduction symbol, with the accumulator read few enough times to stay under
+  `virtualize_max_visits`.
+
 - **A guarded setter's computation is no longer inlined without its guard** (gh-ocannl-651). The
   `Low_level.t` doc's v1 contract — a conditional write is not a definite write, so virtualization
   treats guarded computations as non-inlineable — was enforced for a guard INTERIOR to the captured
