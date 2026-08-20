@@ -1888,6 +1888,13 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
               ("compute_capability_major", [%sexp_of: int] attributes.compute_capability_major);
               ("compute_capability_minor", [%sexp_of: int] attributes.compute_capability_minor);
               ("max_threads_per_block", [%sexp_of: int] attributes.max_threads_per_block);
+              (* The launch-dimension limits the schedule layer gates against: [max_grid_size]
+                 feeds [hardware_limits.max_grid_yz], and [max_threads_dim] bounds a workgroup
+                 per-dimension (beyond the [max_threads_per_block] product). Surfaced so a run on
+                 hardware can read back what the gates compare against -- otherwise the only
+                 evidence a query is not degenerate is that nothing got rejected. *)
+              ("max_grid_size", [%sexp_of: int * int * int] attributes.max_grid_size);
+              ("max_threads_dim", [%sexp_of: int * int * int] attributes.max_threads_dim);
               ("unified_addressing", [%sexp_of: bool] attributes.unified_addressing);
             ]
           in
