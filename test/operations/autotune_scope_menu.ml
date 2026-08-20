@@ -170,28 +170,62 @@ let () =
          | _ -> false)));
   (* The executed leg: every proposal, replayed through the cache's saved form the way a beam
      candidate is, must compile and reproduce the serial result. *)
-  let claim_compiles =
-    "every menu proposal on the minted form compiles and matches the serial result"
+  let parity_leg ~claim ~saved_prefix menu_ops =
+    cc_only claim (fun () ->
+        let all_ok =
+          List.for_all menu_ops ~f:(fun op ->
+              let saved = saved_prefix @ [ op ] in
+              let cctx = Context.auto () in
+              let cctx, croutine =
+                Context.compile
+                  ~lowered_transform:(fun o ->
+                    let canon = SC.canonicalize ~static_indices:[] ~with_placements:false o in
+                    let sched, _reg = SC.of_saved canon saved in
+                    Sched.apply sched o)
+                  cctx comp Idx.Empty
+              in
+              let cctx = Context.run cctx croutine in
+              let got = Context.get_values cctx out.Tensor.value in
+              let ok = Array.for_all2_exn got reference ~f:Float.equal in
+              if not ok then
+                Stdio.eprintf "menu proposal diverges: %s\n"
+                  (Sexp.to_string_hum (SC.sexp_of_saved_optop op));
+              ok)
+        in
+        p claim (all_ok && not (List.is_empty menu_ops)))
   in
-  cc_only claim_compiles (fun () ->
-      let all_ok =
-        List.for_all menu ~f:(fun op ->
-            let saved = saved_unroll @ [ op ] in
-            let cctx = Context.auto () in
-            let cctx, croutine =
-              Context.compile
-                ~lowered_transform:(fun o ->
-                  let canon = SC.canonicalize ~static_indices:[] ~with_placements:false o in
-                  let sched, _reg = SC.of_saved canon saved in
-                  Sched.apply sched o)
-                cctx comp Idx.Empty
-            in
-            let cctx = Context.run cctx croutine in
-            let got = Context.get_values cctx out.Tensor.value in
-            let ok = Array.for_all2_exn got reference ~f:Float.equal in
-            if not ok then
-              Stdio.eprintf "menu proposal diverges: %s\n"
-                (Sexp.to_string_hum (SC.sexp_of_saved_optop op));
-            ok)
-      in
-      p claim_compiles (all_ok && not (List.is_empty menu)))
+  parity_leg ~claim:"every menu proposal on the minted form compiles and matches the serial result"
+    ~saved_prefix:saved_unroll menu;
+  (* === Partition: segments after the first start at their breakpoint (absolute ranges), and only
+     [Split]'s index arithmetic needs a zero-origin loop — the other families must keep proposing
+     for them (Codex P2 on PR #403). Partitioning the innermost reduction axis mints one scope
+     spanning both segment loops. *)
+  let pt, segment_syms = Sched.partition ~axis:t ~breakpoints:[ nt / 2 ] in
+  let saved_pt, pt_registry = SC.to_saved (SC.base_registry pre_canon) [ pt ] in
+  let pt_post = Sched.apply [ pt ] (hermetic pre) in
+  let pt_menu = Autotune.menu ~is_cpu:true ~is_gpu:false ~limits ~registry:pt_registry pt_post in
+  let seg1, seg2 =
+    match segment_syms with [ a; b ] -> (a, b) | _ -> assert false
+  in
+  let rseg1 = Option.value_exn (SC.resolve pt_registry seg1) in
+  let rseg2 = Option.value_exn (SC.resolve pt_registry seg2) in
+  p "the nonzero-origin partition segment draws an Unroll proposal"
+    (List.exists pt_menu ~f:(function
+      | SC.Unroll { axis; _ } -> SC.equal_sym_ref axis rseg2
+      | _ -> false));
+  p "the nonzero-origin partition segment draws the Vectorized retype"
+    (List.exists pt_menu ~f:(function
+      | SC.Retype { axis; ty = LL.Vectorized } -> SC.equal_sym_ref axis rseg2
+      | _ -> false));
+  p "no Split targets the nonzero-origin segment (Split alone requires a zero origin)"
+    (not
+       (List.exists pt_menu ~f:(function
+         | SC.Split { axis; _ } -> SC.equal_sym_ref axis rseg2
+         | _ -> false)));
+  p "the zero-origin first segment still draws a dividing Split"
+    (List.exists pt_menu ~f:(function
+      | SC.Split { axis; _ } -> SC.equal_sym_ref axis rseg1
+      | _ -> false));
+  parity_leg
+    ~claim:"every menu proposal on the partitioned form compiles and matches the serial result"
+    ~saved_prefix:saved_pt pt_menu

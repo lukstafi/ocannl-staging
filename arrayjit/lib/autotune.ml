@@ -1256,6 +1256,12 @@ let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu ~
 type loop_desc = {
   ld_ref : SC.sym_ref;
   ld_sym : Idx.symbol;  (** The raw binder, for consulting {!Sched.op_legality}. *)
+  ld_from_ : int;
+      (** The loop's lower bound. [Partition] segments after the first start at their breakpoint
+          (segment ranges stay absolute), and only [Split] among the proposed ops requires a
+          zero-origin loop — [Swap], [Unroll] (either representation) and non-hardware [Retype]s
+          are origin-agnostic, so nonzero-origin loops stay enumerated for them (Codex P2 on PR
+          #403). *)
   ld_extent : int;
   ld_axis : LL.axis_type;
   ld_innermost : bool;
@@ -1319,11 +1325,11 @@ let collect_loops registry llc =
     | LL.If { body; _ } -> walk body
     | LL.For_loop { index; from_; to_; body; axis; _ } ->
         (match SC.resolve registry index with
-        | Some ld_ref when from_ = 0 && not (Hash_set.mem seen index) ->
+        | Some ld_ref when not (Hash_set.mem seen index) ->
             Hash_set.add seen index;
             let ld_perfect_child =
               match body with
-              | LL.For_loop { index = ci; from_ = 0; axis = cax; _ } ->
+              | LL.For_loop { index = ci; axis = cax; _ } ->
                   Option.map (SC.resolve registry ci) ~f:(fun r -> (r, ci, cax))
               | _ -> None
             in
@@ -1331,7 +1337,8 @@ let collect_loops registry llc =
               {
                 ld_ref;
                 ld_sym = index;
-                ld_extent = to_ + 1;
+                ld_from_ = from_;
+                ld_extent = to_ - from_ + 1;
                 ld_axis = axis;
                 ld_innermost = not (contains_loop body);
                 ld_accumulating = LL.has_accumulation body;
@@ -1406,7 +1413,10 @@ let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) ~registry
   in
   let splits =
     List.concat_map loops ~f:(fun ld ->
-        if not (LL.equal_axis_type ld.ld_axis LL.Serial) then []
+        (* [Sched.Split]'s index arithmetic requires a zero-origin loop (its apply raises
+           otherwise); nonzero-origin loops — [Partition] segments after the first — are still in
+           [loops] for the origin-agnostic families below. *)
+        if not (LL.equal_axis_type ld.ld_axis LL.Serial) || ld.ld_from_ <> 0 then []
         else
           List.filter_map split_factors ~f:(fun factor ->
               if factor < ld.ld_extent && ld.ld_extent % factor = 0 then
