@@ -2940,9 +2940,9 @@
     1
     (run
      ./generated_provenance.exe
-     shared_prefix_unarmed
+     shared_prefix_stale
      --ocannl_build_files_prefix=gp_shared_dir))
    (run
     ./generated_provenance.exe
-    shared_prefix_armed
+    shared_prefix_fresh
     --ocannl_build_files_prefix=gp_shared_dir))))

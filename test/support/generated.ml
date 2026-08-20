@@ -75,9 +75,25 @@ let scoping () =
   | "." -> Flat
   | prefix -> Shared_prefix prefix
 
-(* [Flat] never reaches a read (init fails), so the remaining question at read time is whether the
-   directory was swept or has to be armed path by path. *)
+(* [Flat] never reaches a read (init aborts), so the remaining question at read time is whether the
+   directory was swept — in which case existence is provenance — or whether the artifact has to be
+   newer than the run. *)
 let sweeps_directory = ref true
+
+(* When the directory was not swept: the moment this run began, as a timestamp from the artifact
+   filesystem itself. *)
+let floor = ref 0.
+
+let exe_derived_name () =
+  Utils.clean_filename @@ Stdlib.Filename.remove_extension
+  @@ Stdlib.Filename.basename Stdlib.Sys.executable_name
+
+let exe_basename = exe_derived_name
+
+let written_after_floor p =
+  match Unix.stat p with
+  | { Unix.st_mtime; _ } -> Float.(st_mtime >= !floor)
+  | exception Unix.Unix_error _ -> false
 
 (* A refusal that returns is not a refusal. [Verdict.fail] only increments a counter, so a caller
    that reports an unusable artifact directory and carries on hands the rest of the test exactly the
@@ -163,16 +179,15 @@ let init ~backend_name =
   Hashtbl.clear read_digests;
   Hashtbl.clear armed;
   let dir = Utils.build_files_dir () in
-  if is_symlink dir || is_symlink (Stdlib.Filename.dirname dir) then (
-    (* Refused rather than skipped: silently declining to establish freshness is the state this
-       module exists to make impossible, and following the link would delete files that are not this
-       test's — a strictly worse outcome than any stale artifact. *)
-    sweeps_directory := false;
-    Verdict.fail
+  if is_symlink dir || is_symlink (Stdlib.Filename.dirname dir) then
+    (* Refused rather than skipped, and aborted rather than merely recorded: following the link
+       would delete files that are not this test's — strictly worse than any stale artifact — and a
+       refusal the run continues past would do exactly that at the next {!arm}. *)
+    abort
       (Printf.sprintf
-         "Generated.init: %s (or its parent) is a symbolic link; refusing to sweep it, since \
+         "Generated.init: %s (or its parent) is a symbolic link; refusing to use it, since \
           following it would delete files outside the artifact tree"
-         dir))
+         dir)
   else
     match scoping () with
     | Flat ->
@@ -192,13 +207,24 @@ let init ~backend_name =
             let p = Stdlib.Filename.concat dir entry in
             let is_dir = try Stdlib.Sys.is_directory p with Stdlib.Sys_error _ -> true in
             if not is_dir then remove_or_fail ~context:"Generated.init" p)
-    | Shared_prefix _ ->
+    | Shared_prefix _ -> (
         (* An explicit prefix is not this executable's to empty — two tests can be configured with
            the same one, and a wholesale sweep would delete a concurrent test's kernel between its
-           compile and its read. Freshness is still available, one routine at a time: {!arm} deletes
-           a single path, which touches only the routine this test is about to compile. So the sweep
-           is skipped and {!read} requires that path to have been armed. *)
-        sweeps_directory := false
+           compile and its read. So freshness is established WITHOUT deleting anything: a marker
+           file records when this run began, and a read accepts only an artifact written after it.
+           That is weaker than the sweep (it cannot tell this run's kernel from a concurrent test's
+           under the same name, which is the same-name hazard that exists anyway) but it is the
+           guarantee that matters — an artifact outliving the run that produced it is what this
+           module exists to catch, and it costs no deletion at all.
+
+           The floor is the marker's own mtime rather than a clock reading, so that it is compared
+           against artifact mtimes from the same filesystem: a coarse timestamp granularity then
+           moves both values together instead of making freshly written files look stale. *)
+        sweeps_directory := false;
+        let marker = Stdlib.Filename.concat dir (".ocannl_generated_floor." ^ exe_basename ()) in
+        (try Stdio.Out_channel.write_all marker ~data:"" with Stdlib.Sys_error _ -> ());
+        floor :=
+          try (Unix.stat marker).Unix.st_mtime with Unix.Unix_error _ -> Unix.gettimeofday ())
 
 (** [arm ?ext routine] deletes [routine]'s artifact, so that the next {!read} of it sees only what
     the *next* compile emits. Use it in a loop that compiles several candidates under one routine
@@ -223,22 +249,23 @@ let read ?ext routine =
     "")
   else
     let p = path ?ext routine in
-    if (not !sweeps_directory) && not (Hashtbl.mem armed p) then (
-      (* The directory was not swept (an explicit build_files_prefix, which another executable may
-         share), so existence does not establish provenance here: the file may be a previous run's,
-         or another process's. The per-routine route is still open — arm before the compile. *)
-      Verdict.fail
-        (Printf.sprintf
-           "Generated.read %s: build_files_prefix is set explicitly, so this directory is not this \
-            executable's to empty and existence does not establish freshness; call Generated.arm \
-            %s before the compile that should produce it"
-           routine routine);
-      "")
-    else if not (Stdlib.Sys.file_exists p) then (
+    if not (Stdlib.Sys.file_exists p) then (
       Verdict.fail
         (Printf.sprintf
            "no generated source for routine %s: %s was not emitted by this run (kernel folded \
             away, renamed, fissioned, or debug artifacts are off)"
+           routine p);
+      "")
+    else if (not !sweeps_directory) && (not (Hashtbl.mem armed p)) && not (written_after_floor p)
+    then (
+      (* Nothing was swept here, so existence alone does not establish provenance: this file
+         predates the run and is exactly the stale artifact the old readers accepted. An ARMED path
+         is exempt — it was deleted outright, so its existence is provenance in its own right. *)
+      Verdict.fail
+        (Printf.sprintf
+           "stale generated source for routine %s: %s predates this run (build_files_prefix is set \
+            explicitly, so the directory is not this executable's to empty and the artifact must \
+            be newer than the run that reads it)"
            routine p);
       "")
     else

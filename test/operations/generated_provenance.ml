@@ -69,15 +69,21 @@ let () =
   (* An explicit build_files_prefix is not this executable's to empty — two tests can be given the
      same one — but it is not fatal either: the per-routine route stays open. Both halves are pinned
      here, and the surviving decoy is what shows the sweep did NOT run. *)
-  | "shared_prefix_armed" ->
+  (* The other half: an explicitly prefixed directory must keep working for the ordinary caller, who
+     calls init once and then reads — no arming — and a concurrent test's artifact in the same
+     directory must survive, since nothing may be swept here. *)
+  | "shared_prefix_fresh" ->
       let decoy = path "gp_other_tests_kernel" in
       Stdio.Out_channel.write_all decoy ~data:"another concurrent test's kernel\n";
       Generated.init ~backend_name;
       Verdict.p "an explicitly prefixed directory is left alone" (Stdlib.Sys.file_exists decoy);
-      Generated.arm "gp_shared";
       emit "gp_shared" "kernel body: mine\n";
+      Verdict.p "an unarmed read of a freshly emitted artifact succeeds under an explicit prefix"
+        (String.is_substring (Generated.read "gp_shared") ~substring:"mine");
+      Generated.arm "gp_shared";
+      emit "gp_shared" "kernel body: armed\n";
       Verdict.p "an armed read under an explicit prefix succeeds"
-        (String.is_substring (Generated.read "gp_shared") ~substring:"mine")
+        (String.is_substring (Generated.read "gp_shared") ~substring:"armed")
   (* === Must be refused (the refusal is the assertion; see the header) === *)
   (* The issue's own failure: an artifact left by an EARLIER run, which the readers this replaced
      accepted because it happened to exist. Written before init, so init's sweep must remove it. *)
@@ -111,12 +117,13 @@ let () =
   | "flat" ->
       Generated.init ~backend_name;
       Stdio.printf "init returned under the flat layout\n"
-  (* Under an explicit prefix nothing was swept, so existence alone does not establish provenance:
-     the file may be a previous run's, or another process's. *)
-  | "shared_prefix_unarmed" ->
+  (* Under an explicit prefix nothing is swept, so provenance comes from the timestamp floor: an
+     artifact predating the run is exactly the stale file the old readers accepted, and must be
+     refused even though it exists. *)
+  | "shared_prefix_stale" ->
+      emit "gp_shared" "kernel body: from a previous run\n";
       Generated.init ~backend_name;
-      emit "gp_shared" "kernel body: possibly another process's\n";
-      Stdio.printf "unarmed read under an explicit prefix: %S\n" (Generated.read "gp_shared")
+      Stdio.printf "stale read under an explicit prefix: %S\n" (Generated.read "gp_shared")
   (* Before init the directory may hold anything, so no read may be answered. *)
   | "uninitialized" -> Stdio.printf "read before init: %S\n" (Generated.read "gp_anything")
   (* === The symlinked artifact directory ===
@@ -163,8 +170,16 @@ let () =
           ignore_unix Unix.unlink scoped;
           Verdict.p "a symlinked artifact directory is refused rather than followed into"
             (refused && survived))
-  (* Run by the mode above, in a child process, because refusing a directory aborts. *)
+  (* Run by the mode above, in a child process, because refusing a directory aborts.
+
+     The arm attempt after init is the point: an exit status alone cannot tell a refusal that
+     STOPPED the run from one that merely recorded a failure and returned, and the difference is
+     whether the deletions that follow go through the link. Under a terminating refusal this line is
+     never reached; under a non-terminating one it unlinks the planted file in the link target, and
+     the parent's survival check fails. That regression shipped once — a lost edit left this branch
+     calling Verdict.fail — so the probe now discriminates it rather than trusting the exit code. *)
   | "symlink_child" ->
       Generated.init ~backend_name;
+      Generated.arm "gp_precious";
       Stdio.printf "init returned on a symlinked artifact directory\n"
   | m -> failwith ("generated_provenance: unknown mode " ^ m)
