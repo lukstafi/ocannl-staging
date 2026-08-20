@@ -5857,6 +5857,29 @@ let check_hardware_limits_classified ~name ~(limits : Backend_intf.hardware_limi
                    requested = shared_bytes;
                    limit = Some max_bytes;
                    detail;
+                 } )));
+  (* The [.z] grid fold (gh-ocannl-643) multiplies every Grid slot [>= 2] into [grid.(2)], and
+     CUDA/HIP cap that hardware dimension at 65535 — [validate_parallel] deliberately accepts any
+     fold (it is backend-independent), so this is where an over-cap launch is refused before
+     reaching the driver. The autotune batch-grid twins pre-filter at seeding against the same
+     limit; this gate also covers hand-built schedules and future annotators. *)
+  Option.iter limits.max_grid_z ~f:(fun max_z ->
+      let grid_z = (Low_level.launch_dims opt.llc).grid.(2) in
+      if grid_z > max_z then
+        let detail =
+          [%string
+            "Schedule: kernel %{name} folds grid slots >= 2 to a .z extent of %{grid_z#Int}, \
+             exceeding the device limit of %{max_z#Int}"]
+        in
+        raise
+          (Schedule_outcome.Cause_at
+             ( Schedule_outcome.Hardware_limits,
+               Schedule_outcome.Resource_exceeded
+                 {
+                   resource = Schedule_outcome.Grid_z_extent;
+                   requested = grid_z;
+                   limit = Some max_z;
+                   detail;
                  } )))
 
 let check_hardware_limits ~name ~limits opt =

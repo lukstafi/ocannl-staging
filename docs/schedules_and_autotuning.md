@@ -230,6 +230,17 @@ the retained procedural analyses alongside the affine engine and raises on diver
   seed `(pad, …, tensorize)` compositions instead of being filtered, for every pipeline that
   stages all its operands. Fused-epilogue twins and per-fission-segment sketches
   (keyed by structural digest) extend the pool.
+- **Batch-grid twins** (gh-ocannl-643): a batched (rank-3+) matmul site's GPU seeds each come in
+  two batch-geometry flavors — batch loops `Serial` (the historical shape: the row/column blocks
+  spend grid slots 0 and 1, batch and head iterate inside every block) and batch loops `Retype`d
+  to `Grid`, landing on grid slots ≥ 2 which fold onto the hardware `.z` dimension (the launch's
+  `.z` extent is the batch extents' product; each loop binds `(z / stride) % cap` —
+  `Low_level.grid_fold`). The zeroing nest and every companion nest carry the same per-position
+  annotation with interior batch loops hoisted identically, preserving cross-nest positional
+  thread identity. Twins rather than a replacement because block-count curves are non-monotone
+  (gh-ocannl-569's clean-room probe peaked near 128 blocks and regressed by 1024): a rank-4
+  q/k/v projection at `8×8×128×32` gains 64× the blocks, which the tuner measures against the
+  occupancy it costs. Products beyond the CUDA/HIP `gridDim.z` cap (65535) are not seeded.
 - **Split-reduce seeds** (gh-ocannl-484 task 3): `Autotune.split_reduce_sites` detects
   reduction-dominated accumulations — a target with at most a few thousand cells fed by a serial
   reduction loop of substantial extent (conv bias/weight gradients, softmax denominators, skinny

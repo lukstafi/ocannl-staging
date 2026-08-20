@@ -572,6 +572,28 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   never seeded, so it never reaches the decline log. gh-569's Part 3 read 25 coverage declines out of
   `schedule_log_declines`; the same workload on current master logs zero
   (`report-gh612-hip.md`). Ask the emitted source and the launch geometry instead.
+- Batch loops of a GPU matmul sketch are no longer unconditionally `Serial` (gh-ocannl-643, the
+  rank-4 q/k/v residue of gh-569: `36.7%` of the gpt2_mini step at 10% of sgemm peak because a
+  `(batch, head, seq, head_dim)` site launched 4 blocks with batch and head serial inside). Two
+  mechanisms, layered: (1) `Grid` slots >= 2 are legal and FOLD onto the hardware `.z` dimension —
+  `Low_level.launch_dims` multiplies their per-slot maxima into `grid.(2)` and each folded loop
+  binds `(z / stride) % cap` (`Low_level.grid_fold`; rendered in `C_syntax.hardware_binding`,
+  degenerating to the bare `.z` register for a lone slot-2 loop, so pre-existing kernels emit
+  byte-identical source); the 3-slot cap now applies to `Workgroup` only, and cc's serial fallback
+  is untouched. (2) The GPU matmul sketch families seed each geometry in two batch flavors
+  (`sk_batch_grid` twins, a "batch" tree level above "geometry"): batch positions `Retype`d to
+  `Grid` vs. the historical `Serial` — TWINS, not a replacement, because the device block-count
+  curve is non-monotone (gh-569's probe), so the tuner measures both. Three traps encoded in the
+  implementation: the zero nest and every companion nest must carry the SAME per-position batch
+  annotation with interior (`m_bi`) batch loops hoisted identically (`companion_role_ops`,
+  `zero_geometry ~batch_grid`) or positional slot order diverges between nests and a thread zeroes
+  cells another thread accumulates; `companion_geometry`'s `annotate` callback therefore takes the
+  companion's whole chain (the hoist `Swap`s name the companion's own symbols) — its Ok/Error
+  verdict still never depends on what `annotate` emits, so the gh-577 static witness stays sound;
+  and batch products beyond 65535 are never seeded (`max_grid_fold_extent` — the CUDA/HIP
+  `gridDim.z` cap; such a candidate could only fail at launch, GPU-only, after compiling).
+  Pinned end-to-end by `test/operations/schedule_batch_grid.ml` (structure everywhere, execution
+  and emitted-source fold on GPU backends).
 - "`Tile_mma` is a barrier" is only half true, and the half that fails is the one barrier elision
   wants. Every rendering form ENDS the intrinsic block with a workgroup barrier, so a staging
   barrier that follows one is always redundant (`Schedule.elide_staged_barriers` drops it, and the
