@@ -25,11 +25,15 @@ let () = assert (LL.virtualize_settings.max_visits = 1)
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let vocab = 4
 let embed = 3
+let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 
-(* Read the generated C source for a forward kernel, if the C-family backend wrote one. *)
-let read_generated_c base_name =
-  let path = Utils.build_file (base_name ^ ".c") in
-  if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
+module Generated = Test_utils.Generated
+
+let () = Generated.init ~backend_name
+
+(* Every kernel here is compiled on an explicit [Context.cpu ()] lineage, so the artifacts are the C
+   backend's regardless of the run's configured backend: the reads below pin [.c] rather than
+   deriving the extension from the configured backend. *)
 
 (* Embedding table C with C[o,i] = o*vocab + i, so row i (over the input axis) is distinctive. *)
 let cvals = Array.init (embed * vocab) ~f:Float.of_int
@@ -121,6 +125,10 @@ let () =
   let id_values = [| 1.; 3.; 0. |] in
   let ids, embedded = build_embedding id_values in
   let ctx = Context.cpu () in
+  (* [build_embedding] is called twice more below, and each of those forward passes recompiles the
+     routine [embedded_fwd] over this one's artifact. Arming makes the read below provenance-checked
+     rather than order-dependent: it sees this compile's kernel or nothing. *)
+  Generated.arm ~ext:".c" "embedded_fwd";
   let ctx = Train.forward_once ctx embedded in
   let got = Context.get_values ctx embedded.Tensor.value in
   let dyn, loops, index_is_input, truncs = inspect embedded ids.Tensor.value in
@@ -148,18 +156,14 @@ let () =
      tensor's precision verbatim (default: single/float32, exact for integers up to 2^24). For very
      large vocabularies, callers should use double-precision IDs so the value survives to the
      widened cast without prior float-rounding loss. *)
-  (match read_generated_c "embedded_fwd" with
-  | None -> p "generated C: guarded dynamic table read present (skipped: non-C backend)" true
-  | Some c ->
-      (* The cast is to Ops.index_prec () = int (default) or long long (large_models). *)
-      let has_index_prec_cast =
-        String.is_substring c ~substring:"((int)("
-        || String.is_substring c ~substring:"((long long)("
-      in
-      p "generated C contains a guarded dynamic table read"
-        (has_index_prec_cast && String.is_substring c ~substring:"?");
-      p "generated C has no vocabulary reduction loop"
-        (not (String.is_substring c ~substring:"<= 3")));
+  (let c = Generated.read ~ext:".c" "embedded_fwd" in
+   (* The cast is to Ops.index_prec () = int (default) or long long (large_models). *)
+   let has_index_prec_cast =
+     String.is_substring c ~substring:"((int)(" || String.is_substring c ~substring:"((long long)("
+   in
+   p "generated C contains a guarded dynamic table read"
+     (has_index_prec_cast && String.is_substring c ~substring:"?");
+   p "generated C has no vocabulary reduction loop" (not (String.is_substring c ~substring:"<= 3")));
 
   (* --- Out-of-bounds index yields a zero embedding row --- *)
   let oob = [| 1.; Float.of_int vocab (* == vocab, out of [0,vocab) *) |] in
@@ -375,13 +379,10 @@ let () =
   (* (2) C-level inspection: emb_wide kernel is [emb_wide_fwd.c]. The dynamic-index cast must track
      [Ops.index_prec ()] (signed since docs/proposals/signed-index-precision.md), not some hardcoded
      type: under large_models the same arm renders [((long long)(]. *)
-  match read_generated_c "emb_wide_fwd" with
-  | None -> p "large-index (C): double *ids_wide and index-prec cast (skipped: non-C backend)" true
-  | Some c ->
-      p "large-index (C): ids_wide parameter declared as double*"
-        (String.is_substring c ~substring:"double *restrict ids_wide");
-      let has_index_prec_cast =
-        String.is_substring c ~substring:"((int)("
-        || String.is_substring c ~substring:"((long long)("
-      in
-      p "large-index (C): dynamic index cast tracks the index precision" has_index_prec_cast
+  let c = Generated.read ~ext:".c" "emb_wide_fwd" in
+  p "large-index (C): ids_wide parameter declared as double*"
+    (String.is_substring c ~substring:"double *restrict ids_wide");
+  let has_index_prec_cast =
+    String.is_substring c ~substring:"((int)(" || String.is_substring c ~substring:"((long long)("
+  in
+  p "large-index (C): dynamic index cast tracks the index precision" has_index_prec_cast

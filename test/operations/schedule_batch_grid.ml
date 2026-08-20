@@ -1,27 +1,26 @@
-(* gh-ocannl-643: the rank-4 q/k/v geometry — batch and head axes of a batched/multi-head GEMM
-   reach grid parallelism instead of running as serial loops inside each block.
+(* gh-ocannl-643: the rank-4 q/k/v geometry — batch and head axes of a batched/multi-head GEMM reach
+   grid parallelism instead of running as serial loops inside each block.
 
    Mechanism under test, in two layers:
 
    - The [.z] grid fold (Low_level): [Grid] slots >= 2 are legal and share the hardware [.z]
-     dimension — [launch_dims] multiplies their per-slot maxima into [grid.(2)], and each such loop
-     binds [(z / stride) % cap] ([Low_level.grid_fold]; rendered by [C_syntax.hardware_binding]).
-     On backends that bind no hardware register (cc) the loops keep their serial rendering, so the
-     scheduled kernels execute correctly everywhere.
+   dimension — [launch_dims] multiplies their per-slot maxima into [grid.(2)], and each such loop
+   binds [(z / stride) % cap] ([Low_level.grid_fold]; rendered by [C_syntax.hardware_binding]). On
+   backends that bind no hardware register (cc) the loops keep their serial rendering, so the
+   scheduled kernels execute correctly everywhere.
 
    - The [sk_batch_grid] twins (sketch families): each GPU matmul geometry of a batched (rank-3+)
-     site is seeded twice — batch loops [Serial] (the pre-643 shape) and batch loops [Retype]d to
-     [Grid] — with the zeroing nest and every companion nest carrying the same per-position
-     annotation, interior batch loops hoisted identically ([companion_role_ops]). Twins rather than
-     a replacement: block-count curves are non-monotone (gh-ocannl-569's probe), so the tuner
-     measures both.
+   site is seeded twice — batch loops [Serial] (the pre-643 shape) and batch loops [Retype]d to
+   [Grid] — with the zeroing nest and every companion nest carrying the same per-position
+   annotation, interior batch loops hoisted identically ([companion_role_ops]). Twins rather than a
+   replacement: block-count curves are non-monotone (gh-ocannl-569's probe), so the tuner measures
+   both.
 
-   Three lowered shapes: the q/k/v projection's leading-batch rank-4 site
-   [out[b,h,s,j] += x[b,s,k] * w[h,k,j]] (two outer batch loops — the issue's mechanism); the same
-   site with a materialized output feeding a bias+relu companion nest (companion coverage at full
-   arity plus the companions' batch annotation); and the interior-batch rank-4 site
-   [out[b,i,h,j] += att[b,i,h,k] * v[b,k,h,j]] (the head axis BETWEEN the tile roles, so the
-   zero-nest and companion hoisting is load-bearing).
+   Three lowered shapes: the q/k/v projection's leading-batch rank-4 site [out[b,h,s,j] += x[b,s,k]
+   * w[h,k,j]] (two outer batch loops — the issue's mechanism); the same site with a materialized
+   output feeding a bias+relu companion nest (companion coverage at full arity plus the companions'
+   batch annotation); and the interior-batch rank-4 site [out[b,i,h,j] += att[b,i,h,k] * v[b,k,h,j]]
+   (the head axis BETWEEN the tile roles, so the zero-nest and companion hoisting is load-bearing).
 
    Executed assertions compare each candidate against a serial reference computed from the same
    discriminating inputs; the input values vary with every index and keep all partial sums exactly
@@ -37,22 +36,15 @@ module Asgns = Ir.Assignments
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
-
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let skipped = Verdict.skipped ~backend:backend_name
 
 let on_gpu =
   List.exists [ "metal"; "cuda"; "hip" ] ~f:(fun s -> String.is_substring backend_name ~substring:s)
 
-let read_generated base_name =
-  let ext =
-    if String.is_substring backend_name ~substring:"metal" then ".metal"
-    else if String.is_substring backend_name ~substring:"hip" then ".hip"
-    else if on_gpu then ".cu"
-    else ".c"
-  in
-  let path = Utils.build_file (base_name ^ ext) in
-  if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
+module Generated = Test_utils.Generated
+
+let () = Generated.init ~backend_name
 
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
@@ -74,21 +66,22 @@ let compile_serial ~name tensor =
   nonzero name (Context.get_values (Context.run ctx routine) tensor.Tensor.value)
 
 (* The scalar-blocktile GPU seeds of the routine, unfused, via the public seeding API. Synthetic
-   no-limits keep the enumeration machine-independent; no mma capability, so the tensorized
-   pipeline is refuted and the seeds are exactly the blocktile family. *)
+   no-limits keep the enumeration machine-independent; no mma capability, so the tensorized pipeline
+   is refuted and the seeds are exactly the blocktile family. *)
 let blocktile_seeds opt =
   Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false ~limits:Ir.Backend_intf.no_hardware_limits
     opt
-  |> List.filter ~f:(fun q -> q.Autotune.sk_gpu && (not q.Autotune.sk_mma) && not q.Autotune.sk_epilogue)
+  |> List.filter ~f:(fun q ->
+      q.Autotune.sk_gpu && (not q.Autotune.sk_mma) && not q.Autotune.sk_epilogue)
 
-(* One leg: build the tensor twice (serial reference and candidate), enumerate the blocktile
-   seeds, and check the batch-grid structure (launch dims, fold arithmetic, [validate_parallel]) on
-   every seed's schedule applied as the pure IR transform it is — backend-independent, so this runs
-   on cc too. On GPU backends every seed is additionally compiled, executed against the serial
-   reference and — for the batch-grid twins — the generated source is checked for the folded [.z]
-   bindings; cc cannot execute workgroup-shared staging, so those claims print as skipped there
-   (the same gating as autotune_batched_companion). [batch_product] is the expected [.z] extent;
-   [fold_div] and [fold_mod] the substrings the folded bindings must render. *)
+(* One leg: build the tensor twice (serial reference and candidate), enumerate the blocktile seeds,
+   and check the batch-grid structure (launch dims, fold arithmetic, [validate_parallel]) on every
+   seed's schedule applied as the pure IR transform it is — backend-independent, so this runs on cc
+   too. On GPU backends every seed is additionally compiled, executed against the serial reference
+   and — for the batch-grid twins — the generated source is checked for the folded [.z] bindings; cc
+   cannot execute workgroup-shared staging, so those claims print as skipped there (the same gating
+   as autotune_batched_companion). [batch_product] is the expected [.z] extent; [fold_div] and
+   [fold_mod] the substrings the folded bindings must render. *)
 let leg ~tag ~batch_product ~fold_div ~fold_mod ~build =
   let want = compile_serial ~name:(tag ^ "_serial") (build ()) in
   let cand = build () in
@@ -138,15 +131,14 @@ let leg ~tag ~batch_product ~fold_div ~fold_mod ~build =
         in
         let slot_max s =
           List.fold axes ~init:1 ~f:(fun m a ->
-              match a.LL.ha_kind with
-              | `Grid when a.LL.ha_slot = s -> max m a.LL.ha_extent
-              | _ -> m)
+              match a.LL.ha_kind with `Grid when a.LL.ha_slot = s -> max m a.LL.ha_extent | _ -> m)
         in
         let stride_at slot = fst (LL.grid_fold axes ~slot) in
         let cap_at slot = snd (LL.grid_fold axes ~slot) in
         if
           not
-            (max_slot = 3 && stride_at 2 = 1
+            (max_slot = 3
+            && stride_at 2 = 1
             && Poly.equal (cap_at 2) (Some (slot_max 2))
             && stride_at 3 = slot_max 2
             && Option.is_none (cap_at 3)
@@ -159,8 +151,16 @@ let leg ~tag ~batch_product ~fold_div ~fold_mod ~build =
   p (tag ^ ": the fold arithmetic decodes innermost-mod, outermost-div") !fold_ok;
   (* --- Executable parity, seed by seed, on backends that can run shared staging. --- *)
   if on_gpu then begin
-    let n_ran = ref 0 and n_match = ref 0 and src_fold = ref None in
+    let n_ran = ref 0 and n_match = ref 0 in
+    (* Every seed compiles under the one routine name [<tag>_sched], so each overwrites the previous
+       seed's artifact. Arming before each compile makes the read below this seed's kernel or
+       nothing -- until gh-ocannl-655 the fold was credited to whichever seed happened to have
+       written last, which is how a post-loop grep for the fold found a later serial seed's kernel
+       and read 0 occurrences (gh-ocannl-643). Each batch-grid seed is now checked in its own right
+       rather than one standing for all. *)
+    let n_fold_seeds = ref 0 and n_folded = ref 0 in
     List.iter seeds ~f:(fun q ->
+        Generated.arm (tag ^ "_sched");
         match
           let ctx, routine =
             Context.compile
@@ -172,17 +172,19 @@ let leg ~tag ~batch_product ~fold_div ~fold_mod ~build =
         | got ->
             Int.incr n_ran;
             if Array.for_all2_exn got want ~f:Float.equal then Int.incr n_match;
-            if q.Autotune.sk_batch_grid && Option.is_none !src_fold then
-              src_fold :=
-                Option.map (read_generated (tag ^ "_sched")) ~f:(fun src ->
-                    String.is_substring src ~substring:fold_div
-                    && String.is_substring src ~substring:fold_mod)
+            if q.Autotune.sk_batch_grid then (
+              Int.incr n_fold_seeds;
+              let src = Generated.read (tag ^ "_sched") in
+              if
+                String.is_substring src ~substring:fold_div
+                && String.is_substring src ~substring:fold_mod
+              then Int.incr n_folded)
         | exception exn -> Stdio.eprintf "%s: seed FAILED: %s\n" tag (Exn.to_string exn));
     p (tag ^ ": every seed compiles and runs") (!n_ran = List.length seeds && !n_ran > 0);
     p (tag ^ ": every candidate matches the serial reference bitwise") (!n_ran = !n_match);
     p
       (tag ^ ": the generated source folds the batch axes onto the .z register")
-      (Option.value !src_fold ~default:false)
+      (!n_fold_seeds > 0 && !n_folded = !n_fold_seeds)
   end
   else begin
     Stdio.eprintf "%s: %s cannot execute workgroup-shared staging — execution legs skipped\n" tag
@@ -224,8 +226,8 @@ let () =
       ~f:(fun idcs -> (Float.of_int (idcs.(0) % 3) -. 1.) *. 0.5)
       ()
   in
-  leg ~tag:"qkv_companion" ~batch_product:(bb * hh) ~fold_div:(reg ^ " / 4")
-    ~fold_mod:(reg ^ " % 4") ~build:(fun () ->
+  leg ~tag:"qkv_companion" ~batch_product:(bb * hh) ~fold_div:(reg ^ " / 4") ~fold_mod:(reg ^ " % 4")
+    ~build:(fun () ->
       let xv = x () and wv = w () and bv = bias () in
       let%op z = xv +* "bsk;hkj=>bhsj" wv in
       Train.set_materialized z.Tensor.value;
@@ -240,7 +242,8 @@ let () =
     NTDSL.init ~l:"bg_att" ~prec:Ir.Ops.single ~o:[ bt; ss2; hh2; kk2 ]
       ~f:(fun idcs ->
         Float.of_int
-          (((idcs.(0) * ss2 * hh2 * kk2) + (idcs.(1) * hh2 * kk2) + (idcs.(2) * kk2) + idcs.(3)) % 11)
+          (((idcs.(0) * ss2 * hh2 * kk2) + (idcs.(1) * hh2 * kk2) + (idcs.(2) * kk2) + idcs.(3))
+          % 11)
         *. 0.125)
       ()
   in
@@ -248,7 +251,8 @@ let () =
     NTDSL.init ~l:"bg_v" ~prec:Ir.Ops.single ~o:[ bt; kk2; hh2; jj2 ]
       ~f:(fun idcs ->
         (Float.of_int
-           (((idcs.(0) * kk2 * hh2 * jj2) + (idcs.(1) * hh2 * jj2) + (idcs.(2) * jj2) + idcs.(3)) % 7)
+           (((idcs.(0) * kk2 * hh2 * jj2) + (idcs.(1) * hh2 * jj2) + (idcs.(2) * jj2) + idcs.(3))
+           % 7)
         -. 3.)
         *. 0.5)
       ()
@@ -260,8 +264,8 @@ let () =
       out);
 
   (* --- Interior batch with a companion: the companion nest's own head loop must hoist above its
-     row loop ([companion_role_ops]'s Swaps on the companion's symbols) or its positional slot
-     order diverges from the site's and validation rejects the write coverage. --- *)
+     row loop ([companion_role_ops]'s Swaps on the companion's symbols) or its positional slot order
+     diverges from the site's and validation rejects the write coverage. --- *)
   let bias2 () =
     NTDSL.init ~l:"bg_bias2" ~prec:Ir.Ops.single ~o:[ jj2 ]
       ~f:(fun idcs -> (Float.of_int (idcs.(0) % 3) -. 1.) *. 0.5)
@@ -275,8 +279,8 @@ let () =
       let%op y2 = relu (z2 + bv) in
       y2);
 
-  (* --- The tensorized (mma) pipeline's batch-grid twins, construction and validation only ---
-     A synthetic f32 mma capability makes the tensorized branch seedable machine-independently;
+  (* --- The tensorized (mma) pipeline's batch-grid twins, construction and validation only --- A
+     synthetic f32 mma capability makes the tensorized branch seedable machine-independently;
      execution stays with the real-capability legs of schedule_batched_mma (an f32 tile is not a
      hardware format on the wmma backends). What must hold structurally: the twins are seeded, the
      schedules construct, validate, and launch with the folded batch [.z] extent. *)
@@ -317,7 +321,7 @@ let () =
   let mma_grid_seeds =
     Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false ~limits:mma_limits opt
     |> List.filter ~f:(fun q ->
-           q.Autotune.sk_mma && q.Autotune.sk_batch_grid && not q.Autotune.sk_epilogue)
+        q.Autotune.sk_mma && q.Autotune.sk_batch_grid && not q.Autotune.sk_epilogue)
   in
   p "qkv_mma: tensorized batch-grid twins are seeded" (not (List.is_empty mma_grid_seeds));
   p "qkv_mma: every tensorized batch-grid twin constructs, validates, and folds the batch onto .z"
@@ -333,12 +337,12 @@ let () =
              Stdio.eprintf "qkv_mma: construct FAILED: %s\n" (Exn.to_string exn);
              false));
 
-  (* --- The pre-driver gate for the launch dimensions: [validate_parallel] deliberately accepts
-     any grid geometry (it is backend-independent), so [Schedule.check_hardware_limits_classified]
-     is where a backend's [max_grid_yz] refuses an over-cap extent as a typed [Resource_exceeded] —
+  (* --- The pre-driver gate for the launch dimensions: [validate_parallel] deliberately accepts any
+     grid geometry (it is backend-independent), so [Schedule.check_hardware_limits_classified] is
+     where a backend's [max_grid_yz] refuses an over-cap extent as a typed [Resource_exceeded] —
      covering hand-built schedules and future annotators, not only these seeds; and the seeding
-     guard reads the same limit, so a tight cap also stops the twins from being proposed at all.
-     One limit field (CUDA and HIP cap [gridDim.y] and [gridDim.z] at the same 65535), two typed
+     guard reads the same limit, so a tight cap also stops the twins from being proposed at all. One
+     limit field (CUDA and HIP cap [gridDim.y] and [gridDim.z] at the same 65535), two typed
      resources, because the two extents are shrunk by different knobs. --- *)
   let bg_seed = List.find_exn (blocktile_seeds opt) ~f:(fun q -> q.Autotune.sk_batch_grid) in
   let o = Sched.apply (Autotune.sketch_schedule ~p:bg_seed opt) opt in
@@ -366,10 +370,10 @@ let () =
     |> List.for_all ~f:(fun q -> not q.Autotune.sk_batch_grid));
 
   (* The [.y] gate is the same check one dimension over, and has nothing to do with the fold:
-     [grid.(1)] is a blocktiled matmul's row-block count, which grows with the site's m-extent
-     alone (at [bm = 16] an m-extent past ~1M rows is already over the 65535 cap). A serial-batch
-     seed isolates it: its [.z] extent is 1, so only the [.y] check can fire, and the typed
-     resource says which dimension asked too much. *)
+     [grid.(1)] is a blocktiled matmul's row-block count, which grows with the site's m-extent alone
+     (at [bm = 16] an m-extent past ~1M rows is already over the 65535 cap). A serial-batch seed
+     isolates it: its [.z] extent is 1, so only the [.y] check can fire, and the typed resource says
+     which dimension asked too much. *)
   let serial_seed =
     List.find_exn (blocktile_seeds opt) ~f:(fun q -> not q.Autotune.sk_batch_grid)
   in
