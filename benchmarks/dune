@@ -1,5 +1,13 @@
 (rule
  (alias runtest)
- (deps orchestrate.py test_orchestrate.py runners/bench_common.py)
+ ; fixture_digest.py is imported by the test; fixtures/DIGESTS.txt and the workload specs are
+ ; read by it (gh-ocannl-645), so a stale pin fails the suite rather than drifting.
+ (deps
+  orchestrate.py
+  test_orchestrate.py
+  runners/bench_common.py
+  fixture_digest.py
+  fixtures/DIGESTS.txt
+  (glob_files workloads/*.json))
  (action
   (run python3 %{dep:test_orchestrate.py})))

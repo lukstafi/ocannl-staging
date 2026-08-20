@@ -73,6 +73,19 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   axes then input axes; channels-last images — layouts documented per model in the
   generator), dataset, and all hyperparameters in the safetensors `__metadata__` map, so
   fixtures are self-describing and runners need only the fixture path.
+- `fixtures/DIGESTS.txt` + `fixture_digest.py` — **which bytes a published number is on**
+  (gh-ocannl-645). The fixtures are gitignored regenerable artifacts, so this file is the only
+  checked-in statement of what one contains: `gen_fixtures.py` records `<sha256>  <bytes>
+  <name>` as it generates (announcing a *changed* digest loudly, and leaving a reviewable git
+  diff), `orchestrate.py` refuses to measure a fixture whose bytes do not match it
+  (`--no-fixture-digest-check` opts out, for a deliberate regeneration you are about to
+  re-record), and every result row and report section states the digest it ran on. Fixture
+  bytes depend on the spec, on the generator, *and* on the numpy version that drew the random
+  streams — numpy promises no `Generator` stream stability across releases — so a mismatch is
+  real information even when `workloads/` is untouched. A fixture regenerated at a different
+  spec revision is otherwise invisible: it is consumed **uniformly** by every cell, and the
+  cross-cell parity gate compares cells with each other, not with the workload the report
+  names, so it certifies exactly as it certifies the intended one.
 - `runners/ocannl/bench_{mlp,conv,gpt}.ml` + `bench_harness.ml` — OCANNL runners
   (`dune build benchmarks/runners/ocannl/bench_mlp.exe` etc.). Env: `BENCH_FIXTURE` (path),
   `BENCH_TUNE=1` (`Train.tune_placements`: autotunes both the default placements graph and
@@ -153,8 +166,9 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   retest whether an entry still applies in your environment),
   `--gpu metal|cuda|hip|none` (the GPU column of the matrix — OCANNL backend, PyTorch device,
   tinygrad device together; defaults to metal on macOS and cuda elsewhere, `none` runs a
-  CPU-only matrix). Env: `BENCH_CELL_LOG_DIR=<dir>` keeps every cell's raw combined output, one
-  file per cell label — a successful cell's output is otherwise discarded, which throws away the
+  CPU-only matrix), `--no-fixture-digest-check` (measure fixtures that do not match
+  `fixtures/DIGESTS.txt`). Env: `BENCH_CELL_LOG_DIR=<dir>` keeps every cell's raw combined
+  output, one file per cell label — a successful cell's output is otherwise discarded, which throws away the
   candidate-level evidence a measurement sweep has to report. Combined with
   `OCANNL_AUTOTUNE_LOG=true` it makes the seeded-vs-timed mma and split-reduce counts, the
   `FAILED` blocker breakdown and the split-reduce evictions fall out of the sweep's own search
@@ -292,6 +306,10 @@ benchmarks/.venv/bin/python benchmarks/gen_fixtures.py
 benchmarks/.venv/bin/python benchmarks/orchestrate.py
 ```
 
+`gen_fixtures.py` rewrites `fixtures/DIGESTS.txt` for whatever it regenerates. Review that diff
+before publishing numbers: a changed digest means the workload changed, and reports measured on
+either side of it are not comparable.
+
 tinygrad's CPU device JIT-compiles kernels with `clang`; on a machine without clang, point
 `CC` at a substitute (a `zig cc` wrapper script from `pip install ziglang` works — translate
 `--target=x86_64-none-unknown-elf` to `--target=x86_64-freestanding-none` and add `-g0`).
@@ -351,6 +369,14 @@ than the driver (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION` at module load), run it wi
   `compile_s` being small. (The asymmetry to keep in mind when reading a matrix: tinygrad's
   `--beam N` cell searches *in the timing process*, as does `torch.compile`; only the OCANNL
   tuned cell splits the two passes, and only it is gated here.)
+- **A report states the fixture digest its numbers are on.** `orchestrate.py` puts it in each
+  workload section of `results/report.md` and in every `results.jsonl` row (`fixture`,
+  `fixture_sha256`); a hand-written report quotes the same `fixtures/DIGESTS.txt` line, and a
+  hand-written driver pins it (`gh612_cells.sh` refuses to run a cell whose fixture does not
+  match a pinned digest, with an env opt-out for deliberate re-generation). Cross-session
+  comparisons depend on it entirely: `report-gh569-hip.md`'s 46.65 ms denominator and
+  `report-gh612-hip.md`'s 32.33 ms are comparable only if both ran the same bytes, and until
+  gh-ocannl-645 that was an assumption no artifact recorded.
 - Timing on a laptop: prefer the p50 of the per-step synced times; rerun and compare rounds
   if thermals are suspect. Keep timing out of CI; the parity gate is the CI-worthy part.
 - Untuned-default before/after (gh-ocannl-491): the model-picked default is config-gated, so

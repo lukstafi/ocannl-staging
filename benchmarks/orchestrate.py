@@ -29,6 +29,8 @@ import sys
 import time
 from pathlib import Path
 
+import fixture_digest
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 # BENCH_VENV_PY overrides the venv interpreter — for environments where benchmarks/.venv
@@ -282,6 +284,43 @@ def parity_check(results):
             r["parity"] = "PASS" if max_rel < tol and r["parity_loss_moved"] else "FAIL"
 
 
+def check_fixture_digests(fixtures, digests_path=None, allow_unpinned=False):
+    """What the fixtures ARE, checked before anything is measured on them (gh-ocannl-645).
+
+    Returns `{fixture path: sha256}` for stamping onto the results. Exits on a fixture whose
+    bytes are not the ones `fixtures/DIGESTS.txt` records unless `allow_unpinned` — a
+    differently generated fixture is consumed uniformly by every cell, so the cross-cell parity
+    gate certifies it exactly as it certifies the intended workload, and the digest is the only
+    thing that ties a published number to the workload the report names.
+    """
+    entries = fixture_digest.read_digests(
+        digests_path or HERE / "fixtures" / fixture_digest.DIGEST_FILE
+    )
+    shas = {}
+    unpinned = []
+    for fx in fixtures:
+        verdict, sha, size = fixture_digest.status(fx, entries)
+        shas[fx] = sha
+        print(f"fixture {fx.name}: sha256 {sha} ({size} bytes) — {verdict}", flush=True)
+        if verdict != "MATCH":
+            unpinned.append((fx, verdict))
+    named = ", ".join(f"{fx.name} ({verdict})" for fx, verdict in unpinned)
+    if unpinned and not allow_unpinned:
+        sys.exit(
+            f"refusing to measure {named}: these bytes are not the ones "
+            "fixtures/DIGESTS.txt records, so a report of them would name a workload nothing "
+            "pins. Re-run gen_fixtures.py to regenerate and re-record (the digest diff is the "
+            "review), or pass --no-fixture-digest-check to measure them as they are."
+        )
+    if unpinned:
+        print(
+            f"MEASURING UNPINNED FIXTURES: {named} — results carry their measured digest, but "
+            "nothing checked in describes them",
+            flush=True,
+        )
+    return shas
+
+
 def provenance_check(results):
     """Annotate each OCANNL tuned cell with which pass produced its step times (gh-ocannl-644).
 
@@ -331,6 +370,14 @@ def report(results, out_dir, unavailable=()):
     for workload in sorted({r["workload"] for r in results}):
         lines.append(f"\n## {workload}\n")
         rows = [r for r in results if r["workload"] == workload]
+        # Which bytes these numbers are on (gh-ocannl-645). A report is compared across sessions
+        # and machines; without this the comparison rests on the assumption that everyone
+        # regenerated the same fixture. More than one line here means the section mixes fixtures.
+        measured_on = sorted(
+            {(r.get("fixture"), r.get("fixture_sha256")) for r in rows if r.get("fixture_sha256")}
+        )
+        for fixture, sha in measured_on:
+            lines.append(f"measured on `{fixture}`, sha256 `{sha}`\n")
         # Precision-major, p50-ascending within a precision: scheduling variants are ranked
         # against the others computing in the same format, and a reduced-precision block reads as
         # its own group rather than being interleaved by a speed it owes to its storage format.
@@ -454,6 +501,13 @@ def main():
     )
     ap.add_argument("--skip-build", action="store_true")
     ap.add_argument(
+        "--no-fixture-digest-check",
+        action="store_true",
+        help="measure fixtures whose bytes do not match fixtures/DIGESTS.txt. The digest is "
+        "what says which workload a published number is on (gh-ocannl-645); use this only "
+        "for a deliberately regenerated fixture you are about to re-record",
+    )
+    ap.add_argument(
         "--no-skip-cells",
         action="store_true",
         help="run the SKIP_CELLS entries too. Each was observed pathological on one "
@@ -491,6 +545,8 @@ def main():
     if not fixtures:
         sys.exit("no fixtures found — run gen_fixtures.py first")
 
+    fixture_shas = check_fixture_digests(fixtures, allow_unpinned=args.no_fixture_digest_check)
+
     metas = {fx: read_st_metadata(fx) for fx in fixtures}
     models = {fx: metas[fx].get("model", "mlp") for fx in fixtures}
     if "ocannl" in args.only and not args.skip_build:
@@ -506,10 +562,16 @@ def main():
     partial.parent.mkdir(parents=True, exist_ok=True)
     partial.write_text("")  # fresh run
 
+    # The fixture the cells currently being dispatched are measuring — stamped onto every result
+    # so a row, and the report built from it, states its own workload identity (gh-ocannl-645)
+    # rather than leaving it to how the operator ran the sweep.
+    stamp = {}
+
     def collect(label, cmd, override=None, **kwargs):
         t0 = time.monotonic()
         r = run_cell(label, cmd, **kwargs)
         if r:
+            r.update(stamp)
             if override:
                 r.update(override)
             results.append(r)
@@ -523,6 +585,8 @@ def main():
     for fx in fixtures:
         name = fx.stem
         model = models[fx]
+        stamp.clear()
+        stamp.update(fixture=fx.name, fixture_sha256=fixture_shas[fx])
         if "ocannl" in args.only:
             variants = ["default"]
             if args.materialized:

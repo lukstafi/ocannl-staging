@@ -1,6 +1,14 @@
+import contextlib
+import io
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
+import fixture_digest
 import orchestrate
+
+HERE = Path(__file__).resolve().parent
 
 
 def result(framework, backend, variant, losses, precision="f32"):
@@ -225,6 +233,132 @@ class ProvenanceTest(unittest.TestCase):
     def test_every_verdict_renders(self):
         for verdict in ("REPLAY", "SEARCH-PASS", "UNKNOWN"):
             self.assertIn(verdict, orchestrate.PROVENANCE_MARK)
+
+
+class FixtureDigestTest(unittest.TestCase):
+    """gh-ocannl-645: what a report's numbers were measured on is recorded, not assumed."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+
+    def fixture(self, name, content=b"weights"):
+        path = self.dir / name
+        path.write_bytes(content)
+        return path
+
+    def check(self, *args, **kwargs):
+        """check_fixture_digests with its per-fixture log kept out of the test output."""
+        with contextlib.redirect_stdout(io.StringIO()):
+            return orchestrate.check_fixture_digests(*args, **kwargs)
+
+    def test_recording_round_trips(self):
+        fx = self.fixture("mlp_small.safetensors")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+
+        changes = fixture_digest.record(digests, [fx])
+
+        self.assertEqual([(name, was) for name, was, _ in changes], [("mlp_small.safetensors", None)])
+        entries = fixture_digest.read_digests(digests)
+        self.assertEqual(entries[fx.name], (fixture_digest.sha256_file(fx), fx.stat().st_size))
+        self.assertEqual(fixture_digest.status(fx, entries)[0], "MATCH")
+
+    def test_regenerating_different_bytes_is_announced_as_a_change(self):
+        fx = self.fixture("gpt2_mini.safetensors", b"generated at spec revision A")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        fixture_digest.record(digests, [fx])
+        was = fixture_digest.read_digests(digests)[fx.name]
+
+        fx.write_bytes(b"generated at spec revision B")
+        changes = fixture_digest.record(digests, [fx])
+
+        self.assertEqual(len(changes), 1)
+        name, previous, now = changes[0]
+        self.assertEqual((name, previous), (fx.name, was))
+        self.assertEqual(now, fixture_digest.read_digests(digests)[fx.name])
+
+    def test_regenerating_one_fixture_keeps_the_others_recorded(self):
+        # gen_fixtures.py takes a spec list; regenerating one workload must not drop the
+        # identities of the fixtures already on disk, or the pin silently narrows to one.
+        a, b = self.fixture("a.safetensors", b"aaa"), self.fixture("b.safetensors", b"bbb")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        fixture_digest.record(digests, [a, b])
+
+        fixture_digest.record(digests, [a])
+
+        self.assertEqual(set(fixture_digest.read_digests(digests)), {a.name, b.name})
+
+    def test_a_differently_generated_fixture_does_not_match(self):
+        # The hazard: the difference is applied uniformly to every cell, so the cross-cell parity
+        # gate certifies it. Only the digest contradicts the report's workload name.
+        fx = self.fixture("lenet.safetensors", b"the bytes the report was measured on")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        fixture_digest.record(digests, [fx])
+        entries = fixture_digest.read_digests(digests)
+
+        fx.write_bytes(b"the bytes someone regenerated later")
+
+        self.assertEqual(fixture_digest.status(fx, entries)[0], "MISMATCH")
+
+    def test_an_unrecorded_fixture_is_not_silently_accepted(self):
+        fx = self.fixture("mystery.safetensors")
+
+        self.assertEqual(fixture_digest.status(fx, {})[0], "UNRECORDED")
+
+    def test_a_malformed_line_is_an_error_not_a_dropped_pin(self):
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        digests.write_text(fixture_digest.HEADER + "deadbeef  lenet.safetensors\n")
+
+        with self.assertRaises(ValueError):
+            fixture_digest.read_digests(digests)
+
+    def test_the_checked_in_file_parses_and_names_live_workloads(self):
+        # A digest for a workload spec that no longer exists is stale: it pins bytes no current
+        # run can produce, and reads as coverage.
+        entries = fixture_digest.read_digests(HERE / "fixtures" / fixture_digest.DIGEST_FILE)
+        specs = {p.stem for p in (HERE / "workloads").glob("*.json")}
+        self.assertTrue(specs, "no workload specs found next to the test")
+        for name in entries:
+            self.assertTrue(name.endswith(".safetensors"), name)
+            self.assertIn(name[: -len(".safetensors")], specs, name)
+
+    def test_the_sweep_refuses_bytes_nothing_records(self):
+        fx = self.fixture("lenet.safetensors")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        fixture_digest.write_digests(digests, {})
+
+        with self.assertRaises(SystemExit) as refused:
+            self.check([fx], digests_path=digests)
+
+        self.assertIn("--no-fixture-digest-check", str(refused.exception))
+
+    def test_the_sweep_runs_and_stamps_a_recorded_fixture(self):
+        fx = self.fixture("lenet.safetensors")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        fixture_digest.record(digests, [fx])
+
+        shas = self.check([fx], digests_path=digests)
+
+        self.assertEqual(shas, {fx: fixture_digest.sha256_file(fx)})
+
+    def test_the_opt_out_measures_them_and_still_reports_the_digest(self):
+        # A deliberate regeneration is a legitimate reason to run unpinned; it must not also cost
+        # the run its record of what it ran on.
+        fx = self.fixture("lenet.safetensors")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        fixture_digest.record(digests, [fx])
+        fx.write_bytes(b"regenerated")
+
+        shas = self.check([fx], digests_path=digests, allow_unpinned=True)
+
+        self.assertEqual(shas, {fx: fixture_digest.sha256_file(fx)})
+
+    def test_generated_fixtures_are_named_after_their_spec(self):
+        # What the recorded-name check above relies on: gen_fixtures.py writes
+        # fixtures/<spec name>.safetensors, and every spec's `name` is its file stem.
+        for spec in (HERE / "workloads").glob("*.json"):
+            self.assertEqual(json.loads(spec.read_text())["name"], spec.stem, spec.name)
 
 
 if __name__ == "__main__":

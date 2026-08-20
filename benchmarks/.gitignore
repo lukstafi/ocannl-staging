@@ -1,5 +1,8 @@
 .venv
-fixtures/
+# The fixtures themselves are large regenerable artifacts, but their recorded identity is not:
+# DIGESTS.txt is what says which bytes a published report was measured on (gh-ocannl-645).
+fixtures/*
+!fixtures/DIGESTS.txt
 results/
 __pycache__/
 _build/
