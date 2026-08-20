@@ -115,6 +115,21 @@ type sketch_params = {
           duplicating the store-back) fails its compile and is skipped like any other invalid
           candidate. On GPU the accumulator moves to workgroup-shared memory (the [shared] flag) so
           the Metal fragment intrinsics keep firing after placement makes it routine-local. *)
+  sk_batch_grid : bool;
+      (** GPU matmul pipelines on batched (rank-3+) sites only (gh-ocannl-643): [Retype] the site's
+          batch loops — [m_bo] and the hoisted [m_bi] — to [Grid], so a batched/multi-head GEMM's
+          batch and head axes launch as grid blocks (folded onto the hardware [.z] dimension, see
+          [Low_level]'s hardware-axis section comment) instead of running as serial loops inside
+          each block. The zeroing nest and every companion nest carry the same per-position
+          annotation, with interior batch loops hoisted identically, so the cross-nest positional
+          thread identity is preserved. Seeded as a {e twin} of each geometry — the serial-batch
+          flavor stays measured, because block-count curves are non-monotone (gh-ocannl-569's probe
+          peaked near 128 blocks and regressed by 1024): the tuner, not a heuristic, decides
+          whether the extra parallelism beats the occupancy it costs. Never seeded when the batch
+          extents' product exceeds the backend's [.z] launch-dimension limit
+          ([hardware_limits.max_grid_z], falling back to [max_grid_fold_extent] where the backend
+          advertises none — the same limit [Schedule.check_hardware_limits_classified] enforces
+          pre-driver for schedules that do not come from these seeds). *)
   sk_swizzle : LL.swizzle_kind option;
       (** Staged GPU mma sketches only ([sk_mma] with [sk_bk > 0]): store both cooperative operand
           tiles in this XOR layout (gh-ocannl-481 item 3, D3). Seeded as a {e twin} of each staged
@@ -920,8 +935,8 @@ let zero_expansion_witness (site : matmul_site) : string option =
    its own [`Zeros] segment — there is nothing to expand and the pipelines are correct without it:
    [Privatize] init-loads the accumulator tile from the (pre-zeroed) target, and [Tile_mma] loads
    the accumulator fragment before the reduction. *)
-let zero_geometry (site : matmul_site) ~(mk_zops : zi:Idx.symbol -> zj:Idx.symbol -> Sched.schedule)
-    : Sched.schedule =
+let zero_geometry ?(batch_grid = false) (site : matmul_site)
+    ~(mk_zops : zi:Idx.symbol -> zj:Idx.symbol -> Sched.schedule) : Sched.schedule =
   if not site.m_zeroed then []
   else (
     if Option.is_some (zero_expansion_witness site) then
@@ -938,11 +953,27 @@ let zero_geometry (site : matmul_site) ~(mk_zops : zi:Idx.symbol -> zj:Idx.symbo
                } ));
     let ez, zsyms = Sched.expand_zero ~tn:site.m_d in
     (* Batched outputs (gh-ocannl-528): the row/column zero loops get the accumulation's geometry;
-       the batch-axis zero loops stay [Serial], like the batch loops of the accumulation nest. The
-       row loop precedes the column loop in the zero nest ([m_row_axis < rank - 1]), matching the
-       accumulation's positional hardware-slot order. *)
+       the batch-axis zero loops stay [Serial], like the batch loops of the accumulation nest —
+       except under the [sk_batch_grid] twins (gh-ocannl-643), where they mirror the accumulation
+       nest's batch geometry: interior-batch zero loops (node axes between the row axis and the
+       minor axis) hoist above the row loop with the same sequential adjacent [Swap]s as
+       [batch_hoist_swaps], and every batch zero loop retypes to [Grid] — the zero nest's loop
+       order and per-position geometry then match the accumulation nest's by construction, which is
+       what keeps a hardware thread zeroing exactly the cells it accumulates. The row loop precedes
+       the column loop in the zero nest ([m_row_axis < rank - 1]), matching the accumulation's
+       positional hardware-slot order. *)
     let zi = List.nth_exn zsyms site.m_row_axis and zj = List.last_exn zsyms in
-    ez :: mk_zops ~zi ~zj)
+    let batch_ops =
+      if not batch_grid then []
+      else
+        let rank = List.length zsyms in
+        List.concat_mapi zsyms ~f:(fun ax zs ->
+            if ax = site.m_row_axis || ax = rank - 1 then []
+            else
+              (if ax > site.m_row_axis then [ Sched.Swap { outer = zi; inner = zs } ] else [])
+              @ [ Sched.Retype { axis = zs; ty = LL.Grid } ])
+    in
+    (ez :: batch_ops) @ mk_zops ~zi ~zj)
 
 (* The would-be epilogue tail's loop symbols: the first real statement after the last statement
    writing [target] — the nest [Sched.Fuse_epilogue] consumes (its perfect-Serial-nest and
@@ -1002,8 +1033,12 @@ let rec nest_loop_syms acc (llc : LL.t) =
    [Workgroup] lane). Emitting a positionally identical geometry on each companion nest therefore
    preserves the alignment the analysis proved, and covers the same slots the site's nest binds.
 
-   [site_syms] is the accumulation nest's chain, [annotate pos sym] the ops for chain position [pos]
-   of a companion, [skip] the loop symbols of a nest to leave alone (the fused twins' epilogue tail,
+   [site_syms] is the accumulation nest's chain, [annotate chain] the ops for one companion nest's
+   whole chain (the chain is passed entire, in nest order with extents, so the caller can also emit
+   the positional loop-reorder [Swap]s that mirror the site pipeline's interior-batch hoisting —
+   gh-ocannl-643; positional identity across nests is preserved because the permutation and the
+   per-position geometry are functions of the shared chain-position roles alone), [skip] the loop
+   symbols of a nest to leave alone (the fused twins' epilogue tail,
    which the fusion relocates under the accumulation nest's geometry — annotating it would make
    [Fuse_epilogue] reject the candidate for the wrong reason), and [expanded_zeros] the nodes whose
    whole-node [Zero_out] the caller expands with the same geometry.
@@ -1027,8 +1062,9 @@ let rec nest_loop_syms acc (llc : LL.t) =
    simd width here (a single [Workgroup] slot of extent [sk_simd]), which is what makes that safe in
    practice; a cross-nest simdgroup barrier would be the formal fix. *)
 let companion_geometry ~(site_syms : (Idx.symbol * int) list) ~(skip : Idx.symbol list)
-    ~(expanded_zeros : Ir.Tnode.t list) ~(annotate : int -> Idx.symbol -> Sched.schedule)
-    (opt : LL.optimized) : (Sched.schedule, string) Result.t =
+    ~(expanded_zeros : Ir.Tnode.t list)
+    ~(annotate : (Idx.symbol * int) list -> Sched.schedule) (opt : LL.optimized) :
+    (Sched.schedule, string) Result.t =
   let plc = opt.LL.optimize_ctx.LL.placements in
   let rec writes_materialized (llc : LL.t) =
     match llc with
@@ -1122,8 +1158,7 @@ let companion_geometry ~(site_syms : (Idx.symbol * int) list) ~(skip : Idx.symbo
           List.fold_until needs ~init:[]
             ~f:(fun acc stmt ->
               match chain_of stmt with
-              | Some cs when same_shape cs ->
-                  Continue (acc @ List.concat (List.mapi cs ~f:(fun pos (s, _) -> annotate pos s)))
+              | Some cs when same_shape cs -> Continue (acc @ annotate cs)
               | Some cs ->
                   Stop
                     (Error
@@ -1180,20 +1215,72 @@ let matmul_coverage_witness ~(opt : LL.optimized) ~(fused : bool) (site : matmul
     companion_geometry ~site_syms:(matmul_site_chain site)
       ~skip:(if fused then epilogue_tail_loop_syms ~target:site.m_d opt else [])
       ~expanded_zeros:(if site.m_zeroed then [ site.m_d ] else [])
-      ~annotate:(fun _ _ -> [])
+      ~annotate:(fun _ -> [])
       opt
   with
   | Ok _ -> None
   | Error why -> Some (Printf.sprintf "GPU matmul companion coverage (gh-521): %s" why)
 
-(* Chain-position roles matching [matmul_site_chain]: batch positions get no annotation (batch loops
-   stay [Serial] — the 3-slot grid budget is spent on the row/column blocks, and serial loops above
-   hardware loops are legal: hardware loops bind, not iterate), row/column positions get the
-   pipeline's geometry. *)
+(* Chain-position roles matching [matmul_site_chain]: row/column positions get the pipeline's
+   geometry; batch positions stay [Serial] by default (serial loops above hardware loops are legal:
+   hardware loops bind, not iterate) and become whole-loop [Grid] axes under the [sk_batch_grid]
+   twins (gh-ocannl-643) — the row/column blocks keep grid slots 0 and 1, and the batch grid axes
+   land on slots [>= 2], which fold onto the hardware [.z] dimension (see [Low_level]'s
+   hardware-axis section comment). *)
 let matmul_chain_roles (site : matmul_site) : [ `Batch | `Row | `Col ] list =
   List.map site.m_bo ~f:(fun _ -> `Batch)
   @ (`Row :: List.map site.m_bi ~f:(fun _ -> `Batch))
   @ [ `Col ]
+
+(* One companion nest's schedule under the shared chain-position roles: the interior batch loops
+   (the [`Batch] positions after the [`Row] one) are hoisted above the nest's own row loop with the
+   same sequential adjacent [Swap]s as [batch_hoist_swaps] applies to the site nest, then each
+   chain position gets its role's annotation. Emitted per companion because the swaps name the
+   companion's own symbols; positional thread identity across nests is preserved because the
+   permutation and the per-position geometry are functions of the role list alone (gh-ocannl-643).
+   With batch positions unannotated the hoists are omitted: they would be dead reordering. *)
+let companion_role_ops ~(roles : [ `Batch | `Row | `Col ] array)
+    ~(annotate_role : [ `Batch | `Row | `Col ] -> Idx.symbol -> Sched.schedule) ~(batch_grid : bool)
+    (cs : (Idx.symbol * int) list) : Sched.schedule =
+  let hoists =
+    if not batch_grid then []
+    else
+      let row = ref None in
+      List.concat_mapi cs ~f:(fun pos (s, _) ->
+          match roles.(pos) with
+          | `Row ->
+              row := Some s;
+              []
+          | `Batch -> (
+              match !row with Some r -> [ Sched.Swap { outer = r; inner = s } ] | None -> [])
+          | `Col -> [])
+  in
+  hoists @ List.concat (List.mapi cs ~f:(fun pos (s, _) -> annotate_role roles.(pos) s))
+
+(* The batch loops of a site, in [matmul_site_chain] order (outer batch loops, then the interior
+   ones the pipelines hoist above the row loop — the final nest order). *)
+let matmul_batch_loops (site : matmul_site) : (Idx.symbol * int) list = site.m_bo @ site.m_bi
+
+(* The batch fold lands whole batch-extent products on [.z], and CUDA/HIP cap [gridDim.z] at 65535
+   ([gridDim.x] alone is 2^31-scale; Metal is larger still). The authoritative per-backend cap is
+   [hardware_limits.max_grid_z], enforced pre-driver by [Schedule.check_hardware_limits_classified];
+   this constant is the conservative fallback when a backend advertises no limit, so seeding stays
+   deterministic across machines. A product beyond the cap must not be seeded: the candidate could
+   only fail at launch, on the GPU backends only, after compiling. *)
+let max_grid_fold_extent = 65535
+
+(* Whether the [sk_batch_grid] twins are seedable for this site: there are batch loops to spread,
+   and their product fits the backend's [.z] launch dimension. *)
+let batch_grid_twin_ok ~(limits : Ir.Backend_intf.hardware_limits) (site : matmul_site) : bool =
+  let cap = Option.value limits.Ir.Backend_intf.max_grid_z ~default:max_grid_fold_extent in
+  let product = List.fold (matmul_batch_loops site) ~init:1 ~f:(fun acc (_, n) -> acc * n) in
+  (not (List.is_empty (matmul_batch_loops site))) && product >= 2 && product <= cap
+
+(* The site nest's own batch geometry under [sk_batch_grid]: whole-loop [Grid] retypes of the batch
+   loops ([batch_hoist_swaps] has already made them the outermost loops of the nest). *)
+let site_batch_ops ~(batch_grid : bool) (site : matmul_site) : Sched.schedule =
+  if not batch_grid then []
+  else List.map (matmul_batch_loops site) ~f:(fun (g, _) -> Sched.Retype { axis = g; ty = LL.Grid })
 
 (* Hoist interior batch loops above the [m_i] loop (gh-ocannl-528), making the [i x j x k]
    micro-kernel perfectly nested for the splits, sinks and [Tensorize] below. Sequential adjacent
@@ -1208,15 +1295,17 @@ let batch_hoist_swaps (site : matmul_site) : Sched.schedule =
    workgroup extents), and companion nests the matching per-position split pair
    ([companion_geometry], gh-ocannl-521). *)
 let gpu_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
-    { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_tm = tm; sk_tn = tn; sk_epilogue; _ } : Sched.schedule
-    =
+    { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_tm = tm; sk_tn = tn; sk_epilogue; sk_batch_grid; _ } :
+    Sched.schedule =
   (* One geometry description drives the accumulation nest, the expanded zeroing nest and the
      companion nests: per row/column chain position, the block split (Grid) and the register split
      (Workgroup), which is what makes their slots and workgroup extents agree by construction; batch
-     positions stay [Serial] (gh-ocannl-528). *)
+     positions stay [Serial] (gh-ocannl-528), or become whole-loop [Grid] axes under the
+     [sk_batch_grid] twins (gh-ocannl-643). *)
   let annotate_role role sym =
     match role with
-    | `Batch -> []
+    | `Batch ->
+        if sk_batch_grid then [ Sched.Retype { axis = sym; ty = LL.Grid } ] else []
     | (`Row | `Col) as rc ->
         let blk, reg = match rc with `Row -> (bm, tm) | `Col -> (bn, tn) in
         let sp, _, inner = Sched.split ~axis:sym ~factor:blk ~outer:LL.Grid ~inner:LL.Serial in
@@ -1224,7 +1313,7 @@ let gpu_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
         [ sp; sp2 ]
   in
   let roles = Array.of_list (matmul_chain_roles site) in
-  let annotate pos sym = annotate_role roles.(pos) sym in
+  let annotate = companion_role_ops ~roles ~annotate_role ~batch_grid:sk_batch_grid in
   let cops =
     match
       companion_geometry ~site_syms:(matmul_site_chain site)
@@ -1236,9 +1325,10 @@ let gpu_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
     | Error why -> companion_coverage_unsupported ~tensorized:false why
   in
   let zops =
-    zero_geometry site ~mk_zops:(fun ~zi ~zj -> annotate_role `Row zi @ annotate_role `Col zj)
+    zero_geometry ~batch_grid:sk_batch_grid site ~mk_zops:(fun ~zi ~zj ->
+        annotate_role `Row zi @ annotate_role `Col zj)
   in
-  let zops = cops @ zops in
+  let zops = cops @ zops @ site_batch_ops ~batch_grid:sk_batch_grid site in
   let sp_i, _, i_i = Sched.split ~axis:site.m_i ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
   let sp_i2, i_w, i_t = Sched.split ~axis:i_i ~factor:tm ~outer:LL.Workgroup ~inner:LL.Serial in
   let sp_j, j_o, j_i = Sched.split ~axis:site.m_j ~factor:bn ~outer:LL.Grid ~inner:LL.Serial in
@@ -1342,15 +1432,26 @@ let cpu_sketch_schedule (site : matmul_site) { sk_bm = bm; sk_bn = bn; sk_bk = b
    compile at all (gh-ocannl-521): before, only the [Fuse_epilogue] twin could survive a companion,
    and when the fusion declined the seed had no surviving form. *)
 let gpu_mma_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
-    { sk_bm = bm; sk_bn = bn; sk_bk = bk; sk_simd = w; sk_epilogue; sk_swizzle; sk_depth; _ } :
-    Sched.schedule =
+    {
+      sk_bm = bm;
+      sk_bn = bn;
+      sk_bk = bk;
+      sk_simd = w;
+      sk_epilogue;
+      sk_swizzle;
+      sk_depth;
+      sk_batch_grid;
+      _;
+    } : Sched.schedule =
   (* The column role splits at the lane width, not at [bn]: the inner loop IS the workgroup slot the
      [Tile_mma]'s lane occupies, and a barrier-carrying kernel requires equal extents at a slot. The
      seeds constrain [sk_bn = sk_simd], so this is also the accumulation nest's column block. Batch
-     positions stay [Serial] (gh-ocannl-528). *)
+     positions stay [Serial] (gh-ocannl-528), or become whole-loop [Grid] axes under the
+     [sk_batch_grid] twins (gh-ocannl-643). *)
   let annotate_role role sym =
     match role with
-    | `Batch -> []
+    | `Batch ->
+        if sk_batch_grid then [ Sched.Retype { axis = sym; ty = LL.Grid } ] else []
     | `Row ->
         let sp, _, _ = Sched.split ~axis:sym ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
         [ sp ]
@@ -1359,7 +1460,7 @@ let gpu_mma_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
         [ sp ]
   in
   let roles = Array.of_list (matmul_chain_roles site) in
-  let annotate pos sym = annotate_role roles.(pos) sym in
+  let annotate = companion_role_ops ~roles ~annotate_role ~batch_grid:sk_batch_grid in
   let cops =
     match
       companion_geometry ~site_syms:(matmul_site_chain site)
@@ -1371,9 +1472,10 @@ let gpu_mma_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
     | Error why -> companion_coverage_unsupported ~tensorized:true why
   in
   let zops =
-    zero_geometry site ~mk_zops:(fun ~zi ~zj -> annotate_role `Row zi @ annotate_role `Col zj)
+    zero_geometry ~batch_grid:sk_batch_grid site ~mk_zops:(fun ~zi ~zj ->
+        annotate_role `Row zi @ annotate_role `Col zj)
   in
-  let zops = cops @ zops in
+  let zops = cops @ zops @ site_batch_ops ~batch_grid:sk_batch_grid site in
   let sp_i, _, i_i = Sched.split ~axis:site.m_i ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
   let sp_j, j_o, j_i = Sched.split ~axis:site.m_j ~factor:bn ~outer:LL.Grid ~inner:LL.Serial in
   if bk = 0 then
@@ -1900,6 +2002,7 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
           sk_epilogue = false;
           sk_swizzle = None;
           sk_depth = 1;
+          sk_batch_grid = false;
           sk_pack_prec = None;
         }
       in
@@ -2235,10 +2338,14 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
       sk_epilogue = fused;
       sk_swizzle = None;
       sk_depth = 1;
+      sk_batch_grid = false;
       sk_pack_prec = None;
     }
   in
-  let blocktile_child =
+  (* Both GPU pipeline branches are parameterized by the batch-geometry flavor (gh-ocannl-643):
+     [~batch_grid] threads into their leaves' [sk_batch_grid]. The CPU branches ignore it — they are
+     only ever built with [batch_grid = false] (see [with_batch_twins] at the pipeline level). *)
+  let blocktile_child ~batch_grid =
     if is_gpu then
       let a_prec = Lazy.force site.m_a.Ir.Tnode.storage_prec in
       let b_prec = Lazy.force site.m_b.Ir.Tnode.storage_prec in
@@ -2303,6 +2410,7 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                            sk_bk = bk;
                            sk_tm = tm;
                            sk_tn = tn;
+                           sk_batch_grid = batch_grid;
                          }) ))))
     else if is_cpu then
       (* Hoisted vs in-kernel packing stays a measured choice (gh-ocannl-470): when a constant
@@ -2335,7 +2443,7 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
             ])
     else Sspace.Refuted "backend kind seeds no scalar blocktile pipeline"
   in
-  let mma_child =
+  let mma_child ~batch_grid =
     match (is_gpu, limits.Ir.Backend_intf.mma) with
     | true, Some _ when Utils.debug_log_from_routines () ->
         (* Same predicate the GPU [mma_syntax] paths consult: under routine logging the emission
@@ -2467,6 +2575,7 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                                              sk_bm = bm;
                                              sk_bn = w;
                                              sk_bk = bk;
+                                             sk_batch_grid = batch_grid;
                                            }))))))) )
             in
             subt (fun () ->
@@ -2502,6 +2611,7 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                                  sk_bm = bm;
                                  sk_bn = bn;
                                  sk_bk = bk;
+                                 sk_batch_grid = batch_grid;
                                }
                              in
                              (* The twins level (per staged geometry): the swizzled layout and the
@@ -2945,9 +3055,23 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                   [ ("whole-triple", whole_child); ("packed", subt (fun () -> packed ())) ]))
     | _ -> Sspace.Refuted "backend kind seeds no tensorized pipeline"
   in
+  (* The batch-geometry level (gh-ocannl-643), per GPU pipeline, ABOVE the geometry menus:
+     "batch-serial" first, so an unbatched (or CPU) site's leaf list is byte-identical to the
+     pre-level enumeration — the level only appears where the twins are seedable, and the grid twins
+     follow all serial-batch geometries of their pipeline, like the other propose-both-measure
+     levels. The coverage witness is flavor-independent here ([companion_geometry]'s verdict never
+     depends on the emitted geometry), so both flavors share the one precondition guard. *)
+  let with_batch_twins mk =
+    if is_gpu && batch_grid_twin_ok ~limits site then
+      subt (fun () ->
+          choice "batch"
+            [ ("batch-serial", mk ~batch_grid:false); ("batch-grid", mk ~batch_grid:true) ])
+    else mk ~batch_grid:false
+  in
   choice "pipeline"
     [
-      ("blocktile", precondition_guard blocktile_child); ("tensorized", precondition_guard mma_child);
+      ("blocktile", precondition_guard (with_batch_twins blocktile_child));
+      ("tensorized", precondition_guard (with_batch_twins mma_child));
     ]
 
 let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits) ~opt ~fused site

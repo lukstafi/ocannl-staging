@@ -986,7 +986,7 @@ let spec_label = function
   | Whole (W_saved s) -> Printf.sprintf "W_saved[%d ops]" (List.length s)
   | Whole (W_preset { block_size }) -> Printf.sprintf "W_preset[bs=%s]" (bs_label block_size)
   | Whole (W_sketch p) when p.sk_mma ->
-      Printf.sprintf "W_sketch[%smma-%s %dx%dx%d%s%s%s%s%s%s%s%s]"
+      Printf.sprintf "W_sketch[%smma-%s %dx%dx%d%s%s%s%s%s%s%s%s%s]"
         (if p.sk_conv then "conv-" else "")
         (if p.sk_gpu then "gpu" else "cpu")
         p.sk_bm p.sk_bn p.sk_bk
@@ -995,12 +995,14 @@ let spec_label = function
         (if p.sk_hoist then " hoist" else "")
         (if p.sk_grid then " grid" else "")
         (if p.sk_pack_rest then " packrest" else "")
+        (if p.sk_batch_grid then " bgrid" else "")
         (if p.sk_epilogue then " ep" else "")
   | Whole (W_sketch p) ->
-      Printf.sprintf "W_sketch[%s %dx%dx%d/%dx%d%s%s]"
+      Printf.sprintf "W_sketch[%s %dx%dx%d/%dx%d%s%s%s]"
         (if p.sk_gpu then "gpu" else "cpu")
         p.sk_bm p.sk_bn p.sk_bk p.sk_tm p.sk_tn
         (if p.sk_hoist then " hoist" else "")
+        (if p.sk_batch_grid then " bgrid" else "")
         (if p.sk_epilogue then " ep" else "")
   | Fiss (F_preset { block_size; privatize; config_thresholds }) ->
       Printf.sprintf "F_preset[bs=%s%s%s]" (bs_label block_size)
@@ -1013,7 +1015,7 @@ let spec_label = function
         (if fine then "fine " else "")
         (String.concat ~sep:","
            (List.map entries ~f:(fun (_, p) ->
-                Printf.sprintf "%s%s%s %dx%dx%d%s%s%s%s%s%s%s%s"
+                Printf.sprintf "%s%s%s %dx%dx%d%s%s%s%s%s%s%s%s%s"
                   (if p.sk_conv then "conv-" else "")
                   (if p.sk_mma then "mma-" else "")
                   (if p.sk_gpu then "gpu" else "cpu")
@@ -1023,6 +1025,7 @@ let spec_label = function
                   (if p.sk_hoist then " hoist" else "")
                   (if p.sk_grid then " grid" else "")
                   (if p.sk_pack_rest then " packrest" else "")
+                  (if p.sk_batch_grid then " bgrid" else "")
                   (if p.sk_epilogue then " ep" else ""))))
   | Fiss (F_split { sites }) ->
       Printf.sprintf "F_split[%s]"

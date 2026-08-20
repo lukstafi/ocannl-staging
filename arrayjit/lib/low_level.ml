@@ -3901,7 +3901,18 @@ let validate_scope_bodies (llc : t) : unit =
     kind, the innermost binds [.x] (slot 0), the next [.y], then [.z] — the slot of a loop is the
     maximum nesting depth of same-kind annotated loops strictly inside it, so sibling nests align
     positionally. [Grid] occupies the grid dimensions; [Workgroup] and [Workgroup_reduce] share the
-    block/threadgroup dimensions. *)
+    block/threadgroup dimensions.
+
+    [Grid] slots beyond the three hardware dimensions are legal (gh-ocannl-643: a rank-4 batched
+    matmul's chain is two batch loops + row + column, four grid-annotated loops): slots [>= 2] share
+    the hardware [.z] dimension by {e folding} — the launch's [.z] extent is the product of the
+    per-slot maxima ({!launch_dims}), and a slot-[s] loop binds [(z / stride) % cap] where [stride]
+    is the product of the slot maxima below it and [cap] its own slot maximum ({!grid_fold};
+    rendered by [C_syntax.hardware_binding]). The decode is a bijection between [.z] values and slot
+    coordinate tuples, so thread identity and the coverage rule are unchanged; a nest whose extent
+    at a slot is below the slot maximum keeps the ordinary [If] guard ({!guard_annotated_extents}).
+    [Workgroup] slots stay capped at 3: threadgroup shape interacts with barriers and thread-id
+    semantics, and no annotator emits deeper workgroup nests. *)
 
 type launch_dims = { grid : int array; block : int array } [@@deriving sexp_of, equal]
 
@@ -3969,16 +3980,42 @@ let slot_max_extent axes kind slot =
       if Poly.equal a.ha_kind kind && a.ha_slot = slot then max m a.ha_extent else m)
 
 (** Launch dimensions: per-slot maximum extents over the kernel's annotated loops ([.x], [.y], [.z];
-    all-1s for all-[Serial] code). Smaller-extent sibling bindings are wrapped in [If] guards by
-    {!guard_annotated_extents}. *)
+    all-1s for all-[Serial] code). [Grid] slots [>= 2] fold onto the hardware [.z] dimension (see
+    the section comment), so [grid.(2)] is the {e product} of their per-slot maxima. Smaller-extent
+    sibling bindings are wrapped in [If] guards by {!guard_annotated_extents}. *)
 let launch_dims (llc : t) : launch_dims =
   let axes = hardware_axes llc in
   let grid = [| 1; 1; 1 |] and block = [| 1; 1; 1 |] in
+  let max_grid_slot =
+    List.fold axes ~init:(-1) ~f:(fun m a ->
+        match a.ha_kind with `Grid -> max m a.ha_slot | `Workgroup -> m)
+  in
   List.iter axes ~f:(fun a ->
-      if a.ha_slot < 3 then
-        let arr = match a.ha_kind with `Grid -> grid | `Workgroup -> block in
-        arr.(a.ha_slot) <- max arr.(a.ha_slot) a.ha_extent);
+      match a.ha_kind with
+      | `Grid -> if a.ha_slot < 2 then grid.(a.ha_slot) <- max grid.(a.ha_slot) a.ha_extent
+      | `Workgroup -> if a.ha_slot < 3 then block.(a.ha_slot) <- max block.(a.ha_slot) a.ha_extent);
+  for s = 2 to max_grid_slot do
+    grid.(2) <- grid.(2) * slot_max_extent axes `Grid s
+  done;
   { grid; block }
+
+(** The binding arithmetic of a [Grid] loop at [slot >= 2] under the [.z] fold (see the section
+    comment): [(stride, cap)] such that the loop's index is [(z / stride) % cap] — [stride] the
+    product of the per-slot maxima of grid slots in [\[2, slot)], [cap = Some m] with [m] the
+    loop's own slot maximum when a higher grid slot exists in the kernel, [None] (no modulo needed)
+    when this is the topmost folded slot, since then [z / stride < m] already. For the common
+    single-slot-2 case this is [(1, None)]: the binding is the bare [.z] register. *)
+let grid_fold (axes : hardware_axis_info list) ~(slot : int) : int * int option =
+  assert (slot >= 2);
+  let stride = ref 1 in
+  for s = 2 to slot - 1 do
+    stride := !stride * slot_max_extent axes `Grid s
+  done;
+  let has_higher =
+    List.exists axes ~f:(fun a ->
+        match a.ha_kind with `Grid -> a.ha_slot > slot | `Workgroup -> false)
+  in
+  (!stride, if has_higher then Some (slot_max_extent axes `Grid slot) else None)
 
 (* Whether any [Local_scope] body within [llc]'s scalars contains a hardware-annotated loop. *)
 let rec scalar_scopes_have_annotated (llc : t) : bool =
@@ -4009,7 +4046,8 @@ let rec scalar_scopes_have_annotated (llc : t) : bool =
 
 (** Backend-independent well-formedness of hardware annotations (axis-types proposal §2). A no-op
     for all-[Serial] code. Raises [Invalid_argument] on: annotated loops with [from_ <> 0]; more
-    than 3 slots of one kind; annotated loops inside [Local_scope] bodies; a kernel containing
+    than 3 [Workgroup] slots ([Grid] slots [>= 2] fold onto [.z], see the hardware-axis section
+    comment); annotated loops inside [Local_scope] bodies; a kernel containing
     barriers whose same-slot workgroup extents differ (a barrier under divergent control flow is UB)
     or with a barrier lexically under an [If] guard; and writes to materialized tensor nodes
     lexically outside all annotated loops (every hardware thread would execute them, racing with the
@@ -4023,7 +4061,10 @@ let validate_parallel plc (llc : t) : unit =
           invalid_arg
             ("Low_level.validate_parallel: annotated loop " ^ Indexing.symbol_ident a.ha_index
            ^ " must start at 0, starts at " ^ Int.to_string a.ha_from_);
-        if a.ha_slot > 2 then
+        (* Grid slots [>= 2] fold onto the hardware [.z] dimension (see the hardware-axis section
+           comment), so any number of grid axes is renderable; workgroup slots stay capped at the
+           three threadgroup dimensions. *)
+        if a.ha_slot > 2 && Poly.equal a.ha_kind `Workgroup then
           invalid_arg
             ("Low_level.validate_parallel: more than 3 " ^ hardware_kind_label a.ha_kind
            ^ " axes in one kernel (loop " ^ Indexing.symbol_ident a.ha_index ^ " needs slot "

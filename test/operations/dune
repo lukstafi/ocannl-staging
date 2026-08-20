@@ -1932,6 +1932,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name schedule_batch_grid)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules schedule_batch_grid)
+ (libraries base ocannl stdio arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name simd_lane_choice)
  (package neural_nets_lib)
  (deps ocannl_config)

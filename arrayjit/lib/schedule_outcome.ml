@@ -11,7 +11,7 @@ type phase =
   | Sync
 [@@deriving sexp_of, compare, equal]
 
-type resource = Workgroup_threads | Workgroup_memory | Thread_scratch
+type resource = Workgroup_threads | Workgroup_memory | Thread_scratch | Grid_z_extent
 [@@deriving sexp_of, compare, equal]
 
 type severity = Expected | Compiler_bug [@@deriving sexp_of, compare, equal]

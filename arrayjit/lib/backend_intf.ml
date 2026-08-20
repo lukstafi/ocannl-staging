@@ -115,6 +115,15 @@ type hardware_limits = {
   max_workgroup_memory_bytes : int option;
       (** Capacity in bytes of the workgroup-shared memory (CUDA [__shared__] / Metal
           [threadgroup]); [None] when the backend imposes no limit. *)
+  max_grid_z : int option;
+      (** Upper bound on the launch's [.z] grid dimension — the dimension [Grid] slots [>= 2] fold
+          onto (gh-ocannl-643, [Low_level]'s hardware-axis section comment), so this is the cap on
+          a kernel's folded batch-extent product. CUDA and HIP cap [gridDim.y]/[gridDim.z] at
+          65535 (an architectural constant, unlike the queried per-device limits above); [None]
+          when the backend imposes no such limit (Metal's threadgroups-per-grid dimensions are not
+          16-bit, and the C backends render annotated loops serially). Checked pre-driver by
+          [Schedule.check_hardware_limits_classified]; the autotune batch-grid twins also consult
+          it at seeding so an over-cap candidate is never proposed. *)
   mma : mma_capability option;
       (** Tile-MMA units ([simdgroup_matrix] / tensor cores); [None] when the backend has none wired
           — [Tile_mma] statements then render their scalar fallback. *)
@@ -178,6 +187,7 @@ let no_hardware_limits =
   {
     max_threads_per_workgroup = None;
     max_workgroup_memory_bytes = None;
+    max_grid_z = None;
     mma = None;
     simd_vector_bytes = 0;
     peak_flops = None;

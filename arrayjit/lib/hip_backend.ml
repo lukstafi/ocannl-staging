@@ -1900,6 +1900,10 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
              min_over (fun (a : H.Device.attributes) -> a.max_threads_per_block);
            max_workgroup_memory_bytes =
              min_over (fun (a : H.Device.attributes) -> a.shared_mem_per_block);
+           max_grid_z =
+             min_over (fun (a : H.Device.attributes) ->
+                 let _, _, z = a.max_grid_size in
+                 z);
            (* Cooperative tile-MMA via rocWMMA, gated on [mma_supported]: RDNA3/RDNA3.5+
               (gfx11/gfx12) wave32 across ALL devices AND discoverable rocWMMA headers. CDNA (gfx9,
               wave64, MFMA) and header-less hosts stay on the scalar path -- reporting [Some] there
