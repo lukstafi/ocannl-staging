@@ -461,7 +461,8 @@ let render_raw (r : Scan.raw_stanza) =
     List.map r.Scan.raw_test_cwds ~f:(fun cwd ->
         if String.is_empty cwd then "%{test}" else cwd ^ ":%{test}")
   in
-  Printf.sprintf "%s%s{%s}" r.Scan.raw_head
+  Printf.sprintf "%s%s%s{%s}" r.Scan.raw_head
+    (if String.is_empty r.Scan.raw_subdir then "" else "@" ^ r.Scan.raw_subdir)
     (if r.Scan.raw_inline_tests then "+inline" else "")
     (String.concat ~sep:" " (tests @ runs))
 
@@ -482,22 +483,26 @@ let raw_stanza_cases =
        `in_subdir site.subdir site.cwd`. *)
     ( "a stanza inside a subdir runs there",
       {dune|(subdir gen (test (name t)))|dune},
-      [ "subdir{}"; "test{gen:%{test}}" ] );
+      [ "subdir{}"; "test@gen{gen:%{test}}" ] );
     ( "and a rule inside one too",
       {dune|(subdir gen (rule (action (run %{dep:a.exe}))))|dune},
-      [ "subdir{}"; "rule{gen:a.exe}" ] );
+      [ "subdir{}"; "rule@gen{gen:a.exe}" ] );
     ( "nested subdirs compose",
       {dune|(subdir a (subdir b (rule (action (run %{dep:x.exe})))))|dune},
-      [ "subdir{}"; "subdir{}"; "rule{a/b:x.exe}" ] );
+      [ "subdir{}"; "subdir@a{}"; "rule@a/b{a/b:x.exe}" ] );
     ( "a subdir composes with a chdir",
       {dune|(subdir gen (rule (action (chdir sub (run %{dep:a.exe})))))|dune},
-      [ "subdir{}"; "rule{gen/sub:a.exe}" ] );
+      [ "subdir{}"; "rule@gen{gen/sub:a.exe}" ] );
     (* An inline_tests field belongs to the stanza it sits directly inside. *)
     ("a library with inline tests", {dune|(library (name l) (inline_tests))|dune}, [ "library+inline{}" ]);
     ("a library without", {dune|(library (name l) (libraries base))|dune}, [ "library{}" ]);
     ( "an inline_tests nested deeper is not the library's field",
       {dune|(library (name l) (env (inline_tests)))|dune},
       [ "library{}" ] );
+    (* A library in a subdir runs its inline tests there, so that directory travels with it. *)
+    ( "a library with inline tests inside a subdir",
+      {dune|(subdir child (library (name l) (inline_tests)))|dune},
+      [ "subdir{}"; "library@child+inline{}" ] );
     (* What runs things, and where. *)
     ("a rule running a dep pform", {dune|(rule (action (run %{dep:probe.exe})))|dune}, [ "rule{probe.exe}" ]);
     ("a bare path", {dune|(rule (action (run ./probe.exe)))|dune}, [ "rule{probe.exe}" ]);

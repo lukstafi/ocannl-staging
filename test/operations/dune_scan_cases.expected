@@ -80,6 +80,7 @@ ok: raw stanzas -- a subdir composes with a chdir
 ok: raw stanzas -- a library with inline tests
 ok: raw stanzas -- a library without
 ok: raw stanzas -- an inline_tests nested deeper is not the library's field
+ok: raw stanzas -- a library with inline tests inside a subdir
 ok: raw stanzas -- a rule running a dep pform
 ok: raw stanzas -- a bare path
 ok: raw stanzas -- an extensionless explicit path

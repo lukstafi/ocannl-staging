@@ -653,6 +653,9 @@ let inert_heads =
 type raw_stanza = {
   raw_head : string;  (** the atom the stanza opens with *)
   raw_inline_tests : bool;  (** whether it has an [(inline_tests …)] field of its own *)
+  raw_subdir : string;
+      (** the directory the stanza's [(subdir …)] nesting puts it in — where dune runs what it
+          declares, and so where the config is resolved from. [""] for a top-level stanza. *)
   raw_runs : (string * string) list;
       (** the executables it runs, each with the directory the process ends up in — the stanza's
           [(subdir …)] composed with the [chdir] actions around the command, which is the directory
@@ -800,6 +803,7 @@ let raw_stanzas content =
           {
             raw_head = head;
             raw_inline_tests = inline;
+            raw_subdir = subdir;
             raw_runs =
               List.filter_map ran ~f:(fun (cwd, cmd) ->
                   if String.equal (program_path cmd) test_pform then None

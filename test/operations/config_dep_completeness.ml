@@ -290,23 +290,12 @@ let () =
          exempt ones -- an exemption is about the config dependency, not about whether the stanza
          was seen. *)
       let raw = Scan.raw_stanzas content in
-      let seen kind = List.count described ~f:(fun (_, k, _, _) -> Poly.equal k kind) in
-      let floors =
-        [
-          ( seen Scan.Inline_tests,
-            List.count raw ~f:(fun r ->
-                String.equal r.Scan.raw_head "library" && r.Scan.raw_inline_tests),
-            "inline-test libraries" );
-        ]
+      let inline_floor =
+        List.filter_map raw ~f:(fun r ->
+            if String.equal r.Scan.raw_head "library" && r.Scan.raw_inline_tests then
+              Some r.Scan.raw_subdir
+            else None)
       in
-      List.iter floors ~f:(fun (seen, floor, what) ->
-          if seen < floor then (
-            Int.incr floor_holes;
-            fail
-              (Printf.sprintf
-                 "%s: the raw text shows %d %s but the scan placed only %d -- it is reading the \
-                  file with a hole in it"
-                 dune_file floor what seen)));
       (* Test stanzas are compared per WORKING DIRECTORY, not merely counted: a test action can run
          `%{test}` in several `chdir` branches, and [sites] emits one Test site per directory
          because each resolves a different config -- so counting the stanza once would let one of
@@ -336,6 +325,26 @@ let () =
                  dune_file in_text
                  (if in_text = 1 then "stanza" else "stanzas")
                  (if String.is_empty cwd then " in its own directory" else " in " ^ cwd)
+                 in_walk)));
+      (* Inline-test libraries are compared the same way, per directory: a `(subdir …)` moves where
+         they run, so losing that placement would validate the dependency against the parent
+         directory (Codex P2, round 8). *)
+      let placed_inline =
+        List.filter_map described ~f:(fun (site, kind, _, _) ->
+            match kind with Scan.Inline_tests -> Some (effective site) | _ -> None)
+        |> tally_of
+      in
+      Map.iteri (tally_of inline_floor) ~f:(fun ~key:dir ~data:in_text ->
+          let in_walk = Option.value (Map.find placed_inline dir) ~default:0 in
+          if in_walk < in_text then (
+            Int.incr floor_holes;
+            fail
+              (Printf.sprintf
+                 "%s: the raw text shows %d inline-test %s in%s but the scan placed only %d -- it \
+                  is reading the file with a hole in it"
+                 dune_file in_text
+                 (if in_text = 1 then "library" else "libraries")
+                 (if String.is_empty dir then " its own directory" else " " ^ dir)
                  in_walk)));
       (* The rules are compared as a MULTISET over (working directory, executable), which is the
          pair [sites] makes one site of. Neither coarser comparison works: a flat set would let five
@@ -369,7 +378,10 @@ let () =
                  in_text
                  (if in_text = 1 then "stanza" else "stanzas")
                  in_walk)));
-      if List.exists floors ~f:(fun (_, floor, _) -> floor > 0) || not (List.is_empty run_floor)
+      if
+        (not (List.is_empty test_floor))
+        || (not (List.is_empty inline_floor))
+        || not (List.is_empty run_floor)
       then Int.incr floors_checked;
       (* The golden holds which KINDS a dune file has, not how many of each: a tally there made
          every test added anywhere in the repository churn this file, and put a single hot line in
@@ -394,7 +406,7 @@ let () =
           "  %s: %d tests (floor %d), %d inline-test libraries (floor %d), %d exe-running rules \
            (%d named in the text), %d exempt"
           dune_file (tally Scan.Test) (List.length test_floor) (tally Scan.Inline_tests)
-          (List.nth_exn (List.map floors ~f:(fun (_, f, _) -> f)) 0)
+          (List.length inline_floor)
           (tally Scan.Runs_executable) (List.length run_floor) (List.length exempted)
         :: !inventory);
   let stale =
