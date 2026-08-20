@@ -119,6 +119,13 @@ ok: raw stanzas -- and one behind a ./, which says only "here"
 ok: raw stanzas -- a binding may wrap its path in a dependency form
 ok: raw stanzas -- a binding written after the action
 ok: raw stanzas -- a binding does not leak to the next stanza
+ok: raw stanzas -- a non-path form in a binding is not its value
+ok: raw stanzas -- and a binding of only a non-path form resolves to nothing
+ok: raw stanzas -- a binding outside the deps field is not a binding
+ok: raw stanzas -- a bare command under setenv PATH is unnameable
+ok: raw stanzas -- but a named executable under one is still a run
+ok: raw stanzas -- two bare ones are two, and repeats collapse
+ok: raw stanzas -- a chdir under one still names where it runs
 ok: raw stanzas -- a binding resolving to no executable stays declined
 ok: raw stanzas -- a toolchain pform is not ours
 ok: raw stanzas -- an executable only depended on

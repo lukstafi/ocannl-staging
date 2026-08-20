@@ -653,6 +653,9 @@ let inert_heads =
 type raw_stanza = {
   raw_head : string;  (** the atom the stanza opens with *)
   raw_inline_tests : bool;  (** whether it has an [(inline_tests …)] field of its own *)
+  raw_unnameable : int;
+      (** how many bare commands the stanza runs under a [(setenv PATH …)] — each one a program the
+          walk refuses to name, and so an {!Unreadable_directory} site it must have placed. *)
   raw_subdir : string;
       (** the directory the stanza's [(subdir …)] nesting puts it in — where dune runs what it
           declares, and so where the config is resolved from. [""] for a top-level stanza. *)
@@ -722,22 +725,34 @@ let raw_stanzas content =
   let parsed = Sexplib.Sexp.scan_sexps (Lexing.from_string content) in
   (* Every `(:name …)` the stanza binds, with the first executable it names -- the binding may wrap
      its path in a dependency form, and it is found wherever in the stanza it sits. *)
+  (* A binding's paths, the way [named_deps_of] reads them: atoms, and the forms that CARRY paths.
+     Descending into any form instead would take `(:runner (alias fake.exe) (file real.exe))` for
+     the alias -- which dune does not run and the walk does not name (Codex P2, round 9). *)
   let rec first_executable sexp =
     match sexp with
     | Sexp.Atom a when is_executable a -> Some (program_path a)
     | Sexp.Atom _ -> None
-    | Sexp.List l -> List.find_map l ~f:first_executable
+    | Sexp.List (Sexp.Atom head :: rest) when List.mem path_bearing_forms head ~equal:String.equal
+      ->
+        List.find_map rest ~f:first_executable
+    | Sexp.List _ -> None
   in
-  let rec bindings_in sexp =
-    match sexp with
-    | Sexp.Atom _ -> []
-    | Sexp.List (Sexp.Atom name :: rest)
-      when String.is_prefix name ~prefix:":" && String.length name > 1 ->
-        (match List.find_map rest ~f:first_executable with
-        | Some path -> [ (String.drop_prefix name 1, path) ]
-        | None -> [])
-        @ List.concat_map rest ~f:bindings_in
-    | Sexp.List l -> List.concat_map l ~f:bindings_in
+  (* And only from the stanza's own `deps` field, which is the only place [named_deps_of] looks. *)
+  let bindings_of fields =
+    match
+      List.find_map fields ~f:(function
+        | Sexp.List (Sexp.Atom "deps" :: args) -> Some args
+        | _ -> None)
+    with
+    | None -> []
+    | Some args ->
+        List.filter_map args ~f:(function
+          | Sexp.List (Sexp.Atom name :: values)
+            when String.is_prefix name ~prefix:":" && String.length name > 1 -> (
+              match List.find_map values ~f:first_executable with
+              | Some path -> Some (String.drop_prefix name 1, path)
+              | None -> None)
+          | _ -> None)
   in
   (* The program a command token names, mirroring [classify_command] for the spellings the stanza
      itself settles: a `.exe`, any explicit relative path (`./probe` is ours whatever its
@@ -761,16 +776,21 @@ let raw_stanzas content =
   in
   (* Every command the stanza runs, with the directory it runs in. Its own traversal, deliberately:
      this is the question [executables_run] answers, and answering it twice is the point. *)
-  let rec commands ~cwd ~unresolved sexp =
+  let rec commands ~cwd ~unresolved ~under_path sexp =
     match sexp with
     | Sexp.Atom _ -> []
+    (* `(setenv PATH …)` changes what a BARE command name resolves to, so the walk stops vouching
+       for where such a program runs. Descending through it as an ordinary form would lose that
+       (Codex P2, round 9); what is beneath it is marked instead. *)
+    | Sexp.List (Sexp.Atom "setenv" :: Sexp.Atom "PATH" :: _value :: rest) ->
+        List.concat_map rest ~f:(commands ~cwd ~unresolved ~under_path:true)
     | Sexp.List (Sexp.Atom "chdir" :: Sexp.Atom dir :: rest) ->
         if String.is_substring dir ~substring:"%{" then
-          List.concat_map rest ~f:(commands ~cwd ~unresolved:true)
-        else List.concat_map rest ~f:(commands ~cwd:(in_subdir cwd dir) ~unresolved)
+          List.concat_map rest ~f:(commands ~cwd ~unresolved:true ~under_path)
+        else List.concat_map rest ~f:(commands ~cwd:(in_subdir cwd dir) ~unresolved ~under_path)
     | Sexp.List (Sexp.Atom ("run" | "dynamic-run") :: Sexp.Atom cmd :: _) ->
-        if unresolved then [] else [ (cwd, cmd) ]
-    | Sexp.List l -> List.concat_map l ~f:(commands ~cwd ~unresolved)
+        if unresolved then [] else [ (cwd, cmd, under_path) ]
+    | Sexp.List l -> List.concat_map l ~f:(commands ~cwd ~unresolved ~under_path)
   in
   let of_stanza ~subdir sexp =
     match sexp with
@@ -783,16 +803,16 @@ let raw_stanzas content =
         in
         let ran =
           if List.mem counted_heads head ~equal:String.equal then
-            commands ~cwd:subdir ~unresolved:false sexp
+            commands ~cwd:subdir ~unresolved:false ~under_path:false sexp
           else []
         in
-        let bindings = bindings_in sexp in
+        let bindings = bindings_of fields in
         let is_test = List.mem test_heads head ~equal:String.equal in
         let test_cwds =
           if not is_test then []
           else
             match
-              List.filter_map ran ~f:(fun (cwd, cmd) ->
+              List.filter_map ran ~f:(fun (cwd, cmd, _) ->
                   (* `./%{test}` is the test binary too: the `./` says only "here". *)
                   if String.equal (program_path cmd) test_pform then Some cwd else None)
             with
@@ -805,7 +825,7 @@ let raw_stanzas content =
             raw_inline_tests = inline;
             raw_subdir = subdir;
             raw_runs =
-              List.filter_map ran ~f:(fun (cwd, cmd) ->
+              List.filter_map ran ~f:(fun (cwd, cmd, _) ->
                   if String.equal (program_path cmd) test_pform then None
                   else
                     match program ~bindings cmd with
@@ -814,6 +834,20 @@ let raw_stanzas content =
               |> List.dedup_and_sort ~compare:(fun (c1, e1) (c2, e2) ->
                      match String.compare c1 c2 with 0 -> String.compare e1 e2 | n -> n);
             raw_test_cwds = test_cwds;
+            (* A bare name under `(setenv PATH …)`: the only shape whose site the walk is certain to
+               make {!Unreadable_directory}, since a command it CAN name stays a [Runs] even there.
+               Deduplicated by (directory, command), which is how the walk's own sites collapse. *)
+            raw_unnameable =
+              List.filter_map ran ~f:(fun (cwd, cmd, under_path) ->
+                  if
+                    under_path
+                    && (not (String.is_substring cmd ~substring:"%{"))
+                    && (not (is_executable cmd))
+                    && not (is_explicit_path cmd)
+                  then Some (cwd, cmd)
+                  else None)
+              |> List.dedup_and_sort ~compare:Poly.compare
+              |> List.length;
           };
         ]
   in

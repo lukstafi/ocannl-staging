@@ -461,10 +461,14 @@ let render_raw (r : Scan.raw_stanza) =
     List.map r.Scan.raw_test_cwds ~f:(fun cwd ->
         if String.is_empty cwd then "%{test}" else cwd ^ ":%{test}")
   in
+  let unnameable =
+    if r.Scan.raw_unnameable = 0 then []
+    else [ Printf.sprintf "!%d" r.Scan.raw_unnameable ]
+  in
   Printf.sprintf "%s%s%s{%s}" r.Scan.raw_head
     (if String.is_empty r.Scan.raw_subdir then "" else "@" ^ r.Scan.raw_subdir)
     (if r.Scan.raw_inline_tests then "+inline" else "")
-    (String.concat ~sep:" " (tests @ runs))
+    (String.concat ~sep:" " (tests @ runs @ unnameable))
 
 let raw_stanza_cases =
   [
@@ -628,6 +632,33 @@ let raw_stanza_cases =
       {dune|(rule (deps (:pp pp.exe)) (action (run %{pp})))
 (rule (action (run %{pp})))|dune},
       [ "rule{pp.exe}"; "rule{}" ] );
+    (* A binding's paths are the atoms and the forms that CARRY paths -- an `(alias …)` names
+       something dune does not run, so an `.exe`-looking atom inside one is not the binding's value.
+       *)
+    ( "a non-path form in a binding is not its value",
+      {dune|(rule (deps (:runner (alias fake.exe) (file real.exe))) (action (run %{runner})))|dune},
+      [ "rule{real.exe}" ] );
+    ( "and a binding of only a non-path form resolves to nothing",
+      {dune|(rule (deps (:runner (alias fake.exe))) (action (run %{runner})))|dune},
+      [ "rule{}" ] );
+    ( "a binding outside the deps field is not a binding",
+      {dune|(rule (action (progn (:pp pp.exe) (run %{pp}))))|dune},
+      [ "rule{}" ] );
+    (* `(setenv PATH …)` changes what a bare name resolves to, so the walk stops vouching for the
+       program -- and the floor records that it must have said so. A command the text CAN name
+       stays an ordinary run even there, because the walk still names it. *)
+    ( "a bare command under setenv PATH is unnameable",
+      {dune|(rule (action (setenv PATH . (run probe))))|dune},
+      [ "rule{!1}" ] );
+    ( "but a named executable under one is still a run",
+      {dune|(rule (action (setenv PATH . (run %{dep:probe.exe}))))|dune},
+      [ "rule{probe.exe}" ] );
+    ( "two bare ones are two, and repeats collapse",
+      {dune|(rule (action (setenv PATH . (progn (run a) (run b) (run a)))))|dune},
+      [ "rule{!2}" ] );
+    ( "a chdir under one still names where it runs",
+      {dune|(rule (action (setenv PATH . (chdir sub (run %{dep:a.exe})))))|dune},
+      [ "rule{sub:a.exe}" ] );
     ( "a binding resolving to no executable stays declined",
       {dune|(rule (deps (:script run.sh)) (action (run %{script})))|dune},
       [ "rule{}" ] );

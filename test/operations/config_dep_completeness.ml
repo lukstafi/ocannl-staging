@@ -346,6 +346,25 @@ let () =
                  (if in_text = 1 then "library" else "libraries")
                  (if String.is_empty dir then " its own directory" else " " ^ dir)
                  in_walk)));
+      (* A bare command under `(setenv PATH …)` is one the walk refuses to name -- PATH decides what
+         it resolves to -- so it must have placed a site saying so. Compared as a total per file,
+         since the walk's own site for it carries a composed name rather than the command (Codex P2,
+         round 9). Any `Unreadable_directory` site counts: a `(bash …)` line makes one too, so the
+         walk's tally is a superset and the comparison stays a floor. *)
+      let unnameable_floor = List.sum (module Int) raw ~f:(fun r -> r.Scan.raw_unnameable) in
+      let placed_unnameable =
+        List.count described ~f:(fun (_, kind, _, _) ->
+            match kind with Scan.Unreadable_directory -> true | _ -> false)
+      in
+      if placed_unnameable < unnameable_floor then (
+        Int.incr floor_holes;
+        fail
+          (Printf.sprintf
+             "%s: the raw text runs %d bare %s under `(setenv PATH ...)`, and the scan placed only \
+              %d it could not name -- it is reading the file with a hole in it"
+             dune_file unnameable_floor
+             (if unnameable_floor = 1 then "command" else "commands")
+             placed_unnameable));
       (* The rules are compared as a MULTISET over (working directory, executable), which is the
          pair [sites] makes one site of. Neither coarser comparison works: a flat set would let five
          of the six rules that each run `profile_precedence.exe` be dropped with the sixth answering
@@ -381,7 +400,8 @@ let () =
       if
         (not (List.is_empty test_floor))
         || (not (List.is_empty inline_floor))
-        || not (List.is_empty run_floor)
+        || (not (List.is_empty run_floor))
+        || unnameable_floor > 0
       then Int.incr floors_checked;
       (* The golden holds which KINDS a dune file has, not how many of each: a tally there made
          every test added anywhere in the repository churn this file, and put a single hot line in
