@@ -71,6 +71,7 @@ SAME_PROCESS_CELLS = {("tinygrad", "beam"), ("pytorch", "compiled")}
 PROVENANCE_MARK = {
     "REPLAY": "replay",
     "SEARCH-PASS": "**SEARCH PASS**",
+    "NO-SEARCH": "no search",
     "SAME-PROCESS": "same-process",
     "CACHED": "cached",
     "UNKNOWN": "?",
@@ -343,7 +344,10 @@ def provenance_check(results):
     and only a reviewer reading the driver caught it.
 
     A two-pass cell is REPLAY (compliant) or SEARCH-PASS (its timings came from a process that
-    searched — returned as a violation). A cell whose protocol searches in the timing process is
+    searched — returned as a violation). NO-SEARCH is the third case: with `autotune_search=false`
+    (the reproducible profile) a tuned cell neither searches nor replays, it ships the untuned
+    default — nothing to gate, but calling that a replay would credit the row with a tuned artifact
+    it does not have. A cell whose protocol searches in the timing process is
     SAME-PROCESS or, when it replayed its framework's own cache instead, CACHED; neither is a
     violation, because nothing yet says those frameworks pay for it (gh-ocannl-675) — the point of
     annotating them is that the report stops implying the question is OCANNL's alone. UNKNOWN is a
@@ -362,9 +366,14 @@ def provenance_check(results):
         if searched is None:
             r["provenance"] = "UNKNOWN"
         elif two_pass:
-            r["provenance"] = "SEARCH-PASS" if searched else "REPLAY"
+            tune = r.get("tune") or {}
             if searched:
+                r["provenance"] = "SEARCH-PASS"
                 violations.append(r)
+            elif tune and not tune.get("searches") and not tune.get("replays"):
+                r["provenance"] = "NO-SEARCH"
+            else:
+                r["provenance"] = "REPLAY"
         else:
             r["provenance"] = "SAME-PROCESS" if searched else "CACHED"
     return violations
@@ -419,7 +428,9 @@ def report(results, out_dir, unavailable=()):
                 "tuned cell, whose protocol splits them: `replay` is the fresh pass-2 process "
                 "replaying the cached winner, **`SEARCH PASS`** is the searching process itself — "
                 "whose accumulated modules and buffers inflate every launch, so those numbers are "
-                "not comparable with the others. For a tinygrad `beam` or a `torch.compile` cell, "
+                "not comparable with the others, and `no search` is a tuned cell that searched "
+                "nothing and replayed nothing (autotune_search=false), so it shipped the untuned "
+                "default. For a tinygrad `beam` or a `torch.compile` cell, "
                 "which search in the timing process by protocol: `same-process` searched here, "
                 "`cached` replayed its framework's own cache (so its `compile s` is a replay cost). "
                 "A `compile s` marked `(cached)` is the same statement about a tuned cell's "

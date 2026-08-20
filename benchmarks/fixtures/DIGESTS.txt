@@ -8,7 +8,7 @@
 # A changed digest here is a changed workload: numbers measured before it are not comparable
 # with numbers measured after it, whatever the report calls the workload. Fixture bytes depend
 # on the workload spec, on gen_fixtures.py, and on the numpy version that drew the random
-# streams (numpy does not promise Generator stream stability across releases) — so a mismatch
+# streams (numpy does not promise Generator stream stability across releases), so a mismatch
 # names a real difference even when the spec is untouched.
 #
 # <sha256>  <bytes>  <name>

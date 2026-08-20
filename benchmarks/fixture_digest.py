@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """The recorded identity of a benchmark fixture (gh-ocannl-645).
 
-`benchmarks/fixtures/` is gitignored — the fixtures are large, regenerable artifacts — so no
+`benchmarks/fixtures/` is gitignored (the fixtures are large, regenerable artifacts), so no
 checkout establishes a fixture's bytes. Without a recorded digest nothing in the repository says
 which bytes a published report was measured on, and nothing can catch a fixture regenerated at a
 different spec revision, or by a different numpy: the difference applies *uniformly* to every cell,
 so the cross-cell parity gate (which compares cells with each other, not with the workload the
 report names) certifies it exactly as it certifies the intended workload. Cross-session comparisons
-— `report-gh569-hip.md`'s 46.65 ms denominator against `report-gh612-hip.md`'s 32.33 ms — are only
+(`report-gh569-hip.md`'s 46.65 ms denominator against `report-gh612-hip.md`'s 32.33 ms) are only
 meaningful if both ran the same bytes, and that is the whole point of such a measurement.
 
 So `gen_fixtures.py` records `fixtures/DIGESTS.txt` (checked in, unlike the fixtures themselves) as
@@ -36,7 +36,7 @@ HEADER = """\
 # A changed digest here is a changed workload: numbers measured before it are not comparable
 # with numbers measured after it, whatever the report calls the workload. Fixture bytes depend
 # on the workload spec, on gen_fixtures.py, and on the numpy version that drew the random
-# streams (numpy does not promise Generator stream stability across releases) — so a mismatch
+# streams (numpy does not promise Generator stream stability across releases), so a mismatch
 # names a real difference even when the spec is untouched.
 #
 # <sha256>  <bytes>  <name>
@@ -79,7 +79,7 @@ def record(path, fixtures):
     """Record `fixtures` (paths) into the digest file at `path`, keeping every other entry.
 
     Returns the list of `(name, was, now)` changes, where `was` is None for a newly recorded
-    fixture — the caller says so out loud: a silently rewritten digest is the failure this file
+    fixture. The caller says so out loud: a silently rewritten digest is the failure this file
     exists to prevent, and a regeneration is where it would happen.
     """
     entries = read_digests(path)
@@ -98,7 +98,7 @@ def record(path, fixtures):
 def status(fixture, entries):
     """`(verdict, sha256, size)` of `fixture` against recorded `entries`.
 
-    Verdict is MATCH, MISMATCH (recorded, different bytes) or UNRECORDED (no entry — a fixture
+    Verdict is MATCH, MISMATCH (recorded, different bytes) or UNRECORDED (no entry: a fixture
     nothing in the repository describes, which is what a report must not quietly be measured on).
     """
     fixture = Path(fixture)

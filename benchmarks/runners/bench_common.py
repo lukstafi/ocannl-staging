@@ -30,7 +30,7 @@ def emit(result):
 # Whether THIS process ran its own kernel search / codegen or replayed a cache. OCANNL's tuned
 # cell splits the two into separate processes, because a searching process is measurably slower
 # per launch; tinygrad's BEAM cell and torch.compile search in the process that then times
-# steps. Whether that costs them anything is unmeasured (gh-ocannl-675) — until it is, every
+# steps. Whether that costs them anything is unmeasured (gh-ocannl-675); until it is, every
 # runner at least SAYS which it did, so the report does not imply the question applies to
 # OCANNL alone.
 #
@@ -76,7 +76,7 @@ def tinygrad_searched(counts, beam):
 
     A cache write means it did; only reads mean every beam result was replayed from
     `~/.cache/tinygrad`. Beam requested but nothing observed means the internals moved under the
-    probe — that is UNKNOWN, never False.
+    probe. That is UNKNOWN, never False.
     """
     if not beam:
         return False

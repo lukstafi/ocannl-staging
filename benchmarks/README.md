@@ -355,9 +355,12 @@ than the driver (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION` at module load), run it wi
   whose `compile_s` should reflect a from-scratch search.
 
   **The result line says which pass produced it** (gh-ocannl-644): `"searched": true|false` is
-  whether *this process* ran a search, and the `tune` object breaks it down per arm
-  (`cache_hit`) and in total (`searches` / `replays`, counting the gh-555 flip refinements too,
-  which are searches this process ran even though they are not arms). `orchestrate.py` gates on
+  whether *this process* ran a search, and the `tune` object breaks it down per arm (`searched`
+  and `cache_hit`, which are not complements) and in total (`searches` / `replays`, counting the
+  gh-555 flip refinements too, which are searches this process ran even though they are not
+  arms). A tuned cell under `autotune_search=false` — the `reproducible` profile — reports zero
+  of both: it shipped the untuned default, having neither searched nor replayed, and the report
+  says `no search` rather than crediting the row with a tuned artifact it does not have. `orchestrate.py` gates on
   it — a tuned cell whose step times came from a searching process fails the **PROVENANCE
   GATE** and is marked `SEARCH PASS` in the report's `pass` column — and stamps
   `search_pass_searched`, so a `compile_s` that was itself a cache replay reads as

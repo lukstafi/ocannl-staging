@@ -217,6 +217,24 @@ class ProvenanceTest(unittest.TestCase):
         self.assertEqual(orchestrate.provenance_check([searching]), [searching])
         self.assertEqual(searching["provenance"], "SEARCH-PASS")
 
+    def test_a_disabled_search_is_neither_a_violation_nor_a_replay(self):
+        # gh-ocannl-559's reproducible profile turns the search off: the cell ships the untuned
+        # default, having neither searched nor replayed. Gating it would fail BOTH passes of every
+        # tuned cell, and calling it a replay would credit the row with a tuned artifact it does
+        # not have.
+        cell = self.tuned(False)
+        cell["tune"] = {"shipped": "A", "searches": 0, "replays": 0, "arms": []}
+
+        self.assertEqual(orchestrate.provenance_check([cell]), [])
+        self.assertEqual(cell["provenance"], "NO-SEARCH")
+
+    def test_a_replay_is_still_a_replay_when_the_arms_report_one(self):
+        cell = self.tuned(False)
+        cell["tune"] = {"shipped": "A", "searches": 0, "replays": 2, "arms": []}
+
+        self.assertEqual(orchestrate.provenance_check([cell]), [])
+        self.assertEqual(cell["provenance"], "REPLAY")
+
     def test_a_runner_without_the_field_is_unknown_not_a_violation(self):
         old = self.tuned(None)
 
@@ -256,7 +274,14 @@ class ProvenanceTest(unittest.TestCase):
         self.assertEqual(beam["provenance"], "UNKNOWN")
 
     def test_every_verdict_renders(self):
-        for verdict in ("REPLAY", "SEARCH-PASS", "SAME-PROCESS", "CACHED", "UNKNOWN"):
+        for verdict in (
+            "REPLAY",
+            "SEARCH-PASS",
+            "NO-SEARCH",
+            "SAME-PROCESS",
+            "CACHED",
+            "UNKNOWN",
+        ):
             self.assertIn(verdict, orchestrate.PROVENANCE_MARK)
 
     def test_the_gated_and_stated_cell_sets_do_not_overlap(self):

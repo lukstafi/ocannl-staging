@@ -245,9 +245,16 @@ let tune_arms () = { arm_reports = []; shipped = None; searches = 0; replays = 0
     must {e not} enter [arm_reports] (their arrival order would misname the arms in {!tune_json}),
     yet a flip search loads this process with accumulated modules and buffers exactly like an arm
     search does — which is the whole reason the two-pass protocol exists. A caller that runs any
-    search whose outcome it does not otherwise collect should still route it here. *)
+    search whose outcome it does not otherwise collect should still route it here.
+
+    A report is counted by [Autotune.searched] and [cache_hit], which are not complements: under
+    [autotune_search=false] — the reproducible profile — and on a pre-search failure, a call
+    reports neither, having shipped the untuned default without searching or replaying anything.
+    Such an arm must not be counted as a search: it would fail the sweep's provenance gate on both
+    passes of a tuned cell, and there is nothing wrong with either. *)
 let collect_search t (r : Autotune.report) =
-  if r.Autotune.cache_hit then t.replays <- t.replays + 1 else t.searches <- t.searches + 1
+  if r.Autotune.searched then t.searches <- t.searches + 1
+  else if r.Autotune.cache_hit then t.replays <- t.replays + 1
 
 let collect_arm t (r : Autotune.report) =
   collect_search t r;
@@ -271,11 +278,13 @@ let searched t = t.searches > 0
     compiled from it — [Train.tune_placements] ranks it at [infinity] and this attribution follows
     the same rule rather than re-deriving a winner from times alone.
 
-    Each arm also records whether it {e searched} or replayed a cached winner ([cache_hit]), and the
-    object totals both over every search this process reported ([searches] / [replays], flip
-    refinements included). That is the per-arm detail behind the result line's [searched] field
-    (gh-ocannl-644): a cell can be mixed — one arm cached, the other searched because its half of
-    the A/B was never cached — and only the per-arm breakdown says which. *)
+    Each arm also records whether it {e searched} and whether it replayed a cached winner
+    ([cache_hit]), and the object totals both over every search this process reported ([searches] /
+    [replays], flip refinements included). That is the per-arm detail behind the result line's
+    [searched] field (gh-ocannl-644): a cell can be mixed — one arm cached, the other searched
+    because its half of the A/B was never cached — and only the per-arm breakdown says which. The
+    two flags are both [false] for an arm that neither searched nor replayed, which is what
+    [autotune_search=false] and a pre-search failure produce. *)
 let tune_json t =
   let ms_json v = if Float.is_inf v then "null" else Printf.sprintf "%.6g" v in
   (* Quote-and-control-character scrubbing rather than escaping: these strings are diagnostics
@@ -310,8 +319,8 @@ let tune_json t =
       in
       let arm (name, (r : Autotune.report)) =
         Printf.sprintf
-          {|{"arm":"%s","cache_hit":%b,"best_ms":%s,"best_label":"%s","tensorized":%b,"mma_scalar_fallbacks":%d,"mma_seeded":%d,"mma_timed":%d,"mma_best_ms":%s,"terminal_failure":%s}|}
-          name r.Autotune.cache_hit (ms_json r.Autotune.best_ms)
+          {|{"arm":"%s","searched":%b,"cache_hit":%b,"best_ms":%s,"best_label":"%s","tensorized":%b,"mma_scalar_fallbacks":%d,"mma_seeded":%d,"mma_timed":%d,"mma_best_ms":%s,"terminal_failure":%s}|}
+          name r.Autotune.searched r.Autotune.cache_hit (ms_json r.Autotune.best_ms)
           (json_string r.Autotune.best_label)
           r.Autotune.best_tensorized r.Autotune.best_mma_scalar_fallbacks r.Autotune.mma_candidates
           r.Autotune.mma_timed (ms_json r.Autotune.mma_best_ms)
@@ -615,7 +624,10 @@ let time_segments ?promote_locals ?(repeats = 20) ~backend ~limits ~static_indic
     so without this field a report can quote pass-1 timings as protocol-compliant ones indefinitely,
     and nothing in the artifact contradicts it — which is what [report-gh612-hip.md] did for fifteen
     revisions. [searched] is [false] for an untuned cell too: it says no search ran in this process,
-    which for a cell that tunes nothing is both true and the condition the protocol wants. *)
+    which for a cell that tunes nothing is both true and the condition the protocol wants — as it is
+    for a tuned cell under [autotune_search=false], which ships the untuned default having neither
+    searched nor replayed (the [tune] object's zero [searches] and [replays] are what tell that
+    apart from a replay). *)
 let measure_and_emit ~st ~backend ~variant ?(precision = "f32") ~compile_s ?tokens_per_step ?tune
     ~run_step ~read_loss ~sync () =
   let workload = get_meta st "name" in
