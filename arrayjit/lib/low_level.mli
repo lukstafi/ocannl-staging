@@ -258,6 +258,20 @@ val subst_accum_read :
 (** Retarget an {!accum_update_parts}-shaped update's read of [tn[idcs]] to the scope local [id].
     Raises on any other shape. *)
 
+val scalar_reads_scope : id:scope_id -> scalar_t -> bool
+(** Whether the scalar reads the scope local [id], descending into nested scope bodies — the
+    scope-local counterpart of {!scalar_touches_tn}. Distinguishes a scope-opening init (a
+    [Set_local] whose value is free of the local) from a self-referential update. *)
+
+val accum_local_update_op : id:scope_id -> scalar_t -> Ops.binop option
+(** The reduction operator of a scope-local update in either spelling: the plain
+    {!accum_local_update_parts} form, or virtualization's guarded-read form
+    [Where (index-only cond, update, Get_local id)] (possibly nested per guard condition). The
+    residency classifier's recognizer (gh-ocannl-663): the guarded form is a reduction for
+    accumulator-width purposes but does NOT decompose into an unguarded [(op, contrib)], so it is
+    deliberately not part of {!accum_local_update_parts} or of {!scope_updates_reduce_op}'s hoist
+    license. *)
+
 val accum_local_update_parts : id:scope_id -> scalar_t -> (Ops.binop * scalar_t) option
 (** The reduce-shaped update of a scope LOCAL, [local = op(local, contrib)] (or its FMA form) with
     [contrib] free of the local — [subst_accum_read]'s output shape; returns [(op, contrib)]. The

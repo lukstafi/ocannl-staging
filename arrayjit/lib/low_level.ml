@@ -5042,6 +5042,33 @@ let pure_index_guard (llsc : scalar_t) =
   | Binop ((Ops.Cmplt | Ops.Cmple), (a, _), (b, _)) -> operand a && operand b
   | _ -> false
 
+(* Whether a scalar reads the scope local [id], descending into nested scope bodies — certifies
+   that an update's contribution is free of the local it updates (the scope-local counterpart of
+   {!scalar_touches_tn}). *)
+let rec scalar_reads_scope ~id (s : scalar_t) =
+  match s with
+  | Get_local id' -> Scope_id.equal id id'
+  | Local_scope { body; _ } -> code_reads_scope ~id body
+  | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> false
+  | Get_dynamic { dyn_value = v, _; _ } -> scalar_reads_scope ~id v
+  | Ternop (_, (a, _), (b, _), (c, _)) ->
+      scalar_reads_scope ~id a || scalar_reads_scope ~id b || scalar_reads_scope ~id c
+  | Binop (_, (a, _), (b, _)) -> scalar_reads_scope ~id a || scalar_reads_scope ~id b
+  | Unop (_, (a, _)) -> scalar_reads_scope ~id a
+
+and code_reads_scope ~id (llc : t) =
+  match llc with
+  | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _ ->
+      false
+  | Seq (a, b) -> code_reads_scope ~id a || code_reads_scope ~id b
+  | For_loop { body; _ } -> code_reads_scope ~id body
+  | If { cond = c, _; body } -> scalar_reads_scope ~id c || code_reads_scope ~id body
+  | Set { llsc; _ } | Set_local (_, llsc) -> scalar_reads_scope ~id llsc
+  | Set_dynamic { dyn_value = v, _; llsc; _ } ->
+      scalar_reads_scope ~id v || scalar_reads_scope ~id llsc
+  | Set_from_vec { arg = a, _; _ } -> scalar_reads_scope ~id a
+  | Tile_mma _ -> false
+
 (* The reduce-shaped update of a scope LOCAL: [local = op(local, contrib)] (or its FMA form) with
    [contrib] free of the local — [subst_accum_read]'s output shape. The [`Scope] arm of the peel
    below accepts a base only when every update fits this grammar, because hoisting an enclosing loop
@@ -5050,27 +5077,7 @@ let pure_index_guard (llsc : scalar_t) =
    and holding it wide would change values outside the accumulator-width policy. *)
 let accum_local_update_parts ~id (llsc : scalar_t) =
   let is_acc = function Get_local id' -> Scope_id.equal id id' | _ -> false in
-  let rec reads_local (s : scalar_t) =
-    match s with
-    | Get_local id' -> Scope_id.equal id id'
-    | Local_scope { body; _ } -> code_reads_local body
-    | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> false
-    | Get_dynamic { dyn_value = v, _; _ } -> reads_local v
-    | Ternop (_, (a, _), (b, _), (c, _)) -> reads_local a || reads_local b || reads_local c
-    | Binop (_, (a, _), (b, _)) -> reads_local a || reads_local b
-    | Unop (_, (a, _)) -> reads_local a
-  and code_reads_local (llc : t) =
-    match llc with
-    | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _ ->
-        false
-    | Seq (a, b) -> code_reads_local a || code_reads_local b
-    | For_loop { body; _ } -> code_reads_local body
-    | If { cond = c, _; body } -> reads_local c || code_reads_local body
-    | Set { llsc; _ } | Set_local (_, llsc) -> reads_local llsc
-    | Set_dynamic { dyn_value = v, _; llsc; _ } -> reads_local v || reads_local llsc
-    | Set_from_vec { arg = a, _; _ } -> reads_local a
-    | Tile_mma _ -> false
-  in
+  let reads_local = scalar_reads_scope ~id in
   let reduce_op = function Ops.Add | Ops.Mul | Ops.Max | Ops.Min -> true | _ -> false in
   match llsc with
   | Binop (op, (a, _), (b, _)) when reduce_op op && is_acc a && not (reads_local b) -> Some (op, b)
@@ -5079,6 +5086,43 @@ let accum_local_update_parts ~id (llsc : scalar_t) =
     when is_acc c && (not (reads_local a)) && not (reads_local b) ->
       Some (Ops.Add, Binop (Ops.Mul, (a, pa), (b, pb)))
   | _ -> None
+
+(* A scalar reading only embedded indices and constants — the semantic notion behind
+   {!pure_index_guard}, closed over the index arithmetic ([And]-joined range conditions, [Cmpeq]
+   unit-solve conditions) that virtualization's guarded reads build. Such an expression cannot
+   observe any precision residency. *)
+let rec index_only_scalar (llsc : scalar_t) =
+  match llsc with
+  | Embed_index _ | Constant _ | Constant_bits _ -> true
+  | Get _ | Get_local _ | Get_merge_buffer _ | Get_dynamic _ | Local_scope _ -> false
+  | Ternop (_, (a, _), (b, _), (c, _)) ->
+      index_only_scalar a && index_only_scalar b && index_only_scalar c
+  | Binop (_, (a, _), (b, _)) -> index_only_scalar a && index_only_scalar b
+  | Unop (_, (a, _)) -> index_only_scalar a
+
+(* The reduction operator of a scope-local update in EITHER spelling: the plain
+   [accum_local_update_parts] form, or virtualization's guarded-read form — [Set_local (id,
+   Where (index-only cond, update, Get_local id))], possibly nested per condition
+   ([inline_computation] folds one [Where] per range/unit-solve guard). The guarded form is a
+   reduction for RESIDENCY purposes (gh-ocannl-663): the condition observes no precision, the
+   off-condition arm carries the accumulator through unchanged, and the on-condition arm is the
+   reduce-shaped update — so the accumulator-scope census accepts it where treating the guarded
+   self-read as a recurrence would leave a virtualized reduction narrow while its materialized
+   serial twin widens (placement-dependent width). Deliberately NOT merged into
+   {!accum_local_update_parts}: its [(op, contrib)] decomposition licenses consumers (the SIMD
+   folding, [subst_accum_read]-style rewrites) to rebuild an unguarded [op(local, contrib)], which
+   the guarded form is not; and not into {!scope_updates_reduce_op}: that is the HOIST license,
+   and hoisting a guarded update across further levels is a separate question from what width its
+   accumulator resides at. *)
+let accum_local_update_op ~id (llsc : scalar_t) : Ops.binop option =
+  let rec go llsc =
+    match llsc with
+    | Ternop (Ops.Where, (c, _), (t, _), (Get_local id', _))
+      when Scope_id.equal id id' && index_only_scalar c ->
+        go t
+    | _ -> Option.map (accum_local_update_parts ~id llsc) ~f:fst
+  in
+  go llsc
 
 (* Whether a scope body's update statements (everything after the opening init) fit the grammar the
    scope-form mint emits: Serial/[Unrolled]/[Vectorized] loops, pure-index-guarded [If]s, comments,

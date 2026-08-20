@@ -965,6 +965,11 @@ struct
   let compute_prec prec =
     Numerics.cpu_compute_prec ~native_fp16_arithmetic:(has_native_fp16_arithmetic ()) prec
 
+  (* On CPU a reduction accumulator is an assignment intermediate like any other: it resides at the
+     compute precision (gh-ocannl-639). Restated next to the [compute_prec] override because the
+     pair binds at [include] time (see the signature's coupling note, gh-ocannl-663). *)
+  let accum_prec = compute_prec
+
   (* The explicit vector renderings work at the compute precision, so admitting fp16 here is
      admitting native 16-bit vector arithmetic -- [vec_ext_typ] mints a [HALF_T] vector and the lane
      count doubles.
