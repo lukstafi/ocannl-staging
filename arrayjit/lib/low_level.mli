@@ -294,7 +294,10 @@ val peel_accum_nest :
     Phase B of docs/proposals/axis-types-for-loops.md. Hardware slot assignment is positional, not
     stored in the IR: among a kernel's annotated loops of one kind, the innermost binds [.x] (slot
     0), the next [.y], then [.z]; [Workgroup] and [Workgroup_reduce] share the block/threadgroup
-    slot space. *)
+    slot space. [Grid] slots [>= 2] all share the hardware [.z] dimension by folding
+    (gh-ocannl-643): the launch's [.z] extent is their per-slot maxima multiplied out
+    ({!launch_dims}) and each such loop binds [(z / stride) % cap] ({!grid_fold}); [Workgroup]
+    slots stay capped at 3. *)
 
 type launch_dims = { grid : int array; block : int array } [@@deriving sexp_of, equal]
 (** Arrays of length 3 ([.x], [.y], [.z]); all-1s for all-[Serial] code. *)
@@ -311,7 +314,14 @@ val hardware_axes : t -> hardware_axis_info list
 (** All hardware-annotated loops in pre-order, with their positional slots. *)
 
 val launch_dims : t -> launch_dims
-(** Per-slot maximum extents over the kernel's annotated loops. *)
+(** Per-slot maximum extents over the kernel's annotated loops; [grid.(2)] is the product of the
+    per-slot maxima of grid slots [>= 2] (the [.z] fold, see the section comment). *)
+
+val grid_fold : hardware_axis_info list -> slot:int -> int * int option
+(** The binding arithmetic of a [Grid] loop at [slot >= 2] under the [.z] fold: [(stride, cap)]
+    such that the loop binds [(z / stride) % cap] — [stride] the product of the per-slot maxima of
+    grid slots in [\[2, slot)], [cap = None] (no modulo) when no higher grid slot exists in the
+    kernel. [(1, None)] — the bare [.z] register — for the common single-slot-2 case. *)
 
 val scope_purity_violation : t -> string option
 (** gh-ocannl-584: the predicate form of {!validate_scope_bodies} — [None] when every [Local_scope]

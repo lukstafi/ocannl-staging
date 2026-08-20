@@ -2515,14 +2515,33 @@ module C_syntax (B : C_syntax_config) = struct
                   ("C_syntax.pp_ll: hardware-annotated loop " ^ symbol_ident i
                  ^ " missing from the slot table (pp_ll called outside compile_proc?)")
           in
-          match B.hardware_index ~kind ~slot with
+          (* Grid slots [>= 2] fold onto the hardware [.z] register (gh-ocannl-643, the
+             [Low_level] hardware-axis section comment): the loop binds [(z / stride) % cap], with
+             the divisor/modulo omitted where trivial — a lone slot-2 loop renders the bare
+             register exactly as before the fold existed. The backend is only ever asked for slots
+             it names ([0..2]). *)
+          let hw_slot, fold =
+            match kind with
+            | `Grid when slot >= 2 ->
+                (2, Some (Low_level.grid_fold !current_hardware_axes ~slot))
+            | _ -> (slot, None)
+          in
+          match B.hardware_index ~kind ~slot:hw_slot with
           | None -> fallback ()
           | Some reg ->
               let cast = "(" ^ String.strip B.loop_index_type ^ ")" in
+              let expr =
+                match fold with
+                | None | Some (1, None) -> cast ^ reg
+                | Some (stride, cap) ->
+                    let e = cast ^ reg in
+                    let e = if stride > 1 then e ^ " / " ^ Int.to_string stride else e in
+                    Option.value_map cap ~default:e ~f:(fun c -> e ^ " % " ^ Int.to_string c)
+              in
               let binding =
                 string ("const " ^ B.loop_index_type)
                 ^^ pp_symbol i
-                ^^ string (" = " ^ cast ^ reg ^ ";")
+                ^^ string (" = " ^ expr ^ ";")
               in
               group
                 (lbrace
