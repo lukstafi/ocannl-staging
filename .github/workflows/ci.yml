@@ -309,9 +309,25 @@ jobs:
     # rewrite and `ps` carries the columns whose absence the liveness probe
     # degrades for -- the step would have exercised neither, while its name
     # claimed both. The path is fixed on every windows runner image.
+    #
+    # `Progra~1`, not `Program Files`, and the YAML quotes do not save it: the
+    # runner parses a custom `shell:` by splitting the string at the FIRST space
+    # into command and arguments, with no quote handling
+    # (ScriptHandlerHelpers.ParseShellOptionString), so the long form selects
+    # `C:\Program` as the executable and the step dies before bash starts -- on
+    # every Windows run, whatever the build did (Codex P1). The 8.3 alias is the
+    # space-free spelling of the same file.
+    #
+    # `bin\bash.exe`, NOT `usr\bin\bash.exe`: the former is Git's launcher, and
+    # it prepends its own `/mingw64/bin:/usr/bin` to whatever PATH it inherits.
+    # That is what makes choosing the executable sufficient -- `uname`, `perl`
+    # and the rest resolve to Git's copies even though setup-ocaml has put
+    # opam's cygwin `bin` on the inherited PATH, verified by launching it with
+    # exactly that PATH. The raw `usr\bin\bash.exe` provisions nothing and would
+    # need the prefix set by hand.
     - name: Smoke tools/test-run.sh (Git Bash)
       if: ${{ !cancelled() && runner.os == 'Windows' }}
-      shell: 'C:\Program Files\Git\bin\bash.exe --noprofile --norc -eo pipefail {0}'
+      shell: 'C:\Progra~1\Git\bin\bash.exe --noprofile --norc -eo pipefail {0}'
       run: |
         # The shell pin above is the whole reason the branches below are the MSYS
         # ones, and a shell declaration is exactly the kind of line a later edit
