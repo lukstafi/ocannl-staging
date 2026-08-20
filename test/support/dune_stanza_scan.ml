@@ -704,8 +704,10 @@ let raw_stanzas content =
   let counted_heads = "test" :: "tests" :: action_heads in
   let test_heads = [ "test"; "tests" ] in
   let results = ref [] in
-  (* One frame per open paren, innermost first:
-     (head, children_are_stanzas, is_stanza, cwd, cwd_is_unresolvable, runs, test cwds, inline). *)
+  (* One frame per open paren, innermost first: (head, children_are_stanzas, is_stanza, cwd,
+     cwd_is_unresolvable, commands awaiting resolution, test cwds, inline, `(:name …)` bindings).
+     Commands wait because a binding may be written after the action that uses it; they are
+     resolved when the stanza closes, against the bindings that stanza turned out to have. *)
   let stack = ref [] in
   let i = ref 0 in
   let length = String.length content in
@@ -752,15 +754,48 @@ let raw_stanzas content =
     else if delimiter content.[pos] then None
     else Some (token_at pos)
   in
+  (* The first atom naming an executable inside the form whose body begins at [pos], stopping at
+     that form's own closing paren: how a `(:pp pp.exe)` binding -- or a `(:runner (file probe.exe))`
+     one -- says what it binds. *)
+  let first_executable_in_form pos =
+    let found = ref None in
+    let depth = ref 0 in
+    let i = ref pos in
+    while Option.is_none !found && !i < length && !depth >= 0 do
+      (match content.[!i] with
+      | ';' ->
+          while !i < length && not (Char.equal content.[!i] '\n') do
+            Int.incr i
+          done
+      | '"' ->
+          Int.incr i;
+          let closed = ref false in
+          while (not !closed) && !i < length do
+            (match content.[!i] with '\\' -> Int.incr i | '"' -> closed := true | _ -> ());
+            Int.incr i
+          done;
+          Int.decr i
+      | '(' -> Int.incr depth
+      | ')' -> Int.decr depth
+      | c when Char.is_whitespace c -> ()
+      | _ ->
+          let token = token_at !i in
+          if is_executable token then found := Some (program_path token);
+          i := !i + String.length token - 1);
+      Int.incr i
+    done;
+    !found
+  in
   (* The program a command token names, mirroring [classify_command] for the spellings the text can
      resolve on its own: a `.exe`, any explicit relative path (`./probe` is ours whatever its
      extension), and the pforms that name a path in this workspace. *)
-  let program token =
-    match String.chop_prefix token ~prefix:"%{" with
-    (* A pform inside an otherwise literal token -- `./%{pp}`, bound by a `(:pp pp.exe)` dependency
-       -- names something only the deps say, so the text declines it rather than reporting the
-       unexpanded spelling as an executable. *)
-    | None when String.is_substring token ~substring:"%{" -> None
+  let program ~bindings token =
+    (* A `./` in front says only "here"; what follows may still be a pform. *)
+    let bare = program_path token in
+    match String.chop_prefix bare ~prefix:"%{" with
+    (* A pform inside an otherwise MIXED token names something no single binding gives, so the text
+       declines it rather than reporting the unexpanded spelling as an executable. *)
+    | None when String.is_substring bare ~substring:"%{" -> None
     | None ->
         if is_executable token || is_explicit_path token then Some (program_path token) else None
     | Some rest -> (
@@ -771,7 +806,12 @@ let raw_stanzas content =
             | Some (("dep" | "exe" | "path" | "file"), path) ->
                 if is_executable path then Some (program_path path) else None
             | Some ("bin", name) -> Some name
-            | _ -> None))
+            | Some _ -> None
+            (* `./%{pp}` with `(deps (:pp pp.exe))`: the action names the dependency, and the
+               binding is right there in the same stanza -- so the text CAN resolve it, and the
+               three rules of test/ppx/dune are all of this shape (Codex P2, round 6). A pform that
+               is not bound here (a toolchain one, `%{test}`) resolves to nothing and is declined. *)
+            | None -> List.Assoc.find !bindings inner ~equal:String.equal))
   in
   while !i < length do
     (match content.[!i] with
@@ -793,13 +833,13 @@ let raw_stanzas content =
         let after_head = head_pos + String.length head in
         let parent = List.hd !stack in
         let is_stanza =
-          match parent with None -> true | Some (_, opens, _, _, _, _, _, _) -> opens
+          match parent with None -> true | Some (_, opens, _, _, _, _, _, _, _) -> opens
         in
         let inherited_cwd =
-          match parent with None -> "" | Some (_, _, _, cwd, _, _, _, _) -> cwd
+          match parent with None -> "" | Some (_, _, _, cwd, _, _, _, _, _) -> cwd
         in
         let inherited_unresolved =
-          match parent with None -> false | Some (_, _, _, _, u, _, _, _) -> u
+          match parent with None -> false | Some (_, _, _, _, u, _, _, _, _) -> u
         in
         let destination =
           if String.equal head "chdir" then token_after after_head else None
@@ -819,23 +859,29 @@ let raw_stanzas content =
         in
         (* An `inline_tests` field belongs to the stanza it sits DIRECTLY inside. *)
         (match (String.equal head "inline_tests", parent) with
-        | true, Some (_, _, true, _, _, _, _, inline) -> inline := true
+        | true, Some (_, _, true, _, _, _, _, inline, _) -> inline := true
         | _ -> ());
+        (* A `(:name …)` dependency binds an executable for the stanza it belongs to. *)
+        (if String.is_prefix head ~prefix:":" && String.length head > 1 then
+           match List.find !stack ~f:(fun (_, _, stanza, _, _, _, _, _, _) -> stanza) with
+           | Some (_, _, _, _, _, _, _, _, bindings) -> (
+               match first_executable_in_form after_head with
+               | Some path ->
+                   bindings := (String.drop_prefix head 1, path) :: !bindings
+               | None -> ())
+           | None -> ());
         (if List.mem [ "run"; "dynamic-run" ] head ~equal:String.equal && not unresolved then
            match token_after after_head with
            | None -> ()
            | Some token -> (
                (* Attributed to the nearest enclosing STANZA, and kept only when that stanza is one
                   the walk makes sites of. *)
-               match List.find !stack ~f:(fun (_, _, stanza, _, _, _, _, _) -> stanza) with
-               | Some (h, _, _, _, _, runs, tests, _)
+               match List.find !stack ~f:(fun (_, _, stanza, _, _, _, _, _, _) -> stanza) with
+               | Some (h, _, _, _, _, pending, tests, _, _)
                  when List.mem counted_heads h ~equal:String.equal ->
                    if String.equal token test_pform then (
                      if List.mem test_heads h ~equal:String.equal then tests := cwd :: !tests)
-                   else (
-                     match program token with
-                     | Some path -> runs := (cwd, path) :: !runs
-                     | None -> ())
+                   else pending := (cwd, token) :: !pending
                | _ -> ()));
         stack :=
           ( head,
@@ -845,13 +891,22 @@ let raw_stanzas content =
             unresolved,
             ref [],
             ref [],
-            ref false )
+            ref false,
+            ref [] )
           :: !stack
     | ')' -> (
         match !stack with
         | [] -> ()
-        | (head, _, is_stanza, _, _, runs, tests, inline) :: rest ->
+        | (head, _, is_stanza, _, _, pending, tests, inline, bindings) :: rest ->
             stack := rest;
+            (* Now that the whole stanza has been read, its bindings are known. *)
+            let runs =
+              ref
+                (List.filter_map !pending ~f:(fun (cwd, token) ->
+                     match program ~bindings token with
+                     | Some path -> Some (cwd, path)
+                     | None -> None))
+            in
             if is_stanza then
               results :=
                 {

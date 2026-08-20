@@ -577,11 +577,30 @@ let raw_stanza_cases =
        the safe direction for a floor. *)
     ("the test pform runs where the action puts it", {dune|(test (name t) (action (run %{test} --flag)))|dune}, [ "test{%{test}}" ]);
     ("a shell line", {dune|(rule (action (bash "./probe.exe")))|dune}, [ "rule{}" ]);
-    ("a name bound by a dep", {dune|(rule (deps (:pp pp.exe)) (action (run %{pp})))|dune}, [ "rule{}" ]);
-    (* Nor one behind a `./`, which is an explicit path in form only: what it names is in the deps,
-       not in the text. *)
-    ( "nor one behind a ./",
+    (* A `(:name …)` dependency binds an executable, and the binding sits in the same stanza -- so
+       the text CAN resolve it, and the three rules of test/ppx/dune are all of this shape. *)
+    ("a name bound by a dep", {dune|(rule (deps (:pp pp.exe)) (action (run %{pp})))|dune}, [ "rule{pp.exe}" ]);
+    ( "and one behind a ./, which says only \"here\"",
       {dune|(rule (deps (:pp pp.exe)) (action (run ./%{pp} --impl x)))|dune},
+      [ "rule{pp.exe}" ] );
+    ( "a binding may wrap its path in a dependency form",
+      {dune|(rule (deps (:runner (file probe.exe))) (action (run %{runner})))|dune},
+      [ "rule{probe.exe}" ] );
+    (* The binding may be written after the action that uses it, so resolution waits for the whole
+       stanza. *)
+    ( "a binding written after the action",
+      {dune|(rule (action (run ./%{pp})) (deps (:pp pp.exe)))|dune},
+      [ "rule{pp.exe}" ] );
+    (* Each stanza has its own bindings: one rule's does not resolve another's pform. *)
+    ( "a binding does not leak to the next stanza",
+      {dune|(rule (deps (:pp pp.exe)) (action (run %{pp})))
+(rule (action (run %{pp})))|dune},
+      [ "rule{pp.exe}"; "rule{}" ] );
+    ( "a binding resolving to no executable stays declined",
+      {dune|(rule (deps (:script run.sh)) (action (run %{script})))|dune},
+      [ "rule{}" ] );
+    ( "a toolchain pform is not ours",
+      {dune|(rule (action (run %{ocamlc} -c x.ml)))|dune},
       [ "rule{}" ] );
     ("an executable only depended on", {dune|(rule (deps %{dep:probe.exe}))|dune}, [ "rule{}" ]);
     ("one named in a comment", {dune|(rule (action (progn)))

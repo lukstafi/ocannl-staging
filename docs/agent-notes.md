@@ -1540,7 +1540,10 @@ that they earn a lookup rather than always-loaded space.
   read naively comes back empty — a stanza the floor cannot see is a stanza it cannot hold the walk
   to, which is silent rather than loud. Expect the real tree to find what the fixtures miss:
   `./%{pp}` is an explicit path in form only, and reading it literally reported an unexpanded
-  `%{pp}` as an executable. The
+  `%{pp}` as an executable — while declining it outright then left the three `test/ppx` rules, which
+  all take that shape, with no floor at all. The resolution there is to read the `(:pp pp.exe)`
+  binding from the same stanza, which also means resolving commands only once the stanza has been
+  read, since a binding may be written after the action that uses it. The
   sibling checks are worth a glance when touching this genre and were both fine: `env_var_deps` lists
   names only, and `digest_completeness`'s key count moves only alongside its own enumerated key list
   — a number in the same commit as the change it describes costs nothing.

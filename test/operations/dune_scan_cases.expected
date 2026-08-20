@@ -107,7 +107,12 @@ ok: raw stanzas -- nor is an executable's
 ok: raw stanzas -- the test pform runs where the action puts it
 ok: raw stanzas -- a shell line
 ok: raw stanzas -- a name bound by a dep
-ok: raw stanzas -- nor one behind a ./
+ok: raw stanzas -- and one behind a ./, which says only "here"
+ok: raw stanzas -- a binding may wrap its path in a dependency form
+ok: raw stanzas -- a binding written after the action
+ok: raw stanzas -- a binding does not leak to the next stanza
+ok: raw stanzas -- a binding resolving to no executable stays declined
+ok: raw stanzas -- a toolchain pform is not ours
 ok: raw stanzas -- an executable only depended on
 ok: raw stanzas -- one named in a comment
 ok: raw stanzas -- one inside a string
