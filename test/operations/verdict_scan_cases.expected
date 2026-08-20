@@ -1,0 +1,40 @@
+ok: claim shape -- the plain form
+ok: claim shape -- no trailing newline
+ok: claim shape -- a blank line either side
+ok: claim shape -- a flush directive consumes no argument
+ok: claim shape -- nor does a separator
+ok: claim shape -- a per cent sign in the label
+ok: claim shape -- a colon inside the label
+ok: claim shape -- no space after the colon
+ok: claim shape -- a tab before the boolean
+ok: claim shape -- the planted canary
+ok: claim shape -- the planted canary over a continuation
+ok: not a claim -- a computed label is #624's, not this check's
+ok: not a claim -- a second boolean
+ok: not a claim -- an interpolated value after the boolean
+ok: not a claim -- an annotation after the boolean
+ok: not a claim -- a width means the print is laying out a column
+ok: not a claim -- so does a left-justifying flag
+ok: not a claim -- no colon, so no label
+ok: not a claim -- no label before the colon
+ok: not a claim -- a bare boolean
+ok: not a claim -- nothing before it but a blank line
+ok: not a claim -- not a boolean at all
+ok: not a claim -- a boolean that is not the last conversion
+ok: not a claim -- prose after the boolean
+ok: not a claim -- a trailing per cent neither crashes the scan nor vanishes
+ok: not a claim -- a nested format is not read as a bare boolean
+ok: source -- a claim applied to a printing function names it
+ok: source -- the receiver is reported as written
+ok: source -- a claim handed to a wrapper is still a claim
+ok: source -- a claim bound to a name, applied to nothing
+ok: source -- a claim inside a list is reached
+ok: source -- a quoted-string literal decodes the same way
+ok: source -- a line continuation joins the label
+ok: source -- an ordinary comment quoting the shape
+ok: source -- a documentation comment quoting the shape
+ok: source -- an attached documentation comment quoting the shape
+ok: source -- a claim inside an extension payload is reached
+ok: source -- a claim quoted inside a string is not a claim
+the walk counts every string literal it passes: true
+and places the ones a named function receives: true

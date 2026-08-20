@@ -26,7 +26,13 @@ let () =
     if Float.(abs (At.((ctx, x_deint).@{[| i |]}) - At.((ctx, roundtrip).@{[| i |]})) > 1e-5) then
       ok := false
   done;
-  Stdio.printf "\nMatch: %b\n\n" !ok
+  (* Through [Verdict], so that a mismatch exits the run nonzero. Printed as `Match: %b` and exited
+     0, as this line stood, the only gate was the golden diff -- and the first move on a failing
+     golden diff is `dune promote`, which would have recorded `Match: false` as the expected output
+     (gh-ocannl-601, gh-ocannl-668). *)
+  Stdio.printf "\n";
+  Verdict.p "deinterleave and interleave roundtrip to the original" !ok;
+  Stdio.printf "\n"
 
 (* === Test 2: RoPE basic shape and numeric === *)
 let () =

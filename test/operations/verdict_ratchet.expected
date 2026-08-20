@@ -1,0 +1,25 @@
+Test sources that print a claim they decided themselves, outside `Verdict`: a format whose
+one argument-consuming conversion is a bare `%b` at the end, behind a literal label
+(gh-ocannl-668). Such a line is gated only by the golden diff, and a golden diff is
+`dune promote`-able -- which is how a failure gets recorded as the expected output.
+
+Directories scanned: arrayjit/test, test/config, test/einsum, test/gpt2, test/operations, test/operations/config, test/operations/profiles, test/operations/startup_streams, test/ppx, test/support, test/training
+
+Sources whose claim-shaped literals are this check's own input, not prints:
+  test/operations/verdict_scan_cases.ml -- the fixture table for the shape reader: its claim-shaped formats are inputs, compared against the labels they should yield, and never printed
+
+Planted in that fixture so that a scan which went blind cannot report a clean tree:
+  test/operations/verdict_scan_cases.ml:planted canary -- the plain spelling, a fixture input for the shape reader
+  test/operations/verdict_scan_cases.ml:planted canary over a continuation -- the same literal written over a line continuation, which only a reader of decoded values finds
+
+Individual claim-shaped literals exempted, with the reason each is not an assertion:
+  (none: a descriptive print interpolates what it describes, and that second conversion is hatch enough)
+
+every test source decides its claims through Verdict: true
+the scan found every literal planted for it: true
+every exemption on this check's lists is still earned: true
+the walk read string literals out of these sources: true
+and placed some of them as arguments of a named function: true
+over more than one test directory: true
+
+OK: no test source prints a claim it decided itself outside `Verdict`.
