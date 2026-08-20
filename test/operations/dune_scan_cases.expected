@@ -69,6 +69,16 @@ ok: a subdir's stanzas are the same kinds of site
 ok: a nested subdir names the path it applies to
 ok: stanzas outside the subdir keep the dune file's own directory
 ok: stanzas are reported in file order
+ok: head occurrences -- a stanza with that head
+ok: head occurrences -- two of them
+ok: head occurrences -- a plural stanza counts once
+ok: head occurrences -- a field, not only a stanza
+ok: head occurrences -- a longer head is a different head
+ok: head occurrences -- nor is it the head when it is an argument
+ok: head occurrences -- a head inside a line comment is not there
+ok: head occurrences -- nor is one inside a string
+ok: head occurrences -- an escaped quote does not end the string early
+ok: head occurrences -- a comment does not swallow what follows it
 ok: path-rewriting stanzas -- an env stanza setting PATH
 ok: path-rewriting stanzas -- one setting something else to PATH
 ok: path-rewriting stanzas -- an env stanza that touches neither

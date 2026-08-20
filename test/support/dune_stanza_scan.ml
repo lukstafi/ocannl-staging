@@ -121,6 +121,53 @@ let form_count content =
   done;
   !count
 
+(** [head_occurrences content ~head] counts the forms in [content] that OPEN with the atom [head] —
+    ["(test …"], ["(inline_tests …"] — read straight off the raw text, skipping [;] comments and
+    quoted strings the way {!form_count} does, and sharing none of the sexp machinery {!sites} is
+    built on.
+
+    It is a second opinion on the first. A check phrased in terms of the sexp walk cannot notice
+    that walk going blind: a stanza it stops recognising looks exactly like a stanza that is not
+    there, and a caller counting sites sees a smaller number with nothing to compare it against.
+    This is the number to compare it against.
+
+    What it yields is a LOWER bound on the sites those stanzas produce, in both directions it can be
+    wrong: [(tests (names a b c))] is one occurrence and three sites, and a form written [( test …]
+    — legal sexp, unheard of in dune — reads here as an empty head and is not counted at all. Both
+    errors make the floor smaller, which is the safe direction: blindness makes sites DISAPPEAR, so
+    a floor that under-counts still fails on it and never fails on a correct scan. *)
+let head_occurrences content ~head =
+  let count = ref 0 in
+  let i = ref 0 in
+  let length = String.length content in
+  let delimiter c = Char.is_whitespace c || List.mem [ '('; ')'; ';'; '"' ] c ~equal:Char.equal in
+  while !i < length do
+    (match content.[!i] with
+    | ';' ->
+        while !i < length && not (Char.equal content.[!i] '\n') do
+          Int.incr i
+        done
+    | '"' ->
+        Int.incr i;
+        let closed = ref false in
+        while (not !closed) && !i < length do
+          (match content.[!i] with '\\' -> Int.incr i | '"' -> closed := true | _ -> ());
+          Int.incr i
+        done;
+        Int.decr i
+    | '(' ->
+        let start = !i + 1 in
+        let stop = ref start in
+        while !stop < length && not (delimiter content.[!stop]) do
+          Int.incr stop
+        done;
+        if String.equal (String.sub content ~pos:start ~len:(!stop - start)) head then
+          Int.incr count
+    | _ -> ());
+    Int.incr i
+  done;
+  !count
+
 (** Raises if [content] is not something both readers agree on: a scan that cannot read its input
     must say so rather than report a file with a hole in it. *)
 let stanzas content =

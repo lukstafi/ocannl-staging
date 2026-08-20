@@ -446,6 +446,37 @@ let accepted_marker_cases =
       [ "test t [declares]" ] );
   ]
 
+(* [head_occurrences] is the floor `config_dep_completeness` holds the sexp walk to: a count read
+   off the raw text, which a walk going blind cannot take down with it (gh-ocannl-665). It has to
+   be a LOWER bound on the sites the walk yields for the same file, so the cases that matter are
+   the ones where it could over-count -- a head named in a comment, in a string, or as the prefix
+   of a longer one -- since only over-counting can fail a correct scan. *)
+let head_occurrence_cases =
+  [
+    ("a stanza with that head", "test", {dune|(test (name t))|dune}, 1);
+    ("two of them", "test", {dune|(test (name a))
+(test (name b))|dune}, 2);
+    (* One occurrence, three sites: the floor is under the count, which is the point. *)
+    ("a plural stanza counts once", "tests", {dune|(tests (names a b c))|dune}, 1);
+    ("a field, not only a stanza", "inline_tests", {dune|(library (name l) (inline_tests))|dune}, 1);
+    ("a longer head is a different head", "test", {dune|(test_helper (name t))|dune}, 0);
+    ("nor is it the head when it is an argument", "test", {dune|(alias (name test))|dune}, 0);
+    ("a head inside a line comment is not there", "test", {dune|; (test (name t))|dune}, 0);
+    ( "nor is one inside a string",
+      "test",
+      {dune|(rule (action (echo "(test (name t))")))|dune},
+      0 );
+    ( "an escaped quote does not end the string early",
+      "test",
+      {dune|(rule (action (echo "a \" (test (name t))")))|dune},
+      0 );
+    ( "a comment does not swallow what follows it",
+      "test",
+      {dune|; (test (name hidden))
+(test (name t))|dune},
+      1 );
+  ]
+
 let () =
   let check name expected found =
     if List.equal String.equal found expected then printf "ok: %s\n" name
@@ -462,6 +493,10 @@ let () =
           []
       in
       check name expected found);
+  List.iter head_occurrence_cases ~f:(fun (name, head, source, expected) ->
+      let found = Scan.head_occurrences source ~head in
+      if found = expected then printf "ok: head occurrences -- %s\n" name
+      else fail "head occurrences -- %s: expected %d `(%s`, found %d" name expected head found);
   List.iter path_rewriting_cases ~f:(fun (name, source, expected) ->
       check ("path-rewriting stanzas -- " ^ name) expected (Scan.path_rewriting_stanzas source));
   List.iter declared_paths_cases ~f:(fun (name, source, expected) ->
