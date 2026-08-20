@@ -477,9 +477,21 @@ let raw_stanza_cases =
     ( "a build profile named test is not a test stanza",
       {dune|(env (test (flags (:standard))))|dune},
       [ "env{}" ] );
-    ( "a stanza inside a subdir is a stanza",
+    (* A `(subdir …)` moves where its stanzas run, and that directory is where the config is
+       resolved -- so it composes into the recorded one, ready to compare against
+       `in_subdir site.subdir site.cwd`. *)
+    ( "a stanza inside a subdir runs there",
       {dune|(subdir gen (test (name t)))|dune},
-      [ "test{%{test}}"; "subdir{}" ] );
+      [ "subdir{}"; "test{gen:%{test}}" ] );
+    ( "and a rule inside one too",
+      {dune|(subdir gen (rule (action (run %{dep:a.exe}))))|dune},
+      [ "subdir{}"; "rule{gen:a.exe}" ] );
+    ( "nested subdirs compose",
+      {dune|(subdir a (subdir b (rule (action (run %{dep:x.exe})))))|dune},
+      [ "subdir{}"; "subdir{}"; "rule{a/b:x.exe}" ] );
+    ( "a subdir composes with a chdir",
+      {dune|(subdir gen (rule (action (chdir sub (run %{dep:a.exe})))))|dune},
+      [ "subdir{}"; "rule{gen/sub:a.exe}" ] );
     (* An inline_tests field belongs to the stanza it sits directly inside. *)
     ("a library with inline tests", {dune|(library (name l) (inline_tests))|dune}, [ "library+inline{}" ]);
     ("a library without", {dune|(library (name l) (libraries base))|dune}, [ "library{}" ]);
@@ -517,8 +529,23 @@ let raw_stanza_cases =
     ( "one executable under two chdirs is two entries",
       {dune|(rule (action (progn (chdir d1 (run %{dep:a.exe})) (chdir d2 (run %{dep:a.exe})))))|dune},
       [ "rule{d1:a.exe d2:a.exe}" ] );
-    (* A quoted atom is an atom: sexplib hands the walk `(chdir "scratch dir" …)` as one, so the
-       reader has to read it as one too or it keeps the enclosing directory. *)
+    (* `./%{test}` is the test binary too -- the `./` says only "here" -- so the directory its
+       branch names is where the Test site goes. *)
+    ( "the test pform behind a ./",
+      {dune|(test (name t) (action (chdir child (run ./%{test}))))|dune},
+      [ "test{child:%{test}}" ] );
+    (* Quoted atoms are atoms wherever they appear, including a form's HEAD and a binding's value.
+       Nothing here handles them specially: the text is parsed, so they arrive already decoded. *)
+    ( "a quoted head is the same head",
+      {dune|(rule (action ("run" %{dep:probe.exe})))|dune},
+      [ "rule{probe.exe}" ] );
+    ( "a quoted path in a binding",
+      {dune|(rule (deps (:pp "pp.exe")) (action (run %{pp})))|dune},
+      [ "rule{pp.exe}" ] );
+    ( "a quoted stanza head",
+      {dune|("rule" (action (run %{dep:probe.exe})))|dune},
+      [ "rule{probe.exe}" ] );
+    (* A quoted atom is an atom: `(chdir "scratch dir" …)` names a directory with a space in it. *)
     ( "a quoted chdir destination",
       {dune|(rule (action (chdir "scratch dir" (run %{dep:probe.exe}))))|dune},
       [ "rule{scratch dir:probe.exe}" ] );

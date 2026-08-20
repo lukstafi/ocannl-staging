@@ -1515,35 +1515,32 @@ that they earn a lookup rather than always-loaded space.
   read by a SECOND reader that shares no machinery with the first (`Dune_stanza_scan.head_occurrences`
   counts `(test` off the raw text, and a sexp walk going blind cannot take it down too), and the
   exact numbers on STDERR, which a `(test)` stanza does not diff. Assert the floor through `Verdict`
-  rather than as a golden line, so a scan that goes blind cannot be promoted back to green. The
-  expensive part is not writing the second reader, it is making it agree with the first about SCOPE:
-  three review rounds on gh-ocannl-665 were spent entirely there, and every disagreement fails a
-  correct scan or silently covers nothing, never anything in between. The general lesson — a second
-  reader must mirror the first's scoping rules exactly, while sharing none of its machinery — is
-  worth budgeting for up front, and the cheapest way to hold it is ONE stanza-aware pass
-  (`Dune_stanza_scan.raw_stanzas`) that all the floors read from, rather than a per-question reader
-  each of which learns the scoping rules separately. The four axes that bit, all worth checking on
-  any similar reader: (a) STANZA POSITION — only top level and inside `subdir` is a stanza, so
-  matching heads at every depth misreads `(env (test (flags …)))`, where `test` names a build
-  profile; (b) WHAT RUNS THINGS — the walk makes sites only of tests, rules and aliases, so counting
-  every `(run …)` flags a library's `(preprocess (action (run …)))` that was never a site; (c) WHERE
-  it runs — `chdir` moves the process and the walk emits one site per working directory, so the key
-  is `(cwd, executable)`, not the executable alone, and the directories have to compose the same
-  way — including for a test's OWN binary, since `%{test}` in two `chdir` branches is two `Test`
-  sites; (c') WHAT CANNOT BE RESOLVED — under a `chdir` whose destination holds a pform the walk
-  emits a site with no executables, so the reader must drop that whole subtree rather than report it
-  under the literal `%{…}`; (d) GROUPING and IDENTITY — one site per distinct executable per directory, so raw occurrence
-  counts fail a `progn` running one executable twice while a flat set lets five of six rules be
-  answered for by the sixth; and identities come from a structured field (`site.executables`), never
-  from splitting a display name that joins several with `", "`. And budget for LEXING as its own axis: dune allows whitespace
-  and comments after an opening paren and quoted atoms anywhere, so a head or a `chdir` destination
-  read naively comes back empty — a stanza the floor cannot see is a stanza it cannot hold the walk
-  to, which is silent rather than loud. Expect the real tree to find what the fixtures miss:
-  `./%{pp}` is an explicit path in form only, and reading it literally reported an unexpanded
-  `%{pp}` as an executable — while declining it outright then left the three `test/ppx` rules, which
-  all take that shape, with no floor at all. The resolution there is to read the `(:pp pp.exe)`
-  binding from the same stanza, which also means resolving commands only once the stanza has been
-  read, since a binding may be written after the action that uses it. The
+  rather than as a golden line, so a scan that goes blind cannot be promoted back to green. Put the
+  independence in the CLASSIFICATION and nowhere else: what can go blind is the checker's own
+  traversal and command-recognition, so answer those questions a second way — but PARSE the input
+  with the same reader the format admits rather than re-deriving its grammar. Seven review rounds on
+  gh-ocannl-665 went into a floor that hand-scanned dune's text, and the same lesson kept arriving
+  from new directions: quoted atoms in a `chdir` destination, then in a command, then in a binding's
+  value, then in a form's HEAD; whitespace after an open paren; comments where an atom may begin.
+  Each was either a false failure or silent under-coverage, and the module's own opening line had
+  already said why — an approximation of a grammar has no natural stopping point. Rewriting the
+  floor on `Sexplib` dissolved four findings at once and shrank it.
+  What the second reader still must agree about is SCOPE, and getting it wrong fails correct scans
+  rather than blind ones: (a) STANZA POSITION — only top level and inside `subdir`, else `(env (test
+  (flags …)))` reads as a test stanza when it names a build profile; (b) WHAT RUNS THINGS — only
+  tests, rules and aliases, else a library's `(preprocess (action (run …)))` counts; (c) WHERE it
+  runs — `subdir` and `chdir` compose into the directory whose config the process finds, and the
+  comparison key is that composition, for a test's own `%{test}` as much as for a helper; (c')
+  what CANNOT be resolved — under a `chdir` holding a pform the walk emits a site with no
+  executables, so drop that subtree rather than report a literal `%{…}`; (d) GROUPING and IDENTITY —
+  one site per distinct executable per directory, so raw occurrence counts fail a `progn` running
+  one executable twice while a flat set lets five of six rules be answered for by the sixth, and
+  identities come from a structured field (`site.executables`), never from splitting a display name.
+  A last trap in the other direction: declining what you cannot resolve is the SAFE direction for a
+  floor and therefore the easy thing to over-use — declining `./%{pp}` left all three `test/ppx`
+  rules with no floor at all, and the fix was to resolve the `(:pp pp.exe)` binding from the same
+  stanza, which in turn means resolving commands only once the stanza has been read.
+  The
   sibling checks are worth a glance when touching this genre and were both fine: `env_var_deps` lists
   names only, and `digest_completeness`'s key count moves only alongside its own enumerated key list
   — a number in the same commit as the change it describes costs nothing.

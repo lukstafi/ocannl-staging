@@ -313,9 +313,13 @@ let () =
          those sites be dropped unnoticed (Codex P2, round 5). A stanza with no custom action runs
          where it is, which is the "" both sides fall back to. *)
       let test_floor = List.concat_map raw ~f:(fun r -> r.Scan.raw_test_cwds) in
+      (* The directory a process actually runs in is the stanza's `(subdir …)` composed with its
+         `chdir`s -- which is what `directory_of` above resolves the config against, so it is what
+         both sides must compare (Codex P2, round 7). *)
+      let effective site = Scan.in_subdir site.Scan.subdir site.Scan.cwd in
       let placed_tests =
         List.filter_map described ~f:(fun (site, kind, _, _) ->
-            match kind with Scan.Test -> Some site.Scan.cwd | _ -> None)
+            match kind with Scan.Test -> Some (effective site) | _ -> None)
       in
       let tally_of = List.fold ~init:(Map.empty (module String)) ~f:(fun counts key ->
           Map.update counts key ~f:(fun n -> 1 + Option.value n ~default:0))
@@ -348,7 +352,7 @@ let () =
       let placed =
         occurrences
           (List.concat_map described ~f:(fun (site, _, _, _) ->
-               List.map site.Scan.executables ~f:(fun exe -> (site.Scan.cwd, exe))))
+               List.map site.Scan.executables ~f:(fun exe -> (effective site, exe))))
       in
       let run_floor = List.concat_map raw ~f:(fun r -> r.Scan.raw_runs) in
       Map.iteri (occurrences run_floor) ~f:(fun ~key ~data:in_text ->

@@ -73,7 +73,10 @@ ok: raw stanzas -- a test stanza
 ok: raw stanzas -- two of them
 ok: raw stanzas -- a plural stanza is one stanza
 ok: raw stanzas -- a build profile named test is not a test stanza
-ok: raw stanzas -- a stanza inside a subdir is a stanza
+ok: raw stanzas -- a stanza inside a subdir runs there
+ok: raw stanzas -- and a rule inside one too
+ok: raw stanzas -- nested subdirs compose
+ok: raw stanzas -- a subdir composes with a chdir
 ok: raw stanzas -- a library with inline tests
 ok: raw stanzas -- a library without
 ok: raw stanzas -- an inline_tests nested deeper is not the library's field
@@ -88,6 +91,10 @@ ok: raw stanzas -- the same one twice in a stanza is one entry
 ok: raw stanzas -- the same one in two stanzas is two stanzas
 ok: raw stanzas -- a chdir names where it runs
 ok: raw stanzas -- one executable under two chdirs is two entries
+ok: raw stanzas -- the test pform behind a ./
+ok: raw stanzas -- a quoted head is the same head
+ok: raw stanzas -- a quoted path in a binding
+ok: raw stanzas -- a quoted stanza head
 ok: raw stanzas -- a quoted chdir destination
 ok: raw stanzas -- a quoted command
 ok: raw stanzas -- an escape inside a quoted atom
