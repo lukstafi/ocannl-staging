@@ -293,10 +293,6 @@ let () =
       let seen kind = List.count described ~f:(fun (_, k, _, _) -> Poly.equal k kind) in
       let floors =
         [
-          ( seen Scan.Test,
-            List.count raw ~f:(fun r ->
-                List.mem [ "test"; "tests" ] r.Scan.raw_head ~equal:String.equal),
-            "test stanzas" );
           ( seen Scan.Inline_tests,
             List.count raw ~f:(fun r ->
                 String.equal r.Scan.raw_head "library" && r.Scan.raw_inline_tests),
@@ -311,6 +307,32 @@ let () =
                  "%s: the raw text shows %d %s but the scan placed only %d -- it is reading the \
                   file with a hole in it"
                  dune_file floor what seen)));
+      (* Test stanzas are compared per WORKING DIRECTORY, not merely counted: a test action can run
+         `%{test}` in several `chdir` branches, and [sites] emits one Test site per directory
+         because each resolves a different config -- so counting the stanza once would let one of
+         those sites be dropped unnoticed (Codex P2, round 5). A stanza with no custom action runs
+         where it is, which is the "" both sides fall back to. *)
+      let test_floor = List.concat_map raw ~f:(fun r -> r.Scan.raw_test_cwds) in
+      let placed_tests =
+        List.filter_map described ~f:(fun (site, kind, _, _) ->
+            match kind with Scan.Test -> Some site.Scan.cwd | _ -> None)
+      in
+      let tally_of = List.fold ~init:(Map.empty (module String)) ~f:(fun counts key ->
+          Map.update counts key ~f:(fun n -> 1 + Option.value n ~default:0))
+      in
+      let placed_test_cwds = tally_of placed_tests in
+      Map.iteri (tally_of test_floor) ~f:(fun ~key:cwd ~data:in_text ->
+          let in_walk = Option.value (Map.find placed_test_cwds cwd) ~default:0 in
+          if in_walk < in_text then (
+            Int.incr floor_holes;
+            fail
+              (Printf.sprintf
+                 "%s: the raw text shows %d test %s running%s but the scan placed only %d -- it is \
+                  reading the file with a hole in it"
+                 dune_file in_text
+                 (if in_text = 1 then "stanza" else "stanzas")
+                 (if String.is_empty cwd then " in its own directory" else " in " ^ cwd)
+                 in_walk)));
       (* The rules are compared as a MULTISET over (working directory, executable), which is the
          pair [sites] makes one site of. Neither coarser comparison works: a flat set would let five
          of the six rules that each run `profile_precedence.exe` be dropped with the sixth answering
@@ -367,10 +389,8 @@ let () =
         Printf.sprintf
           "  %s: %d tests (floor %d), %d inline-test libraries (floor %d), %d exe-running rules \
            (%d named in the text), %d exempt"
-          dune_file (tally Scan.Test)
+          dune_file (tally Scan.Test) (List.length test_floor) (tally Scan.Inline_tests)
           (List.nth_exn (List.map floors ~f:(fun (_, f, _) -> f)) 0)
-          (tally Scan.Inline_tests)
-          (List.nth_exn (List.map floors ~f:(fun (_, f, _) -> f)) 1)
           (tally Scan.Runs_executable) (List.length run_floor) (List.length exempted)
         :: !inventory);
   let stale =

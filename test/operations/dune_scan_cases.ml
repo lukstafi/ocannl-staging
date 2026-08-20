@@ -457,25 +457,29 @@ let render_raw (r : Scan.raw_stanza) =
     List.map r.Scan.raw_runs ~f:(fun (cwd, exe) ->
         if String.is_empty cwd then exe else cwd ^ ":" ^ exe)
   in
+  let tests =
+    List.map r.Scan.raw_test_cwds ~f:(fun cwd ->
+        if String.is_empty cwd then "%{test}" else cwd ^ ":%{test}")
+  in
   Printf.sprintf "%s%s{%s}" r.Scan.raw_head
     (if r.Scan.raw_inline_tests then "+inline" else "")
-    (String.concat ~sep:" " runs)
+    (String.concat ~sep:" " (tests @ runs))
 
 let raw_stanza_cases =
   [
     (* Stanza position: only the top level, and inside `subdir`, which is the one form that contains
        stanzas. A `test` nested anywhere else is not a stanza -- `(env (test …))` names a build
        PROFILE, and `sites` rightly makes no test site of it. *)
-    ("a test stanza", {dune|(test (name t))|dune}, [ "test{}" ]);
+    ("a test stanza", {dune|(test (name t))|dune}, [ "test{%{test}}" ]);
     ("two of them", {dune|(test (name a))
-(test (name b))|dune}, [ "test{}"; "test{}" ]);
-    ("a plural stanza is one stanza", {dune|(tests (names a b c))|dune}, [ "tests{}" ]);
+(test (name b))|dune}, [ "test{%{test}}"; "test{%{test}}" ]);
+    ("a plural stanza is one stanza", {dune|(tests (names a b c))|dune}, [ "tests{%{test}}" ]);
     ( "a build profile named test is not a test stanza",
       {dune|(env (test (flags (:standard))))|dune},
       [ "env{}" ] );
     ( "a stanza inside a subdir is a stanza",
       {dune|(subdir gen (test (name t)))|dune},
-      [ "test{}"; "subdir{}" ] );
+      [ "test{%{test}}"; "subdir{}" ] );
     (* An inline_tests field belongs to the stanza it sits directly inside. *)
     ("a library with inline tests", {dune|(library (name l) (inline_tests))|dune}, [ "library+inline{}" ]);
     ("a library without", {dune|(library (name l) (libraries base))|dune}, [ "library{}" ]);
@@ -528,7 +532,40 @@ let raw_stanza_cases =
       {dune|(rule (action (chdir a (chdir b (run %{dep:x.exe})))))|dune},
       [ "rule{a/b:x.exe}" ] );
     ("an alias runs things too", {dune|(alias (action (run %{dep:a.exe})))|dune}, [ "alias{a.exe}" ]);
-    ("a test's custom action", {dune|(test (name t) (action (run %{dep:helper.exe})))|dune}, [ "test{helper.exe}" ]);
+    ("a test's custom action", {dune|(test (name t) (action (run %{dep:helper.exe})))|dune}, [ "test{%{test} helper.exe}" ]);
+    (* A test's own binary runs where its action puts it, and `sites` emits one Test site per
+       directory because each resolves a different config -- so two chdir branches are two. *)
+    ( "a test's own binary under a chdir",
+      {dune|(test (name t) (action (chdir ../sibling (run %{test}))))|dune},
+      [ "test{../sibling:%{test}}" ] );
+    ( "and in two branches, two directories",
+      {dune|(test (name t) (action (progn (chdir d1 (run %{test})) (chdir d2 (run %{test})))))|dune},
+      [ "test{d1:%{test} d2:%{test}}" ] );
+    (* Under a chdir the text cannot resolve, the walk cannot say where the process runs and emits
+       a site carrying no executables -- so nothing beneath it is reported here either. *)
+    ( "a run under an unresolvable chdir is declined",
+      {dune|(rule (action (chdir %{workspace_root} (run %{dep:probe.exe}))))|dune},
+      [ "rule{}" ] );
+    (* The test's own binary is the exception that proves the rule: the walk's `%{test}` filter
+       drops the wrapped command too, so its Test site falls back to the stanza's own directory --
+       and this reader falls back the same way, which is what keeps them equal. *)
+    ( "a test's own binary under one falls back to its own directory",
+      {dune|(test (name t) (action (chdir %{workspace_root} (run %{test}))))|dune},
+      [ "test{%{test}}" ] );
+    ( "the whole subtree beneath it, however deep",
+      {dune|(rule (action (chdir %{root} (chdir sub (run %{dep:probe.exe})))))|dune},
+      [ "rule{}" ] );
+    (* Dune allows whitespace and comments after an opening paren; a head read as empty would make
+       the stanza invisible to a floor whose whole job is seeing it. *)
+    ( "whitespace before the head",
+      "(\n test (name probe)\n)",
+      [ "test{%{test}}" ] );
+    ( "a comment before the head",
+      "(; which test\n test (name probe))",
+      [ "test{%{test}}" ] );
+    ( "and before a chdir destination",
+      "(rule (action (chdir ; here\n ../sibling (run %{dep:a.exe}))))",
+      [ "rule{../sibling:a.exe}" ] );
     (* What `sites` makes no site of, this makes no entry of. *)
     ( "a library's preprocessor is not a test-running rule",
       {dune|(library (name l) (preprocess (action (run %{dep:pp.exe} x))))|dune},
@@ -538,7 +575,7 @@ let raw_stanza_cases =
       [ "executable{}" ] );
     (* Declined because the text alone does not say what they resolve to: all under-report, which is
        the safe direction for a floor. *)
-    ("the test pform", {dune|(test (name t) (action (run %{test} --flag)))|dune}, [ "test{}" ]);
+    ("the test pform runs where the action puts it", {dune|(test (name t) (action (run %{test} --flag)))|dune}, [ "test{%{test}}" ]);
     ("a shell line", {dune|(rule (action (bash "./probe.exe")))|dune}, [ "rule{}" ]);
     ("a name bound by a dep", {dune|(rule (deps (:pp pp.exe)) (action (run %{pp})))|dune}, [ "rule{}" ]);
     (* Nor one behind a `./`, which is an explicit path in form only: what it names is in the deps,

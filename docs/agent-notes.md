@@ -1529,12 +1529,18 @@ that they earn a lookup rather than always-loaded space.
   every `(run …)` flags a library's `(preprocess (action (run …)))` that was never a site; (c) WHERE
   it runs — `chdir` moves the process and the walk emits one site per working directory, so the key
   is `(cwd, executable)`, not the executable alone, and the directories have to compose the same
-  way; (d) GROUPING and IDENTITY — one site per distinct executable per directory, so raw occurrence
+  way — including for a test's OWN binary, since `%{test}` in two `chdir` branches is two `Test`
+  sites; (c') WHAT CANNOT BE RESOLVED — under a `chdir` whose destination holds a pform the walk
+  emits a site with no executables, so the reader must drop that whole subtree rather than report it
+  under the literal `%{…}`; (d) GROUPING and IDENTITY — one site per distinct executable per directory, so raw occurrence
   counts fail a `progn` running one executable twice while a flat set lets five of six rules be
   answered for by the sixth; and identities come from a structured field (`site.executables`), never
-  from splitting a display name that joins several with `", "`. Expect the real tree to find what
-  the fixtures miss: `./%{pp}` is an explicit path in form only, and reading it literally reported
-  an unexpanded `%{pp}` as an executable. The
+  from splitting a display name that joins several with `", "`. And budget for LEXING as its own axis: dune allows whitespace
+  and comments after an opening paren and quoted atoms anywhere, so a head or a `chdir` destination
+  read naively comes back empty — a stanza the floor cannot see is a stanza it cannot hold the walk
+  to, which is silent rather than loud. Expect the real tree to find what the fixtures miss:
+  `./%{pp}` is an explicit path in form only, and reading it literally reported an unexpanded
+  `%{pp}` as an executable. The
   sibling checks are worth a glance when touching this genre and were both fine: `env_var_deps` lists
   names only, and `digest_completeness`'s key count moves only alongside its own enumerated key list
   — a number in the same commit as the change it describes costs nothing.

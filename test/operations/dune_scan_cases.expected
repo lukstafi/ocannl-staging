@@ -94,9 +94,17 @@ ok: raw stanzas -- an escape inside a quoted atom
 ok: raw stanzas -- nested chdirs compose
 ok: raw stanzas -- an alias runs things too
 ok: raw stanzas -- a test's custom action
+ok: raw stanzas -- a test's own binary under a chdir
+ok: raw stanzas -- and in two branches, two directories
+ok: raw stanzas -- a run under an unresolvable chdir is declined
+ok: raw stanzas -- a test's own binary under one falls back to its own directory
+ok: raw stanzas -- the whole subtree beneath it, however deep
+ok: raw stanzas -- whitespace before the head
+ok: raw stanzas -- a comment before the head
+ok: raw stanzas -- and before a chdir destination
 ok: raw stanzas -- a library's preprocessor is not a test-running rule
 ok: raw stanzas -- nor is an executable's
-ok: raw stanzas -- the test pform
+ok: raw stanzas -- the test pform runs where the action puts it
 ok: raw stanzas -- a shell line
 ok: raw stanzas -- a name bound by a dep
 ok: raw stanzas -- nor one behind a ./
