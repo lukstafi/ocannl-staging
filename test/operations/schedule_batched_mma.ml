@@ -3,23 +3,23 @@
    Three lowered shapes drive the checks:
 
    - Leading batch: [out[b,s,j] += x[b,s,k] * w[k,j]] — the ffn/logits shape of a transformer
-     forward. Detection assigns [i = s] (the deepest loop read by A and absent from B) and records
-     [b] as an outer batch loop; the sketch pipelines leave it Serial.
-   - Interior batch: [out[b,i,h,j] += att[b,i,h,k] * v[b,k,h,j]] — attention's scores-times-values,
-     with the head axis BETWEEN the tile roles in both the output layout and the loop nest. The
-     pipelines hoist [h] above [i] with Swaps, and [Tensorize] records leading-dimension strides
-     larger than the minor dims ([Tile_mma.ldd]/[lda]/[ldb]) — a wrong stride reads/writes the
-     wrong cells, so the bitwise parity against the serial twin is what pins the layout.
-   - A variance-style self-product [v[b,s] += x[b,s,k] * x[b,s,k]] — the layer-norm shape whose
-     reads mention every loop. It used to be mis-detected as a matmul site (its seeds were the only
-     mma candidates gpt2_mini ever proposed, all failing at candidate compile); the role exclusions
-     ([j] absent from A, [i] absent from B) must reject it, so it seeds nothing.
+   forward. Detection assigns [i = s] (the deepest loop read by A and absent from B) and records [b]
+   as an outer batch loop; the sketch pipelines leave it Serial. - Interior batch: [out[b,i,h,j] +=
+   att[b,i,h,k] * v[b,k,h,j]] — attention's scores-times-values, with the head axis BETWEEN the tile
+   roles in both the output layout and the loop nest. The pipelines hoist [h] above [i] with Swaps,
+   and [Tensorize] records leading-dimension strides larger than the minor dims
+   ([Tile_mma.ldd]/[lda]/[ldb]) — a wrong stride reads/writes the wrong cells, so the bitwise parity
+   against the serial twin is what pins the layout. - A variance-style self-product [v[b,s] +=
+   x[b,s,k] * x[b,s,k]] — the layer-norm shape whose reads mention every loop. It used to be
+   mis-detected as a matmul site (its seeds were the only mma candidates gpt2_mini ever proposed,
+   all failing at candidate compile); the role exclusions ([j] absent from A, [i] absent from B)
+   must reject it, so it seeds nothing.
 
    The execution legs run the CPU tensorized sketch end-to-end through the public seeding API
    ([Autotune.sketch_seed_params] with synthetic limits, [Autotune.sketch_schedule]) on the C
    backends, where the register-tiled [Tile_mma] rendering promises bitwise parity for fused-f32
-   accumulations. GPU backends keep the seeding checks (pure functions of the lowering) and skip
-   the CPU-pipeline execution legs. *)
+   accumulations. GPU backends keep the seeding checks (pure functions of the lowering) and skip the
+   CPU-pipeline execution legs. *)
 
 open Base
 open Ocannl
@@ -35,14 +35,14 @@ let p = Verdict.p
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
    that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
    parity check between two zero arrays passes while covering nothing (gh-ocannl-481 item 3). Every
-   reference array is pinned nonzero where it is produced, so the parity claims below have content.
-   *)
+   reference array is pinned nonzero where it is produced, so the parity claims below have
+   content. *)
 let nonzero name (a : float array) =
   if not (Array.exists a ~f:(fun x -> Float.(x <> 0.))) then
     failwith (name ^ ": the reference is all zeros — the parity checks against it are vacuous");
   a
-let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 
+let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let skipped = Verdict.skipped ~backend:backend_name
 
 let on_gpu =
@@ -79,7 +79,7 @@ let gpu_limits =
                 (8, 8, 8) );
             ];
           mma_staged_layouts = [];
-            mma_pipeline_depths = [];
+          mma_pipeline_depths = [];
         };
   }
 
@@ -116,9 +116,9 @@ let with_lowering ~name tensor ~(transform : LL.optimized -> LL.optimized) =
   in
   (Option.value_exn !captured, ctx, routine)
 
-(* The whole-triple CPU tensorized sketch selected from the public seeding API, executed against
-   the serial twin. On GPU backends only the lowering capture runs (identity transform; the
-   routine is compiled but not executed). *)
+(* The whole-triple CPU tensorized sketch selected from the public seeding API, executed against the
+   serial twin. On GPU backends only the lowering capture runs (identity transform; the routine is
+   compiled but not executed). *)
 let check_leg ~tag ~serial ~tensorized =
   let want = compile_serial ~name:(tag ^ "_serial") serial in
   if on_gpu then (
@@ -206,8 +206,7 @@ let () =
   (* --- Variance-style self-product: must not be detected as a matmul site --- *)
   let x2 =
     NTDSL.init ~l:"x2" ~prec:Ir.Ops.single ~o:[ bt; ss; kk ]
-      ~f:(fun idcs ->
-        Float.of_int (((idcs.(0) * ss * kk) + (idcs.(1) * kk) + idcs.(2)) % 5) *. 0.5)
+      ~f:(fun idcs -> Float.of_int (((idcs.(0) * ss * kk) + (idcs.(1) * kk) + idcs.(2)) % 5) *. 0.5)
       ()
   in
   let%op var = x2 +* "bsk;bsk=>bs" x2 in
@@ -222,8 +221,8 @@ let () =
      the recorded leading-dimension strides ([Tile_mma.ldd]/[lda]/[ldb]) are consumed by the
      backends' own mma hooks, and a stride that is right for the register-tiled C rendering can
      still be wrong for a fragment load. On a real device an f32 site seeds nothing on the wmma
-     backends (RDNA3.5 and CUDA have no f32 operand shape), so the reachable format is a narrow
-     one; bf16 is the one both wmma backends and Metal have in the uniform combination.
+     backends (RDNA3.5 and CUDA have no f32 operand shape), so the reachable format is a narrow one;
+     bf16 is the one both wmma backends and Metal have in the uniform combination.
 
      So: seed against [Context.hardware_limits], apply the real pipeline, execute, and require both
      that the values match the serial twin and that the emitted source carries the backend's
@@ -231,11 +230,11 @@ let () =
      [hh]-times larger than the minor dims, which is exactly the case gh-ocannl-528 introduced and
      the case a fragment load addresses differently from a scalar loop.
 
-     Tolerance rather than bitwise on HIP, for the reason [schedule_mma_matmul] documents at
-     length: gfx1151's WMMA does not return the exactly-rounded dot product in any format
-     combination, reproducibly so outside OCANNL. It is loose enough to admit that (worst measured
-     5.86e-03 in the uniform-bf16 combination) and far tighter than a stride defect, which moves
-     values by O(1). *)
+     Tolerance rather than bitwise on HIP, for the reason [schedule_mma_matmul] documents at length:
+     gfx1151's WMMA does not return the exactly-rounded dot product in any format combination,
+     reproducibly so outside OCANNL. It is loose enough to admit that (worst measured 5.86e-03 in
+     the uniform-bf16 combination) and far tighter than a stride defect, which moves values by
+     O(1). *)
   let real_limits = Context.hardware_limits (Context.auto ()) in
   let has_uniform_bf16_tile =
     match real_limits.Ir.Backend_intf.mma with
@@ -255,7 +254,8 @@ let () =
   in
   let close a b = Float.(abs (a - b) <= 0.05 * max 1. (abs b)) in
   (* At most this many candidates are executed per site: each one is a full backend compile, and on
-     HIP the rocWMMA headers make that expensive. Reported on stderr so the bound is never silent. *)
+     HIP the rocWMMA headers make that expensive. Reported on stderr so the bound is never
+     silent. *)
   let max_candidates = 4 in
   let bf16_leg ~tag ~build =
     let ref_t = build () in
@@ -267,7 +267,8 @@ let () =
           (named (tag ^ "_bf16_serial") (Train.forward ref_t))
           Ir.Indexing.Empty
       in
-      nonzero (tag ^ "_bf16_serial") (Context.get_values (Context.run ctx routine) ref_t.Tensor.value)
+      nonzero (tag ^ "_bf16_serial")
+        (Context.get_values (Context.run ctx routine) ref_t.Tensor.value)
     in
     let cand = build () in
     let fwd = named (tag ^ "_bf16_mma") (Train.forward cand) in
@@ -305,16 +306,19 @@ let () =
           | got ->
               Int.incr n_ran;
               if Array.for_all2_exn got want ~f:close then Int.incr n_close;
-              if Option.value_map (read_generated (tag ^ "_bf16_mma")) ~default:false
-                   ~f:renders_intrinsic
+              if
+                Option.value_map
+                  (read_generated (tag ^ "_bf16_mma"))
+                  ~default:false ~f:renders_intrinsic
               then Int.incr n_intrinsic
           | exception _ -> ());
-    p (tag ^ " bf16: the backend's advertised tile is seeded")
+    p
+      (tag ^ " bf16: the backend's advertised tile is seeded")
       ((not has_uniform_bf16_tile) || not (List.is_empty seeds));
-    p (tag ^ " bf16: some candidate compiles and runs")
-      ((not has_uniform_bf16_tile) || !n_ran >= 1);
+    p (tag ^ " bf16: some candidate compiles and runs") ((not has_uniform_bf16_tile) || !n_ran >= 1);
     p (tag ^ " bf16: every running candidate matches the serial twin") (!n_ran = !n_close);
-    p (tag ^ " bf16: some running candidate renders the tensor-core intrinsic")
+    p
+      (tag ^ " bf16: some running candidate renders the tensor-core intrinsic")
       ((not has_uniform_bf16_tile) || !n_intrinsic >= 1)
   in
   let bf16_init ~l ~o ~f = NTDSL.init ~l ~prec:Ir.Ops.bfloat16 ~o ~f () in

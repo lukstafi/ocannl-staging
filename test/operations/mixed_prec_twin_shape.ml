@@ -11,10 +11,10 @@
    twin's memory and cast work every step, and (b) the row symbol appears in the matmul's weight
    operand, which made EVERY tensorized candidate decline on a backend whose only tensor-core route
    is a reduced input format — unstaged seeds fail [Schedule.Tensorize]'s unit-coefficient role
-   check (the third micro symbol occurs in an operand), and staged seeds pin the cooperative
-   [Stage] load nest inside the row loop (the row symbol is an outer-part symbol of the staged
-   source), breaking the perfect nest Tensorize requires. On HIP that was 16 of 28 mma candidates,
-   and mma_timed = 0.
+   check (the third micro symbol occurs in an operand), and staged seeds pin the cooperative [Stage]
+   load nest inside the row loop (the row symbol is an outer-part symbol of the staged source),
+   breaking the perfect nest Tensorize requires. On HIP that was 16 of 28 mma candidates, and
+   mma_timed = 0.
 
    So this pins the shape itself, at every reduced precision and with a batch axis present. *)
 
@@ -44,13 +44,11 @@ let find_consumer root master =
   Option.value_exn ~here:[%here] (walk root)
 
 let dims_of t = Lazy.force t.Tensor.value.Tn.dims
-
-let show_dims d =
-  "[" ^ String.concat ~sep:"x" (Array.to_list d |> List.map ~f:Int.to_string) ^ "]"
+let show_dims d = "[" ^ String.concat ~sep:"x" (Array.to_list d |> List.map ~f:Int.to_string) ^ "]"
 
 let leg ~label ~prec =
-  (* A batched input: [batch] rows of [din], so the matmul's weight operand is the thing whose
-     batch row could be resolved by the use site. *)
+  (* A batched input: [batch] rows of [din], so the matmul's weight operand is the thing whose batch
+     row could be resolved by the use site. *)
   let x =
     NTDSL.init ~l:("x_" ^ label) ~prec:Ir.Ops.single ~b:[ batch ] ~o:[ din ]
       ~f:(function [| _; i |] -> Float.of_int i *. 0.25 | _ -> assert false)

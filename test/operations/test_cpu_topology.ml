@@ -1,6 +1,6 @@
 (* Tests for the CPU topology facts and the worker-pool uniformity decision (gh-ocannl-530,
-   docs/proposals/gh-ocannl-530-pool-uniformity.md). The parsers and the decision function are
-   pure, so they are exercised on fabricated inputs (rog's recorded topology among them) with
+   docs/proposals/gh-ocannl-530-pool-uniformity.md). The parsers and the decision function are pure,
+   so they are exercised on fabricated inputs (rog's recorded topology among them) with
    machine-independent golden output; the live probes are only checked for invariants, with the
    machine's actual facts printed to stderr for manual inspection. *)
 
@@ -14,18 +14,13 @@ let sexp_str s = Sexp.to_string_hum s
    {0,1,10-13,22,23} = mask 0xC03C03, E-cores the other sixteen = 0x3FC3FC. *)
 let rog_p_list = "0-1,10-13,22-23"
 let rog_e_list = "2-9,14-21"
-
-let rog_classes =
-  CT.parse_classes_str "1:8:c03c03;0:16:3fc3fc"
-
+let rog_classes = CT.parse_classes_str "1:8:c03c03;0:16:3fc3fc"
 let mac_style_classes = CT.parse_classes_str "1:12:0;0:4:0"
 let uniform_classes = CT.parse_classes_str "0:16:ffff"
 
 let () =
   printf "== parse_cpu_list ==\n";
-  List.iter
-    [ rog_p_list; rog_e_list; "0-15"; "3"; ""; "0-,2"; "5-3"; "1,foo" ]
-    ~f:(fun s ->
+  List.iter [ rog_p_list; rog_e_list; "0-15"; "3"; ""; "0-,2"; "5-3"; "1,foo" ] ~f:(fun s ->
       printf "%S -> %s\n" s (sexp_str ([%sexp_of: int list option] (CT.parse_cpu_list s))));
   printf "\n== mask_of_cpu_list ==\n";
   let mask_of s =
@@ -46,8 +41,7 @@ let () =
       "1:8" (* malformed *);
       "1:0:ff" (* zero count *);
       "";
-    ]
-    ~f:(fun s ->
+    ] ~f:(fun s ->
       printf "%S -> %s\n" s (sexp_str ([%sexp_of: CT.core_class list] (CT.parse_classes_str s))));
   printf "\n== classes_of_ranked_cpu_lists ==\n";
   let ranked =
@@ -96,8 +90,7 @@ let () =
     "uniform machine, auto";
   show ~openmp:true ~setting:`Auto ~classes:mac_style_classes ~hypervisor:`No ~effective:16
     "classes without masks, auto";
-  show ~openmp:true ~setting:`Auto ~classes:[] ~hypervisor:`No ~effective:8
-    "no class info, auto";
+  show ~openmp:true ~setting:`Auto ~classes:[] ~hypervisor:`No ~effective:8 "no class info, auto";
   show ~openmp:true ~setting:`Auto ~classes:rog_classes ~hypervisor:`No ~effective:8
     ~affinity_mask:0xC03C03L "externally pinned to 8P, auto";
   show ~openmp:true ~setting:`Auto ~classes:rog_classes ~hypervisor:`No ~effective:8
@@ -112,14 +105,12 @@ let () =
     (List.is_sorted_strictly classes ~compare:(fun a b -> Int.compare b.CT.perf_rank a.CT.perf_rank)
     && List.for_all classes ~f:(fun c -> c.CT.count > 0)
     && List.for_all classes ~f:(fun c ->
-           Int64.(c.CT.mask = 0L)
-           || Int64.popcount c.CT.mask = c.CT.count)
+        Int64.(c.CT.mask = 0L) || Int64.popcount c.CT.mask = c.CT.count)
     &&
     (* Nonzero masks are pairwise disjoint. *)
     let masked = List.filter classes ~f:(fun c -> Int64.(c.CT.mask <> 0L)) in
     List.for_alli masked ~f:(fun i a ->
-        List.for_alli masked ~f:(fun j b ->
-            i = j || Int64.(a.CT.mask land b.CT.mask = 0L))));
+        List.for_alli masked ~f:(fun j b -> i = j || Int64.(a.CT.mask land b.CT.mask = 0L))));
   (* The machine's actual facts, for manual inspection only (stderr is not golden-checked). *)
   eprintf "machine classes: %s\n" (sexp_str ([%sexp_of: CT.core_class list] classes));
   eprintf "machine effective_cpu_count: %d\n" effective;

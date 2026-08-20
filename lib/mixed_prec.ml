@@ -133,12 +133,12 @@ module Loss_scaler = struct
       t.good_steps <- 0;
       set_scale t ctx (t.scale_val *. t.backoff_factor))
 
-  (** Like {!update}, crediting [steps] steps at once — for the fused gated recipe
-      ({!gated_step}), whose host only samples the checksum every [check_interval] steps: a finite
-      sample credits the whole window toward growth, a non-finite one backs off once. Growth
-      consumes [growth_interval] from the credited count and keeps the remainder (growing once per
-      full interval contained in it), so the average growth cadence matches the per-step schedule
-      even when the sampling interval does not divide [growth_interval]. *)
+  (** Like {!update}, crediting [steps] steps at once — for the fused gated recipe ({!gated_step}),
+      whose host only samples the checksum every [check_interval] steps: a finite sample credits the
+      whole window toward growth, a non-finite one backs off once. Growth consumes [growth_interval]
+      from the credited count and keeps the remainder (growing once per full interval contained in
+      it), so the average growth cadence matches the per-step schedule even when the sampling
+      interval does not divide [growth_interval]. *)
   let update_n t ctx ~grads_finite ~steps =
     if grads_finite then (
       t.good_steps <- t.good_steps + steps;
@@ -192,32 +192,32 @@ let scaled_step ~(scaler : Loss_scaler.t) ~grad_routine ~sgd_routine ~checksum c
 (** {2 The fused gated recipe (gh-ocannl-492 task 5)}
 
     {!scaled_step}'s per-step host read costs a full device await AND a routine split; the checksum
-    reduction itself is a full sweep over every gradient. The fused recipe removes the per-step
-    host round-trip: the inf/nan gate is evaluated {e on device} — the checksum flag is range-tested
-    into a broadcastable 0/1 [update_gate], and every optimizer-state mutation selects through it
+    reduction itself is a full sweep over every gradient. The fused recipe removes the per-step host
+    round-trip: the inf/nan gate is evaluated {e on device} — the checksum flag is range-tested into
+    a broadcastable 0/1 [update_gate], and every optimizer-state mutation selects through it
     ([Train.sgd_update ~update_gate], [Where] selection so skipped steps leave parameters and
     momentum buffers untouched exactly) — so the whole step is one routine and steps queue without
     synchronizing. The host only samples a {e sticky} window checksum every [check_interval] steps
     to drive the dynamic-scale schedule: [window_checksum] accumulates the per-step flag and
     non-finite values are absorbing (inf/nan never cancel back to finite), so a single overflow
     anywhere in the window is caught at the next sample and backs the scale off. Overflowing steps
-    inside a window are already skipped on device — delayed sampling delays only the {e scale
-    adjustment}, never poisons state.
+    inside a window are already skipped on device — delayed sampling delays only the
+    {e scale adjustment}, never poisons state.
 
     The finiteness test is a range comparison ([-3e38 < flag < 3e38]) rather than [x <> x] or
     [x - x = 0]: the latter fold away under the fast-math flags some GPU backends compile with,
-    while an ordered hardware compare of a runtime value against a constant is IEEE-honest about
-    inf and nan on every backend (nan fails both ordered compares, so it gates to 0). *)
+    while an ordered hardware compare of a runtime value against a constant is IEEE-honest about inf
+    and nan on every backend (nan fails both ordered compares, so it gates to 0). *)
 
 (** [gated_scaled_update scaler ~learning_rate ... loss] builds the whole dynamically-scaled
     training step as ONE computation: scaled backprop, gradient checksum, the on-device gate, and
-    the gated+unscaled SGD step. Returns [(window_checksum, comp)]; compile [comp] once and drive
-    it with {!gated_step}. *)
+    the gated+unscaled SGD step. Returns [(window_checksum, comp)]; compile [comp] once and drive it
+    with {!gated_step}. *)
 let gated_scaled_update ?setup_for_parallel ?accum_loss (scaler : Loss_scaler.t) ~learning_rate
     ?momentum ?weight_decay ?nesterov loss =
-  (* Materialized like {!scaled_grad_update}'s: overflow detection depends on gradients being
-     STORED at their (reduced) precision — a virtualized gradient recomputed at the consumer could
-     bypass the f16 rounding that produces the inf the gate exists to catch. *)
+  (* Materialized like {!scaled_grad_update}'s: overflow detection depends on gradients being STORED
+     at their (reduced) precision — a virtualized gradient recomputed at the consumer could bypass
+     the f16 rounding that produces the inf the gate exists to catch. *)
   Set.iter (Train.trainable_params loss) ~f:(fun p ->
       Train.set_materialized (Option.value_exn ~here:[%here] p.Tensor.diff).grad);
   let update =
@@ -229,10 +229,10 @@ let gated_scaled_update ?setup_for_parallel ?accum_loss (scaler : Loss_scaler.t)
   Train.set_materialized wflag.Tensor.value;
   Tn.set_observable wflag.Tensor.value;
   let gate_comp =
-    (* Ordered comparisons yield exact 0/1, and nan fails both, so the product is the gate. The
-       [i => j] copy bridges the axis bases: [finite01] inherits the flag's default-basis axis
-       while [gate] carries the broadcastable [bcast_if_1] axis — distinct spec variables keep the
-       two from unifying (incompatible basis atoms). *)
+    (* Ordered comparisons yield exact 0/1, and nan fails both, so the product is the gate. The [i
+       => j] copy bridges the axis bases: [finite01] inherits the flag's default-basis axis while
+       [gate] carries the broadcastable [bcast_if_1] axis — distinct spec variables keep the two
+       from unifying (incompatible basis atoms). *)
     [%cd
       { finite01 } =: (flag < !.3.0e38) * (!.(-3.0e38) < flag) ~logic:".";
       gate =: id finite01 ~logic:"i => j";
@@ -250,12 +250,11 @@ let gated_scaled_update ?setup_for_parallel ?accum_loss (scaler : Loss_scaler.t)
     window otherwise). Returns [(ctx, window_finite)] — [window_finite] is [true] on non-sampling
     steps. [step] is 0-based. *)
 let gated_step ~(scaler : Loss_scaler.t) ~routine ~window_checksum ~check_interval ~step ctx =
-  if check_interval <= 0 then
-    invalid_arg "Mixed_prec.gated_step: check_interval must be positive";
+  if check_interval <= 0 then invalid_arg "Mixed_prec.gated_step: check_interval must be positive";
   let ctx = Context.run ctx routine in
-  if (step + 1) % check_interval = 0 then (
+  if (step + 1) % check_interval = 0 then
     let sum = (Context.get_values ctx window_checksum.Tensor.value).(0) in
     let grads_finite = Float.is_finite sum in
     let ctx = Context.set_values ctx window_checksum.Tensor.value [| 0. |] in
-    (Loss_scaler.update_n scaler ctx ~grads_finite ~steps:check_interval, grads_finite))
+    (Loss_scaler.update_n scaler ctx ~grads_finite ~steps:check_interval, grads_finite)
   else (ctx, true)

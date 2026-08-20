@@ -204,9 +204,9 @@ module Multidev (Backend : For_add_scheduler) :
      first [get_device] -- runs that never use multidev_cc pay nothing.
 
      Forcing the pool policy here, before any [Domain.spawn], is load-bearing on Linux:
-     [sched_setaffinity(0)] restricts the calling thread and threads spawned afterwards, so a
-     worker domain created before the restriction would keep the full-machine mask and its OpenMP
-     teams would run on the mixed pool the policy exists to avoid. It also makes the device count
+     [sched_setaffinity(0)] restricts the calling thread and threads spawned afterwards, so a worker
+     domain created before the restriction would keep the full-machine mask and its OpenMP teams
+     would run on the mixed pool the policy exists to avoid. It also makes the device count
      affinity-respecting (gh-ocannl-530: [Domain.recommended_domain_count] is affinity-blind on
      Windows), so a restricted or pinned run does not oversubscribe its CPU subset with worker
      domains. *)

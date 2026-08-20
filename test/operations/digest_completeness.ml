@@ -5,18 +5,17 @@
    a default-flags run replayed a tf32-tuned winner at 5.9x slower than not tuning at all. That is
    one instance of a general hazard: any knob that changes emitted code, schedule semantics or
    placement decisions and does NOT reach the identity a cache keys on produces silent cross-regime
-   replay. This test turns the class into a standing invariant, the way
-   [test_config_consistency] does for documentation and registration:
+   replay. This test turns the class into a standing invariant, the way [test_config_consistency]
+   does for documentation and registration:
 
    - every known config key is classified in [Utils.config_key_classification] (a new key with no
-     classification fails here, which is the forcing function),
-   - a classification that claims a cache-key component names one that exists — the components are
-     enumerated by [Schedule_cache.key_components], which drives [cache_key] itself, so the
-     enumeration cannot go stale,
-   - every component other than the digest is claimed by at least one key, so a component cannot
-     quietly become vestigial,
-   - and no key READ AT CODEGEN is classified as code-borne: those reads happen after the lowered
-     code the digest names, so they cannot reach it — which is exactly how gh-ocannl-568 happened.
+   classification fails here, which is the forcing function), - a classification that claims a
+   cache-key component names one that exists — the components are enumerated by
+   [Schedule_cache.key_components], which drives [cache_key] itself, so the enumeration cannot go
+   stale, - every component other than the digest is claimed by at least one key, so a component
+   cannot quietly become vestigial, - and no key READ AT CODEGEN is classified as code-borne: those
+   reads happen after the lowered code the digest names, so they cannot reach it — which is exactly
+   how gh-ocannl-568 happened.
 
    The exemptions (search-shaping and execution-neutral) are deliberately not machine-checkable:
    they are the reviewable text the issue asks for, printed below so that a diff shows when one
@@ -35,7 +34,11 @@ module Config_key_scan = Test_utils.Config_key_scan
    exactly the way check 3 exists to catch. *)
 let codegen_stage_modules =
   [
-    "c_syntax.ml"; "cc_backend.ml"; "cuda_backend.ml"; "hip_backend.ml"; "metal_backend.ml";
+    "c_syntax.ml";
+    "cc_backend.ml";
+    "cuda_backend.ml";
+    "hip_backend.ml";
+    "metal_backend.ml";
     "schedule_cache.ml";
   ]
 
@@ -62,13 +65,13 @@ let () =
   let by_file = Config_key_scan.keys_by_file source_files in
   (* Failures go through [Verdict]: reported on both channels, and the run exits nonzero from its
      teardown. A golden-diff test that prints its failures and exits 0 can be `dune promote`d into
-     passing, blessing the FAIL text as the expected output (Codex P2, round 10 of PR #343); since
-     a nonzero exit means dune never writes the redirected stdout, the same lines go to stderr,
-     where they survive to be read (gh-ocannl-601). *)
+     passing, blessing the FAIL text as the expected output (Codex P2, round 10 of PR #343); since a
+     nonzero exit means dune never writes the redirected stdout, the same lines go to stderr, where
+     they survive to be read (gh-ocannl-601). *)
   let fail = Verdict.fail in
   let listing keys = String.concat ~sep:", " (Set.to_list keys) in
-  (* [codegen_stage_modules] selects by basename, so two scanned files sharing a name would make
-     the selection ambiguous -- possible only since the globs replaced the enumerated list. *)
+  (* [codegen_stage_modules] selects by basename, so two scanned files sharing a name would make the
+     selection ambiguous -- possible only since the globs replaced the enumerated list. *)
   let duplicate_basenames = Config_key_scan.duplicate_basenames source_files in
   if not (List.is_empty duplicate_basenames) then
     fail
@@ -77,9 +80,7 @@ let () =
           or key the list by path: %s"
          (String.concat ~sep:", " duplicate_basenames));
   (* 1. The classification covers exactly the known keys, once each. *)
-  let classified =
-    List.concat_map Utils.config_key_classification ~f:(fun (_, _, keys) -> keys)
-  in
+  let classified = List.concat_map Utils.config_key_classification ~f:(fun (_, _, keys) -> keys) in
   let duplicates =
     List.find_all_dups classified ~compare:String.compare |> Set.of_list (module String)
   in
@@ -96,7 +97,8 @@ let () =
   let unknown = Set.diff classified Utils.known_config_keys in
   if not (Set.is_empty unknown) then
     fail
-      (Printf.sprintf "classified keys that are not in Utils.known_config_keys: %s" (listing unknown));
+      (Printf.sprintf "classified keys that are not in Utils.known_config_keys: %s"
+         (listing unknown));
   (* 2. Claimed components exist, and every component other than the digest is claimed. *)
   let components = Set.of_list (module String) SC.key_components in
   let claimed =
@@ -125,9 +127,7 @@ let () =
   in
   let miscl =
     Set.filter codegen_read ~f:(fun key ->
-        match Utils.classify_config_key key with
-        | Some (Utils.Code_borne, _) -> true
-        | _ -> false)
+        match Utils.classify_config_key key with Some (Utils.Code_borne, _) -> true | _ -> false)
   in
   if not (Set.is_empty miscl) then
     fail
@@ -151,8 +151,7 @@ let () =
   List.iter Utils.config_key_classification ~f:(fun (cls, why, keys) ->
       printf "\n%s -- %s\n" (class_name cls) why;
       List.iter (List.sort keys ~compare:String.compare) ~f:(fun key ->
-          printf "  %s%s\n" key
-            (if Set.mem codegen_read key then " [read at codegen]" else "")));
+          printf "  %s%s\n" key (if Set.mem codegen_read key then " [read at codegen]" else "")));
   printf "\n";
   if not (Verdict.any_failed ()) then
     printf "OK: %d config keys classified against %d cache-key components.\n"

@@ -11,8 +11,8 @@
    ([reinterpret_cast] of the aligned pack structs, llm.c's Packed128) instead of vector extensions.
    The 517-column case is ineligible there — a 517-wide last dimension breaks the lane-alignment
    guarantee — and renders serially, while the split 512-column case is eligible (the [Affine]
-   coefficient and last dimension 512 are both lane multiples). Every printed boolean holds on
-   every backend and at every vector width. *)
+   coefficient and last dimension 512 are both lane multiples). Every printed boolean holds on every
+   backend and at every vector width. *)
 
 open Base
 open Ocannl
@@ -27,11 +27,11 @@ let approx a b = Float.(abs (a - b) < 1e-4)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_cpu = String.is_substring backend_name ~substring:"cc"
 
-(* The vector width is a per-machine fact (16 NEON, 32 AVX2, 64 AVX-512), so the split factor of
-   the second leg is derived from it rather than spelled: a factor below one vector leaves the
-   retyped inner loop unable to fill a single vector, and the leg would then assert the absence of
-   the rendering it exists to exercise. GPU backends report 0 here and keep the factor at 8 — one
-   packed 128-bit load is 4 f32 lanes, and 8 is what their eligibility rule was written against. *)
+(* The vector width is a per-machine fact (16 NEON, 32 AVX2, 64 AVX-512), so the split factor of the
+   second leg is derived from it rather than spelled: a factor below one vector leaves the retyped
+   inner loop unable to fill a single vector, and the leg would then assert the absence of the
+   rendering it exists to exercise. GPU backends report 0 here and keep the factor at 8 — one packed
+   128-bit load is 4 f32 lanes, and 8 is what their eligibility rule was written against. *)
 let simd_vector_bytes =
   (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.simd_vector_bytes
 

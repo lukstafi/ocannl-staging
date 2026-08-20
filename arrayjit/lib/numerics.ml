@@ -29,10 +29,10 @@ type t = {
 
           A reduction accumulator is such an intermediate (gh-ocannl-639): every rendering of an
           accumulation nest — the plain serial fallback included — holds the accumulator at the
-          resolved compute precision across the whole nest and narrows it once at the store, so
-          the effective accumulation width is this policy's, never a property of which schedule
-          happened to place the accumulator in a register. (Narrowing POINTS beyond that single
-          one remain a property of a schedule's reduction structure: a k-blocked schedule stores
+          resolved compute precision across the whole nest and narrows it once at the store, so the
+          effective accumulation width is this policy's, never a property of which schedule happened
+          to place the accumulator in a register. (Narrowing POINTS beyond that single one remain a
+          property of a schedule's reduction structure: a k-blocked schedule stores
           storage-precision partials at its block boundaries by construction.)
 
           On by default: it strictly increases accuracy relative to per-operator rounding and is the
@@ -43,16 +43,16 @@ type t = {
   fp16_arithmetic : bool;
       (** Compute fp16 in fp16 on CPU targets that have native 16-bit arithmetic (ARMv8.2-FP16,
           AVX512-FP16), instead of widening to f32 (gh-ocannl-516). This is the one narrow format a
-          CPU can execute natively — bf16 has no C type and no general ARM/x86 arithmetic, and
-          stays emulated by design — and where the hardware has it, the lane count doubles against
-          f32.
+          CPU can execute natively — bf16 has no C type and no general ARM/x86 arithmetic, and stays
+          emulated by design — and where the hardware has it, the lane count doubles against f32.
 
           Off by default, and the asymmetry with {!narrow_compute_f32} is deliberate: computing in
           fp16 keeps intermediates at fp16's 10-bit mantissa and 65504 range, so it trades accuracy
           for throughput, while widening to f32 trades nothing. It also only pays where the target's
-          arithmetic is genuinely 16-bit ({!Ir.Backend_intf.hardware_limits.native_fp16_arithmetic});
-          on a target that merely promotes to float, turning it on costs accuracy for no speed, so
-          the backend ignores it there. *)
+          arithmetic is genuinely 16-bit
+          ({!Ir.Backend_intf.hardware_limits.native_fp16_arithmetic}); on a target that merely
+          promotes to float, turning it on costs accuracy for no speed, so the backend ignores it
+          there. *)
 }
 [@@deriving sexp, compare, equal]
 

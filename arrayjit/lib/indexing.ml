@@ -337,9 +337,9 @@ let identity_projections ?debug_info ?derived_for ~lhs_dims () =
     debug_info;
   }
 
-(** The extents of the product-space components of [p]: one entry per component, in
-    [product_space] order. A concatenation component's extent is the sum of its segment extents.
-    Non-iterated (dimension-1) axes do not appear. *)
+(** The extents of the product-space components of [p]: one entry per component, in [product_space]
+    order. A concatenation component's extent is the sum of its segment extents. Non-iterated
+    (dimension-1) axes do not appear. *)
 let prod_dims (p : projections) : int array =
   Array.map p.product_space ~f:(List.fold ~init:0 ~f:( + ))
 
@@ -348,12 +348,12 @@ let prod_dims (p : projections) : int array =
     components, possibly interleaved with non-iterated (dimension-1) axes, which the product space
     omits. [dims] is the tensor's dimensions; each dimension-1 axis maps to [Fixed_idx 0] and every
     other axis consumes the first not-yet-consumed product component of equal extent. Matching by
-    extent rather than strictly by position tolerates a proxy-shape layout whose axis order
-    deviates from the product order (e.g. a reduced-over row variable placed in the result's
-    output row while the result keeps input axes): any pairing is correct as long as it is
-    consistent, and this is a pure function of [p] and [dims], so every access to the tensor uses
-    the same pairing. A leftover on either side means the product-space proxy shape (gh-512) got
-    out of sync with the derived projections, and raises rather than corrupting memory. *)
+    extent rather than strictly by position tolerates a proxy-shape layout whose axis order deviates
+    from the product order (e.g. a reduced-over row variable placed in the result's output row while
+    the result keeps input axes): any pairing is correct as long as it is consistent, and this is a
+    pure function of [p] and [dims], so every access to the tensor uses the same pairing. A leftover
+    on either side means the product-space proxy shape (gh-512) got out of sync with the derived
+    projections, and raises rather than corrupting memory. *)
 let prod_project_for (p : projections) ~(dims : int array) : axis_index array =
   let mismatch () =
     raise

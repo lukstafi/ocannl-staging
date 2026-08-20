@@ -101,9 +101,9 @@ let () =
   let late_inject = H.env_flag "BENCH_LATE_INJECT" in
   let ctx = if late_inject then ctx else H.inject ctx st batch_loss mapping in
   show ctx "after-inject";
-  (* Only the lowering is wanted here (an explicit transform replaces the default pipeline,
-     so the routine is discarded); the timed routine is compiled with the regular default
-     pipeline below. *)
+  (* Only the lowering is wanted here (an explicit transform replaces the default pipeline, so the
+     routine is discarded); the timed routine is compiled with the regular default pipeline
+     below. *)
   let opt = H.capture_lowering ctx step_comp bindings in
   let promote_locals =
     match Stdlib.Sys.getenv_opt "BENCH_PROMOTE" with Some "0" -> Some false | _ -> None
@@ -112,24 +112,24 @@ let () =
   (* Which accumulations the gh-ocannl-484 task-3 detector actually proposes on this graph — the
      seeded family can only reach the segments listed here, so this is what says whether the
      dominant segment of the census above is even a candidate. *)
-  (if H.env_flag "BENCH_SR_SITES" then
-     let sites = Autotune.split_reduce_sites opt in
-     Stdio.printf "split-reduce sites detected: %d\n" (List.length sites);
-     List.iter sites ~f:(fun s ->
-         Stdio.printf "  %s: reduction extent %d, target cells %d, est. segment cost %d%s%s\n"
-           (Ir.Tnode.debug_name s.Autotune.sr_target)
-           s.Autotune.sr_red s.Autotune.sr_out s.Autotune.sr_cost
-           (if s.Autotune.sr_dynamic then " (scatter)" else "")
-           (* gh-ocannl-537: the conv-gradient sites are reachable only through an enabling
-              interchange, so name it — a site listed with no swaps was splittable as lowered. *)
-           (match s.Autotune.sr_swaps with
-           | [] -> ""
-           | swaps ->
-               Printf.sprintf " (via %d swap%s: %s)" (List.length swaps)
-                 (if List.length swaps = 1 then "" else "s")
-                 (String.concat ~sep:" "
-                    (List.map swaps ~f:(fun (o, i) ->
-                         Ir.Indexing.symbol_ident i ^ "^" ^ Ir.Indexing.symbol_ident o))))));
+  if H.env_flag "BENCH_SR_SITES" then (
+    let sites = Autotune.split_reduce_sites opt in
+    Stdio.printf "split-reduce sites detected: %d\n" (List.length sites);
+    List.iter sites ~f:(fun s ->
+        Stdio.printf "  %s: reduction extent %d, target cells %d, est. segment cost %d%s%s\n"
+          (Ir.Tnode.debug_name s.Autotune.sr_target)
+          s.Autotune.sr_red s.Autotune.sr_out s.Autotune.sr_cost
+          (if s.Autotune.sr_dynamic then " (scatter)" else "")
+          (* gh-ocannl-537: the conv-gradient sites are reachable only through an enabling
+             interchange, so name it — a site listed with no swaps was splittable as lowered. *)
+          (match s.Autotune.sr_swaps with
+          | [] -> ""
+          | swaps ->
+              Printf.sprintf " (via %d swap%s: %s)" (List.length swaps)
+                (if List.length swaps = 1 then "" else "s")
+                (String.concat ~sep:" "
+                   (List.map swaps ~f:(fun (o, i) ->
+                        Ir.Indexing.symbol_ident i ^ "^" ^ Ir.Indexing.symbol_ident o))))));
   (* ...and, for the ones it does not propose, which rule rejected them. *)
   if H.env_flag "BENCH_SR_SITES" then H.print_split_reduce_verdicts opt;
   let t0 = Unix.gettimeofday () in
@@ -140,15 +140,15 @@ let () =
   Stdio.printf "backend: %s  compile_s: %.3f\n" backend compile_s;
   (* Per-segment (per-layer) times: populate intermediates with one full step, then time each
      fission segment as its own routine. *)
-  (if H.env_flag "BENCH_SEG_TIMES" then (
-     let batch_ref = IDX.find_exn routine.Context.bindings batch_n in
-     batch_ref := 0;
-     Train.run ctx routine;
-     Context.sync ctx;
-     H.time_segments ?promote_locals ~backend ~limits ~static_indices:[ batch_n ] ~ctx
-       ~comp:step_comp ~bindings
-       ~bind:(fun r -> IDX.find_exn r.Context.bindings batch_n := 0)
-       opt));
+  if H.env_flag "BENCH_SEG_TIMES" then (
+    let batch_ref = IDX.find_exn routine.Context.bindings batch_n in
+    batch_ref := 0;
+    Train.run ctx routine;
+    Context.sync ctx;
+    H.time_segments ?promote_locals ~backend ~limits ~static_indices:[ batch_n ] ~ctx
+      ~comp:step_comp ~bindings
+      ~bind:(fun r -> IDX.find_exn r.Context.bindings batch_n := 0)
+      opt);
   (if H.env_flag "BENCH_STEPS" then
      let batch_ref = IDX.find_exn routine.Context.bindings batch_n in
      for step = 0 to 2 do

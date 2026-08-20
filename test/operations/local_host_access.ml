@@ -31,14 +31,15 @@ let p = Verdict.p
    distinct per row, dependent on every term of the reduction, and nowhere near the seeded
    sentinel. *)
 let rows = 4
-
 let inner = 32
 let a_values = Array.init (rows * inner) ~f:(fun n -> Float.of_int ((n / inner) + 1))
 let x_values = Array.init inner ~f:Float.of_int
 let sum_x = Float.of_int (inner * (inner - 1) / 2)
 let h_expected = Array.init rows ~f:(fun i -> Float.of_int (i + 1) *. sum_x)
 let sentinel = Array.create ~len:rows (-1.)
-let close got expected = Array.for_all2_exn got expected ~f:(fun v w -> Float.(abs (v -. w) <= 1e-3))
+
+let close got expected =
+  Array.for_all2_exn got expected ~f:(fun v w -> Float.(abs (v -. w) <= 1e-3))
 
 (* The program: [h = a * x] — the contraction whose extent trips the cost guard — consumed by an
    observable output. [~materialize_h] is the one difference between the two arms. *)

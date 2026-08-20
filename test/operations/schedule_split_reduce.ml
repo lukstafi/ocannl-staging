@@ -36,12 +36,13 @@ let p = Verdict.p
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
    that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
    parity check between two zero arrays passes while covering nothing (gh-ocannl-481 item 3). Every
-   reference array is pinned nonzero where it is produced, so the parity claims below have content.
-   *)
+   reference array is pinned nonzero where it is produced, so the parity claims below have
+   content. *)
 let nonzero name (a : float array) =
   if not (Array.exists a ~f:(fun x -> Float.(x <> 0.))) then
     failwith (name ^ ": the reference is all zeros — the parity checks against it are vacuous");
   a
+
 let approx a b = Float.(abs (a - b) < 1e-3 *. (1. +. abs b))
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_cpu = String.is_substring backend_name ~substring:"cc"
@@ -70,9 +71,7 @@ let find_loop_with_extent ~n (llc : LL.t) : Idx.symbol option =
 let census ?label (llc : LL.t) : int * int * int =
   let ifs = ref 0 and loops = ref 0 and labeled = ref 0 in
   let tagged tn =
-    match label with
-    | None -> false
-    | Some l -> List.mem tn.Tn.label l ~equal:String.equal
+    match label with None -> false | Some l -> List.mem tn.Tn.label l ~equal:String.equal
   in
   let rec go (llc : LL.t) =
     match llc with
@@ -117,8 +116,8 @@ let census ?label (llc : LL.t) : int * int * int =
     | LL.Get_dynamic { tn; dyn_value = v, _; _ } ->
         if tagged tn then Int.incr labeled;
         scan v
-    | LL.Get_local _ | LL.Get_merge_buffer _ | LL.Constant _ | LL.Constant_bits _
-    | LL.Embed_index _ ->
+    | LL.Get_local _ | LL.Get_merge_buffer _ | LL.Constant _ | LL.Constant_bits _ | LL.Embed_index _
+      ->
         ()
   in
   go llc;
@@ -127,10 +126,10 @@ let census ?label (llc : LL.t) : int * int * int =
 let preset opt =
   if on_cpu then Sched.default_cpu ~min_parallel:1 opt else Sched.default_gpu ~min_parallel:1 opt
 
-(* Fission the (already Split_reduce-transformed) routine and annotate each segment with the
-   default preset — the plural-transform flow of gh-484: the partials edge cuts, each pass gets its
-   own launch geometry, and the runtime event chain provides the grid-wide synchronization the
-   combine needs. *)
+(* Fission the (already Split_reduce-transformed) routine and annotate each segment with the default
+   preset — the plural-transform flow of gh-484: the partials edge cuts, each pass gets its own
+   launch geometry, and the runtime event chain provides the grid-wide synchronization the combine
+   needs. *)
 let fission_annotate opt =
   Sched.fission_scheduled ~preset ~zero_sched:(fun _ -> []) ~static_indices:[] opt
   |> List.map ~f:(fun (_, _, _, scheduled) -> scheduled)
@@ -142,12 +141,14 @@ let bitwise = Array.for_all2_exn ~f:Float.equal
 let m_ext = 13
 let k_ext = 70
 
-(* Mixed magnitudes so reassociation is numerically observable: the split-schedule values may
-   differ from the unsplit serial twin in low bits, while staying bitwise-stable per schedule. *)
+(* Mixed magnitudes so reassociation is numerically observable: the split-schedule values may differ
+   from the unsplit serial twin in low bits, while staying bitwise-stable per schedule. *)
 let mav =
-  Array.init (m_ext * k_ext) ~f:(fun x -> Float.sin (Float.of_int x) *. (10. **. Float.of_int (x % 5)))
+  Array.init (m_ext * k_ext) ~f:(fun x ->
+      Float.sin (Float.of_int x) *. (10. **. Float.of_int (x % 5)))
 
-let mvv = Array.init k_ext ~f:(fun x -> Float.cos (Float.of_int x) *. (10. **. Float.of_int (x % 3)))
+let mvv =
+  Array.init k_ext ~f:(fun x -> Float.cos (Float.of_int x) *. (10. **. Float.of_int (x % 3)))
 
 let make_matvec label =
   let m =
@@ -180,19 +181,17 @@ let () =
   let legal = ref None and illegal_target = ref None and cache_ok = ref false in
   let y1, m1 = make_matvec "1" in
   let split_transform ?(num_blocks = 7) ~target ?(observe = fun (_ : LL.optimized) -> ()) () =
-    fun (opt : LL.optimized) ->
-      let axis = Option.value_exn ~here:[%here] (find_loop_with_extent ~n:k_ext opt.LL.llc) in
-      let op, _b, _i, _c = Sched.split_reduce ~axis ~target ~num_blocks in
-      let opt' = Sched.apply [ op ] opt in
-      observe opt';
-      opt'
+   fun (opt : LL.optimized) ->
+    let axis = Option.value_exn ~here:[%here] (find_loop_with_extent ~n:k_ext opt.LL.llc) in
+    let op, _b, _i, _c = Sched.split_reduce ~axis ~target ~num_blocks in
+    let opt' = Sched.apply [ op ] opt in
+    observe opt';
+    opt'
   in
   let observe (opt' : LL.optimized) =
     stats := census ~label:"partials" opt'.LL.llc;
     n_nests :=
-      List.count (LL.flat_lines [ opt'.LL.llc ]) ~f:(function
-        | LL.For_loop _ -> true
-        | _ -> false)
+      List.count (LL.flat_lines [ opt'.LL.llc ]) ~f:(function LL.For_loop _ -> true | _ -> false)
   in
   let twin_transform (opt : LL.optimized) =
     (* Legality oracle and cache round-trip, probed against the pre-transform code. *)
@@ -205,12 +204,10 @@ let () =
      let saved1, _ = Cache.to_saved (Cache.base_registry canonical) [ op ] in
      let sched2, _ = Cache.of_saved canonical saved1 in
      let saved2, _ = Cache.to_saved (Cache.base_registry canonical) sched2 in
-     (* Applicability of the re-minted schedule, probed hermetically (a raw [Sched.apply] here
-        would pollute the compile's traced store with a stray partials node). *)
+     (* Applicability of the re-minted schedule, probed hermetically (a raw [Sched.apply] here would
+        pollute the compile's traced store with a stray partials node). *)
      let verdicts = Sched.schedule_legality opt sched2 in
-     let reapplicable =
-       match verdicts with [ (_, Sched.Op_legal) ] -> true | _ -> false
-     in
+     let reapplicable = match verdicts with [ (_, Sched.Op_legal) ] -> true | _ -> false in
      cache_ok := Cache.equal_saved_schedule saved1 saved2 && reapplicable);
     split_transform ~target:y1.Tensor.value ~observe () opt
   in
@@ -225,7 +222,8 @@ let () =
   p "split-reduce on a read-only operand is Op_illegal"
     (match !illegal_target with Some (Sched.Op_illegal _) -> true | _ -> false);
   p "schedule-cache round-trip re-mints an applicable Split_reduce" !cache_ok;
-  p "split-schedule serial twin approximates the unsplit reference" (Array.for_all2_exn twin want ~f:approx);
+  p "split-schedule serial twin approximates the unsplit reference"
+    (Array.for_all2_exn twin want ~f:approx);
 
   (* -- The same schedule, fissioned and annotated: must match the serial twin BITWISE. -- *)
   let seg_pins = ref (false, false) in
@@ -360,7 +358,8 @@ let run_update ?(transform = fun (opt : LL.optimized) -> opt) ?transforms ~name 
   let ctx, routine =
     match transforms with
     | None -> Context.compile ~lowered_transform:transform ctx (named name update) Idx.Empty
-    | Some transforms -> Context.compile ~lowered_transforms:transforms ctx (named name update) Idx.Empty
+    | Some transforms ->
+        Context.compile ~lowered_transforms:transforms ctx (named name update) Idx.Empty
   in
   let ctx = Context.run ctx routine in
   Context.get_values ctx grad
@@ -382,8 +381,8 @@ let () =
   let want = nonzero "sr_emb_serial" (run_update ~name:"sr_emb_serial" g0) in
   p "serial scatter gradient equals the analytic dense gradient bitwise" (bitwise want expected);
 
-  (* -- Unbail (a): with no split at all, the default preset now annotates the scatter segment —
-     the embedding-dim loop parallelizes (its component pins the written row's column), while the
+  (* -- Unbail (a): with no split at all, the default preset now annotates the scatter segment — the
+     embedding-dim loop parallelizes (its component pins the written row's column), while the
      position loop driving the dynamic index stays serial. Bitwise-equal to the serial run: per
      cell, the accumulation order is unchanged. -- *)
   let scatter_annotated = ref false in
@@ -392,7 +391,9 @@ let () =
   let unbailed =
     run_update
       ~transforms:(fun opt ->
-        let segs = Sched.fission_scheduled ~preset ~zero_sched:(fun _ -> []) ~static_indices:[] opt in
+        let segs =
+          Sched.fission_scheduled ~preset ~zero_sched:(fun _ -> []) ~static_indices:[] opt
+        in
         List.iter segs ~f:(fun (_, pre, sched, _) ->
             let rec has_dyn (llc : LL.t) =
               match llc with
@@ -423,8 +424,7 @@ let () =
         let count = ref 0 in
         let rec go (llc : LL.t) =
           match llc with
-          | LL.Set_dynamic { tn; _ }
-            when List.mem tn.Tn.label "partials" ~equal:String.equal ->
+          | LL.Set_dynamic { tn; _ } when List.mem tn.Tn.label "partials" ~equal:String.equal ->
               Int.incr count
           | LL.Seq (a, b) ->
               go a;

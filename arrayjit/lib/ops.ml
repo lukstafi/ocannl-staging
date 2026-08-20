@@ -79,21 +79,20 @@ let is_up_to_fp16 = function
 (** The floating-point formats narrower than f32: the ones a CPU has no arithmetic for, so that
     every operator over them is a widen/op/narrow round-trip through f32 (gh-ocannl-517). Integer
     precisions are excluded — their arithmetic is native at every width. *)
-let is_narrow_float = function
-  | Half_prec _ | Bfloat16_prec _ | Fp8_prec _ -> true
-  | _ -> false
+let is_narrow_float = function Half_prec _ | Bfloat16_prec _ | Fp8_prec _ -> true | _ -> false
 
 (** Whether a constant is too large to be safe in a half-precision node. The cutoff
     ([check_half_prec_constants_cutoff], default 2^14) sits well below fp16's 65504 max finite: it
     is headroom against overflow during {e arithmetic} on the constant, not a representability test.
 
     Both infinities are therefore out of scope by construction, not by exception (gh-ocannl-547).
-    They are exactly representable in IEEE binary16; they are emitted deliberately as {e reduction
-    identities} — see {!neutral_elem}, whose [Max] is [neg_infinity] and [Min] is [infinity], with
-    {!C_syntax} rendering them as [(-INFINITY)] / [INFINITY] and the GPU backends converting through
-    [__float2half] / [__double2half] / a [(half)] cast, all of which map infinities per IEEE; and no
-    arithmetic can push an infinity past a finite bound, so there is no headroom to preserve. An
-    identity is a sentinel arithmetic is expected to {e consume}, not to accumulate.
+    They are exactly representable in IEEE binary16; they are emitted deliberately as
+    {e reduction identities} — see {!neutral_elem}, whose [Max] is [neg_infinity] and [Min] is
+    [infinity], with {!C_syntax} rendering them as [(-INFINITY)] / [INFINITY] and the GPU backends
+    converting through [__float2half] / [__double2half] / a [(half)] cast, all of which map
+    infinities per IEEE; and no arithmetic can push an infinity past a finite bound, so there is no
+    headroom to preserve. An identity is a sentinel arithmetic is expected to {e consume}, not to
+    accumulate.
 
     Refusing them made every fp16 max-reduction — hence every fp16 softmax, hence every attention
     model at f16 — fail during lowering, on every backend. NaN is likewise out of scope, by the
@@ -447,8 +446,8 @@ type binop =
           a 128-bit counter and outputs a 128-bit value (precision [Uint4x32]). *)
   | Uint4x32_to_prec_uniform_lane
       (** Extracts one lane of the packed uniform conversion: the first argument is a Uint4x32
-          block, the second an integer lane index in [\[0, vec_unop_lanes prec)]; the result is
-          lane [i] of {!vec_unop.Uint4x32_to_prec_uniform} applied to the block, guaranteed
+          block, the second an integer lane index in [\[0, vec_unop_lanes prec)]; the result is lane
+          [i] of {!vec_unop.Uint4x32_to_prec_uniform} applied to the block, guaranteed
           bitwise-identical to the corresponding vectorized store. IR-internal (gh-509 task 4):
           minted by the virtualizer to inline packed-uniform results per cell; not exposed in the
           user-facing syntaxes. Heterogeneous: the arguments must not be converted to the result
@@ -507,8 +506,8 @@ type op = Ternop of ternop | Binop of binop | Unop of unop [@@deriving sexp, com
       [binop_syntax] / [ternop_syntax], plus {!C_syntax.pp_scalar}, which emits a projection's
       selected operand alone) decide what a kernel actually evaluates;
     - {!Low_level.affine_accesses} enumerates the accesses an unevaluated operand does not make;
-    - {!Cost_model}'s upper and floor walks charge, respectively, the most and the least an
-      operand tree can cost, and its certainty pre-pass decides whose reads are conditional.
+    - {!Cost_model}'s upper and floor walks charge, respectively, the most and the least an operand
+      tree can cost, and its certainty pre-pass decides whose reads are conditional.
 
     They drifted apart three times in one review because each restated the same case analysis. Both
     classifiers below are matched exhaustively (no wildcard arm), so adding an operator to {!binop}
@@ -532,8 +531,8 @@ type ternop_conditionality =
   | Cond_and_one_arm
       (** The first operand (the condition) is always evaluated, then exactly one of the second and
           third: the renderings are short-circuiting [?:] on every backend, deliberately so — MSL's
-          [select] would evaluate both arms and defeat the range guards that lower to [Where]
-          (see {!Metal_backend}'s [ternop_syntax]). *)
+          [select] would evaluate both arms and defeat the range guards that lower to [Where] (see
+          {!Metal_backend}'s [ternop_syntax]). *)
 [@@deriving sexp, compare, equal]
 
 let binop_conditionality = function
@@ -560,8 +559,8 @@ let neutral_elem = function
   | Min -> Float.infinity
   | And -> 1.
   | Or -> 0.
-  | Arg2 | Arg1 | Mod | Cmplt | Cmple | Cmpeq | Cmpne | Threefry4x32_crypto
-  | Threefry4x32_light | Uint4x32_to_prec_uniform_lane (* | Shl | Shr *) ->
+  | Arg2 | Arg1 | Mod | Cmplt | Cmple | Cmpeq | Cmpne | Threefry4x32_crypto | Threefry4x32_light
+  | Uint4x32_to_prec_uniform_lane (* | Shl | Shr *) ->
       0.
 
 let interpret_binop op v1 v2 =
@@ -747,8 +746,7 @@ let binop_c_syntax prec v =
 let is_assign_op = function
   | Arg1 | Mod | Threefry4x32_crypto | Threefry4x32_light | Uint4x32_to_prec_uniform_lane
   (* | Shl | Shr *)
-  | Cmplt | Cmple | Cmpeq | Cmpne
-    ->
+  | Cmplt | Cmple | Cmpeq | Cmpne ->
       false
   | Add | Sub | Mul | Div | ToPowOf | Relu_gate | Satur01_gate | Arg2 | Max | Min | Or | And -> true
 
@@ -778,8 +776,7 @@ let assign_op_cd_syntax ~initialize_neutral = function
   | And -> "=&&"
   | Arg1 | Mod | Threefry4x32_crypto | Threefry4x32_light | Uint4x32_to_prec_uniform_lane
   (* | Shl | Shr *)
-  | Cmplt | Cmple | Cmpeq | Cmpne
-    ->
+  | Cmplt | Cmple | Cmpeq | Cmpne ->
       invalid_arg "Ops.assign_op_cd_syntax: not an assignment op"
 
 (** Note: currently we do not support unary prefix symbols. *)
@@ -1015,10 +1012,10 @@ external single_to_half : float -> int = "arrayjit_single_to_half"
 external fp8_to_single : int -> float = "arrayjit_fp8_to_single"
 external single_to_fp8 : float -> int = "arrayjit_single_to_fp8"
 
+external double_to_fp8 : float -> int = "arrayjit_double_to_fp8"
 (** One-step f64 -> e5m2, for the host side (an OCaml float is a double) and for the C backends'
     [Double_prec] sources. Narrowing via f32 first rounds twice, which disagrees with the GPU fp8
     types for values just off an f32 tie (gh-ocannl-648). *)
-external double_to_fp8 : float -> int = "arrayjit_double_to_fp8"
 
 external copy_with_padding_c :
   ('a, 'b, Bigarray.c_layout) Bigarray.Genarray.t ->

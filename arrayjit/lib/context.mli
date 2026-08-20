@@ -7,22 +7,22 @@ type t [@@deriving sexp_of]
 (** Execution context managing device, compilation, and buffers *)
 
 type task_handle
-(** The routine's executable schedule (its backend task). Abstract on purpose: dispatch goes
-    through {!run}, which validates the lineage and launch bindings before running and records the
-    execution in the ledger afterwards — a directly runnable task would be a one-field-access
-    bypass of those checks. *)
+(** The routine's executable schedule (its backend task). Abstract on purpose: dispatch goes through
+    {!run}, which validates the lineage and launch bindings before running and records the execution
+    in the ledger afterwards — a directly runnable task would be a one-field-access bypass of those
+    checks. *)
 
 type routine = private {
   context : t;
-      (** The context the routine was compiled from, carrying the compilation frontier advanced
-          past this routine (see {!section:execution_deps}). *)
+      (** The context the routine was compiled from, carrying the compilation frontier advanced past
+          this routine (see {!section:execution_deps}). *)
   task : task_handle;
   bindings : Ir.Indexing.lowered_bindings;
   name : string;  (** The name of the routine, derived from the backend compilation. *)
   inputs : Set.M(Ir.Tnode).t;
       (** The externally required initialization set — what {!run}'s initialization check requires
-          to be initialized: the materialized nodes the routine reads before writing them, if at
-          all (read-only nodes included), {i minus} those whose initialization the routine itself
+          to be initialized: the materialized nodes the routine reads before writing them, if at all
+          (read-only nodes included), {i minus} those whose initialization the routine itself
           carries — the computation's embedded nodes, and nodes with registered host initialization
           data, which self-initialize at link time from [Ir.Host_inits] (gh-ocannl-333). Not the
           backend's raw read set: the execution-dependency frontier is built from the unfiltered
@@ -85,13 +85,12 @@ val compile :
     compilation artifacts (generated source files, kernel functions); if omitted, the name is
     derived from the comp's {!Ir.Assignments.Block_comment} labels via
     {!Ir.Assignments.get_name_exn}, which raises if the comp contains no block comment.
-    [lowered_transform] rewrites the
-    optimized lowered code before backend compilation — the seam for schedule transforms and for
-    hand-annotating hardware axis types in tests (docs/proposals/axis-types-for-loops.md).
-    [lowered_transforms] is the plural seam for transforms that split the routine into several
-    kernels (fission): the returned segments run back-to-back on the routine's stream with
-    device-side events at the boundaries, like {!Ir.Schedule.maybe_default_schedules}' segments.
-    Pass at most one of the two.
+    [lowered_transform] rewrites the optimized lowered code before backend compilation — the seam
+    for schedule transforms and for hand-annotating hardware axis types in tests
+    (docs/proposals/axis-types-for-loops.md). [lowered_transforms] is the plural seam for transforms
+    that split the routine into several kernels (fission): the returned segments run back-to-back on
+    the routine's stream with device-side events at the boundaries, like
+    {!Ir.Schedule.maybe_default_schedules}' segments. Pass at most one of the two.
 
     [prelowered] (gh-ocannl-562) is a test seam: it replaces this compile's lowering of [comp] with
     the given optimized code, which then drives codegen AND the analysis layer (I/O classification,
@@ -158,9 +157,9 @@ val check_runnable : t -> routine -> unit
     All of it precedes the dispatch, so a failure here proves nothing was executed and no device
     buffer was written. That is the point (gh-ocannl-550): a caller running a routine inside a
     launch-tagged failure boundary validates through this rather than letting an unattributable
-    failure at [Launch] condemn the lineage for a mistake nothing had yet acted on
-    (gh-ocannl-564). Equivalent to {!check_lineage_runnable} followed by {!check_launch_bindings};
-    a caller that must treat the two halves differently calls them directly. *)
+    failure at [Launch] condemn the lineage for a mistake nothing had yet acted on (gh-ocannl-564).
+    Equivalent to {!check_lineage_runnable} followed by {!check_launch_bindings}; a caller that must
+    treat the two halves differently calls them directly. *)
 
 val check_lineage_runnable : t -> routine -> unit
 (** The lineage-wide half of {!check_runnable}: poisoned lineage, uninitialized inputs, unsatisfied
@@ -171,14 +170,14 @@ val check_lineage_runnable : t -> routine -> unit
     A search must therefore let this one out (gh-ocannl-569). Contained as a per-candidate decline
     it is silent: on a backend whose serial baseline is not dispatched — every GPU backend,
     gh-ocannl-532 — every candidate declines for this one reason, nothing is timed, and
-    [Train.tune_placements] ships the untuned default out of an unusable lineage under a report
-    that says the search completed. *)
+    [Train.tune_placements] ships the untuned default out of an unusable lineage under a report that
+    says the search completed. *)
 
 val check_launch_bindings : routine -> unit
 (** The per-candidate half of {!check_runnable}: bind-time validation of the launch parameters the
     caller just wrote (non-negative, within the declared static range, within the index width).
-    Candidates differ in their static ranges, so one can fail this while its siblings time cleanly
-    — which is what makes it the half a search contains as a decline (gh-ocannl-564). *)
+    Candidates differ in their static ranges, so one can fail this while its siblings time cleanly —
+    which is what makes it the half a search contains as a decline (gh-ocannl-564). *)
 
 val sync : t -> unit
 (** Blocks until the context's device is idle. Host reads ({!to_host}, {!get_values}) synchronize on
@@ -196,9 +195,9 @@ val failure_classifier :
 val rollback_execution : t -> int -> unit
 (** Undoes {!run}'s execution marking for the given routine id. {!run} marks a routine executed
     before the later {!sync} can report an asynchronous failure, so a contained launch/sync
-    rejection has to withdraw that claim — otherwise the next routine compiled in this lineage
-    waits on a dependency that never completed. Only sound when the failure is known not to have
-    written device buffers; otherwise use {!poison_lineage}. *)
+    rejection has to withdraw that claim — otherwise the next routine compiled in this lineage waits
+    on a dependency that never completed. Only sound when the failure is known not to have written
+    device buffers; otherwise use {!poison_lineage}. *)
 
 val poison_lineage : t -> routine_name:string -> exn -> unit
 (** Marks this execution lineage unusable because a failure may have left device buffers partially
@@ -345,21 +344,22 @@ val release : t -> unit
     {b Precondition, not checked}: the context must have no live descendants. A context compiled
     {e from} this one inherits its buffer locations while keeping it as their backend parent, so
     releasing an ancestor leaves the descendant resolving a dropped pool id (or reading a freed
-    pointer). Release leaves, not interior nodes. This is the pre-existing contract of the underlying
-    {!Backends_deprecated.finalize} — what is new is that it is reachable from here — and it is
-    deliberately left as a precondition rather than enforced: tracking live descendants would mean
-    refcounting persistent context values, whose whole point is that a child can be derived at any
-    time and outlive the expression that made it. The one caller in-tree ({!Autotune.tune}) releases
-    only leaf siblings of one search context, which is the shape this is for.
+    pointer). Release leaves, not interior nodes. This is the pre-existing contract of the
+    underlying {!Backends_deprecated.finalize} — what is new is that it is reachable from here — and
+    it is deliberately left as a precondition rather than enforced: tracking live descendants would
+    mean refcounting persistent context values, whose whole point is that a child can be derived at
+    any time and outlive the expression that made it. The one caller in-tree ({!Autotune.tune})
+    releases only leaf siblings of one search context, which is the shape this is for.
 
-    A context whose buffers were released must not be run or read again; it is a dead handle, exactly
-    as after the finalizer had reclaimed it. Nothing in the context is invalidated for {e reading
-    metadata} (placements, names, the ledger), only for touching buffers.
+    A context whose buffers were released must not be run or read again; it is a dead handle,
+    exactly as after the finalizer had reclaimed it. Nothing in the context is invalidated for
+    {e reading metadata} (placements, names, the ledger), only for touching buffers.
 
-    What it does {e not} free: per-device constants ({!Ir.Backend_intf.field-device.constant_buffer_cache}
-    entries), which are shared across contexts by design and outlive them. That is a real bound on
-    what this can do for a schedule search — a hoisted [Stage] candidate mints a fresh packed constant
-    per application, so those accumulate whatever the caller does here (gh-ocannl-565).
+    What it does {e not} free: per-device constants
+    ({!Ir.Backend_intf.field-device.constant_buffer_cache} entries), which are shared across
+    contexts by design and outlive them. That is a real bound on what this can do for a schedule
+    search — a hoisted [Stage] candidate mints a fresh packed constant per application, so those
+    accumulate whatever the caller does here (gh-ocannl-565).
 
     This exists because releasing is otherwise not something a finalizer can be relied on to do
     (gh-ocannl-550): the backends' pool tables hold a strong reference to every slab they allocated,
@@ -385,20 +385,19 @@ val decide_materialized : t -> Ir.Tnode.t list -> t
     are skipped. *)
 
 val decide_inline : t -> Ir.Tnode.t list -> t
-(** A child context whose compilation lineage additionally prefers the given nodes inline
-    (gh-555): subsequent compiles exempt them from the heuristic virtualization caps
-    ([virtualize_max_visits], [virtualize_max_inline_reduction], [virtualize_max_inline_fanin]) —
-    the caps are priors of the
-    default placement policy, not legality. Legality still applies: a preferred node the
-    virtualizer rejects (escaping symbols, non-injective producer indices, opaque effects, ...)
-    materializes as before, and the observability pessimizations (read-only, read-before-write)
-    are unaffected. The preference steers placements the lineage has {e not yet decided}: a node
-    already materialized by an earlier compile in this lineage keeps that decision (decisions are
-    final within a lineage — compiled routines depend on them), so apply the preference to a
-    pre-compile sibling of the routines that set the node, as [Train.tune_placements] does.
-    Together with {!decide_materialized} this spans the per-node inlining decision vector:
-    [Inline] here, [Materialize] there, the default heuristics elsewhere. Hermetic like
-    {!decide_materialized}: the argument context and its other descendants are unaffected. *)
+(** A child context whose compilation lineage additionally prefers the given nodes inline (gh-555):
+    subsequent compiles exempt them from the heuristic virtualization caps ([virtualize_max_visits],
+    [virtualize_max_inline_reduction], [virtualize_max_inline_fanin]) — the caps are priors of the
+    default placement policy, not legality. Legality still applies: a preferred node the virtualizer
+    rejects (escaping symbols, non-injective producer indices, opaque effects, ...) materializes as
+    before, and the observability pessimizations (read-only, read-before-write) are unaffected. The
+    preference steers placements the lineage has {e not yet decided}: a node already materialized by
+    an earlier compile in this lineage keeps that decision (decisions are final within a lineage —
+    compiled routines depend on them), so apply the preference to a pre-compile sibling of the
+    routines that set the node, as [Train.tune_placements] does. Together with
+    {!decide_materialized} this spans the per-node inlining decision vector: [Inline] here,
+    [Materialize] there, the default heuristics elsewhere. Hermetic like {!decide_materialized}: the
+    argument context and its other descendants are unaffected. *)
 
 (** {2 Memory-budget planning (gh-ocannl-498)} *)
 
@@ -413,15 +412,15 @@ type budget_plan = {
   bp_flips : (Ir.Tnode.t * int * int) list;
       (** The accepted flips in acceptance order: the node demoted to recompute-at-use, the
           {e marginal} bytes it relieved on top of the flips accepted before it, and its
-          recompute-cost bound. Flips committed as one joint group (see {!plan_memory_budget})
-          carry [0] each except the one that closed the group, which carries the group's whole
-          relief — so the reliefs sum to exactly [bp_baseline - bp_final] either way. *)
+          recompute-cost bound. Flips committed as one joint group (see {!plan_memory_budget}) carry
+          [0] each except the one that closed the group, which carries the group's whole relief — so
+          the reliefs sum to exactly [bp_baseline - bp_final] either way. *)
   bp_considered : int;  (** Inline candidates individually scored. *)
   bp_dropped : int;  (** Inline candidates the [max_candidates] cut left unscored. *)
   bp_within_budget : bool;
-      (** Whether [bp_final] meets the budget. Always [true] for {!Minimize}, which has no target
-          to miss. A [false] here is a planning outcome, not an error: the selector reports that
-          the decision vector cannot reach the budget rather than forcing illegal flips. *)
+      (** Whether [bp_final] meets the budget. Always [true] for {!Minimize}, which has no target to
+          miss. A [false] here is a planning outcome, not an error: the selector reports that the
+          decision vector cannot reach the budget rather than forcing illegal flips. *)
 }
 [@@deriving sexp_of]
 
@@ -454,8 +453,8 @@ val plan_memory_budget :
   Ir.Indexing.unit_bindings ->
   t * budget_plan
 (** gh-ocannl-498 rematerialization: choose which materialized intermediates to demote to
-    recompute-at-use so that the routine's scored footprint ({!footprint}) fits [budget], and
-    return a child context that decides them inline ({!decide_inline}) together with the plan.
+    recompute-at-use so that the routine's scored footprint ({!footprint}) fits [budget], and return
+    a child context that decides them inline ({!decide_inline}) together with the plan.
 
     A deterministic planning pass, not a timed search: recompute-vs-store under a budget is
     decidable from the two cost sides — the recompute-cost bound each [`Inline] flip candidate
@@ -464,9 +463,9 @@ val plan_memory_budget :
     placements the pass always chooses the same flips.
 
     The selection is greedy in two rounds. First every candidate is scored on its own against the
-    baseline layout — footprint relief is not a function of the node's own size, since a node
-    whose live span was already shared with another's frees no bytes by leaving. That solo relief
-    only {e ranks}: candidates are ordered by relief per unit of recompute cost (an exact rational
+    baseline layout — footprint relief is not a function of the node's own size, since a node whose
+    live span was already shared with another's frees no bytes by leaving. That solo relief only
+    {e ranks}: candidates are ordered by relief per unit of recompute cost (an exact rational
     comparison, never a cross-multiplication that could overflow nor a float, so the order is
     bit-reproducible), zero-relief ones last.
 
@@ -500,6 +499,5 @@ val plan_memory_budget :
     preference simply reproduces the materialized placement — which is why relief is scored from a
     real lowering rather than assumed.
 
-    Raises {!Ir.Utils.User_error} when config [buffer_aliasing] is off: without the liveness
-    planner every node is always-live and the score has nothing to do with what the allocator
-    would do. *)
+    Raises {!Ir.Utils.User_error} when config [buffer_aliasing] is off: without the liveness planner
+    every node is always-live and the score has nothing to do with what the allocator would do. *)

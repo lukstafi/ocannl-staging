@@ -31,8 +31,8 @@ let p = Verdict.p
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
    that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
    parity check between two zero arrays passes while covering nothing (gh-ocannl-481 item 3). Every
-   reference array is pinned nonzero where it is produced, so the parity claims below have content.
-   *)
+   reference array is pinned nonzero where it is produced, so the parity claims below have
+   content. *)
 let nonzero name (a : float array) =
   if not (Array.exists a ~f:(fun x -> Float.(x <> 0.))) then
     failwith (name ^ ": the reference is all zeros — the parity checks against it are vacuous");
@@ -386,15 +386,7 @@ let () =
              LL.For_loop
                {
                  fc with
-                 body =
-                   LL.For_loop
-                     {
-                       index = surplus;
-                       from_ = 0;
-                       to_ = 1;
-                       body;
-                       axis = LL.Serial;
-                     };
+                 body = LL.For_loop { index = surplus; from_ = 0; to_ = 1; body; axis = LL.Serial };
                })
            else LL.For_loop { fc with body = wrap body }
        | LL.Seq (a, b) ->

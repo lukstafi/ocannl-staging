@@ -96,13 +96,13 @@ let () =
     (match classified with
     | Error
         (Ir.Schedule_outcome.Classified
-          {
-            phase = Ir.Schedule_outcome.Backend_codegen;
-            cause =
-              Ir.Schedule_outcome.Illegal_schedule
-                { check = "Low_level.validate_parallel"; detail = _ };
-            execution_effect = Ir.Schedule_outcome.No_device_writes;
-          }) ->
+           {
+             phase = Ir.Schedule_outcome.Backend_codegen;
+             cause =
+               Ir.Schedule_outcome.Illegal_schedule
+                 { check = "Low_level.validate_parallel"; detail = _ };
+             execution_effect = Ir.Schedule_outcome.No_device_writes;
+           }) ->
         true
     | Ok _ | Error (Ir.Schedule_outcome.Classified _) | Error (Ir.Schedule_outcome.Fatal _) -> false);
 
@@ -137,8 +137,8 @@ let () =
   in
   p "fallback_if false re-raises instead of recompiling"
     ((match raised with
-     | Some msg -> String.is_substring msg ~substring:"all active hardware dimensions"
-     | None -> false)
+       | Some msg -> String.is_substring msg ~substring:"all active hardware dimensions"
+       | None -> false)
     && Option.is_none !fell_back);
 
   (* Fatal compiler failures are not advisory declines: they propagate once, with their original
@@ -196,8 +196,9 @@ let () =
   let c, d, comp = pair "model" in
   let choice = ref None in
   let ctx, routine =
-    Autotune.model_default ~report:(fun r -> choice := Some r) (Context.auto ()) comp
-      Ir.Indexing.Empty
+    Autotune.model_default
+      ~report:(fun r -> choice := Some r)
+      (Context.auto ()) comp Ir.Indexing.Empty
   in
   let ctx = Context.run ctx routine in
   p "model_default returns a working routine" (values ctx c d);

@@ -26,12 +26,12 @@
    dimension depend on the stride, not on the data — so parity is unchanged and the evidence is the
    emitted arithmetic.
 
-   The error legs pin [Schedule.Stage]'s layout validation on every backend: swizzle requires
-   shared staging and a tile with at least two axes; the element flavor needs a power-of-two minor
-   tile dim, the b128 flavor a power-of-two count > 1 of whole 16-byte units — two rules that
-   neither imply nor are implied by each other; [pad_stride] needs a stride to pad and a multiple
-   above 1. The last leg is where items 3 and 4 touch (D5): the b128 rule is checked on the PADDED
-   dims, so a tile that misses it is lifted over it by [pad_stride] rather than being declined. *)
+   The error legs pin [Schedule.Stage]'s layout validation on every backend: swizzle requires shared
+   staging and a tile with at least two axes; the element flavor needs a power-of-two minor tile
+   dim, the b128 flavor a power-of-two count > 1 of whole 16-byte units — two rules that neither
+   imply nor are implied by each other; [pad_stride] needs a stride to pad and a multiple above 1.
+   The last leg is where items 3 and 4 touch (D5): the b128 rule is checked on the PADDED dims, so a
+   tile that misses it is lifted over it by [pad_stride] rather than being declined. *)
 
 open Base
 open Ocannl
@@ -46,15 +46,15 @@ let p = Verdict.p
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
    that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
    parity check between two zero arrays passes while covering nothing (gh-ocannl-481 item 3). Every
-   reference array is pinned nonzero where it is produced, so the parity claims below have content.
-   *)
+   reference array is pinned nonzero where it is produced, so the parity claims below have
+   content. *)
 let nonzero name (a : float array) =
   if not (Array.exists a ~f:(fun x -> Float.(x <> 0.))) then
     failwith (name ^ ": the reference is all zeros — the parity checks against it are vacuous");
   a
+
 let approx a b = Float.(abs (a - b) < 1e-3)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-
 let skipped = Verdict.skipped ~backend:backend_name
 let on_metal = String.is_substring backend_name ~substring:"metal"
 
@@ -211,7 +211,9 @@ let () =
      know about [ldmatrix]. --- *)
   let%op mc1b = ma * mb in
   let smem_b128_comp = named "mm_swz128_smem" (Train.forward mc1b) in
-  let transform_b128 opt = Sched.apply (smem_schedule ~swizzle:(Some LL.Swizzle_b128) mc1b opt) opt in
+  let transform_b128 opt =
+    Sched.apply (smem_schedule ~swizzle:(Some LL.Swizzle_b128) mc1b opt) opt
+  in
   let ctx_b = Context.auto () in
   if on_gpu then (
     let ctx_b, routine_b =
@@ -240,8 +242,7 @@ let () =
     (match
        try
          ignore
-           (Context.compile ~lowered_transform:transform_b128 ctx_b smem_b128_comp
-              Ir.Indexing.Empty
+           (Context.compile ~lowered_transform:transform_b128 ctx_b smem_b128_comp Ir.Indexing.Empty
              : Context.t * Context.routine);
          None
        with Invalid_argument msg -> Some msg
@@ -257,12 +258,11 @@ let () =
      micro-kernel iterate the same 8x8 index space — only the stride between rows, which is what a
      bank-conflict fix and every layout rule stated on the leading dimension actually depend on.
      Parity is therefore the same as the unpadded schedule's, and the emitted evidence is the
-     stride: [* 12 +] row arithmetic over 96-element shared arrays instead of [* 8 +] over 64. --- *)
+     stride: [* 12 +] row arithmetic over 96-element shared arrays instead of [* 8 +] over 64.
+     --- *)
   let%op mc1p = ma * mb in
   let smem_pad_comp = named "mm_padstride_smem" (Train.forward mc1p) in
-  let transform_pad opt =
-    Sched.apply (smem_schedule ~swizzle:None ~pad_stride:12 mc1p opt) opt
-  in
+  let transform_pad opt = Sched.apply (smem_schedule ~swizzle:None ~pad_stride:12 mc1p opt) opt in
   let ctx_p = Context.auto () in
   if on_gpu then (
     let ctx_p, routine_p =
@@ -279,11 +279,10 @@ let () =
         let count_sub sub =
           String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
         in
-        let decl =
-          if on_metal then "threadgroup float tile_" else "__shared__ float tile_"
-        in
+        let decl = if on_metal then "threadgroup float tile_" else "__shared__ float tile_" in
         p "pad_stride widens the tile stride (GPU) or rejected (CPU)"
-          (count_sub decl = 2 && count_sub "[96]" = 2
+          (count_sub decl = 2
+          && count_sub "[96]" = 2
           && count_sub " * 12 + " >= 4
           && (not (has " * 8 + "))
           (* Padding alone is not a swizzle: the offsets stay plain row-major. *)
@@ -306,9 +305,9 @@ let () =
   (* --- Swizzled tiles feeding Tensorize: the intrinsic/fragment renderings assume row-major
      pointer+stride operands, so they must decline and the lane-0 scalar fallback must run — and
      stay correct, reading elementwise through the swizzled offsets. Same pipeline as the staged leg
-     of schedule_mma_matmul.ml, with [swizzle = Some LL.Swizzle_elem] on both stages ([bm = 16] keeps the block
-     extents intrinsic-sized, so a surviving intrinsic would fire — its absence below is the
-     decline, not a shape accident). --- *)
+     of schedule_mma_matmul.ml, with [swizzle = Some LL.Swizzle_elem] on both stages ([bm = 16]
+     keeps the block extents intrinsic-sized, so a surviving intrinsic would fire — its absence
+     below is the decline, not a shape accident). --- *)
   let%op mc2 = ma * mb in
   let bt = 16 in
   let staged_schedule (opt : LL.optimized) : Sched.schedule =

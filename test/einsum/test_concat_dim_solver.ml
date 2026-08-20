@@ -1,8 +1,8 @@
 open! Base
 open Ocannl
 
-(* Failures go through [Verdict], so that a regression exits nonzero instead of being
-   `dune promote`d into the golden as the expected output (gh-ocannl-601). *)
+(* Failures go through [Verdict], so that a regression exits nonzero instead of being `dune
+   promote`d into the golden as the expected output (gh-ocannl-601). *)
 let fail fmt = Printf.ksprintf Verdict.fail fmt
 
 (* Solver-level regressions for the Concat dim-solver hardening (task-7d2ed931), following the
@@ -57,9 +57,7 @@ let run ~stage cs : outcome =
 let report name ~(expect : outcome) (actual : outcome) =
   if equal_outcome expect actual then
     Stdio.printf "  PASS: %s [%s]\n" name (outcome_to_string actual)
-  else
-    fail "%s (expected %s, got %s)" name (outcome_to_string expect)
-      (outcome_to_string actual)
+  else fail "%s (expected %s, got %s)" name (outcome_to_string expect) (outcome_to_string actual)
 
 (* AC1 — the existing-GLB merge of two [Concat] bounds no longer crashes AND actually merges. The
    first [Dim_ineq] records [Concat [_; _]] as [vv]'s GLB; the second drives the merge at stage 4

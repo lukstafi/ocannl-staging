@@ -6,8 +6,8 @@
     default presets, fission, autotuning) and docs/proposals/schedule-ir-optops.md for the design
     rationale, including the pass-ordering contract (§2): schedules run after the whole
     [optimize_proc] pipeline (so they see fused code), {!apply} folds freshly constructed guards by
-    re-running [simplify_llc] (plus CSE and hoisting when a transform duplicated code), and there
-    is no re-virtualization. *)
+    re-running [simplify_llc] (plus CSE and hoisting when a transform duplicated code), and there is
+    no re-virtualization. *)
 
 open Base
 module Tn = Tnode
@@ -104,10 +104,10 @@ type optop =
           terms. With [shared = true] the tile is added to [workgroup_shared] and a cooperative-load
           nest plus barriers are inserted at the deepest loop carrying an outer-part symbol or a
           reused [Workgroup] tile axis: [Workgroup]-typed tile loops are reused as the cooperating
-          thread indices, [Serial] tile loops are iterated under fresh symbols, per-axis edge
-          guards are constructed then folded — in [Where] form storing 0 (the add-reduce
-          accumulation identity) to out-of-range slots, so edge tiles of a non-dividing or padded
-          staging are safe to read over their whole index space; every minted tile is recorded in
+          thread indices, [Serial] tile loops are iterated under fresh symbols, per-axis edge guards
+          are constructed then folded — in [Where] form storing 0 (the add-reduce accumulation
+          identity) to out-of-range slots, so edge tiles of a non-dividing or padded staging are
+          safe to read over their whole index space; every minted tile is recorded in
           {!Low_level.optimized.zero_fringe} accordingly (gh-ocannl-485) — and redundant loading
           along non-participating workgroup axes is restricted to one representative thread. Shared
           stages sharing an anchor compose into ONE phase per iteration of it: a later stage's load
@@ -115,16 +115,17 @@ type optop =
           loads (gh-ocannl-567 — the loads write distinct tiles and depend on nothing of each
           other's, so a barrier between them would only serialize two independent copies), and the
           phase closer is shared rather than duplicated. Grouping requires that the phase already in
-          place read nothing this stage's remap turns into a read of its tile. A shared stage with no anchor (no outer-part
-          symbol, no reused workgroup axis — e.g. staging a broadcast vector) wraps the outermost
-          tile loop instead of the routine root, so enclosing workgroup axes can guard the loads;
-          every workgroup slot active in the kernel's launch must be reused or bound by a loop
-          enclosing the staging point, otherwise threads differing in the uncovered slot would race
-          on the shared tile and the op raises. Note that [Split]'s whole-body remainder guards
-          would place the inserted barriers under divergent control flow (rejected by
-          [validate_parallel]), so v1 shared staging requires tile sizes dividing the extents. With
-          [shared = false] (CPU operand packing) all tile loops must be [Serial] and a plain serial
-          copy nest is inserted, no barriers. The source must not be written in the routine.
+          place read nothing this stage's remap turns into a read of its tile. A shared stage with
+          no anchor (no outer-part symbol, no reused workgroup axis — e.g. staging a broadcast
+          vector) wraps the outermost tile loop instead of the routine root, so enclosing workgroup
+          axes can guard the loads; every workgroup slot active in the kernel's launch must be
+          reused or bound by a loop enclosing the staging point, otherwise threads differing in the
+          uncovered slot would race on the shared tile and the op raises. Note that [Split]'s
+          whole-body remainder guards would place the inserted barriers under divergent control flow
+          (rejected by [validate_parallel]), so v1 shared staging requires tile sizes dividing the
+          extents. With [shared = false] (CPU operand packing) all tile loops must be [Serial] and a
+          plain serial copy nest is inserted, no barriers. The source must not be written in the
+          routine.
 
           [cooperative = Some w] is the lane-aware mode for composing with {!constructor-Tensorize}
           (docs/proposals/tensorize-mma.md, "Lane-aware Stage"): shared staging with all-[Serial]
@@ -163,14 +164,14 @@ type optop =
             one instruction. Backends without such loads still decline it to the scalar
             micro-kernel, which stays correct.
 
-          [pad_stride = Some p] rounds the tile's MINOR dim up to a multiple of [p]
-          (gh-ocannl-481 item 4). The tile's leading-dimension stride is that dim — every consumer
-          reads it off the node — so this changes the stride while the iterated index space stays
-          the unpadded extents. Two payoffs, both about the stride rather than the data: shared
-          memory bank conflicts on a strided read of the tile (proposal §5's "correct, possibly
-          bank-conflicted" v1), and layout rules stated on the stride — a fragment load's
-          ld-multiple constraint, and [Swizzle_b128]'s 16-byte-unit count, which is why the two
-          compose as "pad first, then check". Requires a tile with at least two axes and [p > 1].
+          [pad_stride = Some p] rounds the tile's MINOR dim up to a multiple of [p] (gh-ocannl-481
+          item 4). The tile's leading-dimension stride is that dim — every consumer reads it off the
+          node — so this changes the stride while the iterated index space stays the unpadded
+          extents. Two payoffs, both about the stride rather than the data: shared memory bank
+          conflicts on a strided read of the tile (proposal §5's "correct, possibly bank-conflicted"
+          v1), and layout rules stated on the stride — a fragment load's ld-multiple constraint, and
+          [Swizzle_b128]'s 16-byte-unit count, which is why the two compose as "pad first, then
+          check". Requires a tile with at least two axes and [p > 1].
 
           The padded slots hold nothing under a row-major layout: no loop reaches them, so they are
           neither written nor read, and the {!field:Low_level.zero_fringe} contract — about the
@@ -200,31 +201,31 @@ type optop =
           taking exactly the unpipelined code path; [d = 2] only: both the portable form (phase 1)
           and CUDA's [cp.async] arm (phase 2) have single-step lookahead — one prefetch per
           iteration, completed behind one barrier resp. one wait-all — so deeper depths would only
-          consume shared memory and are rejected until the async arms grow
-          commit-group/wait-group bookkeeping). Requires [cooperative = Some _] and an
-          anchor loop L* that is [Serial], starts at 0 and has at least one iteration (the
-          rotation needs a well-defined iteration order and the prologue fills buffer copy 0 — a
-          dead anchor must not execute it; the no-anchor broadcast case has no rotor). The staging composition then becomes: a prologue copy of iteration [from_] before
-          L*, per iteration [k] a single barrier followed by the copy for [k + 1] under an
-          [If (k < to_)] guard (folded away on 1-trip loops) followed by the compute, and a
-          trailing barrier after L* — [2N] barriers become [N + 1], and the prefetch is issued
-          before the compute whose latency hides it. Pipelined stages sharing the anchor compose
-          into the {e same} phase — the later stage's prefetch is grouped behind the existing
-          barrier, back to back with the earlier ones, keeping one barrier per iteration for all of
-          them (a barrier between prefetches would force the earlier copy to complete before the
-          compute, forfeiting its overlap). When a later {!constructor-Tensorize} leaves the rotor
-          body ending in a [Tile_mma] — a barrier by the emission contract, bracketed on every
-          barrier-capable backend — {!apply}'s finalization elides the pipeline's own barriers
+          consume shared memory and are rejected until the async arms grow commit-group/wait-group
+          bookkeeping). Requires [cooperative = Some _] and an anchor loop L* that is [Serial],
+          starts at 0 and has at least one iteration (the rotation needs a well-defined iteration
+          order and the prologue fills buffer copy 0 — a dead anchor must not execute it; the
+          no-anchor broadcast case has no rotor). The staging composition then becomes: a prologue
+          copy of iteration [from_] before L*, per iteration [k] a single barrier followed by the
+          copy for [k + 1] under an [If (k < to_)] guard (folded away on 1-trip loops) followed by
+          the compute, and a trailing barrier after L* — [2N] barriers become [N + 1], and the
+          prefetch is issued before the compute whose latency hides it. Pipelined stages sharing the
+          anchor compose into the {e same} phase — the later stage's prefetch is grouped behind the
+          existing barrier, back to back with the earlier ones, keeping one barrier per iteration
+          for all of them (a barrier between prefetches would force the earlier copy to complete
+          before the compute, forfeiting its overlap). When a later {!constructor-Tensorize} leaves
+          the rotor body ending in a [Tile_mma] — a barrier by the emission contract, bracketed on
+          every barrier-capable backend — {!apply}'s finalization elides the pipeline's own barriers
           (the loop-leading one, and the after-loop one where still adjacent): the intrinsic's
           bracket is the phase, so the tensorized pipelined kernel pays NO explicit barrier per
           iteration, one fewer than the depth-1 form (whose k-block loads feed the SAME iteration's
           compute, so its phase barrier is load-bearing — only the intrinsic's trailing bracket is
           emitted per iteration on every rendering form; see {!apply}). A scalar pipelined compute
-          keeps its explicit barriers. The tile is recorded in {!field:Low_level.pipelined}:
-          codegen allocates [d] rotating copies and selects the buffer by the loop counter (reads
-          [k mod d], in-loop writes [(k+1) mod d], the prologue write copy 0), so the compute reads
-          exactly the values the unpipelined form reads, in the same order — the pipelined
-          rendering is bitwise identical to [pipeline_depth = 1], a pure prefetch-timing transform
+          keeps its explicit barriers. The tile is recorded in {!field:Low_level.pipelined}: codegen
+          allocates [d] rotating copies and selects the buffer by the loop counter (reads [k mod d],
+          in-loop writes [(k+1) mod d], the prologue write copy 0), so the compute reads exactly the
+          values the unpipelined form reads, in the same order — the pipelined rendering is bitwise
+          identical to [pipeline_depth = 1], a pure prefetch-timing transform
           ({!check_hardware_limits} accounts the tile's shared-memory bytes times [d]). [Tile_mma]
           in the compute is compatible: its bracketing barriers are uniformly reached and separate
           same-buffer phases even more strongly than required. Backends that cannot render
@@ -296,16 +297,16 @@ type optop =
           backend's intrinsic block; a pad-masked store-back — gh-ocannl-485's range guards on a
           non-dividing site — is recognized through its guards, which are re-imposed on the
           relocated tail, gh-ocannl-521), the whole-K [Tile_mma] writing [target] directly (the
-          unstaged tensorized pipelines: the intrinsic block completes the accumulator's m x n
-          tile, so the tail becomes a sibling lane-0 nest over the tile at the accumulator's base
-          indices, gh-ocannl-521), the [Privatize] tile store-back (per-element), and the plain
-          accumulation nest (the tail slides inside the output loops after the serial reduction
-          loop). The tail must be the first real statement after the last statement writing
-          [target]: a perfect Serial nest over exactly [target]'s dims, assigning a different node
-          at the identity index tuple, elementwise, with every read of [target] at that tuple, and
-          no later statement mentioning [target]. The store-back of [target] itself is kept.
-          Elementwise tails never reorder the reduction, so on the C backends the fused values are
-          bitwise equal to the two-kernel form. Apply after [Tensorize]/[Privatize].
+          unstaged tensorized pipelines: the intrinsic block completes the accumulator's m x n tile,
+          so the tail becomes a sibling lane-0 nest over the tile at the accumulator's base indices,
+          gh-ocannl-521), the [Privatize] tile store-back (per-element), and the plain accumulation
+          nest (the tail slides inside the output loops after the serial reduction loop). The tail
+          must be the first real statement after the last statement writing [target]: a perfect
+          Serial nest over exactly [target]'s dims, assigning a different node at the identity index
+          tuple, elementwise, with every read of [target] at that tuple, and no later statement
+          mentioning [target]. The store-back of [target] itself is kept. Elementwise tails never
+          reorder the reduction, so on the C backends the fused values are bitwise equal to the
+          two-kernel form. Apply after [Tensorize]/[Privatize].
 
           [shared] (GPU only, requires the fragment site): the fused tail is often [target]'s last
           consumer, so placement makes [target] routine-local — a per-thread array the fragment
@@ -391,22 +392,21 @@ val partition : axis:Indexing.symbol -> breakpoints:int list -> optop * Indexing
 val partition_breakpoints : axis:Indexing.symbol -> Low_level.t -> int list
 (** Derives candidate {!constructor-Partition} breakpoints of the [axis] loop from the guards
     already present in its body: statement [If] conditions and scalar [Where] conditions (e.g. the
-    virtualizer's per-component range guards of an inlined concatenation, [Split]'s remainder
-    guard, or a clamped window's range guards, gh-ocannl-504) are scanned for comparisons whose two
-    sides differ by [k*axis + off]. With everything besides [axis] constant, such a comparison
-    flips truth value at one point of the axis range. Non-axis symbols bound by other loops
-    (inside the [axis] loop — e.g. the window symbol of a clamped-window guard — or enclosing it)
-    are bounded by their loop ranges, putting [off] in an interval: the
-    comparison is then always-true / mixed / always-false
-    over the axis range, and both transition points are recorded — the mixed (boundary) segments
-    are exactly delimited while the decided segments fold their guards. Returns the collected flip
-    points that fall strictly inside the loop range, sorted and deduplicated (possibly empty — e.g.
-    when every guard is already interval-decided); partitioning at them makes every such guard
-    interval-decided within each segment (for interval-ranged comparisons: outside the mixed
-    segments), so {!apply}'s trailing simplify erases them. Loops are located the way {!apply}
-    rewrites them (gh-ocannl-668): inside a [Local_scope] body, where the accumulation mints of a
-    materializing {!constructor-Unroll} or a {!constructor-Partition} put the segment and inner
-    loops; and over EVERY loop binding [axis], not the first — a materializing
+    virtualizer's per-component range guards of an inlined concatenation, [Split]'s remainder guard,
+    or a clamped window's range guards, gh-ocannl-504) are scanned for comparisons whose two sides
+    differ by [k*axis + off]. With everything besides [axis] constant, such a comparison flips truth
+    value at one point of the axis range. Non-axis symbols bound by other loops (inside the [axis]
+    loop — e.g. the window symbol of a clamped-window guard — or enclosing it) are bounded by their
+    loop ranges, putting [off] in an interval: the comparison is then always-true / mixed /
+    always-false over the axis range, and both transition points are recorded — the mixed (boundary)
+    segments are exactly delimited while the decided segments fold their guards. Returns the
+    collected flip points that fall strictly inside the loop range, sorted and deduplicated
+    (possibly empty — e.g. when every guard is already interval-decided); partitioning at them makes
+    every such guard interval-decided within each segment (for interval-ranged comparisons: outside
+    the mixed segments), so {!apply}'s trailing simplify erases them. Loops are located the way
+    {!apply} rewrites them (gh-ocannl-668): inside a [Local_scope] body, where the accumulation
+    mints of a materializing {!constructor-Unroll} or a {!constructor-Partition} put the segment and
+    inner loops; and over EVERY loop binding [axis], not the first — a materializing
     {!constructor-Unroll} leaves one copy per unrolled step with a different constant substituted
     for the unrolled index, so one source guard's copies flip at different points and the result is
     their union (each copy filtered by its own range). Raises [Invalid_argument] when no loop binds
@@ -441,8 +441,8 @@ val split_reduce_hoist : Low_level.optimized -> optop -> Indexing.symbol list
     loop (gh-ocannl-537). This is the one rejection cause a loop interchange can remove — OCANNL
     lowers conv bias/weight gradients with the accumulated channel loops innermost and the reduction
     loops (batch, y, x) outside them, the exact inverse of the static form's pinning discipline — so
-    autotune seeding hoists these symbols with a {!constructor-Swap} chain and re-probes, rather than
-    dropping the site. The answer comes from the recognizer itself (a hermetic probe of its own
+    autotune seeding hoists these symbols with a {!constructor-Swap} chain and re-probes, rather
+    than dropping the site. The answer comes from the recognizer itself (a hermetic probe of its own
     apply), not from a re-implementation of the discipline or a parse of its message.
 
     [[]] for every other outcome: a legal op, a non-[Split_reduce] op, and any rejection an
@@ -467,8 +467,8 @@ val apply :
   Low_level.optimized ->
   Low_level.optimized
 (** Applies the ops left to right to the optimized code, then elides the staging barriers a later
-    [Tensorize] made redundant, then re-runs [Low_level.simplify_llc] (which folds remainder and edge
-    guards the loop extents prove) and, when a materializing [Unroll] duplicated code, CSE +
+    [Tensorize] made redundant, then re-runs [Low_level.simplify_llc] (which folds remainder and
+    edge guards the loop extents prove) and, when a materializing [Unroll] duplicated code, CSE +
     cross-statement hoisting. [Stage] registers its tile in the traced store (and [workgroup_shared]
     when shared); the optimization context and merge node are never changed. Raises
     [Invalid_argument] when an op references a loop that does not exist at its point in the
@@ -551,15 +551,15 @@ val aligned_chains :
     The presets consume this to emit their own Grid/Workgroup-per-nest geometry. A sketch pipeline
     (autotune) consumes it to cover the nests it does {e not} build — a tensorized accumulation nest
     binds two [Grid] slots and a [Workgroup] lane, geometry no preset emits, and its companion nests
-    must be annotated with the matching slot structure or [Low_level.validate_parallel] rejects their
-    writes (gh-ocannl-521). Callers supplying their own geometry must keep the positional pairing:
-    the alignment argument is exactly that thread [(c0, c1, ...)] covers the same index slice in
-    every linked nest.
+    must be annotated with the matching slot structure or [Low_level.validate_parallel] rejects
+    their writes (gh-ocannl-521). Callers supplying their own geometry must keep the positional
+    pairing: the alignment argument is exactly that thread [(c0, c1, ...)] covers the same index
+    slice in every linked nest.
 
     [expanded_zeros] names nodes whose whole-node [Zero_out] the caller's schedule will turn into a
-    per-element nest ({!Expand_zero}) carrying the caller's geometry. Such a statement is skipped for
-    the query instead of bailing it as a bare materialized write — the write it stands for is not
-    bare by the time the code is validated. *)
+    per-element nest ({!Expand_zero}) carrying the caller's geometry. Such a statement is skipped
+    for the query instead of bailing it as a bare materialized write — the write it stands for is
+    not bare by the time the code is validated. *)
 
 val default_gpu :
   ?block_size:int ->
@@ -624,18 +624,18 @@ val automatic_schedule_active : backend_name:string -> bool
 
 val default_pipeline_fissions : unit -> bool
 (** The config [schedule_fission] gate consulted by {!maybe_default_schedules}: whether the untuned
-    default pipeline fissions into per-segment kernels (subject to {!automatic_schedule_active}),
-    or applies the whole-routine {!maybe_default_schedule} instead. *)
+    default pipeline fissions into per-segment kernels (subject to {!automatic_schedule_active}), or
+    applies the whole-routine {!maybe_default_schedule} instead. *)
 
 val default_schedule_fingerprint : backend_name:string -> string
 (** A stable summary of the configuration that shapes the untuned default pipeline on this backend:
-    the {!automatic_schedule_active} gate (["inactive"] when it is off — the untuned default is
-    then the unscheduled serial form), the [schedule_fission] gate, and the preset thresholds
+    the {!automatic_schedule_active} gate (["inactive"] when it is off — the untuned default is then
+    the unscheduled serial form), the [schedule_fission] gate, and the preset thresholds
     ([gpu_schedule_block_size] / [gpu_schedule_min_parallel] / [cpu_schedule_min_parallel]).
     Diagnostics recorded against one default pipeline (e.g. the autotuner's [default_ms],
-    gh-ocannl-552) compare fingerprints to detect that a config change redefined the default
-    (Codex P2 on PR #279). Does not cover per-device hardware limits — cache consumers already key
-    per backend. *)
+    gh-ocannl-552) compare fingerprints to detect that a config change redefined the default (Codex
+    P2 on PR #279). Does not cover per-device hardware limits — cache consumers already key per
+    backend. *)
 
 val maybe_default_schedule :
   backend_name:string ->
@@ -686,18 +686,18 @@ val fission_scheduled :
     {!maybe_default_schedules} for the synchronization contract.
 
     [arity_cuts] (default [false], gh-ocannl-574): segment for the {e full-arity} sketch pipelines
-    instead of the default presets. The no-parallelism-loss guard normally compares chains under
-    the presets' Grid+Workgroup cap, so a merge that trims a rank-3+ site's minor axis reads as
-    lossless — correct for the default annotators, which never bind more than that prefix, but the
-    GPU matmul sketches annotate the site's whole chain and cover every materialized-writing nest
-    of the kernel with the same geometry ([companion_geometry], gh-ocannl-521/569). Under
-    [arity_cuts] chains are analyzed uncapped and a merge additionally requires every
-    materialized-writing nest to keep an identical extent list, so a companion that cannot follow
-    the site's arity — a reduction {e over} the site's minor axis and the reduction target's
-    initialization nest, the lm_head's max-logits row — is cut into its own downstream kernel
-    (stream order supplies the synchronization) and the site's kernel seeds at full arity. The
-    finer segmentation costs launches the default pipeline does not want to pay unconditionally,
-    so this is a candidate-generation mode (the autotuner times it), never the default.
+    instead of the default presets. The no-parallelism-loss guard normally compares chains under the
+    presets' Grid+Workgroup cap, so a merge that trims a rank-3+ site's minor axis reads as lossless
+    — correct for the default annotators, which never bind more than that prefix, but the GPU matmul
+    sketches annotate the site's whole chain and cover every materialized-writing nest of the kernel
+    with the same geometry ([companion_geometry], gh-ocannl-521/569). Under [arity_cuts] chains are
+    analyzed uncapped and a merge additionally requires every materialized-writing nest to keep an
+    identical extent list, so a companion that cannot follow the site's arity — a reduction {e over}
+    the site's minor axis and the reduction target's initialization nest, the lm_head's max-logits
+    row — is cut into its own downstream kernel (stream order supplies the synchronization) and the
+    site's kernel seeds at full arity. The finer segmentation costs launches the default pipeline
+    does not want to pay unconditionally, so this is a candidate-generation mode (the autotuner
+    times it), never the default.
 
     [promote_locals] (default [false]): promote statement-crossing [Local] scratch to [On_device]
     before segmentation. A nest whose only writes land in [Local] scratch gets no parallel chain

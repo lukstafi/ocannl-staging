@@ -8,13 +8,14 @@ type tn_set = Set.M(Ir.Tnode).t
 type asgns = Ir.Assignments.t
 type comp = Ir.Assignments.comp
 type fetch_op = Ir.Assignments.fetch_op
+
 type projections = {
   projections_debug : string;
   projections : Ir.Indexing.projections Lazy.t;
   product_shape : Shape.t Lazy.t;
       (** The product-space proxy shape of the operation (gh-512), for [%cd] [*_pspace]
-          intermediates; see {!Shape.product_space_shape}. Forcing it emits shape constraints, so
-          it must be forced (if at all) while the operation's code is being built. *)
+          intermediates; see {!Shape.product_space_shape}. Forcing it emits shape constraints, so it
+          must be forced (if at all) while the operation's code is being built. *)
 }
 
 type diff = {
@@ -245,8 +246,8 @@ val param_postprocess : (t -> t) ref
     returned to user code; defaults to the identity. Mixed-precision recipes install a wrapper here
     that returns a reduced-precision "cast twin" consuming the parameter (gh-ocannl-492 master
     weights): the graph then reads the twin while the optimizer keeps updating the master parameter,
-    which remains the sole member of the result's {!field:params}. Reset by
-    {!unsafe_reinitialize}. *)
+    which remains the sole member of the result's {!field:params}. Reset by {!unsafe_reinitialize}.
+*)
 
 val term_init : ?grad_spec:grad_spec -> float array -> op_fun
 (** A {!term} wrapper that sets up the value node initialization (it generalizes {!ndarray} to

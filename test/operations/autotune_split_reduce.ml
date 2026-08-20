@@ -15,10 +15,10 @@
    partials node, the per-segment lookup and drift guard pass), with correct values. - Multi-site:
    two skinny matvec accumulations in one routine seed per-site singles plus one composite
    recombining each site's best-timed [num_blocks]. - gh-ocannl-537: a bias gradient — the
-   conv-benchmark shape, accumulated channel loop innermost — is reached through the enabling
-   [Swap] chain and its candidate is TIMED, not merely seeded. - gh-ocannl-541: sites rank by
-   estimated segment cost (no integer-division ratio-0 artefact), the candidate-volume cap lives
-   in [tune], and a site the cap evicts is recorded in the decline census instead of vanishing. *)
+   conv-benchmark shape, accumulated channel loop innermost — is reached through the enabling [Swap]
+   chain and its candidate is TIMED, not merely seeded. - gh-ocannl-541: sites rank by estimated
+   segment cost (no integer-division ratio-0 artefact), the candidate-volume cap lives in [tune],
+   and a site the cap evicts is recorded in the decline census instead of vanishing. *)
 
 open Base
 open Ocannl
@@ -33,12 +33,13 @@ let p = Verdict.p
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
    that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
    parity check between two zero arrays passes while covering nothing (gh-ocannl-481 item 3). Every
-   reference array is pinned nonzero where it is produced, so the parity claims below have content.
-   *)
+   reference array is pinned nonzero where it is produced, so the parity claims below have
+   content. *)
 let nonzero name (a : float array) =
   if not (Array.exists a ~f:(fun x -> Float.(x <> 0.))) then
     failwith (name ^ ": the reference is all zeros — the parity checks against it are vacuous");
   a
+
 let approx a b = Float.(abs (a - b) < 1e-3 *. (1. +. abs b))
 
 let named name (comp : Asgns.comp) : Asgns.comp =
@@ -71,7 +72,8 @@ let mav =
   Array.init (out_d * red_d) ~f:(fun x ->
       Float.sin (Float.of_int x) *. (10. **. Float.of_int (x % 3)))
 
-let mvv = Array.init red_d ~f:(fun x -> Float.cos (Float.of_int x) *. (10. **. Float.of_int (x % 2)))
+let mvv =
+  Array.init red_d ~f:(fun x -> Float.cos (Float.of_int x) *. (10. **. Float.of_int (x % 2)))
 
 let make_matvec label =
   let m =
@@ -108,8 +110,7 @@ let () =
   let sites = Autotune.split_reduce_sites base_opt in
   p "skinny matvec yields one static split-reduce site"
     (match sites with
-    | [ s ] ->
-        (not s.Autotune.sr_dynamic) && s.Autotune.sr_red = red_d && s.Autotune.sr_out = out_d
+    | [ s ] -> (not s.Autotune.sr_dynamic) && s.Autotune.sr_red = red_d && s.Autotune.sr_out = out_d
     | _ -> false);
 
   (* Elementwise code has no rmw accumulation: no sites. *)
@@ -128,8 +129,9 @@ let () =
       ~label:[ "sr_ms" ] ~input_dims:[ short ] ~output_dims:[ out_d ] ()
   in
   let vs =
-    TDSL.ndarray (Array.init short ~f:(fun x -> Float.of_int (x % 3))) ~label:[ "sr_vs" ]
-      ~output_dims:[ short ] ()
+    TDSL.ndarray
+      (Array.init short ~f:(fun x -> Float.of_int (x % 3)))
+      ~label:[ "sr_vs" ] ~output_dims:[ short ] ()
   in
   let%op ys = ms * vs in
   let short_opt = capture_base (named "asr_short" (Train.forward ys)) in
@@ -199,8 +201,7 @@ let () =
   | None ->
       p "split-reduce candidates seeded" false;
       p "split-reduce candidates timed" false);
-  p "tuned skinny matvec matches the serial reference"
-    (Array.for_all2_exn got want ~f:approx)
+  p "tuned skinny matvec matches the serial reference" (Array.for_all2_exn got want ~f:approx)
 
 (* === Leg 4: a hand-crafted split-reduce cache entry replays (the F_split_saved path). === *)
 
@@ -224,7 +225,7 @@ let () =
         let op, _, _, _ =
           Sched.split_reduce ~axis:s.Autotune.sr_axis ~target:s.Autotune.sr_target ~num_blocks:8
         in
-        (prelude_saved := fst (SC.to_saved (SC.base_registry (SC.canonicalize opt)) [ op ]));
+        prelude_saved := fst (SC.to_saved (SC.base_registry (SC.canonicalize opt)) [ op ]);
         let opt' = Sched.apply [ op ] opt in
         let tuples = Sched.fission_scheduled ~preset ~zero_sched ~static_indices:[] opt' in
         segments_assoc :=
@@ -317,9 +318,9 @@ let () =
   let got = Context.get_values ctx z1.Tensor.value in
   (match !report with
   | Some r ->
-      (* CPU sweep {8, 32, 128}: site 1 (red 128) admits {8, 32}, site 2 (red 256) admits
-         {8, 32, 128} — five singles; the composite recombines the two sites' best-timed singles.
-         On cc every candidate compiles and times, so the composite is exactly one extra timing. *)
+      (* CPU sweep {8, 32, 128}: site 1 (red 128) admits {8, 32}, site 2 (red 256) admits {8, 32,
+         128} — five singles; the composite recombines the two sites' best-timed singles. On cc
+         every candidate compiles and times, so the composite is exactly one extra timing. *)
       p "multi-site split-reduce singles seeded"
         (if is_cpu then r.Autotune.split_reduce_candidates = 5
          else r.Autotune.split_reduce_candidates >= 2);
@@ -329,8 +330,7 @@ let () =
   | None ->
       p "multi-site split-reduce singles seeded" false;
       p "best-timed singles recombined into a composite" false);
-  p "tuned multi-site routine matches the serial reference"
-    (Array.for_all2_exn got want ~f:approx)
+  p "tuned multi-site routine matches the serial reference" (Array.for_all2_exn got want ~f:approx)
 
 (* === Leg 6: the conv-gradient shape — the enabling interchange (gh-ocannl-537). ===
 
@@ -350,13 +350,12 @@ let cg_w = 4
 let cg_o = 6
 
 let cgv =
-  Array.init (cg_b * cg_h * cg_w * cg_o) ~f:(fun x ->
-      Float.sin (Float.of_int x) *. (10. **. Float.of_int (x % 3)))
+  Array.init
+    (cg_b * cg_h * cg_w * cg_o)
+    ~f:(fun x -> Float.sin (Float.of_int x) *. (10. **. Float.of_int (x % 3)))
 
 let make_bias_grad label =
-  let x =
-    TDSL.ndarray cgv ~label:[ "cg_x" ^ label ] ~output_dims:[ cg_b; cg_h; cg_w; cg_o ] ()
-  in
+  let x = TDSL.ndarray cgv ~label:[ "cg_x" ^ label ] ~output_dims:[ cg_b; cg_h; cg_w; cg_o ] () in
   let bias =
     TDSL.param
       ~values:(Array.init cg_o ~f:(fun i -> Float.of_int i /. 10.))
@@ -420,16 +419,16 @@ let () =
   let got = cg_grad ctx bias1 in
   (match !report with
   | Some r ->
-      (* Two sites — the bias gradient (interchanged) and the loss reduction (splittable as
-         lowered) — over the [2*b <= extent] slice of each sweep: 4 singles on CPU, 2 on GPU. *)
+      (* Two sites — the bias gradient (interchanged) and the loss reduction (splittable as lowered)
+         — over the [2*b <= extent] slice of each sweep: 4 singles on CPU, 2 on GPU. *)
       p "conv-gradient split-reduce candidates seeded"
         (if is_cpu then r.Autotune.split_reduce_candidates = 4
          else r.Autotune.split_reduce_candidates >= 2);
       (* The gh-537 assertion: TIMED, not merely seeded — seeded-but-never-timed is exactly the
-         failure mode gh-476 paid a sweep to discover. Sharper than [timed > 0], which the loss
-         site alone would satisfy: [candidates + 1] is every single plus the composite, and the
-         composite is only proposed when EACH site contributed a best-timed single — so it holds
-         only if the interchanged bias-gradient candidate compiled and ran. *)
+         failure mode gh-476 paid a sweep to discover. Sharper than [timed > 0], which the loss site
+         alone would satisfy: [candidates + 1] is every single plus the composite, and the composite
+         is only proposed when EACH site contributed a best-timed single — so it holds only if the
+         interchanged bias-gradient candidate compiled and ran. *)
       p "the interchanged bias-gradient candidate reaches timing"
         (r.Autotune.split_reduce_timed = r.Autotune.split_reduce_candidates + 1)
   | None ->
@@ -439,14 +438,14 @@ let () =
 
 (* === Leg 7: cost ranking and the eviction census (gh-ocannl-541). ===
 
-   Three sites in one routine, chosen so the estimated-segment-cost ranking exactly INVERTS the
-   old [sr_red / sr_out] integer-division ranking: a large-output matvec (out 512, red 128 — old
-   ratio 0, the artefact that excluded every conv weight gradient), a skinny matvec (out 8, red
-   128 — old ratio 16), and a scalar total (out 1, red 512 — old ratio 512). Trip counts 65536 /
-   1024 / 512 rank them large-first. And with [max_split_reduce_sites:1] only the top site is
-   seeded while the two evicted sites land in the decline census under
-   [Seed_evicted_key "split_reduce"] — the gh-541 Metal-leg blind spot was exactly a
-   previously-seeded site vanishing without a signal when the cap bound. *)
+   Three sites in one routine, chosen so the estimated-segment-cost ranking exactly INVERTS the old
+   [sr_red / sr_out] integer-division ranking: a large-output matvec (out 512, red 128 — old ratio
+   0, the artefact that excluded every conv weight gradient), a skinny matvec (out 8, red 128 — old
+   ratio 16), and a scalar total (out 1, red 512 — old ratio 512). Trip counts 65536 / 1024 / 512
+   rank them large-first. And with [max_split_reduce_sites:1] only the top site is seeded while the
+   two evicted sites land in the decline census under [Seed_evicted_key "split_reduce"] — the gh-541
+   Metal-leg blind spot was exactly a previously-seeded site vanishing without a signal when the cap
+   bound. *)
 
 let rk_o = 512
 

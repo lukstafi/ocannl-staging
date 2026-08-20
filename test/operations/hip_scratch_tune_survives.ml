@@ -17,8 +17,8 @@
    every whole-routine preset declines — so the winner is a genuine result, not a survival artifact.
 
    The fixture is one deliberately oversized routine-local intermediate rather than a wide graph:
-   [mid] is pinned [Local] and read back in an order that is not the write order, since a
-   same-order read lets the compiler forward each store to its load and delete the array (the
+   [mid] is pinned [Local] and read back in an order that is not the write order, since a same-order
+   read lets the compiler forward each store to its load and delete the array (the
    [hip_scratch_budget] lesson). Its size is just under the ~262 KB frame hipcc will emit, so the
    rejection is reachable on as many devices as possible: the budget is 4 GiB divided by the
    device's resident work-items, so it RISES on smaller devices, and one with <= 16384 of them
@@ -69,7 +69,8 @@ let () =
   let comp = Train.forward total in
   let report = ref None in
   (* [cache_dir:""] disables the disk cache: a hit reports no declines and runs no search, which
-     here is indistinguishable from the bug being fixed. [rounds:0] keeps the search to its seeds. *)
+     here is indistinguishable from the bug being fixed. [rounds:0] keeps the search to its
+     seeds. *)
   let ctx, routine =
     Autotune.tune ~beam_width:1 ~rounds:0 ~repeats:1 ~cache_dir:""
       ~report:(fun r -> report := Some r)

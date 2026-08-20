@@ -11,13 +11,14 @@ type tn_set = Set.M(Tn).t
 type asgns = Asgns.t
 type comp = Asgns.comp
 type fetch_op = Asgns.fetch_op
+
 type projections = {
   projections_debug : string;
   projections : Ir.Indexing.projections Lazy.t;
   product_shape : Shape.t Lazy.t;
       (** The product-space proxy shape of the operation (gh-512), for [%cd] [*_pspace]
-          intermediates; see {!Shape.product_space_shape}. Forcing it emits shape constraints, so
-          it must be forced (if at all) while the operation's code is being built. *)
+          intermediates; see {!Shape.product_space_shape}. Forcing it emits shape constraints, so it
+          must be forced (if at all) while the operation's code is being built. *)
 }
 
 let _get_local_debug_runtime = Utils.get_local_debug_runtime
@@ -823,9 +824,9 @@ let ndarray ?(grad_spec = Prohibit_grad) values ?(label = []) ?top_down_prec ?ba
   (* gh-ocannl-633: a below-threshold literal keeps its in-kernel init (the recipe virtualization
      inlines), but its values are also registered as host-init data like the ndarray-backed path
      above the threshold: a lineage that materializes the node drops the in-kernel init and
-     self-initializes at link time from this entry
-     ([Low_level.hosted_constant_inits_to_link_time]), and hoisted operand packing
-     ([Schedule.hoistable_constant]) can read the values below the size cutoff. *)
+     self-initializes at link time from this entry ([Low_level.hosted_constant_inits_to_link_time]),
+     and hoisted operand packing ([Schedule.hoistable_constant]) can read the values below the size
+     cutoff. *)
   (match fetch_op with
   | Some (Asgns.Constant _ | Asgns.Constant_fill _) ->
       register_small_constant_host_init t.value values
@@ -870,8 +871,8 @@ let param_postprocess : (t -> t) ref = ref Fn.id
 
 (* gh-ocannl-544: an initialization expression's job is to fill the parameter's shape, so its
    intermediate results resolve at their use sites — they widen to the parameter instead of closing
-   down and broadcasting (which would repeat random values along the broadcast axes). Walks the
-   init expression's subgraph, stopping at parameters (their own terminal marking governs them). *)
+   down and broadcasting (which would repeat random values along the broadcast axes). Walks the init
+   expression's subgraph, stopping at parameters (their own terminal marking governs them). *)
 let mark_init_cone (t : t) =
   let visited = Hash_set.create (module Int) in
   let rec loop sub =

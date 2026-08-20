@@ -1,9 +1,9 @@
 (* gh-ocannl-593 and gh-ocannl-595: what an OCANNL-linked executable puts on each stream before it
    reaches its own [main].
 
-   The convention (gh-ocannl-581) is that stdout belongs to the program and every library
-   diagnostic goes to stderr -- which is what lets `tools/fit_envelope.exe` and the benchmark
-   runners make stdout a data channel. Nothing tested it: every other test config sets
+   The convention (gh-ocannl-581) is that stdout belongs to the program and every library diagnostic
+   goes to stderr -- which is what lets `tools/fit_envelope.exe` and the benchmark runners make
+   stdout a data channel. Nothing tested it: every other test config sets
    `suppress_welcome_message=true` and `log_config_sourcing=false`, so the whole suite would stay
    green with the [Stdio.eprintf] calls in `arrayjit/lib/utils.ml` flipped back to [Stdio.printf].
 
@@ -11,12 +11,11 @@
    rule captures came from the library. The two rules next to it capture the two halves of the
    contract.
 
-   - The stdout half: with the chatter turned all the way UP, stdout is still empty.
-   - The stderr half: on a DEFAULT run, stderr is short enough that a warning on it is legible.
-     That is the acceptance test of gh-ocannl-595, which is why `log_config_sourcing` defaults to
-     false and `log_level` to 0. The golden is the welcome banner plus the unknown-config-key
-     warning that this directory's `ocannl_config` provokes on purpose -- three lines, not
-     eighty-four.
+   - The stdout half: with the chatter turned all the way UP, stdout is still empty. - The stderr
+   half: on a DEFAULT run, stderr is short enough that a warning on it is legible. That is the
+   acceptance test of gh-ocannl-595, which is why `log_config_sourcing` defaults to false and
+   `log_level` to 0. The golden is the welcome banner plus the unknown-config-key warning that this
+   directory's `ocannl_config` provokes on purpose -- three lines, not eighty-four.
 
    The modes are argument-selected rather than three executables because the stdout half wants a
    subject that links the library and does nothing else, and the other two are a few lines each. *)
@@ -25,12 +24,12 @@ open Base
 open Stdio
 
 (* Keys that would rewrite the stderr golden if they arrived from the ambient environment, which
-   outranks this directory's config file. As in `profiles/`, the executable cannot PREVENT this
-   (the settings are read during [Utils]'s initialization) but detecting it is enough: a rule that
-   exits nonzero writes no golden, so a mystifying diff becomes a named failure. The dune rule
-   declares the same keys as env_var dependencies, which is what gets this guard RUN when one of
-   them changes. Only the stderr rule guards; the stdout rule's claim is stream-level and holds
-   under any of these.
+   outranks this directory's config file. As in `profiles/`, the executable cannot PREVENT this (the
+   settings are read during [Utils]'s initialization) but detecting it is enough: a rule that exits
+   nonzero writes no golden, so a mystifying diff becomes a named failure. The dune rule declares
+   the same keys as env_var dependencies, which is what gets this guard RUN when one of them
+   changes. Only the stderr rule guards; the stdout rule's claim is stream-level and holds under any
+   of these.
 
    The startup-cleanup keys are not here: they are pinned on the rule's commandline, which no
    environment variable can outrank -- the honest option wherever it is available, a guard being

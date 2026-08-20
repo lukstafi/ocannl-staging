@@ -2,19 +2,19 @@
     exhausted a 12 GB card (gh-ocannl-550).
 
     The question the census exists to answer is {e which class} grows with candidates processed, so
-    the classes are separated rather than summed: the device buffers behind the backends' pool tables
-    (working, i.e. context-owned, vs. constant, i.e. per-device and deduped), the backend contexts,
-    and the loaded code modules. Bytes are tracked only for pools; a module's device footprint is not
-    a number any backend API reports.
+    the classes are separated rather than summed: the device buffers behind the backends' pool
+    tables (working, i.e. context-owned, vs. constant, i.e. per-device and deduped), the backend
+    contexts, and the loaded code modules. Bytes are tracked only for pools; a module's device
+    footprint is not a number any backend API reports.
 
     Counting sites, and therefore the exact coverage:
 
-    - Pools: both shared allocation sites — [Backends.allocate_delta] (a compile's in-context delta) and
-      the [allocate] used when a [from_host] or [copy] destination is not in the context yet — against
-      the context [finalize] that frees either. A device's reserved merge-buffer pool is NOT counted: it
-      is one entry per device that grows in place, so it cannot be a growth class at all, and its
-      allocation site is inside each backend rather than at the shared seam. Read the device's
-      [merge_buffer_capacity] for that one.
+    - Pools: both shared allocation sites — [Backends.allocate_delta] (a compile's in-context delta)
+      and the [allocate] used when a [from_host] or [copy] destination is not in the context yet —
+      against the context [finalize] that frees either. A device's reserved merge-buffer pool is NOT
+      counted: it is one entry per device that grows in place, so it cannot be a growth class at
+      all, and its allocation site is inside each backend rather than at the shared seam. Read the
+      device's [merge_buffer_capacity] for that one.
     - Contexts: [Backend_impl.Device.make_context] / [make_child], shared by every backend, against
       the context [finalize].
     - Modules: per-backend link sites. Instrumented on [cc] and [cuda] (the backends the
@@ -28,8 +28,8 @@
     explicit release — see {!unreleased_contexts}. *)
 
 val record_pool : device_id:int -> pool_id:int -> constant:bool -> size_in_bytes:int -> unit
-(** Records a pool as live. Replacing an existing [(device_id, pool_id)] entry replaces its size
-    (a pool grown in place is still one live pool). *)
+(** Records a pool as live. Replacing an existing [(device_id, pool_id)] entry replaces its size (a
+    pool grown in place is still one live pool). *)
 
 val forget_pool : device_id:int -> pool_id:int -> unit
 (** Drops a pool from the live set, counting a free. Idempotent: a second call for a pool already
@@ -60,6 +60,7 @@ type t = {
 val snapshot : unit -> t
 val live_pools : t -> int
 val live_pool_bytes : t -> int
+
 val unreleased_contexts : t -> int
 (** [contexts_created - contexts_released]. NOT a live count, and the difference matters: unlike a
     pool, a context is not rooted by any table, so an unreleased one may well have been collected

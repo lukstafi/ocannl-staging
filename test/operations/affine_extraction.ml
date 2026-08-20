@@ -200,8 +200,8 @@ let () =
   let x = fresh_tn "X" [| 4 |] in
   let y2 = fresh_tn "Y" [| 4 |] in
   let i7 = Idx.get_symbol () in
-  (* Fresh (virtualizable) scope nodes, so the program below also survives [specialize_proc] for
-     the decision-level check further down. *)
+  (* Fresh (virtualizable) scope nodes, so the program below also survives [specialize_proc] for the
+     decision-level check further down. *)
   let la = LL.get_scope (fresh_tn "LA" [| 4 |]) and lb = LL.get_scope (fresh_tn "LB" [| 4 |]) in
   let scope_a : LL.scalar_t =
     LL.Local_scope
@@ -235,7 +235,8 @@ let () =
   in
   let x_writes = List.filter sib_accs ~f:(fun a -> a.Aff.a_write && a.Aff.a_tn.Tn.uid = x.Tn.uid) in
   (match Aff.read_covered_before ~read:x_read ~writes:x_writes () with
-  | `Covered -> Verdict.fail "scope A's read covered by scope B's write: containment crossed sibling operands"
+  | `Covered ->
+      Verdict.fail "scope A's read covered by scope B's write: containment crossed sibling operands"
   | `Unknown _ ->
       Stdio.printf "scope A's read not covered by the sibling operand's write: correct\n");
   (* The reverse arrangement — the writing scope evaluated first in traversal order — is declined
@@ -257,8 +258,10 @@ let () =
   in
   let x_writes = List.filter rev_accs ~f:(fun a -> a.Aff.a_write && a.Aff.a_tn.Tn.uid = x.Tn.uid) in
   (match Aff.read_covered_before ~read:x_read ~writes:x_writes () with
-  | `Covered -> Stdio.printf "read covered across sibling operands (write-first): ordering claimed\n"
-  | `Unknown _ -> Stdio.printf "no ordering claimed across sibling operands (write-first): correct\n");
+  | `Covered ->
+      Stdio.printf "read covered across sibling operands (write-first): ordering claimed\n"
+  | `Unknown _ ->
+      Stdio.printf "no ordering claimed across sibling operands (write-first): correct\n");
 
   (* The decision level: the same verdict driving the real pipeline. [analyze_proc] +
      [specialize_proc] run [decide_placements] (hence [reads_covered_query]) on this code, and must
@@ -276,7 +279,6 @@ let () =
   (match Base.Hashtbl.find opt.LL.traced_store x with
   | None -> Verdict.fail "decide_placements: X not traced -- the fact this leg checks is missing"
   | Some traced ->
-      Verdict.p "decide_placements classifies X as read-before-write"
-        traced.LL.read_before_write);
+      Verdict.p "decide_placements classifies X as read-before-write" traced.LL.read_before_write);
   let (inputs, _outputs), _merge = LL.input_and_output_nodes opt in
   Verdict.p "X is a routine input (incoming buffer preserved)" (Base.Set.mem inputs x)

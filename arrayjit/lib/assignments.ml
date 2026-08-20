@@ -295,7 +295,7 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
         else
           match index_interval ~sizes idx with
           | None -> None
-          | Some (lo, hi) ->
+          | Some (lo, hi) -> (
               let n = sem_dims.(i) in
               if lo >= 0 && hi < n then None
               else
@@ -314,8 +314,7 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
                      bound the strict [idx < n]. *)
                   let lower =
                     if lo < 0 then
-                      Some
-                        (Low_level.Binop (Ops.Cmple, embed (Indexing.Fixed_idx 0), embed idx))
+                      Some (Low_level.Binop (Ops.Cmple, embed (Indexing.Fixed_idx 0), embed idx))
                     else None
                   in
                   let upper =
@@ -323,9 +322,8 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
                       Some (Low_level.Binop (Ops.Cmplt, embed idx, embed (Indexing.Fixed_idx n)))
                     else None
                   in
-                  (match (lower, upper) with
-                  | Some l, Some u ->
-                      Some (Low_level.Binop (Ops.And, (l, iprec), (u, iprec)), iprec)
+                  match (lower, upper) with
+                  | Some l, Some u -> Some (Low_level.Binop (Ops.And, (l, iprec), (u, iprec)), iprec)
                   | Some c, None | None, Some c -> Some (c, iprec)
                   | None, None -> None))
   in
@@ -344,8 +342,8 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
         resolve_alias parent (Array.append [| Iterator static_symbol |] idcs)
     | None -> (tn, idcs)
   in
-  (* [clamp] (gh-504): when [Some (accum, sizes, conds)], prepend to [conds] the clamp range
-     guards of this access, computed on the semantic (pre-padding-shift) indices. *)
+  (* [clamp] (gh-504): when [Some (accum, sizes, conds)], prepend to [conds] the clamp range guards
+     of this access, computed on the semantic (pre-padding-shift) indices. *)
   let get ?clamp (buffer : buffer) (idcs : Indexing.axis_index array) : Low_level.scalar_t =
     (* Only [Node] buffers can be slice-alias views; [Merge_buffer] is never redirected. *)
     let buffer, idcs =
@@ -575,8 +573,8 @@ let%track4_sexp to_low_level ?(static_indices = []) code =
             set ~clamp lhs lhs_idcs rhs2
           else set ~clamp lhs lhs_idcs @@ apply_op (Ops.Binop accum) [| lhs_ll; rhs2 |]
         in
-        (* An out-of-range write target (the transposed clamp of a backward scatter) skips the
-           whole statement. *)
+        (* An out-of-range write target (the transposed clamp of a backward scatter) skips the whole
+           statement. *)
         match !lhs_conds with
         | [] -> stmt
         | conds -> Low_level.If { cond = and_all conds; body = stmt }

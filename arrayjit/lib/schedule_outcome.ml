@@ -15,6 +15,7 @@ type resource = Workgroup_threads | Workgroup_memory | Thread_scratch
 [@@deriving sexp_of, compare, equal]
 
 type severity = Expected | Compiler_bug [@@deriving sexp_of, compare, equal]
+
 type execution_effect = No_device_writes | Writes_may_have_occurred
 [@@deriving sexp_of, compare, equal]
 
@@ -27,12 +28,7 @@ type cause =
       limit : int option;
       detail : string;
     }
-  | Backend_rejected of {
-      backend : string;
-      stage : string;
-      severity : severity;
-      detail : string;
-    }
+  | Backend_rejected of { backend : string; stage : string; severity : severity; detail : string }
   | Unclassified of { phase : phase; exn_constructor : string; detail : string }
   | Seed_evicted of { family : string; detail : string }
   | Not_dispatched of { origin : string; detail : string }
@@ -87,8 +83,9 @@ let is_compile_side = function
   | Transform | Hardware_limits | Backend_codegen | Backend_compile | Backend_link -> true
   | Preflight | Launch | Sync -> false
 
-(* gh-ocannl-564: this phase precedes the dispatch, so its failures prove the device did nothing — no
-   partial write to bound, no lineage to condemn. The one phase always containable, strict or not. *)
+(* gh-ocannl-564: this phase precedes the dispatch, so its failures prove the device did nothing —
+   no partial write to bound, no lineage to condemn. The one phase always containable, strict or
+   not. *)
 let is_pre_dispatch = function
   | Preflight -> true
   | Transform | Hardware_limits | Backend_codegen | Backend_compile | Backend_link | Launch | Sync
@@ -100,11 +97,7 @@ let unclassified phase exn =
     phase;
     cause =
       Unclassified
-        {
-          phase;
-          exn_constructor = Stdlib.Printexc.exn_slot_name exn;
-          detail = Exn.to_string exn;
-        };
+        { phase; exn_constructor = Stdlib.Printexc.exn_slot_name exn; detail = Exn.to_string exn };
     execution_effect = No_device_writes;
   }
 
@@ -127,8 +120,8 @@ let classify_raw ~strict ~classify_backend ~provenance ~phase ~candidate exn bac
     | None ->
         if equal_provenance provenance Cache_replay && is_assert_or_stack exn then
           Classified (unclassified phase exn)
-        else if (not strict) && is_compile_side phase
-                && not (equal_provenance provenance User_schedule)
+        else if
+          (not strict) && is_compile_side phase && not (equal_provenance provenance User_schedule)
         then Classified (unclassified phase exn)
         else fatal ()
 
@@ -176,8 +169,7 @@ let exception_of_cause cause =
   | Not_dispatched _ ->
       Invalid_argument (detail_of_cause cause)
 
-let raise_cause cause =
-  raise (exception_of_cause cause)
+let raise_cause cause = raise (exception_of_cause cause)
 
 let fatal_of_classified ?candidate (classified : classified_cause) =
   let exn = exception_of_cause classified.cause in

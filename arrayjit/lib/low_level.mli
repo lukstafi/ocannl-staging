@@ -52,13 +52,7 @@ type t =
   | Comment of string
   | Staged_compilation of (unit -> PPrint.document)
   | Seq of t * t
-  | For_loop of {
-      index : Indexing.symbol;
-      from_ : int;
-      to_ : int;
-      body : t;
-      axis : axis_type;
-    }
+  | For_loop of { index : Indexing.symbol; from_ : int; to_ : int; body : t; axis : axis_type }
   | Zero_out of Tnode.t
   | Set of {
       tn : Tnode.t;
@@ -101,14 +95,16 @@ type t =
           [if (cond != 0) { body }]). Introduced by launch-extent guards on hardware-annotated loops
           (docs/proposals/axis-types-for-loops.md §2); [simplify_llc] erases a guard whose condition
           an interval proves, and simplifies a surviving guard's body under the bounds the condition
-          implies. A conditional write is never a definite write; virtualization treats
-          guarded computations as non-inlineable in v1. *)
+          implies. A conditional write is never a definite write; virtualization treats guarded
+          computations as non-inlineable in v1. *)
   | Tile_mma of {
       d : Tnode.t * Indexing.axis_index array;  (** Accumulator block base. *)
       a : Tnode.t * Indexing.axis_index array;
       b : Tnode.t * Indexing.axis_index array;
-      ta : bool;  (** [a] is stored transposed: its tile axes are [k, i]-major rather than [i, k]. *)
-      tb : bool;  (** [b] is stored transposed: its tile axes are [j, k]-major rather than [k, j]. *)
+      ta : bool;
+          (** [a] is stored transposed: its tile axes are [k, i]-major rather than [i, k]. *)
+      tb : bool;
+          (** [b] is stored transposed: its tile axes are [j, k]-major rather than [k, j]. *)
       m : int;
       n : int;
       k : int;  (** Covered block extents (multiples of the backend's intrinsic tile). *)
@@ -116,8 +112,8 @@ type t =
       lda : int;
       ldb : int;
           (** Leading-dimension strides in elements, recorded by {!Schedule.optop.Tensorize}: the
-              tnode's minor dim in the plain last-two-axes case, larger when interior batch axes
-              sit between the tile roles (gh-ocannl-528). *)
+              tnode's minor dim in the plain last-two-axes case, larger when interior batch axes sit
+              between the tile roles (gh-ocannl-528). *)
       lane : Indexing.symbol;  (** The cooperating [Workgroup] axis (extent = SIMD width). *)
       fallback : t;  (** Semantically equivalent scalar micro-kernel over fresh serial symbols. *)
     }
@@ -149,9 +145,9 @@ and scalar_t =
           unobservable from outside the body — the same assumption {!Affine.path_before} makes when
           it declines to order sibling [Arg] positions. (It governs a body's effects, not its
           inputs: the hoist additionally needs the body's reads — tensor nodes and scope locals
-          alike — untouched across the statements it is lifted over, which is its own hazard
-          check's obligation.) Enforced by {!validate_scope_bodies}; the optimization pipeline
-          satisfies it by construction. *)
+          alike — untouched across the statements it is lifted over, which is its own hazard check's
+          obligation.) Enforced by {!validate_scope_bodies}; the optimization pipeline satisfies it
+          by construction. *)
   | Get_local of scope_id
   | Get of Tnode.t * Indexing.axis_index array
   | Get_dynamic of {
@@ -252,8 +248,8 @@ val code_touches_tn : Tnode.t -> t -> bool
 val accum_update_parts :
   tn:Tnode.t -> idcs:Indexing.axis_index array -> scalar_t -> (Ops.binop * scalar_t) option
 (** The accumulation-update statement shape [tn[idcs] = op(tn[idcs], contrib)] (or its FMA form)
-    over an associative-commutative [op], with [contrib] free of [tn]; returns [(op, contrib)].
-    The single source of truth shared by [C_syntax]'s widened renderings and
+    over an associative-commutative [op], with [contrib] free of [tn]; returns [(op, contrib)]. The
+    single source of truth shared by [C_syntax]'s widened renderings and
     [Schedule.Unroll ~materialize:true]'s scope-form unrolling (gh-ocannl-639), so "what counts as
     an accumulation" cannot drift between the schedule transform and the emission. *)
 
@@ -265,8 +261,8 @@ val subst_accum_read :
 val accum_local_update_parts : id:scope_id -> scalar_t -> (Ops.binop * scalar_t) option
 (** The reduce-shaped update of a scope LOCAL, [local = op(local, contrib)] (or its FMA form) with
     [contrib] free of the local — [subst_accum_read]'s output shape; returns [(op, contrib)]. The
-    SIMD reduction rendering uses it to fold vector chains into a widened accumulator's scope
-    local (gh-ocannl-639), and {!peel_accum_nest}'s scope-form validation is built on it. *)
+    SIMD reduction rendering uses it to fold vector chains into a widened accumulator's scope local
+    (gh-ocannl-639), and {!peel_accum_nest}'s scope-form validation is built on it. *)
 
 val peel_accum_nest :
   ?extra_level:(Indexing.symbol -> axis_type -> bool) ->
@@ -278,20 +274,20 @@ val peel_accum_nest :
   * string
   * (t -> t))
   option
-(** Peel a single-statement reduction nest down to its accumulation base (gh-ocannl-639). Levels
-    are Serial/[Unrolled]/[Vectorized] loops, loops [extra_level] vouches for (codegen passes a
+(** Peel a single-statement reduction nest down to its accumulation base (gh-ocannl-639). Levels are
+    Serial/[Unrolled]/[Vectorized] loops, loops [extra_level] vouches for (codegen passes a
     predicate accepting hardware-annotated reduction loops its backend serializes — the schedule
-    mints pass nothing, since wrapping a hardware-annotated loop in a scope at transform time
-    would break the schedule on backends that do bind the hardware dimension), and
-    pure-index-guarded [If]s (the gh-490 [If (i < s)] shape and
-    its constant-bound sibling — data-dependent guards stay opaque), each containing nothing else;
-    the base is a raw {!accum_update_parts}-shaped update ([`Update]) or the scope form a previous
-    rewrite minted ([`Scope]: the scope id and the update statements after the opening init,
-    validated to carry ONE reduction operator — mixed-operator sequences are not reductions and
-    keep their per-iteration narrowing), with the accumulated cell invariant across the peeled
-    levels ([free_of] seeds the invariance check with the caller's own loop). [rebuild] re-wraps a
-    replacement base statement in the peeled levels. The ONE definition shared by [C_syntax]'s
-    widened serial fallback and the schedule mints, so transform and emission cannot drift. *)
+    mints pass nothing, since wrapping a hardware-annotated loop in a scope at transform time would
+    break the schedule on backends that do bind the hardware dimension), and pure-index-guarded
+    [If]s (the gh-490 [If (i < s)] shape and its constant-bound sibling — data-dependent guards stay
+    opaque), each containing nothing else; the base is a raw {!accum_update_parts}-shaped update
+    ([`Update]) or the scope form a previous rewrite minted ([`Scope]: the scope id and the update
+    statements after the opening init, validated to carry ONE reduction operator — mixed-operator
+    sequences are not reductions and keep their per-iteration narrowing), with the accumulated cell
+    invariant across the peeled levels ([free_of] seeds the invariance check with the caller's own
+    loop). [rebuild] re-wraps a replacement base statement in the peeled levels. The ONE definition
+    shared by [C_syntax]'s widened serial fallback and the schedule mints, so transform and emission
+    cannot drift. *)
 
 (** {2 Hardware axis analyses}
 
@@ -330,11 +326,11 @@ val validate_scope_bodies : t -> unit
     lexically within it). Raises [Invalid_argument] on anything else inside a [Local_scope] body at
     any nesting depth: a tensor-node write ([Set], [Set_from_vec], [Set_dynamic], [Zero_out],
     [Tile_mma]), a [Set_local] of a sibling or enclosing scope's local, a [Workgroup_barrier], or a
-    [Staged_compilation]. Applied at both ends of the pipeline — {!optimize} on the way in
-    (before a pass can launder a violation out of any body) and [C_syntax.compile_proc] on the way
-    out. The raw analysis entry points {!analyze_proc} / {!specialize_proc} deliberately do not
-    validate, being the probes that must stay conservative on IR they may not trust. The
-    optimization pipeline satisfies the contract by construction. *)
+    [Staged_compilation]. Applied at both ends of the pipeline — {!optimize} on the way in (before a
+    pass can launder a violation out of any body) and [C_syntax.compile_proc] on the way out. The
+    raw analysis entry points {!analyze_proc} / {!specialize_proc} deliberately do not validate,
+    being the probes that must stay conservative on IR they may not trust. The optimization pipeline
+    satisfies the contract by construction. *)
 
 val validate_parallel : Tnode.Placements.t -> t -> unit
 (** Backend-independent well-formedness of hardware annotations (axis-types proposal §2); a no-op
@@ -390,17 +386,17 @@ type traced_array = {
   mutable zeroed_out : bool;
   mutable read_before_write : bool;
       (** The node is read before it is written (i.e. it is recurrent): its entry values are
-          consumed, so it is an input of the routine ([input_and_output_nodes]) and not eligible
-          for buffer aliasing. For a node that owns a buffer, the verdict is strict of the
+          consumed, so it is an input of the routine ([input_and_output_nodes]) and not eligible for
+          buffer aliasing. For a node that owns a buffer, the verdict is strict of the
           read-modify-write exemption (gh-ocannl-618): a read at its enclosing statement's write
           position still consumes the entry value unless a prior definite write covers its cells —
           the exemption applies to the visit-counting placement heuristics, not to the interface.
-          The strict classification closes over the SETTLED placements (in
-          [reconcile_traced_store], since placement and legality decisions after
-          [decide_placements] can still flip a candidate non-virtual), and a flipped node is
-          promoted [On_device] — an entry-consuming node must own a persistent buffer, not
-          [Local] scratch; a node that stays virtual is exempt by construction — it has no
-          interface, and the virtualizer's partial-write producers depend on that freedom. *)
+          The strict classification closes over the SETTLED placements (in [reconcile_traced_store],
+          since placement and legality decisions after [decide_placements] can still flip a
+          candidate non-virtual), and a flipped node is promoted [On_device] — an entry-consuming
+          node must own a persistent buffer, not [Local] scratch; a node that stays virtual is
+          exempt by construction — it has no interface, and the virtualizer's partial-write
+          producers depend on that freedom. *)
   mutable read_only : bool;
       (** Surprisingly, the notions of read-only and of constant memory mode come apart: small
           hosted constants are not read-only because they are initialized on devices by being
@@ -469,10 +465,10 @@ type optimize_ctx = {
           materialized inputs hold at that moment, so a write to one of its leaves between the
           deferring routine and a consuming read is observed by the splice — whereas the
           materialized reading of the same program snapshots the leaf at the deferring routine's
-          execution point. The recompute-vs-materialize semantics is deliberately not fixed at
-          this level; users select the reading via the memory-mode intent and via routine
-          boundaries (routine execution is manual). See "Recompute-at-read" in
-          docs/lowering_and_inlining.md. *)
+          execution point. The recompute-vs-materialize semantics is deliberately not fixed at this
+          level; users select the reading via the memory-mode intent and via routine boundaries
+          (routine execution is manual). See "Recompute-at-read" in docs/lowering_and_inlining.md.
+      *)
   placements : Tnode.Placements.t;
       (** Per-compilation-lineage memory-mode resolution
           (docs/proposals/context-scoped-memory-modes.md): the pipeline's placement decisions
@@ -487,11 +483,11 @@ type optimize_ctx = {
   inline_preferences : Hash_set.M(Tnode).t;
       (** gh-555: the [Inline] half of the per-lineage inlining decision vector. A node recorded
           here is exempt from the heuristic virtualization caps ([virtualize_max_visits],
-          [virtualize_max_inline_reduction], [virtualize_max_inline_fanin]) — the caps are priors
-          of the default decision policy,
-          not legality; the legality rejections and observability pessimizations still apply. The
-          [Materialize] half of the vector is a pre-seeded [On_device] decision in [placements]
-          (see [Context.decide_materialized] / [Context.decide_inline]). *)
+          [virtualize_max_inline_reduction], [virtualize_max_inline_fanin]) — the caps are priors of
+          the default decision policy, not legality; the legality rejections and observability
+          pessimizations still apply. The [Materialize] half of the vector is a pre-seeded
+          [On_device] decision in [placements] (see [Context.decide_materialized] /
+          [Context.decide_inline]). *)
 }
 [@@deriving sexp_of]
 
@@ -516,8 +512,8 @@ val decide_materialized : ?provenance:int -> optimize_ctx -> Tnode.t list -> uni
 
 (** Granularity of the XOR remap applied to a swizzled node's minor axis (gh-ocannl-481 item 3, D1).
     Both flavors are per-row bijections of the minor axis, so the IR-level semantics are identical;
-    they differ in the unit the XOR permutes and therefore in which access pattern they
-    de-conflict. *)
+    they differ in the unit the XOR permutes and therefore in which access pattern they de-conflict.
+*)
 type swizzle_kind =
   | Swizzle_elem
       (** Element-granularity XOR: [P*C + col] renders as [P*C + (col lxor (P land (C-1)))]. Spreads
@@ -527,33 +523,33 @@ type swizzle_kind =
       (** 16-byte-unit XOR: the column's 16-byte-unit index is XORed with the low bits of the row
           prefix, leaving the offset within the unit alone. This is the CUTLASS-style layout
           [ldmatrix] wants — its 8 per-phase row addresses are 16-byte-aligned, so only a remap that
-          keeps 16-byte units intact can both de-conflict them and stay loadable. Requires the
-          row's byte length to be a multiple of 16 and a power of two in 16-byte units. *)
+          keeps 16-byte units intact can both de-conflict them and stay loadable. Requires the row's
+          byte length to be a multiple of 16 and a power of two in 16-byte units. *)
 [@@deriving sexp, compare, equal]
 
-(** gh-555: one searchable inlining decision dimension of a compile — a node whose placement the
-    default policy decided, together with the flip a search can try and the recompute-cost bound of
-    the virtual placement (reduction extent × per-cell read multiplicity × transitive inline
-    fan-in). [`Materialize] flips a
-    node the policy left virtual (via [Context.decide_materialized]); [`Inline] flips a node
-    materialized by the heuristic caps (never by legality or observability), via
-    [Context.decide_inline]. An [`Inline] flip's legality is settled only when the virtualizer
-    replays: a rejected flip reproduces the materialized placement. *)
 type flip_candidate = {
   fc_tn : Tnode.t;
   fc_flip : [ `Materialize | `Inline ];
   fc_recompute_cost : int;
 }
 [@@deriving sexp_of]
+(** gh-555: one searchable inlining decision dimension of a compile — a node whose placement the
+    default policy decided, together with the flip a search can try and the recompute-cost bound of
+    the virtual placement (reduction extent × per-cell read multiplicity × transitive inline
+    fan-in). [`Materialize] flips a node the policy left virtual (via
+    [Context.decide_materialized]); [`Inline] flips a node materialized by the heuristic caps (never
+    by legality or observability), via [Context.decide_inline]. An [`Inline] flip's legality is
+    settled only when the virtualizer replays: a rejected flip reproduces the materialized
+    placement. *)
 
+type pipelined_tile = { pt_depth : int; pt_rotor : Indexing.symbol } [@@deriving sexp_of]
 (** gh-487: a software-pipelined (double-buffered) staged tile — codegen allocates [pt_depth]
-    rotating copies of the tile and renders every access with a buffer-selection term rotated by
-    the [pt_rotor] loop counter: reads select copy [rotor mod depth], writes copy
+    rotating copies of the tile and renders every access with a buffer-selection term rotated by the
+    [pt_rotor] loop counter: reads select copy [rotor mod depth], writes copy
     [(rotor + 1) mod depth] (the schedule emits the loads one iteration ahead), and writes outside
     the rotor loop (the prologue load) select copy 0. The IR keeps the tile's single-copy dims and
     indices — the rotation is a physical-layout choice like {!type-swizzle_kind}, invisible to
     IR-level semantics — so the pipelined rendering is bitwise identical to the unpipelined one. *)
-type pipelined_tile = { pt_depth : int; pt_rotor : Indexing.symbol } [@@deriving sexp_of]
 
 type optimized = {
   traced_store : traced_store;
@@ -591,18 +587,18 @@ type optimized = {
           guards or by the host-side constant packing. [Schedule.Tensorize] consults this to
           discharge pad guards on the intrinsic path. *)
   flip_candidates : flip_candidate list;
-      (** gh-555: the searchable inlining decision dimensions of this compile, most expensive
-          first, as decided at the whole-routine specialization (schedule-transform copies inherit
-          the whole-routine list). Excluded: nodes never assigned or never read, scalar constexprs
-          and pure one-hot selector producers, and nodes placed by legality, intent or
-          observability rather than the heuristic policy. *)
+      (** gh-555: the searchable inlining decision dimensions of this compile, most expensive first,
+          as decided at the whole-routine specialization (schedule-transform copies inherit the
+          whole-routine list). Excluded: nodes never assigned or never read, scalar constexprs and
+          pure one-hot selector producers, and nodes placed by legality, intent or observability
+          rather than the heuristic policy. *)
   spliced_rbw : Set.M(Tnode).t;
       (** gh-610 review round 6: the nodes whose [read_before_write] was set by the FINAL-code
-          reconciliation (a spliced read preceding, or not definitely covered by, the routine's
-          own writes) — as opposed to the raw analysis' uncovered-read classification, which also
-          flags every pure input. [Backends]' prior-context demand keys on this set: a
-          reconcile-flipped node's entry value must already live in the linked context, while
-          raw-classified inputs keep the assignments layer's curated exclusions. *)
+          reconciliation (a spliced read preceding, or not definitely covered by, the routine's own
+          writes) — as opposed to the raw analysis' uncovered-read classification, which also flags
+          every pure input. [Backends]' prior-context demand keys on this set: a reconcile-flipped
+          node's entry value must already live in the linked context, while raw-classified inputs
+          keep the assignments layer's curated exclusions. *)
 }
 [@@deriving sexp_of]
 
@@ -643,8 +639,8 @@ val clear_analysis_cache : unit -> unit
     code, hence their tensor nodes; the cache clears itself before accessibility snapshots
     ({!Tnode.print_accessible_headers}) and callers that tear down a session
     ([Tensor.unsafe_reinitialize]) clear it to release the nodes promptly. Never needed for
-    correctness: entries keyed by stale nodes cannot alias fresh ones ([Tnode.uid] is never
-    reused). *)
+    correctness: entries keyed by stale nodes cannot alias fresh ones ([Tnode.uid] is never reused).
+*)
 
 val reads_scope_before_set : scope_id -> t -> bool
 (** [reads_scope_before_set id body] returns [true] if [id] is read (via [Get_local]) before the
@@ -657,8 +653,9 @@ val simplify_llc : Indexing.static_symbol list -> t -> t
     narrowed by every enclosing [If] condition that is a conjunction of integer-affine index
     comparisons (gh-ocannl-566), so a guard the statement guard proves folds too — what is
     simplified under a condition is valid only where that condition holds. Called internally by
-    [optimize]; exposed for [Schedule.apply], whose transforms construct guards after the pipeline's simplify
-    already ran (docs/proposals/schedule-ir-optops.md §2), and for testing. Pure and idempotent. *)
+    [optimize]; exposed for [Schedule.apply], whose transforms construct guards after the pipeline's
+    simplify already ran (docs/proposals/schedule-ir-optops.md §2), and for testing. Pure and
+    idempotent. *)
 
 val rewrite_one_hot_reductions : ?static_indices:Indexing.static_symbol list -> t -> t
 (** gh-343: rewrites the narrow one-hot embedding pattern -- an [Add] reduction over a loop variable
@@ -697,8 +694,8 @@ val input_and_output_nodes : optimized -> (Set.M(Tnode).t * Set.M(Tnode).t) * Tn
     non-merge nodes. They are inputs in a broad sense, as they could be recurrent nodes or
     parameters. Outputs are all the materialized nodes written-to by the code. The last returned
     component is the input merge node, if used in the code. Reads entering the code only through a
-    cross-routine inlined computation count: the traced store is completed from the final
-    optimized code (gh-610). *)
+    cross-routine inlined computation count: the traced store is completed from the final optimized
+    code (gh-610). *)
 
 val loop_bounds : t -> (Indexing.symbol * (int * int)) list
 (** All [For_loop] bindings within the code (loop symbols are unique within a routine), with

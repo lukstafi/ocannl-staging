@@ -1,11 +1,11 @@
 (* The CUDA arm of gh-ocannl-536's typed-outcome containment.
 
-   [Cuda_backend.Impl.classify_failure] is the per-backend plug-in point {!Context.failure_classifier}
-   hands to the autotuner: without it, a [Cu.Cuda_error] or [Nvrtc.Nvrtc_error] is opaque to the
-   common policy, so it is [Unclassified] and — at [Launch]/[Sync] regardless of
-   [strict_failure_classification], since only compile-side phases are softened — fatal. One
-   candidate the toolchain refuses would end the whole search and take the measurements already
-   collected with it.
+   [Cuda_backend.Impl.classify_failure] is the per-backend plug-in point
+   {!Context.failure_classifier} hands to the autotuner: without it, a [Cu.Cuda_error] or
+   [Nvrtc.Nvrtc_error] is opaque to the common policy, so it is [Unclassified] and — at
+   [Launch]/[Sync] regardless of [strict_failure_classification], since only compile-side phases are
+   softened — fatal. One candidate the toolchain refuses would end the whole search and take the
+   measurements already collected with it.
 
    Both probes raise REAL exceptions through the real bindings. Cudajit's [result] is abstract, so a
    [Cuda_error] cannot be constructed by hand; a test that hand-rolled the exception would be
@@ -23,9 +23,7 @@ let classify = Cuda_backend.Impl.classify_failure
 
 let fail_with_cause label (cause : SO.classified_cause option) =
   let rendered =
-    match cause with
-    | None -> "None"
-    | Some c -> Sexp.to_string_hum (SO.sexp_of_classified_cause c)
+    match cause with None -> "None" | Some c -> Sexp.to_string_hum (SO.sexp_of_classified_cause c)
   in
   failwith (Printf.sprintf "%s: unexpected classification %s" label rendered)
 
@@ -35,10 +33,11 @@ let fail_with_cause label (cause : SO.classified_cause option) =
 let expect_rejection label ~phase ~stage ~severity ~execution_effect exn =
   match classify phase exn with
   | Some
-      ({ SO.cause = SO.Backend_rejected { backend; stage = got_stage; severity = got_severity; _ }; _ }
-      as classified)
-    when String.equal backend "cuda"
-         && String.equal got_stage stage
+      ({
+         SO.cause = SO.Backend_rejected { backend; stage = got_stage; severity = got_severity; _ };
+         _;
+       } as classified)
+    when String.equal backend "cuda" && String.equal got_stage stage
          && SO.equal_severity got_severity severity
          && SO.equal_execution_effect classified.SO.execution_effect execution_effect
          && SO.equal_phase classified.SO.phase phase ->
@@ -69,11 +68,16 @@ let check_nvrtc () =
 (* An allocation the driver refuses outright: returned before any kernel runs and leaving the
    context usable, hence [No_device_writes] — the case the tuner can actually continue past. *)
 let check_driver_out_of_memory () =
-  let devices = try Cu.init (); Cu.Device.get_count () with _ -> 0 in
+  let devices =
+    try
+      Cu.init ();
+      Cu.Device.get_count ()
+    with _ -> 0
+  in
   if devices > 0 then (
     Cu.Context.set_current (Cu.Context.get_primary (Cu.Device.get ~ordinal:0));
-    (* 32 TiB: larger than any device, comfortably inside [size_t], and refused outright rather
-       than by putting the device under allocation pressure. *)
+    (* 32 TiB: larger than any device, comfortably inside [size_t], and refused outright rather than
+       by putting the device under allocation pressure. *)
     match Cu.Deviceptr.mem_alloc ~size_in_bytes:(1 lsl 45) with
     | _ -> failwith "check_driver_out_of_memory: expected the oversized allocation to be refused"
     | exception (Cu.Cuda_error _ as exn) ->

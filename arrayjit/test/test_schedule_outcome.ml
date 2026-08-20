@@ -37,8 +37,7 @@ let () =
   let unsupported_1 = Unsupported { feature = "mma"; detail = "precision f64" } in
   let unsupported_2 = Unsupported { feature = "mma"; detail = "extent 7" } in
   assert (equal_rejection_key (key_of_cause unsupported_1) (key_of_cause unsupported_2));
-  let backend_rejection ?(backend = "cc") ?(stage = "compiler") ?(severity = Compiler_bug)
-      detail =
+  let backend_rejection ?(backend = "cc") ?(stage = "compiler") ?(severity = Compiler_bug) detail =
     Backend_rejected { backend; stage; severity; detail }
   in
   let backend_key = key_of_cause (backend_rejection "diagnostic one") in
@@ -66,8 +65,7 @@ let () =
     not
       (equal_rejection_key (key_of_cause unclassified_1)
          (key_of_cause
-            (Unclassified
-               { phase = Backend_compile; exn_constructor = "Failure"; detail = "one" }))));
+            (Unclassified { phase = Backend_compile; exn_constructor = "Failure"; detail = "one" }))));
   let typed =
     protect ~strict:true ~classify_backend:no_backend_classification ~provenance:Candidate
       ~phase:Transform (fun () -> raise (Cause_at (Transform, illegal_1)))
@@ -92,15 +90,15 @@ let () =
   ignore
     (protect ~strict:false ~classify_backend:no_backend_classification ~provenance:Candidate
        ~phase:Launch (fun () -> failwith "launch failed")
-     |> expect_fatal);
+    |> expect_fatal);
   ignore
     (protect ~strict:false ~classify_backend:no_backend_classification ~provenance:User_schedule
        ~phase:Transform (fun () -> failwith "user transform failed")
-     |> expect_fatal);
+    |> expect_fatal);
   ignore
     (protect ~strict:false ~classify_backend:no_backend_classification ~provenance:Candidate
        ~phase:Transform (fun () -> assert false)
-     |> expect_fatal);
+    |> expect_fatal);
   let cached_assert =
     protect ~strict:true ~classify_backend:no_backend_classification ~provenance:Cache_replay
       ~phase:Transform (fun () -> assert false)
@@ -114,12 +112,7 @@ let () =
       phase = Backend_compile;
       cause =
         Backend_rejected
-          {
-            backend = "test";
-            stage = "compiler";
-            severity = Expected;
-            detail = "rejected";
-          };
+          { backend = "test"; stage = "compiler"; severity = Expected; detail = "rejected" };
       execution_effect = No_device_writes;
     }
   in
@@ -127,7 +120,8 @@ let () =
     protect ~strict:true
       ~classify_backend:(fun phase _exn ->
         Option.some_if (equal_phase phase Backend_compile) compiler_rejection)
-      ~provenance:Candidate ~phase:Backend_compile (fun () -> failwith "backend exception")
+      ~provenance:Candidate ~phase:Backend_compile
+      (fun () -> failwith "backend exception")
     |> expect_classified
   in
   assert (equal_classified_cause classified compiler_rejection);
@@ -196,8 +190,8 @@ let () =
                 { backend = "test"; stage = "driver"; severity = Expected; detail = "guessed" };
             execution_effect = Writes_may_have_occurred;
           })
-      ~provenance:Candidate ~phase:Launch (fun () ->
-        tag Preflight (fun () -> failwith "unexecuted dependencies"))
+      ~provenance:Candidate ~phase:Launch
+      (fun () -> tag Preflight (fun () -> failwith "unexecuted dependencies"))
     |> expect_classified
   in
   assert (equal_execution_effect preflight_not_backend_judged.execution_effect No_device_writes);
@@ -205,4 +199,4 @@ let () =
   ignore
     (protect ~strict:true ~classify_backend:no_backend_classification ~provenance:Candidate
        ~phase:Launch (fun () -> tag Preflight (fun () -> assert false))
-     |> expect_fatal)
+    |> expect_fatal)

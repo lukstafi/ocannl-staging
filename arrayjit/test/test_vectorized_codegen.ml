@@ -393,9 +393,7 @@ let () =
       let set =
         LL.Set { tn = td; idcs = [| Idx.Iterator fi; Idx.Iterator fj |]; llsc; debug = "" }
       in
-      let mk index to_ body =
-        LL.For_loop { index; from_ = 0; to_; axis = LL.Serial; body }
-      in
+      let mk index to_ body = LL.For_loop { index; from_ = 0; to_; axis = LL.Serial; body } in
       mk fi 5 (mk fj 28 (mk fl 4 set))
     in
     LL.For_loop
@@ -444,24 +442,25 @@ let () =
   PPrint.ToChannel.pretty 0.9 100 Stdio.stdout doc11;
   Stdio.printf "\n";
 
-  (* --- The whole-vector FMA arms, at every (compute precision, lane count) the emission can
-     reach (gh-ocannl-614, gh-ocannl-621). A kernel pins only the width its own [cc_vector_bytes]
-     selects — 32 bytes above, and the setting is read once per process — so the table is printed
-     directly instead. What the golden holds fixed: which widths have a whole-vector arm at all
-     (everything else keeps the per-lane loop that gcc spills or scalarizes), the guard each arm
-     sits behind, the operand order [a * b + dst], and the extra mask/rounding arguments of the
-     AVX-512 forms. A guard that stopped being mutually exclusive with its siblings, or an arm
-     that silently disappeared at one width, shows up here as a diff.
+  (* --- The whole-vector FMA arms, at every (compute precision, lane count) the emission can reach
+     (gh-ocannl-614, gh-ocannl-621). A kernel pins only the width its own [cc_vector_bytes] selects
+     — 32 bytes above, and the setting is read once per process — so the table is printed directly
+     instead. What the golden holds fixed: which widths have a whole-vector arm at all (everything
+     else keeps the per-lane loop that gcc spills or scalarizes), the guard each arm sits behind,
+     the operand order [a * b + dst], and the extra mask/rounding arguments of the AVX-512 forms. A
+     guard that stopped being mutually exclusive with its siblings, or an arm that silently
+     disappeared at one width, shows up here as a diff.
 
-     The 16-lane f32, 8-lane f64, native-fp16 and aarch64 rows could not be executed where they
-     were written; what was checked, per row, is that the arm compiles under the target its guard
-     names and renders exactly one fused instruction at [-ffp-contract=off]. --- *)
+     The 16-lane f32, 8-lane f64, native-fp16 and aarch64 rows could not be executed where they were
+     written; what was checked, per row, is that the arm compiles under the target its guard names
+     and renders exactly one fused instruction at [-ffp-contract=off]. --- *)
   let module Arms = Ir.C_syntax.C_syntax (Ir.C_syntax.Pure_C_config (struct
     type buffer_ptr = unit Ctypes.ptr
 
     let procs = [||]
     let full_printf_support = true
-  end)) in
+  end))
+  in
   Stdio.printf "\n/* --- whole-vector FMA arms by (compute precision, lanes) --- */\n";
   List.iter
     [ (Ops.half, "f16"); (Ops.single, "f32"); (Ops.double, "f64") ]
@@ -492,7 +491,6 @@ let () =
        None
      with Invalid_argument msg -> Some msg
    with
-  | Some msg ->
-      Verdict.p "alias parameter rejected" (String.is_substring msg ~substring:"restrict")
+  | Some msg -> Verdict.p "alias parameter rejected" (String.is_substring msg ~substring:"restrict")
   | None -> Stdio.printf "alias parameter rejected: false\n");
   Stdio.printf "%!"

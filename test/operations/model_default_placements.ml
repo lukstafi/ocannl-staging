@@ -1,19 +1,19 @@
-(* gh-ocannl-514: the placement levels of the untuned regime — [Autotune.model_default] under
-   config [model_default_placements] = N > 0 branch-and-bounds over the top-N flip candidates of
-   the decision surface before compiling, scoring each vector's hermetic lowering with the same
+(* gh-ocannl-514: the placement levels of the untuned regime — [Autotune.model_default] under config
+   [model_default_placements] = N > 0 branch-and-bounds over the top-N flip candidates of the
+   decision surface before compiling, scoring each vector's hermetic lowering with the same
    selection that scores the pipelines, and applying the winning vector via the context-level
    placement decisions. The dune rule pins the cc backend, [model_default_placements=3], and a
    compute-bound envelope (peak_flops 1e9, peak_bandwidth 1e12).
 
-   The graph makes a placement flip the model-argmin deterministically: [y = exp u] is read by
-   two consumer statements yet stays policy-virtual, so both consumers replay the exp and the
-   surface reports the [`Materialize] flip; materializing trades y's buffer traffic (one write,
-   one read per consumer statement) for the 64 duplicated exp evaluations, which the
-   compute-bound envelope prices as a strict win — the placement argmin reverses the greedy
-   default in exactly the direction the recompute-cost bound cannot see. The pick must fire, the
-   emitted label must carry the placement decision, and the executed values must match a plain
-   compile (the structural-vs-executable rule: a placement pick that computed different values
-   would be a miscompile, not a schedule choice). *)
+   The graph makes a placement flip the model-argmin deterministically: [y = exp u] is read by two
+   consumer statements yet stays policy-virtual, so both consumers replay the exp and the surface
+   reports the [`Materialize] flip; materializing trades y's buffer traffic (one write, one read per
+   consumer statement) for the 64 duplicated exp evaluations, which the compute-bound envelope
+   prices as a strict win — the placement argmin reverses the greedy default in exactly the
+   direction the recompute-cost bound cannot see. The pick must fire, the emitted label must carry
+   the placement decision, and the executed values must match a plain compile (the
+   structural-vs-executable rule: a placement pick that computed different values would be a
+   miscompile, not a schedule choice). *)
 
 open Base
 open Ocannl
@@ -33,7 +33,7 @@ let () =
   let u = TDSL.ndarray uv ~label:[ "u" ] ~output_dims:[ m ] () in
   let%op y = exp u in
   let%op s1 = relu y in
-  let%op total = (s1 ++ "i => 0") + (y ++ "i => 0") in
+  let%op total = s1 ++ "i => 0" + (y ++ "i => 0") in
   ignore (y, s1);
   let comp = named "mdp" (Train.forward total) in
   (let module LL = Ir.Low_level in
@@ -42,16 +42,16 @@ let () =
    List.iter surface.Autotune.ps_candidates ~f:(fun fc ->
        Stdio.printf "  %-11s %-8s cost %d\n"
          (match fc.LL.fc_flip with `Materialize -> "materialize" | `Inline -> "inline")
-         (Ir.Tnode.debug_name fc.LL.fc_tn)
-         fc.LL.fc_recompute_cost));
+         (Ir.Tnode.debug_name fc.LL.fc_tn) fc.LL.fc_recompute_cost));
   (* Reference values from a plain compile. *)
   let ctx_ref, routine_ref = Context.compile (Context.auto ()) comp Ir.Indexing.Empty in
   let ctx_ref = Context.run ctx_ref routine_ref in
   let expected = Context.get_values ctx_ref total.Tensor.value in
   let choice = ref None in
   let ctx, routine =
-    Autotune.model_default ~report:(fun r -> choice := Some r) (Context.auto ()) comp
-      Ir.Indexing.Empty
+    Autotune.model_default
+      ~report:(fun r -> choice := Some r)
+      (Context.auto ()) comp Ir.Indexing.Empty
   in
   let ctx = Context.run ctx routine in
   let got = Context.get_values ctx total.Tensor.value in

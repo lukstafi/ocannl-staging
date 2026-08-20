@@ -72,8 +72,8 @@ val finalize :
     per-device constants. Idempotent (guarded by the context's [finalized] flag), and freeing is
     per-[pool_id] rather than per-node: one pool holds several nodes.
 
-    This is NOT optional if the memory matters (gh-ocannl-550, correcting the note that used to stand
-    here). A pool's backend buffer is never garbage-collected, because the backend's private
+    This is NOT optional if the memory matters (gh-ocannl-550, correcting the note that used to
+    stand here). A pool's backend buffer is never garbage-collected, because the backend's private
     [(device_id, pool_id) -> base] table is a module-level strong root holding every slab it
     allocated; dropping that entry -- which only this function does -- is what makes the buffer
     collectable at all (and eagerly frees it where the backend has a raw deallocator). Measured: a

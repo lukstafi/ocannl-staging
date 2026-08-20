@@ -193,8 +193,8 @@ using namespace metal;|}, []);
     ("uint8x16_t", {|struct uint8x16_t { uint8_t v[16]; };|}, []);
     ("half8_t", {|struct half8_t { half v[8]; };|}, []);
     (* [Set_from_vec] assigns block elements directly into the destination cells. Keep bfloat
-       elements as values rather than raw uint16 bit patterns, which would be converted
-       numerically on assignment (0x3F80 becoming 16256.0 rather than 1.0). *)
+       elements as values rather than raw uint16 bit patterns, which would be converted numerically
+       on assignment (0x3F80 becoming 16256.0 rather than 1.0). *)
     ("bfloat16x8_t", {|struct bfloat16x8_t { bfloat v[8]; };|}, []);
     ( "uint32_to_single_uniform",
       {|inline float uint32_to_single_uniform(uint32_t x) {
@@ -380,9 +380,9 @@ using namespace metal;|}, []);
     return result;
 }|},
       [ "int8x16_t" ] );
-    (* Lane extraction from the packed uniform conversion (gh-509 task 4): minted by the
-       virtualizer to inline packed-uniform results per cell. Implemented via the _vec builtins so
-       the value stream is bitwise-identical to the vectorized stores by construction. *)
+    (* Lane extraction from the packed uniform conversion (gh-509 task 4): minted by the virtualizer
+       to inline packed-uniform results per cell. Implemented via the _vec builtins so the value
+       stream is bitwise-identical to the vectorized stores by construction. *)
     ( "uint4x32_to_single_uniform_lane",
       {|float uint4x32_to_single_uniform_lane(uint4 x, int32_t lane) {
     return uint4x32_to_single_uniform_vec(x).v[lane];

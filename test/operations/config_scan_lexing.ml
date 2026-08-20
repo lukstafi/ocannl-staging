@@ -2,20 +2,20 @@
 
     [Config_key_scan] decides what counts as code, so every one of its mistakes is silent by
     construction: keys that vanish from a scan look exactly like keys that were never read. Four
-    rounds of review on PR #340 found such bugs one at a time -- prose read as a call site, a
-    quoted string inside a comment read as a nested comment, a character literal opening a string,
-    an escaped literal losing its value -- which is the argument for testing on hostile input
-    rather than on the library sources that happen to exist today.
+    rounds of review on PR #340 found such bugs one at a time -- prose read as a call site, a quoted
+    string inside a comment read as a nested comment, a character literal opening a string, an
+    escaped literal losing its value -- which is the argument for testing on hostile input rather
+    than on the library sources that happen to exist today.
 
-    The scanner now runs the compiler's own lexer, so most of these are regression cases rather
-    than live hazards. They are kept because that is the point: they are what says so. *)
+    The scanner now runs the compiler's own lexer, so most of these are regression cases rather than
+    live hazards. They are kept because that is the point: they are what says so. *)
 
 open Base
 open Stdio
 module Scan = Test_utils.Config_key_scan
 
-(* Failures go through [Verdict], so that a regression exits nonzero instead of being
-   `dune promote`d into the golden as the expected output (gh-ocannl-601). *)
+(* Failures go through [Verdict], so that a regression exits nonzero instead of being `dune
+   promote`d into the golden as the expected output (gh-ocannl-601). *)
 let fail fmt = Printf.ksprintf Verdict.fail fmt
 
 (* A key that MUST be found is spelled with the marker; a key that must NOT be found sits in prose
@@ -59,9 +59,9 @@ let x = get ~arg_name:"kappa" ~default:""|ocaml},
     ( "a record literal is not a quoted string",
       {ocaml|let r = { field } let x = get ~arg_name:"mu" ~default:""|ocaml},
       [ "mu" ] );
-    (* Round 3. The first two are forms the compiler accepts that a textual scan mis-read; the
-       third is one the review proposed which OCaml does not actually accept as a delimiter --
-       `{foo2|` lexes as `{`, `foo2`, `|`, so the tag rule is lowercase and underscore only. *)
+    (* Round 3. The first two are forms the compiler accepts that a textual scan mis-read; the third
+       is one the review proposed which OCaml does not actually accept as a delimiter -- `{foo2|`
+       lexes as `{`, `foo2`, `|`, so the tag rule is lowercase and underscore only. *)
     ( "a character literal inside a comment does not open a string",
       {ocaml|(* the quote character is '"' *) let x = get ~arg_name:"nu" ~default:""|ocaml},
       [ "nu" ] );
@@ -89,7 +89,7 @@ let x = get ~arg_name:"kappa" ~default:""|ocaml},
       [ "undocumented" ] );
     ( "an escape sequence decodes to the real key",
       {ocaml|let x = get ~arg_name:"tab	here" ~default:""|ocaml},
-      [ "tab	here" ] );
+      [ "tab\there" ] );
     ( "a typed optional default is still a literal default",
       {ocaml|let get_style ?(arg_name : string = "typed_default") () = arg_name|ocaml},
       [ "typed_default" ] );
@@ -102,8 +102,8 @@ let x = get ~arg_name:"kappa" ~default:""|ocaml},
   ]
 
 (* The other half of what the check needs from the lexer: which uses are NOT literals. A helper
-   forwarding the key -- in any spelling -- must show up here, or it hides every key routed
-   through it. *)
+   forwarding the key -- in any spelling -- must show up here, or it hides every key routed through
+   it. *)
 let non_literal_cases =
   [
     ("labelled variable", {ocaml|let f name = get ~arg_name:name ~default:""|ocaml}, 1);
@@ -117,14 +117,18 @@ let non_literal_cases =
     ("prose is not reported", {ocaml|(* ~arg_name and ?arg_name *) let x = 1|ocaml}, 0);
   ]
 
-(* Where a use sits, which is what decides whether an exemption covers it. A documentation
-   comment is not a definition, however much its text looks like one. *)
+(* Where a use sits, which is what decides whether an exemption covers it. A documentation comment
+   is not a definition, however much its text looks like one. *)
 let definition_cases =
   [
-    ("a plain definition", {ocaml|let get_global_arg x = x
-let other y = get ~arg_name:y|ocaml}, Some "other");
-    ("a rec definition", {ocaml|let rec loop x = loop x
-let other y = get ~arg_name:y|ocaml}, Some "other");
+    ( "a plain definition",
+      {ocaml|let get_global_arg x = x
+let other y = get ~arg_name:y|ocaml},
+      Some "other" );
+    ( "a rec definition",
+      {ocaml|let rec loop x = loop x
+let other y = get ~arg_name:y|ocaml},
+      Some "other" );
     ( "a doc comment quoting a column-zero binding is not a definition",
       {ocaml|let real x = x
 (** an example:
@@ -227,8 +231,8 @@ let f () =
       [ Some "M.get_global_arg (nested)"; Some "get_global_arg (nested)" ] );
   ]
 
-(* The other spelling of a read: a field of the resolved settings record. Prose naming one is not
-   a read of it. *)
+(* The other spelling of a read: a field of the resolved settings record. Prose naming one is not a
+   read of it. *)
 let settings_cases =
   [
     ("a field read", {ocaml|let x = Utils.settings.large_models|ocaml}, [ "large_models" ]);
@@ -242,10 +246,10 @@ let settings_cases =
       {ocaml|let e = Set.Make(String).empty
 let x = Utils.settings.large_models|ocaml},
       [ "large_models" ] );
-    (* An applied path in expression position is NOT a settings read, for the parser's reason
-       rather than the scanner's: OCaml reads `F(X)` as a constructor application, so this is a
-       field access over an expression and its receiver is no identifier at all. Pinned because a
-       review round asked the scanner to preserve a shape the language does not produce. *)
+    (* An applied path in expression position is NOT a settings read, for the parser's reason rather
+       than the scanner's: OCaml reads `F(X)` as a constructor application, so this is a field
+       access over an expression and its receiver is no identifier at all. Pinned because a review
+       round asked the scanner to preserve a shape the language does not produce. *)
     ( "an applied path in expression position is not an identifier, so not a read",
       {ocaml|let x = F(X).Utils.settings.large_models|ocaml},
       [] );
@@ -270,17 +274,14 @@ let () =
       in
       let expected = List.sort ~compare:String.compare expected in
       if List.equal String.equal found expected then printf "ok: %s\n" name
-      else (
+      else
         fail "%s -- expected [%s], found [%s]" name
           (String.concat ~sep:"; " expected)
-          (String.concat ~sep:"; " found)));
+          (String.concat ~sep:"; " found));
   List.iter non_literal_cases ~f:(fun (name, source, expected) ->
-      let found =
-        List.count (Scan.label_uses source) ~f:(fun u -> Option.is_none u.Scan.key)
-      in
+      let found = List.count (Scan.label_uses source) ~f:(fun u -> Option.is_none u.Scan.key) in
       if found = expected then printf "ok: non-literal uses -- %s\n" name
-      else (
-        fail "non-literal uses -- %s: expected %d, found %d" name expected found));
+      else fail "non-literal uses -- %s: expected %d, found %d" name expected found);
   let enclosing_definition source =
     let definitions = Scan.definitions source in
     let render (d : Scan.definition) =
@@ -294,23 +295,23 @@ let () =
   let show = Option.value ~default:"<none>" in
   List.iter definition_cases ~f:(fun (name, source, expected) ->
       let found = enclosing_definition source in
-      if Option.equal String.equal found expected then printf "ok: enclosing definition -- %s\n" name
-      else (
-        fail "enclosing definition -- %s: expected %s, found %s" name (show expected)
-          (show found)));
+      if Option.equal String.equal found expected then
+        printf "ok: enclosing definition -- %s\n" name
+      else
+        fail "enclosing definition -- %s: expected %s, found %s" name (show expected) (show found));
   List.iter compiler_dependent_cases ~f:(fun (name, source, accepted) ->
       let found = enclosing_definition source in
       if List.mem accepted found ~equal:(Option.equal String.equal) then
         printf "ok: enclosing definition -- %s\n" name
-      else (
+      else
         fail "enclosing definition -- %s: expected one of [%s], found %s" name
           (String.concat ~sep:"; " (List.map accepted ~f:show))
-          (show found)));
+          (show found));
   List.iter settings_cases ~f:(fun (name, source, expected) ->
       let found = List.sort ~compare:String.compare (Scan.settings_keys_in_source source) in
       let expected = List.sort ~compare:String.compare expected in
       if List.equal String.equal found expected then printf "ok: settings read -- %s\n" name
-      else (
+      else
         fail "settings read -- %s: expected [%s], found [%s]" name
           (String.concat ~sep:"; " expected)
-          (String.concat ~sep:"; " found)));
+          (String.concat ~sep:"; " found))

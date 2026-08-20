@@ -13,9 +13,7 @@ let get_meta st k = List.Assoc.find_exn (St.metadata st) ~equal:String.equal k
 let meta_int st k = Int.of_string (get_meta st k)
 
 let meta_default st k ~default =
-  match List.Assoc.find (St.metadata st) ~equal:String.equal k with
-  | Some v -> v
-  | None -> default
+  match List.Assoc.find (St.metadata st) ~equal:String.equal k with Some v -> v | None -> default
 
 (** Whether the fixture describes a training workload ([mode: train], the generator's default) as
     opposed to a forward-only one ([mode: infer]). Every runner dispatches its step shape on this,
@@ -28,17 +26,18 @@ let meta_int_default st k ~default =
   match List.Assoc.find (St.metadata st) ~equal:String.equal k with
   | Some v -> Int.of_string v
   | None -> default
+
 let env_flag name = match Stdlib.Sys.getenv_opt name with Some "1" -> true | _ -> false
 
 (** {1 Reduced-precision legs and training-step shapes (gh-ocannl-492 tasks 4 and 5)}
 
     These live here rather than in a runner because a flag implemented in {e one} runner is
     indistinguishable, from the report, from a cell nobody ran: [BENCH_STATIC_SCALE] and
-    [BENCH_GATE_INTERVAL] existed in [bench_mlp] alone, which silently made the gate-cost
-    experiment unavailable for every other workload — including [gpt2_mini], the matmul-dominated
-    one where reduced precision matters most (gh-ocannl-551). A runner now opts in by calling
-    {!precision_leg} with whether its fixture is a training one, and every leg is either available
-    or refused with a message naming why. *)
+    [BENCH_GATE_INTERVAL] existed in [bench_mlp] alone, which silently made the gate-cost experiment
+    unavailable for every other workload — including [gpt2_mini], the matmul-dominated one where
+    reduced precision matters most (gh-ocannl-551). A runner now opts in by calling {!precision_leg}
+    with whether its fixture is a training one, and every leg is either available or refused with a
+    message naming why. *)
 
 type precision_leg = {
   label : string;
@@ -48,17 +47,16 @@ type precision_leg = {
   static_scale : bool;  (** f16 with a fixed scale: no gate, no host read. *)
   gate_interval : int option;  (** f16 with the fused on-device gate, sampled every N steps. *)
   init_scale : float;
-      (** The f16 loss scale to start from — the fixture's [loss_scale] metadata (torch's 65536
-          when absent), overridable with [BENCH_LOSS_SCALE]. It is a workload property: a scale
-          that overflows on the first step costs the dynamic legs a few backoff steps (which the
-          parity window then sees) and makes the static leg — which never adjusts — diverge
-          outright. *)
+      (** The f16 loss scale to start from — the fixture's [loss_scale] metadata (torch's 65536 when
+          absent), overridable with [BENCH_LOSS_SCALE]. It is a workload property: a scale that
+          overflows on the first step costs the dynamic legs a few backoff steps (which the parity
+          window then sees) and makes the static leg — which never adjusts — diverge outright. *)
 }
 
-(** Parses [BENCH_PRECISION] / [BENCH_STATIC_SCALE] / [BENCH_GATE_INTERVAL]. [runner] prefixes
-    error messages; [training] is {!is_training} of the fixture — the gate legs measure the cost of
-    the loss-scaling gate, which only a training step has, so on a forward-only fixture they are
-    refused rather than silently ignored. *)
+(** Parses [BENCH_PRECISION] / [BENCH_STATIC_SCALE] / [BENCH_GATE_INTERVAL]. [runner] prefixes error
+    messages; [training] is {!is_training} of the fixture — the gate legs measure the cost of the
+    loss-scaling gate, which only a training step has, so on a forward-only fixture they are refused
+    rather than silently ignored. *)
 let precision_leg ~runner ~training ?st () =
   let base, prec =
     match Stdlib.Sys.getenv_opt "BENCH_PRECISION" with
@@ -87,8 +85,7 @@ let precision_leg ~runner ~training ?st () =
         training step has; this fixture is forward-only (metadata mode=infer)");
   let label =
     if static_scale then base ^ "-static"
-    else
-      match gate_interval with Some n -> Printf.sprintf "%s-gated%d" base n | None -> base
+    else match gate_interval with Some n -> Printf.sprintf "%s-gated%d" base n | None -> base
   in
   let init_scale =
     match Stdlib.Sys.getenv_opt "BENCH_LOSS_SCALE" with
@@ -109,9 +106,9 @@ type train_parts =
   | Device_gated of Mixed_prec.Loss_scaler.t * Tensor.t * Asgns.comp * int
       (** One routine with the gate on device; the host samples the window checksum every N. *)
 
-(** The step shape of [leg]. f16 without a gate-leg flag is the dynamic host-read gate (its
-    per-step device sync is part of what the leg measures); [no_sgd] builds the gradient update
-    alone (f32/bf16 only — a debugging shape, not a comparable cell). *)
+(** The step shape of [leg]. f16 without a gate-leg flag is the dynamic host-read gate (its per-step
+    device sync is part of what the leg measures); [no_sgd] builds the gradient update alone
+    (f32/bf16 only — a debugging shape, not a comparable cell). *)
 let train_step_parts ?(setup_for_parallel = false) ?(no_sgd = false) ~leg ~learning_rate loss =
   match leg with
   | { base = "f16"; static_scale = false; gate_interval = Some interval; _ } ->
@@ -126,32 +123,31 @@ let train_step_parts ?(setup_for_parallel = false) ?(no_sgd = false) ~leg ~learn
       let sgd_comp = Mixed_prec.scaled_sgd_update scaler ~learning_rate loss in
       Host_gated (scaler, checksum, grad_comp, sgd_comp)
   | { base = "f16"; static_scale = true; _ } ->
-      (* Scaled backprop and unscaled optimizer as ONE routine, no checksum, no gate, no host
-         read — the scale scalars are set once and never adjusted. *)
+      (* Scaled backprop and unscaled optimizer as ONE routine, no checksum, no gate, no host read —
+         the scale scalars are set once and never adjusted. *)
       let scaler = Mixed_prec.Loss_scaler.create ~init_scale:leg.init_scale () in
       Plain_step
         (Asgns.sequence
            [
-             Train.grad_update ~setup_for_parallel
-               ~loss_scale:scaler.Mixed_prec.Loss_scaler.scale loss;
-             Train.sgd_update ~learning_rate
-               ~grad_unscale:scaler.Mixed_prec.Loss_scaler.unscale loss;
+             Train.grad_update ~setup_for_parallel ~loss_scale:scaler.Mixed_prec.Loss_scaler.scale
+               loss;
+             Train.sgd_update ~learning_rate ~grad_unscale:scaler.Mixed_prec.Loss_scaler.unscale
+               loss;
            ])
   | _ ->
       let update = Train.grad_update ~setup_for_parallel loss in
       Plain_step
-        (if no_sgd then update
-         else Asgns.sequence [ update; Train.sgd_update ~learning_rate loss ])
+        (if no_sgd then update else Asgns.sequence [ update; Train.sgd_update ~learning_rate loss ])
 
-(** The compiled counterpart of {!train_parts}. A forward-only runner reuses [Plain] for its
-    forward routine, so one step driver ({!run_train_step}) serves both modes. *)
+(** The compiled counterpart of {!train_parts}. A forward-only runner reuses [Plain] for its forward
+    routine, so one step driver ({!run_train_step}) serves both modes. *)
 type train_routines =
   | Plain of Context.routine
   | Host_gate of Mixed_prec.Loss_scaler.t * Tensor.t * Context.routine * Context.routine
   | Device_gate of Mixed_prec.Loss_scaler.t * Tensor.t * Context.routine * int
 
-(** Compiles a step shape. [tuned] is the runner's autotuning compile (it needs the loss tensor,
-    so the runner supplies it). Each leg tunes the routine that carries the work: the
+(** Compiles a step shape. [tuned] is the runner's autotuning compile (it needs the loss tensor, so
+    the runner supplies it). Each leg tunes the routine that carries the work: the
     dynamic-loss-scaling legs keep their step SHAPE — the gate is what they measure — so only the
     gradient/fused routine is tuned and the tiny optimizer routine is compiled plainly, from the
     tuned context so the lineage's compile order is unchanged. The untuned arm is uniform by
@@ -171,11 +167,11 @@ let compile_train_step ~tune ~tuned ctx bindings parts =
       (ctx, Plain routine)
   | Host_gated (scaler, checksum, grad_comp, sgd_comp) ->
       let ctx, grad_routine = if tune then tuned ctx grad_comp else untuned ctx grad_comp in
-      (* The optimizer routine is not TUNED — timing it is not what this leg measures, and its
-         plain compile from the tuned context keeps the lineage's compile order unchanged — but it
-         does take the untuned arm's model gate: the leg's reported step time is both routines, so
-         a gate that skipped this one would understate its own treatment (and the config reference
-         defines the gate over a runner's untuned arm, not over a chosen routine of it). *)
+      (* The optimizer routine is not TUNED — timing it is not what this leg measures, and its plain
+         compile from the tuned context keeps the lineage's compile order unchanged — but it does
+         take the untuned arm's model gate: the leg's reported step time is both routines, so a gate
+         that skipped this one would understate its own treatment (and the config reference defines
+         the gate over a runner's untuned arm, not over a chosen routine of it). *)
       let ctx, sgd_routine =
         if tune then Context.compile ctx sgd_comp bindings else untuned ctx sgd_comp
       in
@@ -196,7 +192,9 @@ let run_train_step routines ctx_ref ~step =
   match routines with
   | Plain routine -> Train.run !ctx_ref routine
   | Host_gate (scaler, checksum, grad_routine, sgd_routine) ->
-      let ctx, _ran = Mixed_prec.scaled_step ~scaler ~grad_routine ~sgd_routine ~checksum !ctx_ref in
+      let ctx, _ran =
+        Mixed_prec.scaled_step ~scaler ~grad_routine ~sgd_routine ~checksum !ctx_ref
+      in
       ctx_ref := ctx
   | Device_gate (scaler, wflag, routine, interval) ->
       let ctx, _window_finite =
@@ -229,8 +227,8 @@ let percentile sorted p =
     under it the derived answer would name the arm the search preferred while the result line's
     losses came from the other one, which is the single fact a forced-arm measurement is run to
     establish. It also never described a flip-refined result (["flip"]), which is not an arm at all.
-    The derivation is kept as the fallback for a caller that reports arms without wiring
-    [on_ship]. *)
+    The derivation is kept as the fallback for a caller that reports arms without wiring [on_ship].
+*)
 
 type tune_arms = {
   mutable arm_reports : Autotune.report list; (* reverse order *)
@@ -241,11 +239,12 @@ let tune_arms () = { arm_reports = []; shipped = None }
 let collect_arm t (r : Autotune.report) = t.arm_reports <- r :: t.arm_reports
 let collect_ship t what = t.shipped <- Some what
 
-(** The [tune] JSON object, or [None] when no arm reported (an untuned cell). Times are milliseconds,
-    and a time that was never measured is [null], not [inf]: [best_ms] is [infinity] when an arm
-    timed nothing at all (every candidate failed and the GPU baseline was not dispatched) and
-    [mma_best_ms] when it timed no tensorized candidate. Those are exactly the runs whose evidence
-    this object exists to preserve, so they must not be the runs whose result line fails to parse.
+(** The [tune] JSON object, or [None] when no arm reported (an untuned cell). Times are
+    milliseconds, and a time that was never measured is [null], not [inf]: [best_ms] is [infinity]
+    when an arm timed nothing at all (every candidate failed and the GPU baseline was not
+    dispatched) and [mma_best_ms] when it timed no tensorized candidate. Those are exactly the runs
+    whose evidence this object exists to preserve, so they must not be the runs whose result line
+    fails to parse.
 
     An arm that terminated on a failure carries [terminal_failure] and is {e never} the shipped one,
     whatever its pre-failure [best_ms] says (gh-ocannl-550): the search raised, so no routine was
@@ -268,7 +267,9 @@ let tune_json t =
   match List.rev t.arm_reports with
   | [] -> None
   | reports ->
-      let named = List.mapi reports ~f:(fun i r -> (Printf.sprintf "%c" (Char.of_int_exn (65 + i)), r)) in
+      let named =
+        List.mapi reports ~f:(fun i r -> (Printf.sprintf "%c" (Char.of_int_exn (65 + i)), r))
+      in
       let shipped =
         match t.shipped with
         | Some what -> what
@@ -284,12 +285,10 @@ let tune_json t =
       let arm (name, (r : Autotune.report)) =
         Printf.sprintf
           {|{"arm":"%s","best_ms":%s,"best_label":"%s","tensorized":%b,"mma_scalar_fallbacks":%d,"mma_seeded":%d,"mma_timed":%d,"mma_best_ms":%s,"terminal_failure":%s}|}
-          name
-          (ms_json r.Autotune.best_ms)
+          name (ms_json r.Autotune.best_ms)
           (json_string r.Autotune.best_label)
           r.Autotune.best_tensorized r.Autotune.best_mma_scalar_fallbacks r.Autotune.mma_candidates
-          r.Autotune.mma_timed
-          (ms_json r.Autotune.mma_best_ms)
+          r.Autotune.mma_timed (ms_json r.Autotune.mma_best_ms)
           (Option.value_map r.Autotune.terminal_failure ~default:"null" ~f:(fun tf ->
                Printf.sprintf {|"%s"|} (json_string tf.Autotune.detail)))
       in
@@ -341,11 +340,12 @@ let dump_params loss =
            (Array.to_list (Array.map (Lazy.force tn.Tn.dims) ~f:Int.to_string))))
 
 (** Captures [comp]'s optimized lowering, the input every diagnostic below works from. Supplying a
-    [?lowered_transform] bypasses the default annotator, so the routine this links is the unscheduled
-    serial form — for a large graph that is the whole working set in one work-item's stack frame, and
-    on HIP the gh-ocannl-533 scratch validator declines it (gpt2_mini's forward asks for 163,856 B).
-    The lowering is captured inside the transform, i.e. before codegen and link, so a typed rejection
-    costs nothing here: the routine is discarded either way. An untyped failure still propagates. *)
+    [?lowered_transform] bypasses the default annotator, so the routine this links is the
+    unscheduled serial form — for a large graph that is the whole working set in one work-item's
+    stack frame, and on HIP the gh-ocannl-533 scratch validator declines it (gpt2_mini's forward
+    asks for 163,856 B). The lowering is captured inside the transform, i.e. before codegen and
+    link, so a typed rejection costs nothing here: the routine is discarded either way. An untyped
+    failure still propagates. *)
 let capture_lowering ctx comp bindings =
   let stash = ref None in
   let outcome =
@@ -450,7 +450,8 @@ let print_split_reduce_verdicts opt =
   let module Sched = Ir.Schedule in
   let module Idx = Ir.Indexing in
   (* The same output-parallelism bound the detector uses, so this probe covers exactly the writes it
-     considers — a write above the bound is out of the family's scope by design, not by rejection. *)
+     considers — a write above the bound is out of the family's scope by design, not by
+     rejection. *)
   let out_max = 4096 in
   Stdio.printf "split-reduce probe (writes with <= %d cells):\n" out_max;
   let rec walk enclosing (llc : LL.t) =
@@ -498,14 +499,14 @@ let print_split_reduce_verdicts opt =
   Stdio.Out_channel.flush Stdio.stdout
 
 (** Diagnostic: per-segment (approximately per-layer) wall times of the default fission pipeline.
-    Each segment's post-schedule code is compiled as its own routine through the
-    [lowered_transform] seam (hermetic, autotune-style: the compile's fresh lowering of [comp] is
-    discarded and the stashed segment substituted), then timed min-of-[repeats] with a device sync
-    per run — so each number is one kernel's wall time including launch overhead. Run the full step
-    once before calling so segment inputs are populated; timing mutates segment outputs (and
-    re-accumulates accumulators), so restore any state that matters afterwards. [bind] binds the
-    routine's static indices (e.g. the batch index). Used by the [bench_*_diag] runners; not part
-    of the benchmark protocol. *)
+    Each segment's post-schedule code is compiled as its own routine through the [lowered_transform]
+    seam (hermetic, autotune-style: the compile's fresh lowering of [comp] is discarded and the
+    stashed segment substituted), then timed min-of-[repeats] with a device sync per run — so each
+    number is one kernel's wall time including launch overhead. Run the full step once before
+    calling so segment inputs are populated; timing mutates segment outputs (and re-accumulates
+    accumulators), so restore any state that matters afterwards. [bind] binds the routine's static
+    indices (e.g. the batch index). Used by the [bench_*_diag] runners; not part of the benchmark
+    protocol. *)
 let time_segments ?promote_locals ?(repeats = 20) ~backend ~limits ~static_indices ~ctx ~comp
     ~bindings ~bind opt =
   let module LL = Ir.Low_level in
@@ -520,8 +521,8 @@ let time_segments ?promote_locals ?(repeats = 20) ~backend ~limits ~static_indic
     let writes = ref [] in
     let rec code (l : LL.t) =
       match l with
-      | LL.Noop | LL.Comment _ | LL.Declare_local _ | LL.Staged_compilation _
-      | LL.Workgroup_barrier | LL.Tile_mma _ | LL.Set_local _ ->
+      | LL.Noop | LL.Comment _ | LL.Declare_local _ | LL.Staged_compilation _ | LL.Workgroup_barrier
+      | LL.Tile_mma _ | LL.Set_local _ ->
           ()
       | LL.Seq (a, b) ->
           code a;
@@ -543,11 +544,12 @@ let time_segments ?promote_locals ?(repeats = 20) ~backend ~limits ~static_indic
          keeps the whole per-thread working set that the full pipeline's promotions relieve, and on
          HIP the gh-ocannl-533 scratch validator declines it (gpt2_mini's cross-entropy head asks
          for 163,856 B per work-item). That is a limitation of this instrument, not of the workload
-         — so the segment is reported as declined and the remaining ones are still timed. An
-         untyped failure still propagates: [User_schedule] provenance keeps this diagnostic honest
-         about compiler bugs. *)
+         — so the segment is reported as declined and the remaining ones are still timed. An untyped
+         failure still propagates: [User_schedule] provenance keeps this diagnostic honest about
+         compiler bugs. *)
       match
-        Context.compile_outcome ~lowered_transform:(fun _ -> post)
+        Context.compile_outcome
+          ~lowered_transform:(fun _ -> post)
           ~provenance:Ir.Schedule_outcome.User_schedule ctx comp bindings
       with
       | Error (Ir.Schedule_outcome.Fatal _ as failure) -> Ir.Schedule_outcome.raise_failure failure
@@ -578,8 +580,7 @@ let time_segments ?promote_locals ?(repeats = 20) ~backend ~limits ~static_indic
     binding and enqueues one step; [read_loss] returns the current loss value (awaits the device);
     [sync] awaits all queued work. *)
 let measure_and_emit ~st ~backend ~variant ?(precision = "f32") ~compile_s ?tokens_per_step ?tune
-    ~run_step ~read_loss ~sync ()
-    =
+    ~run_step ~read_loss ~sync () =
   let workload = get_meta st "name" in
   let parity_steps = meta_int st "parity_steps" in
   let warmup_steps = meta_int st "warmup_steps" in
@@ -628,6 +629,5 @@ let measure_and_emit ~st ~backend ~variant ?(precision = "f32") ~compile_s ?toke
   Stdio.printf
     {|{"framework":"ocannl","backend":"%s","variant":"%s","precision":"%s","workload":"%s","compile_s":%.3f,%s%s"step_ms":{"p10":%.6g,"p50":%.6g,"p90":%.6g},"queued_step_ms":%.6g,"timed_steps":%d,"losses":[%s]}|}
     backend variant precision workload compile_s tokens_field tune_field (percentile synced 10.)
-    (percentile synced 50.)
-    (percentile synced 90.) queued_ms timed_steps (json_floats losses);
+    (percentile synced 50.) (percentile synced 90.) queued_ms timed_steps (json_floats losses);
   Stdio.printf "\n"

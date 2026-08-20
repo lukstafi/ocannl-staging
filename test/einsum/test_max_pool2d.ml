@@ -203,10 +203,10 @@ let check_padded_values ctx output =
     Float.(v.(0) = -11. && v.(1) = -9. && v.(2) = -3. && v.(3) = -1.)
 
 (** Test max_pool2d with use_padding=true ("same" pooling): output spatial dims = input/stride. The
-    pool lowers with clamped window bounds (gh-504): per output position the window is
-    range-guarded to the valid input range, so the operand needs no margins at all — no -inf
-    demand, no padding commitment. The operand here is a plain broadcast result (open trailing-dims
-    row), exercising the mixed-anchoring row unification. *)
+    pool lowers with clamped window bounds (gh-504): per output position the window is range-guarded
+    to the valid input range, so the operand needs no margins at all — no -inf demand, no padding
+    commitment. The operand here is a plain broadcast result (open trailing-dims row), exercising
+    the mixed-anchoring row unification. *)
 let test_max_pool2d_padded () =
   printf "Testing max_pool2d with use_padding=true (stride=2, window=3)...\n%!";
   Tensor.unsafe_reinitialize ();
@@ -262,8 +262,8 @@ let test_max_pool2d_padded_locked_data () =
 (** Inception-style sharing: one tensor feeding both a padded 0-neutral conv and a padded max-pool.
     The conv commits 0-margins on the shared buffer; the pool reads the same buffer with clamped
     windows (gh-504) and never sees the margins, so plain [max_pool2d] composes without a copy —
-    before gh-504 this was rejected ("Conflicting padding neutral elements") with
-    [max_pool2d_copy] as the remedy; the copy variant is kept working. *)
+    before gh-504 this was rejected ("Conflicting padding neutral elements") with [max_pool2d_copy]
+    as the remedy; the copy variant is kept working. *)
 let test_max_pool2d_conflicting_consumers () =
   printf "Testing Inception-style sharing: padded conv + padded max-pool...\n%!";
   Tensor.unsafe_reinitialize ();

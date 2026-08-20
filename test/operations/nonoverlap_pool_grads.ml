@@ -15,8 +15,8 @@
    non-overlapping domain the two gates produce BITWISE-equal pooled values and input gradients —
    ties included — across no-padding, gapped (stride > window), and clamped padded odd-extent
    configurations, and for [max_pool2d_copy]. This is the issue's "documented choice": on this
-   domain there is no semantic difference to choose, only cost. - [einmax1]'s flag: a full
-   reduction (trivially non-overlapping) with ties matches the product-space gradient bitwise. *)
+   domain there is no semantic difference to choose, only cost. - [einmax1]'s flag: a full reduction
+   (trivially non-overlapping) with ties matches the product-space gradient bitwise. *)
 
 open Base
 open Ocannl
@@ -30,8 +30,8 @@ let bitwise = Array.for_all2_exn ~f:Float.equal
 let grad_of t = (Option.value_exn ~here:[%here] t.Tensor.diff).Tensor.grad
 
 (* Whether the update computation mentions a tensor whose label contains [sub] — a pre-lowering
-   structural pin of which gate formulation was built (the cheap gate's proxies typically
-   virtualize away entirely in the lowered code, which is the point of the specialization). *)
+   structural pin of which gate formulation was built (the cheap gate's proxies typically virtualize
+   away entirely in the lowered code, which is the point of the specialization). *)
 let mentions_label ~sub (update : Asgns.comp) : bool =
   let nodes, guessed = Asgns.collect_nodes_guess_output update.Asgns.asgns in
   let mem set =
@@ -118,8 +118,7 @@ let () =
   in
   parity "pool 2/2 no-padding with ties" ~dims:[ 6; 6; 2 ] ~stride:2 ~window_size:2
     ~use_padding:false;
-  parity "pool 3/2 gapped no-padding" ~dims:[ 8; 8; 2 ] ~stride:3 ~window_size:2
-    ~use_padding:false;
+  parity "pool 3/2 gapped no-padding" ~dims:[ 8; 8; 2 ] ~stride:3 ~window_size:2 ~use_padding:false;
   parity "pool 2/2 padded" ~dims:[ 8; 8; 2 ] ~stride:2 ~window_size:2 ~use_padding:true;
   (* Padded window 3 at stride 3: the centered anchoring clamps the edge windows (gh-504), so the
      gate parity covers clamped out-of-range window positions. *)
@@ -139,9 +138,7 @@ let () =
 (* === Leg 3: einmax1's flag — a full reduction with ties, both gates bitwise-equal. === *)
 
 let%op emax_gate ?(nonoverlapping = false) () x =
-  let einmax1 ?label ?capture_dims spec t1 =
-    einmax1 ?label ?capture_dims ~nonoverlapping spec t1
-  in
+  let einmax1 ?label ?capture_dims spec t1 = einmax1 ?label ?capture_dims ~nonoverlapping spec t1 in
   x @^^ "i => 0"
 
 let () =
@@ -161,6 +158,7 @@ let () =
   in
   let l_ref, g_ref = run ~label:"pspace" (emax_gate ~nonoverlapping:false ()) in
   let l_new, g_new = run ~label:"nonoverlap" (emax_gate ~nonoverlapping:true ()) in
-  p "einmax1 full reduction with ties: gates match bitwise" (bitwise l_ref l_new && bitwise g_ref g_new);
+  p "einmax1 full reduction with ties: gates match bitwise"
+    (bitwise l_ref l_new && bitwise g_ref g_new);
   p "tie gradient gates every achieving position" (bitwise g_new [| 1.; 1.; 0.; 1.; 1. |]);
   printf "\nDone.\n%!"

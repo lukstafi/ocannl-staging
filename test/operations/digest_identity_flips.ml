@@ -5,10 +5,9 @@
    nothing. So this test flips one representative key of each class and observes the identity a
    cache would key on, which is what the classes are statements about:
 
-   - code-borne: the canonical digest changes (and with it the whole key),
-   - keyed: the digest is UNCHANGED — the flip is invisible to the lowered code, which is the hazard
-     — while the cache key separates the regimes,
-   - search-shaping / execution-neutral: neither changes.
+   - code-borne: the canonical digest changes (and with it the whole key), - keyed: the digest is
+   UNCHANGED — the flip is invisible to the lowered code, which is the hazard — while the cache key
+   separates the regimes, - search-shaping / execution-neutral: neither changes.
 
    The issue's own caution applies: flips are calibration, not the mechanism. Absence of change is
    weak evidence in general, so this covers a handful of representatives rather than every key, and
@@ -65,7 +64,9 @@ let identity_of ?materialized_constant ctx =
 let () =
   let ctx = Context.auto () in
   let backend = Context.backend_name ctx in
-  let is_cc = String.is_prefix backend ~prefix:"cc" || String.is_prefix backend ~prefix:"multidev" in
+  let is_cc =
+    String.is_prefix backend ~prefix:"cc" || String.is_prefix backend ~prefix:"multidev"
+  in
   let digest0, key0 = identity_of ctx in
   p "the identity is stable across two compiles of the same program"
     (let digest1, key1 = identity_of ctx in
@@ -83,11 +84,11 @@ let () =
   p "a code-borne knob (default_prec) changes the digest" (not (String.equal digest0 digest_v));
   p "and therefore the cache key" (not (String.equal key0 key_v));
 
-  (* gh-ocannl-633: [limit_constant_fill_size] is classified code-borne — it changes the
-     assignments the front end builds — but once placement MATERIALIZES a small constant (two
-     reads per cell exceed the default [virtualize_max_visits]), the in-kernel init moves to the
-     link-time host-init upload, so both regimes compile the same program and the identity
-     converges — a correct cache hit, not a missed separation. *)
+  (* gh-ocannl-633: [limit_constant_fill_size] is classified code-borne — it changes the assignments
+     the front end builds — but once placement MATERIALIZES a small constant (two reads per cell
+     exceed the default [virtualize_max_visits]), the in-kernel init moves to the link-time
+     host-init upload, so both regimes compile the same program and the identity converges — a
+     correct cache hit, not a missed separation. *)
   let digest_m0, key_m0 = identity_of ~materialized_constant:true ctx in
   set_config "limit_constant_fill_size" "1";
   let digest_m1, key_m1 = identity_of ~materialized_constant:true ctx in
@@ -156,8 +157,7 @@ let () =
   set_config "buffer_aliasing" "true";
   let key_a = key_of ctx canon in
   unset_config "buffer_aliasing";
-  p "an aliasing flip separates the key without touching the digest"
-    (not (String.equal key0 key_a));
+  p "an aliasing flip separates the key without touching the digest" (not (String.equal key0 key_a));
 
   (* The OpenMP runtime's controls decide the team every Grid loop executes on, and the pool tag —
      derived from process affinity — cannot see them (Codex P1 on PR #337). Only meaningful where

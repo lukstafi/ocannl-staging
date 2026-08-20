@@ -64,13 +64,7 @@ type t =
   | Comment of string
   | Staged_compilation of ((unit -> PPrint.document)[@equal.ignore] [@compare.ignore])
   | Seq of t * t
-  | For_loop of {
-      index : Indexing.symbol;
-      from_ : int;
-      to_ : int;
-      body : t;
-      axis : axis_type;
-    }
+  | For_loop of { index : Indexing.symbol; from_ : int; to_ : int; body : t; axis : axis_type }
   | Zero_out of Tn.t
   | Set of { tn : Tn.t; idcs : Indexing.axis_index array; llsc : scalar_t; mutable debug : string }
   | Set_dynamic of {
@@ -117,8 +111,10 @@ type t =
       d : Tn.t * Indexing.axis_index array;  (** Accumulator block base. *)
       a : Tn.t * Indexing.axis_index array;
       b : Tn.t * Indexing.axis_index array;
-      ta : bool;  (** [a] is stored transposed: its tile axes are [k, i]-major rather than [i, k]. *)
-      tb : bool;  (** [b] is stored transposed: its tile axes are [j, k]-major rather than [k, j]. *)
+      ta : bool;
+          (** [a] is stored transposed: its tile axes are [k, i]-major rather than [i, k]. *)
+      tb : bool;
+          (** [b] is stored transposed: its tile axes are [j, k]-major rather than [k, j]. *)
       m : int;
       n : int;
       k : int;  (** Covered block extents (multiples of the backend's intrinsic tile). *)
@@ -139,16 +135,15 @@ type t =
           [simdgroup_matrix]). The per-lane ownership of tile elements is architecture-defined and
           deliberately opaque — the [lane] index must not occur in the base indices. Each operand's
           tile is a 2-D slice with the minor tile axis at the tnode's last axis (stride 1) and the
-          major tile axis at the recorded leading-dimension stride ([ldd]/[lda]/[ldb]) — the
-          tnode's second-to-last axis in the plain case, further out for batched sites. With [ta]
-          (resp. [tb]) the stored layout of [a] (resp. [b]) is the transpose of its role —
-          emissions load tiles with the hardware transpose flag ([simdgroup_load]'s
-          [transpose_matrix], wmma's [col_major]) and swap the tile-offset arithmetic; the scalar
-          [fallback] carries the original indexing and is unaffected. Backends without an MMA hook
-          render [fallback] once per simdgroup, under an [if (lane == 0)] guard — the renderer's
-          obligation, keyed off [lane]. The statement validates like {!Workgroup_barrier} (it is
-          one for code-motion and divergence purposes) plus a write of [d] for the coverage
-          rule. *)
+          major tile axis at the recorded leading-dimension stride ([ldd]/[lda]/[ldb]) — the tnode's
+          second-to-last axis in the plain case, further out for batched sites. With [ta] (resp.
+          [tb]) the stored layout of [a] (resp. [b]) is the transpose of its role — emissions load
+          tiles with the hardware transpose flag ([simdgroup_load]'s [transpose_matrix], wmma's
+          [col_major]) and swap the tile-offset arithmetic; the scalar [fallback] carries the
+          original indexing and is unaffected. Backends without an MMA hook render [fallback] once
+          per simdgroup, under an [if (lane == 0)] guard — the renderer's obligation, keyed off
+          [lane]. The statement validates like {!Workgroup_barrier} (it is one for code-motion and
+          divergence purposes) plus a write of [d] for the coverage rule. *)
 [@@deriving sexp_of, equal]
 
 and scalar_t =
@@ -326,8 +321,8 @@ module Canonical_render = struct
     and emit (llc : t) =
       match llc with
       | Noop -> add "nop;"
-      (* Comment text is presentational (routine names, debug names): identical code under
-         different names shares one digest. *)
+      (* Comment text is presentational (routine names, debug names): identical code under different
+         names shares one digest. *)
       | Comment _ -> add "c;"
       | Staged_compilation _ ->
           p.mark_incomplete ();
@@ -526,21 +521,21 @@ type traced_array = {
           including reads inside [Local_scope] bodies in the right-hand side (their loads execute
           per evaluation of the setter), and excluding the node's own read-modify-write self-reads
           (when inlined they become the local accumulator, not a load). Decision-independent
-          analysis fact behind the transitive inline-fanin guard (gh-573): a read of a cell
-          executes one setter's computation, so the guard takes the per-setter maximum, not the
-          union — a Block/concat node written by one range-guarded setter per component costs one
-          component per read. The per-setter maximum is chosen before downstream unions, so a
-          consumer overlapping one alternative but not another can be undercounted — accepted: an
-          exact treatment is combinatorial across multi-setter dependencies, and both error
-          directions of this heuristic prior are benign (a miss reproduces the pre-guard
-          placement, which stays a [`Materialize] flip candidate with a fanin-charged cost). *)
+          analysis fact behind the transitive inline-fanin guard (gh-573): a read of a cell executes
+          one setter's computation, so the guard takes the per-setter maximum, not the union — a
+          Block/concat node written by one range-guarded setter per component costs one component
+          per read. The per-setter maximum is chosen before downstream unions, so a consumer
+          overlapping one alternative but not another can be undercounted — accepted: an exact
+          treatment is combinatorial across multi-setter dependencies, and both error directions of
+          this heuristic prior are benign (a miss reproduces the pre-guard placement, which stays a
+          [`Materialize] flip candidate with a fanin-charged cost). *)
   mutable inline_fanin : int;
       (** The transitive inline fan-in the guard computed for this node under the current
-          placements: the number of distinct materialized nodes the node's fully-inlined
-          computation would load (at least 1). Decision-dependent (written by [decide_placements]
-          on the candidate's private store copy); multiplies into [fc_recompute_cost] so the
-          search and the memory-budget planner see the true cost of re-inlining a node the fanin
-          cap materialized. *)
+          placements: the number of distinct materialized nodes the node's fully-inlined computation
+          would load (at least 1). Decision-dependent (written by [decide_placements] on the
+          candidate's private store copy); multiplies into [fc_recompute_cost] so the search and the
+          memory-budget planner see the true cost of re-inlining a node the fanin cap materialized.
+      *)
 }
 [@@deriving sexp_of]
 
@@ -562,11 +557,11 @@ type optimize_ctx = {
       (** gh-555: the [Inline] half of the per-lineage inlining decision vector. A node recorded
           here is exempt from the heuristic virtualization caps ([virtualize_max_visits],
           [virtualize_max_inline_reduction], [virtualize_max_inline_fanin]) in {!decide_placements}
-          — the caps are priors of the
-          default policy, not legality. Legality is unaffected: [check_and_store_virtual] /
-          [inline_computation] can still reject the node ([Never_virtual] with their provenances).
-          The [Materialize] half of the vector is a pre-seeded [On_device] decision in
-          {!field-placements} (see [Context.decide_materialized]). *)
+          — the caps are priors of the default policy, not legality. Legality is unaffected:
+          [check_and_store_virtual] / [inline_computation] can still reject the node
+          ([Never_virtual] with their provenances). The [Materialize] half of the vector is a
+          pre-seeded [On_device] decision in {!field-placements} (see
+          [Context.decide_materialized]). *)
 }
 [@@deriving sexp_of]
 
@@ -613,8 +608,8 @@ type traced_store = (Tn.t, traced_array) Base.Hashtbl.t [@@deriving sexp_of]
 
 (** Granularity of the XOR remap applied to a swizzled node's minor axis (gh-ocannl-481 item 3, D1).
     Both flavors are per-row bijections of the minor axis, so the IR-level semantics are identical;
-    they differ in the unit the XOR permutes and therefore in which access pattern they
-    de-conflict. *)
+    they differ in the unit the XOR permutes and therefore in which access pattern they de-conflict.
+*)
 type swizzle_kind =
   | Swizzle_elem
       (** Element-granularity XOR: [P*C + col] renders as [P*C + (col lxor (P land (C-1)))]. Spreads
@@ -624,35 +619,36 @@ type swizzle_kind =
       (** 16-byte-unit XOR: the column's 16-byte-unit index is XORed with the low bits of the row
           prefix, leaving the offset within the unit alone. This is the CUTLASS-style layout
           [ldmatrix] wants — its 8 per-phase row addresses are 16-byte-aligned, so only a remap that
-          keeps 16-byte units intact can both de-conflict them and stay loadable. Requires the
-          row's byte length to be a multiple of 16 and a power of two in 16-byte units. *)
+          keeps 16-byte units intact can both de-conflict them and stay loadable. Requires the row's
+          byte length to be a multiple of 16 and a power of two in 16-byte units. *)
 [@@deriving sexp, compare, equal]
 
-(** gh-555: one searchable inlining decision dimension of a compile — a node whose placement the
-    default policy decided, together with the flip a search can try and the recompute-cost bound of
-    the virtual placement (reduction extent × per-cell read multiplicity × transitive inline
-    fan-in — the cost the flip trades against memory traffic; without the fan-in factor a node the
-    fanin cap materialized would rank among the cheapest to re-inline, and the memory-budget
-    planner would prefer undoing exactly the guard's decision). [`Materialize] flips a node the policy left virtual (via
-    [Context.decide_materialized]); [`Inline] flips a node materialized by the heuristic caps
-    (provenance 1, 39 or 41 — never by legality or observability, which are not decisions), via
-    [Context.decide_inline]. An [`Inline] flip's legality is settled only when the virtualizer
-    replays ([check_and_store_virtual]): a rejected flip reproduces the materialized placement. *)
 type flip_candidate = {
   fc_tn : Tnode.t;
   fc_flip : [ `Materialize | `Inline ];
   fc_recompute_cost : int;
 }
 [@@deriving sexp_of]
+(** gh-555: one searchable inlining decision dimension of a compile — a node whose placement the
+    default policy decided, together with the flip a search can try and the recompute-cost bound of
+    the virtual placement (reduction extent × per-cell read multiplicity × transitive inline fan-in
+    — the cost the flip trades against memory traffic; without the fan-in factor a node the fanin
+    cap materialized would rank among the cheapest to re-inline, and the memory-budget planner would
+    prefer undoing exactly the guard's decision). [`Materialize] flips a node the policy left
+    virtual (via [Context.decide_materialized]); [`Inline] flips a node materialized by the
+    heuristic caps (provenance 1, 39 or 41 — never by legality or observability, which are not
+    decisions), via [Context.decide_inline]. An [`Inline] flip's legality is settled only when the
+    virtualizer replays ([check_and_store_virtual]): a rejected flip reproduces the materialized
+    placement. *)
 
+type pipelined_tile = { pt_depth : int; pt_rotor : Indexing.symbol } [@@deriving sexp_of]
 (** gh-487: a software-pipelined (double-buffered) staged tile — codegen allocates [pt_depth]
-    rotating copies of the tile and renders every access with a buffer-selection term rotated by
-    the [pt_rotor] loop counter: reads select copy [rotor mod depth], writes copy
+    rotating copies of the tile and renders every access with a buffer-selection term rotated by the
+    [pt_rotor] loop counter: reads select copy [rotor mod depth], writes copy
     [(rotor + 1) mod depth] (the schedule emits the loads one iteration ahead), and writes outside
     the rotor loop (the prologue load) select copy 0. The IR keeps the tile's single-copy dims and
     indices — the rotation is a physical-layout choice like {!type-swizzle_kind}, invisible to
     IR-level semantics — so the pipelined rendering is bitwise identical to the unpipelined one. *)
-type pipelined_tile = { pt_depth : int; pt_rotor : Indexing.symbol } [@@deriving sexp_of]
 
 type optimized = {
   traced_store : traced_store;
@@ -691,17 +687,17 @@ type optimized = {
           guards or by the host-side constant packing. [Schedule.Tensorize] consults this to
           discharge pad guards on the intrinsic path. *)
   flip_candidates : flip_candidate list;
-      (** gh-555: the searchable inlining decision dimensions of this compile, most expensive
-          first, as decided at the whole-routine specialization (schedule-transform copies inherit
-          the whole-routine list). Excluded: nodes never assigned or never read (no decision to
-          make), scalar constexprs and pure one-hot selector producers (must stay virtual for their
-          rewrites), and nodes placed by legality, intent or observability rather than the
-          heuristic policy. *)
+      (** gh-555: the searchable inlining decision dimensions of this compile, most expensive first,
+          as decided at the whole-routine specialization (schedule-transform copies inherit the
+          whole-routine list). Excluded: nodes never assigned or never read (no decision to make),
+          scalar constexprs and pure one-hot selector producers (must stay virtual for their
+          rewrites), and nodes placed by legality, intent or observability rather than the heuristic
+          policy. *)
   spliced_rbw : Set.M(Tnode).t;
       (** gh-610 review round 6: the nodes whose [read_before_write] was set by the FINAL-code
-          reconciliation (a spliced read preceding, or not definitely covered by, the routine's
-          own writes) — as opposed to the raw analysis' uncovered-read classification, which also
-          flags every pure input. [Backends]' prior-context demand keys on this set. *)
+          reconciliation (a spliced read preceding, or not definitely covered by, the routine's own
+          writes) — as opposed to the raw analysis' uncovered-read classification, which also flags
+          every pure input. [Backends]' prior-context demand keys on this set. *)
 }
 [@@deriving sexp_of]
 
@@ -804,7 +800,8 @@ let track_symbol reverse_node_map tn idcs =
     | Indexing.Concat syms -> List.iter syms ~f:add)
 
 (* gh-343 / task-73617488: helpers for the one-hot reduction rewrite and the virtualizer exemption.
-   Placed before [trace_node_facts] so [is_one_hot_selector_assignment] is available during tracing. *)
+   Placed before [trace_node_facts] so [is_one_hot_selector_assignment] is available during
+   tracing. *)
 
 let axis_index_mentions_symbol (s : Indexing.symbol) (idx : Indexing.axis_index) : bool =
   match idx with
@@ -968,15 +965,14 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
     match Affine.fiber_cardinality ~domain:(Map.to_alist loop_ranges) idcs with
     | `Exact n | `At_least n -> n
   in
-  (* [scope_reads] is the enclosing setter's identity and read sinks when this traversal is
-     inside a [Local_scope] body in that setter's right-hand side (gh-573): the body's loads
-     execute per evaluation of the setter, so they belong to its [setter_reads], with the
-     setter's own read-modify-write self-reads still excluded. The payload carries TWO sinks,
-     (self, statement sink, current sink): scope bodies hoist to just before the enclosing
-     statement and execute unconditionally (both [Where] arms' bodies really run — see the
-     operand-conditionality notes), so they record into the statement sink, while directly
-     conditional arm expressions record into per-arm current sinks maxed by the [Ternop] arm
-     below. [None] at top level. *)
+  (* [scope_reads] is the enclosing setter's identity and read sinks when this traversal is inside a
+     [Local_scope] body in that setter's right-hand side (gh-573): the body's loads execute per
+     evaluation of the setter, so they belong to its [setter_reads], with the setter's own
+     read-modify-write self-reads still excluded. The payload carries TWO sinks, (self, statement
+     sink, current sink): scope bodies hoist to just before the enclosing statement and execute
+     unconditionally (both [Where] arms' bodies really run — see the operand-conditionality notes),
+     so they record into the statement sink, while directly conditional arm expressions record into
+     per-arm current sinks maxed by the [Ternop] arm below. [None] at top level. *)
   let rec loop_proc ~loop_ranges ~scope_reads llc =
     let loop = loop_proc ~loop_ranges ~scope_reads in
     match llc with
@@ -1010,8 +1006,8 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
           max traced.inline_reduction_extent (reduction_extent loop_ranges idcs);
         if (not traced.has_assignment) && (not (Hash_set.mem read_seen tn)) && is_scalar_dims tn
         then
-          (* An assignment re-executed by an enclosing loop is not a single constant assignment
-             (the retired tracer cleared the flag on the statement's second enumerated visit). *)
+          (* An assignment re-executed by an enclosing loop is not a single constant assignment (the
+             retired tracer cleared the flag on the statement's second enumerated visit). *)
           traced.is_scalar_constexpr <-
             Map.for_all loop_ranges ~f:(fun w -> w <= 1) && is_constexpr_comp traced_store llsc
         else if traced.has_assignment then traced.is_scalar_constexpr <- false;
@@ -1073,10 +1069,10 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
         let traced : traced_array = get_node traced_store ptr in
         if not (Option.exists lhs ~f:(fun (tn, _) -> Tn.equal ptr tn)) then
           traced.read_by_other <- true;
-        (* The collector carries the setter's identity separately from [lhs], which a
-           [Local_scope] body does not inherit: the read-modify-write self-read exclusion must
-           follow the OUTER setter through the body, or a self-accumulating scope records a
-           phantom contributor that can flip a decision at the cap boundary. *)
+        (* The collector carries the setter's identity separately from [lhs], which a [Local_scope]
+           body does not inherit: the read-modify-write self-read exclusion must follow the OUTER
+           setter through the body, or a self-accumulating scope records a phantom contributor that
+           can flip a decision at the cap boundary. *)
         Option.iter reads ~f:(fun (self, _stmt, cur) ->
             if not (Tn.equal ptr self) then Hash_set.add cur ptr);
         (* The read-modify-write exemption: a read at the enclosing statement's write position is
@@ -1122,10 +1118,10 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
             (* Exactly one arm's EXPRESSION evaluates per visit ([Ops.ternop_conditionality]): the
                setter's fan-in charges the wider arm, not the union — two arms each within the cap
                must not jointly trip it. [Local_scope] bodies inside the arms are the exception:
-               they hoist to statement level and both execute, so their reads flow to the
-               statement sink via the [Local_scope] arm above rather than into the per-arm sinks.
-               The other traced facts still record from both arms (their subjects are
-               rendering-level, and both arms are rendered). *)
+               they hoist to statement level and both execute, so their reads flow to the statement
+               sink via the [Local_scope] arm above rather than into the per-arm sinks. The other
+               traced facts still record from both arms (their subjects are rendering-level, and
+               both arms are rendered). *)
             let r2 = Hash_set.create (module Tnode) and r3 = Hash_set.create (module Tnode) in
             loop_scalar ~loop_ranges ~lhs ~reads:(Some (self, stmt, r2)) llv2;
             loop_scalar ~loop_ranges ~lhs ~reads:(Some (self, stmt, r3)) llv3;
@@ -1342,8 +1338,7 @@ let rec computation_reads_merge ~self : t -> bool = function
   | Set_local (_, llsc) -> scalar_reads_merge_buffer ~self llsc
   | Set_from_vec { tn; arg = s, _; _ } -> Tn.equal tn self && scalar_reads_merge_buffer ~self s
   | Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
-      Tn.equal tn self
-      && (scalar_reads_merge_buffer ~self v || scalar_reads_merge_buffer ~self llsc)
+      Tn.equal tn self && (scalar_reads_merge_buffer ~self v || scalar_reads_merge_buffer ~self llsc)
   | If { cond = c0, _; body } ->
       scalar_reads_merge_buffer ~self c0 || computation_reads_merge ~self body
   | Tile_mma { fallback; _ } -> computation_reads_merge ~self fallback
@@ -1354,12 +1349,11 @@ and scalar_reads_merge_buffer ~self : scalar_t -> bool = function
   | Get_dynamic { dyn_value = v, _; _ } -> scalar_reads_merge_buffer ~self v
   | Local_scope { body; _ } -> computation_reads_merge ~self body
   | Ternop (_, (a, _), (b, _), (d, _)) ->
-      scalar_reads_merge_buffer ~self a
-      || scalar_reads_merge_buffer ~self b
+      scalar_reads_merge_buffer ~self a || scalar_reads_merge_buffer ~self b
       || scalar_reads_merge_buffer ~self d
   | Binop (op, (a, _), (b, _)) -> (
-      (* A projection's discarded operand is never rendered, hence never reads anything: it must
-         not taint (review round 3). A gated second operand may evaluate, so it counts. *)
+      (* A projection's discarded operand is never rendered, hence never reads anything: it must not
+         taint (review round 3). A gated second operand may evaluate, so it counts. *)
       match Ops.binop_conditionality op with
       | Ops.Only_first -> scalar_reads_merge_buffer ~self a
       | Ops.Only_second -> scalar_reads_merge_buffer ~self b
@@ -1388,10 +1382,10 @@ let%track7_sexp inline_computation ~id ~inherited_merge_tainted ~inherited_tns
   (* Review round 2 of the gh-610/611 PR: a computation INHERITED from an earlier routine of the
      lineage that reads a merge buffer must not be consumed here — merge-buffer contents are
      transient to the routine receiving the transfer, and this routine declaring the SAME merge
-     source does not rescue the splice: the deferred read would observe this routine's transfer,
-     not the one it was written against. Detection is at consumption time because only the
-     entry-time snapshot (taken in [virtual_llc]) can tell inherited components from ones stored
-     during this routine's own walk; a post-hoc scan of the final code cannot. *)
+     source does not rescue the splice: the deferred read would observe this routine's transfer, not
+     the one it was written against. Detection is at consumption time because only the entry-time
+     snapshot (taken in [virtual_llc]) can tell inherited components from ones stored during this
+     routine's own walk; a post-hoc scan of the final code cannot. *)
   if Hash_set.mem inherited_merge_tainted traced.tn then
     raise
     @@ Utils.User_error
@@ -1404,10 +1398,10 @@ let%track7_sexp inline_computation ~id ~inherited_merge_tainted ~inherited_tns
   (* gh-509 task 4: a packed-uniform producer ([Set_from_vec]) is inlined via the lane-extract
      scalar form [vec_convert(counter[flat / lanes]).v[flat mod lanes]], where [flat] is the read
      cell's flat offset -- bitwise-identical to the vectorized stores (the lane builtins index the
-     same converted block). The value stream depends only on the element index, so a single
-     builder serves every peeled computation (interior and tail write the same stream). The
-     counter is read at a runtime-computed block index ([Get_dynamic]), so it is committed to a
-     materialized placement; its own (inlineable) chain stays virtual inside its setter. *)
+     same converted block). The value stream depends only on the element index, so a single builder
+     serves every peeled computation (interior and tail write the same stream). The counter is read
+     at a runtime-computed block index ([Get_dynamic]), so it is committed to a materialized
+     placement; its own (inlineable) chain stays virtual inside its setter. *)
   let set_from_vec_def =
     List.find_map computations ~f:(fun (_, def) ->
         let rec find = function
@@ -1474,17 +1468,16 @@ let%track7_sexp inline_computation ~id ~inherited_merge_tainted ~inherited_tns
       match arg_scalar with
       | Get (ctr, ctr_idcs) ->
           (* The counter is about to gain a dynamically-indexed read, which recomputation cannot
-             serve: it must stay materialized. Bail out (keeping the uniform result materialized,
-             as before gh-509 task 4) if the counter's placement is already committed the other
-             way. *)
+             serve: it must stay materialized. Bail out (keeping the uniform result materialized, as
+             before gh-509 task 4) if the counter's placement is already committed the other way. *)
           (match Tn.Placements.get optim_ctx.placements ctr with
           | Some ((Virtual | Effectively_constant), _) -> raise @@ Non_virtual 146
           | _ -> ());
           let ctr_read =
             match ctr_sym with
             | None ->
-                (* Single-block target: the counter read is at static indices; keep the plain
-                   [Get] (cleanup commits the surviving read to [Never_virtual]). *)
+                (* Single-block target: the counter read is at static indices; keep the plain [Get]
+                   (cleanup commits the surviving read to [Never_virtual]). *)
                 if Array.exists ctr_idcs ~f:mentions_nonstatic then raise @@ Non_virtual 146;
                 Get (ctr, ctr_idcs)
             | Some c ->
@@ -1764,10 +1757,10 @@ let%track7_sexp inline_computation ~id ~inherited_merge_tainted ~inherited_tns
           if List.is_empty body then None else Some (unflat_lines body)
       | For_loop { index; body; _ } when Map.mem env index -> loop env body
       | For_loop { from_; to_; _ } when to_ < from_ ->
-          (* A dead loop replays zero times: drop it from the spliced body (review round 10) —
-             it would otherwise RENDER in the consumer (renderers emit dead loops), and a merge
-             read inside it would reference a parameter the consumer cannot declare. Mirrors
-             the tracer's and the fan-in collector's dead-body skips. *)
+          (* A dead loop replays zero times: drop it from the spliced body (review round 10) — it
+             would otherwise RENDER in the consumer (renderers emit dead loops), and a merge read
+             inside it would reference a parameter the consumer cannot declare. Mirrors the tracer's
+             and the fan-in collector's dead-body skips. *)
           Some Noop
       | For_loop { index; from_; to_; body; axis } ->
           (* Freshen the binding. *)
@@ -1795,10 +1788,9 @@ let%track7_sexp inline_computation ~id ~inherited_merge_tainted ~inherited_tns
           in
           (* gh-133 Stage B: range guards -- a unit-solved symbol's value must fall within its
              producer loop range [0, range). The guard never forms a negative intermediate: we
-             compare [rest] and [rhs] (both non-negative) rather than [rhs - rest]. uc=+1:
-             [rest <= rhs] & [rhs < rest+range]; uc=-1: [rhs <= rest] & [rest < rhs+range] -- one
-             canonical shape per role, a direct [Cmple] lower bound and a strict [Cmplt] upper
-             bound. *)
+             compare [rest] and [rhs] (both non-negative) rather than [rhs - rest]. uc=+1: [rest <=
+             rhs] & [rhs < rest+range]; uc=-1: [rhs <= rest] & [rest < rhs+range] -- one canonical
+             shape per role, a direct [Cmple] lower bound and a strict [Cmplt] upper bound. *)
           let add_offset (idx : Indexing.axis_index) d : Indexing.axis_index =
             if d = 0 then idx
             else
@@ -1920,19 +1912,18 @@ let%track7_sexp inline_computation ~id ~inherited_merge_tainted ~inherited_tns
   with Non_virtual i ->
     (* Review round 11: an INHERITED computation has no materialization fallback — the deferring
        routine already dropped the setters from its schedule, so committing [Never_virtual] here
-       would either conflict with the lineage's [Virtual] commitment (a cryptic
-       provenance-collision error) or commit the consumer to a buffer no routine writes. Fail
-       actionably instead. *)
+       would either conflict with the lineage's [Virtual] commitment (a cryptic provenance-collision
+       error) or commit the consumer to a buffer no routine writes. Fail actionably instead. *)
     if Hash_set.mem inherited_tns traced.tn then
       raise
         (Utils.User_error
            [%string
-             "the deferred computation of %{Tn.debug_name traced.tn}, stored by an earlier \
-              routine of this compilation lineage, could not be inlined at a read site of this \
-              routine (rejection %{i#Int}: unsupported indexing or vector form for inlining): \
-              no routine writes the node's buffer, so the read cannot fall back to a \
-              materialized access. Mark %{Tn.debug_name traced.tn} as materialized (e.g. via \
-              Train.set_materialized) in the routine that computes it."]);
+             "the deferred computation of %{Tn.debug_name traced.tn}, stored by an earlier routine \
+              of this compilation lineage, could not be inlined at a read site of this routine \
+              (rejection %{i#Int}: unsupported indexing or vector form for inlining): no routine \
+              writes the node's buffer, so the read cannot fall back to a materialized access. \
+              Mark %{Tn.debug_name traced.tn} as materialized (e.g. via Train.set_materialized) in \
+              the routine that computes it."]);
     Tn.Placements.update optim_ctx.placements traced.tn Never_virtual i;
     None
 
@@ -1965,21 +1956,20 @@ let rec proc_contains_set_from_vec tn = function
 let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_indices (llc : t) :
     t * Tnode.t Hash_set.t =
   let plc = optim_ctx.placements in
-  (* Every array read inside the inlined body of an INHERITED computation (present in the
-     lineage table at routine entry — the snapshot above): cross-routine splicing introduces
-     reads the raw analysis never saw, so the reconcile-time strict coverage verdicts apply
-     exactly to these nodes, and a raw-positioned or locally-inlined read keeps the raw verdicts
-     (review round 7: a routine-wide gate dragged unrelated raw reads into strict re-judging, a
-     has-local-assignment provenance test missed consumption through an update of an inherited
-     virtual, and recording LOCAL splices re-broke the init flows — local bodies' reads were
-     already judged by the raw analysis at their producer positions). Nested inherited
-     consumption inside a local body still records: the nested [Get] routes through the same
-     arm while the local setter is processed for storage. *)
+  (* Every array read inside the inlined body of an INHERITED computation (present in the lineage
+     table at routine entry — the snapshot above): cross-routine splicing introduces reads the raw
+     analysis never saw, so the reconcile-time strict coverage verdicts apply exactly to these
+     nodes, and a raw-positioned or locally-inlined read keeps the raw verdicts (review round 7: a
+     routine-wide gate dragged unrelated raw reads into strict re-judging, a has-local-assignment
+     provenance test missed consumption through an update of an inherited virtual, and recording
+     LOCAL splices re-broke the init flows — local bodies' reads were already judged by the raw
+     analysis at their producer positions). Nested inherited consumption inside a local body still
+     records: the nested [Get] routes through the same arm while the local setter is processed for
+     storage. *)
   let spliced_reads = Hash_set.create (module Tnode) in
   let rec record_spliced_reads (c : t) =
     match c with
-    | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _
-      ->
+    | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _ ->
         ()
     | Seq (c1, c2) ->
         record_spliced_reads c1;
@@ -2007,8 +1997,8 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
         record_spliced_scalar b;
         record_spliced_scalar d
     | Binop (op, (a, _), (b, _)) -> (
-        (* A projection's discarded operand is never evaluated: its reads are not spliced
-           (review round 8) — same dispatch as the reconcile and merge-taint walkers. *)
+        (* A projection's discarded operand is never evaluated: its reads are not spliced (review
+           round 8) — same dispatch as the reconcile and merge-taint walkers. *)
         match Ops.binop_conditionality op with
         | Ops.Only_first -> record_spliced_scalar a
         | Ops.Only_second -> record_spliced_scalar b
@@ -2017,11 +2007,11 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
             record_spliced_scalar b)
     | Unop (_, (a, _)) -> record_spliced_scalar a
   in
-  (* The entry-time snapshot of merge-tainted deferred computations: everything in the table at
-     this point was stored by an earlier routine of the lineage (this routine's own computations
-     are stored during the walk below), so a node found here with a merge-buffer-reading body is
-     exactly a cross-routine merge splice waiting to happen — [inline_computation] rejects its
-     consumption. A node with local setters ON TOP of an inherited tainted component (the
+  (* The entry-time snapshot of merge-tainted deferred computations: everything in the table at this
+     point was stored by an earlier routine of the lineage (this routine's own computations are
+     stored during the walk below), so a node found here with a merge-buffer-reading body is exactly
+     a cross-routine merge splice waiting to happen — [inline_computation] rejects its consumption.
+     A node with local setters ON TOP of an inherited tainted component (the
      update-an-inherited-virtual pattern) is tainted all the same: inlining would replay the
      inherited component. *)
   let inherited_tns = Hash_set.create (module Tnode) in
@@ -2049,10 +2039,10 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
         let c2 = loop c2 in
         Seq (c1, c2)
     (* Review round 13: dead loops are dropped at virtualization — they replay zero times, and
-       descending into them could reject valid programs (a merge-tainted splice in code that
-       never executes) or mint phantom parameters for identifiers only dead code renders.
-       Aligns the consumer side with [inline_computation]'s spliced-body elision (round 10);
-       stored computations lose their dead sub-loops at store time for the same reason. *)
+       descending into them could reject valid programs (a merge-tainted splice in code that never
+       executes) or mint phantom parameters for identifiers only dead code renders. Aligns the
+       consumer side with [inline_computation]'s spliced-body elision (round 10); stored
+       computations lose their dead sub-loops at store time for the same reason. *)
     | For_loop { from_; to_; _ } when to_ < from_ -> Noop
     | For_loop ({ index; body; _ } as for_config) -> (
         if in_storage_pass then
@@ -2188,47 +2178,45 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
         let traced = get_node traced_store tn in
         if Tn.Placements.known_non_virtual plc traced.tn then (
           (* Review round 13: [Local] is non-virtual yet does NOT persist across routines — an
-             inherited node the earlier routine materialized as routine-local scratch has no
-             buffer a later routine can read. Only persistent placements may pass through. *)
+             inherited node the earlier routine materialized as routine-local scratch has no buffer
+             a later routine can read. Only persistent placements may pass through. *)
           if Hash_set.mem inherited_tns tn && Tn.Placements.known_not_materialized plc tn then
             raise
               (Utils.User_error
                  [%string
                    "the node %{Tn.debug_name tn} was computed as routine-local scratch by an \
-                    earlier routine of this compilation lineage: its buffer does not persist, \
-                    so a later routine cannot read it. Mark %{Tn.debug_name tn} as materialized \
-                    (e.g. via Train.set_materialized) in the routine that computes it."]);
+                    earlier routine of this compilation lineage: its buffer does not persist, so a \
+                    later routine cannot read it. Mark %{Tn.debug_name tn} as materialized (e.g. \
+                    via Train.set_materialized) in the routine that computes it."]);
           llsc)
         else
           let id = get_scope tn in
           Option.value ~default:llsc
           @@ Option.map
                (inline_computation ~id ~inherited_merge_tainted ~inherited_tns optim_ctx traced
-                  static_indices indices)
-               ~f:(fun body ->
+                  static_indices indices) ~f:(fun body ->
                  if Hash_set.mem inherited_tns tn then record_spliced_reads body;
                  Local_scope { id; body; orig_indices = indices })
     | Get_dynamic { tn; idcs; dyn_axis; dyn_value = v, prec } ->
-        (* Review round 12: a dynamically-indexed read cannot be served by recomputation (the
-           gather index is only known at runtime), so a LOCAL table materializes — but an
-           INHERITED table has no setter left in any schedule, and letting it reach cleanup
-           produces the cryptic already-virtual provenance collision. Fail actionably here. *)
+        (* Review round 12: a dynamically-indexed read cannot be served by recomputation (the gather
+           index is only known at runtime), so a LOCAL table materializes — but an INHERITED table
+           has no setter left in any schedule, and letting it reach cleanup produces the cryptic
+           already-virtual provenance collision. Fail actionably here. *)
         if
           Hash_set.mem inherited_tns tn
           && ((not (Tn.Placements.known_non_virtual plc tn))
-             (* Round 13: [Local] passes [known_non_virtual] yet does not persist across
-                routines — only a persistent materialized table can serve the gather. *)
+             (* Round 13: [Local] passes [known_non_virtual] yet does not persist across routines —
+                only a persistent materialized table can serve the gather. *)
              || Tn.Placements.known_not_materialized plc tn)
         then
           raise
             (Utils.User_error
                [%string
-                 "the deferred computation of %{Tn.debug_name tn}, stored by an earlier routine \
-                  of this compilation lineage, is read as a dynamic-gather table in this \
-                  routine: dynamically-indexed reads cannot be served by inlining, and no \
-                  routine writes a persistent buffer for the node. Mark %{Tn.debug_name tn} as \
-                  materialized (e.g. via Train.set_materialized) in the routine that computes \
-                  it."]);
+                 "the deferred computation of %{Tn.debug_name tn}, stored by an earlier routine of \
+                  this compilation lineage, is read as a dynamic-gather table in this routine: \
+                  dynamically-indexed reads cannot be served by inlining, and no routine writes a \
+                  persistent buffer for the node. Mark %{Tn.debug_name tn} as materialized (e.g. \
+                  via Train.set_materialized) in the routine that computes it."]);
         Get_dynamic { tn; idcs; dyn_axis; dyn_value = (loop v, prec) }
     | Local_scope opts ->
         Local_scope
@@ -2243,10 +2231,10 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
     | Embed_index _ -> llsc
     | Ternop (op, (llv1, prec1), (llv2, prec2), (llv3, prec3)) ->
         Ternop (op, (loop llv1, prec1), (loop llv2, prec2), (loop llv3, prec3))
-    (* Review round 9: a projection's discarded operand is never evaluated — do not descend into
-       it (attempting to inline a merge-tainted inherited virtual there would raise for code
-       that never runs); collapse to the selected operand, mirroring [simplify_llc]'s Arg1/Arg2
-       arms — the renderers emit the selected operand alone either way. *)
+    (* Review round 9: a projection's discarded operand is never evaluated — do not descend into it
+       (attempting to inline a merge-tainted inherited virtual there would raise for code that never
+       runs); collapse to the selected operand, mirroring [simplify_llc]'s Arg1/Arg2 arms — the
+       renderers emit the selected operand alone either way. *)
     | Binop (Arg1, (llv1, _), _) -> loop llv1
     | Binop (Arg2, _, (llv2, _)) -> loop llv2
     | Binop (op, (llv1, prec1), (llv2, prec2)) -> Binop (op, (loop llv1, prec1), (loop llv2, prec2))
@@ -2401,8 +2389,8 @@ let cleanup_virtual_llc plc ~static_indices (llc : t) : t =
     @@ List.map ~f:(fun s -> s.Indexing.static_symbol) static_indices
   in
   (* gh-611: a routine whose every statement virtualizes away is legal, not a crash — its runtime
-     schedule is empty while its stored computations and placements persist in the lineage,
-     awaiting consumption by later routines (the incremental flows: [Context.decide_inline], the
+     schedule is empty while its stored computations and placements persist in the lineage, awaiting
+     consumption by later routines (the incremental flows: [Context.decide_inline], the
      [?prelowered] seam, the documented cross-routine computation sharing). *)
   Option.value ~default:Noop @@ loop_proc ~balanced:false ~env_dom:static_indices llc
 
@@ -2457,10 +2445,10 @@ and substitute_proc ~var ~value llc =
     Phase A of docs/proposals/interval-analysis-scalar-t.md: [interval_of] computes machine-value
     bounds of a scalar expression as consumed at a given precision, threading a total symbol
     environment (every in-scope symbol comes from a [For_loop] or a static binding) -- the abstract
-    twin of the retired concrete tracer's [symbol -> int] env. Results carry the set of tensor nodes whose
-    {e proposed} (unsettled) bounds candidates were consulted; any rewrite that consumes a result
-    must settle those sources ({!Tnode.settle_bounds}, binding constraint 2) -- facts derived purely
-    from precisions and loop extents have no sources and need no settlement. *)
+    twin of the retired concrete tracer's [symbol -> int] env. Results carry the set of tensor nodes
+    whose {e proposed} (unsettled) bounds candidates were consulted; any rewrite that consumes a
+    result must settle those sources ({!Tnode.settle_bounds}, binding constraint 2) -- facts derived
+    purely from precisions and loop extents have no sources and need no settlement. *)
 
 type interval_result = { ival : Interval.t; srcs : Set.M(Tn).t }
 
@@ -2533,10 +2521,10 @@ let ienv_extend ienv sym ~from_ ~to_ =
 
     The result is guard-relative: a statement simplified under a condition is valid only where that
     condition holds, exactly as a statement simplified under a loop range is valid only within it.
-    Nothing in [optimize_proc] moves statements across an [If] afterwards ([hoist_cross_statement_cse]
-    descends only into [Seq]/[For_loop] and never lifts a guarded body), and a schedule transform
-    that relocates code owes the same re-derivation it already owes for loop extents
-    (docs/proposals/schedule-ir-optops.md §2). *)
+    Nothing in [optimize_proc] moves statements across an [If] afterwards
+    ([hoist_cross_statement_cse] descends only into [Seq]/[For_loop] and never lifts a guarded
+    body), and a schedule transform that relocates code owes the same re-derivation it already owes
+    for loop extents (docs/proposals/schedule-ir-optops.md §2). *)
 
 (* Integer-affine view of a scalar as [(coefficient, symbol) terms, constant offset]; [None] for
    anything that is not an integer index expression. *)
@@ -2584,7 +2572,8 @@ let narrow_sym_env_le sym_env ~terms ~offset =
   | None -> sym_env
   | Some bounded ->
       List.fold bounded ~init:sym_env ~f:(fun env (k, s, (lo, hi)) ->
-          (* [rest] is minimized by taking each other term's extreme in the direction of its sign. *)
+          (* [rest] is minimized by taking each other term's extreme in the direction of its
+             sign. *)
           let rest_lo =
             List.fold bounded ~init:offset ~f:(fun acc (c, s', (lo', hi')) ->
                 if Indexing.equal_symbol s s' then acc
@@ -2602,14 +2591,16 @@ let ienv_narrow_from_cond ienv ~(cprec : Ops.prec) (cond : scalar_t) : ienv =
   (* The machine evaluates each comparison side at the index precision (the [Embed_index] boundary,
      cf. [interval_of]) and converts it to [cprec], the condition's evaluation precision. The
      comparison outcome is the mathematical-integer fact read off below only when both steps are
-     faithful over the side's whole range under the incoming bounds -- e.g. a single-precision
-     guard [k <= 2^24] is also true at [k = 2^24 + 1], which rounds down. Integer wrap is modular,
-     so an in-range final value suffices; float rounding is not, so [Interval.at_prec] widening to
-     top declines the narrowing. (Both checks are conservative for a pure-constant side, which
-     skips the index-precision step; declining is always sound.) *)
+     faithful over the side's whole range under the incoming bounds -- e.g. a single-precision guard
+     [k <= 2^24] is also true at [k = 2^24 + 1], which rounds down. Integer wrap is modular, so an
+     in-range final value suffices; float rounding is not, so [Interval.at_prec] widening to top
+     declines the narrowing. (Both checks are conservative for a pure-constant side, which skips the
+     index-precision step; declining is always sound.) *)
   let side_faithful sym_env (terms, offset) =
     let range =
-      List.fold terms ~init:(Some (offset, offset)) ~f:(fun acc (c, s) ->
+      List.fold terms
+        ~init:(Some (offset, offset))
+        ~f:(fun acc (c, s) ->
           match (acc, sym_int_bounds sym_env s) with
           | Some (lo, hi), Some (slo, shi) ->
               let a = c * slo and b = c * shi in
@@ -2626,11 +2617,9 @@ let ienv_narrow_from_cond ienv ~(cprec : Ops.prec) (cond : scalar_t) : ienv =
   let le sym_env a b ~shift =
     (* On integers [a < b] is [a - b + 1 <= 0] and [a <= b] is [a - b <= 0]. *)
     match Option.both (affine_terms_of_scalar a) (affine_terms_of_scalar b) with
-    | Some ((ta, oa), (tb, ob))
-      when side_faithful sym_env (ta, oa) && side_faithful sym_env (tb, ob) ->
-        let terms =
-          Indexing.coalesce_affine_terms (ta @ List.map tb ~f:(fun (c, s) -> (-c, s)))
-        in
+    | Some ((ta, oa), (tb, ob)) when side_faithful sym_env (ta, oa) && side_faithful sym_env (tb, ob)
+      ->
+        let terms = Indexing.coalesce_affine_terms (ta @ List.map tb ~f:(fun (c, s) -> (-c, s))) in
         narrow_sym_env_le sym_env ~terms ~offset:(oa - ob + shift)
     | _ -> sym_env
   in
@@ -3514,9 +3503,9 @@ let writes_of_stmt (stmt : t) : Set.M(Tn).t =
 
 (** The scope locals a [Local_scope] body READS, at any depth. The companion of {!reads_of_body} for
     the other half of a body's inputs: [reads_of_body] tracks tensor nodes and ignores [Get_local]
-    entirely, which left cross-statement hoisting blind to local-valued dependencies
-    (gh-ocannl-584 review round 2). Over-approximate on purpose — it includes locals the body itself
-    owns, which no sibling statement can write, and an enlarged hazard set only narrows hoisting. *)
+    entirely, which left cross-statement hoisting blind to local-valued dependencies (gh-ocannl-584
+    review round 2). Over-approximate on purpose — it includes locals the body itself owns, which no
+    sibling statement can write, and an enlarged hazard set only narrows hoisting. *)
 let local_reads_of_body (body : t) : scope_id list =
   let acc = ref [] in
   let rec loop_proc (llc : t) =
@@ -4034,16 +4023,16 @@ let validate_parallel plc (llc : t) : unit =
           (* gh-ocannl-633: a constant's in-kernel init normally moves to a link-time [Host_inits]
              upload before this check ([hosted_constant_inits_to_link_time]); when a bail-out kept
              it (e.g. a padded constant), name the actual culprit — the schedule is not at fault.
-             The flag advice is scoped honestly (review round 2): [Tensor.constant_fill]'s
-             1-element arm never consults the limit — deliberately, since routing a 1-element
-             literal to the host-backed path would pin its element count and break broadcast shape
-             inference — so for such literals the flag changes nothing, and this frame cannot tell
-             the literal's length (a broadcast scalar's node has the consumer's numel). *)
+             The flag advice is scoped honestly (review round 2): [Tensor.constant_fill]'s 1-element
+             arm never consults the limit — deliberately, since routing a 1-element literal to the
+             host-backed path would pin its element count and break broadcast shape inference — so
+             for such literals the flag changes nothing, and this frame cannot tell the literal's
+             length (a broadcast scalar's node has the consumer's numel). *)
           if Tn.known_host_constant tn then
             ". The write is the in-kernel initialization of a constant that could not be moved to \
-             link time; for literals of at least two elements, \
-             --ocannl_limit_constant_fill_size=0 forces host-side initialization (one-element \
-             literals always initialize in kernel, keeping broadcast shape inference)"
+             link time; for literals of at least two elements, --ocannl_limit_constant_fill_size=0 \
+             forces host-side initialization (one-element literals always initialize in kernel, \
+             keeping broadcast shape inference)"
           else "")
     in
     let rec check_writes ~covered ~enclosing llc =
@@ -4104,8 +4093,7 @@ let validate_parallel_classified plc llc =
       raise
         (Schedule_outcome.Cause_at
            ( Schedule_outcome.Backend_codegen,
-             Schedule_outcome.Illegal_schedule
-               { check = "Low_level.validate_parallel"; detail } ))
+             Schedule_outcome.Illegal_schedule { check = "Low_level.validate_parallel"; detail } ))
 
 (** Wraps the body of each hardware-annotated loop whose extent is smaller than its slot's launch
     dimension in an [If (index < extent)] guard, for the kinds [should_guard] selects (backends
@@ -4498,16 +4486,16 @@ let affine_accesses (llc : t) : Tn.t Affine.access list =
      statements establish their own (its reads are subordinate to the inner setters, not to the
      statement the scope is inlined into). *)
   let rec code ~loops ~path ~guarded (llc : t) =
-    (* gh-561: paths gain an intra-statement component at each statement the traversal descends
-       into — [Cond]/[Body] for [If], [Rhs]/[Write] for the [Set] family — so lexicographic path
-       order is program order within a statement too: a guarded body's write no longer shares its
-       condition's path, and a statement's write orders after its right-hand side (including
-       [Local_scope] bodies inlined there, which used to need a prefix-exclusion rule in
+    (* gh-561: paths gain an intra-statement component at each statement the traversal descends into
+       — [Cond]/[Body] for [If], [Rhs]/[Write] for the [Set] family — so lexicographic path order is
+       program order within a statement too: a guarded body's write no longer shares its condition's
+       path, and a statement's write orders after its right-hand side (including [Local_scope]
+       bodies inlined there, which used to need a prefix-exclusion rule in
        [Affine.read_covered_before]). Each statement's scalar tree carries an evaluation-position
-       counter ([arg_c], shared across [Set_dynamic]'s dynamic index and value): every
-       [Local_scope] occurrence extends the path with a distinct [Arg] component, so sibling scope
-       bodies inlined into one statement never interleave their interior components — and
-       [path_before] deliberately does not order across sibling [Arg]s. *)
+       counter ([arg_c], shared across [Set_dynamic]'s dynamic index and value): every [Local_scope]
+       occurrence extends the path with a distinct [Arg] component, so sibling scope bodies inlined
+       into one statement never interleave their interior components — and [path_before]
+       deliberately does not order across sibling [Arg]s. *)
     let arg_c = ref 0 in
     match llc with
     | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ -> ()
@@ -4533,8 +4521,8 @@ let affine_accesses (llc : t) : Tn.t Affine.access list =
           ~write:true tn idcs
     | Set_from_vec { tn; idcs; length; arg = a, _; _ } ->
         scalar ~loops ~path:(Affine.Rhs :: path) ~guarded ~arg_c ~stmt_write:idcs a;
-        add ~loops ~path:(Affine.Write :: path) ~guarded ~vec_len:length
-          ~rmw:(reads_tn tn.Tn.uid a) ~val_syms:(scalar_syms a) ~write:true tn idcs
+        add ~loops ~path:(Affine.Write :: path) ~guarded ~vec_len:length ~rmw:(reads_tn tn.Tn.uid a)
+          ~val_syms:(scalar_syms a) ~write:true tn idcs
     | Set_local (_, llsc) ->
         scalar ~loops ~path:(Affine.Rhs :: path) ~guarded ~arg_c ?stmt_write:None llsc
     | Tile_mma { fallback; _ } -> code ~loops ~path ~guarded fallback
@@ -4800,8 +4788,8 @@ let guard_conjuncts ~ienv ~(index_expr : scalar_arg) ~class_count : scalar_t lis
   (* The gather compares against [class_count], an exact small integer. *)
   let upper_proved = Float.(ivr.ival.Interval.hi < Float.of_int class_count) in
   let integral_proved = prec_proves_integral || ivr.ival.Interval.integral in
-  (* An unsigned guard precision proves the lower bound by construction (its machine range starts
-     at 0), so the lower conjunct is always erased there rather than emitted vacuously. *)
+  (* An unsigned guard precision proves the lower bound by construction (its machine range starts at
+     0), so the lower conjunct is always erased there rather than emitted vacuously. *)
   assert ((not unsigned_guard) || lower_proved);
   let lower =
     if lower_proved then None
@@ -4882,9 +4870,9 @@ let rec scalar_touches_tn tn (llsc : scalar_t) =
   match llsc with
   | Get (tn2, _) -> Tn.equal tn tn2
   | Get_merge_buffer _ ->
-      (* A node's merge buffer is a SEPARATE read-only staging buffer (the transfer source's
-         copy), never the node's own storage — reading it is independent of the accumulator's
-         cell, so [p =+ p.merge]-style updates stay recognizable as accumulations. *)
+      (* A node's merge buffer is a SEPARATE read-only staging buffer (the transfer source's copy),
+         never the node's own storage — reading it is independent of the accumulator's cell, so [p
+         =+ p.merge]-style updates stay recognizable as accumulations. *)
       false
   | Get_dynamic { tn = tn2; dyn_value = v, _; _ } -> Tn.equal tn tn2 || scalar_touches_tn tn v
   | Local_scope { body; _ } -> code_touches_tn tn body
@@ -4909,12 +4897,12 @@ and code_touches_tn tn (llc : t) =
   | Tile_mma { d = d_tn, _; a = a_tn, _; b = b_tn, _; _ } ->
       Tn.equal tn d_tn || Tn.equal tn a_tn || Tn.equal tn b_tn
 
-(* gh-ocannl-639: the accumulation-update statement shape [tn[idcs] = op(tn[idcs], contrib)] (or
-   its FMA form) over an associative-commutative [op], with [contrib] free of [tn]. The single
-   source of truth for [C_syntax]'s widened renderings (the serial-fallback nest rewrite and its
-   siblings) and for [Schedule.Unroll ~materialize:true]'s scope-form unrolling — sharing it is
-   what keeps "what counts as an accumulation" from drifting between the schedule transform and
-   the emission that must honor it. *)
+(* gh-ocannl-639: the accumulation-update statement shape [tn[idcs] = op(tn[idcs], contrib)] (or its
+   FMA form) over an associative-commutative [op], with [contrib] free of [tn]. The single source of
+   truth for [C_syntax]'s widened renderings (the serial-fallback nest rewrite and its siblings) and
+   for [Schedule.Unroll ~materialize:true]'s scope-form unrolling — sharing it is what keeps "what
+   counts as an accumulation" from drifting between the schedule transform and the emission that
+   must honor it. *)
 let accum_update_parts ~tn ~idcs (llsc : scalar_t) : (Ops.binop * scalar_t) option =
   let is_acc s = equal_scalar_t s (Get (tn, idcs)) in
   let reduce_op = function Ops.Add | Ops.Mul | Ops.Max | Ops.Min -> true | _ -> false in
@@ -4942,11 +4930,11 @@ let subst_accum_read ~tn ~idcs ~id (llsc : scalar_t) : scalar_t =
       (* [accum_update_parts] admits only the two shapes above. *)
       assert false
 
-(* A guard reading only embedded indices and constants — the gh-490 symbolic-extent shape
-   [If (i < s)] and its constant-bound sibling (Schedule.Pad's leaf guards). Such a guard commutes
-   with an accumulator's init and store: it gates which updates run, and for a cell whose guard
-   never fires a widen/narrow round-trip is exact on every narrow-float value. Data-dependent
-   guards are NOT of this shape and stay opaque to the peel below. *)
+(* A guard reading only embedded indices and constants — the gh-490 symbolic-extent shape [If (i <
+   s)] and its constant-bound sibling (Schedule.Pad's leaf guards). Such a guard commutes with an
+   accumulator's init and store: it gates which updates run, and for a cell whose guard never fires
+   a widen/narrow round-trip is exact on every narrow-float value. Data-dependent guards are NOT of
+   this shape and stay opaque to the peel below. *)
 let pure_index_guard (llsc : scalar_t) =
   let operand = function Embed_index _ | Constant _ -> true | _ -> false in
   match llsc with
@@ -4955,10 +4943,10 @@ let pure_index_guard (llsc : scalar_t) =
 
 (* The reduce-shaped update of a scope LOCAL: [local = op(local, contrib)] (or its FMA form) with
    [contrib] free of the local — [subst_accum_read]'s output shape. The [`Scope] arm of the peel
-   below accepts a base only when every update fits this grammar, because hoisting an enclosing
-   loop into a scope is licensed by the reduction reading alone: a general recurrence through the
-   local (a subtraction, a scaled update) narrows per enclosing iteration by the source's own
-   semantics, and holding it wide would change values outside the accumulator-width policy. *)
+   below accepts a base only when every update fits this grammar, because hoisting an enclosing loop
+   into a scope is licensed by the reduction reading alone: a general recurrence through the local
+   (a subtraction, a scaled update) narrows per enclosing iteration by the source's own semantics,
+   and holding it wide would change values outside the accumulator-width policy. *)
 let accum_local_update_parts ~id (llsc : scalar_t) =
   let is_acc = function Get_local id' -> Scope_id.equal id id' | _ -> false in
   let rec reads_local (s : scalar_t) =
@@ -4991,13 +4979,13 @@ let accum_local_update_parts ~id (llsc : scalar_t) =
       Some (Ops.Add, Binop (Ops.Mul, (a, pa), (b, pb)))
   | _ -> None
 
-(* Whether a scope body's update statements (everything after the opening init) fit the grammar
-   the scope-form mint emits: Serial/[Unrolled]/[Vectorized] loops, pure-index-guarded [If]s,
-   comments, and reduce-shaped [Set_local]s of the scope's own local — all carrying ONE reduction
-   operator (the FMA form counting as [Add]). Anything else — another node's write, a nested
-   scope, a non-reduction recurrence, or individually-valid updates under MIXED operators (e.g.
-   [local += x; local *= y], which is not a reduction and whose per-iteration narrowing is the
-   source's semantics) — disqualifies the base from hoisting. Returns the uniform operator. *)
+(* Whether a scope body's update statements (everything after the opening init) fit the grammar the
+   scope-form mint emits: Serial/[Unrolled]/[Vectorized] loops, pure-index-guarded [If]s, comments,
+   and reduce-shaped [Set_local]s of the scope's own local — all carrying ONE reduction operator
+   (the FMA form counting as [Add]). Anything else — another node's write, a nested scope, a
+   non-reduction recurrence, or individually-valid updates under MIXED operators (e.g. [local += x;
+   local *= y], which is not a reduction and whose per-iteration narrowing is the source's
+   semantics) — disqualifies the base from hoisting. Returns the uniform operator. *)
 let scope_updates_reduce_op ~id (llc : t) : Ops.binop option =
   let rec go op_acc llc =
     match llc with
@@ -5018,24 +5006,22 @@ let scope_updates_reduce_op ~id (llc : t) : Ops.binop option =
 
 (* gh-ocannl-639: peel a single-statement reduction nest down to its accumulation base. Levels are
    Serial/[Unrolled] loops and {!pure_index_guard}ed [If]s, each containing nothing else (comments
-   aside); the base is either a raw accumulation update ([`Update]: an
-   {!accum_update_parts}-shaped [Set] whose cell is invariant across the peeled levels) or the
-   scope form a previous rewrite minted ([`Scope]: a [Set] whose value is a [Local_scope] opening
-   with the init [Set_local (id, Get (tn, idcs))], returned as the id and the update statements
-   after the init — reusing the id is what lets a consumer hoist the scope through further
-   levels). Returns [(tn, idcs, base, debug, rebuild)] where [rebuild] re-wraps a replacement base
-   statement in the peeled levels. The ONE definition shared by [C_syntax]'s widened serial
-   fallback and the scope-form mints of [Schedule.Unroll ~materialize:true] and
-   [Schedule.Partition], so the transforms and the emission cannot drift in what nests they
-   recognize.
+   aside); the base is either a raw accumulation update ([`Update]: an {!accum_update_parts}-shaped
+   [Set] whose cell is invariant across the peeled levels) or the scope form a previous rewrite
+   minted ([`Scope]: a [Set] whose value is a [Local_scope] opening with the init [Set_local (id,
+   Get (tn, idcs))], returned as the id and the update statements after the init — reusing the id is
+   what lets a consumer hoist the scope through further levels). Returns [(tn, idcs, base, debug,
+   rebuild)] where [rebuild] re-wraps a replacement base statement in the peeled levels. The ONE
+   definition shared by [C_syntax]'s widened serial fallback and the scope-form mints of
+   [Schedule.Unroll ~materialize:true] and [Schedule.Partition], so the transforms and the emission
+   cannot drift in what nests they recognize.
 
    Deliberately single-statement: a fused body updating several distinct accumulators is out of
    scope — no lowering or schedule op produces one (each [Assignments] accumulation lowers to its
-   own nest; [Fuse_epilogue] folds elementwise tails, not sibling reductions), so no candidate
-   pair can diverge on it; and a multi-accumulator hoist could not be a [Local_scope] value at all
-   (scope purity forbids a sibling [Set] inside a scope body) — it would need the [Declare_local]
-   statement form. A transform that starts minting fused reduction bodies must extend this peel
-   alongside. *)
+   own nest; [Fuse_epilogue] folds elementwise tails, not sibling reductions), so no candidate pair
+   can diverge on it; and a multi-accumulator hoist could not be a [Local_scope] value at all (scope
+   purity forbids a sibling [Set] inside a scope body) — it would need the [Declare_local] statement
+   form. A transform that starts minting fused reduction bodies must extend this peel alongside. *)
 let peel_accum_nest ?(extra_level = fun _ _ -> false) ~free_of body :
     (Tn.t
     * Indexing.axis_index array
@@ -5059,19 +5045,19 @@ let peel_accum_nest ?(extra_level = fun _ _ -> false) ~free_of body :
     | [ For_loop ({ index; body = ibody; axis = Serial | Unrolled | Vectorized; _ } as r) ] ->
         (* [Vectorized] levels ride into the scope: the SIMD reduction rendering recognizes the
            [Set_local] update form and folds its chains into the scope local, so the whole nest
-           keeps one accumulator residency even when an inner reduction axis is vectorized
-           (autotune proposes Retype-[Vectorized] over reductions); where that rendering
-           declines, the loop renders serially over the scope local — same values either way. *)
+           keeps one accumulator residency even when an inner reduction axis is vectorized (autotune
+           proposes Retype-[Vectorized] over reductions); where that rendering declines, the loop
+           renders serially over the scope local — same values either way. *)
         peel ~free_of:(index :: free_of)
           ~rebuild:(fun b -> rebuild (For_loop { r with body = b }))
           ibody
     | [ For_loop ({ index; body = ibody; axis; _ } as r) ] when extra_level index axis ->
         (* Levels the CALLER vouches for beyond the annotation-free kinds — codegen passes a
-           predicate accepting a hardware-annotated reduction loop its backend will serialize
-           (no hardware index for the slot), so e.g. a nested [Workgroup_reduce] on cc keeps the
-           whole-nest residency. The schedule mints pass nothing: wrapping a hardware-annotated
-           loop in a scope at transform time would break the schedule on backends that do bind
-           the hardware dimension. *)
+           predicate accepting a hardware-annotated reduction loop its backend will serialize (no
+           hardware index for the slot), so e.g. a nested [Workgroup_reduce] on cc keeps the
+           whole-nest residency. The schedule mints pass nothing: wrapping a hardware-annotated loop
+           in a scope at transform time would break the schedule on backends that do bind the
+           hardware dimension. *)
         peel ~free_of:(index :: free_of)
           ~rebuild:(fun b -> rebuild (For_loop { r with body = b }))
           ibody
@@ -5378,8 +5364,7 @@ let statics_set_of static_indices =
 let static_bounds (static_indices : Indexing.static_symbol list) s =
   List.find_map static_indices ~f:(fun ss ->
       if Indexing.equal_symbol ss.Indexing.static_symbol s then
-        Option.map ss.static_range ~f:(fun r ->
-            if ss.used_as_extent then (0, r) else (0, r - 1))
+        Option.map ss.static_range ~f:(fun r -> if ss.used_as_extent then (0, r) else (0, r - 1))
       else None)
 
 let rmw_exempt ~statics_set (r : _ Affine.access) =
@@ -5421,14 +5406,14 @@ let reads_covered_query ?(write_eligible = fun ~read:_ ~write:_ -> true)
   List.iter accs ~f:(fun a -> Hashtbl.add_multi by_tn ~key:a.Affine.a_tn ~data:a);
   let statics_set = statics_set_of static_indices in
   let static_range = static_bounds static_indices in
-  (* The three-way verdict is the gh-ocannl-618 split, decided in one pass: [`Covered] holds
-     without leaning on the read-modify-write exemption; [`Covered_rmw_exempt] means the only
-     uncovered reads are {!rmw_exempt} ones — covered for the tracer-mirroring placement and
-     multiplicity consumers, NOT covered for the routine interface ([read_before_write]), where a
-     same-position read is a genuine read-modify-write whose cells require their entry values
-     unless a prior definite write covers them (review round 6 of the gh-610/611 PR established
-     this reading for spliced reads; the raw-side split followed). A strictly-uncovered read
-     dominates an exemption-dependent one. *)
+  (* The three-way verdict is the gh-ocannl-618 split, decided in one pass: [`Covered] holds without
+     leaning on the read-modify-write exemption; [`Covered_rmw_exempt] means the only uncovered
+     reads are {!rmw_exempt} ones — covered for the tracer-mirroring placement and multiplicity
+     consumers, NOT covered for the routine interface ([read_before_write]), where a same-position
+     read is a genuine read-modify-write whose cells require their entry values unless a prior
+     definite write covers them (review round 6 of the gh-610/611 PR established this reading for
+     spliced reads; the raw-side split followed). A strictly-uncovered read dominates an
+     exemption-dependent one. *)
   fun tn ->
     match Hashtbl.find by_tn tn with
     | None -> `Covered
@@ -5437,10 +5422,7 @@ let reads_covered_query ?(write_eligible = fun ~read:_ ~write:_ -> true)
         let writes = List.filter accs ~f:(fun a -> a.Affine.a_write) in
         let exempt_witness = ref None in
         let rec go = function
-          | [] -> (
-              match !exempt_witness with
-              | None -> `Covered
-              | Some w -> `Covered_rmw_exempt w)
+          | [] -> ( match !exempt_witness with None -> `Covered | Some w -> `Covered_rmw_exempt w)
           | r :: rest when r.Affine.a_write -> go rest
           | r :: rest -> (
               let writes = List.filter writes ~f:(fun w -> write_eligible ~read:r ~write:w) in
@@ -5480,8 +5462,7 @@ let read_multiplicity_query (static_indices : Indexing.static_symbol list)
         let bounds =
           Array.map sites ~f:(fun a ->
               let domain = List.map a.Affine.a_loops ~f:(fun (s, (lo, hi)) -> (s, hi - lo + 1)) in
-              match Affine.fiber_cardinality_ub ~domain a.a_map with
-              | `Exact n | `At_most n -> n)
+              match Affine.fiber_cardinality_ub ~domain a.a_map with `Exact n | `At_most n -> n)
         in
         Array.foldi sites ~init:0 ~f:(fun i acc a ->
             let total =
@@ -5497,23 +5478,21 @@ let read_multiplicity_query (static_indices : Indexing.static_symbol list)
 let drop_dead_loop_accesses (accs : Tn.t Affine.access list) : Tn.t Affine.access list =
   List.filter accs ~f:(fun a -> List.for_all a.Affine.a_loops ~f:(fun (_, (lo, hi)) -> hi >= lo))
 
-
 (* The placement decision procedure over the traced facts and affine metrics — the tail of the
    retired [visit_llc], factored out (gh-554; the analysis/decision split of gh-555 step 1). Writes
    decisions into the lineage's placements table; the metrics are forced only when a decision
    actually consults them. The heuristic caps ([max_visits], [max_inline_reduction],
-   [max_inline_fanin]) are priors of
-   this default policy, not legality: a node in [optim_ctx.inline_preferences] (gh-555) is exempt
-   from both, like one-hot selector producers always were, while the legality rejections
-   ([check_and_store_virtual] / [inline_computation]) and the observability pessimizations
-   (read-only, read-before-write) apply regardless. *)
+   [max_inline_fanin]) are priors of this default policy, not legality: a node in
+   [optim_ctx.inline_preferences] (gh-555) is exempt from both, like one-hot selector producers
+   always were, while the legality rejections ([check_and_store_virtual] / [inline_computation]) and
+   the observability pessimizations (read-only, read-before-write) apply regardless. *)
 let decide_placements (optim_ctx : optimize_ctx) traced_store ~max_visits ~reads_covered
     ~read_multiplicity =
   let plc = optim_ctx.placements in
   (* task-73617488: one-hot selector producers are exempt from the heuristic caps. The ordinary
-     [virtual_llc]/[cleanup_virtual_llc] path will inline them so that
-     [rewrite_one_hot_reductions] can fire at default [max_visits = 1]. gh-555: an explicit
-     [Inline] decision ([inline_preferences]) is the same kind of exemption, searchable. *)
+     [virtual_llc]/[cleanup_virtual_llc] path will inline them so that [rewrite_one_hot_reductions]
+     can fire at default [max_visits = 1]. gh-555: an explicit [Inline] decision
+     ([inline_preferences]) is the same kind of exemption, searchable. *)
   let cap_exempt traced =
     (traced.prefers_virtual_one_hot && not traced.has_non_one_hot_setter)
     || Hash_set.mem optim_ctx.inline_preferences traced.tn
@@ -5522,11 +5501,11 @@ let decide_placements (optim_ctx : optimize_ctx) traced_store ~max_visits ~reads
       let tn = traced.tn in
       (* The gh-ocannl-618 split of the read-modify-write exemption by consumer: the placement
          decisions here accept exemption-dependent coverage ([`Covered_rmw_exempt]) as covered,
-         mirroring the retired tracer — a statement's read of its own store position is not a
-         visit. The routine-INTERFACE classification does not, but it cannot run here: placements
-         are not settled (the fan-in guard below and [check_and_store_virtual]'s legality
-         rejections still flip candidates non-virtual), so the strict verdict is applied by
-         [reconcile_traced_store] over the FINAL code, once every node's standing is known. *)
+         mirroring the retired tracer — a statement's read of its own store position is not a visit.
+         The routine-INTERFACE classification does not, but it cannot run here: placements are not
+         settled (the fan-in guard below and [check_and_store_virtual]'s legality rejections still
+         flip candidates non-virtual), so the strict verdict is applied by [reconcile_traced_store]
+         over the FINAL code, once every node's standing is known. *)
       let covered =
         lazy
           (match (Lazy.force reads_covered) tn with
@@ -5586,18 +5565,18 @@ let decide_placements (optim_ctx : optimize_ctx) traced_store ~max_visits ~reads
         traced.read_before_write <- true;
         Tn.Placements.update plc tn On_device 36));
   (* Transitive inline-fanin guard (gh-573): the per-node caps above cannot see chains. A running
-     sum such as a transformer's residual stream has per-cell read multiplicity within the visit
-     cap (its consumers' copy-position reads are read-modify-write-exempt) and no reduction loops,
-     yet inlining it replays the entire prefix of the chain at every consumer — quadratic in depth.
-     The per-evaluation cost that actually grows is the fan-in of the fully-inlined computation:
-     the number of distinct materialized nodes it loads (the issue's triangular kernel signatures).
-     Bottom-up over the setter-reads graph, a node still headed for inlining accumulates its
-     virtual dependencies' fan-in sets; when the set outgrows the cap, the node is materialized
-     (provenance 41 — a heuristic policy decision, [`Inline]-flippable like the other caps), which
-     resets the fan-in of everything downstream: the chain materializes once per ~cap
-     contributors instead of once per consumer. Per-setter maximum, not union across setters — a
-     read of one cell executes one setter's computation (Block/concat range-guarded setters). *)
-  if virtualize_settings.max_inline_fanin >= 0 then (
+     sum such as a transformer's residual stream has per-cell read multiplicity within the visit cap
+     (its consumers' copy-position reads are read-modify-write-exempt) and no reduction loops, yet
+     inlining it replays the entire prefix of the chain at every consumer — quadratic in depth. The
+     per-evaluation cost that actually grows is the fan-in of the fully-inlined computation: the
+     number of distinct materialized nodes it loads (the issue's triangular kernel signatures).
+     Bottom-up over the setter-reads graph, a node still headed for inlining accumulates its virtual
+     dependencies' fan-in sets; when the set outgrows the cap, the node is materialized (provenance
+     41 — a heuristic policy decision, [`Inline]-flippable like the other caps), which resets the
+     fan-in of everything downstream: the chain materializes once per ~cap contributors instead of
+     once per consumer. Per-setter maximum, not union across setters — a read of one cell executes
+     one setter's computation (Block/concat range-guarded setters). *)
+  if virtualize_settings.max_inline_fanin >= 0 then
     (* The reads a stored computation replays when [inline_computation] inlines it: [Get]s of nodes
        other than [self], including inside [Local_scope] bodies. Mirrors [trace_node_facts]'
        collection for this routine's own setters; used for a dependency this routine only READS
@@ -5634,7 +5613,7 @@ let decide_placements (optim_ctx : optimize_ctx) traced_store ~max_visits ~reads
       | Constant _ | Constant_bits _ | Embed_index _ | Get_local _ | Get_merge_buffer _ -> acc
       | Get (q, _) -> if Tn.equal q self then acc else (stmt, Set.add cur q)
       | Get_dynamic { tn = q; dyn_value = v, _; _ } ->
-          reads_of_scalar ~self (stmt, (if Tn.equal q self then cur else Set.add cur q)) v
+          reads_of_scalar ~self (stmt, if Tn.equal q self then cur else Set.add cur q) v
       | Local_scope { body; _ } -> (reads_of_proc ~self stmt body, cur)
       | Ternop (op, (v1, _), (v2, _), (v3, _)) -> (
           let acc = reads_of_scalar ~self acc v1 in
@@ -5652,8 +5631,8 @@ let decide_placements (optim_ctx : optimize_ctx) traced_store ~max_visits ~reads
           | Ops.Only_first -> reads_of_scalar ~self acc v1
           | Ops.Only_second -> reads_of_scalar ~self acc v2
           | Ops.Both_operands | Ops.Gated_second ->
-              (* A gated second operand still charges: the worst-case evaluation runs both, and
-                 with a single alternative the per-arm maximum degenerates to the union. *)
+              (* A gated second operand still charges: the worst-case evaluation runs both, and with
+                 a single alternative the per-arm maximum degenerates to the union. *)
               reads_of_scalar ~self (reads_of_scalar ~self acc v1) v2)
       | Unop (_, (v, _)) -> reads_of_scalar ~self acc v
     in
@@ -5667,14 +5646,14 @@ let decide_placements (optim_ctx : optimize_ctx) traced_store ~max_visits ~reads
              [On_device] by the coverage rule above anyway. *)
           Hashtbl.set memo ~key:tn ~data:(Set.singleton (module Tnode) tn);
           let expand acc p =
-            (* Recurse first: the dependency's own decision lands before its placement is
-               consulted, making the result traversal-order-independent. An undecided dependency
-               expands as though it will be virtual, though inlining legality is only settled
-               later ([check_and_store_virtual], inside the virtualizer this pass feeds) — an
-               over-approximation erring toward materialization, the safe direction shared with
-               the multiplicity bound; the opposite default would let a chain of undecided links
-               through the cap on every first compile. A consumer spuriously materialized this
-               way stays an [`Inline] flip candidate, the search's channel for undoing it. *)
+            (* Recurse first: the dependency's own decision lands before its placement is consulted,
+               making the result traversal-order-independent. An undecided dependency expands as
+               though it will be virtual, though inlining legality is only settled later
+               ([check_and_store_virtual], inside the virtualizer this pass feeds) — an
+               over-approximation erring toward materialization, the safe direction shared with the
+               multiplicity bound; the opposite default would let a chain of undecided links through
+               the cap on every first compile. A consumer spuriously materialized this way stays an
+               [`Inline] flip candidate, the search's channel for undoing it. *)
             let s_p = fanin p in
             if Tn.Placements.known_non_virtual plc p then Set.add acc p else Set.union acc s_p
           in
@@ -5710,9 +5689,7 @@ let decide_placements (optim_ctx : optimize_ctx) traced_store ~max_visits ~reads
                 | read_sets -> max_expansion read_sets)
             | Some traced ->
                 let s =
-                  Set.union
-                    (max_expansion traced.setter_reads)
-                    (max_expansion (inherited_reads ()))
+                  Set.union (max_expansion traced.setter_reads) (max_expansion (inherited_reads ()))
                 in
                 traced.inline_fanin <- max 1 (Set.length s);
                 if
@@ -5726,7 +5703,7 @@ let decide_placements (optim_ctx : optimize_ctx) traced_store ~max_visits ~reads
           Hashtbl.set memo ~key:tn ~data:s;
           s
     in
-    Hashtbl.iter_keys traced_store ~f:(fun tn -> ignore (fanin tn : Set.M(Tnode).t)))
+    Hashtbl.iter_keys traced_store ~f:(fun tn -> ignore (fanin tn : Set.M(Tnode).t))
 
 type analysis = {
   an_llc : t;
@@ -5774,58 +5751,55 @@ let copy_traced_store (store : traced_store) : traced_store =
   Hashtbl.map store ~f:(fun t -> { t with tn = t.tn })
 
 (* gh-610: reconcile the traced store with the FINAL optimized code. The traced store is the
-   routine's node registry — the kernel parameter list ([C_syntax.compile_proc]), context
-   allocation ([Backends.allocate_delta]) and the routine interface ([input_and_output_nodes])
-   all enumerate it — but [analyze_proc] builds it from the RAW code, and cross-routine inlining
+   routine's node registry — the kernel parameter list ([C_syntax.compile_proc]), context allocation
+   ([Backends.allocate_delta]) and the routine interface ([input_and_output_nodes]) all enumerate it
+   — but [analyze_proc] builds it from the RAW code, and cross-routine inlining
    ([inline_computation] splicing a computation an earlier routine of the lineage committed
    [Virtual]) makes the final code diverge from the raw code in both directions. Three
    reconciliations, all against the final code (review round 1 of the gh-610/611 PR):
 
-   - Nodes the raw code never mentions get fresh entries, or C-family codegen emits an identifier
-     no parameter declares. A stored computation's setters target the virtual node itself, so
-     splices only contribute reads and fresh entries are [read_only]; writes are handled all the
-     same in case a future pass splices differently.
-   - A spliced read of an ALREADY-TRACED node can invalidate the raw analysis' write-covers-reads
-     conclusion, leaving the node output-only with its incoming value silently ignored. A read at
-     a walk position before the node's first write is flipped to [read_before_write] directly (a
-     raw pre-write read would already have set it via the coverage query); a read AFTER a write
-     is NOT thereby covered — the write may touch only some cells or sit under a guard — so such
-     reads are re-judged with the same per-cell machinery the raw pipeline uses,
-     [reads_covered_query] over the final code's affine accesses (review round 2: syntactic
-     priority is not coverage). The query is built lazily: routines without a
-     read-after-write-of-a-traced-node pattern never pay for it.
-   - The gh-ocannl-618 strict interface classification closes over the settled placements: a
-     read-modify-write-exempt read still consumes the entry values of a node that owns a buffer
-     ([ell[0] = 5000; out[i] = ell[i]] reads ell's incoming cells 1.. at the copy position, an
-     accumulation with no preceding definite initialization reads its own), so every non-virtual
-     written node whose RAW-analysis coverage is exemption-dependent flips to
-     [read_before_write] and is promoted [On_device]. This cannot run in [decide_placements]
-     (review round 1 of the gh-617/618 PR): an undecided node can become non-virtual AFTER it —
-     the fan-in guard, a [check_and_store_virtual] legality rejection — and only here is every
-     node's standing known. Nodes that stay virtual are exempt by construction: a virtual node
-     has no interface, and exemption-dependent coverage is exactly the shape of the
-     virtualizer's partial-write producers (an injective scatter emits no neutral init; inlining
-     prepends the init fallback).
-   - Read-only entries whose node the final code never touches are dropped (an all-virtual
-     routine's deferred-computation leaves): they would otherwise read back as phantom inputs,
-     parameters, allocations and dependencies of a schedule that does not touch them. The prune
-     is deliberately no wider than that genre: an entry recording a raw WRITE keeps its place
-     even when no access survives — the vanished write is not splicing's doing (out-of-contract
-     scope writes probed at the analysis level per gh-584, optimizer elisions), and the raw
-     decision-level facts are the deliverable there. Committed-[Virtual] entries stay too — they
-     are not interface material (no parameter, no allocation) but remain introspectable.
+   - Nodes the raw code never mentions get fresh entries, or C-family codegen emits an identifier no
+   parameter declares. A stored computation's setters target the virtual node itself, so splices
+   only contribute reads and fresh entries are [read_only]; writes are handled all the same in case
+   a future pass splices differently. - A spliced read of an ALREADY-TRACED node can invalidate the
+   raw analysis' write-covers-reads conclusion, leaving the node output-only with its incoming value
+   silently ignored. A read at a walk position before the node's first write is flipped to
+   [read_before_write] directly (a raw pre-write read would already have set it via the coverage
+   query); a read AFTER a write is NOT thereby covered — the write may touch only some cells or sit
+   under a guard — so such reads are re-judged with the same per-cell machinery the raw pipeline
+   uses, [reads_covered_query] over the final code's affine accesses (review round 2: syntactic
+   priority is not coverage). The query is built lazily: routines without a
+   read-after-write-of-a-traced-node pattern never pay for it. - The gh-ocannl-618 strict interface
+   classification closes over the settled placements: a read-modify-write-exempt read still consumes
+   the entry values of a node that owns a buffer ([ell[0] = 5000; out[i] = ell[i]] reads ell's
+   incoming cells 1.. at the copy position, an accumulation with no preceding definite
+   initialization reads its own), so every non-virtual written node whose RAW-analysis coverage is
+   exemption-dependent flips to [read_before_write] and is promoted [On_device]. This cannot run in
+   [decide_placements] (review round 1 of the gh-617/618 PR): an undecided node can become
+   non-virtual AFTER it — the fan-in guard, a [check_and_store_virtual] legality rejection — and
+   only here is every node's standing known. Nodes that stay virtual are exempt by construction: a
+   virtual node has no interface, and exemption-dependent coverage is exactly the shape of the
+   virtualizer's partial-write producers (an injective scatter emits no neutral init; inlining
+   prepends the init fallback). - Read-only entries whose node the final code never touches are
+   dropped (an all-virtual routine's deferred-computation leaves): they would otherwise read back as
+   phantom inputs, parameters, allocations and dependencies of a schedule that does not touch them.
+   The prune is deliberately no wider than that genre: an entry recording a raw WRITE keeps its
+   place even when no access survives — the vanished write is not splicing's doing (out-of-contract
+   scope writes probed at the analysis level per gh-584, optimizer elisions), and the raw
+   decision-level facts are the deliverable there. Committed-[Virtual] entries stay too — they are
+   not interface material (no parameter, no allocation) but remain introspectable.
 
-   Merge-buffer reads reconcile separately, via the return value: the result says whether the
-   final code still reads the merge buffer, so the caller can drop a raw-declared [merge_node]
-   whose read was deferred away (keeping it would make linking demand a transfer the schedule
-   never consumes). A spliced merge read the routine does NOT declare raises instead: merge
-   buffers hold the payload of the transfer preceding THIS routine's run, so deferring a merge
-   read into a later routine changes which transfer it observes — that computation must not be
-   shared across routines. *)
+   Merge-buffer reads reconcile separately, via the return value: the result says whether the final
+   code still reads the merge buffer, so the caller can drop a raw-declared [merge_node] whose read
+   was deferred away (keeping it would make linking demand a transfer the schedule never consumes).
+   A spliced merge read the routine does NOT declare raises instead: merge buffers hold the payload
+   of the transfer preceding THIS routine's run, so deferring a merge read into a later routine
+   changes which transfer it observes — that computation must not be shared across routines. *)
 let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
     ~(spliced_reads : Tnode.t Hash_set.t) ~(static_indices : Indexing.static_symbol list)
     ~(merge_node : Tnode.t option)
-    ~(raw_coverage : (Tn.t -> [ `Covered | `Covered_rmw_exempt of string | `Unknown of string ]) Lazy.t)
+    ~(raw_coverage :
+       (Tn.t -> [ `Covered | `Covered_rmw_exempt of string | `Unknown of string ]) Lazy.t)
     ~(cap_inline_flips : Tnode.t Hash_set.t) (llc : t) : bool * Set.M(Tnode).t =
   let accessed = Hash_set.create (module Tnode) in
   let written_seen = Hash_set.create (module Tnode) in
@@ -5837,26 +5811,24 @@ let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
   (* [live] is false under a dead loop ([to_ < from_]): a dead access still REGISTERS (renderers
      emit dead-loop bodies, so their identifiers need parameters, and its entry must survive the
      prune) but never executes, so it neither supplies coverage (a dead write does not enter
-     [written_seen]) nor demands it (a dead read flips no flag), and a node mentioned only in
-     dead code gets a flagless entry — registered for rendering, absent from the interface —
-     mirroring the raw analysis and [drop_dead_loop_accesses] (review rounds 3-4). *)
+     [written_seen]) nor demands it (a dead read flips no flag), and a node mentioned only in dead
+     code gets a flagless entry — registered for rendering, absent from the interface — mirroring
+     the raw analysis and [drop_dead_loop_accesses] (review rounds 3-4). *)
   let read ~live tn =
     Hash_set.add accessed tn;
     match Hashtbl.find traced_store tn with
     | None -> if live then Hash_set.add fresh_read tn
     | Some traced ->
-        (* Flag flips are gated PER NODE on [spliced_reads] — the nodes read inside inlined
-           bodies (review rounds 6-7): splicing is what moves reads to positions the raw
-           analysis never judged, so only those nodes get the strict coverage verdicts, while
-           raw-positioned reads keep the raw verdicts, whose lenient contracts (rmw exemption,
-           guards-taken) deliberately classify patterns whose initialization lives in an earlier
-           routine of the program — routine-wide strictness broke real flows across the suite.
-           [zeroed_out] counts as written: a [Zero_out]-only node (a [Fetch] of constant 0.)
-           records no [has_assignment], yet a spliced read before it still needs the entry
-           value. *)
+        (* Flag flips are gated PER NODE on [spliced_reads] — the nodes read inside inlined bodies
+           (review rounds 6-7): splicing is what moves reads to positions the raw analysis never
+           judged, so only those nodes get the strict coverage verdicts, while raw-positioned reads
+           keep the raw verdicts, whose lenient contracts (rmw exemption, guards-taken) deliberately
+           classify patterns whose initialization lives in an earlier routine of the program —
+           routine-wide strictness broke real flows across the suite. [zeroed_out] counts as
+           written: a [Zero_out]-only node (a [Fetch] of constant 0.) records no [has_assignment],
+           yet a spliced read before it still needs the entry value. *)
         if
-          live
-          && Hash_set.mem spliced_reads tn
+          live && Hash_set.mem spliced_reads tn
           && (traced.has_assignment || traced.zeroed_out)
           && not traced.read_before_write
         then
@@ -5900,12 +5872,12 @@ let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
     match sc with
     | Constant _ | Constant_bits _ | Embed_index _ | Get_local _ -> ()
     | Get_merge_buffer (source, _) ->
-        (* Dead merge reads mirror the raw tracer's dead-body skip (review round 9): the read
-           never executes, so it neither validates against the declared merge node nor keeps the
-           declaration alive. The SOURCE deliberately does not enter [accessed] in either case:
-           the merge buffer is the parameter, and an ordinary traced entry for the source would
-           mint a duplicate buffer through [C_syntax.compile_proc]/[allocate_delta] — the raw
-           tracer records only [merge_node] (review round 5). *)
+        (* Dead merge reads mirror the raw tracer's dead-body skip (review round 9): the read never
+           executes, so it neither validates against the declared merge node nor keeps the
+           declaration alive. The SOURCE deliberately does not enter [accessed] in either case: the
+           merge buffer is the parameter, and an ordinary traced entry for the source would mint a
+           duplicate buffer through [C_syntax.compile_proc]/[allocate_delta] — the raw tracer
+           records only [merge_node] (review round 5). *)
         if live then (
           (match merge_node with
           | Some m when Tn.equal m source -> ()
@@ -5916,8 +5888,8 @@ let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
                      "an inlined cross-routine computation reads the merge buffer of \
                       %{Tn.debug_name source}, which is not this routine's declared merge node: \
                       merge-buffer contents are transient to the routine receiving the transfer, \
-                      so a computation reading them must not be deferred across routines. Mark \
-                      the node computed from the merge buffer as materialized (e.g. via \
+                      so a computation reading them must not be deferred across routines. Mark the \
+                      node computed from the merge buffer as materialized (e.g. via \
                       Train.set_materialized) in the routine that reads the transfer."]));
           uses_merge := true)
     | Get (tn, _) -> read ~live tn
@@ -5932,8 +5904,8 @@ let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
     | Binop (op, (a, _), (b, _)) -> (
         (* The discarded operand of a projection is never rendered, hence never evaluated:
            registering its reads would invent phantom parameters — dispatch through the operand
-           conditionality classifier like the affine and tracing walkers (review round 3). A
-           gated second operand IS rendered, so it registers. *)
+           conditionality classifier like the affine and tracing walkers (review round 3). A gated
+           second operand IS rendered, so it registers. *)
         match Ops.binop_conditionality op with
         | Ops.Only_first -> scalar ~live a
         | Ops.Only_second -> scalar ~live b
@@ -5945,12 +5917,12 @@ let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
   proc ~live:true llc;
   let final_accs = lazy (drop_dead_loop_accesses (affine_accesses llc)) in
   (* Reads that follow a write of their node in program order: whether the write actually covers
-     them is a per-cell, guard-aware question, answered by the same query that judged the raw
-     reads. Lazy so routines without the pattern skip the affine pass over the final code. *)
+     them is a per-cell, guard-aware question, answered by the same query that judged the raw reads.
+     Lazy so routines without the pattern skip the affine pass over the final code. *)
   (if not (Hash_set.is_empty suspects) then
-     (* A guarded write may suppress [read_before_write] only for reads it DOMINATES: when the
-        read executes, a same-guard write executed too, but a guard that can be false while the
-        read still runs leaves the entry value required (review rounds 4 and 8; the query's own
+     (* A guarded write may suppress [read_before_write] only for reads it DOMINATES: when the read
+        executes, a same-guard write executed too, but a guard that can be false while the read
+        still runs leaves the entry value required (review rounds 4 and 8; the query's own
         guards-taken contract stays for its placement-decision consumers). Guarded READS still
         demand coverage — conservative in the same direction. *)
      let covered =
@@ -5974,31 +5946,30 @@ let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
         traced.read_before_write <- true;
         Hash_set.add flipped_rbw tn)
       else traced.read_only <- true);
-  (* The gh-ocannl-618 strict interface classification, over the SETTLED placements (see the
-     header comment): every non-virtual written node whose reads are covered only thanks to the
+  (* The gh-ocannl-618 strict interface classification, over the SETTLED placements (see the header
+     comment): every non-virtual written node whose reads are covered only thanks to the
      read-modify-write exemption consumes its entry values, so it must not classify output-only
      (aliasing-eligible, absent from link-time input verification). Judged on the RAW analysis'
      verdict ([raw_coverage] — review round 4): the fact being closed over is a property of the
      program as analyzed, and the final code can only obscure it — [rewrite_one_hot_reductions]
-     turns a raw copy-position self-read into [Get_dynamic], whose coverage is uninterpretable,
-     so a final-code query both loses real exemption facts (an uninitialized embedding-gradient
+     turns a raw copy-position self-read into [Get_dynamic], whose coverage is uninterpretable, so a
+     final-code query both loses real exemption facts (an uninitialized embedding-gradient
      accumulation) and mints spurious [`Unknown]s (round 3's threefry materialization). ONLY the
      [`Covered_rmw_exempt] verdict flips: this pass closes the exemption split, it does not
      re-litigate coverage — genuinely uncovered raw reads were already flipped by
-     [decide_placements], and spliced reads have their own strict path above. A flipped node is
-     also promoted [On_device], like [decide_placements]' own rule (same provenance 36): a
-     late-rejected candidate is otherwise only [Never_virtual], which [is_materialized_force]
-     would default to [Local] — routine scratch with no incoming contents, contradicting the
-     entry values the reads consume. Two bookkeeping consequences of promoting (round 4): a
-     cap-provenance entry (1/39/41) is recorded in [cap_inline_flips] before being overwritten,
-     so the node keeps its [`Inline] flip candidacy (a virtual reading needs no interface
-     classification — the search remains free to try it); and a node an EARLIER routine of the
-     lineage committed [Local] cannot be promoted — its scratch buffer does not persist, so the
-     in-place update is rejected with the materialize-before-first-use error rather than
-     [Placements.update]'s internal transition failure. Deliberately NOT recorded in
-     [flipped_rbw]: these are raw-analysis-genre facts, and the prior-context demand override is
-     for splice-created flips only (a raw pattern's entry values arrive through the assignments
-     layer's curated flows). *)
+     [decide_placements], and spliced reads have their own strict path above. A flipped node is also
+     promoted [On_device], like [decide_placements]' own rule (same provenance 36): a late-rejected
+     candidate is otherwise only [Never_virtual], which [is_materialized_force] would default to
+     [Local] — routine scratch with no incoming contents, contradicting the entry values the reads
+     consume. Two bookkeeping consequences of promoting (round 4): a cap-provenance entry (1/39/41)
+     is recorded in [cap_inline_flips] before being overwritten, so the node keeps its [`Inline]
+     flip candidacy (a virtual reading needs no interface classification — the search remains free
+     to try it); and a node an EARLIER routine of the lineage committed [Local] cannot be promoted —
+     its scratch buffer does not persist, so the in-place update is rejected with the
+     materialize-before-first-use error rather than [Placements.update]'s internal transition
+     failure. Deliberately NOT recorded in [flipped_rbw]: these are raw-analysis-genre facts, and
+     the prior-context demand override is for splice-created flips only (a raw pattern's entry
+     values arrive through the assignments layer's curated flows). *)
   Hashtbl.iteri traced_store ~f:(fun ~key:tn ~data:traced ->
       if
         (traced.has_assignment || traced.zeroed_out)
@@ -6013,21 +5984,20 @@ let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
                 (Utils.User_error
                    [%string
                      "the node %{Tn.debug_name tn} was placed as routine-local scratch by an \
-                      earlier routine of this compilation lineage, but this routine updates it \
-                      in place (its reads consume the entry values), and a scratch buffer does \
-                      not persist between routines. Mark %{Tn.debug_name tn} as materialized \
-                      (e.g. via Train.set_materialized) before the first routine using it gets \
-                      compiled."]);
+                      earlier routine of this compilation lineage, but this routine updates it in \
+                      place (its reads consume the entry values), and a scratch buffer does not \
+                      persist between routines. Mark %{Tn.debug_name tn} as materialized (e.g. via \
+                      Train.set_materialized) before the first routine using it gets compiled."]);
             (match Tn.Placements.raw_entry plc tn with
             | Some (Never_virtual, (1 | 39 | 41)) -> Hash_set.add cap_inline_flips tn
             | _ -> ());
             traced.read_before_write <- true;
             Tn.Placements.update plc tn On_device 36);
-  (* A node mentioned ONLY in dead code still needs a registry entry (its identifier renders, so
-     a parameter must declare it and the prune must not drop it) but no interface flags: it
-     neither reads nor writes at runtime, and advertising either would create phantom
-     dependencies for schedules that execute nothing (review round 4). [get_node] creates the
-     flagless entry; for already-entried nodes it is a no-op lookup. *)
+  (* A node mentioned ONLY in dead code still needs a registry entry (its identifier renders, so a
+     parameter must declare it and the prune must not drop it) but no interface flags: it neither
+     reads nor writes at runtime, and advertising either would create phantom dependencies for
+     schedules that execute nothing (review round 4). [get_node] creates the flagless entry; for
+     already-entried nodes it is a no-op lookup. *)
   Hash_set.iter accessed ~f:(fun tn -> ignore (get_node traced_store tn : traced_array));
   let stale =
     Hashtbl.fold traced_store ~init:[] ~f:(fun ~key ~data acc ->
@@ -6065,11 +6035,11 @@ let reconcile_traced_store (plc : Tn.Placements.t) (traced_store : traced_store)
 
    Only constants the routine also READS convert: in-routine reads are what motivate materializing
    an operand beside its init, and every gh-633 face has them. A write-only constant — a literal
-   that IS the routine's root, the [Train.forward_once]-then-print pattern — is an explicit
-   "compute this constant into the context" request: converting it would optimize the routine to
-   [Noop] and push observation onto the [Host_inits]/for-print-proxy fallbacks, churning behavior
-   for no legality gain (no reads, so nothing races the annotated loops... the init alone can, but
-   such a routine carries no hardware loops to race with).
+   that IS the routine's root, the [Train.forward_once]-then-print pattern — is an explicit "compute
+   this constant into the context" request: converting it would optimize the routine to [Noop] and
+   push observation onto the [Host_inits]/for-print-proxy fallbacks, churning behavior for no
+   legality gain (no reads, so nothing races the annotated loops... the init alone can, but such a
+   routine carries no hardware loops to race with).
 
    Walker conventions (gh-ocannl-630): the read scan descends operands exhaustively WITHOUT
    [Ops.binop_conditionality] dispatch — counting a projection's discarded read keeps a node
@@ -6143,9 +6113,7 @@ let hosted_constant_inits_to_link_time (plc : Tn.Placements.t) (traced_store : t
     let rec rewrite (c : t) : t =
       match c with
       | Seq (c1, c2) -> (
-          match (rewrite c1, rewrite c2) with
-          | Noop, c | c, Noop -> c
-          | c1, c2 -> Seq (c1, c2))
+          match (rewrite c1, rewrite c2) with Noop, c | c, Noop -> c | c1, c2 -> Seq (c1, c2))
       | For_loop ({ body; _ } as f) -> (
           match rewrite body with Noop -> Noop | body -> For_loop { f with body })
       | If ({ body; _ } as i) -> (
@@ -6191,16 +6159,15 @@ let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : opt
   (match llc with
   | Noop -> [%log "routine optimized to an empty schedule: every target virtualized (gh-611)"]
   | _ -> ());
-  (* The searchable decision dimensions (gh-555), read off the now-committed placements: cleanup
-     has committed the surviving virtual candidates, and the backend-compile finalization
+  (* The searchable decision dimensions (gh-555), read off the now-committed placements: cleanup has
+     committed the surviving virtual candidates, and the backend-compile finalization
      ([default_to_most_local]) has not yet rewritten the cap provenances. *)
   let flip_candidates =
     let plc = input_ctx.placements in
     Hashtbl.fold traced_store ~init:[] ~f:(fun ~key:tn ~data:traced acc ->
         let one_hot = traced.prefers_virtual_one_hot && not traced.has_non_one_hot_setter in
         if
-          (not traced.has_assignment)
-          || one_hot || traced.is_scalar_constexpr
+          (not traced.has_assignment) || one_hot || traced.is_scalar_constexpr
           || not traced.read_by_other
         then acc
         else
@@ -6214,10 +6181,10 @@ let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : opt
             | Some (Virtual, _) when not (Tn.known_virtual tn || Tn.known_constant tn) ->
                 Some `Materialize
             | Some (Never_virtual, (1 | 39 | 41)) -> Some `Inline
-            (* A cap-selected node the reconcile-stage interface classification promoted
-               [On_device 36] (gh-618 round 4): the promotion is the interface consequence of the
-               cap's own materialization, not a legality/intent decision, so the [`Inline] flip
-               stays searchable — a virtual reading has no interface to classify. *)
+            (* A cap-selected node the reconcile-stage interface classification promoted [On_device
+               36] (gh-618 round 4): the promotion is the interface consequence of the cap's own
+               materialization, not a legality/intent decision, so the [`Inline] flip stays
+               searchable — a virtual reading has no interface to classify. *)
             | Some (On_device, 36) when Hash_set.mem cap_inline_flips tn -> Some `Inline
             | _ -> None
           in
@@ -6232,9 +6199,9 @@ let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : opt
               }
               :: acc)
     |> List.sort ~compare:(fun a b ->
-           match Int.compare b.fc_recompute_cost a.fc_recompute_cost with
-           | 0 -> Tn.compare a.fc_tn b.fc_tn
-           | c -> c)
+        match Int.compare b.fc_recompute_cost a.fc_recompute_cost with
+        | 0 -> Tn.compare a.fc_tn b.fc_tn
+        | c -> c)
   in
   let optimize_ctx = input_ctx in
   {
@@ -6309,8 +6276,8 @@ let analysis_cache_misses = ref 0
 let analysis_cache_stats () = (!analysis_cache_hits, !analysis_cache_misses)
 let clear_analysis_cache () = analysis_cache := []
 
-(* Entries retain their routines' code, hence their tensor nodes: drop them before an
-   accessibility snapshot — the diagnostic reports user-code liveness, not cache retention. *)
+(* Entries retain their routines' code, hence their tensor nodes: drop them before an accessibility
+   snapshot — the diagnostic reports user-code liveness, not cache retention. *)
 let () =
   Tn.before_accessibility_snapshot := clear_analysis_cache :: !Tn.before_accessibility_snapshot
 
@@ -6321,8 +6288,7 @@ let cached_analyze_proc (static_indices : Indexing.static_symbol list) (llc : t)
       match List.Assoc.find !analysis_cache key ~equal:String.equal with
       | Some an ->
           Int.incr analysis_cache_hits;
-          analysis_cache :=
-            (key, an) :: List.Assoc.remove !analysis_cache key ~equal:String.equal;
+          analysis_cache := (key, an) :: List.Assoc.remove !analysis_cache key ~equal:String.equal;
           (* Re-run the (cheap) written-bounds pinning: it is idempotent on this routine's nodes,
              but its raising guard — a writer compiled after a reader settled the written node's
              bounds — must fire regardless of the cache (see [pin_device_written_bounds]). *)
@@ -6337,9 +6303,9 @@ let cached_analyze_proc (static_indices : Indexing.static_symbol list) (llc : t)
 let optimize_proc (input_ctx : optimize_ctx) static_indices llc =
   (* gh-ocannl-584: the pipeline's entry gate for scope purity, ahead of the analysis cache so a
      digest hit cannot skip it. Codegen's gate alone would not do: [hoist_cross_statement_cse] lifts
-     a body shared by sibling statements to a top-level [Declare_local] + body, which moves an impure
-     body's write out of any [Local_scope] -- past the later check, and executing once instead of
-     once per user statement. Catch it while it is still visibly a body. *)
+     a body shared by sibling statements to a top-level [Declare_local] + body, which moves an
+     impure body's write out of any [Local_scope] -- past the later check, and executing once
+     instead of once per user statement. Catch it while it is still visibly a body. *)
   validate_scope_bodies llc;
   specialize_proc input_ctx (cached_analyze_proc static_indices llc)
 
@@ -6466,19 +6432,8 @@ let to_doc_cstyle ?name ?static_indices () llc =
         group (header ^^ body_doc ^^ break 1 ^^ string "}")
     | Workgroup_barrier -> string "workgroup_barrier;"
     | Tile_mma
-        {
-          d = d_tn, d_idcs;
-          a = a_tn, a_idcs;
-          b = b_tn, b_idcs;
-          ta;
-          tb;
-          m;
-          n;
-          k;
-          lane;
-          fallback;
-          _;
-        } ->
+        { d = d_tn, d_idcs; a = a_tn, a_idcs; b = b_tn, b_idcs; ta; tb; m; n; k; lane; fallback; _ }
+      ->
         let transposed t = if t then string "^T" else empty in
         let header =
           string (Printf.sprintf "tile_mma<%dx%dx%d>@" m n k)
@@ -6619,19 +6574,8 @@ let to_doc ?name ?static_indices () llc =
         group (header ^^ body_doc ^^ break 1 ^^ string "}")
     | Workgroup_barrier -> string "workgroup_barrier;"
     | Tile_mma
-        {
-          d = d_tn, d_idcs;
-          a = a_tn, a_idcs;
-          b = b_tn, b_idcs;
-          ta;
-          tb;
-          m;
-          n;
-          k;
-          lane;
-          fallback;
-          _;
-        } ->
+        { d = d_tn, d_idcs; a = a_tn, a_idcs; b = b_tn, b_idcs; ta; tb; m; n; k; lane; fallback; _ }
+      ->
         let transposed t = if t then string "^T" else empty in
         let header =
           string (Printf.sprintf "tile_mma<%dx%dx%d>@" m n k)

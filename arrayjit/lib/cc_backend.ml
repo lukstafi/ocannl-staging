@@ -27,11 +27,11 @@ let fast_math_enabled () = Utils.get_global_flag ~default:false ~arg_name:"cc_ba
    magnitude costlier than on Unix, that probing dominates short tests -- measured on one Windows
    box, test/operations/hello_world_dim1x1 runs in 1.52s probing against 1.00s cached.
 
-   So memoize across processes too, in files under [probe_cache_dir]. The key covers everything
-   that can change an answer without changing a file's identity: the settings feeding the probes,
-   plus a digest of PATH standing in for which toolchain is active (an opam switch change, a
-   different compiler in front). A stale entry would silently select wrong ISA flags, so the key
-   errs towards re-probing; [cc_backend_probe_cache=false] bypasses the files entirely.
+   So memoize across processes too, in files under [probe_cache_dir]. The key covers everything that
+   can change an answer without changing a file's identity: the settings feeding the probes, plus a
+   digest of PATH standing in for which toolchain is active (an opam switch change, a different
+   compiler in front). A stale entry would silently select wrong ISA flags, so the key errs towards
+   re-probing; [cc_backend_probe_cache=false] bypasses the files entirely.
 
    Every failure degrades to probing in-process rather than raising: an unwritable temp directory, a
    torn or truncated file, a rename losing a race. Dune runs these executables in parallel, so
@@ -45,11 +45,11 @@ let probe_cache_marker = "ocannl-cc-probe-v1\n"
    OCANNL runs. Hence a per-user directory created 0700, refused unless it really is a directory we
    own with no group/other access -- a squatted path (or a symlink, which is why this is [lstat] and
    not [stat]) fails the test and probing simply stays in-process, as it was before this cache.
-   Ownership and permissions are checked on POSIX only: Windows has no equivalent exposure, its
-   temp directory being per-user already, and it reports both halves synthetically -- [getuid]
-   answers 1 where [lstat] answers uid 0, and the mode always reads 0o777 -- so the test would
-   reject OCANNL's own directory and quietly disable the cache on the platform that needs it most.
-   That the path is a directory rather than a planted symlink is still checked everywhere. *)
+   Ownership and permissions are checked on POSIX only: Windows has no equivalent exposure, its temp
+   directory being per-user already, and it reports both halves synthetically -- [getuid] answers 1
+   where [lstat] answers uid 0, and the mode always reads 0o777 -- so the test would reject OCANNL's
+   own directory and quietly disable the cache on the platform that needs it most. That the path is
+   a directory rather than a planted symlink is still checked everywhere. *)
 let probe_cache_dir =
   lazy
     (let dir =
@@ -69,12 +69,13 @@ let probe_cache_dir =
        Option.some_if ours dir
      with _ -> None)
 
-(* Forward reference to [compiler_command] below: resolving the command is itself a cached probe,
-   so the key of the probes that RUN the compiler is built from it, not the other way round. *)
+(* Forward reference to [compiler_command] below: resolving the command is itself a cached probe, so
+   the key of the probes that RUN the compiler is built from it, not the other way round. *)
 let compiler_command_ref : (unit -> string) ref = ref (fun () -> "")
 
 (* Whitespace-separated tokens, honoring quotes: the command is spelled for a shell, so a path
-   containing spaces arrives quoted and splitting on the first space would fingerprint a fragment. *)
+   containing spaces arrives quoted and splitting on the first space would fingerprint a
+   fragment. *)
 let shell_tokens command =
   let tokens = ref [] and current = Buffer.create 32 and quote = ref None in
   let flush () =
@@ -103,13 +104,18 @@ let resolve_executable token =
       List.concat_map dirs ~f:(fun dir ->
           List.map exts ~f:(fun ext -> Stdlib.Filename.concat dir (token ^ ext)))
   in
-  (* Executable, not merely present (Codex P1 on PR #337): a PATH search skips a non-executable
-     file of the right name and runs a later one, so accepting the first regular file would key on
-     a file the compile never runs -- and then an upgrade of the one it does run would go unnoticed.
-     [X_OK] is meaningless on Windows, where OCaml's [access] does not implement it and the
-     extension list above carries the same information. *)
+  (* Executable, not merely present (Codex P1 on PR #337): a PATH search skips a non-executable file
+     of the right name and runs a later one, so accepting the first regular file would key on a file
+     the compile never runs -- and then an upgrade of the one it does run would go unnoticed. [X_OK]
+     is meaningless on Windows, where OCaml's [access] does not implement it and the extension list
+     above carries the same information. *)
   let is_executable path =
-    Sys.win32 || (try Unix.access path [ Unix.X_OK ]; true with _ -> false)
+    Sys.win32
+    ||
+      try
+        Unix.access path [ Unix.X_OK ];
+        true
+      with _ -> false
   in
   List.find_map candidates ~f:(fun path ->
       match try Some (Unix.stat path) with _ -> None with
@@ -200,37 +206,37 @@ let cached_probe ?(validate = fun _ -> true) ~name ~compute () =
   with
   | None -> compute ()
   | Some path -> (
-    let cached =
-      try
-        let data = Stdio.In_channel.read_all path in
-        (* The marker separates "the probe answered with the empty string" -- which [simd_flags]
-           legitimately does -- from a half-written or foreign file. *)
-        if String.is_prefix data ~prefix:probe_cache_marker then
-          let value = String.drop_prefix data (String.length probe_cache_marker) in
-          Option.some_if (validate value) value
-        else None
-      with _ -> None
-    in
-    match cached with
-    | Some value -> value
-    | None ->
-        let value = compute () in
-        (try
-           (* Publish by rename so a concurrent reader sees either the old file or the whole new
-              one, never a partial write. Staging inside the same (private) directory keeps the
-              rename on one volume, which it requires, and keeps the staging file unreadable to
-              anyone else too. *)
-           let tmp =
-             Stdlib.Filename.temp_file ~temp_dir:(Stdlib.Filename.dirname path)
-               "ocannl_cc_probe_" ".tmp"
-           in
-           Stdio.Out_channel.write_all tmp ~data:(probe_cache_marker ^ value);
-           try Stdlib.Sys.rename tmp path
-           with e ->
-             (try Stdlib.Sys.remove tmp with _ -> ());
-             raise e
-         with _ -> ());
-        value)
+      let cached =
+        try
+          let data = Stdio.In_channel.read_all path in
+          (* The marker separates "the probe answered with the empty string" -- which [simd_flags]
+             legitimately does -- from a half-written or foreign file. *)
+          if String.is_prefix data ~prefix:probe_cache_marker then
+            let value = String.drop_prefix data (String.length probe_cache_marker) in
+            Option.some_if (validate value) value
+          else None
+        with _ -> None
+      in
+      match cached with
+      | Some value -> value
+      | None ->
+          let value = compute () in
+          (try
+             (* Publish by rename so a concurrent reader sees either the old file or the whole new
+                one, never a partial write. Staging inside the same (private) directory keeps the
+                rename on one volume, which it requires, and keeps the staging file unreadable to
+                anyone else too. *)
+             let tmp =
+               Stdlib.Filename.temp_file ~temp_dir:(Stdlib.Filename.dirname path) "ocannl_cc_probe_"
+                 ".tmp"
+             in
+             Stdio.Out_channel.write_all tmp ~data:(probe_cache_marker ^ value);
+             try Stdlib.Sys.rename tmp path
+             with e ->
+               (try Stdlib.Sys.remove tmp with _ -> ());
+               raise e
+           with _ -> ());
+          value)
 
 let compiler_command =
   let resolved =
@@ -253,9 +259,9 @@ let compiler_command =
          ())
   in
   fun () ->
-    (* Resolve lazily rather than passing [Lazy.force resolved] as [~default]: that spawns
-       [ocamlc -config] even when the setting makes the answer irrelevant. An empty setting means
-       unset -- which is how [ocannl_config.reference] spells it. *)
+    (* Resolve lazily rather than passing [Lazy.force resolved] as [~default]: that spawns [ocamlc
+       -config] even when the setting makes the answer irrelevant. An empty setting means unset --
+       which is how [ocannl_config.reference] spells it. *)
     match Utils.get_global_arg ~default:"" ~arg_name:"cc_backend_compiler_command" with
     | "" -> Lazy.force resolved
     | command -> command
@@ -303,8 +309,8 @@ let probe_compiles ?(mode = `Compile) ~flags ~data () =
    and *downgrades* the target with it -- 22 [__ARM_FEATURE_*] macros against 26 with no flag and 33
    with [-mcpu=native], losing [__ARM_FEATURE_FP16_VECTOR_ARITHMETIC] among them, so a machine with
    native 16-bit arithmetic looked like one without (gh-ocannl-516). On x86 the mistake runs the
-   other way: [-mcpu=] is an alias for [-mtune=] there, which selects scheduling but not the ISA,
-   so it would silently forgo AVX2.
+   other way: [-mcpu=] is an alias for [-mtune=] there, which selects scheduling but not the ISA, so
+   it would silently forgo AVX2.
 
    "auto" (the default) therefore asks the target which family it is in and then probes that
    family's spelling, falling back to no flag -- the compiler's own default target, which is the
@@ -317,10 +323,11 @@ let arch_flags =
          ~compute:(fun () ->
            let is_arm =
              probe_compiles ~flags:""
-               ~data:"#if !defined(__aarch64__) && !defined(__arm__) && !defined(_M_ARM64)\n\
-                      #error \"not ARM\"\n\
-                      #endif\n\
-                      int ocannl_arch_probe;\n"
+               ~data:
+                 "#if !defined(__aarch64__) && !defined(__arm__) && !defined(_M_ARM64)\n\
+                  #error \"not ARM\"\n\
+                  #endif\n\
+                  int ocannl_arch_probe;\n"
                ()
            in
            let trivial = "int ocannl_arch_probe;\n" in
@@ -331,9 +338,8 @@ let arch_flags =
   fun () ->
     match Utils.get_global_arg ~default:"auto" ~arg_name:"cc_backend_arch_flags" with
     | "auto" -> Lazy.force probed
-    (* The portable baseline, spelled as a word because a config source cannot carry an empty
-       value (an empty setting means "unset"), and the `reproducible` profile has to be able to
-       pin it. *)
+    (* The portable baseline, spelled as a word because a config source cannot carry an empty value
+       (an empty setting means "unset"), and the `reproducible` profile has to be able to pin it. *)
     | "none" -> ""
     | flags -> flags
 
@@ -343,7 +349,10 @@ let arch_flags =
    leaving the compiler's own default -- which is what every OCANNL release before gh-ocannl-559
    did. *)
 let fp_contract_flag () =
-  match String.lowercase (String.strip (Utils.get_global_arg ~default:"auto" ~arg_name:"cc_backend_fp_contract")) with
+  match
+    String.lowercase
+      (String.strip (Utils.get_global_arg ~default:"auto" ~arg_name:"cc_backend_fp_contract"))
+  with
   | "auto" -> None
   | ("off" | "on" | "fast") as mode -> Some ("-ffp-contract=" ^ mode)
   | other -> invalid_arg ("cc_backend_fp_contract: expected auto | off | on | fast, got " ^ other)
@@ -371,11 +380,11 @@ let simd_flags =
   fun () ->
     match Utils.get_global_arg ~default:"auto" ~arg_name:"cc_backend_simd_flags" with
     | "auto" -> Lazy.force probed
-    (* No SIMD flags, spelled as a word for the same reason as [arch_flags]' "none": a config
-       source cannot carry an empty value. Whether the probe fires at all depends on what the
-       toolchain's default target already exposes, which is a per-machine fact, so a run that must
-       be machine-independent pins this rather than reasoning about which of the added flags could
-       have changed a result. *)
+    (* No SIMD flags, spelled as a word for the same reason as [arch_flags]' "none": a config source
+       cannot carry an empty value. Whether the probe fires at all depends on what the toolchain's
+       default target already exposes, which is a per-machine fact, so a run that must be
+       machine-independent pins this rather than reasoning about which of the added flags could have
+       changed a result. *)
     | "none" -> ""
     | flags -> flags
 
@@ -438,15 +447,15 @@ let parallel_grid_syntax_setting =
       | None ->
           invalid_arg ("cc_parallel_grid: expected auto | dispatch | openmp | none, got " ^ setting)
 
-(* gh-ocannl-516: whether the target has native fp16 arithmetic. Three states, and the middle one
-   is the reason a boolean will not do:
+(* gh-ocannl-516: whether the target has native fp16 arithmetic. Three states, and the middle one is
+   the reason a boolean will not do:
 
-   - [`None]: no [_Float16] at all. Half is emulated -- stored as uint16, computed through float.
-   - [`Promoted]: the type exists and its arithmetic is correct, but the compiler implements it by
-     promoting to float (x86-64 without AVX512-FP16). Better than bf16's explicit round-trips
-     because the compiler owns the promotion and can keep values in registers, but there is no
-     lane-count win, so the vector renderings and the cost model must not expect one.
-   - [`Native]: genuine 16-bit vector arithmetic (ARMv8.2-FP16, AVX512-FP16) -- twice f32's lanes.
+   - [`None]: no [_Float16] at all. Half is emulated -- stored as uint16, computed through float. -
+   [`Promoted]: the type exists and its arithmetic is correct, but the compiler implements it by
+   promoting to float (x86-64 without AVX512-FP16). Better than bf16's explicit round-trips because
+   the compiler owns the promotion and can keep values in registers, but there is no lane-count win,
+   so the vector renderings and the cost model must not expect one. - [`Native]: genuine 16-bit
+   vector arithmetic (ARMv8.2-FP16, AVX512-FP16) -- twice f32's lanes.
 
    All three are C-preprocessor facts, resolved when [cc] compiles a kernel, while the renderer
    decides what to emit in OCaml well before that. Probing the compiler once per process and
@@ -540,14 +549,14 @@ let avx512_target =
    width; clang/gcc lower 16-byte vectors natively on ARM). 0 disables explicit emission
    (auto-vectorization pragmas remain).
 
-   The 512-bit rung is measured, not inferred: on Zen 5 (Ryzen AI Max+ 395, gcc 15) the packed
-   f32 GEBP of [bin/narrow_gebp_bench] at n = 512 runs 225.7 GFLOP/s at 64 bytes against 130.5 at
-   32, f16 189.6 against 108.1 and bf16 140.6 against 95.1, with identical checksums. It is a
-   default rather than a hint because the alternative -- a machine that has the registers using
-   half of them -- is the more surprising of the two. Where 512-bit operation is not wanted (Intel
-   server parts clock down under sustained 512-bit work in a way Zen 5 does not), pin
-   [cc_vector_bytes=32]; and note the width is part of what a schedule-cache entry keys on, so
-   flipping it re-tunes rather than replaying a crown chosen at the other width.
+   The 512-bit rung is measured, not inferred: on Zen 5 (Ryzen AI Max+ 395, gcc 15) the packed f32
+   GEBP of [bin/narrow_gebp_bench] at n = 512 runs 225.7 GFLOP/s at 64 bytes against 130.5 at 32,
+   f16 189.6 against 108.1 and bf16 140.6 against 95.1, with identical checksums. It is a default
+   rather than a hint because the alternative -- a machine that has the registers using half of them
+   -- is the more surprising of the two. Where 512-bit operation is not wanted (Intel server parts
+   clock down under sustained 512-bit work in a way Zen 5 does not), pin [cc_vector_bytes=32]; and
+   note the width is part of what a schedule-cache entry keys on, so flipping it re-tunes rather
+   than replaying a crown chosen at the other width.
 
    Widening a *default* cannot narrow what already vectorizes: a loop too short to fill the wider
    vector degrades to the width it can fill rather than declining, see [vec_lanes_for] in
@@ -575,11 +584,11 @@ let kernel_link_flags =
     | "Win32" | "Cygwin" -> "-shared"
     | _ -> "-shared -fPIC")
 
-(* gh-ocannl-530 (docs/proposals/gh-ocannl-530-pool-uniformity.md): on hybrid CPUs, one pool
-   mixing two core speeds costs the tuned schedules 20-31% -- chunked Grid loops end at a barrier,
-   so the step is set by the slowest worker -- while restricting the pool to a uniform core class
-   recovers 25-34% of tuned time at no measured cost to the default (untuned) baselines. So [cc]
-   restricts its worker pool to the highest-performance core class by default, on hybrid, native
+(* gh-ocannl-530 (docs/proposals/gh-ocannl-530-pool-uniformity.md): on hybrid CPUs, one pool mixing
+   two core speeds costs the tuned schedules 20-31% -- chunked Grid loops end at a barrier, so the
+   step is set by the slowest worker -- while restricting the pool to a uniform core class recovers
+   25-34% of tuned time at no measured cost to the default (untuned) baselines. So [cc] restricts
+   its worker pool to the highest-performance core class by default, on hybrid, native
    (non-virtualized) topologies; everything else -- libdispatch pools, fabricated guest topologies
    (WSL2), externally pinned processes, uniform machines -- is a conservative no-op. *)
 let pool_core_class_of_string = function
@@ -601,7 +610,7 @@ let pool_restriction =
        | None ->
            invalid_arg
              ("cc_pool_core_class: expected auto | all | performance | efficiency, got "
-             ^ setting_str)
+            ^ setting_str)
      in
      let openmp =
        match parallel_grid_syntax_setting () with `Openmp -> true | `Dispatch | `None -> false
@@ -609,8 +618,8 @@ let pool_restriction =
      let effective = effective_cpu_count () in
      let affinity_mask = current_affinity_mask () in
      let decision =
-       (* The class and hypervisor probes only matter where a restriction is possible at all;
-          skip their syscalls when the outcome is structurally "keep". *)
+       (* The class and hypervisor probes only matter where a restriction is possible at all; skip
+          their syscalls when the outcome is structurally "keep". *)
        if (not openmp) || Poly.equal setting `All then
          unrestricted_decision ~effective ~affinity_mask
        else
@@ -637,8 +646,8 @@ let parallel_grid_chunks_setting () =
   (* Auto: a small multiple of the worker-pool width -- enough chunks that uneven per-chunk cost
      load-balances, few enough that per-chunk overhead stays negligible. The width is the
      pool-policy result (gh-ocannl-530), which is affinity-respecting -- unlike
-     [Domain.recommended_domain_count], which on Windows reports the full machine under any
-     pinning, silently mis-sizing the grid decomposition of a pinned run. *)
+     [Domain.recommended_domain_count], which on Windows reports the full machine under any pinning,
+     silently mis-sizing the grid decomposition of a pinned run. *)
   | _ -> 4 * effective_pool_width ()
 
 (* gh-ocannl-572: the codegen knobs of this backend, as one signature for the autotune disk-cache
@@ -675,8 +684,7 @@ let target_fingerprint =
              Stdio.Out_channel.write_all src ~data:"";
              let cmd =
                Printf.sprintf "%s %s -dM -E %s > %s 2> %s" (compiler_command ()) flags
-                 (Stdlib.Filename.quote src) (Stdlib.Filename.quote out)
-                 (Stdlib.Filename.quote log)
+                 (Stdlib.Filename.quote src) (Stdlib.Filename.quote out) (Stdlib.Filename.quote log)
              in
              Stdlib.Sys.command cmd = 0
            with _ -> false
@@ -740,18 +748,28 @@ let codegen_tag () =
                  (including [GOMP_STACKSIZE], which libgomp honors when [OMP_STACKSIZE] is unset:
                  Codex P1 on PR #337). An unlisted variable degrades to what everything did before
                  this component existed: a shared key across two timing regimes. What is
-                 deliberately absent is [OMP_SCHEDULE]: the emitted pragma is
-                 [schedule(static)], which the variable cannot reach, so keying on it would only
-                 retune identical loops. *)
+                 deliberately absent is [OMP_SCHEDULE]: the emitted pragma is [schedule(static)],
+                 which the variable cannot reach, so keying on it would only retune identical
+                 loops. *)
               List.map
-                [ "OMP_NUM_THREADS"; "OMP_DYNAMIC"; "OMP_THREAD_LIMIT"; "OMP_PROC_BIND";
-                  "OMP_PLACES"; "OMP_MAX_ACTIVE_LEVELS"; "OMP_STACKSIZE"; "OMP_WAIT_POLICY";
-                  "GOMP_STACKSIZE"; "GOMP_CPU_AFFINITY"; "GOMP_SPINCOUNT"; "KMP_AFFINITY";
-                  "KMP_BLOCKTIME" ]
-                ~f:(fun var -> var ^ "=" ^ Option.value (Stdlib.Sys.getenv_opt var) ~default:"")
+                [
+                  "OMP_NUM_THREADS";
+                  "OMP_DYNAMIC";
+                  "OMP_THREAD_LIMIT";
+                  "OMP_PROC_BIND";
+                  "OMP_PLACES";
+                  "OMP_MAX_ACTIVE_LEVELS";
+                  "OMP_STACKSIZE";
+                  "OMP_WAIT_POLICY";
+                  "GOMP_STACKSIZE";
+                  "GOMP_CPU_AFFINITY";
+                  "GOMP_SPINCOUNT";
+                  "KMP_AFFINITY";
+                  "KMP_BLOCKTIME";
+                ] ~f:(fun var -> var ^ "=" ^ Option.value (Stdlib.Sys.getenv_opt var) ~default:"")
         in
-        ((match mode with `Dispatch -> "grid-dispatch" | `Openmp -> "grid-openmp")
-        :: runtime_controls)
+        (match mode with `Dispatch -> "grid-dispatch" | `Openmp -> "grid-openmp")
+        :: runtime_controls
         @ [
             Int.to_string (parallel_grid_chunks_setting ());
             Int.to_string (Lazy.force C_syntax.per_chunk_private_bytes_cap);
@@ -781,10 +799,9 @@ let get_global_run_id =
 let%track7_sexp c_compile_and_load ~f_path =
   (* The pool restriction (gh-ocannl-530) must be in force before the first [-fopenmp] kernel is
      dlopened, not merely before its first parallel region: libgomp computes its default team size
-     from the affinity mask in its ELF/PE constructor, which runs at dlopen. Forced
-     unconditionally — the decision itself no-ops under [`Dispatch]/[`None], and re-reading the
-     syntax setting here would re-scan argv per kernel compile just to guard an already-memoized
-     force. *)
+     from the affinity mask in its ELF/PE constructor, which runs at dlopen. Forced unconditionally
+     — the decision itself no-ops under [`Dispatch]/[`None], and re-reading the syntax setting here
+     would re-scan argv per kernel compile just to guard an already-memoized force. *)
   ignore (Lazy.force pool_restriction : Utils.Cpu_topology.pool_decision);
   let base_name : string = Stdlib.Filename.chop_extension f_path in
   (* There can be only one library with a given name, the object gets cached. Moreover, [Dl.dlclose]
@@ -835,8 +852,7 @@ let%track7_sexp c_compile_and_load ~f_path =
        never saw whole. *)
     Printf.sprintf "%s %s %s -o %s %s > %s 2>&1" (compiler_command ())
       (Stdlib.Filename.quote f_path) compiler_flags (Stdlib.Filename.quote libname)
-      kernel_link_flags
-      (Stdlib.Filename.quote temp_log)
+      kernel_link_flags (Stdlib.Filename.quote temp_log)
   in
   (* Debug: log the command if debugging is enabled *)
   [%log3 "command", cmdline];
@@ -950,15 +966,15 @@ struct
     Numerics.cpu_compute_prec ~native_fp16_arithmetic:(has_native_fp16_arithmetic ()) prec
 
   (* The explicit vector renderings work at the compute precision, so admitting fp16 here is
-     admitting native 16-bit vector arithmetic -- [vec_ext_typ] mints a [HALF_T] vector and the
-     lane count doubles.
+     admitting native 16-bit vector arithmetic -- [vec_ext_typ] mints a [HALF_T] vector and the lane
+     count doubles.
 
      The condition is the target's, not the policy's, and the two are not the same question.
      Arriving here at [Half_prec] does not mean [fp16_arithmetic] chose it: [narrow_compute_f32 =
      false] also leaves half alone, on any target, and there [HALF_T] is [uint16_t] -- a vector of
-     those would do integer arithmetic on raw half bit patterns and quietly corrupt the loop. So
-     ask the probe directly. Declining on a merely [`Promoted] target costs nothing that existed
-     before gh-ocannl-516, when half never vectorized at all. *)
+     those would do integer arithmetic on raw half bit patterns and quietly corrupt the loop. So ask
+     the probe directly. Declining on a merely [`Promoted] target costs nothing that existed before
+     gh-ocannl-516, when half never vectorized at all. *)
   let vector_prec_ok prec =
     match prec with
     | Ops.Single_prec _ | Ops.Double_prec _ -> true
@@ -968,8 +984,8 @@ struct
   (* Override operation syntax to handle special precision types *)
   let ternop_syntax prec op v1 v2 v3 =
     match (prec, op) with
-    (* gh-ocannl-516: at fp16 compute precision the FMA goes through the shared macro, so the
-       scalar path and the vector rendering's per-lane fallback are the same operation -- see
+    (* gh-ocannl-516: at fp16 compute precision the FMA goes through the shared macro, so the scalar
+       path and the vector rendering's per-lane fallback are the same operation -- see
        [C_syntax.vec_acc_fma]. *)
     | Ops.Half_prec _, Ops.FMA ->
         let open PPrint in
@@ -980,72 +996,73 @@ struct
           ^^ ifflat (space ^^ v3) (nest 2 (break 1 ^^ v3))
           ^^ string ")")
     | _ -> (
-    match prec with
-    | Ops.Bfloat16_prec _ ->
-        (* For BFloat16, perform operations in float precision *)
-        let open PPrint in
-        let float_v1 = string "bfloat16_to_single(" ^^ v1 ^^ string ")" in
-        let float_v2 = string "bfloat16_to_single(" ^^ v2 ^^ string ")" in
-        let float_v3 = string "bfloat16_to_single(" ^^ v3 ^^ string ")" in
-        let op_prefix, op_infix1, op_infix2, op_suffix = Ops.ternop_c_syntax Ops.single op in
-        let float_result =
-          group
-            (string op_prefix ^^ float_v1 ^^ string op_infix1
-            ^^ ifflat (space ^^ float_v2) (nest 2 (break 1 ^^ float_v2))
-            ^^ string op_infix2
-            ^^ ifflat (space ^^ float_v3) (nest 2 (break 1 ^^ float_v3))
-            ^^ string op_suffix)
-        in
-        string "single_to_bfloat16(" ^^ float_result ^^ string ")"
-    | Ops.Half_prec _ ->
-        (* For Half, perform operations in float precision on non-native systems *)
-        let open PPrint in
-        let float_v1 = string "HALF_TO_FP(" ^^ v1 ^^ string ")" in
-        let float_v2 = string "HALF_TO_FP(" ^^ v2 ^^ string ")" in
-        let float_v3 = string "HALF_TO_FP(" ^^ v3 ^^ string ")" in
-        let op_prefix, op_infix1, op_infix2, op_suffix = Ops.ternop_c_syntax Ops.single op in
-        let float_result =
-          group
-            (string op_prefix ^^ float_v1 ^^ string op_infix1
-            ^^ ifflat (space ^^ float_v2) (nest 2 (break 1 ^^ float_v2))
-            ^^ string op_infix2
-            ^^ ifflat (space ^^ float_v3) (nest 2 (break 1 ^^ float_v3))
-            ^^ string op_suffix)
-        in
-        (* [FLOAT_TO_HALF], not [FP_TO_HALF]: the latter is the *identity* on a native [_Float16]
-           target, which would leave the f32 result of a library call ([expf], [sqrtf], [fmaxf]) at
-           f32 -- and C's usual arithmetic conversions then keep every enclosing operator at f32
-           too, all the way to the store. The fp16-arithmetic policy promises fp16 intermediates,
-           10-bit mantissa and a 65504 ceiling included, so the narrowing has to be a real cast
-           (gh-ocannl-516 review). A no-op where the ring operators already compute in [_Float16],
-           and unchanged on the emulated path, where both macros are [float_to_half_emulated].
-           Same reasoning at the two [FLOAT_TO_HALF] sites below. *)
-        string "FLOAT_TO_HALF(" ^^ float_result ^^ string ")"
-    | Ops.Fp8_prec _ ->
-        (* For FP8, perform operations in float precision *)
-        let open PPrint in
-        let float_v1 = string "fp8_to_single(" ^^ v1 ^^ string ")" in
-        let float_v2 = string "fp8_to_single(" ^^ v2 ^^ string ")" in
-        let float_v3 = string "fp8_to_single(" ^^ v3 ^^ string ")" in
-        let op_prefix, op_infix1, op_infix2, op_suffix = Ops.ternop_c_syntax Ops.single op in
-        let float_result =
-          group
-            (string op_prefix ^^ float_v1 ^^ string op_infix1
-            ^^ ifflat (space ^^ float_v2) (nest 2 (break 1 ^^ float_v2))
-            ^^ string op_infix2
-            ^^ ifflat (space ^^ float_v3) (nest 2 (break 1 ^^ float_v3))
-            ^^ string op_suffix)
-        in
-        string "single_to_fp8(" ^^ float_result ^^ string ")"
-    | _ ->
-        let op_prefix, op_infix1, op_infix2, op_suffix = Ops.ternop_c_syntax prec op in
-        let open PPrint in
-        group
-          (string op_prefix ^^ v1 ^^ string op_infix1
-          ^^ ifflat (space ^^ v2) (nest 2 (break 1 ^^ v2))
-          ^^ string op_infix2
-          ^^ ifflat (space ^^ v3) (nest 2 (break 1 ^^ v3))
-          ^^ string op_suffix))
+        match prec with
+        | Ops.Bfloat16_prec _ ->
+            (* For BFloat16, perform operations in float precision *)
+            let open PPrint in
+            let float_v1 = string "bfloat16_to_single(" ^^ v1 ^^ string ")" in
+            let float_v2 = string "bfloat16_to_single(" ^^ v2 ^^ string ")" in
+            let float_v3 = string "bfloat16_to_single(" ^^ v3 ^^ string ")" in
+            let op_prefix, op_infix1, op_infix2, op_suffix = Ops.ternop_c_syntax Ops.single op in
+            let float_result =
+              group
+                (string op_prefix ^^ float_v1 ^^ string op_infix1
+                ^^ ifflat (space ^^ float_v2) (nest 2 (break 1 ^^ float_v2))
+                ^^ string op_infix2
+                ^^ ifflat (space ^^ float_v3) (nest 2 (break 1 ^^ float_v3))
+                ^^ string op_suffix)
+            in
+            string "single_to_bfloat16(" ^^ float_result ^^ string ")"
+        | Ops.Half_prec _ ->
+            (* For Half, perform operations in float precision on non-native systems *)
+            let open PPrint in
+            let float_v1 = string "HALF_TO_FP(" ^^ v1 ^^ string ")" in
+            let float_v2 = string "HALF_TO_FP(" ^^ v2 ^^ string ")" in
+            let float_v3 = string "HALF_TO_FP(" ^^ v3 ^^ string ")" in
+            let op_prefix, op_infix1, op_infix2, op_suffix = Ops.ternop_c_syntax Ops.single op in
+            let float_result =
+              group
+                (string op_prefix ^^ float_v1 ^^ string op_infix1
+                ^^ ifflat (space ^^ float_v2) (nest 2 (break 1 ^^ float_v2))
+                ^^ string op_infix2
+                ^^ ifflat (space ^^ float_v3) (nest 2 (break 1 ^^ float_v3))
+                ^^ string op_suffix)
+            in
+            (* [FLOAT_TO_HALF], not [FP_TO_HALF]: the latter is the *identity* on a native
+               [_Float16] target, which would leave the f32 result of a library call ([expf],
+               [sqrtf], [fmaxf]) at f32 -- and C's usual arithmetic conversions then keep every
+               enclosing operator at f32 too, all the way to the store. The fp16-arithmetic policy
+               promises fp16 intermediates, 10-bit mantissa and a 65504 ceiling included, so the
+               narrowing has to be a real cast (gh-ocannl-516 review). A no-op where the ring
+               operators already compute in [_Float16], and unchanged on the emulated path, where
+               both macros are [float_to_half_emulated]. Same reasoning at the two [FLOAT_TO_HALF]
+               sites below. *)
+            string "FLOAT_TO_HALF(" ^^ float_result ^^ string ")"
+        | Ops.Fp8_prec _ ->
+            (* For FP8, perform operations in float precision *)
+            let open PPrint in
+            let float_v1 = string "fp8_to_single(" ^^ v1 ^^ string ")" in
+            let float_v2 = string "fp8_to_single(" ^^ v2 ^^ string ")" in
+            let float_v3 = string "fp8_to_single(" ^^ v3 ^^ string ")" in
+            let op_prefix, op_infix1, op_infix2, op_suffix = Ops.ternop_c_syntax Ops.single op in
+            let float_result =
+              group
+                (string op_prefix ^^ float_v1 ^^ string op_infix1
+                ^^ ifflat (space ^^ float_v2) (nest 2 (break 1 ^^ float_v2))
+                ^^ string op_infix2
+                ^^ ifflat (space ^^ float_v3) (nest 2 (break 1 ^^ float_v3))
+                ^^ string op_suffix)
+            in
+            string "single_to_fp8(" ^^ float_result ^^ string ")"
+        | _ ->
+            let op_prefix, op_infix1, op_infix2, op_suffix = Ops.ternop_c_syntax prec op in
+            let open PPrint in
+            group
+              (string op_prefix ^^ v1 ^^ string op_infix1
+              ^^ ifflat (space ^^ v2) (nest 2 (break 1 ^^ v2))
+              ^^ string op_infix2
+              ^^ ifflat (space ^^ v3) (nest 2 (break 1 ^^ v3))
+              ^^ string op_suffix))
 
   let binop_syntax prec op v1 v2 =
     match op with

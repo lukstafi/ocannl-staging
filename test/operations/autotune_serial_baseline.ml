@@ -8,17 +8,16 @@
    Printed booleans, all backend-independent:
 
    - The tuner's base compile binds no hardware dimension. Supplying a [?lowered_transform] bypasses
-     the default annotator, so the identity-transform baseline is the unscheduled serial form on
-     every backend — the premise of the rule.
-   - The default compile of that same code does bind one wherever automatic scheduling is active, so
-     on GPU the baseline is strictly the serial twin of code the backend parallelizes for free.
-   - [Autotune.tune] times the baseline exactly where it is not a single work-item: [baseline_ms] is
-     finite on CPU backends (the serial form runs at full single-core speed and stays a legitimate
-     competitor) and [infinity] on GPU ones. Where it is refused, the refusal is recorded in the
-     report's decline census under [Not_dispatched_key "baseline"] (gh-ocannl-543).
-   - Either way the search returns a working routine whose winner carries a measurement.
-   - The rule holds on the cache-replay path too: a planted entry naming the serial form as the
-     winner is rejected and re-searched on GPU, and honoured on CPU. *)
+   the default annotator, so the identity-transform baseline is the unscheduled serial form on every
+   backend — the premise of the rule. - The default compile of that same code does bind one wherever
+   automatic scheduling is active, so on GPU the baseline is strictly the serial twin of code the
+   backend parallelizes for free. - [Autotune.tune] times the baseline exactly where it is not a
+   single work-item: [baseline_ms] is finite on CPU backends (the serial form runs at full
+   single-core speed and stays a legitimate competitor) and [infinity] on GPU ones. Where it is
+   refused, the refusal is recorded in the report's decline census under [Not_dispatched_key
+   "baseline"] (gh-ocannl-543). - Either way the search returns a working routine whose winner
+   carries a measurement. - The rule holds on the cache-replay path too: a planted entry naming the
+   serial form as the winner is rejected and re-searched on GPU, and honoured on CPU. *)
 
 open Base
 open Ocannl
@@ -38,7 +37,6 @@ let named name (comp : Asgns.comp) : Asgns.comp =
    CPU backends too, not only on GPU ones (where the threshold is [gpu_schedule_min_parallel] = 64).
    Compiled, never run: this half of the test is structural. *)
 let side = 256
-
 let n = 16
 let mav = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 7) *. 0.5)
 let mbv = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 11) -. 4.)
@@ -53,7 +51,8 @@ let mm_expected =
       !acc)
 
 let () =
-  (* --- The structural premise: identity transform = the serial form; no transform = parallel --- *)
+  (* --- The structural premise: identity transform = the serial form; no transform = parallel
+     --- *)
   let av = Array.init (side * side) ~f:(fun i -> Float.of_int (i % 13) *. 0.25) in
   let bv = Array.init (side * side) ~f:(fun i -> Float.of_int (i % 7) -. 3.) in
   let a = TDSL.ndarray av ~label:[ "sb_a" ] ~output_dims:[ side; side ] () in
@@ -102,8 +101,8 @@ let () =
   p "the serial baseline is timed on CPU backends and not dispatched on GPU ones"
     (Bool.equal (Float.is_finite r.Autotune.baseline_ms) (not is_gpu));
   (* gh-ocannl-543: the refusal is a decline like any other. Without a census entry a GPU search
-     that refused most of its candidate space reports exactly what an empty candidate space
-     reports, and the difference was only visible in the [autotune_log] stderr stream. *)
+     that refused most of its candidate space reports exactly what an empty candidate space reports,
+     and the difference was only visible in the [autotune_log] stderr stream. *)
   p "the refusal is recorded in the decline census, on GPU backends only"
     (Bool.equal is_gpu
        (List.exists r.Autotune.declines ~f:(fun d ->
@@ -112,11 +111,11 @@ let () =
             | _ -> false)));
   p "the search timed at least one candidate" (r.Autotune.candidates_timed >= 1);
   p "the winner carries a measurement" (Float.is_finite r.Autotune.best_ms);
-  (* gh-ocannl-552: [baseline_ms] cannot answer "did tuning beat what the user gets without
-     tuning?" on GPU (it is [infinity] there), so the untuned default pipeline's own seed is the
-     reference. Attributed by digest: on CPU backends the config thresholds may leave the code
-     unparallelized, in which case the seed dedups against the timed serial baseline and inherits
-     its measurement. *)
+  (* gh-ocannl-552: [baseline_ms] cannot answer "did tuning beat what the user gets without tuning?"
+     on GPU (it is [infinity] there), so the untuned default pipeline's own seed is the reference.
+     Attributed by digest: on CPU backends the config thresholds may leave the code unparallelized,
+     in which case the seed dedups against the timed serial baseline and inherits its
+     measurement. *)
   p "the untuned default pipeline is measured as the reference (gh-ocannl-552)"
     (match r.Autotune.default_ms with
     | Some d -> Float.is_finite d && Float.(r.Autotune.best_ms <= d)

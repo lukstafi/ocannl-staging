@@ -260,11 +260,10 @@ val set_terminal : is_param:bool -> t -> unit
     of the initialization expressions of the parameters. *)
 
 val set_resolve_at_use : t -> unit
-(** Mark the shape's rows as resolved by their use sites (gh-ocannl-544): at the final solver
-    stages their row variables may close to the GLB of the use sites' rows, where operation
-    results close to an empty remainder by default. Used by [Tensor.param] for
-    parameter-initialization cones and by the [stretch] operation; terminal shapes (leaves,
-    parameters) are marked automatically. *)
+(** Mark the shape's rows as resolved by their use sites (gh-ocannl-544): at the final solver stages
+    their row variables may close to the GLB of the use sites' rows, where operation results close
+    to an empty remainder by default. Used by [Tensor.param] for parameter-initialization cones and
+    by the [stretch] operation; terminal shapes (leaves, parameters) are marked automatically. *)
 
 (** How to propagate shape updates and do the last update of [Tensor.t.shape] when finalizing the
     tensor. Axes are broadcast-expanded on a bottom-up update to fit the incoming shape. *)
@@ -315,15 +314,15 @@ val to_dims : t -> int array
 (** Uses the matrix convention of putting the input axes last. *)
 
 val product_space_shape : update_step -> t
-(** The product-space proxy shape of an einsum-family operation (gh-512): the result's axes
-    followed by the reduced-over (contracted) axes, in the product-space order of the derived
-    projections. The proxy shares the operation's shape-inference solution (its constraints are
-    emitted on construction), so [infer_equal]-ing a [%cd] [*_pspace] intermediate against it gives
-    the intermediate the dimensions of the operation's full product space (e.g. the (output x
-    kernel) pair space of a windowed reduction). Must be called before the operation's inference
-    completes. Raises [Row.Shape_error] when the product space is not expressible as a shape: a
-    non-einsum operation, more than one reduced-over row variable, or a reduced-over row variable
-    combined with an open result input row. *)
+(** The product-space proxy shape of an einsum-family operation (gh-512): the result's axes followed
+    by the reduced-over (contracted) axes, in the product-space order of the derived projections.
+    The proxy shares the operation's shape-inference solution (its constraints are emitted on
+    construction), so [infer_equal]-ing a [%cd] [*_pspace] intermediate against it gives the
+    intermediate the dimensions of the operation's full product space (e.g. the (output x kernel)
+    pair space of a windowed reduction). Must be called before the operation's inference completes.
+    Raises [Row.Shape_error] when the product space is not expressible as a shape: a non-einsum
+    operation, more than one reduced-over row variable, or a reduced-over row variable combined with
+    an open result input row. *)
 
 val to_padding : t -> (Ir.Ops.axis_padding array * float) option
 (** Returns the padding of the shape, if any. The inner [float option] is the padded value: [Some v]

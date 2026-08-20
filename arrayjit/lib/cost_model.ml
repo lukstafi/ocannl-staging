@@ -56,8 +56,8 @@ let access_cells (a : Tn.t Affine.access) : int * bool =
         (not (exact_image && disjoint_runs)) || a.a_guarded )
     else (min node_cells image, (not exact_image) || a.a_guarded)
 
-(* Same-node accesses whose images provably share no cell: the union of their images is then the
-   sum of their cardinalities. *)
+(* Same-node accesses whose images provably share no cell: the union of their images is then the sum
+   of their cardinalities. *)
 let rec pairwise_disjoint = function
   | [] -> true
   | a :: tl ->
@@ -66,19 +66,18 @@ let rec pairwise_disjoint = function
 (* The certainty pre-pass shared by both extractions (gh-ocannl-578): which nodes' reads (or any
    accesses) are not certain to execute as the access list says. Node-granular and therefore
    conservative in both directions of use — the floor zeroes an uncertain node's whole read
-   contribution (only loosening the floor), and the upper extraction refuses exactness for it
-   (only widening the approximation flag).
+   contribution (only loosening the floor), and the upper extraction refuses exactness for it (only
+   widening the approximation flag).
 
    - [gated_reads]: read by an operand the renderers evaluate conditionally
-     ({!Ops.binop_conditionality} / {!Ops.ternop_conditionality}): a [Where] arm, of which at most
-     one executes, or the gated right operand of [&&] / [||] / a gate;
-   - [open_reads]: read by a producer statement of an open-placement node — an inline completion
-     instantiates the producer only at surviving consumer sites and [cleanup_virtual_llc] drops
-     the setter loop, its reads included (an open producer computing a larger domain than its
-     consumers demand makes "recomputation only adds ops" false, so its whole effect attributes
-     to the open placement); the upper extraction has no open placements and passes a vacuous
-     [open_placement];
-   - [dead]: any access under a dead loop ([to_ < from_]) — the body never executes. *)
+   ({!Ops.binop_conditionality} / {!Ops.ternop_conditionality}): a [Where] arm, of which at most one
+   executes, or the gated right operand of [&&] / [||] / a gate; - [open_reads]: read by a producer
+   statement of an open-placement node — an inline completion instantiates the producer only at
+   surviving consumer sites and [cleanup_virtual_llc] drops the setter loop, its reads included (an
+   open producer computing a larger domain than its consumers demand makes "recomputation only adds
+   ops" false, so its whole effect attributes to the open placement); the upper extraction has no
+   open placements and passes a vacuous [open_placement]; - [dead]: any access under a dead loop
+   ([to_ < from_]) — the body never executes. *)
 let access_uncertainty ~open_placement (code : Low_level.t) =
   let gated_reads = Hashtbl.create (module Tn) in
   let open_reads = Hashtbl.create (module Tn) in
@@ -97,8 +96,8 @@ let access_uncertainty ~open_placement (code : Low_level.t) =
         sc_reads ~into b;
         sc_reads ~into c
     | Binop (op, (a, _), (b, _)) -> (
-        (* A projection's discarded operand is never evaluated ([affine_accesses] omits it too),
-           per {!Ops.binop_conditionality}. *)
+        (* A projection's discarded operand is never evaluated ([affine_accesses] omits it too), per
+           {!Ops.binop_conditionality}. *)
         match Ops.binop_conditionality op with
         | Ops.Only_first -> sc_reads ~into a
         | Ops.Only_second -> sc_reads ~into b
@@ -117,12 +116,10 @@ let access_uncertainty ~open_placement (code : Low_level.t) =
     | If { cond = c0, _; body } ->
         sc_reads ~into c0;
         code_reads ~into body
-    | Set { tn; llsc; _ } | Set_dynamic { tn; llsc; _ } ->
+    | Set { tn; llsc; _ } | Set_dynamic { tn; llsc; _ } -> (
         mark into tn;
         sc_reads ~into llsc;
-        (match c with
-        | Set_dynamic { dyn_value = v, _; _ } -> sc_reads ~into v
-        | _ -> ())
+        match c with Set_dynamic { dyn_value = v, _; _ } -> sc_reads ~into v | _ -> ())
     | Set_local (_, llsc) -> sc_reads ~into llsc
     | Set_from_vec { tn; arg = a, _; _ } ->
         mark into tn;
@@ -203,12 +200,12 @@ let access_uncertainty ~open_placement (code : Low_level.t) =
 let footprints ~read_uncertain ~any_uncertain (accesses : Tn.t Affine.access list) :
     (Tn.t * node_footprint) list =
   (* Per node and direction: sum of per-access cell counts (a union upper bound, capped by the
-     node's size); exact when every access in the direction is individually exact, the accesses
-     are pairwise provably disjoint ({!Affine.may_touch_same_cell} — the union of disjoint images
-     is their sum, gh-ocannl-578; subsumes the single-exact-access case), and the direction is
-     certain to execute as listed ({!access_uncertainty}): a conditionally-evaluated read (a
-     [Where] arm, a gated right operand) or any dead-loop access may touch fewer cells than its
-     image, so its direction stays an upper bound. *)
+     node's size); exact when every access in the direction is individually exact, the accesses are
+     pairwise provably disjoint ({!Affine.may_touch_same_cell} — the union of disjoint images is
+     their sum, gh-ocannl-578; subsumes the single-exact-access case), and the direction is certain
+     to execute as listed ({!access_uncertainty}): a conditionally-evaluated read (a [Where] arm, a
+     gated right operand) or any dead-loop access may touch fewer cells than its image, so its
+     direction stays an upper bound. *)
   let tbl = Hashtbl.create (module Tn) in
   let order = ref [] in
   List.iter accesses ~f:(fun a ->
@@ -227,15 +224,17 @@ let footprints ~read_uncertain ~any_uncertain (accesses : Tn.t Affine.access lis
         let exact =
           certain
           && List.for_all counted ~f:(fun (_, (_, approx)) -> not approx)
-          && (match counted with [] | [ _ ] -> true | _ -> pairwise_disjoint accs)
+          && match counted with [] | [ _ ] -> true | _ -> pairwise_disjoint accs
         in
         (cells, not exact)
       in
       let read_cells, reads_approx = direction ~certain:(not (read_uncertain tn)) reads in
       let write_cells, writes_approx = direction ~certain:(not (any_uncertain tn)) writes in
       let rmw_cells =
-        List.sum (module Int) writes ~f:(fun a ->
-            if a.Affine.a_rmw then fst (access_cells a) else 0)
+        List.sum
+          (module Int)
+          writes
+          ~f:(fun a -> if a.Affine.a_rmw then fst (access_cells a) else 0)
       in
       let width = Ops.prec_in_bytes (Lazy.force tn.Tn.storage_prec) in
       let node_bytes = Tn.num_elems tn * width in
@@ -297,11 +296,11 @@ let analyze (code : Low_level.t) : summary =
            returns its definitions separately), so both arms' scope bodies do run. Only an operand
            no renderer emits at all — a projection's discarded one, below — may be dropped. The
            floor's [Int.min] stays sound under the same hoisting: it only loosens. Charging both
-           arms of a short-circuiting [?:] is an over-count whenever either arm contributes any
-           work — only one arm's inline ops execute, equal costs notwithstanding — so any nonzero
-           arm flags the op count approximate (gh-ocannl-578; a cost residing entirely in hoisted
-           scope bodies does execute, so this conservatively over-flags such arms — the sound
-           direction). Only a zero-cost arm pair keeps the count exact. *)
+           arms of a short-circuiting [?:] is an over-count whenever either arm contributes any work
+           — only one arm's inline ops execute, equal costs notwithstanding — so any nonzero arm
+           flags the op count approximate (gh-ocannl-578; a cost residing entirely in hoisted scope
+           bodies does execute, so this conservatively over-flags such arms — the sound direction).
+           Only a zero-cost arm pair keeps the count exact. *)
         let ops = match op with Ops.FMA | Ops.Mul3 -> 2 | Ops.Where -> 1 in
         let c2 = arg a2 and c3 = arg a3 in
         (match Ops.ternop_conditionality op with
@@ -325,9 +324,7 @@ let analyze (code : Low_level.t) : summary =
     | Unop (_, a1) -> 1 + arg a1
   and arg (sc, _prec) = sc_flops sc in
   let flops = go ~scale:1 ~env:[] code in
-  let read_uncertain, any_uncertain =
-    access_uncertainty ~open_placement:(fun _ -> false) code
-  in
+  let read_uncertain, any_uncertain = access_uncertainty ~open_placement:(fun _ -> false) code in
   let per_node = footprints ~read_uncertain ~any_uncertain (Low_level.affine_accesses code) in
   {
     per_node;
@@ -348,14 +345,13 @@ let arithmetic_intensity s = Float.of_int s.flops /. Float.of_int (max 1 (total_
    flips direction here — guarded ([If]) work floors to zero (guards-never-taken), a
    conditionally-evaluated operand ({!Ops.binop_conditionality} / {!Ops.ternop_conditionality})
    counts at its cheapest instead of its dearest, so [Where] charges its condition plus the cheaper
-   arm where the upper walk charges the dearer one and a gated right operand floors away, a
-   node's multiple same-direction accesses sum only when the exact images are pairwise provably
-   disjoint (both extractions then agree the union is the sum) and otherwise take their MAX (a
-   union is at least its largest member) instead of the capped sum, non-exact images contribute
-   zero, and opaque
-   code ([Staged_compilation], merge-buffer reads) — the upper contract's one escape hatch —
-   merely loosens a floor without breaking it. [fr_exact] is [false] when any flooring occurred:
-   the floor is then sound but not tight. *)
+   arm where the upper walk charges the dearer one and a gated right operand floors away, a node's
+   multiple same-direction accesses sum only when the exact images are pairwise provably disjoint
+   (both extractions then agree the union is the sum) and otherwise take their MAX (a union is at
+   least its largest member) instead of the capped sum, non-exact images contribute zero, and opaque
+   code ([Staged_compilation], merge-buffer reads) — the upper contract's one escape hatch — merely
+   loosens a floor without breaking it. [fr_exact] is [false] when any flooring occurred: the floor
+   is then sound but not tight. *)
 
 type floor = { fr_flops : int; fr_bytes : int; fr_exact : bool } [@@deriving sexp_of]
 
@@ -364,7 +360,6 @@ type floor = { fr_flops : int; fr_bytes : int; fr_exact : bool } [@@deriving sex
 let access_cells_floor a =
   let cells, approx = access_cells a in
   if approx then 0 else cells
-
 
 let floor_flops ~open_placement (code : Low_level.t) : int * bool =
   let exact = ref true in
@@ -385,15 +380,17 @@ let floor_flops ~open_placement (code : Low_level.t) : int * bool =
         if open_placement tn then set_open () else scale * (length + sc a)
     | Set_local (_, llsc) -> scale * sc llsc
     | If { cond = cnd, _; body = _ } ->
-        (* Guards-never-taken: the body\'s work is not certain, only the condition\'s is — the
-           exact dual of the upper walk\'s guards-taken. *)
+        (* Guards-never-taken: the body\'s work is not certain, only the condition\'s is — the exact
+           dual of the upper walk\'s guards-taken. *)
         exact := false;
         scale * sc cnd
     | Tile_mma { d = d_tn, _; m; n; k; lane; _ } -> (
-        (* Same lane-cooperative attribution as the upper walk — the count is exact when the lane
-           binding is in scope; without it the certain floor is zero. An open accumulator is an
-           open producer like the Set family: its work attributes to the open placement. *)
-        if open_placement d_tn then set_open ()
+        if
+          (* Same lane-cooperative attribution as the upper walk — the count is exact when the lane
+             binding is in scope; without it the certain floor is zero. An open accumulator is an
+             open producer like the Set family: its work attributes to the open placement. *)
+          open_placement d_tn
+        then set_open ()
         else
           match List.Assoc.find env lane ~equal:Idx.equal_symbol with
           | Some lane_extent -> scale / max 1 lane_extent * (2 * m * n * k)
@@ -401,8 +398,8 @@ let floor_flops ~open_placement (code : Low_level.t) : int * bool =
               exact := false;
               0)
   and set_open () =
-    (* An open producer\'s work attributes to the open placement: an inline completion computes
-       it only at surviving consumer sites (possibly fewer cells than the setter loop covers), a
+    (* An open producer\'s work attributes to the open placement: an inline completion computes it
+       only at surviving consumer sites (possibly fewer cells than the setter loop covers), a
        materialize completion as written. Zero is the certain floor across both. *)
     exact := false;
     0
@@ -435,7 +432,7 @@ let floor_flops ~open_placement (code : Low_level.t) : int * bool =
         | Ops.Gated_second ->
             (* Short-circuiting renderings: && / || and the gates' ?: evaluate the right operand
                only when the left one passes. *)
-            (if arg a2 <> 0 then exact := false);
+            if arg a2 <> 0 then exact := false;
             1 + arg a1
         | Ops.Both_operands -> 1 + arg a1 + arg a2)
     | Unop (Ops.Identity, a1) -> arg a1
@@ -452,14 +449,14 @@ let under_dead_loop (a : Tn.t Affine.access) =
 let completion_floor ?(open_placement = fun _ -> false) (code : Low_level.t) : floor =
   let flops, flops_exact = floor_flops ~open_placement code in
   let read_uncertain, any_uncertain = access_uncertainty ~open_placement code in
-  (* Per node and direction, the certain traffic: the sum of the exact images when they are
-     pairwise provably disjoint (a disjoint union attains its sum, gh-ocannl-578), otherwise the
-     largest exact image (a union is at least its largest member). Nodes with an open placement
-     level contribute zero: their fully-inlined completion moves no bytes for them, and the floor
+  (* Per node and direction, the certain traffic: the sum of the exact images when they are pairwise
+     provably disjoint (a disjoint union attains its sum, gh-ocannl-578), otherwise the largest
+     exact image (a union is at least its largest member). Nodes with an open placement level
+     contribute zero: their fully-inlined completion moves no bytes for them, and the floor
      quantifies over every completion. Committing such a node to Materialize adds back
      {!node_floor_bytes} — the monotone refinement delta. Reads that are not certain in every
-     completion (Where arms, open producers\' operands, dead code) floor to zero, as do guarded
-     and non-exact accesses. *)
+     completion (Where arms, open producers\' operands, dead code) floor to zero, as do guarded and
+     non-exact accesses. *)
   let tbl = Hashtbl.create (module Tn) in
   let inexact = ref (not flops_exact) in
   List.iter (Low_level.affine_accesses code) ~f:(fun a ->
@@ -483,7 +480,7 @@ let completion_floor ?(open_placement = fun _ -> false) (code : Low_level.t) : f
           else begin
             (* The union exceeds the retained maximum unless the images coincide — which is not
                proved, so the floor is loose. *)
-            (if List.length nz > 1 then inexact := true);
+            if List.length nz > 1 then inexact := true;
             List.fold nz ~init:0 ~f:(fun m (_, c) -> max m c)
           end
         in
@@ -507,9 +504,9 @@ let roofline_seconds ?peak_flops ?peak_memory_bandwidth ~flops ~bytes () : float
   match legs with [] -> None | l -> Some (List.reduce_exn l ~f:Float.max)
 
 module Calibration = struct
-  (* The calibration TSV schema and the envelope fitter over it (gh-ocannl-514 phase 0). This
-     module is the schema's single owner: rows are emitted through [to_line] (Autotune) and read
-     back through [of_line] (tools/fit_envelope.exe), so writer and reader cannot drift apart. *)
+  (* The calibration TSV schema and the envelope fitter over it (gh-ocannl-514 phase 0). This module
+     is the schema's single owner: rows are emitted through [to_line] (Autotune) and read back
+     through [of_line] (tools/fit_envelope.exe), so writer and reader cannot drift apart. *)
 
   type row = {
     backend : string;
@@ -532,17 +529,17 @@ module Calibration = struct
   }
   [@@deriving sexp_of]
 
-  (* Milliseconds are serialized FLOORED at the 6th decimal (not rounded to nearest): a stored
-     time never exceeds the true measurement, so constants fit from the file remain conservative
-     with respect to the original in-process measurement — round-to-nearest could round a short
-     kernel's time up by 0.5 ns, a 1e-4 relative error at 5 us, far above [report]'s 2e-6 bump.
-     The floored decimal survives the round-trip: [d /. 1e6] for integral [d] is within ~1e-11 of
-     the decimal, so ["%.6f"] prints [d] back exactly. *)
+  (* Milliseconds are serialized FLOORED at the 6th decimal (not rounded to nearest): a stored time
+     never exceeds the true measurement, so constants fit from the file remain conservative with
+     respect to the original in-process measurement — round-to-nearest could round a short kernel's
+     time up by 0.5 ns, a 1e-4 relative error at 5 us, far above [report]'s 2e-6 bump. The floored
+     decimal survives the round-trip: [d /. 1e6] for integral [d] is within ~1e-11 of the decimal,
+     so ["%.6f"] prints [d] back exactly. *)
   let floor6 v = Float.round_down (v *. 1e6) /. 1e6
 
-  (* The routine and label columns are the only free text in a row, hence the only place a stray
-     tab or newline could split one line into fragments no reader can parse. A name carrying one
-     loses the character, not the row. *)
+  (* The routine and label columns are the only free text in a row, hence the only place a stray tab
+     or newline could split one line into fragments no reader can parse. A name carrying one loses
+     the character, not the row. *)
   let cell = String.map ~f:(function '\t' | '\n' | '\r' -> ' ' | c -> c)
 
   let to_line r =
@@ -573,22 +570,44 @@ module Calibration = struct
       with _ -> None
     in
     match String.split line ~on:'\t' with
-    | [ backend; digest; routine; label; measured; model; kernels; flops; bytes; flops_approx;
-        bytes_approx; opaque ] ->
+    | [
+     backend;
+     digest;
+     routine;
+     label;
+     measured;
+     model;
+     kernels;
+     flops;
+     bytes;
+     flops_approx;
+     bytes_approx;
+     opaque;
+    ] ->
         build backend digest routine label measured model kernels flops bytes flops_approx
           bytes_approx opaque
     (* Rows recorded before the routine column (gh-ocannl-635). Unlike the 9-column rows that
        predate the approx flags, these carry everything a leg needs to prove its counts exact, so
        they still fit — they just cannot name the computation they measured. *)
-    | [ backend; digest; label; measured; model; kernels; flops; bytes; flops_approx;
-        bytes_approx; opaque ] ->
+    | [
+     backend;
+     digest;
+     label;
+     measured;
+     model;
+     kernels;
+     flops;
+     bytes;
+     flops_approx;
+     bytes_approx;
+     opaque;
+    ] ->
         build backend digest "" label measured model kernels flops bytes flops_approx bytes_approx
           opaque
     | _ -> None
 
   (* How a row names itself in a report: the tuned computation, then the candidate within it. *)
   let qualified ~routine ~label = if String.is_empty routine then label else routine ^ "/" ^ label
-
   let row_name r = qualified ~routine:r.routine ~label:r.label
 
   type fit = {
@@ -617,14 +636,13 @@ module Calibration = struct
         cell := r :: !cell);
     List.rev_map !order ~f:(fun backend ->
         let rows = List.rev !(Hashtbl.find_exn by_backend backend) in
-        (* Each leg fits from the rows where THAT leg's counts are exact (and non-opaque,
-           positively timed): guards-taken / union over-counting can "achieve" a counts/time
-           ratio far above any hardware peak, and letting it drive a maximum would inflate the
-           envelope machine-wide — but exactness is per leg (a multi-read footprint makes bytes
-           approximate without touching an exact op count), so a row feeds whichever legs it can
-           prove. The fitted constant per leg is the tightest sound one for those rows —
-           [bound <= measured] needs [peak >= counts/measured] on every row — so it is the
-           maximum achieved [counts/time]. *)
+        (* Each leg fits from the rows where THAT leg's counts are exact (and non-opaque, positively
+           timed): guards-taken / union over-counting can "achieve" a counts/time ratio far above
+           any hardware peak, and letting it drive a maximum would inflate the envelope machine-wide
+           — but exactness is per leg (a multi-read footprint makes bytes approximate without
+           touching an exact op count), so a row feeds whichever legs it can prove. The fitted
+           constant per leg is the tightest sound one for those rows — [bound <= measured] needs
+           [peak >= counts/measured] on every row — so it is the maximum achieved [counts/time]. *)
         let timed = List.filter rows ~f:(fun r -> (not r.opaque) && Float.(r.measured_ms > 0.)) in
         let leg ~exact count =
           List.fold timed ~init:None ~f:(fun acc r ->
@@ -638,21 +656,21 @@ module Calibration = struct
         in
         let peak_flops = leg ~exact:(fun r -> not r.flops_approx) (fun r -> r.flops) in
         let peak_bandwidth = leg ~exact:(fun r -> not r.bytes_approx) (fun r -> r.bytes) in
-        (* Multi-kernel rows aggregate per-kernel counts, so the per-leg maxima above are
-           necessary for them but not sufficient: [summaries_roofline] sums per-kernel
-           max-of-legs, which can exceed the aggregate legs (a compute-bound + bandwidth-bound
-           kernel mix approaches twice either). The aggregate SUFFICIENT condition is
-           [flops/peak_flops + bytes/peak_bandwidth <= time] (max <= sum per kernel), so both
-           legs are raised uniformly — preserving their ratio — by the smallest slack that
-           enforces it on every multi-kernel row. Raising peaks is the safe direction: the bound
-           stays a lower bound, only pruning weakens. With one leg absent the bound degenerates
-           to the other leg's aggregate, which the necessary maximum already covers. *)
+        (* Multi-kernel rows aggregate per-kernel counts, so the per-leg maxima above are necessary
+           for them but not sufficient: [summaries_roofline] sums per-kernel max-of-legs, which can
+           exceed the aggregate legs (a compute-bound + bandwidth-bound kernel mix approaches twice
+           either). The aggregate SUFFICIENT condition is [flops/peak_flops + bytes/peak_bandwidth
+           <= time] (max <= sum per kernel), so both legs are raised uniformly — preserving their
+           ratio — by the smallest slack that enforces it on every multi-kernel row. Raising peaks
+           is the safe direction: the bound stays a lower bound, only pruning weakens. With one leg
+           absent the bound degenerates to the other leg's aggregate, which the necessary maximum
+           already covers. *)
         let fission_slack =
           match (peak_flops, peak_bandwidth) with
           | Some (pf, _), Some (pb, _) ->
               List.fold timed ~init:None ~f:(fun acc r ->
-                  (* Only fully-exact rows can force slack: an over-counted leg would inflate
-                     the aggregate sum, and with it both fitted constants. *)
+                  (* Only fully-exact rows can force slack: an over-counted leg would inflate the
+                     aggregate sum, and with it both fitted constants. *)
                   if r.kernels <= 1 || r.flops_approx || r.bytes_approx then acc
                   else
                     let t = r.measured_ms *. 1e-3 in
@@ -677,9 +695,9 @@ module Calibration = struct
           fit_bytes_approx = List.count timed ~f:(fun r -> r.bytes_approx);
           fit_multi_kernel = List.count timed ~f:(fun r -> r.kernels > 1);
           fit_violations =
-            (* Fully-exact rows only, matching the runtime warning: on a row with an approx leg
-               the exceedance may reflect over-counting, not an understated envelope, and this
-               counter prompts a refit. *)
+            (* Fully-exact rows only, matching the runtime warning: on a row with an approx leg the
+               exceedance may reflect over-counting, not an understated envelope, and this counter
+               prompts a refit. *)
             List.count rows ~f:(fun r ->
                 match r.model_ms with
                 | Some m ->

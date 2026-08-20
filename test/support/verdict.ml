@@ -25,8 +25,8 @@ open Base
 let failures = ref 0
 
 (** Records a failure, on stdout (where the golden sees it) and stderr (where it survives the
-    nonzero exit). [msg] should read as the thing that is wrong, without a "FAIL" prefix of its
-    own. *)
+    nonzero exit). [msg] should read as the thing that is wrong, without a "FAIL" prefix of its own.
+*)
 let fail msg =
   Int.incr failures;
   Stdio.printf "FAIL: %s\n" msg;
@@ -77,11 +77,11 @@ let skipped ~backend name =
     specific number (a measured value, a difference) that must stay out of a passing golden. *)
 let pass_fail ?detail label b =
   if b then Stdio.printf "%s: PASS\n" label
-  else (
+  else
     let detail = match detail with None -> "" | Some f -> " (" ^ f () ^ ")" in
     Int.incr failures;
     Stdio.printf "%s: FAIL%s\n" label detail;
-    Stdio.eprintf "FAIL: %s%s\n" label detail)
+    Stdio.eprintf "FAIL: %s%s\n" label detail
 
 (** Whether any check has failed so far. For a test that wants to say something extra about a bad
     run; the exit status is taken care of without it. *)

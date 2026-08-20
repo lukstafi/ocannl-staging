@@ -9,32 +9,31 @@
 
    The splat has to be ARITHMETIC-FREE to keep that promise, which is why it renders as an
    initializer of repeated copies of a bound scalar. Both arithmetic spellings alter bits the scalar
-   twin keeps: [((vtyp){0} + x)] breaks on negative zero, since IEEE-754 has
-   [(+0.0) + (-0.0) = +0.0], so a negative-zero element enters the vector arithmetic as POSITIVE
-   zero; and [(x - (vtyp){0})], the first fix for that, is the identity on both zeros but still
-   quiets a signaling NaN ([0x7f800001 -> 0x7fc00001] under gcc [-fsignaling-nans]; that it usually
-   survives is only the optimizer folding the subtraction away, which nothing requires). The legs
-   below execute the negative-zero case — a signaling NaN cannot be planted through the tensor API,
-   since host values cross as OCaml doubles and the narrowing conversion quiets it — and the
-   structural pins keep the arithmetic spellings out. Its products then differ from the scalar path's in the sign of a zero, and that survives
-   into the result whenever the accumulating sum is itself a signed zero. The two legs below are
-   those two arrangements, and each is checked with a comparison that can SEE the difference:
-   [Float.equal] reports [-0. = +0.], so parity here is on the bits.
+   twin keeps: [((vtyp){0} + x)] breaks on negative zero, since IEEE-754 has [(+0.0) + (-0.0) =
+   +0.0], so a negative-zero element enters the vector arithmetic as POSITIVE zero; and [(x -
+   (vtyp){0})], the first fix for that, is the identity on both zeros but still quiets a signaling
+   NaN ([0x7f800001 -> 0x7fc00001] under gcc [-fsignaling-nans]; that it usually survives is only
+   the optimizer folding the subtraction away, which nothing requires). The legs below execute the
+   negative-zero case — a signaling NaN cannot be planted through the tensor API, since host values
+   cross as OCaml doubles and the narrowing conversion quiets it — and the structural pins keep the
+   arithmetic spellings out. Its products then differ from the scalar path's in the sign of a zero,
+   and that survives into the result whenever the accumulating sum is itself a signed zero. The two
+   legs below are those two arrangements, and each is checked with a comparison that can SEE the
+   difference: [Float.equal] reports [-0. = +0.], so parity here is on the bits.
 
    - Register tiling: a 4x16 accumulator preloaded with [-0.0] in every cell (the statement's [+=]
-     semantics load it into the C-tile, and a [+0.0] accumulator would absorb the sign of every
-     zero product), row 0 of A all [-0.0], B strictly positive. Row 0 of the product is [-0.0] cell
-     by cell — [(-0.0) * b = -0.0] and [(-0.0) + (-0.0) = -0.0] — while the normalizing splat
-     yields [+0.0] throughout it. The other rows are ordinary nonzero values, so the reference is
-     not vacuous, and they also pin that the fix changed nothing else. The preloaded accumulator is
-     why this leg is an explicit [=+] into an initialized tensor rather than one of
-     [schedule_mma_matmul]'s zero-then-accumulate legs.
-   - Vectorized FMA: [s *. a + b] over a [Vectorized] innermost loop, where [s] is [-0.0] per row,
-     broadcast along the vectorized axis (so it is lane-uniform and reaches the FMA through the
-     splat), [a] takes both signs and [b] is mostly negative zero.
+   semantics load it into the C-tile, and a [+0.0] accumulator would absorb the sign of every zero
+   product), row 0 of A all [-0.0], B strictly positive. Row 0 of the product is [-0.0] cell by cell
+   — [(-0.0) * b = -0.0] and [(-0.0) + (-0.0) = -0.0] — while the normalizing splat yields [+0.0]
+   throughout it. The other rows are ordinary nonzero values, so the reference is not vacuous, and
+   they also pin that the fix changed nothing else. The preloaded accumulator is why this leg is an
+   explicit [=+] into an initialized tensor rather than one of [schedule_mma_matmul]'s
+   zero-then-accumulate legs. - Vectorized FMA: [s *. a + b] over a [Vectorized] innermost loop,
+   where [s] is [-0.0] per row, broadcast along the vectorized axis (so it is lane-uniform and
+   reaches the FMA through the splat), [a] takes both signs and [b] is mostly negative zero.
 
-   Both legs first need the negative zeros to reach the kernel at all, which is a second instance
-   of the same normalization: the constant fill of a small array inlines as scalar stores of C
+   Both legs first need the negative zeros to reach the kernel at all, which is a second instance of
+   the same normalization: the constant fill of a small array inlines as scalar stores of C
    literals, and [%.16g (-0.)] is ["-0"] — an integer literal, [+0.0] once cast. Hence the
    [c_float_literal] half of gh-ocannl-615 and the first printed check.
 
@@ -52,7 +51,6 @@ let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_cpu = String.is_substring backend_name ~substring:"cc"
-
 let skipped = Verdict.skipped ~backend:backend_name
 
 (* Parity on the bits, not on the values: [Float.equal (-0.) 0.] is [true], and the sign of a zero
@@ -121,8 +119,8 @@ let rec innermost_loop (llc : LL.t) : Ir.Indexing.symbol option =
    scalar stores of C literals on every C-family backend, and [%.16g (-0.)] is ["-0"] — an INTEGER
    literal, [+0.0] once cast. So before gh-ocannl-615 a [-0.0] in host data was normalized before
    any kernel ran, which is what made the first version of the legs below vacuous. Value-only, since
-   whether a given backend inlines this particular fill or uploads it is its own business; either way
-   the host's bits must come back. *)
+   whether a given backend inlines this particular fill or uploads it is its own business; either
+   way the host's bits must come back. *)
 
 let () =
   (* Both zeros and ordinary values, so a buffer that came back all-[+0.0] (the pre-fix behavior) or
@@ -151,13 +149,12 @@ let () =
        so row 0's products are [-0.0] rather than [+0.0]. Everything is a multiple of 1/8, hence
        exact in f32: the parity claims are about zero signs, not rounding. *)
     let av =
-      Array.init (mi * mk) ~f:(fun x ->
-          if x < mk then -0.0 else Float.of_int ((x % 7) + 1) *. 0.5)
+      Array.init (mi * mk) ~f:(fun x -> if x < mk then -0.0 else Float.of_int ((x % 7) + 1) *. 0.5)
     in
     let bv = Array.init (mk * mj) ~f:(fun x -> Float.of_int ((x % 13) + 1) *. 0.25) in
-    (* The accumulator's preloaded value: the C-tile is loaded from [d] at block entry, and a
-       [-0.0] accumulator is what makes a [-0.0] product visible ([(+0.0) + (-0.0) = +0.0] would
-       otherwise absorb the sign). *)
+    (* The accumulator's preloaded value: the C-tile is loaded from [d] at block entry, and a [-0.0]
+       accumulator is what makes a [-0.0] product visible ([(+0.0) + (-0.0) = +0.0] would otherwise
+       absorb the sign). *)
     let dv = Array.create ~len:(mi * mj) (-0.0) in
     let ma = TDSL.ndarray av ~label:[ "nz_a" ] ~input_dims:[ mk ] ~output_dims:[ mi ] () in
     let mb = TDSL.ndarray bv ~label:[ "nz_b" ] ~input_dims:[ mj ] ~output_dims:[ mk ] () in
@@ -189,10 +186,10 @@ let () =
         let has s = String.is_substring src ~substring:s in
         p "register tiling renders a bit-preserving A splat"
           (has "Tile_mma register tiling" && has "full blocks 4x16 of 4x16"
-          (* An initializer of repeated copies of one bound scalar — no arithmetic, so no bit
-             pattern is altered. Both arithmetic spellings are pinned out by name: [(vtyp){0} + x]
-             normalizes a negative zero, and [x - (vtyp){0}] quiets a signaling NaN. *)
-          && has "tmma_as_0__, tmma_as_0__"
+         (* An initializer of repeated copies of one bound scalar — no arithmetic, so no bit pattern
+            is altered. Both arithmetic spellings are pinned out by name: [(vtyp){0} + x] normalizes
+            a negative zero, and [x - (vtyp){0}] quiets a signaling NaN. *)
+         && has "tmma_as_0__, tmma_as_0__"
           && (not (has "){0} + "))
           && not (has " - (ocannl_vec")))
   else (
@@ -208,8 +205,8 @@ let () =
     (* [a] takes both signs, so the correct product is [-0.0] on the positive cells and [+0.0] on
        the negative ones — the normalizing splat gets BOTH backwards, which a fix that merely
        flipped a sign would not. [b] is negative zero except on a few cells: a zero addend keeps the
-       product's zero sign observable, and the nonzero cells keep the reference non-vacuous (and
-       pin that ordinary arithmetic is unchanged). *)
+       product's zero sign observable, and the nonzero cells keep the reference non-vacuous (and pin
+       that ordinary arithmetic is unchanged). *)
     let av =
       Array.init n ~f:(fun x ->
           let mag = Float.of_int ((x % 7) + 1) *. 0.5 in
@@ -229,14 +226,14 @@ let () =
     let s =
       TDSL.ndarray (Array.create ~len:rows (-0.0)) ~label:[ "nzv_s" ] ~output_dims:[ rows ] ()
     in
-    let%op c0 = (s +* "i;ij=>ij" a) + b in
+    let%op c0 = s +* "i;ij=>ij" a + b in
     let ctx_twin = run ~name:"nzv_twin" ~transform:(fun opt -> opt) (Train.forward c0) in
     let want = discriminating "nzv_twin" (Context.get_values ctx_twin c0.Tensor.value) in
     (* Both zero signs must actually occur, or half the discrimination above is imaginary. *)
     p "vectorized reference carries zeros of both signs"
       (Array.exists want ~f:is_neg_zero
       && Array.exists want ~f:(fun x -> Float.equal x 0. && not (Float.ieee_negative x)));
-    let%op c1 = (s +* "i;ij=>ij" a) + b in
+    let%op c1 = s +* "i;ij=>ij" a + b in
     let transform (opt : LL.optimized) =
       let j = Option.value_exn ~here:[%here] (innermost_loop opt.LL.llc) in
       Sched.apply [ Sched.Retype { axis = j; ty = LL.Vectorized } ] opt
@@ -250,10 +247,7 @@ let () =
     | Some src ->
         let has s = String.is_substring src ~substring:s in
         p "vectorized rendering renders a bit-preserving splat"
-          (has "vector_size"
-          && has "vunif"
-          && (not (has "){0} + "))
-          && not (has " - (ocannl_vec")))
+          (has "vector_size" && has "vunif" && (not (has "){0} + ")) && not (has " - (ocannl_vec")))
   else (
     skipped "vectorized reference carries zeros of both signs";
     skipped "vectorized FMA preserves a negative-zero uniform operand (bitwise vs the serial twin)";

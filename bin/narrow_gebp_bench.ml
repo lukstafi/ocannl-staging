@@ -2,29 +2,28 @@
    storage, with the widening folded into the packing [Stage] ([tile_prec]). Times, on the C
    backends, the serial naive kernel against the all-Serial packed GEBP and the pool-parallel
    grid-outermost per-chunk-packing flavor (schedule_bench's packmma / pm_bpk shapes), at the
-   requested storage precision — the packed panels are minted at the compute precision the
-   emission resolves ([Numerics.cpu_compute_prec] over [Context.hardware_limits]), so an f32 run
-   measures the plain GEBP, a bf16/f16 run measures f32-GEBP-over-narrow-storage, and an f16 run
-   with --ocannl_fp16_arithmetic=true on a native-arithmetic target (NEON, AVX512-FP16) measures
-   the pure-f16 GEBP — the honest first comparison the issue asks for. On a target that merely
-   promotes ([cc_fp16_arithmetic] probes it), the policy is ignored and the run stays f32-compute.
+   requested storage precision — the packed panels are minted at the compute precision the emission
+   resolves ([Numerics.cpu_compute_prec] over [Context.hardware_limits]), so an f32 run measures the
+   plain GEBP, a bf16/f16 run measures f32-GEBP-over-narrow-storage, and an f16 run with
+   --ocannl_fp16_arithmetic=true on a native-arithmetic target (NEON, AVX512-FP16) measures the
+   pure-f16 GEBP — the honest first comparison the issue asks for. On a target that merely promotes
+   ([cc_fp16_arithmetic] probes it), the policy is ignored and the run stays f32-compute.
 
-   Usage: OCANNL_BACKEND=cc dune exec bin/narrow_gebp_bench.exe -- [f32|bf16|f16] [n] [repeats]
-   [bm] [bk] (defaults f32, 512, 20, 64, 256; [bm]/[bk] also as [--bm=]/[--bk=] flags). The packed
-   variants schedule [Sched.split]s of factor [bm] over the i axis and [bk] over the k axis, so
-   they need [n mod bm = 0] and [n mod bk = 0] (and an n big enough to leave a loop nest at all);
-   an unschedulable n runs the unblocked naive variant alone, so an arbitrary extent still has
-   something to compare against. Each line carries a position-weighted checksum of the whole
-   output, which is what makes a mishandled edge region visible — the register-tiled micro-kernel
-   peels row and column edges whenever its block shape does not cover the extent, and a single
-   interior cell sees none of that. Since gh-ocannl-639 every leg (the naive serial fallback
-   included) accumulates at compute precision, so with this bench's exact-by-design partial sums
-   the checksums are comparable across the board even in a narrow-storage run. Each packed line
-   carries its
+   Usage: OCANNL_BACKEND=cc dune exec bin/narrow_gebp_bench.exe -- [f32|bf16|f16] [n] [repeats] [bm]
+   [bk] (defaults f32, 512, 20, 64, 256; [bm]/[bk] also as [--bm=]/[--bk=] flags). The packed
+   variants schedule [Sched.split]s of factor [bm] over the i axis and [bk] over the k axis, so they
+   need [n mod bm = 0] and [n mod bk = 0] (and an n big enough to leave a loop nest at all); an
+   unschedulable n runs the unblocked naive variant alone, so an arbitrary extent still has
+   something to compare against. Each line carries a position-weighted checksum of the whole output,
+   which is what makes a mishandled edge region visible — the register-tiled micro-kernel peels row
+   and column edges whenever its block shape does not cover the extent, and a single interior cell
+   sees none of that. Since gh-ocannl-639 every leg (the naive serial fallback included) accumulates
+   at compute precision, so with this bench's exact-by-design partial sums the checksums are
+   comparable across the board even in a narrow-storage run. Each packed line carries its
    [C_syntax.mma_census] rendering, because a [Tile_mma] whose preconditions fail (a column extent
-   below the compute vector width is one of several ways in) renders the scalar fallback while
-   still reporting as "packmma" — read the bracket, not the variant name, when deciding what a
-   timing measured. Readbacks stay outside the timed region (the [Context.get_values] trap,
+   below the compute vector width is one of several ways in) renders the scalar fallback while still
+   reporting as "packmma" — read the bracket, not the variant name, when deciding what a timing
+   measured. Readbacks stay outside the timed region (the [Context.get_values] trap,
    docs/agent-notes.md). *)
 
 open Base
@@ -62,8 +61,8 @@ let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; i
    it. Every intermediate is masked below 2^54, so nothing overflows a 63-bit int and the sequence
    is reproducible by an external oracle. *)
 let mix ~salt a b =
-  let x = (a * 73856093) lxor (b * 19349663) lxor salt in
-  let x = (x lxor (x lsr 13)) land 0xFFFFFF in
+  let x = a * 73856093 lxor (b * 19349663) lxor salt in
+  let x = x lxor (x lsr 13) land 0xFFFFFF in
   let x = x * 1274126177 land 0xFFFFFF in
   x lxor (x lsr 7)
 
@@ -91,9 +90,12 @@ let () =
      for any n. *)
   let unschedulable =
     (if n < 2 then [ Printf.sprintf "n = %d leaves no i/j/k loop nest to schedule" n ] else [])
-    @ List.filter_map [ ("bm", bm); ("bk", bk) ] ~f:(fun (name, f) ->
+    @ List.filter_map
+        [ ("bm", bm); ("bk", bk) ]
+        ~f:(fun (name, f) ->
           if n % f = 0 then None
-          else Some (Printf.sprintf "%s = %d does not divide n = %d (remainder %d)" name f n (n % f)))
+          else
+            Some (Printf.sprintf "%s = %d does not divide n = %d (remainder %d)" name f n (n % f)))
   in
   let flops = 2.0 *. Float.of_int n *. Float.of_int n *. Float.of_int n in
   (* Operand values that vary with EVERY index at every n, drawn through [mix] so that no shift of
@@ -113,9 +115,9 @@ let () =
      because the resulting 1/8 product granularity is load-bearing in a narrow-storage run (see the
      checksum's note below; a finer-grained attempt overflowed the bf16 mantissa and split the legs
      at n = 256). ma is strictly positive, so a dropped term cannot cancel into something plausible;
-     mb is signed and near-mean-zero, which makes partial sums random-walk rather than grow with n
-     — measured max |partial sum| 18 at n = 256 and 31 at n = 512, against the ~0.075n a
-     periodic-in-k pairing produced. *)
+     mb is signed and near-mean-zero, which makes partial sums random-walk rather than grow with n —
+     measured max |partial sum| 18 at n = 256 and 31 at n = 512, against the ~0.075n a periodic-in-k
+     pairing produced. *)
   let ma =
     NTDSL.init ~l:"ma" ~prec ~i:[ n ] ~o:[ n ]
       ~f:(fun idcs -> Float.of_int (1 + (mix ~salt:0x5A17 idcs.(0) idcs.(1) % 3)) *. 0.25)
@@ -168,9 +170,7 @@ let () =
         [ ez; sp_zi ]
     in
     let tz, _lane = Sched.tensorize ~i:i_i ~j ~k:k_i ~simd_width:1 in
-    zops @ [ sp_i; sp_k ]
-    @ sink j [ k_o ]
-    @ sink i_i [ k_o ]
+    zops @ [ sp_i; sp_k ] @ sink j [ k_o ] @ sink i_i [ k_o ]
     @ (if grid then [] else sink i_o [ k_o ])
     @ [ stage mb.Tensor.value [ k_i; j ]; stage ma.Tensor.value [ i_i; k_i ] ]
     @ [ tz ]
@@ -206,13 +206,13 @@ let () =
         ctx (Stdlib.Array.make repeats ())
     in
     let stop = Time_now.nanoseconds_since_unix_epoch () in
-    (* Readback OUTSIDE the timed region (the [Context.get_values] trap, docs/agent-notes.md):
-       the cc scheduler is synchronous, so the run loop needs no readback to complete. *)
+    (* Readback OUTSIDE the timed region (the [Context.get_values] trap, docs/agent-notes.md): the
+       cc scheduler is synchronous, so the run loop needs no readback to complete. *)
     let values = Context.get_values ctx mc.Tensor.value in
-    (* Element [1][1] of the n*n result — an interior cell, away from the corners — except at
-       n = 1, where the whole output is one element. One interior cell cannot see a remainder
-       region, so the whole output is checksummed too: every correct variant prints the identical
-       value, a tail-mishandling one does not.
+    (* Element [1][1] of the n*n result — an interior cell, away from the corners — except at n = 1,
+       where the whole output is one element. One interior cell cannot see a remainder region, so
+       the whole output is checksummed too: every correct variant prints the identical value, a
+       tail-mishandling one does not.
 
        Which remainder, precisely — the obvious answer is the wrong one. A [Sched.split] whose
        factor does not divide its extent is NOT the case covered here: [unschedulable] rejects
@@ -220,39 +220,38 @@ let () =
        naive line has nothing to be compared against. What IS covered is the register-tiled
        micro-kernel's own edge peel, which needs no split remainder: the [Tile_mma] covers full
        blocks only, and n is free of any width constraint because j is never split. At n = 77 with
-       bm = 7, bk = 11 the emitted kernel carries two scalar peel loops — a column peel over
-       j in [76, 77) and a row peel over i in [4, 7) — that the same kernel at n = 76 does not
-       have, and all three variants agree on the checksum across it. So the tail this check guards
-       is the micro-kernel peel and the packing [Stage] edges, not the block remainder.
-       Position-weighted for a different reason than schedule_bench's: with the per-axis residues
-       above there is no divisibility class on which a plain sum vanishes (unlike the flattened
-       form, whose collapse also zeroed it). What an unweighted sum cannot see is a PERMUTATION —
-       a tail written with the right values at the wrong offsets leaves the multiset intact, and
-       the multiset is all a plain sum reads — and a misplaced edge is exactly what the peel risks.
+       bm = 7, bk = 11 the emitted kernel carries two scalar peel loops — a column peel over j in
+       [76, 77) and a row peel over i in [4, 7) — that the same kernel at n = 76 does not have, and
+       all three variants agree on the checksum across it. So the tail this check guards is the
+       micro-kernel peel and the packing [Stage] edges, not the block remainder. Position-weighted
+       for a different reason than schedule_bench's: with the per-axis residues above there is no
+       divisibility class on which a plain sum vanishes (unlike the flattened form, whose collapse
+       also zeroed it). What an unweighted sum cannot see is a PERMUTATION — a tail written with the
+       right values at the wrong offsets leaves the multiset intact, and the multiset is all a plain
+       sum reads — and a misplaced edge is exactly what the peel risks.
 
        The weight runs through [mix] on the (row, column) pair for the same reason the operands do,
        and the flat-offset form is the trap it avoids: a weight of [1 + (t mod 251)] over the flat
        offset t = i*n + j collapses to [1 + j] whenever 251 divides n, giving every row identical
-       weights, so at n = 251 (or 502, 753, ...) a row permutation was invisible to the checksum
-       AND to the spot cell at once. Same degeneracy as the operands', one line away, and it came
-       in with the port. Weights stay capped at 251 so that products of these exact-in-binary
-       operands stay exact in the double accumulator.
+       weights, so at n = 251 (or 502, 753, ...) a row permutation was invisible to the checksum AND
+       to the spot cell at once. Same degeneracy as the operands', one line away, and it came in
+       with the port. Weights stay capped at 251 so that products of these exact-in-binary operands
+       stay exact in the double accumulator.
 
-       Cross-variant equality is EXACT in an f32 run, at every extent: the products are multiples
-       of 1/8 bounded by 0.75n, so the whole reduction is exact in the f32 accumulator and
-       independent of the order the variants sum in. Since gh-ocannl-639 it holds in narrow
-       storage runs too, at every extent where the per-k-block partial sums stay exact at storage
-       precision: the naive serial fallback now holds its accumulator at compute precision across
-       the whole k extent and narrows once at the store (before gh-ocannl-639 it narrowed at
-       EVERY k step, which split it from the packed legs at bf16 n = 320 and forced the run to
-       announce the non-comparability outright), while the packed variants narrow once per k
-       block (the C-tile stores back at [bk] boundaries — the narrowing points remain a property
-       of the schedule's reduction structure; only the accumulator's WIDTH is policy). The
-       near-mean-zero mb keeps partial sums random-walking (max 31 at n = 512, multiples of 1/8 —
-       bf16-exact), so every rounding any variant performs is exact and the checksums agree
-       bitwise; well beyond that extent an inexact block-boundary partial could split naive from
-       packed again, far more rarely than the per-step narrowing did. Both checks are outside the
-       timed region. *)
+       Cross-variant equality is EXACT in an f32 run, at every extent: the products are multiples of
+       1/8 bounded by 0.75n, so the whole reduction is exact in the f32 accumulator and independent
+       of the order the variants sum in. Since gh-ocannl-639 it holds in narrow storage runs too, at
+       every extent where the per-k-block partial sums stay exact at storage precision: the naive
+       serial fallback now holds its accumulator at compute precision across the whole k extent and
+       narrows once at the store (before gh-ocannl-639 it narrowed at EVERY k step, which split it
+       from the packed legs at bf16 n = 320 and forced the run to announce the non-comparability
+       outright), while the packed variants narrow once per k block (the C-tile stores back at [bk]
+       boundaries — the narrowing points remain a property of the schedule's reduction structure;
+       only the accumulator's WIDTH is policy). The near-mean-zero mb keeps partial sums
+       random-walking (max 31 at n = 512, multiples of 1/8 — bf16-exact), so every rounding any
+       variant performs is exact and the checksums agree bitwise; well beyond that extent an inexact
+       block-boundary partial could split naive from packed again, far more rarely than the per-step
+       narrowing did. Both checks are outside the timed region. *)
     let checksum =
       Array.foldi values ~init:0.0 ~f:(fun t acc v ->
           let w = 1 + (mix ~salt:0x7E51 (t / n) (t % n) % 251) in
@@ -261,7 +260,8 @@ let () =
     let spot = Int.min (n + 1) (Array.length values - 1) in
     let secs = Float.of_int63 Int63.(stop - start) /. 1e9 /. Float.of_int repeats in
     p "%-12s %8.3f ms  %8.2f GFLOP/s  (spot check [%d] %.2f, chk %.10g)%s\n" variant (secs *. 1e3)
-      (flops /. secs /. 1e9) spot values.(spot) checksum
+      (flops /. secs /. 1e9)
+      spot values.(spot) checksum
       (match renderings with
       | [] -> ""
       | rs ->
@@ -269,9 +269,7 @@ let () =
             List.map (List.dedup_and_sort rs ~compare:Ir.C_syntax.compare_mma_rendering)
               ~f:(fun r ->
                 let k = List.count rs ~f:(Ir.C_syntax.equal_mma_rendering r) in
-                Printf.sprintf "%s x%d"
-                  (Sexp.to_string (Ir.C_syntax.sexp_of_mma_rendering r))
-                  k)
+                Printf.sprintf "%s x%d" (Sexp.to_string (Ir.C_syntax.sexp_of_mma_rendering r)) k)
           in
           "  [" ^ String.concat ~sep:", " counted ^ "]");
     (secs, renderings)
@@ -286,12 +284,12 @@ let () =
   p "GEBP n=%d, %d repeats, blocking bm=%d bk=%d, storage %s, compute %s, packed panels %s\n" n
     repeats bm bk (Ir.Ops.prec_string prec) (Ir.Ops.prec_string cprec)
     (Option.value_map tile_prec ~default:"(storage)" ~f:Ir.Ops.prec_string);
-  (* Say it at runtime rather than only in a comment: since gh-ocannl-639 every variant
-     accumulates at compute precision (naive narrows once per cell, packed once per k block).
-     Whether the checksums are comparable depends on the extent: every rounding any variant
-     performs is exact as long as the per-k-block partial sums stay storage-exact, which for
-     these operands is measured through n = 512 at bf16 (max |partial| 31, multiples of 1/8);
-     beyond that an inexact block partial can legitimately split naive from packed. *)
+  (* Say it at runtime rather than only in a comment: since gh-ocannl-639 every variant accumulates
+     at compute precision (naive narrows once per cell, packed once per k block). Whether the
+     checksums are comparable depends on the extent: every rounding any variant performs is exact as
+     long as the per-k-block partial sums stay storage-exact, which for these operands is measured
+     through n = 512 at bf16 (max |partial| 31, multiples of 1/8); beyond that an inexact block
+     partial can legitimately split naive from packed. *)
   if Option.is_some tile_prec then
     if n <= 512 then
       p

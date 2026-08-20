@@ -33,10 +33,9 @@
    carries its [C_syntax.mma_census] rendering: a [Tile_mma] whose preconditions fail (a column
    extent below the compute vector width is one way in, and arbitrary extents reach it) renders the
    scalar fallback while still reporting under its schedule's name, so read the bracket, not the
-   variant name, when deciding what a timing measured.
-   Run with OCANNL_BACKEND=metal (or cuda); the C backends reject the shared schedules. Timing
-   includes kernel executions and one device-to-host transfer per variant (runs queue on the
-   stream; get_values synchronizes). *)
+   variant name, when deciding what a timing measured. Run with OCANNL_BACKEND=metal (or cuda); the
+   C backends reject the shared schedules. Timing includes kernel executions and one device-to-host
+   transfer per variant (runs queue on the stream; get_values synchronizes). *)
 
 open Base
 open Ocannl
@@ -46,12 +45,12 @@ module Sched = Ir.Schedule
 module Asgns = Ir.Assignments
 module Numerics = Ir.Numerics
 
-(* CUDA's uniform-f32 MMA arm is gated on tf32 (the Numerics policy): without it the [Tile_mma]s
-   of the mma_pd* variants render the lane-0 scalar fallback and the labels would time a kernel
-   that never tensorizes ("timed is not tensorized", docs/agent-notes.md). Metal's f32
-   [simdgroup_matrix] path has no such gate and is unaffected. This bench asserts no parity, so
-   the tf32 rounding is free; cross-check a new backend's emission with
-   --ocannl_schedule_log_declines=true before trusting the labels. *)
+(* CUDA's uniform-f32 MMA arm is gated on tf32 (the Numerics policy): without it the [Tile_mma]s of
+   the mma_pd* variants render the lane-0 scalar fallback and the labels would time a kernel that
+   never tensorizes ("timed is not tensorized", docs/agent-notes.md). Metal's f32 [simdgroup_matrix]
+   path has no such gate and is unaffected. This bench asserts no parity, so the tf32 rounding is
+   free; cross-check a new backend's emission with --ocannl_schedule_log_declines=true before
+   trusting the labels. *)
 let () = Numerics.set_policy { (Numerics.get ()) with tf32_matmuls = true }
 let p = Stdio.printf
 
@@ -74,17 +73,17 @@ let () =
   (* Positional integer args only — the --ocannl_* config flags share the argv, and [Bench_args]
      holds the split (gh-ocannl-634). Getting it wrong is worse here than in a one-argument bench:
      with five positionals, an argument silently dropped loses its own value AND shifts every later
-     one into the wrong slot (`schedule_bench 256 20 -64 512` would run with m defaulting to n and
-     k = 512 read as m), so the bad value never reaches the range check that names it. Every
-     argument is a positive extent or count, except [naive_repeats]. *)
+     one into the wrong slot (`schedule_bench 256 20 -64 512` would run with m defaulting to n and k
+     = 512 read as m), so the bad value never reaches the range check that names it. Every argument
+     is a positive extent or count, except [naive_repeats]. *)
   let args = Bench_args.create "schedule_bench" in
   let n = Bench_args.int args 0 ~name:"n" ~default:256 in
   let repeats = Bench_args.int args 1 ~name:"repeats" ~default:20 in
   let m = Bench_args.int args 2 ~name:"m" ~default:n in
   let k = Bench_args.int args 3 ~name:"k" ~default:n in
   (* The naive 1x1-launch kernel is minutes per run at large sizes (a single GPU thread); cap its
-     repeats separately so the scheduled variants can be timed at scale (arg 5, default = repeats;
-     0 skips the naive leg entirely, including its warmup run — speedups then print as nan). *)
+     repeats separately so the scheduled variants can be timed at scale (arg 5, default = repeats; 0
+     skips the naive leg entirely, including its warmup run — speedups then print as nan). *)
   let naive_repeats = Bench_args.int args 4 ~name:"naive_repeats" ~least:0 ~default:repeats in
   (* Blocking factors, named once and shared between each schedule below and the divisibility gate
      at the bottom, so the requirement and what is actually scheduled cannot drift apart. *)
@@ -100,7 +99,9 @@ let () =
      precondition of the gate, not a requirement of any one variant's blocking, so it is folded into
      [unmet] rather than listed per variant. *)
   let degenerate =
-    List.filter_map [ ("m", m); ("n", n); ("k", k) ] ~f:(fun (name, e) ->
+    List.filter_map
+      [ ("m", m); ("n", n); ("k", k) ]
+      ~f:(fun (name, e) ->
         if e >= 2 then None
         else
           Some
@@ -115,11 +116,10 @@ let () =
   let unmet reqs =
     degenerate
     @ List.filter_map reqs ~f:(fun (fname, f, ename, e) ->
-          if e % f = 0 then None
-          else
-            Some
-              (Printf.sprintf "%s = %d does not divide %s = %d (remainder %d)" fname f ename e
-                 (e % f)))
+        if e % f = 0 then None
+        else
+          Some
+            (Printf.sprintf "%s = %d does not divide %s = %d (remainder %d)" fname f ename e (e % f)))
     |> List.dedup_and_sort ~compare:String.compare
   in
   let mav = Array.init (m * k) ~f:(fun i -> Float.of_int (i % 13) *. 0.25) in
@@ -293,11 +293,11 @@ let () =
       ]
   in
 
-  (* Staged + tensorized simdgroup mma (the autotune staged-seed shape, gh-ocannl-487): both
-     operand tiles cooperatively staged at the serial [k_o] anchor and the micro-kernel tensorized,
-     with the software-pipelining depth as the knob — [pipeline_depth = 1] is the strictly phased
-     form, [2] the double-buffered one, bitwise identical by the transform's invariant, so the
-     paired timing difference is the prefetch overlap's alone. *)
+  (* Staged + tensorized simdgroup mma (the autotune staged-seed shape, gh-ocannl-487): both operand
+     tiles cooperatively staged at the serial [k_o] anchor and the micro-kernel tensorized, with the
+     software-pipelining depth as the knob — [pipeline_depth = 1] is the strictly phased form, [2]
+     the double-buffered one, bitwise identical by the transform's invariant, so the paired timing
+     difference is the prefetch overlap's alone. *)
   let mma_staged_schedule ~pipeline_depth ~mc opt =
     let bm, bn, bk, w = (mma_bm, mma_bn, mma_bk, mma_w) in
     let i, j, k = accum_syms opt in
@@ -357,7 +357,17 @@ let () =
     let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; inner }) in
     let stage source tile_loops =
       Sched.Stage
-        { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = None; pad_stride = None; pipeline_depth = 1; tile_prec = None }
+        {
+          source;
+          tile_loops;
+          shared = false;
+          cooperative = None;
+          hoisted = false;
+          swizzle = None;
+          pad_stride = None;
+          pipeline_depth = 1;
+          tile_prec = None;
+        }
     in
     let tz, _lane = Sched.tensorize ~i:i_i ~j ~k:k_i ~simd_width:1 in
     [ sp_i; sp_k ] @ sink j [ k_o ] @ sink i_i [ k_o ] @ sink i_o [ k_o ]
@@ -380,7 +390,17 @@ let () =
     let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; inner }) in
     let stage source tile_loops =
       Sched.Stage
-        { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = None; pad_stride = None; pipeline_depth = 1; tile_prec = None }
+        {
+          source;
+          tile_loops;
+          shared = false;
+          cooperative = None;
+          hoisted = false;
+          swizzle = None;
+          pad_stride = None;
+          pipeline_depth = 1;
+          tile_prec = None;
+        }
     in
     let tz, _lane = Sched.tensorize ~i:i_i ~j ~k:k_i ~simd_width:1 in
     [ ez; sp_zi; sp_i; sp_k ] @ sink j [ k_o ] @ sink i_i [ k_o ] @ sink i_o [ k_o ]
@@ -404,7 +424,17 @@ let () =
     let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; inner }) in
     let stage ~hoisted source tile_loops =
       Sched.Stage
-        { source; tile_loops; shared = false; cooperative = None; hoisted; swizzle = None; pad_stride = None; pipeline_depth = 1; tile_prec = None }
+        {
+          source;
+          tile_loops;
+          shared = false;
+          cooperative = None;
+          hoisted;
+          swizzle = None;
+          pad_stride = None;
+          pipeline_depth = 1;
+          tile_prec = None;
+        }
     in
     let stage_b =
       match pack_b with
@@ -427,9 +457,9 @@ let () =
        preconditions fail renders the scalar fallback and still reports under its schedule's name —
        "timed is not tensorized", docs/agent-notes.md — so a variant name is not evidence of
        tensorization and every variant carrying one has to be read from the census instead. The
-       decline rules include a column extent below the compute vector width (which arbitrary
-       extents now reach), a narrow [vector_bytes], mixed operand precisions, an accumulation not in
-       FMA form, and [debug_log_from_routines]. Collecting the census only appends to a list, so it
+       decline rules include a column extent below the compute vector width (which arbitrary extents
+       now reach), a narrow [vector_bytes], mixed operand precisions, an accumulation not in FMA
+       form, and [debug_log_from_routines]. Collecting the census only appends to a list, so it
        perturbs neither what is compiled nor what is timed. *)
     Ir.C_syntax.mma_census := [];
     Ir.C_syntax.mma_census_enabled := true;
@@ -457,22 +487,22 @@ let () =
        not divide its extent puts the last partial block exactly there, so the whole output is
        checksummed too: every correct variant prints the identical value, and one that drops or
        repeats tail work does not. Position-weighted, because a plain sum of THIS data is 0 whenever
-       17 divides n (each mb row spans a full cycle of its 17 values, and the total factors as
-       sum_k (sum_i a) (sum_j b)) — exactly the arbitrary-extent regime the checksum is for.
-       The weight is capped so that products of these exact-in-binary operands stay exact in the
-       double accumulator. Both checks are outside the timed region. *)
+       17 divides n (each mb row spans a full cycle of its 17 values, and the total factors as sum_k
+       (sum_i a) (sum_j b)) — exactly the arbitrary-extent regime the checksum is for. The weight is
+       capped so that products of these exact-in-binary operands stay exact in the double
+       accumulator. Both checks are outside the timed region. *)
     let checksum =
       Array.foldi values ~init:0.0 ~f:(fun i acc v -> acc +. (v *. Float.of_int (1 + (i % 251))))
     in
     let spot = Int.min (n + 1) (Array.length values - 1) in
     p "%-10s %8.3f ms  %8.2f GFLOP/s  (spot [%d] %.1f, chk %.10g)%s\n" variant (secs *. 1e3)
-      (flops /. secs /. 1e9) spot values.(spot) checksum
+      (flops /. secs /. 1e9)
+      spot values.(spot) checksum
       (match renderings with
       | [] -> ""
       | rs ->
           let counted =
-            List.map
-              (List.dedup_and_sort rs ~compare:Ir.C_syntax.compare_mma_rendering)
+            List.map (List.dedup_and_sort rs ~compare:Ir.C_syntax.compare_mma_rendering)
               ~f:(fun r ->
                 Printf.sprintf "%s x%d"
                   (Sexp.to_string (Ir.C_syntax.sexp_of_mma_rendering r))
@@ -519,8 +549,8 @@ let () =
   let backend = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc") in
   (* HIP belongs here too: the backend renders workgroup-shared placement exactly as CUDA and Metal
      do, so the shared/staged/tensorized variants — including the gh-ocannl-487 [mma_pd1]/[mma_pd2]
-     pipelining pair — are expressible on it. Omitting it silently routed every HIP run into the
-     CPU branch below, which is why the pipelining pair had never been timed on an AMD GPU. *)
+     pipelining pair — are expressible on it. Omitting it silently routed every HIP run into the CPU
+     branch below, which is why the pipelining pair had never been timed on an AMD GPU. *)
   let has_shared =
     String.is_substring backend ~substring:"metal"
     || String.is_substring backend ~substring:"cuda"
@@ -531,68 +561,78 @@ let () =
     else Float.nan
   in
   (if has_shared then
-    let mma_reqs =
-      [
-        ("bm", mma_bm, "m", m); ("bn", mma_bn, "n", n); ("w", mma_w, "n", n);
-        ("bk", mma_bk, "k", k);
-      ]
-    in
-    (* [parallel] asks for nothing beyond a nest to address: it only splits the zeroing and
-       accumulation loops, with no swap, staging, privatization or tensorization downstream of the
-       split, so [Sched.split]'s remainder guard is all the partial block needs. Measured at 17^3,
-       33^3, 100^3 and 100x17x33 on metal — the checksum matches the naive leg's at each, tail
-       included. That does NOT generalize to the others: with their reqs disabled, smem, regtile and
-       both mma_pd variants raise [Invalid_argument] at 100^3, as do all six C-backend blocked
-       variants, so those gates report a real requirement rather than an assumed one. *)
-    let t_par = bench_v ~variant:"parallel" ~reqs:[] ~schedule:(Some parallel_schedule) () in
-    let t_smem =
-      bench_v ~variant:"smem"
-        ~reqs:[ ("bm", smem_bm, "m", m); ("bn", smem_bn, "n", n); ("bk", smem_bk, "k", k) ]
-        ~schedule:(Some smem_schedule) ()
-    in
-    let t_reg =
-      bench_v ~variant:"regtile"
-        ~reqs:[ ("bm", reg_bm, "m", m); ("bn", reg_bn, "n", n); ("bk", reg_bk, "k", k) ]
-        ~schedule:(Some regtile_schedule) ()
-    in
-    let t_mma1 =
-      bench_v ~variant:"mma_pd1" ~reqs:mma_reqs
-        ~schedule:(Some (mma_staged_schedule ~pipeline_depth:1)) () in
-    let t_mma2 =
-      bench_v ~variant:"mma_pd2" ~reqs:mma_reqs
-        ~schedule:(Some (mma_staged_schedule ~pipeline_depth:2)) () in
-    p "speedups vs naive: parallel %.1fx, smem %.1fx, regtile %.1fx, mma_pd1 %.1fx, mma_pd2 %.1fx\n"
-      (t_naive /. t_par) (t_naive /. t_smem) (t_naive /. t_reg) (t_naive /. t_mma1)
-      (t_naive /. t_mma2)
-  else
-    (* The GEBP family blocks i and k only — j is left whole — so it asks nothing of n. The
-       [tensorize] variant has no blocking at all: the whole triple becomes one [Tile_mma], so any
-       non-degenerate extent still gets a scheduled measurement. *)
-    let gebp_reqs = [ ("bm", gebp_bm, "m", m); ("bk", gebp_bk, "k", k) ] in
-    let t_pack =
-      bench_v ~variant:"cpupack"
-        ~reqs:[ ("bm", cpu_bm, "m", m); ("bn", cpu_bn, "n", n); ("bk", cpu_bk, "k", k) ]
-        ~schedule:(Some cpupack_schedule) ()
-    in
-    let t_tmma = bench_v ~variant:"tensorize" ~reqs:[] ~schedule:(Some tensorize_schedule) () in
-    let t_pmma =
-      bench_v ~variant:"packmma" ~reqs:gebp_reqs ~schedule:(Some packmma_schedule) () in
-    let t_pmmap =
-      bench_v ~variant:"packmma_par" ~reqs:gebp_reqs ~schedule:(Some packmma_par_schedule) () in
-    let t_hoist =
-      bench_v ~variant:"pm_hoist" ~reqs:gebp_reqs
-        ~schedule:(Some (packmma_outer_schedule ~pack_a:false ~pack_b:`Hoist)) () in
-    let t_mixed =
-      bench_v ~variant:"pm_mixed" ~reqs:gebp_reqs
-        ~schedule:(Some (packmma_outer_schedule ~pack_a:true ~pack_b:`Hoist)) () in
-    let t_bpk =
-      bench_v ~variant:"pm_bpk" ~reqs:gebp_reqs
-        ~schedule:(Some (packmma_outer_schedule ~pack_a:true ~pack_b:`Chunk)) () in
-    p
-      "speedups vs naive: cpupack %.1fx, tensorize %.1fx, packmma %.1fx, packmma_par %.1fx, \
-       pm_hoist %.1fx, pm_mixed %.1fx, pm_bpk %.1fx\n"
-      (t_naive /. t_pack) (t_naive /. t_tmma) (t_naive /. t_pmma) (t_naive /. t_pmmap)
-      (t_naive /. t_hoist) (t_naive /. t_mixed) (t_naive /. t_bpk));
+     let mma_reqs =
+       [
+         ("bm", mma_bm, "m", m); ("bn", mma_bn, "n", n); ("w", mma_w, "n", n); ("bk", mma_bk, "k", k);
+       ]
+     in
+     (* [parallel] asks for nothing beyond a nest to address: it only splits the zeroing and
+        accumulation loops, with no swap, staging, privatization or tensorization downstream of the
+        split, so [Sched.split]'s remainder guard is all the partial block needs. Measured at 17^3,
+        33^3, 100^3 and 100x17x33 on metal — the checksum matches the naive leg's at each, tail
+        included. That does NOT generalize to the others: with their reqs disabled, smem, regtile
+        and both mma_pd variants raise [Invalid_argument] at 100^3, as do all six C-backend blocked
+        variants, so those gates report a real requirement rather than an assumed one. *)
+     let t_par = bench_v ~variant:"parallel" ~reqs:[] ~schedule:(Some parallel_schedule) () in
+     let t_smem =
+       bench_v ~variant:"smem"
+         ~reqs:[ ("bm", smem_bm, "m", m); ("bn", smem_bn, "n", n); ("bk", smem_bk, "k", k) ]
+         ~schedule:(Some smem_schedule) ()
+     in
+     let t_reg =
+       bench_v ~variant:"regtile"
+         ~reqs:[ ("bm", reg_bm, "m", m); ("bn", reg_bn, "n", n); ("bk", reg_bk, "k", k) ]
+         ~schedule:(Some regtile_schedule) ()
+     in
+     let t_mma1 =
+       bench_v ~variant:"mma_pd1" ~reqs:mma_reqs
+         ~schedule:(Some (mma_staged_schedule ~pipeline_depth:1))
+         ()
+     in
+     let t_mma2 =
+       bench_v ~variant:"mma_pd2" ~reqs:mma_reqs
+         ~schedule:(Some (mma_staged_schedule ~pipeline_depth:2))
+         ()
+     in
+     p
+       "speedups vs naive: parallel %.1fx, smem %.1fx, regtile %.1fx, mma_pd1 %.1fx, mma_pd2 %.1fx\n"
+       (t_naive /. t_par) (t_naive /. t_smem) (t_naive /. t_reg) (t_naive /. t_mma1)
+       (t_naive /. t_mma2)
+   else
+     (* The GEBP family blocks i and k only — j is left whole — so it asks nothing of n. The
+        [tensorize] variant has no blocking at all: the whole triple becomes one [Tile_mma], so any
+        non-degenerate extent still gets a scheduled measurement. *)
+     let gebp_reqs = [ ("bm", gebp_bm, "m", m); ("bk", gebp_bk, "k", k) ] in
+     let t_pack =
+       bench_v ~variant:"cpupack"
+         ~reqs:[ ("bm", cpu_bm, "m", m); ("bn", cpu_bn, "n", n); ("bk", cpu_bk, "k", k) ]
+         ~schedule:(Some cpupack_schedule) ()
+     in
+     let t_tmma = bench_v ~variant:"tensorize" ~reqs:[] ~schedule:(Some tensorize_schedule) () in
+     let t_pmma = bench_v ~variant:"packmma" ~reqs:gebp_reqs ~schedule:(Some packmma_schedule) () in
+     let t_pmmap =
+       bench_v ~variant:"packmma_par" ~reqs:gebp_reqs ~schedule:(Some packmma_par_schedule) ()
+     in
+     let t_hoist =
+       bench_v ~variant:"pm_hoist" ~reqs:gebp_reqs
+         ~schedule:(Some (packmma_outer_schedule ~pack_a:false ~pack_b:`Hoist))
+         ()
+     in
+     let t_mixed =
+       bench_v ~variant:"pm_mixed" ~reqs:gebp_reqs
+         ~schedule:(Some (packmma_outer_schedule ~pack_a:true ~pack_b:`Hoist))
+         ()
+     in
+     let t_bpk =
+       bench_v ~variant:"pm_bpk" ~reqs:gebp_reqs
+         ~schedule:(Some (packmma_outer_schedule ~pack_a:true ~pack_b:`Chunk))
+         ()
+     in
+     p
+       "speedups vs naive: cpupack %.1fx, tensorize %.1fx, packmma %.1fx, packmma_par %.1fx, \
+        pm_hoist %.1fx, pm_mixed %.1fx, pm_bpk %.1fx\n"
+       (t_naive /. t_pack) (t_naive /. t_tmma) (t_naive /. t_pmma) (t_naive /. t_pmmap)
+       (t_naive /. t_hoist) (t_naive /. t_mixed) (t_naive /. t_bpk));
   (* The closing verdict the variant names cannot give: a [Tile_mma] that declined rendered the
      lane-0 scalar loop, so the line above timed a scalar kernel under a tensorized label. Reported
      rather than rejected — the census is honest for every decline rule at once, whereas a minimum

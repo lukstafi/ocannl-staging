@@ -6,16 +6,16 @@
    backend-independent -- it was reproduced on cc, metal, cuda and hip alike):
 
    1. The max-subtraction's [-inf]. A [Max] accumulation initializes with its neutral element
-      [Float.neg_infinity], and [Ops.exceeds_fp16_cutoff] rejected it: [abs c >= cutoff] is
-      trivially true for an infinity. But [-inf] is exactly representable in binary16 and the code
-      generator emits it deliberately ([C_syntax] renders [(-INFINITY)]), so the cutoff -- a
-      headroom guard against overflow during arithmetic -- had no business rejecting it. Infinities
-      are now exempt. Part 1 below pins the bare max-reduction; part 2 pins it inside a softmax.
+   [Float.neg_infinity], and [Ops.exceeds_fp16_cutoff] rejected it: [abs c >= cutoff] is trivially
+   true for an infinity. But [-inf] is exactly representable in binary16 and the code generator
+   emits it deliberately ([C_syntax] renders [(-INFINITY)]), so the cutoff -- a headroom guard
+   against overflow during arithmetic -- had no business rejecting it. Infinities are now exempt.
+   Part 1 below pins the bare max-reduction; part 2 pins it inside a softmax.
 
    2. The mask fill. It was [-1e9], four orders of magnitude past binary16's largest finite value,
-      so the guard was doing exactly its job. The fill is now [Float.neg_infinity]
-      ([Nn_blocks.default_mask_fill], overridable per call via [?mask_fill]), which is
-      precision-independent -- see the comment there for why not a smaller finite magic number.
+   so the guard was doing exactly its job. The fill is now [Float.neg_infinity]
+   ([Nn_blocks.default_mask_fill], overridable per call via [?mask_fill]), which is
+   precision-independent -- see the comment there for why not a smaller finite magic number.
 
    Fixing (1) alone only moved the failure to (2), so the masked-softmax case below is the one that
    actually pins the workload; the max-reduction case isolates (1).
@@ -67,8 +67,7 @@ let () =
   let n = 4 in
   let scores =
     NTDSL.init ~l:"scores" ~prec:Ir.Ops.half ~b:[ n ] ~i:[ n ] ~o:[]
-      ~f:(function
-        | [| s; t |] -> Float.of_int ((2 * s) + t) *. 0.25 | _ -> assert false)
+      ~f:(function [| s; t |] -> Float.of_int ((2 * s) + t) *. 0.25 | _ -> assert false)
       ()
   in
   let mask =
@@ -103,12 +102,8 @@ let () =
   Verdict.p "rows sum to 1 (within half's resolution)"
     (List.for_all (List.init n ~f:Fn.id) ~f:(fun s -> Float.(abs (row_sum s - 1.) < 0.01)));
   Verdict.p "masked-out entries are exactly zero"
-    (List.for_all
-       (List.init n ~f:Fn.id)
-       ~f:(fun s ->
-         List.for_all
-           (List.init n ~f:Fn.id)
-           ~f:(fun t -> s >= t || Float.equal p.((s * n) + t) 0.)));
+    (List.for_all (List.init n ~f:Fn.id) ~f:(fun s ->
+         List.for_all (List.init n ~f:Fn.id) ~f:(fun t -> s >= t || Float.equal p.((s * n) + t) 0.)));
   Verdict.p "all entries finite" (Array.for_all p ~f:Float.is_finite);
   (* Tolerance against the same softmax evaluated in double. Half's resolution below 1 is ~1e-3, so
      5e-4 admits the ulp of backend [exp] disagreement and nothing looser -- a saturated sentinel or

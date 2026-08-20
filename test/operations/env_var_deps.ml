@@ -11,12 +11,12 @@
    `Utils.read_env_var` consults ONE name per key, `OCANNL_<KEY>` (gh-ocannl-652). Before that it
    consulted the lowercase `ocannl_<key>` FIRST -- so `ocannl_backend=cuda` outranked
    `OCANNL_BACKEND` and decided which backend every test compiled and ran on, while not one dune
-   file in the repository declared it: a developer who exported the lowercase form got stale
-   targets served as passes, from rules written precisely to prevent that. gh-ocannl-628 swept the
-   second spelling INTO 213 stanzas; gh-ocannl-652 dropped the spelling instead, and made setting
-   one fatal so that the demotion could not be silent. What is left to check here is that a
-   declaration names the spelling that is read -- a stanza declaring `(env_var ocannl_backend)`
-   tracks a variable no run will consult, and invalidates nothing.
+   file in the repository declared it: a developer who exported the lowercase form got stale targets
+   served as passes, from rules written precisely to prevent that. gh-ocannl-628 swept the second
+   spelling INTO 213 stanzas; gh-ocannl-652 dropped the spelling instead, and made setting one fatal
+   so that the demotion could not be silent. What is left to check here is that a declaration names
+   the spelling that is read -- a stanza declaring `(env_var ocannl_backend)` tracks a variable no
+   run will consult, and invalidates nothing.
 
    {2 Suites a rejected spelling never reaches}
 
@@ -29,9 +29,9 @@
 
    Per ALIAS, not per directory (Codex P1 round 3). A `(test)` stanza is a runtest action and
    nothing else, so a directory whose gate is a test stanza is ungated for `@slow` -- a separately
-   documented entry point that `dune build @slow` reaches without building one `(test)`. Asking
-   the question per directory let a runtest gate vouch for the slow rules beside it, which is the
-   shape of the hole it was written to prevent.
+   documented entry point that `dune build @slow` reaches without building one `(test)`. Asking the
+   question per directory let a runtest gate vouch for the slow rules beside it, which is the shape
+   of the hole it was written to prevent.
 
    {2 Gates the build does not see}
 
@@ -45,20 +45,20 @@
    {1 What decides "addressed to the configuration"}
 
    `Utils.classify_env_var`, the same function the startup check uses (gh-ocannl-629), so a name a
-   rule tracks and a name a run reports cannot be classified two ways. It also supplies the
-   reserved namespaces: `OCANNL_TOOL_...` is the tooling's, and `OCANNL_LOG_LEVEL_<MODULE>` is a
-   gate, checked by the other half of this test. Both are uppercase-only, as configuration keys now
-   are too. *)
+   rule tracks and a name a run reports cannot be classified two ways. It also supplies the reserved
+   namespaces: `OCANNL_TOOL_...` is the tooling's, and `OCANNL_LOG_LEVEL_<MODULE>` is a gate,
+   checked by the other half of this test. Both are uppercase-only, as configuration keys now are
+   too. *)
 
 open Base
 open Stdio
 module Scan = Test_utils.Dune_stanza_scan
 module Sources = Test_utils.Config_key_scan
 
-(* Declarations of a name OCANNL does not read as a configuration key. Keyed by
-   "<dune file>:<name>", and each entry earns its place on every run (see the staleness check
-   below): a rule tracking a variable no key would be read from is normally a typo, which is the
-   whole point of asking. *)
+(* Declarations of a name OCANNL does not read as a configuration key. Keyed by "<dune
+   file>:<name>", and each entry earns its place on every run (see the staleness check below): a
+   rule tracking a variable no key would be read from is normally a typo, which is the whole point
+   of asking. *)
 let exempt_declarations =
   [
     ( "test/operations/dune:ocannl_backedn",
@@ -78,9 +78,9 @@ let exempt_declarations =
 let gateless_dirs =
   [
     ( "benchmarks/dune",
-      "its one runtest action runs python3 over the benchmark orchestrator's own unit tests, \
-       which import no OCANNL executable -- there is no startup check in reach to gate, the same \
-       reason `config_dep_completeness` exempts it from the ocannl_config dependency" );
+      "its one runtest action runs python3 over the benchmark orchestrator's own unit tests, which \
+       import no OCANNL executable -- there is no startup check in reach to gate, the same reason \
+       `config_dep_completeness` exempts it from the ocannl_config dependency" );
   ]
 
 (* A gate is a stanza that depends on the state of the world: that is what makes dune rerun it
@@ -93,9 +93,9 @@ let rec depends_on_universe = function
 
 (* The lock a directory's actions share, where it has one. A gate added to such a directory has to
    take it too (Codex P1 round 4): not because the gate contends -- it links `arrayjit.utils` and
-   starts no OpenMP pool -- but because the one unlocked action in a file of locked ones is what
-   the next person copies when writing a real training test. Asked of the file rather than
-   hard-coded per directory, so a directory that adopts the lock later brings its gate along. *)
+   starts no OpenMP pool -- but because the one unlocked action in a file of locked ones is what the
+   next person copies when writing a real training test. Asked of the file rather than hard-coded
+   per directory, so a directory that adopts the lock later brings its gate along. *)
 let training_lock = "ocannl_training_test"
 
 let rec takes_training_lock = function
@@ -210,17 +210,18 @@ let () =
             else
               fail
                 (Printf.sprintf
-                   "%s has actions on the `%s` alias and no ambient gate attached to it -- \
-                    nothing here declares a rejected environment spelling, so \
-                    `ocannl_backend=cuda dune build @%s` would serve this directory's cached \
-                    results with the fatal startup check never reached; copy the \
-                    `env_spelling_gate` stanza for that alias from a neighbour, or exempt the \
-                    directory by name with the reason"
+                   "%s has actions on the `%s` alias and no ambient gate attached to it -- nothing \
+                    here declares a rejected environment spelling, so `ocannl_backend=cuda dune \
+                    build @%s` would serve this directory's cached results with the fatal startup \
+                    check never reached; copy the `env_spelling_gate` stanza for that alias from a \
+                    neighbour, or exempt the directory by name with the reason"
                    dune_file alias
                    (if String.equal alias "slow" then "slow"
                     else Stdlib.Filename.dirname dune_file ^ "/" ^ alias)));
       let fields = List.concat_map stanzas ~f:dep_fields in
-      let declared = List.concat_map fields ~f:(fun (_, args) -> List.concat_map args ~f:env_vars_in) in
+      let declared =
+        List.concat_map fields ~f:(fun (_, args) -> List.concat_map args ~f:env_vars_in)
+      in
       (* A declaration this scan did not look inside a dependency field for is one it cannot check,
          so the two counts have to agree. Dune admits `(env_var ...)` only in a dependency
          specification, so a disagreement means a field spelling this scan does not know. *)
@@ -241,8 +242,8 @@ let () =
               | Utils.Env_config_key config_key -> tracked_keys := Set.add !tracked_keys config_key
               (* The gates are checked below, against the modules that read them. *)
               | Utils.Env_reserved _ -> ()
-              | Utils.Env_unread_spelling _ | Utils.Env_unknown_key _
-              | Utils.Env_unread_reserved _ ->
+              | Utils.Env_unread_spelling _ | Utils.Env_unknown_key _ | Utils.Env_unread_reserved _
+                ->
                   if Map.mem exemptions key then exemptions_used := Set.add !exemptions_used key
                   else
                     let what =
@@ -258,8 +259,8 @@ let () =
                           invalidates nothing; fix the spelling, or exempt it by name with the \
                           reason"
                          dune_file name what)));
-      (* What a stanza's own modules read, against what the stanza declares: the gates, read
-         while PREPROCESSING them, and the ambient variables they read by name at RUN time. *)
+      (* What a stanza's own modules read, against what the stanza declares: the gates, read while
+         PREPROCESSING them, and the ambient variables they read by name at RUN time. *)
       List.iter stanzas ~f:(fun stanza ->
           match (Scan.head stanza, Scan.field stanza "modules") with
           | Some kind, Some modules when List.mem module_stanzas kind ~equal:String.equal ->
@@ -293,7 +294,8 @@ let () =
                   (Printf.sprintf
                      "%s declares tracing gates, and this check was handed no sources from %s to \
                       check them against -- add the directory to the rule\'s globs"
-                     where (if String.is_empty dir then "the repository root" else dir))
+                     where
+                     (if String.is_empty dir then "the repository root" else dir))
               else (
                 List.iter read_gates ~f:(fun (gate, source) ->
                     if not (List.mem declared_gates gate ~equal:String.equal) then
@@ -323,28 +325,27 @@ let () =
                  them -- so for those the declaration is looked for anywhere in the dune file, the
                  same latitude `config_dep_completeness` gives the `ocannl_config` dep. *)
               let declared_for_stanza =
-                match Scan.field stanza "deps" with Some _ -> env_vars_of "deps" | None -> declared
+                match Scan.field stanza "deps" with
+                | Some _ -> env_vars_of "deps"
+                | None -> declared
               in
               List.iter sources ~f:(fun (source, content) ->
                   Sources.env_var_reads_in_source content
                   |> List.iter ~f:(fun read ->
-                         match Utils.classify_env_var read with
-                         | Utils.Env_not_addressed -> ()
-                         | _ ->
-                             if not (List.mem declared_for_stanza read ~equal:String.equal) then
-                               fail
-                                 (Printf.sprintf
-                                    "%s/%s reads the environment variable %s by name, and %s does \
-                                     not declare it -- dune then reuses the previous result across \
-                                     a change of the variable that decides what the run does"
-                                    dir source read where)
-                             else
-                               read_table := (where, read, dir ^ "/" ^ source) :: !read_table))
+                      match Utils.classify_env_var read with
+                      | Utils.Env_not_addressed -> ()
+                      | _ ->
+                          if not (List.mem declared_for_stanza read ~equal:String.equal) then
+                            fail
+                              (Printf.sprintf
+                                 "%s/%s reads the environment variable %s by name, and %s does not \
+                                  declare it -- dune then reuses the previous result across a \
+                                  change of the variable that decides what the run does"
+                                 dir source read where)
+                          else read_table := (where, read, dir ^ "/" ^ source) :: !read_table))
           | _ -> ()));
   let stale =
-    Set.diff
-      (Set.of_list (module String) (List.map exempt_declarations ~f:fst))
-      !exemptions_used
+    Set.diff (Set.of_list (module String) (List.map exempt_declarations ~f:fst)) !exemptions_used
   in
   if not (Set.is_empty stale) then
     fail
@@ -352,19 +353,19 @@ let () =
          "exempted declarations no dune file makes any more -- drop them from the exemption list: \
           %s"
          (String.concat ~sep:", " (Set.to_list stale)));
-  (* The coverage of the gate half, stated rather than assumed: a library outside these
-     directories has no sources here to check its `preprocessor_deps` against, and says so above
-     if it declares a gate at all -- but a gate it FAILS to declare is invisible from here, so the
-     boundary belongs in the golden where widening it is a reviewable diff. *)
+  (* The coverage of the gate half, stated rather than assumed: a library outside these directories
+     has no sources here to check its `preprocessor_deps` against, and says so above if it declares
+     a gate at all -- but a gate it FAILS to declare is invisible from here, so the boundary belongs
+     in the golden where widening it is a reviewable diff. *)
   printf "Directories whose sources this scan reads:\n";
-  Set.iter scanned_dirs ~f:(fun dir ->
-      printf "  %s\n" (if String.is_empty dir then "." else dir));
+  Set.iter scanned_dirs ~f:(fun dir -> printf "  %s\n" (if String.is_empty dir then "." else dir));
   printf "\nConfiguration keys tracked as ambient dependencies, in the one spelling OCANNL reads:\n";
   Set.iter !tracked_keys ~f:(printf "  %s\n");
   printf "\nPer-module tracing gates, and the library whose preprocessor_deps declares each:\n";
   List.sort !gate_table ~compare:(fun (_, a, _) (_, b, _) -> String.compare a b)
   |> List.iter ~f:(fun (where, gate, source) -> printf "  %-30s %s (%s)\n" gate where source);
-  printf "\nAmbient variables a module reads by name at run time, and the stanza that declares each:\n";
+  printf
+    "\nAmbient variables a module reads by name at run time, and the stanza that declares each:\n";
   List.sort !read_table ~compare:(fun (_, a, _) (_, b, _) -> String.compare a b)
   |> List.iter ~f:(fun (where, read, source) -> printf "  %-30s %s (%s)\n" read where source);
   let stale_gateless =

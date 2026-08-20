@@ -29,7 +29,6 @@ let vv = Array.init n ~f:(fun i -> (Float.of_int i *. 0.5) -. 7.)
 let expected_sum = Array.fold vv ~init:0. ~f:( +. )
 let approx a b = Float.(abs (a - b) < 1e-3)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-
 let skipped = Verdict.skipped ~backend:backend_name
 
 let has_barriers =
@@ -60,14 +59,7 @@ let group_reduce ~(v : Tn.t) ~(s : Tn.t) (opt : LL.optimized) : LL.optimized =
   let it i = Idx.Iterator i in
   let wg body_f : LL.t =
     let i = Idx.get_symbol () in
-    LL.For_loop
-      {
-        index = i;
-        from_ = 0;
-        to_ = n - 1;
-        body = body_f i;
-        axis = Workgroup_reduce;
-      }
+    LL.For_loop { index = i; from_ = 0; to_ = n - 1; body = body_f i; axis = Workgroup_reduce }
   in
   let load =
     wg (fun i -> LL.Set { tn = partial; idcs = [| it i |]; llsc = Get (v, [| it i |]); debug = "" })

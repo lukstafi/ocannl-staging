@@ -10,8 +10,8 @@
 open! Base
 open Ocannl
 
-(* Failures go through [Verdict], so that a regression exits nonzero instead of being
-   `dune promote`d into the golden as the expected output (gh-ocannl-601). *)
+(* Failures go through [Verdict], so that a regression exits nonzero instead of being `dune
+   promote`d into the golden as the expected output (gh-ocannl-601). *)
 let fail fmt = Printf.ksprintf Verdict.fail fmt
 
 let dummy_origin : Row.constraint_origin list =
@@ -197,8 +197,7 @@ let test_5_monotonicity_via_refiring () =
   try
     let _remaining, _env = Row.solve_inequalities ~stage:Stage1 [ eq ] env in
     Stdio.printf "  PASS\n"
-  with Row.Shape_error (msg, _) ->
-    fail "substitution should not retract; got Shape_error: %s" msg
+  with Row.Shape_error (msg, _) -> fail "substitution should not retract; got Shape_error: %s" msg
 
 (* Test 5b: monotonicity via re-firing (negative mutation). Same setup as Test 5 but the substituted
    leading axis CONFLICTS with the banked GLB's leading axis (banked Dim 4 vs substituted Dim 5).

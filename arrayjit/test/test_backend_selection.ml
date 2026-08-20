@@ -42,5 +42,4 @@ let () =
   (* Selection still works end to end. *)
   let ctx = Context.auto () in
   let name = Context.backend_name ctx in
-  assert (
-    List.mem [ "cc"; "multidev_cc"; "cuda"; "hip"; "metal" ] name ~equal:String.equal)
+  assert (List.mem [ "cc"; "multidev_cc"; "cuda"; "hip"; "metal" ] name ~equal:String.equal)

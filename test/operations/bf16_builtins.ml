@@ -67,8 +67,8 @@ let () =
      bfloat16 node, which CUDA and HIP accept even unbridged (their converting constructor from
      float is implicit) -- only Metal rejects it. Leaving the builtin virtual instead inlines it
      into the consuming bfloat16 binop, where the float operand is what nvrtc reports as a
-     mixed-operand [__hadd] and hiprtc as an ambiguous [operator '+']. That is why gpt2_mini at
-     bf16 compiles in the materialized placement on those two backends and not in the default one:
+     mixed-operand [__hadd] and hiprtc as an ambiguous [operator '+']. That is why gpt2_mini at bf16
+     compiles in the materialized placement on those two backends and not in the default one:
      nothing introduces a float, inlining just moves the builtin's own float result from an
      assignment into an operand.
 
@@ -103,7 +103,9 @@ let () =
     ]
   in
   let ctx =
-    List.fold (List.map exact ~f:snd @ List.map ranged ~f:(fun (_, t, _, _) -> t)) ~init:ctx
+    List.fold
+      (List.map exact ~f:snd @ List.map ranged ~f:(fun (_, t, _, _) -> t))
+      ~init:ctx
       ~f:(fun ctx t -> Train.forward_once ctx t)
   in
   List.iter exact ~f:(fun (label, t) -> show ctx label t);

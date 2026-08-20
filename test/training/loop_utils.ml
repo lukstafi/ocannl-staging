@@ -1,17 +1,16 @@
 (* Training-loop utilities (gh-ocannl-465), ported from llm.c's loop scaffolding:
 
    1. Host-side LR schedules (llmc/schedulers.h): a golden table of the four kinds plus claims
-      pinning warmup, the decay endpoints, and WSD's stable region.
-   2. Global-norm gradient clipping (llmc/global_norm.cuh): the on-device norm must match a host
-      recomputation from the (untouched!) gradient buffers, and the clipped SGD step must match a
-      host oracle folding scale = min(1, max_norm/norm) into the update. Also exercises
-      [scheduled_learning_rate]: a second step at a different schedule point must move parameters
-      by the NEW rate (the data-backed scalar must not be undone by a re-fetch).
-   3. Gradient accumulation: two micro-steps at batch 2 with [~accum_steps:2] must reproduce -- in
-      executed values, per the structural-vs-executable rule -- the gradients and the post-SGD
-      parameters of a single batch-4 step.
-   4. The z-score outlier detector (llmc/outlier_detector.h): warmup returns nan, in-family values
-      score small, a spike scores large. *)
+   pinning warmup, the decay endpoints, and WSD's stable region. 2. Global-norm gradient clipping
+   (llmc/global_norm.cuh): the on-device norm must match a host recomputation from the (untouched!)
+   gradient buffers, and the clipped SGD step must match a host oracle folding scale = min(1,
+   max_norm/norm) into the update. Also exercises [scheduled_learning_rate]: a second step at a
+   different schedule point must move parameters by the NEW rate (the data-backed scalar must not be
+   undone by a re-fetch). 3. Gradient accumulation: two micro-steps at batch 2 with [~accum_steps:2]
+   must reproduce -- in executed values, per the structural-vs-executable rule -- the gradients and
+   the post-SGD parameters of a single batch-4 step. 4. The z-score outlier detector
+   (llmc/outlier_detector.h): warmup returns nan, in-family values score small, a spike scores
+   large. *)
 
 open Base
 open Ocannl
@@ -24,7 +23,13 @@ open Ocannl.Operation.DSL_modules
 let schedules () =
   let show name kind =
     let sched =
-      { Train.Lr_schedule.kind; base_lr = 1.0; warmup_steps = 5; total_steps = 25; final_frac = 0.1 }
+      {
+        Train.Lr_schedule.kind;
+        base_lr = 1.0;
+        warmup_steps = 5;
+        total_steps = 25;
+        final_frac = 0.1;
+      }
     in
     let lr step = Train.Lr_schedule.learning_rate sched ~step in
     printf "%-8s" name;
@@ -41,8 +46,7 @@ let schedules () =
   let wsd_s = show "wsd" (Train.Lr_schedule.Wsd { decay_frac = 0.2 }) in
   let lr sched step = Train.Lr_schedule.learning_rate sched ~step in
   Verdict.p "warmup applies to every kind, constant included"
-    (List.for_all [ con_s; cos_s; lin_s; wsd_s ] ~f:(fun s ->
-         Float.(abs (lr s 0 -. 0.2) < 1e-12)));
+    (List.for_all [ con_s; cos_s; lin_s; wsd_s ] ~f:(fun s -> Float.(abs (lr s 0 -. 0.2) < 1e-12)));
   Verdict.p "constant holds base_lr after warmup"
     (List.for_all [ 5; 15; 30 ] ~f:(fun s -> Float.(abs (lr con_s s -. 1.0) < 1e-12)));
   Verdict.p "warmup starts at base_lr/warmup_steps" Float.(abs (lr cos_s 0 -. 0.2) < 1e-12);
@@ -67,8 +71,7 @@ let schedules () =
       final_frac = 0.1;
     }
   in
-  Verdict.p "the total_steps clamp outranks a longer warmup"
-    Float.(abs (lr over 6 -. 0.1) < 1e-12)
+  Verdict.p "the total_steps clamp outranks a longer warmup" Float.(abs (lr over 6 -. 0.1) < 1e-12)
 
 (* ----- Shared deterministic model: logits = b + w*x, mean squared error ----- *)
 
@@ -96,13 +99,15 @@ let build_model ~freeze_w ~batch ~x_row =
       ()
   in
   (* Real parameters ([Tensor.param]-registered, deterministic values): {!Train.sgd_update},
-     {!Train.grad_l2_norm} and {!Train.zero_params_grads} derive their set from [loss.params]
-     (via {!Train.trainable_params}), and tensors built with
-     [Operation.init ~grad_spec:Require_grad] do not join it. *)
+     {!Train.grad_l2_norm} and {!Train.zero_params_grads} derive their set from [loss.params] (via
+     {!Train.trainable_params}), and tensors built with [Operation.init ~grad_spec:Require_grad] do
+     not join it. *)
   let w =
     let nd =
       Ir.Ndarray.init_array ~debug:"w" Ir.Ops.single ~dims:[| classes; din |] ~padding:None
-        ~f:(function [| c; d |] -> w_val c d | _ -> assert false)
+        ~f:(function
+        | [| c; d |] -> w_val c d
+        | _ -> assert false)
     in
     TDSL.reshape_param ~l:"w" ~i:[ din ] ~o:[ classes ] nd ()
   in
@@ -187,7 +192,8 @@ let clipping () =
       let expected = p0 -. (lr *. ((host_scale *. g) +. (weight_decay *. p0))) in
       max_err := Float.max !max_err (Float.abs (p1 -. expected))
     in
-    Array.iteri wv0 ~f:(fun c row -> Array.iteri row ~f:(fun d p0 -> check p0 wv1.(c).(d) wg.(c).(d)));
+    Array.iteri wv0 ~f:(fun c row ->
+        Array.iteri row ~f:(fun d p0 -> check p0 wv1.(c).(d) wg.(c).(d)));
     Array.iteri bv0 ~f:(fun c p0 -> check p0 bv1.(c) bg.(c));
     (ctx, host_norm, device_norm, device_scale, host_scale, !max_err)
   in
@@ -267,8 +273,7 @@ let accumulation () =
   Verdict.p "second micro-step changed the accumulated gradients"
     Float.(
       Float.max
-        (Array.fold2_exn wg_1 wg_b ~init:0. ~f:(fun acc r1 r2 ->
-             Float.max acc (max_abs_diff r1 r2)))
+        (Array.fold2_exn wg_1 wg_b ~init:0. ~f:(fun acc r1 r2 -> Float.max acc (max_abs_diff r1 r2)))
         (max_abs_diff bg_1 bg_b)
       > 1e-4);
   Verdict.pass_fail "accumulated micro-batch gradients match the single big-batch gradients"
@@ -291,8 +296,8 @@ let accumulation () =
    but the loss's zero_grads tree does not zero it and the backprop does not accumulate into it.
    [grad_update ~accum_steps] must accept such a model (the documented freezing flow) and leave the
    frozen gradient untouched, while the trainable parameter still accumulates. The optimizer-side
-   helpers derive their set from the backprop ([Train.trainable_params], gh-ocannl-673), so a
-   frozen parameter takes no step at all -- in particular no weight decay. *)
+   helpers derive their set from the backprop ([Train.trainable_params], gh-ocannl-673), so a frozen
+   parameter takes no step at all -- in particular no weight decay. *)
 
 let frozen_backbone_accumulation () =
   (* Case A: one batch-4 step over the frozen-backbone model. *)
@@ -331,11 +336,8 @@ let frozen_backbone_accumulation () =
   (* Case B: two batch-2 micro-steps with accum_steps = 2 over the same 4 dataset rows. *)
   Tensor.unsafe_reinitialize ();
   let x, targets, _w, b_p, loss = build_model ~freeze_w:true ~batch:2 ~x_row:(fun b -> b) in
-  let micro =
-    try Some (Train.grad_update ~accum_steps:2 loss) with Invalid_argument _ -> None
-  in
-  Verdict.p "a frozen parameter does not reject the accumulating grad_update"
-    (Option.is_some micro);
+  let micro = try Some (Train.grad_update ~accum_steps:2 loss) with Invalid_argument _ -> None in
+  Verdict.p "a frozen parameter does not reject the accumulating grad_update" (Option.is_some micro);
   match micro with
   | None -> ()
   | Some micro ->
@@ -422,11 +424,12 @@ let outlier_detector () =
   let z_after_nan = Train.Outlier_detector.update det 1.0 in
   Verdict.p "the window survives a nan sample (later scores stay finite)"
     (Float.is_finite z_after_nan);
-  (* Centered variance: a large common offset with small real variance must not cancel to a zero
-     std (the running E[x^2] - E[x]^2 form scored this window's next deviation as infinity). *)
+  (* Centered variance: a large common offset with small real variance must not cancel to a zero std
+     (the running E[x^2] - E[x]^2 form scored this window's next deviation as infinity). *)
   let det = Train.Outlier_detector.create ~window_size:4 () in
-  List.iter [ 1e8; 1e8 +. 1.; 1e8 -. 1.; 1e8 ] ~f:(fun v ->
-      ignore (Train.Outlier_detector.update det v : float));
+  List.iter
+    [ 1e8; 1e8 +. 1.; 1e8 -. 1.; 1e8 ]
+    ~f:(fun v -> ignore (Train.Outlier_detector.update det v : float));
   let z_offset = Train.Outlier_detector.update det (1e8 +. 1.) in
   Verdict.p "a large-offset window keeps a finite variance (no cancellation)"
     (Float.is_finite z_offset && Float.(abs (z_offset -. Float.sqrt 2.) < 1e-6));
@@ -448,8 +451,7 @@ let outlier_detector () =
   List.iter [ Float.max_finite_value; Float.max_finite_value; Float.max_finite_value ] ~f:(fun v ->
       ignore (Train.Outlier_detector.update det v : float));
   let z_below_max = Train.Outlier_detector.update det 1.0 in
-  Verdict.p "a maxed-out window still scores (no nan from mean overflow)"
-    Float.(z_below_max < -1e6)
+  Verdict.p "a maxed-out window still scores (no nan from mean overflow)" Float.(z_below_max < -1e6)
 
 let () =
   schedules ();

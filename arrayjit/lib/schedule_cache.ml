@@ -78,8 +78,8 @@ let tn_of_ref c i =
 (* The canonical identity of an optimized routine, for schedule replay: the code walk is
    [LL.Canonical_render.emit], with the identity policy below (everything alpha-renamed, so a
    schedule saved in one session replays onto an isomorphic lowering in another) plus this
-   consumer's extras — the [base_syms]/[tn_refs] resolution maps and the codegen-companion
-   sections. Opposite choices to [Low_level.analysis_digest]'s, which keys by identity; see
+   consumer's extras — the [base_syms]/[tn_refs] resolution maps and the codegen-companion sections.
+   Opposite choices to [Low_level.analysis_digest]'s, which keys by identity; see
    [LL.Canonical_render]. *)
 let canonicalize ?(static_indices = []) ?(with_placements = true) (opt : LL.optimized) : canonical =
   let buf = Buffer.create 4096 in
@@ -164,11 +164,11 @@ let canonicalize ?(static_indices = []) ?(with_placements = true) (opt : LL.opti
   Set.iter opt.LL.simdgroup_fragments ~f:(fun tn ->
       emit_tn tn;
       add ",");
-  (* Emitted only when non-empty so pre-swizzle canonical digests (and their caches) stay valid.
-     The layout kind is part of the entry (gh-ocannl-481 item 3: the two flavors are different
-     physical layouts consumed by different renderings, so a cached winner must never alias across
-     them), with the original element flavor keeping its bare rendering for the same reason the
-     whole section is gated on non-emptiness. *)
+  (* Emitted only when non-empty so pre-swizzle canonical digests (and their caches) stay valid. The
+     layout kind is part of the entry (gh-ocannl-481 item 3: the two flavors are different physical
+     layouts consumed by different renderings, so a cached winner must never alias across them),
+     with the original element flavor keeping its bare rendering for the same reason the whole
+     section is gated on non-emptiness. *)
   if not (Map.is_empty opt.LL.swizzled) then begin
     add "];swizzled:[";
     Map.iteri opt.LL.swizzled ~f:(fun ~key:tn ~data:kind ->
@@ -177,10 +177,10 @@ let canonicalize ?(static_indices = []) ?(with_placements = true) (opt : LL.opti
         add ",")
   end;
   (* Gated on non-emptiness like [swizzled], and for the same reason. The depth is digest-relevant
-     on its own: pipeline depths >= 2 produce identical IR (the prologue/prefetch restructuring
-     does not mention the depth) and differ only in the renderer's rotation modulus, so without
-     this section a depth-2 winner would alias a depth-3 program (gh-ocannl-487). The rotor needs
-     no entry — it is the staging anchor loop, determined by the code itself. *)
+     on its own: pipeline depths >= 2 produce identical IR (the prologue/prefetch restructuring does
+     not mention the depth) and differ only in the renderer's rotation modulus, so without this
+     section a depth-2 winner would alias a depth-3 program (gh-ocannl-487). The rotor needs no
+     entry — it is the staging anchor loop, determined by the code itself. *)
   if not (Map.is_empty opt.LL.pipelined) then begin
     add "];pipelined:[";
     Map.iteri opt.LL.pipelined ~f:(fun ~key:tn ~data:{ LL.pt_depth; pt_rotor = _ } ->
@@ -433,17 +433,17 @@ let of_saved canonical (saved : saved_schedule) : Schedule.schedule * registry =
 
 (** {2 The disk cache} *)
 
-(* gh-ocannl-568: the numerics policy is NOT a property of the code, so it cannot reach the canonical
-   digest — it is chosen by the user and consulted at codegen ([Numerics.get] in the backends' mma
-   and narrow-arithmetic paths) and by the tile-shape choice of the autotune sketches. Two processes
-   differing only in it therefore lower to byte-identical code with an equal digest while generating
-   different kernels, and a winner tuned under one policy would replay under the other: measured at
-   5.9x SLOWER than not tuning at all when a default-flags run replayed a tf32-tuned tensorized
-   schedule, whose rendering degrades to the scalar fallback under the stricter numerics. It also
-   breaks {!Numerics}'s invariant that the policy is identical across sibling candidates — a replayed
-   winner is a candidate from another policy regime. So the policy enters the disk-cache key (and the
-   entry, below), which is where the hazard lives: within one process the policy is fixed, across
-   processes only the cache carries schedules. *)
+(* gh-ocannl-568: the numerics policy is NOT a property of the code, so it cannot reach the
+   canonical digest — it is chosen by the user and consulted at codegen ([Numerics.get] in the
+   backends' mma and narrow-arithmetic paths) and by the tile-shape choice of the autotune sketches.
+   Two processes differing only in it therefore lower to byte-identical code with an equal digest
+   while generating different kernels, and a winner tuned under one policy would replay under the
+   other: measured at 5.9x SLOWER than not tuning at all when a default-flags run replayed a
+   tf32-tuned tensorized schedule, whose rendering degrades to the scalar fallback under the
+   stricter numerics. It also breaks {!Numerics}'s invariant that the policy is identical across
+   sibling candidates — a replayed winner is a candidate from another policy regime. So the policy
+   enters the disk-cache key (and the entry, below), which is where the hazard lives: within one
+   process the policy is fixed, across processes only the cache carries schedules. *)
 let numerics_tag () =
   String.prefix
     (Stdlib.Digest.to_hex (Stdlib.Digest.string (Numerics.fingerprint (Numerics.get ()))))
@@ -459,8 +459,8 @@ let codegen_tag ~(limits : Backend_intf.hardware_limits) () =
      than passed through a helper: that literal IS how the consistency tests find a configuration
      read ([Test_utils.Config_key_scan]), so a wrapper taking the name as an argument would hide
      these keys from both the registration check and the classification check -- which a negative
-     control on this very function confirmed while addressing Codex's scan-list finding on
-     PR #337. (For the same reason, prose here avoids spelling the marker the scanner looks for.) *)
+     control on this very function confirmed while addressing Codex's scan-list finding on PR #337.
+     (For the same reason, prose here avoids spelling the marker the scanner looks for.) *)
   let gate name value = if value then name else "no-" ^ name in
   let parts =
     [
@@ -469,8 +469,8 @@ let codegen_tag ~(limits : Backend_intf.hardware_limits) () =
          compute capability, mma formats, shared-memory capacity, thread limits -- share every key
          while generating, rendering and timing candidates differently. The record is exactly the
          device description schedule construction already consults, so hashing it keeps the key as
-         discriminating as the decisions it stands for, and a device's own [codegen_tag] rides
-         along in it. *)
+         discriminating as the decisions it stands for, and a device's own [codegen_tag] rides along
+         in it. *)
       Sexp.to_string (Backend_intf.sexp_of_hardware_limits limits);
       (if Utils.settings.large_models then "wide-index" else "narrow-index");
       (* The EFFECTIVE predicate, not the raw flag (Codex P1 on PR #337): the gate additionally
@@ -482,8 +482,8 @@ let codegen_tag ~(limits : Backend_intf.hardware_limits) () =
          so hashing it here would re-tune cc and Metal for nothing (Codex P2). *)
       gate "routine-logs" (Utils.debug_log_from_routines ());
       (* Where routine logs go matters only when there are routine logs: with the gate off, nothing
-         generated or timed depends on it, and hashing it would re-tune for nothing (Codex P2 on
-         PR #337). *)
+         generated or timed depends on it, and hashing it would re-tune for nothing (Codex P2 on PR
+         #337). *)
       gate "stream-logs"
         (Utils.debug_log_from_routines ()
         && Utils.get_global_flag ~default:false ~arg_name:"debug_log_to_stream_files");
@@ -494,9 +494,9 @@ let codegen_tag ~(limits : Backend_intf.hardware_limits) () =
         (Utils.debug_log_from_routines ()
         && Utils.get_global_flag ~default:false ~arg_name:"prefer_backend_uniformity");
       (* An aliasing candidate's kernel parameter drops its [restrict] qualifier, since the
-         link-time liveness planner may overlap it with another parameter's bytes (gh-ocannl-489):
-         a real change to the emitted C, and to what the C compiler may then assume. Codex P1 on
-         PR #337. *)
+         link-time liveness planner may overlap it with another parameter's bytes (gh-ocannl-489): a
+         real change to the emitted C, and to what the C compiler may then assume. Codex P1 on PR
+         #337. *)
       gate "buffer-aliasing" (Utils.get_global_flag ~default:false ~arg_name:"buffer_aliasing");
     ]
   in
@@ -510,9 +510,9 @@ type entry = {
           key, which carries the same tag — a self-description of the file, and a guard for a
           hand-moved or hand-written entry. *)
   codegen : string option; [@sexp.option]
-      (** {!codegen_tag} of the codegen configuration the search ran under (gh-ocannl-572), the
-          same self-description as [numerics] and with the same belt-and-braces role. Optional so
-          that entries written before this field existed stay readable. *)
+      (** {!codegen_tag} of the codegen configuration the search ran under (gh-ocannl-572), the same
+          self-description as [numerics] and with the same belt-and-braces role. Optional so that
+          entries written before this field existed stay readable. *)
   source_digest : string;
   saved : saved_schedule;
   segments : (string * saved_schedule) list option; [@sexp.option]
@@ -533,9 +533,9 @@ type entry = {
   default_fingerprint : string option; [@sexp.option]
       (** {!Schedule.default_schedule_fingerprint} at store time, present iff [default_ms] is: the
           cache key covers only the source digest and the backend, so a config change can redefine
-          what "the default pipeline" means without missing the cache. A replaying process
-          compares fingerprints and drops a stale [default_ms] (the schedule itself stays valid —
-          only this diagnostic is config-relative). *)
+          what "the default pipeline" means without missing the cache. A replaying process compares
+          fingerprints and drops a stale [default_ms] (the schedule itself stays valid — only this
+          diagnostic is config-relative). *)
 }
 [@@deriving sexp]
 
@@ -557,10 +557,9 @@ let cache_key ~(limits : Backend_intf.hardware_limits) canonical ~backend =
     | "backend" -> sanitize backend
     | "numerics" -> "n" ^ numerics_tag ()
     | "codegen" -> "c" ^ codegen_tag ~limits ()
-    (* The worker-pool signature (gh-ocannl-530): CPU crowns do not transfer across pools, so a
-       pool change re-tunes instead of replaying. [None] (GPU backends) contributes nothing. *)
-    | "pool" -> (
-        match limits.worker_pool_tag with None -> "" | Some tag -> "p" ^ sanitize tag)
+    (* The worker-pool signature (gh-ocannl-530): CPU crowns do not transfer across pools, so a pool
+       change re-tunes instead of replaying. [None] (GPU backends) contributes nothing. *)
+    | "pool" -> ( match limits.worker_pool_tag with None -> "" | Some tag -> "p" ^ sanitize tag)
     | other -> invalid_arg ("Schedule_cache.cache_key: unhandled key component " ^ other)
   in
   String.concat ~sep:"-"

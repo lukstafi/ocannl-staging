@@ -14,10 +14,10 @@
 
    The fresh segment symbols returned by [Sched.partition] make each segment individually
    addressable by subsequent ops (per-segment scheduling), demonstrated by unrolling just the tail
-   segment. Section 6 pins that this addressability survives an accumulation mint: a loop moved
-   into a [Local_scope] by a materializing [Unroll] is still located by [partition_breakpoints] and
-   still rewritten by the [Partition] its breakpoints feed (gh-ocannl-668). Structural checks pair
-   with executed-output parity against untransformed references on every backend. *)
+   segment. Section 6 pins that this addressability survives an accumulation mint: a loop moved into
+   a [Local_scope] by a materializing [Unroll] is still located by [partition_breakpoints] and still
+   rewritten by the [Partition] its breakpoints feed (gh-ocannl-668). Structural checks pair with
+   executed-output parity against untransformed references on every backend. *)
 
 open Base
 open Ocannl
@@ -32,8 +32,8 @@ let p = Verdict.p
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
    that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
    parity check between two zero arrays passes while covering nothing (gh-ocannl-481 item 3). Every
-   reference array is pinned nonzero where it is produced, so the parity claims below have content.
-   *)
+   reference array is pinned nonzero where it is produced, so the parity claims below have
+   content. *)
 let nonzero name (a : float array) =
   if not (Array.exists a ~f:(fun x -> Float.(x <> 0.))) then
     failwith (name ^ ": the reference is all zeros — the parity checks against it are vacuous");
@@ -113,14 +113,13 @@ let find_nest ~outer_n ~inner_n (llc : LL.t) : (Idx.symbol * Idx.symbol) option 
   go ~enclosing:None llc;
   !found
 
-(* How many [For_loop]s bind [sym] — the copies a materializing [Unroll] leaves behind, all of
-   which [Sched.apply] rewrites. *)
+(* How many [For_loop]s bind [sym] — the copies a materializing [Unroll] leaves behind, all of which
+   [Sched.apply] rewrites. *)
 let count_loops sym (llc : LL.t) : int =
   let n = ref 0 in
   let rec go (llc : LL.t) =
     match llc with
-    | LL.For_loop { index; body; _ } ->
-        if Idx.equal_symbol index sym then Int.incr n else go body
+    | LL.For_loop { index; body; _ } -> if Idx.equal_symbol index sym then Int.incr n else go body
     | LL.If { body; _ } -> go body
     | LL.Seq (a, b) ->
         go a;
@@ -153,8 +152,8 @@ let count_loops sym (llc : LL.t) : int =
   go llc;
   !n
 
-(* The first [For_loop] binding [sym] in preorder, as a standalone routine — the slice of the code
-   a first-match probe used to speak for. *)
+(* The first [For_loop] binding [sym] in preorder, as a standalone routine — the slice of the code a
+   first-match probe used to speak for. *)
 let first_binding sym (llc : LL.t) : LL.t =
   let found = ref None in
   let rec go (llc : LL.t) =
@@ -405,10 +404,8 @@ let () =
   let le_upper = bps_of ~to_:9 (fun i -> LL.Binop (Ir.Ops.Cmple, ivar i, fixed 6)) in
   let lt_upper = bps_of ~to_:9 (fun i -> LL.Binop (Ir.Ops.Cmplt, ivar i, fixed 7)) in
   let is bps want = List.equal Int.equal bps want in
-  p "Cmple lower bound breaks where its Cmplt encoding did"
-    (is le_lower [ 3 ] && is lt_lower [ 3 ]);
-  p "Cmple upper bound breaks where its Cmplt encoding did"
-    (is le_upper [ 7 ] && is lt_upper [ 7 ]);
+  p "Cmple lower bound breaks where its Cmplt encoding did" (is le_lower [ 3 ] && is lt_lower [ 3 ]);
+  p "Cmple upper bound breaks where its Cmplt encoding did" (is le_upper [ 7 ] && is lt_upper [ 7 ]);
   (* A non-unit coefficient exercises the rounding: [2i <= 5] flips at [i = 3], as does [2i < 6]. *)
   let coef2 n = (LL.Embed_index (Idx.Affine { symbols = [ (2, n) ]; offset = 0 }), iprec) in
   let le_scaled = bps_of ~to_:9 (fun i -> LL.Binop (Ir.Ops.Cmple, coef2 i, fixed 5)) in
@@ -418,22 +415,20 @@ let () =
 
   (* === 6: Loops inside a [Local_scope] (gh-ocannl-668) — the accumulation mint of a materializing
      [Unroll] wraps the inner reduction loop in the accumulator's scope, and [Sched.apply] keeps
-     rewriting loops there. Every probe that LOCATES a loop must reach the same place, or it
-     reports absent a loop the very next op rewrites: here [partition_breakpoints] derives the pad
-     guard's flip point from the scope-nested [s] loop, and the [Partition] it feeds applies. === *)
+     rewriting loops there. Every probe that LOCATES a loop must reach the same place, or it reports
+     absent a loop the very next op rewrites: here [partition_breakpoints] derives the pad guard's
+     flip point from the scope-nested [s] loop, and the [Partition] it feeds applies. === *)
   let ni, nr, ns = (4, 6, 5) in
-  let xv6 =
-    Array.init (ni * nr * ns) ~f:(fun t -> Float.of_int ((t % 7) + 1) *. 0.25)
-  in
+  let xv6 = Array.init (ni * nr * ns) ~f:(fun t -> Float.of_int ((t % 7) + 1) *. 0.25) in
   let make_graph6 () =
     let x = TDSL.ndarray xv6 ~label:[ "sp_rx" ] ~output_dims:[ ni; nr; ns ] () in
     let%op out = x ++ "irs => i" in
     out
   in
   let want6 = nonzero "sp_ref6" (run_with "sp_ref6" (fun opt -> opt) (make_graph6 ())) in
-  (* [Pad] gives the inner loop a guard with a known flip point ([s < 5] over the padded range
-     [0, 8)); the materializing unroll of the OUTER reduction axis then moves the whole guarded
-     inner loop into the accumulator scope. *)
+  (* [Pad] gives the inner loop a guard with a known flip point ([s < 5] over the padded range [0,
+     8)); the materializing unroll of the OUTER reduction axis then moves the whole guarded inner
+     loop into the accumulator scope. *)
   let stmt_level = ref true and in_scope = ref false in
   let bps6 = ref [] in
   let census6 = ref (-1, -1, -1) in
@@ -442,7 +437,9 @@ let () =
     let s = Option.value_exn ~here:[%here] (find_loop_with_extent ~n:ns opt.LL.llc) in
     let opt =
       Sched.apply
-        [ Sched.Pad { axis = s; to_multiple_of = 4 }; Sched.Unroll { axis = r; materialize = true } ]
+        [
+          Sched.Pad { axis = s; to_multiple_of = 4 }; Sched.Unroll { axis = r; materialize = true };
+        ]
         opt
     in
     stmt_level := binds_loop ~in_scopes:false s opt.LL.llc;
@@ -464,8 +461,8 @@ let () =
 
   (* === 7: MANY bindings of one symbol (gh-ocannl-668, review round 1) — a materializing [Unroll]
      leaves one copy of the inner loop per unrolled step, each carrying the same guard with a
-     different constant substituted for the unrolled index, and [Partition] rewrites every copy.
-     So the breakpoints are the UNION over the copies: stopping at the first one folds that copy's
+     different constant substituted for the unrolled index, and [Partition] rewrites every copy. So
+     the breakpoints are the UNION over the copies: stopping at the first one folds that copy's
      guard and leaves its siblings mixed (or reports no breakpoint at all when the first copy's
      guard happens to be already decided).
 
@@ -476,8 +473,10 @@ let () =
      yields [2], the copies together [2; 4]. === *)
   Tensor.unsafe_reinitialize ();
   let make_pool () =
-    let x = TDSL.ndarray (Array.init 8 ~f:(fun i -> Float.of_int i -. 16.)) ~label:[ "sp_px" ]
-        ~output_dims:[ 8 ] ()
+    let x =
+      TDSL.ndarray
+        (Array.init 8 ~f:(fun i -> Float.of_int i -. 16.))
+        ~label:[ "sp_px" ] ~output_dims:[ 8 ] ()
     in
     let%op y = x @^+ "2*o=+w; w => o" [ "w" ] (stretch 0.0) in
     Shape.set_dim w 5;
@@ -488,9 +487,7 @@ let () =
   let copies = ref 0 in
   let census7 = ref (-1, -1, -1) in
   let transform_copies (opt : LL.optimized) =
-    let o, w =
-      Option.value_exn ~here:[%here] (find_nest ~outer_n:4 ~inner_n:5 opt.LL.llc)
-    in
+    let o, w = Option.value_exn ~here:[%here] (find_nest ~outer_n:4 ~inner_n:5 opt.LL.llc) in
     let opt = Sched.apply [ Sched.Unroll { axis = o; materialize = true } ] opt in
     copies := count_loops w opt.LL.llc;
     (* What the first copy alone would have contributed, isolated the way the pre-fix walk saw it:
@@ -512,13 +509,15 @@ let () =
   p "partition over many bindings matches reference" (close got7 want7);
 
   (* The two dimensions meet when the copies live inside an accumulator scope — the shape a
-     materializing [Unroll] of an outer reduction axis mints. Hand-built so the copies carry
-     visibly different guards ([i < 3] and [i < 6]) whatever a lowering happens to produce. *)
+     materializing [Unroll] of an outer reduction axis mints. Hand-built so the copies carry visibly
+     different guards ([i < 3] and [i < 6]) whatever a lowering happens to produce. *)
   let scoped_copies =
     let axis = Idx.get_symbol () in
     let tn =
       Ir.Tnode.create (Ir.Tnode.Specified Ir.Ops.single) ~id:9701 ~label:[ "sp_agg" ]
-        ~unpadded_dims:(lazy [| 1 |]) ~padding:(lazy None) ()
+        ~unpadded_dims:(lazy [| 1 |])
+        ~padding:(lazy None)
+        ()
     in
     let guarded k =
       LL.For_loop
@@ -527,11 +526,7 @@ let () =
           from_ = 0;
           to_ = 9;
           body =
-            LL.If
-              {
-                cond = (LL.Binop (Ir.Ops.Cmplt, ivar axis, fixed k), iprec);
-                body = LL.Noop;
-              };
+            LL.If { cond = (LL.Binop (Ir.Ops.Cmplt, ivar axis, fixed k), iprec); body = LL.Noop };
           axis = LL.Serial;
         }
     in
@@ -543,11 +538,7 @@ let () =
           idcs;
           llsc =
             LL.Local_scope
-              {
-                id = LL.get_scope tn;
-                body = LL.Seq (guarded 3, guarded 6);
-                orig_indices = idcs;
-              };
+              { id = LL.get_scope tn; body = LL.Seq (guarded 3, guarded 6); orig_indices = idcs };
           debug = "";
         }
     in

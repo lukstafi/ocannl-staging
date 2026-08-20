@@ -1,7 +1,7 @@
 (** CPU topology facts for the worker-pool uniformity policy (gh-ocannl-530,
     docs/proposals/gh-ocannl-530-pool-uniformity.md). Facts only — the policy that consumes them
-    lives in [Cc_backend]. Every probe degrades to an "unknown" answer ([[]], [`Unknown], a
-    fallback count) rather than raising; the consumers treat unknown conservatively. *)
+    lives in [Cc_backend]. Every probe degrades to an "unknown" answer ([[]], [`Unknown], a fallback
+    count) rather than raising; the consumers treat unknown conservatively. *)
 
 open Base
 
@@ -37,20 +37,14 @@ let parse_cpu_list s =
   in
   let s = String.strip s in
   if String.is_empty s then None
-  else
-    String.split s ~on:','
-    |> List.map ~f:parse_range
-    |> Option.all
-    |> Option.map ~f:List.concat
+  else String.split s ~on:',' |> List.map ~f:parse_range |> Option.all |> Option.map ~f:List.concat
 
 (** Affinity mask of a CPU list; [None] when empty or any CPU is outside the 64-bit mask (v1 does
     not cross Windows processor groups, and the policy no-ops on such machines). *)
 let mask_of_cpu_list cpus =
   if List.is_empty cpus then None
   else if List.exists cpus ~f:(fun c -> c < 0 || c >= 64) then None
-  else
-    Some
-      (List.fold cpus ~init:0L ~f:(fun acc c -> Int64.(acc lor shift_left 1L c)))
+  else Some (List.fold cpus ~init:0L ~f:(fun acc c -> Int64.(acc lor shift_left 1L c)))
 
 (* [decide_pool_restriction] picks classes positionally (fastest first), so the one ordering
    convention lives here and both parsers share it. *)
@@ -75,8 +69,8 @@ let parse_classes_str s =
     | None -> []
     | Some classes -> sort_fastest_first classes
 
-(** Builds perf-ranked classes from (rank, cpu list) pairs; [[]] if any list fails to fit a
-    64-bit mask. *)
+(** Builds perf-ranked classes from (rank, cpu list) pairs; [[]] if any list fails to fit a 64-bit
+    mask. *)
 let classes_of_ranked_cpu_lists ranked =
   ranked
   |> List.map ~f:(fun (perf_rank, cpus) ->
@@ -87,24 +81,22 @@ let classes_of_ranked_cpu_lists ranked =
 
 (* --- Platform probes. --- *)
 
-let read_sys_file path =
-  try Some (String.strip (Stdio.In_channel.read_all path)) with _ -> None
+let read_sys_file path = try Some (String.strip (Stdio.In_channel.read_all path)) with _ -> None
 
 (* Intel hybrid exposes the two classes directly; ARM big.LITTLE (and DynamIQ) exposes per-CPU
    relative capacity instead, so group CPUs by capacity and rank the groups by it. Any missing or
    unparsable piece yields [[]] (read as: uniform or unknown). *)
 let linux_classes () =
   match
-    ( read_sys_file "/sys/devices/cpu_core/cpus",
-      read_sys_file "/sys/devices/cpu_atom/cpus" )
+    (read_sys_file "/sys/devices/cpu_core/cpus", read_sys_file "/sys/devices/cpu_atom/cpus")
   with
   | Some core, Some atom -> (
       match (parse_cpu_list core, parse_cpu_list atom) with
       | Some core, Some atom -> classes_of_ranked_cpu_lists [ (1, core); (0, atom) ]
       | _ -> [])
   | _ when not (Stdlib.Sys.file_exists "/sys/devices/system/cpu/cpu0/cpu_capacity") ->
-      (* The common uniform-x86 case: skip the per-CPU walk below (one failed open per CPU on a
-         big server) when the first capacity file is already absent. *)
+      (* The common uniform-x86 case: skip the per-CPU walk below (one failed open per CPU on a big
+         server) when the first capacity file is already absent. *)
       []
   | _ -> (
       match Option.bind (read_sys_file "/sys/devices/system/cpu/present") ~f:parse_cpu_list with
@@ -127,7 +119,8 @@ let linux_classes () =
                 |> List.sort ~compare:(fun (a, _) (b, _) -> Int.compare a b)
               in
               if List.length groups < 2 then []
-              else classes_of_ranked_cpu_lists (List.mapi groups ~f:(fun i (_, cpus) -> (i, cpus)))))
+              else classes_of_ranked_cpu_lists (List.mapi groups ~f:(fun i (_, cpus) -> (i, cpus))))
+      )
 
 let core_classes =
   let classes =
@@ -143,25 +136,22 @@ let total_logical_count classes = List.sum (module Int) classes ~f:(fun c -> c.c
 
 (** Logical CPUs available to this process — affinity-respecting, unlike
     [Domain.recommended_domain_count] (affinity-blind on Windows, [_SC_NPROCESSORS_ONLN]-based
-    elsewhere). Queried fresh on each call: the answer changes when the process restricts
-    itself. *)
+    elsewhere). Queried fresh on each call: the answer changes when the process restricts itself. *)
 let effective_cpu_count () =
   let n = effective_cpu_count_stub () in
   if n > 0 then n else max 1 (Stdlib.Domain.recommended_domain_count ())
 
 (** The process's current affinity mask over logical CPUs; [None] when the platform has no such
     notion (Darwin), the mask involves CPUs beyond the 64-bit range, or the query fails. Like
-    {!effective_cpu_count}, queried fresh — the answer changes when the process restricts
-    itself. *)
-let current_affinity_mask () =
-  match affinity_mask_stub () with 0L -> None | m -> Some m
+    {!effective_cpu_count}, queried fresh — the answer changes when the process restricts itself. *)
+let current_affinity_mask () = match affinity_mask_stub () with 0L -> None | m -> Some m
 
 (** Whether the process runs as a hypervisor {e guest} (WSL2, Hyper-V VMs, KVM, ...), where
-    guest-visible topology is fabricated and must not drive geometry decisions (gh-ocannl-530).
-    A native Windows host with the Hyper-V role (or WSL2/VBS) enabled sets the CPUID hypervisor
-    bit yet sees real topology, and reads as [`No] here: on Windows a "Microsoft Hv" hypervisor
-    is the host platform itself, while Hyper-V guests see fabricated {e uniform} topology, making
-    the core-classes check the operative gate for them (see the stub for why the root-partition
+    guest-visible topology is fabricated and must not drive geometry decisions (gh-ocannl-530). A
+    native Windows host with the Hyper-V role (or WSL2/VBS) enabled sets the CPUID hypervisor bit
+    yet sees real topology, and reads as [`No] here: on Windows a "Microsoft Hv" hypervisor is the
+    host platform itself, while Hyper-V guests see fabricated {e uniform} topology, making the
+    core-classes check the operative gate for them (see the stub for why the root-partition
     privilege check does not work). [`Unknown] on platforms without a detection path (non-x86
     Linux). *)
 let hypervisor_present () =
@@ -173,15 +163,15 @@ type pool_decision = {
   pool_width : int;  (** Worker-pool width after the decision, feeding the auto chunk count. *)
   pool_tag : string;
       (** Compact pool signature ([w8P], [w24], ...) for the autotune disk-cache key: crowned
-          schedules do not transfer across pools (the gh-530 cross-arm replay), so a policy flip
-          or a different external pinning must re-tune, not replay. *)
+          schedules do not transfer across pools (the gh-530 cross-arm replay), so a policy flip or
+          a different external pinning must re-tune, not replay. *)
 }
 [@@deriving sexp_of]
 
 (** The undecided/degraded outcome: leave the pool as found. The tag carries the current affinity
     mask when one is known and narrower than trivial — two same-width external pinnings over
-    different cores are different pools (crowns do not transfer between them any more than
-    between the policy's classes), so they must not share autotune cache keys. *)
+    different cores are different pools (crowns do not transfer between them any more than between
+    the policy's classes), so they must not share autotune cache keys. *)
 let unrestricted_decision ~effective ~affinity_mask =
   let pool_tag =
     match affinity_mask with
@@ -199,11 +189,11 @@ let unrestricted_decision ~effective ~affinity_mask =
 
     Explicit [`Performance]/[`Efficiency] override an external pinning (the user asked for the
     class) and skip the hypervisor gate (so e.g. big.LITTLE ARM Linux, where detection is
-    [`Unknown], can still be forced); [`Auto] respects the pinning as the user's own pool
-    decision, and treats [`Unknown] like [`Yes] — "cannot rule virtualization out" must not
-    restrict by default. [`Efficiency] picks the class {e just below} the performance class, not
-    the slowest: on three-class parts (P / E / LP-E) the low-power island is a near-serial pool
-    nobody means by "efficiency cores". *)
+    [`Unknown], can still be forced); [`Auto] respects the pinning as the user's own pool decision,
+    and treats [`Unknown] like [`Yes] — "cannot rule virtualization out" must not restrict by
+    default. [`Efficiency] picks the class {e just below} the performance class, not the slowest: on
+    three-class parts (P / E / LP-E) the low-power island is a near-serial pool nobody means by
+    "efficiency cores". *)
 let decide_pool_restriction ~openmp ~setting ~classes ~hypervisor ~effective ~affinity_mask =
   let keep = unrestricted_decision ~effective ~affinity_mask in
   let restrict_to (cls : core_class) suffix =
@@ -230,10 +220,10 @@ let decide_pool_restriction ~openmp ~setting ~classes ~hypervisor ~effective ~af
 (** Restricts execution to the CPUs of [mask]. Scope differs by OS, and the difference is
     load-bearing: Windows ([SetProcessAffinityMask]) restricts the whole process including
     already-running threads; Linux ([sched_setaffinity(0)]) restricts the {e calling thread} and
-    whatever it spawns afterwards — threads and domains that already exist keep their mask. So
-    the call must happen before the threads that will run OpenMP teams are created (the Multidev
-    worker domains force it before spawning; the Sync scheduler runs kernels on the calling
-    thread). Children of the calling thread inherit on both platforms. *)
+    whatever it spawns afterwards — threads and domains that already exist keep their mask. So the
+    call must happen before the threads that will run OpenMP teams are created (the Multidev worker
+    domains force it before spawning; the Sync scheduler runs kernels on the calling thread).
+    Children of the calling thread inherit on both platforms. *)
 let restrict_process_to_mask mask =
   match set_process_affinity_stub mask with
   | 0 -> Ok ()

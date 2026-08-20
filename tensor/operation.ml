@@ -284,9 +284,9 @@ let neg ?spec ?(capture_dims = []) =
 (** An identity operation whose sole purpose is to give the result a tensor node distinct from the
     argument's: the assignment-level precision conversion then happens between the two nodes when
     their precisions differ. This is the "cast twin" primitive of the mixed-precision recipes
-    (gh-ocannl-492): pin the result at a reduced precision to make it a low-precision copy of an
-    f32 master weight; the gradient accumulates back through the cast, widening (e.g. f16 -> f32)
-    at the accumulating assignment. *)
+    (gh-ocannl-492): pin the result at a reduced precision to make it a low-precision copy of an f32
+    master weight; the gradient accumulates back through the cast, widening (e.g. f16 -> f32) at the
+    accumulating assignment. *)
 let cast ?spec ?(capture_dims = []) =
   let module NTDSL = Initial_NTDSL in
   let%cd op_asn ~t ~t1 ~projections = v =:+ id v1 in
@@ -304,8 +304,19 @@ let stretch ?spec ?(capture_dims = []) =
   let module NTDSL = Initial_NTDSL in
   let%cd op_asn ~t ~t1 ~projections = v =:+ id v1 in
   let%cd grad_asn ~t:_ ~g ~t1 ~projections = g1 =+ id g in
-  fun ?grad_spec t1 ?label ?top_down_prec ?batch_dims ?batch_axes ?input_dims ?output_dims
-    ?input_axes ?output_axes ?deduced () ->
+  fun ?grad_spec
+    t1
+    ?label
+    ?top_down_prec
+    ?batch_dims
+    ?batch_axes
+    ?input_dims
+    ?output_dims
+    ?input_axes
+    ?output_axes
+    ?deduced
+    ()
+  ->
     let result =
       Tensor.unop ~op_label:"stretch"
         ~transpose_op:(transpose_op_of_spec ?spec ~capture_dims ())
@@ -327,8 +338,18 @@ let uint4x32_to_prec_uniform ?grad_spec =
   let module NTDSL = Initial_NTDSL in
   let%cd op_asn ~t ~t1 ~projections = v =: uint4x32_to_prec_uniform v1 in
   let%cd grad_asn ~t:_ ~g:_ ~t1:_ ~projections:_ = Asgns.empty_comp in
-  fun t1 ?label ?top_down_prec ?batch_dims ?batch_axes ?input_dims ?output_dims ?input_axes
-    ?output_axes ?deduced () ->
+  fun t1
+    ?label
+    ?top_down_prec
+    ?batch_dims
+    ?batch_axes
+    ?input_dims
+    ?output_dims
+    ?input_axes
+    ?output_axes
+    ?deduced
+    ()
+  ->
     (* Ignore what the caller says, since we must learn the precision from the outside. *)
     ignore (top_down_prec : bool option);
     Tn.update_prec t1.Tensor.value Ir.Ops.uint4x32;
@@ -339,9 +360,9 @@ let uint4x32_to_prec_uniform ?grad_spec =
         ?label ~top_down_prec:true t1 ?batch_dims ?batch_axes ?input_dims ?output_dims ?input_axes
         ?output_axes ?deduced ()
     in
-    (* A sampler's result resolves at its use site (gh-ocannl-544): a random draw must fill
-       whatever shape the context demands — closing it down and broadcasting would repeat random
-       values along the broadcast axes. *)
+    (* A sampler's result resolves at its use site (gh-ocannl-544): a random draw must fill whatever
+       shape the context demands — closing it down and broadcasting would repeat random values along
+       the broadcast axes. *)
     Shape.set_resolve_at_use result.Tensor.shape;
     result
 
@@ -349,8 +370,18 @@ let uint4x32_to_prec_uniform1 ?grad_spec =
   let module NTDSL = Initial_NTDSL in
   let%cd op_asn ~t ~t1 ~projections = v =: uint4x32_to_prec_uniform1 v1 in
   let%cd grad_asn ~t:_ ~g:_ ~t1:_ ~projections:_ = Asgns.empty_comp in
-  fun t1 ?label ?top_down_prec ?batch_dims ?batch_axes ?input_dims ?output_dims ?input_axes
-    ?output_axes ?deduced () ->
+  fun t1
+    ?label
+    ?top_down_prec
+    ?batch_dims
+    ?batch_axes
+    ?input_dims
+    ?output_dims
+    ?input_axes
+    ?output_axes
+    ?deduced
+    ()
+  ->
     (* Ignore what the caller says, since we must learn the precision from the outside. *)
     ignore (top_down_prec : bool option);
     Tn.update_prec t1.Tensor.value Ir.Ops.uint4x32;
@@ -677,10 +708,10 @@ let einmax1 ?(capture_dims = []) ?(nonoverlapping = false) spec =
     module O = NDO_before_einmax1
   end in
   let%cd op_asn ~t ~t1 ~projections = v =:@^ v1 in
-  (* Both variants bind as [grad_asn]: the %cd binding name feeds generated labels and comments,
-     so the default path must keep producing byte-identical code to before the flag existed. *)
+  (* Both variants bind as [grad_asn]: the %cd binding name feeds generated labels and comments, so
+     the default path must keep producing byte-identical code to before the flag existed. *)
   let grad_asn =
-    if nonoverlapping then (
+    if nonoverlapping then
       let%cd grad_asn ~t ~g ~t1 ~projections =
         (* Clamped windows (gh-504) need no validity mask here: the proxies live in t1's own index
            space, where every cell is in range — out-of-range (result, window) iterations are
@@ -688,8 +719,8 @@ let einmax1 ?(capture_dims = []) ?(nonoverlapping = false) spec =
         { cond_rhs1 } =: eq (t, t1);
         g1 =+ where cond_rhs1 g 0
       in
-      grad_asn)
-    else (
+      grad_asn
+    else
       let%cd grad_asn ~t ~g ~t1 ~projections =
         (* The gate statement reads t1 itself, so a clamped out-of-range access (gh-504 padded
            windows) substitutes the whole rhs with the Arg2 neutral 0: invalid pairs gate nothing,
@@ -697,7 +728,7 @@ let einmax1 ?(capture_dims = []) ?(nonoverlapping = false) spec =
         { cond_pspace } =: eq (t, t1);
         g1 =+ where cond_pspace g 0
       in
-      grad_asn)
+      grad_asn
   in
   Tensor.unop ~transpose_op:(Shape.Permute (spec, capture_dims)) ~op_asn ~grad_asn ~op_label:"@^=>"
 
@@ -705,49 +736,48 @@ let einmax1 ?(capture_dims = []) ?(nonoverlapping = false) spec =
 
     The gradient gate lives in the product space of the operation — one bit per (result position,
     contracted position) pair — so both gradients are exact for arbitrary specs, including
-    overlapping reduction windows (stride < window) and RHS2 indices independent of RHS1. Ties
-    gate the full upstream gradient to every achieving pair (duplication, not a normalized
-    split).
+    overlapping reduction windows (stride < window) and RHS2 indices independent of RHS1. Ties gate
+    the full upstream gradient to every achieving pair (duplication, not a normalized split).
 
-    [nonoverlapping] (gh-ocannl-527): the caller asserts the {!einmax1} domain condition — each
-    RHS1 position feeds at most one result position — {e and} additionally that the (result,
-    contracted) pair is recoverable from the RHS1 position (RHS1's index space covers RHS2's, the
-    convolution-like shape: kernel indices contracted against strided input indices; the
-    pre-gh-512 g2 limitation delimits exactly this). On that domain the gate contracts to one bit
-    per input position and both gradients agree with the product-space gate exactly, ties included
-    — a cost specialization, not a semantics choice (1.8-2.6x on the non-overlapping conv-pooling
-    benchmarks). Outside it the cheap gate is wrong (last-write-wins collisions, misattributed
-    g2); when in doubt keep the default. *)
+    [nonoverlapping] (gh-ocannl-527): the caller asserts the {!einmax1} domain condition — each RHS1
+    position feeds at most one result position — {e and} additionally that the (result, contracted)
+    pair is recoverable from the RHS1 position (RHS1's index space covers RHS2's, the
+    convolution-like shape: kernel indices contracted against strided input indices; the pre-gh-512
+    g2 limitation delimits exactly this). On that domain the gate contracts to one bit per input
+    position and both gradients agree with the product-space gate exactly, ties included — a cost
+    specialization, not a semantics choice (1.8-2.6x on the non-overlapping conv-pooling
+    benchmarks). Outside it the cheap gate is wrong (last-write-wins collisions, misattributed g2);
+    when in doubt keep the default. *)
 let tropical ?(capture_dims = []) ?(nonoverlapping = false) spec =
   let module NTDSL = struct
     include Initial_NTDSL
     module O = NDO_before_einmax1
   end in
   let%cd op_asn ~t ~t1 ~t2 ~projections = v =:@^ v1 + v2 in
-  (* Both variants bind as [grad_asn]: the %cd binding name feeds generated labels and comments,
-     so the default path must keep producing byte-identical code to before the flag existed. *)
+  (* Both variants bind as [grad_asn]: the %cd binding name feeds generated labels and comments, so
+     the default path must keep producing byte-identical code to before the flag existed. *)
   let grad_asn =
-    if nonoverlapping then (
+    if nonoverlapping then
       let%cd grad_asn ~t ~g ~t1 ~t2 ~projections =
         (* The [_rhs1] proxies live in t1's index space: with non-overlapping windows each cell is
            written by at most one (result, contracted) pair, so [=:@^] never mixes windows and the
            gate is exact. Clamped windows (gh-504) need no validity mask: every proxy cell is in
-           range, and cells of skipped (out-of-clamp) iterations keep their neutral
-           initialization, gating nothing. *)
+           range, and cells of skipped (out-of-clamp) iterations keep their neutral initialization,
+           gating nothing. *)
         { sum_rhs1 } =:@^ add (t1, t2);
         { cond_rhs1 } =: eq (t, sum_rhs1);
         g1 =+ where cond_rhs1 g 0;
         g2 =+ where cond_rhs1 g 0
       in
-      grad_asn)
-    else (
+      grad_asn
+    else
       let%cd grad_asn ~t ~g ~t1 ~t2 ~projections =
         (* [=:@^] gives pairs whose t1 access is clamped out of range (gh-504 padded windows) the
-           max-neutral -inf; that alone leaves them gated when t itself is -inf (an all-[-inf]
-           valid window — legitimate in the tropical semiring), and the g2 scatter has a valid
-           kernel projection for them, so an explicit validity mask conjoins the gate: [=:||]
-           reads t1, and an out-of-range access substitutes the Or neutral 0 where an in-range one
-           contributes 1. *)
+           max-neutral -inf; that alone leaves them gated when t itself is -inf (an all-[-inf] valid
+           window — legitimate in the tropical semiring), and the g2 scatter has a valid kernel
+           projection for them, so an explicit validity mask conjoins the gate: [=:||] reads t1, and
+           an out-of-range access substitutes the Or neutral 0 where an in-range one contributes
+           1. *)
         { sum_pspace } =:@^ add (t1, t2);
         { cond_pspace } =: eq (t, sum_pspace);
         { valid_pspace } =:|| eq (t1, t1);
@@ -755,7 +785,7 @@ let tropical ?(capture_dims = []) ?(nonoverlapping = false) spec =
         g1 =+ where cond_pspace g 0;
         g2 =+ where cond_pspace g 0
       in
-      grad_asn)
+      grad_asn
   in
   Tensor.binop ~compose_op:(Shape.Einsum (spec, capture_dims)) ~op_asn ~grad_asn ~op_label:"@^=>+"
 
@@ -937,9 +967,7 @@ let wrap ~l ?prec ?b ?(i = []) ?o ndarray =
      inference-side reduced-precision path — data-backed tensors are precision-[Specified] at
      creation, so a storage policy cannot re-assign them, and with no optimizer there is no master
      copy for a cast twin to preserve: re-precision at load, like torch's [model.half ()]. *)
-  let ndarray =
-    match prec with Some prec -> Ir.Ndarray.convert prec ndarray | None -> ndarray
-  in
+  let ndarray = match prec with Some prec -> Ir.Ndarray.convert prec ndarray | None -> ndarray in
   Tensor.term ~init_data:(Asgns.Keep_shape_no_padding ndarray) ?batch_dims:b ~label:[ l ]
     ~input_dims:i ?output_dims:o
 
@@ -989,8 +1017,8 @@ struct
       exclusive. Since gh-ocannl-509 the packed [uniform] is total over shapes (the counter extent
       rounds up and the last 128-bit block is consumed partially), so the pointwise {!uniform1}
       fallback is no longer needed; set this to [default_uniform1_param_init] to reproduce pre-0.9
-      random streams. Initialization expressions are forward-only; {!param} adds the final
-      parameter gradient when needed. *)
+      random streams. Initialization expressions are forward-only; {!param} adds the final parameter
+      gradient when needed. *)
   let default_param_init = ref default_uniform_param_init
   (* Useful for debugging: *)
   (* let default_param_init =
@@ -1131,6 +1159,7 @@ struct
     let einsum ?label ?capture_dims spec t1 t2 = einsum ?label ?capture_dims spec t1 t2 ()
     let outer_sum ?label ?capture_dims spec t1 t2 = outer_sum ?label ?capture_dims spec t1 t2 ()
     let einsum1 ?label ?capture_dims spec t1 = einsum1 ?label ?capture_dims spec t1 ()
+
     let einmax1 ?label ?capture_dims ?nonoverlapping spec t1 =
       einmax1 ?label ?capture_dims ?nonoverlapping spec t1 ()
 

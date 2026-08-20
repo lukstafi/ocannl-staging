@@ -63,7 +63,9 @@ let () =
   let a = sym () and b = sym () in
   p "i+j (both ranges > 1) rejected"
     (not
-       (Idx.affine_injective ~symbol_range:(ranges [ (a, 3); (b, 3) ]) [| aff [ (1, a); (1, b) ] 0 |]));
+       (Idx.affine_injective
+          ~symbol_range:(ranges [ (a, 3); (b, 3) ])
+          [| aff [ (1, a); (1, b) ] 0 |]));
 
   (* Reject: stride*o + k, k range > stride (stride=2, k range 3). *)
   let o = sym () and kk = sym () in

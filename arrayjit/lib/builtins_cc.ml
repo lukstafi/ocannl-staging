@@ -549,11 +549,11 @@ uint16_t single_to_bfloat16(float f)
 }
 |},
       [] );
-    (* Whole-vector conversion between 16-bit storage and f32 compute registers (gh-ocannl-517).
-       The vector typedefs are minted by the codegen (their lane count follows cc_vector_bytes), so
-       they are macro parameters; [LANES] is only used by the fallback arms. Each fallback goes
-       through the very scalar conversion the serial path uses, which is what makes the vectorized
-       rendering bitwise identical to its serial remainder loop on any compiler. *)
+    (* Whole-vector conversion between 16-bit storage and f32 compute registers (gh-ocannl-517). The
+       vector typedefs are minted by the codegen (their lane count follows cc_vector_bytes), so they
+       are macro parameters; [LANES] is only used by the fallback arms. Each fallback goes through
+       the very scalar conversion the serial path uses, which is what makes the vectorized rendering
+       bitwise identical to its serial remainder loop on any compiler. *)
     ( "OCANNL_HAS_CONVERTVECTOR",
       {|
 #if __has_builtin(__builtin_convertvector)
@@ -1235,9 +1235,9 @@ uint64x2_t uint4x32_to_uint64_uniform_vec(uint4x32_t x) {
 }
 |},
       [ "uint4x32_t"; "uint64x2_t" ] );
-    (* Lane extraction from the packed uniform conversion (gh-509 task 4): minted by the
-       virtualizer to inline packed-uniform results per cell. Implemented via the _vec builtins so
-       the value stream is bitwise-identical to the vectorized stores by construction. *)
+    (* Lane extraction from the packed uniform conversion (gh-509 task 4): minted by the virtualizer
+       to inline packed-uniform results per cell. Implemented via the _vec builtins so the value
+       stream is bitwise-identical to the vectorized stores by construction. *)
     ( "uint4x32_to_single_uniform_lane",
       {|
 /* Lane of the packed single uniform conversion. */

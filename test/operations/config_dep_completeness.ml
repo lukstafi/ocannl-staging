@@ -9,23 +9,22 @@
 
    gh-ocannl-586 fixed seven stanzas that had drifted that way and left a sentence in CLAUDE.md
    standing between the project and the eighth -- which is the same guarantee the seven had, none.
-   Seventeen candidates had accumulated unnoticed, which is the measure of how quiet the failure
-   is. This test is the forcing function instead.
+   Seventeen candidates had accumulated unnoticed, which is the measure of how quiet the failure is.
+   This test is the forcing function instead.
 
    What it checks, over every dune file in the repository:
 
    - every `(test)`/`(tests)` stanza, and every `(library)` with `(inline_tests)`, lists
-     `ocannl_config` in the deps dune uses when it runs them;
-   - every `(rule ...)` that runs an executable does too -- the predicate that carries the content,
-     because an `(executable)` stanza has no `deps` field at all, so the dep belongs on its
-     companion rule;
-   - and a directory with any such stanza has an `ocannl_config` to depend on in the first place.
+   `ocannl_config` in the deps dune uses when it runs them; - every `(rule ...)` that runs an
+   executable does too -- the predicate that carries the content, because an `(executable)` stanza
+   has no `deps` field at all, so the dep belongs on its companion rule; - and a directory with any
+   such stanza has an `ocannl_config` to depend on in the first place.
 
-   An `(executable)` no rule runs is structurally not a site and needs no exemption: that is how
-   the diagnostic and tutorial executables (`bench_circles_step`, `gpt2_generate`, the `@slow`
-   runners' companions) stay off this list without anyone maintaining one. What does need an
-   exemption is a rule that runs something this scan cannot vouch for, and those are named below
-   with their reasons. *)
+   An `(executable)` no rule runs is structurally not a site and needs no exemption: that is how the
+   diagnostic and tutorial executables (`bench_circles_step`, `gpt2_generate`, the `@slow` runners'
+   companions) stay off this list without anyone maintaining one. What does need an exemption is a
+   rule that runs something this scan cannot vouch for, and those are named below with their
+   reasons. *)
 
 open Base
 open Stdio
@@ -38,12 +37,12 @@ let exempt_sites =
   [
     ( "test/ppx:pp.exe",
       "the ppx driver, run to expand a source file and diff the expansion: `ppx_ocannl` links \
-       base, ppxlib, str and einsum_parser -- no configuration reader -- so no `ocannl_config` \
-       can reach its output" );
+       base, ppxlib, str and einsum_parser -- no configuration reader -- so no `ocannl_config` can \
+       reach its output" );
     ( "benchmarks:python3, handed %{dep:test_orchestrate.py}",
       "the benchmark orchestrator's own unit tests, in Python: the interpreter runs a script that \
-       imports orchestrate.py and runners/bench_common.py and calls no OCANNL executable, so \
-       there is no configuration in reach -- and a Python process would not read one anyway" );
+       imports orchestrate.py and runners/bench_common.py and calls no OCANNL executable, so there \
+       is no configuration in reach -- and a Python process would not read one anyway" );
   ]
 
 (* Paths arrive relative to the rule's directory deep in the build tree; [Scan.base_dir] and
@@ -77,7 +76,7 @@ let () =
        calls it ".". The ancestor walk below normalizes the same way, so the two agree wherever a
        directory from one meets a directory from the other (Codex P2, round 16). *)
     |> List.map ~f:(fun (path, _) ->
-           match Stdlib.Filename.dirname path with "." -> "" | directory -> directory)
+        match Stdlib.Filename.dirname path with "." -> "" | directory -> directory)
     |> Set.of_list (module String)
   in
   if List.is_empty dune_files then (
@@ -130,7 +129,9 @@ let () =
          `chdir` action runs elsewhere again. The config an executable finds is the one in the
          directory the PROCESS runs in. *)
       let stanza_dir site = repo_relative [ dir ] site.Scan.subdir in
-      let directory_of site = repo_relative [ dir ] (Scan.in_subdir site.Scan.subdir site.Scan.cwd) in
+      let directory_of site =
+        repo_relative [ dir ] (Scan.in_subdir site.Scan.subdir site.Scan.cwd)
+      in
       (* Where the executable's own config search leads, nearest first: its directory and every
          ancestor below the repository root, as `Utils.config_file_args` walks them. What it reads
          is the FIRST of those that has a config -- so that is both the file that must exist and the
@@ -149,7 +150,8 @@ let () =
           if String.is_empty directory then []
           else
             directory
-            :: ancestors (match Stdlib.Filename.dirname directory with "." -> "" | parent -> parent)
+            :: ancestors
+                 (match Stdlib.Filename.dirname directory with "." -> "" | parent -> parent)
         in
         List.find (ancestors (directory_of site)) ~f:has_config
       in
@@ -207,9 +209,8 @@ let () =
                 fail
                   (Printf.sprintf
                      "%s runs `%s`, and a shell may change directory without dune knowing -- so \
-                      which %s the process finds cannot be established here. Write the action as \
-                      a `run` (with a `chdir` if it needs one), or exempt it by name with the \
-                      reason"
+                      which %s the process finds cannot be established here. Write the action as a \
+                      `run` (with a `chdir` if it needs one), or exempt it by name with the reason"
                      dune_file name Scan.config_file)
             | true, _, _ -> bump (Scan.kind_name kind)
             | false, false, Scan.Unreadable_command ->
@@ -251,8 +252,8 @@ let () =
             "exempt rules (" ^ exempt_names ^ ")" );
         ]
         |> List.filter_map ~f:(fun (n, singular, plural) ->
-               if n = 0 then None
-               else Some (Printf.sprintf "%d %s" n (if n = 1 then singular else plural)))
+            if n = 0 then None
+            else Some (Printf.sprintf "%d %s" n (if n = 1 then singular else plural)))
       in
       printf "%s: %s\n" dune_file
         (if List.is_empty counted then "nothing that runs a test executable"
@@ -267,8 +268,10 @@ let () =
          (String.concat ~sep:", " (Set.to_list stale)));
   (* The reviewable part: an exemption is a claim about what an executable links, which no scan can
      check, so it is printed rather than merely held. *)
-  printf "\nStanza kinds that can run a test executable: %s (plus `test`, `tests` and a `library`'s \
-          `inline_tests`, which dune runs itself).\n"
+  printf
+    "\n\
+     Stanza kinds that can run a test executable: %s (plus `test`, `tests` and a `library`'s \
+     `inline_tests`, which dune runs itself).\n"
     (String.concat ~sep:", " Scan.action_heads);
   printf "Stanza kinds that cannot: %s. Anything else fails above.\n"
     (String.concat ~sep:", " Scan.inert_heads);
@@ -280,7 +283,8 @@ let () =
   let count kind = Option.value (Hashtbl.find counts kind) ~default:0 in
   if not (Verdict.any_failed ()) then
     printf
-      "\nOK: %d dune files; %d test stanzas, %d inline-test libraries and %d exe-running rules \
+      "\n\
+       OK: %d dune files; %d test stanzas, %d inline-test libraries and %d exe-running rules \
        declare %s; %d exempt.\n"
       (List.length dune_files) (count "test") (count "inline tests") (count "rule running")
       Scan.config_file (count "exempt")

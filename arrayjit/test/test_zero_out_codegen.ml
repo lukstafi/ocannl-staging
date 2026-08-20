@@ -45,13 +45,7 @@ let () =
      not make it redundant -- the zeroing loop must be emitted. *)
   let scenario_b =
     LL.For_loop
-      {
-        index = Idx.get_symbol ();
-        from_ = 0;
-        to_ = 3;
-        body = LL.Zero_out tn_b;
-        axis = Serial;
-      }
+      { index = Idx.get_symbol (); from_ = 0; to_ = 3; body = LL.Zero_out tn_b; axis = Serial }
   in
 
   let llc = LL.Seq (scenario_a, scenario_b) in
@@ -74,7 +68,7 @@ let () =
       pipelined = Base.Map.empty (module Tn);
       zero_fringe = Base.Set.empty (module Tn);
       flip_candidates = [];
-    spliced_rbw = Base.Set.empty (module Tn);
+      spliced_rbw = Base.Set.empty (module Tn);
     }
   in
   let module Syntax = Ir.C_syntax.C_syntax (Ir.C_syntax.Pure_C_config (struct

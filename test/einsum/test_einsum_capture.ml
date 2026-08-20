@@ -1,8 +1,8 @@
 open Base
 open Ocannl
 
-(* Failures go through [Verdict], so that a regression exits nonzero instead of being
-   `dune promote`d into the golden as the expected output (gh-ocannl-601). *)
+(* Failures go through [Verdict], so that a regression exits nonzero instead of being `dune
+   promote`d into the golden as the expected output (gh-ocannl-601). *)
 let fail fmt = Printf.ksprintf Verdict.fail fmt
 
 let capture_for_computation () =
@@ -420,8 +420,7 @@ let test_dim_row_var_name_clash () =
    with
   | Row.Shape_error (msg, _) when String.is_substring msg ~substring:"dimension variable" ->
       Stdio.printf "Test 1 - PASS: Caught name clash for 'd': %s\n" msg
-  | Row.Shape_error (msg, _) ->
-      fail "Test 1: Got Shape_error but wrong message: %s" msg
+  | Row.Shape_error (msg, _) -> fail "Test 1: Got Shape_error but wrong message: %s" msg
   | exn -> fail "Test 1: Got unexpected exception: %s" (Exn.to_string exn));
 
   (* Test 2: Unary einsum (permute) with name clash should raise Shape_error *)
@@ -437,8 +436,7 @@ let test_dim_row_var_name_clash () =
    with
   | Row.Shape_error (msg, _) when String.is_substring msg ~substring:"dimension variable" ->
       Stdio.printf "Test 2 - PASS: Caught name clash for 'v': %s\n" msg
-  | Row.Shape_error (msg, _) ->
-      fail "Test 2: Got Shape_error but wrong message: %s" msg
+  | Row.Shape_error (msg, _) -> fail "Test 2: Got Shape_error but wrong message: %s" msg
   | exn -> fail "Test 2: Got unexpected exception: %s" (Exn.to_string exn));
 
   (* Test 3: No clash - different names for dim and row vars should work *)

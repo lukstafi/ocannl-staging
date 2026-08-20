@@ -16,12 +16,11 @@
       non-injective maps, guarded ([If]) accesses (counted guards-taken), other vectorized runs, and
       uninterpretable components ([Sub_axis]/[Concat]/dynamic indices — whole-node fallback) only
       over-count, as does summing multiple same-direction accesses of one node (a union bound,
-      capped by the node's size) — except that a direction whose accesses are all exact and
-      pairwise provably disjoint ({!Affine.may_touch_same_cell}) sums exactly (gh-ocannl-578).
-      Conditional evaluation also over-counts: a read the renderers may skip — a [Where] arm, the
-      gated right operand of [&&]/[||]/a gate — or any access under a dead loop keeps its
-      direction approximate, since the image can exceed what executes. [fp_approx] is [false]
-      only when the count is exact.
+      capped by the node's size) — except that a direction whose accesses are all exact and pairwise
+      provably disjoint ({!Affine.may_touch_same_cell}) sums exactly (gh-ocannl-578). Conditional
+      evaluation also over-counts: a read the renderers may skip — a [Where] arm, the gated right
+      operand of [&&]/[||]/a gate — or any access under a dead loop keeps its direction approximate,
+      since the image can exceed what executes. [fp_approx] is [false] only when the count is exact.
     - The op count is an upper bound in the same guards-taken sense, and counts every scalar
       [Unop]/[Binop]/[Ternop] evaluation as one "FLOP" regardless of precision or integerness —
       except the two-operation ternaries [FMA]/[Mul3], which count two (matching [peak_flops]'
@@ -73,60 +72,59 @@ val arithmetic_intensity : summary -> float
 (** FLOPs per byte moved, [flops / max 1 (total_bytes)]. *)
 
 val footprint_approximate : summary -> bool
-(** [true] when any per-node footprint is an upper bound rather than exact ([fp_approx]) — the
-    byte counts over-approximate while the op count may still be exact. *)
+(** [true] when any per-node footprint is an upper bound rather than exact ([fp_approx]) — the byte
+    counts over-approximate while the op count may still be exact. *)
 
 type floor = { fr_flops : int; fr_bytes : int; fr_exact : bool } [@@deriving sexp_of]
 (** Lower bounds on arithmetic work and compulsory traffic — the dual extraction (gh-ocannl-514
     phase 3), for bounding {e every completion} of a partial placement vector where {!analyze}
-    upper-bounds one concrete candidate. [fr_exact] is [false] when some flooring-to-zero
-    occurred (a guarded body, a non-exact access image, opaque code): the floor is then sound
-    but not tight. *)
+    upper-bounds one concrete candidate. [fr_exact] is [false] when some flooring-to-zero occurred
+    (a guarded body, a non-exact access image, opaque code): the floor is then sound but not tight.
+*)
 
 val completion_floor : ?open_placement:(Tnode.t -> bool) -> Low_level.t -> floor
 (** The floor of the roofline legs over placement completions, with every approximation biased
     {e down} — the exact dual of {!analyze}'s contract:
 
-    - [fr_flops]: guarded ([If]) bodies count zero (guards-never-taken, dual to guards-taken);
-      the short-circuiting forms count only their certain part — [Where] its condition plus the
-      cheaper arm (rendered as [?:]), [And]/[Or] the left operand (rendered as [&&]/[||]), the
-      [Arg1]/[Arg2] projections only the selected operand (the discarded one is never rendered);
-      opaque code counts zero (an under-count is sound in this direction); [Tile_mma] keeps the
-      lane-cooperative attribution, exact when the lane binding is in scope. Statements
-      producing an [open_placement] node — the [Set] family and [Tile_mma] with an open
-      accumulator — count zero: an inline completion instantiates the producer only at surviving
-      consumer sites, possibly {e fewer} cells than the setter loop covers, so "recomputation
-      only adds ops" does not hold and the producer's whole effect attributes to the open
-      placement. Call this on the {e all-materialized} specialization of the decision surface,
-      where every open node's work sits in its own producer statement.
+    - [fr_flops]: guarded ([If]) bodies count zero (guards-never-taken, dual to guards-taken); the
+      short-circuiting forms count only their certain part — [Where] its condition plus the cheaper
+      arm (rendered as [?:]), [And]/[Or] the left operand (rendered as [&&]/[||]), the [Arg1]/[Arg2]
+      projections only the selected operand (the discarded one is never rendered); opaque code
+      counts zero (an under-count is sound in this direction); [Tile_mma] keeps the lane-cooperative
+      attribution, exact when the lane binding is in scope. Statements producing an [open_placement]
+      node — the [Set] family and [Tile_mma] with an open accumulator — count zero: an inline
+      completion instantiates the producer only at surviving consumer sites, possibly {e fewer}
+      cells than the setter loop covers, so "recomputation only adds ops" does not hold and the
+      producer's whole effect attributes to the open placement. Call this on the
+      {e all-materialized} specialization of the decision surface, where every open node's work sits
+      in its own producer statement.
     - [fr_bytes]: per node and direction, the sum of the exact images when they are pairwise
       provably disjoint (a disjoint union attains its sum — both extractions then agree,
       gh-ocannl-578), otherwise the largest exact image (a union is at least its largest member —
-      dual to the upper extraction's capped sum; a second nonzero contribution then marks the
-      floor loose); guarded, non-exact, dead-loop-enclosed,
-      conditionally-evaluated ([Where] arm, [And]/[Or] right operand) and open-producer-operand
-      accesses contribute zero — their execution is not certain in every completion. Nodes with
-      [open_placement] contribute zero.
+      dual to the upper extraction's capped sum; a second nonzero contribution then marks the floor
+      loose); guarded, non-exact, dead-loop-enclosed, conditionally-evaluated ([Where] arm,
+      [And]/[Or] right operand) and open-producer-operand accesses contribute zero — their execution
+      is not certain in every completion. Nodes with [open_placement] contribute zero.
 
     {e Committing} a placement decision is re-evaluation with the narrowed [open_placement]: the
-    suppression sets only shrink, so the floor is monotone in refinement — the property that
-    lets a bound prune as commitments accumulate. (An incremental per-node delta cannot be sound
-    in isolation: a Materialize commitment also makes its producer's operations and operand
-    reads certain, not just the node's own traffic.) Committing to Inline tightens nothing for
-    now: a nonzero recompute floor needs lower-bound multiplicity metrics, deferred until the
-    driver proves the need.
+    suppression sets only shrink, so the floor is monotone in refinement — the property that lets a
+    bound prune as commitments accumulate. (An incremental per-node delta cannot be sound in
+    isolation: a Materialize commitment also makes its producer's operations and operand reads
+    certain, not just the node's own traffic.) Committing to Inline tightens nothing for now: a
+    nonzero recompute floor needs lower-bound multiplicity metrics, deferred until the driver proves
+    the need.
 
     A [max (fr_flops/peak_flops) (fr_bytes/peak_bandwidth)] roofline over these floors
     ({!roofline_seconds}) lower-bounds every completion — the two legs' minima need not be
     simultaneously achievable for the max of the two to be sound. *)
 
 val approximate : summary -> bool
-(** [flops_approx || footprint_approximate]: some count is an upper bound rather than exact.
-    Such counts are still upper bounds (unlike under [opaque]), but a candidate whose guards
-    mostly fail can carry counts far above the work it performs — quantities derived from an
-    approximate count (achieved throughput, the roofline bound vs. a measurement) are not
-    evidence about the hardware. Exactness is per leg: op counts ([flops_approx]) and byte
-    counts ([footprint_approximate]) go approximate independently. *)
+(** [flops_approx || footprint_approximate]: some count is an upper bound rather than exact. Such
+    counts are still upper bounds (unlike under [opaque]), but a candidate whose guards mostly fail
+    can carry counts far above the work it performs — quantities derived from an approximate count
+    (achieved throughput, the roofline bound vs. a measurement) are not evidence about the hardware.
+    Exactness is per leg: op counts ([flops_approx]) and byte counts ([footprint_approximate]) go
+    approximate independently. *)
 
 val roofline_seconds :
   ?peak_flops:float ->
@@ -142,11 +140,11 @@ val roofline_seconds :
     upper-bound byte/op counts — rank with it, do not predict. *)
 
 module Calibration : sig
-  (** The calibration TSV schema (config [autotune_calibration_file], gh-ocannl-491 task 4) and
-      the envelope fitter over it (gh-ocannl-514 phase 0): one row per timed candidate, the
-      model's inputs and roofline score next to the measured time. This module is the schema's
-      single owner — rows are emitted through {!to_line} (by [Autotune]) and read back through
-      {!of_line} (by [tools/fit_envelope.exe]), so writer and reader cannot drift apart. *)
+  (** The calibration TSV schema (config [autotune_calibration_file], gh-ocannl-491 task 4) and the
+      envelope fitter over it (gh-ocannl-514 phase 0): one row per timed candidate, the model's
+      inputs and roofline score next to the measured time. This module is the schema's single owner
+      — rows are emitted through {!to_line} (by [Autotune]) and read back through {!of_line} (by
+      [tools/fit_envelope.exe]), so writer and reader cannot drift apart. *)
 
   type row = {
     backend : string;
@@ -161,39 +159,39 @@ module Calibration : sig
     label : string;
     measured_ms : float;
     model_ms : float option;
-        (** The roofline bound under the envelope constants in force at recording time; [None]
-            when the model had no coverage (opaque code or no envelope constants). *)
+        (** The roofline bound under the envelope constants in force at recording time; [None] when
+            the model had no coverage (opaque code or no envelope constants). *)
     kernels : int;
     flops : int;  (** Aggregated over the candidate's kernels, like [bytes]. *)
     bytes : int;
     flops_approx : bool;
-        (** The op count is an upper bound rather than exact (guards-taken, any kernel): the
-            compute leg of the fit skips this row; likewise [bytes_approx] for the memory leg
-            ({!footprint_approximate}). Approximate legs are recorded for divergence analysis
-            but excluded from envelope fitting. *)
+        (** The op count is an upper bound rather than exact (guards-taken, any kernel): the compute
+            leg of the fit skips this row; likewise [bytes_approx] for the memory leg
+            ({!footprint_approximate}). Approximate legs are recorded for divergence analysis but
+            excluded from envelope fitting. *)
     bytes_approx : bool;
     opaque : bool;
   }
   [@@deriving sexp_of]
 
   val to_line : row -> string
-  (** Tab-separated, no trailing newline. [of_line (to_line r)] recovers [r] up to float
-      formatting: [measured_ms] and [model_ms] record 6 decimals, {e floored} rather than
-      rounded — a stored time never exceeds the true measurement, so constants fit from a file
-      remain conservative with respect to the original in-process measurement (round-to-nearest
-      could overstate a 5 us kernel's time by a fitting-relevant 1e-4 relative). Tabs and
-      newlines in the free-text [routine] and [label] columns become spaces: a name carrying one
-      would otherwise split its row into fragments no reader can parse. *)
+  (** Tab-separated, no trailing newline. [of_line (to_line r)] recovers [r] up to float formatting:
+      [measured_ms] and [model_ms] record 6 decimals, {e floored} rather than rounded — a stored
+      time never exceeds the true measurement, so constants fit from a file remain conservative with
+      respect to the original in-process measurement (round-to-nearest could overstate a 5 us
+      kernel's time by a fitting-relevant 1e-4 relative). Tabs and newlines in the free-text
+      [routine] and [label] columns become spaces: a name carrying one would otherwise split its row
+      into fragments no reader can parse. *)
 
   val of_line : string -> row option
-  (** [None] on malformed lines (wrong column count, unparseable numbers). Rows in the
-      11-column schema that predates {!field-routine} (gh-ocannl-635) still parse, with an empty
-      [routine]: they carry every exactness flag the fit needs, so a file accumulated across
-      builds keeps its old rows — they merely cannot name their computation. *)
+  (** [None] on malformed lines (wrong column count, unparseable numbers). Rows in the 11-column
+      schema that predates {!field-routine} (gh-ocannl-635) still parse, with an empty [routine]:
+      they carry every exactness flag the fit needs, so a file accumulated across builds keeps its
+      old rows — they merely cannot name their computation. *)
 
   val qualified : routine:string -> label:string -> string
-  (** How a row names itself in a report: ["routine/label"], or just the label when the routine
-      is unknown (a legacy row). *)
+  (** How a row names itself in a report: ["routine/label"], or just the label when the routine is
+      unknown (a legacy row). *)
 
   val row_name : row -> string
   (** {!qualified} of the row's own fields — the naming used by the {!fit} witnesses. *)
@@ -205,20 +203,20 @@ module Calibration : sig
     fit_flops_approx : int;
         (** Among [fit_rows]: rows the compute leg skips (approximate op count — guards-taken
             over-counting can fake a throughput above any hardware peak, and one such row would
-            inflate the envelope machine-wide); likewise [fit_bytes_approx] for the memory
-            leg. Exactness is per leg, so a row with an exact op count but a multi-read
-            (approximate) footprint still feeds the compute leg. *)
+            inflate the envelope machine-wide); likewise [fit_bytes_approx] for the memory leg.
+            Exactness is per leg, so a row with an exact op count but a multi-read (approximate)
+            footprint still feeds the compute leg. *)
     fit_bytes_approx : int;
     fit_multi_kernel : int;  (** Among [fit_rows]; see {!fit} for the aggregate caveat. *)
     fit_violations : int;
-        (** Fully-exact rows whose recorded [model_ms] exceeds [measured_ms]: the envelope in
-            force when they were recorded understated this machine's peaks. Rows with an
-            approximate leg are not counted — their exceedance may reflect over-counting
-            instead, mirroring the runtime warning's gating. *)
+        (** Fully-exact rows whose recorded [model_ms] exceeds [measured_ms]: the envelope in force
+            when they were recorded understated this machine's peaks. Rows with an approximate leg
+            are not counted — their exceedance may reflect over-counting instead, mirroring the
+            runtime warning's gating. *)
     fit_fission_slack : (float * string) option;
         (** The uniform factor (> 1) applied to both legs so the aggregate sufficient condition
-            holds on every multi-kernel row (see {!fit}), and the row forcing it; [None] when
-            the per-leg maxima already suffice (or a leg is absent). *)
+            holds on every multi-kernel row (see {!fit}), and the row forcing it; [None] when the
+            per-leg maxima already suffice (or a leg is absent). *)
     fit_peak_flops : (float * string) option;
         (** The fitted constant (fission slack included) and the binding row's
             [routine/label (digest)] ({!row_name}); [None] when no scoreable row has a positive
@@ -230,30 +228,27 @@ module Calibration : sig
   val fit : row list -> fit list
   (** Grouped by backend in order of first appearance. The fitted constants are the tightest
       envelope under which the roofline bound respects every row it can be audited on: per row,
-      [bound <= measured] requires [peak >= counts/measured] on each leg, so each leg starts as
-      the maximum achieved [counts/time] over the rows where {e that leg's} counts are exact —
-      the ratio is then a throughput the machine demonstrably reached. Multi-kernel
-      rows aggregate per-kernel counts, making those maxima necessary for them but not
-      sufficient ([Autotune]'s bound sums per-kernel max-of-legs, which can approach twice the
-      aggregate legs on a compute-bound + bandwidth-bound mix), so both legs are then raised
-      uniformly by the smallest {!field-fit_fission_slack} enforcing the aggregate sufficient
-      condition [flops/peak_flops + bytes/peak_memory_bandwidth <= time] on every fully-exact
-      multi-kernel row — after which the recomputed bound respects every row it was fit from
-      (an over-counted leg is barred from forcing slack: it would inflate both constants).
-      Raising a peak
-      only weakens pruning (the bound stays a lower bound); understating one breaks fathoming.
+      [bound <= measured] requires [peak >= counts/measured] on each leg, so each leg starts as the
+      maximum achieved [counts/time] over the rows where {e that leg's} counts are exact — the ratio
+      is then a throughput the machine demonstrably reached. Multi-kernel rows aggregate per-kernel
+      counts, making those maxima necessary for them but not sufficient ([Autotune]'s bound sums
+      per-kernel max-of-legs, which can approach twice the aggregate legs on a compute-bound +
+      bandwidth-bound mix), so both legs are then raised uniformly by the smallest
+      {!field-fit_fission_slack} enforcing the aggregate sufficient condition
+      [flops/peak_flops + bytes/peak_memory_bandwidth <= time] on every fully-exact multi-kernel row
+      — after which the recomputed bound respects every row it was fit from (an over-counted leg is
+      barred from forcing slack: it would inflate both constants). Raising a peak only weakens
+      pruning (the bound stays a lower bound); understating one breaks fathoming.
 
       Sound on the data, not certified for the machine: fitted peaks are floors a kernel
       demonstrably reached, and a future candidate can achieve more. Between refits such a
-      candidate's bound can exceed its would-be measured time — caught by the continuous
-      agreement check when it is timed, but under [autotune_keep_fraction < 1] it may be
-      model-pre-filtered before timing, where the check cannot see it.
-      [tools/fit_envelope.exe]'s [--margin] trades pruning strength for headroom against
-      exactly that. *)
+      candidate's bound can exceed its would-be measured time — caught by the continuous agreement
+      check when it is timed, but under [autotune_keep_fraction < 1] it may be model-pre-filtered
+      before timing, where the check cannot see it. [tools/fit_envelope.exe]'s [--margin] trades
+      pruning strength for headroom against exactly that. *)
 
   val report : fit -> string
-  (** Config-pasteable: [model_peak_*=...] lines under [#] comment lines naming the binding rows
-      and any fission slack (config comments must be whole lines). Printed constants carry a
-      ~2e-6 relative bump so that 7-significant-digit truncation cannot land below the implied
-      minimum. *)
+  (** Config-pasteable: [model_peak_*=...] lines under [#] comment lines naming the binding rows and
+      any fission slack (config comments must be whole lines). Printed constants carry a ~2e-6
+      relative bump so that 7-significant-digit truncation cannot land below the implied minimum. *)
 end

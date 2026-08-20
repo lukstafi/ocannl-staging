@@ -1,12 +1,12 @@
 (* gh-555: inlining as a first-class, searchable schedule decision.
 
-   Phase 1 exercises the analysis/specialization split directly on hand-built [Ir.Low_level.t]
-   (like virtual_shared_loop.ml): [analyze_proc] runs once, [specialize_proc] replays per candidate
-   over the shared analysis. Pinned: - the default policy materializes a complex producer read
-   twice (the [virtualize_max_visits] cap); - an [inline_preferences] entry (the Inline half of the
-   decision vector) exempts the producer from the cap, and the virtualizer inlines it — same
-   analysis, different decisions, hermetic results; - replaying with a fresh default context
-   reproduces the first result exactly (candidate hermeticity of the shared traced store).
+   Phase 1 exercises the analysis/specialization split directly on hand-built [Ir.Low_level.t] (like
+   virtual_shared_loop.ml): [analyze_proc] runs once, [specialize_proc] replays per candidate over
+   the shared analysis. Pinned: - the default policy materializes a complex producer read twice (the
+   [virtualize_max_visits] cap); - an [inline_preferences] entry (the Inline half of the decision
+   vector) exempts the producer from the cap, and the virtualizer inlines it — same analysis,
+   different decisions, hermetic results; - replaying with a fresh default context reproduces the
+   first result exactly (candidate hermeticity of the shared traced store).
 
    Phase 2 exercises the [Context.decide_inline] API end-to-end on a tensor graph: executed values
    must agree between the default (materialized intermediate) and the inline-forced compile.
@@ -35,10 +35,7 @@ let set s tn llsc : LL.t = LL.Set { tn; idcs = [| iter s |]; llsc; debug = "" }
 let get s tn : LL.scalar_t = LL.Get (tn, [| iter s |])
 let mul a b : LL.scalar_t = LL.Binop (Ops.Mul, (a, single), (b, single))
 let c x : LL.scalar_t = LL.Constant x
-
-let loop s body : LL.t =
-  LL.For_loop { index = s; from_ = 0; to_ = 2; body; axis = Serial }
-
+let loop s body : LL.t = LL.For_loop { index = s; from_ = 0; to_ = 2; body; axis = Serial }
 let seq a b : LL.t = LL.Seq (a, b)
 
 let rec walk_t ~on_set ~on_get (llc : LL.t) =
@@ -138,8 +135,7 @@ let phase1 () =
      opposite direction, with the recompute-cost bound (extent 1 × multiplicity 2). *)
   let find_flip o tn =
     List.find_map o.LL.flip_candidates ~f:(fun fc ->
-        if fc.LL.fc_tn.Tn.id = tn.Tn.id then Some (fc.LL.fc_flip, fc.LL.fc_recompute_cost)
-        else None)
+        if fc.LL.fc_tn.Tn.id = tn.Tn.id then Some (fc.LL.fc_flip, fc.LL.fc_recompute_cost) else None)
   in
   p "default arm reports the producer as an Inline flip of cost 2"
     (match find_flip o_default prod with Some (`Inline, 2) -> true | _ -> false);
@@ -162,7 +158,7 @@ let phase2 () =
         ()
     in
     let%op t = x *. x in
-    let%op y = (t ++ "i=>0") + (t ++ "i=>0") in
+    let%op y = t ++ "i=>0" + (t ++ "i=>0") in
     Train.set_materialized y.Tensor.value;
     Tn.set_observable y.Tensor.value;
     (t, y)
@@ -179,7 +175,8 @@ let phase2 () =
   let yv_inline, plc_inline, t_inline = run ~inline:true in
   p "phase2 default: intermediate is non-virtual"
     (Tn.Placements.known_non_virtual plc_default t_default);
-  p "phase2 inline-forced: intermediate is virtual" (Tn.Placements.known_virtual plc_inline t_inline);
+  p "phase2 inline-forced: intermediate is virtual"
+    (Tn.Placements.known_virtual plc_inline t_inline);
   p "phase2 parity: same result length" (Array.length yv_default = Array.length yv_inline);
   let max_diff =
     Array.foldi yv_default ~init:0.0 ~f:(fun i acc v ->

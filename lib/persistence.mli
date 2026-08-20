@@ -10,12 +10,7 @@
     the payloads be mapped rather than copied (see {!load}). *)
 
 val save :
-  ctx:Context.t ->
-  appending:bool ->
-  ?alignment:int ->
-  Ocannl_tensor.Tensor.tn_set ->
-  string ->
-  unit
+  ctx:Context.t -> appending:bool -> ?alignment:int -> Ocannl_tensor.Tensor.tn_set -> string -> unit
 (** [save ~ctx ~appending t_set path] writes tensor data to a checkpoint file.
 
     When [~appending:false], creates a fresh checkpoint (overwriting any existing file). When

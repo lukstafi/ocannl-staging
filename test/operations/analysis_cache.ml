@@ -1,15 +1,15 @@
 (* gh-560: reuse one [Low_level] analysis across sibling candidate compiles.
 
    Phase 1 exercises the analysis cache directly on hand-built [Ir.Low_level.t] (like
-   inline_decision_replay.ml): an alpha-variant re-lowering of the same routine (fresh loop
-   symbols, same tensor nodes) hits the cache and reproduces the first compile's result exactly;
-   the same structure over different tensor nodes, over a different static symbol, or after
-   mutating a static symbol's range, does not share an entry (tensor nodes and statics key by
-   identity — a cache hit reuses the stored code verbatim).
+   inline_decision_replay.ml): an alpha-variant re-lowering of the same routine (fresh loop symbols,
+   same tensor nodes) hits the cache and reproduces the first compile's result exactly; the same
+   structure over different tensor nodes, over a different static symbol, or after mutating a static
+   symbol's range, does not share an entry (tensor nodes and statics key by identity — a cache hit
+   reuses the stored code verbatim).
 
-   Phase 2 exercises the seam end-to-end: sibling [Context.compile]s of one comp share the
-   analysis, and the analyze-only [Context.decision_surface] reports the same flip candidates as a
-   capture compile's [lowered_transform] — without advancing the context.
+   Phase 2 exercises the seam end-to-end: sibling [Context.compile]s of one comp share the analysis,
+   and the analyze-only [Context.decision_surface] reports the same flip candidates as a capture
+   compile's [lowered_transform] — without advancing the context.
 
    Printed facts are booleans/PASS lines so the expected output stays backend-stable. *)
 
@@ -36,10 +36,7 @@ let set s tn llsc : LL.t = LL.Set { tn; idcs = [| iter s |]; llsc; debug = "" }
 let get s tn : LL.scalar_t = LL.Get (tn, [| iter s |])
 let mul a b : LL.scalar_t = LL.Binop (Ops.Mul, (a, single), (b, single))
 let c x : LL.scalar_t = LL.Constant x
-
-let loop s body : LL.t =
-  LL.For_loop { index = s; from_ = 0; to_ = 2; body; axis = Serial }
-
+let loop s body : LL.t = LL.For_loop { index = s; from_ = 0; to_ = 2; body; axis = Serial }
 let seq a b : LL.t = LL.Seq (a, b)
 let p = Verdict.p
 
@@ -53,9 +50,8 @@ let build_llc (x, prod, oa, ob) =
   seq producer (seq use_a use_b)
 
 let optimize llc ~static_indices =
-  LL.optimize
-    (LL.empty_optimize_ctx ())
-    ~unoptim_ll_source:None ~ll_source:None ~name:"ac_test" static_indices llc
+  LL.optimize (LL.empty_optimize_ctx ()) ~unoptim_ll_source:None ~ll_source:None ~name:"ac_test"
+    static_indices llc
 
 (* Runs [f] and reports whether the analysis cache registered a hit (and no miss) for it. *)
 let delta f =
@@ -83,8 +79,12 @@ let phase1 () =
   p "same structure over different tensor nodes misses" (Poly.equal (h3, m3) (`Hits 0, `Misses 1));
   (* Static symbols key by identity and by their (mutable) range facts. *)
   let mk_static () =
-    { Idx.static_symbol = sym (); static_range = Some 3; used_as_extent = false;
-      used_as_slice = false }
+    {
+      Idx.static_symbol = sym ();
+      static_range = Some 3;
+      used_as_extent = false;
+      used_as_slice = false;
+    }
   in
   let stns = mk_tns () in
   let sx, _, soa, _ = stns in
@@ -94,23 +94,15 @@ let phase1 () =
     let i = sym () in
     loop i (set i soa (mul (get i sx) (LL.Get (sx, [| iter s |]))))
   in
-  let _, h4, m4 =
-    delta (fun () -> optimize (static_llc static) ~static_indices:[ static ])
-  in
+  let _, h4, m4 = delta (fun () -> optimize (static_llc static) ~static_indices:[ static ]) in
   p "static-indexed first compile misses" (Poly.equal (h4, m4) (`Hits 0, `Misses 1));
-  let _, h5, m5 =
-    delta (fun () -> optimize (static_llc static) ~static_indices:[ static ])
-  in
+  let _, h5, m5 = delta (fun () -> optimize (static_llc static) ~static_indices:[ static ]) in
   p "same static symbol hits" (Poly.equal (h5, m5) (`Hits 1, `Misses 0));
   let static' = mk_static () in
-  let _, h6, m6 =
-    delta (fun () -> optimize (static_llc static') ~static_indices:[ static' ])
-  in
+  let _, h6, m6 = delta (fun () -> optimize (static_llc static') ~static_indices:[ static' ]) in
   p "a fresh static symbol misses" (Poly.equal (h6, m6) (`Hits 0, `Misses 1));
   static'.Idx.static_range <- Some 2;
-  let _, h7, m7 =
-    delta (fun () -> optimize (static_llc static') ~static_indices:[ static' ])
-  in
+  let _, h7, m7 = delta (fun () -> optimize (static_llc static') ~static_indices:[ static' ]) in
   p "mutating the static's range misses" (Poly.equal (h7, m7) (`Hits 0, `Misses 1))
 
 open Ocannl

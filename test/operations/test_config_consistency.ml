@@ -13,7 +13,7 @@ let uncomment line =
       | Some (key, _)
         when (not (String.is_empty key))
              && String.for_all key ~f:(fun c ->
-                    Char.is_alphanum c || Char.equal '_' c || Char.equal '-' c) ->
+                 Char.is_alphanum c || Char.equal '_' c || Char.equal '-' c) ->
           rest
       | _ -> line)
   | None -> line
@@ -61,9 +61,9 @@ let () =
   let source_keys = Config_key_scan.keys_in_files source_files in
   (* Failures go through [Verdict]: reported on both channels, and the run exits nonzero from its
      teardown. A golden-diff test that prints its failures and exits 0 can be `dune promote`d into
-     passing, blessing the FAIL text as the expected output (Codex P2, round 10 of PR #343); since
-     a nonzero exit means dune never writes the redirected stdout, the same lines go to stderr,
-     where they survive to be read (gh-ocannl-601). *)
+     passing, blessing the FAIL text as the expected output (Codex P2, round 10 of PR #343); since a
+     nonzero exit means dune never writes the redirected stdout, the same lines go to stderr, where
+     they survive to be read (gh-ocannl-601). *)
   let fail = Verdict.fail in
   (* 1. Source call-site keys must all appear in the reference file *)
   let missing_in_ref = Set.diff source_keys file_keys in
@@ -144,20 +144,19 @@ let () =
      parameter hides every key routed through it from BOTH scanners -- on staging PR #337 one such
      helper hid three real keys, and a deliberately unregistered fake key stayed green until the
      helper was removed. So the label must carry a literal everywhere except in the functions that
-     legitimately move a key around, named one by one below:
-     - in utils.ml, the lookup plumbing itself, which forwards the name between get_global_arg,
-       get_global_flag and get_global_arg_with_source and on into the boolean parser;
-     - in tnode.ml, get_style, which takes the key as an optional parameter defaulting to a
-       literal, re-passed by its callers with literals of their own.
-     Naming the functions rather than exempting their files is the difference between "this
-     forwarding is known" and "nothing in this file is ever checked" (Codex P2, round 1): utils.ml
-     and tnode.ml go on reading configuration in the ordinary way everywhere else, and a new
-     forwarding helper in either of them fails like anywhere else.
-     What counts as a use, and which function it sits in, are the parse tree's answers rather than a
-     pattern's (Config_key_scan): every spelling of the label that OCaml accepts is one node, and
-     prose about the convention -- including this comment's neighbours in the scanned files -- is
-     not code at all. An exemption reaches a named TOP-LEVEL function and nothing nested inside it,
-     so a local helper, however it is introduced, forwards keys on its own account. *)
+     legitimately move a key around, named one by one below: - in utils.ml, the lookup plumbing
+     itself, which forwards the name between get_global_arg, get_global_flag and
+     get_global_arg_with_source and on into the boolean parser; - in tnode.ml, get_style, which
+     takes the key as an optional parameter defaulting to a literal, re-passed by its callers with
+     literals of their own. Naming the functions rather than exempting their files is the difference
+     between "this forwarding is known" and "nothing in this file is ever checked" (Codex P2, round
+     1): utils.ml and tnode.ml go on reading configuration in the ordinary way everywhere else, and
+     a new forwarding helper in either of them fails like anywhere else. What counts as a use, and
+     which function it sits in, are the parse tree's answers rather than a pattern's
+     (Config_key_scan): every spelling of the label that OCaml accepts is one node, and prose about
+     the convention -- including this comment's neighbours in the scanned files -- is not code at
+     all. An exemption reaches a named TOP-LEVEL function and nothing nested inside it, so a local
+     helper, however it is introduced, forwards keys on its own account. *)
   let forwarding_sites =
     Map.of_alist_exn
       (module String)
@@ -209,23 +208,22 @@ let () =
   let forwarding_hit = ref (Set.empty (module String)) in
   (* 6b. The OTHER spelling of a read -- a field of `Utils.settings` -- is recognised by that
      receiver, and a read spelled any other way (bare `settings.k` under an `open Utils`, or
-     `U.settings.k` under an alias, at any depth) vanishes from the census: a key read only that
-     way at codegen could then be classified code-borne and pass digest_completeness unchallenged
-     (Codex P2, rounds 14 and 15). The READ is what is checked, not the scope, so a qualified
-     record expression like row.ml's `Utils.{ value; unique_id }` is not a finding. utils.ml is
-     where the record lives, so its own unqualified reads are the definition, not a hidden call
-     site. *)
+     `U.settings.k` under an alias, at any depth) vanishes from the census: a key read only that way
+     at codegen could then be classified code-borne and pass digest_completeness unchallenged (Codex
+     P2, rounds 14 and 15). The READ is what is checked, not the scope, so a qualified record
+     expression like row.ml's `Utils.{ value; unique_id }` is not a finding. utils.ml is where the
+     record lives, so its own unqualified reads are the definition, not a hidden call site. *)
   List.iter source_files ~f:(fun fname ->
       let base = Stdlib.Filename.basename fname in
-      if not (String.equal base "utils.ml") then (
+      if not (String.equal base "utils.ml") then
         let original = In_channel.read_all fname in
         List.iter (Config_key_scan.unqualified_settings_reads original) ~f:(fun offset ->
             fail
             @@ Printf.sprintf
-                 "%s uses the settings record or one of its predicates somewhere the census \
-                  cannot follow -- a read without the `Utils.settings` receiver, or either handed \
-                  on to be read elsewhere: %s"
-                 base (line_at original offset))));
+                 "%s uses the settings record or one of its predicates somewhere the census cannot \
+                  follow -- a read without the `Utils.settings` receiver, or either handed on to \
+                  be read elsewhere: %s"
+                 base (line_at original offset)));
   List.iter source_files ~f:(fun fname ->
       let base = Stdlib.Filename.basename fname in
       let known =
@@ -267,14 +265,15 @@ let () =
                         ^ if top_level then "" else " (nested)"
                   in
                   fail
-                  @@ Printf.sprintf "%s does not spell the config key as a string literal, in %s: %s"
-                       base where (line_at original offset))));
-  (* An exemption is a claim that a named function forwards a key; a claim that stops being true
-     is stale, not a free pass, so each one has to earn its place on every run. *)
+                  @@ Printf.sprintf
+                       "%s does not spell the config key as a string literal, in %s: %s" base where
+                       (line_at original offset))));
+  (* An exemption is a claim that a named function forwards a key; a claim that stops being true is
+     stale, not a free pass, so each one has to earn its place on every run. *)
   let exempted_sites =
     Map.to_alist forwarding_sites
     |> List.concat_map ~f:(fun (base, fns) ->
-           List.map (Set.to_list fns) ~f:(fun fn -> base ^ ":" ^ fn))
+        List.map (Set.to_list fns) ~f:(fun fn -> base ^ ":" ^ fn))
     |> Set.of_list (module String)
   in
   let stale = Set.diff exempted_sites !forwarding_hit in
@@ -293,10 +292,9 @@ let () =
       (List.length payload_keys)
       (String.concat ~sep:", "
       @@ List.map payload_keys ~f:(fun (name, keys) ->
-             Printf.sprintf "%s (%d keys)" name (Set.length keys)));
+          Printf.sprintf "%s (%d keys)" name (Set.length keys)));
     printf
-      "OK: %d files spell every config key as a string literal, outside %d forwarding functions: \
-       %s.\n"
+      "OK: %d files spell every config key as a string literal, outside %d forwarding functions: %s.\n"
       (List.length source_files) (Set.length exempted_sites)
       (String.concat ~sep:", " @@ Set.to_list exempted_sites);
     (* Which directories the census came from, so that the globs' reach is reviewable rather than

@@ -1,24 +1,21 @@
-(* gh-ocannl-514 phase 3: [Ir.Cost_model.completion_floor] — the dual (lower-bound) extraction
-   over hand-built programs where every number is checkable by hand (single precision, 4
-   bytes/cell). Each case also asserts the duality invariant on the same code: the floor never
-   exceeds the upper extraction ([analyze]).
+(* gh-ocannl-514 phase 3: [Ir.Cost_model.completion_floor] — the dual (lower-bound) extraction over
+   hand-built programs where every number is checkable by hand (single precision, 4 bytes/cell).
+   Each case also asserts the duality invariant on the same code: the floor never exceeds the upper
+   extraction ([analyze]).
 
-   - pointwise map: all accesses exact, floor = upper on both legs;
-   - matmul with an rmw accumulator: exact when closed; opening the accumulator's placement
-     attributes the whole producer — its ops and operand reads — to the open level, and
-     committing (re-evaluation with the narrowed open set) recovers the closed floor, monotone
-     in refinement;
-   - guarded write: the floor counts guards-never-taken (condition ops only, no write traffic)
-     where the upper counts guards-taken — [fr_exact] false;
-   - two reads of one node: pairwise provably-disjoint exact images sum in both extractions
-     (gh-ocannl-578); possibly-overlapping ones keep the asymmetry — the floor takes the larger
-     exact image (a union is at least its largest member, flagged loose) where the upper takes
-     the capped sum;
-   - short-circuiting forms: Where arms, And/Or right operands (conditional — cheaper-arm /
-     left-operand floors, conditional reads zeroed) and Arg1/Arg2 discarded operands (never
-     rendered at all, so absent from both extractions);
-   - the over-producing open producer, dead loops, and the dynamic-gather fallback flooring to
-     zero where the upper falls back to the whole node.
+   - pointwise map: all accesses exact, floor = upper on both legs; - matmul with an rmw
+   accumulator: exact when closed; opening the accumulator's placement attributes the whole producer
+   — its ops and operand reads — to the open level, and committing (re-evaluation with the narrowed
+   open set) recovers the closed floor, monotone in refinement; - guarded write: the floor counts
+   guards-never-taken (condition ops only, no write traffic) where the upper counts guards-taken —
+   [fr_exact] false; - two reads of one node: pairwise provably-disjoint exact images sum in both
+   extractions (gh-ocannl-578); possibly-overlapping ones keep the asymmetry — the floor takes the
+   larger exact image (a union is at least its largest member, flagged loose) where the upper takes
+   the capped sum; - short-circuiting forms: Where arms, And/Or right operands (conditional —
+   cheaper-arm / left-operand floors, conditional reads zeroed) and Arg1/Arg2 discarded operands
+   (never rendered at all, so absent from both extractions); - the over-producing open producer,
+   dead loops, and the dynamic-gather fallback flooring to zero where the upper falls back to the
+   whole node.
 
    The last section pins the classifier those short-circuiting cases now read from
    ([Ops.binop_conditionality] / [Ops.ternop_conditionality], gh-ocannl-582) and its agreement with
@@ -52,7 +49,8 @@ let it s = Idx.Iterator s
 let show name ?open_placement code =
   let s = CM.analyze code in
   let f = CM.completion_floor ?open_placement code in
-  Stdio.printf "== %s ==\n  floor: flops=%d bytes=%d %s\n  upper: flops=%d bytes=%d\n  floor <= upper: %b\n"
+  Stdio.printf
+    "== %s ==\n  floor: flops=%d bytes=%d %s\n  upper: flops=%d bytes=%d\n  floor <= upper: %b\n"
     name f.CM.fr_flops f.CM.fr_bytes
     (if f.CM.fr_exact then "exact" else "inexact")
     s.CM.flops (CM.total_bytes s)
@@ -61,8 +59,8 @@ let show name ?open_placement code =
 
 let () =
   let i = Idx.get_symbol () and j = Idx.get_symbol () and k = Idx.get_symbol () in
-  (* Pointwise 4x5 map: C[i][j] = A[i][j] + B[j]. All accesses exact: floor = upper.
-     A rd 80 B, B rd 20 B, C wr 80 B; 20 adds. *)
+  (* Pointwise 4x5 map: C[i][j] = A[i][j] + B[j]. All accesses exact: floor = upper. A rd 80 B, B rd
+     20 B, C wr 80 B; 20 adds. *)
   let a = fresh_tn "A" [| 4; 5 |] in
   let b = fresh_tn "B" [| 5 |] in
   let c = fresh_tn "C" [| 4; 5 |] in
@@ -78,9 +76,9 @@ let () =
             }))
   in
   let _ = show "pointwise map" pointwise in
-  (* 4x5x6 matmul, rmw accumulator: D[i][j] += A2[i][k] * B2[k][j]. Exact both ways: flops =
-     2*4*5*6 = 240; bytes = A2 96 + B2 120 + D rd 80 + D wr 80 = 376. Opening D's placement
-     drops its 160 bytes; node_floor_bytes D restores them — the Materialize delta. *)
+  (* 4x5x6 matmul, rmw accumulator: D[i][j] += A2[i][k] * B2[k][j]. Exact both ways: flops = 2*4*5*6
+     = 240; bytes = A2 96 + B2 120 + D rd 80 + D wr 80 = 376. Opening D's placement drops its 160
+     bytes; node_floor_bytes D restores them — the Materialize delta. *)
   let a2 = fresh_tn "A2" [| 4; 6 |] in
   let b2 = fresh_tn "B2" [| 6; 5 |] in
   let d = fresh_tn "D" [| 4; 5 |] in
@@ -103,12 +101,10 @@ let () =
                })))
   in
   let closed = show "matmul (rmw accumulator)" matmul in
-  let opened =
-    show "matmul, D's placement open" ~open_placement:(fun tn -> Tn.equal tn d) matmul
-  in
-  (* Committing a placement is re-evaluation with the narrowed open set: suppression only
-     shrinks, so the floor is monotone in refinement — here, committing D (the only open node)
-     recovers the closed floor exactly, and both legs are monotone. *)
+  let opened = show "matmul, D's placement open" ~open_placement:(fun tn -> Tn.equal tn d) matmul in
+  (* Committing a placement is re-evaluation with the narrowed open set: suppression only shrinks,
+     so the floor is monotone in refinement — here, committing D (the only open node) recovers the
+     closed floor exactly, and both legs are monotone. *)
   let committed = CM.completion_floor ~open_placement:(fun _ -> false) matmul in
   Verdict.p "  commitment (narrowed open set) recovers the closed floor"
     (committed.CM.fr_bytes = closed.CM.fr_bytes && committed.CM.fr_flops = closed.CM.fr_flops);
@@ -157,8 +153,8 @@ let () =
   let _ = show "two disjoint reads, both extractions sum" two_reads in
   (* Two exact reads that may overlap: G2[i] = H8[i] + H8[i+1]. The upper sums (8 cells = 32 rd
      bytes, a union bound); the floor takes only the larger exact image (4 cells = 16 bytes) — a
-     union is at least its largest member, no more is certain. G2 writes 16 both ways: floor 32
-     vs upper 48. *)
+     union is at least its largest member, no more is certain. G2 writes 16 both ways: floor 32 vs
+     upper 48. *)
   let g2 = fresh_tn "G2" [| 4 |] in
   let h8 = fresh_tn "H8" [| 8 |] in
   let shift1 s = Idx.Affine { symbols = [ (1, s) ]; offset = 1 } in
@@ -196,10 +192,10 @@ let () =
          })
   in
   let _ = show "dynamic gather" gather in
-  (* Where short-circuits (?: in every renderer): K[i] = where(E>0, E*2, E+M[i]+1). The floor
-     counts cond + select + the cheaper arm (1+1+1 = 3/iter vs the upper's both-arms 5/iter),
-     and M — read only inside an arm — floors its read to zero; E is also read in an arm, so its
-     read floors too (node-granular certainty, conservative). *)
+  (* Where short-circuits (?: in every renderer): K[i] = where(E>0, E*2, E+M[i]+1). The floor counts
+     cond + select + the cheaper arm (1+1+1 = 3/iter vs the upper's both-arms 5/iter), and M — read
+     only inside an arm — floors its read to zero; E is also read in an arm, so its read floors too
+     (node-granular certainty, conservative). *)
   let kq = fresh_tn "K" [| 4 |] in
   let e2 = fresh_tn "E2" [| 4 |] in
   let m = fresh_tn "M" [| 4 |] in
@@ -223,10 +219,10 @@ let () =
          })
   in
   let _ = show "where short-circuit" where_case in
-  (* An open producer computing a larger domain than consumed: P2[0..7] = A3[0..7] * 2, then
-     C3[0] = P2[0]. The inline completion instantiates one multiply and one A3 read and drops
-     the setter loop, so with P2 open the floor keeps only C3's certain write — the producer's
-     ops AND its A3 reads attribute to the open placement. *)
+  (* An open producer computing a larger domain than consumed: P2[0..7] = A3[0..7] * 2, then C3[0] =
+     P2[0]. The inline completion instantiates one multiply and one A3 read and drops the setter
+     loop, so with P2 open the floor keeps only C3's certain write — the producer's ops AND its A3
+     reads attribute to the open placement. *)
   let p2 = fresh_tn "P2" [| 8 |] in
   let a3 = fresh_tn "A3" [| 8 |] in
   let c3 = fresh_tn "C3" [| 1 |] in
@@ -241,22 +237,19 @@ let () =
                debug = "";
              }),
         LL.Set
-          {
-            tn = c3;
-            idcs = [| Idx.Fixed_idx 0 |];
-            llsc = get p2 [| Idx.Fixed_idx 0 |];
-            debug = "";
-          } )
+          { tn = c3; idcs = [| Idx.Fixed_idx 0 |]; llsc = get p2 [| Idx.Fixed_idx 0 |]; debug = "" }
+      )
   in
   let _ = show "over-producing closed" over_produce in
   let _ =
-    show "over-producing, P2's placement open" ~open_placement:(fun tn -> Tn.equal tn p2)
+    show "over-producing, P2's placement open"
+      ~open_placement:(fun tn -> Tn.equal tn p2)
       over_produce
   in
-  (* And renders as the short-circuiting &&: the certain floor is the op plus the left operand;
-     the right comparison (reading M) is conditional — its op floors away and M's read floors to
-     zero. Arg1 renders only its selected operand: the discarded expensive right operand
-     contributes to neither extraction — not its ops, not its M read. *)
+  (* And renders as the short-circuiting &&: the certain floor is the op plus the left operand; the
+     right comparison (reading M) is conditional — its op floors away and M's read floors to zero.
+     Arg1 renders only its selected operand: the discarded expensive right operand contributes to
+     neither extraction — not its ops, not its M read. *)
   let l = fresh_tn "L" [| 4 |] in
   let and_case =
     for_over i
@@ -328,8 +321,7 @@ end)
 let () =
   Stdio.printf "\n== operand conditionality ==\n";
   List.iter Ops.all_of_binop ~f:(fun op ->
-      Stdio.printf "  %-28s %s\n"
-        (Ops.binop_cd_fallback_syntax op)
+      Stdio.printf "  %-28s %s\n" (Ops.binop_cd_fallback_syntax op)
         (Sexp.to_string @@ Ops.sexp_of_binop_conditionality @@ Ops.binop_conditionality op));
   List.iter Ops.all_of_ternop ~f:(fun op ->
       Stdio.printf "  %-28s %s\n" (Ops.ternop_cd_syntax op)

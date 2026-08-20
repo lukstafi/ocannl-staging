@@ -1,19 +1,19 @@
 (* Exact tropical/einmax1 gradients via the product-space gate (gh-ocannl-512).
 
-   The gradient gate of the max-family einsums lives in the product space of the operation — one
-   bit per (result position, contracted position) pair ([{ cond_pspace }] in [Operation.tropical] /
+   The gradient gate of the max-family einsums lives in the product space of the operation — one bit
+   per (result position, contracted position) pair ([{ cond_pspace }] in [Operation.tropical] /
    [Operation.einmax1]) — instead of a last-write-wins bit per input position. Pinned here:
 
    - Overlapping reduction windows (stride < window): positions receive gradient exactly from the
-     windows they won — the issue's minimal repro.
+   windows they won — the issue's minimal repro.
 
    - General specs where RHS2 has indices independent of RHS1 (tropical matmul): the g2 gradient is
-     exact — the previously documented limitation is gone.
+   exact — the previously documented limitation is gone.
 
    - Ties: the gradient goes in full to every achieving pair, and window contributions accumulate.
 
    - Clamped padded windows (gh-ocannl-504) with overlap: out-of-range pairs hold the max-neutral
-     -inf in the product-space intermediate ([=:@^]), so they gate neither gradient.
+   -inf in the product-space intermediate ([=:@^]), so they gate neither gradient.
 
    Both binary [@^+] and unary [@^^] overlapping windows are covered. The unary case also pins
    projection inference for convolution indices that occur only inside the convolution compound
@@ -27,13 +27,12 @@ open Stdio
 let p = Verdict.p
 let close a b = Array.for_all2_exn a b ~f:(fun x y -> Float.(abs (x - y) < 1e-5))
 let fa a = String.concat ~sep:" " (Array.to_list a |> List.map ~f:(fun v -> Printf.sprintf "%g" v))
-
 let grad_of t = (Option.value_exn ~here:[%here] t.Tensor.diff).Tensor.grad
 
 let () =
   (* === 1: The issue's minimal repro — 1-D max-slide, window 2, stride 1, zero kernel, sum loss.
-     Windows: (x0,x1) (x1,x2) (x2,x3) (x3,x4); argmaxes i=0, i=1, i=3, i=4. The old input-space
-     gate gave [1;2;0;0;1] (i=1 over-credited with window 0, window 3's gradient lost). === *)
+     Windows: (x0,x1) (x1,x2) (x2,x3) (x3,x4); argmaxes i=0, i=1, i=3, i=4. The old input-space gate
+     gave [1;2;0;0;1] (i=1 over-credited with window 0, window 3's gradient lost). === *)
   Tensor.unsafe_reinitialize ();
   let xv = [| 5.; 3.; 1.; 2.; 5. |] in
   let x =
@@ -109,9 +108,8 @@ let () =
     (close lv2 [| 7. |] && close gx2 [| 1.; 0.; 1. |]);
 
   (* === 3: Tropical matmul — RHS2 has an index (j) independent of RHS1, the formerly documented g2
-     limitation. t[i,j] = max_k (a[i,k] + b[k,j]) with a = [[1,9],[5,1]], b = [[10,20],[3,4]]:
-     t = [[12,21],[15,25]] (winners k=1,0,0,0), loss 73, ga = [[1,1],[2,0]], gb = [[1,2],[1,0]]. ===
-  *)
+     limitation. t[i,j] = max_k (a[i,k] + b[k,j]) with a = [[1,9],[5,1]], b = [[10,20],[3,4]]: t =
+     [[12,21],[15,25]] (winners k=1,0,0,0), loss 73, ga = [[1,1],[2,0]], gb = [[1,2],[1,0]]. === *)
   Tensor.unsafe_reinitialize ();
   let av = [| [| 1.; 9. |]; [| 5.; 1. |] |] in
   let bv = [| [| 10.; 20. |]; [| 3.; 4. |] |] in
@@ -141,8 +139,7 @@ let () =
   printf "tropical matmul: ga = [%s], gb = [%s]\n%!" (fa ga) (fa gb);
   p "tropical matmul forward" (close tv [| 12.; 21.; 15.; 25. |] && close lv3 [| 73. |]);
   p "tropical matmul g1 exact" (close ga [| 1.; 1.; 2.; 0. |]);
-  p "tropical matmul g2 exact (formerly the documented limitation)"
-    (close gb [| 1.; 2.; 1.; 0. |]);
+  p "tropical matmul g2 exact (formerly the documented limitation)" (close gb [| 1.; 2.; 1.; 0. |]);
 
   (* === 4: Ties with overlap — x = [7;7;7], window 2, stride 1. Both windows tie everywhere: each
      achieving pair gets the full gradient, and the shared middle position accumulates from both
@@ -186,10 +183,9 @@ let () =
   p "clamped overlap forward" (close yv5 [| -3.; -2.; -1.; -1. |]);
   p "clamped overlap gradient exact" (close gx5 [| 0.; 1.; 1.; 2. |]);
 
-  (* === 6: AlexNet-style overlapping max_pool2d (window 3, stride 2) on a 5x5 range input.
-     Position (2,2)=12 lies in all four windows and wins only the first: the old input-space gate
-     let the three losing windows overwrite its bit. Winners: 12@(2,2), 14@(2,4), 22@(4,2),
-     24@(4,4). === *)
+  (* === 6: AlexNet-style overlapping max_pool2d (window 3, stride 2) on a 5x5 range input. Position
+     (2,2)=12 lies in all four windows and wins only the first: the old input-space gate let the
+     three losing windows overwrite its bit. Winners: 12@(2,2), 14@(2,4), 22@(4,2), 24@(4,4). === *)
   Tensor.unsafe_reinitialize ();
   let x6 =
     Operation.init ~l:"owg_x6" ~prec:Ir.Ops.single ~b:[] ~o:[ 5; 5; 1 ]
@@ -210,15 +206,14 @@ let () =
   p "overlapping max_pool2d forward" (close yv6 [| 12.; 14.; 22.; 24. |]);
   p "overlapping max_pool2d gradient exact"
     (close gx6
-       (Array.init 25 ~f:(fun i ->
-            if i = 12 || i = 14 || i = 22 || i = 24 then 1. else 0.)));
+       (Array.init 25 ~f:(fun i -> if i = 12 || i = 14 || i = 22 || i = 24 then 1. else 0.)));
 
   (* === 7: All-[-inf] input under clamped padded windows with a learnable kernel — the validity
      mask. Every output is -inf, so out-of-range pairs' -inf neutral EQUALS t; without the
      [valid_pspace] conjunction the g2 scatter (whose kernel projection is valid for those pairs)
-     would credit them. Valid pairs per kernel position w: w=0 misses o=0, w=2 misses o=3, so
-     gk = [3;4;3]; per input position: gx = [2;3;3;2] (all valid pairs tie at -inf and each gates
-     the full gradient). === *)
+     would credit them. Valid pairs per kernel position w: w=0 misses o=0, w=2 misses o=3, so gk =
+     [3;4;3]; per input position: gx = [2;3;3;2] (all valid pairs tie at -inf and each gates the
+     full gradient). === *)
   Tensor.unsafe_reinitialize ();
   let x7 =
     Operation.init ~l:"owg_x7" ~prec:Ir.Ops.single ~b:[] ~o:[ 4 ]
@@ -243,12 +238,11 @@ let () =
   p "clamped-out pairs gate no input gradient" (close gx7 [| 2.; 3.; 3.; 2. |]);
   p "clamped-out pairs gate no kernel gradient (validity mask)" (close gk7 [| 3.; 4.; 3. |]);
 
-  (* === 8: Row-variable reduction keeping nonempty input axes — einmax1 @^^ "...|... => ...|0" on
-     a 2->3 matrix-shaped tensor. The reduced output row (extent 3) lands after the kept input row
+  (* === 8: Row-variable reduction keeping nonempty input axes — einmax1 @^^ "...|... => ...|0" on a
+     2->3 matrix-shaped tensor. The reduced output row (extent 3) lands after the kept input row
      (extent 2) in the proxy layout while the product order has them the other way around;
-     [Indexing.prod_project_for]'s extent-based (first-fit) pairing makes the layouts agree.
-     p8 = [[1,5,3],[9,2,4]]: per-row maxima 5 (b=1) and 9 (b=0), loss 14, gp = [[0,1,0],[1,0,0]].
-     === *)
+     [Indexing.prod_project_for]'s extent-based (first-fit) pairing makes the layouts agree. p8 =
+     [[1,5,3],[9,2,4]]: per-row maxima 5 (b=1) and 9 (b=0), loss 14, gp = [[0,1,0],[1,0,0]]. === *)
   Tensor.unsafe_reinitialize ();
   let p8v = [| [| 1.; 5.; 3. |]; [| 9.; 2.; 4. |] |] in
   let p8 =

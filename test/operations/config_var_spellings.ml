@@ -1,25 +1,25 @@
 (* gh-ocannl-605: the spellings a configuration setting has outside an ocannl_config file.
 
-   Two lists, and then a live check that they are the truth rather than a wish. The environment
-   list is the shorter one on purpose, and since gh-ocannl-652 it holds ONE name: a dune rule that
-   has to declare the ambient variables it is invalidated by must enumerate it by hand, and while
-   it held four spellings per key the natural-looking all-dashed `ocannl-log-level` was not among
-   them -- a dep on it declared a variable nothing reads while leaving the one OCANNL does read
-   untracked. Dashes are idiomatic on the commandline and stay there, where they are also
-   normalized: the prefix separator and the key's own separators dash independently, so every
-   spelling one would guess is accepted.
+   Two lists, and then a live check that they are the truth rather than a wish. The environment list
+   is the shorter one on purpose, and since gh-ocannl-652 it holds ONE name: a dune rule that has to
+   declare the ambient variables it is invalidated by must enumerate it by hand, and while it held
+   four spellings per key the natural-looking all-dashed `ocannl-log-level` was not among them -- a
+   dep on it declared a variable nothing reads while leaving the one OCANNL does read untracked.
+   Dashes are idiomatic on the commandline and stay there, where they are also normalized: the
+   prefix separator and the key's own separators dash independently, so every spelling one would
+   guess is accepted.
 
-   The live section is what makes this a test rather than a restatement of the source. The rule
-   next to it sets a synthetic key in every environment spelling that was dropped and in the one
-   that was kept, and a second key in the dropped spellings only. Synthetic keys, deliberately:
-   nothing there is a real setting, so the library reads no differently for having been asked.
+   The live section is what makes this a test rather than a restatement of the source. The rule next
+   to it sets a synthetic key in every environment spelling that was dropped and in the one that was
+   kept, and a second key in the dropped spellings only. Synthetic keys, deliberately: nothing there
+   is a real setting, so the library reads no differently for having been asked.
 
    The commandline lookups name REAL keys, because the unknown-argument warning at the foot of
    `arrayjit/lib/utils.ml` inspects every argument addressed to OCANNL. It used to do so with a
-   parser of its own -- split on `=`, dash to underscore, look up -- which disagreed with the
-   reader in both directions: `--ocannl-print-decimals-precision=7` passed validation and was then
-   ignored, while `--ocannl_log_level_0` was applied and warned about, its separator not being an
-   `=`. Both now go through `Utils.cmdline_var_prefixes`, so these two lines and the sibling
+   parser of its own -- split on `=`, dash to underscore, look up -- which disagreed with the reader
+   in both directions: `--ocannl-print-decimals-precision=7` passed validation and was then ignored,
+   while `--ocannl_log_level_0` was applied and warned about, its separator not being an `=`. Both
+   now go through `Utils.cmdline_var_prefixes`, so these two lines and the sibling
    `config_var_warnings` golden are the two halves of one claim. *)
 
 open Base
@@ -74,13 +74,13 @@ let () =
    reserved namespaces could only appear as an ABSENCE of warnings -- and an absence reads the same
    whether the namespace is honoured or the walk never ran.
 
-   No case-only variant is listed: `ocannl_backend` is one variable with `OCANNL_BACKEND` on
-   Windows and a different one everywhere else, so its classification is correct and different per
-   platform, which is not something a golden can hold. The dashed spellings carry that leg instead:
-   they are unread on every platform, punctuation being the one thing a case-insensitive
-   environment does NOT fold -- which is a property of `Utils.same_env_name` rather than a wish,
-   since the predicate it replaced answered "read" to every candidate on Windows (Codex P1 on PR
-   #389). The case-only variants are claimed below. *)
+   No case-only variant is listed: `ocannl_backend` is one variable with `OCANNL_BACKEND` on Windows
+   and a different one everywhere else, so its classification is correct and different per platform,
+   which is not something a golden can hold. The dashed spellings carry that leg instead: they are
+   unread on every platform, punctuation being the one thing a case-insensitive environment does NOT
+   fold -- which is a property of `Utils.same_env_name` rather than a wish, since the predicate it
+   replaced answered "read" to every candidate on Windows (Codex P1 on PR #389). The case-only
+   variants are claimed below. *)
 let describe = function
   | Utils.Env_not_addressed -> "not addressed to OCANNL"
   | Utils.Env_reserved prefix -> "reserved namespace " ^ prefix
@@ -105,8 +105,7 @@ let () =
       "OCANNL_LOG_LEVEL";
       "OCANNL_LOG_LEVEL_ROW";
       "PATH";
-    ]
-    ~f:(fun name ->
+    ] ~f:(fun name ->
       printf "  %-26s %s\n" ("\"" ^ name ^ "\"") (describe (Utils.classify_env_var name)))
 
 (* The casing leg, as a CLAIM rather than as three more lines above, for the reason that list
@@ -133,4 +132,5 @@ let () =
   List.iter [ "ocannl_backend"; "ocannl_log_level_row"; "ocannl_tool_test_cap" ] ~f:(fun name ->
       Verdict.p
         (Printf.sprintf "%S is read exactly where the environment is case-insensitive" name)
-        (Option.equal Bool.equal (read_under_the_prefix name) (Some Utils.env_names_case_insensitive)))
+        (Option.equal Bool.equal (read_under_the_prefix name)
+           (Some Utils.env_names_case_insensitive)))

@@ -1,10 +1,10 @@
 (* The lane-count choice behind explicit SIMD rendering (gh-ocannl-621 follow-up): which vector
    width an extent gets on a register file of a given size.
 
-   Pure arithmetic over [Ir.Backend_intf.simd_lane_ladder] / [simd_lanes_for], so unlike every
-   other vector-width test here it says the same thing on every machine — which is the point: the
-   property that matters is a comparison BETWEEN widths ("a wider register file never renders worse
-   than a narrower one"), and no single machine can exhibit both sides of it. *)
+   Pure arithmetic over [Ir.Backend_intf.simd_lane_ladder] / [simd_lanes_for], so unlike every other
+   vector-width test here it says the same thing on every machine — which is the point: the property
+   that matters is a comparison BETWEEN widths ("a wider register file never renders worse than a
+   narrower one"), and no single machine can exhibit both sides of it. *)
 
 open Base
 
@@ -21,8 +21,8 @@ let trips ~vector_bytes ~elt_bytes ~extent =
   | Some lanes -> (extent / lanes) + (extent % lanes)
 
 let () =
-  (* The ladder halves from the register width down to a floor of 32 bytes — never below the width
-     a pre-AVX-512 machine used, because a narrower rendering would newly vectorize (and thereby
+  (* The ladder halves from the register width down to a floor of 32 bytes — never below the width a
+     pre-AVX-512 machine used, because a narrower rendering would newly vectorize (and thereby
      reassociate) loops that render serially today. *)
   p "f32 ladders: 64B halves to 32B, narrower widths offer one rung"
     (List.equal Int.equal (ladder ~vector_bytes:64 ~elt_bytes:4) [ 16; 8 ]

@@ -1,5 +1,5 @@
-(* gh-ocannl-544: a use site cannot silently widen an operation result's row beyond its
-   arguments' — the widening must be requested by name, with [stretch].
+(* gh-ocannl-544: a use site cannot silently widen an operation result's row beyond its arguments' —
+   the widening must be requested by name, with [stretch].
 
    Leg 1 (the gh-ocannl-540 failure shape, generalized): [relu w] read as the weight operand of a
    BATCHED matmul. Before gh-ocannl-544 the relu result's open batch row was resolved by the use
@@ -22,9 +22,7 @@ let batch = 8
 let din = 4
 let dout = 3
 let dims_of t = Lazy.force t.Tensor.value.Tn.dims
-
-let show_dims d =
-  "[" ^ String.concat ~sep:"x" (Array.to_list d |> List.map ~f:Int.to_string) ^ "]"
+let show_dims d = "[" ^ String.concat ~sep:"x" (Array.to_list d |> List.map ~f:Int.to_string) ^ "]"
 
 (* Find the unique tensor in [root]'s subgraph whose debug name contains [sub]. *)
 let find_by_name root sub =
@@ -50,8 +48,7 @@ let () =
   ignore (Train.forward_once (Context.auto ()) loss : Context.t);
   let h = find_by_name loss "relu" in
   let d = dims_of h in
-  Stdio.printf "close-down: relu(w) %s | batch-free=%b\n" (show_dims d)
-    (Array.length d = 2)
+  Stdio.printf "close-down: relu(w) %s | batch-free=%b\n" (show_dims d) (Array.length d = 2)
 
 let () =
   let x = batched_input "x2" in
@@ -70,11 +67,11 @@ let () =
   let ones = find_by_name total "stretch" in
   Stdio.printf "kernel: stretch(1.0) %s\n" (show_dims (dims_of ones))
 
-(* Dim-level close-down: the sum of two fixed scalars has one open axis variable; consumed
-   pointwise by a [din]-wide tensor, that axis used to widen to the use site's dim. Now an
-   unmarked, unconstrained axis is guessed minimal and broadcasts — the pre-544 [0.5 + 0.5]
-   result no longer silently inherits its consumer's width (e.g. a learning-rate expression
-   meeting a single parameter shape stays scalar). *)
+(* Dim-level close-down: the sum of two fixed scalars has one open axis variable; consumed pointwise
+   by a [din]-wide tensor, that axis used to widen to the use site's dim. Now an unmarked,
+   unconstrained axis is guessed minimal and broadcasts — the pre-544 [0.5 + 0.5] result no longer
+   silently inherits its consumer's width (e.g. a learning-rate expression meeting a single
+   parameter shape stays scalar). *)
 let () =
   let x4 = batched_input "x4" in
   let one = TDSL.O.( + ) (TDSL.number 0.5) (TDSL.number 0.5) in

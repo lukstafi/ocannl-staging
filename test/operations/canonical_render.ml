@@ -3,11 +3,10 @@
    replay). Those two are tested through their consumers (analysis_cache.ml, autotune_smoke.ml);
    this test pins the walk itself, which they now share.
 
-   Part 1 is a golden of the rendering of a construct-rich program, under a policy that names
-   tensor nodes by label (so the golden is stable — neither consumer's identity choice) and lets
-   the walk alpha-rename loop binders and local scopes. Any change to how a construct enters a
-   digest shows up here, and because there is exactly one walk it shows up for both consumers at
-   once.
+   Part 1 is a golden of the rendering of a construct-rich program, under a policy that names tensor
+   nodes by label (so the golden is stable — neither consumer's identity choice) and lets the walk
+   alpha-rename loop binders and local scopes. Any change to how a construct enters a digest shows
+   up here, and because there is exactly one walk it shows up for both consumers at once.
 
    Part 2 checks the policy seam: what the walk delegates (tensor-node identity, free symbols,
    binder shadowing, opaque constructs, [Tile_mma]) versus what it owns (loop-binder tokens and
@@ -95,11 +94,7 @@ let build_rich (table, ids, out, acc) =
                 idcs = [| Idx.Affine { symbols = [ (2, i); (1, j) ]; offset = 5 } |];
                 llsc =
                   LL.Local_scope
-                    {
-                      id = LL.get_scope acc;
-                      body = LL.Noop;
-                      orig_indices = [| Idx.Iterator i |];
-                    };
+                    { id = LL.get_scope acc; body = LL.Noop; orig_indices = [| Idx.Iterator i |] };
                 debug = "";
               } ) )
   in

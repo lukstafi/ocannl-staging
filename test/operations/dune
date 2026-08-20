@@ -1400,7 +1400,13 @@
 (executable
  (name digest_completeness)
  (modules digest_completeness)
- (libraries base arrayjit.utils arrayjit.ir stdio test_utils arrayjit.verdict))
+ (libraries
+  base
+  arrayjit.utils
+  arrayjit.ir
+  stdio
+  test_utils
+  arrayjit.verdict))
 
 ; Same globs as test_config_consistency above, for the same reason: the second scanner inherited
 ; the first one's list, so it inherited the blind spot too.
@@ -1704,6 +1710,7 @@
 
 ; Deliberately does not take the ocannl_training_test lock: overlap with another process-local
 ; OpenMP pool is useful whole-suite concurrency stress. Keep this action bounded instead.
+
 (test
  (name cpu_parallel)
  (package neural_nets_lib)
@@ -2215,6 +2222,7 @@
 ; Bound pruning against the measured incumbent (gh-ocannl-514 phase 4b). Run by a rule so the
 ; backend, the gate and the tiny envelope are pinned on the command line — the floor then
 ; dwarfs any measured time, pruning every sketch deterministically on any machine.
+
 (executable
  (name autotune_bound_pruning)
  (modules autotune_bound_pruning)
@@ -2245,6 +2253,7 @@
 ; End-to-end streaming memory-bandwidth calibration (gh-ocannl-578). Run by a rule so the
 ; calibration TSV's location is pinned on the command line; the backend stays the configured one —
 ; the pass is backend-generic and the printed facts are structural (timings never appear).
+
 (executable
  (name bandwidth_calibration)
  (modules bandwidth_calibration)
@@ -2273,6 +2282,7 @@
 
 ; The dual (floor) extraction over the same hand-checkable style of programs
 ; (Ir.Cost_model.completion_floor, gh-ocannl-514 phase 3).
+
 (test
  (name cost_model_floor)
  (package neural_nets_lib)
@@ -2286,6 +2296,7 @@
 
 ; Pure string/arithmetic test of the calibration schema and envelope fitter
 ; (Ir.Cost_model.Calibration, gh-ocannl-514 phase 0): no backend, no config sensitivity.
+
 (test
  (name envelope_fitting)
  (package neural_nets_lib)
@@ -2297,6 +2308,7 @@
 
 ; The matmul sketch family as a refinement tree (gh-ocannl-514 phase 1): golden of the seed
 ; enumeration under synthetic limits (pure in the lowering, so GPU legs need no GPU).
+
 (test
  (name sketch_family_tree)
  (package neural_nets_lib)
@@ -2616,7 +2628,9 @@
     (with-stdout-to
      hip_scratch_tune_survives.actual
      (run %{dep:hip_scratch_tune_survives.exe}))
-    (diff hip_scratch_tune_survives.expected hip_scratch_tune_survives.actual)))))
+    (diff
+     hip_scratch_tune_survives.expected
+     hip_scratch_tune_survives.actual)))))
 
 ; gh-ocannl-550, the accumulation half: candidate artifacts are released at the candidate boundary,
 ; so a search's live pools and contexts are bounded by the beam. GPU-free — the accumulation is
@@ -2751,7 +2765,6 @@
  (libraries base ocannl stdio pprint ll_test)
  (preprocess
   (pps ppx_here ppx_ocannl)))
-
 
 ; gh-ocannl-634: the commandline split the bin/ tools share. It links `bench_args` alone -- no
 ; backend, no configuration reader -- and drives the parser through its `?argv` parameter, so it

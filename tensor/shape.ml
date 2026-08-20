@@ -1362,20 +1362,20 @@ let infer_equal (sh1 : t) (sh2 : t) =
     :: Row.Row_eq { r1 = sh1.output; r2 = sh2.output; origin = get_origin `Output }
     :: !active_constraints
 
-(** The product-space proxy shape of an einsum-family operation (gh-512): the result's axes
-    followed by the reduced-over (contracted) axes, matching the product-space order of
-    [derive_projections] — result rows in [to_dims] order, then contracted axes by first
-    occurrence over the RHS slots (each walked batch, output, input; [beg_dims], row variable,
-    [dims]). Built by re-elaborating the einsum spec with fresh variables — the re-emitted operand
-    equalities tie them to the operation's own solution — and appending the contracted axes to the
-    result's input row (the last row in [to_dims] order). A [%cd] [*_pspace] intermediate's shape
-    is [infer_equal]-ed to this proxy; the identity projection over the product space is derived
-    from the projections by [Ir.Indexing.prod_project_for], which cross-checks the resulting
-    dimensions against the product space at lowering.
+(** The product-space proxy shape of an einsum-family operation (gh-512): the result's axes followed
+    by the reduced-over (contracted) axes, matching the product-space order of [derive_projections]
+    — result rows in [to_dims] order, then contracted axes by first occurrence over the RHS slots
+    (each walked batch, output, input; [beg_dims], row variable, [dims]). Built by re-elaborating
+    the einsum spec with fresh variables — the re-emitted operand equalities tie them to the
+    operation's own solution — and appending the contracted axes to the result's input row (the last
+    row in [to_dims] order). A [%cd] [*_pspace] intermediate's shape is [infer_equal]-ed to this
+    proxy; the identity projection over the product space is derived from the projections by
+    [Ir.Indexing.prod_project_for], which cross-checks the resulting dimensions against the product
+    space at lowering.
 
     Raises [Row.Shape_error] when the product space is not expressible as a shape: a non-einsum
-    operation, more than one reduced-over row variable, or a reduced-over row variable combined
-    with an open result input row. *)
+    operation, more than one reduced-over row variable, or a reduced-over row variable combined with
+    an open result input row. *)
 let product_space_shape (update_step : update_step) : t =
   let cur_sh = update_step.shape in
   let invalid msg error_shapes =
@@ -1397,8 +1397,8 @@ let product_space_shape (update_step : update_step) : t =
         | _ -> invalid ("invalid ternary einsum spec: " ^ spec) [ cur_sh; sh1; sh2; sh3 ])
     | _ ->
         invalid
-          "product-space intermediates (*_pspace) require an einsum-family operation (an einsum \
-           or permutation spec)"
+          "product-space intermediates (*_pspace) require an einsum-family operation (an einsum or \
+           permutation spec)"
           [ cur_sh ]
   in
   let error_shapes = cur_sh :: rhs_shapes in
@@ -1442,11 +1442,11 @@ let product_space_shape (update_step : update_step) : t =
       ignore (elaborate ~label:(Printf.sprintf "Product-space ARGUMENT %d" (idx + 1)) ls sh));
   ignore (elaborate ~label:"Product-space RESULT" ls_lhs cur_sh);
   active_constraints := !constraints @ !active_constraints;
-  (* The proxy's result rows: a SEPARATE, constraint-free elaboration (shared variable
-     environments, so named variables coincide with the constrained ones) in which fixed-index
-     axes are pinned to dimension 1 ([`Unit_dim]) — their projections are pinned, so they are
-     never product axes regardless of their extent. The constrained elaboration above must not
-     use [`Unit_dim]: it would pin the operation's actual fixed-index result axes. *)
+  (* The proxy's result rows: a SEPARATE, constraint-free elaboration (shared variable environments,
+     so named variables coincide with the constrained ones) in which fixed-index axes are pinned to
+     dimension 1 ([`Unit_dim]) — their projections are pinned, so they are never product axes
+     regardless of their extent. The constrained elaboration above must not use [`Unit_dim]: it
+     would pin the operation's actual fixed-index result axes. *)
   let _, _, (b_lhs, i_lhs, o_lhs) =
     einsum_slot_spec_to_dims_bio ~fixed_index:`Unit_dim ~original_spec:spec ~sh_id:cur_sh.id
       ~row_var_env ~dim_var_env ls_lhs
@@ -1460,9 +1460,9 @@ let product_space_shape (update_step : update_step) : t =
     let axis_items = function
       | Label l -> [ `Lbl l ]
       | Fixed_index _ -> []
-      | Affine_spec { over_label; conv; _ } -> (
+      | Affine_spec { over_label; conv; _ } ->
           `Lbl over_label
-          :: (match conv with Some { kernel_label; _ } -> [ `Lbl kernel_label ] | None -> []))
+          :: (match conv with Some { kernel_label; _ } -> [ `Lbl kernel_label ] | None -> [])
       | Concat_spec ls -> [ `Cnc ls ]
     in
     let row_items beg_specs bcast specs =
@@ -1503,8 +1503,7 @@ let product_space_shape (update_step : update_step) : t =
               if List.for_all ls ~f:is_known then []
               else if List.exists ls ~f:is_known then
                 cannot
-                  ("a concatenation axis is partially reduced over: "
-                  ^ String.concat ~sep:"^" ls)
+                  ("a concatenation axis is partially reduced over: " ^ String.concat ~sep:"^" ls)
               else (
                 seen_labels := List.fold ls ~init:!seen_labels ~f:Set.add;
                 [ `Dim (Row.Concat (List.map ls ~f:lookup_var)) ])
@@ -1528,14 +1527,14 @@ let product_space_shape (update_step : update_step) : t =
     with
     | None ->
         let extra = List.map contracted ~f:(function `Dim d -> d | `Rvar _ -> assert false) in
-        (* Appending to [dims] places the contracted axes after an open row variable's expansion,
-           so an open result input row needs no special case here. *)
+        (* Appending to [dims] places the contracted axes after an open row variable's expansion, so
+           an open result input row needs no special case here. *)
         ({ i_lhs with dims = i_lhs.dims @ extra }, o_lhs)
     | Some (idx, `Rvar v) -> (
         if
-          List.exists (List.drop contracted (idx + 1)) ~f:(function
-            | `Rvar _ -> true
-            | `Dim _ -> false)
+          List.exists
+            (List.drop contracted (idx + 1))
+            ~f:(function `Rvar _ -> true | `Dim _ -> false)
         then
           cannot "the operation reduces over more than one row variable (unknown-rank axis groups)"
         else
@@ -1918,9 +1917,7 @@ let set_terminal ~is_param (sh : t) =
 let set_resolve_at_use (sh : t) =
   let mark row =
     let row = Row.subst_row !state row in
-    (match row.bcast with
-    | Row.Row_var v -> Row.add_resolve_at_use v
-    | Row.Broadcastable -> ());
+    (match row.bcast with Row.Row_var v -> Row.add_resolve_at_use v | Row.Broadcastable -> ());
     List.iter (row.beg_dims @ row.dims) ~f:(fun d ->
         Set.iter (Row.vars_of_dim d) ~f:Row.add_resolve_at_use_dim)
   in

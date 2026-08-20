@@ -5,17 +5,17 @@
    had:
 
    - a schedule retyping loops to hardware axes was rejected by [validate_parallel]'s coverage rule,
-     because the straight-line init writes to the materialized constant were nested under no
-     annotated loop — a legality that depended on the operands' literal size, not on the schedule;
-   - a routine compiled in a fresh context after another routine had consumed the constant's fetch
-     raised [User_error "The linked context lacks node ..."], because only the first forward embeds
-     the init code.
+   because the straight-line init writes to the materialized constant were nested under no annotated
+   loop — a legality that depended on the operands' literal size, not on the schedule; - a routine
+   compiled in a fresh context after another routine had consumed the constant's fetch raised
+   [User_error "The linked context lacks node ..."], because only the first forward embeds the init
+   code.
 
-   Both parts rely on the constants being materialized rather than virtual: at 4x4 extents each
-   cell of [ma]/[mb] is read 4 times, which exceeds the default [virtualize_max_visits] = 1. The
-   executed legs compare against an OCaml-side reference with all-distinct operand values (every
-   cell's product mix is unique, so a dropped or misplaced init write cannot cancel out); all values
-   are small integers, exact in single precision, compared for exact equality. *)
+   Both parts rely on the constants being materialized rather than virtual: at 4x4 extents each cell
+   of [ma]/[mb] is read 4 times, which exceeds the default [virtualize_max_visits] = 1. The executed
+   legs compare against an OCaml-side reference with all-distinct operand values (every cell's
+   product mix is unique, so a dropped or misplaced init write cannot cancel out); all values are
+   small integers, exact in single precision, compared for exact equality. *)
 
 open Base
 open Ocannl
@@ -100,8 +100,7 @@ let () =
   let ctx2 = Context.run ctx2 routine2 in
   let values2 = Context.get_values ctx2 md.Tensor.value in
   let reference2 = Array.map mav ~f:(fun v -> v *. v) in
-  Verdict.pass_fail
-    "fresh context reads the consumed constant via its link-time host-init upload"
+  Verdict.pass_fail "fresh context reads the consumed constant via its link-time host-init upload"
     (Array.length values2 = Array.length reference2
     && Array.for_all2_exn values2 reference2 ~f:(fun a b -> Float.equal a b))
     ~detail:(fun () ->
@@ -110,19 +109,18 @@ let () =
   (* Part 3 (gh-633 review round 1, both P2s): a 1-element zero literal broadcast to a matmul
      operand lowers as whole-node [Zero_out] — a form [--ocannl_limit_constant_fill_size=0] cannot
      reach, since [constant_fill]'s 1-element arm never consults the limit — and
-     [Train.set_materialized] flips the node's intent from [Effectively_constant] to [On_device],
-     so eligibility must ride the persistent [host_constant] marker. Under the same
-     hardware-annotating schedule, the [Zero_out] used to be rejected outright by
-     [validate_parallel]'s multi-threaded-kernel rule.
+     [Train.set_materialized] flips the node's intent from [Effectively_constant] to [On_device], so
+     eligibility must ride the persistent [host_constant] marker. Under the same hardware-annotating
+     schedule, the [Zero_out] used to be rejected outright by [validate_parallel]'s
+     multi-threaded-kernel rule.
 
      A zero constant's CONTENT cannot discriminate by value — its expected cells equal the
-     allocator/init sentinel by design (review round 2) — so the mechanism is asserted
-     structurally: the optimized code handed to the schedule transform must carry no surviving
-     setter of [mz] ([Ll_test.count_set] counts [Zero_out] too). The executed leg keeps a fully
-     discriminating nonzero reference by ADDING the zero operand ([(ma + mz) * mb] = part 1's
-     reference), so a dropped [Zero_out] over a garbage-filled buffer still shows; the
-     value-bearing correctness of the upload machinery itself rides parts 1-2's nonzero
-     constants, which share it. *)
+     allocator/init sentinel by design (review round 2) — so the mechanism is asserted structurally:
+     the optimized code handed to the schedule transform must carry no surviving setter of [mz]
+     ([Ll_test.count_set] counts [Zero_out] too). The executed leg keeps a fully discriminating
+     nonzero reference by ADDING the zero operand ([(ma + mz) * mb] = part 1's reference), so a
+     dropped [Zero_out] over a garbage-filled buffer still shows; the value-bearing correctness of
+     the upload machinery itself rides parts 1-2's nonzero constants, which share it. *)
   let mz = TDSL.ndarray [| 0. |] ~label:[ "mz" ] ~input_dims:[ k ] ~output_dims:[ m ] () in
   Train.set_materialized mz.Tensor.value;
   let%op mc3 = (ma + mz) * mb in

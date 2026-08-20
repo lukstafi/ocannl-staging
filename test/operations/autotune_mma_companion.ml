@@ -58,9 +58,8 @@ let () =
      compared against the unscheduled twin rather than the schedule's shape being inspected. --- *)
   let limits = Context.hardware_limits (Context.auto ()) in
   let seeds_of opt =
-    List.filter
-      (Autotune.sketch_seed_params ~is_gpu ~is_cpu:false ~limits opt)
-      ~f:(fun p -> p.Autotune.sk_mma && p.Autotune.sk_gpu && not p.Autotune.sk_epilogue)
+    List.filter (Autotune.sketch_seed_params ~is_gpu ~is_cpu:false ~limits opt) ~f:(fun p ->
+        p.Autotune.sk_mma && p.Autotune.sk_gpu && not p.Autotune.sk_epilogue)
   in
   let n_seeds =
     let captured = ref [] in
@@ -75,7 +74,8 @@ let () =
   in
   (* Vacuous where the backend advertises no mma format tile for f32 — CUDA/HIP need the tf32 arm
      (config [tf32_matmuls]) for an f32 site, Metal's simdgroup matrices take f32 directly. Say so
-     on stderr so a vacuous pass is not mistaken for coverage; the golden stays backend-independent. *)
+     on stderr so a vacuous pass is not mistaken for coverage; the golden stays
+     backend-independent. *)
   if is_gpu && n_seeds = 0 then
     Stdio.eprintf "mc: no GPU tensorized seed for this site on %s — the checks below are vacuous\n"
       backend_name;

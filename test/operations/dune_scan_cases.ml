@@ -11,8 +11,8 @@ open Base
 open Stdio
 module Scan = Test_utils.Dune_stanza_scan
 
-(* Failures go through [Verdict], so that a regression exits nonzero instead of being
-   `dune promote`d into the golden as the expected output (gh-ocannl-601). *)
+(* Failures go through [Verdict], so that a regression exits nonzero instead of being `dune
+   promote`d into the golden as the expected output (gh-ocannl-601). *)
 let fail fmt = Printf.ksprintf Verdict.fail fmt
 
 let render (site : Scan.site) =
@@ -32,8 +32,8 @@ let cases =
     ( "a test with deps but not this one",
       {dune|(test (name t) (deps (env_var OCANNL_BACKEND) t.expected))|dune},
       [ "test t" ] );
-    (* The dep may sit anywhere in the field, including inside a group, and a directory reaching
-       for a config elsewhere still declares one. *)
+    (* The dep may sit anywhere in the field, including inside a group, and a directory reaching for
+       a config elsewhere still declares one. *)
     ( "the dep is found wherever in deps it sits",
       {dune|(test (name t) (deps (glob_files *.data) (env_var OCANNL_BACKEND) ocannl_config))|dune},
       [ "test t [declares]" ] );
@@ -56,9 +56,9 @@ let cases =
     ( "nor is an environment variable of that name",
       {dune|(test (name t) (deps (env_var ocannl_config)))|dune},
       [ "test t" ] );
-    (* A glob matches the source tree, and in a directory whose config arrives through
-       `(copy_files …)` the file is a generated target -- so the glob matches nothing and builds
-       nothing, while looking like a declaration (Codex P2, round 7). *)
+    (* A glob matches the source tree, and in a directory whose config arrives through `(copy_files
+       …)` the file is a generated target -- so the glob matches nothing and builds nothing, while
+       looking like a declaration (Codex P2, round 7). *)
     ( "a glob does not depend on the copied config",
       {dune|(test (name t) (deps (glob_files ocannl_config)))|dune},
       [ "test t" ] );
@@ -88,8 +88,8 @@ let cases =
  (action (run ./%{pp} --impl %{input} -o %{targets})))|dune},
       [ "rule running pp.exe" ] );
     (* A dependency form wrapping the path binds the executable just as surely; keeping only bare
-       atoms lost it, after which the binding looked empty and the command external (Codex P2,
-       round 6). *)
+       atoms lost it, after which the binding looked empty and the command external (Codex P2, round
+       6). *)
     ( "a named dep may wrap its path in a dependency form",
       {dune|(rule (deps ocannl_config (:runner (file probe.exe))) (action (run %{runner})))|dune},
       [ "rule running probe.exe [declares]" ] );
@@ -105,8 +105,8 @@ let cases =
       {dune|(rule (deps ../sibling/ocannl_config)
  (action (chdir ../sibling (run %{dep:probe.exe}))))|dune},
       [ "in ../sibling: rule running probe.exe [declares]" ] );
-    (* A `(test)` may carry a custom action, and a chdir in one moves the test's own process
-       (Codex P2, round 8). *)
+    (* A `(test)` may carry a custom action, and a chdir in one moves the test's own process (Codex
+       P2, round 8). *)
     ( "a test's own action can move where it runs",
       {dune|(test (name t) (deps ocannl_config) (action (chdir ../sibling (run %{test}))))|dune},
       [ "in ../sibling: test t [declares]" ] );
@@ -146,17 +146,15 @@ let cases =
     ( "an explicit relative program is a site without an extension",
       {dune|(rule (deps ocannl_config) (action (run ./probe)))|dune},
       [ "rule running probe [declares]" ] );
-    ( "a bare word is still a tool on PATH",
-      {dune|(rule (action (run diff a b)))|dune},
-      [] );
+    ("a bare word is still a tool on PATH", {dune|(rule (action (run diff a b)))|dune}, []);
     (* An absolute path names something the system provides -- no more ours than a bare word is
        (Codex P2, round 18). *)
     ( "an absolute path is a system tool",
       {dune|(rule (action (run /usr/bin/python3 --version)))|dune},
       [] );
-    (* A PATH tool handed something this repository builds may be launching it (`env probe.exe`)
-       or reading it (`diff old.exe new.exe`), and dune's grammar does not say which -- so neither
-       is guessed: the pair is reported, and the check settles it the way it settles every other
+    (* A PATH tool handed something this repository builds may be launching it (`env probe.exe`) or
+       reading it (`diff old.exe new.exe`), and dune's grammar does not say which -- so neither is
+       guessed: the pair is reported, and the check settles it the way it settles every other
        unreadable command (Codex P2, rounds 12 and 13). *)
     ( "a launcher's target is reported without guessing that it is one",
       {dune|(rule (deps ocannl_config) (action (run env %{dep:probe.exe} --flag)))|dune},
@@ -166,9 +164,8 @@ let cases =
       ] );
     ( "and so is a tool that is only reading them",
       {dune|(rule (action (run diff old.exe new.exe)))|dune},
-      [
-        "rule whose working directory this scan cannot establish: diff, handed old.exe, new.exe";
-      ] );
+      [ "rule whose working directory this scan cannot establish: diff, handed old.exe, new.exe" ]
+    );
     (* Fail closed on an argument the scan cannot resolve either: `./%{runner}` names whatever the
        binding does, and dropping it would hide a launched executable (Codex P2, round 14). *)
     ( "an unresolvable argument counts as much as a resolved one",
@@ -185,8 +182,8 @@ let cases =
         "rule whose working directory this scan cannot establish: %{dep:probe.exe}, under `(chdir \
          %{workspace_root} ...)` [declares]";
       ] );
-    (* But only for something that could read a configuration there: a PATH tool reads none
-       wherever it runs, so an unresolvable destination over one is not a finding (round 13). *)
+    (* But only for something that could read a configuration there: a PATH tool reads none wherever
+       it runs, so an unresolvable destination over one is not a finding (round 13). *)
     ( "a chdir to a pform over a PATH tool is not",
       {dune|(rule (action (chdir %{workspace_root} (run diff a b))))|dune},
       [] );
@@ -202,14 +199,14 @@ let cases =
       {dune|(rule (deps ocannl_config)
  (action (chdir %{workspace_root} (invent-an-action probe.exe))))|dune},
       [
-        "rule whose working directory this scan cannot establish: invent-an-action, under \
-         `(chdir %{workspace_root} ...)` [declares]";
+        "rule whose working directory this scan cannot establish: invent-an-action, under `(chdir \
+         %{workspace_root} ...)` [declares]";
       ] );
     ( "a rewritten PATH makes a bare command unplaceable",
       {dune|(rule (deps ocannl_config) (action (setenv PATH . (run env probe))))|dune},
       [
-        "rule whose working directory this scan cannot establish: env, under `(setenv PATH . \
-         ...)` [declares]";
+        "rule whose working directory this scan cannot establish: env, under `(setenv PATH . ...)` \
+         [declares]";
       ] );
     ( "but a path-qualified command still names what it names",
       {dune|(rule (deps ocannl_config) (action (setenv PATH . (run %{dep:probe.exe}))))|dune},
@@ -241,8 +238,7 @@ let cases =
     ( "a PATH tool handed something from the workspace is unplaceable",
       {dune|(rule (alias runtest) (deps helper.py) (action (run python3 %{dep:test_it.py})))|dune},
       [
-        "rule whose working directory this scan cannot establish: python3, handed \
-         %{dep:test_it.py}";
+        "rule whose working directory this scan cannot establish: python3, handed %{dep:test_it.py}";
       ] );
     (* An `(alias ...)` stanza took an action of its own before dune 2.0 and can still depend on an
        executable, so it is read like a rule rather than passed over (Codex P2, round 1). *)
@@ -274,16 +270,16 @@ let cases =
         "rule whose working directory this scan cannot establish: shell: if ready; then \
          ./probe.exe; fi";
       ] );
-    (* Command position, not "an .exe somewhere in the stanza": a rule that only moves an
-       executable around runs nothing. *)
+    (* Command position, not "an .exe somewhere in the stanza": a rule that only moves an executable
+       around runs nothing. *)
     ( "a rule that copies an executable does not run it",
       {dune|(rule (target probe.copy) (action (copy %{dep:probe.exe} %{target})))|dune},
       [] );
     ( "a command this scan cannot place is reported, not ignored",
       {dune|(rule (deps ocannl_config) (action (run %{dep:helper.sh})))|dune},
       [ "rule whose command this scan cannot read: %{dep:helper.sh} [declares]" ] );
-    (* dynamic-run executes a program too (Codex P2, round 3), and an action head on neither list
-       is reported rather than passed over -- which is what makes a fourth such action harmless. *)
+    (* dynamic-run executes a program too (Codex P2, round 3), and an action head on neither list is
+       reported rather than passed over -- which is what makes a fourth such action harmless. *)
     ( "dynamic-run executes a program as much as run does",
       {dune|(rule (deps ocannl_config) (action (dynamic-run %{dep:probe.exe} --flag)))|dune},
       [ "rule running probe.exe [declares]" ] );
@@ -352,8 +348,8 @@ let cases =
   ]
 
 (* Stanzas that rewrite the executable search path for a whole directory, which the check refuses
-   rather than modelling. Only the NAME position of an `env-vars` binding counts: setting some
-   other variable to the literal value `PATH` rewrites nothing (Codex P2, round 18). *)
+   rather than modelling. Only the NAME position of an `env-vars` binding counts: setting some other
+   variable to the literal value `PATH` rewrites nothing (Codex P2, round 18). *)
 let path_rewriting_cases =
   [
     ("an env stanza setting PATH", {dune|(env (_ (env-vars (PATH .))))|dune}, [ "env" ]);
@@ -362,8 +358,8 @@ let path_rewriting_cases =
   ]
 
 (* WHICH config file a stanza depends on, as written. The scan reports the paths; which of them is
-   the one the process will actually read is the check's decision, since only it knows where
-   configs exist -- OCANNL walks up from the process directory and reads the first it finds, so an
+   the one the process will actually read is the check's decision, since only it knows where configs
+   exist -- OCANNL walks up from the process directory and reads the first it finds, so an
    ancestor's answers only while no nearer directory has its own (Codex P2, rounds 9 to 11). *)
 let declared_paths_cases =
   [
@@ -396,13 +392,14 @@ let copy_cases =
        guessing narrow rejects a correctly configured one (Codex P2, round 12). *)
     ("a wildcard that covers it", {dune|(copy_files (files ../config/*))|dune}, [ "." ]);
     ("a wildcard that cannot", {dune|(copy_files (files ../config/*.expected))|dune}, []);
-    ("dune's set syntax is taken as possibly matching",
-     {dune|(copy_files (files ../config/{ocannl_config,other}))|dune}, [ "." ]);
+    ( "dune's set syntax is taken as possibly matching",
+      {dune|(copy_files (files ../config/{ocannl_config,other}))|dune},
+      [ "." ] );
     ("no copy_files at all", {dune|(test (name t) (deps ocannl_config))|dune}, []);
   ]
 
-(* Which stanza kinds the scan has no classification for. One it cannot place might carry an
-   action that runs a test executable, so it is reported rather than counted as nothing. *)
+(* Which stanza kinds the scan has no classification for. One it cannot place might carry an action
+   that runs a test executable, so it is reported rather than counted as nothing. *)
 let unclassified_cases =
   [
     ("a classified stanza", {dune|(test (name t) (deps ocannl_config))|dune}, []);
@@ -412,9 +409,7 @@ let unclassified_cases =
     ( "an include, whose contents the scan never sees",
       {dune|(include stanzas.inc)|dune},
       [ "include" ] );
-    ( "inside a subdir, too",
-      {dune|(subdir gen (cram (applies_to x)))|dune},
-      [ "cram" ] );
+    ("inside a subdir, too", {dune|(subdir gen (cram (applies_to x)))|dune}, [ "cram" ]);
     ("something that is not a stanza at all", {dune|bare_atom|dune}, [ "<not a stanza>" ]);
   ]
 
@@ -424,13 +419,14 @@ let unclassified_cases =
 let nested_marker_case =
   ( "a marker nested inside a stanza",
     {dune|(rule (deps ocannl_config)
- (action (progn (echo #|) (run %{dep:probe.exe}) (echo |#))))|dune} )
+ (action (progn (echo #|) (run %{dep:probe.exe}) (echo |#))))|dune}
+  )
 
 (* The two sequences sexplib reads as comments and dune does not. Reading such a file would drop
    whatever they enclose, so the scan refuses it -- but only when something was actually dropped,
-   which a second count of the top-level forms is what establishes. Inside a string or after a
-   `;`, sexplib does not treat them as comments either, and refusing there would take the whole
-   suite down over an unrelated argument (Codex P2, round 12). *)
+   which a second count of the top-level forms is what establishes. Inside a string or after a `;`,
+   sexplib does not treat them as comments either, and refusing there would take the whole suite
+   down over an unrelated argument (Codex P2, round 12). *)
 let refused_cases =
   [
     ("a block comment", {dune|#| (test (name hidden)) |#
@@ -453,10 +449,10 @@ let accepted_marker_cases =
 let () =
   let check name expected found =
     if List.equal String.equal found expected then printf "ok: %s\n" name
-    else (
+    else
       fail "%s -- expected [%s], found [%s]" name
         (String.concat ~sep:"; " expected)
-        (String.concat ~sep:"; " found))
+        (String.concat ~sep:"; " found)
   in
   List.iter cases ~f:(fun (name, source, expected) ->
       let found =
@@ -495,4 +491,4 @@ let () =
       | exception _ -> printf "ok: refused -- %s\n" name
       | sites ->
           fail "refused -- %s: read the file as %d sites instead of refusing it" name
-            (List.length sites));
+            (List.length sites))

@@ -28,8 +28,7 @@ let close t =
   end
 
 let checked_ic t what =
-  if t.closed then
-    failwith [%string "Safetensors.%{what} %{t.path}: the file has been closed"];
+  if t.closed then failwith [%string "Safetensors.%{what} %{t.path}: the file has been closed"];
   t.ic
 
 let dtype_size = function
@@ -213,8 +212,7 @@ let to_ndarray ?prec t name =
     failwith
       [%string
         "Safetensors.to_ndarray %{t.path}: tensor %{name} has %{nbytes#Int} bytes, but \
-         %{numel#Int} elements of %{dtype} need \
-         %{(numel * Ir.Ops.prec_in_bytes payload_prec)#Int}"];
+         %{numel#Int} elements of %{dtype} need %{(numel * Ir.Ops.prec_in_bytes payload_prec)#Int}"];
   let byte_offset = t.buffer_start + offset in
   let nd =
     if Ir.Ndarray.mappable_file_region ~prec:payload_prec ~byte_offset ~nbytes then begin
@@ -251,5 +249,5 @@ let to_float32 t name =
       (* Unreachable: "F32" is [Ops.single], and neither ingestion path changes the precision. *)
       failwith
         [%string
-          "Safetensors.to_float32 %{t.path}: tensor %{name} ingested as \
-           %{Ir.Ops.prec_string (Ir.Ndarray.get_prec nd)}"]
+          "Safetensors.to_float32 %{t.path}: tensor %{name} ingested as %{Ir.Ops.prec_string \
+           (Ir.Ndarray.get_prec nd)}"]

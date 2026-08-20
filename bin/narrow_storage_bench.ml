@@ -1,5 +1,5 @@
-(* 16-bit storage with f32 compute: does the halved memory traffic actually show up?
-   (gh-ocannl-517 task 3.)
+(* 16-bit storage with f32 compute: does the halved memory traffic actually show up? (gh-ocannl-517
+   task 3.)
 
    Three streaming kernels over large 1-D arrays, each run at f32, bf16 and half storage, in the
    default rendering and with the innermost loop explicitly retyped [Vectorized]. Narrow storage
@@ -8,42 +8,37 @@
    what distinguishes a real traffic win from a measurement artifact.
 
    The reported GB/s counts the bytes the kernel's own precision moves, so the number is directly
-   comparable to the machine's stream bandwidth; the "vs f32" column is the speedup that matters
-   for the issue's claim.
+   comparable to the machine's stream bandwidth; the "vs f32" column is the speedup that matters for
+   the issue's claim.
 
    Measured on an Apple-Silicon M-series (NEON, single stream, n = 2^22, 100 repeats), explicit
    [Vectorized] rendering, "vs f32" column ("half-nat" is fp16 storage computed in fp16,
    gh-ocannl-516):
 
-   {v
-     kernel      f32 GB/s   bf16    half    half-nat
-     add           127.3    0.91x   1.51x   2.05x
-     mul_add       127.5    0.89x   1.48x   1.98x
-     polynomial     87.3    0.63x   0.76x   1.99x
-   v}
+   {v kernel f32 GB/s bf16 half half-nat add 127.3 0.91x 1.51x 2.05x mul_add 127.5 0.89x 1.48x 1.98x
+   polynomial 87.3 0.63x 0.76x 1.99x v}
 
    Three findings:
 
    - The traffic win is real where the kernel is actually bandwidth-bound. "add" at f32 runs at the
-     machine's stream ceiling and half storage collects most of the theoretical 2x. The
-     compute-bound control stays below 1x with f32 compute, as it must -- there is no traffic to
-     save there, only conversions to pay for.
+   machine's stream ceiling and half storage collects most of the theoretical 2x. The compute-bound
+   control stays below 1x with f32 compute, as it must -- there is no traffic to save there, only
+   conversions to pay for.
 
    - It is *fp16*, not bf16, that collects the win, the reverse of gh-ocannl-517's expectation.
-     bf16's conversion is cheap in instruction count but not free: widening is a zero-extend plus a
-     shift and narrowing is four vector ops (the round-to-nearest-even of [single_to_bfloat16]),
-     which at 130 GB/s costs more than halving the bytes saves. The route to making bf16
-     competitive is a hardware convert ([BFCVT] on ARMv8.6-A, AVX512-BF16 on x86) rather than
-     portable bit arithmetic -- with the caveat that it would have to be shown to agree with
-     [single_to_bfloat16] bitwise, NaN payloads included, or it breaks the parity the vectorized
-     rendering owes its serial twin.
+   bf16's conversion is cheap in instruction count but not free: widening is a zero-extend plus a
+   shift and narrowing is four vector ops (the round-to-nearest-even of [single_to_bfloat16]), which
+   at 130 GB/s costs more than halving the bytes saves. The route to making bf16 competitive is a
+   hardware convert ([BFCVT] on ARMv8.6-A, AVX512-BF16 on x86) rather than portable bit arithmetic
+   -- with the caveat that it would have to be shown to agree with [single_to_bfloat16] bitwise, NaN
+   payloads included, or it breaks the parity the vectorized rendering owes its serial twin.
 
    - Native fp16 arithmetic (gh-ocannl-516) is what makes the compute-bound case work at all: the
-     polynomial goes from 0.76x to 1.99x, because the lane count doubles instead of the loads being
-     widened back to f32. It also removes the conversions from the streaming kernels, taking them
-     from 1.5x to ~2x. Reaching it needed the arch-flag fix in the same change: Apple clang accepts
-     [-march=native] on arm64 and downgrades the target with it, so the probe saw a machine without
-     16-bit arithmetic.
+   polynomial goes from 0.76x to 1.99x, because the lane count doubles instead of the loads being
+   widened back to f32. It also removes the conversions from the streaming kernels, taking them from
+   1.5x to ~2x. Reaching it needed the arch-flag fix in the same change: Apple clang accepts
+   [-march=native] on arm64 and downgrades the target with it, so the probe saw a machine without
+   16-bit arithmetic.
 
    Usage: dune exec bin/narrow_storage_bench.exe -- [n] [repeats] [threads] (defaults 4194304, 50,
    1).
@@ -130,8 +125,7 @@ let () =
     let ctx =
       Stdlib.Array.fold_left
         (fun ctx () -> Context.run ctx routine)
-        ctx
-        (Stdlib.Array.make repeats ())
+        ctx (Stdlib.Array.make repeats ())
     in
     (* An explicitly configured accelerator enqueues asynchronously, so the timed region has to be
        fenced: without this it would report enqueue time, and the readback below -- which fences on
@@ -152,9 +146,9 @@ let () =
       ("add", (fun a b -> [%op a + b]), 2);
       (* Still streaming, twice the arithmetic per byte. *)
       ("mul_add", (fun a b -> [%op (a *. b) + a]), 2);
-      (* Compute-bound control: the intermediates are virtual, so the byte traffic is unchanged
-         from "add" while the FLOPs per byte are ~15x. Narrow storage should NOT speed this up
-         much -- if it does, the "add" number is measuring something other than traffic. *)
+      (* Compute-bound control: the intermediates are virtual, so the byte traffic is unchanged from
+         "add" while the FLOPs per byte are ~15x. Narrow storage should NOT speed this up much -- if
+         it does, the "add" number is measuring something other than traffic. *)
       ( "polynomial",
         (fun a b ->
           let%op t = ((a *. b) + a) *. ((a *. b) + b) *. ((a + b) *. a) in

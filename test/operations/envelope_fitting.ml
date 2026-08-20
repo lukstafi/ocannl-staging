@@ -27,35 +27,32 @@ let row ~backend ~digest ?(routine = "") ~label ~measured_ms ~model_ms ~kernels 
 let () =
   let rows =
     [
-      (* Bandwidth-bound copy: zero flops, so it must not constrain the compute leg. Recorded
-         before any envelope constants were set: empty model column. Measured time is floored at
-         the 6th decimal on serialization (never rounded up), so the sub-ns tail vanishes. *)
+      (* Bandwidth-bound copy: zero flops, so it must not constrain the compute leg. Recorded before
+         any envelope constants were set: empty model column. Measured time is floored at the 6th
+         decimal on serialization (never rounded up), so the sub-ns tail vanishes. *)
       row ~backend:"cc" ~digest:"aaaaaaaa/11111111" ~routine:"stream_copy" ~label:"copy_preset"
         ~measured_ms:2.0000004999 ~model_ms:None ~kernels:1 ~flops:0 ~bytes:16_000_000 ();
-      (* Compute-bound matmul whose recorded bound exceeds its measured time: a violation row —
-         the envelope in force at recording time understated the machine. *)
+      (* Compute-bound matmul whose recorded bound exceeds its measured time: a violation row — the
+         envelope in force at recording time understated the machine. *)
       row ~backend:"cc" ~digest:"bbbbbbbb/22222222" ~routine:"matmul_fwd" ~label:"matmul bs=64"
-        ~measured_ms:4.0 ~model_ms:(Some 5.0) ~kernels:1 ~flops:2_000_000_000
-        ~bytes:3_000_000 ();
-      (* Approx-flops row (guards-taken over-counting): its fake 100x compute throughput must
-         not drive the compute leg, and its recorded model > measured exceedance must not count
-         as a bound violation (possible over-count, not an understated envelope). Exactness is
-         per leg: the exact bytes count still feeds the memory leg — with the highest achieved
-         bandwidth here, this row must become the memory-leg binding row. *)
+        ~measured_ms:4.0 ~model_ms:(Some 5.0) ~kernels:1 ~flops:2_000_000_000 ~bytes:3_000_000 ();
+      (* Approx-flops row (guards-taken over-counting): its fake 100x compute throughput must not
+         drive the compute leg, and its recorded model > measured exceedance must not count as a
+         bound violation (possible over-count, not an understated envelope). Exactness is per leg:
+         the exact bytes count still feeds the memory leg — with the highest achieved bandwidth
+         here, this row must become the memory-leg binding row. *)
       row ~backend:"cc" ~digest:"eeeeeeee/55555555" ~routine:"conv_fwd" ~label:"masked fringe"
-        ~measured_ms:1.0 ~model_ms:(Some 2.5) ~kernels:1 ~flops:50_000_000_000
-        ~bytes:9_000_000 ~flops_approx:true ();
+        ~measured_ms:1.0 ~model_ms:(Some 2.5) ~kernels:1 ~flops:50_000_000_000 ~bytes:9_000_000
+        ~flops_approx:true ();
       (* Opaque row: excluded from the fit (its counts may under-estimate), still counted. *)
       row ~backend:"cc" ~digest:"cccccccc/33333333" ~routine:"staged_gemm" ~label:"staged"
-        ~measured_ms:1.0 ~model_ms:None ~kernels:1 ~flops:1_000_000 ~bytes:1_000_000
-        ~opaque:true ();
-      (* Second backend, multi-kernel aggregate row: fits are grouped per backend. With both
-         legs binding on this single row, each leg's necessary maximum alone equals the measured
-         time, so the aggregate sufficient condition (flops/pf + bytes/pb <= t) forces fission
-         slack 2 — the recomputed per-kernel-summed bound then respects the row. *)
+        ~measured_ms:1.0 ~model_ms:None ~kernels:1 ~flops:1_000_000 ~bytes:1_000_000 ~opaque:true ();
+      (* Second backend, multi-kernel aggregate row: fits are grouped per backend. With both legs
+         binding on this single row, each leg's necessary maximum alone equals the measured time, so
+         the aggregate sufficient condition (flops/pf + bytes/pb <= t) forces fission slack 2 — the
+         recomputed per-kernel-summed bound then respects the row. *)
       row ~backend:"toy" ~digest:"dddddddd/44444444" ~routine:"mlp_step" ~label:"fissioned fused"
-        ~measured_ms:10.0 ~model_ms:(Some 9.0) ~kernels:3 ~flops:5_000_000 ~bytes:400_000_000
-        ();
+        ~measured_ms:10.0 ~model_ms:(Some 9.0) ~kernels:3 ~flops:5_000_000 ~bytes:400_000_000 ();
     ]
   in
   let lines = List.map rows ~f:Cal.to_line in
@@ -77,10 +74,9 @@ let () =
   in
   List.iter bad ~f:(fun l ->
       Verdict.p (Printf.sprintf "malformed %S rejected" l) (Option.is_none (Cal.of_line l)));
-  (* A row from before the routine column (gh-ocannl-635) keeps fitting: it carries every
-     exactness flag a leg needs, so a file accumulated across builds does not lose its history —
-     such a row only stops naming its computation, and its witness falls back to the bare
-     candidate label. *)
+  (* A row from before the routine column (gh-ocannl-635) keeps fitting: it carries every exactness
+     flag a leg needs, so a file accumulated across builds does not lose its history — such a row
+     only stops naming its computation, and its witness falls back to the bare candidate label. *)
   let legacy =
     Cal.of_line
       "cc\tffffffff/66666666\tlegacy_preset\t3.000000\t\t1\t0\t12000000\tfalse\tfalse\tfalse"
@@ -107,7 +103,6 @@ let () =
   List.iter (Cal.fit for_fit) ~f:(fun f ->
       Stdio.printf "%s" (Cal.report f);
       Stdio.printf
-        "(timed %d, opaque %d, approx-flops %d, approx-bytes %d, multi-kernel %d, violations \
-         %d)\n\n"
+        "(timed %d, opaque %d, approx-flops %d, approx-bytes %d, multi-kernel %d, violations %d)\n\n"
         f.Cal.fit_rows f.Cal.fit_opaque f.Cal.fit_flops_approx f.Cal.fit_bytes_approx
         f.Cal.fit_multi_kernel f.Cal.fit_violations)

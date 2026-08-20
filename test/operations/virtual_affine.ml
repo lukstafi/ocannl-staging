@@ -38,8 +38,7 @@ let case_structural_match () =
   let prod = loop_n oh 3 (loop_n wh 2 (set tgt [| aff [ (2, oh); (1, wh) ] 0 |] (tag oh wh))) in
   let cons =
     loop_n a 3
-      (loop_n b 2
-         (set out [| aff [ (2, a); (1, b) ] 0 |] (get tgt [| aff [ (2, a); (1, b) ] 0 |])))
+      (loop_n b 2 (set out [| aff [ (2, a); (1, b) ] 0 |] (get tgt [| aff [ (2, a); (1, b) ] 0 |])))
   in
   let llc = seq prod cons in
   let o = optimize llc in
@@ -100,7 +99,9 @@ let case_triangular () =
     seq (zero tgt)
       (loop_n s1 3 (loop_n s2 2 (set tgt [| iter s1; aff [ (1, s1); (1, s2) ] 0 |] (tag s1 s2))))
   in
-  let cons = loop_n a 3 (loop_n b 4 (set out [| iter a; iter b |] (get tgt [| iter a; iter b |]))) in
+  let cons =
+    loop_n a 3 (loop_n b 4 (set out [| iter a; iter b |] (get tgt [| iter a; iter b |])))
+  in
   let llc = seq prod cons in
   let o = optimize llc in
   p "triangular producer virtual" (known_virtual o tgt);
@@ -122,8 +123,7 @@ let case_triangular () =
   let seed = [ (out, blank 12) ] and read = [ out ] in
   let virt = execute ~name:"va_triangular" o ~seed ~read in
   let mat = execute ~name:"va_triangular_mat" (optimize ~materialized:[ tgt ] llc) ~seed ~read in
-  p "triangular: executed values are the scattered band over the zero-init"
-    (same virt [ expected ]);
+  p "triangular: executed values are the scattered band over the zero-init" (same virt [ expected ]);
   p "triangular: virtual and materialized arms agree" (same virt mat)
 
 (* === Case 4: non-injective i+j (both ranges > 1) stays non-virtual === *)
@@ -134,23 +134,22 @@ let case_noninjective () =
   let prod = loop_n i 3 (loop_n j 3 (set tgt [| aff [ (1, i); (1, j) ] 0 |] (c 1.))) in
   let cons =
     loop_n a 3
-      (loop_n b 3
-         (set out [| aff [ (1, a); (1, b) ] 0 |] (get tgt [| aff [ (1, a); (1, b) ] 0 |])))
+      (loop_n b 3 (set out [| aff [ (1, a); (1, b) ] 0 |] (get tgt [| aff [ (1, a); (1, b) ] 0 |])))
   in
   let o = optimize (seq prod cons) in
   (* i+j with both ranges > 1 is not injective: the dropped producer loops fold over a fiber, so the
      producer must stay materialized (the reason is the injectivity soundness line). *)
   p "non-injective producer stays non-virtual" (known_non_virtual o tgt);
   p "non-injective producer array read preserved" (count_get o tgt >= 1);
-  (* Staying materialized is already the safe reading, so this case has no second arm - the
-     executed leg pins that the fiber the producer folds over reaches the consumer through a
-     buffer. The producer value stays constant here, unlike the guarded cases: nothing selects an
-     iteration, so a per-iteration value would only pin which write of the fiber lands last, which
-     is the loop order rather than the property under test. Only [out] is read back: [tgt] is
-     non-virtual but unobservable, so the pipeline places it [Local] (routine-scoped scratch with
-     no context buffer). The second fact pins that reading it back raises (gh-ocannl-599) rather
-     than answering with whatever a host write left behind — which is how this case reported an
-     array of sentinels when its executed leg was first written. *)
+  (* Staying materialized is already the safe reading, so this case has no second arm - the executed
+     leg pins that the fiber the producer folds over reaches the consumer through a buffer. The
+     producer value stays constant here, unlike the guarded cases: nothing selects an iteration, so
+     a per-iteration value would only pin which write of the fiber lands last, which is the loop
+     order rather than the property under test. Only [out] is read back: [tgt] is non-virtual but
+     unobservable, so the pipeline places it [Local] (routine-scoped scratch with no context
+     buffer). The second fact pins that reading it back raises (gh-ocannl-599) rather than answering
+     with whatever a host write left behind — which is how this case reported an array of sentinels
+     when its executed leg was first written. *)
   let ctx = run ~name:"va_noninjective" o ~seed:[ (out, blank 5) ] in
   p "non-injective: the scattered value reached the consumer through the buffer"
     (close (Context.get_values ctx out) (Array.create ~len:5 1.));
@@ -174,8 +173,7 @@ let case_stage_a_diagonal () =
   let seed = [ (out, blank 9) ] and read = [ out ] in
   let virt = execute ~name:"va_stage_a" o ~seed ~read in
   let mat = execute ~name:"va_stage_a_mat" (optimize ~materialized:[ d ] llc) ~seed ~read in
-  p "stage-a diagonal: executed values are the diagonal over the zero-init"
-    (same virt [ expected ]);
+  p "stage-a diagonal: executed values are the diagonal over the zero-init" (same virt [ expected ]);
   p "stage-a diagonal: virtual and materialized arms agree" (same virt mat)
 
 let () =

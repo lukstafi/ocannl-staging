@@ -10,14 +10,14 @@
    ([Train.tune_placements]: placement A/B — the default virtual-plus-promotion graph and the
    materialize-all graph are both tuned and the measured winner kept).
 
-   BENCH_PRECISION=bf16|f16 (gh-ocannl-492 task 4) trains under the mixed-precision recipe:
-   fixture weights stay f32 masters with reduced-precision cast twins feeding the graph
+   BENCH_PRECISION=bf16|f16 (gh-ocannl-492 task 4) trains under the mixed-precision recipe: fixture
+   weights stay f32 masters with reduced-precision cast twins feeding the graph
    (Mixed_prec.with_master_weights), activations and gradients storage-assigned to the reduced
-   precision over the logits subtree (Precision_policy.apply — the softmax-CE loss head stays
-   f32), and — f16 only — dynamic loss scaling: the step becomes a gradient routine plus an
-   optimizer routine gated on the host-read gradient checksum, so the reported step times include
-   the per-step device sync that the inf/nan gate costs. Composing BENCH_PRECISION with BENCH_NO_SGD
-   is not supported.
+   precision over the logits subtree (Precision_policy.apply — the softmax-CE loss head stays f32),
+   and — f16 only — dynamic loss scaling: the step becomes a gradient routine plus an optimizer
+   routine gated on the host-read gradient checksum, so the reported step times include the per-step
+   device sync that the inf/nan gate costs. Composing BENCH_PRECISION with BENCH_NO_SGD is not
+   supported.
 
    BENCH_PRECISION composes with BENCH_TUNE (gh-ocannl-529): under a reduced precision it is the
    operand storage precision that decides whether a tensorized candidate is seeded at all, and on
@@ -25,9 +25,9 @@
    the dynamic-loss-scaling legs only the gradient (or fused) routine is tuned; the step shape is
    what those legs measure, so the small optimizer routine keeps its plain compile.
 
-   The gh-ocannl-492 task-5 gate-cost experiment legs (f16 only): BENCH_STATIC_SCALE=1 uses a
-   fixed loss scale with no gate and no host read (the discriminating experiment — if f16's
-   penalty collapses toward bf16's under it, the dynamic gate is confirmed as the GPU-side cost);
+   The gh-ocannl-492 task-5 gate-cost experiment legs (f16 only): BENCH_STATIC_SCALE=1 uses a fixed
+   loss scale with no gate and no host read (the discriminating experiment — if f16's penalty
+   collapses toward bf16's under it, the dynamic gate is confirmed as the GPU-side cost);
    BENCH_GATE_INTERVAL=N uses the fused on-device gate (Mixed_prec.gated_scaled_update) with the
    host sampling the sticky window checksum every N steps. The reported "precision" field becomes
    f16-static / f16-gatedN respectively. Since gh-ocannl-551 the flag parsing and the step shapes
@@ -101,8 +101,8 @@ let () =
         Mixed_prec.with_master_weights ~placement ~prec make_params
     | None -> make_params ()
   in
-  (* Under the mixed-precision recipe the postprocess hook has replaced each parameter with its
-     cast twin, so these ARE the twin nodes. BENCH_PRESEED_TWINS=1 hands them to
+  (* Under the mixed-precision recipe the postprocess hook has replaced each parameter with its cast
+     twin, so these ARE the twin nodes. BENCH_PRESEED_TWINS=1 hands them to
      [Context.decide_materialized] before tuning (gh-ocannl-558's other route to site-targeted
      materialization): a context-level decision, unlike BENCH_TWIN_PLACEMENT=materialized, which
      declares tnode-level intent and so is invisible to the placement A/B and to the gh-555 flip
@@ -110,8 +110,7 @@ let () =
   let twin_tns =
     match mp_prec with
     | None -> []
-    | Some _ ->
-        List.concat_map params ~f:(fun (w, b) -> [ w.Tensor.value; b.Tensor.value ])
+    | Some _ -> List.concat_map params ~f:(fun (w, b) -> [ w.Tensor.value; b.Tensor.value ])
   in
   let materialize =
     match Stdlib.Sys.getenv_opt "BENCH_MATERIALIZE" with Some "1" -> true | _ -> false
@@ -132,9 +131,9 @@ let () =
   (* Storage-precision policy: activations and gradients of the MLP body (the logits subtree) go
      reduced; the softmax-CE loss head and its gradients are PINNED at f32 via [except] — the
      "softmax and losses stay f32" AMP default. Merely not assigning the head is not enough:
-     bottom-up precision inference would promote it to the reduced precision from the logits
-     operand (e.g. the stable-softmax max_logits, whose -inf init the f16 constant guard rejects).
-     Masters and twins already carry Specified precisions and are untouched. *)
+     bottom-up precision inference would promote it to the reduced precision from the logits operand
+     (e.g. the stable-softmax max_logits, whose -inf init the f16 constant guard rejects). Masters
+     and twins already carry Specified precisions and are untouched. *)
   Option.iter mp_prec ~f:(fun prec ->
       let body = Hash_set.create (module Int) in
       let rec walk t =
@@ -155,11 +154,9 @@ let () =
     failwith "bench_mlp: BENCH_NO_SGD with BENCH_PRECISION is not supported";
   (* The step shape is the leg's business (Bench_harness.train_step_parts): the f16 default is a
      gradient routine plus an optimizer routine gated on the host-read gradient checksum (dynamic
-     loss scaling), the other legs are a single fused routine. Note: grad_update consumes the
-     loss's forward code, so exactly one shape may be built. *)
-  let parts =
-    H.train_step_parts ~setup_for_parallel:debug ~no_sgd ~leg ~learning_rate batch_loss
-  in
+     loss scaling), the other legs are a single fused routine. Note: grad_update consumes the loss's
+     forward code, so exactly one shape may be built. *)
+  let parts = H.train_step_parts ~setup_for_parallel:debug ~no_sgd ~leg ~learning_rate batch_loss in
   let ctx = Context.auto () in
   let backend = Context.backend_name ctx in
   let ctx = Train.init_params ctx bindings batch_loss in
@@ -175,34 +172,32 @@ let () =
      into [arms] — [tune_json]'s attribution rule names arms by arrival order. Printed under a
      distinct tag instead, which is all the flip chain needs to be readable (gh-ocannl-558). *)
   let print_report tag (r : Autotune.report) =
-    if verbose_report then (
-          let declines =
-            String.concat ~sep:","
-              (List.map r.declines ~f:(fun d ->
-                   Sexp.to_string (Ir.Schedule_outcome.sexp_of_rejection_key d.key)
-                   ^ "=" ^ Int.to_string d.count))
-          in
-          let terminal =
-            Option.value_map r.terminal_failure ~default:"none" ~f:(fun failure ->
-                Sexp.to_string (Ir.Schedule_outcome.sexp_of_phase failure.phase)
-                ^ Option.value_map failure.candidate ~default:"" ~f:(fun candidate ->
-                      ":" ^ candidate))
-          in
-          Stdlib.Printf.eprintf
-            "%s: cache_hit=%b partial=%b timed=%d failed=%d declines=[%s] terminal=%s \
-             rounds=%d sketch=%d mma_candidates=%d mma_timed=%d model_pruned=%d bound_pruned=%d \
-             fissioned=%b baseline_ms=%.4f \
-             default_ms=%s best_ms=%.4f best=%s tensorized=%b mma_statements=%d \
-             mma_scalar_fallbacks=%d mma_best_ms=%s\n\
-             %!"
-            tag r.cache_hit r.partial r.candidates_timed r.candidates_failed declines terminal
-            r.rounds_run r.sketch_candidates r.mma_candidates r.mma_timed r.model_pruned
-            r.bound_pruned r.fissioned r.baseline_ms
-            (Option.value_map r.default_ms ~default:"none" ~f:(Printf.sprintf "%.4f"))
-            r.best_ms
-            (if String.is_empty r.best_label then "none" else r.best_label)
-            r.best_tensorized r.best_mma_statements r.best_mma_scalar_fallbacks
-            (if Float.is_inf r.mma_best_ms then "none" else Printf.sprintf "%.4f" r.mma_best_ms))
+    if verbose_report then
+      let declines =
+        String.concat ~sep:","
+          (List.map r.declines ~f:(fun d ->
+               Sexp.to_string (Ir.Schedule_outcome.sexp_of_rejection_key d.key)
+               ^ "=" ^ Int.to_string d.count))
+      in
+      let terminal =
+        Option.value_map r.terminal_failure ~default:"none" ~f:(fun failure ->
+            Sexp.to_string (Ir.Schedule_outcome.sexp_of_phase failure.phase)
+            ^ Option.value_map failure.candidate ~default:"" ~f:(fun candidate -> ":" ^ candidate))
+      in
+      Stdlib.Printf.eprintf
+        "%s: cache_hit=%b partial=%b timed=%d failed=%d declines=[%s] terminal=%s rounds=%d \
+         sketch=%d mma_candidates=%d mma_timed=%d model_pruned=%d bound_pruned=%d fissioned=%b \
+         baseline_ms=%.4f default_ms=%s best_ms=%.4f best=%s tensorized=%b mma_statements=%d \
+         mma_scalar_fallbacks=%d mma_best_ms=%s\n\
+         %!"
+        tag r.cache_hit r.partial r.candidates_timed r.candidates_failed declines terminal
+        r.rounds_run r.sketch_candidates r.mma_candidates r.mma_timed r.model_pruned r.bound_pruned
+        r.fissioned r.baseline_ms
+        (Option.value_map r.default_ms ~default:"none" ~f:(Printf.sprintf "%.4f"))
+        r.best_ms
+        (if String.is_empty r.best_label then "none" else r.best_label)
+        r.best_tensorized r.best_mma_statements r.best_mma_scalar_fallbacks
+        (if Float.is_inf r.mma_best_ms then "none" else Printf.sprintf "%.4f" r.mma_best_ms)
   in
   let report =
     Some
@@ -241,7 +236,8 @@ let () =
                   | `Materialize -> "materialize")
                   (Ir.Tnode.debug_name fc.Ir.Low_level.fc_tn)
                   fc.Ir.Low_level.fc_tn.Ir.Tnode.uid
-                  (Ir.Ops.prec_string (Stdlib.Lazy.force fc.Ir.Low_level.fc_tn.Ir.Tnode.storage_prec))
+                  (Ir.Ops.prec_string
+                     (Stdlib.Lazy.force fc.Ir.Low_level.fc_tn.Ir.Tnode.storage_prec))
                   fc.Ir.Low_level.fc_recompute_cost);
             o)
           ctx comp bindings
@@ -253,13 +249,12 @@ let () =
   let preseed_twins = H.env_flag "BENCH_PRESEED_TWINS" in
   if preseed_twins && List.is_empty twin_tns then
     failwith "bench_mlp: BENCH_PRESEED_TWINS needs BENCH_PRECISION (no twins without it)";
-  (* The two flags do not compose, and neither failure mode is visible in the result line, so
-     refuse rather than measure something other than what was asked for. With
-     BENCH_TWIN_PLACEMENT=virtual the twins carry declared [Virtual] intent, which
-     [Context.decide_materialized] skips by contract — the pre-seed would be a silent no-op and the
-     "control" would be the default arm again. With =materialized the intent already pins the twins
-     in BOTH arms, so the run is no longer the context-level-decision-only experiment the pre-seed
-     exists to be. *)
+  (* The two flags do not compose, and neither failure mode is visible in the result line, so refuse
+     rather than measure something other than what was asked for. With BENCH_TWIN_PLACEMENT=virtual
+     the twins carry declared [Virtual] intent, which [Context.decide_materialized] skips by
+     contract — the pre-seed would be a silent no-op and the "control" would be the default arm
+     again. With =materialized the intent already pins the twins in BOTH arms, so the run is no
+     longer the context-level-decision-only experiment the pre-seed exists to be. *)
   if preseed_twins && Option.is_some (Stdlib.Sys.getenv_opt "BENCH_TWIN_PLACEMENT") then
     failwith
       "bench_mlp: BENCH_PRESEED_TWINS conflicts with BENCH_TWIN_PLACEMENT. The pre-seed is a \
@@ -273,8 +268,7 @@ let () =
     let scratch = Train.init_params (Context.auto ()) bindings batch_loss in
     let scratch = if preseed_twins then Context.decide_materialized scratch twin_tns else scratch in
     Train.tune_placements ?report ?flip_report ~on_ship:(H.collect_ship arms) ~rounds:0
-      ~timing_ctx:scratch ctx batch_loss comp
-      bindings
+      ~timing_ctx:scratch ctx batch_loss comp bindings
   in
   let ctx, routines = H.compile_train_step ~tune ~tuned ctx bindings parts in
   let compile_s = Unix.gettimeofday () -. t0 in

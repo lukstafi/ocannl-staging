@@ -64,9 +64,7 @@ let reduce_transform ~n ~body_of (s : Tn.t) (opt : LL.optimized) : LL.optimized 
   let i = Idx.get_symbol () in
   {
     opt with
-    llc =
-      LL.For_loop
-        { index = i; from_ = 0; to_ = n - 1; body = body_of i; axis = Vectorized };
+    llc = LL.For_loop { index = i; from_ = 0; to_ = n - 1; body = body_of i; axis = Vectorized };
   }
 
 let run ~name ~transform t =

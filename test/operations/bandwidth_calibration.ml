@@ -1,10 +1,10 @@
-(* End-to-end streaming memory-bandwidth calibration (gh-ocannl-578): [Ocannl.Calibrate.stream]
-   over tiny tensors, on the configured backend. The pass's whole point is producing calibration
-   rows with EXACT byte counts — the fitter's per-leg exactness rule bars approximate rows from
-   the memory leg, which is why matmul-family tuning data alone leaves
-   [model_peak_memory_bandwidth] unfittable. Timings are machine-dependent, so only structural
-   facts are printed: rows were appended through the ordinary tuning emission path, bytes-exact
-   rows are among them, and the fit over just these rows yields a memory-leg constant.
+(* End-to-end streaming memory-bandwidth calibration (gh-ocannl-578): [Ocannl.Calibrate.stream] over
+   tiny tensors, on the configured backend. The pass's whole point is producing calibration rows
+   with EXACT byte counts — the fitter's per-leg exactness rule bars approximate rows from the
+   memory leg, which is why matmul-family tuning data alone leaves [model_peak_memory_bandwidth]
+   unfittable. Timings are machine-dependent, so only structural facts are printed: rows were
+   appended through the ordinary tuning emission path, bytes-exact rows are among them, and the fit
+   over just these rows yields a memory-leg constant.
 
    The calibration file is pinned by the companion dune rule
    (--ocannl_autotune_calibration_file=bandwidth_calibration.tsv) and truncated here at start, so
@@ -30,11 +30,11 @@ let () =
     else []
   in
   Verdict.p "rows appended" (not (List.is_empty rows));
-  (* Every row names the computation it timed (gh-ocannl-635) — the writer-side half of the
-     schema, which only an end-to-end tuning run exercises: the name comes from the comp's block
-     comment through [Autotune.tune]'s compiles. Without it the fitted memory-leg floor cannot say
-     which stream kernel demonstrated it, and per-kernel rates have to be reconstructed outside
-     the rows. *)
+  (* Every row names the computation it timed (gh-ocannl-635) — the writer-side half of the schema,
+     which only an end-to-end tuning run exercises: the name comes from the comp's block comment
+     through [Autotune.tune]'s compiles. Without it the fitted memory-leg floor cannot say which
+     stream kernel demonstrated it, and per-kernel rates have to be reconstructed outside the
+     rows. *)
   let kernels = List.map reports ~f:fst in
   Verdict.p "every row names its routine"
     (List.for_all rows ~f:(fun r -> List.mem kernels r.Cal.routine ~equal:String.equal));

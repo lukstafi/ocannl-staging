@@ -42,9 +42,9 @@ let case_independent () =
   p "independent siblings setters dropped" (count_set o a = 0 && count_set o b = 0);
   p "independent siblings inlined at use sites (no array reads survive)"
     (count_get o a = 0 && count_get o b = 0);
-  (* Sharing symbol [i] alone must not make either sibling complex. Phrased as the claim that
-     holds, so that a regression prints [false] rather than turning a designed negative into an
-     undesigned one (gh-ocannl-601). *)
+  (* Sharing symbol [i] alone must not make either sibling complex. Phrased as the claim that holds,
+     so that a regression prints [false] rather than turning a designed negative into an undesigned
+     one (gh-ocannl-601). *)
   p "no is_complex from sharing alone" (not (is_complex o a || is_complex o b));
   let seed = [ (oa, blank 3); (ob, blank 3) ] and read = [ oa; ob ] in
   let virt = execute ~name:"vsl_independent" o ~seed ~read in
@@ -116,8 +116,7 @@ let case_chain () =
   let seed = [ (out, blank 3) ] and read = [ out ] in
   let virt = execute ~name:"vsl_chain" o ~seed ~read in
   let mat = execute ~name:"vsl_chain_mat" (optimize ~materialized:[ a; b ] llc) ~seed ~read in
-  p "forward chain: the doubly-inlined value is (2 + i + 1) * 2"
-    (same virt [ [| 6.; 8.; 10. |] ]);
+  p "forward chain: the doubly-inlined value is (2 + i + 1) * 2" (same virt [ [| 6.; 8.; 10. |] ]);
   p "forward chain: virtual and materialized arms agree" (same virt mat)
 
 (* === Case 5: loop-carried / read-before-write sibling read stays materialized === [a] is written
@@ -139,8 +138,8 @@ let case_reverse () =
   p "loop-carried provider kept materialized" (known_non_virtual o a);
   p "loop-carried provider read NOT rewritten (array read preserved)" (count_get o a >= 1);
   (* The values make the safety mechanism observable: each [b.(i)] must come from the INCOMING
-     [a.(i+1)], never from the [2.] the same loop stores one iteration later (which would give
-     [3.] throughout). *)
+     [a.(i+1)], never from the [2.] the same loop stores one iteration later (which would give [3.]
+     throughout). *)
   let seed = [ (a, [| 10.; 20.; 30.; 40. |]); (b, blank 3) ] and read = [ b; a ] in
   let got = execute ~name:"vsl_reverse" o ~seed ~read in
   p "loop-carried: reads saw the incoming values, writes landed"
@@ -191,8 +190,8 @@ let case_inloop_consumer () =
   p "in-loop consumer: both inlined providers reached the sum" (same virt [ [| 5.; 7.; 9. |] ]);
   p "in-loop consumer: virtual and materialized arms agree" (same virt mat)
 
-(* === Case 9: a write under a dead loop ([to_ < from_]) never executes === The retired tracer
-   never enumerated dead loops; the structural facts pass and the metric views must likewise record
+(* === Case 9: a write under a dead loop ([to_ < from_]) never executes === The retired tracer never
+   enumerated dead loops; the structural facts pass and the metric views must likewise record
    nothing from them: the node stays read-only (a routine input, not a spurious output). *)
 let case_dead_loop () =
   let d = mk "dead" and out = mk "dlo" in
@@ -203,8 +202,7 @@ let case_dead_loop () =
   let o = optimize (seq dead_write consume) in
   p "dead loop: node stays read-only" (read_only o d);
   let (inputs, outputs), _merge = LL.input_and_output_nodes o in
-  p "dead loop: node is a routine input, not an output"
-    (Set.mem inputs d && not (Set.mem outputs d));
+  p "dead loop: node is a routine input, not an output" (Set.mem inputs d && not (Set.mem outputs d));
   (* Had the dead loop run, the consumer would have copied [7.] instead of the seeded values. *)
   let got =
     execute ~name:"vsl_dead_loop" o

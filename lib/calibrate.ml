@@ -4,9 +4,9 @@
     per-leg exactness rule and can constrain the envelope's memory leg
     ([model_peak_memory_bandwidth]). Matmul-family tuning data cannot: its rows are compute-bound
     (their bytes-over-time understates achievable bandwidth no matter how exactly counted) and
-    typically carry guards-taken/union upper bounds, so the fit of the memory leg needs exactly
-    this kind of calibration diversity — see [tools/calibrate_bandwidth.ml] for the command-line
-    entry point and [Ir.Cost_model.Calibration] for the fit semantics. *)
+    typically carry guards-taken/union upper bounds, so the fit of the memory leg needs exactly this
+    kind of calibration diversity — see [tools/calibrate_bandwidth.ml] for the command-line entry
+    point and [Ir.Cost_model.Calibration] for the fit semantics. *)
 
 open Base
 module Asgns = Ir.Assignments
@@ -17,19 +17,18 @@ let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
 (** [stream ?elems ?repeats ctx] times the four STREAM kernels — copy [c =: a], scale
-    [b =: 0.5 *. a], add [c =: a + b], triad [a =: b + 0.5 *. c] — over 1-D single-precision
-    tensors of [elems] cells each (default [2^26], 256 MiB per tensor: well past any last-level
-    cache, so the measured rates are main-memory rates). Each kernel goes through
-    {!Autotune.tune} with seed candidates only ([~rounds:0]) and the schedule cache disabled, so
-    every timed candidate appends a calibration row through the ordinary emission path; the
-    search is forced on ([~search:true]) — timing is the point of a calibration pass, whatever
-    profile the config picked. Choose [elems] a power of two: an extent every workgroup size
-    divides evenly keeps the parallelized candidates free of range guards, hence their rows
-    bytes-exact.
+    [b =: 0.5 *. a], add [c =: a + b], triad [a =: b + 0.5 *. c] — over 1-D single-precision tensors
+    of [elems] cells each (default [2^26], 256 MiB per tensor: well past any last-level cache, so
+    the measured rates are main-memory rates). Each kernel goes through {!Autotune.tune} with seed
+    candidates only ([~rounds:0]) and the schedule cache disabled, so every timed candidate appends
+    a calibration row through the ordinary emission path; the search is forced on ([~search:true]) —
+    timing is the point of a calibration pass, whatever profile the config picked. Choose [elems] a
+    power of two: an extent every workgroup size divides evenly keeps the parallelized candidates
+    free of range guards, hence their rows bytes-exact.
 
-    Returns the kernels' tuning reports in order, [(name, report)]. Raises {!Utils.User_error}
-    when config [autotune_calibration_file] is not set — the pass would time kernels with
-    nowhere to record them. *)
+    Returns the kernels' tuning reports in order, [(name, report)]. Raises {!Utils.User_error} when
+    config [autotune_calibration_file] is not set — the pass would time kernels with nowhere to
+    record them. *)
 let stream ?(elems = 1 lsl 26) ?repeats ctx =
   let file =
     String.strip (Utils.get_global_arg ~arg_name:"autotune_calibration_file" ~default:"")
@@ -84,5 +83,4 @@ let stream ?(elems = 1 lsl 26) ?repeats ctx =
           | None ->
               (* [tune] reports exactly once per call on every path that does any work. *)
               raise
-                (Utils.User_error
-                   (Printf.sprintf "Calibrate.stream: no tuning report for %s" name))))
+                (Utils.User_error (Printf.sprintf "Calibrate.stream: no tuning report for %s" name))))

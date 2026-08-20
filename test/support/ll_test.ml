@@ -30,8 +30,8 @@
       placed [Local], routine-scoped scratch, and host access to it raises (gh-ocannl-599).
 
     This library links [ocannl], which is why it lives beside {!Test_utils} rather than inside it:
-    [test_utils] deliberately depends on [arrayjit.ir] alone, for tests that link no more than
-    that. *)
+    [test_utils] deliberately depends on [arrayjit.ir] alone, for tests that link no more than that.
+*)
 
 open Base
 module LL = Ir.Low_level
@@ -99,8 +99,8 @@ let mul a b = binop Ops.Mul a b
 
 (** {1 Discriminating producer values}
 
-    A producer that writes a constant makes an executed leg blind to WHICH iteration supplied a
-    cell — and that is precisely what the guards under test decide. These three write values that
+    A producer that writes a constant makes an executed leg blind to WHICH iteration supplied a cell
+    — and that is precisely what the guards under test decide. These three write values that
     identify the iteration and stay clear of the zero-init. *)
 
 (** [tick s] is [1 + s]: identifies a one-symbol producer's iteration, and the [1 +] keeps even the
@@ -217,15 +217,16 @@ let optimize ?(materialized = []) ~name llc : LL.optimized =
 
 (** Post-optimization placement probes. Decisions live on the [optimize_ctx]'s placements
     (context-scoped memory modes), not on the tnode, which holds only declared intent. *)
-let known_virtual (o : LL.optimized) tn = Tn.Placements.known_virtual o.LL.optimize_ctx.placements tn
+let known_virtual (o : LL.optimized) tn =
+  Tn.Placements.known_virtual o.LL.optimize_ctx.placements tn
 
 let known_non_virtual (o : LL.optimized) tn =
   Tn.Placements.known_non_virtual o.LL.optimize_ctx.placements tn
 
 (** {1 The executed leg} *)
 
-(* One root context per executable: [Context.compile] forks the lineage for each compile, so
-   sibling executions do not observe each other's decisions. *)
+(* One root context per executable: [Context.compile] forks the lineage for each compile, so sibling
+   executions do not observe each other's decisions. *)
 let base_ctx = lazy (Context.auto ())
 
 (** [link ~name o] compiles the optimized record AS WRITTEN through the [?prelowered] seam,
@@ -293,8 +294,8 @@ let same ?tol got expected = List.for_all2_exn got expected ~f:(close ?tol)
 
 (** Asserts a named boolean claim, printing [name: b]. Booleans keep [.expected] files
     backend-stable; {!Verdict.p} is what keeps a [false] from being [dune promote]d into the golden
-    as the expected output, so every claim has to be phrased so that [true] is the passing reading
-    — a fact whose desired value is [false] gets renamed, not recorded (gh-ocannl-601). *)
+    as the expected output, so every claim has to be phrased so that [true] is the passing reading —
+    a fact whose desired value is [false] gets renamed, not recorded (gh-ocannl-601). *)
 let p = Verdict.p
 
 (** {1 Structural probes}
@@ -363,8 +364,8 @@ let walk ?(on_set = ignore1) ?(on_get = ignore1) ?(on_binop = ignore1) ?(on_tern
   walk_t ~on_set ~on_get ~on_binop ~on_ternop ~on_scope llc
 
 (** [walk_scalar] over a scalar expression, likewise. *)
-let walk_scalar ?(on_set = ignore1) ?(on_get = ignore1) ?(on_binop = ignore1)
-    ?(on_ternop = ignore1) ?(on_scope = ignore1) s =
+let walk_scalar ?(on_set = ignore1) ?(on_get = ignore1) ?(on_binop = ignore1) ?(on_ternop = ignore1)
+    ?(on_scope = ignore1) s =
   walk_s ~on_set ~on_get ~on_binop ~on_ternop ~on_scope s
 
 let count f =

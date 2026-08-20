@@ -11,11 +11,11 @@
    Asserted, backend-independently: arm A's winner ships (the returned routine computes the right
    values), it is cached (a second, injection-free tune replays that same schedule from the disk
    cache instead of re-searching), and the failed arm is reported honestly — its partial report
-   arrives in position carrying the terminal failure, rather than being silently downgraded to
-   "arm B lost".
+   arrives in position carrying the terminal failure, rather than being silently downgraded to "arm
+   B lost".
 
-   gh-ocannl-564 extends the suite one level down, to what a timing run does BEFORE it dispatches:
-   a failure of [Context.run]'s pre-dispatch validation writes nothing, so it must be a decline the
+   gh-ocannl-564 extends the suite one level down, to what a timing run does BEFORE it dispatches: a
+   failure of [Context.run]'s pre-dispatch validation writes nothing, so it must be a decline the
    search survives — not the fatal it was when it arrived tagged [Launch] with no backend able to
    attribute it. *)
 
@@ -59,7 +59,7 @@ let with_injected_failure ?exn ?(after_arm_timed = 0) ~arms_reported ~at ~messag
              (Option.value exn
                 ~default:(Failure (Printf.sprintf "%s at candidate %s" message label)))));
   Exn.protect ~f ~finally:(fun () ->
-      Autotune.on_candidate_attempt := (fun _ -> ());
+      (Autotune.on_candidate_attempt := fun _ -> ());
       Autotune.on_candidate_preflight := fun _ -> ())
 
 (* gh-ocannl-564: the same discipline at the pre-dispatch validation seam. [at] counts preflights
@@ -153,10 +153,11 @@ let () =
   let got_2 = Context.get_values ctx_2 t2.Tensor.value in
   p "the cached winner replays to the right values" (Array.for_all2_exn got_2 expected ~f:approx);
 
-  (* --- Run 3: arm B dies at its FIRST attempt — its base compile, before a search exists. [?report]
-     is positional, so consumers name arms by arrival order; the failed arm must still occupy its
-     slot rather than let the surviving arm's report be attributed to it. The report is the tuner's
-     own (it reports on every path), so it carries a structured phase rather than a guess. --- *)
+  (* --- Run 3: arm B dies at its FIRST attempt — its base compile, before a search exists.
+     [?report] is positional, so consumers name arms by arrival order; the failed arm must still
+     occupy its slot rather than let the surviving arm's report be attributed to it. The report is
+     the tuner's own (it reports on every path), so it carries a structured phase rather than a
+     guess. --- *)
   let arms_reported = ref 0 in
   let reports = ref [] in
   let report r =
@@ -208,8 +209,8 @@ let () =
              if !attempts = 2 then assert false);
         try
           let _ =
-            Train.tune_placements ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir
-              (Context.auto ()) t2 comp Ir.Indexing.Empty
+            Train.tune_placements ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir (Context.auto ()) t2
+              comp Ir.Indexing.Empty
           in
           false
         with Assert_failure _ -> true)
@@ -326,9 +327,7 @@ let () =
   let ctx_r1, r1 = Context.compile ctx_r comp Ir.Indexing.Empty in
   let _ctx_r2, r2 = Context.compile ctx_r1 comp Ir.Indexing.Empty in
   let preflight_rejected =
-    match Context.check_runnable ctx_r1 r2 with
-    | () -> false
-    | exception Failure _ -> true
+    match Context.check_runnable ctx_r1 r2 with () -> false | exception Failure _ -> true
   in
   p "pre-dispatch validation rejects an unexecuted dependency" preflight_rejected;
   p "a pre-dispatch rejection leaves the lineage usable"
@@ -448,10 +447,13 @@ let () =
      its way to the end and reports a COMPLETED search that shipped an untuned fallback out of a
      dead lineage. *)
   p "the arm it happened in reports a terminal failure, not a completed search"
-    (Option.value_map (List.hd (List.rev !reports_z)) ~default:false ~f:(fun r ->
+    (Option.value_map
+       (List.hd (List.rev !reports_z))
+       ~default:false
+       ~f:(fun r ->
          r.Autotune.partial
          && Option.value_map r.Autotune.terminal_failure ~default:false ~f:(fun tf ->
-                String.is_substring tf.Autotune.detail ~substring:"poisoned")));
+             String.is_substring tf.Autotune.detail ~substring:"poisoned")));
 
   (* --- The genuine whole-search form, injection-free: a lineage holding an unexecuted compile of
      the same computation gives every routine the tuner compiles an unsatisfied dependency, failing

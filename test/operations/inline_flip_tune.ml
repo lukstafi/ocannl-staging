@@ -1,11 +1,11 @@
 (* gh-555: smoke test for the greedy inlining-flip refinement of [Train.tune_placements].
 
    A matmul-plus-relu routine has a policy-virtual intermediate (the matmul result inlines into the
-   pointwise consumer), so the default-policy arm's compile reports at least one [`Materialize]
-   flip candidate. With [~inline_flips:2] the driver runs the placement A/B, captures the decision
+   pointwise consumer), so the default-policy arm's compile reports at least one [`Materialize] flip
+   candidate. With [~inline_flips:2] the driver runs the placement A/B, captures the decision
    surface, and searches the top flips. The public [?report] keeps its positional contract (exactly
-   the two placement arms, in order); the refinement probes are observed through [?flip_report].
-   The shipped routine must compute the same values as a plain compile.
+   the two placement arms, in order); the refinement probes are observed through [?flip_report]. The
+   shipped routine must compute the same values as a plain compile.
 
    Printed facts are booleans so the expected output stays backend-stable. *)
 
@@ -42,6 +42,5 @@ let () =
   let ctx_t = Context.run ctx_t routine_t in
   let got = Context.get_values ctx_t t2.Tensor.value in
   p "tuned routine values match the plain compile" (Array.for_all2_exn got expected ~f:approx);
-  p "the public report callback keeps the positional A/B contract"
-    (List.length !arm_reports = 2);
+  p "the public report callback keeps the positional A/B contract" (List.length !arm_reports = 2);
   p "flip refinement searched at least one flip" (List.length !flip_reports >= 1)

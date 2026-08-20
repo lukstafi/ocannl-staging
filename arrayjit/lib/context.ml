@@ -167,85 +167,85 @@ let compile_outcome ?name ?lowered_transform ?lowered_transforms ?prelowered ~pr
   match backend_outcome with
   | Error failure -> Error failure
   | Ok (task, lowered_bindings, name, backend_inputs, backend_outputs) ->
-  (* Allocate unique ID from shared ledger *)
-  let id = ctx.ledger.next_id in
-  ctx.ledger.next_id <- id + 1;
+      (* Allocate unique ID from shared ledger *)
+      let id = ctx.ledger.next_id in
+      ctx.ledger.next_id <- id + 1;
 
-  (* Use the backend routine's precise access sets for dependency tracking. [backend_inputs] =
-     materialized read-only and read-before-write nodes. [backend_outputs] = all materialized
-     written-to nodes. *)
-  let frontier = ctx.frontier in
-  let empty_int_set = Set.empty (module Int) in
+      (* Use the backend routine's precise access sets for dependency tracking. [backend_inputs] =
+         materialized read-only and read-before-write nodes. [backend_outputs] = all materialized
+         written-to nodes. *)
+      let frontier = ctx.frontier in
+      let empty_int_set = Set.empty (module Int) in
 
-  (* RAW: for each backend input, depend on its last writer *)
-  let deps =
-    Set.fold backend_inputs ~init:empty_int_set ~f:(fun deps tn ->
-        match Map.find frontier.last_writer tn with
-        | Some writer_id -> Set.add deps writer_id
-        | None -> deps)
-  in
+      (* RAW: for each backend input, depend on its last writer *)
+      let deps =
+        Set.fold backend_inputs ~init:empty_int_set ~f:(fun deps tn ->
+            match Map.find frontier.last_writer tn with
+            | Some writer_id -> Set.add deps writer_id
+            | None -> deps)
+      in
 
-  (* WAW + WAR: for each backend output, depend on last writer and all last readers *)
-  let deps =
-    Set.fold backend_outputs ~init:deps ~f:(fun deps tn ->
-        let deps =
-          match Map.find frontier.last_writer tn with
-          | Some writer_id -> Set.add deps writer_id
-          | None -> deps
-        in
-        match Map.find frontier.last_readers tn with
-        | Some readers -> Set.union deps readers
-        | None -> deps)
-  in
+      (* WAW + WAR: for each backend output, depend on last writer and all last readers *)
+      let deps =
+        Set.fold backend_outputs ~init:deps ~f:(fun deps tn ->
+            let deps =
+              match Map.find frontier.last_writer tn with
+              | Some writer_id -> Set.add deps writer_id
+              | None -> deps
+            in
+            match Map.find frontier.last_readers tn with
+            | Some readers -> Set.union deps readers
+            | None -> deps)
+      in
 
-  (* Build updated frontier (immutable — only in returned context) *)
-  let new_last_writer =
-    Set.fold backend_outputs ~init:frontier.last_writer ~f:(fun lw tn ->
-        Map.set lw ~key:tn ~data:id)
-  in
-  let new_last_readers =
-    Set.fold backend_outputs ~init:frontier.last_readers ~f:(fun lr tn -> Map.remove lr tn)
-  in
-  let pure_inputs = Set.diff backend_inputs backend_outputs in
-  let new_last_readers =
-    Set.fold pure_inputs ~init:new_last_readers ~f:(fun lr tn ->
-        let existing = Option.value (Map.find lr tn) ~default:empty_int_set in
-        Map.set lr ~key:tn ~data:(Set.add existing id))
-  in
-  let new_frontier = { last_writer = new_last_writer; last_readers = new_last_readers } in
+      (* Build updated frontier (immutable — only in returned context) *)
+      let new_last_writer =
+        Set.fold backend_outputs ~init:frontier.last_writer ~f:(fun lw tn ->
+            Map.set lw ~key:tn ~data:id)
+      in
+      let new_last_readers =
+        Set.fold backend_outputs ~init:frontier.last_readers ~f:(fun lr tn -> Map.remove lr tn)
+      in
+      let pure_inputs = Set.diff backend_inputs backend_outputs in
+      let new_last_readers =
+        Set.fold pure_inputs ~init:new_last_readers ~f:(fun lr tn ->
+            let existing = Option.value (Map.find lr tn) ~default:empty_int_set in
+            Map.set lr ~key:tn ~data:(Set.add existing id))
+      in
+      let new_frontier = { last_writer = new_last_writer; last_readers = new_last_readers } in
 
-  (* Register in shared ledger *)
-  Hashtbl.set ctx.ledger.routine_names ~key:id ~data:name;
+      (* Register in shared ledger *)
+      Hashtbl.set ctx.ledger.routine_names ~key:id ~data:name;
 
-  (* Required inputs for the initialization check below: the backend routine's materialized
-     read-only / read-before-write nodes, resolved against this compile's placements (the
-     context-scoped memory-modes split removed the pre-lowering [context_nodes] settlement). Nodes
-     with registered host initialization data (ndarray-backed literals, loaded tensors)
-     self-initialize at link time from [Host_inits] (gh-ocannl-333), so they are excluded. *)
-  let inputs =
-    Set.filter (Set.diff backend_inputs comp.Asgns.embedded_nodes) ~f:(fun tn ->
-        not (Ir.Host_inits.mem tn))
-  in
+      (* Required inputs for the initialization check below: the backend routine's materialized
+         read-only / read-before-write nodes, resolved against this compile's placements (the
+         context-scoped memory-modes split removed the pre-lowering [context_nodes] settlement).
+         Nodes with registered host initialization data (ndarray-backed literals, loaded tensors)
+         self-initialize at link time from [Host_inits] (gh-ocannl-333), so they are excluded. *)
+      let inputs =
+        Set.filter (Set.diff backend_inputs comp.Asgns.embedded_nodes) ~f:(fun tn ->
+            not (Ir.Host_inits.mem tn))
+      in
 
-  (* Outputs are all nodes written by the computation *)
-  let outputs = backend_outputs in
+      (* Outputs are all nodes written by the computation *)
+      let outputs = backend_outputs in
 
-  let updated_ctx = { ctx with wrapped; frontier = new_frontier } in
+      let updated_ctx = { ctx with wrapped; frontier = new_frontier } in
 
-  let routine =
-    {
-      context = updated_ctx;
-      task;
-      bindings = lowered_bindings;
-      name;
-      inputs;
-      outputs;
-      routine_id = id;
-      execution_deps = deps;
-    }
-  in
+      let routine =
+        {
+          context = updated_ctx;
+          task;
+          bindings = lowered_bindings;
+          name;
+          inputs;
+          outputs;
+          routine_id = id;
+          execution_deps = deps;
+        }
+      in
 
-  Ok (updated_ctx, routine)
+      Ok (updated_ctx, routine)
 
 let compile ?name ?lowered_transform ?lowered_transforms ?prelowered ctx comp bindings =
   match
@@ -298,15 +298,15 @@ let poison_lineage ctx ~routine_name exn =
 
 (* The LINEAGE-WIDE half of [check_runnable]: a poisoned lineage, an uninitialized input, an
    unexecuted dependency. Each is a property of the context and of the computation, identical for
-   every candidate a search compiles from it, so a genuine one fails every candidate of every arm
-   at once — which is why it must reach the caller rather than being absorbed as a per-candidate
+   every candidate a search compiles from it, so a genuine one fails every candidate of every arm at
+   once — which is why it must reach the caller rather than being absorbed as a per-candidate
    decline (gh-ocannl-569). Contained, a search whose serial baseline is not dispatched (every GPU
-   search, gh-ocannl-532) declines every candidate for this one reason, times nothing, and ships
-   the untuned default out of an unusable lineage under a COMPLETED report — the caller never
-   learns about the one-line fix. That is the reasoning the poisoned-lineage check was already
-   raised outside the [Preflight] region for; these two belong beside it. On the C backends the
-   dispatched serial baseline hit this first and took the arm down with it, which is why the
-   divergence was CPU-invisible until HIP ran the suite. *)
+   search, gh-ocannl-532) declines every candidate for this one reason, times nothing, and ships the
+   untuned default out of an unusable lineage under a COMPLETED report — the caller never learns
+   about the one-line fix. That is the reasoning the poisoned-lineage check was already raised
+   outside the [Preflight] region for; these two belong beside it. On the C backends the dispatched
+   serial baseline hit this first and took the arm down with it, which is why the divergence was
+   CPU-invisible until HIP ran the suite. *)
 let check_lineage_runnable ctx routine =
   check_not_poisoned ctx;
   (* Check that all required inputs are initialized. A node counts as initialized if it was produced
@@ -332,24 +332,24 @@ let check_lineage_runnable ctx routine =
 
   (* Check execution dependencies *)
   let missing_deps = Set.diff routine.execution_deps ctx.ledger.executed in
-  (if not (Set.is_empty missing_deps) then
-     let dep_names =
-       Set.to_list missing_deps
-       |> List.filter_map ~f:(fun dep_id ->
-           Option.map (Hashtbl.find ctx.ledger.routine_names dep_id) ~f:(fun n ->
-               Printf.sprintf "%s (id=%d)" n dep_id))
-       |> String.concat ~sep:", "
-     in
-     failwith
-       (Printf.sprintf "Context.run: routine %s (id=%d) has unexecuted dependencies: %s"
-          routine.name routine.routine_id dep_names))
+  if not (Set.is_empty missing_deps) then
+    let dep_names =
+      Set.to_list missing_deps
+      |> List.filter_map ~f:(fun dep_id ->
+          Option.map (Hashtbl.find ctx.ledger.routine_names dep_id) ~f:(fun n ->
+              Printf.sprintf "%s (id=%d)" n dep_id))
+      |> String.concat ~sep:", "
+    in
+    failwith
+      (Printf.sprintf "Context.run: routine %s (id=%d) has unexecuted dependencies: %s" routine.name
+         routine.routine_id dep_names)
 
 (* The PER-CANDIDATE half: bind-time validation of launch parameters
    (docs/proposals/signed-index-precision.md) — each bound value must be non-negative, within its
-   declared static range, and within the index width. Unlike the lineage checks above this reads
-   the bindings the caller just wrote for THIS routine, and candidates differ in their static
-   ranges, so one candidate can fail it while its siblings time cleanly. That makes it the half a
-   search should contain as a decline (gh-ocannl-564). *)
+   declared static range, and within the index width. Unlike the lineage checks above this reads the
+   bindings the caller just wrote for THIS routine, and candidates differ in their static ranges, so
+   one candidate can fail it while its siblings time cleanly. That makes it the half a search should
+   contain as a decline (gh-ocannl-564). *)
 let check_launch_bindings routine =
   Idx.validate_lowered_bindings ~width64:Utils.settings.large_models routine.bindings
 
@@ -433,9 +433,9 @@ let placements ctx =
    computes into its local storage, and [to_host] then hands back exactly the bytes that were
    uploaded -- plausible numbers no kernel wrote. Both directions therefore refuse.
 
-   The check reads the effective placement, so it fires only where a decision (or a declared
-   [Local] intent) exists: a node no routine of this lineage has mentioned is undecided and keeps
-   the ordinary behavior, including the "not present in context" refusal. *)
+   The check reads the effective placement, so it fires only where a decision (or a declared [Local]
+   intent) exists: a node no routine of this lineage has mentioned is undecided and keeps the
+   ordinary behavior, including the "not present in context" refusal. *)
 let local_placement ctx (tn : Tn.t) : int option =
   match Tn.Placements.get (placements ctx) tn with Some (Tn.Local, prov) -> Some prov | _ -> None
 
@@ -527,10 +527,12 @@ let to_host ctx (tn : Tn.t) : Nd.t =
          put there, and its host-init data predates every run -- neither is what the routines
          computed. The one honest read is a for-print proxy: a separate, materialized node
          recomputing the value. *)
-      match from_proxy () with Some nd -> nd | None -> refuse_local ~fn:"to_host" ctx tn prov)
-  | None ->
+      match from_proxy () with
+      | Some nd -> nd
+      | None -> refuse_local ~fn:"to_host" ctx tn prov)
+  | None -> (
       if transfer tn then nd
-      else (
+      else
         match Ir.Host_inits.find tn with
         | Some init ->
             (* An ndarray-backed literal that is not part of any computation in this context (so it
@@ -741,10 +743,10 @@ let release ctx =
     }
 
 (* gh-560: the analyze-only entry points — lowering and optimization without backend codegen or
-   linking. [Backends.lower_assignments] forks the lineage state itself, so the result is read off
-   a hermetic sibling: the argument context, its ledger and frontier are unaffected. With the
-   analysis cache (gh-560), a context that already compiled this routine (e.g. the tuner's arms)
-   pays only the [specialize_proc] replay here. *)
+   linking. [Backends.lower_assignments] forks the lineage state itself, so the result is read off a
+   hermetic sibling: the argument context, its ledger and frontier are unaffected. With the analysis
+   cache (gh-560), a context that already compiled this routine (e.g. the tuner's arms) pays only
+   the [specialize_proc] replay here. *)
 let lowered_for_decisions ?name ?(materialized = []) ?(inline = []) ctx comp bindings =
   let optim_ctx = Backends.query ctx.wrapped { q = (fun _ c -> c.BI.optimize_ctx) } in
   let optim_ctx = Ir.Low_level.copy_optimize_ctx optim_ctx in
@@ -797,14 +799,13 @@ let decide_inline ctx tns =
                decided, because inlining legality is settled only during optimization
                ([check_and_store_virtual]) — a preferred node the virtualizer rejects still
                materializes. A node whose placement THIS lineage already decided (e.g. a cap
-               materialization from an earlier compile of a routine setting it) keeps that
-               decision: decisions are final within a lineage — already-compiled routines depend on
-               them (a consumer compiled against the node's buffer must find it written) — so the
-               preference only steers placements not yet decided. Callers wanting the exemption to
-               take effect fork a pre-compile sibling, as [Train.tune_placements] does. *)
+               materialization from an earlier compile of a routine setting it) keeps that decision:
+               decisions are final within a lineage — already-compiled routines depend on them (a
+               consumer compiled against the node's buffer must find it written) — so the preference
+               only steers placements not yet decided. Callers wanting the exemption to take effect
+               fork a pre-compile sibling, as [Train.tune_placements] does. *)
             let optimize_ctx = Ir.Low_level.copy_optimize_ctx bctx.BI.optimize_ctx in
-            List.iter tns
-              ~f:(Hash_set.add optimize_ctx.Ir.Low_level.inline_preferences);
+            List.iter tns ~f:(Hash_set.add optimize_ctx.Ir.Low_level.inline_preferences);
             (Backend.make_child ~optimize_ctx bctx, ()));
       }
   in

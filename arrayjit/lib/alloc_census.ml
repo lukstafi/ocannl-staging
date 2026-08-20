@@ -11,7 +11,6 @@ open Base
 let live : (int * int, int * bool) Hashtbl.Poly.t = Hashtbl.Poly.create ()
 let live_mutex = Stdlib.Mutex.create ()
 let with_live f = Stdlib.Mutex.protect live_mutex f
-
 let working_pools_allocated : Utils.atomic_int = Atomic.make 0
 let constant_pools_allocated : Utils.atomic_int = Atomic.make 0
 let pools_freed : Utils.atomic_int = Atomic.make 0

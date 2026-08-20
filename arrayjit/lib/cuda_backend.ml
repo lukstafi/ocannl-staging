@@ -103,8 +103,8 @@ let initialized_devices = Hash_set.create (module Int)
 let initialized = ref false
 
 (* The compute capability, as [major * 10 + minor], of the GeForce-Blackwell family whose
-   block-scaled [mma.sync ... kind::mxf8f6f4] forms exist only under an architecture-specific
-   target (gh-ocannl-481 item 3, D4). *)
+   block-scaled [mma.sync ... kind::mxf8f6f4] forms exist only under an architecture-specific target
+   (gh-ocannl-481 item 3, D4). *)
 let mxfp8_family_cc = 120
 
 let%diagn_sexp gpu_arch_options ~device_cc cu_src : string list =
@@ -115,21 +115,21 @@ let%diagn_sexp gpu_arch_options ~device_cc cu_src : string list =
      Two kinds of target, and the difference is the whole point of this function:
 
      - A FLOOR (every marker but one): the lowest arch whose PTX contains the instruction. PTX
-       targeted at a floor is forward-JIT-compiled by the driver on every later GPU, so one compile
-       covers the entire range above it. The [(wmma-bf16)] and [(wmma-tf32)] markers are emitted by
-       [mma_syntax] for bf16 resp. tf32 fragments (both sm_80+); [(mma-fp8)] and [(mma-bf16)] for
-       the inline-PTX [mma.sync] paths (sm_89+ resp. sm_80+, no header needed).
-     - A FAMILY target ([(mma-mxfp8)]): a [compute_120a]-style architecture-specific arch, which
-       only the device family it names can load. Blackwell's block-scaled [kind::mxf8f6f4] forms
-       exist ONLY under such a target, so this is the one case where forward-JIT portability has to
-       be given up — and therefore the one marker gated on the attached devices' own family. Family
-       PTX is never produced for a device that could not load it; a marked kernel reaching a
-       mismatched device falls back to floor targeting, which is defense in depth rather than a
-       recovery path (an arm emitting the marker is gated on the same family, so it should have
-       declined already). No arm emits it yet: block scaling itself is blocked on OCANNL having
-       microscaling storage at all (the e8m0 per-32-element scale factors are extra mma OPERANDS
-       with their own layout, and [Tile_mma] has no slot for them), and a unit-scale arm would be
-       numerically identical to the plain fp8 path while forfeiting forward-JIT. *)
+     targeted at a floor is forward-JIT-compiled by the driver on every later GPU, so one compile
+     covers the entire range above it. The [(wmma-bf16)] and [(wmma-tf32)] markers are emitted by
+     [mma_syntax] for bf16 resp. tf32 fragments (both sm_80+); [(mma-fp8)] and [(mma-bf16)] for the
+     inline-PTX [mma.sync] paths (sm_89+ resp. sm_80+, no header needed). - A FAMILY target
+     ([(mma-mxfp8)]): a [compute_120a]-style architecture-specific arch, which only the device
+     family it names can load. Blackwell's block-scaled [kind::mxf8f6f4] forms exist ONLY under such
+     a target, so this is the one case where forward-JIT portability has to be given up — and
+     therefore the one marker gated on the attached devices' own family. Family PTX is never
+     produced for a device that could not load it; a marked kernel reaching a mismatched device
+     falls back to floor targeting, which is defense in depth rather than a recovery path (an arm
+     emitting the marker is gated on the same family, so it should have declined already). No arm
+     emits it yet: block scaling itself is blocked on OCANNL having microscaling storage at all (the
+     e8m0 per-32-element scale factors are extra mma OPERANDS with their own layout, and [Tile_mma]
+     has no slot for them), and a unit-scale arm would be numerically identical to the plain fp8
+     path while forfeiting forward-JIT. *)
   let has s = String.is_substring cu_src ~substring:s in
   if has "(mma-mxfp8)" && device_cc / 10 = mxfp8_family_cc / 10 then (
     [%log "family-arch target", (device_cc : int)];
@@ -180,9 +180,9 @@ let%diagn_sexp gpu_arch_options ~device_cc cu_src : string list =
           (* The [cp.async] staging builtins (gh-ocannl-487 phase 2); emission is gated on the
              devices' own capability, so the floor only ever fires where it can also load. The
              marker is the PTX instruction text, which appears exactly in the prepended helper
-             definitions' asm literals — never in an identifier — so a routine or label merely
-             NAMED like a helper (which the token-scoped builtin filter declines to activate)
-             cannot raise the floor past a pre-Ampere device (Codex P2 on PR #317, round 5). *)
+             definitions' asm literals — never in an identifier — so a routine or label merely NAMED
+             like a helper (which the token-scoped builtin filter declines to activate) cannot raise
+             the floor past a pre-Ampere device (Codex P2 on PR #317, round 5). *)
           (if has "cp.async." then Some 80 else None);
           (if uses_h_arith then Some (if has "__nv_bfloat16" then 80 else 53) else None);
         ]
@@ -294,10 +294,10 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     (* [with_debug] only asks NVRTC to keep the compilation log on a SUCCESSFUL compile (a failing
        one carries its log in the exception either way), and the only reader of that log is the
        [.cu_log] build file written just below -- so it wants exactly the flag that writes it, and
-       that file's [Option.value_exn] is what makes the implication load-bearing. The
-       [|| log_level > 0] disjunct it used to carry made the log's retention hostage to a verbosity
-       knob that nothing here consults (gh-ocannl-595). Kernel debug codegen is separate: it comes
-       from [Utils.with_runtime_debug ()] via [--device-debug] below. *)
+       that file's [Option.value_exn] is what makes the implication load-bearing. The [|| log_level
+       > 0] disjunct it used to carry made the log's retention hostage to a verbosity knob that
+       nothing here consults (gh-ocannl-595). Kernel debug codegen is separate: it comes from
+       [Utils.with_runtime_debug ()] via [--device-debug] below. *)
     let with_debug = Utils.settings.output_debug_files_in_build_directory in
     let cuda_include_opt =
       (* On Windows, check for the no-spaces junction created by ocaml-cudajit *)
@@ -352,8 +352,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
 
   (* gh-ocannl-550: [Cu.Module] exposes no explicit unload — a module is unloaded by cudajit's own
      GC finalizer — so loads counted against unloads is the only way to see whether a schedule
-     search's per-candidate modules are being reclaimed at all. The added finalizer only counts;
-     the unload stays cudajit's, and the two finalizers on one module are independent. *)
+     search's per-candidate modules are being reclaimed at all. The added finalizer only counts; the
+     unload stays cudajit's, and the two finalizers on one module are independent. *)
   let load_module ptx =
     let m = Cu.Module.load_data_ex ptx (run_options ()) in
     Alloc_census.count_module_loaded ();
@@ -367,7 +367,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     let n = num_devices () in
     (* No devices at all is "this backend is not available here" ([Context.auto] moves on); asking
        for an ordinal past an existing device is an ordinary caller error. A driver that fails to
-       initialize propagates out of [num_devices] unchanged — see {!Backend_intf.Backend_unavailable}. *)
+       initialize propagates out of [num_devices] unchanged — see
+       {!Backend_intf.Backend_unavailable}. *)
     if n = 0 then
       raise
       @@ Backend_intf.Backend_unavailable
@@ -547,8 +548,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     (* gh-ocannl-487 phase 2: [cp.async] staging for software-pipelined tiles (the
        [ocannl_cp_async*] builtins; their name doubles as the [gpu_arch_options] sm_80 floor
        marker). Gated on the attached devices' minimum compute capability, not the emission call:
-       pre-Ampere devices keep the portable synchronous rendering, which is correct at any depth
-       — the same posture as a hand-built pipelined schedule on a backend without the hook. *)
+       pre-Ampere devices keep the portable synchronous rendering, which is correct at any depth —
+       the same posture as a hand-built pipelined schedule on a backend without the hook. *)
     let async_copy =
       if min_compute_capability () >= 80 then
         Some
@@ -685,9 +686,9 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
        The extent-32 lane loop binds threadIdx.x, so the 32 consecutive .x threads reaching the
        statement form the cooperating warp. Transposed operand storage ([ta]/[tb]) loads wmma
        fragments as [col_major] with swapped offset arithmetic; both inline-PTX arms index every
-       gathered element at the transposed (col, row) address instead (gh-ocannl-481 item 1).
-       Uniform f32 targets the wmma tf32 shape m16n16k8 on sm_80+ (the [(wmma-tf32)] marker selects
-       the arch) when the numerics policy opts in ([Numerics.t.tf32_matmuls], gh-ocannl-478): tf32
+       gathered element at the transposed (col, row) address instead (gh-ocannl-481 item 1). Uniform
+       f32 targets the wmma tf32 shape m16n16k8 on sm_80+ (the [(wmma-tf32)] marker selects the
+       arch) when the numerics policy opts in ([Numerics.t.tf32_matmuls], gh-ocannl-478): tf32
        truncates the mantissa to 10 bits, so with the policy off — the default — uniform f32 stays
        on the scalar path with full f32 numerics. Declines (the barrier-bracketed lane-0 fallback
        renders instead) on: other precision combinations, extents not multiples of the intrinsic
@@ -719,13 +720,12 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           in
           let plain = function `Plain -> true | `Swizzled_b128 -> false in
           (* An operand eligible for the warp-cooperative [ldmatrix] load (gh-ocannl-481 item 3):
-             the swizzled 16-byte-unit layout, in shared memory, which is the only combination
-             whose per-lane row addresses [ldmatrix] can both reach and de-conflict. Everything
-             else keeps the per-lane gathers, which stay correct for plain shared tiles and device
-             pointers alike. Note the asymmetry the arms below rely on: eligibility is
-             [space AND layout], but the DECLINE is on the layout alone — a swizzled operand this
-             arm cannot [ldmatrix] must not silently fall through to row-major gathers, whatever
-             space it sits in. *)
+             the swizzled 16-byte-unit layout, in shared memory, which is the only combination whose
+             per-lane row addresses [ldmatrix] can both reach and de-conflict. Everything else keeps
+             the per-lane gathers, which stay correct for plain shared tiles and device pointers
+             alike. Note the asymmetry the arms below rely on: eligibility is [space AND layout],
+             but the DECLINE is on the layout alone — a swizzled operand this arm cannot [ldmatrix]
+             must not silently fall through to row-major gathers, whatever space it sits in. *)
           let ldm = function
             | `Shared, `Swizzled_b128 -> true
             | (`Shared | `Device | `Thread | `Fragment _), (`Plain | `Swizzled_b128) -> false
@@ -733,10 +733,10 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           let a_swz = ldm (a_space, a_layout) and b_swz = ldm (b_space, b_layout) in
           (* The shared-window address of the element at (row, col) of a [Swizzle_b128] tile whose
              minor dim is [ld]: the column's 16-byte-unit index is XORed with the low bits of the
-             row (see [Low_level.Swizzle_b128]), everything within a unit left alone. Every
-             fragment entry point below has [col] a multiple of [u], so the within-unit remainder
-             is zero and drops out. [ldmatrix] is a [.shared] instruction, hence the conversion out
-             of the generic window. *)
+             row (see [Low_level.Swizzle_b128]), everything within a unit left alone. Every fragment
+             entry point below has [col] a multiple of [u], so the within-unit remainder is zero and
+             drops out. [ldmatrix] is a [.shared] instruction, hence the conversion out of the
+             generic window. *)
           let swz_saddr ~ptr ~ld ~prec ~row ~col =
             let u = 16 / Ops.prec_in_bytes prec in
             let s = Int.floor_log2 u in
@@ -808,8 +808,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           let a_ldm = is_fp8_combo && a_swz && not ta in
           let b_ldm = is_fp8_combo && b_swz && tb in
           if
-            is_fp8_combo
-            && plain d_layout
+            is_fp8_combo && plain d_layout
             && (plain a_layout || a_ldm)
             && (plain b_layout || b_ldm)
             && m % 16 = 0
@@ -871,8 +870,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
             (* The [ldmatrix] entry points, in the 16-bit view of the fp8 bytes: A's four 8x8
                matrices are (m rows {0-7, 8-15}) x (byte columns {0-15, 16-31}), which is the
                [m16n8k16] A arrangement at byte granularity; B stored transposed is (n rows 0-7) x
-               (byte columns {0-15, 16-31}), giving b0/b1 in that order. With [q = lane >> 3]
-               naming the matrix, lane [r = lane & 7] supplies row [r] of matrix [q]. *)
+               (byte columns {0-15, 16-31}), giving b0/b1 in that order. With [q = lane >> 3] naming
+               the matrix, lane [r = lane & 7] supplies row [r] of matrix [q]. *)
             let a_ldm_lines =
               ldmatrix_lines ~indent:"      "
                 ~regs:[ "__mma_a0"; "__mma_a1"; "__mma_a2"; "__mma_a3" ]
@@ -883,12 +882,9 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                      ~col:"__ki * 32 + 16 * (__mma_lid >> 4)")
             in
             let b_ldm_lines =
-              ldmatrix_lines ~indent:"      "
-                ~regs:[ "__mma_b0"; "__mma_b1" ]
-                ~trans:false
+              ldmatrix_lines ~indent:"      " ~regs:[ "__mma_b0"; "__mma_b1" ] ~trans:false
                 ~addr:
-                  (swz_saddr ~ptr:"__mma_bp" ~ld:ldb ~prec:b_prec
-                     ~row:"__ni * 8 + (__mma_lid & 7)"
+                  (swz_saddr ~ptr:"__mma_bp" ~ld:ldb ~prec:b_prec ~row:"__ni * 8 + (__mma_lid & 7)"
                      ~col:"__ki * 32 + 16 * ((__mma_lid >> 3) & 1)")
             in
             let barrier = "__syncthreads();" in
@@ -918,21 +914,21 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                      a_reg "__mma_a2" ~lo:true ~c:16;
                      a_reg "__mma_a3" ~lo:false ~c:16;
                    ])
-              @ (if b_ldm then b_ldm_lines
-                 else [ b_reg "__mma_b0" ~r:0; b_reg "__mma_b1" ~r:16 ])
+              @ (if b_ldm then b_ldm_lines else [ b_reg "__mma_b0" ~r:0; b_reg "__mma_b1" ~r:16 ])
               @ [
-                "      asm(\"mma.sync.aligned.m16n8k32.row.col.f32.e5m2.e5m2.f32 \"";
-                "          \"{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\"";
-                "          : \"+f\"(__mma_d0), \"+f\"(__mma_d1), \"+f\"(__mma_d2), \"+f\"(__mma_d3)";
-                "          : \"r\"(__mma_a0), \"r\"(__mma_a1), \"r\"(__mma_a2), \"r\"(__mma_a3), \
-                 \"r\"(__mma_b0), \"r\"(__mma_b1));";
-                "    }";
-                "    __mma_dr0[0] = __mma_d0; __mma_dr0[1] = __mma_d1;";
-                "    __mma_dr1[0] = __mma_d2; __mma_dr1[1] = __mma_d3;";
-                "  }";
-                "}";
-                barrier;
-              ]
+                  "      asm(\"mma.sync.aligned.m16n8k32.row.col.f32.e5m2.e5m2.f32 \"";
+                  "          \"{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\"";
+                  "          : \"+f\"(__mma_d0), \"+f\"(__mma_d1), \"+f\"(__mma_d2), \
+                   \"+f\"(__mma_d3)";
+                  "          : \"r\"(__mma_a0), \"r\"(__mma_a1), \"r\"(__mma_a2), \"r\"(__mma_a3), \
+                   \"r\"(__mma_b0), \"r\"(__mma_b1));";
+                  "    }";
+                  "    __mma_dr0[0] = __mma_d0; __mma_dr0[1] = __mma_d1;";
+                  "    __mma_dr1[0] = __mma_d2; __mma_dr1[1] = __mma_d3;";
+                  "  }";
+                  "}";
+                  barrier;
+                ]
             in
             let cast_ptr name ptr =
               string (Printf.sprintf "const unsigned char *%s = (const unsigned char *)(" name)
@@ -954,10 +950,9 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           else if
             (* Unlike fp8, both bf16 operands can come in through [ldmatrix] in either storage
                orientation: the fragment registers hold 16-bit element PAIRS, and the pair a lane
-               needs is contiguous under one of the two forms — [.trans] transposes each 8x8 tile
-               on distribution, which is exactly the difference between the two orientations. *)
-            is_bf16_uniform
-            && plain d_layout
+               needs is contiguous under one of the two forms — [.trans] transposes each 8x8 tile on
+               distribution, which is exactly the difference between the two orientations. *)
+            is_bf16_uniform && plain d_layout
             && (plain a_layout || a_swz)
             && (plain b_layout || b_swz)
             && m % 16 = 0
@@ -966,13 +961,13 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
             && loadable d_space && loadable a_space && loadable b_space
             && min_compute_capability () >= 80
           then
-            (* Raw [mma.sync] with the architecturally-defined per-lane fragment layouts of
-               m16n8k16 (PTX ISA "Matrix Fragments for mma.m16n8k16", shared by .f16 and .bf16).
-               Thread [lane], with groupID g = lane>>2 and threadID-in-group t = lane&3, holds: A
-               (16x16) regs a0..a3 = the element pairs at rows {g, g+8} x column pairs {2t, 2t+8};
-               B (16x8, column-major fragment) regs b0,b1 = row pairs {2t, 2t+8} down column g;
-               accumulator D (16x8 f32) regs d0..d3 = rows {g, g+8} x columns {2t, 2t+1}. The
-               lower-indexed element of each pair sits in the low half of its .b32 register.
+            (* Raw [mma.sync] with the architecturally-defined per-lane fragment layouts of m16n8k16
+               (PTX ISA "Matrix Fragments for mma.m16n8k16", shared by .f16 and .bf16). Thread
+               [lane], with groupID g = lane>>2 and threadID-in-group t = lane&3, holds: A (16x16)
+               regs a0..a3 = the element pairs at rows {g, g+8} x column pairs {2t, 2t+8}; B (16x8,
+               column-major fragment) regs b0,b1 = row pairs {2t, 2t+8} down column g; accumulator D
+               (16x8 f32) regs d0..d3 = rows {g, g+8} x columns {2t, 2t+1}. The lower-indexed
+               element of each pair sits in the low half of its .b32 register.
 
                Unlike the fp8 arm, transposed operand storage ([ta]/[tb]) is supported: every gather
                goes through [a_at]/[b_at], which index the STORED matrix at (col, row) under the
@@ -1012,16 +1007,17 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
             in
             let b_reg name ~r =
               "      "
-              ^ pack2 name "__mma_bp" (b_at ~row:(b_row r) ~col:b_col)
+              ^ pack2 name "__mma_bp"
+                  (b_at ~row:(b_row r) ~col:b_col)
                   (b_at ~row:(b_row (r + 1)) ~col:b_col)
             in
             (* The [ldmatrix] entry points. Naming the matrix [q = lane >> 3] and the row within it
                [r = lane & 7], the four A matrices are (m rows {0-7, 8-15}) x (k columns {0-7,
-               8-15}) in register order a0..a3, and the two B matrices are (k rows {0-7, 8-15}) x
-               (n columns 0-7) in order b0, b1. Each is read as 8 rows of 8 contiguous 16-bit
-               elements from the operand's OWN storage, so the transposed orientations swap which
-               index walks the rows and add [.trans] exactly when the fragment's minor direction is
-               the stored major one. *)
+               8-15}) in register order a0..a3, and the two B matrices are (k rows {0-7, 8-15}) x (n
+               columns 0-7) in order b0, b1. Each is read as 8 rows of 8 contiguous 16-bit elements
+               from the operand's OWN storage, so the transposed orientations swap which index walks
+               the rows and add [.trans] exactly when the fragment's minor direction is the stored
+               major one. *)
             let a_ldm_lines =
               ldmatrix_lines ~indent:"      "
                 ~regs:[ "__mma_a0"; "__mma_a1"; "__mma_a2"; "__mma_a3" ]
@@ -1037,9 +1033,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                        ~col:"__ki * 16 + 8 * (__mma_lid >> 4)")
             in
             let b_ldm_lines =
-              ldmatrix_lines ~indent:"      "
-                ~regs:[ "__mma_b0"; "__mma_b1" ]
-                ~trans:(not tb)
+              ldmatrix_lines ~indent:"      " ~regs:[ "__mma_b0"; "__mma_b1" ] ~trans:(not tb)
                 ~addr:
                   (if tb then
                      swz_saddr ~ptr:"__mma_bp" ~ld:ldb ~prec:b_prec
@@ -1080,20 +1074,21 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                    ])
               @ (if b_swz then b_ldm_lines else [ b_reg "__mma_b0" ~r:0; b_reg "__mma_b1" ~r:8 ])
               @ [
-                "      asm(\"mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 \"";
-                "          \"{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\"";
-                "          : \"+f\"(__mma_d0), \"+f\"(__mma_d1), \"+f\"(__mma_d2), \"+f\"(__mma_d3)";
-                "          : \"r\"(__mma_a0), \"r\"(__mma_a1), \"r\"(__mma_a2), \"r\"(__mma_a3), \
-                 \"r\"(__mma_b0), \"r\"(__mma_b1));";
-                "    }";
-                "    __mma_dr0[0] = __float2bfloat16(__mma_d0); __mma_dr0[1] = \
-                 __float2bfloat16(__mma_d1);";
-                "    __mma_dr1[0] = __float2bfloat16(__mma_d2); __mma_dr1[1] = \
-                 __float2bfloat16(__mma_d3);";
-                "  }";
-                "}";
-                barrier;
-              ]
+                  "      asm(\"mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 \"";
+                  "          \"{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\"";
+                  "          : \"+f\"(__mma_d0), \"+f\"(__mma_d1), \"+f\"(__mma_d2), \
+                   \"+f\"(__mma_d3)";
+                  "          : \"r\"(__mma_a0), \"r\"(__mma_a1), \"r\"(__mma_a2), \"r\"(__mma_a3), \
+                   \"r\"(__mma_b0), \"r\"(__mma_b1));";
+                  "    }";
+                  "    __mma_dr0[0] = __float2bfloat16(__mma_d0); __mma_dr0[1] = \
+                   __float2bfloat16(__mma_d1);";
+                  "    __mma_dr1[0] = __float2bfloat16(__mma_d2); __mma_dr1[1] = \
+                   __float2bfloat16(__mma_d3);";
+                  "  }";
+                  "}";
+                  barrier;
+                ]
             in
             let ptr_decl name typ ptr =
               string (Printf.sprintf "%s *%s = " typ name) ^^ ptr ^^ semi
@@ -1121,9 +1116,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                destination registers. So the whole template path declines swizzled operands
                (gh-ocannl-481 item 3, D2) — the caller then reaches for the scalar fallback, or, in
                an accumulator-resident scope, for the inline-PTX arms above. *)
-            match
-              (if plain d_layout && plain a_layout && plain b_layout then combo else None)
-            with
+            match if plain d_layout && plain a_layout && plain b_layout then combo else None with
             | None -> None
             | Some
                 {
@@ -1171,7 +1164,9 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                 let k_loop_lines ~ab_typ ~acc =
                   [
                     Printf.sprintf "for (int __ki = 0; __ki < %d; ++__ki) {" kt;
-                    Printf.sprintf "  %s __mma_bf[%d];" (frag "matrix_b" ab_typ (Some b_frag_layout)) nt;
+                    Printf.sprintf "  %s __mma_bf[%d];"
+                      (frag "matrix_b" ab_typ (Some b_frag_layout))
+                      nt;
                     Printf.sprintf "  for (int __ni = 0; __ni < %d; ++__ni) {" nt;
                     (* Transposed storage ([tb]): the stored matrix is the role's transpose — index
                        it at (col, row) and declare the fragment [col_major]; the leading dimension
@@ -1191,7 +1186,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                   @ [
                       "  }";
                       Printf.sprintf "  for (int __mi = 0; __mi < %d; ++__mi) {" mt;
-                      Printf.sprintf "    %s __mma_af;" (frag "matrix_a" ab_typ (Some a_frag_layout));
+                      Printf.sprintf "    %s __mma_af;"
+                        (frag "matrix_a" ab_typ (Some a_frag_layout));
                       (if ta then
                          Printf.sprintf
                            "    nvcuda::wmma::load_matrix_sync(__mma_af, __mma_ap + __ki * %d * %d \
@@ -1242,8 +1238,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                       (fun ~a_ptr ~b_ptr ->
                         group
                           (string
-                             (Printf.sprintf "{ /* tile_mma fragment update %dx%dx%d (wmma%s) */" m n
-                                k marker)
+                             (Printf.sprintf "{ /* tile_mma fragment update %dx%dx%d (wmma%s) */" m
+                                n k marker)
                           ^^ nest 2 (hardline ^^ body ~a_ptr ~b_ptr)
                           ^^ hardline ^^ rbrace))
                 | _ when ab_ok && ldd % d_ld_mult = 0 && loadable d_space ->
@@ -1298,10 +1294,10 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
        wmma arm exactly (via [wmma_combo] and the same extent/stride/space/arch checks), so an
        accepted scope never strands its inner call. The fp8 inline-PTX combination declines: its
        accumulator lives in per-lane f32 registers with the m16n8k32 layout, not wmma fragments, so
-       it keeps the per-[k_o] rendering through the caller's target-aliasing path. Swizzled
-       operands decline for the same reason the wmma arm of [mma_syntax] does — opaque fragments
-       cannot be fed from [ldmatrix] — which is precisely what routes a swizzled staged bf16 leg to
-       the inline-PTX arm via the caller's target aliasing (gh-ocannl-481 item 3, D3). *)
+       it keeps the per-[k_o] rendering through the caller's target-aliasing path. Swizzled operands
+       decline for the same reason the wmma arm of [mma_syntax] does — opaque fragments cannot be
+       fed from [ldmatrix] — which is precisely what routes a swizzled staged bf16 leg to the
+       inline-PTX arm via the caller's target aliasing (gh-ocannl-481 item 3, D3). *)
     let mma_fragment_syntax =
       Some
         (fun ~d_prec
@@ -1670,20 +1666,20 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Min, Uint4x32_prec _ -> func "min"
       | Min, Bfloat16_prec _ -> func "__hmin"
       | ( Mod,
-          ( Byte_prec _ | Uint16_prec _ | Int32_prec _ | Uint32_prec _ | Int64_prec _
-          | Uint64_prec _ ) ) ->
+          (Byte_prec _ | Uint16_prec _ | Int32_prec _ | Uint32_prec _ | Int64_prec _ | Uint64_prec _)
+        ) ->
           f "%"
-      (* Like the libm calls in [unop_syntax]: [fmod] on bfloat16 operands returns float, which
-         only fails once the placement inlines it into a bfloat16 binop (gh-ocannl-549). *)
+      (* Like the libm calls in [unop_syntax]: [fmod] on bfloat16 operands returns float, which only
+         fails once the placement inlines it into a bfloat16 binop (gh-ocannl-549). *)
       | Mod, Bfloat16_prec _ ->
           fun v1 v2 ->
             group
-              (string "__float2bfloat16(fmodf(__bfloat162float(" ^^ v1
-              ^^ string "), __bfloat162float(" ^^ v2 ^^ string ")))")
+              (string "__float2bfloat16(fmodf(__bfloat162float("
+              ^^ v1 ^^ string "), __bfloat162float(" ^^ v2 ^^ string ")))")
       | Mod, _ -> func "fmod"
-      (* Comparisons and logical connectives are precision-independent and spelled the same in
-         CUDA C++ as in C, so they render through the shared default -- fp8 already bridged above.
-         The constructors stay listed to keep the match exhaustiveness-checked. *)
+      (* Comparisons and logical connectives are precision-independent and spelled the same in CUDA
+         C++ as in C, so they render through the shared default -- fp8 already bridged above. The
+         constructors stay listed to keep the match exhaustiveness-checked. *)
       | ((Cmplt | Cmple | Cmpne | Cmpeq | Or | And) as op), _ ->
           C_syntax.default_binop_syntax prec op
       | ToPowOf, (Uint32_prec _ | Uint64_prec _) ->
@@ -1831,8 +1827,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Recip_sqrt, Half_prec _ -> func "hrsqrt"
       | Recip_sqrt, Double_prec _ -> f "(1.0 / sqrt(" "))"
       | Recip_sqrt, Single_prec _ -> f "(1.0f / sqrtf(" "))"
-      | Recip_sqrt, Bfloat16_prec _ ->
-          f "__float2bfloat16(1.0f / sqrtf(__bfloat162float(" ")))"
+      | Recip_sqrt, Bfloat16_prec _ -> f "__float2bfloat16(1.0f / sqrtf(__bfloat162float(" ")))"
       | Recip_sqrt, _ -> f "(1 / sqrtf(" "))"
       | Neg, _ -> f "(-(" "))"
       | Trunc, Double_prec _ -> func "trunc"
@@ -2152,16 +2147,16 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
   (* One CUDA graph for a fissioned routine's whole segment batch (gh-ocannl-488): stream-capture
      the segment launch loop once per distinct set of launch-time-varying arguments — static-index
      binding values, plus the merge-buffer position when the routine reads it — instantiate, and
-     replay with a single cuGraphLaunch per step instead of one cuLaunchKernel per segment.
-     Baking kernel arguments into the graph is sound because context buffer bases are pre-resolved
-     at link time (tnode pools are never reallocated in place while their routines are live; the
-     merge pool, which can be, is part of the key by pointer identity) and every other varying
-     argument is part of the key. The same-stream linear dependency chain the capture records is
-     exactly the FIFO ordering the per-segment launch loop relies on. Instantiated graphs are
-     retained in a bounded FIFO cache, so a training loop cycling through batch-index bindings
-     replays cached graphs from the second epoch on. Transparent fallback to per-segment launches:
-     when kernel logging is on (the log id is a fresh kernel argument every run), when disabled via
-     [gpu_graph_capture=false], or permanently for this routine if the driver rejects capture. *)
+     replay with a single cuGraphLaunch per step instead of one cuLaunchKernel per segment. Baking
+     kernel arguments into the graph is sound because context buffer bases are pre-resolved at link
+     time (tnode pools are never reallocated in place while their routines are live; the merge pool,
+     which can be, is part of the key by pointer identity) and every other varying argument is part
+     of the key. The same-stream linear dependency chain the capture records is exactly the FIFO
+     ordering the per-segment launch loop relies on. Instantiated graphs are retained in a bounded
+     FIFO cache, so a training loop cycling through batch-index bindings replays cached graphs from
+     the second epoch on. Transparent fallback to per-segment launches: when kernel logging is on
+     (the log id is a fresh kernel argument every run), when disabled via [gpu_graph_capture=false],
+     or permanently for this routine if the driver rejects capture. *)
   let sequence_segments (context : context) ~name ~(bindings : Indexing.lowered_bindings)
       ~uses_merge_buffer (tasks : Task.t list) : Task.t option =
     let use_capture =
@@ -2190,12 +2185,11 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
         String.concat ~sep:";" (idx @ merge)
       in
       let capture () =
-        (* RELAXED, not THREAD_LOCAL: GC finalizers (module unloads, buffer frees of dead
-           handles) can fire at any allocation point on the capturing thread, and stricter modes
-           make the driver reject such "potentially unsafe" calls mid-capture — with the
-           exception then escaping [Gc.finalise] at an arbitrary program point. The finalizers
-           only release dead handles, so they are genuinely safe to run concurrently with
-           capture. *)
+        (* RELAXED, not THREAD_LOCAL: GC finalizers (module unloads, buffer frees of dead handles)
+           can fire at any allocation point on the capturing thread, and stricter modes make the
+           driver reject such "potentially unsafe" calls mid-capture — with the exception then
+           escaping [Gc.finalise] at an arbitrary program point. The finalizers only release dead
+           handles, so they are genuinely safe to run concurrently with capture. *)
         Cu.Graph.begin_capture ~mode:Cu.Graph.RELAXED device.runner;
         let graph =
           try
@@ -2242,8 +2236,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                               surfaces on the plain path. *)
                            broken := true;
                            Stdio.eprintf
-                             "ocannl: disabling CUDA graph capture for routine %s (%s: %s)\n%!"
-                             name message
+                             "ocannl: disabling CUDA graph capture for routine %s (%s: %s)\n%!" name
+                             message
                              (Sexp.to_string_hum @@ Cu.sexp_of_result status);
                            run_plain ())));
            })
@@ -2338,8 +2332,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                             (16, 16, 8);
                         ];
                     (* Swizzled staged tiles (gh-ocannl-481 item 3, D3): only the inline-PTX arms
-                       can read them, and only in the orientations the staged sketches mint. That
-                       is the uniform-bf16 combination — both its operands' fragment registers hold
+                       can read them, and only in the orientations the staged sketches mint. That is
+                       the uniform-bf16 combination — both its operands' fragment registers hold
                        16-bit pairs that are contiguous in the roles' own orientations. fp8 is
                        deliberately absent: its A side qualifies but its B side does not (4 fp8
                        bytes of a B register are strided at that orientation), so a swizzled fp8
@@ -2352,11 +2346,11 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                             Backend_intf.Mma_swizzled_b128;
                         ];
                     (* gh-ocannl-487 phase 2: the depth-2 twins are worth proposing exactly where
-                       the [cp.async] arm renders them (sm_80+; [Cuda_syntax_config.async_copy]
-                       has the matching gate) — pre-Ampere the twin would be the portable
-                       synchronous form, whose occupancy cost was measured, not hypothesized
-                       (phase 1: ~1.4-1.5x on Metal). Depth 2 only: the wait-all emission has
-                       single-step lookahead; deeper pipelines need commit_group/wait_group N. *)
+                       the [cp.async] arm renders them (sm_80+; [Cuda_syntax_config.async_copy] has
+                       the matching gate) — pre-Ampere the twin would be the portable synchronous
+                       form, whose occupancy cost was measured, not hypothesized (phase 1: ~1.4-1.5x
+                       on Metal). Depth 2 only: the wait-all emission has single-step lookahead;
+                       deeper pipelines need commit_group/wait_group N. *)
                     mma_pipeline_depths = (if cc >= 80 then [ 2 ] else []);
                   }
               else None);
@@ -2369,11 +2363,10 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
            codegen_tag = None;
            (* Advisory roofline envelope (gh-ocannl-491): documented rough constants for the sm_70+
               class. Flops: RTX-30/40 mid-range ~15 fp32 TFLOP/s — the model only ranks, so a
-              class-typical number suffices. Bandwidth is a class CEILING per the
-              [hardware_limits] contract (gh-ocannl-578): an RTX 4090 already sustains ~1 TB/s
-              (above the previous 4.5e11) and HBM3e datacenter parts reach ~8 TB/s. Per-device
-              queries (SM count x clock, memory clock x bus width) remain calibration follow-up
-              work. *)
+              class-typical number suffices. Bandwidth is a class CEILING per the [hardware_limits]
+              contract (gh-ocannl-578): an RTX 4090 already sustains ~1 TB/s (above the previous
+              4.5e11) and HBM3e datacenter parts reach ~8 TB/s. Per-device queries (SM count x
+              clock, memory clock x bus width) remain calibration follow-up work. *)
            peak_flops = Some 1.5e13;
            peak_memory_bandwidth = Some 8.0e12;
          })
@@ -2410,18 +2403,18 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
      worth writing:
 
      - Statuses the driver returns {e before any thread runs} — a launch configuration refused, an
-       allocation denied, a module that will not load — are [No_device_writes]. The tuner withdraws
-       the routine's execution claim and keeps searching. This is the containment win, and on this
-       backend it is the whole of it: [CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES], the status a
-       register-heavy or over-wide candidate actually gets, is non-sticky and write-free.
-     - The fault family (illegal address, misaligned address, device-side assert, watchdog timeout)
-       is asynchronous: the kernel was running, whatever it wrote before faulting stays written, and
-       the CUDA context is left sticky — every later call in it fails with the same code. These are
-       [Writes_may_have_occurred]: the tuner counts the decline, then escalates and poisons the
-       lineage. Classifying them does not make them survivable — nothing does until
-       [recover_after_launch_failure] lands — but it puts the driver's own verdict in the report
-       instead of an opaque [Cuda_error], and states the damage rather than leaving it to the phase
-       default.
+     allocation denied, a module that will not load — are [No_device_writes]. The tuner withdraws
+     the routine's execution claim and keeps searching. This is the containment win, and on this
+     backend it is the whole of it: [CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES], the status a
+     register-heavy or over-wide candidate actually gets, is non-sticky and write-free. - The fault
+     family (illegal address, misaligned address, device-side assert, watchdog timeout) is
+     asynchronous: the kernel was running, whatever it wrote before faulting stays written, and the
+     CUDA context is left sticky — every later call in it fails with the same code. These are
+     [Writes_may_have_occurred]: the tuner counts the decline, then escalates and poisons the
+     lineage. Classifying them does not make them survivable — nothing does until
+     [recover_after_launch_failure] lands — but it puts the driver's own verdict in the report
+     instead of an opaque [Cuda_error], and states the damage rather than leaving it to the phase
+     default.
 
      Everything else stays [None], deliberately. An environment or toolchain fault (no JIT compiler,
      PTX newer than the driver, no binary for this GPU, an unavailable device) fails every candidate
@@ -2471,8 +2464,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
             reject ~stage ~severity:Schedule_outcome.Expected
               ~execution_effect:Schedule_outcome.No_device_writes detail
         (* Only informative where the driver is validating a launch geometry we chose. *)
-        | "CUDA_ERROR_INVALID_VALUE"
-          when Schedule_outcome.equal_phase phase Schedule_outcome.Launch ->
+        | "CUDA_ERROR_INVALID_VALUE" when Schedule_outcome.equal_phase phase Schedule_outcome.Launch
+          ->
             reject ~stage ~severity:Schedule_outcome.Expected
               ~execution_effect:Schedule_outcome.No_device_writes detail
         (* Our PTX, rejected by the driver's JIT before anything ran: a codegen bug, not the user's

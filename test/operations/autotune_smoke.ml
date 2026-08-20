@@ -129,7 +129,7 @@ let () =
         pipelined = Map.empty (module Ir.Tnode);
         zero_fringe = Set.empty (module Ir.Tnode);
         flip_candidates = [];
-    spliced_rbw = Base.Set.empty (module Ir.Tnode);
+        spliced_rbw = Base.Set.empty (module Ir.Tnode);
       }
     in
     fake
@@ -296,9 +296,7 @@ let () =
   in
   let r3, got3, got_mm3 = tune_no_search ~cache_dir:"" () in
   p "search off without a cache times nothing"
-    ((not r3.Autotune.cache_hit)
-    && r3.Autotune.candidates_timed = 0
-    && r3.Autotune.rounds_run = 0
+    ((not r3.Autotune.cache_hit) && r3.Autotune.candidates_timed = 0 && r3.Autotune.rounds_run = 0
     && List.is_empty r3.Autotune.best_schedule
     && String.equal r3.Autotune.best_label "search disabled");
   p "search off without a cache returns the correct untuned routine"
@@ -317,7 +315,9 @@ let () =
      to leave one there -- while naming the same directory explicitly replays it. *)
   let default_cache_dir = "autotune_cache" in
   let ctx = Context.auto () in
-  let _ctx, _routine = Autotune.tune ~beam_width:2 ~rounds:1 ~repeats:1 ctx tune_comp Ir.Indexing.Empty in
+  let _ctx, _routine =
+    Autotune.tune ~beam_width:2 ~rounds:1 ~repeats:1 ctx tune_comp Ir.Indexing.Empty
+  in
   let r5, _, _ = tune_no_search ~cache_dir:default_cache_dir () in
   p "search off replays the default cache directory when asked for it" r5.Autotune.cache_hit;
   let r6 = ref None in

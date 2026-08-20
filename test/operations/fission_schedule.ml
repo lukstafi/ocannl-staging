@@ -419,7 +419,9 @@ let () =
   in
   let rec writes_tn tn (llc : LL.t) =
     match llc with
-    | LL.Set { tn = t; _ } | LL.Set_dynamic { tn = t; _ } | LL.Set_from_vec { tn = t; _ }
+    | LL.Set { tn = t; _ }
+    | LL.Set_dynamic { tn = t; _ }
+    | LL.Set_from_vec { tn = t; _ }
     | LL.Zero_out t
     | LL.Tile_mma { d = t, _; _ } ->
         Tn.equal t tn
@@ -480,9 +482,7 @@ let () =
   let%op y2 = relu (z2 + bias) in
   let opt2 = capture (named "arity_relu" (Train.forward y2)) in
   p "arity: bias+relu companion stays merged in both modes"
-    (List.equal Poly.equal
-       (seg_kinds (segments ~arity_cuts:false opt2))
-       [ `Zeros; `Normal ]
+    (List.equal Poly.equal (seg_kinds (segments ~arity_cuts:false opt2)) [ `Zeros; `Normal ]
     && List.equal Poly.equal (seg_kinds (segments ~arity_cuts:true opt2)) [ `Zeros; `Normal ]);
   (* A sum-reduce target is zero-initialized, so its [Zero_out] already separates the statements:
      both modes agree. *)

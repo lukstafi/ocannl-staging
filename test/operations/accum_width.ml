@@ -1,14 +1,14 @@
 (* Accumulator-width policy (gh-ocannl-639): a reduction accumulator over narrow-float storage
-   resides at compute precision across the whole reduction nest and narrows once at the store —
-   for EVERY rendering, the plain serial fallback included — so the effective accumulation width
-   is set by the numerics policy ([Numerics.cpu_compute_prec]), never by which schedule happened
-   to place the accumulator in a register. Before gh-ocannl-639 the unscheduled lowering
-   round-tripped the accumulator through storage on every reduction step
-   ([mc[..] = single_to_bfloat16(fmaf(..., bfloat16_to_single(mc[..])))]), so a bf16 result
-   depended on whether a register-tiling schedule ran.
+   resides at compute precision across the whole reduction nest and narrows once at the store — for
+   EVERY rendering, the plain serial fallback included — so the effective accumulation width is set
+   by the numerics policy ([Numerics.cpu_compute_prec]), never by which schedule happened to place
+   the accumulator in a register. Before gh-ocannl-639 the unscheduled lowering round-tripped the
+   accumulator through storage on every reduction step ([mc[..] = single_to_bfloat16(fmaf(...,
+   bfloat16_to_single(mc[..])))]), so a bf16 result depended on whether a register-tiling schedule
+   ran.
 
-   Inputs are exact in bf16 while their PARTIAL SUMS are not: products are multiples of 15/128
-   and their mean is nonzero (~0.23), so the running sum drifts past the range where bf16's 8
+   Inputs are exact in bf16 while their PARTIAL SUMS are not: products are multiples of 15/128 and
+   their mean is nonzero (~0.23), so the running sum drifts past the range where bf16's 8
    significand bits can hold such multiples (a zero-mean b operand random-walks below 4 and every
    partial sum stays bf16-exact — the first draft of this test proved that the hard way), and
    per-k-step narrowing visibly diverges from whole-k f32 residency — the policy-off leg is the
@@ -18,8 +18,8 @@
    gives the normative result the widened kernel must match bitwise.
 
    The claims are CPU-emission claims ([comp_prec] is the identity on the GPU backends' native
-   narrow arithmetic, so their serial legs keep storage-precision accumulation); on other
-   backends they are skipped. *)
+   narrow arithmetic, so their serial legs keep storage-precision accumulation); on other backends
+   they are skipped. *)
 
 open Base
 open Ocannl
@@ -43,8 +43,8 @@ let read_generated base_name =
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
-(* The single-child chain of loops from the top of each top-level nest (tile_mma_narrow's
-   helper): used to address the reduction axis for the unroll legs. *)
+(* The single-child chain of loops from the top of each top-level nest (tile_mma_narrow's helper):
+   used to address the reduction axis for the unroll legs. *)
 let nest_paths (llc : LL.t) : Ir.Indexing.symbol list list =
   let strip stmts = List.filter stmts ~f:(function LL.Noop | LL.Comment _ -> false | _ -> true) in
   let rec path (llc : LL.t) : Ir.Indexing.symbol list =
@@ -78,19 +78,20 @@ let run ~name ?schedule (out : Tensor.t) =
   in
   let ctx = Context.auto () in
   let ctx, routine =
-    Context.compile ~lowered_transform:transform ctx (named name (Train.forward out))
+    Context.compile ~lowered_transform:transform ctx
+      (named name (Train.forward out))
       Ir.Indexing.Empty
   in
   let ctx = Context.run ctx routine in
   Context.get_values ctx out.Tensor.value
 
 let n = 64
+
 (* The operands' cells are exact in bf16 while the k-sum's partials are not: see {!Ll_test.cycle}
    for why the cycles are shaped this way, and the header above for this pair's own arithmetic
    (products are multiples of 15/128, mean ~0.23). *)
 let fa = Ll_test.cycle ~dims:[| n; n |] ~modulus:3 ~offset:1. ~stride:0.375
 let fb = Ll_test.cycle ~dims:[| n; n |] ~modulus:5 ~offset:(-1.5) ~stride:0.625
-
 let claim_parity = "bf16 naive matmul equals the once-narrowed wide-accumulation reference"
 let claim_shape = "the emitted serial k-loop narrows the accumulator once per cell, not per step"
 
@@ -137,12 +138,11 @@ let claim_mat_then_inner =
    serial result)"
 
 let claim_vec_nested =
-  "a vectorized inner reduction axis folds into the whole-nest wide accumulator (equals the \
-   serial result)"
+  "a vectorized inner reduction axis folds into the whole-nest wide accumulator (equals the serial \
+   result)"
 
 let claim_wgr_nested =
-  "a serialized nested Workgroup_reduce keeps the whole-nest accumulator (equals the serial \
-   result)"
+  "a serialized nested Workgroup_reduce keeps the whole-nest accumulator (equals the serial result)"
 
 let claim_mixed_scope =
   "a mixed-operator scope is not a reduction and keeps its per-iteration narrowing (256 +1 *1 \
@@ -242,11 +242,11 @@ let () =
      in
      p claim_merge_shape
        (Option.is_some (LL.accum_update_parts ~tn:pmrg ~idcs:[| Ll_test.fixed 0 |] mllsc)));
-    (* Both unroll representations autotune proposes over small reduction loops (annotated:
-       codegen repeats the body; materialized: the IR carries one copy per step and no loop)
-       must keep the wide accumulator — the reduction is exact in f32 and narrows at the same
-       single point, so both are bitwise equal to the serial leg; per-repetition narrowing
-       would visibly diverge on these inputs (the same discrimination as the policy-off arm). *)
+    (* Both unroll representations autotune proposes over small reduction loops (annotated: codegen
+       repeats the body; materialized: the IR carries one copy per step and no loop) must keep the
+       wide accumulator — the reduction is exact in f32 and narrows at the same single point, so
+       both are bitwise equal to the serial leg; per-repetition narrowing would visibly diverge on
+       these inputs (the same discrimination as the policy-off arm). *)
     let matmul_leg ~claim ~name ~sched =
       let ma_u = NTDSL.init ~l:(name ^ "_a") ~prec:Ir.Ops.bfloat16 ~i:[ n ] ~o:[ n ] ~f:fa () in
       let mb_u = NTDSL.init ~l:(name ^ "_b") ~prec:Ir.Ops.bfloat16 ~i:[ n ] ~o:[ n ] ~f:fb () in
@@ -259,10 +259,10 @@ let () =
       ~sched:(unroll_k ~materialize:false);
     matmul_leg ~claim:claim_unroll_mat ~name:"aw_bf16_unroll_mat"
       ~sched:(unroll_k ~materialize:true);
-    (* Partition is an index-set specialization of one reduction: its segment seams must not
-       become narrowing points, so one accumulator scope spans all the segments (unlike the naive
-       reading where each sibling segment loop would widen separately and narrow at every
-       breakpoint — visibly on these drifting sums). *)
+    (* Partition is an index-set specialization of one reduction: its segment seams must not become
+       narrowing points, so one accumulator scope spans all the segments (unlike the naive reading
+       where each sibling segment loop would widen separately and narrow at every breakpoint —
+       visibly on these drifting sums). *)
     matmul_leg ~claim:claim_partition ~name:"aw_bf16_partition" ~sched:(fun opt ->
         let k =
           match List.find_exn (nest_paths opt.LL.llc) ~f:(fun p -> List.length p = 3) with
@@ -271,9 +271,9 @@ let () =
         in
         let pt, _segment_syms = Sched.partition ~axis:k ~breakpoints:[ 16; 40 ] in
         [ pt ]);
-    (* The segment symbols Schedule.partition returns must stay usable AFTER the accumulation
-       mint wrapped the segment loops in the scope: rewrite_loop descends into Local_scope
-       bodies since gh-ocannl-639. *)
+    (* The segment symbols Schedule.partition returns must stay usable AFTER the accumulation mint
+       wrapped the segment loops in the scope: rewrite_loop descends into Local_scope bodies since
+       gh-ocannl-639. *)
     matmul_leg ~claim:claim_partition_compose ~name:"aw_bf16_partition_compose" ~sched:(fun opt ->
         let k =
           match List.find_exn (nest_paths opt.LL.llc) ~f:(fun p -> List.length p = 3) with
@@ -325,24 +325,23 @@ let () =
           Sched.Unroll { axis = r; materialize = false };
           Sched.Unroll { axis = s; materialize = false };
         ]);
-    (* Sequential materialization of both axes: the second unroll must recognize the scope form
-       the first one minted and reuse its accumulator — the outer loop is gone afterwards, so
-       codegen's scope-base hoist could not recover a per-outer-iteration narrowing. *)
+    (* Sequential materialization of both axes: the second unroll must recognize the scope form the
+       first one minted and reuse its accumulator — the outer loop is gone afterwards, so codegen's
+       scope-base hoist could not recover a per-outer-iteration narrowing. *)
     leg2 ~claim:claim_2ax_both_mat ~name:"aw2_unroll_both_mat" ~sched:(fun ~r ~s ->
         [
           Sched.Unroll { axis = s; materialize = true };
           Sched.Unroll { axis = r; materialize = true };
         ]);
-    (* Pad puts an [If (s < 6)] index guard on the leaf, then the materializing unroll must peel
-       it into the scope: without that, the unroll would emit guarded per-copy Sets with no loop
-       left, and every copy would narrow through storage. *)
+    (* Pad puts an [If (s < 6)] index guard on the leaf, then the materializing unroll must peel it
+       into the scope: without that, the unroll would emit guarded per-copy Sets with no loop left,
+       and every copy would narrow through storage. *)
     leg2 ~claim:claim_2ax_pad_mat ~name:"aw2_unroll_pad_mat" ~sched:(fun ~r:_ ~s ->
         [
-          Sched.Pad { axis = s; to_multiple_of = 4 };
-          Sched.Unroll { axis = s; materialize = true };
+          Sched.Pad { axis = s; to_multiple_of = 4 }; Sched.Unroll { axis = s; materialize = true };
         ]);
-    (* After an outer materializing unroll, the copied inner s loops live inside the scope and
-       keep their symbol: a later op targeting s must reach all of them. *)
+    (* After an outer materializing unroll, the copied inner s loops live inside the scope and keep
+       their symbol: a later op targeting s must reach all of them. *)
     leg2 ~claim:claim_mat_then_inner ~name:"aw2_mat_then_inner" ~sched:(fun ~r ~s ->
         [
           Sched.Unroll { axis = r; materialize = true };
@@ -376,8 +375,8 @@ let () =
     in
     p claim_vec_nested (vecn_fired && Array.for_all2_exn got_vnv got_vn ~f:Float.equal);
     (* A hardware-annotated inner reduction axis the backend serializes (cc binds no workgroup
-       dimension) is a serial level to the peel, so the whole nest keeps one accumulator instead
-       of narrowing once per outer iteration. The [=+]-into-pre-zeroed form again: the einsum
+       dimension) is a serial level to the peel, so the whole nest keeps one accumulator instead of
+       narrowing once per outer iteration. The [=+]-into-pre-zeroed form again: the einsum
        lowering's whole-node init nest fails [validate_parallel] under a hardware annotation. *)
     let run_sum2 ~name ?schedule () =
       let xw = NTDSL.init ~l:(name ^ "_x") ~prec:Ir.Ops.bfloat16 ~o:[ ni; nr; ns ] ~f:fx () in
@@ -398,14 +397,15 @@ let () =
     let got_wnn =
       run_sum2 ~name:"aw2_wgr_hw"
         ~schedule:
-          (two_axis_sched ~f:(fun ~r:_ ~s -> [ Sched.Retype { axis = s; ty = LL.Workgroup_reduce } ]))
+          (two_axis_sched ~f:(fun ~r:_ ~s ->
+               [ Sched.Retype { axis = s; ty = LL.Workgroup_reduce } ]))
         ()
     in
     p claim_wgr_nested (Array.for_all2_exn got_wnn got_wn ~f:Float.equal);
     (* === adjacent accumulations: two SOURCE assignments into one cell are two stores, and each
        store narrows — they must NOT share an accumulator residency (that is the provenance
-       boundary: only unrolled copies of one assignment may). 256 + 1 rounds to 256 at bf16
-       twice over; a rewrite merging the pair would produce 258. *)
+       boundary: only unrolled copies of one assignment may). 256 + 1 rounds to 256 at bf16 twice
+       over; a rewrite merging the pair would produce 258. *)
     let s_acc = NTDSL.init ~l:"aw_s" ~prec:Ir.Ops.bfloat16 ~o:[ 1 ] ~f:(fun _ -> 256.0) () in
     let ax1 = NTDSL.init ~l:"aw_ax1" ~prec:Ir.Ops.bfloat16 ~o:[ 1 ] ~f:(fun _ -> 1.0) () in
     let ax2 = NTDSL.init ~l:"aw_ax2" ~prec:Ir.Ops.bfloat16 ~o:[ 1 ] ~f:(fun _ -> 1.0) () in
@@ -432,7 +432,8 @@ let () =
     let iprec = Ir.Ops.index_prec () in
     let guard = LL.Binop (Ir.Ops.Cmplt, (Ll_test.embed gi, iprec), (LL.Constant 5.0, iprec)) in
     let upd =
-      Ll_test.set gacc [| Ll_test.fixed 0 |]
+      Ll_test.set gacc
+        [| Ll_test.fixed 0 |]
         (LL.Binop
            ( Ir.Ops.Add,
              (Ll_test.get gacc [| Ll_test.fixed 0 |], bf16),
@@ -493,8 +494,7 @@ let () =
             ( LL.Set_local
                 (mid, LL.Binop (Ir.Ops.Add, (LL.Get_local mid, bf16), (LL.Constant 1.0, bf16))),
               LL.Set_local
-                (mid, LL.Binop (Ir.Ops.Mul, (LL.Get_local mid, bf16), (LL.Constant 1.0, bf16))) )
-        )
+                (mid, LL.Binop (Ir.Ops.Mul, (LL.Get_local mid, bf16), (LL.Constant 1.0, bf16))) ) )
     in
     let mix_llc =
       Ll_test.loop_n mi 2
@@ -509,9 +509,7 @@ let () =
            })
     in
     let mo = Ll_test.optimize ~materialized:[ macc ] ~name:"aw_mixed" mix_llc in
-    let mvals =
-      Ll_test.execute ~name:"aw_mixed" mo ~seed:[ (macc, [| 256.0 |]) ] ~read:[ macc ]
-    in
+    let mvals = Ll_test.execute ~name:"aw_mixed" mo ~seed:[ (macc, [| 256.0 |]) ] ~read:[ macc ] in
     p claim_mixed_scope (Float.equal (List.hd_exn mvals).(0) 256.0);
     (* === Workgroup_reduce serialized on cc: retyping the reduction axis to a hardware kind the
        backend cannot bind must not change the accumulator width relative to the Serial spelling.
@@ -544,9 +542,7 @@ let () =
     in
     let got_w = run_sum ~cols:16 ~name:"aw_wgr_serial" () in
     let got_wg =
-      run_sum ~cols:16 ~name:"aw_wgr_hw"
-        ~schedule:(retype_reduction LL.Workgroup_reduce)
-        ()
+      run_sum ~cols:16 ~name:"aw_wgr_hw" ~schedule:(retype_reduction LL.Workgroup_reduce) ()
     in
     p claim_wgreduce (Array.for_all2_exn got_wg got_w ~f:Float.equal);
     (* === the SIMD reduction's scalar remainder === *)
@@ -565,10 +561,10 @@ let () =
       | None -> false
     in
     p claim_simd_tail (vec_fired && Array.for_all2_exn got_vt got_v ~f:Float.equal);
-    (* Negative control: turning the policy off recovers the pre-gh-517/pre-gh-639 semantics —
-       every operator, the accumulation update included, rounds to storage precision — which on
-       these inputs must visibly differ from the widened default, proving the inputs discriminate
-       the accumulator width. *)
+    (* Negative control: turning the policy off recovers the pre-gh-517/pre-gh-639 semantics — every
+       operator, the accumulation update included, rounds to storage precision — which on these
+       inputs must visibly differ from the widened default, proving the inputs discriminate the
+       accumulator width. *)
     let saved_policy = Numerics.get () in
     Numerics.set_policy { saved_policy with narrow_compute_f32 = false };
     let ma2 = NTDSL.init ~l:"ma2" ~prec:Ir.Ops.bfloat16 ~i:[ n ] ~o:[ n ] ~f:fa () in

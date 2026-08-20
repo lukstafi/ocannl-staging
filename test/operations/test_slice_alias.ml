@@ -97,8 +97,7 @@ let () =
 
   (* --- AC1: the alias view owns no buffer; the parent does. --- *)
   Verdict.p "slice is an alias view" (Ir.Tnode.is_alias bv.value);
-  Verdict.p "slice absent from ctx_buffers (no fresh alloc)"
-    (not (Context.mem ctx bv.value));
+  Verdict.p "slice absent from ctx_buffers (no fresh alloc)" (not (Context.mem ctx bv.value));
   Verdict.p "parent present in ctx_buffers" (Context.mem ctx images.value);
 
   (* --- AC2 read-through: the slice reads the parent row selected by the runtime batch index.
@@ -207,8 +206,7 @@ let () =
   let%op fresh_s = freshp @| fresh_n in
   let fresh_ctx = Context.auto () in
   Verdict.p "fresh slice marked is_slice before lowering" (Ir.Tnode.is_slice fresh_s.value);
-  Verdict.p "fresh slice has no alias_of yet (pre-lowering)"
-    (not (Ir.Tnode.is_alias fresh_s.value));
+  Verdict.p "fresh slice has no alias_of yet (pre-lowering)" (not (Ir.Tnode.is_alias fresh_s.value));
   let fresh_set_raises =
     try
       ignore (Context.set_values fresh_ctx fresh_s.value [| 0.; 0.; 0. |] : Context.t);

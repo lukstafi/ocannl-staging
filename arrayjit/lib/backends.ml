@@ -332,12 +332,12 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
     in
     let mode = Option.map tn.Tn.memory_mode_intent ~f:fst in
     Backend.alloc_pool ?mode device ~pool_id ~size_in_bytes ~alignment:(Ops.prec_in_bytes prec);
-    (* gh-ocannl-550: the OTHER shared allocation site — a [from_host] or [copy] whose destination node
-       is not in the context yet allocates here, not through [allocate_delta]. Its slabs go into the
-       same backend pool tables and are freed by the same context [finalize], so leaving them
-       uncounted made the census silently underreport in data-loading and context-copy workflows. Not
-       working-vs-constant: this path is a working buffer by construction (a host transfer's
-       destination). *)
+    (* gh-ocannl-550: the OTHER shared allocation site — a [from_host] or [copy] whose destination
+       node is not in the context yet allocates here, not through [allocate_delta]. Its slabs go
+       into the same backend pool tables and are freed by the same context [finalize], so leaving
+       them uncounted made the census silently underreport in data-loading and context-copy
+       workflows. Not working-vs-constant: this path is a working buffer by construction (a host
+       transfer's destination). *)
     Alloc_census.record_pool ~device_id:device.device_id ~pool_id ~constant:false ~size_in_bytes;
     if zero_init then Backend.memset_zero device ~pool_id ~offset:0 ~size_in_bytes;
     { pool_id; offset = 0 }
@@ -382,8 +382,9 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
   (* gh-ocannl-550: [allocate] roots a pool in the backend table, and the transfer that follows adds
      its location to the context only on success — so a failing upload leaves a pool no context can
      ever reach, and therefore no [Context.release] can reclaim. Frees the one pool this operation
-     minted; unlike [allocate_delta]'s unwind there is no constant-cache involvement here (a transfer
-     destination is a working buffer by construction), so this needs nothing beyond the free. *)
+     minted; unlike [allocate_delta]'s unwind there is no constant-cache involvement here (a
+     transfer destination is a working buffer by construction), so this needs nothing beyond the
+     free. *)
   let with_transfer_pool device (loc : Backend_intf.buffer_loc) ~f =
     match f () with
     | result -> result
@@ -885,11 +886,11 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
           (Either.Second { batch; count = List.length segments }, lowered)
     in
     (* Placements of all context nodes are settled by codegen (the [compile] just above), so this
-       query resolves against the code's own lineage fork. The raw assignments over-approximate
-       what the RESIDUAL schedule needs — a deferral-only routine reads nothing at run time, so
-       linking it on a fresh context must not demand its deferred computations' leaves
-       (gh-ocannl-611, review round 3). The reconciled traced store is exactly the final
-       schedule's node registry, so it is the filter. *)
+       query resolves against the code's own lineage fork. The raw assignments over-approximate what
+       the RESIDUAL schedule needs — a deferral-only routine reads nothing at run time, so linking
+       it on a fresh context must not demand its deferred computations' leaves (gh-ocannl-611,
+       review round 3). The reconciled traced store is exactly the final schedule's node registry,
+       so it is the filter. *)
     let from_prior_context : Tn.t_set =
       let raw =
         Set.diff
@@ -897,29 +898,29 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
           comp.embedded_nodes
         |> Set.filter ~f:(Hashtbl.mem lowered.Low_level.traced_store)
       in
-      (* Splicing reconciles in the OTHER direction too (round 5): leaves reaching the routine
-         only through an inlined cross-routine computation are absent from the raw assignments,
-         yet their entry values are required — without them, [verify_prior_context] would accept
-         a context where [allocate_delta] zero-fills the spliced inputs and the consumer
-         silently computes with zeros. The reconciled interface's inputs are exactly the
-         entry-value-matters nodes. Two deliberate bounds on the union: only inputs the raw
-         assignments never MENTION are added — a mentioned node's prior-context status is
-         already curated by [context_nodes]' exclusions (the random-seed and threefry nodes of
-         init comps are mentioned yet deliberately not demanded) — and only for a routine
-         CARRYING an assignments program, since [from_prior_context] is an assignments-layer
-         promise: a hand-built [?prelowered] routine (empty comp) supplies its inputs through
-         the context API after linking (the ll_test seed-then-run pattern). *)
+      (* Splicing reconciles in the OTHER direction too (round 5): leaves reaching the routine only
+         through an inlined cross-routine computation are absent from the raw assignments, yet their
+         entry values are required — without them, [verify_prior_context] would accept a context
+         where [allocate_delta] zero-fills the spliced inputs and the consumer silently computes
+         with zeros. The reconciled interface's inputs are exactly the entry-value-matters nodes.
+         Two deliberate bounds on the union: only inputs the raw assignments never MENTION are added
+         — a mentioned node's prior-context status is already curated by [context_nodes]' exclusions
+         (the random-seed and threefry nodes of init comps are mentioned yet deliberately not
+         demanded) — and only for a routine CARRYING an assignments program, since
+         [from_prior_context] is an assignments-layer promise: a hand-built [?prelowered] routine
+         (empty comp) supplies its inputs through the context API after linking (the ll_test
+         seed-then-run pattern). *)
       match comp.asgns with
       | Assignments.Noop -> raw
       | _ ->
           let (inputs, _), _ = Low_level.input_and_output_nodes lowered in
           let reads, writes = Assignments.collect_nodes_guess_output comp.asgns in
           let mentioned = Set.union reads writes in
-          (* A RECONCILE-FLIPPED read-before-write input overrides the mention filter (round 6):
-             a comp that writes a node AFTER consuming an inherited computation reading it
-             mentions the node only as a write, yet the splice needs its entry value. The key is
-             [spliced_rbw] — flips made against the FINAL code — not the raw flag: the raw
-             analysis also marks every pure input read-before-write, and demanding those broke
+          (* A RECONCILE-FLIPPED read-before-write input overrides the mention filter (round 6): a
+             comp that writes a node AFTER consuming an inherited computation reading it mentions
+             the node only as a write, yet the splice needs its entry value. The key is
+             [spliced_rbw] — flips made against the FINAL code — not the raw flag: the raw analysis
+             also marks every pure input read-before-write, and demanding those broke
              ndarray-literal and seed-node flows across the suite. *)
           let demanded =
             Set.filter inputs ~f:(fun tn ->
@@ -1061,8 +1062,8 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
       Option.iter free_pool ~f:(fun free_pool ->
           List.dedup_and_sort !minted ~compare:Int.compare
           |> List.iter ~f:(fun pool_id ->
-                 free_pool device ~pool_id;
-                 Alloc_census.forget_pool ~device_id:device.device_id ~pool_id))
+              free_pool device ~pool_id;
+              Alloc_census.forget_pool ~device_id:device.device_id ~pool_id))
     in
     let pack ?arena ~constant (group : (Tn.t * Low_level.traced_array) list)
         ~(register : Tn.t -> alloc:(unit -> buffer_loc) -> unit) : unit =
@@ -1161,17 +1162,18 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
     let passes () =
       pack ?arena:alias_spans ~constant:false working ~register:(fun key ~alloc ->
           ctx_buffers := Map.add_exn !ctx_buffers ~key ~data:(alloc ()));
-    (* Pass 2b: constants / read-only -> per-device constant pool(s). Constants already allocated on
-       this device (a hit in [constant_buffer_cache], possibly from another context tree) resolve
-       directly and are excluded from the new slab, so the freshly-minted constant pool holds
-       exactly this device's genuinely-new constants -- no wasted holes. The remaining new constants
-       pack into one constant pool (or more, past the cap), deduped into the cache. Constant pools
-       outlive the context and are skipped by context [finalize] (freed at device teardown). *)
-    let new_constants = ref [] in
-    List.iter constants ~f:(fun (key, node) ->
-        match Hashtbl.find device.constant_buffer_cache key with
-        | Some data -> ctx_buffers := Map.add_exn !ctx_buffers ~key ~data
-        | None -> new_constants := (key, node) :: !new_constants);
+      (* Pass 2b: constants / read-only -> per-device constant pool(s). Constants already allocated
+         on this device (a hit in [constant_buffer_cache], possibly from another context tree)
+         resolve directly and are excluded from the new slab, so the freshly-minted constant pool
+         holds exactly this device's genuinely-new constants -- no wasted holes. The remaining new
+         constants pack into one constant pool (or more, past the cap), deduped into the cache.
+         Constant pools outlive the context and are skipped by context [finalize] (freed at device
+         teardown). *)
+      let new_constants = ref [] in
+      List.iter constants ~f:(fun (key, node) ->
+          match Hashtbl.find device.constant_buffer_cache key with
+          | Some data -> ctx_buffers := Map.add_exn !ctx_buffers ~key ~data
+          | None -> new_constants := (key, node) :: !new_constants);
       pack ~constant:true (List.rev !new_constants) ~register:(fun key ~alloc ->
           let data =
             Hashtbl.find_or_add device.constant_buffer_cache key ~default:(fun () ->
@@ -1193,8 +1195,8 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
   (* gh-ocannl-550: [allocate_delta] runs BEFORE the backend link, and the pool table roots whatever
      it allocated — so a link that raises (HIP's scratch-budget validator, a driver refusal, an
      aliased-read rejection) used to leave that routine's pools behind with no context through which
-     anyone could ever release them. Those are the [Backend_link] declines an autotune search absorbs,
-     so they accumulated exactly like the candidates that succeeded.
+     anyone could ever release them. Those are the [Backend_link] declines an autotune search
+     absorbs, so they accumulated exactly like the candidates that succeeded.
 
      Frees the delta of [ctx_buffers] against [context]: keyed by [pool_id] (one pool holds several
      nodes) and skipping per-device constants, i.e. the same rule the context [finalize] applies —
@@ -1204,11 +1206,12 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
        (gh-ocannl-550, round-five review): [allocate_delta] queues [Host_inits] uploads through
        [Device.from_host], so a delta being discarded after a failed link can still have writes in
        flight — and freeing the slab under them is device corruption, on a path that is otherwise a
-       contained candidate decline the search carries on from. Best-effort: the device may already be
-       refusing work, and that must not replace the link failure the caller has to classify. *)
+       contained candidate decline the search carries on from. Best-effort: the device may already
+       be refusing work, and that must not replace the link failure the caller has to classify. *)
     (try Device.await context.device with _ -> ());
     Option.iter free_pool ~f:(fun free_pool ->
-        Map.fold ctx_buffers ~init:(Set.empty (module Int))
+        Map.fold ctx_buffers
+          ~init:(Set.empty (module Int))
           ~f:(fun ~key ~data:(loc : buffer_loc) freed ->
             if
               (not (Map.mem context.ctx_buffers key))
@@ -1246,75 +1249,75 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
       allocate_delta context ~name:code.name ~alias_spans:code.alias_spans code.lowered
     in
     with_delta context ctx_buffers ~f:(fun () ->
-    (* gh-ocannl-489: a routine reading a node whose buffer an earlier routine of this lineage
-       aliased would read clobbered values -- fail at link time, before any schedule runs. Writes
-       (outputs) are allowed: the aliasing routine rewrites everything it reads on each run. This
-       code's own aliased nodes are never its inputs (aliasing-eligible nodes are not
-       read-before-write), so the check only fires on genuinely cross-routine reads. *)
-    Set.iter inputs ~f:(fun tn ->
-        Option.iter (Map.find ctx_buffers tn) ~f:(fun loc ->
-            if buffer_overlaps ctx_buffers tn loc then
-              aliased_read_error ~what:("linking " ^ code.name ^ ", input") tn));
-    let optimize_ctx = code.lowered.Low_level.optimize_ctx in
-    let bindings, schedule =
-      match code.proc with
-      | Either.First single -> link context single ctx_buffers
-      | Either.Second { batch; count } ->
-          (* Fissioned routine: every segment kernel links against the routine's one ctx_buffers
-             delta and shares the one bindings assoc; the combined task launches the segments in
-             order on the routine's stream, whose FIFO ordering supplies the grid-wide
-             synchronization at each segment boundary (the same contract consecutive routines on one
-             stream already rely on). *)
-          let bindings, tasks =
-            link_batch context batch (Array.create ~len:count (Some ctx_buffers))
-          in
-          let tasks = Array.to_list (Array.filter_opt tasks) in
-          assert (List.length tasks = count);
-          (* Device-side ordering at each segment boundary: the cut is where the kernel-internal
-             code lacks grid-wide synchronization, so the stream must provide it. Queue FIFO alone
-             is not enough on Metal — command buffers over untracked resources may overlap in
-             execution (caught by test_random_histograms). Backends that can order the batch
-             device-side more cheaply (one Metal command buffer with a serial compute pass) provide
-             [sequence_segments]; the fallback chains an event per boundary: schedule each next
-             segment to wait for all work enqueued so far. No host blocking. *)
-          let schedule =
-            match
-              sequence_segments context ~name:code.name ~bindings
-                ~uses_merge_buffer:(Option.is_some code.expected_merge_node)
-                tasks
-            with
-            | Some fused -> fused
-            | None ->
-                Task.Task
-                  {
-                    context_lifetime = tasks;
-                    description = "fissioned segments of " ^ code.name;
-                    work =
-                      (fun () ->
-                        List.iteri tasks ~f:(fun i t ->
-                            if i > 0 then will_wait_for context (all_work context.device);
-                            Task.run t));
-                  }
-          in
-          (bindings, schedule)
-    in
-    let context = make_child ~ctx_buffers ~optimize_ctx context in
-    let schedule =
-      Task.prepend schedule ~work:(fun () ->
-          check_merge_buffer context.device ~code_node:code.expected_merge_node)
-    in
-    sync_routine
-      { context; schedule; bindings; name = code.name; inputs; merge_buffer_input; outputs })
+        (* gh-ocannl-489: a routine reading a node whose buffer an earlier routine of this lineage
+           aliased would read clobbered values -- fail at link time, before any schedule runs.
+           Writes (outputs) are allowed: the aliasing routine rewrites everything it reads on each
+           run. This code's own aliased nodes are never its inputs (aliasing-eligible nodes are not
+           read-before-write), so the check only fires on genuinely cross-routine reads. *)
+        Set.iter inputs ~f:(fun tn ->
+            Option.iter (Map.find ctx_buffers tn) ~f:(fun loc ->
+                if buffer_overlaps ctx_buffers tn loc then
+                  aliased_read_error ~what:("linking " ^ code.name ^ ", input") tn));
+        let optimize_ctx = code.lowered.Low_level.optimize_ctx in
+        let bindings, schedule =
+          match code.proc with
+          | Either.First single -> link context single ctx_buffers
+          | Either.Second { batch; count } ->
+              (* Fissioned routine: every segment kernel links against the routine's one ctx_buffers
+                 delta and shares the one bindings assoc; the combined task launches the segments in
+                 order on the routine's stream, whose FIFO ordering supplies the grid-wide
+                 synchronization at each segment boundary (the same contract consecutive routines on
+                 one stream already rely on). *)
+              let bindings, tasks =
+                link_batch context batch (Array.create ~len:count (Some ctx_buffers))
+              in
+              let tasks = Array.to_list (Array.filter_opt tasks) in
+              assert (List.length tasks = count);
+              (* Device-side ordering at each segment boundary: the cut is where the kernel-internal
+                 code lacks grid-wide synchronization, so the stream must provide it. Queue FIFO
+                 alone is not enough on Metal — command buffers over untracked resources may overlap
+                 in execution (caught by test_random_histograms). Backends that can order the batch
+                 device-side more cheaply (one Metal command buffer with a serial compute pass)
+                 provide [sequence_segments]; the fallback chains an event per boundary: schedule
+                 each next segment to wait for all work enqueued so far. No host blocking. *)
+              let schedule =
+                match
+                  sequence_segments context ~name:code.name ~bindings
+                    ~uses_merge_buffer:(Option.is_some code.expected_merge_node)
+                    tasks
+                with
+                | Some fused -> fused
+                | None ->
+                    Task.Task
+                      {
+                        context_lifetime = tasks;
+                        description = "fissioned segments of " ^ code.name;
+                        work =
+                          (fun () ->
+                            List.iteri tasks ~f:(fun i t ->
+                                if i > 0 then will_wait_for context (all_work context.device);
+                                Task.run t));
+                      }
+              in
+              (bindings, schedule)
+        in
+        let context = make_child ~ctx_buffers ~optimize_ctx context in
+        let schedule =
+          Task.prepend schedule ~work:(fun () ->
+              check_merge_buffer context.device ~code_node:code.expected_merge_node)
+        in
+        sync_routine
+          { context; schedule; bindings; name = code.name; inputs; merge_buffer_input; outputs })
 
   let%debug3_sexp link_batch context code_batch =
     verify_prior_context ~plc:(get_optimize_ctx_batch code_batch).Low_level.placements
       ~ctx_arrays:context.ctx_buffers ~from_prior_context:code_batch.from_prior_context;
-    (* gh-ocannl-550: the same unwind [link] gets, extended over the whole batch. Every member's delta
-       is allocated before the backend linker runs, so a later member's allocation or the link itself
-       raising used to abandon every completed member's pools -- rooted, with no context to reach them,
-       since the member contexts are only derived in the fold below. [free_delta] is applied per member
-       and skips per-device constants exactly as the context [finalize] does, so a partial batch gives
-       back its working pools and leaves the shared constants alone. *)
+    (* gh-ocannl-550: the same unwind [link] gets, extended over the whole batch. Every member's
+       delta is allocated before the backend linker runs, so a later member's allocation or the link
+       itself raising used to abandon every completed member's pools -- rooted, with no context to
+       reach them, since the member contexts are only derived in the fold below. [free_delta] is
+       applied per member and skips per-device constants exactly as the context [finalize] does, so
+       a partial batch gives back its working pools and leaves the shared constants alone. *)
     let allocated = ref [] in
     let unwind_batch () =
       List.iter !allocated ~f:(fun cb -> try free_delta context cb with _ -> ())
@@ -1387,11 +1390,11 @@ let finalize (type dev runner event)
      that RAISES resets it (gh-ocannl-550). [Backend.await] is the realistic raiser: a device still
      reporting an asynchronous error, or a dead worker domain. Left set, every later release of this
      context would be a silent no-op and its pools would stay rooted for the process — restoring
-     exactly the unbounded growth this exists to end, and on the failure paths where it matters most,
-     since the tuner catches a failed release and carries on with the next candidate or arm. A retry
-     is safe: freeing is idempotent per [pool_id] on every backend (the table entry is gone after the
-     first success, and [Alloc_census.forget_pool] ignores an absent key), so a cleanup that got part
-     way through does not double-free on the next attempt. *)
+     exactly the unbounded growth this exists to end, and on the failure paths where it matters
+     most, since the tuner catches a failed release and carries on with the next candidate or arm. A
+     retry is safe: freeing is idempotent per [pool_id] on every backend (the table entry is gone
+     after the first success, and [Alloc_census.forget_pool] ignores an absent key), so a cleanup
+     that got part way through does not double-free on the next attempt. *)
   let cleanup () =
     Option.iter Backend.free_pool ~f:(fun free_pool ->
         Backend.await ctx.device;
@@ -1399,7 +1402,8 @@ let finalize (type dev runner event)
            same [pool_id] is reached through several keys; dedup before freeing, or the second visit
            frees an already-freed slab. [Alloc_census.forget_pool] is idempotent for the same
            reason, but the backend's [free_pool] is the one that must not run twice. *)
-        Map.fold ctx.ctx_buffers ~init:(Set.empty (module Int))
+        Map.fold ctx.ctx_buffers
+          ~init:(Set.empty (module Int))
           ~f:(fun ~key ~data:(loc : Ir.Backend_intf.buffer_loc) freed ->
             if
               (not (Option.exists ctx.parent ~f:(fun pc -> Map.mem pc.ctx_buffers key)))

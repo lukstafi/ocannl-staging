@@ -3,14 +3,14 @@
    the tensorized pipelines that previously required divisibility:
 
    - [Pad { axis; to_multiple_of }] extends each loop to the next tile multiple and guards each
-     effectful leaf statement with [If (axis < N)], so the downstream [Split]s divide cleanly.
-   - [Stage] tiles minted over the padded loops zero-fill their fringe (the [Where]-form edge
-     guards), so the micro-kernel reads the add-reduce identity where the source ends.
-   - [Tensorize] recognizes the guards: row/column masks move to the accumulator contraction's
-     transfers (0-filled init-load, [If]-guarded store-back — the "padded scratch, only the valid
-     region written out" discipline), and reduction-axis guards are discharged against the
-     zero-fringe staged operands (padded contributions are exact zeros) — so the [Tile_mma] block
-     covers the full padded extents guard-free and the intrinsic/register-tiled renderings fire.
+   effectful leaf statement with [If (axis < N)], so the downstream [Split]s divide cleanly. -
+   [Stage] tiles minted over the padded loops zero-fill their fringe (the [Where]-form edge guards),
+   so the micro-kernel reads the add-reduce identity where the source ends. - [Tensorize] recognizes
+   the guards: row/column masks move to the accumulator contraction's transfers (0-filled init-load,
+   [If]-guarded store-back — the "padded scratch, only the valid region written out" discipline),
+   and reduction-axis guards are discharged against the zero-fringe staged operands (padded
+   contributions are exact zeros) — so the [Tile_mma] block covers the full padded extents
+   guard-free and the intrinsic/register-tiled renderings fire.
 
    The CPU leg is the packed GEBP composition (pad i and k; the 65-wide column panel needs no pad —
    the register tiling peels columns natively): values must match the serial twin BITWISE (per
@@ -38,15 +38,15 @@ let p = Verdict.p
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
    that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
    parity check between two zero arrays passes while covering nothing (gh-ocannl-481 item 3). Every
-   reference array is pinned nonzero where it is produced, so the parity claims below have content.
-   *)
+   reference array is pinned nonzero where it is produced, so the parity claims below have
+   content. *)
 let nonzero name (a : float array) =
   if not (Array.exists a ~f:(fun x -> Float.(x <> 0.))) then
     failwith (name ^ ": the reference is all zeros — the parity checks against it are vacuous");
   a
+
 let approx a b = Float.(abs (a - b) < 1e-2)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-
 let skipped = Verdict.skipped ~backend:backend_name
 let on_metal = String.is_substring backend_name ~substring:"metal"
 let on_cpu = String.is_substring backend_name ~substring:"cc"
@@ -104,11 +104,11 @@ let run_serial ~name (out : Tensor.t) =
 let mav = Array.init (m_ext * k_ext) ~f:(fun x -> Float.of_int (x % 13) *. 0.25)
 let mbv = Array.init (k_ext * n_ext) ~f:(fun x -> Float.of_int (x % 17) -. 8.)
 
-(* === CPU leg: padded packed GEBP (mirrors autotune's [cpu_mma_pack_sketch_schedule] with
-   [bn = 0], plus the pads). Pad i to [bm], k to [bk]; split; sink to
-   [k_o { i_o { i_i { j { k_i }}}}]; pack B~ [bk x n] at [k_o] and A~ [bm x bk] at [i_o]; tensorize
-   with a unit lane. The pad guards survive as a row mask (transfers) and a discharged reduction
-   mask; the [Tile_mma] runs 16 x 65 x 16 blocks through the register tiling. === *)
+(* === CPU leg: padded packed GEBP (mirrors autotune's [cpu_mma_pack_sketch_schedule] with [bn = 0],
+   plus the pads). Pad i to [bm], k to [bk]; split; sink to [k_o { i_o { i_i { j { k_i }}}}]; pack
+   B~ [bk x n] at [k_o] and A~ [bm x bk] at [i_o]; tensorize with a unit lane. The pad guards
+   survive as a row mask (transfers) and a discharged reduction mask; the [Tile_mma] runs 16 x 65 x
+   16 blocks through the register tiling. === *)
 let () =
   let ma = TDSL.ndarray mav ~label:[ "ma" ] ~input_dims:[ k_ext ] ~output_dims:[ m_ext ] () in
   let mb = TDSL.ndarray mbv ~label:[ "mb" ] ~input_dims:[ n_ext ] ~output_dims:[ k_ext ] () in
@@ -123,12 +123,20 @@ let () =
     let sp_k, k_o, k_i = Sched.split ~axis:k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
     let stage source tile_loops =
       Sched.Stage
-        { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = None; pad_stride = None; pipeline_depth = 1; tile_prec = None }
+        {
+          source;
+          tile_loops;
+          shared = false;
+          cooperative = None;
+          hoisted = false;
+          swizzle = None;
+          pad_stride = None;
+          pipeline_depth = 1;
+          tile_prec = None;
+        }
     in
     [ Sched.Pad { axis = i; to_multiple_of = bm }; Sched.Pad { axis = k; to_multiple_of = bk } ]
-    @ [ sp_i; sp_k ]
-    @ sink j [ k_o ]
-    @ sink i_i [ k_o ] @ sink i_o [ k_o ]
+    @ [ sp_i; sp_k ] @ sink j [ k_o ] @ sink i_i [ k_o ] @ sink i_o [ k_o ]
     @ [ stage mb.Tensor.value [ k_i; j ]; stage ma.Tensor.value [ i_i; k_i ] ]
     @ if on_cpu then [ fst (Sched.tensorize ~i:i_i ~j ~k:k_i ~simd_width:1) ] else []
   in
@@ -155,14 +163,12 @@ let () =
          store-back writes only the valid rows. *)
       p "staged tiles zero-fill their fringe and the store-back is masked"
         ((not on_cpu)
-        || (has "!= 0.0 ? " && has "(float)(0)"
-           && has (Printf.sprintf "< (int)(%d))) {" m_ext)))
+        || (has "!= 0.0 ? " && has "(float)(0)" && has (Printf.sprintf "< (int)(%d))) {" m_ext)))
 
-(* === GPU leg: padded shared cooperative composition (mirrors autotune's
-   [gpu_mma_sketch_schedule], plus the pads — including the unsplit column panel, which the
-   intrinsic n-extent needs). The masked contraction places the fragment in threadgroup memory and
-   brackets the reduction loop with barriers; the store-back writes only the valid 33 x 65
-   region. === *)
+(* === GPU leg: padded shared cooperative composition (mirrors autotune's [gpu_mma_sketch_schedule],
+   plus the pads — including the unsplit column panel, which the intrinsic n-extent needs). The
+   masked contraction places the fragment in threadgroup memory and brackets the reduction loop with
+   barriers; the store-back writes only the valid 33 x 65 region. === *)
 let () =
   if on_gpu then (
     let ma = TDSL.ndarray mav ~label:[ "gma" ] ~input_dims:[ k_ext ] ~output_dims:[ m_ext ] () in
@@ -180,7 +186,9 @@ let () =
          sides); the column loop splits into Serial x Workgroup(32) to satisfy barrier-strength
          extent uniformity with the lane loops. *)
       let sp_zi, _, _ = Sched.split ~axis:zi ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
-      let sp_zj, _, _ = Sched.split ~axis:zj ~factor:simd_width ~outer:LL.Serial ~inner:LL.Workgroup in
+      let sp_zj, _, _ =
+        Sched.split ~axis:zj ~factor:simd_width ~outer:LL.Serial ~inner:LL.Workgroup
+      in
       let sp_i, _, i_i = Sched.split ~axis:i ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
       let sp_k, k_o, k_i = Sched.split ~axis:k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
       let tz, _lane = Sched.tensorize ~i:i_i ~j ~k:k_i ~simd_width in
@@ -288,14 +296,13 @@ let () =
       List.exists gpu_seeds ~f:(fun p -> p.Autotune.sk_mma && p.Autotune.sk_bk > 0)
     in
     let unstaged_gpu =
-      List.exists gpu_seeds ~f:(fun p -> p.Autotune.sk_mma && p.Autotune.sk_gpu && p.Autotune.sk_bk = 0)
+      List.exists gpu_seeds ~f:(fun p ->
+          p.Autotune.sk_mma && p.Autotune.sk_gpu && p.Autotune.sk_bk = 0)
     in
     let packed_cpu =
       List.find cpu_seeds ~f:(fun p ->
           p.Autotune.sk_mma && p.Autotune.sk_bm = 16 && p.Autotune.sk_bk = 16
-          && (not p.Autotune.sk_hoist)
-          && (not p.Autotune.sk_grid)
-          && (not p.Autotune.sk_pack_rest)
+          && (not p.Autotune.sk_hoist) && (not p.Autotune.sk_grid) && (not p.Autotune.sk_pack_rest)
           && not p.Autotune.sk_epilogue)
     in
     seeded := Some (staged_gpu, unstaged_gpu, packed_cpu);
@@ -332,10 +339,7 @@ let () =
     let i, j, k =
       match triple (nest_paths opt.LL.llc) with [ i; j; k ] -> (i, j, k) | _ -> assert false
     in
-    [
-      Sched.Pad { axis = k; to_multiple_of = bk };
-      fst (Sched.tensorize ~i ~j ~k ~simd_width:1);
-    ]
+    [ Sched.Pad { axis = k; to_multiple_of = bk }; fst (Sched.tensorize ~i ~j ~k ~simd_width:1) ]
   in
   let transform opt = Sched.apply (unstaged_padded opt) opt in
   let rejected =

@@ -9,13 +9,13 @@
 open Base
 open Stdio
 
+module Config_key_scan = Config_key_scan
 (** Scanning OCaml sources for the config keys they read, shared by the configuration-consistency
     tests. *)
-module Config_key_scan = Config_key_scan
 
+module Dune_stanza_scan = Dune_stanza_scan
 (** Reading dune files for the stanzas that run a test executable, and whether they declare the
     shared [ocannl_config]. *)
-module Dune_stanza_scan = Dune_stanza_scan
 
 (** [concise_float ~prec v] formats [v] with [prec] decimals, normalizing exponent digits portably.
     Re-export of [Ir.Ndarray.concise_float]. *)

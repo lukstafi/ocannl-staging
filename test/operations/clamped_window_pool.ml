@@ -1,32 +1,32 @@
-(* Clamped-window lowering for padded max-family pooling (gh-ocannl-504): a padded ([=]-mode)
-   window spec whose accumulation identity is non-finite (max / tropical) demands NO margins on its
+(* Clamped-window lowering for padded max-family pooling (gh-ocannl-504): a padded ([=]-mode) window
+   spec whose accumulation identity is non-finite (max / tropical) demands NO margins on its
    operand. Shape inference skips the margin registration ([Row.solve_proj_equations]'s
-   [clamp_padded]), and the assignments lowering clamps the window to the operand's valid range
-   with range guards — a scalar [Where] falling back to the accumulation identity on gathered
-   reads, a statement [If] on a scatter's write target — so an out-of-range window position
-   contributes the identity, which is the same as not visiting it.
+   [clamp_padded]), and the assignments lowering clamps the window to the operand's valid range with
+   range guards — a scalar [Where] falling back to the accumulation identity on gathered reads, a
+   statement [If] on a scatter's write target — so an out-of-range window position contributes the
+   identity, which is the same as not visiting it.
 
    Pinned here:
 
    - The operand and result of a padded max-pool stay unpadded; executed values match the
-     -inf-margins semantics ("same" pooling), on an all-negative input that would expose 0-margin
-     corruption.
+   -inf-margins semantics ("same" pooling), on an all-negative input that would expose 0-margin
+   corruption.
 
    - The clamp guards are [Sched.partition_breakpoints] flip points (the guards mention the window
-     symbol, exercising the interval-offset extension): partitioning the output loop at them gives
-     guard-free interior segments with specialized boundary segments, matching the unpartitioned
-     reference (executed parity).
+   symbol, exercising the interval-offset extension): partitioning the output loop at them gives
+   guard-free interior segments with specialized boundary segments, matching the unpartitioned
+   reference (executed parity).
 
    - Backward: the argmax scatter transposes the clamp — guarded writes ([If]) — and gradients are
-     correct.
+   correct.
 
    - Inception-style sharing: one tensor feeding both a padded 0-neutral conv (which commits
-     0-margins on the shared buffer) and a padded max-pool reading it clamped, never seeing the
-     0-margins. Previously rejected ("Conflicting padding neutral elements") with a
-     materialized-copy remedy.
+   0-margins on the shared buffer) and a padded max-pool reading it clamped, never seeing the
+   0-margins. Previously rejected ("Conflicting padding neutral elements") with a materialized-copy
+   remedy.
 
    - The neutral-element gate: a padded add-family window spec ([+++], neutral 0) still demands
-     margins — physical halos remain the add-family mechanism. *)
+   margins — physical halos remain the add-family mechanism. *)
 
 open Base
 open Ocannl
@@ -138,8 +138,8 @@ let fa a = String.concat ~sep:" " (Array.to_list a |> List.map ~f:(fun v -> Prin
 let () =
   Tensor.unsafe_reinitialize ();
 
-  (* === 1: Clamped padded max-pool, 1-D: N=8, stride 2, window 5 (left margin 2, right 3).
-     Windows clip at both ends: y_o = max x[2o-2 .. 2o+2]. === *)
+  (* === 1: Clamped padded max-pool, 1-D: N=8, stride 2, window 5 (left margin 2, right 3). Windows
+     clip at both ends: y_o = max x[2o-2 .. 2o+2]. === *)
   let xv = Array.init 8 ~f:(fun i -> Float.of_int i -. 16.) in
   let make_pool () =
     let x = TDSL.ndarray xv ~label:[ "cw_x" ] ~output_dims:[ 8 ] () in
@@ -166,8 +166,7 @@ let () =
         opt)
   in
   pr "clamped pool = [%s]\n" (fa want);
-  p "clamped values match the -inf-margins semantics"
-    (close want [| -14.; -12.; -10.; -9. |]);
+  p "clamped values match the -inf-margins semantics" (close want [| -14.; -12.; -10.; -9. |]);
   p "operand stays unpadded"
     (match Lazy.force x.Tensor.value.Ir.Tnode.padding with None -> true | Some _ -> false);
   p "result stays unpadded"
@@ -225,16 +224,15 @@ let () =
   let ctx = Context.run ctx routine in
   let bxg = Context.get_values ctx (Option.value_exn ~here:[%here] bx.Tensor.diff).grad in
   pr "pool input gradient = [%s]\n" (fa bxg);
-  p "gradient lands on each clipped window's argmax"
-    (close bxg [| 1.; 0.; 1.; 0.; 1.; 0. |]);
+  p "gradient lands on each clipped window's argmax" (close bxg [| 1.; 0.; 1.; 0.; 1.; 0. |]);
   (let ifs, _, _ = !bwd_census in
    p "backward scatter writes are If-guarded" (ifs > 0));
   p "differentiable operand stays unpadded"
     (match Lazy.force bx.Tensor.value.Ir.Tnode.padding with None -> true | Some _ -> false);
 
-  (* === 4: Inception-style sharing — a padded 0-neutral conv commits margins on the shared
-     operand; the padded max-pool reads the same buffer clamped and never sees the 0-margins
-     (all-negative input: a 0-margin max would surface as 0s / wrong edge maxima). === *)
+  (* === 4: Inception-style sharing — a padded 0-neutral conv commits margins on the shared operand;
+     the padded max-pool reads the same buffer clamped and never sees the 0-margins (all-negative
+     input: a 0-margin max would surface as 0s / wrong edge maxima). === *)
   Tensor.unsafe_reinitialize ();
   let%op sx = TDSL.range_of_shape ~output_dims:[ 8 ] () - 16. in
   (* Created (and compiled) first: [conv_out] embeds [sx]'s computation. *)
@@ -257,8 +255,7 @@ let () =
   pr "shared pooled = [%s]\n" (fa pv);
   pr "shared conv = [%s]\n" (fa cv);
   p "pool never reads the 0-margins" (close pv [| -15.; -13.; -11.; -9. |]);
-  p "conv sums with 0-margins"
-    (close cv [| -31.; -45.; -42.; -39.; -36.; -33.; -30.; -19. |]);
+  p "conv sums with 0-margins" (close cv [| -31.; -45.; -42.; -39.; -36.; -33.; -30.; -19. |]);
 
   (* === 5: The gate is the accumulation identity — a padded add-family window ([+++], neutral 0)
      still demands margins (the physical-halo mechanism). === *)

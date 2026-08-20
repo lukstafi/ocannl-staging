@@ -3,9 +3,9 @@
    The `ocannl_config` next to this test is the "exhaustive config file" scenario: it picks the
    `reproducible` profile AND states three settings explicitly, two of them keys that payload also
    sets. The dune rules run this executable four times -- with no argument, with a
-   commandline-picked profile, with an environment-picked one, and with a commandline-picked
-   profile plus one explicitly overridden key -- so the four .expected files are the precedence
-   claims of the issue, checked against what the library actually resolves. *)
+   commandline-picked profile, with an environment-picked one, and with a commandline-picked profile
+   plus one explicitly overridden key -- so the four .expected files are the precedence claims of
+   the issue, checked against what the library actually resolves. *)
 
 open Base
 open Stdio
@@ -28,14 +28,14 @@ let keys =
     ("virtualize_max_visits", "1");
   ]
 
-(* `no_config_file` is consulted during [Utils]'s own initialization, before this executable
-   reaches [main], and would discard the ocannl_config the whole test rests on. Nothing here can
-   PREVENT that -- but detecting it is enough, since a rule that exits nonzero writes no golden,
-   and detection is one list entry where clearing it in dune would be a `setenv` per rule
-   (Codex P2 on PR #291; two spellings x six rules before gh-ocannl-652 dropped the lowercase one,
-   four before gh-ocannl-605 dropped the dash-prefixed ones). The startup chatter keys (`suppress_welcome_message`,
-   `log_config_sourcing`) need no guard: that output goes to stderr (gh-ocannl-581) and the rules
-   capture stdout only. *)
+(* `no_config_file` is consulted during [Utils]'s own initialization, before this executable reaches
+   [main], and would discard the ocannl_config the whole test rests on. Nothing here can PREVENT
+   that -- but detecting it is enough, since a rule that exits nonzero writes no golden, and
+   detection is one list entry where clearing it in dune would be a `setenv` per rule (Codex P2 on
+   PR #291; two spellings x six rules before gh-ocannl-652 dropped the lowercase one, four before
+   gh-ocannl-605 dropped the dash-prefixed ones). The startup chatter keys
+   (`suppress_welcome_message`, `log_config_sourcing`) need no guard: that output goes to stderr
+   (gh-ocannl-581) and the rules capture stdout only. *)
 let guarded_keys = List.map keys ~f:fst @ [ "no_config_file" ]
 
 let () =

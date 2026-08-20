@@ -61,12 +61,13 @@ let p = Verdict.p
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
    that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
    parity check between two zero arrays passes while covering nothing (gh-ocannl-481 item 3). Every
-   reference array is pinned nonzero where it is produced, so the parity claims below have content.
-   *)
+   reference array is pinned nonzero where it is produced, so the parity claims below have
+   content. *)
 let nonzero name (a : float array) =
   if not (Array.exists a ~f:(fun x -> Float.(x <> 0.))) then
     failwith (name ^ ": the reference is all zeros — the parity checks against it are vacuous");
   a
+
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_cpu = String.is_substring backend_name ~substring:"cc"
 
@@ -115,7 +116,17 @@ let composed_schedule ~a ~b (opt : LL.optimized) : Sched.schedule =
   let sp_k, k_o, k_i = Sched.split ~axis:k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
   let stage source tile_loops =
     Sched.Stage
-      { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = None; pad_stride = None; pipeline_depth = 1; tile_prec = None }
+      {
+        source;
+        tile_loops;
+        shared = false;
+        cooperative = None;
+        hoisted = false;
+        swizzle = None;
+        pad_stride = None;
+        pipeline_depth = 1;
+        tile_prec = None;
+      }
   in
   [ sp_i; sp_k ]
   (* i_o i_i j k_o k_i -> k_o i_o i_i j k_i (B~ packs at k_o, outside the row blocks). *)
@@ -260,7 +271,17 @@ let () =
     let sp_k, k_o, k_i = Sched.split ~axis:k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
     let stage source tile_loops =
       Sched.Stage
-        { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = None; pad_stride = None; pipeline_depth = 1; tile_prec = None }
+        {
+          source;
+          tile_loops;
+          shared = false;
+          cooperative = None;
+          hoisted = false;
+          swizzle = None;
+          pad_stride = None;
+          pipeline_depth = 1;
+          tile_prec = None;
+        }
     in
     let tz, _lane = Sched.tensorize ~i:i_i ~j ~k:k_i ~simd_width:1 in
     [ ez; sp_zi; sp_i; sp_k ] @ sink j [ k_o ] @ sink i_i [ k_o ] @ sink i_o [ k_o ]

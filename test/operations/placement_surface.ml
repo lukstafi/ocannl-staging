@@ -2,17 +2,17 @@
    partial-vector floor.
 
    The matmul reads a policy-virtual operand ([mbs], a pointwise scale of [mb]) and its result
-   ([mc]) inlines into the relu consumer, so the default-placement lowering carries no
-   recognizable matmul site at all — the site exists only in the all-materialized specialization
-   of the decision surface, reading [mbs] into [mc]. With synthetic GPU limits advertising an
-   (f32, f32, f32) mma format tile (classification is a pure function of the lowerings, so no GPU
-   is needed — the sketch_family_tree harness), the enablement prior must promote exactly the
-   site's flip candidates: materializing them is what makes the tensorized family expressible.
+   ([mc]) inlines into the relu consumer, so the default-placement lowering carries no recognizable
+   matmul site at all — the site exists only in the all-materialized specialization of the decision
+   surface, reading [mbs] into [mc]. With synthetic GPU limits advertising an (f32, f32, f32) mma
+   format tile (classification is a pure function of the lowerings, so no GPU is needed — the
+   sketch_family_tree harness), the enablement prior must promote exactly the site's flip
+   candidates: materializing them is what makes the tensorized family expressible.
 
    The decoy [us] (a pointwise scale read with a 32-fold per-cell multiplicity by a broadcast
    consumer) carries a larger recompute-cost bound than the site candidates — the gh-558 shape,
-   where cost ordering buries the family-unlocking flips below a candidate that unlocks nothing
-   and enablement ordering does not.
+   where cost ordering buries the family-unlocking flips below a candidate that unlocks nothing and
+   enablement ordering does not.
 
    The floor closure is asserted monotone in the committed materializations, under the envelope
    constants pinned by the rule's command line (cc carries none of its own).
@@ -67,7 +67,7 @@ let () =
   (* The decoy half: us is policy-virtual, read broadcast by every row of w. *)
   let%op us = u *. 2.0 in
   let%op d2 = w +* "ij; j => ij" us in
-  let%op total = (t2 ++ "ij => 0") + (d2 ++ "ij => 0") in
+  let%op total = t2 ++ "ij => 0" + (d2 ++ "ij => 0") in
   let comp = named "ps" (Train.forward total) in
   let ctx = Context.auto () in
   let base = Context.lowered_for_decisions ctx comp Ir.Indexing.Empty in
@@ -89,9 +89,7 @@ let () =
   p "it does not contain the decoy us" (not (mem enablement us));
   p "no site is eligible under default placements (empty disablement)" (Set.is_empty disablement);
   let show ordering =
-    let ranked =
-      Autotune.rank_flip_candidates ~ordering ~enablement ~disablement candidates
-    in
+    let ranked = Autotune.rank_flip_candidates ~ordering ~enablement ~disablement candidates in
     List.iter ranked ~f:(fun fc ->
         Stdio.printf "  %-11s %-12s cost %-5d%s\n"
           (match fc.LL.fc_flip with `Materialize -> "materialize" | `Inline -> "inline")
@@ -108,15 +106,14 @@ let () =
     (match by_cost with fc :: _ -> not (is_en fc) | [] -> false);
   p "enablement ranking puts the family-unlocking materialize flip first"
     (match by_enablement with
-    | fc :: _ -> is_en fc && (match fc.LL.fc_flip with `Materialize -> true | `Inline -> false)
+    | fc :: _ -> ( is_en fc && match fc.LL.fc_flip with `Materialize -> true | `Inline -> false)
     | [] -> false);
   p "enablement ranking puts the family-breaking inline flip last"
     (match List.last by_enablement with
-    | Some fc ->
-        is_en fc && (match fc.LL.fc_flip with `Inline -> true | `Materialize -> false)
+    | Some fc -> ( is_en fc && match fc.LL.fc_flip with `Inline -> true | `Materialize -> false)
     | None -> false);
-  (* The floor closure, under the rule's pinned envelope: monotone in the commitments, and
-     strictly above the empty commitment once the site nodes' traffic is certain. *)
+  (* The floor closure, under the rule's pinned envelope: monotone in the commitments, and strictly
+     above the empty commitment once the site nodes' traffic is certain. *)
   let surface = Autotune.placement_surface ~ordering:`Enablement ctx comp Ir.Indexing.Empty in
   let f0 = surface.Autotune.ps_floor_ms ~materialized:[] in
   let f1 = surface.Autotune.ps_floor_ms ~materialized:[ mbs.Tensor.value ] in

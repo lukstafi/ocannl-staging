@@ -12,8 +12,8 @@
 open! Base
 open Ocannl
 
-(* Failures go through [Verdict], so that a regression exits nonzero instead of being
-   `dune promote`d into the golden as the expected output (gh-ocannl-601). *)
+(* Failures go through [Verdict], so that a regression exits nonzero instead of being `dune
+   promote`d into the golden as the expected output (gh-ocannl-601). *)
 let fail fmt = Printf.ksprintf Verdict.fail fmt
 
 let dummy_origin : Row.constraint_origin list =
@@ -67,8 +67,7 @@ let test_parser_places_leading_in_beg_dims () =
       match row_has_structure row ~expected_beg:[ 3 ] ~expected_trailing:[ 7 ] with
       | Ok () -> Stdio.printf "  PASS\n"
       | Error msg -> fail "%s" msg)
-  | Row.Broadcastable ->
-      fail "bcast should be Row_var (named row var rho), got Broadcastable"
+  | Row.Broadcastable -> fail "bcast should be Row_var (named row var rho), got Broadcastable"
 
 (* Test 2: spec-driven outer-left mismatch raises Shape_error. Build two rows from specs that share
    the same row variable but disagree on the outer-left leading axis. After unification, the
@@ -138,8 +137,7 @@ let test_spec_substitution_preserves_leading () =
   | Ok () -> (
       match result.bcast with
       | Row.Broadcastable -> Stdio.printf "  PASS\n"
-      | Row.Row_var _ ->
-          fail "expected Broadcastable after substitution, got Row_var")
+      | Row.Row_var _ -> fail "expected Broadcastable after substitution, got Row_var")
   | Error msg -> fail "%s" msg
 
 let () =

@@ -2,12 +2,12 @@ open Base
 module Nd = Ir.Ndarray
 module Ops = Ir.Ops
 
-(* One temp file PER test, not one shared path: each mapped read below leaves a live mapping of
-   the file, and Windows refuses to truncate a file some section still maps (the section pins the
-   file's size), so reusing the path would fail the next test's [open_out_bin] there with
-   EINVAL (gh-ocannl-588). Deleting the file under a live mapping is fine on every platform --
-   modern Windows uses POSIX delete semantics, the same fact that lets a checkpoint save rename
-   over a mapped file -- so each test removes its own file while its mapping is still alive. *)
+(* One temp file PER test, not one shared path: each mapped read below leaves a live mapping of the
+   file, and Windows refuses to truncate a file some section still maps (the section pins the file's
+   size), so reusing the path would fail the next test's [open_out_bin] there with EINVAL
+   (gh-ocannl-588). Deleting the file under a live mapping is fine on every platform -- modern
+   Windows uses POSIX delete semantics, the same fact that lets a checkpoint save rename over a
+   mapped file -- so each test removes its own file while its mapping is still alive. *)
 let fresh_tmp_file () = Stdlib.Filename.temp_file "ndarray_binary_io_test" ".bin"
 
 let test_round_trip_prec prec_name prec init_f =

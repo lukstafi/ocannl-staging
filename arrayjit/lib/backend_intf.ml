@@ -97,10 +97,10 @@ type mma_capability = {
       (** Software-pipelining depths beyond the unpipelined 1 that autotune's {e staged} mma/conv
           sketches propose as twins of each staged seed ([Schedule.Stage ~pipeline_depth],
           gh-ocannl-487) — a list, not a flag, so the search has a dimension. The portable
-          double-buffered rendering is backend-generic, but a depth is advertised only where the
-          arm has been validated on hardware: Metal ([[2]], phase 1, portable form) and CUDA
-          ([[2]] on sm_80+, phase 2, the [cp.async] arm); HIP stays empty until its LDS async-copy
-          arm lands. Empty on CPU backends (cooperative staging is not renderable there). *)
+          double-buffered rendering is backend-generic, but a depth is advertised only where the arm
+          has been validated on hardware: Metal ([[2]], phase 1, portable form) and CUDA ([[2]] on
+          sm_80+, phase 2, the [cp.async] arm); HIP stays empty until its LDS async-copy arm lands.
+          Empty on CPU backends (cooperative staging is not renderable there). *)
 }
 [@@deriving sexp, compare, equal]
 (** Tensor-core capability descriptor (docs/proposals/tensorize-mma.md §6). Which operand precisions
@@ -131,37 +131,37 @@ type hardware_limits = {
           or cheap device queries — the model ranks candidate schedules, it does not predict
           runtimes. Never gates compilation and never overrides a measured timing; [None] when the
           backend offers no estimate. Known single-precision bias (gh-ocannl-575): a pure-fp16
-          kernel on a {!native_fp16_arithmetic} target has twice this ceiling, so its roofline
-          flops leg over-estimates — harmless for ranking because a site's candidates all share
-          one policy-resolved compute precision (footprint widths, by contrast, are exact: they
-          come off each node's own storage precision). *)
+          kernel on a {!native_fp16_arithmetic} target has twice this ceiling, so its roofline flops
+          leg over-estimates — harmless for ranking because a site's candidates all share one
+          policy-resolved compute precision (footprint widths, by contrast, are exact: they come off
+          each node's own storage precision). *)
   peak_memory_bandwidth : float option;
       (** Advisory peak main-memory bandwidth in bytes/s, the other leg of the roofline envelope
           (gh-ocannl-491). Same contract as [peak_flops] — advisory, rough, never load-bearing for
           correctness; [None] when the backend offers no estimate — with one bias requirement
           (gh-ocannl-578): the value must be a {e class ceiling}, at least what any machine of the
-          backend's class can sustain. Streaming kernels with exact byte counts are routine now
-          (the calibration pass, packed initializations), and each one achieving more than the
-          advisory trips the gh-514 agreement warning — while under [autotune_bound_pruning] an
-          understated leg over-prunes. Overstatement only loosens an advisory bound; calibrated
-          [model_peak_*] overrides beat these wherever fidelity matters. *)
+          backend's class can sustain. Streaming kernels with exact byte counts are routine now (the
+          calibration pass, packed initializations), and each one achieving more than the advisory
+          trips the gh-514 agreement warning — while under [autotune_bound_pruning] an understated
+          leg over-prunes. Overstatement only loosens an advisory bound; calibrated [model_peak_*]
+          overrides beat these wherever fidelity matters. *)
   native_fp16_arithmetic : bool;
-      (** Whether 16-bit float arithmetic executes natively at twice f32's lane count (gh-ocannl-516:
-          ARMv8.2-FP16, AVX512-FP16). [false] covers both "no [_Float16] on this target" and the
-          middle case that matters for ranking: the type exists and computes correctly, but the
-          compiler implements it by promoting to float, so the lane count does {e not} double and
-          candidates must not be seeded as if it did. Whether the type exists at all is a separate,
-          purely textual question the emitted C answers for itself ([HAS_NATIVE_FLOAT16]); this
-          field is about throughput.
+      (** Whether 16-bit float arithmetic executes natively at twice f32's lane count
+          (gh-ocannl-516: ARMv8.2-FP16, AVX512-FP16). [false] covers both "no [_Float16] on this
+          target" and the middle case that matters for ranking: the type exists and computes
+          correctly, but the compiler implements it by promoting to float, so the lane count does
+          {e not} double and candidates must not be seeded as if it did. Whether the type exists at
+          all is a separate, purely textual question the emitted C answers for itself
+          ([HAS_NATIVE_FLOAT16]); this field is about throughput.
 
           Always [false] on the GPU backends, whose 16-bit story is their native types and
           tensor-core shapes rather than a CPU vector width. *)
   worker_pool_tag : string option;
-      (** Compact signature of the worker pool timings execute on ([w8P], [w24], ...), filled by
-          the CPU backends from the pool-uniformity policy (gh-ocannl-530). Enters the autotune
+      (** Compact signature of the worker pool timings execute on ([w8P], [w24], ...), filled by the
+          CPU backends from the pool-uniformity policy (gh-ocannl-530). Enters the autotune
           disk-cache key the way the numerics tag does: schedules crowned on one pool do not
-          transfer to another, so a policy flip or a different external pinning must re-tune
-          rather than replay. [None] (GPU backends) leaves the cache key unchanged. *)
+          transfer to another, so a policy flip or a different external pinning must re-tune rather
+          than replay. [None] (GPU backends) leaves the cache key unchanged. *)
   codegen_tag : string option;
       (** Compact signature of this backend's {e codegen} configuration: the settings the backend
           consults when rendering and compiling a kernel, which are therefore invisible to the
@@ -201,17 +201,17 @@ let simd_lane_ladder ~vector_bytes ~elt_bytes =
 let simd_lanes_for ~vector_bytes ~elt_bytes ~extent =
   simd_lane_ladder ~vector_bytes ~elt_bytes
   |> List.filter ~f:(fun lanes -> extent >= lanes)
-  (* Loop trips: [extent / lanes] vector steps plus [extent mod lanes] scalar remainder
-     iterations. Both issue one instruction per body operation, so the sum is comparable across
-     widths with no fitted constant -- and it is what makes the choice extent-shaped rather than
-     width-shaped: it takes the full width on a long loop (517 at 16 lanes is 32 + 5 trips against
-     8 lanes' 64 + 5), and steps down where the wider vector would leave a remainder the narrower
-     one divides away (40 is 2 + 8 against 5 + 0). *)
+  (* Loop trips: [extent / lanes] vector steps plus [extent mod lanes] scalar remainder iterations.
+     Both issue one instruction per body operation, so the sum is comparable across widths with no
+     fitted constant -- and it is what makes the choice extent-shaped rather than width-shaped: it
+     takes the full width on a long loop (517 at 16 lanes is 32 + 5 trips against 8 lanes' 64 + 5),
+     and steps down where the wider vector would leave a remainder the narrower one divides away (40
+     is 2 + 8 against 5 + 0). *)
   |> List.min_elt ~compare:(fun a b ->
-         let trips lanes = (extent / lanes) + (extent % lanes) in
-         match compare_int (trips a) (trips b) with
-         | 0 -> compare_int b a (* equal trips: the wider vector *)
-         | c -> c)
+      let trips lanes = (extent / lanes) + (extent % lanes) in
+      match compare_int (trips a) (trips b) with
+      | 0 -> compare_int b a (* equal trips: the wider vector *)
+      | c -> c)
 
 let simd_reduce_chains ~lanes ~extent =
   if 4 * lanes <= extent then 4 else if 2 * lanes <= extent then 2 else 1
@@ -229,30 +229,30 @@ let simd_reduce_lanes_for ~vector_bytes ~elt_bytes ~extent =
   simd_lane_ladder ~vector_bytes ~elt_bytes
   |> List.filter ~f:(fun lanes -> extent >= lanes)
   |> List.min_elt ~compare:(fun a b ->
-         match compare_int (cost a) (cost b) with
-         | 0 -> compare_int b a (* equal cost: the wider vector *)
-         | c -> c)
+      match compare_int (cost a) (cost b) with
+      | 0 -> compare_int b a (* equal cost: the wider vector *)
+      | c -> c)
 
 (** The lane count for an ACCUMULATING [Vectorized] loop, which {!simd_lanes_for} would get wrong at
-    short extents: that rendering ends in a horizontal fold whose length is the lane count itself, so
-    a wider vector buys fewer updates and pays a longer dependent tail. At an f32 extent of 64, 16
-    lanes save four vector updates over 8 and add eight operations to the fold — the wider width
+    short extents: that rendering ends in a horizontal fold whose length is the lane count itself,
+    so a wider vector buys fewer updates and pays a longer dependent tail. At an f32 extent of 64,
+    16 lanes save four vector updates over 8 and add eight operations to the fold — the wider width
     losing on a loop the elementwise metric would hand it. The cost mirrors the emission term for
     term, so the two cannot drift: chains and step as {!C_syntax} computes them, the serial
     leftover, and the epilogue's vector combines and scalar fold. *)
 
 (** The lane count an explicit-SIMD rendering should use for a loop of [extent] iterations over
-    [elt_bytes]-wide elements on a [vector_bytes]-wide register file: the width of {!simd_lane_ladder}
-    that minimizes loop trips, [None] where even the narrowest exceeds the extent. (The register-tiled
-    micro-kernel searches the ladder itself: its peel is a scalar column loop rather than a remainder
-    of the same body, and it has a fitted cost model for that.)
+    [elt_bytes]-wide elements on a [vector_bytes]-wide register file: the width of
+    {!simd_lane_ladder} that minimizes loop trips, [None] where even the narrowest exceeds the
+    extent. (The register-tiled micro-kernel searches the ladder itself: its peel is a scalar column
+    loop rather than a remainder of the same body, and it has a fitted cost model for that.)
 
     A single width would make a wider machine emit {e less} vector code than a narrower one — the
     renderings decline outright below one full vector, so widening the auto [cc_vector_bytes] from
     32 to 64 on an AVX-512 target (gh-ocannl-621 follow-up) would drop every f32 loop of extent
-    8..15 to the serial fallback, and an accumulating loop loses reassociation with it, which is
-    the whole point of the [Vectorized] retype. Nor is "the widest that fits" enough: at extent 40
-    a 16-lane vector covers 32 columns and leaves 8 to scalar code, where 8 lanes divide the extent
+    8..15 to the serial fallback, and an accumulating loop loses reassociation with it, which is the
+    whole point of the [Vectorized] retype. Nor is "the widest that fits" enough: at extent 40 a
+    16-lane vector covers 32 columns and leaves 8 to scalar code, where 8 lanes divide the extent
     evenly — a wider register file made to run slower. Hence a ladder and a choice, not a number.
 
     The floor is [min vector_bytes 32] — never narrower than the width the machine used before any
@@ -465,8 +465,7 @@ module type Backend_device_common = sig
       {!static_properties}: computing it (device enumeration) must not run at backend-module
       initialization. *)
 
-  val classify_failure :
-    Schedule_outcome.phase -> exn -> Schedule_outcome.classified_cause option
+  val classify_failure : Schedule_outcome.phase -> exn -> Schedule_outcome.classified_cause option
   (** Recognizes backend-owned failures at a tagged boundary. Returning [None] leaves the common
       policy to treat the exception as unclassified. *)
 

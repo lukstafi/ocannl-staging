@@ -117,15 +117,16 @@ let () =
   (* Tune the step schedule empirically. [rounds:0] keeps only the preset seed candidates, which all
      preserve reduction order — the trained values are schedule-invariant, so this file's expected
      output stays deterministic no matter which seed wins. The fixed, launch-bound graph gains
-     nothing from also compiling the generic 64/128/256/512 GPU block-size sweep; the backend-default
-     whole/fission presets remain in the search when [seed_block_sizes] is empty. [timing_ctx] gives
-     the tuner a scratch lineage (with its own freshly initialized parameter buffers) to time
-     candidates against, so the timing runs cannot perturb the real training state (a step timed on
-     all-zero data inputs poisons parameters with inf/NaN through log 0). *)
+     nothing from also compiling the generic 64/128/256/512 GPU block-size sweep; the
+     backend-default whole/fission presets remain in the search when [seed_block_sizes] is empty.
+     [timing_ctx] gives the tuner a scratch lineage (with its own freshly initialized parameter
+     buffers) to time candidates against, so the timing runs cannot perturb the real training state
+     (a step timed on all-zero data inputs poisons parameters with inf/NaN through log 0). *)
   let scratch = Train.init_params (Context.auto ()) bindings batch_loss in
   let ctx, sgd_routine =
     Autotune.tune ~rounds:0 ~seed_block_sizes:[] ~timing_ctx:scratch ctx
-      (Asgns.sequence [ update; sgd ]) bindings
+      (Asgns.sequence [ update; sgd ])
+      bindings
   in
   let step_ref = IDX.find_exn sgd_routine.Context.bindings step_n in
   step_ref := 0;

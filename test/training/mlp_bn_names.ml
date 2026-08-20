@@ -361,20 +361,20 @@ let () =
     aux 0
   in
 
-  (* The sampled text is deliberately NOT part of the golden output. Two reasons, either one
-     fatal to a byte-exact expectation:
+  (* The sampled text is deliberately NOT part of the golden output. Two reasons, either one fatal
+     to a byte-exact expectation:
 
-     1. With a single-example inference batch the BatchNorm above collapses to [beta] regardless
-        of input (the running-statistics FIXME in [nn_blocks.ml], spelled out in
-        [docs/makemore_tutorial.md]), so the characters are essentially a readout of the [dice]
-        stream against a near-constant distribution, not of the model reading its context.
+     1. With a single-example inference batch the BatchNorm above collapses to [beta] regardless of
+     input (the running-statistics FIXME in [nn_blocks.ml], spelled out in
+     [docs/makemore_tutorial.md]), so the characters are essentially a readout of the [dice] stream
+     against a near-constant distribution, not of the model reading its context.
 
      2. They sit on knife-edge boundaries of the sampling CDF. Under this seed, step 15 of the
-        second name draws dice=0.294824 against an 'a'/'b' boundary at 0.294888 — a margin of
-        6.4e-5. A ~2e-4 wiggle in the trained weights, small enough to leave all three printed
-        losses identical at 4 decimals, moves the boundary past the dice and flips the character;
-        that is exactly what differs between backends, config profiles, and hardware. Re-pinning
-        the text would just relocate the failure to the next machine.
+     second name draws dice=0.294824 against an 'a'/'b' boundary at 0.294888 — a margin of 6.4e-5. A
+     ~2e-4 wiggle in the trained weights, small enough to leave all three printed losses identical
+     at 4 decimals, moves the boundary past the dice and flips the character; that is exactly what
+     differs between backends, config profiles, and hardware. Re-pinning the text would just
+     relocate the failure to the next machine.
 
      So the names go to stderr for the reader (the [slow] rule captures only stdout), and stdout
      keeps what is portable: that sampling stayed inside the alphabet, and the head of the
@@ -397,7 +397,7 @@ let () =
   let top3 =
     Array.sub ranked ~pos:0 ~len:3
     |> Array.map ~f:(fun (p, i) ->
-           Printf.sprintf "%c=%.2f" (List.nth_exn Dataprep.Names.letters_with_dot i) p)
+        Printf.sprintf "%c=%.2f" (List.nth_exn Dataprep.Names.letters_with_dot i) p)
     |> String.concat_array ~sep:" "
   in
   printf "Start-context top-3 next chars: %s\n%!" top3

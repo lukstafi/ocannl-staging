@@ -13,10 +13,10 @@
    codegen — what is asserted here is cache identity, which must separate the regimes on every
    backend, conservatively, rather than only where the flag currently bites):
 
-   - The cache key is a function of the policy: equal within a regime, different across.
-   - A search's entry replays under the policy that wrote it, and does NOT under another.
-   - The two entries coexist: crossing back still hits, i.e. the second regime's search did not
-     overwrite the first regime's winner. *)
+   - The cache key is a function of the policy: equal within a regime, different across. - A
+   search's entry replays under the policy that wrote it, and does NOT under another. - The two
+   entries coexist: crossing back still hits, i.e. the second regime's search did not overwrite the
+   first regime's winner. *)
 
 open Base
 open Ocannl
@@ -55,8 +55,7 @@ let clean_cache () =
 
 let entry_count () =
   if Stdlib.Sys.file_exists cache_dir && Stdlib.Sys.is_directory cache_dir then
-    Array.count (Stdlib.Sys.readdir cache_dir) ~f:(fun f ->
-        String.is_suffix f ~suffix:".sexp")
+    Array.count (Stdlib.Sys.readdir cache_dir) ~f:(fun f -> String.is_suffix f ~suffix:".sexp")
   else 0
 
 let () =
@@ -125,8 +124,7 @@ let () =
   (* --- Regime B: the same code, the same directory, the other policy --- *)
   Numerics.set_policy policy_b;
   let r, got = tune () in
-  p "the entry does NOT replay under a different policy (gh-ocannl-568)"
-    (not r.Autotune.cache_hit);
+  p "the entry does NOT replay under a different policy (gh-ocannl-568)" (not r.Autotune.cache_hit);
   p "the cross-policy run searches instead of replaying"
     ((not stored_a) || r.Autotune.candidates_timed >= 1);
   p "the cross-policy run computes correct values" (Array.for_all2_exn got mm_expected ~f:approx);

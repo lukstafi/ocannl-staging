@@ -1,21 +1,21 @@
-(* Memory-bandwidth calibration pass (gh-ocannl-578): run the STREAM-style footprint-exact
-   kernels of [Ocannl.Calibrate.stream] on the configured backend, so the envelope's memory leg
+(* Memory-bandwidth calibration pass (gh-ocannl-578): run the STREAM-style footprint-exact kernels
+   of [Ocannl.Calibrate.stream] on the configured backend, so the envelope's memory leg
    ([model_peak_memory_bandwidth]) becomes fittable — matmul-family tuning data alone cannot
    constrain it (compute-bound rows with approximate byte counts).
 
    Usage: dune exec tools/calibrate_bandwidth.exe -- [--elems=N] [--repeats=N] [--ocannl_* flags]
 
-   Config [autotune_calibration_file] must be set (config file, OCANNL_AUTOTUNE_CALIBRATION_FILE,
-   or --ocannl_autotune_calibration_file=PATH): the timed candidates append their rows there
-   through the ordinary tuning emission path. Afterwards the pass reports each kernel's
-   demonstrated bandwidth off those rows (they name the computation they timed), verifies
-   bytes-exact rows appeared at all — failing loudly otherwise, rather than leaving the memory leg
-   silently unfittable — and refits the whole file, printing config-pasteable [model_peak_*]
-   constants for this backend (concatenating data from several runs only tightens the fit; use
+   Config [autotune_calibration_file] must be set (config file, OCANNL_AUTOTUNE_CALIBRATION_FILE, or
+   --ocannl_autotune_calibration_file=PATH): the timed candidates append their rows there through
+   the ordinary tuning emission path. Afterwards the pass reports each kernel's demonstrated
+   bandwidth off those rows (they name the computation they timed), verifies bytes-exact rows
+   appeared at all — failing loudly otherwise, rather than leaving the memory leg silently
+   unfittable — and refits the whole file, printing config-pasteable [model_peak_*] constants for
+   this backend (concatenating data from several runs only tightens the fit; use
    tools/fit_envelope.exe for multi-backend files or --margin headroom).
 
-   [--elems] should stay a power of two (default 2^26, 256 MiB per stream tensor): an extent
-   every workgroup size divides evenly keeps parallelized candidates free of range guards, hence
+   [--elems] should stay a power of two (default 2^26, 256 MiB per stream tensor): an extent every
+   workgroup size divides evenly keeps parallelized candidates free of range guards, hence
    bytes-exact. Backend and device follow the ordinary config (--ocannl_backend=...). Linking
    [ocannl] makes this a config consumer like any OCANNL executable; its startup chatter goes to
    stderr, leaving stdout a clean redirectable data channel. *)
@@ -41,8 +41,8 @@ let () =
           | Some _ | (exception _) -> usage ()
           | None ->
               (* Any spelling the config machinery accepts for a known key (--ocannl_backend=...,
-                 --ocannl-backend=..., --backend=..., ...) is its argument, not ours; anything
-                 else is a probable typo. *)
+                 --ocannl-backend=..., --backend=..., ...) is its argument, not ours; anything else
+                 is a probable typo. *)
               if not (Utils.cmdline_arg_is_config_key a) then usage ()));
   let file =
     String.strip (Utils.get_global_arg ~arg_name:"autotune_calibration_file" ~default:"")
@@ -72,19 +72,19 @@ let () =
   let gbps r = Float.of_int r.Cal.bytes /. (r.Cal.measured_ms *. 1e-3) /. 1e9 in
   let by_rate r1 r2 = Float.compare (gbps r1) (gbps r2) in
   (* Per-kernel rates read off the rows themselves (gh-ocannl-635): each row names the computation
-     it timed, so the fastest bytes-exact row of a kernel is the bandwidth that kernel
-     demonstrated — on the byte count the fit below will use, rather than a nominal
-     streams-times-elems reconstruction that could agree with the fitter only by coincidence. The
-     tuning winner's time comes alongside: it may belong to a candidate whose bytes are
-     approximate, hence to no row here. *)
+     it timed, so the fastest bytes-exact row of a kernel is the bandwidth that kernel demonstrated
+     — on the byte count the fit below will use, rather than a nominal streams-times-elems
+     reconstruction that could agree with the fitter only by coincidence. The tuning winner's time
+     comes alongside: it may belong to a candidate whose bytes are approximate, hence to no row
+     here. *)
   List.iter reports ~f:(fun (name, rep) ->
       let ms = rep.Autotune.best_ms in
       let winner =
-        if Float.(ms > 0.) && Float.is_finite ms then Printf.sprintf "%8.4f ms" ms
-        else "      n/a"
+        if Float.(ms > 0.) && Float.is_finite ms then Printf.sprintf "%8.4f ms" ms else "      n/a"
       in
       match
-        List.max_elt (List.filter exact_bytes ~f:(fun r -> String.equal r.Cal.routine name))
+        List.max_elt
+          (List.filter exact_bytes ~f:(fun r -> String.equal r.Cal.routine name))
           ~compare:by_rate
       with
       | Some r ->
@@ -93,9 +93,9 @@ let () =
       | None -> Stdio.printf "# %-13s winner %s, no bytes-exact row\n" name winner);
   (match List.max_elt exact_bytes ~compare:by_rate with
   | None ->
-      (* The whole point of this pass is exact-bytes rows; producing none is a failure, not a
-         quiet degradation (likely cause: range guards from an extent the schedule could not
-         split evenly — keep --elems a power of two). *)
+      (* The whole point of this pass is exact-bytes rows; producing none is a failure, not a quiet
+         degradation (likely cause: range guards from an extent the schedule could not split evenly
+         — keep --elems a power of two). *)
       Stdio.eprintf
         "calibrate_bandwidth: FAILED — none of the %d new rows has an exact byte count, so the \
          memory leg remains unfittable; try a power-of-two --elems\n"

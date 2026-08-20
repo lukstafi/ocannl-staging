@@ -42,13 +42,13 @@ let string_literal expr =
    opam files declare -- the scheduled 5.3 job caught exactly that.
 
    [Longident.flatten] fatal-errors on a functor application, and it is worth recording why that
-   cannot arise here rather than guarding against it (Codex P2 on PR #342, whose premise this
-   is): in EXPRESSION position OCaml gives no [Pexp_ident] an applied path. [Set.Make(String).empty]
-   and [F(X).Utils.settings.large_models] both parse as [Pexp_field] over a constructor
-   application, with a qualified label -- checked against the parser, not assumed. Since
-   {!longident_of} runs on [Pexp_ident] alone, and a record-field label is never an application,
-   every path reaching here is [Lident] or [Ldot]. A future parser that changed this would take the
-   test down loudly, which beats a fallback silently dropping a read. *)
+   cannot arise here rather than guarding against it (Codex P2 on PR #342, whose premise this is):
+   in EXPRESSION position OCaml gives no [Pexp_ident] an applied path. [Set.Make(String).empty] and
+   [F(X).Utils.settings.large_models] both parse as [Pexp_field] over a constructor application,
+   with a qualified label -- checked against the parser, not assumed. Since {!longident_of} runs on
+   [Pexp_ident] alone, and a record-field label is never an application, every path reaching here is
+   [Lident] or [Ldot]. A future parser that changed this would take the test down loudly, which
+   beats a fallback silently dropping a read. *)
 let flatten_longident = Longident.flatten
 
 let longident_of expr =
@@ -61,8 +61,8 @@ let structure_of content = Parse.implementation (Lexing.from_string content)
 (** The ppx_minidebug extension whose argument names a module's compile-time tracing gate. *)
 let tracing_gate_extension = "global_debug_log_level_from_env_var"
 
-(** The environment variables [content] reads at RUN time by name: the string literal argument of
-    a [Sys.getenv] / [Sys.getenv_opt], under any receiver path ([Stdlib.Sys.getenv_opt], [Sys.getenv]
+(** The environment variables [content] reads at RUN time by name: the string literal argument of a
+    [Sys.getenv] / [Sys.getenv_opt], under any receiver path ([Stdlib.Sys.getenv_opt], [Sys.getenv]
     with [Base] in scope). A dynamic argument is deliberately not reported -- the reader that takes
     the name as a parameter is {!Utils.read_env_var} itself, whose keys are a different question
     (gh-ocannl-628, Codex P2 round 2 on PR #371).
@@ -101,14 +101,14 @@ let env_var_reads_in_source content =
 let tracing_gates_in_source content =
   structure_of content
   |> List.filter_map ~f:(fun item ->
-         match item.pstr_desc with
-         | Pstr_extension (({ txt; _ }, payload), _) when String.equal txt tracing_gate_extension
-           -> (
-             match payload with
-             | PStr [ { pstr_desc = Pstr_eval (expr, _); _ } ] -> string_literal expr
-             | _ -> None)
-         | _ -> None)
+      match item.pstr_desc with
+      | Pstr_extension (({ txt; _ }, payload), _) when String.equal txt tracing_gate_extension -> (
+          match payload with
+          | PStr [ { pstr_desc = Pstr_eval (expr, _); _ } ] -> string_literal expr
+          | _ -> None)
+      | _ -> None)
 
+type label_use = { key : string option; offset : int }
 (** Every place the [arg_name] label names a configuration key, and what it names it with. [key] is
     [Some k] when the argument is a string literal — the convention both consistency tests rely on
     to find a read — and [None] when it is anything else: a variable, a punned parameter, an
@@ -116,9 +116,8 @@ let tracing_gates_in_source content =
 
     Both positions count, because both name keys: an argument at an application site
     ([~arg_name:"key"], [?arg_name:"key"]) and a parameter's default ([?(arg_name = "key")], with or
-    without a type annotation). A label in a {e type} is not a use of anything and does not
-    appear. *)
-type label_use = { key : string option; offset : int }
+    without a type annotation). A label in a {e type} is not a use of anything and does not appear.
+*)
 
 let label_uses content =
   let uses = ref [] in
@@ -145,6 +144,7 @@ let label_uses content =
   iterator.structure iterator (structure_of content);
   List.rev !uses
 
+type definition = { start : int; stop : int; name : string option; top_level : bool }
 (** Every function in the file: the source range it covers, the name of the binding it is the body
     of (if any), and whether that binding is top-level.
 
@@ -156,12 +156,12 @@ let label_uses content =
 
     Three rounds of review found the correlation breaking, each in a new spelling: a local
     [let hidden name = …], then a nameless [let result, source = …] that had to stay transparent
-    because the real plumbing forwards its key from inside one, then [let (hidden as alias) = fun
-    name -> …], whose pattern yields no simple name. Keying on the lambda answers all three at once
-    and does not care how the helper was introduced:
+    because the real plumbing forwards its key from inside one, then
+    [let (hidden as alias) = fun name -> …], whose pattern yields no simple name. Keying on the
+    lambda answers all three at once and does not care how the helper was introduced:
 
-    - the plumbing's own [let result, source = resolve_config_value … ~arg_name:n in …] is no
-      lambda at all, so the use stays with the host function, as it must;
+    - the plumbing's own [let result, source = resolve_config_value … ~arg_name:n in …] is no lambda
+      at all, so the use stays with the host function, as it must;
     - a local helper is a lambda, so the use is its own, whatever pattern binds it;
     - an inline [(fun name -> … ~arg_name:name)] is a lambda with no binding at all, so it has no
       name and can be exempt nowhere — a hole that was open until this round and that no list of
@@ -170,7 +170,6 @@ let label_uses content =
     [name] is best-effort and fails safe: a pattern this does not recognise yields no name, and a
     nameless function is refused rather than exempted. The module path is kept for the reader, as
     [top_level] is what an exemption may rely on. *)
-type definition = { start : int; stop : int; name : string option; top_level : bool }
 
 (* The simple name a pattern binds, where it has one. Best-effort by design: see above. *)
 let rec pattern_name pattern =
@@ -206,9 +205,8 @@ let definitions content =
         (fun self item ->
           match item.pstr_desc with
           | Pstr_module { pmb_name = { txt = name; _ }; _ } ->
-              within
-                (Option.value name ~default:"_")
-                (fun () -> Ast_iterator.default_iterator.structure_item self item)
+              within (Option.value name ~default:"_") (fun () ->
+                  Ast_iterator.default_iterator.structure_item self item)
           (* Anonymous nesting has no name to borrow; the reader gets a placeholder. Correctness
              does not ride on this list being complete -- [top_level] does that. *)
           | Pstr_recmodule _ | Pstr_open _ | Pstr_include _ | Pstr_extension _ ->
@@ -218,11 +216,8 @@ let definitions content =
         (fun self binding ->
           (match (pattern_name binding.pvb_pat, binding.pvb_expr.pexp_desc) with
           | Some name, Pexp_function _ ->
-              Hashtbl.set named
-                ~key:binding.pvb_expr.pexp_loc.loc_start.pos_cnum
-                ~data:
-                  ( qualify name,
-                    Set.mem root_bindings binding.pvb_loc.loc_start.pos_cnum )
+              Hashtbl.set named ~key:binding.pvb_expr.pexp_loc.loc_start.pos_cnum
+                ~data:(qualify name, Set.mem root_bindings binding.pvb_loc.loc_start.pos_cnum)
           | _ -> ());
           Ast_iterator.default_iterator.value_binding self binding);
     }
@@ -258,8 +253,8 @@ let definition_at definitions offset =
 
 (** The keys [content] reads through the label.
 
-    A key that reaches the lookup any other way — through a helper taking the name as a
-    parameter — is invisible to this scan, and hence to both tests built on it. That is why
+    A key that reaches the lookup any other way — through a helper taking the name as a parameter —
+    is invisible to this scan, and hence to both tests built on it. That is why
     [test_config_consistency] separately fails any non-literal use of the label outside the handful
     of named functions that implement the lookup. *)
 let keys_in_source content =
@@ -279,10 +274,10 @@ let keys_in_source content =
     Two kinds of argument are therefore not sources. Anything that is not a [.ml] file: the config
     file the rule depends on, the reference file, the executable itself. And dune's preprocessed
     twin [x.pp.ml] of an [x.ml] that is in the list — those are the ppx expansion of a file already
-    scanned, so they would double every census, and they exist only where the library that owns
-    them is built, which is what would make the census differ between a machine with the CUDA
-    toolchain and one without. A twin is dropped only when its original is present, so a source
-    genuinely named [x.pp.ml] is not silently lost.
+    scanned, so they would double every census, and they exist only where the library that owns them
+    is built, which is what would make the census differ between a machine with the CUDA toolchain
+    and one without. A twin is dropped only when its original is present, so a source genuinely
+    named [x.pp.ml] is not silently lost.
 
     Nothing else is filtered, and both tests print how many files they scanned: a glob that stops
     matching shows up as a diff rather than as a quietly smaller census. *)
@@ -314,8 +309,7 @@ let by_directory files =
   in
   List.map files ~f:strip
   |> List.sort_and_group ~compare:String.compare
-  |> List.map ~f:(fun group ->
-         Printf.sprintf "%s %d" (List.hd_exn group) (List.length group))
+  |> List.map ~f:(fun group -> Printf.sprintf "%s %d" (List.hd_exn group) (List.length group))
   |> String.concat ~sep:", "
 
 (** Basenames that more than one of [files] carries.
@@ -400,10 +394,10 @@ let settings_keys_in_source content =
     catch (Codex P2, rounds 14 and 15 of PR #343).
 
     Resolving aliases and opens is the other way to close this, and a bigger machine than the
-    convention needs — no source spells a read that way today, so the convention is checked
-    instead, exactly as the string-literal one for [arg_name] is. Policing the READ rather than the
-    scope is what makes it precise: [module Lazy = Utils.Lazy] and a qualified record expression
-    such as [Utils.{ value; unique_id }] introduce no such read and do not appear here, while
+    convention needs — no source spells a read that way today, so the convention is checked instead,
+    exactly as the string-literal one for [arg_name] is. Policing the READ rather than the scope is
+    what makes it precise: [module Lazy = Utils.Lazy] and a qualified record expression such as
+    [Utils.{ value; unique_id }] introduce no such read and do not appear here, while
     [Low_level.virtualize_settings.max_visits] is a different record and never did.
 
     [offset] is where the read sits, for the caller's report. *)
@@ -414,15 +408,15 @@ let unqualified_settings_reads content =
     && List.equal String.equal (List.drop path (List.length path - 2)) [ "Utils"; "settings" ]
   in
   (* Where `Utils.settings` is used AS a record rather than read through: the receiver of a field
-     access is the one place it may appear. Everything else -- `let s = Utils.settings`,
-     `read Utils.settings`, storing it, returning it -- puts the reads out of the census's reach,
-     since they are then spelled against a name this scan has no reason to know (Codex P2, rounds
-     16 and 17 of PR #343). Blessing that one position covers the whole class at once, where
-     naming the ways to alias it did not. *)
+     access is the one place it may appear. Everything else -- `let s = Utils.settings`, `read
+     Utils.settings`, storing it, returning it -- puts the reads out of the census's reach, since
+     they are then spelled against a name this scan has no reason to know (Codex P2, rounds 16 and
+     17 of PR #343). Blessing that one position covers the whole class at once, where naming the
+     ways to alias it did not. *)
   let blessed = Hash_set.create (module Int) in
   (* The predicates {!settings_keys_in_source} folds thresholds into are recognised as CALLS, so
-     handing one around as a value loses its keys the same way handing the record around does
-     (Codex P2, round 20). Their one visible position is the function of an application. *)
+     handing one around as a value loses its keys the same way handing the record around does (Codex
+     P2, round 20). Their one visible position is the function of an application. *)
   let predicates = [ "debug_log_from_routines"; "with_runtime_debug" ] in
   let ends_in names path =
     List.last path |> Option.value_map ~default:false ~f:(List.mem names ~equal:String.equal)
@@ -459,10 +453,10 @@ let unqualified_settings_reads content =
           | Pexp_ident { txt; _ }
             when List.last (flatten_longident txt)
                  |> Option.value_map ~default:false ~f:(String.equal "settings") ->
-              (* Any identifier ending in `settings`, not only the qualified one: under a local
-                 open the record is spelled bare, and `read settings` hands it on just as
-                 `read Utils.settings` does (Codex P2, round 18). Recorded now and discarded below
-                 if it turns out to be a blessed receiver -- a field access is visited before its
+              (* Any identifier ending in `settings`, not only the qualified one: under a local open
+                 the record is spelled bare, and `read settings` hands it on just as `read
+                 Utils.settings` does (Codex P2, round 18). Recorded now and discarded below if it
+                 turns out to be a blessed receiver -- a field access is visited before its
                  receiver. *)
               found := expr.pexp_loc.loc_start.pos_cnum :: !found
           | _ -> ());

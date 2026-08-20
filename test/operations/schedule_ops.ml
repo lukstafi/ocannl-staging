@@ -223,7 +223,7 @@ let () =
       pipelined = Map.empty (module Ir.Tnode);
       zero_fringe = Set.empty (module Ir.Tnode);
       flip_candidates = [];
-    spliced_rbw = Base.Set.empty (module Ir.Tnode);
+      spliced_rbw = Base.Set.empty (module Ir.Tnode);
     }
   in
   let guarded_accum ~cond_of =

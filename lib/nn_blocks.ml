@@ -432,7 +432,8 @@ let%op transformer_decoder_block ~label ~num_heads ~d_k ~d_v ~d_ff ?(epsilon = 1
     ?(pos_embed = No_pos_embed) () =
   (* RoPE is applied to self-attention only, not cross-attention. *)
   let masked_mha =
-    multi_head_attention ~label:("masked_mha" :: label) ~num_heads ~d_k ~d_v ?mask_fill ~pos_embed ()
+    multi_head_attention ~label:("masked_mha" :: label) ~num_heads ~d_k ~d_v ?mask_fill ~pos_embed
+      ()
   in
   let cross_mha = cross_attention ~label:("cross_mha" :: label) ~num_heads ~d_k ~d_v () in
   (* Standard 2-layer FFN: expand to d_ff then contract back to d_model *)
@@ -570,10 +571,10 @@ let%op depthwise_separable_conv2d ~label ?(kernel_size = 3) ?(stride = 1) ?(use_
     no-padding mode (indices stay within bounds).
 
     With [use_padding=true] ("same" pooling, output size [input_size / stride]), the pool lowers
-    with clamped window bounds (gh-504): per output position the window loop is range-guarded to
-    the intersection of the window with the valid input range, and an out-of-range position
-    contributes the max-accumulation identity ([-inf]) — the same as not visiting it — so clamping
-    is semantically exact and the operand needs NO margins at all. The operand therefore composes
+    with clamped window bounds (gh-504): per output position the window loop is range-guarded to the
+    intersection of the window with the valid input range, and an out-of-range position contributes
+    the max-accumulation identity ([-inf]) — the same as not visiting it — so clamping is
+    semantically exact and the operand needs NO margins at all. The operand therefore composes
     freely with 0-neutral margin-touching consumers such as padded convs (the Inception-block
     pattern), with eagerly allocated data nodes (e.g. [TDSL.init]), and with operands already
     lowered in earlier compilations of a staged flow. The backward argmax scatter transposes the
@@ -583,9 +584,9 @@ let%op depthwise_separable_conv2d ~label ?(kernel_size = 3) ?(stride = 1) ?(use_
 
     Overlapping pooling ([stride < window_size], AlexNet-style) has exact gradients: the gradient
     gate lives in the (output x window) product space (gh-512), so each position receives gradient
-    from exactly the windows it won, with ties gating every achieving pair. Non-overlapping
-    pooling ([stride >= window_size], the common case) dispatches to the cheaper input-space gate
-    (gh-527) — exact on that domain, ties included, see [Operation.tropical]. *)
+    from exactly the windows it won, with ties gating every achieving pair. Non-overlapping pooling
+    ([stride >= window_size], the common case) dispatches to the cheaper input-space gate (gh-527) —
+    exact on that domain, ties included, see [Operation.tropical]. *)
 let%op max_pool2d ?(stride = 2) ?(window_size = 2) ?(use_padding = false) () x =
   (* [@^+] expands to the [tropical] in scope (TDSL.O's, unless shadowed) — dispatch the gradient
      gate here, where the window geometry is a plain value. *)
@@ -597,8 +598,8 @@ let%op max_pool2d ?(stride = 2) ?(window_size = 2) ?(use_padding = false) () x =
   (* NOTE: projections inference runs per-assignment in a distinct phase from shape inference, so
      for it to know about the window size, we use a constant kernel = 0.0 to propagate the shape.
      [stretch] makes the kernel's shape resolve at this use site — it acquires the window axes from
-     the einsum spec (gh-ocannl-544; plain operation results close down to their arguments'
-     shapes). See: https://github.com/ahrefs/ocannl/discussions/381 *)
+     the einsum spec (gh-ocannl-544; plain operation results close down to their arguments' shapes).
+     See: https://github.com/ahrefs/ocannl/discussions/381 *)
   Shape.set_dim pwh window_size;
   Shape.set_dim pww window_size;
   if use_padding then

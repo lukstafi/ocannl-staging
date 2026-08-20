@@ -1,13 +1,12 @@
 (* gh-ocannl-566: [simplify_llc] narrows its interval environment with the bounds an enclosing [If]
    condition implies for its body, so a guard the condition proves is folded away.
 
-   Exposed by gh-ocannl-487 phase 1: the depth-2 pipelined prefetch loads block [k+1] under
-   [If (k < to_)], and the [k := k+1] substitution widens its zero-fringe edge guard's index
-   interval past the extent -- the loop range alone cannot decide it, the enclosing condition can.
-   That end-to-end case is pinned (structurally and by executed bitwise parity) in
-   [schedule_pipelined_matmul]; here each narrowing rule is exercised in isolation against a
-   discriminating control that must NOT fold, since a folded guard silently changes the value a cell
-   holds.
+   Exposed by gh-ocannl-487 phase 1: the depth-2 pipelined prefetch loads block [k+1] under [If (k <
+   to_)], and the [k := k+1] substitution widens its zero-fringe edge guard's index interval past
+   the extent -- the loop range alone cannot decide it, the enclosing condition can. That end-to-end
+   case is pinned (structurally and by executed bitwise parity) in [schedule_pipelined_matmul]; here
+   each narrowing rule is exercised in isolation against a discriminating control that must NOT
+   fold, since a folded guard silently changes the value a cell holds.
 
    High-level lowering does not produce these shapes on demand, so the cases are built directly as
    [Ir.Low_level.t] and run through [Ir.Low_level.simplify_llc] -- the pass under test, called with
@@ -56,7 +55,10 @@ let where_zero cond src idx : LL.scalar_t =
 
 let set_at dst idx llsc : LL.t = LL.Set { tn = dst; idcs = [| idx |]; llsc; debug = "" }
 let set dst s llsc : LL.t = set_at dst (iter s) llsc
-let loop ?(from_ = 0) ~to_ s body : LL.t = LL.For_loop { index = s; from_; to_; body; axis = Serial }
+
+let loop ?(from_ = 0) ~to_ s body : LL.t =
+  LL.For_loop { index = s; from_; to_; body; axis = Serial }
+
 let if_ cond body : LL.t = LL.If { cond = (cond, iprec); body }
 
 (* --- structural probes on the simplified form --- *)
@@ -81,12 +83,12 @@ and count_s ~f_stmt ~f_scalar (llsc : LL.scalar_t) : int =
   | _ -> 0
 
 let never _ = false
-let wheres llc = count llc ~f_stmt:never ~f_scalar:(function LL.Ternop (Ops.Where, _, _, _) -> true | _ -> false)
+
+let wheres llc =
+  count llc ~f_stmt:never ~f_scalar:(function LL.Ternop (Ops.Where, _, _, _) -> true | _ -> false)
+
 let ifs llc = count llc ~f_stmt:(function LL.If _ -> true | _ -> false) ~f_scalar:never
-
-let zeros llc =
-  count llc ~f_stmt:never ~f_scalar:(function LL.Constant 0. -> true | _ -> false)
-
+let zeros llc = count llc ~f_stmt:never ~f_scalar:(function LL.Constant 0. -> true | _ -> false)
 let simplify llc = LL.simplify_llc [] llc
 
 (* The motivating shape, parameterized by the guard wrapping the inner nest: two k-blocks of 16 over
@@ -180,7 +182,8 @@ let () =
     let k = sym () in
     simplify
       (loop ~to_:9 k
-         (if_ (lt (ivar k) (ic 3))
+         (if_
+            (lt (ivar k) (ic 3))
             (if_ (lt (ivar k) (ic 5)) (set dst k (LL.Get (src, [| iter k |]))))))
   in
   p "an inner guard implied by the outer one is erased" (ifs nested = 1);
@@ -195,7 +198,8 @@ let () =
     simplify
       (loop ~to_:1 k
          (if_
-            (LL.Binop (Ops.Cmplt, (LL.Get (sel, [| Idx.Fixed_idx 0 |]), single), (LL.Constant 1., single)))
+            (LL.Binop
+               (Ops.Cmplt, (LL.Get (sel, [| Idx.Fixed_idx 0 |]), single), (LL.Constant 1., single)))
             (loop ~to_:15 i (set dst i (where_zero (lt idx (ic 32)) src (iter i))))))
   in
   p "a data-dependent guard narrows nothing" (wheres data_dep = 1 && ifs data_dep = 1);
@@ -212,10 +216,13 @@ let () =
 
   (* --- Evaluation-precision soundness: past a float precision's exact-integer range the machine
      comparison is not the mathematical one -- single represents [2^24 + 1] as [2^24], so a
-     single-precision guard [k <= 2^24] is machine-true at [k = 2^24 + 1] too, and narrowing from
-     it would fold the (index-precision) edge guard to the wrong branch there. The identical guard
+     single-precision guard [k <= 2^24] is machine-true at [k = 2^24 + 1] too, and narrowing from it
+     would fold the (index-precision) edge guard to the wrong branch there. The identical guard
      evaluated at the index precision is exact and narrows. --- *)
-  let lim = 16777216 (* 2^24, [Interval.float_exact_int_limit] of single *) in
+  let lim =
+    16777216
+    (* 2^24, [Interval.float_exact_int_limit] of single *)
+  in
   let prec_case ~cond_prec =
     let dst = mk "sin_dst7" and src = mk "sin_src7" in
     let k = sym () in
@@ -231,12 +238,12 @@ let () =
     (wheres (prec_case ~cond_prec:single) = 1);
   p "the same guard at the index precision narrows" (wheres (prec_case ~cond_prec:iprec) = 0)
 
-(* --- Executed leg (the structural-vs-executable rule): a folded guard changes the emitted code
-   but must not change any value, and an over-narrowing defect would -- by folding a [Where] to the
-   wrong branch. Each representative case runs raw and simplified through the configured backend
-   and both results are compared bitwise to a hand-computed reference. The carrier comp (a plain
-   copy) only pins the tnodes' read/write roles and placement; [lowered_transform] replaces its
-   lowered code with the case, [Zero_out]-prefixed so unwritten cells are defined. --- *)
+(* --- Executed leg (the structural-vs-executable rule): a folded guard changes the emitted code but
+   must not change any value, and an over-narrowing defect would -- by folding a [Where] to the
+   wrong branch. Each representative case runs raw and simplified through the configured backend and
+   both results are compared bitwise to a hand-computed reference. The carrier comp (a plain copy)
+   only pins the tnodes' read/write roles and placement; [lowered_transform] replaces its lowered
+   code with the case, [Zero_out]-prefixed so unwritten cells are defined. --- *)
 
 let dbg : Idx.projections_debug = { spec = ""; derived_for = Sexp.Atom ""; trace = [] }
 

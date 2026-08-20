@@ -1,10 +1,10 @@
-(* gh-ocannl-514 phase 4b: bound pruning against the measured incumbent in [Autotune.tune],
-   config [autotune_bound_pruning]. The dune rule pins the cc backend and a tiny envelope
-   (model_peak_* = 1e3), making the schedule-invariant roofline floor astronomically larger than
-   any measured time — every enumerative sketch candidate is then provably unable to win and is
-   pruned before compile, deterministically on any machine, while the baseline and presets are
-   exempt and still timed. The tuned routine must still compute correct values (the winner comes
-   from the never-pruned candidates). *)
+(* gh-ocannl-514 phase 4b: bound pruning against the measured incumbent in [Autotune.tune], config
+   [autotune_bound_pruning]. The dune rule pins the cc backend and a tiny envelope (model_peak_* =
+   1e3), making the schedule-invariant roofline floor astronomically larger than any measured time —
+   every enumerative sketch candidate is then provably unable to win and is pruned before compile,
+   deterministically on any machine, while the baseline and presets are exempt and still timed. The
+   tuned routine must still compute correct values (the winner comes from the never-pruned
+   candidates). *)
 
 open Base
 open Ocannl
@@ -30,12 +30,12 @@ let () =
   let ctx0 = Context.run ctx0 r0 in
   let want = Context.get_values ctx0 c0.Tensor.value in
   (* The tuned run, bound pruning on (via the rule's command line). Fresh-search behavior is the
-     assertion, so a cache entry left by an earlier run of this binary in the same build tree
-     must not replay — clear the cache directory first. *)
+     assertion, so a cache entry left by an earlier run of this binary in the same build tree must
+     not replay — clear the cache directory first. *)
   let cache_dir = "autotune_bound_pruning_cache" in
-  (if Stdlib.Sys.file_exists cache_dir then
-     Array.iter (Stdlib.Sys.readdir cache_dir) ~f:(fun f ->
-         Stdlib.Sys.remove (Stdlib.Filename.concat cache_dir f)));
+  if Stdlib.Sys.file_exists cache_dir then
+    Array.iter (Stdlib.Sys.readdir cache_dir) ~f:(fun f ->
+        Stdlib.Sys.remove (Stdlib.Filename.concat cache_dir f));
   let%op c1 = a * b in
   let reports = ref [] in
   let ctx, routine =

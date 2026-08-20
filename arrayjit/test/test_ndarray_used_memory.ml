@@ -1,6 +1,6 @@
-(* [Ndarray.get_used_memory] is a LIVE gauge of host-array bytes, not a cumulative allocation
-   total: [create_array] adds the array's size and the finalizer it registers gives those bytes back
-   when the array is collected. This pins both halves.
+(* [Ndarray.get_used_memory] is a LIVE gauge of host-array bytes, not a cumulative allocation total:
+   [create_array] adds the array's size and the finalizer it registers gives those bytes back when
+   the array is collected. This pins both halves.
 
    Both used to be wrong. The finalizer added instead of subtracting, so the gauge only ever grew
    and each collected array was counted twice; and [init_array] added a second time (and registered
@@ -39,14 +39,11 @@ let () =
   let prec = Ops.single in
   let bytes_of dims = Array.fold dims ~init:1 ~f:( * ) * Ops.prec_in_bytes prec in
   let create_dims = [| 128; 1024 |] in
-  check "create_array" ~n:4
-    ~bytes_per_array:(bytes_of create_dims)
-    ~alloc:(fun () -> Nd.create_array ~debug:"used_memory" prec ~dims:create_dims ~padding:None);
+  check "create_array" ~n:4 ~bytes_per_array:(bytes_of create_dims) ~alloc:(fun () ->
+      Nd.create_array ~debug:"used_memory" prec ~dims:create_dims ~padding:None);
   (* [init_array] is slow (unboxing at each index), hence the smaller arrays. *)
   let init_dims = [| 32; 256 |] in
-  check "init_array" ~n:3
-    ~bytes_per_array:(bytes_of init_dims)
-    ~alloc:(fun () ->
+  check "init_array" ~n:3 ~bytes_per_array:(bytes_of init_dims) ~alloc:(fun () ->
       Nd.init_array ~debug:"used_memory" prec ~dims:init_dims ~padding:None ~f:(fun _ -> 1.0));
   (* A reshaped view shares the source's bytes, so accounting must outlive the source wrapper: the
      bytes are still held while only the view is reachable. [Tnode.create_with_reshape] is exactly

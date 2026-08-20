@@ -20,12 +20,12 @@
     nondeterministic lowering degrades to cache misses, never to a schedule applied to the wrong
     loop.
 
-    Schedule identity pins numerics (gh-ocannl-484): ops holding the reduction-reassociation
-    license ([Split_reduce] — whose fixed combine tree is a function of [num_blocks] — [Swap] and
-    [Vectorized] retypes over accumulations, [Tensorize]) make the computed values a function of
-    the schedule. Replaying a cached schedule reproduces results bitwise; retuning, clearing the
-    cache, or a digest change may select a different schedule and change low-order bits of
-    reduction results. *)
+    Schedule identity pins numerics (gh-ocannl-484): ops holding the reduction-reassociation license
+    ([Split_reduce] — whose fixed combine tree is a function of [num_blocks] — [Swap] and
+    [Vectorized] retypes over accumulations, [Tensorize]) make the computed values a function of the
+    schedule. Replaying a cached schedule reproduces results bitwise; retuning, clearing the cache,
+    or a digest change may select a different schedule and change low-order bits of reduction
+    results. *)
 
 open Base
 
@@ -163,25 +163,24 @@ val codegen_tag : limits:Backend_intf.hardware_limits -> unit -> string
     {!digest} names — so, exactly like {!numerics_tag}, these are invisible to the digest while
     changing the kernel or what a timing measures, and a winner crowned under one such regime must
     not replay under another. Three layers: the process-wide gates (the index and pool-slot width
-    [large_models], [buffer_aliasing]'s [restrict] suppression, and the {e effective} routine-logging
-    predicate — which includes the [log_level > 1] threshold, so a verbosity bump alone never churns
-    keys — together with the settings that only matter once logging reaches the kernel
-    ([prefer_backend_uniformity]'s logging spelling, the stream-log routing); the whole
+    [large_models], [buffer_aliasing]'s [restrict] suppression, and the {e effective}
+    routine-logging predicate — which includes the [log_level > 1] threshold, so a verbosity bump
+    alone never churns keys — together with the settings that only matter once logging reaches the
+    kernel ([prefer_backend_uniformity]'s logging spelling, the stream-log routing); the whole
     [limits] record, which describes the device candidates are generated, rendered and timed
-    against; and, inside it, the backend's own
-    {!Ir.Backend_intf.hardware_limits.codegen_tag}. *)
+    against; and, inside it, the backend's own {!Ir.Backend_intf.hardware_limits.codegen_tag}. *)
 
 type entry = {
   version : int;
   backend : string;
   numerics : string;
       (** {!numerics_tag} of the policy the search ran under; redundant with the key, which carries
-          the same tag, so it is a self-description of the file and a guard for a hand-moved
-          entry. *)
+          the same tag, so it is a self-description of the file and a guard for a hand-moved entry.
+      *)
   codegen : string option; [@sexp.option]
-      (** {!codegen_tag} of the codegen configuration the search ran under (gh-ocannl-572): the
-          same self-description as [numerics]. Optional so entries written before this field
-          existed stay readable. *)
+      (** {!codegen_tag} of the codegen configuration the search ran under (gh-ocannl-572): the same
+          self-description as [numerics]. Optional so entries written before this field existed stay
+          readable. *)
   source_digest : string;
   saved : saved_schedule;
   segments : (string * saved_schedule) list option; [@sexp.option]
@@ -210,9 +209,9 @@ type entry = {
   default_fingerprint : string option; [@sexp.option]
       (** {!Schedule.default_schedule_fingerprint} at store time, present iff [default_ms] is: the
           cache key covers only the source digest and the backend, so a config change can redefine
-          what "the default pipeline" means without missing the cache. A replaying process
-          compares fingerprints and drops a stale [default_ms] (the schedule itself stays valid —
-          only this diagnostic is config-relative). *)
+          what "the default pipeline" means without missing the cache. A replaying process compares
+          fingerprints and drops a stale [default_ms] (the schedule itself stays valid — only this
+          diagnostic is config-relative). *)
 }
 [@@deriving sexp]
 
@@ -230,13 +229,12 @@ val key_components : string list
 val cache_key : limits:Backend_intf.hardware_limits -> canonical -> backend:string -> string
 (** Filename-safe cache key: the digest, the backend name, {!numerics_tag} of the current numerics
     policy, {!codegen_tag} of the codegen configuration (including [limits.codegen_tag], the
-    compiling backend's own contribution), and the worker-pool signature
-    ([limits.worker_pool_tag], gh-ocannl-530: CPU crowns do not transfer across pools). The
-    backend-supplied components arrive as the whole [limits] record rather than one optional
-    argument each, so a component added there reaches every call site instead of defaulting to
-    absent at the ones that were not updated (gh-ocannl-572). Callers time kernels on a concrete
-    device, so include anything else that distinguishes performance environments in [backend] (e.g.
-    a device id) if needed. *)
+    compiling backend's own contribution), and the worker-pool signature ([limits.worker_pool_tag],
+    gh-ocannl-530: CPU crowns do not transfer across pools). The backend-supplied components arrive
+    as the whole [limits] record rather than one optional argument each, so a component added there
+    reaches every call site instead of defaulting to absent at the ones that were not updated
+    (gh-ocannl-572). Callers time kernels on a concrete device, so include anything else that
+    distinguishes performance environments in [backend] (e.g. a device id) if needed. *)
 
 val store : dir:string -> key:string -> entry -> unit
 (** Writes the entry to [dir]/[key].sexp, creating [dir] (and parents) if missing. Tolerates

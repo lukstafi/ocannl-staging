@@ -1,9 +1,9 @@
 (* Functional and NaN-semantics test for the Cmple (less-or-equal) primitive and the derived
    comparisons: [<=] lowers to Cmple, while [>] and [>=] are operand swaps of Cmplt/Cmple.
 
-   The NaN block pins that Cmple is a true primitive and not a not-(b < a) composite: any
-   comparison with a NaN operand must yield 0, whereas the negation rewrite would yield 1. This
-   guards against a future "simplification" of Cmple into Cmplt-plus-Not. *)
+   The NaN block pins that Cmple is a true primitive and not a not-(b < a) composite: any comparison
+   with a NaN operand must yield 0, whereas the negation rewrite would yield 1. This guards against
+   a future "simplification" of Cmple into Cmplt-plus-Not. *)
 
 open Base
 open Ocannl

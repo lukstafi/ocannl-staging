@@ -37,16 +37,16 @@ let p = Verdict.p
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
    that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
    parity check between two zero arrays passes while covering nothing (gh-ocannl-481 item 3). Every
-   reference array is pinned nonzero where it is produced, so the parity claims below have content.
-   *)
+   reference array is pinned nonzero where it is produced, so the parity claims below have
+   content. *)
 let nonzero name (a : float array) =
   if not (Array.exists a ~f:(fun x -> Float.(x <> 0.))) then
     failwith (name ^ ": the reference is all zeros — the parity checks against it are vacuous");
   a
+
 let approx a b = Float.(abs (a - b) < 1e-2)
 let approx_rel a b = Float.(abs (a - b) <= 1e-2 * max 1. (abs b))
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-
 let skipped = Verdict.skipped ~backend:backend_name
 let on_metal = String.is_substring backend_name ~substring:"metal"
 
@@ -429,20 +429,19 @@ let () =
           (* CUDA: the wmma f16 intrinsic, or the lane-0 fallback on older devices. *)
           has "nvcuda::wmma" || has "== 0)"
         else
-          (* gh-ocannl-575: the register tiling fires over narrow storage — the compute precision
-             is f32 under the default [narrow_compute_f32] policy ([fp16_arithmetic] is off), and
-             all three operands widen/narrow at the memory boundary. *)
-          has "Tile_mma register tiling"
-          && has "narrow storage bridged: d:half a:half b:half"
+          (* gh-ocannl-575: the register tiling fires over narrow storage — the compute precision is
+             f32 under the default [narrow_compute_f32] policy ([fp16_arithmetic] is off), and all
+             three operands widen/narrow at the memory boundary. *)
+          has "Tile_mma register tiling" && has "narrow storage bridged: d:half a:half b:half"
       in
       p "half tensorized structure as expected" ok);
 
   (* --- Bfloat16 (gh-ocannl-545): the two accumulator shapes, which are NOT interchangeable on
-     CUDA. [nvcuda::wmma] has no bf16 accumulator fragment (mma.hpp declares [__nv_bfloat16] operands
-     against a [float] accumulator only), so bf16 x bf16 -> f32 takes the wmma template path while
-     the uniform bf16 x bf16 -> bf16 combination — the one a uniformly-bf16 network actually
-     produces — takes the inline-PTX [mma.sync.aligned.m16n8k16...f32.bf16.bf16.f32] path, whose
-     per-lane accumulator registers convert at the [d] boundary. Both legs are pinned so a
+     CUDA. [nvcuda::wmma] has no bf16 accumulator fragment (mma.hpp declares [__nv_bfloat16]
+     operands against a [float] accumulator only), so bf16 x bf16 -> f32 takes the wmma template
+     path while the uniform bf16 x bf16 -> bf16 combination — the one a uniformly-bf16 network
+     actually produces — takes the inline-PTX [mma.sync.aligned.m16n8k16...f32.bf16.bf16.f32] path,
+     whose per-lane accumulator registers convert at the [d] boundary. Both legs are pinned so a
      regression on either shows up as a rendering change, not just a timing one. HIP has both
      rocWMMA combinations and Metal has the uniform one ([simdgroup_bfloat8x8]).
 
@@ -501,10 +500,9 @@ let () =
        for cell from the same data. Measured on a single exact 16x16x16 [mma_sync] with a
        [fill_fragment]-zeroed accumulator, against an exact double reference:
 
-         bf16 x bf16 -> f32   227/256 cells differ, worst 1.19e-07  (one f32 ulp at ~1.0)
-         bf16 x bf16 -> bf16  235/256 cells differ, worst 5.86e-03
-         f16  x f16  -> f32   227/256 cells differ, worst 1.19e-07
-         f16  x f16  -> f16    18/256 cells differ, worst 5.96e-08
+       bf16 x bf16 -> f32 227/256 cells differ, worst 1.19e-07 (one f32 ulp at ~1.0) bf16 x bf16 ->
+       bf16 235/256 cells differ, worst 5.86e-03 f16 x f16 -> f32 227/256 cells differ, worst
+       1.19e-07 f16 x f16 -> f16 18/256 cells differ, worst 5.96e-08
 
        So the tolerance is per accumulator format, and the narrow-accumulator one has to be wide:
        the uniform-bf16 combination — HIP's only tensor-core route for a uniformly-bf16 network —
@@ -544,8 +542,8 @@ let () =
            tf32 legs above already pin strictly. *)
         has "(wmma-bf16)"
       else
-        (* gh-ocannl-575: register-tiled at the f32 accumulator precision, the bf16 operands
-           bridged at the memory boundary. *)
+        (* gh-ocannl-575: register-tiled at the f32 accumulator precision, the bf16 operands bridged
+           at the memory boundary. *)
         has "Tile_mma register tiling" && has "narrow storage bridged: a:bfloat16 b:bfloat16")
     ();
   (* The uniform combination in all three operand orientations. CUDA's inline-PTX arm gathers every
@@ -562,8 +560,8 @@ let () =
       has "mma.sync.aligned.m16n8k16"
     else
       (* gh-ocannl-575: uniform bf16 register-tiles with f32 compute under the default
-         [narrow_compute_f32] policy, every operand bridged. The [bfu_tb] leg still declines to
-         the scalar fallback (transposed B), which [uniform_check]'s caller handles below. *)
+         [narrow_compute_f32] policy, every operand bridged. The [bfu_tb] leg still declines to the
+         scalar fallback (transposed B), which [uniform_check]'s caller handles below. *)
       has "Tile_mma register tiling"
       && has "narrow storage bridged: d:bfloat16 a:bfloat16 b:bfloat16"
   in
@@ -594,14 +592,14 @@ let () =
      is a multiple of 0.25 bounded by 1.5, and a 32-term f32 sum of such products is exact
      regardless of accumulation order — so parity is bitwise on every backend and either rendering
      path. Metal runs these too (gh-ocannl-632): it has no fp8 type, but it stores e5m2 as a byte
-     and computes in f32, and its [simdgroup_matrix] has no fp8 format tile, so the legs land on
-     the lane-0 fallback the GPU arm of the structural check already admits.
+     and computes in f32, and its [simdgroup_matrix] has no fp8 format tile, so the legs land on the
+     lane-0 fallback the GPU arm of the structural check already admits.
 
      All three operand orientations are covered (gh-ocannl-481 item 1): the arm's per-lane byte
-     gathers now address every fragment element at its transposed (col, row) offset under
-     [ta]/[tb], so the gradient GEMMs' layouts ([dA = g.B^T], [dB = A^T.g]) tensorize instead of
-     silently scalar-falling-back. A mis-mapped gather computes a different product, so the bitwise
-     parity is what pins the per-lane layout. --- *)
+     gathers now address every fragment element at its transposed (col, row) offset under [ta]/[tb],
+     so the gradient GEMMs' layouts ([dA = g.B^T], [dB = A^T.g]) tensorize instead of silently
+     scalar-falling-back. A mis-mapped gather computes a different product, so the bitwise parity is
+     what pins the per-lane layout. --- *)
   (let fp8_a ~l ~o ~i =
      NTDSL.init ~l ~prec:Ir.Ops.fp8 ?i ~o
        ~f:(fun idcs -> (Float.of_int (((idcs.(0) * n) + idcs.(1)) % 5) *. 0.5) -. 1.)
@@ -655,9 +653,9 @@ let () =
              (* Transposed B declines the register tiling on the C backends. *)
              has "== 0)" && (not (has "simdgroup")) && not (has "Tile_mma register tiling")
            else
-             (* gh-ocannl-575: fp8 storage register-tiles at the f32 accumulator precision;
-                fp8 has no whole-vector conversion, so the operand loads convert per lane
-                (the [vec_bridge] fallback arm) while the arithmetic stays vectorized. *)
+             (* gh-ocannl-575: fp8 storage register-tiles at the f32 accumulator precision; fp8 has
+                no whole-vector conversion, so the operand loads convert per lane (the [vec_bridge]
+                fallback arm) while the arithmetic stays vectorized. *)
              has "Tile_mma register tiling" && has "narrow storage bridged: a:fp8 b:fp8"
          in
          p (Printf.sprintf "%s tensorized structure as expected" tag) ok
@@ -694,9 +692,7 @@ let () =
         Ir.Indexing.Empty
     in
     let ctx_e0 = Context.run ctx_e0 routine_e0 in
-    let got_edge_serial =
-      nonzero "mm_edge_serial" (Context.get_values ctx_e0 ec0.Tensor.value)
-    in
+    let got_edge_serial = nonzero "mm_edge_serial" (Context.get_values ctx_e0 ec0.Tensor.value) in
     let%op ec1 = ea * eb in
     let edge_schedule (opt : LL.optimized) : Sched.schedule =
       let paths = nest_paths opt.LL.llc in
@@ -747,10 +743,10 @@ let () =
     let wi = 8 and wk = 8 and wj = 40 in
     (* Both operands must vary with BOTH their axes or the oracle stops discriminating: a modulus
        dividing the row stride makes every reduction row identical, and a mis-indexed k read then
-       still matches the serial twin (Codex P1 on PR #357). 11 and 13 are coprime to the strides
-       (8 and 40), so all 8 rows and all 8 columns of each operand differ — and so do all 8 rows of
-       the product, whose columns take 13 distinct values, more than any tile width in play. The
-       values stay exactly representable (multiples of 1/32 throughout). *)
+       still matches the serial twin (Codex P1 on PR #357). 11 and 13 are coprime to the strides (8
+       and 40), so all 8 rows and all 8 columns of each operand differ — and so do all 8 rows of the
+       product, whose columns take 13 distinct values, more than any tile width in play. The values
+       stay exactly representable (multiples of 1/32 throughout). *)
     let wav = Array.init (wi * wk) ~f:(fun x -> Float.of_int (x % 11) *. 0.125) in
     let wbv = Array.init (wk * wj) ~f:(fun x -> (Float.of_int (x % 13) -. 6.) *. 0.25) in
     let wa = TDSL.ndarray wav ~label:[ "wa" ] ~input_dims:[ wk ] ~output_dims:[ wi ] () in
@@ -765,9 +761,7 @@ let () =
         Ir.Indexing.Empty
     in
     let ctx_w0 = Context.run ctx_w0 routine_w0 in
-    let got_width_serial =
-      nonzero "mm_width_serial" (Context.get_values ctx_w0 wc0.Tensor.value)
-    in
+    let got_width_serial = nonzero "mm_width_serial" (Context.get_values ctx_w0 wc0.Tensor.value) in
     let%op wc1 = wa * wb in
     let width_schedule (opt : LL.optimized) : Sched.schedule =
       let paths = nest_paths opt.LL.llc in
@@ -812,20 +806,16 @@ let () =
      That matters because the whole-vector arm gcc needs is a target builtin
      ([C_syntax.vec_fma_builtin], mirroring clang's [__builtin_elementwise_fma]) rather than the
      obvious [dst = a * b + dst]: gcc -O3 spills the C-tile when the update is a per-lane
-     subscripted loop (~9x on this GEBP shape), while [a * b + dst] allocates well but is only
-     MAYBE contracted. So this leg pins what the emission promises — a fused chain in serial k
-     order, bitwise equal to the fallback — and the structural check pins that a whole-vector arm
-     is on offer at all, which is the part that only shows up as throughput. --- *)
+     subscripted loop (~9x on this GEBP shape), while [a * b + dst] allocates well but is only MAYBE
+     contracted. So this leg pins what the emission promises — a fused chain in serial k order,
+     bitwise equal to the fallback — and the structural check pins that a whole-vector arm is on
+     offer at all, which is the part that only shows up as throughput. --- *)
   if not on_gpu then (
     let fi = 8 and fk = 32 and fj = 32 in
     (* Full-mantissa operands: each product needs more bits than f32 carries, so fma and mul-add
        differ, and both vary with both axes (69 and 53 are coprime to the strides). *)
-    let fav =
-      Array.init (fi * fk) ~f:(fun x -> 1.0 +. (Float.of_int ((x % 69) + 3) *. 0x1p-18))
-    in
-    let fbv =
-      Array.init (fk * fj) ~f:(fun x -> -1.0 -. (Float.of_int ((x % 53) + 5) *. 0x1p-17))
-    in
+    let fav = Array.init (fi * fk) ~f:(fun x -> 1.0 +. (Float.of_int ((x % 69) + 3) *. 0x1p-18)) in
+    let fbv = Array.init (fk * fj) ~f:(fun x -> -1.0 -. (Float.of_int ((x % 53) + 5) *. 0x1p-17)) in
     let fa = TDSL.ndarray fav ~label:[ "fua" ] ~input_dims:[ fk ] ~output_dims:[ fi ] () in
     let fb = TDSL.ndarray fbv ~label:[ "fub" ] ~input_dims:[ fj ] ~output_dims:[ fk ] () in
     let%op fc0 = fa * fb in
@@ -838,9 +828,7 @@ let () =
         Ir.Indexing.Empty
     in
     let ctx_f0 = Context.run ctx_f0 routine_f0 in
-    let want_fused =
-      nonzero "mm_fused_serial" (Context.get_values ctx_f0 fc0.Tensor.value)
-    in
+    let want_fused = nonzero "mm_fused_serial" (Context.get_values ctx_f0 fc0.Tensor.value) in
     let%op fc1 = fa * fb in
     let fused_schedule (opt : LL.optimized) : Sched.schedule =
       let paths = nest_paths opt.LL.llc in
@@ -869,8 +857,9 @@ let () =
        this leg would silently duplicate the first one, which cannot see a rounding difference. *)
     let inexact_in_f32 x = Float.(Int32.float_of_bits (Int32.bits_of_float x) <> x) in
     p "full-mantissa products are inexact in f32"
-      (List.for_all (List.range 0 (fi * fk)) ~f:(fun x ->
-           inexact_in_f32 (fav.(x) *. fbv.(x % (fk * fj)))));
+      (List.for_all
+         (List.range 0 (fi * fk))
+         ~f:(fun x -> inexact_in_f32 (fav.(x) *. fbv.(x % (fk * fj)))));
     p "full-mantissa tensorized matmul matches the serial twin bitwise"
       (Array.for_all2_exn got_fused want_fused ~f:Float.equal);
     match read_generated "mm_fused_mma" with
@@ -878,14 +867,13 @@ let () =
     | Some src ->
         let has s = String.is_substring src ~substring:s in
         p "register tiling offers a whole-vector fused accumulator update"
-          (has "Tile_mma register tiling"
-          && has "__builtin_elementwise_fma"
-          (* The gcc arm: a whole-vector builtin, not the per-lane subscripted loop the spill
-             lives in. Every arm is emitted target-independently, behind an [#elif] — which one
-             carries the x86 builtin depends on the machine's lane count ([__FMA__] at 4 and 8
-             lanes, [__AVX512F__] at 16), so the pin is that an x86 whole-vector arm exists at
-             this width, not how its guard reads. *)
-          && has "#elif "
+          (has "Tile_mma register tiling" && has "__builtin_elementwise_fma"
+         (* The gcc arm: a whole-vector builtin, not the per-lane subscripted loop the spill lives
+            in. Every arm is emitted target-independently, behind an [#elif] — which one carries the
+            x86 builtin depends on the machine's lane count ([__FMA__] at 4 and 8 lanes,
+            [__AVX512F__] at 16), so the pin is that an x86 whole-vector arm exists at this width,
+            not how its guard reads. *)
+         && has "#elif "
           && has "__builtin_ia32_vfmadd"))
   else (
     skipped "full-mantissa products are inexact in f32";

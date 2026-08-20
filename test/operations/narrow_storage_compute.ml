@@ -5,19 +5,19 @@
    Three things are checked, in the order they can fail:
 
    1. Accuracy. An elementwise chain whose intermediates are virtual is run at bf16 storage against
-      an all-f32 reference, once under the policy and once with [narrow_compute_f32 = false] (the
-      per-operator rounding that predates this issue). Only the second rounds the intermediates, so
-      its error is the larger one -- the assertion is the comparison, not a tolerance.
+   an all-f32 reference, once under the policy and once with [narrow_compute_f32 = false] (the
+   per-operator rounding that predates this issue). Only the second rounds the intermediates, so its
+   error is the larger one -- the assertion is the comparison, not a tolerance.
 
    2. Bitwise parity of the vectorized rendering against its serial twin, at bf16 and at half. The
-      convert-on-load/store bridge and the scalar path must agree exactly: bf16's vector narrowing
-      reimplements [single_to_bfloat16]'s round-to-nearest-even with vector arithmetic, and half's
-      goes through [__builtin_convertvector] where the scalar path casts to [_Float16]. Anything
-      approximate here would be a real defect, so the comparison is [=], not [approx].
+   convert-on-load/store bridge and the scalar path must agree exactly: bf16's vector narrowing
+   reimplements [single_to_bfloat16]'s round-to-nearest-even with vector arithmetic, and half's goes
+   through [__builtin_convertvector] where the scalar path casts to [_Float16]. Anything approximate
+   here would be a real defect, so the comparison is [=], not [approx].
 
    3. Structure of the generated source: a bf16 [Vectorized] loop must actually vectorize (it was
-      gated to f32/f64 before this issue), and its arithmetic must be free of the per-operator
-      [single_to_bfloat16] wrapping -- the narrowing appears once, on the way out.
+   gated to f32/f64 before this issue), and its arithmetic must be free of the per-operator
+   [single_to_bfloat16] wrapping -- the narrowing appears once, on the way out.
 
    GPU backends are deliberately unaffected (they have native 16-bit types and arithmetic), so the
    structural checks are CPU-only; the parity checks hold everywhere. *)
@@ -91,8 +91,7 @@ let vectorize (opt : LL.optimized) =
   let j = Option.value_exn ~here:[%here] (innermost_loop opt.LL.llc) in
   Sched.apply [ Sched.Retype { axis = j; ty = LL.Vectorized } ] opt
 
-let max_err x y =
-  Array.foldi x ~init:0. ~f:(fun i acc v -> Float.max acc (Float.abs (v -. y.(i))))
+let max_err x y = Array.foldi x ~init:0. ~f:(fun i acc v -> Float.max acc (Float.abs (v -. y.(i))))
 
 let () =
   Tensor.unsafe_reinitialize ();
@@ -130,8 +129,9 @@ let () =
     ((not on_cpu) || Float.(err_wide < err_per_op));
   (* The wide leg's only rounding is the final store, so its relative error is bounded by bf16's
      half-ulp (2^-9); the per-operator leg compounds five of them. *)
-  let rel arr = max_err reference arr /. Array.fold reference ~init:0. ~f:(fun m v ->
-      Float.max m (Float.abs v)) in
+  let rel arr =
+    max_err reference arr /. Array.fold reference ~init:0. ~f:(fun m v -> Float.max m (Float.abs v))
+  in
   p "wide-compute relative error within one bf16 ulp" ((not on_cpu) || Float.(rel wide < 0.004));
   p "per-operator relative error exceeds it" Float.(rel per_op > 0.004);
 
@@ -141,7 +141,8 @@ let () =
     ~f:(fun (name, prec) ->
       let twin = run ~name:("nsc_twin_" ^ name) ~transform:serial ~prec ~label:("t" ^ name) () in
       let vec = run ~name:("nsc_vec_" ^ name) ~transform:vectorize ~prec ~label:("v" ^ name) () in
-      p (name ^ " vectorized rendering is bitwise identical to the serial twin")
+      p
+        (name ^ " vectorized rendering is bitwise identical to the serial twin")
         (Array.for_all2_exn vec twin ~f:Float.equal));
 
   (* --- 2b. Native fp16 arithmetic (gh-ocannl-516): same parity obligation, one precision up. ---
@@ -167,16 +168,12 @@ let () =
 
   (* Computing *in* fp16 means fp16's 65504 ceiling applies to the intermediates, not just to the
      stored result. [exp 12.] is 162754, which overflows it; scaling that back down recovers a
-     finite value only if the exponential was allowed to stay in f32. The check is on a library
-     call on purpose: the ring operators compute in [_Float16] whether or not the result of a
+     finite value only if the exponential was allowed to stay in f32. The check is on a library call
+     on purpose: the ring operators compute in [_Float16] whether or not the result of a
      float-returning call is cast back, so an [expf] is what distinguishes the two. *)
   let overflow_leg policy =
-    let a =
-      NTDSL.init ~l:"ovf_a" ~prec:Ir.Ops.half ~o:[ 1 ] ~f:(fun _ -> 12.0) ()
-    in
-    let c =
-      NTDSL.init ~l:"ovf_c" ~prec:Ir.Ops.half ~o:[ 1 ] ~f:(fun _ -> 0.001) ()
-    in
+    let a = NTDSL.init ~l:"ovf_a" ~prec:Ir.Ops.half ~o:[ 1 ] ~f:(fun _ -> 12.0) () in
+    let c = NTDSL.init ~l:"ovf_c" ~prec:Ir.Ops.half ~o:[ 1 ] ~f:(fun _ -> 0.001) () in
     let%op y = exp a *. c in
     Tn.update_prec y.Tensor.value Ir.Ops.half;
     Ir.Numerics.set_policy policy;
@@ -254,8 +251,7 @@ let () =
     ((not on_cpu) || not (src_has vec_source "bfloat16_to_single(single_to_bfloat16("));
   (* f32 arithmetic reached a bf16 kernel: the fused multiply-add is the f32 one. *)
   p "arithmetic is f32"
-    ((not on_cpu)
-    || src_has vec_source "fmaf(" || src_has vec_source "__builtin_elementwise_fma");
+    ((not on_cpu) || src_has vec_source "fmaf(" || src_has vec_source "__builtin_elementwise_fma");
   (* Under the fp16-arithmetic policy the half kernel's vector element type is HALF_T rather than
      float -- the lane count doubles and no conversion appears at all. On a target without native
      16-bit arithmetic the policy is correctly ignored, and the kernel is the widening one. *)

@@ -112,9 +112,9 @@ let () =
     Array.foldi y_vals_a ~init:0. ~f:(fun i acc va ->
         Float.max acc (Float.abs (va -. y_vals_b.(i))))
   in
-  (* The parity tolerances cannot reject an input-independent forward: if both legs collapsed to
-     one constant (or to zeros) every check below would read [true]. The reference's own spread
-     must exceed the tolerance it gates. *)
+  (* The parity tolerances cannot reject an input-independent forward: if both legs collapsed to one
+     constant (or to zeros) every check below would read [true]. The reference's own spread must
+     exceed the tolerance it gates. *)
   let ref_spread =
     Array.fold y_vals_a ~init:0. ~f:(fun acc v -> Float.max acc (Float.abs (v -. y_vals_a.(0))))
   in

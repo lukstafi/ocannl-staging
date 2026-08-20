@@ -73,13 +73,7 @@ let () =
   let idx = Idx.get_symbol () in
   let loop_with_write =
     LL.For_loop
-      {
-        index = idx;
-        from_ = 0;
-        to_ = 3;
-        body = LL.Set_local (id, LL.Constant 1.);
-        axis = Serial;
-      }
+      { index = idx; from_ = 0; to_ = 3; body = LL.Set_local (id, LL.Constant 1.); axis = Serial }
   in
   assert (not (LL.reads_scope_before_set id loop_with_write));
 
@@ -108,13 +102,7 @@ let () =
      reason as Noop, so this must also return true. *)
   let empty_loop_write =
     LL.For_loop
-      {
-        index = idx;
-        from_ = 5;
-        to_ = 0;
-        body = LL.Set_local (id, LL.Constant 1.);
-        axis = Serial;
-      }
+      { index = idx; from_ = 5; to_ = 0; body = LL.Set_local (id, LL.Constant 1.); axis = Serial }
   in
   assert (LL.reads_scope_before_set id empty_loop_write);
 
@@ -207,13 +195,7 @@ let () =
   let idx = Idx.get_symbol () in
   let empty_loop =
     LL.For_loop
-      {
-        index = idx;
-        from_ = 5;
-        to_ = 0;
-        body = LL.Set_local (id, LL.Constant 0.);
-        axis = Serial;
-      }
+      { index = idx; from_ = 5; to_ = 0; body = LL.Set_local (id, LL.Constant 0.); axis = Serial }
   in
   let acc_step =
     LL.Set_local

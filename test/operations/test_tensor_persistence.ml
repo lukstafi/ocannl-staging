@@ -240,8 +240,7 @@ let () =
   in
   let report path =
     let alignment, data_start, tensors = file_layout path in
-    Stdio.printf "  alignment=%d, data_start mod alignment=%d\n" alignment
-      (data_start % alignment);
+    Stdio.printf "  alignment=%d, data_start mod alignment=%d\n" alignment (data_start % alignment);
     List.iter tensors ~f:(fun (id, offset) ->
         Stdio.printf "  id=%d offset=%d, offset mod alignment=%d\n" id offset (offset % alignment))
   in
@@ -249,9 +248,7 @@ let () =
   let ctx = Context.cpu () in
   (* Byte lengths (12, 5, 4) that would leave every subsequent payload misaligned if packed. *)
   let ctx, tn_a = make_tn ctx ~id:0 ~label:[ "a" ] Ops.single [| 3 |] [| 1.0; 2.0; 3.0 |] in
-  let ctx, tn_b =
-    make_tn ctx ~id:1 ~label:[ "b" ] Ops.byte [| 5 |] [| 1.0; 2.0; 3.0; 4.0; 5.0 |]
-  in
+  let ctx, tn_b = make_tn ctx ~id:1 ~label:[ "b" ] Ops.byte [| 5 |] [| 1.0; 2.0; 3.0; 4.0; 5.0 |] in
   let ctx, tn_c = make_tn ctx ~id:2 ~label:[ "c" ] Ops.single [| 1 |] [| 7.0 |] in
   let t_set = Set.of_list (module Tn) [ tn_a; tn_b; tn_c ] in
   let path = tmp_file "aligned" in
@@ -272,9 +269,7 @@ let () =
   Tensor.unsafe_reinitialize ();
   let ctx = Context.cpu () in
   let ctx, tn_a = make_tn ctx ~id:0 ~label:[ "a" ] Ops.single [| 3 |] [| 1.0; 2.0; 3.0 |] in
-  let ctx, tn_b =
-    make_tn ctx ~id:1 ~label:[ "b" ] Ops.byte [| 5 |] [| 1.0; 2.0; 3.0; 4.0; 5.0 |]
-  in
+  let ctx, tn_b = make_tn ctx ~id:1 ~label:[ "b" ] Ops.byte [| 5 |] [| 1.0; 2.0; 3.0; 4.0; 5.0 |] in
   let ctx, tn_c = make_tn ctx ~id:2 ~label:[ "c" ] Ops.single [| 1 |] [| 7.0 |] in
   let path = tmp_file "packed" in
   Persistence.save ~ctx ~appending:false ~alignment:1
@@ -298,8 +293,7 @@ let () =
     List.count layout ~f:(fun (id, offset) ->
         (data_start + offset) % Ops.prec_in_bytes (prec_of_id id) = 0)
   in
-  Stdio.printf "  packed load: %d mapped, %d decoded\n"
-    (mapped_after - mapped_before)
+  Stdio.printf "  packed load: %d mapped, %d decoded\n" (mapped_after - mapped_before)
     (copied_after - copied_before);
   Verdict.p "a payload at an offset its precision cannot be mapped at is decoded"
     (mapped_after - mapped_before = expected_mapped
@@ -376,8 +370,7 @@ let () =
     let ctx, loaded = Persistence.load ~ctx ~mmap path in
     let mapped_after, copied_after = Persistence.ingestion_counts () in
     Stdio.printf "  load ~mmap:%b ingested %d payloads by mapping, %d by copying\n" mmap
-      (mapped_after - mapped_before)
-      (copied_after - copied_before);
+      (mapped_after - mapped_before) (copied_after - copied_before);
     List.map (Set.to_list loaded) ~f:(fun tn -> (tn.Tn.id, show ctx tn))
   in
   let copied = load_and_show ~mmap:false in
@@ -486,7 +479,8 @@ let () =
   Verdict.p "the file on disk holds what the save wrote"
     (Array.equal Float.equal (Context.get_values ctx tn) v2);
   (* A save whose rename fails leaves its temp file behind, so clean up both. *)
-  List.iter [ live_mapping_path; live_mapping_path ^ ".tmp" ] ~f:(fun path ->
-      if Stdlib.Sys.file_exists path then Stdlib.Sys.remove path);
+  List.iter
+    [ live_mapping_path; live_mapping_path ^ ".tmp" ]
+    ~f:(fun path -> if Stdlib.Sys.file_exists path then Stdlib.Sys.remove path);
 
   Stdio.printf "=== All persistence tests completed ===\n"

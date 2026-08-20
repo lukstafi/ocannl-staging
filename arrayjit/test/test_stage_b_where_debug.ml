@@ -56,7 +56,7 @@ let compile_to_c ~name llc =
       pipelined = Base.Map.empty (module Tn);
       zero_fringe = Base.Set.empty (module Tn);
       flip_candidates = [];
-    spliced_rbw = Base.Set.empty (module Tn);
+      spliced_rbw = Base.Set.empty (module Tn);
     }
   in
   let module Syntax = Ir.C_syntax.C_syntax (Ir.C_syntax.Pure_C_config (struct
@@ -179,8 +179,7 @@ let () =
       ( LL.Declare_local { id = id1; needs_init = true },
         LL.Seq
           ( LL.Declare_local { id = id2; needs_init = true },
-            LL.For_loop { index = t; from_ = 0; to_ = 3; body; axis = Serial } )
-      )
+            LL.For_loop { index = t; from_ = 0; to_ = 3; body; axis = Serial } ) )
   in
   let c = compile_to_c ~name:"nested_where" llc in
   (* The inner condition's read [condrd3[t]] is gated by the OUTER guard: [(<outer_cond> ?

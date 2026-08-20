@@ -19,10 +19,10 @@
    Structural pins say what the optimizer BUILT; virtualization rewrites what value a cell holds, so
    every case also has an EXECUTED leg (gh-ocannl-589): the very same [optimized] record is compiled
    through the [?prelowered] seam (gh-ocannl-562, worked out in [prelowered_seam.ml]), seeded, run,
-   and its outputs checked against an OCaml reference, plus against a second arm that
-   re-specializes the same code with the producer's placement pre-decided [On_device]. That second
-   arm is what pins the guarded inline to the materialized reading of the same program: the guard
-   must reproduce, cell by cell, what the producer's buffer would have held. *)
+   and its outputs checked against an OCaml reference, plus against a second arm that re-specializes
+   the same code with the producer's placement pre-decided [On_device]. That second arm is what pins
+   the guarded inline to the materialized reading of the same program: the guard must reproduce,
+   cell by cell, what the producer's buffer would have held. *)
 
 open Base
 open Ll_test
@@ -72,8 +72,8 @@ let case_diagonal_equal () =
   p "diagonal-equal: producer virtual" (known_virtual opt d);
   p "diagonal-equal: read inlined (no array read of d)" (count_get opt d = 0);
   p "diagonal-equal: guard folded away (no Where)" (count_where opt = 0);
-  (* Folding the guard away must not fold the producer's index dependence away with it: the
-     consumer writes only its own diagonal, and each cell there holds that row's producer value. *)
+  (* Folding the guard away must not fold the producer's index dependence away with it: the consumer
+     writes only its own diagonal, and each cell there holds that row's producer value. *)
   let expected =
     Array.init 9 ~f:(fun n -> if n / 3 = n % 3 then Float.of_int ((n / 3) + 1) else sentinel)
   in
@@ -93,7 +93,8 @@ let case_partial_diagonal () =
   let a = sym () and b = sym () and cc = sym () in
   let producer = seq (zero d) (loop i (loop j (set d [| iter i; iter j; iter i |] (tag i j)))) in
   let consumer =
-    loop a (loop b (loop cc (set o [| iter a; iter b; iter cc |] (get d [| iter a; iter b; iter cc |]))))
+    loop a
+      (loop b (loop cc (set o [| iter a; iter b; iter cc |] (get d [| iter a; iter b; iter cc |]))))
   in
   let llc = seq producer consumer in
   let opt = optimize llc in

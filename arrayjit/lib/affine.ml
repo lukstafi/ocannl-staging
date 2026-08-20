@@ -258,11 +258,11 @@ let covers_box ~range ~(dims : int array) (idcs : Idx.axis_index array) : bool =
 
     [fiber_cardinality ~domain idcs]: how many points of the loop box [domain] (symbol, width pairs)
     map to one given cell in the image of the access map [idcs] — the per-cell visit count of a read
-    access, and the recompute cost per read site of inlining a setter (the retired [Low_level] concrete tracer's
-    reduction extent, [virtualize_max_inline_reduction]'s subject). Domain symbols absent from the
-    map contribute the product of their widths; when the map is injective on its mentioned symbols
-    ({!Indexing.affine_injective}) that product is the exact fiber size of every image cell (cells
-    outside the image have zero), otherwise it is a lower bound. *)
+    access, and the recompute cost per read site of inlining a setter (the retired [Low_level]
+    concrete tracer's reduction extent, [virtualize_max_inline_reduction]'s subject). Domain symbols
+    absent from the map contribute the product of their widths; when the map is injective on its
+    mentioned symbols ({!Indexing.affine_injective}) that product is the exact fiber size of every
+    image cell (cells outside the image have zero), otherwise it is a lower bound. *)
 let fiber_cardinality ~(domain : (Idx.symbol * int) list) (idcs : Idx.axis_index array) :
     [ `Exact of int | `At_least of int ] =
   let mentions s =
@@ -523,8 +523,8 @@ let same_statement p q =
   | Some p', Some q' -> List.equal equal_path_comp p' q'
   | _ -> false
 
-(** The top-level statement index of a path, [-1] when the whole routine is a single statement
-    (its accesses' paths start with an intra-statement component). *)
+(** The top-level statement index of a path, [-1] when the whole routine is a single statement (its
+    accesses' paths start with an intra-statement component). *)
 let stmt_head = function Stmt h :: _ -> h | _ -> -1
 
 type 'tn access = {
@@ -556,15 +556,15 @@ type 'tn access = {
       (** Reads only: the index map of the enclosing [Set]/[Set_from_vec]/[Set_dynamic] statement's
           write when the read occurs in that statement's right-hand side; [None] elsewhere ([If]
           conditions and [Local_scope] inner statements carry their own statements' writes). The
-          subject of the read-modify-write exemption ([Low_level.rmw_exempt]): matching by
-          statement subordination rather than by program path, so a guarded body's write cannot
-          alias its [If] condition's read (they share a path). *)
+          subject of the read-modify-write exemption ([Low_level.rmw_exempt]): matching by statement
+          subordination rather than by program path, so a guarded body's write cannot alias its [If]
+          condition's read (they share a path). *)
   a_loops : (Idx.symbol * (int * int)) list;
       (** Enclosing loops, outermost first, with inclusive iteration bounds. *)
   a_path : path_comp list;
       (** Lexicographic program-order position: statement indices per [Seq] nesting level,
-          interleaved with intra-statement components ({!path_comp}) at each statement the
-          traversal descends into. *)
+          interleaved with intra-statement components ({!path_comp}) at each statement the traversal
+          descends into. *)
 }
 [@@deriving sexp_of]
 
@@ -626,8 +626,9 @@ let may_touch_same_cell ?(static_range = fun _ -> None) (a : 'tn access) (b : 't
     write's map).
 
     Guarded writes are the caller's choice: include them to mirror guards-taken analyses
-    ([Low_level.trace_node_facts] and the coverage queries take guards unconditionally), pre-filter [a_guarded] for
-    execution-accurate coverage. [writes] must be accesses of the same node as [read]. *)
+    ([Low_level.trace_node_facts] and the coverage queries take guards unconditionally), pre-filter
+    [a_guarded] for execution-accurate coverage. [writes] must be accesses of the same node as
+    [read]. *)
 
 (* Value set of one axis component, abstracted as an arithmetic progression {ap_lo, ap_lo + ap_step,
    ..., ap_hi} (ap_step = 0 iff singleton). For the write (superset) side the form must be dense —
@@ -707,12 +708,12 @@ let linear_terms (idx : Idx.axis_index) : ((int * Idx.symbol) list * int) option
 (** Whether the runs of a vectorized access ([a_vec_last]) are pairwise disjoint in the node's flat
     cell space — the access then touches exactly [base image * a_vec_len] distinct cells
     (gh-ocannl-578). Sufficient conditions on the minor (last, contiguous) axis component: it is
-    linear with every symbol's range known from [a_loops]; every run stays within its row ([lo >=
-    0] and [hi + a_vec_len <= minor_dim], where [minor_dim] is the node's minor-axis extent — a
-    spilling run could overlap a base in the next row); and any two attained base values differ by
-    a multiple of the coefficient gcd [g] with [g >= a_vec_len] (or the component is constant,
-    [g = 0]). Distinct base cells then differ either in a non-minor axis — disjoint runs, since
-    none spills — or by at least a run length along the minor axis. Conservative: [false] when any
+    linear with every symbol's range known from [a_loops]; every run stays within its row ([lo >= 0]
+    and [hi + a_vec_len <= minor_dim], where [minor_dim] is the node's minor-axis extent — a
+    spilling run could overlap a base in the next row); and any two attained base values differ by a
+    multiple of the coefficient gcd [g] with [g >= a_vec_len] (or the component is constant,
+    [g = 0]). Distinct base cells then differ either in a non-minor axis — disjoint runs, since none
+    spills — or by at least a run length along the minor axis. Conservative: [false] when any
     condition is not proved. *)
 let vec_runs_disjoint ~minor_dim (a : 'tn access) : bool =
   a.a_vec_last
@@ -755,12 +756,9 @@ let read_covered_before ?(thread = fun _ -> false) ?(static_range = fun _ -> Non
       match (p, q) with
       | [], [] | _ :: _, [] -> false
       | [], _ :: _ -> true
-      | a :: p', b :: q' ->
+      | a :: p', b :: q' -> (
           if equal_path_comp a b then before p' q'
-          else (
-            match (a, b) with
-            | Arg _, Arg _ -> false
-            | _ -> compare_path_comp a b < 0)
+          else match (a, b) with Arg _, Arg _ -> false | _ -> compare_path_comp a b < 0)
     in
     before p q
   in

@@ -6,13 +6,12 @@
    strided/gapped access: the image cardinality counts the touched cells, not the node size; - rmw
    reduction: the accumulator's read/write/rmw split; - guarded write: guards-taken op count
    ([flops_approx]) and a never-definite write; - dynamic gather: the uninterpretable-component
-   fallback to whole-node bytes; - overlapping writes: the union bound capped by the node's size;
-   - multi-read exactness (gh-ocannl-578): pairwise provably-disjoint exact reads sum exactly,
-   overlapping ones stay a flagged union bound, and conditionally-evaluated reads (Where arms)
-   stay a flagged bound even when disjoint — with the op count flagged too when the arms' costs
-   differ; - vectorized runs (gh-ocannl-578): bases spaced by at least the run length (or on
-   distinct in-bounds rows) count exactly, close-spaced or row-spilling bases stay a flagged
-   upper bound.
+   fallback to whole-node bytes; - overlapping writes: the union bound capped by the node's size; -
+   multi-read exactness (gh-ocannl-578): pairwise provably-disjoint exact reads sum exactly,
+   overlapping ones stay a flagged union bound, and conditionally-evaluated reads (Where arms) stay
+   a flagged bound even when disjoint — with the op count flagged too when the arms' costs differ; -
+   vectorized runs (gh-ocannl-578): bases spaced by at least the run length (or on distinct
+   in-bounds rows) count exactly, close-spaced or row-spilling bases stay a flagged upper bound.
 
    The tail asserts the roofline bound is monotone in the envelope constants. *)
 
@@ -294,8 +293,8 @@ let () =
   in
   show_summary "where equal-cost arms (op count stays a bound)" (CM.analyze where_equal_arms);
 
-  (* Vectorized runs (gh-ocannl-578), strip-mined: setv4 V16[4*i] — bases 4 apart tile the node,
-     16 cells written exactly. The random-bits source is read once per run. *)
+  (* Vectorized runs (gh-ocannl-578), strip-mined: setv4 V16[4*i] — bases 4 apart tile the node, 16
+     cells written exactly. The random-bits source is read once per run. *)
   let v16 = fresh_tn "V16" [| 16 |] in
   let src = fresh_tn "U" [| 4 |] in
   let base4 s = Idx.Affine { symbols = [ (4, s) ]; offset = 0 } in

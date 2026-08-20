@@ -34,8 +34,8 @@ let () =
     | Some "true" -> true
     | _ -> false
   in
-  (* Per-conv strides (cifar_stride's stride-2 stem, gh-ocannl-502); valid-only, see
-     gen_fixtures. Absent on pre-existing fixtures. *)
+  (* Per-conv strides (cifar_stride's stride-2 stem, gh-ocannl-502); valid-only, see gen_fixtures.
+     Absent on pre-existing fixtures. *)
   let s1 = H.meta_int_default st "stride1" ~default:1 in
   let s2 = H.meta_int_default st "stride2" ~default:1 in
   let x_nd = St.to_ndarray st "x" in

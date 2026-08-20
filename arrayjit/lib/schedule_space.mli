@@ -6,34 +6,34 @@
 
     - {b Placement levels}: per policy-decided tensor node, where its value lives on the
       inline/compute-at/materialize spectrum ({!placement}). The Inline/Materialize poles are the
-      landed decision vector ([Context.decide_inline], [optimized.flip_candidates]);
-      [Pl_stage_at] is the compute-at middle, represented here from the start so it is a decision
-      level rather than a bolt-on — its instantiation (a [Schedule.Stage] at the given loop) lands
-      with the later phases.
+      landed decision vector ([Context.decide_inline], [optimized.flip_candidates]); [Pl_stage_at]
+      is the compute-at middle, represented here from the start so it is a decision level rather
+      than a bolt-on — its instantiation (a [Schedule.Stage] at the given loop) lands with the later
+      phases.
     - {b Family levels}: which sketch pipeline, and its parameters — represented as a refinement
       {!tree} whose choices may depend on earlier commitments (a staging shape constrains which
-      geometries remain; a twin exists only for staged geometries). The sketch families factor
-      into such trees instead of flat enumerations ([Autotune.matmul_sketch_tree] is the first);
-      today's seed lists are exactly the trees' {!leaves}.
+      geometries remain; a twin exists only for staged geometries). The sketch families factor into
+      such trees instead of flat enumerations ([Autotune.matmul_sketch_tree] is the first); today's
+      seed lists are exactly the trees' {!leaves}.
 
-    Phase 2 makes the tree carry {e legality over partial shapes}: each choice's children are
-    judged with the same three-valued logic as [Schedule.op_legality], quantified over
-    completions — {!child.Refuted} asserts no completion below the child is valid (with the
-    violated constraint as witness, a decline explanation produced before any compilation,
-    gh-ocannl-479), {!child.Unknown} never fathoms, and construction commits to a verdict at the
-    moment the domain is built rather than leaving branches to fail at candidate compile. A
-    fourth verdict, {!child.Excluded}, keeps the landed policy/legality separation (gh-ocannl-555:
-    preferences suppress heuristic caps only, legality is non-negotiable) visible in the space
-    itself: an [Excluded] branch is valid but suppressed by default-policy search economy — a
-    driver may re-propose it by lifting the policy; it must never re-propose a [Refuted] one. *)
+    Phase 2 makes the tree carry {e legality over partial shapes}: each choice's children are judged
+    with the same three-valued logic as [Schedule.op_legality], quantified over completions —
+    {!child.Refuted} asserts no completion below the child is valid (with the violated constraint as
+    witness, a decline explanation produced before any compilation, gh-ocannl-479), {!child.Unknown}
+    never fathoms, and construction commits to a verdict at the moment the domain is built rather
+    than leaving branches to fail at candidate compile. A fourth verdict, {!child.Excluded}, keeps
+    the landed policy/legality separation (gh-ocannl-555: preferences suppress heuristic caps only,
+    legality is non-negotiable) visible in the space itself: an [Excluded] branch is valid but
+    suppressed by default-policy search economy — a driver may re-propose it by lifting the policy;
+    it must never re-propose a [Refuted] one. *)
 
-type placement = Pl_inline | Pl_stage_at of Indexing.symbol | Pl_materialize
-[@@deriving sexp_of, compare, equal]
 (** One tensor node's placement level. [Pl_stage_at s] materializes the node at loop [s]'s scope —
     recomputed per iteration of the loops outside [s], shared by the loops inside. [Pl_inline] and
     [Pl_materialize] are the poles the greedy flip chain already searches. Loop identity is by
     lowering-local symbol: persistence across fresh lowerings (schedule-cache rebinding) is the
     later phases' concern, like instantiation. *)
+type placement = Pl_inline | Pl_stage_at of Indexing.symbol | Pl_materialize
+[@@deriving sexp_of, compare, equal]
 
 type 'a child =
   | Child of 'a tree Lazy.t  (** Feasible as far as construction can decide. *)
@@ -43,46 +43,46 @@ type 'a child =
           the subtree stays enumerable and a fathom must never prune it; its completions settle at
           candidate compile. *)
   | Excluded of string * 'a child Lazy.t
-      (** Valid but not proposed: default-policy search economy (a dominated or degenerate shape,
-          a twin whose measured cost exceeds its possible win). The witness states the policy;
-          the payload is the {e same judgment with only this policy lifted} — forcing it is the
-          driver's lift operation ({!lift_excluded}), and the result remains subject to legality
-          (a lifted branch may still be [Refuted] on other grounds). {!leaves}, {!enumerate} and
-          the collectors treat the exclusion as opaque: they neither enumerate nor descend into
-          the payload. *)
+      (** Valid but not proposed: default-policy search economy (a dominated or degenerate shape, a
+          twin whose measured cost exceeds its possible win). The witness states the policy; the
+          payload is the {e same judgment with only this policy lifted} — forcing it is the driver's
+          lift operation ({!lift_excluded}), and the result remains subject to legality (a lifted
+          branch may still be [Refuted] on other grounds). {!leaves}, {!enumerate} and the
+          collectors treat the exclusion as opaque: they neither enumerate nor descend into the
+          payload. *)
   | Refuted of string
-      (** The [Op_illegal] analogue, quantified over completions: {e no} completion below this
-          child satisfies the family's contract — an op precondition, a resource cap, or a
+      (** The [Op_illegal] analogue, quantified over completions: {e no} completion below this child
+          satisfies the family's contract — an op precondition, a resource cap, or a
           statically-decided emission constraint refutes them all. The witness is the violated
           constraint: a decline explanation produced before any compilation. *)
 
 and 'a tree =
   | Leaf of 'a  (** A fully committed schedule shape — today, one sketch-seed parameter set. *)
   | Choice of { level : string; children : (string * 'a child) list }
-      (** One open decision: [level] names it, each child one way to commit it (labelled, with
-          its verdict). A [Choice] whose children are all [Refuted]/[Excluded] is an infeasible
-          node ({!leaves} is empty). Levels appear in {e emission order} (the order candidates
-          reach timing), not necessarily dependency order. Verdicts are decided when the parent
-          is constructed — fathoming needs them without expansion — while feasible children's
-          subtrees stay lazy: expanding one is a decision, not a side effect of construction. *)
+      (** One open decision: [level] names it, each child one way to commit it (labelled, with its
+          verdict). A [Choice] whose children are all [Refuted]/[Excluded] is an infeasible node
+          ({!leaves} is empty). Levels appear in {e emission order} (the order candidates reach
+          timing), not necessarily dependency order. Verdicts are decided when the parent is
+          constructed — fathoming needs them without expansion — while feasible children's subtrees
+          stay lazy: expanding one is a decision, not a side effect of construction. *)
 
 val leaves : 'a tree -> 'a list
-(** All completions of [Child] and [Unknown] branches, in tree traversal order — the order the
-    flat enumerations produced, so a factored family's [leaves] replaces its seed list drop-in.
-    Forces the reachable subtrees. *)
+(** All completions of [Child] and [Unknown] branches, in tree traversal order — the order the flat
+    enumerations produced, so a factored family's [leaves] replaces its seed list drop-in. Forces
+    the reachable subtrees. *)
 
 val enumerate : 'a tree -> ((string * string) list * 'a) list
 (** {!leaves} with each completion's decision path — the committed [(level, label)] vector that
-    identifies the leaf; prefixes of these paths are the partial vectors interior nodes stand
-    for. *)
+    identifies the leaf; prefixes of these paths are the partial vectors interior nodes stand for.
+*)
 
 val refutations : 'a tree -> ((string * string) list * string) list
-(** Every [Refuted] child with its decision path (ending at the refuted commitment) and witness:
-    the shape's pre-compilation decline explanations (gh-ocannl-479), in traversal order. *)
+(** Every [Refuted] child with its decision path (ending at the refuted commitment) and witness: the
+    shape's pre-compilation decline explanations (gh-ocannl-479), in traversal order. *)
 
 val exclusions : 'a tree -> ((string * string) list * string) list
-(** Every [Excluded] child with path and policy witness — the branches a driver could re-propose
-    by lifting default-policy economy. *)
+(** Every [Excluded] child with path and policy witness — the branches a driver could re-propose by
+    lifting default-policy economy. *)
 
 val unknowns : 'a tree -> ((string * string) list * string) list
 (** Every [Unknown] child with path and witness — the branches whose verdicts only candidate
@@ -92,17 +92,17 @@ type search_stats = {
   st_expanded : int;  (** Choice nodes entered. *)
   st_scored : int;  (** Leaves the score hook priced. *)
   st_unscored : int;
-      (** Leaves the score hook declined to price ([None]) — never winners. The hook's [None]
-          covers both genuine no-coverage and caller-side rejections; a caller wanting the split
-          tracks it inside the hook (as [Autotune.model_default] does). *)
+      (** Leaves the score hook declined to price ([None]) — never winners. The hook's [None] covers
+          both genuine no-coverage and caller-side rejections; a caller wanting the split tracks it
+          inside the hook (as [Autotune.model_default] does). *)
   st_fathomed : int;  (** Subtrees pruned by the bound against the running threshold. *)
   st_refuted : int;  (** [Refuted] children encountered (never entered). *)
   st_excluded : int;  (** [Excluded] children encountered (never entered; a driver may lift). *)
   st_unknown : int;  (** [Unknown] children entered — the bound never fathoms them. *)
 }
 [@@deriving sexp_of]
-(** The fathomed-vs-scored ledger (gh-ocannl-514 phase 6's evaluation data): how much of the
-    space the verdicts and the bound dispatched without pricing. *)
+(** The fathomed-vs-scored ledger (gh-ocannl-514 phase 6's evaluation data): how much of the space
+    the verdicts and the bound dispatched without pricing. *)
 
 val no_search_stats : search_stats
 
@@ -112,42 +112,39 @@ val search :
   score:('a -> float option) ->
   'a tree ->
   ('a * float) option * search_stats
-(** Branch-and-bound minimization over the refinement tree (gh-ocannl-514 phase 4). Depth-first
-    in child order — the emission order — so on a bound-free run the returned minimum is the
-    {e first} leaf achieving it, matching the flat enumerations' [min_elt] tie behavior that
-    candidate ordering relies on. The running threshold starts at [incumbent] (an existing
-    candidate's cost — e.g. the untuned default's model score, or a measured time) and tightens
-    to each new best score; a leaf wins only by {e strict} improvement, preserving
-    ties-to-the-incumbent.
+(** Branch-and-bound minimization over the refinement tree (gh-ocannl-514 phase 4). Depth-first in
+    child order — the emission order — so on a bound-free run the returned minimum is the {e first}
+    leaf achieving it, matching the flat enumerations' [min_elt] tie behavior that candidate
+    ordering relies on. The running threshold starts at [incumbent] (an existing candidate's cost —
+    e.g. the untuned default's model score, or a measured time) and tightens to each new best score;
+    a leaf wins only by {e strict} improvement, preserving ties-to-the-incumbent.
 
-    [bound] is the optimistic (lower-bound) cost of a subtree's completions: a subtree whose
-    bound is at or above the threshold is fathomed — equality fathoms because displacement needs
-    strict improvement. Soundness is the caller's contract ({!Cost_model.completion_floor}'s):
-    a bound that can exceed a completion's true cost prunes true winners. [path] is the committed
-    [(level, label)] vector down to and including the judged child — the partial vector the
-    subtree stands for (a prefix of {!enumerate}'s paths; [[]] for the root) — so a bound whose
-    floor depends on the commitments (the placement levels, where
-    {!Cost_model.completion_floor}'s [open_placement] narrows as [Pl_materialize] commitments
-    accumulate) can price the exact node being judged; a commitment-invariant bound (the
-    schedule-invariant family floor) ignores it.
+    [bound] is the optimistic (lower-bound) cost of a subtree's completions: a subtree whose bound
+    is at or above the threshold is fathomed — equality fathoms because displacement needs strict
+    improvement. Soundness is the caller's contract ({!Cost_model.completion_floor}'s): a bound that
+    can exceed a completion's true cost prunes true winners. [path] is the committed
+    [(level, label)] vector down to and including the judged child — the partial vector the subtree
+    stands for (a prefix of {!enumerate}'s paths; [[]] for the root) — so a bound whose floor
+    depends on the commitments (the placement levels, where {!Cost_model.completion_floor}'s
+    [open_placement] narrows as [Pl_materialize] commitments accumulate) can price the exact node
+    being judged; a commitment-invariant bound (the schedule-invariant family floor) ignores it.
 
     Verdict-fathoming and cost-fathoming are distinct relations. The [Op_unknown]-never-fathoms
-    contract is about {e verdicts}: an [Unknown] child is never treated as [Refuted], so a
-    directly encountered one is entered without consulting the bound (legality uncertainty is
-    its dominant unknown, and a sound bound over possibly-nonexistent completions is vacuous
-    there). A {e cost} bound, by contrast, may fathom any [Child] subtree — nested [Unknown]s
-    included — because its soundness quantifies over every completion independently of how
-    verdicts resolve: a subtree that cannot beat the incumbent even where legal is correctly
-    pruned. [Refuted]/[Excluded] children are never entered (the construction-time fathoms,
-    counted separately). Unscored leaves ([score] = [None]) are counted and never win: in the
-    untuned regime a pick must have a model price, and the measured regime handles no-coverage
-    candidates outside the bound-driven walk. *)
+    contract is about {e verdicts}: an [Unknown] child is never treated as [Refuted], so a directly
+    encountered one is entered without consulting the bound (legality uncertainty is its dominant
+    unknown, and a sound bound over possibly-nonexistent completions is vacuous there). A {e cost}
+    bound, by contrast, may fathom any [Child] subtree — nested [Unknown]s included — because its
+    soundness quantifies over every completion independently of how verdicts resolve: a subtree that
+    cannot beat the incumbent even where legal is correctly pruned. [Refuted]/[Excluded] children
+    are never entered (the construction-time fathoms, counted separately). Unscored leaves ([score]
+    = [None]) are counted and never win: in the untuned regime a pick must have a model price, and
+    the measured regime handles no-coverage candidates outside the bound-driven walk. *)
 
 val lift_excluded : 'a child -> 'a child
 (** The policy-lift operation: [Excluded (_, payload)] becomes the forced payload — the same
     judgment with only that one policy lifted, still subject to legality; any other child is
-    returned unchanged. Lifting is per exclusion: a payload may itself contain further
-    [Excluded] children deeper in its subtree. *)
+    returned unchanged. Lifting is per exclusion: a payload may itself contain further [Excluded]
+    children deeper in its subtree. *)
 
 val count_choices : 'a tree -> int
 (** Interior (decision) nodes reachable through [Child]/[Unknown]; forces them. *)

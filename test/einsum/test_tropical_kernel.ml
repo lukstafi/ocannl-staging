@@ -9,9 +9,9 @@ open Stdio
     (t2/rhs2) gradients.
 
     The implementation gates gradients with a product-space condition tensor (`_pspace` suffix,
-    gh-ocannl-512): one bit per ((oh,ow) output, (wh,ww) kernel position) pair, which exactly
-    tracks which pair achieved the argmax for each output — including for overlapping windows
-    (stride < window); see test/operations/overlapping_window_grads.ml for those cases. *)
+    gh-ocannl-512): one bit per ((oh,ow) output, (wh,ww) kernel position) pair, which exactly tracks
+    which pair achieved the argmax for each output — including for overlapping windows (stride <
+    window); see test/operations/overlapping_window_grads.ml for those cases. *)
 
 (** Create a tropical convolution-like operation with a learnable kernel.
 

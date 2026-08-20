@@ -32,8 +32,8 @@ let create_histogram values ~num_bins ~min_val ~max_val =
 (* Every check here is an assertion, so it goes through [Verdict]: a tolerance-based test whose
    verdict lives only in stdout can be `dune promote`d into recording its own failure
    (gh-ocannl-601). The PASS/FAIL column stays -- the numbers behind it are backend- and
-   machine-specific, so what a golden can pin is the verdict, not the value. The failing value
-   comes back on the [?detail] thunk, which is evaluated only when the check fails. *)
+   machine-specific, so what a golden can pin is the verdict, not the value. The failing value comes
+   back on the [?detail] thunk, which is evaluated only when the check fails. *)
 let print_check name passed = Verdict.pass_fail ("  " ^ name) passed
 
 let stats values =
@@ -158,8 +158,7 @@ let test_normal_at_with_shape () =
   let check name value expected tolerance =
     let passed = Float.(abs (value -. expected) <= tolerance) in
     Verdict.pass_fail
-      (Printf.sprintf "  %s (expected: ~%.1f, tolerance: %.2f)" name expected tolerance)
-      passed
+      (Printf.sprintf "  %s (expected: ~%.1f, tolerance: %.2f)" name expected tolerance) passed
       ~detail:(fun () -> Printf.sprintf "got %.4f" value);
     passed
   in
@@ -167,17 +166,15 @@ let test_normal_at_with_shape () =
   let check_bound name value bound is_lower =
     let passed = if is_lower then Float.(value < bound) else Float.(value > bound) in
     let op = if is_lower then "<" else ">" in
-    Verdict.pass_fail
-      (Printf.sprintf "  %s (should be %s %.1f)" name op bound)
-      passed
+    Verdict.pass_fail (Printf.sprintf "  %s (should be %s %.1f)" name op bound) passed
       ~detail:(fun () -> Printf.sprintf "got %.4f" value);
     passed
   in
 
-  (* Thunks folded left to right, rather than the [&&] chain this was: short-circuiting stops at
-     the first failing check, so one regression would also delete every later line from the
-     output -- and a bare list of calls would print them backwards, OCaml evaluating list elements
-     right to left. *)
+  (* Thunks folded left to right, rather than the [&&] chain this was: short-circuiting stops at the
+     first failing check, so one regression would also delete every later line from the output --
+     and a bare list of calls would print them backwards, OCaml evaluating list elements right to
+     left. *)
   let checks =
     [
       (fun () -> check "Mean" mean 0.0 0.1);

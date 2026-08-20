@@ -101,9 +101,9 @@ let sound verdict oracle =
 
 let unsound_count = ref 0
 
-(* A query answering where the oracle says it may not is the one thing this file exists to catch,
-   so it fails the run rather than only landing in the printed tally -- which a `dune promote`
-   would otherwise bless (gh-ocannl-601). *)
+(* A query answering where the oracle says it may not is the one thing this file exists to catch, so
+   it fails the run rather than only landing in the printed tally -- which a `dune promote` would
+   otherwise bless (gh-ocannl-601). *)
 let unsound name =
   Int.incr unsound_count;
   Verdict.claim (name ^ ": query unsound against the oracle") false
@@ -493,11 +493,11 @@ let () =
     ~read:(acc ~write:false ~loops:[ (i1, (0, 2)) ] ~path:[ 0; 1 ] [| Idx.Fixed_idx 0 |])
     ~writes:[ acc ~loops:[ (i1, (0, 2)) ] ~path:[ 0; 0 ] [| Idx.Iterator i1 |] ]
     ();
-  (* Loop-carried coverage (read x[i-1] on the rhs of the statement writing x[i], after an x[0]
-     init statement): declined, oracle covers. gh-561 note: this used to hand-build the shift
-     statement's read and write at sibling positions and the init at their PREFIX — the ambiguity
-     the intra-statement components remove; now the read/write share the shift statement's
-     position, ordered [Rhs] before [Write], and the init is an honestly earlier statement. *)
+  (* Loop-carried coverage (read x[i-1] on the rhs of the statement writing x[i], after an x[0] init
+     statement): declined, oracle covers. gh-561 note: this used to hand-build the shift statement's
+     read and write at sibling positions and the init at their PREFIX — the ambiguity the
+     intra-statement components remove; now the read/write share the shift statement's position,
+     ordered [Rhs] before [Write], and the init is an honestly earlier statement. *)
   check_containment ~name:"loop-carried shift declined"
     ~read:(acc ~write:false ~loops:[ (i1, (1, 3)) ] ~path:[ 1 ] [| aff [ (1, i1) ] (-1) |])
     ~writes:
@@ -620,9 +620,9 @@ let () =
     ();
 
   Stdio.printf "\n=== gh-561: intra-statement path components ===\n";
-  (* The trap shape (gh-554 round 3): [if (E[i] < 1) then E[i] = ...] — the condition's read and
-     the guarded body's write used to share one statement position, so a consumer ordering or
-     matching reads against writes by path aliased them. The encoding now keeps them apart. *)
+  (* The trap shape (gh-554 round 3): [if (E[i] < 1) then E[i] = ...] — the condition's read and the
+     guarded body's write used to share one statement position, so a consumer ordering or matching
+     reads against writes by path aliased them. The encoding now keeps them apart. *)
   let cond_read = [ Aff.Stmt 3; Aff.Cond ] in
   let body_write = [ Aff.Stmt 3; Aff.Body; Aff.Write ] in
   let rhs_read = [ Aff.Stmt 3; Aff.Body; Aff.Rhs ] in

@@ -54,9 +54,7 @@ let phase1 () =
   let x = mk "pls_x" and y = mk "pls_y" in
   materialize y;
   let i = sym () in
-  let llc =
-    loop ~upto:3 i (set y [| iter i |] (add (mul (get x [| iter i |]) (c 2.)) (c 1.)))
-  in
+  let llc = loop ~upto:3 i (set y [| iter i |] (add (mul (get x [| iter i |]) (c 2.)) (c 1.))) in
   let xv = [| 1.5; 2.5; 3.5; 4.5 |] in
   let opt = optimize ~name:"pls_pointwise" llc in
   (* The I/O claims read [inputs]/[outputs] off the compiled routine itself, so they pin the
@@ -98,8 +96,7 @@ let phase2 () =
         body =
           seq
             (LL.Set_local (id_a, c 0.))
-            (loop ~upto:1 k
-               (LL.Set_local (id_a, add (LL.Get_local id_a) (get x [| iter i |]))));
+            (loop ~upto:1 k (LL.Set_local (id_a, add (LL.Get_local id_a) (get x [| iter i |]))));
         orig_indices = [| iter i |];
       }
   in
@@ -157,8 +154,7 @@ let phase3 () =
         body =
           seq
             (LL.Set_local (id_a, c 0.))
-            (loop ~upto:1 k
-               (LL.Set_local (id_a, add (LL.Get_local id_a) (get x [| iter i |]))));
+            (loop ~upto:1 k (LL.Set_local (id_a, add (LL.Get_local id_a) (get x [| iter i |]))));
         orig_indices = [| iter i |];
       }
   in
@@ -167,9 +163,7 @@ let phase3 () =
       {
         id = id_b;
         body =
-          seq
-            (set x [| iter i |] (c 5.))
-            (LL.Set_local (id_b, mul (get x [| iter i |]) (c 3.)));
+          seq (set x [| iter i |] (c 5.)) (LL.Set_local (id_b, mul (get x [| iter i |]) (c 3.)));
         orig_indices = [| iter i |];
       }
   in
@@ -330,10 +324,7 @@ let phase6 () =
     LL.Local_scope
       {
         id;
-        body =
-          seq
-            (set x [| iter i |] (c 5.))
-            (LL.Set_local (id, mul (get x [| iter i |]) (c 3.)));
+        body = seq (set x [| iter i |] (c 5.)) (LL.Set_local (id, mul (get x [| iter i |]) (c 3.)));
         orig_indices = [| iter i |];
       }
   in

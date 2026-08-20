@@ -137,7 +137,7 @@ let () =
   let entries =
     empty
     :: List.map dtypes ~f:(fun (name, dtype, prec) ->
-           (name, dtype, [ 4 ], payload_bytes prec values))
+        (name, dtype, [ 4 ], payload_bytes prec values))
   in
   (* The same payloads twice: once with the byte buffer on the 8-byte boundary the reference
      implementation pads to, once shifted a byte off it. Neither file is uniform: payload offsets
@@ -228,8 +228,8 @@ let () =
   (* A dtype OCANNL has no precision for is refused, rather than reinterpreted. *)
   Verdict.p "I8 has no OCANNL precision" (Option.is_none (Safetensors.prec_of_dtype "I8"));
   Verdict.p "BF16 maps to bfloat16"
-    (Option.value_map (Safetensors.prec_of_dtype "BF16") ~default:false
-       ~f:(fun p -> Ir.Ops.equal_prec p Ir.Ops.bfloat16));
+    (Option.value_map (Safetensors.prec_of_dtype "BF16") ~default:false ~f:(fun p ->
+         Ir.Ops.equal_prec p Ir.Ops.bfloat16));
   let _ : int =
     build_file "i8.safetensors" ~extra_pad:0 [ ("q", "I8", [ 4 ], "\000\001\002\003") ]
   in

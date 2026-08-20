@@ -211,9 +211,7 @@ let () =
               from_ = 0;
               to_ = k - 1;
               axis = LL.Grid;
-              body =
-                LL.For_loop
-                  { index = x; from_ = 0; to_ = k - 1; axis = LL.Serial; body };
+              body = LL.For_loop { index = x; from_ = 0; to_ = k - 1; axis = LL.Serial; body };
             }
         in
         { opt with llc }

@@ -228,7 +228,8 @@ let project_p_slot debug loc (setup : array_setup) =
       Ast_builder.Default.pexp_extension ~loc
       @@ Location.error_extensionf ~loc
            "ppx_ocannl %%cd: insufficient slot filler information at %s %s" debug
-           "(incorporate one of: v, v1, v2, g, g1, g2, lhs, rhs, rhs1, rhs2, or a _pspace-suffixed tensor)"
+           "(incorporate one of: v, v1, v2, g, g1, g2, lhs, rhs, rhs1, rhs2, or a _pspace-suffixed \
+            tensor)"
 
 let project_p_dims debug loc (setup : array_setup) =
   match setup.slot with
@@ -246,7 +247,8 @@ let project_p_dims debug loc (setup : array_setup) =
       Ast_builder.Default.pexp_extension ~loc
       @@ Location.error_extensionf ~loc
            "ppx_ocannl %%cd: insufficient slot filler information at %s %s" debug
-           "(incorporate one of: v, v1, v2, g, g1, g2, lhs, rhs, rhs1, rhs2, or a _pspace-suffixed tensor)"
+           "(incorporate one of: v, v1, v2, g, g1, g2, lhs, rhs, rhs1, rhs2, or a _pspace-suffixed \
+            tensor)"
 
 let guess_pun_hint ~no_filler_label ~punned ~bad_pun_hints filler_typ filler =
   let loc = filler.pexp_loc in
@@ -554,8 +556,8 @@ let translate ?ident_label (expr : expression) : result =
             @@ Location.error_extensionf ~loc
                  "ppx_ocannl %%cd: expected a binary operator, one of: %s"
                  "+ (Add), - (Sub), * (Mul), / (Div), **(ToPowOf), -?/ (Relu_gate), -?^ \
-                  (Satur01_gate), -/> (Arg2), <  (Cmplt), <= (Cmple), = (Cmpeq), <> (Cmpne), || (Or), && \
-                  (And), % (Mod), @^(Max), @- (Min), ^^^^ (threefry4x32)" ))
+                  (Satur01_gate), -/> (Arg2), <  (Cmplt), <= (Cmple), = (Cmpeq), <> (Cmpne), || \
+                  (Or), && (And), % (Mod), @^(Max), @- (Min), ^^^^ (threefry4x32)" ))
     in
     let ternary_op tern_op =
       loc
@@ -576,8 +578,8 @@ let translate ?ident_label (expr : expression) : result =
       | RHS3, No_grad_tensor_intro _ ->
           [%expr Shape.infer_equal [%e lhs.expr].Tensor.shape t3.Tensor.shape]
       | Prod, No_grad_tensor_intro _ ->
-          (* Product-space intermediate (gh-512): its shape is the operation's product-space proxy
-             — result axes then contracted axes; see [Shape.product_space_shape]. *)
+          (* Product-space intermediate (gh-512): its shape is the operation's product-space proxy —
+             result axes then contracted axes; see [Shape.product_space_shape]. *)
           [%expr
             Shape.infer_equal [%e lhs.expr].Tensor.shape
               (Lazy.force projections.Tensor.product_shape)]

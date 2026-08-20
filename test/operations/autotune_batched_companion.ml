@@ -5,15 +5,14 @@
    companion nest (bias + relu) in the same routine. The site's chain is three loops, but
    {!Sched.aligned_chains} used to cap every nest's chain at two — so [companion_geometry]'s
    full-arity check could never match a rank-3 site, and every GPU sketch seed (scalar AND
-   tensorized) declined with "the accumulation nest's aligned chain was trimmed below its
-   8x128x1024 geometry". That single decline pinned five FFN-class kernels to ~1.3% of fp32 peak —
-   70% of the gpt2_mini step on CUDA, 47% on HIP.
+   tensorized) declined with "the accumulation nest's aligned chain was trimmed below its 8x128x1024
+   geometry". That single decline pinned five FFN-class kernels to ~1.3% of fp32 peak — 70% of the
+   gpt2_mini step on CUDA, 47% on HIP.
 
-   Two layers of pinning:
-   - Structural (backend-independent, runs on cc too): the scalar GPU seeds' schedules CONSTRUCT —
-     [Autotune.sketch_schedule] does not raise the companion-coverage decline — and the constructed
-     schedule spreads the minor output axis (j) across [Grid] blocks.
-   - Executable (GPU backends): each unfused scalar GPU seed compiles and computes correctly. *)
+   Two layers of pinning: - Structural (backend-independent, runs on cc too): the scalar GPU seeds'
+   schedules CONSTRUCT — [Autotune.sketch_schedule] does not raise the companion-coverage decline —
+   and the constructed schedule spreads the minor output axis (j) across [Grid] blocks. - Executable
+   (GPU backends): each unfused scalar GPU seed compiles and computes correctly. *)
 
 open Base
 open Ocannl
@@ -42,7 +41,9 @@ let () =
   let wv = Array.init (k * m) ~f:(fun i -> Float.of_int (i % 5) *. 0.125) in
   let bv = Array.init m ~f:(fun i -> Float.of_int (i % 3) -. 1.) in
   let expected =
-    Array.init (b * n * m) ~f:(fun idx ->
+    Array.init
+      (b * n * m)
+      ~f:(fun idx ->
         let bi = idx / (n * m) in
         let i = idx % (n * m) / m and j = idx % m in
         let acc = ref 0. in
@@ -73,17 +74,16 @@ let () =
   in
   let opt = Option.value_exn !captured in
   let gpu_seeds opt =
-    List.filter
-      (Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false ~limits opt)
-      ~f:(fun p -> p.Autotune.sk_gpu && not p.Autotune.sk_epilogue)
+    List.filter (Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false ~limits opt) ~f:(fun p ->
+        p.Autotune.sk_gpu && not p.Autotune.sk_epilogue)
   in
   let seeds = gpu_seeds opt in
   p "bc: scalar GPU seeds exist for the batched site"
     (List.exists seeds ~f:(fun p -> not p.Autotune.sk_mma));
   (* The production census declined the tensorized seeds in the same proportion as the scalar ones
      (10 and 10) — both flavors route through [companion_geometry]. Tensorized seeds only exist
-     where the backend advertises an mma format for f32 (Metal locally; CUDA/HIP need the tf32
-     arm), so this line is informational rather than golden-pinned. *)
+     where the backend advertises an mma format for f32 (Metal locally; CUDA/HIP need the tf32 arm),
+     so this line is informational rather than golden-pinned. *)
   if not (List.exists seeds ~f:(fun p -> p.Autotune.sk_mma)) then
     Stdio.eprintf "bc: no tensorized seed for this site on %s — mma legs below are vacuous\n"
       backend_name;
@@ -96,15 +96,17 @@ let () =
             Either.Second detail
         | exception exn -> Either.Second (Exn.to_string exn))
   in
-  let declines = List.filter_map constructed ~f:(function Either.Second e -> Some e | _ -> None) in
+  let declines =
+    List.filter_map constructed ~f:(function Either.Second e -> Some e | _ -> None)
+  in
   p "bc: no seed declines on companion coverage" (List.is_empty declines);
   List.iter declines ~f:(fun e -> Stdio.eprintf "bc decline: %s\n" e);
   (* The point of the fix is reach: the minor output axis (j) must actually carry [Grid] blocks in
-     the constructed schedule, not merely survive construction. A schedule constructed under the
-     old rule could not exist at all, but guard against a future regression that constructs a
-     j-serial form: the split must be a real spread (factor < extent) of an axis of j's extent —
-     m = 64 is unique to the minor output axis here (b = 4, i = 32, k = 16), in the site's nest
-     and its companions alike. *)
+     the constructed schedule, not merely survive construction. A schedule constructed under the old
+     rule could not exist at all, but guard against a future regression that constructs a j-serial
+     form: the split must be a real spread (factor < extent) of an axis of j's extent — m = 64 is
+     unique to the minor output axis here (b = 4, i = 32, k = 16), in the site's nest and its
+     companions alike. *)
   let bounds = LL.loop_bounds opt.LL.llc in
   let spreads_j sched =
     List.exists sched ~f:(function
@@ -120,13 +122,16 @@ let () =
     (List.for_all constructed ~f:(function Either.First s -> spreads_j s | _ -> false));
 
   (* Executable parity, seed by seed, on backends that can run shared staging. Vacuous on cc —
-     announced on stderr so it is not mistaken for coverage; the golden stays backend-independent. *)
+     announced on stderr so it is not mistaken for coverage; the golden stays
+     backend-independent. *)
   if not is_gpu then
     Stdio.eprintf "bc: %s is not a GPU backend — the executable parity check below is vacuous\n"
       backend_name;
   p "bc: every unfused GPU seed compiles and computes correctly"
     ((not is_gpu)
-    || List.for_all (List.init (List.length seeds) ~f:Fn.id) ~f:(fun idx ->
+    || List.for_all
+         (List.init (List.length seeds) ~f:Fn.id)
+         ~f:(fun idx ->
            let transform opt =
              let sp = List.nth_exn (gpu_seeds opt) idx in
              Sched.apply (Autotune.sketch_schedule ~p:sp opt) opt
@@ -203,36 +208,38 @@ let () =
         let refs = Ir.Schedule_space.refutations tree in
         (not (List.is_empty refs))
         && List.for_all refs ~f:(fun (_, w) ->
-               String.is_substring w ~substring:"companion coverage (gh-521)")
+            String.is_substring w ~substring:"companion coverage (gh-521)")
     | None -> false);
-  (* The builders' raise site remains the safety net for parameters replayed against a lowering
-     they were not seeded for (the fission-recombination scenario): a seed minted on the
-     buildable batched head must still raise the coverage decline when applied to the
-     reduction-companion routine. *)
+  (* The builders' raise site remains the safety net for parameters replayed against a lowering they
+     were not seeded for (the fission-recombination scenario): a seed minted on the buildable
+     batched head must still raise the coverage decline when applied to the reduction-companion
+     routine. *)
   p "bc: a foreign seed replayed against the companion routine still raises the decline"
     (match seeds with
     | sp :: _ -> (
         match Autotune.sketch_schedule ~p:sp opt2 with
         | _ -> false
-        | exception
-            Ir.Schedule_outcome.Cause_at (_, Ir.Schedule_outcome.Unsupported { feature; _ }) ->
+        | exception Ir.Schedule_outcome.Cause_at (_, Ir.Schedule_outcome.Unsupported { feature; _ })
+          ->
             String.equal feature "autotune_sketch_companion_coverage"
         | exception _ -> false)
     | [] -> false)
 
-(* gh-ocannl-574 (the gh-569 residual): the boundary above is respected by CUTTING, not by
-   coverage. The lm_head shape proper — a materialized GEMM whose row-MAX companion follows in the
-   same fission segment (a max target's [-inf] initialization is a [Set] nest, so no [Zero_out]
-   separates the statements, unlike the rowsum above) — must fission apart under the finer
-   [arity_cuts] segmentation: the GEMM ships alone and its seeds then spread the minor output axis
-   (j) across [Grid] blocks, while the reduction runs as its own downstream kernel with the stream
-   supplying the synchronization. *)
+(* gh-ocannl-574 (the gh-569 residual): the boundary above is respected by CUTTING, not by coverage.
+   The lm_head shape proper — a materialized GEMM whose row-MAX companion follows in the same
+   fission segment (a max target's [-inf] initialization is a [Set] nest, so no [Zero_out] separates
+   the statements, unlike the rowsum above) — must fission apart under the finer [arity_cuts]
+   segmentation: the GEMM ships alone and its seeds then spread the minor output axis (j) across
+   [Grid] blocks, while the reduction runs as its own downstream kernel with the stream supplying
+   the synchronization. *)
 let () =
   let b = 4 and n = 32 and m = 64 and k = 16 in
   let xv = Array.init (b * n * k) ~f:(fun i -> Float.of_int (i % 7) *. 0.25) in
   let wv = Array.init (k * m) ~f:(fun i -> Float.of_int (i % 5) *. 0.125) in
   let z_expected =
-    Array.init (b * n * m) ~f:(fun idx ->
+    Array.init
+      (b * n * m)
+      ~f:(fun idx ->
         let bi = idx / (n * m) in
         let i = idx % (n * m) / m and j = idx % m in
         let acc = ref 0. in
@@ -267,9 +274,8 @@ let () =
   in
   let opt = Option.value_exn !captured in
   let gpu_seeds opt =
-    List.filter
-      (Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false ~limits opt)
-      ~f:(fun p -> p.Autotune.sk_gpu && not p.Autotune.sk_epilogue)
+    List.filter (Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false ~limits opt) ~f:(fun p ->
+        p.Autotune.sk_gpu && not p.Autotune.sk_epilogue)
   in
   (* The fission segmentation, exactly as the autotuner's seed enumeration runs it (GPU pipeline;
      hermetic copy per query — [promote_locals] mutates placements). *)
@@ -293,8 +299,7 @@ let () =
   (* Coarse segmentation: the GEMM shares its segment with the row-max companion (and the max
      target's initialization nest) — the production decline gh-574 sets out to relieve. Since
      gh-ocannl-577 the segment's family refutes on the companion-coverage witness at tree
-     construction, so its seed list is empty rather than every proposed seed declining at
-     build. *)
+     construction, so its seed list is empty rather than every proposed seed declining at build. *)
   let coarse = normals (segments ~arity_cuts:false opt) in
   p "lm: coarse fission keeps the row-max companion in the GEMM's segment"
     (match coarse with
@@ -306,7 +311,7 @@ let () =
             let refs = Ir.Schedule_space.refutations tree in
             (not (List.is_empty refs))
             && List.for_all refs ~f:(fun (_, w) ->
-                   String.is_substring w ~substring:"companion coverage (gh-521)")
+                String.is_substring w ~substring:"companion coverage (gh-521)")
         | None -> false)
     | _ -> false);
   (* Finer segmentation: the GEMM segment is freed, its seeds construct, and they spread j — the
@@ -332,14 +337,14 @@ let () =
         let seeds = gpu_seeds seg in
         (not (List.is_empty seeds))
         && List.for_all seeds ~f:(fun sp ->
-               match Autotune.sketch_schedule ~p:sp seg with
-               | sched -> spreads_j seg sched
-               | exception exn ->
-                   Stdio.eprintf "lm: fine seed FAILED to construct: %s\n" (Exn.to_string exn);
-                   false));
-  (* Executed: the finer fissioned form (default per-segment presets) computes the same values —
-     the cut's stream-order synchronization replaces the fused segment's serial order. Runs on
-     every backend. *)
+            match Autotune.sketch_schedule ~p:sp seg with
+            | sched -> spreads_j seg sched
+            | exception exn ->
+                Stdio.eprintf "lm: fine seed FAILED to construct: %s\n" (Exn.to_string exn);
+                false));
+  (* Executed: the finer fissioned form (default per-segment presets) computes the same values — the
+     cut's stream-order synchronization replaces the fused segment's serial order. Runs on every
+     backend. *)
   let comp_e, z_e, r_e = mk_comp "lme" in
   let is_cpu = Sched.backend_is_cpu backend_name in
   let transforms opt =
@@ -367,8 +372,8 @@ let () =
         Stdio.eprintf "lm: finer fissioned execution FAILED: %s\n" (Exn.to_string exn);
         false);
   (* Executed per seed (GPU backends): each fine GPU seed's sketch schedule on the freed GEMM
-     segment, presets elsewhere — the executable half of the spreads-j pin. Vacuous on cc,
-     announced on stderr. *)
+     segment, presets elsewhere — the executable half of the spreads-j pin. Vacuous on cc, announced
+     on stderr. *)
   if not is_gpu then
     Stdio.eprintf "lm: %s is not a GPU backend — the per-seed executable check below is vacuous\n"
       backend_name;
@@ -382,32 +387,32 @@ let () =
     in
     n_seeds > 0
     && List.for_all (List.init n_seeds ~f:Fn.id) ~f:(fun idx ->
-           let comp_s, z_s, r_s = mk_comp (Printf.sprintf "lms%d" idx) in
-           let transforms opt =
-             let preset seg =
-               (* The freed GEMM segment is the only one with GPU seeds; every other segment keeps
-                  the default preset. *)
-               match List.nth (gpu_seeds seg) idx with
-               | Some sp -> Autotune.sketch_schedule ~p:sp seg
-               | None -> Sched.default_gpu ~min_parallel:1 ~limits seg
-             in
-             let zero_sched = Sched.zero_expansion ~limits in
-             List.map
-               (Sched.fission_scheduled ~promote_locals:true ~arity_cuts:true ~preset ~zero_sched
-                  ~static_indices:[] opt) ~f:(fun (_, _, _, post) -> post)
-           in
-           match
-             let ctx, routine =
-               Context.compile ~lowered_transforms:transforms (Context.auto ()) comp_s
-                 Ir.Indexing.Empty
-             in
-             let ctx = Context.run ctx routine in
-             (Context.get_values ctx z_s.Tensor.value, Context.get_values ctx r_s.Tensor.value)
-           with
-           | got_z, got_r -> approx got_z z_expected && approx got_r r_expected
-           | exception exn ->
-               Stdio.eprintf "lm: fine GPU seed %d FAILED %s\n" idx (Exn.to_string exn);
-               false));
+        let comp_s, z_s, r_s = mk_comp (Printf.sprintf "lms%d" idx) in
+        let transforms opt =
+          let preset seg =
+            (* The freed GEMM segment is the only one with GPU seeds; every other segment keeps the
+               default preset. *)
+            match List.nth (gpu_seeds seg) idx with
+            | Some sp -> Autotune.sketch_schedule ~p:sp seg
+            | None -> Sched.default_gpu ~min_parallel:1 ~limits seg
+          in
+          let zero_sched = Sched.zero_expansion ~limits in
+          List.map
+            (Sched.fission_scheduled ~promote_locals:true ~arity_cuts:true ~preset ~zero_sched
+               ~static_indices:[] opt) ~f:(fun (_, _, _, post) -> post)
+        in
+        match
+          let ctx, routine =
+            Context.compile ~lowered_transforms:transforms (Context.auto ()) comp_s
+              Ir.Indexing.Empty
+          in
+          let ctx = Context.run ctx routine in
+          (Context.get_values ctx z_s.Tensor.value, Context.get_values ctx r_s.Tensor.value)
+        with
+        | got_z, got_r -> approx got_z z_expected && approx got_r r_expected
+        | exception exn ->
+            Stdio.eprintf "lm: fine GPU seed %d FAILED %s\n" idx (Exn.to_string exn);
+            false));
   (* Tune integration: the search on the lm_head shape (fine candidates seeded on GPU backends)
      crowns a winner that computes the right values, and a second tune replays it through the disk
      cache — exercising the [finer_fission] entry field when a fine candidate won. *)
@@ -435,4 +440,6 @@ let () =
   p "lm: cache-replayed head matches the reference"
     (approx got_z2 z_expected && approx got_r2 r_expected);
   p "lm: second tune was a cache hit or full replay"
-    (match reports2 with [ rep ] -> rep.Autotune.cache_hit || not rep.Autotune.partial | _ -> false)
+    (match reports2 with
+    | [ rep ] -> rep.Autotune.cache_hit || not rep.Autotune.partial
+    | _ -> false)

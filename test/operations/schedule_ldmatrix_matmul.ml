@@ -10,14 +10,14 @@
    What each leg pins:
 
    - Bitwise parity against the serial twin. The inputs are exact in bf16 (resp. e5m2) and every
-     partial sum is exactly representable, so ANY correct accumulation order reproduces them
-     exactly — which makes parity a test of the per-lane element mapping, not of tolerance. A
-     mis-derived [ldmatrix] address or a wrong [.trans] gives a different product.
-   - The emitted load form. [ldmatrix]'s four bf16 shapes are selected by the operands' storage
-     orientation: [.trans] transposes each 8x8 tile on distribution, which is exactly the difference
-     between an operand stored in its role's orientation and its transpose.
-   - The rendering census: [Mma_intrinsics_ldmatrix], distinct from [Mma_intrinsics], so a sweep can
-     tell which of the two load paths a timing measured.
+   partial sum is exactly representable, so ANY correct accumulation order reproduces them exactly —
+   which makes parity a test of the per-lane element mapping, not of tolerance. A mis-derived
+   [ldmatrix] address or a wrong [.trans] gives a different product. - The emitted load form.
+   [ldmatrix]'s four bf16 shapes are selected by the operands' storage orientation: [.trans]
+   transposes each 8x8 tile on distribution, which is exactly the difference between an operand
+   stored in its role's orientation and its transpose. - The rendering census:
+   [Mma_intrinsics_ldmatrix], distinct from [Mma_intrinsics], so a sweep can tell which of the two
+   load paths a timing measured.
 
    fp8's eligibility is one-sided per operand and the sides are opposite: [ldmatrix.b16] moves
    16-bit units, so it can build a register holding 4 fp8 bytes only when those bytes are contiguous
@@ -46,9 +46,7 @@ let p = Verdict.p
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_metal = String.is_substring backend_name ~substring:"metal"
 let on_cuda = String.is_substring backend_name ~substring:"cuda"
-
-let on_gpu =
-  on_metal || on_cuda || String.is_substring backend_name ~substring:"hip"
+let on_gpu = on_metal || on_cuda || String.is_substring backend_name ~substring:"hip"
 
 let read_generated base_name =
   let ext =
@@ -80,8 +78,8 @@ let n = 32
 let bm = 16
 let simd_width = 32
 
-(* The staged leg of schedule_mma_matmul.ml: loop order i_o(Grid) { k_o { i_i { j { k_i } } } }, both
-   operands staged through cooperative shared tiles anchored at k_o, then the i_i x j x k_i
+(* The staged leg of schedule_mma_matmul.ml: loop order i_o(Grid) { k_o { i_i { j { k_i } } } },
+   both operands staged through cooperative shared tiles anchored at k_o, then the i_i x j x k_i
    micro-kernel tensorized.
 
    A cooperative [Stage] mints the tile's axis order from the order of its [tile_loops], so the
@@ -149,7 +147,9 @@ let staged_schedule ~out ~src_a ~src_b ~swz_a ~swz_b ~bk ~ta ~tb (opt : LL.optim
 let leg ?schedule_of ~tag ~build ~src_a ~src_b ~swz_a ~swz_b ~check ~acc_prec ?(bk = bm)
     ?(ta = false) ?(tb = false) () =
   let name = "ldm_" ^ tag in
-  let parity_label = Printf.sprintf "%s staged ldmatrix parity (GPU) or clean rejection (CPU)" tag in
+  let parity_label =
+    Printf.sprintf "%s staged ldmatrix parity (GPU) or clean rejection (CPU)" tag
+  in
   let struct_label = Printf.sprintf "%s ldmatrix structure and census as expected" tag in
   (* Each [build ()] mints a fresh root over the shared leaves, so a root must be fully consumed
      before the next is built ([Tensor.consume_forward_code] rejects overlapping live roots). *)
@@ -293,8 +293,8 @@ let () =
     ();
   (* The swizzled twin as AUTOTUNE builds it (gh-ocannl-481 item 3, D3), not as this file hand-wires
      it: [Autotune.sketch_schedule] with [sk_swizzle] set is the pipeline the tuner will actually
-     time on CUDA, pads and companion geometry included. Its staged tiles are [16 x 32] and
-     [32 x 32] bf16 — 64-byte rows, 4 whole 16-byte units. *)
+     time on CUDA, pads and companion geometry included. Its staged tiles are [16 x 32] and [32 x
+     32] bf16 — 64-byte rows, 4 whole 16-byte units. *)
   leg ~tag:"bf_sketch" ~acc_prec:Ir.Ops.bfloat16 ~src_a:mab.Tensor.value ~src_b:mbb.Tensor.value
     ~swz_a:b128 ~swz_b:b128
     ~build:(fun () ->

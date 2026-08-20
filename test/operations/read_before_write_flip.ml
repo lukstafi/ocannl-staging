@@ -77,8 +77,7 @@ let () =
   let yv_mat, opt_mat, h_mat = run ~materialize_h:true in
   (match Hashtbl.find opt_mat.LL.traced_store h_mat.Tensor.value with
   | None -> p "materialized: intermediate traced" false
-  | Some traced ->
-      p "materialized: read_before_write stays false" (not traced.LL.read_before_write));
+  | Some traced -> p "materialized: read_before_write stays false" (not traced.LL.read_before_write));
   p "materialized: intermediate stays non-virtual"
     (not (Tn.Placements.known_virtual opt_mat.LL.optimize_ctx.LL.placements h_mat.Tensor.value));
   p "parity: same result length" (Array.length yv_default = Array.length yv_mat);

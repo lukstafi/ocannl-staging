@@ -20,18 +20,18 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
   return __shfl_xor_sync(0xffffffffu, v, lane_mask);
 }|},
       [] );
-    (* Asynchronous global->shared staging copies for software-pipelined tiles (gh-ocannl-487
-       phase 2; [C_syntax_config.async_copy]). sm_80+; the [cp.async.] PTX instruction text in the
-       definitions serves as [gpu_arch_options]' arch-floor marker — it exists in the source
-       exactly when a definition was actually prepended. Inline PTX rather than <cuda_pipeline.h> so nvrtc
+    (* Asynchronous global->shared staging copies for software-pipelined tiles (gh-ocannl-487 phase
+       2; [C_syntax_config.async_copy]). sm_80+; the [cp.async.] PTX instruction text in the
+       definitions serves as [gpu_arch_options]' arch-floor marker — it exists in the source exactly
+       when a definition was actually prepended. Inline PTX rather than <cuda_pipeline.h> so nvrtc
        needs no extra headers; [cvta.to.shared] inside the asm avoids relying on
-       [__cvta_generic_to_shared]'s availability. 4- and 8-byte element copies only — the
-       alignment plain shared declarations guarantee; a 16-byte [.cg] variant returns when a
-       rendering guarantees 16-byte-aligned destinations (Codex P2 on PR #317). The "memory"
-       clobbers pin the copies and the wait against compiler reordering of shared/global accesses.
-       One entry PER emitted name — the entry key is both the usage filter and the identifier
-       blacklist ([C_syntax.builtin_idents]), so a multi-name entry would leave the unlisted names
-       open to shadowing by label-derived identifiers (Codex P2 on PR #317, round 2). *)
+       [__cvta_generic_to_shared]'s availability. 4- and 8-byte element copies only — the alignment
+       plain shared declarations guarantee; a 16-byte [.cg] variant returns when a rendering
+       guarantees 16-byte-aligned destinations (Codex P2 on PR #317). The "memory" clobbers pin the
+       copies and the wait against compiler reordering of shared/global accesses. One entry PER
+       emitted name — the entry key is both the usage filter and the identifier blacklist
+       ([C_syntax.builtin_idents]), so a multi-name entry would leave the unlisted names open to
+       shadowing by label-derived identifiers (Codex P2 on PR #317, round 2). *)
     ( "ocannl_cp_async4",
       {|__device__ __forceinline__ void ocannl_cp_async4(void *dst_shared, const void *src_global) {
   asm volatile(
@@ -338,9 +338,9 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
   return result;
 }|},
       [ "uint4x32_t"; "uint64x2_t" ] );
-    (* Lane extraction from the packed uniform conversion (gh-509 task 4): minted by the
-       virtualizer to inline packed-uniform results per cell. Implemented via the _vec builtins so
-       the value stream is bitwise-identical to the vectorized stores by construction. *)
+    (* Lane extraction from the packed uniform conversion (gh-509 task 4): minted by the virtualizer
+       to inline packed-uniform results per cell. Implemented via the _vec builtins so the value
+       stream is bitwise-identical to the vectorized stores by construction. *)
     ( "uint4x32_to_single_uniform_lane",
       {|__device__ float uint4x32_to_single_uniform_lane(uint4x32_t x, int lane) {
   return uint4x32_to_single_uniform_vec(x).v[lane];

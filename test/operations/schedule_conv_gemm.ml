@@ -44,8 +44,8 @@ let p = Verdict.p
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
    that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
    parity check between two zero arrays passes while covering nothing (gh-ocannl-481 item 3). Every
-   reference array is pinned nonzero where it is produced, so the parity claims below have content.
-   *)
+   reference array is pinned nonzero where it is produced, so the parity claims below have
+   content. *)
 let nonzero name (a : float array) =
   if not (Array.exists a ~f:(fun x -> Float.(x <> 0.))) then
     failwith (name ^ ": the reference is all zeros — the parity checks against it are vacuous");
@@ -55,7 +55,6 @@ let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-
 let skipped = Verdict.skipped ~backend:backend_name
 let on_cpu = String.is_substring backend_name ~substring:"cc"
 let on_metal = String.is_substring backend_name ~substring:"metal"
@@ -301,7 +300,9 @@ let () =
      legs — and the seeding wave proposes it (asserted above, executed below). *)
   pipeline_leg "cvg2" make_conv_s2v;
   if on_cpu then (
-    let has_in file s = String.is_substring (Stdio.In_channel.read_all (Utils.build_file file)) ~substring:s in
+    let has_in file s =
+      String.is_substring (Stdio.In_channel.read_all (Utils.build_file file)) ~substring:s
+    in
     let struct_pin file =
       has_in file "Tile_mma register tiling" && has_in file "fragment_" && has_in file "tile_"
     in
@@ -313,8 +314,8 @@ let () =
     skipped "conv pipeline structure: im2col packs, register tiling, resident fragment";
     skipped
       "cvg2 pipeline structure: compacted im2col packs, register tiling fires on the strided row");
-  (* v1 fence: hoisted (host-side) packing does not compact — a strided tile part is rejected
-     loudly rather than silently packing a dilated tile. *)
+  (* v1 fence: hoisted (host-side) packing does not compact — a strided tile part is rejected loudly
+     rather than silently packing a dilated tile. *)
   (let x, _kern, y = make_conv_s2v "cvg2_h" in
    let transform (opt : LL.optimized) =
      let paths = nest_paths opt.LL.llc in
@@ -868,7 +869,18 @@ let () =
     in
     let cooperative = if shared then Some simd_width else None in
     let stage source tile_loops =
-      Sched.Stage { source; tile_loops; shared; cooperative; hoisted = false; swizzle = None; pad_stride = None; pipeline_depth = 1; tile_prec = None }
+      Sched.Stage
+        {
+          source;
+          tile_loops;
+          shared;
+          cooperative;
+          hoisted = false;
+          swizzle = None;
+          pad_stride = None;
+          pipeline_depth = 1;
+          tile_prec = None;
+        }
     in
     let outer_grid =
       if not shared then []
@@ -1003,7 +1015,8 @@ let () =
     let got = run_fiss_sched "cvmb_cpu" y ~conv_sched in
     p "cvmb: merged-segment blocked conv pipeline matches the natural form within tolerance"
       (Array.for_all2_exn got want_mb ~f:(fun a b -> Float.(abs (a - b) < 1e-3)))
-  else skipped "cvmb: merged-segment blocked conv pipeline matches the natural form within tolerance";
+  else
+    skipped "cvmb: merged-segment blocked conv pipeline matches the natural form within tolerance";
   clean_cache "conv_tune_cache_merged_blocked";
   let _, _, y = make_merged16 "cvmb_t" in
   let reports = ref [] in

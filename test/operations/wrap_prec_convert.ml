@@ -1,15 +1,15 @@
 (* Load-time precision conversion for data-backed tensors (gh-ocannl-492, the forward-only leg).
 
-   Data-backed tensors are precision-[Specified] at creation from their ndarray, so a storage
-   policy cannot re-assign them; and with no optimizer there is no master copy for a cast twin to
-   preserve. [TDSL.wrap ~prec] (via [Ir.Ndarray.convert]) re-precisions the data at ingestion
-   instead — torch's [model.half ()] for inference. Pinned here:
+   Data-backed tensors are precision-[Specified] at creation from their ndarray, so a storage policy
+   cannot re-assign them; and with no optimizer there is no master copy for a cast twin to preserve.
+   [TDSL.wrap ~prec] (via [Ir.Ndarray.convert]) re-precisions the data at ingestion instead —
+   torch's [model.half ()] for inference. Pinned here:
 
    - The wrapped tensor's storage precision is the requested one, and its values are the
-   half-rounded images of the f32 data (readback matches an explicit host-side rounding). - A
-   matvec forward over bf16-converted weights tracks the f32 forward within bf16 tolerance — the
-   end-to-end shape of bench_gpt's BENCH_PRECISION leg. - Same-precision wrap is the identity
-   (values bitwise-equal to the plain wrap). *)
+   half-rounded images of the f32 data (readback matches an explicit host-side rounding). - A matvec
+   forward over bf16-converted weights tracks the f32 forward within bf16 tolerance — the end-to-end
+   shape of bench_gpt's BENCH_PRECISION leg. - Same-precision wrap is the identity (values
+   bitwise-equal to the plain wrap). *)
 
 open Base
 open Ocannl
@@ -22,13 +22,13 @@ let n = 12
 let k = 16
 
 let wv =
-  Array.init (n * k) ~f:(fun i -> (Float.sin (Float.of_int i) *. 1.7) +. (Float.of_int (i % 5) *. 0.31))
+  Array.init (n * k) ~f:(fun i ->
+      (Float.sin (Float.of_int i) *. 1.7) +. (Float.of_int (i % 5) *. 0.31))
 
 let xv = Array.init k ~f:(fun i -> Float.cos (Float.of_int (3 * i)))
 
 let nd_of values ~dims =
-  Ir.Ndarray.init_array ~debug:"wpc" Ir.Ops.single ~dims ~padding:None
-    ~f:(fun idcs ->
+  Ir.Ndarray.init_array ~debug:"wpc" Ir.Ops.single ~dims ~padding:None ~f:(fun idcs ->
       let flat = Array.foldi idcs ~init:0 ~f:(fun ax acc i -> (acc * dims.(ax)) + i) in
       ignore flat;
       values.((idcs.(0) * dims.(1)) + idcs.(1)))
@@ -49,8 +49,7 @@ let () =
     Ir.Ndarray.retrieve_flat_values tmp
   in
   p "converted values equal the host-side half rounding" (Array.equal Float.equal got rounded);
-  p "conversion actually rounds (data is not half-exact)"
-    (not (Array.equal Float.equal got wv));
+  p "conversion actually rounds (data is not half-exact)" (not (Array.equal Float.equal got wv));
 
   (* -- Same-precision wrap is the identity. -- *)
   Tensor.unsafe_reinitialize ();

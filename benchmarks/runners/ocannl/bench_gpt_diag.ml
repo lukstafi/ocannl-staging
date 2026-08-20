@@ -90,9 +90,9 @@ let () =
   let backend = Context.backend_name ctx in
   let limits = Context.hardware_limits ctx in
   let ctx = Train.init_params ctx bindings batch_loss in
-  (* Only the lowering is wanted here (an explicit transform replaces the default pipeline,
-     so the routine is discarded); the timed routine is compiled with the regular default
-     pipeline below. *)
+  (* Only the lowering is wanted here (an explicit transform replaces the default pipeline, so the
+     routine is discarded); the timed routine is compiled with the regular default pipeline
+     below. *)
   let opt = H.capture_lowering ctx fwd bindings in
   let promote_locals =
     match Stdlib.Sys.getenv_opt "BENCH_PROMOTE" with Some "0" -> Some false | _ -> None
@@ -102,18 +102,18 @@ let () =
   let ctx, routine = Context.compile ctx fwd bindings in
   let compile_s = Unix.gettimeofday () -. t0 in
   Stdio.printf "backend: %s  compile_s: %.3f\n" backend compile_s;
-  (* Per-segment times: populate intermediates with one full forward, then time each fission
-     segment as its own routine. Mirrors bench_conv_diag; the gpt graph is forward-only, so the
-     populating run is the same [fwd] routine that is then decomposed. *)
-  (if H.env_flag "BENCH_SEG_TIMES" then (
-     let batch_ref = IDX.find_exn routine.Context.bindings batch_n in
-     batch_ref := 0;
-     Train.run ctx routine;
-     Context.sync ctx;
-     H.time_segments ?promote_locals ~backend ~limits ~static_indices:[ batch_n ] ~ctx ~comp:fwd
-       ~bindings
-       ~bind:(fun r -> IDX.find_exn r.Context.bindings batch_n := 0)
-       opt));
+  (* Per-segment times: populate intermediates with one full forward, then time each fission segment
+     as its own routine. Mirrors bench_conv_diag; the gpt graph is forward-only, so the populating
+     run is the same [fwd] routine that is then decomposed. *)
+  if H.env_flag "BENCH_SEG_TIMES" then (
+    let batch_ref = IDX.find_exn routine.Context.bindings batch_n in
+    batch_ref := 0;
+    Train.run ctx routine;
+    Context.sync ctx;
+    H.time_segments ?promote_locals ~backend ~limits ~static_indices:[ batch_n ] ~ctx ~comp:fwd
+      ~bindings
+      ~bind:(fun r -> IDX.find_exn r.Context.bindings batch_n := 0)
+      opt);
   (* Time a few individual steps with a full sync each. *)
   if H.env_flag "BENCH_STEPS" then
     let batch_ref = IDX.find_exn routine.Context.bindings batch_n in

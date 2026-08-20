@@ -3,17 +3,16 @@
    [Cuda_backend.gpu_arch_options] decides one thing with two very different answers:
 
    - a FLOOR: the lowest arch whose PTX contains the instructions a kernel uses. The driver
-     forward-JIT-compiles floor-targeted PTX on every later GPU, so one compile covers everything
-     above it — which is why a triggered floor is deliberately NOT raised to the device arch, only
-     up to compute_75 (CUDA 13 dropped offline compilation below that).
-   - a FAMILY target: a [compute_120a]-style architecture-specific arch, loadable only by the device
-     family it names. Blackwell's block-scaled [kind::mxf8f6f4] forms exist only under such a
-     target, so it is the one marker that gives up forward-JIT portability — and therefore the one
-     gated on the attached devices' own family, so family PTX is never produced for a device that
-     could not load it.
+   forward-JIT-compiles floor-targeted PTX on every later GPU, so one compile covers everything
+   above it — which is why a triggered floor is deliberately NOT raised to the device arch, only up
+   to compute_75 (CUDA 13 dropped offline compilation below that). - a FAMILY target: a
+   [compute_120a]-style architecture-specific arch, loadable only by the device family it names.
+   Blackwell's block-scaled [kind::mxf8f6f4] forms exist only under such a target, so it is the one
+   marker that gives up forward-JIT portability — and therefore the one gated on the attached
+   devices' own family, so family PTX is never produced for a device that could not load it.
 
-   No arm emits [(mma-mxfp8)] yet (block scaling is blocked on OCANNL having microscaling storage
-   at all), so this pins the MECHANISM: that the marker selects a family target on a family device,
+   No arm emits [(mma-mxfp8)] yet (block scaling is blocked on OCANNL having microscaling storage at
+   all), so this pins the MECHANISM: that the marker selects a family target on a family device,
    that it does not on any other device, and that its presence changes nothing for every existing
    floor marker. The function is pure, so no GPU is needed — this file is selected on cudajit being
    installed, not on hardware being present. *)
@@ -24,8 +23,7 @@ let check label ~device_cc src ~expected =
   let got = Cuda_backend.gpu_arch_options ~device_cc src in
   let render l = if List.is_empty l then "(none)" else String.concat ~sep:" " l in
   if not (List.equal String.equal got expected) then
-    failwith
-      (Printf.sprintf "%s: expected %s, got %s" label (render expected) (render got))
+    failwith (Printf.sprintf "%s: expected %s, got %s" label (render expected) (render got))
 
 let () =
   (* No markers, no arch option at all: the kernel compiles at nvrtc's default target. *)
@@ -43,14 +41,13 @@ let () =
      text, which lives in the prepended helper definitions' asm literals — so the floor fires
      exactly when a helper was actually emitted, and a routine merely NAMED like one (which the
      token-scoped builtin filter declines to activate) raises nothing. *)
-  check "cp.async floor" ~device_cc:120
-    {|asm volatile("cp.async.ca.shared.global [d], [s], 4;");|}
+  check "cp.async floor" ~device_cc:120 {|asm volatile("cp.async.ca.shared.global [d], [s], 4;");|}
     ~expected:[ "--gpu-architecture=compute_80" ];
   check "a helper-like routine name alone raises no floor" ~device_cc:75
     {|extern "C" __global__ void ocannl_cp_async4_probe() {}|} ~expected:[];
   (* Batched sources take the max of the triggered floors, not the first match. *)
-  check "batched floors take the max" ~device_cc:120
-    "nvcuda::wmma::mma_sync(x); /* (mma-fp8) */" ~expected:[ "--gpu-architecture=compute_89" ];
+  check "batched floors take the max" ~device_cc:120 "nvcuda::wmma::mma_sync(x); /* (mma-fp8) */"
+    ~expected:[ "--gpu-architecture=compute_89" ];
   check "cp.async batched with fp8 takes the max" ~device_cc:120
     {|asm volatile("cp.async.wait_all;"); /* (mma-fp8) */|}
     ~expected:[ "--gpu-architecture=compute_89" ];
@@ -65,13 +62,15 @@ let () =
     ~expected:[ "--gpu-architecture=compute_120a" ];
   check "mxfp8 marker on sm_121" ~device_cc:121 "/* (mma-mxfp8) */"
     ~expected:[ "--gpu-architecture=compute_121a" ];
-  (* ...and nothing of the sort anywhere else: an sm_89 device gets the ordinary floor policy, so
-     no unloadable PTX is ever produced for it. *)
+  (* ...and nothing of the sort anywhere else: an sm_89 device gets the ordinary floor policy, so no
+     unloadable PTX is ever produced for it. *)
   check "mxfp8 marker off-family falls back to the floor" ~device_cc:89
-    "/* (mma-mxfp8) */ /* (mma-fp8) */" ~expected:[ "--gpu-architecture=compute_89" ];
+    "/* (mma-mxfp8) */ /* (mma-fp8) */"
+    ~expected:[ "--gpu-architecture=compute_89" ];
   check "mxfp8 marker off-family with no floor" ~device_cc:89 "/* (mma-mxfp8) */" ~expected:[];
   (* The family target supersedes floors on a family device: family PTX is not forward-JIT PTX, and
      mixing the two targets in one compile is not expressible. *)
   check "mxfp8 marker supersedes a floor on-family" ~device_cc:120
-    "/* (mma-mxfp8) */ /* (mma-fp8) */" ~expected:[ "--gpu-architecture=compute_120a" ];
+    "/* (mma-mxfp8) */ /* (mma-fp8) */"
+    ~expected:[ "--gpu-architecture=compute_120a" ];
   Stdio.print_endline "cuda gpu_arch_options: ok"

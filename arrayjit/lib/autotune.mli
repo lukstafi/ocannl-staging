@@ -66,15 +66,15 @@
       the segment's pre-schedule digest), the remaining segments keeping the default preset. A
       segment's site has its [Zero_out] in a separate [`Zeros] segment, so the pipelines skip the
       zero-expansion geometry there — sound because [Privatize] init-loads the accumulator tile from
-      the (pre-zeroed) target and [Tile_mma] loads the accumulator fragment before the reduction.
-      On GPU backends the segmentation is additionally enumerated under
+      the (pre-zeroed) target and [Tile_mma] loads the accumulator fragment before the reduction. On
+      GPU backends the segmentation is additionally enumerated under
       {!Ir.Schedule.fission_scheduled}'s [arity_cuts] (finer) mode (gh-ocannl-574): a segment
       carrying a companion that cannot follow its site's full arity — the lm_head GEMM with its
-      max-logits row reduction — has every seed of the shared segment decline on companion
-      coverage, and the finer cut frees the site into its own kernel; segments whose digest is new
-      versus the coarse segmentation seed [fine]-flagged singles, one composite recombines the fine
-      keys' best-timed singles (coarse-timed bests staff the digest-identical segments), and a fine
-      winner records the mode in its cache entry so replay re-segments identically.
+      max-logits row reduction — has every seed of the shared segment decline on companion coverage,
+      and the finer cut frees the site into its own kernel; segments whose digest is new versus the
+      coarse segmentation seed [fine]-flagged singles, one composite recombines the fine keys'
+      best-timed singles (coarse-timed bests staff the digest-identical segments), and a fine winner
+      records the mode in its cache entry so replay re-segments identically.
     - {b Convolution sketches} (gh-ocannl-493): when a convolution accumulation site is detected
       ({!detect_conv}), the implicit-GEMM pipeline — the packing [Stage] serving as im2col, the
       micro-kernel the ordinary [Tile_mma]. On the C backends: serial and Grid-parallel flavors, the
@@ -116,13 +116,13 @@
       candidate. Static indices are bound to the midpoint of their declared ranges during timing and
       restored afterwards.
 
-    Implementation note: the {e structured} half of the candidate space — matmul/conv site detection,
-    the composed schedule pipelines those sites parameterize, and the refinement trees whose leaves
-    are the seed lists — lives in [sketch_families.ml] and is included here (gh-ocannl-580). This
-    interface is unchanged by that split and remains the library's only gate; the family entry points
-    below ({!sketch_params}, {!detect_conv}, {!matmul_sketch_tree}, {!sketch_schedule},
-    {!sketch_path_traffic_floor}, …) are defined there, and {!sketch_seed_params} is the composition
-    the search enumerates. *)
+    Implementation note: the {e structured} half of the candidate space — matmul/conv site
+    detection, the composed schedule pipelines those sites parameterize, and the refinement trees
+    whose leaves are the seed lists — lives in [sketch_families.ml] and is included here
+    (gh-ocannl-580). This interface is unchanged by that split and remains the library's only gate;
+    the family entry points below ({!sketch_params}, {!detect_conv}, {!matmul_sketch_tree},
+    {!sketch_schedule}, {!sketch_path_traffic_floor}, …) are defined there, and
+    {!sketch_seed_params} is the composition the search enumerates. *)
 
 open Base
 
@@ -199,14 +199,13 @@ val sketch_seed_params :
     declined rendering (gh-ocannl-479) — on GPU backends: the (operand, operand, accumulator) format
     tile advertised by [limits.mma.mma_format_tiles], including policy-enabled TF32 and excluding
     combinations the backend supports at one accumulator width but not the other (gh-ocannl-545:
-    CUDA's bf16 has no wmma accumulator of its own); on the C backends:
-    operand-precision uniformity (f32/f64), the fused accumulation form, micro-kernel column extent
-    at least one vector of lanes ([limits.simd_vector_bytes]), and transposed-B storage for shapes
-    that read B in place. Builder preconditions the schedule builders settle identically for every
-    tile completion — the zero-expansion row-axis rule, and the GPU sketches' companion-coverage
-    rule per fusion flavor — also pre-filter here, as the family tree's construction-time
-    refutations (gh-ocannl-577): a seed list never proposes a candidate that statically must fail
-    its build. Exposed for tests. *)
+    CUDA's bf16 has no wmma accumulator of its own); on the C backends: operand-precision uniformity
+    (f32/f64), the fused accumulation form, micro-kernel column extent at least one vector of lanes
+    ([limits.simd_vector_bytes]), and transposed-B storage for shapes that read B in place. Builder
+    preconditions the schedule builders settle identically for every tile completion — the
+    zero-expansion row-axis rule, and the GPU sketches' companion-coverage rule per fusion flavor —
+    also pre-filter here, as the family tree's construction-time refutations (gh-ocannl-577): a seed
+    list never proposes a candidate that statically must fail its build. Exposed for tests. *)
 
 val matmul_sketch_tree :
   is_gpu:bool ->
@@ -217,22 +216,21 @@ val matmul_sketch_tree :
 (** The matmul sketch family as a refinement tree (gh-ocannl-514 phase 1): decision levels —
     pipeline, packing shape, geometry, twins — whose lazily-refined choices depend on earlier
     commitments, and whose {!Ir.Schedule_space.leaves} are exactly the family's
-    {!sketch_seed_params} unfused contribution, in enumeration order (the fused twins enumerate
-    from the tree's [Fuse_epilogue] flavor, whose construction-time verdicts differ —
-    gh-ocannl-577). [None] when no matmul site is detected. Statically-decidable builder
-    preconditions refute at the pipeline level here — above the geometry menus and the tile
-    lattice, so a family whose every completion must fail its candidate build never expands
-    (gh-ocannl-577). The conv family and the epilogue-twin level factor the same way as
-    follow-ups. Exposed for tests and as the phase-4 search driver's entry into the family
-    space. *)
+    {!sketch_seed_params} unfused contribution, in enumeration order (the fused twins enumerate from
+    the tree's [Fuse_epilogue] flavor, whose construction-time verdicts differ — gh-ocannl-577).
+    [None] when no matmul site is detected. Statically-decidable builder preconditions refute at the
+    pipeline level here — above the geometry menus and the tile lattice, so a family whose every
+    completion must fail its candidate build never expands (gh-ocannl-577). The conv family and the
+    epilogue-twin level factor the same way as follow-ups. Exposed for tests and as the phase-4
+    search driver's entry into the family space. *)
 
 val geometry_lattice_witness : string
-(** The exclusion witness marking the tile-size lattice branches beyond the curated geometry
-    menus (gh-ocannl-514 phase 5): binary interval refinements over the staged tile sizes —
-    every intrinsic-tile multiple of the row block crossed with every staged depth block — whose
-    boxes carry corner-judged verdicts (a workgroup-memory floor at the most favorable corner
-    refutes the whole box pre-expansion). {!Ir.Schedule_space.leaves} never enumerates an
-    excluded branch, so the tuner's seed lists are unchanged by the lattice's existence. *)
+(** The exclusion witness marking the tile-size lattice branches beyond the curated geometry menus
+    (gh-ocannl-514 phase 5): binary interval refinements over the staged tile sizes — every
+    intrinsic-tile multiple of the row block crossed with every staged depth block — whose boxes
+    carry corner-judged verdicts (a workgroup-memory floor at the most favorable corner refutes the
+    whole box pre-expansion). {!Ir.Schedule_space.leaves} never enumerates an excluded branch, so
+    the tuner's seed lists are unchanged by the lattice's existence. *)
 
 val lift_geometry_lattice :
   sketch_params Ir.Schedule_space.tree -> sketch_params Ir.Schedule_space.tree
@@ -249,18 +247,17 @@ val sketch_path_traffic_floor :
   int
 (** The certain-traffic increment (bytes) of a family-tree decision path (gh-ocannl-514 phase 5):
     traffic every completion below the path moves beyond the schedule-invariant
-    {!Ir.Cost_model.completion_floor}, read off the path's committed staging decisions — a
-    committed staged geometry contributes its operand tiles' distinct-cell footprints exactly as
+    {!Ir.Cost_model.completion_floor}, read off the path's committed staging decisions — a committed
+    staged geometry contributes its operand tiles' distinct-cell footprints exactly as
     {!Ir.Cost_model.analyze} charges them on every leaf (in-kernel GPU stages read and write; CPU
     packed panels only under in-kernel [serial] packing — a hoisted panel replaces the original
-    operand's reads rather than adding traffic), and a lattice box contributes its most
-    favorable (smallest-tiles) corner priced at the same per-format intrinsic tile the lattice
-    is built from, so the increment is monotone in refinement. [0] when no matmul site is
-    detected or nothing is certain. Composed with the floor's legs, this
-    is what makes the family bound non-uniform across the tree — the schedule-invariant floor
-    differentiates only placements (phase 3), the increments differentiate the sketch-geometry
-    subtrees. Detection runs once at partial application; the returned closure is cheap per
-    path. Exposed for tests. *)
+    operand's reads rather than adding traffic), and a lattice box contributes its most favorable
+    (smallest-tiles) corner priced at the same per-format intrinsic tile the lattice is built from,
+    so the increment is monotone in refinement. [0] when no matmul site is detected or nothing is
+    certain. Composed with the floor's legs, this is what makes the family bound non-uniform across
+    the tree — the schedule-invariant floor differentiates only placements (phase 3), the increments
+    differentiate the sketch-geometry subtrees. Detection runs once at partial application; the
+    returned closure is cheap per path. Exposed for tests. *)
 
 val sketch_schedule : p:sketch_params -> Ir.Low_level.optimized -> Ir.Schedule.schedule
 (** The composed pipeline a seed parameterizes, built against the given lowering (the site is
@@ -309,11 +306,11 @@ val split_reduce_sites :
     recognizer decides the pinning discipline), so every returned site is seedable as proposed.
 
     Every detected site is returned, ranked by descending estimated segment cost ([sr_cost], the
-    accumulation's trip count) — gh-ocannl-541: the earlier [sr_red / sr_out] integer-division
-    ratio zeroed every large-output site, and the in-detection cap then silently excluded (and,
-    once gh-537 made more sites reachable, evicted) exactly the sites carrying the most serial
-    work. The candidate-volume cap now lives in {!tune} ([max_split_reduce_sites] /
-    config [autotune_split_reduce_max_sites]), which records evicted sites in the decline census.
+    accumulation's trip count) — gh-ocannl-541: the earlier [sr_red / sr_out] integer-division ratio
+    zeroed every large-output site, and the in-detection cap then silently excluded (and, once
+    gh-537 made more sites reachable, evicted) exactly the sites carrying the most serial work. The
+    candidate-volume cap now lives in {!tune} ([max_split_reduce_sites] / config
+    [autotune_split_reduce_max_sites]), which records evicted sites in the decline census.
 
     A candidate rejected {e only} because the accumulation cell's loops sit inside the reduction
     loop — how OCANNL lowers conv bias/weight gradients, where nothing else in the schedule space
@@ -360,13 +357,12 @@ type report = {
           validation is the exception, and deliberately so: an incompatible [timing_ctx] is a
           precondition violation detected before anything happens, not an outcome of a search, and
           reporting it would attribute a phase to a call that never reached one. The failures that
-          precede the search
-          proper — a base compile that fails before the base lowering is captured, a fatal baseline
-          link, a fatal cache replay, a baseline timing failure — and the untuned fallback compiles
-          of a search-less call ([search=false]) report with every counter at the value it had
-          reached and the failure in [terminal_failure], so a caller attributing arms by arrival
-          order (the positional [?report] of [Train.tune_placements]) still gets a slot for the
-          search that died. *)
+          precede the search proper — a base compile that fails before the base lowering is
+          captured, a fatal baseline link, a fatal cache replay, a baseline timing failure — and the
+          untuned fallback compiles of a search-less call ([search=false]) report with every counter
+          at the value it had reached and the failure in [terminal_failure], so a caller attributing
+          arms by arrival order (the positional [?report] of [Train.tune_placements]) still gets a
+          slot for the search that died. *)
   baseline_declined : bool;
       (** The serial baseline's own compile was rejected with a typed cause and the search ran on
           the scheduled candidates alone (gh-ocannl-533): [baseline_ms] is then [infinity] and the
@@ -394,8 +390,8 @@ type report = {
   fiss_sketch_candidates : int;
       (** Per-fission-segment sketch candidates seeded (0 when the computation does not fission, or
           no segment contains a compatible matmul site). Includes the finer-segmentation
-          ([arity_cuts], gh-ocannl-574) singles on GPU backends. Deterministic given the
-          computation and backend. *)
+          ([arity_cuts], gh-ocannl-574) singles on GPU backends. Deterministic given the computation
+          and backend. *)
   fiss_sketch_timed : int;
       (** Of the seeded per-fission-segment sketch candidates, those that compiled and were actually
           timed (not rejected by op preconditions or hardware limits, not deduplicated by digest).
@@ -403,10 +399,10 @@ type report = {
   split_reduce_candidates : int;
       (** Split-reduce seeds (gh-ocannl-484 task 3): one candidate per {!split_reduce_sites} site
           within the [max_split_reduce_sites] cap and eligible [num_blocks] value — the two-pass
-          deterministic split reduction applied whole-routine before fission, each resulting
-          segment getting the default preset. Deterministic given the computation and backend; [0]
-          when no reduction-dominated site is detected. Sites the cap evicts appear in [declines]
-          under [Seed_evicted_key "split_reduce"]. *)
+          deterministic split reduction applied whole-routine before fission, each resulting segment
+          getting the default preset. Deterministic given the computation and backend; [0] when no
+          reduction-dominated site is detected. Sites the cap evicts appear in [declines] under
+          [Seed_evicted_key "split_reduce"]. *)
   split_reduce_timed : int;
       (** Of the split-reduce candidates (the per-site singles and the recombined multi-site
           composite), those that compiled and were actually timed. *)
@@ -439,8 +435,8 @@ type report = {
   baseline_ms : float;
       (** The unscheduled serial baseline's measured time, or [infinity] when it was not dispatched:
           on a GPU backend an unparallelized candidate is never run (gh-ocannl-532 — the whole
-          routine in one work-item, unbounded in cost and uninterruptible), so it has no
-          measurement and cannot win. Also [infinity] when [baseline_declined]. *)
+          routine in one work-item, unbounded in cost and uninterruptible), so it has no measurement
+          and cannot win. Also [infinity] when [baseline_declined]. *)
   default_ms : float option;
       (** The untuned default pipeline's measured time (gh-ocannl-552): the [config_thresholds]
           fissioned-preset seed reproduces {!Ir.Schedule.maybe_default_schedules} exactly, so this
@@ -454,8 +450,8 @@ type report = {
           scheduling inactive ({!Ir.Schedule.automatic_schedule_active}) the untuned default is the
           unscheduled serial form and this field reports the baseline's measurement (so [None] on
           GPU, where that form is never dispatched); with config [schedule_fission=false] no
-          candidate reproduces the whole-routine config-thresholds default and this is [None].
-          Also [None] when the seed failed to compile, was refused as unparallelized on GPU
+          candidate reproduces the whole-routine config-thresholds default and this is [None]. Also
+          [None] when the seed failed to compile, was refused as unparallelized on GPU
           (gh-ocannl-532), or on a cache hit whose entry predates this field or was written under a
           config that shaped a different default pipeline
           ({!Ir.Schedule.default_schedule_fingerprint} mismatch). *)
@@ -487,8 +483,7 @@ type report = {
       (** The best {e timed} tensorized candidate's time, [infinity] when none was timed
           (gh-ocannl-546). Against [best_ms] this is the margin by which tensorization won or lost
           this search, which is the difference between "the tensorized pipeline is uncompetitive
-          here" and "it lost inside measurement noise"; [best_tensorized] implies the two are
-          equal.
+          here" and "it lost inside measurement noise"; [best_tensorized] implies the two are equal.
 
           Its population is {e structural} — timed candidates whose schedule contains a
           [Schedule.Tensorize] — and therefore differs from [mma_timed]'s label-promised one, in
@@ -544,14 +539,14 @@ val placement_enablement :
     from the seeders' own site classification, before any compile. Returns
     [(enablement, disablement)]:
 
-    - [enablement]: operand/destination nodes of an mma-eligible matmul site (the backend
-      advertises a format tile for the site's storage-precision triple,
-      whole-routine or per-fission-segment — the granularity the seeders detect at) that exists in
-      the all-materialized lowering but has no eligible counterpart under default placements.
-      Materializing such a node is what makes the tensorized family expressible — the flip changes
-      the feasible set, not just the objective, which the per-node recompute-cost bound has no term
-      for (on gh-558's [mlp_wide]/hip/bf16, cost ranking buried the family-unlocking cast twins
-      below four no-op [`Inline] flips and a budget-5 chain found nothing).
+    - [enablement]: operand/destination nodes of an mma-eligible matmul site (the backend advertises
+      a format tile for the site's storage-precision triple, whole-routine or per-fission-segment —
+      the granularity the seeders detect at) that exists in the all-materialized lowering but has no
+      eligible counterpart under default placements. Materializing such a node is what makes the
+      tensorized family expressible — the flip changes the feasible set, not just the objective,
+      which the per-node recompute-cost bound has no term for (on gh-558's [mlp_wide]/hip/bf16, cost
+      ranking buried the family-unlocking cast twins below four no-op [`Inline] flips and a budget-5
+      chain found nothing).
     - [disablement]: operand/destination nodes of sites already eligible under default placements.
       An [`Inline] flip of a node in {e either} set can only move away from an eligible site —
       {!rank_flip_candidates} demotes those.
@@ -568,8 +563,8 @@ val rank_flip_candidates :
 (** Deduplicate (by [Tn.uid], keep-first) and rank the decision surface. [`Cost] is the legacy
     recompute-cost-descending order (the gh-555 chain's, kept as the evaluation baseline);
     [`Enablement] sorts family-unlocking [`Materialize] flips ([enablement] members) first and
-    family-breaking [`Inline] flips (members of either set) last, cost-descending within each
-    class. Config [tune_flip_ordering] selects the default. Exposed for tests. *)
+    family-breaking [`Inline] flips (members of either set) last, cost-descending within each class.
+    Config [tune_flip_ordering] selects the default. Exposed for tests. *)
 
 type placement_surface = {
   ps_candidates : Ir.Low_level.flip_candidate list;
@@ -579,12 +574,12 @@ type placement_surface = {
   ps_floor_ms : materialized:Ir.Tnode.t list -> float option;
       (** The roofline floor (ms) of a partial placement vector: every completion in which
           [materialized] holds costs at least this much — {!Ir.Cost_model.completion_floor} on the
-          all-materialized specialization with the other candidates' placements open, under the
-          same envelope constants as {!model_score}. Monotone in [materialized] (commitments only
-          narrow [open_placement]), so it is a sound branch-and-bound fathom: in the tuned regime,
-          a flip whose floor meets the best {e measured} time cannot win and is skipped without
-          spending budget (the admissible direction — the bound already exceeds the incumbent's
-          measurement). [None] when no envelope constant is present. *)
+          all-materialized specialization with the other candidates' placements open, under the same
+          envelope constants as {!model_score}. Monotone in [materialized] (commitments only narrow
+          [open_placement]), so it is a sound branch-and-bound fathom: in the tuned regime, a flip
+          whose floor meets the best {e measured} time cannot win and is skipped without spending
+          budget (the admissible direction — the bound already exceeds the incumbent's measurement).
+          [None] when no envelope constant is present. *)
 }
 (** The placement decision surface prepared for search (gh-ocannl-514): the per-node
     inline/materialize levels of the joint placement x sketch x fission space. *)
@@ -597,9 +592,9 @@ val placement_surface :
   placement_surface
 (** Read and rank the decision surface from [ctx] (analyze-only — two hermetic lowerings via
     {!Context.lowered_for_decisions}, sharing the gh-560 analysis cache; no backend codegen, no
-    effect on [ctx]). [ordering] defaults from config [tune_flip_ordering] ([enablement]).
-    Consumed by [Train.tune_placements]' flip refinement and by {!model_default}'s placement
-    search (config [model_default_placements]). *)
+    effect on [ctx]). [ordering] defaults from config [tune_flip_ordering] ([enablement]). Consumed
+    by [Train.tune_placements]' flip refinement and by {!model_default}'s placement search (config
+    [model_default_placements]). *)
 
 type model_choice = {
   mc_label : string;
@@ -636,11 +631,10 @@ val compile_advisory :
     back to a plain {!Context.compile} — the ordinary default pipeline — for a classified compiler
     rejection, including validation in backend codegen. Fatal failures propagate without retrying.
     [on_fallback] is called with the public rendering of the cause when fallback fires.
-    [fallback_if] (default: always) is consulted first, for transforms that
-    may themselves have degraded to the default pipeline — [false] re-raises the original exception,
-    backtrace included, instead of duplicating a compile that has nothing to fall back to. For
-    advisory transforms only: a failure of the default pipeline itself propagates. See
-    {!model_default} (gh-ocannl-519). *)
+    [fallback_if] (default: always) is consulted first, for transforms that may themselves have
+    degraded to the default pipeline — [false] re-raises the original exception, backtrace included,
+    instead of duplicating a compile that has nothing to fall back to. For advisory transforms only:
+    a failure of the default pipeline itself propagates. See {!model_default} (gh-ocannl-519). *)
 
 val model_default :
   ?report:(model_choice -> unit) ->
@@ -658,8 +652,8 @@ val model_default :
     validation, or compilation failure fall back to the ordinary default pipeline — the reported
     {!model_choice} then says ["default"]. Fatal failures propagate without retrying. Once the
     compile is on that pipeline there is nothing left to fall back to, so its failures propagate as
-    they would from {!Context.compile}, without a duplicate attempt. Unlike {!tune}, nothing
-    is executed and no cache is involved — results depend only on the computation, backend, and
+    they would from {!Context.compile}, without a duplicate attempt. Unlike {!tune}, nothing is
+    executed and no cache is involved — results depend only on the computation, backend, and
     envelope constants. *)
 
 val set_test_bindings : Context.routine -> unit
@@ -673,12 +667,11 @@ val on_candidate_attempt : (string -> unit) ref
     label just before its compile — including the baseline's, which is a candidate (gh-ocannl-533);
     that one is called inside the base compile's transform, so a fault injected there is classified
     like any other and surfaces as the pre-search failure of a search that never started. The
-    default is a no-op and no configuration selects it; raising
-    from it terminates the search the way an uncontainable failure does — the partial report
-    (carrying [terminal_failure]) is emitted to [?report] and the exception propagates out of
-    {!tune}, which is what [Train.tune_placements] must survive without losing the other arm's
-    winner. Not a production seam: candidate failures that a backend {e can} attribute are
-    contained without it (see [declines]). *)
+    default is a no-op and no configuration selects it; raising from it terminates the search the
+    way an uncontainable failure does — the partial report (carrying [terminal_failure]) is emitted
+    to [?report] and the exception propagates out of {!tune}, which is what [Train.tune_placements]
+    must survive without losing the other arm's winner. Not a production seam: candidate failures
+    that a backend {e can} attribute are contained without it (see [declines]). *)
 
 val on_candidate_preflight : (string -> unit) ref
 (** Fault-injection seam for the pre-dispatch containment tests (gh-ocannl-564), called with a
@@ -701,9 +694,9 @@ val tune :
      (gh-ocannl-559: the [reproducible] profile) a committed cache entry still replays -- a pinned
      schedule is deterministic -- but nothing is timed, and a cache miss compiles the untuned
      default pipeline and reports {!no_search_report}. Only a CHOSEN cache replays: [cache_dir]
-     passed here, or [autotune_cache_dir] set at some config source. The built-in default counts
-     as no cache, so a search-less run cannot silently pin itself to whatever an earlier local
-     search left in ./autotune_cache. *)
+     passed here, or [autotune_cache_dir] set at some config source. The built-in default counts as
+     no cache, so a search-less run cannot silently pin itself to whatever an earlier local search
+     left in ./autotune_cache. *)
   ?beam_width:int ->
   (* Default from config [autotune_beam_width] (2). *)
   ?rounds:int ->
@@ -728,8 +721,8 @@ val tune :
      measured result; presets, saved schedules and the baseline are never pruned. *)
   ?max_split_reduce_sites:int ->
   (* Candidate-volume cap on the split-reduce seed family: the top so-many {!split_reduce_sites}
-     (ranked by estimated segment cost) are seeded; evicted sites are recorded in the decline
-     census under [Seed_evicted_key "split_reduce"] (gh-ocannl-541). Default from config
+     (ranked by estimated segment cost) are seeded; evicted sites are recorded in the decline census
+     under [Seed_evicted_key "split_reduce"] (gh-ocannl-541). Default from config
      [autotune_split_reduce_max_sites] (8); [0] disables the family. *)
   ?timing_ctx:Context.t ->
   (* A scratch context lineage against which candidates are compiled and timed, so the timing runs
@@ -757,8 +750,8 @@ val tune :
     returned routine is the only artifact left when [tune] returns. Nothing about the returned value
     changes: it is the same live context and routine as before, from the same lineage.
 
-    The bound is on working pools, and that qualifier is load-bearing: {!Context.release} cannot free
-    per-device constants, and a hoisted [Stage] candidate mints a fresh packed constant per
+    The bound is on working pools, and that qualifier is load-bearing: {!Context.release} cannot
+    free per-device constants, and a hoisted [Stage] candidate mints a fresh packed constant per
     application. A search that seeds those (the CPU [hoist] sketches) therefore still grows one
     constant pool per such candidate — measured on [cc] at 1 -> 109 constant pools over 181
     candidates, against working pools held within 2-6. Bounding it needs an eviction rule inside the

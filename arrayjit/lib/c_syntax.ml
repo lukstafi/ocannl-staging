@@ -69,9 +69,10 @@ type mma_rendering =
 let mma_census_enabled = ref false
 let mma_census : (string * mma_rendering) list ref = ref []
 
-(** The address space of a tile-MMA operand as the emission hooks see it. *)
 type mma_space = [ `Device | `Shared | `Thread | `Fragment of string ]
+(** The address space of a tile-MMA operand as the emission hooks see it. *)
 
+type mma_layout = [ `Plain | `Swizzled_b128 ]
 (** The physical layout of a tile-MMA operand's storage (gh-ocannl-481 item 3, D2). This is the
     whole [Stage] -> emission contract: the emission never re-derives the layout, it trusts the
     component it is handed.
@@ -82,7 +83,6 @@ type mma_space = [ `Device | `Shared | `Thread | `Fragment of string ]
     origin of a rank-2 node whose minor dim is [ld], so the element at [(row, col)] sits at
     [row*ld + (((col/u) lxor (row land (ld/u - 1))) * u)] with [u = 16 / prec_in_bytes] — everything
     else declines. *)
-type mma_layout = [ `Plain | `Swizzled_b128 ]
 
 type mma_operand = PPrint.document * int * mma_space * mma_layout
 
@@ -104,14 +104,13 @@ type mma_emission = a_ptr:PPrint.document -> b_ptr:PPrint.document -> PPrint.doc
 
 type async_copy_syntax = {
   ac_copy : dst:PPrint.document -> src:PPrint.document -> bytes:int -> PPrint.document;
-      (** One element-sized asynchronous global→workgroup-shared copy statement; [dst] and [src]
-          are element addresses ([&ident\[offset\]]) and [bytes] the element size — 4 or 8 today.
-          The hardware also copies 16, but a 16-byte copy requires a 16-byte-aligned destination,
-          and plain workgroup-shared declarations align to the element type only (4 for
-          [uint4x32_t]) — so 16 stays out of the per-element eligibility until a rendering
-          guarantees the alignment (Codex P2 on PR #317). The copy is byte-for-byte: eligibility
-          (same storage precision on both sides, no value transformation) is the caller's check.
-      *)
+      (** One element-sized asynchronous global→workgroup-shared copy statement; [dst] and [src] are
+          element addresses ([&ident[offset]]) and [bytes] the element size — 4 or 8 today. The
+          hardware also copies 16, but a 16-byte copy requires a 16-byte-aligned destination, and
+          plain workgroup-shared declarations align to the element type only (4 for [uint4x32_t]) —
+          so 16 stays out of the per-element eligibility until a rendering guarantees the alignment
+          (Codex P2 on PR #317). The copy is byte-for-byte: eligibility (same storage precision on
+          both sides, no value transformation) is the caller's check. *)
   ac_wait_all : string;
       (** Statement completing every asynchronous copy issued so far by the calling thread,
           committed or not (CUDA [cp.async.wait_all]). Cross-thread visibility still needs the
@@ -186,8 +185,8 @@ module type C_syntax_config = sig
   val vector_prec_ok : Ops.prec -> bool
   (** Whether the explicit vector renderings ([Vectorized] loops) can operate at this {e compute}
       precision. f32 and f64 everywhere; fp16 additionally on CPU targets with native 16-bit
-      arithmetic (gh-ocannl-516), which is exactly where {!compute_prec} leaves [Half_prec] alone.
-      A storage precision this rejects can still be vectorized when {!compute_prec} maps it to one
+      arithmetic (gh-ocannl-516), which is exactly where {!compute_prec} leaves [Half_prec] alone. A
+      storage precision this rejects can still be vectorized when {!compute_prec} maps it to one
       this accepts -- that is gh-ocannl-517's convert-on-load/store. *)
 
   val hardware_index : kind:[ `Grid | `Workgroup ] -> slot:int -> string option
@@ -205,17 +204,17 @@ module type C_syntax_config = sig
   (** gh-ocannl-487 phase 2: asynchronous global→workgroup-shared copies (CUDA [cp.async]) for the
       staging loads of software-pipelined tiles ({!Low_level.optimized.pipelined}). When provided,
       an eligible staging [Set] (a raw same-precision copy of a materialized global into an
-      async-eligible pipelined tile) renders as [ac_copy] instead of a load+store through
-      registers, so the prefetch issued for iteration [k+1] genuinely overlaps the compute of [k].
-      Completion is uniform, not per-group: the rotor loop's body is prefixed with [ac_wait_all]
-      followed by a workgroup barrier (re-inserting, for the async arm, exactly the phase opener
-      that {!Schedule.elide_staged_barriers} elides for synchronous stores — those are published
-      by the previous iteration's trailing bracket, an async copy needs its wait BEFORE the
-      publishing barrier). Per-statement eligibility is opportunistic: an ineligible staging
-      statement (precision conversion, a surviving fringe ternary, a non-global source) keeps the
-      plain store, which the same barrier publishes — correctness never depends on which
-      statements the arm accepted. [None] (the default, and every backend but CUDA today) keeps
-      the portable synchronous rendering everywhere. *)
+      async-eligible pipelined tile) renders as [ac_copy] instead of a load+store through registers,
+      so the prefetch issued for iteration [k+1] genuinely overlaps the compute of [k]. Completion
+      is uniform, not per-group: the rotor loop's body is prefixed with [ac_wait_all] followed by a
+      workgroup barrier (re-inserting, for the async arm, exactly the phase opener that
+      {!Schedule.elide_staged_barriers} elides for synchronous stores — those are published by the
+      previous iteration's trailing bracket, an async copy needs its wait BEFORE the publishing
+      barrier). Per-statement eligibility is opportunistic: an ineligible staging statement
+      (precision conversion, a surviving fringe ternary, a non-global source) keeps the plain store,
+      which the same barrier publishes — correctness never depends on which statements the arm
+      accepted. [None] (the default, and every backend but CUDA today) keeps the portable
+      synchronous rendering everywhere. *)
 
   val parallel_grid_syntax : [ `None | `Dispatch | `Openmp ]
   (** Pool-backed [Grid] rendering (docs/proposals/gh-ocannl-164.md): how to render an eligible
@@ -330,18 +329,19 @@ module type C_syntax_config = sig
       (fragment declarations / loads / mma steps / stores) executed by every lane of the enclosing
       lane loop. Return [None] to decline a particular call (unsupported precision combination,
       extents not multiples of the intrinsic tile, thread-space operand, a swizzled layout the arm
-      has no load form for) — the caller then renders the scalar [fallback] under an [if (lane == 0)]
-      guard, which is also the path when the whole hook is [None] (cc, and any backend until wired).
+      has no load form for) — the caller then renders the scalar [fallback] under an
+      [if (lane == 0)] guard, which is also the path when the whole hook is [None] (cc, and any
+      backend until wired).
 
       Acceptance is thus decided without the a/b tile addresses: an accepting arm returns an
-      {!type-mma_emission} that the caller applies to them once it stands where they are
-      renderable. Callers that only need to know whether a call is supported — the fragment scope
-      deciding whether to alias its accumulator back to the backing target — test the outer option
-      and never apply the emission.
+      {!type-mma_emission} that the caller applies to them once it stands where they are renderable.
+      Callers that only need to know whether a call is supported — the fragment scope deciding
+      whether to alias its accumulator back to the backing target — test the outer option and never
+      apply the emission.
 
-      Accepting a [`Swizzled_b128] operand is a promise that it was consumed through a
-      swizzle-aware load: the caller records the call as {!Mma_intrinsics_ldmatrix} on that basis.
-      An arm without such a load form must decline the call. *)
+      Accepting a [`Swizzled_b128] operand is a promise that it was consumed through a swizzle-aware
+      load: the caller records the call as {!Mma_intrinsics_ldmatrix} on that basis. An arm without
+      such a load form must decline the call. *)
 
   val mma_fragment_syntax :
     (d_prec:Ops.prec ->
@@ -393,13 +393,13 @@ end
 
 (** A C source literal for the floating-point constant [c].
 
-    The three special values [%.16g] cannot spell, plus a fourth it spells {e wrong}: a value with no
-    fractional part comes out without a radix point, hence as a C {e integer} literal, and while that
-    is value-preserving for every other constant, [%.16g (-0.)] is ["-0"] — the integer zero, [+0.0]
-    once cast. So a [-0.0] in host data silently became [+0.0] wherever the constant fill inlines as
-    scalar stores, the same negative-zero normalization as the vector splat (gh-ocannl-615). Only
-    this value needs the radix point forced; spelling every whole number as [N.0] instead would be
-    equivalent C and churn every codegen snapshot. *)
+    The three special values [%.16g] cannot spell, plus a fourth it spells {e wrong}: a value with
+    no fractional part comes out without a radix point, hence as a C {e integer} literal, and while
+    that is value-preserving for every other constant, [%.16g (-0.)] is ["-0"] — the integer zero,
+    [+0.0] once cast. So a [-0.0] in host data silently became [+0.0] wherever the constant fill
+    inlines as scalar stores, the same negative-zero normalization as the vector splat
+    (gh-ocannl-615). Only this value needs the radix point forced; spelling every whole number as
+    [N.0] instead would be equivalent C and churn every codegen snapshot. *)
 let c_float_literal c =
   if Float.(c = infinity) then "INFINITY"
   else if Float.(c = neg_infinity) then "(-INFINITY)"
@@ -529,7 +529,8 @@ let op_syntax_idents ~ternop_syntax ~binop_syntax ~unop_syntax ~vec_unop_syntax 
     with _ -> ()
   in
   List.iter all_precs ~f:(fun prec ->
-      List.iter Ops.all_of_ternop ~f:(fun op -> add_doc (fun () -> ternop_syntax prec op arg arg arg));
+      List.iter Ops.all_of_ternop ~f:(fun op ->
+          add_doc (fun () -> ternop_syntax prec op arg arg arg));
       List.iter Ops.all_of_binop ~f:(fun op -> add_doc (fun () -> binop_syntax prec op arg arg));
       List.iter Ops.all_of_unop ~f:(fun op -> add_doc (fun () -> unop_syntax prec op arg));
       List.iter Ops.all_of_vec_unop ~f:(fun op -> add_doc (fun () -> vec_unop_syntax prec op arg));
@@ -625,8 +626,7 @@ let operand_conditionality_violations ~ternop_syntax ~binop_syntax =
           | Some s -> (
               let what = at_prec (Ops.ternop_cd_syntax op) in
               match (at s "$1", at s "$2", at s "$3") with
-              | None, _, _ | _, None, _ | _, _, None ->
-                  report what "not every operand is rendered"
+              | None, _, _ | _, None, _ | _, _, None -> report what "not every operand is rendered"
               | Some _, Some i2, Some i3 -> (
                   match Ops.ternop_conditionality op with
                   | Ops.All_three ->
@@ -751,7 +751,6 @@ struct
   (* Compute where you store. The backends that override this are the ones without native narrow
      arithmetic; see the signature. *)
   let compute_prec prec = prec
-
   let vector_prec_ok = function Ops.Single_prec _ | Ops.Double_prec _ -> true | _ -> false
 
   (* The names the *language* reserves and the scaffolding this module emits. The names an operator
@@ -859,7 +858,8 @@ module C_syntax (B : C_syntax_config) = struct
     | violations ->
         invalid_arg
           ("C_syntax: operator renderings disagree with Ops.binop_conditionality / \
-            Ops.ternop_conditionality:\n" ^ String.concat ~sep:"\n" violations)
+            Ops.ternop_conditionality:\n"
+          ^ String.concat ~sep:"\n" violations)
 
   (* Identifiers a tensor node's code name must not take: what the backend declares reserved (the
      language's keywords, its builtins, its intrinsic globals) plus what its own operator rendering
@@ -887,8 +887,8 @@ module C_syntax (B : C_syntax_config) = struct
      A corollary (gh-ocannl-639): a reduction accumulator RESIDES at [comp_prec] across its whole
      reduction nest and narrows once at the store, in every rendering — virtual scopes
      ([scope_prec_of]), [try_vectorize_reduce]'s epilogue, [try_register_tile]'s C-tile, and the
-     plain serial fallback ([try_widen_serial_reduce]) — so the effective accumulation width is
-     the numerics policy's, never an artifact of which rendering or schedule ran. *)
+     plain serial fallback ([try_widen_serial_reduce]) — so the effective accumulation width is the
+     numerics policy's, never an artifact of which rendering or schedule ran. *)
 
   let comp_prec = B.compute_prec
 
@@ -909,9 +909,9 @@ module C_syntax (B : C_syntax_config) = struct
      consumed by further arithmetic (the default centered-scaled parameter initializer is exactly
      that shape), and the generator is selected by the precision the {e conversion} renders at,
      which [pp_scalar] inherits from its enclosing operator. An assignment that mentions one
-     therefore renders wholly at the storage precision -- forgoing the wide-compute benefit for
-     that statement, which is the cheap side of the trade. Not descended into [Local_scope]: its
-     body renders at its own scope precision, decided by [scope_prec_of]. *)
+     therefore renders wholly at the storage precision -- forgoing the wide-compute benefit for that
+     statement, which is the cheap side of the trade. Not descended into [Local_scope]: its body
+     renders at its own scope precision, decided by [scope_prec_of]. *)
   let rec mentions_rng_conversion (llsc : Low_level.scalar_t) =
     is_rng_conversion llsc
     ||
@@ -927,11 +927,10 @@ module C_syntax (B : C_syntax_config) = struct
   (* Whether the value of a [Set] renders directly at the target's storage precision, bypassing
      [comp_prec]. True when the rendering contains no operator, so there is no intermediate to keep
      wide -- a copy, a constant, a scope-local read -- and whenever an RNG conversion appears
-     anywhere in it. Rendering
-     [x = <narrow y read at f32>] through the store's narrowing conversion would be bitwise the
-     same (widening is exact and narrowing an exactly-representable value is the identity), but it
-     spells a copy loop -- the very shape narrow storage exists to speed up -- as a round-trip
-     through f32 that no C compiler folds away. *)
+     anywhere in it. Rendering [x = <narrow y read at f32>] through the store's narrowing conversion
+     would be bitwise the same (widening is exact and narrowing an exactly-representable value is
+     the identity), but it spells a copy loop -- the very shape narrow storage exists to speed up --
+     as a round-trip through f32 that no C compiler folds away. *)
   let rec renders_at_store_prec (llsc : Low_level.scalar_t) =
     match llsc with
     | Low_level.Get _ | Get_dynamic _ | Get_merge_buffer _ | Get_local _ | Local_scope _
@@ -942,8 +941,8 @@ module C_syntax (B : C_syntax_config) = struct
     | Binop (Ops.Arg1, (v, _), _) | Binop (Ops.Arg2, _, (v, _)) -> renders_at_store_prec v
     | Unop _ | Binop _ | Ternop _ -> false
 
-  (* The precision a [Set]/[Set_dynamic] value expression renders at, and the conversion wrapping
-     it back to the target's storage precision (empty when they coincide). *)
+  (* The precision a [Set]/[Set_dynamic] value expression renders at, and the conversion wrapping it
+     back to the target's storage precision (empty when they coincide). *)
   let store_precs ~store_prec llsc =
     let prec = if renders_at_store_prec llsc then store_prec else comp_prec store_prec in
     (prec, B.convert_precision ~from:prec ~to_:store_prec)
@@ -1015,10 +1014,10 @@ module C_syntax (B : C_syntax_config) = struct
 
   (* [routine_names]: the kernel function names in [proc_doc] — their declarations (and the
      name-echoing comments) are token occurrences the usage scan below must not count as builtin
-     uses. A routine named exactly like a builtin cannot genuinely use it (the definition would be
-     a duplicate C symbol), so excluding the name only converts a pathological collision from
-     silent helper injection — which on CUDA could raise the architecture floor past the device
-     (Codex P2 on PR #317, round 4) — into an ordinary compile error naming the conflict. *)
+     uses. A routine named exactly like a builtin cannot genuinely use it (the definition would be a
+     duplicate C symbol), so excluding the name only converts a pathological collision from silent
+     helper injection — which on CUDA could raise the architecture floor past the device (Codex P2
+     on PR #317, round 4) — into an ordinary compile error naming the conflict. *)
   let filter_and_prepend_builtins ~routine_names ~includes ~builtins ~proc_doc =
     let doc_buffer = Buffer.create 4096 in
     PPrint.ToBuffer.pretty 1.0 110 doc_buffer proc_doc;
@@ -1093,10 +1092,8 @@ module C_syntax (B : C_syntax_config) = struct
     in
     let needed_keys = ref (Set.empty (module String)) in
     List.iter builtins ~f:(fun (key, _, _) ->
-        if
-          (not (List.mem routine_names key ~equal:String.equal))
-          && mentions_token key
-        then needed_keys := Set.add !needed_keys key);
+        if (not (List.mem routine_names key ~equal:String.equal)) && mentions_token key then
+          needed_keys := Set.add !needed_keys key);
 
     (* Add dependencies recursively *)
     let processed_keys = ref (Set.empty (module String)) in
@@ -1121,12 +1118,11 @@ module C_syntax (B : C_syntax_config) = struct
   open Indexing
   open Doc_helpers
 
-  (* An embedded index that renders as a sum (more than one term) must be parenthesized when
-     spliced into an operator context; single-term indices bind at least as tightly as [/], [%]
-     and friends. *)
+  (* An embedded index that renders as a sum (more than one term) must be parenthesized when spliced
+     into an operator context; single-term indices bind at least as tightly as [/], [%] and
+     friends. *)
   let affine_needs_parens = function
-    | Indexing.Affine { symbols; offset } ->
-        List.length symbols + (if offset = 0 then 0 else 1) > 1
+    | Indexing.Affine { symbols; offset } -> (List.length symbols + if offset = 0 then 0 else 1) > 1
     | _ -> false
 
   let pp_array_offset (idcs, dims) =
@@ -1192,23 +1188,22 @@ module C_syntax (B : C_syntax_config) = struct
      the serial fallback all consume the element itself, so the rendering's BITWISE-equality promise
      covers every input, not merely the well-behaved ones:
 
-     - [((vtyp){0} + x)] normalizes a negative-zero [x] to [+0.0], since IEEE-754 has
-       [(+0.0) + (-0.0) = +0.0] (gh-ocannl-615);
-     - [(x - (vtyp){0})], its replacement, is the identity on both zeros — but it is still
-       ARITHMETIC, so it quiets a signaling NaN: verified as [0x7f800001 -> 0x7fc00001] under gcc
-       [-fsignaling-nans], and by inspection at clang [-O0]. That it usually survives is only the
-       optimizer folding the subtraction into a broadcast because nothing requires it to respect
-       sNaN — the same "the compiler will probably do the right thing" dependency that
-       [vec_fma_builtin] refuses for [a * b + c] (Codex P2 on PR #360).
+     - [((vtyp){0} + x)] normalizes a negative-zero [x] to [+0.0], since IEEE-754 has [(+0.0) +
+     (-0.0) = +0.0] (gh-ocannl-615); - [(x - (vtyp){0})], its replacement, is the identity on both
+     zeros — but it is still ARITHMETIC, so it quiets a signaling NaN: verified as [0x7f800001 ->
+     0x7fc00001] under gcc [-fsignaling-nans], and by inspection at clang [-O0]. That it usually
+     survives is only the optimizer folding the subtraction into a broadcast because nothing
+     requires it to respect sNaN — the same "the compiler will probably do the right thing"
+     dependency that [vec_fma_builtin] refuses for [a * b + c] (Codex P2 on PR #360).
 
-     An initializer performs no arithmetic — each lane is a copy — so it preserves every bit
-     pattern unconditionally. Taking a variable rather than an expression is what keeps that cheap:
-     the callers bind the scalar once (the operand can be a memory load under a
-     [convert_precision] wrapper), so the [lanes] repetitions below are repetitions of an
-     identifier. *)
+     An initializer performs no arithmetic — each lane is a copy — so it preserves every bit pattern
+     unconditionally. Taking a variable rather than an expression is what keeps that cheap: the
+     callers bind the scalar once (the operand can be a memory load under a [convert_precision]
+     wrapper), so the [lanes] repetitions below are repetitions of an identifier. *)
   let vec_splat ~vtyp ~lanes src =
     let open PPrint in
-    string (Printf.sprintf "(%s){%s}" vtyp (String.concat ~sep:", " (List.init lanes ~f:(fun _ -> src))))
+    string
+      (Printf.sprintf "(%s){%s}" vtyp (String.concat ~sep:", " (List.init lanes ~f:(fun _ -> src))))
 
   (* The vector-extension typedef shared by the explicit-SIMD renderings: [lanes] elements of the
      compute precision (f32, f64, or -- where the target has native 16-bit arithmetic, gh-ocannl-516
@@ -1224,8 +1219,8 @@ module C_syntax (B : C_syntax_config) = struct
            (lanes * Ops.prec_in_bytes prec)) )
 
   (* The widest vector this loop can fill, [None] where even the narrowest cannot: see
-     {!Backend_intf.simd_lanes_for} for why the width degrades per loop instead of being one
-     number per machine, and for what the floor protects. *)
+     {!Backend_intf.simd_lanes_for} for why the width degrades per loop instead of being one number
+     per machine, and for what the floor protects. *)
   let vec_lanes_for ~prec ~extent =
     simd_lanes_for ~vector_bytes:B.vector_bytes ~elt_bytes:(Ops.prec_in_bytes prec) ~extent
 
@@ -1242,15 +1237,14 @@ module C_syntax (B : C_syntax_config) = struct
      byte), and otherwise:
 
      - bf16 is the top 16 bits of an f32, so widening is a zero-extend and a shift, and narrowing is
-       [single_to_bfloat16]'s round-to-nearest-even done with vector arithmetic — bitwise what the
-       scalar path computes, by construction.
-     - fp16 converts in one instruction on [_Float16] targets. Whether the type exists is a
-       C-preprocessor fact the renderer cannot see (gh-ocannl-516's design problem), so both arms
-       are emitted under [#if HAS_NATIVE_FLOAT16]. Only the conversion is duplicated, never the
-       arithmetic, so this stays a few lines rather than a second copy of the kernel body.
-     - everything else (fp8), and every fallback arm, converts per lane through the backend's own
-       [convert_precision] — the scalar path's conversion, so parity is not something to verify —
-       while the arithmetic around it stays vectorized. *)
+     [single_to_bfloat16]'s round-to-nearest-even done with vector arithmetic — bitwise what the
+     scalar path computes, by construction. - fp16 converts in one instruction on [_Float16]
+     targets. Whether the type exists is a C-preprocessor fact the renderer cannot see
+     (gh-ocannl-516's design problem), so both arms are emitted under [#if HAS_NATIVE_FLOAT16]. Only
+     the conversion is duplicated, never the arithmetic, so this stays a few lines rather than a
+     second copy of the kernel body. - everything else (fp8), and every fallback arm, converts per
+     lane through the backend's own [convert_precision] — the scalar path's conversion, so parity is
+     not something to verify — while the arithmetic around it stays vectorized. *)
 
   let vec_typedef_doc ~ctyp ~name ~bytes =
     PPrint.string (Printf.sprintf "typedef %s %s __attribute__((vector_size(%d)));" ctyp name bytes)
@@ -1273,9 +1267,10 @@ module C_syntax (B : C_syntax_config) = struct
     let per_lane_load ~dst ~mem =
       let pre, post = B.convert_precision ~from:store_prec ~to_:prec in
       string
-        (Printf.sprintf
-           "for (int ocannl_l__ = 0; ocannl_l__ < %d; ++ocannl_l__) %s[ocannl_l__] = " lanes dst)
-      ^^ string pre ^^ parens (base mem)
+        (Printf.sprintf "for (int ocannl_l__ = 0; ocannl_l__ < %d; ++ocannl_l__) %s[ocannl_l__] = "
+           lanes dst)
+      ^^ string pre
+      ^^ parens (base mem)
       ^^ string "[ocannl_l__]" ^^ string post ^^ semi
     in
     let per_lane_store ~src ~mem =
@@ -1295,8 +1290,7 @@ module C_syntax (B : C_syntax_config) = struct
           ^^ string (", sizeof(" ^ dst ^ "));")),
         fun ~src ~mem ->
           string "__builtin_memcpy(&" ^^ mem
-          ^^ string (Printf.sprintf ", &%s, sizeof(%s));" src src)
-      )
+          ^^ string (Printf.sprintf ", &%s, sizeof(%s));" src src) )
     else
       match store_prec with
       | Ops.Bfloat16_prec _ ->
@@ -1309,15 +1303,13 @@ module C_syntax (B : C_syntax_config) = struct
               string (vtyp ^ " " ^ dst ^ ";")
               ^^ hardline
               ^^ call "OCANNL_VEC_WIDEN_BFLOAT16" (args @ [ string dst; base mem ])),
-            fun ~src ~mem ->
-              call "OCANNL_VEC_NARROW_BFLOAT16" (args @ [ base mem; string src ]) )
+            fun ~src ~mem -> call "OCANNL_VEC_NARROW_BFLOAT16" (args @ [ base mem; string src ]) )
       | Ops.Half_prec _ ->
           let h = Printf.sprintf "ocannl_vec%dh" lanes in
           (* [_Float16] exists only where the C preprocessor says so, and this typedef is the one
              place that needs the type name itself rather than a macro argument. *)
           need_typedef h
-            (string "#if HAS_NATIVE_FLOAT16"
-            ^^ hardline
+            (string "#if HAS_NATIVE_FLOAT16" ^^ hardline
             ^^ vec_typedef_doc ~ctyp:"_Float16" ~name:h ~bytes:(lanes * 2)
             ^^ hardline ^^ string "#endif");
           ( (fun ~dst ~mem ->
@@ -1326,14 +1318,12 @@ module C_syntax (B : C_syntax_config) = struct
               ^^ call "OCANNL_VEC_WIDEN_HALF"
                    [ string vtyp; string h; OCaml.int lanes; string dst; base mem ]),
             fun ~src ~mem ->
-              call "OCANNL_VEC_NARROW_HALF"
-                [ string h; OCaml.int lanes; base mem; string src ] )
+              call "OCANNL_VEC_NARROW_HALF" [ string h; OCaml.int lanes; base mem; string src ] )
       | _ ->
           (* fp8 and any other narrow format: the arithmetic still vectorizes, only the conversion
              is per lane -- through the scalar path's own conversion, so parity is by
              construction. *)
-          ( (fun ~dst ~mem ->
-              string (vtyp ^ " " ^ dst ^ ";") ^^ hardline ^^ per_lane_load ~dst ~mem),
+          ( (fun ~dst ~mem -> string (vtyp ^ " " ^ dst ^ ";") ^^ hardline ^^ per_lane_load ~dst ~mem),
             fun ~src ~mem -> per_lane_store ~src ~mem )
 
   (* The names of a [rows]×[cols] grid of vector accumulator registers. *)
@@ -1347,7 +1337,8 @@ module C_syntax (B : C_syntax_config) = struct
      path's spelling is the only faithful one). The per-lane form relies on SLP to reassemble it,
      which is the shape gh-ocannl-614 found gcc -O3 mis-allocating for the FMA update; the
      accumulator grids reached here are 1xN rather than RMxRN, so the register pressure that turned
-     into spills there is not present, but a wide [Max] reduction benching ~10x off would be this. *)
+     into spills there is not present, but a wide [Max] reduction benching ~10x off would be
+     this. *)
   let vec_acc_combine ~prec ~lanes ~op ~dst ~src =
     let open PPrint in
     match op with
@@ -1365,8 +1356,8 @@ module C_syntax (B : C_syntax_config) = struct
 
   (* The target builtins spelling a WHOLE-VECTOR fused multiply-add for this (compute precision,
      lane count), most preferred first: each is the preprocessor condition under which the arm
-     exists, paired with a rendering of the statement [dst = fma(a, b, dst)]. Empty where nothing
-     is known; the guards within one entry are mutually exclusive, so the list becomes a chain of
+     exists, paired with a rendering of the statement [dst = fma(a, b, dst)]. Empty where nothing is
+     known; the guards within one entry are mutually exclusive, so the list becomes a chain of
      [#elif]s.
 
      Why this table exists at all: gcc has no generic vector [fma] builtin (clang's
@@ -1375,32 +1366,30 @@ module C_syntax (B : C_syntax_config) = struct
      ways, both measured per width on the emitted micro-kernel (gh-ocannl-614, gh-ocannl-621):
 
      - it SPILLS. -O3 unrolls the k-loop and puts the C-tile in memory: at f32/8 lanes, 18
-       instructions / 8 vector FMAs / 0 stack references per k step become 200 / 4 vector + 48
-       scalar / 8, which [bin/narrow_gebp_bench] measures as 12.6 GFLOP/s against 128
-       (gh-ocannl-614). The cause is the lane subscripting itself — straight-line lane stores, a
-       lane-indexed scratch array, a [(vtyp){...}] constructor of per-lane [fmaf] calls and
-       [#pragma GCC unroll 1] all spill the same way, while ANY form reaching gcc as one vector
-       operation costs the -O2 instruction count at -O3. Worst at f32/4 lanes on aarch64: 294
-       instructions / 8 vector + 48 scalar FMAs / 58 stack references against the builtin's 26 / 16
-       / 0.
-     - or it SCALARIZES. SLP does not reassemble the lane loop at all, so one lanes-wide FMA
-       becomes [lanes] scalar ones — a lane-count arithmetic loss with no spill to give it away.
-       gcc does this to f64/2 lanes on x86 AND aarch64 at both -O2 and -O3, so
-       [cc_backend_optimization_level=2] does not diagnose it the way it diagnoses a spill, and to
-       f64/8 lanes under AVX-512 at -O3.
+     instructions / 8 vector FMAs / 0 stack references per k step become 200 / 4 vector + 48 scalar
+     / 8, which [bin/narrow_gebp_bench] measures as 12.6 GFLOP/s against 128 (gh-ocannl-614). The
+     cause is the lane subscripting itself — straight-line lane stores, a lane-indexed scratch
+     array, a [(vtyp){...}] constructor of per-lane [fmaf] calls and [#pragma GCC unroll 1] all
+     spill the same way, while ANY form reaching gcc as one vector operation costs the -O2
+     instruction count at -O3. Worst at f32/4 lanes on aarch64: 294 instructions / 8 vector + 48
+     scalar FMAs / 58 stack references against the builtin's 26 / 16 / 0. - or it SCALARIZES. SLP
+     does not reassemble the lane loop at all, so one lanes-wide FMA becomes [lanes] scalar ones — a
+     lane-count arithmetic loss with no spill to give it away. gcc does this to f64/2 lanes on x86
+     AND aarch64 at both -O2 and -O3, so [cc_backend_optimization_level=2] does not diagnose it the
+     way it diagnoses a spill, and to f64/8 lanes under AVX-512 at -O3.
 
      Which is why these are builtins and not the obvious [dst = a * b + dst]: that reaches gcc as
-     one vector operation too, and allocates perfectly, but it is only MAYBE contracted into an
-     FMA — under [cc_backend_fp_contract=off] it measurably is not (a mul and an add, two
-     roundings, verified against these builtins), and then the vector body would round differently
-     from the scalar peel and the serial fallback it promises to equal bit for bit. Every builtin
-     here is fused by definition, so the promise holds under every flag; each was checked to render
-     exactly one fused instruction at [-ffp-contract=off], computing [a * b + dst]. The masked
-     forms are spelled the way gcc's own [<immintrin.h>] spells them: with an all-ones mask and
+     one vector operation too, and allocates perfectly, but it is only MAYBE contracted into an FMA
+     — under [cc_backend_fp_contract=off] it measurably is not (a mul and an add, two roundings,
+     verified against these builtins), and then the vector body would round differently from the
+     scalar peel and the serial fallback it promises to equal bit for bit. Every builtin here is
+     fused by definition, so the promise holds under every flag; each was checked to render exactly
+     one fused instruction at [-ffp-contract=off], computing [a * b + dst]. The masked forms are
+     spelled the way gcc's own [<immintrin.h>] spells them: with an all-ones mask and
      [_MM_FROUND_CUR_DIRECTION] (= 4, i.e. obey MXCSR rather than an embedded rounding mode) these
      calls are character for character what [_mm512_fmadd_ps], [_mm512_fmadd_pd], [_mm_fmadd_ph],
-     [_mm256_fmadd_ph] and [_mm512_fmadd_ph] expand to, so their semantics are the ISA's rather
-     than something inferred here.
+     [_mm256_fmadd_ph] and [_mm512_fmadd_ph] expand to, so their semantics are the ISA's rather than
+     something inferred here.
 
      The AVX-512, AVX512-FP16 and aarch64 rows could not be RUN on the machine they were added from
      (an Arrow Lake-HX part, where AVX-512 is fused off entirely; QEMU's TCG implements neither
@@ -1416,8 +1405,8 @@ module C_syntax (B : C_syntax_config) = struct
      [__builtin_elementwise_fma], so the chain reaches this arm): correct to the bit against the
      32-byte rendering, and 225.7 against 130.5 GFLOP/s on the packed f32 GEBP once
      [cc_vector_bytes] stopped capping the width at 32. The AVX512-FP16 rows remain unexecuted and
-     will stay that way here — no AMD part implements AVX512-FP16, and this fleet's only
-     native-fp16 target is ARM, which takes the NEON rows instead. *)
+     will stay that way here — no AMD part implements AVX512-FP16, and this fleet's only native-fp16
+     target is ARM, which takes the NEON rows instead. *)
   let vec_fma_builtin ~prec ~lanes : (string * (dst:string -> a:string -> b:string -> string)) list
       =
     let call name extra ~dst ~a ~b =
@@ -1434,8 +1423,8 @@ module C_syntax (B : C_syntax_config) = struct
       ( Printf.sprintf "defined(__AVX512F__) && %s" (has name),
         call name (Printf.sprintf ", (%s)-1, 4" mask) )
     in
-    (* AVX512-FP16: the VL (128/256-bit) forms take a mask and no rounding argument, the 512-bit
-       one takes both. *)
+    (* AVX512-FP16: the VL (128/256-bit) forms take a mask and no rounding argument, the 512-bit one
+       takes both. *)
     let avx512fp16 ?(vl = true) ?(round = false) name mask =
       ( Printf.sprintf "HAS_NATIVE_FLOAT16 && defined(__AVX512FP16__)%s && %s"
           (if vl then " && defined(__AVX512VL__)" else "")
@@ -1443,10 +1432,10 @@ module C_syntax (B : C_syntax_config) = struct
         call name (Printf.sprintf ", (%s)-1%s" mask (if round then ", 4" else "")) )
     in
     (* aarch64: gcc's internal NEON [fma] builtins. Undocumented, which is the whole reason for the
-       [__has_builtin] guard — [<arm_neon.h>]'s [vfmaq_f32] would be the documented spelling but
-       the header cannot be included (its native vector typedefs collide with the emitted
-       pack-struct typedefs; see [Builtins_cc.includes]). Inline [fmla] asm was the other candidate
-       and censused three instructions per k step worse, so the builtin wins on both counts. *)
+       [__has_builtin] guard — [<arm_neon.h>]'s [vfmaq_f32] would be the documented spelling but the
+       header cannot be included (its native vector typedefs collide with the emitted pack-struct
+       typedefs; see [Builtins_cc.includes]). Inline [fmla] asm was the other candidate and censused
+       three instructions per k step worse, so the builtin wins on both counts. *)
     let neon name =
       ( Printf.sprintf "defined(__aarch64__) && defined(__ARM_FEATURE_FMA) && %s" (has name),
         call name "" )
@@ -1461,8 +1450,8 @@ module C_syntax (B : C_syntax_config) = struct
         bytes dst dst name a b dst
     in
     let neon_half name ~bytes =
-      ( Printf.sprintf
-          "HAS_NATIVE_FLOAT16 && defined(__ARM_FEATURE_FP16_VECTOR_ARITHMETIC) && %s" (has name),
+      ( Printf.sprintf "HAS_NATIVE_FLOAT16 && defined(__ARM_FEATURE_FP16_VECTOR_ARITHMETIC) && %s"
+          (has name),
         neon_half_render name ~bytes )
     in
     match (prec, lanes) with
@@ -1487,12 +1476,12 @@ module C_syntax (B : C_syntax_config) = struct
      target's whole-vector builtins ({!vec_fma_builtin}), else the per-lane fused loop. *)
   let vec_acc_fma ~prec ~lanes ~dst ~a ~b =
     let open PPrint in
-    (* At fp16 the per-lane fallback must be the *same* fused multiply-add the scalar path emits,
-       or the arms of the [#if] -- and the vector rendering and its serial remainder -- would
-       round differently: promoting to [fmaf] rounds at float and again at fp16, while a native
-       fp16 FMA rounds once. [OCANNL_HALF_FMA] switches on the same target facts as the arms below
-       (clang's elementwise builtin, then a native [__builtin_fmaf16]), so every configuration
-       agrees by construction (gh-ocannl-516, gh-ocannl-621). *)
+    (* At fp16 the per-lane fallback must be the *same* fused multiply-add the scalar path emits, or
+       the arms of the [#if] -- and the vector rendering and its serial remainder -- would round
+       differently: promoting to [fmaf] rounds at float and again at fp16, while a native fp16 FMA
+       rounds once. [OCANNL_HALF_FMA] switches on the same target facts as the arms below (clang's
+       elementwise builtin, then a native [__builtin_fmaf16]), so every configuration agrees by
+       construction (gh-ocannl-516, gh-ocannl-621). *)
     let fma_fn =
       match prec with
       | Ops.Double_prec _ -> "fma"
@@ -1502,7 +1491,7 @@ module C_syntax (B : C_syntax_config) = struct
     let builtin_arms =
       vec_fma_builtin ~prec ~lanes
       |> List.map ~f:(fun (guard, render) ->
-             string ("#elif " ^ guard) ^^ hardline ^^ string (render ~dst ~a ~b) ^^ hardline)
+          string ("#elif " ^ guard) ^^ hardline ^^ string (render ~dst ~a ~b) ^^ hardline)
       |> concat
     in
     string "#if OCANNL_HAS_ELEMENTWISE_FMA"
@@ -1565,16 +1554,16 @@ module C_syntax (B : C_syntax_config) = struct
   (* Set by [compile_proc]: software-pipelined staged tiles ([Schedule.Stage ~pipeline_depth], see
      {!Low_level.optimized.pipelined}), allocated as [pt_depth] rotating copies with every element
      access offset by a buffer-selection term ([pp_pipelined_rotation] below). Renderings that
-     assume single-copy storage (contiguous vector loads/stores, the register-tiled [Tile_mma]
-     path) must decline these nodes; the intrinsic [Tile_mma] arms are fine — their operand
-     pointers carry the rotation term. *)
+     assume single-copy storage (contiguous vector loads/stores, the register-tiled [Tile_mma] path)
+     must decline these nodes; the intrinsic [Tile_mma] arms are fine — their operand pointers carry
+     the rotation term. *)
   let current_pipelined : Low_level.pipelined_tile Map.M(Tn).t ref = ref (Map.empty (module Tn))
   let is_pipelined tn = Map.mem !current_pipelined tn
 
   (* gh-487 phase 2: the pipelined tiles whose staging copies render asynchronously this proc
-     ([B.async_copy] provided, no kernel logging, element size the hardware can copy). Decided
-     once by [compile_proc]; membership drives both the [Set] case's copy emission and the rotor
-     loop's wait+barrier prefix, so the two can never disagree about whether a wait is needed. *)
+     ([B.async_copy] provided, no kernel logging, element size the hardware can copy). Decided once
+     by [compile_proc]; membership drives both the [Set] case's copy emission and the rotor loop's
+     wait+barrier prefix, so the two can never disagree about whether a wait is needed. *)
   let current_async_tiles : Set.M(Tn).t ref = ref (Set.empty (module Tn))
 
   (* Elements per 16-byte unit for [Low_level.Swizzle_b128]: [u] and its log, with [units] the
@@ -1589,11 +1578,11 @@ module C_syntax (B : C_syntax_config) = struct
      read/write pairs are unaffected while same-column accesses from consecutive rows land in
      distinct shared-memory banks. Two granularities (gh-ocannl-481 item 3, D1):
 
-     - [Swizzle_elem]: [P*C + col] becomes [P*C + (col ^ (P & (C-1)))], [C] the minor dim.
-     - [Swizzle_b128]: the column's 16-byte-unit index is XORed instead, the offset within the unit
-       untouched — [P*C + (((col/u ^ (P & (U-1))) * u) + col%u)] with [u] elements per unit and [U]
-       units per row. Whole 16-byte units stay contiguous and 16-byte-aligned, which is what makes
-       the layout simultaneously bank-de-conflicted and [ldmatrix]-loadable.
+     - [Swizzle_elem]: [P*C + col] becomes [P*C + (col ^ (P & (C-1)))], [C] the minor dim. -
+     [Swizzle_b128]: the column's 16-byte-unit index is XORed instead, the offset within the unit
+     untouched — [P*C + (((col/u ^ (P & (U-1))) * u) + col%u)] with [u] elements per unit and [U]
+     units per row. Whole 16-byte units stay contiguous and 16-byte-aligned, which is what makes the
+     layout simultaneously bank-de-conflicted and [ldmatrix]-loadable.
 
      The prefix expression is emitted twice; downstream C compilers CSE it. *)
   let pp_tn_offset tn (idcs, dims) =
@@ -1645,8 +1634,7 @@ module C_syntax (B : C_syntax_config) = struct
         if Array.length dims <> 2 then `Decline "b128-swizzled operand of rank <> 2"
         else if ld <> dims.(1) then
           `Decline "b128-swizzled operand whose leading dimension is not its minor dim"
-        else if
-          not (Array.for_all idcs ~f:(function Indexing.Fixed_idx 0 -> true | _ -> false))
+        else if not (Array.for_all idcs ~f:(function Indexing.Fixed_idx 0 -> true | _ -> false))
         then `Decline "b128-swizzled operand not accessed from the tile origin"
         else `Swizzled_b128
 
@@ -2143,14 +2131,14 @@ module C_syntax (B : C_syntax_config) = struct
 
   (* gh-487: the buffer-selection term of a software-pipelined tile, prepended to the intra-copy
      offset ([pp_tn_offset] / [pp_array_offset]) at every access site. Reads select the copy the
-     schedule loaded for the current rotor iteration ([rotor % depth]); writes select the copy
-     being loaded for the next one ([(rotor + 1) % depth]) — the schedule emits the in-loop load
-     nest one iteration ahead — except the prologue load before the rotor loop, which fills copy 0
-     (matching the first iteration's read of [from_ % depth = 0]; the rendering point's position
-     relative to the rotor loop is exactly [serial_loop_stack] membership, [from_ = 0] by the tile
-     loops' validation). This is the renderer half of the transform's bitwise-identity argument:
-     the IR keeps single-copy indices, and every read resolves to the copy holding exactly the
-     values the unpipelined form would read. *)
+     schedule loaded for the current rotor iteration ([rotor % depth]); writes select the copy being
+     loaded for the next one ([(rotor + 1) % depth]) — the schedule emits the in-loop load nest one
+     iteration ahead — except the prologue load before the rotor loop, which fills copy 0 (matching
+     the first iteration's read of [from_ % depth = 0]; the rendering point's position relative to
+     the rotor loop is exactly [serial_loop_stack] membership, [from_ = 0] by the tile loops'
+     validation). This is the renderer half of the transform's bitwise-identity argument: the IR
+     keeps single-copy indices, and every read resolves to the copy holding exactly the values the
+     unpipelined form would read. *)
   let pp_pipelined_rotation ~is_write tn =
     let open PPrint in
     match Map.find !current_pipelined tn with
@@ -2164,13 +2152,13 @@ module C_syntax (B : C_syntax_config) = struct
           ^^ string (" * " ^ Int.to_string (Tn.num_elems tn) ^ " + ")
         else if is_write then (* The prologue load: copy 0 at offset 0. *) empty
         else
-          (* No copy of the rotating buffer is the right one here: outside the rotor loop there is no
-             rotor value to select with. A schedule that puts such a read there is one this renderer
-             cannot express, so it is a typed decline rather than a bare [invalid_arg]: reached as a
-             tuner candidate (a pipelined twin surviving into a beam round), an untyped exception is
-             classified [Fatal] under [strict_failure_classification] and ends the whole search. At
-             the public [Context.compile] boundary [Schedule_outcome.raise_cause] still renders it as
-             the same [Invalid_argument] carrying this message. *)
+          (* No copy of the rotating buffer is the right one here: outside the rotor loop there is
+             no rotor value to select with. A schedule that puts such a read there is one this
+             renderer cannot express, so it is a typed decline rather than a bare [invalid_arg]:
+             reached as a tuner candidate (a pipelined twin surviving into a beam round), an untyped
+             exception is classified [Fatal] under [strict_failure_classification] and ends the
+             whole search. At the public [Context.compile] boundary [Schedule_outcome.raise_cause]
+             still renders it as the same [Invalid_argument] carrying this message. *)
           raise
             (Schedule_outcome.Cause_at
                ( Schedule_outcome.Backend_codegen,
@@ -2242,17 +2230,17 @@ module C_syntax (B : C_syntax_config) = struct
       else if Tn.Placements.is_materialized_force (placements ()) tn 441 then `Device
       else `Thread
     in
-    (* The a/b operands of a fragment scope are described, not addressed: no pointer is rendered
-       for them here. Their addresses belong to the [Tile_mma] sites inside the reduction loop,
-       which re-render them where a pipelined tile's buffer rotation is in scope (gh-ocannl-487) —
-       at this scope-level position, outside the rotor loop, it is not renderable at all. *)
+    (* The a/b operands of a fragment scope are described, not addressed: no pointer is rendered for
+       them here. Their addresses belong to the [Tile_mma] sites inside the reduction loop, which
+       re-render them where a pipelined tile's buffer rotation is in scope (gh-ocannl-487) — at this
+       scope-level position, outside the rotor loop, it is not renderable at all. *)
     let source ld (tn, idcs) =
       let dims = Lazy.force tn.Tn.dims in
       let prec = Lazy.force tn.Tn.storage_prec in
       (prec, (ld, operand_space tn, operand_layout tn ~ld ~idcs ~dims))
     in
-    (* The accumulator target, in contrast, is addressed at scope level: the fragment load and
-       store bracketing the reduction read and write it. It is never a pipelined tile. *)
+    (* The accumulator target, in contrast, is addressed at scope level: the fragment load and store
+       bracketing the reduction read and write it. It is never a pipelined tile. *)
     let operand ld (tn, idcs) =
       let dims = Lazy.force tn.Tn.dims in
       let prec = Lazy.force tn.Tn.storage_prec in
@@ -2305,8 +2293,8 @@ module C_syntax (B : C_syntax_config) = struct
             match collect_fragment_tiles fragment [] reduction with
             | [ Tile_mma { a; b; ta; tb; m; n; k; lda; ldb; _ } ] -> (
                 let target_base = Array.map init_idcs ~f:(zero_symbols init_syms) in
-                (* [init_syms] is innermost-first, so its last element is the outermost (row)
-                   copy symbol; [init_idcs] still carries it. *)
+                (* [init_syms] is innermost-first, so its last element is the outermost (row) copy
+                   symbol; [init_idcs] still carries it. *)
                 let t_ld = target_ld_of ~row_sym:(List.last init_syms) (target, init_idcs) in
                 let d_prec, target_raw = operand t_ld (target, target_base) in
                 let a_prec, a_raw = source lda a in
@@ -2320,63 +2308,67 @@ module C_syntax (B : C_syntax_config) = struct
                    there — leaving the ordinary [mma_syntax] path, which can. *)
                 match (narrow_operand target_raw, narrow_source a_raw, narrow_source b_raw) with
                 | Some target_op, Some a_src, Some b_src -> (
-                let fragment_name = Printf.sprintf "__mma_fragment_%d" fragment.Tn.uid in
-                let render_with active =
-                  let old = !active_mma_accumulator in
-                  active_mma_accumulator := Some active;
-                  Exn.protect
-                    ~f:(fun () -> render reduction)
-                    ~finally:(fun () -> active_mma_accumulator := old)
-                in
-                let fragment_doc =
-                  if Utils.debug_log_from_routines () then None
-                  else
-                    Option.bind B.mma_fragment_syntax ~f:(fun emit ->
-                        emit ~d_prec ~a_prec ~b_prec ~m ~n ~k ~fragment:fragment_name
-                          ~target:target_op ~a:a_src ~b:b_src ~body:(fun () ->
-                            render_with (Active_fragment (fragment, fragment_name))))
-                in
-                let rendered =
-                  match fragment_doc with
-                  | Some _ as doc -> doc
-                  | None when Utils.debug_log_from_routines () -> None
-                  | None ->
-                      Option.bind B.mma_syntax ~f:(fun emit ->
-                          (* When the fragment hook declined this call (HIP until its
-                             persistent-fragment mapping lands, CUDA's fp8 combination, unsupported
-                             precisions), preserve the existing per-[k_o] intrinsic path by aliasing
-                             the marked local back to the original target when that exact MMA call
-                             is supported. Unsupported calls retain the explicit lane-0 local-array
-                             fallback.
-
-                             This is [mma_syntax] as a support predicate: the emission it returns is
-                             never applied here — the reduction is re-rendered below, and each
-                             [Tile_mma] applies its own, in a position where the a/b addresses (a
-                             pipelined tile's rotating copy among them, gh-ocannl-487) exist. *)
-                          match
-                            emit ~d_prec ~a_prec ~b_prec ~ta ~tb ~m ~n ~k ~d:target_op ~a:a_src
-                              ~b:b_src
-                          with
-                          | Some _ -> Some (render_with (Active_target (fragment, target_op)))
-                          | None -> None)
-                in
-                match rendered with
-                | Some doc ->
-                    rendered_simdgroup_fragments := Set.add !rendered_simdgroup_fragments fragment;
-                    Some (separate hardline (doc :: List.map rest ~f:render))
-                | None ->
-                    (* Scalar/local fallback: lane 0 performs the synthesized transfers. Hardware
-                       backends need the same outer visibility barriers as the ordinary Tile_mma
-                       load/store path, so the init observes sibling zeroing and later statements
-                       observe the final store. Serial C renderers need no barriers. *)
-                    let body_doc =
-                      separate hardline (List.map (init :: reduction :: store :: rest) ~f:render)
+                    let fragment_name = Printf.sprintf "__mma_fragment_%d" fragment.Tn.uid in
+                    let render_with active =
+                      let old = !active_mma_accumulator in
+                      active_mma_accumulator := Some active;
+                      Exn.protect
+                        ~f:(fun () -> render reduction)
+                        ~finally:(fun () -> active_mma_accumulator := old)
                     in
-                    Some
-                      (match B.barrier_syntax with
-                      | Some barrier ->
-                          string barrier ^^ hardline ^^ body_doc ^^ hardline ^^ string barrier
-                      | None -> body_doc))
+                    let fragment_doc =
+                      if Utils.debug_log_from_routines () then None
+                      else
+                        Option.bind B.mma_fragment_syntax ~f:(fun emit ->
+                            emit ~d_prec ~a_prec ~b_prec ~m ~n ~k ~fragment:fragment_name
+                              ~target:target_op ~a:a_src ~b:b_src ~body:(fun () ->
+                                render_with (Active_fragment (fragment, fragment_name))))
+                    in
+                    let rendered =
+                      match fragment_doc with
+                      | Some _ as doc -> doc
+                      | None when Utils.debug_log_from_routines () -> None
+                      | None ->
+                          Option.bind B.mma_syntax ~f:(fun emit ->
+                              (* When the fragment hook declined this call (HIP until its
+                                 persistent-fragment mapping lands, CUDA's fp8 combination,
+                                 unsupported precisions), preserve the existing per-[k_o] intrinsic
+                                 path by aliasing the marked local back to the original target when
+                                 that exact MMA call is supported. Unsupported calls retain the
+                                 explicit lane-0 local-array fallback.
+
+                                 This is [mma_syntax] as a support predicate: the emission it
+                                 returns is never applied here — the reduction is re-rendered below,
+                                 and each [Tile_mma] applies its own, in a position where the a/b
+                                 addresses (a pipelined tile's rotating copy among them,
+                                 gh-ocannl-487) exist. *)
+                              match
+                                emit ~d_prec ~a_prec ~b_prec ~ta ~tb ~m ~n ~k ~d:target_op ~a:a_src
+                                  ~b:b_src
+                              with
+                              | Some _ -> Some (render_with (Active_target (fragment, target_op)))
+                              | None -> None)
+                    in
+                    match rendered with
+                    | Some doc ->
+                        rendered_simdgroup_fragments :=
+                          Set.add !rendered_simdgroup_fragments fragment;
+                        Some (separate hardline (doc :: List.map rest ~f:render))
+                    | None ->
+                        (* Scalar/local fallback: lane 0 performs the synthesized transfers.
+                           Hardware backends need the same outer visibility barriers as the ordinary
+                           Tile_mma load/store path, so the init observes sibling zeroing and later
+                           statements observe the final store. Serial C renderers need no
+                           barriers. *)
+                        let body_doc =
+                          separate hardline
+                            (List.map (init :: reduction :: store :: rest) ~f:render)
+                        in
+                        Some
+                          (match B.barrier_syntax with
+                          | Some barrier ->
+                              string barrier ^^ hardline ^^ body_doc ^^ hardline ^^ string barrier
+                          | None -> body_doc))
                 | _ -> None)
             | _ -> None)
         | _ -> None)
@@ -2391,11 +2383,11 @@ module C_syntax (B : C_syntax_config) = struct
     | Low_level.Noop -> empty
     | Seq (c1, c2) -> (
         (* Note (gh-ocannl-639): a MATERIALIZED unroll of a reduction never reaches this arm as a
-           run of adjacent same-cell [Set]s — [Sched.Unroll ~materialize:true] rewrites a
-           recognized accumulation nest into the scope-local form at unroll time, where the
-           provenance lives. A codegen-side run collapse here was tried and rejected: it could not
-           tell unrolled copies of one source assignment from two user-authored adjacent
-           accumulations, whose separate stores (and separate narrowings) are their semantics. *)
+           run of adjacent same-cell [Set]s — [Sched.Unroll ~materialize:true] rewrites a recognized
+           accumulation nest into the scope-local form at unroll time, where the provenance lives. A
+           codegen-side run collapse here was tried and rejected: it could not tell unrolled copies
+           of one source assignment from two user-authored adjacent accumulations, whose separate
+           stores (and separate narrowings) are their semantics. *)
         match
           try_mma_fragment_scope ~render:(fun body -> pp_ll ~log_set_locals ~in_loop body) c
         with
@@ -2509,8 +2501,8 @@ module C_syntax (B : C_syntax_config) = struct
         in
         (* [fallback] renders the loop when the backend binds no hardware register for it — the
            dispatch passes the gh-ocannl-639 widening-then-serial fallback, so a hardware-annotated
-           reduction serialized for lack of a hardware index (cc's [Workgroup_reduce] among
-           others) keeps the same accumulator width as the [Serial] spelling of the same loop. *)
+           reduction serialized for lack of a hardware index (cc's [Workgroup_reduce] among others)
+           keeps the same accumulator width as the [Serial] spelling of the same loop. *)
         let hardware_binding ?(fallback = serial_loop) kind =
           let slot =
             match
@@ -2768,8 +2760,7 @@ module C_syntax (B : C_syntax_config) = struct
               let sname = fresh "vunif" in
               emit
                 (string (B.typ_of_prec prec ^ " " ^ sname ^ " = ")
-                ^^ uniform_scalar ~written prec llsc
-                ^^ semi);
+                ^^ uniform_scalar ~written prec llsc ^^ semi);
               vec_splat ~vtyp ~lanes sname
           in
           (vec_expr, vec_operand)
@@ -2884,7 +2875,7 @@ module C_syntax (B : C_syntax_config) = struct
                     && Tn.Placements.is_materialized_force (placements ()) tn 463
                     (* Stack and workgroup-shared arrays are only element-aligned. *)
                     && (not (Set.mem !current_workgroup_shared tn))
-                    && not (is_swizzled tn)
+                    && (not (is_swizzled tn))
                     && not (is_pipelined tn)
                   in
                   let vload tn idcs =
@@ -3095,14 +3086,14 @@ module C_syntax (B : C_syntax_config) = struct
                     emit (vec_acc_combine ~prec ~lanes ~op ~dst:name ~src:nm));
             let update_docs = take () in
             let total = "vred_total_" ^ ivar ^ "__" in
-            (* The accumulator cell itself stays at its storage precision: the fold reads it
-               widened and narrows the combined value once, exactly as the scalar path's [Set]
-               does (gh-ocannl-517); a scope-local target is already at [prec] and takes the
-               combined value with no conversion. The scalar REMAINDER (a non-multiple extent's
-               tail) folds into the compute-precision [total] BEFORE that single store
-               (gh-ocannl-639): the original per-step body would narrow the vector partial
-               mid-way and then narrow again per tail step, splitting this rendering from the
-               widened serial baseline on exactly the non-dividing extents. *)
+            (* The accumulator cell itself stays at its storage precision: the fold reads it widened
+               and narrows the combined value once, exactly as the scalar path's [Set] does
+               (gh-ocannl-517); a scope-local target is already at [prec] and takes the combined
+               value with no conversion. The scalar REMAINDER (a non-multiple extent's tail) folds
+               into the compute-precision [total] BEFORE that single store (gh-ocannl-639): the
+               original per-step body would narrow the vector partial mid-way and then narrow again
+               per tail step, splitting this rendering from the widened serial baseline on exactly
+               the non-dividing extents. *)
             let folds =
               vec_acc_grid_fold ~prec ~lanes ~op grid
               @ vec_acc_lane_fold ~prec ~lanes ~op ~vname:acc_regs.(0) ~out:total
@@ -3122,9 +3113,8 @@ module C_syntax (B : C_syntax_config) = struct
               | _ ->
                   let dc, ec = pp_scalar prec contrib in
                   ( dc,
-                    string total ^^ string " = "
-                    ^^ B.binop_syntax prec op (string total) ec
-                    ^^ semi )
+                    string total ^^ string " = " ^^ B.binop_syntax prec op (string total) ec ^^ semi
+                  )
             in
             let tail_body = pp_local_defs tail_defs ^^ tail_update in
             let store =
@@ -3134,7 +3124,8 @@ module C_syntax (B : C_syntax_config) = struct
                   let widen = B.convert_precision ~from:store_prec ~to_:prec in
                   let narrow = B.convert_precision ~from:prec ~to_:store_prec in
                   let cell () =
-                    string (get_ident tn) ^^ brackets (pp_array_offset (idcs, Lazy.force tn.Tn.dims))
+                    string (get_ident tn)
+                    ^^ brackets (pp_array_offset (idcs, Lazy.force tn.Tn.dims))
                   in
                   cell () ^^ string " = "
                   ^^ wrap_conversion narrow
@@ -3361,24 +3352,24 @@ module C_syntax (B : C_syntax_config) = struct
            C-tile and virtual scopes ([scope_prec_of]) — so a reduction's effective accumulation
            width is set by the numerics policy, never by which schedule happened to place the
            accumulator in a register. Implemented as a local rewrite into exactly the [Local_scope]
-           form virtualization gives virtual accumulators, rendered recursively: [scope_prec_of]
-           and the [Set_local]/[Get_local]/[Local_scope] arms already carry the widening and the
-           single narrowing, so nothing new is emitted. Inert ([None]) where [comp_prec] is the
-           identity on the target's storage precision — f32/f64/integers, the GPU backends' native
-           narrow arithmetic, [narrow_compute_f32 = false], native fp16 — those render the plain
-           serial loop unchanged. The nest is peeled through Serial/Unrolled single-statement loop
-           levels ([Unrolled] so a [Sched.Unroll ~materialize:false] over a reduction axis keeps
-           the wide local, its repeated bodies updating the scope local); a guard ([If]), a
-           sibling statement, or any other inner loop stops the widening at that level (the
-           recognizer then fails or the round-trip shrinks to that sub-nest). Two more declines:
-           under [debug_log_from_routines] the per-step [Set] form is kept — a [Local_scope] body
-           renders with [log_set_locals:false], so the rewrite would silence the per-iteration
-           trace; the SIMD renderings bail there for the same reason, and logged narrow runs
-           already differ numerically from plain runs (every tensorized rendering declines under
-           logging). And an update mentioning an RNG conversion is never widened: the conversion
-           picks its result type AND which random bits it consumes from the precision it renders
-           at (gh-ocannl-517's carve-out, [renders_at_store_prec]), so rendering it inside an
-           f32-precision scope would change the draw, not just widen it. *)
+           form virtualization gives virtual accumulators, rendered recursively: [scope_prec_of] and
+           the [Set_local]/[Get_local]/[Local_scope] arms already carry the widening and the single
+           narrowing, so nothing new is emitted. Inert ([None]) where [comp_prec] is the identity on
+           the target's storage precision — f32/f64/integers, the GPU backends' native narrow
+           arithmetic, [narrow_compute_f32 = false], native fp16 — those render the plain serial
+           loop unchanged. The nest is peeled through Serial/Unrolled single-statement loop levels
+           ([Unrolled] so a [Sched.Unroll ~materialize:false] over a reduction axis keeps the wide
+           local, its repeated bodies updating the scope local); a guard ([If]), a sibling
+           statement, or any other inner loop stops the widening at that level (the recognizer then
+           fails or the round-trip shrinks to that sub-nest). Two more declines: under
+           [debug_log_from_routines] the per-step [Set] form is kept — a [Local_scope] body renders
+           with [log_set_locals:false], so the rewrite would silence the per-iteration trace; the
+           SIMD renderings bail there for the same reason, and logged narrow runs already differ
+           numerically from plain runs (every tensorized rendering declines under logging). And an
+           update mentioning an RNG conversion is never widened: the conversion picks its result
+           type AND which random bits it consumes from the precision it renders at (gh-ocannl-517's
+           carve-out, [renders_at_store_prec]), so rendering it inside an f32-precision scope would
+           change the draw, not just widen it. *)
         let try_widen_serial_reduce () : PPrint.document option =
           if Utils.debug_log_from_routines () then None
           else
@@ -3394,16 +3385,16 @@ module C_syntax (B : C_syntax_config) = struct
                       | `Update llsc ->
                           let id = Low_level.get_scope tn in
                           ( id,
-                            Low_level.Set_local
-                              (id, Low_level.subst_accum_read ~tn ~idcs ~id llsc) )
+                            Low_level.Set_local (id, Low_level.subst_accum_read ~tn ~idcs ~id llsc)
+                          )
                       | `Scope (id, rest) ->
                           (* The scope-form base [Sched.Unroll ~materialize:true] minted (or a
                              previous level of this very rewrite): hoist it through the enclosing
-                             reduction levels by moving its init above them and keeping its
-                             updates inside — otherwise a partially materialized nest would store
-                             and narrow the accumulator once per remaining outer iteration. The
-                             scope id is reused, so the rng census's storage-precision marking
-                             still applies; at storage precision the hoist is value-neutral. *)
+                             reduction levels by moving its init above them and keeping its updates
+                             inside — otherwise a partially materialized nest would store and narrow
+                             the accumulator once per remaining outer iteration. The scope id is
+                             reused, so the rng census's storage-precision marking still applies; at
+                             storage precision the hoist is value-neutral. *)
                           (id, Low_level.unflat_lines rest)
                     in
                     let rebuild_hook b =
@@ -3518,12 +3509,11 @@ module C_syntax (B : C_syntax_config) = struct
         let store_prec = Lazy.force tn.storage_prec in
         (* gh-487 phase 2: a staging copy into an async-eligible pipelined tile renders as the
            backend's asynchronous copy — the same address arithmetic on both sides (the write-side
-           buffer rotation included), byte-for-byte, so the bitwise-identity invariant is
-           untouched; completion is the rotor loop's wait+barrier prefix. The eligibility pattern
-           is exact: a raw [Get] of a materialized (global) node at the tile's own storage
-           precision. Anything else — a precision conversion, a surviving zero-fringe ternary, a
-           non-global source — falls through to the plain synchronous store, which the same
-           barrier publishes. *)
+           buffer rotation included), byte-for-byte, so the bitwise-identity invariant is untouched;
+           completion is the rotor loop's wait+barrier prefix. The eligibility pattern is exact: a
+           raw [Get] of a materialized (global) node at the tile's own storage precision. Anything
+           else — a precision conversion, a surviving zero-fringe ternary, a non-global source —
+           falls through to the plain synchronous store, which the same barrier publishes. *)
         let async_copy_doc =
           if not (Set.mem !current_async_tiles tn) then None
           else
@@ -3545,133 +3535,143 @@ module C_syntax (B : C_syntax_config) = struct
         match async_copy_doc with
         | Some doc -> doc
         | None ->
-        let prec, narrowing = store_precs ~store_prec llsc in
-        let local_defs, val_doc = pp_scalar prec llsc in
-        let val_doc = wrap_conversion narrowing val_doc in
-        let local_defs = pp_local_defs local_defs in
-        let offset_doc = pp_pipelined_rotation ~is_write:true tn ^^ pp_tn_offset tn (idcs, dims) in
-        (* See {!C_syntax_config.volatile_scalar_rmw}: pin the per-iteration read-modify-write of
-           loop-invariant-address accumulators by shadowing the node's pointer with a
-           volatile-qualified alias for the whole statement (the shadow also covers reads inside
-           [local_defs]). The rule keys on the miscompiling pass's precondition — a
-           read-modify-write whose address is invariant across at least one enclosing serial [for]
-           loop (a scalar loss reduction's constant index, a gradient accumulated over an outer
-           batch loop, a matmul/conv accumulator indexed only by loops outside its reduction) —
-           because no finer syntactic discriminator survived the observed cases: plain-FMA and
-           Local-scope-bearing statements both miscompiled in some kernels while byte-alike
-           statements in others compiled fine. *)
-        let mentions_sym s (idx : Indexing.axis_index) =
-          match idx with
-          | Indexing.Iterator s2 -> Indexing.equal_symbol s s2
-          | Indexing.Affine { symbols; _ } ->
-              List.exists symbols ~f:(fun (_, s2) -> Indexing.equal_symbol s s2)
-          | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
-        in
-        let rmw_volatile =
-          B.volatile_scalar_rmw
-          && List.exists !serial_loop_stack ~f:(fun s ->
-              not (Array.exists idcs ~f:(mentions_sym s)))
-          (* Only kernel-parameter-derived device pointers: routine-local scratch is declared as a
-             plain local array (not address-castable, and compiler-visible anyway). *)
-          && Tn.Placements.is_materialized_force (placements ()) tn 433
-          &&
-          let rec reads_tn (llsc : Low_level.scalar_t) =
-            match llsc with
-            | Low_level.Get (tn2, _) -> Tn.equal tn tn2
-            | Get_dynamic { tn = tn2; dyn_value = v, _; _ } -> Tn.equal tn tn2 || reads_tn v
-            | Local_scope { body; _ } -> body_reads_tn body
-            | Get_local _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ ->
-                false
-            | Ternop (_, (a, _), (b, _), (c, _)) -> reads_tn a || reads_tn b || reads_tn c
-            | Binop (_, (a, _), (b, _)) -> reads_tn a || reads_tn b
-            | Unop (_, (a, _)) -> reads_tn a
-          and body_reads_tn (body : Low_level.t) =
-            match body with
-            | Low_level.Seq (a, b) -> body_reads_tn a || body_reads_tn b
-            | For_loop { body; _ } -> body_reads_tn body
-            | If { cond = c, _; body } -> reads_tn c || body_reads_tn body
-            | Set { llsc; _ } | Set_local (_, llsc) -> reads_tn llsc
-            | Set_dynamic { dyn_value = v, _; llsc; _ } -> reads_tn v || reads_tn llsc
-            | Set_from_vec { arg = a, _; _ } -> reads_tn a
-            | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _
-            | Workgroup_barrier | Tile_mma _ ->
-                false
-          in
-          reads_tn llsc
-        in
-        let wrap_rmw_volatile stmt_doc =
-          if not rmw_volatile then stmt_doc
-          else
-            let vol_ptr = string (B.buffer_prefix ^ "volatile " ^ B.typ_of_prec store_prec ^ "*") in
-            (* The ident is for readability of the generated source; the uid suffix guarantees
-               uniqueness — label-derived identifiers (get_ident) could legally collide with a
-               prefixed name, and the inner scope must shadow nothing except the target node. *)
-            let tmp = string ("__rmw_" ^ get_ident tn ^ "_" ^ Int.to_string tn.Tn.uid) in
-            lbrace
-            ^^ nest 2
-                 (hardline ^^ vol_ptr ^^ space ^^ tmp ^^ string " = " ^^ ident_doc ^^ semi
-                ^^ hardline ^^ lbrace
-                 ^^ nest 2
-                      (hardline ^^ vol_ptr ^^ space ^^ ident_doc ^^ string " = " ^^ tmp ^^ semi
-                     ^^ hardline ^^ stmt_doc)
-                 ^^ hardline ^^ rbrace)
-            ^^ hardline ^^ rbrace
-        in
-        let assignment =
-          group
-            (ident_doc ^^ brackets offset_doc ^^ string " ="
-            ^^ ifflat (space ^^ val_doc) (nest 4 (hardline ^^ val_doc))
-            ^^ semi)
-        in
-        if Utils.debug_log_from_routines () then
-          (* [val_doc] is already narrowed to the storage precision, so the temporary carrying it
-             into the log statement takes the storage type. *)
-          let num_typ = string (B.typ_of_prec store_prec) in
-          let new_var = string "new_set_v" in
-          let decl = num_typ ^^ space ^^ new_var ^^ string " = " ^^ val_doc ^^ semi in
-          let debug_val_doc, debug_args_docs = debug_float prec llsc in
-          let debug_val_str = doc_to_string debug_val_doc in
-          let pp_args_docs =
-            List.map debug_args_docs ~f:(function
-              | `Accessor idx -> pp_array_offset idx
-              | `Value v_doc -> B.styled_log_arg v_doc)
-          in
-          let log_args_for_printf =
-            offset_doc
-            :: B.styled_log_arg (ident_doc ^^ brackets offset_doc)
-            :: B.styled_log_arg new_var :: pp_args_docs
-          in
-          let log_doc =
-            let log_param_doc = Option.map B.kernel_log_param ~f:(fun (_, name) -> string name) in
-            let comment_base_msg = "# " ^ debug ^ "\n" in
-            let value_base_msg =
-              Printf.sprintf "%s[%%u]{=%s} = %s = %s\n" (get_ident tn) B.float_log_style
-                B.float_log_style debug_val_str
+            let prec, narrowing = store_precs ~store_prec llsc in
+            let local_defs, val_doc = pp_scalar prec llsc in
+            let val_doc = wrap_conversion narrowing val_doc in
+            let local_defs = pp_local_defs local_defs in
+            let offset_doc =
+              pp_pipelined_rotation ~is_write:true tn ^^ pp_tn_offset tn (idcs, dims)
             in
-            let comment_log =
-              B.pp_log_statement ~log_param_c_expr_doc:log_param_doc
-                ~base_message_literal:comment_base_msg ~args_docs:[]
+            (* See {!C_syntax_config.volatile_scalar_rmw}: pin the per-iteration read-modify-write
+               of loop-invariant-address accumulators by shadowing the node's pointer with a
+               volatile-qualified alias for the whole statement (the shadow also covers reads inside
+               [local_defs]). The rule keys on the miscompiling pass's precondition — a
+               read-modify-write whose address is invariant across at least one enclosing serial
+               [for] loop (a scalar loss reduction's constant index, a gradient accumulated over an
+               outer batch loop, a matmul/conv accumulator indexed only by loops outside its
+               reduction) — because no finer syntactic discriminator survived the observed cases:
+               plain-FMA and Local-scope-bearing statements both miscompiled in some kernels while
+               byte-alike statements in others compiled fine. *)
+            let mentions_sym s (idx : Indexing.axis_index) =
+              match idx with
+              | Indexing.Iterator s2 -> Indexing.equal_symbol s s2
+              | Indexing.Affine { symbols; _ } ->
+                  List.exists symbols ~f:(fun (_, s2) -> Indexing.equal_symbol s s2)
+              | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
             in
-            let value_log =
-              B.pp_log_statement ~log_param_c_expr_doc:log_param_doc
-                ~base_message_literal:value_base_msg ~args_docs:log_args_for_printf
+            let rmw_volatile =
+              B.volatile_scalar_rmw
+              && List.exists !serial_loop_stack ~f:(fun s ->
+                  not (Array.exists idcs ~f:(mentions_sym s)))
+              (* Only kernel-parameter-derived device pointers: routine-local scratch is declared as
+                 a plain local array (not address-castable, and compiler-visible anyway). *)
+              && Tn.Placements.is_materialized_force (placements ()) tn 433
+              &&
+              let rec reads_tn (llsc : Low_level.scalar_t) =
+                match llsc with
+                | Low_level.Get (tn2, _) -> Tn.equal tn tn2
+                | Get_dynamic { tn = tn2; dyn_value = v, _; _ } -> Tn.equal tn tn2 || reads_tn v
+                | Local_scope { body; _ } -> body_reads_tn body
+                | Get_local _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ ->
+                    false
+                | Ternop (_, (a, _), (b, _), (c, _)) -> reads_tn a || reads_tn b || reads_tn c
+                | Binop (_, (a, _), (b, _)) -> reads_tn a || reads_tn b
+                | Unop (_, (a, _)) -> reads_tn a
+              and body_reads_tn (body : Low_level.t) =
+                match body with
+                | Low_level.Seq (a, b) -> body_reads_tn a || body_reads_tn b
+                | For_loop { body; _ } -> body_reads_tn body
+                | If { cond = c, _; body } -> reads_tn c || body_reads_tn body
+                | Set { llsc; _ } | Set_local (_, llsc) -> reads_tn llsc
+                | Set_dynamic { dyn_value = v, _; llsc; _ } -> reads_tn v || reads_tn llsc
+                | Set_from_vec { arg = a, _; _ } -> reads_tn a
+                | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _
+                | Workgroup_barrier | Tile_mma _ ->
+                    false
+              in
+              reads_tn llsc
             in
-            let flush_log =
-              if B.log_involves_file_management then string "fflush(log_file);" else empty
+            let wrap_rmw_volatile stmt_doc =
+              if not rmw_volatile then stmt_doc
+              else
+                let vol_ptr =
+                  string (B.buffer_prefix ^ "volatile " ^ B.typ_of_prec store_prec ^ "*")
+                in
+                (* The ident is for readability of the generated source; the uid suffix guarantees
+                   uniqueness — label-derived identifiers (get_ident) could legally collide with a
+                   prefixed name, and the inner scope must shadow nothing except the target node. *)
+                let tmp = string ("__rmw_" ^ get_ident tn ^ "_" ^ Int.to_string tn.Tn.uid) in
+                lbrace
+                ^^ nest 2
+                     (hardline ^^ vol_ptr ^^ space ^^ tmp ^^ string " = " ^^ ident_doc ^^ semi
+                    ^^ hardline ^^ lbrace
+                     ^^ nest 2
+                          (hardline ^^ vol_ptr ^^ space ^^ ident_doc ^^ string " = " ^^ tmp ^^ semi
+                         ^^ hardline ^^ stmt_doc)
+                     ^^ hardline ^^ rbrace)
+                ^^ hardline ^^ rbrace
             in
-            comment_log ^^ hardline ^^ value_log ^^ hardline ^^ flush_log
-          in
-          let assignment' = ident_doc ^^ brackets offset_doc ^^ string " = " ^^ new_var ^^ semi in
-          let block_content =
-            if PPrint.is_empty local_defs then
-              decl ^^ hardline ^^ log_doc ^^ hardline ^^ assignment'
-            else local_defs ^^ hardline ^^ decl ^^ hardline ^^ log_doc ^^ hardline ^^ assignment'
-          in
-          wrap_rmw_volatile (lbrace ^^ nest 2 (hardline ^^ block_content) ^^ hardline ^^ rbrace)
-        else if PPrint.is_empty local_defs then wrap_rmw_volatile assignment
-        else
-          let block_content = local_defs ^^ hardline ^^ assignment in
-          wrap_rmw_volatile (lbrace ^^ nest 2 (hardline ^^ block_content) ^^ hardline ^^ rbrace))
+            let assignment =
+              group
+                (ident_doc ^^ brackets offset_doc ^^ string " ="
+                ^^ ifflat (space ^^ val_doc) (nest 4 (hardline ^^ val_doc))
+                ^^ semi)
+            in
+            if Utils.debug_log_from_routines () then
+              (* [val_doc] is already narrowed to the storage precision, so the temporary carrying
+                 it into the log statement takes the storage type. *)
+              let num_typ = string (B.typ_of_prec store_prec) in
+              let new_var = string "new_set_v" in
+              let decl = num_typ ^^ space ^^ new_var ^^ string " = " ^^ val_doc ^^ semi in
+              let debug_val_doc, debug_args_docs = debug_float prec llsc in
+              let debug_val_str = doc_to_string debug_val_doc in
+              let pp_args_docs =
+                List.map debug_args_docs ~f:(function
+                  | `Accessor idx -> pp_array_offset idx
+                  | `Value v_doc -> B.styled_log_arg v_doc)
+              in
+              let log_args_for_printf =
+                offset_doc
+                :: B.styled_log_arg (ident_doc ^^ brackets offset_doc)
+                :: B.styled_log_arg new_var :: pp_args_docs
+              in
+              let log_doc =
+                let log_param_doc =
+                  Option.map B.kernel_log_param ~f:(fun (_, name) -> string name)
+                in
+                let comment_base_msg = "# " ^ debug ^ "\n" in
+                let value_base_msg =
+                  Printf.sprintf "%s[%%u]{=%s} = %s = %s\n" (get_ident tn) B.float_log_style
+                    B.float_log_style debug_val_str
+                in
+                let comment_log =
+                  B.pp_log_statement ~log_param_c_expr_doc:log_param_doc
+                    ~base_message_literal:comment_base_msg ~args_docs:[]
+                in
+                let value_log =
+                  B.pp_log_statement ~log_param_c_expr_doc:log_param_doc
+                    ~base_message_literal:value_base_msg ~args_docs:log_args_for_printf
+                in
+                let flush_log =
+                  if B.log_involves_file_management then string "fflush(log_file);" else empty
+                in
+                comment_log ^^ hardline ^^ value_log ^^ hardline ^^ flush_log
+              in
+              let assignment' =
+                ident_doc ^^ brackets offset_doc ^^ string " = " ^^ new_var ^^ semi
+              in
+              let block_content =
+                if PPrint.is_empty local_defs then
+                  decl ^^ hardline ^^ log_doc ^^ hardline ^^ assignment'
+                else
+                  local_defs ^^ hardline ^^ decl ^^ hardline ^^ log_doc ^^ hardline ^^ assignment'
+              in
+              wrap_rmw_volatile (lbrace ^^ nest 2 (hardline ^^ block_content) ^^ hardline ^^ rbrace)
+            else if PPrint.is_empty local_defs then wrap_rmw_volatile assignment
+            else
+              let block_content = local_defs ^^ hardline ^^ assignment in
+              wrap_rmw_volatile (lbrace ^^ nest 2 (hardline ^^ block_content) ^^ hardline ^^ rbrace)
+        )
     | Set_dynamic { tn; idcs; dyn_axis; dyn_value = iv, iprec; llsc; debug } ->
         (* gh-466: the scatter counterpart of the [Get_dynamic] gather — the write offset splices
            the runtime index (cast to [Ops.index_prec ()], mirroring the gather) at [dyn_axis]. The
@@ -3976,7 +3976,8 @@ module C_syntax (B : C_syntax_config) = struct
                   else `Thread
                 in
                 ( parens
-                    (string (get_ident tn) ^^ string " + "
+                    (string (get_ident tn)
+                    ^^ string " + "
                     (* A pipelined operand tile's pointer carries the read-side buffer rotation
                        (gh-487) — the intrinsic loads then read the current iteration's copy. *)
                     ^^ pp_pipelined_rotation ~is_write:false tn
@@ -4047,15 +4048,14 @@ module C_syntax (B : C_syntax_config) = struct
            store — the same once-per-cell narrowing as [try_vectorize_reduce]'s epilogue. Where
            storage and compute precisions coincide (including pure-fp16 on native-arithmetic
            targets, where [comp_prec] leaves [Half_prec] alone) the bridges are the identity
-           memcpys, and for each output element the k-chain runs in serial order with the same
-           fused rounding, so the rendering is BITWISE equal to the scalar fallback. A
-           narrow-storage rendering instead rounds strictly less often than the fallback's
-           per-k-step narrowing (better, never bitwise on inexact values — the gh-ocannl-545
-           accumulator precedent), so parity tests pick narrow-exact inputs. The plain-add
-           (non-FMA) fallback form is declined — its [a * b + c] arithmetic is only
-           maybe-contracted, so a vector twin could not promise the equality. Emitted under the
-           same lane-0 guard as the fallback ([`Vec_extensions] backends render the lane loop
-           serially; GPU backends never take this path). *)
+           memcpys, and for each output element the k-chain runs in serial order with the same fused
+           rounding, so the rendering is BITWISE equal to the scalar fallback. A narrow-storage
+           rendering instead rounds strictly less often than the fallback's per-k-step narrowing
+           (better, never bitwise on inexact values — the gh-ocannl-545 accumulator precedent), so
+           parity tests pick narrow-exact inputs. The plain-add (non-FMA) fallback form is declined
+           — its [a * b + c] arithmetic is only maybe-contracted, so a vector twin could not promise
+           the equality. Emitted under the same lane-0 guard as the fallback ([`Vec_extensions]
+           backends render the lane loop serially; GPU backends never take this path). *)
         let try_register_tile () : PPrint.document option =
           (* [cond] names a rule violation: decline (with the per-rule diagnostic, gh-ocannl-479)
              when it holds. *)
@@ -4092,8 +4092,8 @@ module C_syntax (B : C_syntax_config) = struct
               (List.exists [ fst d; fst a; fst b ] ~f:is_swizzled)
           in
           (* The register-tiled pointers stream rows from the raw base at row-major arithmetic; a
-             pipelined operand's live copy rotates per k-block (gh-487). The scalar fallback and
-             the intrinsic arms handle it — their accesses carry the rotation term. *)
+             pipelined operand's live copy rotates per k-block (gh-487). The scalar fallback and the
+             intrinsic arms handle it — their accesses carry the rotation term. *)
           let* () =
             no_test ~reason:"pipelined operand layout (rotating buffer copies)"
               (List.exists [ fst d; fst a; fst b ] ~f:is_pipelined)
@@ -4132,12 +4132,11 @@ module C_syntax (B : C_syntax_config) = struct
                   not (Tn.equal tn d_tn && Tn.equal tn2 d_tn)
               | _ -> true)
           in
-          (* The widths this register file can render, narrowed to those the column extent can
-             fill: an [n] between two rungs keeps its tiling instead of falling to the scalar loop,
-             and the cost model below picks among the rungs that remain. *)
+          (* The widths this register file can render, narrowed to those the column extent can fill:
+             an [n] between two rungs keeps its tiling instead of falling to the scalar loop, and
+             the cost model below picks among the rungs that remain. *)
           let lane_ladder =
-            simd_lane_ladder ~vector_bytes:B.vector_bytes
-              ~elt_bytes:(Ops.prec_in_bytes prec)
+            simd_lane_ladder ~vector_bytes:B.vector_bytes ~elt_bytes:(Ops.prec_in_bytes prec)
             |> List.filter ~f:(fun lanes -> n >= lanes)
           in
           let* () =
@@ -4158,30 +4157,30 @@ module C_syntax (B : C_syntax_config) = struct
 
              The ranking model: per unit of m*k, a tile pass issues one vector FMA per lane-column
              plus the B row loads (1/rm of them per FMA) and the A splats (1/rn), while each peeled
-             column costs [peel_cost] lane-slots. That cost does NOT scale with the lane count —
-             the peel loop is the same scalar code at either width — and the fits agree: ~8 from the
+             column costs [peel_cost] lane-slots. That cost does NOT scale with the lane count — the
+             peel loop is the same scalar code at either width — and the fits agree: ~8 from the
              8-lane sweep, ~10 from the 4-lane one, ~20 from the n = 2048 pair. It only has to RANK
              candidates, not predict times; it reproduces the measured order at n = 512 within a few
              percent across rn = 2..6, and where several widths divide [n] evenly it lands on the
              largest affordable one. Erring low is what costs choices — weighting a peeled column at
-             [lanes] rather than the fit picked the peeling rn = 6 over a peel-free rn = 4 at
-             n = 2048, which measures 1.15x slower (Codex P2 on PR #357).
+             [lanes] rather than the fit picked the peeling rn = 6 over a peel-free rn = 4 at n =
+             2048, which measures 1.15x slower (Codex P2 on PR #357).
 
              The same model ranks the LANE COUNT, over the ladder of widths the register file can
              render ({!Ir.Backend_intf.simd_lane_ladder}): the vector-FMA term is already per
              lane-column, so a narrower vector simply issues more of them, and a width is worth
-             stepping down to exactly when its smaller peel outweighs that. It does at n = 40,
-             where 16 lanes cover 32 columns and peel 8 while 8 lanes divide the extent — the
-             wider register file otherwise running the narrower machine's kernel with a scalar
-             tail. The register-pressure cap stays keyed on the MACHINE's width, not the chosen
-             one: stepping down does not shrink the register file. *)
+             stepping down to exactly when its smaller peel outweighs that. It does at n = 40, where
+             16 lanes cover 32 columns and peel 8 while 8 lanes divide the extent — the wider
+             register file otherwise running the narrower machine's kernel with a scalar tail. The
+             register-pressure cap stays keyed on the MACHINE's width, not the chosen one: stepping
+             down does not shrink the register file. *)
           let lanes, rn =
             let peel_cost = 10. in
             let cost ~lanes ~rn =
               let bw = rn * lanes in
               let n_full = n - (n % bw) in
-              (Float.of_int (n_full / lanes)
-              *. (1. +. (1. /. Float.of_int rm) +. (1. /. Float.of_int rn)))
+              Float.of_int (n_full / lanes)
+              *. (1. +. (1. /. Float.of_int rm) +. (1. /. Float.of_int rn))
               +. (Float.of_int (n - n_full) *. peel_cost)
             in
             let candidates =
@@ -4282,8 +4281,7 @@ module C_syntax (B : C_syntax_config) = struct
             else
               let k_body =
                 List.init rn ~f:(fun c ->
-                    b_load
-                      ~dst:(Printf.sprintf "tmma_b_%d__" c)
+                    b_load ~dst:(Printf.sprintf "tmma_b_%d__" c)
                       ~mem:
                         (string
                            (Printf.sprintf "tmma_b__[tmma_l__ * %d + tmma_j__ + %d]" ldb (c * lanes))))
@@ -4324,7 +4322,8 @@ module C_syntax (B : C_syntax_config) = struct
                                   it k)
                           ^^ nest 2 (hardline ^^ stmts k_body)
                           ^^ hardline ^^ string "}" ^^ hardline
-                          ^^ stmts (per_cell (fun r c -> d_store ~src:grid.(r).(c) ~mem:(d_mem r c))))
+                          ^^ stmts
+                               (per_cell (fun r c -> d_store ~src:grid.(r).(c) ~mem:(d_mem r c))))
                      ^^ hardline ^^ string "}")
                 ^^ hardline ^^ string "}";
               ]
@@ -4438,8 +4437,8 @@ module C_syntax (B : C_syntax_config) = struct
     (* Returns (local definitions, value expression) *)
     let open PPrint in
     match vcomp with
-    | Local_scope
-        { id = { tn = { storage_prec = _; _ }; scope_id } as id; body; orig_indices = _ } ->
+    | Local_scope { id = { tn = { storage_prec = _; _ }; scope_id } as id; body; orig_indices = _ }
+      ->
         let scope_prec = scope_prec_of id in
         let num_typ = string (B.typ_of_prec scope_prec) in
         let init_zero =
@@ -4477,9 +4476,7 @@ module C_syntax (B : C_syntax_config) = struct
         let dims = Lazy.force tn.dims in
         let from_prec = Lazy.force tn.storage_prec in
         let prefix, postfix = B.convert_precision ~from:from_prec ~to_:prec in
-        let offset_doc =
-          pp_pipelined_rotation ~is_write:false tn ^^ pp_tn_offset tn (idcs, dims)
-        in
+        let offset_doc = pp_pipelined_rotation ~is_write:false tn ^^ pp_tn_offset tn (idcs, dims) in
         let expr = string prefix ^^ ident_doc ^^ brackets offset_doc ^^ string postfix in
         ([], expr)
     | Get_dynamic { tn; idcs; dyn_axis; dyn_value = iv, iprec } ->
@@ -4508,8 +4505,8 @@ module C_syntax (B : C_syntax_config) = struct
         let prefix, postfix = B.convert_precision ~from:from_prec ~to_:prec in
         let c_str = c_float_literal c in
         let expr =
-          (* The sign BIT, not [c < 0.]: an unparenthesized [-0.0] beside a subtraction would
-             render as [--0.0]. *)
+          (* The sign BIT, not [c < 0.]: an unparenthesized [-0.0] beside a subtraction would render
+             as [--0.0]. *)
           if String.is_empty prefix && Float.ieee_negative c && not Float.(c = neg_infinity) then
             string "(" ^^ string c_str ^^ string ")" ^^ string postfix
           else string prefix ^^ string c_str ^^ string postfix
@@ -4533,7 +4530,8 @@ module C_syntax (B : C_syntax_config) = struct
         ([], expr)
     | Ternop (op, (v1, v1_prec), (v2, v2_prec), (v3, v3_prec)) ->
         (* A heterogeneous argument keeps its own precision, which -- like every precision reaching
-           here from [Low_level] -- is a storage precision; the rendering takes [comp_prec] of it. *)
+           here from [Low_level] -- is a storage precision; the rendering takes [comp_prec] of
+           it. *)
         let v1_prec = comp_prec v1_prec and v2_prec = comp_prec v2_prec in
         let v3_prec = comp_prec v3_prec in
         let d1, e1, d2, e2, d3, e3 =
@@ -4651,9 +4649,7 @@ module C_syntax (B : C_syntax_config) = struct
         let dims = Lazy.force tn.dims in
         let from_prec = Lazy.force tn.storage_prec in
         let prefix, postfix = B.convert_precision ~from:from_prec ~to_:prec in
-        let offset_doc =
-          pp_pipelined_rotation ~is_write:false tn ^^ pp_tn_offset tn (idcs, dims)
-        in
+        let offset_doc = pp_pipelined_rotation ~is_write:false tn ^^ pp_tn_offset tn (idcs, dims) in
         let access_doc = string prefix ^^ ident_doc ^^ brackets offset_doc ^^ string postfix in
         let expr_doc =
           string prefix ^^ ident_doc
@@ -4820,24 +4816,24 @@ module C_syntax (B : C_syntax_config) = struct
     current_simdgroup_fragments := simdgroup_fragments;
     current_swizzled := swizzled;
     current_pipelined := pipelined;
-    (* gh-487 phase 2: which pipelined tiles stage asynchronously — backend hook present, no
-       kernel logging (logged [Set]s read the written value back, which an in-flight copy cannot
-       provide), and an element size the hardware copies at the alignment plain shared
-       declarations guarantee (4/8 bytes: element-type alignment; sub-4-byte tiles keep the
-       portable form, and 16-byte elements are excluded until a rendering guarantees 16-byte
-       destination alignment — see {!type-async_copy_syntax}). Per-tile, not per-statement: the
-       rotor loop's wait+barrier prefix keys on the same set, so a tile with only ineligible
-       statements merely pays a redundant wait. *)
-    current_async_tiles :=
-      (match B.async_copy with
-      | Some _ when not (Utils.debug_log_from_routines ()) ->
-          Map.keys pipelined
-          |> List.filter ~f:(fun tn ->
-                 match Ops.prec_in_bytes (Lazy.force tn.Tn.storage_prec) with
-                 | 4 | 8 -> true
-                 | _ -> false)
-          |> Set.of_list (module Tn)
-      | _ -> Set.empty (module Tn));
+    (* gh-487 phase 2: which pipelined tiles stage asynchronously — backend hook present, no kernel
+       logging (logged [Set]s read the written value back, which an in-flight copy cannot provide),
+       and an element size the hardware copies at the alignment plain shared declarations guarantee
+       (4/8 bytes: element-type alignment; sub-4-byte tiles keep the portable form, and 16-byte
+       elements are excluded until a rendering guarantees 16-byte destination alignment — see
+       {!type-async_copy_syntax}). Per-tile, not per-statement: the rotor loop's wait+barrier prefix
+       keys on the same set, so a tile with only ineligible statements merely pays a redundant
+       wait. *)
+    (current_async_tiles :=
+       match B.async_copy with
+       | Some _ when not (Utils.debug_log_from_routines ()) ->
+           Map.keys pipelined
+           |> List.filter ~f:(fun tn ->
+               match Ops.prec_in_bytes (Lazy.force tn.Tn.storage_prec) with
+               | 4 | 8 -> true
+               | _ -> false)
+           |> Set.of_list (module Tn)
+       | _ -> Set.empty (module Tn));
     (* gh-487 sanity: the rotation renders off the rotor loop's serial counter; a schedule that
        later retyped the rotor to a hardware axis would otherwise silently freeze the buffer
        selection at copy 0 ([serial_loop_stack] only tracks serial loops). Typed for the same reason
@@ -5090,23 +5086,22 @@ module C_syntax (B : C_syntax_config) = struct
                     nodes; see [zero_out_loop_redundant]); shared placements otherwise keep the
                     backend's default layout (no [aligned_local_attr]).
 
-                    A [Swizzle_b128] tile is the exception: its layout contract is stated in
-                    16-byte units, and the warp-cooperative loads that consume it
-                    ([ldmatrix], gh-ocannl-481 item 3) require every row-group address to be
-                    16-byte aligned. Row starts are 16-byte multiples by the [Stage] validation, so
-                    aligning the base is what makes all of them aligned. The GNU attribute spelling
-                    is understood by every compiler that has a shared address space here (nvcc,
-                    hipcc, MSL's clang). *)
+                    A [Swizzle_b128] tile is the exception: its layout contract is stated in 16-byte
+                    units, and the warp-cooperative loads that consume it ([ldmatrix], gh-ocannl-481
+                    item 3) require every row-group address to be 16-byte aligned. Row starts are
+                    16-byte multiples by the [Stage] validation, so aligning the base is what makes
+                    all of them aligned. The GNU attribute spelling is understood by every compiler
+                    that has a shared address space here (nvcc, hipcc, MSL's clang). *)
                  (match swizzle_of tn with
-                 | Some Low_level.Swizzle_b128 -> string "__attribute__((aligned(16))) "
-                 | Some Low_level.Swizzle_elem | None -> empty)
+                   | Some Low_level.Swizzle_b128 -> string "__attribute__((aligned(16))) "
+                   | Some Low_level.Swizzle_elem | None -> empty)
                  ^^ string (Option.value_exn ~here:[%here] B.shared_decl_prefix)
                  ^^ string (B.typ_of_prec @@ Lazy.force tn.storage_prec)
                  ^^ space
                  ^^ string (get_ident tn)
-                 (* A pipelined tile is [pt_depth] rotating copies (gh-487); the accesses select
-                    the copy via [pp_pipelined_rotation]. [Schedule.check_hardware_limits] accounts
-                    the same multiplier. *)
+                 (* A pipelined tile is [pt_depth] rotating copies (gh-487); the accesses select the
+                    copy via [pp_pipelined_rotation]. [Schedule.check_hardware_limits] accounts the
+                    same multiplier. *)
                  ^^ brackets
                       (OCaml.int
                          (Tn.num_elems tn

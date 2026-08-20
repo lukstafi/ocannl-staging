@@ -28,8 +28,7 @@ let () =
   let v1 = read_in_fresh_context () in
   let v2 = read_in_fresh_context () in
   Verdict.p "literal matches source in ctx1" (Array.equal Float.equal v1 big);
-  Verdict.p "literal matches across two independent contexts"
-    (Array.equal Float.equal v1 v2);
+  Verdict.p "literal matches across two independent contexts" (Array.equal Float.equal v1 v2);
 
   (* --- set_values / get_values round-trip through the device buffer --- *)
   let%op out = t + t in

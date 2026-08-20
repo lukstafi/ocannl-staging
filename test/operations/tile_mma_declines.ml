@@ -42,12 +42,13 @@ let p = Verdict.p
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
    that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
    parity check between two zero arrays passes while covering nothing (gh-ocannl-481 item 3). Every
-   reference array is pinned nonzero where it is produced, so the parity claims below have content.
-   *)
+   reference array is pinned nonzero where it is produced, so the parity claims below have
+   content. *)
 let nonzero name (a : float array) =
   if not (Array.exists a ~f:(fun x -> Float.(x <> 0.))) then
     failwith (name ^ ": the reference is all zeros — the parity checks against it are vacuous");
   a
+
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_cpu = String.is_substring backend_name ~substring:"cc"
 
@@ -154,7 +155,17 @@ let () =
     let sp_k, k_o, k_i = Sched.split ~axis:k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
     let stage source tile_loops =
       Sched.Stage
-        { source; tile_loops; shared = false; cooperative = None; hoisted = false; swizzle = None; pad_stride = None; pipeline_depth = 1; tile_prec = None }
+        {
+          source;
+          tile_loops;
+          shared = false;
+          cooperative = None;
+          hoisted = false;
+          swizzle = None;
+          pad_stride = None;
+          pipeline_depth = 1;
+          tile_prec = None;
+        }
     in
     let tz, _lane = Sched.tensorize ~i:i_i ~j ~k:k_i ~simd_width:1 in
     (* No [sink i_o [k_o]]: the Grid loop stays outermost, so the B~ pack at [k_o] lands inside the
@@ -284,11 +295,11 @@ let () =
   let wb = TDSL.param ~values:mbv "tmd_wb" ~input_dims:[ n ] ~output_dims:[ n ] () in
   let%op yw = wa * wb in
   summarize "seeds: no hoistable operand" (seeds_of ~name:"tmd_seeds_params" (Train.forward yw));
-  (* Column extent below one vector of lanes (nj = 4 < 8): the whole-triple form statically
-     declines and is not seeded. The packed compositions with a split column panel ([bn > 0]) now
-     survive via pad-composition seeding (gh-ocannl-485): the padded micro-kernel's column extent
-     is the panel width, so the register tiling genuinely fires — the (large) padding waste is the
-     tuner's call. Unsplit-panel flavors ([bn = 0], panel width = nj) stay filtered. *)
+  (* Column extent below one vector of lanes (nj = 4 < 8): the whole-triple form statically declines
+     and is not seeded. The packed compositions with a split column panel ([bn > 0]) now survive via
+     pad-composition seeding (gh-ocannl-485): the padded micro-kernel's column extent is the panel
+     width, so the register tiling genuinely fires — the (large) padding waste is the tuner's call.
+     Unsplit-panel flavors ([bn = 0], panel width = nj) stay filtered. *)
   let mbn = Array.init (n * 4) ~f:(fun x -> Float.of_int (x % 17) -. 8.) in
   let ma4 = TDSL.ndarray mav ~label:[ "tmd_s_a4" ] ~input_dims:[ n ] ~output_dims:[ n ] () in
   let mb4 = TDSL.ndarray mbn ~label:[ "tmd_s_b4" ] ~input_dims:[ 4 ] ~output_dims:[ n ] () in
@@ -376,12 +387,11 @@ let () =
    Two more properties this pins, both mechanism rather than any backend's arm set:
 
    - Only STAGED seeds ([sk_bk > 0]) are twinned. An unstaged seed reads its operands in place;
-     there is no shared tile to lay out.
-   - The twin must satisfy [Swizzle_b128]'s extent rule (a power-of-two count > 1 of whole 16-byte
-     units per staged tile row) at SEEDING time. The f32 table below advertises the layout for a
-     format whose 32-element tile rows are 128 bytes — 8 units — while the bf16 table's are 64
-     bytes; a format whose rows missed the rule would simply not be twinned, rather than raise
-     inside [Schedule.apply]. === *)
+   there is no shared tile to lay out. - The twin must satisfy [Swizzle_b128]'s extent rule (a
+   power-of-two count > 1 of whole 16-byte units per staged tile row) at SEEDING time. The f32 table
+   below advertises the layout for a format whose 32-element tile rows are 128 bytes — 8 units —
+   while the bf16 table's are 64 bytes; a format whose rows missed the rule would simply not be
+   twinned, rather than raise inside [Schedule.apply]. === *)
 let () =
   let staged_limits advertised =
     {

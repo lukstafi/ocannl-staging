@@ -10,9 +10,9 @@
    The tool is driven through [?argv] rather than by running a bench: this is a parsing test, and a
    real bench would need a backend, a compilation and minutes of measurement to say the same thing.
 
-   One line of stderr in a passing run is deliberate: the shadowing check below hands [Bench_args]
-   a post-[--] argument that spells a configuration key, and the warning that draws is the thing
-   being tested. *)
+   One line of stderr in a passing run is deliberate: the shadowing check below hands [Bench_args] a
+   post-[--] argument that spells a configuration key, and the warning that draws is the thing being
+   tested. *)
 
 open Base
 open Stdio

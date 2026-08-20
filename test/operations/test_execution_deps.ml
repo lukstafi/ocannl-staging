@@ -123,8 +123,8 @@ let test_reexecution () =
   let _ctx' = Context.run ctx' grad_routine in
   printf "grad -> sgd -> grad: OK\n"
 
-(* Test 6: rollback withdraws an optimistic execution marking (gh-ocannl-536). [Context.run] marks
-   a routine executed before a later [sync] can report an asynchronous failure, so a contained
+(* Test 6: rollback withdraws an optimistic execution marking (gh-ocannl-536). [Context.run] marks a
+   routine executed before a later [sync] can report an asynchronous failure, so a contained
    launch/sync rejection has to undo it — otherwise the next candidate the autotuner compiles in the
    same lineage sees a dependency satisfied by a routine that never completed. *)
 let test_rollback_execution () =
@@ -163,9 +163,7 @@ let test_poisoned_lineage () =
   let ctx = Train.init_params ctx IDX.empty l in
   let routine = Train.to_routine ctx IDX.empty grad in
   let ctx = Context.run ctx routine in
-  Context.poison_lineage ctx
-    ~routine_name:routine.Context.name
-    (Failure "synthetic device failure");
+  Context.poison_lineage ctx ~routine_name:routine.Context.name (Failure "synthetic device failure");
   let refuses what f =
     match f () with
     | _ -> printf "%s: not refused (BUG)\n" what

@@ -13,8 +13,8 @@
    growth_interval = 3, the scale then regrows after three good steps and overflows again, pinning
    the whole backoff/growth cycle.
 
-   Leg E covers the fused gated recipe (gh-ocannl-492 task 5, [Mixed_prec.gated_scaled_update]):
-   the whole step is one routine with the inf/nan gate evaluated on device, and the host samples a
+   Leg E covers the fused gated recipe (gh-ocannl-492 task 5, [Mixed_prec.gated_scaled_update]): the
+   whole step is one routine with the inf/nan gate evaluated on device, and the host samples a
    sticky window checksum every [check_interval] steps. Same oracle-parity discipline at a benign
    scale, and the deterministic-overflow setup pins the on-device skip: with interval 2, the
    overflowing steps leave the master parameters bitwise-unchanged before the host has read
@@ -203,8 +203,7 @@ let () =
   Stdio.printf "f16 leg twin of w1 grad: %s\n"
     (prec_str (Option.value_exn twin_c.Tensor.diff).Tensor.grad);
   Verdict.p "f16 leg all steps ran" (List.for_all stepped_c ~f:Fn.id);
-  Verdict.p "f16 leg loss trajectory parity within 0.1"
-    Float.(max_abs_diff losses_a losses_c < 0.1);
+  Verdict.p "f16 leg loss trajectory parity within 0.1" Float.(max_abs_diff losses_a losses_c < 0.1);
 
   (* Leg D: the dynamic-scale backoff/growth cycle. The b2 twin gradient is exactly the scale, so
      init_scale 65536 > 65504 (max finite f16) overflows deterministically: step 1 skips and backs
@@ -224,12 +223,12 @@ let () =
     (List.for_alli stepped_d ~f:(fun i ran -> (not ran) || Float.is_finite losses_d.(i)));
 
   (* Leg E: the fused gated recipe (gh-ocannl-492 task 5) — one routine per step, the inf/nan gate
-     evaluated on device, the host sampling the sticky window checksum every [check_interval]
-     steps. E1 (benign scale, interval 1): the loss trajectory tracks the f32 oracle like leg C.
-     E2 (leg D's deterministic-overflow setup, interval 2): steps 1-2 overflow and self-skip on
-     device — the master parameters stay bitwise-unchanged even though the host has not read
-     anything yet — the sample at step 2 catches the sticky non-finite window and backs the scale
-     off to the representable 32768, after which steps apply and parameters move. *)
+     evaluated on device, the host sampling the sticky window checksum every [check_interval] steps.
+     E1 (benign scale, interval 1): the loss trajectory tracks the f32 oracle like leg C. E2 (leg
+     D's deterministic-overflow setup, interval 2): steps 1-2 overflow and self-skip on device — the
+     master parameters stay bitwise-unchanged even though the host has not read anything yet — the
+     sample at step 2 catches the sticky non-finite window and backs the scale off to the
+     representable 32768, after which steps apply and parameters move. *)
   let run_gated ~input_l ~scaler ~check_interval =
     let loss, _y = build_leg ~input_l ~build:build_f16 ~prepare:prepare_f16 in
     let wflag, comp = MP.gated_scaled_update scaler ~learning_rate:(learning_rate ()) loss in
@@ -250,7 +249,7 @@ let () =
       finite_flags := window_finite :: !finite_flags;
       scales := MP.Loss_scaler.scale_value scaler :: !scales;
       let w1_now = Context.get_values !ctx w1.Tensor.value in
-      w1_moved := (not (Array.equal Float.equal w1_now w1_init)) :: !w1_moved
+      w1_moved := not (Array.equal Float.equal w1_now w1_init) :: !w1_moved
     done;
     (Array.of_list_rev !losses, List.rev !finite_flags, List.rev !scales, List.rev !w1_moved)
   in
@@ -275,8 +274,8 @@ let () =
     (String.concat ~sep:" " (List.map moved_e2 ~f:(fun b -> if b then "T" else "F")));
 
   (* Leg F: the static-scale combination (bench_mlp's BENCH_STATIC_SCALE experiment leg) — scaled
-     backprop and unscaled optimizer as one routine with a fixed benign scale, no checksum, no
-     gate, no host read. Pins that the pieces compose in a single routine and track the oracle. *)
+     backprop and unscaled optimizer as one routine with a fixed benign scale, no checksum, no gate,
+     no host read. Pins that the pieces compose in a single routine and track the oracle. *)
   let loss_f, _y_f = build_leg ~input_l:"xg" ~build:build_f16 ~prepare:prepare_f16 in
   let scaler_f = MP.Loss_scaler.create ~init_scale:8. () in
   let static_comp =

@@ -1,20 +1,20 @@
-(* The gh-ocannl-521 route-1 regression: the GPU mma sketch seeds' fused-epilogue twins must
-   survive candidate compile. The seeds annotate the GEMM nest and leave companion nests (relu,
-   bias) uncovered; on GPU there is no all-serial fallback, so the non-EP variants fail
+(* The gh-ocannl-521 route-1 regression: the GPU mma sketch seeds' fused-epilogue twins must survive
+   candidate compile. The seeds annotate the GEMM nest and leave companion nests (relu, bias)
+   uncovered; on GPU there is no all-serial fallback, so the non-EP variants fail
    [validate_parallel] on the companion write and the one-companion seed only survives through its
    [Fuse_epilogue] twin. Before this fix the twin's survival path was itself broken two ways —
-   "guarded writes of the reduction output are unsupported" (the gh-485 pad masks on a
-   non-dividing site's fragment store-back) and "the accumulator is a whole-K Tile_mma target"
-   (the unstaged and single-full-K-stage pipelines) — so every mma-labelled candidate failed
-   before being timed, on every GPU backend, and no test asserted more than seeding.
+   "guarded writes of the reduction output are unsupported" (the gh-485 pad masks on a non-dividing
+   site's fragment store-back) and "the accumulator is a whole-K Tile_mma target" (the unstaged and
+   single-full-K-stage pipelines) — so every mma-labelled candidate failed before being timed, on
+   every GPU backend, and no test asserted more than seeding.
 
    Pinned here, against the REAL seed enumeration ([Autotune.sketch_seed_params] /
    [sketch_schedule]) on the current backend, for a dividing and a non-dividing matmul+bias+relu
-   graph: epilogue twins are seeded; at least one applies and passes [validate_parallel] (i.e.
-   would reach timing); and every twin that compiles end-to-end computes values matching the
-   untuned reference. On cc a few cache-blocked packed twins are correctly rejected (their
-   accumulator is genuinely partial per k-block — fusing after it would read partial
-   accumulations); the booleans below hold on every backend. *)
+   graph: epilogue twins are seeded; at least one applies and passes [validate_parallel] (i.e. would
+   reach timing); and every twin that compiles end-to-end computes values matching the untuned
+   reference. On cc a few cache-blocked packed twins are correctly rejected (their accumulator is
+   genuinely partial per k-block — fusing after it would read partial accumulations); the booleans
+   below hold on every backend. *)
 
 open Base
 open Ocannl
@@ -29,8 +29,8 @@ let p = Verdict.p
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
    that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
    parity check between two zero arrays passes while covering nothing (gh-ocannl-481 item 3). Every
-   reference array is pinned nonzero where it is produced, so the parity claims below have content.
-   *)
+   reference array is pinned nonzero where it is produced, so the parity claims below have
+   content. *)
 let nonzero name (a : float array) =
   if not (Array.exists a ~f:(fun x -> Float.(x <> 0.))) then
     failwith (name ^ ": the reference is all zeros — the parity checks against it are vacuous");
@@ -80,9 +80,9 @@ let census tag ~m ~n ~k =
 
      Deliberately keyed on the mma family as a whole, NOT on [ep_params]: the epilogue twins are
      what this test asserts the existence of, so excusing their absence by their own absence would
-     make every assertion below self-satisfying and would mask the regression on a backend that
-     does advertise a tile (Metal at f32, CUDA under tf32). Where the family is seeded, the twins
-     are required. *)
+     make every assertion below self-satisfying and would mask the regression on a backend that does
+     advertise a tile (Metal at f32, CUDA under tf32). Where the family is seeded, the twins are
+     required. *)
   let vacuous = is_gpu && List.is_empty mma_params in
   if vacuous then
     Stdio.eprintf "%s: no GPU mma seed for this site on %s — the checks below are vacuous\n" tag

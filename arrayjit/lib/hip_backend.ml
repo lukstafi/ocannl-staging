@@ -64,8 +64,8 @@ module Slab = struct
      [get_free_and_total_mem] moves in allocation granules, which hides sub-granule effects such as
      the liveness planner's arena savings (gh-ocannl-489) and counts other processes' memory. On an
      APU sharing memory with the display that second effect dominates outright — it is what made
-     test/operations/buffer_aliasing report the planner INCREASING the training footprint here
-     while decreasing it everywhere else (gh-ocannl-542). *)
+     test/operations/buffer_aliasing report the planner INCREASING the training footprint here while
+     decreasing it everywhere else (gh-ocannl-542). *)
   let pools : (int * int, buffer_ptr * int) Hashtbl.Poly.t = Hashtbl.Poly.create ()
 
   let alloc_pool ?mode:_ (device : device) ~pool_id ~size_in_bytes ~alignment:_ =
@@ -583,9 +583,9 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           ~a:(lda, a_space, a_layout)
           ~b:(ldb, b_space, b_layout)
         ->
-          (* rocWMMA fragments are opaque like [nvcuda::wmma]'s: there is no swizzle-aware
-             fragment load here, so a swizzled operand layout declines to the caller's scalar
-             fallback (gh-ocannl-481 item 3, D2). *)
+          (* rocWMMA fragments are opaque like [nvcuda::wmma]'s: there is no swizzle-aware fragment
+             load here, so a swizzled operand layout declines to the caller's scalar fallback
+             (gh-ocannl-481 item 3, D2). *)
           let plain = function `Plain -> true | `Swizzled_b128 -> false in
           let tile = 16 in
           (* (a/b fragment element type, accumulator fragment element type, ld multiple for a/b, ld
@@ -595,16 +595,16 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           let combo =
             if not (plain d_layout && plain a_layout && plain b_layout) then None
             else
-            match (a_prec, b_prec, d_prec) with
-            | Ops.Half_prec _, Ops.Half_prec _, Ops.Single_prec _ ->
-                Some ("rocwmma::float16_t", "float", 8, 4)
-            | Ops.Half_prec _, Ops.Half_prec _, Ops.Half_prec _ ->
-                Some ("rocwmma::float16_t", "rocwmma::float16_t", 8, 8)
-            | Ops.Bfloat16_prec _, Ops.Bfloat16_prec _, Ops.Single_prec _ ->
-                Some ("rocwmma::bfloat16_t", "float", 8, 4)
-            | Ops.Bfloat16_prec _, Ops.Bfloat16_prec _, Ops.Bfloat16_prec _ ->
-                Some ("rocwmma::bfloat16_t", "rocwmma::bfloat16_t", 8, 8)
-            | _ -> None
+              match (a_prec, b_prec, d_prec) with
+              | Ops.Half_prec _, Ops.Half_prec _, Ops.Single_prec _ ->
+                  Some ("rocwmma::float16_t", "float", 8, 4)
+              | Ops.Half_prec _, Ops.Half_prec _, Ops.Half_prec _ ->
+                  Some ("rocwmma::float16_t", "rocwmma::float16_t", 8, 8)
+              | Ops.Bfloat16_prec _, Ops.Bfloat16_prec _, Ops.Single_prec _ ->
+                  Some ("rocwmma::bfloat16_t", "float", 8, 4)
+              | Ops.Bfloat16_prec _, Ops.Bfloat16_prec _, Ops.Bfloat16_prec _ ->
+                  Some ("rocwmma::bfloat16_t", "rocwmma::bfloat16_t", 8, 8)
+              | _ -> None
           in
           let loadable = function
             | `Device | `Shared -> true (* generic-address loads cover both *)
@@ -824,24 +824,24 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           ~b:(ldb, b_space, b_layout)
           ~body
         ->
-          (* rocWMMA fragments are opaque like [nvcuda::wmma]'s: there is no swizzle-aware
-             fragment load here, so a swizzled operand layout declines to the caller's scalar
-             fallback (gh-ocannl-481 item 3, D2). *)
+          (* rocWMMA fragments are opaque like [nvcuda::wmma]'s: there is no swizzle-aware fragment
+             load here, so a swizzled operand layout declines to the caller's scalar fallback
+             (gh-ocannl-481 item 3, D2). *)
           let plain = function `Plain -> true | `Swizzled_b128 -> false in
           let tile = 16 in
           let combo =
             if not (plain d_layout && plain a_layout && plain b_layout) then None
             else
-            match (a_prec, b_prec, d_prec) with
-            | Ops.Half_prec _, Ops.Half_prec _, Ops.Single_prec _ ->
-                Some ("rocwmma::float16_t", "float", 8, 4)
-            | Ops.Half_prec _, Ops.Half_prec _, Ops.Half_prec _ ->
-                Some ("rocwmma::float16_t", "rocwmma::float16_t", 8, 8)
-            | Ops.Bfloat16_prec _, Ops.Bfloat16_prec _, Ops.Single_prec _ ->
-                Some ("rocwmma::bfloat16_t", "float", 8, 4)
-            | Ops.Bfloat16_prec _, Ops.Bfloat16_prec _, Ops.Bfloat16_prec _ ->
-                Some ("rocwmma::bfloat16_t", "rocwmma::bfloat16_t", 8, 8)
-            | _ -> None
+              match (a_prec, b_prec, d_prec) with
+              | Ops.Half_prec _, Ops.Half_prec _, Ops.Single_prec _ ->
+                  Some ("rocwmma::float16_t", "float", 8, 4)
+              | Ops.Half_prec _, Ops.Half_prec _, Ops.Half_prec _ ->
+                  Some ("rocwmma::float16_t", "rocwmma::float16_t", 8, 8)
+              | Ops.Bfloat16_prec _, Ops.Bfloat16_prec _, Ops.Single_prec _ ->
+                  Some ("rocwmma::bfloat16_t", "float", 8, 4)
+              | Ops.Bfloat16_prec _, Ops.Bfloat16_prec _, Ops.Bfloat16_prec _ ->
+                  Some ("rocwmma::bfloat16_t", "rocwmma::bfloat16_t", 8, 8)
+              | _ -> None
           in
           let loadable = function `Device | `Shared -> true | `Thread | `Fragment _ -> false in
           match combo with
@@ -913,16 +913,16 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
        platform's own cast; the two spellings are both [NAME(expr)], so one string serves.
 
        One funnel rather than four call sites, because the first version of this guarded
-       [convert_precision] alone and left fp8 ARITHMETIC results narrowing through bare casts —
-       an fp8 [**.] whose f32 result lands in ROCm's broken window still produced a spurious
-       value with uniformity on (Codex P2 on PR #372). A fifth narrowing site cannot repeat that
-       without going through here. *)
+       [convert_precision] alone and left fp8 ARITHMETIC results narrowing through bare casts — an
+       fp8 [**.] whose f32 result lands in ROCm's broken window still produced a spurious value with
+       uniformity on (Codex P2 on PR #372). A fifth narrowing site cannot repeat that without going
+       through here. *)
     let fp8_uniform_guard () =
       Utils.get_global_flag ~default:false ~arg_name:"prefer_backend_uniformity"
 
     (* Which spelling narrows a value of precision [from] to fp8. The guarded helpers are
-       per-source-width on purpose: a double handed to the float helper would narrow at the call
-       and round twice (gh-ocannl-648), which the platform's own cast does not do. *)
+       per-source-width on purpose: a double handed to the float helper would narrow at the call and
+       round twice (gh-ocannl-648), which the platform's own cast does not do. *)
     let fp8_from_prec_fn from =
       if not (fp8_uniform_guard ()) then "(__hip_fp8_e5m2)"
       else
@@ -1201,16 +1201,16 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Min, Uint4x32_prec _ -> func "min"
       | Min, Bfloat16_prec _ -> func "__hmin"
       | ( Mod,
-          ( Byte_prec _ | Uint16_prec _ | Int32_prec _ | Uint32_prec _ | Int64_prec _
-          | Uint64_prec _ ) ) ->
+          (Byte_prec _ | Uint16_prec _ | Int32_prec _ | Uint32_prec _ | Int64_prec _ | Uint64_prec _)
+        ) ->
           f "%"
-      (* Like the libm calls in [unop_syntax]: [fmod] on bfloat16 operands returns float, which
-         only fails once the placement inlines it into a bfloat16 binop (gh-ocannl-549). *)
+      (* Like the libm calls in [unop_syntax]: [fmod] on bfloat16 operands returns float, which only
+         fails once the placement inlines it into a bfloat16 binop (gh-ocannl-549). *)
       | Mod, Bfloat16_prec _ ->
           fun v1 v2 ->
             group
-              (string "__float2bfloat16(fmodf(__bfloat162float(" ^^ v1
-              ^^ string "), __bfloat162float(" ^^ v2 ^^ string ")))")
+              (string "__float2bfloat16(fmodf(__bfloat162float("
+              ^^ v1 ^^ string "), __bfloat162float(" ^^ v2 ^^ string ")))")
       | Mod, _ -> func "fmod"
       (* Comparisons and logical connectives are precision-independent and spelled the same in HIP
          C++ as in C, so they render through the shared default -- fp8 already bridged above. The
@@ -1275,10 +1275,10 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       (* A libm call on a bfloat16 operand resolves (the operand converts to float) but *returns
          float*. Assigning that back to a bfloat16 cell is accepted -- __hip_bfloat16's converting
          constructor is implicit -- so it goes unnoticed until the placement that inlines the call
-         instead makes the float an operand of a bfloat16 binop, where hiprtc reports
-         "operator '+' is ambiguous ('__hip_bfloat16' and 'float')" (gh-ocannl-549). Bridge the
-         result back the way [ToPowOf], [Relu], [Recip] and [Satur01] already do, so the emission
-         is bfloat16-typed wherever it lands. *)
+         instead makes the float an operand of a bfloat16 binop, where hiprtc reports "operator '+'
+         is ambiguous ('__hip_bfloat16' and 'float')" (gh-ocannl-549). Bridge the result back the
+         way [ToPowOf], [Relu], [Recip] and [Satur01] already do, so the emission is bfloat16-typed
+         wherever it lands. *)
       let bf16_func fn = f ("__float2bfloat16(" ^ fn ^ "(__bfloat162float(") ")))" in
       match (v, prec) with
       | Ops.Identity, _ -> f "" ""
@@ -1354,8 +1354,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Recip_sqrt, Half_prec _ -> func "hrsqrt"
       | Recip_sqrt, Double_prec _ -> f "(1.0 / sqrt(" "))"
       | Recip_sqrt, Single_prec _ -> f "(1.0f / sqrtf(" "))"
-      | Recip_sqrt, Bfloat16_prec _ ->
-          f "__float2bfloat16(1.0f / sqrtf(__bfloat162float(" ")))"
+      | Recip_sqrt, Bfloat16_prec _ -> f "__float2bfloat16(1.0f / sqrtf(__bfloat162float(" ")))"
       | Recip_sqrt, _ -> f "(1 / sqrtf(" "))"
       | Neg, _ -> f "(-(" "))"
       | Trunc, Double_prec _ -> func "trunc"
@@ -1452,15 +1451,12 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       | Bfloat16_prec _, Half_prec _ -> ("__float2half(__bfloat162float(", "))")
       | _, Bfloat16_prec _ -> ("__float2bfloat16((float)(", "))")
       | Bfloat16_prec _, _ -> ("(" ^ typ_of_prec to_ ^ ")(__bfloat162float(", "))")
-      (* Through the same funnel as the operator bridges. A helper and not a ternary wrapped
-         around the operand: a [convert_precision] pair brackets ONE occurrence of its expression,
-         and a ternary would name it twice. With the guard off both arms are spelled exactly as
-         before. *)
+      (* Through the same funnel as the operator bridges. A helper and not a ternary wrapped around
+         the operand: a [convert_precision] pair brackets ONE occurrence of its expression, and a
+         ternary would name it twice. With the guard off both arms are spelled exactly as before. *)
       | _, Fp8_prec _ -> (
           let fn = fp8_from_prec_fn from in
-          match from with
-          | Ops.Half_prec _ -> (fn ^ "(__half2float(", "))")
-          | _ -> (fn ^ "(", ")"))
+          match from with Ops.Half_prec _ -> (fn ^ "(__half2float(", "))") | _ -> (fn ^ "(", ")"))
       | Fp8_prec _, Half_prec _ -> ("__float2half((float)(", "))")
       | ( Fp8_prec _,
           (Byte_prec _ | Uint16_prec _ | Int32_prec _ | Uint32_prec _ | Int64_prec _ | Uint64_prec _)
@@ -1578,24 +1574,23 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
      gh-ocannl-533 saw one autotune candidate take the whole benchmark process down with it.
 
      So this is prediction, not recovery (see docs/proposals/gh-ocannl-536.md): read the linked
-     kernel's private segment size and decline an over-budget kernel BEFORE it is ever launched,
-     as a typed [Resource_exceeded Thread_scratch]. To a tuner candidate that is an ordinary
-     decline the blocker census tabulates; a hand-written schedule gets the usual
-     [Utils.User_error] rendering at the public [Context.compile] boundary.
+     kernel's private segment size and decline an over-budget kernel BEFORE it is ever launched, as
+     a typed [Resource_exceeded Thread_scratch]. To a tuner candidate that is an ordinary decline
+     the blocker census tabulates; a hand-written schedule gets the usual [Utils.User_error]
+     rendering at the public [Context.compile] boundary.
 
      The budget model, established experimentally on gfx1151 (Radeon 8060S, ROCm 7.14, WSL2) -- see
      the gh-ocannl-533 writeup:
 
      - The rejection is a function of the per-work-item size ALONE. A kernel at 98320 B/work-item
-       launches at 204800 work-items; one at 114704 B is rejected at a SINGLE work-item. So the
-       runtime backs the worst-case fully-occupied device, not the requested grid, and the check
-       needs no launch geometry.
-     - The cutoff sits where [private_seg_size] rounded up to a 64-byte granule, times the device's
-       maximum resident work-items ([max_threads_per_multiprocessor * multiprocessor_count]),
-       crosses 4 GiB. Measured boundary: 104832 B accepted, 104848 B rejected; the model reproduces
-       every one of the ~70 sampled points, including both sides of that 16-byte step.
-     - The compiler separately refuses a stack frame over 262136 B, so it never emits a kernel far
-       above this; #533's 163856 B is comfortably inside what compiles and outside what launches.
+     launches at 204800 work-items; one at 114704 B is rejected at a SINGLE work-item. So the
+     runtime backs the worst-case fully-occupied device, not the requested grid, and the check needs
+     no launch geometry. - The cutoff sits where [private_seg_size] rounded up to a 64-byte granule,
+     times the device's maximum resident work-items ([max_threads_per_multiprocessor *
+     multiprocessor_count]), crosses 4 GiB. Measured boundary: 104832 B accepted, 104848 B rejected;
+     the model reproduces every one of the ~70 sampled points, including both sides of that 16-byte
+     step. - The compiler separately refuses a stack frame over 262136 B, so it never emits a kernel
+     far above this; #533's 163856 B is comfortably inside what compiles and outside what launches.
 
      The 4 GiB cap is not a value any HIP or HSA query exposes -- the abort comes from the WSL WDDM
      thunk ([wsl::thunk::ComputeQueue::UpdateScratch]) -- so it is a documented constant from this
@@ -1763,18 +1758,18 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     in
     (lowered_bindings, procs)
 
-  (* One HIP graph for a fissioned routine's whole segment batch (gh-ocannl-488), mirroring the
-     CUDA backend: stream-capture the segment launch loop once per distinct set of
-     launch-time-varying arguments — static-index binding values, plus the merge-buffer position
-     when the routine reads it — instantiate, and replay with a single hipGraphLaunch per step
-     instead of one launch per segment. Baking kernel arguments into the graph is sound because
-     context buffer bases are pre-resolved at link time (tnode pools are never reallocated in place
-     while their routines are live; the merge pool, which can be, is part of the key by pointer
-     identity) and every other varying argument is part of the key. Instantiated graphs are
-     retained in a bounded FIFO cache, so a training loop cycling through batch-index bindings
-     replays cached graphs from the second epoch on. Transparent fallback to per-segment launches:
-     when kernel logging is on (the log id is a fresh kernel argument every run), when disabled via
-     [gpu_graph_capture=false], or permanently for this routine if the runtime rejects capture. *)
+  (* One HIP graph for a fissioned routine's whole segment batch (gh-ocannl-488), mirroring the CUDA
+     backend: stream-capture the segment launch loop once per distinct set of launch-time-varying
+     arguments — static-index binding values, plus the merge-buffer position when the routine reads
+     it — instantiate, and replay with a single hipGraphLaunch per step instead of one launch per
+     segment. Baking kernel arguments into the graph is sound because context buffer bases are
+     pre-resolved at link time (tnode pools are never reallocated in place while their routines are
+     live; the merge pool, which can be, is part of the key by pointer identity) and every other
+     varying argument is part of the key. Instantiated graphs are retained in a bounded FIFO cache,
+     so a training loop cycling through batch-index bindings replays cached graphs from the second
+     epoch on. Transparent fallback to per-segment launches: when kernel logging is on (the log id
+     is a fresh kernel argument every run), when disabled via [gpu_graph_capture=false], or
+     permanently for this routine if the runtime rejects capture. *)
   let sequence_segments (context : context) ~name ~(bindings : Indexing.lowered_bindings)
       ~uses_merge_buffer (tasks : Task.t list) : Task.t option =
     let use_capture =
@@ -1803,12 +1798,11 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
         String.concat ~sep:";" (idx @ merge)
       in
       let capture () =
-        (* RELAXED, not THREAD_LOCAL: GC finalizers (module unloads, buffer frees of dead
-           handles) can fire at any allocation point on the capturing thread, and stricter modes
-           make the runtime reject such "potentially unsafe" calls mid-capture — with the
-           exception then escaping [Gc.finalise] at an arbitrary program point. The finalizers
-           only release dead handles, so they are genuinely safe to run concurrently with
-           capture. *)
+        (* RELAXED, not THREAD_LOCAL: GC finalizers (module unloads, buffer frees of dead handles)
+           can fire at any allocation point on the capturing thread, and stricter modes make the
+           runtime reject such "potentially unsafe" calls mid-capture — with the exception then
+           escaping [Gc.finalise] at an arbitrary program point. The finalizers only release dead
+           handles, so they are genuinely safe to run concurrently with capture. *)
         H.Graph.begin_capture ~mode:H.Graph.RELAXED device.runner;
         let graph =
           try
@@ -1923,17 +1917,17 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                        here. *)
                     mma_format_tiles =
                       [
-                        ((Backend_intf.Mma_f16, Backend_intf.Mma_f16, Backend_intf.Mma_f32),
-                          (16, 16, 16));
-                        ((Backend_intf.Mma_f16, Backend_intf.Mma_f16, Backend_intf.Mma_f16),
-                          (16, 16, 16));
-                        ((Backend_intf.Mma_bf16, Backend_intf.Mma_bf16, Backend_intf.Mma_f32),
-                          (16, 16, 16));
-                        ((Backend_intf.Mma_bf16, Backend_intf.Mma_bf16, Backend_intf.Mma_bf16),
-                          (16, 16, 16));
+                        ( (Backend_intf.Mma_f16, Backend_intf.Mma_f16, Backend_intf.Mma_f32),
+                          (16, 16, 16) );
+                        ( (Backend_intf.Mma_f16, Backend_intf.Mma_f16, Backend_intf.Mma_f16),
+                          (16, 16, 16) );
+                        ( (Backend_intf.Mma_bf16, Backend_intf.Mma_bf16, Backend_intf.Mma_f32),
+                          (16, 16, 16) );
+                        ( (Backend_intf.Mma_bf16, Backend_intf.Mma_bf16, Backend_intf.Mma_bf16),
+                          (16, 16, 16) );
                       ];
-                    (* rocWMMA fragments are opaque like wmma's: no swizzle-aware fragment load
-                       here (gh-ocannl-481 item 3, D3). *)
+                    (* rocWMMA fragments are opaque like wmma's: no swizzle-aware fragment load here
+                       (gh-ocannl-481 item 3, D3). *)
                     mma_staged_layouts = [];
                     mma_pipeline_depths = [];
                   }
@@ -1945,12 +1939,12 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
               ([Train.CDSL.enable_all_debugs] flips the debug settings at any point), and this
               record is memoized (Codex P1 on PR #337). *)
            codegen_tag = None;
-           (* Advisory roofline envelope (gh-ocannl-491): documented rough constants for the
-              targets this backend runs on. Flops: RDNA3-class dGPU/APU ~10 fp32 TFLOP/s — the
-              model only ranks, so a class-typical number suffices. Bandwidth is a class CEILING
-              per the [hardware_limits] contract (gh-ocannl-578): the previous 2.5e11
-              (Strix-Halo-class LPDDR5X) sat below what CDNA parts sustain — MI300-family HBM3/3e
-              reaches ~5.3-6 TB/s. Per-device queries remain calibration follow-up work. *)
+           (* Advisory roofline envelope (gh-ocannl-491): documented rough constants for the targets
+              this backend runs on. Flops: RDNA3-class dGPU/APU ~10 fp32 TFLOP/s — the model only
+              ranks, so a class-typical number suffices. Bandwidth is a class CEILING per the
+              [hardware_limits] contract (gh-ocannl-578): the previous 2.5e11 (Strix-Halo-class
+              LPDDR5X) sat below what CDNA parts sustain — MI300-family HBM3/3e reaches ~5.3-6 TB/s.
+              Per-device queries remain calibration follow-up work. *)
            peak_flops = Some 1.0e13;
            peak_memory_bandwidth = Some 6.0e12;
          })
@@ -1972,13 +1966,12 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       ^ (if Utils.with_runtime_debug () then "/device-debug" else "/no-device-debug")
       (* The fp8 conversion guard (gh-ocannl-647) changes emitted code, so the regimes must not
          share a cache entry. It sits in this backend's own tag rather than the shared codegen
-         gates, like [with_runtime_debug] above and for the same reason: no other backend reads
-         it this way. It does re-key HIP kernels that emit no fp8 conversion at all — the same
+         gates, like [with_runtime_debug] above and for the same reason: no other backend reads it
+         this way. It does re-key HIP kernels that emit no fp8 conversion at all — the same
          over-approximation the debug tag makes, and a constant one. *)
       ^
-      if
-        Utils.get_global_flag ~default:false ~arg_name:"prefer_backend_uniformity"
-      then "/fp8-guard"
+      if Utils.get_global_flag ~default:false ~arg_name:"prefer_backend_uniformity" then
+        "/fp8-guard"
       else "/fp8-native"
     in
     fun () -> { (Lazy.force limits) with Backend_intf.codegen_tag = Some (codegen_tag ()) }

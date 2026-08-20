@@ -363,23 +363,23 @@ module Impl = struct
                    assertion, so it is stated rather than assumed. *)
                 (not (Array.is_empty (Lazy.force metal_devices)))
                 && Array.for_all (Lazy.force metal_devices) ~f:(fun d ->
-                       Me.Device.supports_family d Me.Device.GPUFamily.Apple7)
+                    Me.Device.supports_family d Me.Device.GPUFamily.Apple7)
               then
                 Some
                   {
                     Backend_intf.mma_simd_width = 32;
                     mma_tile = (8, 8, 8);
-                    (* [simdgroup_matrix] has no mixed-precision multiply-accumulate, so every
-                       entry is uniform: the accumulator format equals the operand format
+                    (* [simdgroup_matrix] has no mixed-precision multiply-accumulate, so every entry
+                       is uniform: the accumulator format equals the operand format
                        (gh-ocannl-545). *)
                     mma_format_tiles =
                       [
-                        ((Backend_intf.Mma_f32, Backend_intf.Mma_f32, Backend_intf.Mma_f32),
-                          (8, 8, 8));
-                        ((Backend_intf.Mma_f16, Backend_intf.Mma_f16, Backend_intf.Mma_f16),
-                          (8, 8, 8));
-                        ((Backend_intf.Mma_bf16, Backend_intf.Mma_bf16, Backend_intf.Mma_bf16),
-                          (8, 8, 8));
+                        ( (Backend_intf.Mma_f32, Backend_intf.Mma_f32, Backend_intf.Mma_f32),
+                          (8, 8, 8) );
+                        ( (Backend_intf.Mma_f16, Backend_intf.Mma_f16, Backend_intf.Mma_f16),
+                          (8, 8, 8) );
+                        ( (Backend_intf.Mma_bf16, Backend_intf.Mma_bf16, Backend_intf.Mma_bf16),
+                          (8, 8, 8) );
                       ];
                     (* Metal banks too, but [simdgroup_load] takes a plain pointer and leading
                        dimension — no [ldmatrix] analogue (gh-ocannl-481 item 3, D3). *)
@@ -396,12 +396,11 @@ module Impl = struct
            codegen_tag = None;
            (* Advisory roofline envelope (gh-ocannl-491): documented rough constants for the
               Apple-silicon class ([Device.attributes] exposes no throughput numbers). Flops:
-              mid-range M-series ~5 fp32 TFLOP/s — the model only ranks, so a class-typical
-              number suffices. Bandwidth is a class CEILING per the [hardware_limits] contract
+              mid-range M-series ~5 fp32 TFLOP/s — the model only ranks, so a class-typical number
+              suffices. Bandwidth is a class CEILING per the [hardware_limits] contract
               (gh-ocannl-578): Ultra-tier unified memory reaches ~819 GB/s, and the previous
-              mid-range 2.0e11 was demonstrably understated (a 4e11 B/s streaming rate is
-              routine on an M4 Max), tripping the gh-514 agreement warning on every exact
-              streaming row. *)
+              mid-range 2.0e11 was demonstrably understated (a 4e11 B/s streaming rate is routine on
+              an M4 Max), tripping the gh-514 agreement warning on every exact streaming row. *)
            peak_flops = Some 5.0e12;
            peak_memory_bandwidth = Some 1.0e12;
          })
@@ -631,8 +630,8 @@ module Impl = struct
       | Ops.Uint64_prec _, 2 -> "uint64x2_t"
       | (Ops.Byte_prec _ | Ops.Fp8_prec _), 16 -> "int8x16_t"
       | Ops.Uint16_prec _, 8 -> "uint16x8_t"
-      (* [Set_from_vec] assigns elements directly, so bfloat16 blocks must contain native
-         [bfloat] values rather than raw [ushort] bit patterns. *)
+      (* [Set_from_vec] assigns elements directly, so bfloat16 blocks must contain native [bfloat]
+         values rather than raw [ushort] bit patterns. *)
       | Ops.Bfloat16_prec _, 8 -> "bfloat16x8_t"
       | Ops.Half_prec _, 8 -> "half8_t"
       | _, 1 -> typ_of_prec prec
@@ -917,8 +916,8 @@ module Impl = struct
       | Ops.Uint4x32_prec _ -> "" (* No specific suffix for uint4 *)
       | Ops.Half_prec _ -> "h"
       | Ops.Bfloat16_prec _ -> "bf" (* Verified: [0.0bf] is a bfloat literal MSL accepts. *)
-      (* Not a capability limit but an invariant: [compute_prec] maps fp8 to f32, so no operator
-         is ever rendered at fp8 and no fp8 literal is ever spelled. *)
+      (* Not a capability limit but an invariant: [compute_prec] maps fp8 to f32, so no operator is
+         ever rendered at fp8 and no fp8 literal is ever spelled. *)
       | Ops.Fp8_prec _ ->
           invalid_arg "Metal_backend: fp8 arithmetic renders at single precision (compute_prec)"
       | Ops.Single_prec _ -> "f"
@@ -928,8 +927,8 @@ module Impl = struct
       | Ops.Uint64_prec _ -> "ul"
       | Ops.Void_prec -> ""
 
-    (* MSL's math library has [float] and [half] overloads but no [bfloat] ones, so a builtin
-       called on bfloat operands promotes them and returns [float] -- and unlike C, MSL rejects the
+    (* MSL's math library has [float] and [half] overloads but no [bfloat] ones, so a builtin called
+       on bfloat operands promotes them and returns [float] -- and unlike C, MSL rejects the
        narrowing assignment back to a bfloat destination ("assigning to 'bfloat' from incompatible
        type 'float'"). Every math builtin is affected, so the result is bridged back here rather
        than one operator at a time (gh-ocannl-549).
@@ -937,25 +936,23 @@ module Impl = struct
        The *call* is unambiguous: MSL's [bfloat] is a native scalar type with a single implicit
        conversion, unlike [__nv_bfloat16] / [__hip_bfloat16], whose several conversion operators
        make the call itself ambiguous on the other GPU backends. Conversely those backends accept
-       the narrowing assignment (their converting constructor is implicit), which is why the same
-       op tables fail there only where the float result becomes the operand of a bfloat16 binop --
-       i.e. only in the placement that inlines it.
+       the narrowing assignment (their converting constructor is implicit), which is why the same op
+       tables fail there only where the float result becomes the operand of a bfloat16 binop -- i.e.
+       only in the placement that inlines it.
 
        Arithmetic, comparisons, the ternary and the bfloat literal suffix ([0.0bf], used by the
        gates and by [Recip]) are all native for [bfloat] and need no bridging. *)
     let bf16_from_builtin prec doc =
-      match prec with
-      | Ops.Bfloat16_prec _ -> group (string "(bfloat)" ^^ parens doc)
-      | _ -> doc
+      match prec with Ops.Bfloat16_prec _ -> group (string "(bfloat)" ^^ parens doc) | _ -> doc
 
     let ternop_syntax prec op =
       match op with
       | Ops.Where ->
-          (* A short-circuiting ternary, exactly as on the C/CUDA/HIP backends — NOT [select]:
-             MSL's [select] is a function call that evaluates both branches, so a range guard
-             (an inlined concatenation's component guards, gh-504's clamped-window guards) would
-             still evaluate its guarded out-of-range buffer read. The whole conditional is
-             parenthesized (cf. the CUDA rendering's precedence note). *)
+          (* A short-circuiting ternary, exactly as on the C/CUDA/HIP backends — NOT [select]: MSL's
+             [select] is a function call that evaluates both branches, so a range guard (an inlined
+             concatenation's component guards, gh-504's clamped-window guards) would still evaluate
+             its guarded out-of-range buffer read. The whole conditional is parenthesized (cf. the
+             CUDA rendering's precedence note). *)
           fun v1 v2 v3 -> group (parens (parens v1 ^^ string " ? " ^^ v2 ^^ string " : " ^^ v3))
       | FMA ->
           fun v1 v2 v3 ->
@@ -1050,11 +1047,7 @@ module Impl = struct
              because the other operand is a literal: an untyped [0] would resolve to the *integer*
              [max] and truncate the activation to an integer — with sub-unit activations that
              silently zeroes the whole forward pass. *)
-          fun v ->
-            group
-              (string "(bfloat)max(0.0f, (float)"
-              ^^ parens v
-              ^^ rparen)
+          fun v -> group (string "(bfloat)max(0.0f, (float)" ^^ parens v ^^ rparen)
       | Relu, Ops.Double_prec _ ->
           raise @@ Utils.User_error "Metal backend does not support double precision"
       | Relu, _ (* Byte_prec, Void_prec *) ->
@@ -1062,11 +1055,7 @@ module Impl = struct
       | Satur01, Ops.Bfloat16_prec _ ->
           (* Like [Relu], spelled out rather than bridged: [clamp(bfloat, 0.0bf, 1.0bf)] — the
              suffixed form the generic arm below would emit — is itself ambiguous in MSL. *)
-          fun v ->
-            group
-              (string "(bfloat)clamp((float)"
-              ^^ parens v
-              ^^ string ", 0.0f, 1.0f)")
+          fun v -> group (string "(bfloat)clamp((float)" ^^ parens v ^^ string ", 0.0f, 1.0f)")
       | Satur01, p ->
           let s = metal_prec_suffix_float p in
           fun v ->
@@ -1122,11 +1111,11 @@ module Impl = struct
       (* Default case for all other conversions *)
       | _ -> ("(" ^ typ_of_prec to_ ^ ")(", ")")
 
-    (* [half] and [bfloat] are native MSL scalars and compute where they store; fp8 is not a type
-       at all here, so it takes gh-ocannl-517's seam instead — stored as a byte, computed in f32,
-       converted once per load and once per store by [convert_precision] above. The same
-       resolution [Numerics.cpu_compute_prec] gives fp8 on the CPU backends, and a function of the
-       storage precision alone, as the signature requires. *)
+    (* [half] and [bfloat] are native MSL scalars and compute where they store; fp8 is not a type at
+       all here, so it takes gh-ocannl-517's seam instead — stored as a byte, computed in f32,
+       converted once per load and once per store by [convert_precision] above. The same resolution
+       [Numerics.cpu_compute_prec] gives fp8 on the CPU backends, and a function of the storage
+       precision alone, as the signature requires. *)
     let compute_prec = function Ops.Fp8_prec _ -> Ops.single | prec -> prec
 
     (* If we wanted to reintroduce the log_id parameter: [Some ("const int&", "log_id")]. *)

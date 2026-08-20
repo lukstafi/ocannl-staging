@@ -28,10 +28,10 @@ let env_lookup key =
 
 let file_lookup key = alist_lookup file key
 
-(* The table below is pure -- synthetic sources, embedded payloads, no real configuration is read
-   -- but linking arrayjit.utils runs the config machinery at module initialization, and an
-   unknown ambient OCANNL_PROFILE aborts the process outright. (The startup chatter itself is
-   harmless here: it goes to stderr, gh-ocannl-581.) Same stray-variable guard as
+(* The table below is pure -- synthetic sources, embedded payloads, no real configuration is read --
+   but linking arrayjit.utils runs the config machinery at module initialization, and an unknown
+   ambient OCANNL_PROFILE aborts the process outright. (The startup chatter itself is harmless here:
+   it goes to stderr, gh-ocannl-581.) Same stray-variable guard as
    test/operations/profiles/profile_precedence.ml (Codex P2 on PR #291), duplicated rather than
    shared: the two tests link only arrayjit.utils between them, and test_utils would drag in the
    whole IR for eight lines. A third copy is the signal to factor it out. *)

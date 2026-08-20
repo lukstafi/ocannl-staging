@@ -1,11 +1,11 @@
 (* Regression test for half-precision code generation on the GPU backends -- the f16 counterpart of
    [bf16_ops].
 
-   [Relu_gate] at [Half_prec] used to emit the literal [0.0h] on the CUDA backend
-   (gh-ocannl-518). The [h] suffix is a clang extension (and valid MSL), but not CUDA C++, so nvrtc
-   rejected every kernel containing a half relu backward with "user-defined literal operator not
-   found" -- blocking half-precision training on CUDA outright. The HIP backend had already
-   sidestepped the literal via [__hgt] against a bitcast zero; CUDA now does the same.
+   [Relu_gate] at [Half_prec] used to emit the literal [0.0h] on the CUDA backend (gh-ocannl-518).
+   The [h] suffix is a clang extension (and valid MSL), but not CUDA C++, so nvrtc rejected every
+   kernel containing a half relu backward with "user-defined literal operator not found" -- blocking
+   half-precision training on CUDA outright. The HIP backend had already sidestepped the literal via
+   [__hgt] against a bitcast zero; CUDA now does the same.
 
    The gate only appears in the *backward* pass of [relu], so a forward-only test cannot reach it:
    this one runs fwd+bwd with the relu input's value and gradient, and the relu output's gradient,

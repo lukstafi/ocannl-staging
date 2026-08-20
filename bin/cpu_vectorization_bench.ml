@@ -77,10 +77,10 @@ let () =
        scheduler. *)
     Context.sync ctx;
     let stop = Time_now.nanoseconds_since_unix_epoch () in
-    (* Outside the timed region: [get_values] walks the whole buffer into an OCaml [float array],
-       an O(n) host-side cost that at n >= 10^6 is an order of magnitude larger than the kernel and
-       was previously swamping every number this benchmark reports. The cc scheduler is
-       synchronous, so the fold above needs no separate await. *)
+    (* Outside the timed region: [get_values] walks the whole buffer into an OCaml [float array], an
+       O(n) host-side cost that at n >= 10^6 is an order of magnitude larger than the kernel and was
+       previously swamping every number this benchmark reports. The cc scheduler is synchronous, so
+       the fold above needs no separate await. *)
     let (_ : float array) = Context.get_values ctx t.Tensor.value in
     let secs = Float.of_int63 Int63.(stop - start) /. 1e9 /. Float.of_int repeats in
     p "%-12s %10.3f us  %8.2f %s  correct: %b\n" variant (secs *. 1e6)

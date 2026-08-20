@@ -2,8 +2,8 @@ open! Base
 open Ocannl
 open Ocannl.Nn_blocks.DSL_modules
 
-(* Failures go through [Verdict], so that a regression exits nonzero instead of being
-   `dune promote`d into the golden as the expected output (gh-ocannl-601). *)
+(* Failures go through [Verdict], so that a regression exits nonzero instead of being `dune
+   promote`d into the golden as the expected output (gh-ocannl-601). *)
 let fail fmt = Printf.ksprintf Verdict.fail fmt
 
 let dummy_origin : Row.constraint_origin list =

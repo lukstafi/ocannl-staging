@@ -22,7 +22,10 @@ module Asgns = Ir.Assignments
 
 let p = Verdict.p
 let approx a b = Float.(abs (a -. b) < 1e-4)
-let named name (comp : Asgns.comp) : Asgns.comp = { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
+
+let named name (comp : Asgns.comp) : Asgns.comp =
+  { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
+
 let n = 8
 
 let () =
@@ -109,10 +112,10 @@ let () =
   in
   p "an exception from on_ship propagates to the caller unchanged" raised;
   (* --- Both arms failed, with an arm forced: the forced arm's failure is the one that propagates.
-         The caller asked for that artifact, so reporting the other search's exception would name a
-         search it did not select. Injected through [Autotune.on_candidate_attempt] and told apart
-         by the arm-report count, the way autotune_arm_containment.ml does: arm A's search is the
-         one running before any arm has reported. --- *)
+     The caller asked for that artifact, so reporting the other search's exception would name a
+     search it did not select. Injected through [Autotune.on_candidate_attempt] and told apart by
+     the arm-report count, the way autotune_arm_containment.ml does: arm A's search is the one
+     running before any arm has reported. --- *)
   let both_arms_fail ship_arm =
     let reported = ref 0 in
     (Autotune.on_candidate_attempt :=
@@ -138,10 +141,11 @@ let () =
   p "with both arms failed, forcing arm B propagates arm B's failure"
     (String.is_substring failed_b ~substring:"tsa arm B");
   let d_reports, d_shipped, _, d_got = run () in
-  p "the default run ships and matches the plain compile" (Array.for_all2_exn d_got expected ~f:approx);
-  (match d_reports with
+  p "the default run ships and matches the plain compile"
+    (Array.for_all2_exn d_got expected ~f:approx);
+  match d_reports with
   | [ a; b ] ->
       let measured = if Float.( <= ) a.Autotune.best_ms b.Autotune.best_ms then "A" else "B" in
       p "with no forcing, the shipped arm is the faster-measured one"
         (Option.equal String.equal d_shipped (Some measured))
-  | _ -> Verdict.fail "the default run did not report exactly two arms")
+  | _ -> Verdict.fail "the default run did not report exactly two arms"

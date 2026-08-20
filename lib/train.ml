@@ -78,9 +78,7 @@ let trainable_params loss =
   | Some diff ->
       let written = Asgns.collect_written diff.Tensor.backprop.Asgns.asgns in
       Set.filter loss.Tensor.params ~f:(fun p ->
-          match p.Tensor.diff with
-          | None -> false
-          | Some d -> Set.mem written d.Tensor.grad)
+          match p.Tensor.diff with None -> false | Some d -> Set.mem written d.Tensor.grad)
 
 (* The parameter set an optimizer-side helper operates on: [?params] when given (the escape hatch
    for exotic flows, e.g. a gradient written outside this loss's backprop), the derived
@@ -99,9 +97,9 @@ let params_for ~fn_name ?params loss =
         raise
         @@ Tensor.Session_error
              ( fn_name
-               ^ ": the loss trains no parameters -- no [loss.params] member's gradient is \
-                  written by the backprop code. Note that only [Tensor.param]-registered tensors \
-                  join [params] ([Operation.init ~grad_spec:Require_grad] leaves do not), and a \
+               ^ ": the loss trains no parameters -- no [loss.params] member's gradient is written \
+                  by the backprop code. Note that only [Tensor.param]-registered tensors join \
+                  [params] ([Operation.init ~grad_spec:Require_grad] leaves do not), and a \
                   parameter behind [stop_gradient] is not trained",
                Some loss );
       ps
@@ -112,13 +110,13 @@ let params_for ~fn_name ?params loss =
     gradients every micro-step (their backprop contributions are plain [=+] accumulations relying on
     a same-routine reset) while the {e parameter} gradients accumulate across micro-steps.
 
-    The match is by [Fetch] constructor and tnode identity, so a change to how zeroing is emitted
-    (a different constructor, or a parameter gradient dropping out of the tree) would silently keep
+    The match is by [Fetch] constructor and tnode identity, so a change to how zeroing is emitted (a
+    different constructor, or a parameter gradient dropping out of the tree) would silently keep
     zeroing parameter gradients — corrupting the accumulation. A gradient that the backprop writes
     is accumulated into, so it is zeroed in the tree: we raise when such a [grads] member had
-    nothing removed rather than let the drift through. Pass only the gradients backprop reaches —
-    a parameter detached from the loss (behind {!Operation.stop_gradient}, say) stays in
-    [loss.params] while its gradient is neither zeroed nor accumulated. *)
+    nothing removed rather than let the drift through. Pass only the gradients backprop reaches — a
+    parameter detached from the loss (behind {!Operation.stop_gradient}, say) stays in [loss.params]
+    while its gradient is neither zeroed nor accumulated. *)
 let filter_out_grad_zeroing ~grads asgns =
   let removed = Hash_set.create (module Tn) in
   let rec loop = function
@@ -133,8 +131,7 @@ let filter_out_grad_zeroing ~grads asgns =
   let result = loop asgns in
   let missing = Set.filter grads ~f:(fun g -> not (Hash_set.mem removed g)) in
   if not (Set.is_empty missing) then
-    invalid_arg
-    @@ "Train.filter_out_grad_zeroing: no zeroing found for accumulated gradient(s): "
+    invalid_arg @@ "Train.filter_out_grad_zeroing: no zeroing found for accumulated gradient(s): "
     ^ String.concat ~sep:", " (List.map (Set.to_list missing) ~f:Tn.debug_name)
     ^ " -- the shape of the zero_grads code changed, gradient accumulation would be corrupted";
   result
@@ -231,15 +228,14 @@ let zero_params_grads ?params loss =
   in
   { comp with asgns = Asgns.Block_comment ("zero_params_grads", comp.asgns) }
 
-(** A scalar checksum over the trained parameters' gradients ({!trainable_params}, or [?params])
-    of [loss]: returns the flag tensor and the code
-    that resets it to 0 and accumulates the sum of every gradient cell into it. The sum is
-    non-finite if and only if some gradient cell is non-finite (a finite sum cannot arise from
-    non-finite cells: same-sign infinities stay infinite, opposite-sign infinities and NaNs produce
-    NaN; a spurious overflow of large finite gradients only triggers a benign extra backoff).
-    Sequence it after {!grad_update} in the same routine, read the flag with [Context.get_values]
-    and gate the optimizer step on [Float.is_finite] — the dynamic loss scaling recipe
-    ({!Mixed_prec.step}) does exactly this. *)
+(** A scalar checksum over the trained parameters' gradients ({!trainable_params}, or [?params]) of
+    [loss]: returns the flag tensor and the code that resets it to 0 and accumulates the sum of
+    every gradient cell into it. The sum is non-finite if and only if some gradient cell is
+    non-finite (a finite sum cannot arise from non-finite cells: same-sign infinities stay infinite,
+    opposite-sign infinities and NaNs produce NaN; a spurious overflow of large finite gradients
+    only triggers a benign extra backoff). Sequence it after {!grad_update} in the same routine,
+    read the flag with [Context.get_values] and gate the optimizer step on [Float.is_finite] — the
+    dynamic loss scaling recipe ({!Mixed_prec.step}) does exactly this. *)
 let grad_checksum ?params loss =
   let params = params_for ~fn_name:"Train.grad_checksum" ?params loss in
   let flag = NTDSL.init ~l:"grad_checksum" ~prec:Ir.Ops.single ~o:[ 1 ] ~f:(fun _ -> 0.) () in
@@ -247,8 +243,8 @@ let grad_checksum ?params loss =
   Tn.set_observable flag.Tensor.value;
   (* Settle shape inference for the parameters first: the total-reduce einsum below unifies each
      parameter's rows with the spec's row variables, and a parameter row still unsolved at
-     settlement would then be refused the close-to-empty guess (row.ml's "You forgot to specify
-     the hidden dimension(s)" — a row variable used in an einsum spec is no longer safe to guess).
+     settlement would then be refused the close-to-empty guess (row.ml's "You forgot to specify the
+     hidden dimension(s)" — a row variable used in an einsum spec is no longer safe to guess).
      Forcing dims here closes e.g. a bias's inferred-empty input row before the spec touches it —
      which is also why [grad_checksum] must be called only after the model and the loss are fully
      constructed. *)
@@ -299,13 +295,12 @@ let sgd_one ~learning_rate ?(momentum = 0.0) ?(weight_decay = 0.0) ?(nesterov = 
               (not inside subexpressions), hence the scaled read is its own statement. *)
            (match grad_scale with
            | Some scale ->
-               ({ sgd_delta } =: p.grad * scale ~logic:".";
-                sgd_delta =+ !.weight_decay *. p)
+               { sgd_delta } =: p.grad * scale ~logic:".";
+               sgd_delta =+ !.weight_decay *. p
            | None -> sgd_delta =: p.grad + (!.weight_decay *. p));
            if Float.(momentum > 0.0) then (
              { sgd_momentum } =: (!.momentum *. sgd_momentum) + sgd_delta;
-             if nesterov then sgd_delta =+ !.momentum *. sgd_momentum
-             else sgd_delta =: sgd_momentum);
+             if nesterov then sgd_delta =+ !.momentum *. sgd_momentum else sgd_delta =: sgd_momentum);
            p =- learning_rate * sgd_delta ~logic:".")]
   | Some gate ->
       [%cd
@@ -315,22 +310,21 @@ let sgd_one ~learning_rate ?(momentum = 0.0) ?(weight_decay = 0.0) ?(nesterov = 
            | None -> Asgns.empty_comp);
            (match grad_scale with
            | Some scale ->
-               ({ sgd_delta } =: p.grad * scale ~logic:".";
-                sgd_delta =+ !.weight_decay *. p)
+               { sgd_delta } =: p.grad * scale ~logic:".";
+               sgd_delta =+ !.weight_decay *. p
            | None -> sgd_delta =: p.grad + (!.weight_decay *. p));
            if Float.(momentum > 0.0) then (
              { sgd_momentum } =: where gate ((!.momentum *. sgd_momentum) + sgd_delta) sgd_momentum;
-             if nesterov then sgd_delta =+ !.momentum *. sgd_momentum
-             else sgd_delta =: sgd_momentum);
+             if nesterov then sgd_delta =+ !.momentum *. sgd_momentum else sgd_delta =: sgd_momentum);
            (* The final selection covers every path: without momentum it discards the possibly
-              non-finite delta; with momentum the buffer kept its old (finite) value above, and
-              this still zeroes the step so [p] is untouched. *)
+              non-finite delta; with momentum the buffer kept its old (finite) value above, and this
+              still zeroes the step so [p] is untouched. *)
            sgd_delta =: where gate sgd_delta 0;
            p =- learning_rate * sgd_delta ~logic:".")]
 
 (** Maps {!sgd_one} over the parameters [loss] trains ({!trainable_params}, or [?params]): a
-    parameter frozen behind {!Operation.stop_gradient} takes no step — in particular no weight
-    decay (gh-ocannl-673). *)
+    parameter frozen behind {!Operation.stop_gradient} takes no step — in particular no weight decay
+    (gh-ocannl-673). *)
 let sgd_update ~learning_rate ?momentum ?weight_decay ?nesterov ?grad_unscale ?grad_scale
     ?update_gate ?params loss =
   let f =
@@ -399,8 +393,8 @@ module Lr_schedule = struct
     let min_lr = t.base_lr *. t.final_frac in
     (* The [total_steps] clamp outranks warmup: a warmup longer than the horizon (a degenerate but
        constructible config — the record is transparent and unvalidated) must not keep ramping past
-       the documented endpoint, so past [total_steps] the decay branch answers (its clamped ratio
-       is 1 there, i.e. the final value). *)
+       the documented endpoint, so past [total_steps] the decay branch answers (its clamped ratio is
+       1 there, i.e. the final value). *)
     let with_warmup decayed =
       if step < t.warmup_steps && step < t.total_steps then
         t.base_lr *. Float.of_int (step + 1) /. Float.of_int t.warmup_steps
@@ -418,9 +412,7 @@ module Lr_schedule = struct
             min_lr +. ((1.0 -. ratio) *. (t.base_lr -. min_lr)))
     | Wsd { decay_frac } ->
         with_warmup (fun () ->
-            let decay_point =
-              Float.to_int ((1.0 -. decay_frac) *. Float.of_int t.total_steps)
-            in
+            let decay_point = Float.to_int ((1.0 -. decay_frac) *. Float.of_int t.total_steps) in
             if step < decay_point then t.base_lr
             else
               let ratio = clamped_frac ~from:decay_point in
@@ -449,8 +441,8 @@ let host_scalar ~l v =
 
 (** A learning-rate scalar driven by a host-side schedule: returns the tensor (pass it as
     {!sgd_update}'s [~learning_rate]) and a setter overwriting it with the schedule's value at
-    [step] — call the setter once per step, before running the optimizer routine. The overwrite is
-    a tiny host-to-device transfer, not a recompilation. *)
+    [step] — call the setter once per step, before running the optimizer routine. The overwrite is a
+    tiny host-to-device transfer, not a recompilation. *)
 let scheduled_learning_rate ?(label = "learning_rate") schedule =
   let lr = host_scalar ~l:label (Lr_schedule.learning_rate schedule ~step:0) in
   let set_step ctx ~step =
@@ -459,12 +451,12 @@ let scheduled_learning_rate ?(label = "learning_rate") schedule =
   (lr, set_step)
 
 (** A scalar holding the global L2 norm over the gradients of the parameters [loss] trains
-    ({!trainable_params}, or [?params]): returns the norm
-    tensor (materialized and observable — read it with [Context.get_values] for logging or
-    {!Outlier_detector} feeding) and the code that computes it: per-parameter sum-of-squares einsum
-    reductions (deterministic by construction — OCANNL emits no atomics) followed by a square root.
-    Sequence it after {!grad_update} in the same routine or a later one. Like {!grad_checksum}, it
-    must be called only after the model and the loss are fully constructed.
+    ({!trainable_params}, or [?params]): returns the norm tensor (materialized and observable — read
+    it with [Context.get_values] for logging or {!Outlier_detector} feeding) and the code that
+    computes it: per-parameter sum-of-squares einsum reductions (deterministic by construction —
+    OCANNL emits no atomics) followed by a square root. Sequence it after {!grad_update} in the same
+    routine or a later one. Like {!grad_checksum}, it must be called only after the model and the
+    loss are fully constructed.
 
     When [grad_unscale] is given (the reciprocal of a {!Mixed_prec.Loss_scaler}'s scale), the norm
     is multiplied by it after the square root, so the result is the true-magnitude norm even when
@@ -508,9 +500,9 @@ type grad_clipping = {
           routine — no host round-trip is involved). *)
 }
 
-(** Global-norm gradient clipping, llm.c-style ([llmc/global_norm.cuh] feeding [grad_scale] into
-    the AdamW launch): the returned scale leaves gradient buffers untouched and multiplies the
-    gradients as the optimizer reads them ({!sgd_update}[ ~grad_scale]).
+(** Global-norm gradient clipping, llm.c-style ([llmc/global_norm.cuh] feeding [grad_scale] into the
+    AdamW launch): the returned scale leaves gradient buffers untouched and multiplies the gradients
+    as the optimizer reads them ({!sgd_update}[ ~grad_scale]).
 
     Behavior at the edges of the finite range, deliberately (matching llm.c's
     [grad_scale = grad_clip / grad_norm], which shares both properties): a [nan] norm fails the
@@ -522,9 +514,9 @@ type grad_clipping = {
     degrades to weight decay alone, strictly more conservative than rescaling an explosion of that
     magnitude to [max_norm], and self-recovering since the buffers are untouched. *)
 let clip_by_global_norm ?grad_unscale ?(label = "grad_clip") ?params ~max_norm loss =
-  (* Validated because this is where configuration-derived floats arrive: a negative threshold
-     would REVERSE gradients (negative ratio), and a nan one fails the ordered comparison and
-     silently disables clipping. 0 stays legal — "clip to zero" freezes the gradient term. *)
+  (* Validated because this is where configuration-derived floats arrive: a negative threshold would
+     REVERSE gradients (negative ratio), and a nan one fails the ordered comparison and silently
+     disables clipping. 0 stays legal — "clip to zero" freezes the gradient term. *)
   if (not (Float.is_finite max_norm)) || Float.(max_norm < 0.) then
     invalid_arg "Train.clip_by_global_norm: max_norm must be finite and nonnegative";
   let grad_norm, norm_comp = grad_l2_norm ?grad_unscale ~label:(label ^ "_norm") ?params loss in
@@ -540,7 +532,11 @@ let clip_by_global_norm ?grad_unscale ?(label = "grad_clip") ?params ~max_norm l
       grad_scale =: id clip_sel ~logic:"i => j"]
   in
   let comp = Asgns.sequence [ norm_comp; scale_comp ] in
-  { grad_norm; grad_scale; clip_comp = { comp with asgns = Asgns.Block_comment (label, comp.asgns) } }
+  {
+    grad_norm;
+    grad_scale;
+    clip_comp = { comp with asgns = Asgns.Block_comment (label, comp.asgns) };
+  }
 
 (** A sliding-window z-score outlier detector for host-observed scalars (per llm.c's
     [llmc/outlier_detector.h]): feed it the per-step loss and/or {!grad_l2_norm} values and skip the
@@ -562,20 +558,20 @@ module Outlier_detector = struct
       records [v] (replacing the oldest sample): [Float.nan] until the window has filled — treat
       that as "not an outlier". Three deliberate departures from llm.c's [update_detector]: the
       score is computed {e before} [v] joins the window, since self-inclusion dilutes the baseline
-      and caps any finite spike's score at [sqrt (n - 1)] — for a small window that bound sits
-      below reasonable thresholds; a non-finite [v] never enters the window and scores [infinity],
-      so any finite threshold flags it and the update is skipped, while later samples still get a
-      healthy baseline; and the moments are recomputed from the stored window on normalized values
-      instead of llm.c's running [sum]/[sum_sq] — the [E[x^2] - E[x]^2] form cancels
-      catastrophically for a window with a large common offset and small variance, and even a
-      centered sum can overflow once samples near the float maximum have been recorded, turning
-      later scores into 0 or [nan] — false passes. Normalization goes first so every intermediate
-      is bounded: [mag = max_i (abs x_i)] is a pure maximum (cannot overflow), the mean is
-      accumulated as [x /. mag /. n] (partial sums within [[-1, 1]]), and deviations
-      [x/mag - mean/mag] lie in [[-2, 2]] — no finite window can overflow any of it; O(window) per
-      step is free on the host where llm.c needed O(1) in a kernel-adjacent loop. A genuinely
-      constant-valued window has standard deviation 0, making the z-score of any deviation
-      [infinity] (and of [v = mean], 0). *)
+      and caps any finite spike's score at [sqrt (n - 1)] — for a small window that bound sits below
+      reasonable thresholds; a non-finite [v] never enters the window and scores [infinity], so any
+      finite threshold flags it and the update is skipped, while later samples still get a healthy
+      baseline; and the moments are recomputed from the stored window on normalized values instead
+      of llm.c's running [sum]/[sum_sq] — the [E[x^2] - E[x]^2] form cancels catastrophically for a
+      window with a large common offset and small variance, and even a centered sum can overflow
+      once samples near the float maximum have been recorded, turning later scores into 0 or [nan] —
+      false passes. Normalization goes first so every intermediate is bounded:
+      [mag = max_i (abs x_i)] is a pure maximum (cannot overflow), the mean is accumulated as
+      [x /. mag /. n] (partial sums within [[-1, 1]]), and deviations [x/mag - mean/mag] lie in
+      [[-2, 2]] — no finite window can overflow any of it; O(window) per step is free on the host
+      where llm.c needed O(1) in a kernel-adjacent loop. A genuinely constant-valued window has
+      standard deviation 0, making the z-score of any deviation [infinity] (and of [v = mean], 0).
+  *)
   let update t v =
     if not (Float.is_finite v) then Float.infinity
     else
@@ -592,9 +588,7 @@ module Outlier_detector = struct
             (* All-zero window: any nonzero [v] is infinitely surprising. *)
             if Float.(v = 0.) then 0. else Float.copysign Float.infinity v
           else
-            let smean =
-              Array.fold t.window ~init:0. ~f:(fun acc x -> acc +. (x /. mag /. nf))
-            in
+            let smean = Array.fold t.window ~init:0. ~f:(fun acc x -> acc +. (x /. mag /. nf)) in
             let s =
               Array.fold t.window ~init:0. ~f:(fun acc x ->
                   let d = (x /. mag) -. smean in
@@ -662,26 +656,26 @@ let placement_arm_name = function
     policy with another. {b That guarantee is exactly what the other [ship_arm] settings give up}
     (gh-ocannl-638): a forced arm ships whether or not it was the faster one, which is the point —
     they exist so a measurement can execute the artifact it profiles — so every "keeps the winner"
-    and "at least as fast" statement here is about [Measured_winner] alone. Respecting the two-level memory-mode split
-    (docs/proposals/context-scoped-memory-modes.md) — tnode-level [memory_mode] is declared,
-    semantics-bearing intent, while placement {e decisions} are context-level and functional — the B
-    arm does not touch intent: it tunes from {!Context.decide_materialized} siblings of [ctx] (and
-    of [timing_ctx]), so the arms are hermetic and [tune_placements] leaves no trace on the graph or
-    on the caller's contexts beyond the returned winner. See
+    and "at least as fast" statement here is about [Measured_winner] alone. Respecting the two-level
+    memory-mode split (docs/proposals/context-scoped-memory-modes.md) — tnode-level [memory_mode] is
+    declared, semantics-bearing intent, while placement {e decisions} are context-level and
+    functional — the B arm does not touch intent: it tunes from {!Context.decide_materialized}
+    siblings of [ctx] (and of [timing_ctx]), so the arms are hermetic and [tune_placements] leaves
+    no trace on the graph or on the caller's contexts beyond the returned winner. See
     test/operations/materialize_after_compile.ml. [report], when given, observes both arms' reports
     in order — arm A first, then arm B — so a consumer holding both reports can attribute every
     per-arm fact to the arm that produced it. What the reports do {e not} determine is which arm
     SHIPPED: read [on_ship] for that. The two came apart in stages — a winning flip refinement ships
     a placement vector that is neither arm (gh-ocannl-555), and [ship_arm] (gh-ocannl-638) overrides
     the time comparison outright — so "the smaller [best_ms] shipped" is no longer a rule a consumer
-    can apply, and applying it is exactly the misattribution [on_ship] exists to prevent. The reports
-    are measurements of two searches; [on_ship] is the identity of the returned artifact. That
-    separation is what makes "a [Schedule.Tensorize] was crowned in an arm that did not ship"
+    can apply, and applying it is exactly the misattribution [on_ship] exists to prevent. The
+    reports are measurements of two searches; [on_ship] is the identity of the returned artifact.
+    That separation is what makes "a [Schedule.Tensorize] was crowned in an arm that did not ship"
     reportable (gh-ocannl-546): [best_tensorized] on the other arm's report, with [mma_best_ms]
-    against [best_ms] for the margin. The same conclusion is
-    logged here under config [autotune_log]. Other arguments are forwarded to {!Autotune.tune}; the
-    same caveats apply (notably [timing_ctx] and non-idempotent routines — both arms share
-    [timing_ctx]'s device for their searches).
+    against [best_ms] for the margin. The same conclusion is logged here under config
+    [autotune_log]. Other arguments are forwarded to {!Autotune.tune}; the same caveats apply
+    (notably [timing_ctx] and non-idempotent routines — both arms share [timing_ctx]'s device for
+    their searches).
 
     An arm that fails is a {e losing} arm, not a failed run (gh-ocannl-550): a search that
     terminates on a fatal failure ranks at [infinity], the other arm's completed winner ships and
@@ -692,13 +686,12 @@ let placement_arm_name = function
     does [tune_placements] propagate, with the first failure's original backtrace — with two
     exceptions that are not the arm's to absorb and propagate at once: process-level failures
     ([Out_of_memory], [Sys.Break]) and compiler invariant violations ([Assert_failure],
-    [Stack_overflow]), the same classes {!Ir.Schedule_outcome.classify_raw} refuses to classify.
-    A [report] callback's own exception likewise propagates rather than counting as an arm failure,
+    [Stack_overflow]), the same classes {!Ir.Schedule_outcome.classify_raw} refuses to classify. A
+    [report] callback's own exception likewise propagates rather than counting as an arm failure,
     and so does a failure that poisoned the lineage the arms share ({!Context.poisoned_failure}):
     every timing run in the sibling would then refuse to execute, so the second arm can only burn a
-    search proving it. Consumers
-    attributing arms by arrival order should read [terminal_failure] (equivalently [partial]) before
-    [best_ms], as benchmarks/runners/ocannl/bench_harness.ml does.
+    search proving it. Consumers attributing arms by arrival order should read [terminal_failure]
+    (equivalently [partial]) before [best_ms], as benchmarks/runners/ocannl/bench_harness.ml does.
 
     The in-position guarantee is {!Autotune.tune}'s reporting contract, and inherits its one
     carve-out: an argument-precondition violation (an incompatible [timing_ctx]) is detected before
@@ -719,22 +712,22 @@ let placement_arm_name = function
     first, tiling/scheduling within each arm by the nested {!Autotune.tune}. [inline_flips] (config
     [tune_inline_flips], default 0) adds a greedy per-node refinement level: the default-policy
     arm's compile reports its searchable decision dimensions
-    ({!Ir.Low_level.field-flip_candidates}), and the candidates are tried one at a time from arm
-    A's context — [Materialize] via {!Context.decide_materialized} (walking toward arm B one node
-    at a time), [Inline] via {!Context.decide_inline} — each accepted flip becoming the base for
-    the next, and the refined result shipping only if it beats the A/B winner. Every measured flip
-    costs a full search like an arm, so the budget is explicit and defaults to zero. Flip searches
-    report through [flip_report], not [report]: the positional arm-A-then-arm-B contract of
-    [report] is preserved regardless of the budget.
+    ({!Ir.Low_level.field-flip_candidates}), and the candidates are tried one at a time from arm A's
+    context — [Materialize] via {!Context.decide_materialized} (walking toward arm B one node at a
+    time), [Inline] via {!Context.decide_inline} — each accepted flip becoming the base for the
+    next, and the refined result shipping only if it beats the A/B winner. Every measured flip costs
+    a full search like an arm, so the budget is explicit and defaults to zero. Flip searches report
+    through [flip_report], not [report]: the positional arm-A-then-arm-B contract of [report] is
+    preserved regardless of the budget.
 
     gh-514, the tuned placement-space search: the chain walks the surface in
     {!Autotune.placement_surface}'s ranking — family-unlocking (enablement) [Materialize] flips
     before cost, per the gh-558 lesson; config [tune_flip_ordering=cost] restores the legacy
     recompute-cost order as the evaluation baseline — and, under config [autotune_bound_pruning],
-    fathoms a [Materialize] flip pre-search when the roofline floor of the chain's partial
-    placement vector extended by it already meets the best measured time (admissible: the floor
-    lower-bounds every completion, so the flip cannot win). Fathomed flips do not consume the
-    budget, which counts measured flips.
+    fathoms a [Materialize] flip pre-search when the roofline floor of the chain's partial placement
+    vector extended by it already meets the best measured time (admissible: the floor lower-bounds
+    every completion, so the flip cannot win). Fathomed flips do not consume the budget, which
+    counts measured flips.
 
     gh-ocannl-638, [ship_arm] (config [tune_ship_arm], default [Measured_winner]): ship a chosen
     {!placement_arm} instead of the measured winner. It exists for measurement — a profile of arm
@@ -770,8 +763,8 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
      decision it changes: a search is minutes to hours, and a measurement that set this on the wrong
      cell should learn it from the head of the log, not from the summary of a run it has finished
      paying for. Unconditional on stderr, not through [logf]: this overrides the optimizer's
-     shipping path, which is not something a run should have to have enabled [autotune_log] to
-     find out about. *)
+     shipping path, which is not something a run should have to have enabled [autotune_log] to find
+     out about. *)
   let ship_arm =
     match ship_arm with
     | Some a -> a
@@ -783,7 +776,8 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
   if forced then
     Stdio.eprintf
       "Train.tune_placements: tune_ship_arm selects arm %s, which will ship whatever the timings \
-       say. This is a measurement-only setting; a normal run ships the measured winner.\n%!"
+       say. This is a measurement-only setting; a normal run ships the measured winner.\n\
+       %!"
       (placement_arm_name ship_arm);
   let last = ref None in
   (* The public [?report] contract is positional — arm A's report then arm B's, which consumers
@@ -831,7 +825,8 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
      raises the arm's — the very case a same-value collision would misread as "the callback failed".
      A wrapper the tuner never constructs cannot collide: whatever comes out unwrapped is the
      search's. The rendered message is carried alongside because the tuner prints the wrapper with
-     the default exception printer when it swallows it, and that printer shows string fields only. *)
+     the default exception printer when it swallows it, and that printer shows string fields
+     only. *)
   let exception Report_callback_failed of string * exn * Stdlib.Printexc.raw_backtrace in
   let tune ?to_report arm ctx timing_ctx =
     let to_report = Option.value to_report ~default:report in
@@ -898,17 +893,19 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
                   else Printf.sprintf "%.4f ms" r.Autotune.mma_best_ms))));
     (result, best_ms, r)
   in
-  (* gh-ocannl-550: every arm and every flip that SUCCEEDS produces a compiled routine, and exactly one
-     of them ships. Dropping the OCaml value does not free anything — the backend's pool table roots
-     the slabs (see {!Context.release}) — so an unshipped result is a permanently rooted routine
-     footprint, once per [tune_placements] call, plus one per attempted flip. Bounded per call, and
-     therefore not the per-candidate growth {!Autotune.tune} fixes, but a repeatedly-tuning process
-     (a benchmark sweep, a script tuning several routines) accumulates them without limit.
+  (* gh-ocannl-550: every arm and every flip that SUCCEEDS produces a compiled routine, and exactly
+     one of them ships. Dropping the OCaml value does not free anything — the backend's pool table
+     roots the slabs (see {!Context.release}) — so an unshipped result is a permanently rooted
+     routine footprint, once per [tune_placements] call, plus one per attempted flip. Bounded per
+     call, and therefore not the per-candidate growth {!Autotune.tune} fixes, but a
+     repeatedly-tuning process (a benchmark sweep, a script tuning several routines) accumulates
+     them without limit.
 
      Collected here rather than released at each decision point, because "may still ship" is not a
-     local property: the flip chain bases on arm A's result, so A stays alive while the chain runs even
-     when B won the A/B, and the chain's incumbent stays alive until the final comparison. One sweep at
-     the single point where the answer is known avoids having to re-derive that per branch. *)
+     local property: the flip chain bases on arm A's result, so A stays alive while the chain runs
+     even when B won the A/B, and the chain's incumbent stays alive until the final comparison. One
+     sweep at the single point where the answer is known avoids having to re-derive that per
+     branch. *)
   let produced = ref [] in
   let record = function Ok compiled -> produced := compiled :: !produced | Error _ -> () in
   let release_unshipped ?keep () =
@@ -932,15 +929,17 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
     | Error (exn, backtrace) when lineage_poisoned () ->
         logf "arm %s poisoned the shared %s lineage, so no sibling arm can run: propagating" who
           (if Option.is_some timing_ctx then "timing" else "caller's");
-        (* Nothing will ship (gh-ocannl-550): a sibling arm that already succeeded has no reader left. *)
+        (* Nothing will ship (gh-ocannl-550): a sibling arm that already succeeded has no reader
+           left. *)
         release_unshipped ();
         Stdlib.Printexc.raise_with_backtrace exn backtrace
     | _ -> ()
   in
-  (* A [report] callback exception propagates by design (it is the caller's failure, not the search's),
-     which means it exits [tune_placements] without reaching any of the ship paths below — so results
-     already collected would be abandoned rooted. Every call after the first goes through this
-     (gh-ocannl-550, round-four review); the first needs nothing, since [produced] is still empty. *)
+  (* A [report] callback exception propagates by design (it is the caller's failure, not the
+     search's), which means it exits [tune_placements] without reaching any of the ship paths below
+     — so results already collected would be abandoned rooted. Every call after the first goes
+     through this (gh-ocannl-550, round-four review); the first needs nothing, since [produced] is
+     still empty. *)
   let tune_or_release ?to_report arm c t =
     match tune ?to_report arm c t with
     | r -> r
@@ -1004,27 +1003,30 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
     | Force_arm_b -> false
   in
   let arm_ms r ms = match r with Error _ -> "FAILED" | Ok _ -> Printf.sprintf "%.4f ms" ms in
-  logf "winner: arm %s (A %s vs B %s)" (if measured_a_wins then "A" else "B") (arm_ms a a_ms)
-    (arm_ms b b_ms);
+  logf "winner: arm %s (A %s vs B %s)"
+    (if measured_a_wins then "A" else "B")
+    (arm_ms a a_ms) (arm_ms b b_ms);
   if forced then (
     Stdio.eprintf
       "Train.tune_placements: shipping arm %s by tune_ship_arm; the measured winner is arm %s (A \
-       %s vs B %s)%s.\n%!"
+       %s vs B %s)%s.\n\
+       %!"
       (if a_wins then "A" else "B")
       (if measured_a_wins then "A" else "B")
       (arm_ms a a_ms) (arm_ms b b_ms)
       (if Bool.equal a_wins measured_a_wins then ", so the override changed nothing"
        else ", so the override changed what ships");
     (* A forced arm has no fallback: shipping the other one would return an artifact the caller did
-       not ask for, under a setting whose whole purpose is that the returned routine IS the
-       profiled one. Said here because the propagation below is otherwise indistinguishable from an
-       ordinary both-arms-failed run. *)
+       not ask for, under a setting whose whole purpose is that the returned routine IS the profiled
+       one. Said here because the propagation below is otherwise indistinguishable from an ordinary
+       both-arms-failed run. *)
     match if a_wins then a else b with
     | Ok _ -> ()
     | Error (exn, _) ->
         Stdio.eprintf
           "Train.tune_placements: the arm tune_ship_arm selected failed, so its failure propagates \
-           rather than the other arm shipping in its place: %s\n%!"
+           rather than the other arm shipping in its place: %s\n\
+           %!"
           (Exn.to_string exn));
   (* gh-ocannl-546: a tensorized winner of the arm that is then discarded reaches no artifact and no
      end-to-end number, so the placement A/B is where it has to be said. Stated as the margin it
@@ -1065,7 +1067,8 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
     if forced && inline_flips > 0 then (
       Stdio.eprintf
         "Train.tune_placements: tune_ship_arm forces an arm, so the %d-flip inline refinement is \
-         skipped -- a refined placement vector is neither arm.\n%!"
+         skipped -- a refined placement vector is neither arm.\n\
+         %!"
         inline_flips;
       0)
     else inline_flips
@@ -1093,9 +1096,9 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
                propagates INSTEAD of returning [compiled], and by then [compiled] is the one result
                deliberately not released. Dropping the OCaml value frees nothing (the backend's pool
                table roots the slabs), and the caller never received a handle, so the routine would
-               be permanently unreachable and unreleasable: a repeatedly-tuning process with a
-               flaky callback accumulates one routine footprint per call. Release it here, then
-               re-raise the caller's own exception with its original backtrace. *)
+               be permanently unreachable and unreleasable: a repeatedly-tuning process with a flaky
+               callback accumulates one routine footprint per call. Release it here, then re-raise
+               the caller's own exception with its original backtrace. *)
             (match on_ship with
             | None -> ()
             | Some f -> (
@@ -1119,24 +1122,28 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
   in
   let winner_arm = if a_wins then "A" else "B" in
   if inline_flips <= 0 then ship ~what:winner_arm winner
-  else (
-    (* gh-555: greedy per-node refinement over the inlining decision vector. The vector lives on
-       the default-policy arm (arm B's placements are caller-seeded wholesale, so its compile
-       reports no policy decisions to flip), so the chain refines from arm A's context — a
-       Materialize chain walks from A toward B one node at a time — and the refined result ships
-       only if it beats the A/B winner. The decision surface is read analyze-only (gh-560; the
-       arms' compiles already populated the analysis cache, so this costs specialization replays).
+  else
+    let (* gh-555: greedy per-node refinement over the inlining decision vector. The vector lives on
+           the default-policy arm (arm B's placements are caller-seeded wholesale, so its compile
+           reports no policy decisions to flip), so the chain refines from arm A's context — a
+           Materialize chain walks from A toward B one node at a time — and the refined result ships
+           only if it beats the A/B winner. The decision surface is read analyze-only (gh-560; the
+           arms' compiles already populated the analysis cache, so this costs specialization
+           replays).
 
-       gh-514, the placement-space search over this chain: the surface arrives ranked
-       enablement-first ({!Autotune.placement_surface} — the gh-558 ordering lesson: a flip's
-       value includes which sketch families become expressible under it, so family-unlocking
-       Materialize flips outrank cost), and under config [autotune_bound_pruning] a [`Materialize]
-       flip whose partial-vector roofline floor ({!Ir.Cost_model.completion_floor}, monotone in
-       the chain's accumulated commitments) already meets the chain's best measured time is
-       fathomed without spending budget — the admissible direction, exactly phase 4b's rule one
-       level up. The budget counts {e measured} flips, so a fathomed candidate lets the next one
-       in. *)
-    let module LL = Ir.Low_level in
+           gh-514, the placement-space search over this chain: the surface arrives ranked
+           enablement-first ({!Autotune.placement_surface} — the gh-558 ordering lesson: a flip's
+           value includes which sketch families become expressible under it, so family-unlocking
+           Materialize flips outrank cost), and under config [autotune_bound_pruning] a
+           [`Materialize] flip whose partial-vector roofline floor
+           ({!Ir.Cost_model.completion_floor}, monotone in the chain's accumulated commitments)
+           already meets the chain's best measured time is fathomed without spending budget — the
+           admissible direction, exactly phase 4b's rule one level up. The budget counts {e
+           measured} flips, so a fathomed candidate lets the next one in. *)
+      module
+      LL =
+      Ir.Low_level
+    in
     let surface =
       (* Outside the tuner's failure containment; a lowering failure (the A/B searches above can
          still have crowned a winner) must skip the refinement, not fail the tune. *)
@@ -1160,18 +1167,18 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
           inline_flips
           (if bound_pruning then ", bound pruning on" else "");
         let chain = ref (a, a_ms, ctx, timing_ctx) in
-        (* The chain's accumulated placement commitments, for the floor: an accepted
-           [`Materialize] flip and a rejected [`Inline] flip both leave the node certainly
-           materialized in every completion the chain can still reach; the other two outcomes
-           leave it open (inline commitments never tighten the floor). *)
+        (* The chain's accumulated placement commitments, for the floor: an accepted [`Materialize]
+           flip and a rejected [`Inline] flip both leave the node certainly materialized in every
+           completion the chain can still reach; the other two outcomes leave it open (inline
+           commitments never tighten the floor). *)
         let certain_mat = ref [] in
         let measured = ref 0 and pruned = ref 0 in
         let rec walk = function
           | [] -> ()
           | _ when !measured >= inline_flips -> ()
-          (* Same lineage, same rule as the A/B above: a poisoned one refuses every timing run,
-             so a further search can only fail. Unlike the arms, there is nothing to propagate
-             here — the A/B winner is already in hand — so the refinement just stops. *)
+          (* Same lineage, same rule as the A/B above: a poisoned one refuses every timing run, so a
+             further search can only fail. Unlike the arms, there is nothing to propagate here — the
+             A/B winner is already in hand — so the refinement just stops. *)
           | _ when lineage_poisoned () ->
               logf "flip refinement stopped: the shared lineage is poisoned"
           | fc :: rest -> (
@@ -1180,8 +1187,7 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
                 Printf.sprintf "flip %s %s (cost %d%s)"
                   (match fc.LL.fc_flip with `Inline -> "inline" | `Materialize -> "materialize")
                   (Tn.debug_name fc.LL.fc_tn) fc.LL.fc_recompute_cost
-                  (if Set.mem surface.Autotune.ps_enablement fc.LL.fc_tn then ", enablement"
-                   else "")
+                  (if Set.mem surface.Autotune.ps_enablement fc.LL.fc_tn then ", enablement" else "")
               in
               let floor =
                 match fc.LL.fc_flip with
@@ -1191,9 +1197,9 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
               in
               match floor with
               | Some fl when Float.(fl >= chain_ms) ->
-                  (* Fathomed: the floor lower-bounds every completion with this node
-                     materialized, so no nested search from here can beat the incumbent. The
-                     node's placement stays open — nothing to commit. *)
+                  (* Fathomed: the floor lower-bounds every completion with this node materialized,
+                     so no nested search from here can beat the incumbent. The node's placement
+                     stays open — nothing to commit. *)
                   Int.incr pruned;
                   logf "%s bound-pruned: floor %.4f ms >= incumbent %.4f ms" arm fl chain_ms;
                   walk rest
@@ -1220,14 +1226,14 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
         if !pruned > 0 then
           logf "flip refinement: %d flip(s) bound-pruned, %d measured" !pruned !measured;
         let chain_result, chain_ms, _, _ = !chain in
-    if Float.(chain_ms < winner_ms) then (
-      logf "flip refinement ships: %.4f ms (the placement A/B winner was %.4f ms)" chain_ms
-        winner_ms;
-      ship ~what:"flip" chain_result)
-    else (
-      logf "flip refinement did not improve on the A/B winner (%.4f ms vs %.4f ms)" chain_ms
-        winner_ms;
-      ship ~what:winner_arm winner))
+        if Float.(chain_ms < winner_ms) then (
+          logf "flip refinement ships: %.4f ms (the placement A/B winner was %.4f ms)" chain_ms
+            winner_ms;
+          ship ~what:"flip" chain_result)
+        else (
+          logf "flip refinement did not improve on the A/B winner (%.4f ms vs %.4f ms)" chain_ms
+            winner_ms;
+          ship ~what:winner_arm winner)
 
 module Lazy = Utils.Lazy
 

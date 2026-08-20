@@ -6,13 +6,12 @@
 
    The step shape follows the fixture's [mode] metadata, like the Python runners:
 
-   - [mode: infer] (gpt2_mini) — forward-only; the parity metric is softmax-CE of the logits
-     against fixture target ids, recorded per batch with no updates.
-   - [mode: train] (gpt2_mini_train, gh-ocannl-551) — every weight is a parameter, the step is
-     backprop plus plain SGD, and the whole gh-ocannl-492 task-5 gate-cost family
-     (BENCH_PRECISION with BENCH_STATIC_SCALE / BENCH_GATE_INTERVAL) applies, since the workload
-     now has an optimizer and hence a loss scale to gate. The flags themselves live in
-     Bench_harness, shared with bench_mlp. *)
+   - [mode: infer] (gpt2_mini) — forward-only; the parity metric is softmax-CE of the logits against
+   fixture target ids, recorded per batch with no updates. - [mode: train] (gpt2_mini_train,
+   gh-ocannl-551) — every weight is a parameter, the step is backprop plus plain SGD, and the whole
+   gh-ocannl-492 task-5 gate-cost family (BENCH_PRECISION with BENCH_STATIC_SCALE /
+   BENCH_GATE_INTERVAL) applies, since the workload now has an optimizer and hence a loss scale to
+   gate. The flags themselves live in Bench_harness, shared with bench_mlp. *)
 
 open Base
 open Ocannl
@@ -67,14 +66,13 @@ let () =
      two modes, and the difference is the workload's, not a limitation:
 
      - Forward-only: LOAD-TIME CONVERSION, not cast twins — inference has no optimizer, so there is
-       no master copy for a twin to preserve, and keeping f32 storage would pay exactly the weight
-       bandwidth the leg measures away (torch's [model.half ()]). Data-backed weights (wte/wpe/ffn)
-       convert at wrap; the attention-projection params take the reduced precision through the
-       storage policy and [H.inject]'s [set_values] converts the f32 fixture values at load. No
-       loss scaling: there are no gradients.
-     - Training: the mixed-precision recipe — f32 masters with reduced-precision cast twins, the
-       storage policy over the decoder body's activations and gradients, and for f16 the dynamic
-       loss scaling whose gate the task-5 legs measure.
+     no master copy for a twin to preserve, and keeping f32 storage would pay exactly the weight
+     bandwidth the leg measures away (torch's [model.half ()]). Data-backed weights (wte/wpe/ffn)
+     convert at wrap; the attention-projection params take the reduced precision through the storage
+     policy and [H.inject]'s [set_values] converts the f32 fixture values at load. No loss scaling:
+     there are no gradients. - Training: the mixed-precision recipe — f32 masters with
+     reduced-precision cast twins, the storage policy over the decoder body's activations and
+     gradients, and for f16 the dynamic loss scaling whose gate the task-5 legs measure.
 
      Layer-norm gains/biases and the softmax-CE head stay f32 in both. *)
   let training = H.is_training st in
@@ -113,9 +111,9 @@ let () =
      creation, i.e. at the blocks' [()] application) covers the block params as well as ours. *)
   let build () =
     let wte = wrap "wte" ~i:[ vocab ] ~o:[ d_model ] in
-    (* A parameter has no batch axes (Tensor.param pins them empty), so the trained positional
-       table is [seq] x [d_model] output axes and the einsum-add places its seq axis onto the
-       sequence batch axis; inference keeps the plain broadcast add over a [seq]-batched table. *)
+    (* A parameter has no batch axes (Tensor.param pins them empty), so the trained positional table
+       is [seq] x [d_model] output axes and the einsum-add places its seq axis onto the sequence
+       batch axis; inference keeps the plain broadcast add over a [seq]-batched table. *)
     let%op embedded =
       if training then
         (wte * onehot_x)
@@ -123,16 +121,16 @@ let () =
               (TDSL.wrap_param ~l:"wpe" ~o:[ seq; d_model ] (St.to_ndarray st "wpe") ())
       else
         (wte * onehot_x)
-        + TDSL.wrap ~l:"wpe" ?prec:mp_prec ~b:[ seq ] ~i:[] ~o:[ d_model ]
-            (St.to_ndarray st "wpe") ()
+        + TDSL.wrap ~l:"wpe" ?prec:mp_prec ~b:[ seq ] ~i:[] ~o:[ d_model ] (St.to_ndarray st "wpe")
+            ()
     in
     let layers =
       List.init n_layer ~f:(fun i ->
           let name fmt = Printf.sprintf fmt i in
           let lbl = Printf.sprintf "l%d" i in
           let mha =
-            Nn_blocks.multi_head_attention ~label:[ lbl ] ~num_heads:n_head ~d_k:d_head
-              ~d_v:d_head ()
+            Nn_blocks.multi_head_attention ~label:[ lbl ] ~num_heads:n_head ~d_k:d_head ~d_v:d_head
+              ()
           in
           let ln1 = Nn_blocks.layer_norm ~label:[ "ln1"; lbl ] () in
           let ln2 = Nn_blocks.layer_norm ~label:[ "ln2"; lbl ] () in
@@ -183,8 +181,7 @@ let () =
       in
       walk logits;
       let is_ln tn =
-        List.exists tn.Ir.Tnode.label ~f:(fun l ->
-            String.equal l "gamma" || String.equal l "beta")
+        List.exists tn.Ir.Tnode.label ~f:(fun l -> String.equal l "gamma" || String.equal l "beta")
       in
       let except tn = (not (Hash_set.mem body tn.Ir.Tnode.id)) || is_ln tn in
       Precision_policy.apply ~except
@@ -213,31 +210,31 @@ let () =
   let mapping =
     ("lnf_g", [ "gamma"; "lnf" ])
     :: ("lnf_b", [ "beta"; "lnf" ])
-    (* Training turns the data-backed weights into parameters, so they join the injection mapping
-       — [H.inject] requires every parameter to name its fixture entry, and the tuned variant
-       re-injects after the search has overwritten them. *)
+       (* Training turns the data-backed weights into parameters, so they join the injection mapping
+          — [H.inject] requires every parameter to name its fixture entry, and the tuned variant
+          re-injects after the search has overwritten them. *)
     :: (if training then [ ("wte", [ "wte" ]); ("wpe", [ "wpe" ]) ] else [])
     @ List.concat_map (List.range 0 n_layer) ~f:(fun i ->
-          let l = Printf.sprintf "l%d" i in
+        let l = Printf.sprintf "l%d" i in
+        [
+          (Printf.sprintf "l%d_wq" i, [ l; "w"; "q" ]);
+          (Printf.sprintf "l%d_wk" i, [ l; "w"; "k" ]);
+          (Printf.sprintf "l%d_wv" i, [ l; "w"; "v" ]);
+          (Printf.sprintf "l%d_wo" i, [ l; "w"; "o" ]);
+          (Printf.sprintf "l%d_ln1_g" i, [ l; "gamma"; "ln1" ]);
+          (Printf.sprintf "l%d_ln1_b" i, [ l; "beta"; "ln1" ]);
+          (Printf.sprintf "l%d_ln2_g" i, [ l; "gamma"; "ln2" ]);
+          (Printf.sprintf "l%d_ln2_b" i, [ l; "beta"; "ln2" ]);
+        ]
+        @
+        if training then
           [
-            (Printf.sprintf "l%d_wq" i, [ l; "w"; "q" ]);
-            (Printf.sprintf "l%d_wk" i, [ l; "w"; "k" ]);
-            (Printf.sprintf "l%d_wv" i, [ l; "w"; "v" ]);
-            (Printf.sprintf "l%d_wo" i, [ l; "w"; "o" ]);
-            (Printf.sprintf "l%d_ln1_g" i, [ l; "gamma"; "ln1" ]);
-            (Printf.sprintf "l%d_ln1_b" i, [ l; "beta"; "ln1" ]);
-            (Printf.sprintf "l%d_ln2_g" i, [ l; "gamma"; "ln2" ]);
-            (Printf.sprintf "l%d_ln2_b" i, [ l; "beta"; "ln2" ]);
+            (Printf.sprintf "l%d_ffn_w1" i, [ l; "ffn"; "w1" ]);
+            (Printf.sprintf "l%d_ffn_b1" i, [ l; "ffn"; "b1" ]);
+            (Printf.sprintf "l%d_ffn_w2" i, [ l; "ffn"; "w2" ]);
+            (Printf.sprintf "l%d_ffn_b2" i, [ l; "ffn"; "b2" ]);
           ]
-          @
-          if training then
-            [
-              (Printf.sprintf "l%d_ffn_w1" i, [ l; "ffn"; "w1" ]);
-              (Printf.sprintf "l%d_ffn_b1" i, [ l; "ffn"; "b1" ]);
-              (Printf.sprintf "l%d_ffn_w2" i, [ l; "ffn"; "w2" ]);
-              (Printf.sprintf "l%d_ffn_b2" i, [ l; "ffn"; "b2" ]);
-            ]
-          else [])
+        else [])
   in
   let ctx = H.inject ctx st batch_loss mapping in
   let t0 = Unix.gettimeofday () in
@@ -267,8 +264,8 @@ let () =
   in
   let compile_s = Unix.gettimeofday () -. t0 in
   let ctx = if tune then H.inject ctx st batch_loss mapping else ctx in
-  (* The scaled training legs thread the context (Loss_scaler.update overwrites the scale
-     tensors), hence the reference. *)
+  (* The scaled training legs thread the context (Loss_scaler.update overwrites the scale tensors),
+     hence the reference. *)
   let ctx_ref = ref ctx in
   let batch_ref = IDX.find_exn (H.train_step_bindings routines) batch_n in
   let step_count = ref 0 in
@@ -281,8 +278,8 @@ let () =
   H.measure_and_emit ~st ~backend
     ~variant:
       (* Mirror bench_mlp: the scheduling variant alone. orchestrate renders precision as its own
-         report column and composes the two axes itself (gh-ocannl-539), so a reduced-precision
-         cell is distinguished by the precision field rather than by overloading this one. *)
+         report column and composes the two axes itself (gh-ocannl-539), so a reduced-precision cell
+         is distinguished by the precision field rather than by overloading this one. *)
       (if tune then "tuned" else if materialize then "materialized" else "default")
     ~precision:leg.H.label ~compile_s ~tokens_per_step:(batch_size * seq) ~tune:arms ~run_step
     ~read_loss:(fun () -> (!ctx_ref, batch_loss).@[0])

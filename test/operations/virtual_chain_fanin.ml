@@ -3,39 +3,39 @@
    read-modify-write-exempt — and no reduction loops, so neither per-node cap
    ([virtualize_max_visits], [virtualize_max_inline_reduction]) ever materializes it; yet inlining
    it replays the entire prefix of the chain at every consumer, quadratic in depth. The guard caps
-   the fan-in of the fully-inlined computation (the number of distinct materialized nodes it
-   loads, accumulated through chains of virtual producers): the first chain node whose fan-in
-   exceeds [virtualize_max_inline_fanin] is materialized (provenance 41), which resets the fan-in
-   of everything downstream.
+   the fan-in of the fully-inlined computation (the number of distinct materialized nodes it loads,
+   accumulated through chains of virtual producers): the first chain node whose fan-in exceeds
+   [virtualize_max_inline_fanin] is materialized (provenance 41), which resets the fan-in of
+   everything downstream.
 
    Phase 1 pins the decision structurally on a hand-built [Ir.Low_level.t] chain through the
    [Ll_test] harness: with the default cap 8, a 10-link add chain materializes exactly the link
    whose fan-in first reaches 9 (x8), the links before and after stay virtual, and the
-   materialization is reported as an [`Inline] flip whose recompute cost carries the fan-in
-   (extent 1 × multiplicity 1 × fan-in 9 — so the memory-budget planner does not rank the node
-   among the cheapest to re-inline). Disabling the cap reproduces the old behavior (whole chain
-   virtual). Both readings execute and must agree cell for cell with the OCaml reference
-   (gh-ocannl-589: placement decisions need an executed leg, not just structural pins).
+   materialization is reported as an [`Inline] flip whose recompute cost carries the fan-in (extent
+   1 × multiplicity 1 × fan-in 9 — so the memory-budget planner does not rank the node among the
+   cheapest to re-inline). Disabling the cap reproduces the old behavior (whole chain virtual). Both
+   readings execute and must agree cell for cell with the OCaml reference (gh-ocannl-589: placement
+   decisions need an executed leg, not just structural pins).
 
    Phase 1b pins that reads inside a [Local_scope] body in a setter's right-hand side count toward
    that setter's fan-in (review round 1): a producer computed through a scope body loading 9
    materialized nodes materializes under the cap.
 
-   Phase 2 exercises the real [Assignments] pipeline on a tensor-graph chain built with
-   [TDSL.O.( + )], asserting the same placement pattern through [Context.placements] and value
-   parity between the default and cap-disabled compiles.
+   Phase 2 exercises the real [Assignments] pipeline on a tensor-graph chain built with [TDSL.O.( +
+   )], asserting the same placement pattern through [Context.placements] and value parity between
+   the default and cap-disabled compiles.
 
    Phase 3 pins the cross-routine reading (review round 1): the same chain split across two
    [LL.optimize] calls sharing one [optimize_ctx] — the second routine reads a node the first
    committed [Virtual], whose fan-in is derived from the stored computation rather than from
    (absent) local setters, so the chain cannot escape the cap by being compiled in pieces. The
-   executed leg is gh-ocannl-610's acceptance test: routine B's kernel parameters must include
-   the leaves (x0, w1..w5) that reach it only through the spliced cross-routine computation.
+   executed leg is gh-ocannl-610's acceptance test: routine B's kernel parameters must include the
+   leaves (x0, w1..w5) that reach it only through the spliced cross-routine computation.
 
    Phase 4 pins gh-ocannl-611: a routine whose entire content virtualizes away is legal — it
    optimizes to an empty schedule ([Noop]) whose stored computations persist in the lineage,
-   compiles and runs as a no-op, and a later routine consumes the deferred chain, executed
-   against the same reference. *)
+   compiles and runs as a no-op, and a later routine consumes the deferred chain, executed against
+   the same reference. *)
 
 open Base
 open Ll_test
@@ -47,8 +47,8 @@ let dim = 4
 
 (* === The chain, shared by phases 1 and 3 ===
 
-   x0, w1..w10 materialized; x_k = x_{k-1} + w_k; out = x_10. Fan-in of x_k is k+1
-   ({x0, w1..wk}); the default cap 8 trips first at x8 (fan-in 9). *)
+   x0, w1..w10 materialized; x_k = x_{k-1} + w_k; out = x_10. Fan-in of x_k is k+1 ({x0, w1..wk});
+   the default cap 8 trips first at x8 (fan-in 9). *)
 
 type chain = {
   x0 : Tn.t;
@@ -145,13 +145,10 @@ let phase1b () =
   let id = LL.get_scope lv in
   (* y[i] = Local_scope{ lv := w1[i] + ... + w9[i] }: nine loads, all inside the scope body. *)
   let body =
-    LL.Set_local
-      ( id,
-        Array.fold ws ~init:(c 0.) ~f:(fun acc w -> add acc (get w [| iter i |])) )
+    LL.Set_local (id, Array.fold ws ~init:(c 0.) ~f:(fun acc w -> add acc (get w [| iter i |])))
   in
   let producer =
-    loop_n i dim
-      (set y [| iter i |] (LL.Local_scope { id; body; orig_indices = [| iter i |] }))
+    loop_n i dim (set y [| iter i |] (LL.Local_scope { id; body; orig_indices = [| iter i |] }))
   in
   let consumer = loop_n j dim (set out [| iter j |] (get y [| iter j |])) in
   let o = optimize ~name:"vcf_scope" (seq producer consumer) in
@@ -164,9 +161,9 @@ let phase1b () =
   let got = execute ~name:"vcf_scope" o ~seed ~read:[ out ] in
   p "scope: executed values match the reference" (same got [ expected ]);
   (* Review round 2: a scope body ACCUMULATING INTO the setter's own node must not record the
-     self-read as a contributor. y2 is zero-initialized and set from a scope reading y2 itself
-     plus exactly 8 materialized nodes: fan-in 8, at the cap — a phantom self contributor would
-     make it 9 and flip the decision. *)
+     self-read as a contributor. y2 is zero-initialized and set from a scope reading y2 itself plus
+     exactly 8 materialized nodes: fan-in 8, at the cap — a phantom self contributor would make it 9
+     and flip the decision. *)
   let y2 = mk "y2" and out2 = mk "sout2" and lv2 = mk "lv2" in
   materialize out2;
   virtualize lv2;
@@ -182,7 +179,9 @@ let phase1b () =
   let producer2 =
     seq (zero y2)
       (loop_n i2 dim
-         (set y2 [| iter i2 |] (LL.Local_scope { id = id2; body = body2; orig_indices = [| iter i2 |] })))
+         (set y2
+            [| iter i2 |]
+            (LL.Local_scope { id = id2; body = body2; orig_indices = [| iter i2 |] })))
   in
   let consumer2 = loop_n j2 dim (set out2 [| iter j2 |] (get y2 [| iter j2 |])) in
   let o2 = optimize ~name:"vcf_scope_rmw" (seq producer2 consumer2) in
@@ -192,27 +191,27 @@ let phase1b () =
         Array.foldi (Array.init 8 ~f:w_vals) ~init:0. ~f:(fun _ acc w -> acc +. w.(i)))
   in
   let seed2 =
-    (out2, blank dim) :: (Array.to_list (Array.sub ws ~pos:0 ~len:8) |> List.mapi ~f:(fun k w -> (w, w_vals k)))
+    (out2, blank dim)
+    :: (Array.to_list (Array.sub ws ~pos:0 ~len:8) |> List.mapi ~f:(fun k w -> (w, w_vals k)))
   in
   let got2 = execute ~name:"vcf_scope_rmw" o2 ~seed:seed2 ~read:[ out2 ] in
   p "scope rmw: executed values match the reference" (same got2 [ expected2 ]);
   (* Review round 5: [Where]'s arms are mutually exclusive per evaluation
-     ([Ops.ternop_conditionality] = [Cond_and_one_arm]), so a setter's fan-in charges the wider
-     arm, not the union: mask + two 4-load arms is fan-in 5, within the cap — the union (9) would
+     ([Ops.ternop_conditionality] = [Cond_and_one_arm]), so a setter's fan-in charges the wider arm,
+     not the union: mask + two 4-load arms is fan-in 5, within the cap — the union (9) would
      spuriously materialize. Both arms execute in the parity leg (mask alternates). *)
   let y4 = mk "y4" and out4 = mk "wout" and m = mk "m" in
   materialize out4;
   materialize m;
   let i4 = sym () and j4 = sym () in
   let arm pos =
-    Array.fold
-      (Array.sub ws ~pos ~len:4)
-      ~init:(Ll_test.c 0.)
-      ~f:(fun acc w -> add acc (get w [| iter i4 |]))
+    Array.fold (Array.sub ws ~pos ~len:4) ~init:(Ll_test.c 0.) ~f:(fun acc w ->
+        add acc (get w [| iter i4 |]))
   in
   let producer4 =
     loop_n i4 dim
-      (set y4 [| iter i4 |]
+      (set y4
+         [| iter i4 |]
          (LL.Ternop (Ir.Ops.Where, (get m [| iter i4 |], single), (arm 0, single), (arm 4, single))))
   in
   let consumer4 = loop_n j4 dim (set out4 [| iter j4 |] (get y4 [| iter j4 |])) in
@@ -228,8 +227,7 @@ let phase1b () =
           ~f:(fun _ acc w -> acc +. w.(i)))
   in
   let seed4 =
-    (out4, blank dim) :: (m, m_vals)
-    :: (Array.to_list ws |> List.mapi ~f:(fun k w -> (w, w_vals k)))
+    (out4, blank dim) :: (m, m_vals) :: (Array.to_list ws |> List.mapi ~f:(fun k w -> (w, w_vals k)))
   in
   let got4 = execute ~name:"vcf_where" o4 ~seed:seed4 ~read:[ out4 ] in
   p "where: executed values match the reference (both arms exercised)" (same got4 [ expected4 ]);
@@ -250,27 +248,27 @@ let phase1b () =
         body =
           LL.Set_local
             ( sid,
-              Array.fold
-                (Array.sub ws ~pos ~len:4)
-                ~init:(Ll_test.c 0.)
-                ~f:(fun acc w -> add acc (get w [| iter i5 |])) );
+              Array.fold (Array.sub ws ~pos ~len:4) ~init:(Ll_test.c 0.) ~f:(fun acc w ->
+                  add acc (get w [| iter i5 |])) );
         orig_indices = [| iter i5 |];
       }
   in
   let producer5 =
     loop_n i5 dim
-      (set y5 [| iter i5 |]
+      (set y5
+         [| iter i5 |]
          (LL.Ternop
-            (Ir.Ops.Where, (get m [| iter i5 |], single), (scope_arm ida 0, single),
-             (scope_arm idb 4, single))))
+            ( Ir.Ops.Where,
+              (get m [| iter i5 |], single),
+              (scope_arm ida 0, single),
+              (scope_arm idb 4, single) )))
   in
   let consumer5 = loop_n j5 dim (set out5 [| iter j5 |] (get y5 [| iter j5 |])) in
   let o5 = optimize ~name:"vcf_where_scopes" (seq producer5 consumer5) in
   p "where scopes: producer materialized (hoisted bodies both charge, fan-in 9)"
     (known_non_virtual o5 y5);
   let seed5 =
-    (out5, blank dim) :: (m, m_vals)
-    :: (Array.to_list ws |> List.mapi ~f:(fun k w -> (w, w_vals k)))
+    (out5, blank dim) :: (m, m_vals) :: (Array.to_list ws |> List.mapi ~f:(fun k w -> (w, w_vals k)))
   in
   let got5 = execute ~name:"vcf_where_scopes" o5 ~seed:seed5 ~read:[ out5 ] in
   p "where scopes: executed values match the reference" (same got5 [ expected4 ])
@@ -358,22 +356,21 @@ let phase3 () =
   p "cross-routine: routine A leaves x1..x5 virtual"
     (Array.for_alli c.xs ~f:(fun k tn -> k >= split || known_virtual o_a tn));
   let o_b = LL.optimize ctx ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_xchain_b" [] llc_b in
-  (* Routine B never sets x5, yet x5's stored computation is replayed when inlined: its fan-in
-     (6: {x0, w1..w5}) is derived from the computation, so x6 sees 7, x7 sees 8, and x8 trips the
-     cap exactly as in the single-routine reading. *)
+  (* Routine B never sets x5, yet x5's stored computation is replayed when inlined: its fan-in (6:
+     {x0, w1..w5}) is derived from the computation, so x6 sees 7, x7 sees 8, and x8 trips the cap
+     exactly as in the single-routine reading. *)
   p "cross-routine: x7 stays virtual" (known_virtual o_b c.xs.(6));
   p "cross-routine: x8 materialized by the fan-in cap" (known_non_virtual o_b c.xs.(7));
-  p "cross-routine: x9 and x10 virtual"
-    (known_virtual o_b c.xs.(8) && known_virtual o_b c.xs.(9));
-  (* gh-ocannl-610 acceptance: routine B executes correctly, its kernel declaring parameters for
-     the leaves that reach it only through the spliced cross-routine computation. *)
+  p "cross-routine: x9 and x10 virtual" (known_virtual o_b c.xs.(8) && known_virtual o_b c.xs.(9));
+  (* gh-ocannl-610 acceptance: routine B executes correctly, its kernel declaring parameters for the
+     leaves that reach it only through the spliced cross-routine computation. *)
   let got = execute ~name:"vcf_xchain_b" o_b ~seed:(chain_seed c) ~read:[ c.out ] in
   p "cross-routine: executed values match the reference" (same got [ expected_out ]);
   (* Review round 3: a routine that UPDATES an inherited virtual node must not lose the stored
      prefix behind the update's excluded self-read — the inherited component reads union with the
      local setter reads. Routine B': x5 += w6 (self-update of the inherited virtual), then three
-     fresh links; x5's fan-in is {w6} ∪ {x0, w1..w5} = 7, so the second fresh link (fan-in 9)
-     trips the cap while the first (fan-in 8) stays virtual. *)
+     fresh links; x5's fan-in is {w6} ∪ {x0, w1..w5} = 7, so the second fresh link (fan-in 9) trips
+     the cap while the first (fan-in 8) stays virtual. *)
   let c2 = build_chain ~first_id:3300 () in
   let llc_a2 =
     let out_a2 = c2.mk "out_a2" in
@@ -440,8 +437,8 @@ let phase4 () =
   in
   p "all-virtual: routine A optimizes to an empty schedule"
     (match o_a.LL.llc with LL.Noop -> true | _ -> false);
-  (* Review round 1 (P2): the interface must match the empty schedule — the deferred
-     computations' leaves are not phantom inputs of a routine that reads nothing. *)
+  (* Review round 1 (P2): the interface must match the empty schedule — the deferred computations'
+     leaves are not phantom inputs of a routine that reads nothing. *)
   p "all-virtual: the empty schedule has an empty interface"
     (let (ins, outs), merge = LL.input_and_output_nodes o_a in
      Set.is_empty ins && Set.is_empty outs && Option.is_none merge);
@@ -466,8 +463,8 @@ let phase4 () =
 (* === Phase 5: spliced reads vs the consumer's own writes (review round 1) === *)
 
 let phase5 () =
-  (* P1: a spliced read PRECEDING the routine's own write of an already-traced node must flip it
-     to read_before_write — the raw analysis alone sees only the write, concludes the node is
+  (* P1: a spliced read PRECEDING the routine's own write of an already-traced node must flip it to
+     read_before_write — the raw analysis alone sees only the write, concludes the node is
      output-only, and the incoming value would read as ignorable. Routine A defers v := ell + 100;
      routine B consumes v (splicing the ell read) and THEN overwrites ell. *)
   let mk = node_factory ~first_id:3500 ~dims:[| dim |] () in
@@ -499,9 +496,7 @@ let phase5 () =
      Set.mem ins ell);
   let ell_old = Array.init dim ~f:(fun i -> 1. +. Float.of_int i) in
   let got =
-    execute ~name:"vcf_prewrite_b" o_b
-      ~seed:[ (ell, ell_old); (out, blank dim) ]
-      ~read:[ out; ell ]
+    execute ~name:"vcf_prewrite_b" o_b ~seed:[ (ell, ell_old); (out, blank dim) ] ~read:[ out; ell ]
   in
   p "pre-write splice: out sees the incoming ell, ell holds the overwrite"
     (same got
@@ -541,17 +536,18 @@ let phase5 () =
     with Utils.User_error msg -> String.is_substring msg ~substring:"merge buffer"
   in
   p "merge splice: consuming it in a later routine is rejected" rejected;
-  (* Review round 2, P1: the consumer declaring the SAME merge source does not rescue the splice
-     — the deferred read would observe the consumer's transfer, not the one it was written
-     against. Detection is at consumption time (an entry-time snapshot in [virtual_llc]),
-     because in the final code this case is indistinguishable from legitimate same-routine
-     inlining of a declared merge read. *)
+  (* Review round 2, P1: the consumer declaring the SAME merge source does not rescue the splice —
+     the deferred read would observe the consumer's transfer, not the one it was written against.
+     Detection is at consumption time (an entry-time snapshot in [virtual_llc]), because in the
+     final code this case is indistinguishable from legitimate same-routine inlining of a declared
+     merge read. *)
   let mout2 = mk "mout2" in
   materialize mout2;
   let llc_mb2 =
     let s = sym () in
     loop_n s dim
-      (set mout2 [| iter s |]
+      (set mout2
+         [| iter s |]
          (add (get mv [| iter s |]) (LL.Get_merge_buffer (msrc, [| iter s |]))))
   in
   let rejected2 =
@@ -563,9 +559,9 @@ let phase5 () =
     with Utils.User_error msg -> String.is_substring msg ~substring:"merge buffer"
   in
   p "merge splice: same-source consumer is rejected too" rejected2;
-  (* Review round 5, P2: a legitimate same-routine merge read that survives optimization must
-     not mint an ordinary traced entry for its SOURCE — the merge buffer is the parameter, and a
-     phantom source entry would double the transfer buffer's allocation. *)
+  (* Review round 5, P2: a legitimate same-routine merge read that survives optimization must not
+     mint an ordinary traced entry for its SOURCE — the merge buffer is the parameter, and a phantom
+     source entry would double the transfer buffer's allocation. *)
   let msrc3 = mk "msrc3" in
   materialize msrc3;
   let mtar = mk "mtar" in
@@ -582,13 +578,13 @@ let phase5 () =
     ((match o_m3.LL.merge_node with Some m -> Tn.equal m msrc3 | None -> false)
     && not (Hashtbl.mem o_m3.LL.traced_store msrc3));
   (* Review round 2, P1: a write covering only SOME cells does not cover a later spliced read —
-     coverage is per-cell and guard-aware, decided by [reads_covered_query] over the final code,
-     not by syntactic write-before-read order. Routine B writes ell2[0] only, then consumes
-     v2 = ell2 + 100 at an OFFSET position (out2[i] = v2[i+1]): the spliced reads touch cells
-     the write never covers, so ell2 must stay a routine input. The offset also keeps the read
-     off the enclosing write's index position, so this case does not depend on how the
-     [rmw_exempt] copy-position reads are judged — that split is gh-ocannl-618's, pinned in
-     splice_semantics.ml (raw side) and by the same-position splice below (round 6). *)
+     coverage is per-cell and guard-aware, decided by [reads_covered_query] over the final code, not
+     by syntactic write-before-read order. Routine B writes ell2[0] only, then consumes v2 = ell2 +
+     100 at an OFFSET position (out2[i] = v2[i+1]): the spliced reads touch cells the write never
+     covers, so ell2 must stay a routine input. The offset also keeps the read off the enclosing
+     write's index position, so this case does not depend on how the [rmw_exempt] copy-position
+     reads are judged — that split is gh-ocannl-618's, pinned in splice_semantics.ml (raw side) and
+     by the same-position splice below (round 6). *)
   let ell2 = mk "ell2" in
   materialize ell2;
   let v2 = mk "v2" and out2 = mk "pout" in
@@ -618,21 +614,18 @@ let phase5 () =
      Set.mem ins ell2);
   let ell2_old = Array.init dim ~f:(fun i -> 1. +. Float.of_int i) in
   let got3 =
-    execute ~name:"vcf_partial_b" o_b3
-      ~seed:[ (ell2, ell2_old); (out2, blank dim) ]
-      ~read:[ out2 ]
+    execute ~name:"vcf_partial_b" o_b3 ~seed:[ (ell2, ell2_old); (out2, blank dim) ] ~read:[ out2 ]
   in
   (* out2[i] = ell2[i+1] + 100 for i in 0..2 (incoming cells — the write touched only cell 0);
      out2[3] keeps the sentinel, no writer covers it. *)
   let expected3 =
     Array.init dim ~f:(fun i -> if i < dim - 1 then ell2_old.(i + 1) +. 100. else sentinel)
   in
-  p "partial-write splice: uncovered cells read the incoming values"
-    (same got3 [ expected3 ]);
+  p "partial-write splice: uncovered cells read the incoming values" (same got3 [ expected3 ]);
   (* Review round 3, P1: a DEAD loop's write must not supply coverage — the raw side drops dead
-     accesses ([drop_dead_loop_accesses]) and the reconcile walk now mirrors it: a dead write
-     does not enter the first-write tracking and dead accesses are filtered from the coverage
-     query. Routine B: a dead full write of ell3, then the spliced read, then a live write. *)
+     accesses ([drop_dead_loop_accesses]) and the reconcile walk now mirrors it: a dead write does
+     not enter the first-write tracking and dead accesses are filtered from the coverage query.
+     Routine B: a dead full write of ell3, then the spliced read, then a live write. *)
   let ell3 = mk "ell3" in
   materialize ell3;
   let v3 = mk "v3" and out3 = mk "dout" in
@@ -647,8 +640,8 @@ let phase5 () =
   in
   p "dead-write splice: routine A defers v3" (known_virtual o_a4 v3);
   (* ghost/ghost2 are mentioned ONLY inside a dead loop: since round 13 drops dead loops at
-     virtualization, nothing about them survives — no registry entry, no parameter, no
-     interface presence (rounds 4 and 13). *)
+     virtualization, nothing about them survives — no registry entry, no parameter, no interface
+     presence (rounds 4 and 13). *)
   let ghost = mk "ghost" in
   materialize ghost;
   let ghost2 = mk "ghost2" in
@@ -686,10 +679,10 @@ let phase5 () =
          Array.map ell3_old ~f:(fun x -> x +. 100.);
          Array.init dim ~f:(fun i -> 2000. +. Float.of_int i);
        ]);
-  (* Review round 3, P2: a projection's discarded operand is never rendered — a merge read
-     inside it must not taint the deferred computation, and its ordinary reads must not become
-     phantom parameters. v5 := Arg2(msrc.merge + extra, ell5): the whole first operand is
-     discarded, so consuming v5 in a later routine is legal and computes the second operand. *)
+  (* Review round 3, P2: a projection's discarded operand is never rendered — a merge read inside it
+     must not taint the deferred computation, and its ordinary reads must not become phantom
+     parameters. v5 := Arg2(msrc.merge + extra, ell5): the whole first operand is discarded, so
+     consuming v5 in a later routine is legal and computes the second operand. *)
   let ell5 = mk "ell5" in
   materialize ell5;
   let extra = mk "extra" in
@@ -700,7 +693,8 @@ let phase5 () =
   let llc_a5 =
     let s = sym () in
     loop_n s dim
-      (set v5 [| iter s |]
+      (set v5
+         [| iter s |]
          (binop Ir.Ops.Arg2
             (add (LL.Get_merge_buffer (msrc, [| iter s |])) (get extra [| iter s |]))
             (get ell5 [| iter s |])))
@@ -724,11 +718,11 @@ let phase5 () =
     execute ~name:"vcf_proj_b" o_b5 ~seed:[ (ell5, ell5_vals); (out5, blank dim) ] ~read:[ out5 ]
   in
   p "discarded operand: executed values are the projected operand's" (same got5 [ ell5_vals ]);
-  (* Review round 4, P1: a write under an [If] guard is never a DEFINITE write — when the guard
-     is false at runtime the entry value is still required, so a guarded full write must not
-     suppress the input flag of a later spliced read (the coverage query's guards-taken contract
-     is for placement decisions, not the interface: guarded writes are pre-filtered). Both
-     branches execute below; the offset read keeps the splice off the rmw_exempt position. *)
+  (* Review round 4, P1: a write under an [If] guard is never a DEFINITE write — when the guard is
+     false at runtime the entry value is still required, so a guarded full write must not suppress
+     the input flag of a later spliced read (the coverage query's guards-taken contract is for
+     placement decisions, not the interface: guarded writes are pre-filtered). Both branches execute
+     below; the offset read keeps the splice off the rmw_exempt position. *)
   let flag = mk ~dims:[| 1 |] "flag" in
   materialize flag;
   let ell7 = mk "ell7" in
@@ -797,9 +791,7 @@ let phase5 () =
     let s = sym () in
     loop_n s dim (set v9 [| iter s |] (add (get ell9 [| iter s |]) (c 100.)))
   in
-  let o_a8 =
-    LL.optimize ctx8 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_rmw_a" [] llc_a8
-  in
+  let o_a8 = LL.optimize ctx8 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_rmw_a" [] llc_a8 in
   p "same-position splice: routine A defers v9" (known_virtual o_a8 v9);
   let llc_b8 =
     let s = sym () in
@@ -807,18 +799,16 @@ let phase5 () =
       (set ell9 [| fixed 0 |] (c 5000.))
       (loop_n s dim (set ell9 [| iter s |] (get v9 [| iter s |])))
   in
-  let o_b8 =
-    LL.optimize ctx8 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_rmw_b" [] llc_b8
-  in
+  let o_b8 = LL.optimize ctx8 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_rmw_b" [] llc_b8 in
   p "same-position splice: ell9 is read-before-write (rmw is not exempt from the interface)"
     (read_before_write o_b8 ell9);
   let ell9_old = Array.init dim ~f:(fun i -> 5. +. Float.of_int i) in
   let got8 = execute ~name:"vcf_rmw_b" o_b8 ~seed:[ (ell9, ell9_old) ] ~read:[ ell9 ] in
   p "same-position splice: updated in place over the incoming values"
     (same got8 [ Array.init dim ~f:(fun i -> if i = 0 then 5100. else ell9_old.(i) +. 100.) ]);
-  (* Review round 6, P2: a shared-loop stored body carries SIBLING setters that inlining filters
-     out — a sibling's merge read must not taint the candidate. Routine A's one loop computes
-     both sib (materialized, from the merge buffer) and v10 (virtual, from ell10). *)
+  (* Review round 6, P2: a shared-loop stored body carries SIBLING setters that inlining filters out
+     — a sibling's merge read must not taint the candidate. Routine A's one loop computes both sib
+     (materialized, from the merge buffer) and v10 (virtual, from ell10). *)
   let msrc4 = mk "msrc4" in
   materialize msrc4;
   let sib = mk "sib" in
@@ -854,9 +844,9 @@ let phase5 () =
   in
   p "sibling merge: consuming v10 is legal, only its own setter's reads splice"
     (same got9 [ Array.map ell10_vals ~f:(fun x -> x +. 100.) ]);
-  (* Review round 7, P1: consumption through an UPDATE of the inherited virtual (the consumer
-     has a local assignment to it) still records the spliced leaf reads — the strictness key is
-     what the inlined bodies read, not whether the consumed node lacks local setters. *)
+  (* Review round 7, P1: consumption through an UPDATE of the inherited virtual (the consumer has a
+     local assignment to it) still records the spliced leaf reads — the strictness key is what the
+     inlined bodies read, not whether the consumed node lacks local setters. *)
   let ell12 = mk "ell12" in
   materialize ell12;
   let d12 = mk "d12" in
@@ -900,9 +890,9 @@ let phase5 () =
          Array.init dim ~f:(fun i -> 3000. +. Float.of_int i);
        ]);
   (* Review round 7, P1: strictness is PER SPLICED NODE — a routine that consumes an inherited
-     computation must not re-judge its unrelated raw reads. ew is written then read inside ONE
-     [If] body (guards-taken coverage: the false branch performs neither access), so it must
-     stay off the interface even though the routine splices v13 elsewhere. *)
+     computation must not re-judge its unrelated raw reads. ew is written then read inside ONE [If]
+     body (guards-taken coverage: the false branch performs neither access), so it must stay off the
+     interface even though the routine splices v13 elsewhere. *)
   let gflag = mk ~dims:[| 1 |] "gflag" in
   materialize gflag;
   let ew = mk "ew" in
@@ -946,15 +936,21 @@ let phase5 () =
   let ell13_vals = Array.init dim ~f:(fun i -> 21. +. Float.of_int i) in
   let got11 =
     execute ~name:"vcf_raw_b" o_b11
-      ~seed:[ (gflag, [| 1. |]); (ell13, ell13_vals); (ew, blank dim); (out13, blank dim); (out14, blank dim) ]
+      ~seed:
+        [
+          (gflag, [| 1. |]);
+          (ell13, ell13_vals);
+          (ew, blank dim);
+          (out13, blank dim);
+          (out14, blank dim);
+        ]
       ~read:[ out13; out14 ]
   in
   p "raw-read isolation: executed values match on the taken branch"
-    (same got11
-       [ Array.create ~len:dim 7.; Array.map ell13_vals ~f:(fun x -> x +. 100.) ]);
+    (same got11 [ Array.create ~len:dim 7.; Array.map ell13_vals ~f:(fun x -> x +. 100.) ]);
   (* Review round 8, P2: a discarded projection operand inside an INHERITED computation must not
-     mark its node as spliced — extra3 reaches routine B only through Arg2's dead first operand,
-     so B's own raw guarded-write-then-read of extra3 keeps its raw guards-taken verdict. *)
+     mark its node as spliced — extra3 reaches routine B only through Arg2's dead first operand, so
+     B's own raw guarded-write-then-read of extra3 keeps its raw guards-taken verdict. *)
   let extra3 = mk "extra3" in
   materialize extra3;
   let ell14 = mk "ell14" in
@@ -966,8 +962,7 @@ let phase5 () =
   let llc_a12 =
     let s = sym () in
     loop_n s dim
-      (set v14 [| iter s |]
-         (binop Ir.Ops.Arg2 (get extra3 [| iter s |]) (get ell14 [| iter s |])))
+      (set v14 [| iter s |] (binop Ir.Ops.Arg2 (get extra3 [| iter s |]) (get ell14 [| iter s |])))
   in
   let o_a12 =
     LL.optimize ctx12 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_proj2_a" [] llc_a12
@@ -995,16 +990,20 @@ let phase5 () =
   let got12 =
     execute ~name:"vcf_proj2_b" o_b12
       ~seed:
-        [ (gflag, [| 1. |]); (ell14, ell14_vals); (extra3, blank dim); (out16, blank dim);
-          (out17, blank dim) ]
+        [
+          (gflag, [| 1. |]);
+          (ell14, ell14_vals);
+          (extra3, blank dim);
+          (out16, blank dim);
+          (out17, blank dim);
+        ]
       ~read:[ out16; out17 ]
   in
   p "discarded-splice: executed values are the projected operand's"
     (same got12 [ Array.create ~len:dim 3.; ell14_vals ]);
-  (* Review round 8, P2: a guarded write DOMINATING the spliced read supplies coverage — inside
-     one [If] body the write precedes the consume, so the false path performs neither access and
-     no entry value is required. Contrast vcf_guard above, where the read sits OUTSIDE the
-     guard. *)
+  (* Review round 8, P2: a guarded write DOMINATING the spliced read supplies coverage — inside one
+     [If] body the write precedes the consume, so the false path performs neither access and no
+     entry value is required. Contrast vcf_guard above, where the read sits OUTSIDE the guard. *)
   let leaf15 = mk "leaf15" in
   materialize leaf15;
   let v15 = mk "v15" and out18 = mk "dgout" in
@@ -1049,11 +1048,11 @@ let phase5 () =
          Array.init dim ~f:(fun i -> 600. +. Float.of_int i);
          Array.init dim ~f:(fun i -> 500. +. Float.of_int i);
        ]);
-  (* Review round 9, P2: the CONSUMER's own projection around an inherited virtual — the
-     discarded operand is never evaluated, so a merge-tainted deferred node there must not
-     reject the routine. virtual_llc collapses Arg1/Arg2 to the selected operand (mirroring
-     simplify), so the discarded inline is never attempted; mv is the merge-tainted deferred
-     node from the merge-splice pins above, on the same lineage. *)
+  (* Review round 9, P2: the CONSUMER's own projection around an inherited virtual — the discarded
+     operand is never evaluated, so a merge-tainted deferred node there must not reject the routine.
+     virtual_llc collapses Arg1/Arg2 to the selected operand (mirroring simplify), so the discarded
+     inline is never attempted; mv is the merge-tainted deferred node from the merge-splice pins
+     above, on the same lineage. *)
   let ell16 = mk "ell16" in
   materialize ell16;
   let out19 = mk "prjout3" in
@@ -1061,8 +1060,7 @@ let phase5 () =
   let llc_b14 =
     let s = sym () in
     loop_n s dim
-      (set out19 [| iter s |]
-         (binop Ir.Ops.Arg2 (get mv [| iter s |]) (get ell16 [| iter s |])))
+      (set out19 [| iter s |] (binop Ir.Ops.Arg2 (get mv [| iter s |]) (get ell16 [| iter s |])))
   in
   let o_b14 =
     LL.optimize ctx2 ~unoptim_ll_source:None ~ll_source:None ~name:"vcf_proj3_b" [] llc_b14
@@ -1075,8 +1073,8 @@ let phase5 () =
   in
   p "consumer projection: tainted node in the discarded operand is legal, values project"
     (same got14 [ ell16_vals ]);
-  (* Review round 9, P2: a merge read inside a DEAD loop mirrors the raw tracer's dead-body skip
-     — it neither validates against the declared merge node nor keeps a declaration alive. The
+  (* Review round 9, P2: a merge read inside a DEAD loop mirrors the raw tracer's dead-body skip —
+     it neither validates against the declared merge node nor keeps a declaration alive. The
      routine's live merge read of msrc5 stays the declared node while the dead read of msrc6 is
      ignored. *)
   let msrc5 = mk "msrc5" in
@@ -1115,7 +1113,8 @@ let phase5 () =
     (* The dead merge read lives inside the setter's scope body — a dead sub-loop around a
        [Set_local] — so v16 keeps one consistent setter and stays a virtualization candidate. *)
     loop_n s dim
-      (set v16 [| iter s |]
+      (set v16
+         [| iter s |]
          (LL.Local_scope
             {
               id = id16;
@@ -1173,9 +1172,9 @@ let phase5 () =
     with Utils.User_error msg -> String.is_substring msg ~substring:"could not be inlined"
   in
   p "failed-inline: consuming at an un-inlinable site fails actionably" rejected_fail;
-  (* Review round 12, P2: an INHERITED node read as a dynamic-gather table — the Get_dynamic
-     path never routes through inline_computation, and a dynamic read cannot be served by
-     recomputation; pre-fix this died in cleanup's cryptic already-virtual collision. *)
+  (* Review round 12, P2: an INHERITED node read as a dynamic-gather table — the Get_dynamic path
+     never routes through inline_computation, and a dynamic read cannot be served by recomputation;
+     pre-fix this died in cleanup's cryptic already-virtual collision. *)
   let ell21 = mk "ell21" in
   materialize ell21;
   let sel = mk ~dims:[| 1 |] "sel" in
@@ -1194,7 +1193,8 @@ let phase5 () =
   let llc_b17 =
     let s = sym () in
     loop_n s dim
-      (set out22 [| iter s |]
+      (set out22
+         [| iter s |]
          (LL.Get_dynamic
             {
               tn = v18;
@@ -1240,10 +1240,10 @@ let phase5 () =
 (* === Phase 6: deferral-only comp through the ordinary pipeline (review round 3) === *)
 
 let phase6 () =
-  (* P1: [from_prior_context] is derived from the raw assignments, which over-approximate what
-     the residual schedule needs — pre-fix, a deferral-only comp failed [verify_prior_context]
-     on a fresh context, demanding leaves only its DEFERRED computations read. It is now
-     filtered by the reconciled traced store: the routine links and runs as a no-op. *)
+  (* P1: [from_prior_context] is derived from the raw assignments, which over-approximate what the
+     residual schedule needs — pre-fix, a deferral-only comp failed [verify_prior_context] on a
+     fresh context, demanding leaves only its DEFERRED computations read. It is now filtered by the
+     reconciled traced store: the routine links and runs as a no-op. *)
   Utils.settings.fixed_state_for_init <- Some 42;
   Tensor.unsafe_reinitialize ();
   let base =
@@ -1253,8 +1253,8 @@ let phase6 () =
   in
   let w2 = TDSL.O.( + ) base base in
   (* Routine 1 computes w2 (materialized by [Train.forward]) on its own context chain, consuming
-     w2's forward — the deferral comp below then references w2 as a context-sourced node rather
-     than embedding it. *)
+     w2's forward — the deferral comp below then references w2 as a context-sourced node rather than
+     embedding it. *)
   let ctx_w = Context.auto () in
   let ctx_w, routine_w = Context.compile ctx_w (Train.forward w2) Ir.Indexing.Empty in
   let _ctx_w = Context.run ctx_w routine_w in
@@ -1279,8 +1279,8 @@ let phase6 () =
     with Utils.User_error msg -> String.is_substring msg ~substring:"lacks node"
   in
   p "pipeline consumer on a w2-less chain: rejected at link (spliced input demanded)" rejected;
-  (* The positive arc on ONE chain — compute the leaf, defer, consume — matches the reference:
-     the ordinary-pipeline twin of phase 4's prelowered flow. *)
+  (* The positive arc on ONE chain — compute the leaf, defer, consume — matches the reference: the
+     ordinary-pipeline twin of phase 4's prelowered flow. *)
   Tensor.unsafe_reinitialize ();
   let base2 =
     NTDSL.init ~l:"vcf_p6base2" ~prec:Ir.Ops.single ~o:[ dim ]
@@ -1305,9 +1305,9 @@ let phase6 () =
     (close got expected);
   (* Review round 6, P1: a consumer that WRITES a spliced leaf after consuming mentions the leaf
      only as an (embedded) write — the mention filter must not shield it from the prior-context
-     demand, because the splice reads the leaf's ENTRY value before the overwrite. Hand-composed
-     out of order (topo-sorted tensor forwards always init before consumers), with the fetch
-     marked embedded so the raw set excludes the leaf. *)
+     demand, because the splice reads the leaf's ENTRY value before the overwrite. Hand-composed out
+     of order (topo-sorted tensor forwards always init before consumers), with the fetch marked
+     embedded so the raw set excludes the leaf. *)
   Tensor.unsafe_reinitialize ();
   let base3 =
     NTDSL.init ~l:"vcf_p6base3" ~prec:Ir.Ops.single ~o:[ dim ]
@@ -1321,8 +1321,7 @@ let phase6 () =
   let v11 = TDSL.O.( + ) w4 w4 in
   let ctx_f2 = Context.auto () in
   let ctx_f2, r_d2 =
-    Context.compile ~name:"vcf_p6_defer3" ctx_f2 (Tensor.consume_forward_code v11)
-      Ir.Indexing.Empty
+    Context.compile ~name:"vcf_p6_defer3" ctx_f2 (Tensor.consume_forward_code v11) Ir.Indexing.Empty
   in
   let _ctx_d2 = Context.run ctx_f2 r_d2 in
   let out11 = TDSL.O.( + ) v11 v11 in
@@ -1331,11 +1330,7 @@ let phase6 () =
     {
       asgns =
         Ir.Assignments.Fetch
-          {
-            array = w4.Tensor.value;
-            fetch_op = Ir.Assignments.Constant 0.;
-            dims = lazy [| dim |];
-          };
+          { array = w4.Tensor.value; fetch_op = Ir.Assignments.Constant 0.; dims = lazy [| dim |] };
       embedded_nodes = Set.singleton (module Tn) w4.Tensor.value;
     }
   in
@@ -1350,8 +1345,7 @@ let phase6 () =
       false
     with Utils.User_error msg -> String.is_substring msg ~substring:"lacks node"
   in
-  p "pipeline write-mentioned spliced leaf: demanded despite the embedded-write mention"
-    rejected_w
+  p "pipeline write-mentioned spliced leaf: demanded despite the embedded-write mention" rejected_w
 
 let () =
   phase1 ();

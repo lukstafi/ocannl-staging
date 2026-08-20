@@ -1857,9 +1857,8 @@ and apply_row_constraint ~depth stage origin (r : row) (constr : row_constraint)
     | { beg_dims; dims; bcast = Broadcastable; _ }, Total_elems { numerator; divided_by; _ }
       when List.length divided_by <= 1 -> (
         try
-          (* [beg_dims] participate in the total: block/stack rows carry leading dims there
-             (gh-509: a slack-window re-check against a block row must divide by the full
-             product). *)
+          (* [beg_dims] participate in the total: block/stack rows carry leading dims there (gh-509:
+             a slack-window re-check against a block row must divide by the full product). *)
           let all_dims = beg_dims @ dims in
           fail_if_total_elems_over_sym all_dims;
           let d, vars =
@@ -2031,9 +2030,9 @@ let reduce_solved_basis (solved : solved_dim list) : string option =
 
 (* gh-ocannl-544, dim-level counterpart of [resolve_at_use] (defined below): marked dimension
    variables may close to the GLB of their use sites at stage 6+; unmarked, unconstrained ones are
-   guessed minimal instead (e.g. a learning-rate expression's axis meeting a single parameter
-   shape closes to 1 rather than widening to it). [At_least_dim] variables keep GLB closing
-   regardless: direct indexing is a dim-carrying use. *)
+   guessed minimal instead (e.g. a learning-rate expression's axis meeting a single parameter shape
+   closes to 1 rather than widening to it). [At_least_dim] variables keep GLB closing regardless:
+   direct indexing is a dim-carrying use. *)
 let resolve_at_use_dim = Hash_set.create (module Dim_var)
 let add_resolve_at_use_dim v = Hash_set.add resolve_at_use_dim v
 let is_resolve_at_use_dim v = Hash_set.mem resolve_at_use_dim v
@@ -4151,15 +4150,15 @@ and eliminate_row_constraint ~depth stage origin ~terminal ~(glb : row option) (
                 else Row_eq { r1; r2; origin }
               in
               (row_eq :: [ Dim_eq { d1 = Var v; d2 = get_default_dim ~d:(d / d2) (); origin } ], env)
-          | Strided_var { round_up = true; _ }, [], None
-            when glb_pending && not (is_stage7 stage) ->
+          | Strided_var { round_up = true; _ }, [], None when glb_pending && not (is_stage7 stage)
+            ->
               (* gh-509 task 5: the row variable has registered bounds that have not resolved yet
                  (e.g. a composite parameter initializer over an inferred shape, where the bounds
-                 settle only once the surrounding shapes do). Guessing the counter now would
-                 commit the result prematurely; defer through the stored-constraint path (which
-                 dedups, so the per-stage solver loop still terminates). At stage 7 the arms below
-                 fire regardless: bounds that never resolved will not, and every constraint must
-                 be consumed by the final stage. *)
+                 settle only once the surrounding shapes do). Guessing the counter now would commit
+                 the result prematurely; defer through the stored-constraint path (which dedups, so
+                 the per-stage solver loop still terminates). At stage 7 the arms below fire
+                 regardless: bounds that never resolved will not, and every constraint must be
+                 consumed by the final stage. *)
               keep_constr ()
           | Strided_var { coeff; var; denom; round_up = true }, [], None
             when is_stage5_up stage && denom > 1 && denom % Utils.safe_force coeff <> 0 ->
@@ -4324,11 +4323,11 @@ let%debug5_sexp eliminate_dim_entry stage origin env v ~glb constr =
       Some (Dim_eq { d1 = Var v; d2 = glb; origin })
   | Some _, Unconstrained_dim when is_stage7 stage ->
       (* gh-ocannl-544, dim-level: an unmarked, unconstrained operation-result axis closes minimal
-         instead of widening to its use sites' GLB (e.g. a learning-rate expression's axis meeting
-         a single parameter shape closes to 1 and broadcasts). Deferred to stage 7 — not stage 6 —
-         because stage-6 row closings still propagate concrete dims through equality chains
-         (einsum specs), and an eager guess-to-1 would conflict with a dim that arrives within the
-         same stage (box_muller's interior axes). *)
+         instead of widening to its use sites' GLB (e.g. a learning-rate expression's axis meeting a
+         single parameter shape closes to 1 and broadcasts). Deferred to stage 7 — not stage 6 —
+         because stage-6 row closings still propagate concrete dims through equality chains (einsum
+         specs), and an eager guess-to-1 would conflict with a dim that arrives within the same
+         stage (box_muller's interior axes). *)
       Some (Dim_eq { d1 = Var v; d2 = guess_dim (); origin })
   | Some _, Unconstrained_dim when is_stage6_up stage -> None
   | None, At_least_dim d when is_stage7 stage ->
@@ -4867,10 +4866,10 @@ let%track4_sexp get_proj_equations (inequalities : constraint_ list) proj_axis_e
                   (* The strided projection [stride * counter] carries the whole flat offset: it
                      must pair with the innermost axis of dimension > 1, because dim-1 axes'
                      projections are pinned to [Fixed_idx 0] elsewhere -- pairing with a trailing
-                     dim-1 axis (e.g. a conv kernel's single input channel) would silently
-                     collapse the stride and make every block store at offset 0. All other axes
-                     map to [Sub_axis]; in the row-major flat offset trailing dim-1 axes then
-                     multiply the accumulated offset by 1, so the store offsets are unchanged. *)
+                     dim-1 axis (e.g. a conv kernel's single input channel) would silently collapse
+                     the stride and make every block store at offset 0. All other axes map to
+                     [Sub_axis]; in the row-major flat offset trailing dim-1 axes then multiply the
+                     accumulated offset by 1, so the store offsets are unchanged. *)
                   let rec split_at_inner rev_dims =
                     match rev_dims with
                     | [] -> (None, [])
@@ -5188,8 +5187,8 @@ let%debug4_sexp solve_proj_equations ?(clamp_padded = false) (eqs : proj_equatio
         | Some pid -> proj_classes := Utils.union_add ~equal:Proj_id.equal !proj_classes pid p
         | None -> c.target_id <- Some p);
         (* [get_proj_index] will need indices for the compound's nested projections when this
-           equation is processed below. Register them here: in a unary einsum the convolution
-           window may have no standalone occurrence that would otherwise make it iterated. *)
+           equation is processed below. Register them here: in a unary einsum the convolution window
+           may have no standalone occurrence that would otherwise make it iterated. *)
         loop (Iterated conv_input);
         (* We will substitute variables in conv_input later *)
         p_conv_input := (p, conv_input) :: !p_conv_input

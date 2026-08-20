@@ -10,8 +10,8 @@ open Stdio
 
     Pinned here:
     - Composition: a padded max-pool (clamped) and a padded conv (0-neutral margins) reading the
-      SAME tensor compose without a copy — the conv commits 0-margins on the shared buffer, the
-      pool never reads them (all-negative input: a 0-margin max would corrupt the corners, a
+      SAME tensor compose without a copy — the conv commits 0-margins on the shared buffer, the pool
+      never reads them (all-negative input: a 0-margin max would corrupt the corners, a
       [-inf]-margin conv would produce [-inf]). Before gh-504 this was rejected ("Conflicting
       padding neutral elements") with a materialize-a-copy remedy.
     - The copy pattern keeps working: routing the conv through a materialized copy leaves the pool
@@ -45,8 +45,8 @@ let test_shared_operand () =
   Tensor.unsafe_reinitialize ();
   (* 4x4 input with values -16..-1: negative values expose wrong margin contents. *)
   let%op input = TDSL.range_of_shape ~output_dims:[ 4; 4 ] () - 16. in
-  (* Padded conv on the SAME input as the pool: commits 0-margins on the shared buffer. Created
-     (and compiled) first, embedding [input]'s computation. *)
+  (* Padded conv on the SAME input as the pool: commits 0-margins on the shared buffer. Created (and
+     compiled) first, embedding [input]'s computation. *)
   let%op conv_out = input +* "oh=+kh, ow=+kw; kh, kw => oh, ow" [ "kh"; "kw" ] (1.0 + 0.0) in
   Shape.set_dim kh 3;
   Shape.set_dim kw 3;
@@ -104,8 +104,8 @@ let test_separate_copies () =
     (Array.for_all2_exn pooled_v pooled_v2 ~f:Float.equal
     && Array.for_all2_exn conv_v conv_v2 ~f:Float.equal)
 
-(** Input used with a single padded max-pool: the operand stays unpadded (no margins to
-    initialize), results stable across repeated runs. *)
+(** Input used with a single padded max-pool: the operand stays unpadded (no margins to initialize),
+    results stable across repeated runs. *)
 let test_single_operation_padding () =
   printf "\n\n========================================\n%!";
   printf "Testing single-operation pooling (max-pool only)...\n%!";

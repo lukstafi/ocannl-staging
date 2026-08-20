@@ -3,13 +3,13 @@ open Ocannl
 open Ocannl.Nn_blocks.DSL_modules
 
 (* gh-509 task 4: virtual packed [uniform] results are inlined per cell via the lane-extract form
-   [vec_convert(counter[flat / lanes]).v[flat mod lanes]], and must match materialized runs
-   bitwise. For each precision and shape we run the same program twice -- once with the uniform
-   tensor forced materialized, once left to virtualize -- and compare the consumer's values
-   bit-for-bit (NaN-safe: fp8 random bit patterns can be NaN). The generated source is also
-   checked structurally: the materialized run stores via the vectorized builtin, the virtual run
-   reads via the lane builtin and emits no vectorized store. (Test disabled on Metal because of the
-   double section — Metal has no f64; the lane path itself is backend-generic, fp8 included.) *)
+   [vec_convert(counter[flat / lanes]).v[flat mod lanes]], and must match materialized runs bitwise.
+   For each precision and shape we run the same program twice -- once with the uniform tensor forced
+   materialized, once left to virtualize -- and compare the consumer's values bit-for-bit (NaN-safe:
+   fp8 random bit patterns can be NaN). The generated source is also checked structurally: the
+   materialized run stores via the vectorized builtin, the virtual run reads via the lane builtin
+   and emits no vectorized store. (Test disabled on Metal because of the double section — Metal has
+   no f64; the lane path itself is backend-generic, fp8 included.) *)
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
@@ -39,8 +39,8 @@ let run ~virtual_ ~prec ?input_dims output_dims =
 
 let bits_equal a b = Int64.equal (Int64.bits_of_float a) (Int64.bits_of_float b)
 
-(* Structural checks scan only the routine body: the prepended builtin definitions mention both
-   the vectorized and the lane builtins (the lane builtins are implemented via the _vec ones). *)
+(* Structural checks scan only the routine body: the prepended builtin definitions mention both the
+   vectorized and the lane builtins (the lane builtins are implemented via the _vec ones). *)
 let has sub = function
   | None -> false
   | Some s ->
@@ -58,28 +58,27 @@ let check ~name ~prec ?input_dims output_dims =
     Array.length ref_vals = Array.length vir_vals
     && Array.for_alli vir_vals ~f:(fun i v -> bits_equal v ref_vals.(i))
   in
-  Stdio.printf "%s: %d values, bitwise parity %b | materialized: vec store %b, lane %b | virtual: lane %b, vec store %b\n"
-    name (Array.length ref_vals) parity
-    (has "_uniform_vec(" ref_src)
-    (has "_uniform_lane(" ref_src)
-    (has "_uniform_lane(" vir_src)
-    (has "_uniform_vec(" vir_src)
+  Stdio.printf
+    "%s: %d values, bitwise parity %b | materialized: vec store %b, lane %b | virtual: lane %b, \
+     vec store %b\n"
+    name (Array.length ref_vals) parity (has "_uniform_vec(" ref_src) (has "_uniform_lane(" ref_src)
+    (has "_uniform_lane(" vir_src) (has "_uniform_vec(" vir_src)
 
 let () =
   check ~name:"single n=1 (lone partial block)" ~prec:Ir.Ops.single [ 1 ];
   check ~name:"single n=5 (tail peel)" ~prec:Ir.Ops.single [ 5 ];
   check ~name:"single n=8 (divisible)" ~prec:Ir.Ops.single [ 8 ];
   check ~name:"single 5->3 (multi-axis, 15 elements)" ~prec:Ir.Ops.single ~input_dims:[ 5 ] [ 3 ];
-  (* Trailing dim-1 axis (e.g. a conv kernel's single input channel): the strided store
-     projection must pair with the innermost non-unit axis -- pairing with the dim-1 axis
-     collapsed the stride and left all cells beyond the first block uninitialized. *)
+  (* Trailing dim-1 axis (e.g. a conv kernel's single input channel): the strided store projection
+     must pair with the innermost non-unit axis -- pairing with the dim-1 axis collapsed the stride
+     and left all cells beyond the first block uninitialized. *)
   check ~name:"single 9->1 (trailing dim-1 axis)" ~prec:Ir.Ops.single ~input_dims:[ 1 ] [ 9 ];
   check ~name:"half n=9" ~prec:Ir.Ops.half [ 9 ];
   (* bfloat16 pins that the packed path exists at this precision on every backend -- a missing
      vector block type shows up here as a compile-time refusal. It cannot police the element type
      itself: both runs go through the same builtin, so a builtin returning raw bits (which the
-     assignment to a bfloat16 cell would convert by value) still shows parity. The value-level
-     check for that lives in bf16_ops.ml. *)
+     assignment to a bfloat16 cell would convert by value) still shows parity. The value-level check
+     for that lives in bf16_ops.ml. *)
   check ~name:"bfloat16 n=9" ~prec:Ir.Ops.bfloat16 [ 9 ];
   (* uint32 exercises the unsigned vec/lane builtins (full-range bit patterns). *)
   check ~name:"uint32 n=5" ~prec:Ir.Ops.uint32 [ 5 ];

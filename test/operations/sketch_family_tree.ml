@@ -5,8 +5,8 @@
    included: enumeration order reaches candidate timing order and dedup keep-first); the phase-2
    pre-compile refutations have since deliberately removed statically-doomed entries (e.g. the
    single-row-block whole-triple Grid form), pinned here as behavior. Synthetic limits keep every
-   leg machine-independent — seeding is a pure function of the lowering, so the GPU legs
-   enumerate (and twin: swizzle, pipeline depth) without any GPU present.
+   leg machine-independent — seeding is a pure function of the lowering, so the GPU legs enumerate
+   (and twin: swizzle, pipeline depth) without any GPU present.
 
    The site is a 64x64x64 f32 matmul: every tile geometry in the curated menus divides it, so the
    menus enumerate in full. *)
@@ -35,7 +35,6 @@ let with_lowering ~name tensor =
   Option.value_exn !captured
 
 let cpu_limits = { Ir.Backend_intf.no_hardware_limits with simd_vector_bytes = 32 }
-
 let f32 = Ir.Backend_intf.Mma_f32
 
 let gpu_plain_limits =
@@ -53,8 +52,8 @@ let gpu_plain_limits =
   }
 
 (* Staged-layout and pipelining advertisements switch on the twin seeding: a swizzled twin per
-   staged seed whose tile rows span power-of-two 16-byte units, and a depth twin per fully
-   dividing staged seed. *)
+   staged seed whose tile rows span power-of-two 16-byte units, and a depth twin per fully dividing
+   staged seed. *)
 let gpu_full_limits =
   {
     Ir.Backend_intf.no_hardware_limits with
@@ -116,9 +115,9 @@ let rec print_tree ~indent tree =
                 Stdio.printf "%s%s = %s  [excluded: %s]\n" indent level label w
             | Sspace.Refuted w -> Stdio.printf "%s%s = %s  [refuted: %s]\n" indent level label w)
 
-(* The three verdict collectors: a shape's pre-compilation decline explanations (gh-ocannl-479),
-   the policy-suppressed branches a driver could re-propose, and the branches only candidate
-   compilation settles. *)
+(* The three verdict collectors: a shape's pre-compilation decline explanations (gh-ocannl-479), the
+   policy-suppressed branches a driver could re-propose, and the branches only candidate compilation
+   settles. *)
 let verdict_reports tree =
   let pp (path, w) =
     Stdio.printf "  %s: %s\n"
@@ -149,9 +148,7 @@ let tree_section name ~is_gpu ~is_cpu ~limits opt seeds =
                (List.map path ~f:(fun (level, label) -> level ^ "=" ^ label)))
       | None -> Stdio.printf "no leaves\n");
       Verdict.p "tree leaves = flat enumeration"
-        (List.equal
-           (fun a b -> String.equal (show a) (show b))
-           (Sspace.leaves tree) seeds)
+        (List.equal (fun a b -> String.equal (show a) (show b)) (Sspace.leaves tree) seeds)
 
 (* Awkward sites (phase 2): the tree's verdicts explain, before any compilation, why branches
    propose nothing — where the flat enumeration silently dropped them. Only the collector reports
@@ -163,9 +160,7 @@ let awkward_section name ~is_gpu ~is_cpu ~limits opt =
       let seeds = Autotune.sketch_seed_params ~is_gpu ~is_cpu ~limits opt in
       Stdio.printf "== %s: %d seeds ==\n" name (List.length seeds);
       Verdict.p "tree leaves = flat enumeration"
-        (List.equal
-           (fun a b -> String.equal (show a) (show b))
-           (Sspace.leaves tree) seeds);
+        (List.equal (fun a b -> String.equal (show a) (show b)) (Sspace.leaves tree) seeds);
       verdict_reports tree
 
 let () =
@@ -184,7 +179,9 @@ let () =
   let opt = with_lowering ~name:"sft_mm" mm in
   let cpu_seeds = section "cpu simd32" ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt in
   let _ = section "gpu plain" ~is_gpu:true ~is_cpu:false ~limits:gpu_plain_limits opt in
-  let gpu_seeds = section "gpu staged+depth" ~is_gpu:true ~is_cpu:false ~limits:gpu_full_limits opt in
+  let gpu_seeds =
+    section "gpu staged+depth" ~is_gpu:true ~is_cpu:false ~limits:gpu_full_limits opt
+  in
   tree_section "cpu simd32" ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt cpu_seeds;
   tree_section "gpu staged+depth" ~is_gpu:true ~is_cpu:false ~limits:gpu_full_limits opt gpu_seeds;
   (* --- Awkward sites: witnesses for what is NOT proposed --- *)
@@ -206,12 +203,12 @@ let () =
   awkward_section "awkward 20^3 cpu" ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt_awk;
   (* Half-precision operands (gh-ocannl-575): the seeding pre-filter resolves compute precision
      through the same [Numerics.cpu_compute_prec] the emission asks. Under the default
-     [narrow_compute_f32] policy the site computes in f32, so the CPU tensorized families
-     enumerate, with the packed seeds minting f32 panels ([sk_pack_prec], the packprec column);
-     with the policy off the branch is refuted; with native-fp16 limits plus the
-     [fp16_arithmetic] policy the seeds are pure-f16 (no packprec — panels stay half, at twice
-     the lanes). The synthetic GPU capability still advertises only the f32 format triple, so the
-     GPU leg stays a witness for "not proposed". *)
+     [narrow_compute_f32] policy the site computes in f32, so the CPU tensorized families enumerate,
+     with the packed seeds minting f32 panels ([sk_pack_prec], the packprec column); with the policy
+     off the branch is refuted; with native-fp16 limits plus the [fp16_arithmetic] policy the seeds
+     are pure-f16 (no packprec — panels stay half, at twice the lanes). The synthetic GPU capability
+     still advertises only the f32 format triple, so the GPU leg stays a witness for "not
+     proposed". *)
   let ha =
     NTDSL.init ~l:"ha" ~prec:Ir.Ops.half ~o:[ nn; nn ]
       ~f:(fun idcs -> Float.of_int (((idcs.(0) * nn) + idcs.(1)) % 7) *. 0.5)
@@ -239,8 +236,8 @@ let () =
       ~limits:cpu_native_fp16_limits opt_h
   in
   (* The policy alone must not flip the resolution: on a merely promoted target ([cpu_limits],
-     native_fp16_arithmetic = false) fp16 still computes in f32 and the packed seeds keep their
-     f32 panels. *)
+     native_fp16_arithmetic = false) fp16 still computes in f32 and the packed seeds keep their f32
+     panels. *)
   let _ =
     section "half-prec cpu seeds, fp16 policy on promoted target" ~is_gpu:false ~is_cpu:true
       ~limits:cpu_limits opt_h
@@ -256,18 +253,17 @@ let () =
   let%op tmm = av +* "ik;jk=>ij" tb in
   let opt_t = with_lowering ~name:"sft_tb" tmm in
   awkward_section "transposed-B cpu" ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt_t;
-  (* A companion nest that cannot follow the site's full arity (gh-ocannl-577): the matmul's
-     output feeds a row reduction in the same routine — the lm_head max-logits pattern. The GPU
+  (* A companion nest that cannot follow the site's full arity (gh-ocannl-577): the matmul's output
+     feeds a row reduction in the same routine — the lm_head max-logits pattern. The GPU
      companion-coverage rule (gh-521) then fails for {e every} tile completion, a fact decidable
      from the site and the lowering alone, so the tree refutes both pipelines at construction —
-     where each candidate previously died at build. The refutation sits above the geometry menus
-     and the lattice: lifting the lattice over the refuted family expands nothing and scores
-     nothing (the gh-514 phase-6 finding this pins). CPU pipelines carry no kernel-global launch
-     geometry and still enumerate. *)
-  let%op cred = (av +* "ik;kj=>ij" bv) ++ "ij=>i" in
+     where each candidate previously died at build. The refutation sits above the geometry menus and
+     the lattice: lifting the lattice over the refuted family expands nothing and scores nothing
+     (the gh-514 phase-6 finding this pins). CPU pipelines carry no kernel-global launch geometry
+     and still enumerate. *)
+  let%op cred = av +* "ik;kj=>ij" bv ++ "ij=>i" in
   let opt_c = with_lowering ~name:"sft_companion" cred in
-  awkward_section "companion-reduction gpu" ~is_gpu:true ~is_cpu:false ~limits:gpu_full_limits
-    opt_c;
+  awkward_section "companion-reduction gpu" ~is_gpu:true ~is_cpu:false ~limits:gpu_full_limits opt_c;
   awkward_section "companion-reduction cpu" ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt_c;
   (match Autotune.matmul_sketch_tree ~is_gpu:true ~is_cpu:false ~limits:gpu_full_limits opt_c with
   | None -> Stdio.printf "companion-reduction: no site detected\n"
@@ -279,27 +275,27 @@ let () =
         stats.Sspace.st_expanded stats.Sspace.st_scored stats.Sspace.st_refuted);
   (* Tight hardware limits: the staged operand tiles are a sound workgroup-memory floor, so
      geometries whose depth-1 tiles exceed the cap refute outright and dividing geometries whose
-     doubled tiles exceed it refute their depth twins; a blocktile geometry's launch size
-     (bm/tm * bn/tn threads) is statically known, so the thread cap refutes bm64 bn64 tm4 tn4
-     (256 threads) at 128 — all pre-compile, where
-     Schedule.check_hardware_limits_classified would otherwise reject candidate by candidate.
-     6144 bytes fits bm16 bn32 bk32 (2048 + 4096) exactly at depth 1. *)
+     doubled tiles exceed it refute their depth twins; a blocktile geometry's launch size (bm/tm *
+     bn/tn threads) is statically known, so the thread cap refutes bm64 bn64 tm4 tn4 (256 threads)
+     at 128 — all pre-compile, where Schedule.check_hardware_limits_classified would otherwise
+     reject candidate by candidate. 6144 bytes fits bm16 bn32 bk32 (2048 + 4096) exactly at depth
+     1. *)
   let gpu_tight_limits =
     {
       gpu_full_limits with
       Ir.Backend_intf.max_workgroup_memory_bytes = Some 6144;
       max_threads_per_workgroup = Some 128;
-      (* An advertised depth outside Schedule.apply_stage's implemented 1..2 range refutes
-         rather than enumerating twins that fail every candidate compile. *)
+      (* An advertised depth outside Schedule.apply_stage's implemented 1..2 range refutes rather
+         than enumerating twins that fail every candidate compile. *)
       mma =
         Option.map gpu_full_limits.Ir.Backend_intf.mma ~f:(fun m ->
             { m with Ir.Backend_intf.mma_pipeline_depths = [ 2; 3 ] });
     }
   in
   awkward_section "gpu tight smem" ~is_gpu:true ~is_cpu:false ~limits:gpu_tight_limits opt;
-  (* A wide output column extent: the unsplit B~ panel (bn = 0) of the (64, 0, 256) packed
-     geometry spans 589824 bytes of tiles — above the 256 KiB stack/cache-economy threshold,
-     which EXCLUDES (a driver may lift the policy) rather than refutes. *)
+  (* A wide output column extent: the unsplit B~ panel (bn = 0) of the (64, 0, 256) packed geometry
+     spans 589824 bytes of tiles — above the 256 KiB stack/cache-economy threshold, which EXCLUDES
+     (a driver may lift the policy) rather than refutes. *)
   let wn =
     NTDSL.init ~l:"wn" ~prec:Ir.Ops.single ~o:[ 64; 512 ]
       ~f:(fun idcs -> Float.of_int (((idcs.(0) * 512) + idcs.(1)) % 9) *. 0.25)
@@ -309,8 +305,8 @@ let () =
   let opt_w = with_lowering ~name:"sft_wide" wmm in
   awkward_section "wide-N cpu" ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt_w;
   (* The lift operation: an Excluded child's payload is the same judgment with only that policy
-     lifted, still subject to legality — the serial shape's economy-capped geometry recovers a
-     leaf, while the Grid shapes' lifted payloads re-refute on the single-row-block rule. *)
+     lifted, still subject to legality — the serial shape's economy-capped geometry recovers a leaf,
+     while the Grid shapes' lifted payloads re-refute on the single-row-block rule. *)
   (match Autotune.matmul_sketch_tree ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt_w with
   | None -> Stdio.printf "wide-N: no site\n"
   | Some tree ->
@@ -332,11 +328,11 @@ let () =
       Stdio.printf "wide-N leaves: %d; with exclusions lifted: %d\n"
         (List.length (Sspace.leaves tree))
         (List.length (Sspace.leaves (lift_all tree))));
-  (* --- The B&B driver's contract on a synthetic tree (phase 4): the bound fathoms Child
-     subtrees against the tightening threshold (equality fathoms — displacement needs strict
-     improvement), Unknown children are NEVER fathomed even when their bound would, Refuted and
-     Excluded children are never entered (an excluded 0-cost leaf must not leak into the
-     minimum), and without a bound the walk degenerates to the flat first-best scan. --- *)
+  (* --- The B&B driver's contract on a synthetic tree (phase 4): the bound fathoms Child subtrees
+     against the tightening threshold (equality fathoms — displacement needs strict improvement),
+     Unknown children are NEVER fathomed even when their bound would, Refuted and Excluded children
+     are never entered (an excluded 0-cost leaf must not leak into the minimum), and without a bound
+     the walk degenerates to the flat first-best scan. --- *)
   let leafv name v = Sspace.Child (lazy (Sspace.Leaf (name, v))) in
   let choice level children = Sspace.Choice { level; children } in
   let syn =
@@ -344,9 +340,7 @@ let () =
       [
         ("a", leafv "a" 5.);
         ("b", Sspace.Child (lazy (choice "bsub" [ ("b1", leafv "b1" 3.); ("b2", leafv "b2" 2.) ])));
-        ( "u",
-          Sspace.Unknown
-            ("compile-settled", lazy (choice "usub" [ ("u1", leafv "u1" 1.) ])) );
+        ("u", Sspace.Unknown ("compile-settled", lazy (choice "usub" [ ("u1", leafv "u1" 1.) ])));
         ("r", Sspace.Refuted "illegal");
         ("x", Sspace.Excluded ("policy", lazy (leafv "x" 0.)));
         ("c", Sspace.Child (lazy (choice "csub" [ ("c1", leafv "c1" 2.) ])));
@@ -362,21 +356,18 @@ let () =
   let score (_, v) = Some v in
   let show_run name (best, stats) =
     Stdio.printf "%s: best=%s stats=%s\n" name
-      (match best with
-      | Some ((n, _), v) -> Printf.sprintf "%s@%.1f" n v
-      | None -> "none")
+      (match best with Some ((n, _), v) -> Printf.sprintf "%s@%.1f" n v | None -> "none")
       (Sexp.to_string_hum (Sspace.sexp_of_search_stats stats))
   in
   show_run "search with bounds" (Sspace.search ~bound ~incumbent:5.5 ~score syn);
   show_run "search without bounds" (Sspace.search ~incumbent:5.5 ~score syn);
   show_run "ties: first best wins"
-    (Sspace.search ~score
-       (choice "tie" [ ("t1", leafv "t1" 2.); ("t2", leafv "t2" 2.) ]));
+    (Sspace.search ~score (choice "tie" [ ("t1", leafv "t1" 2.); ("t2", leafv "t2" 2.) ]));
   (* Cost-fathoming vs verdict-fathoming: a bounded Child subtree CONTAINING an Unknown below is
-     correctly fathomed by cost — bound soundness quantifies over every completion independently
-     of how verdicts resolve, so a subtree that cannot beat the incumbent even where legal is
-     pruned. Only a directly encountered Unknown skips the bound (its dominant unknown is
-     legality, where a bound over possibly-nonexistent completions is vacuous). *)
+     correctly fathomed by cost — bound soundness quantifies over every completion independently of
+     how verdicts resolve, so a subtree that cannot beat the incumbent even where legal is pruned.
+     Only a directly encountered Unknown skips the bound (its dominant unknown is legality, where a
+     bound over possibly-nonexistent completions is vacuous). *)
   let nested =
     choice "top"
       [
@@ -385,45 +376,41 @@ let () =
           Sspace.Child
             (lazy
               (choice "dsub"
-                 [ ("du", Sspace.Unknown ("compile-settled", lazy (Sspace.Leaf ("du", 1.)))) ]))
-        );
+                 [ ("du", Sspace.Unknown ("compile-settled", lazy (Sspace.Leaf ("du", 1.)))) ])) );
       ]
   in
   let bound ~path:_ = function Sspace.Choice { level = "dsub"; _ } -> Some 5. | _ -> None in
   show_run "cost bound fathoms above a nested Unknown" (Sspace.search ~bound ~score nested);
   (* Path-dependent bounds (gh-ocannl-514, the placement-space search): the bound receives the
-     committed (level, label) vector down to and including the judged child — the partial vector
-     the subtree stands for — so a floor that tightens as commitments accumulate can price the
-     exact node being judged. Here the bound prices by the committed labels alone: committing
-     "mat" costs 4 per level, so the mat/mat subtree (floor 8) is fathomed against the incumbent
-     7 while mat/keep (floor 4) and keep/* (floor 0) are entered. (The fathomed leaf scores 1 —
-     this synthetic bound is deliberately dishonest about it, pinning the mechanics and the
-     documented caveat that an unsound bound prunes true winners.) *)
+     committed (level, label) vector down to and including the judged child — the partial vector the
+     subtree stands for — so a floor that tightens as commitments accumulate can price the exact
+     node being judged. Here the bound prices by the committed labels alone: committing "mat" costs
+     4 per level, so the mat/mat subtree (floor 8) is fathomed against the incumbent 7 while
+     mat/keep (floor 4) and keep/* (floor 0) are entered. (The fathomed leaf scores 1 — this
+     synthetic bound is deliberately dishonest about it, pinning the mechanics and the documented
+     caveat that an unsound bound prunes true winners.) *)
   let placementish =
     choice "n1"
       [
         ( "mat",
-          Sspace.Child
-            (lazy (choice "n2" [ ("mat", leafv "mm" 1.); ("keep", leafv "mk" 6.) ])) );
+          Sspace.Child (lazy (choice "n2" [ ("mat", leafv "mm" 1.); ("keep", leafv "mk" 6.) ])) );
         ( "keep",
-          Sspace.Child
-            (lazy (choice "n2" [ ("mat", leafv "km" 6.5); ("keep", leafv "kk" 6.9) ])) );
+          Sspace.Child (lazy (choice "n2" [ ("mat", leafv "km" 6.5); ("keep", leafv "kk" 6.9) ])) );
       ]
   in
   let bound ~path _sub =
     Some (4. *. Float.of_int (List.count path ~f:(fun (_, label) -> String.equal label "mat")))
   in
   show_run "path-dependent bound fathoms the doubly-committed subtree"
-    (Sspace.search ~bound ~incumbent:7. ~score placementish)
-;
+    (Sspace.search ~bound ~incumbent:7. ~score placementish);
   (* --- Phase 5: the tile-size lattice and the non-uniform family bound --- *)
   (* The lattice hides behind its exclusion: the un-lifted tree keeps the curated leaves (the
      seed-list identity above already pinned that), and lifting turns the exclusion into interval
      boxes over every intrinsic-tile multiple — 8 bm values x 8 staged bk values on the 64^3
      site — whose leaves join the enumeration without disturbing the curated ones' order. *)
   let mm2 =
-    (* A fresh lowering of the same 64^3 site: [opt] is still live above, but a dedicated name
-       keeps this section's output self-contained. *)
+    (* A fresh lowering of the same 64^3 site: [opt] is still live above, but a dedicated name keeps
+       this section's output self-contained. *)
     with_lowering ~name:"sft_lattice"
       (let%op l2 = av +* "ik;kj=>ij" bv in
        l2)
@@ -440,9 +427,9 @@ let () =
       Verdict.p "the lattice exclusion carries the lift instructions"
         (List.exists (Sspace.exclusions tree) ~f:(fun (_, w) ->
              String.equal w Autotune.geometry_lattice_witness));
-      (* The certain-traffic increments that make the bound non-uniform: a committed staged
-         geometry prices its operand tiles, an unstaged one prices nothing, and a lattice box
-         prices its most favorable corner — monotone in refinement. *)
+      (* The certain-traffic increments that make the bound non-uniform: a committed staged geometry
+         prices its operand tiles, an unstaged one prices nothing, and a lattice box prices its most
+         favorable corner — monotone in refinement. *)
       let inc = Autotune.sketch_path_traffic_floor ~is_gpu:true ~limits:gpu_full_limits mm2 in
       let show_inc name path = Stdio.printf "  %-46s -> %d bytes\n" name (inc path) in
       Stdio.printf "certain-traffic increments along paths:\n";
@@ -453,13 +440,15 @@ let () =
       show_inc "lattice box bm 8..32, bk open"
         [ ("pipeline", "tensorized"); ("geometry", "lattice"); ("bm", "bm 8..32") ];
       show_inc "lattice box bm=32, bk 16..32"
-        [ ("pipeline", "tensorized"); ("geometry", "lattice"); ("bm", "bm=32"); ("bk", "bk 16..32") ];
+        [
+          ("pipeline", "tensorized"); ("geometry", "lattice"); ("bm", "bm=32"); ("bk", "bk 16..32");
+        ];
       show_inc "lattice singleton bm=32 bk=64"
         [ ("pipeline", "tensorized"); ("geometry", "lattice"); ("bm", "bm=32"); ("bk", "bk=64") ];
-      (* Search over the lifted tree with the increment itself as the bound and an incumbent
-         between the small and large boxes' floors: large-tile boxes fathom without expansion, so
-         the walk scores a fraction of the lattice — the logarithmic-effective regime. The score
-         never displaces (infinity), pinning that fathoming alone dispatches the boxes. *)
+      (* Search over the lifted tree with the increment itself as the bound and an incumbent between
+         the small and large boxes' floors: large-tile boxes fathom without expansion, so the walk
+         scores a fraction of the lattice — the logarithmic-effective regime. The score never
+         displaces (infinity), pinning that fathoming alone dispatches the boxes. *)
       let bound ~path _sub = Some (Float.of_int (inc path)) in
       let score _p = Some Float.infinity in
       let _best, stats = Sspace.search ~bound ~incumbent:6000. ~score lifted in
@@ -476,12 +465,11 @@ let () =
   in
   match Autotune.matmul_sketch_tree ~is_gpu:true ~is_cpu:false ~limits:gpu_tiny_smem mm2 with
   | None -> Stdio.printf "lattice under 2KB smem: no site detected\n"
-  | Some tree ->
+  | Some tree -> (
       let lifted = Autotune.lift_geometry_lattice tree in
       let box_refutations =
         List.filter (Sspace.refutations lifted) ~f:(fun (path, _) ->
-            List.exists path ~f:(fun (_, label) ->
-                String.is_substring label ~substring:"..")
+            List.exists path ~f:(fun (_, label) -> String.is_substring label ~substring:"..")
             && List.exists path ~f:(fun (_, label) -> String.equal label "lattice"))
       in
       Stdio.printf "== lattice under a 2048-byte workgroup-memory cap ==\n";
@@ -493,46 +481,46 @@ let () =
       List.iter (List.take box_refutations 2) ~f:(fun (path, w) ->
           Stdio.printf "  %s: %s\n"
             (String.concat ~sep:" > " (List.map path ~f:(fun (l, v) -> l ^ "=" ^ v)))
-            w)
-;
-  (* Review round (Codex P1 on PR #327): the lattice minima and the open-corner pricing must come
-     from the same per-format tile selection the tree builds with — a canonical [mma_tile]
-     coarser than the selected format's (CUDA's TF32 shape) must not inflate the open-axis
-     corner. Canonical 16x16x16, f32 format tile 8x8x8: the open-corner increment prices 8s, and
-     the lattice enumerates 8-step multiples. *)
-  let gpu_coarse_canonical =
-    {
-      Ir.Backend_intf.no_hardware_limits with
-      mma =
-        Some
-          {
-            Ir.Backend_intf.mma_simd_width = 32;
-            mma_tile = (16, 16, 16);
-            mma_format_tiles = [ ((f32, f32, f32), (8, 8, 8)) ];
-            mma_staged_layouts = [];
-            mma_pipeline_depths = [];
-          };
-    }
-  in
-  match
-    Autotune.matmul_sketch_tree ~is_gpu:true ~is_cpu:false ~limits:gpu_coarse_canonical mm2
-  with
-  | None -> Stdio.printf "coarse-canonical: no site detected\n"
-  | Some tree ->
-      let lifted = Autotune.lift_geometry_lattice tree in
-      let lattice_leaves =
-        List.filter (Sspace.enumerate lifted) ~f:(fun (path, _) ->
-            List.exists path ~f:(fun (_, label) -> String.equal label "lattice"))
+            w);
+      (* Review round (Codex P1 on PR #327): the lattice minima and the open-corner pricing must
+         come from the same per-format tile selection the tree builds with — a canonical [mma_tile]
+         coarser than the selected format's (CUDA's TF32 shape) must not inflate the open-axis
+         corner. Canonical 16x16x16, f32 format tile 8x8x8: the open-corner increment prices 8s, and
+         the lattice enumerates 8-step multiples. *)
+      let gpu_coarse_canonical =
+        {
+          Ir.Backend_intf.no_hardware_limits with
+          mma =
+            Some
+              {
+                Ir.Backend_intf.mma_simd_width = 32;
+                mma_tile = (16, 16, 16);
+                mma_format_tiles = [ ((f32, f32, f32), (8, 8, 8)) ];
+                mma_staged_layouts = [];
+                mma_pipeline_depths = [];
+              };
+        }
       in
-      let inc =
-        Autotune.sketch_path_traffic_floor ~is_gpu:true ~limits:gpu_coarse_canonical mm2
-      in
-      Stdio.printf "== coarse canonical mma_tile 16^3, format tile 8^3 ==\n";
-      Stdio.printf "lattice leaves %d (8-step multiples of both axes: %b)\n"
-        (List.length lattice_leaves)
-        (List.for_all lattice_leaves ~f:(fun (_, p) ->
-             p.Autotune.sk_bm % 8 = 0 && p.Autotune.sk_bk % 8 = 0)
-        && List.exists lattice_leaves ~f:(fun (_, p) -> p.Autotune.sk_bm = 8)
-        && List.exists lattice_leaves ~f:(fun (_, p) -> p.Autotune.sk_bk = 8));
-      Stdio.printf "  open-corner lattice increment (format 8s, not canonical 16s) -> %d bytes\n"
-        (inc [ ("pipeline", "tensorized"); ("geometry", "lattice") ])
+      match
+        Autotune.matmul_sketch_tree ~is_gpu:true ~is_cpu:false ~limits:gpu_coarse_canonical mm2
+      with
+      | None -> Stdio.printf "coarse-canonical: no site detected\n"
+      | Some tree ->
+          let lifted = Autotune.lift_geometry_lattice tree in
+          let lattice_leaves =
+            List.filter (Sspace.enumerate lifted) ~f:(fun (path, _) ->
+                List.exists path ~f:(fun (_, label) -> String.equal label "lattice"))
+          in
+          let inc =
+            Autotune.sketch_path_traffic_floor ~is_gpu:true ~limits:gpu_coarse_canonical mm2
+          in
+          Stdio.printf "== coarse canonical mma_tile 16^3, format tile 8^3 ==\n";
+          Stdio.printf "lattice leaves %d (8-step multiples of both axes: %b)\n"
+            (List.length lattice_leaves)
+            (List.for_all lattice_leaves ~f:(fun (_, p) ->
+                 p.Autotune.sk_bm % 8 = 0 && p.Autotune.sk_bk % 8 = 0)
+            && List.exists lattice_leaves ~f:(fun (_, p) -> p.Autotune.sk_bm = 8)
+            && List.exists lattice_leaves ~f:(fun (_, p) -> p.Autotune.sk_bk = 8));
+          Stdio.printf
+            "  open-corner lattice increment (format 8s, not canonical 16s) -> %d bytes\n"
+            (inc [ ("pipeline", "tensorized"); ("geometry", "lattice") ]))

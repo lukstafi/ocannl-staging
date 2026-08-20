@@ -24,6 +24,7 @@ type resource = Workgroup_threads | Workgroup_memory | Thread_scratch
 [@@deriving sexp_of, compare, equal]
 
 type severity = Expected | Compiler_bug [@@deriving sexp_of, compare, equal]
+
 type execution_effect = No_device_writes | Writes_may_have_occurred
 [@@deriving sexp_of, compare, equal]
 
@@ -36,28 +37,23 @@ type cause =
       limit : int option;
       detail : string;
     }
-  | Backend_rejected of {
-      backend : string;
-      stage : string;
-      severity : severity;
-      detail : string;
-    }
+  | Backend_rejected of { backend : string; stage : string; severity : severity; detail : string }
   | Unclassified of { phase : phase; exn_constructor : string; detail : string }
   | Seed_evicted of { family : string; detail : string }
       (** A detected seed site the search declined to propose because a candidate-volume cap bound
           (gh-ocannl-541): the site was reachable and ranked, and lost only to the cap. Recorded in
-          the decline census so a previously-proposed site that stops being proposed leaves a
-          signal instead of vanishing. [family] names the seed family (e.g. ["split_reduce"]). *)
+          the decline census so a previously-proposed site that stops being proposed leaves a signal
+          instead of vanishing. [family] names the seed family (e.g. ["split_reduce"]). *)
   | Not_dispatched of { origin : string; detail : string }
       (** A candidate the search refused to run on a GPU backend because it binds no hardware
           dimension (gh-ocannl-532): the whole routine would execute in one work-item. Nothing is
           wrong with the candidate — the backend's execution model is what rejects it — but it is a
           decline like any other, and leaving it out of the census made a GPU search that timed one
-          candidate indistinguishable from one whose candidates all failed (gh-ocannl-543).
-          [origin] names where the refusal happened: ["baseline"] (the serial baseline),
-          ["candidate"] (a compiled candidate that degenerated to a serial form), or ["beam_move"]
-          (a menu move pruned before compile because it provably cannot parallelize an already
-          unparallelized incumbent). *)
+          candidate indistinguishable from one whose candidates all failed (gh-ocannl-543). [origin]
+          names where the refusal happened: ["baseline"] (the serial baseline), ["candidate"] (a
+          compiled candidate that degenerated to a serial form), or ["beam_move"] (a menu move
+          pruned before compile because it provably cannot parallelize an already unparallelized
+          incumbent). *)
 [@@deriving sexp_of, equal]
 
 type rejection_key =
