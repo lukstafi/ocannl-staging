@@ -1462,6 +1462,24 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
 CLAUDE.md holds the workflow rules; these are the dune/OCaml mechanics behind them, narrow enough
 that they earn a lookup rather than always-loaded space.
 
+- A repository-wide scanning check (`config_dep_completeness`, `env_var_deps`, `cache_dir_ignores`)
+  is only as good as the distance between what it asserts and what it claims, and a proxy that
+  coincides with the property today reads exactly like the property. The working test is: name a
+  change that makes the claim false while the check stays green. Each of these was a real gap, and
+  each looked airtight until asked that way — "the `.gitignore` line is present" is not "git ignores
+  this name" (last-match-wins, so a later `!` takes the coverage away with the line intact); "the
+  literal starts with the prefix" is not "the glob covers it" (a glob segment stops at a separator,
+  `Schedule_cache.ensure_dir` does not); "every `~cache_dir` carries the prefix" is not "every cache
+  directory does" (a direct `Schedule_cache.store ~dir` creates one too, and `""` disables the cache
+  only where `Autotune.tune` reads it that way). Two corollaries. A scan that excludes files by
+  filename suffix has built an escape hatch from its own "every source" claim unless the exclusion
+  is anchored to the directory that generates them. And where the premise is "this value happens to
+  equal that constant", read the constant from where it is defined rather than restating the
+  coincidence: an unchecked default is the one name no call site spells.
+- `git` strips TRAILING spaces from a `.gitignore` pattern (unless backslash-quoted) and keeps
+  LEADING ones, so an accidentally indented ` /foo/` is a pattern beginning with a space and matches
+  nothing. Any code reading that file must not `String.strip` both ends, or it reports coverage git
+  does not give; `#` likewise opens a comment only at column 0. Verified against `git check-ignore`.
 - `tools/test-run.sh` is the one way to run `dune runtest` / `dune build @slow` from a session;
   its header documents usage. It exists because every hand-rolled alternative has failed in
   practice, each differently: piping dune to `tail` reports tail's status (no pipefail), so

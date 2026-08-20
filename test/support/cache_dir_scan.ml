@@ -110,6 +110,14 @@ let scope ast =
      and the qualified path itself -- and matching on the function name alone would take any
      `store ~dir:` in the repository for a cache write. *)
   let cache_modules = Hash_set.of_list (module String) [ cache_module ] in
+  (* An alias of an alias is an alias: `module Cache = SC` names the module as surely as
+     `module SC = Ir.Schedule_cache` does, and structure items are visited in order, so a name
+     already recognised is available to the binding that borrows it (Codex P2, round 4). *)
+  let names_cache_module path =
+    match List.last (Longident.flatten path) with
+    | Some last -> String.equal last cache_module || Hash_set.mem cache_modules last
+    | None -> false
+  in
   let iterator =
     {
       Ast_iterator.default_iterator with
@@ -118,7 +126,7 @@ let scope ast =
           (match item.pstr_desc with
           | Pstr_module
               { pmb_name = { txt = Some alias; _ }; pmb_expr = { pmod_desc = Pmod_ident { txt; _ }; _ }; _ }
-            when Option.equal String.equal (List.last (Longident.flatten txt)) (Some cache_module) ->
+            when names_cache_module txt ->
               Hash_set.add cache_modules alias
           | _ -> ());
           Ast_iterator.default_iterator.structure_item self item);
@@ -132,6 +140,11 @@ let scope ast =
       expr =
         (fun self expr ->
           (match expr.pexp_desc with
+          (* `let module Cache = Ir.Schedule_cache in …` binds the same name in expression position,
+             which no structure item records. *)
+          | Pexp_letmodule ({ txt = Some alias; _ }, { pmod_desc = Pmod_ident { txt; _ }; _ }, _)
+            when names_cache_module txt ->
+              Hash_set.add cache_modules alias
           | Pexp_function (params, _, _) ->
               List.iter params ~f:(fun param ->
                   match param.pparam_desc with
@@ -239,18 +252,36 @@ let read content =
 
 type ignore_line = { pattern : string; negated : bool }
 
+(** A line with git's whitespace rules applied: trailing spaces dropped unless backslash-quoted,
+    LEADING whitespace kept. The asymmetry is git's, and it is not decorative — an accidentally
+    indented [ /autotune_cache*/] has the space as part of the pattern and ignores nothing, so a
+    parser that stripped both ends would report coverage git does not give (Codex P2, round 4;
+    checked against `git check-ignore`, which agrees on both halves). *)
+let strip_trailing_spaces line =
+  let n = String.length line in
+  let rec last_kept i =
+    if i <= 0 then 0
+    else if not (Char.equal line.[i - 1] ' ') then i
+    else if i >= 2 && Char.equal line.[i - 2] '\\' then i
+    else last_kept (i - 1)
+  in
+  String.prefix line (last_kept n)
+
 (** The patterns of an ignore file, in order: comments and blank lines dropped, a leading [!]
     recorded rather than swallowed. Order is kept because gitignore's rule is last-match-wins, so a
-    set of patterns is not enough to answer whether anything is ignored. *)
+    set of patterns is not enough to answer whether anything is ignored. A [#] opens a comment only
+    at the start of the line, which is why the comment test comes before no stripping at all. *)
 let ignore_patterns content =
   String.split_lines content
   |> List.filter_map ~f:(fun line ->
-      let line = String.strip line in
-      if String.is_empty line || String.is_prefix line ~prefix:"#" then None
+      if String.is_prefix line ~prefix:"#" then None
       else
-        match String.chop_prefix line ~prefix:"!" with
-        | Some rest -> Some { pattern = String.strip rest; negated = true }
-        | None -> Some { pattern = line; negated = false })
+        let line = strip_trailing_spaces line in
+        if String.is_empty line then None
+        else
+          match String.chop_prefix line ~prefix:"!" with
+          | Some rest -> Some { pattern = rest; negated = true }
+          | None -> Some { pattern = line; negated = false })
 
 (** The glob that has to be in the root [.gitignore] for the prefix rule to ignore anything.
     Root-anchored and directory-only: a cache directory is only ever created in the working
@@ -264,7 +295,7 @@ let required_glob = "/" ^ required_prefix ^ "*/"
     {!effectively_ignored} would be satisfied by bespoke entries. *)
 let declares_required_glob content =
   String.split_lines content
-  |> List.exists ~f:(fun line -> String.equal (String.strip line) required_glob)
+  |> List.exists ~f:(fun line -> String.equal (strip_trailing_spaces line) required_glob)
 
 (* A glob over one path component: [*] and [?], no separators to consider. Bounded by the pattern
    and name lengths, both tiny here. *)
