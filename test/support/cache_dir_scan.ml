@@ -336,9 +336,21 @@ let has_unescaped_slash pattern =
     directory, so [docs/*.log] cannot match a bare root-level name; a pattern without one matches by
     basename at any depth, the root included. A trailing slash restricts a pattern to directories,
     which every candidate here is. *)
+let rec drop_any_depth_prefix p =
+  match String.chop_prefix p ~prefix:"**/" with
+  | Some rest -> drop_any_depth_prefix rest
+  | None -> p
+
 let root_directory_glob pattern =
   let p = Option.value (String.chop_suffix pattern ~suffix:"/") ~default:pattern in
   let p = Option.value (String.chop_prefix p ~prefix:"/") ~default:p in
+  (* A leading [**/] matches any number of directories INCLUDING ZERO, so [**/foo] and [/**/foo]
+     both reach a root-level [foo] -- rejecting them for containing a slash read them as applying to
+     nothing, and the unreadable-pattern report, sharing this conversion, did not catch them either
+     (Codex P2, round 6; `git check-ignore` confirms all three spellings expose the directory).
+     After the prefix is gone, a [**] left inside one component is git's "consecutive asterisks are
+     regular asterisks", which {!glob_matches} already treats as [*] does. *)
+  let p = drop_any_depth_prefix p in
   if has_unescaped_slash p || String.is_empty p then None else Some p
 
 (** Patterns that could bear on a root-level directory name and that {!glob_matches} cannot read.

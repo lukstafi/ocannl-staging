@@ -1483,7 +1483,10 @@ that they earn a lookup rather than always-loaded space.
   character, in both directions that matter: `\_` is an underscore, so `!/foo\_bar/` really does
   un-ignore `foo_bar` while a matcher reading the backslash literally sees no match and reports it
   still ignored, and `\*` is a literal asterisk rather than a wildcard, so ignoring the escape
-  over-matches as readily as it under-matches. All of this verified against `git check-ignore`
+  over-matches as readily as it under-matches. A leading `**/` matches any number of directories
+  INCLUDING ZERO, so `**/foo` and `/**/foo` both reach a root-level `foo` and cannot be dismissed as
+  "contains a slash, so it is anchored elsewhere"; consecutive asterisks anywhere else are ordinary
+  ones. All of this verified against `git check-ignore`
   rather than read off the documentation — which is the cheaper move whenever the question is what
   git actually does.
 - `tools/test-run.sh` is the one way to run `dune runtest` / `dune build @slow` from a session;
