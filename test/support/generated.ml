@@ -23,8 +23,9 @@
       derived from the executable's own name and dune runs one process per executable, so nothing
       else writes there. The other two resolutions are not this process's to empty and get their own
       treatment: the flat legacy layout ([build_files_prefix=.]) is rejected outright, and an
-      explicit [build_files_prefix] — which two executables can be given alike — skips the sweep and
-      requires {!arm} per routine instead, deleting one path rather than a directory.
+      explicit [build_files_prefix] — which two executables can be given alike — deletes nothing at
+      all, recording instead how each file in the directory stood when the run began, so that a read
+      can ask whether that particular artifact has changed since.
     - {!read} fails the run (through {!Verdict}, so the exit status carries it and no [dune promote]
       can bless it) when the artifact is missing. Silence must not be indistinguishable from a pass,
       which is what a [string option] returning [None] invited: some call sites recorded that as
@@ -80,20 +81,30 @@ let scoping () =
    newer than the run. *)
 let sweeps_directory = ref true
 
-(* When the directory was not swept: the moment this run began, as a timestamp from the artifact
-   filesystem itself. *)
-let floor = ref 0.
+(* When the directory was not swept: what each file in it looked like when the run began, as (mtime,
+   contents digest). An artifact is then judged against ITSELF as it stood at that moment, rather
+   than against any clock reading or marker.
 
-let exe_derived_name () =
-  Utils.clean_filename @@ Stdlib.Filename.remove_extension
-  @@ Stdlib.Filename.basename Stdlib.Sys.executable_name
+   This replaces a marker file whose mtime served as a floor, and with it three hazards that were
+   all one hazard: a stale artifact could TIE with the marker's timestamp on a coarse filesystem, a
+   marker that could not be rewritten silently left the previous run's floor standing, and the
+   marker path itself could be a symlink whose target got truncated. None of them has anywhere to
+   bite here — there is no marker to write, to fail to write, or to follow — and a tie stops being
+   ambiguous: a file whose mtime AND contents are both unchanged since the run began is exactly a
+   file this run did not write. *)
+let snapshot : (string, float * string) Hashtbl.t = Hashtbl.create (module String)
 
-let exe_basename = exe_derived_name
-
-let written_after_floor p =
-  match Unix.stat p with
-  | { Unix.st_mtime; _ } -> Float.(st_mtime >= !floor)
-  | exception Unix.Unix_error _ -> false
+(* Whether [p] has been written since the snapshot: absent from it (created during the run), or
+   changed in contents, or carrying a strictly newer mtime (an identical kernel re-emitted). *)
+let written_since_snapshot p ~src =
+  match Hashtbl.find snapshot p with
+  | None -> true
+  | Some (mtime0, digest0) -> (
+      (not (String.equal (Stdlib.Digest.string src) digest0))
+      ||
+      match Unix.stat p with
+      | { Unix.st_mtime; _ } -> Float.(st_mtime > mtime0)
+      | exception Unix.Unix_error _ -> false)
 
 (* A refusal that returns is not a refusal. [Verdict.fail] only increments a counter, so a caller
    that reports an unusable artifact directory and carries on hands the rest of the test exactly the
@@ -207,24 +218,30 @@ let init ~backend_name =
             let p = Stdlib.Filename.concat dir entry in
             let is_dir = try Stdlib.Sys.is_directory p with Stdlib.Sys_error _ -> true in
             if not is_dir then remove_or_fail ~context:"Generated.init" p)
-    | Shared_prefix _ -> (
+    | Shared_prefix _ ->
         (* An explicit prefix is not this executable's to empty — two tests can be configured with
            the same one, and a wholesale sweep would delete a concurrent test's kernel between its
            compile and its read. So freshness is established WITHOUT deleting anything: a marker
-           file records when this run began, and a read accepts only an artifact written after it.
-           That is weaker than the sweep (it cannot tell this run's kernel from a concurrent test's
-           under the same name, which is the same-name hazard that exists anyway) but it is the
-           guarantee that matters — an artifact outliving the run that produced it is what this
-           module exists to catch, and it costs no deletion at all.
+           read accepts only an artifact that has changed since. That is weaker than the sweep (it
+           cannot tell this run's kernel from a concurrent test's under the same name, which is the
+           same-name hazard that exists anyway) but it is the guarantee that matters — an artifact
+           outliving the run that produced it is what this module exists to catch — and it costs no
+           deletion at all.
 
-           The floor is the marker's own mtime rather than a clock reading, so that it is compared
-           against artifact mtimes from the same filesystem: a coarse timestamp granularity then
-           moves both values together instead of making freshly written files look stale. *)
+           Nothing is written to establish it either: the directory is recorded as it stands, and a
+           read later asks whether that particular file has changed since. *)
         sweeps_directory := false;
-        let marker = Stdlib.Filename.concat dir (".ocannl_generated_floor." ^ exe_basename ()) in
-        (try Stdio.Out_channel.write_all marker ~data:"" with Stdlib.Sys_error _ -> ());
-        floor :=
-          try (Unix.stat marker).Unix.st_mtime with Unix.Unix_error _ -> Unix.gettimeofday ())
+        Hashtbl.clear snapshot;
+        Array.iter (Stdlib.Sys.readdir dir) ~f:(fun entry ->
+            let p = Stdlib.Filename.concat dir entry in
+            (* [lstat], so a symlinked entry is recorded as what it is rather than followed. *)
+            match Unix.lstat p with
+            | { Unix.st_kind = Unix.S_REG; st_mtime; _ } -> (
+                match Stdlib.Digest.file p with
+                | digest -> Hashtbl.set snapshot ~key:p ~data:(st_mtime, digest)
+                | exception Stdlib.Sys_error _ -> ())
+            | _ -> ()
+            | exception Unix.Unix_error _ -> ())
 
 (** [arm ?ext routine] deletes [routine]'s artifact, so that the next {!read} of it sees only what
     the *next* compile emits. Use it in a loop that compiles several candidates under one routine
@@ -256,32 +273,37 @@ let read ?ext routine =
             away, renamed, fissioned, or debug artifacts are off)"
            routine p);
       "")
-    else if (not !sweeps_directory) && (not (Hashtbl.mem armed p)) && not (written_after_floor p)
-    then (
-      (* Nothing was swept here, so existence alone does not establish provenance: this file
-         predates the run and is exactly the stale artifact the old readers accepted. An ARMED path
-         is exempt — it was deleted outright, so its existence is provenance in its own right. *)
-      Verdict.fail
-        (Printf.sprintf
-           "stale generated source for routine %s: %s predates this run (build_files_prefix is set \
-            explicitly, so the directory is not this executable's to empty and the artifact must \
-            be newer than the run that reads it)"
-           routine p);
-      "")
     else
       let src = Stdio.In_channel.read_all p in
       let digest = Stdlib.Digest.string src in
-      (match Hashtbl.find read_digests p with
-      | Some previous when not (String.equal previous digest) ->
-          Verdict.fail
-            (Printf.sprintf
-               "generated source for routine %s changed between reads: %s was overwritten by \
-                another compile under the same name, so the earlier reading described a different \
-                kernel (name the routines apart, or Generated.arm before each compile)"
-               routine p)
-      | Some _ | None -> ());
-      Hashtbl.set read_digests ~key:p ~data:digest;
-      src
+      if
+        (not !sweeps_directory)
+        && (not (Hashtbl.mem armed p))
+        && not (written_since_snapshot p ~src)
+      then (
+        (* Nothing was swept here, so existence alone does not establish provenance: this file is
+           byte-for-byte what stood in the directory before the run started, and no later write
+           touched it — exactly the stale artifact the old readers accepted. An ARMED path is
+           exempt: it was deleted outright, so its existence is provenance in its own right. *)
+        Verdict.fail
+          (Printf.sprintf
+             "stale generated source for routine %s: %s is unchanged from before this run began \
+              (build_files_prefix is set explicitly, so the directory is not this executable's to \
+              empty; arm the routine if its kernel is legitimately identical)"
+             routine p);
+        "")
+      else (
+        (match Hashtbl.find read_digests p with
+        | Some previous when not (String.equal previous digest) ->
+            Verdict.fail
+              (Printf.sprintf
+                 "generated source for routine %s changed between reads: %s was overwritten by \
+                  another compile under the same name, so the earlier reading described a \
+                  different kernel (name the routines apart, or Generated.arm before each compile)"
+                 routine p)
+        | Some _ | None -> ());
+        Hashtbl.set read_digests ~key:p ~data:digest;
+        src)
 
 (** [assert_emits ~routine ~contains claim] records [claim] as holding exactly when [routine]'s
     generated source contains [contains] — the common case, as an assertion rather than a [match]

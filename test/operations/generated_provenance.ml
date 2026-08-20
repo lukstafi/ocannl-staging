@@ -69,6 +69,18 @@ let () =
   (* An explicit build_files_prefix is not this executable's to empty — two tests can be given the
      same one — but it is not fatal either: the per-routine route stays open. Both halves are pinned
      here, and the surviving decoy is what shows the sweep did NOT run. *)
+  (* The converse of the stale case, and the reason the snapshot keeps mtimes at all: a kernel that
+     this run re-emitted BYTE-IDENTICALLY is fresh, and refusing it would break every re-run of a
+     deterministic compile under an explicit prefix. Contents alone cannot tell that apart from a
+     stale file; the recorded mtime can. (The timestamp is set rather than slept for, so the mode is
+     deterministic and costs nothing.) *)
+  | "shared_prefix_reemit" ->
+      emit "gp_reemit" "kernel body: deterministic\n";
+      Generated.init ~backend_name;
+      let later = Unix.gettimeofday () +. 5. in
+      Unix.utimes (path "gp_reemit") later later;
+      Verdict.p "an identical kernel re-emitted by this run is accepted"
+        (String.is_substring (Generated.read "gp_reemit") ~substring:"deterministic")
   (* The other half: an explicitly prefixed directory must keep working for the ordinary caller, who
      calls init once and then reads — no arming — and a concurrent test's artifact in the same
      directory must survive, since nothing may be swept here. *)

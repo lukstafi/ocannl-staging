@@ -2944,5 +2944,9 @@
      --ocannl_build_files_prefix=gp_shared_dir))
    (run
     ./generated_provenance.exe
+    shared_prefix_reemit
+    --ocannl_build_files_prefix=gp_shared_dir)
+   (run
+    ./generated_provenance.exe
     shared_prefix_fresh
     --ocannl_build_files_prefix=gp_shared_dir))))
