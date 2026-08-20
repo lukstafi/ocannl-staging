@@ -23,7 +23,7 @@
 (library
  (name test_utils)
  (package neural_nets_lib)
- (modules test_utils config_key_scan dune_stanza_scan)
+ (modules test_utils config_key_scan cache_dir_scan dune_stanza_scan)
  (libraries base stdio arrayjit.ir compiler-libs.common sexplib))
 
 (library

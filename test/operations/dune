@@ -1509,6 +1509,41 @@
  (action
   (diff env_var_deps.expected env_var_deps.actual)))
 
+; The prefix that lets one `.gitignore` glob cover every autotune schedule cache directory, held
+; over the sources that name them. Reads the same source set as env_var_deps above -- the library
+; directories plus the tests -- since a `~cache_dir` can be named from either side. `.gitignore` is
+; a direct dependency so that editing the glob away re-runs the check.
+
+(executable
+ (name cache_dir_ignores)
+ (modules cache_dir_ignores)
+ (libraries base stdio test_utils arrayjit.verdict))
+
+(rule
+ (target cache_dir_ignores.actual)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  ../../.gitignore
+  (glob_files_rec ../../arrayjit/lib/*.ml)
+  (glob_files_rec ../../tensor/*.ml)
+  (glob_files_rec ../../lib/*.ml)
+  (glob_files_rec ../../bin/*.ml)
+  (glob_files_rec ../../tools/*.ml)
+  (glob_files_rec ../../benchmarks/runners/ocannl/*.ml)
+  (glob_files_rec ../../test/*.ml)
+  (glob_files_rec ../../arrayjit/test/*.ml))
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:cache_dir_ignores.exe} %{workspace_root} %{deps}))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff cache_dir_ignores.expected cache_dir_ignores.actual)))
+
 (executable
  (name config_dep_completeness)
  (modules config_dep_completeness)
