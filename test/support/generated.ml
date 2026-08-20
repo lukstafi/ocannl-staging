@@ -64,19 +64,33 @@ let armed : (string, unit) Hashtbl.t = Hashtbl.create (module String)
    sweep, refuse, or establish freshness per routine through {!arm}. *)
 type scoping = Private_to_this_exe | Shared_prefix of string | Flat
 
+(* Read from the CONFIGURED VALUE, not from what the resolved directory happens to look like. The
+   property is "nobody configured this directory, so it is mine by construction" — and no comparison
+   of the result can establish that: [build_files_prefix=<this exe's own basename>] resolves exactly
+   where the default would, while remaining a prefix a second executable can be given too. The empty
+   string is what [Utils.artifacts_subdir] itself treats as "unset". *)
 let scoping () =
-  match Utils.artifacts_subdir () with
-  | None -> Flat
-  | Some subdir ->
-      let exe_derived =
-        Utils.clean_filename @@ Stdlib.Filename.remove_extension
-        @@ Stdlib.Filename.basename Stdlib.Sys.executable_name
-      in
-      if String.equal subdir exe_derived then Private_to_this_exe else Shared_prefix subdir
+  match Utils.get_global_arg ~default:"" ~arg_name:"build_files_prefix" with
+  | "" -> Private_to_this_exe
+  | "." -> Flat
+  | prefix -> Shared_prefix prefix
 
 (* [Flat] never reaches a read (init fails), so the remaining question at read time is whether the
    directory was swept or has to be armed path by path. *)
 let sweeps_directory = ref true
+
+(* A refusal that returns is not a refusal. [Verdict.fail] only increments a counter, so a caller
+   that reports an unusable artifact directory and carries on hands the rest of the test exactly the
+   directory it just refused — and {!arm}, which deletes, would then run against it. The exit status
+   arriving eventually at teardown does not help: by then the deletions have happened. So refusing
+   the DIRECTORY aborts the process, at the point of refusal, before any compile or cleanup can go
+   through it. Exit 1 rather than an exception, matching what [Verdict]'s own teardown would
+   produce: [Stdlib.exit] runs that teardown on the way out, so the failure is still reported
+   normally. *)
+let abort msg =
+  Verdict.fail msg;
+  Stdio.Out_channel.flush Stdio.stdout;
+  Stdlib.exit 1
 
 let uninitialized where =
   Verdict.fail
@@ -164,10 +178,10 @@ let init ~backend_name =
     | Flat ->
         (* Shared with every concurrently running test by definition, so there is no cleanup this
            process may perform and no per-routine deletion that would be safe either: another test
-           can be writing the very name this one is about to read. Fail loudly — a test that
-           silently gave freshness up would be back where this module started. *)
-        sweeps_directory := false;
-        Verdict.fail
+           can be writing the very name this one is about to read. Nothing this module offers works
+           here, so the run stops rather than going on to delete and read another test's
+           artifacts. *)
+        abort
           "Generated.init: build_files is flat (build_files_prefix=.), shared with concurrently \
            running tests; artifact freshness cannot be established here"
     | Private_to_this_exe ->
