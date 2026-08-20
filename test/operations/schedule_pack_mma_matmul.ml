@@ -71,12 +71,9 @@ let nonzero name (a : float array) =
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_cpu = String.is_substring backend_name ~substring:"cc"
 
-let read_generated base_name =
-  let ext = if String.is_substring backend_name ~substring:"metal" then ".metal" else ".c" in
-  let ext = if String.is_substring backend_name ~substring:"cuda" then ".cu" else ext in
-  let ext = if String.is_substring backend_name ~substring:"hip" then ".hip" else ext in
-  let path = Utils.build_file (base_name ^ ext) in
-  if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
+module Generated = Test_utils.Generated
+
+let () = Generated.init ~backend_name
 
 let has_parallel_construct src =
   String.is_substring src ~substring:"dispatch_apply"
@@ -165,25 +162,21 @@ let () =
   let got = run_composed ~name:"pmm_packed" ~a:ma.Tensor.value ~b:mb.Tensor.value mc1 in
   p "packed+tensorized matmul matches the serial twin bitwise"
     (Array.for_all2_exn got want ~f:Float.equal);
-  (match read_generated "pmm_packed" with
-  | None -> p "packed tiles feed the register-tiled micro-kernel" false
-  | Some src ->
-      let has s = String.is_substring src ~substring:s in
-      let count_sub sub =
-        String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
-      in
-      (* Two plain local tile arrays; on the C backends both operand pointers of the register tiling
-         point into them (the accumulator streams from the real output). *)
-      p "packed tiles feed the register-tiled micro-kernel"
-        (count_sub "float tile_" = 2
-        && (not (has "threadgroup float tile_"))
-        && (not (has "__shared__"))
-        &&
-        if on_cpu then
-          has "Tile_mma register tiling"
-          && count_sub "__ = (tile_" = 2
-          && not (has "Tile_mma register tiling: 0x0")
-        else not (has "tmma_")));
+  (let src = Generated.read "pmm_packed" in
+   let has s = String.is_substring src ~substring:s in
+   let count_sub sub = String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length in
+   (* Two plain local tile arrays; on the C backends both operand pointers of the register tiling
+      point into them (the accumulator streams from the real output). *)
+   p "packed tiles feed the register-tiled micro-kernel"
+     (count_sub "float tile_" = 2
+     && (not (has "threadgroup float tile_"))
+     && (not (has "__shared__"))
+     &&
+     if on_cpu then
+       has "Tile_mma register tiling"
+       && count_sub "__ = (tile_" = 2
+       && not (has "Tile_mma register tiling: 0x0")
+     else not (has "tmma_")));
 
   (* === Transposed B (the layout the register tiling declines whole-triple): the packing normalizes
      it — [tile_loops = [k_i; j]] packs B~ k-major, so [Tensorize] sees [tb = false] and the
@@ -198,12 +191,10 @@ let () =
   let got_tb = run_composed ~name:"pmm_tb_packed" ~a:mta.Tensor.value ~b:mtb.Tensor.value td1 in
   p "packed transposed-B matmul matches the serial twin bitwise"
     (Array.for_all2_exn got_tb want_tb ~f:Float.equal);
-  (match read_generated "pmm_tb_packed" with
-  | None -> p "packing normalizes the transposed-B layout for the register tiling" false
-  | Some src ->
-      let has s = String.is_substring src ~substring:s in
-      p "packing normalizes the transposed-B layout for the register tiling"
-        (if on_cpu then has "Tile_mma register tiling" else not (has "tmma_")));
+  (let src = Generated.read "pmm_tb_packed" in
+   let has s = String.is_substring src ~substring:s in
+   p "packing normalizes the transposed-B layout for the register tiling"
+     (if on_cpu then has "Tile_mma register tiling" else not (has "tmma_")));
 
   (* === Grid-blocked whole-triple Tile_mma pool-parallelizes (materialized operands only: the
      analysis reads the statement through its scalar fallback). CPU-only schedule; identity
@@ -236,14 +227,11 @@ let () =
   let got_g = Context.get_values ctx gc1.Tensor.value in
   p "grid-blocked tensorized matmul matches the serial twin bitwise"
     (Array.for_all2_exn got_g want_g ~f:Float.equal);
-  (match read_generated "pmm_grid_mma" with
-  | None -> p "grid-blocked Tile_mma renders pool-parallel" false
-  | Some src ->
-      p "grid-blocked Tile_mma renders pool-parallel"
-        (if on_cpu then
-           has_parallel_construct src
-           && String.is_substring src ~substring:"Tile_mma register tiling"
-         else not (String.is_substring src ~substring:"tmma_")));
+  (let src = Generated.read "pmm_grid_mma" in
+   p "grid-blocked Tile_mma renders pool-parallel"
+     (if on_cpu then
+        has_parallel_construct src && String.is_substring src ~substring:"Tile_mma register tiling"
+      else not (String.is_substring src ~substring:"tmma_")));
 
   (* === Parallel packed composition (the fully parallel packed GEMM, gh-ocannl-469): the row-block
      loop is Grid-typed and pool-parallelizes. The per-row-block A~ packing Stage sits inside the
@@ -298,25 +286,23 @@ let () =
   let got_pp = Context.get_values ctx pp1.Tensor.value in
   p "parallel packed matmul matches the serial twin bitwise"
     (Array.for_all2_exn got_pp want_pp ~f:Float.equal);
-  match read_generated "pmm_par_packed" with
-  | None -> p "parallel packed composition renders pool-parallel with per-chunk tiles" false
-  | Some src ->
-      let has s = String.is_substring src ~substring:s in
-      p "parallel packed composition renders pool-parallel with per-chunk tiles"
-        (if on_cpu then
-           has_parallel_construct src && has "Pool-backed Grid rendering"
-           && has "Tile_mma register tiling"
-           &&
-           (* The A~ tile is declared per chunk, inside the parallel construct. *)
-           let par_pos =
-             Option.value_exn
-               (Option.first_some
-                  (String.substr_index src ~pattern:"dispatch_apply")
-                  (String.substr_index src ~pattern:"#pragma omp parallel for"))
-           in
-           List.exists (String.substr_index_all src ~may_overlap:false ~pattern:"float tile_")
-             ~f:(fun pos -> pos > par_pos)
-         else not (has "tmma_"))
+  let src = Generated.read "pmm_par_packed" in
+  let has s = String.is_substring src ~substring:s in
+  p "parallel packed composition renders pool-parallel with per-chunk tiles"
+    (if on_cpu then
+       has_parallel_construct src && has "Pool-backed Grid rendering"
+       && has "Tile_mma register tiling"
+       &&
+       (* The A~ tile is declared per chunk, inside the parallel construct. *)
+       let par_pos =
+         Option.value_exn
+           (Option.first_some
+              (String.substr_index src ~pattern:"dispatch_apply")
+              (String.substr_index src ~pattern:"#pragma omp parallel for"))
+       in
+       List.exists (String.substr_index_all src ~may_overlap:false ~pattern:"float tile_")
+         ~f:(fun pos -> pos > par_pos)
+     else not (has "tmma_"))
 
 (* === Grid + hoisted-pack composition (autotune's [sk_grid && sk_hoist] seeds, [bn = 0]): Grid row
    blocks over the packed pipeline with only the hoistable B operand packed (link-time constant-pool
@@ -371,15 +357,13 @@ let () =
   let got = Context.get_values ctx hc1.Tensor.value in
   p "grid + hoisted-pack matmul matches the serial twin bitwise"
     (Array.for_all2_exn got want ~f:Float.equal);
-  match read_generated "pmm_gridpack" with
-  | None -> p "grid + hoisted-pack renders pool-parallel with no in-kernel tile writes" false
-  | Some src ->
-      let has s = String.is_substring src ~substring:s in
-      p "grid + hoisted-pack renders pool-parallel with no in-kernel tile writes"
-        (if on_cpu then
-           has_parallel_construct src && has "Tile_mma register tiling" && has "packed_gb"
-           && not (has "float tile_")
-         else not (has "tmma_"))
+  let src = Generated.read "pmm_gridpack" in
+  let has s = String.is_substring src ~substring:s in
+  p "grid + hoisted-pack renders pool-parallel with no in-kernel tile writes"
+    (if on_cpu then
+       has_parallel_construct src && has "Tile_mma register tiling" && has "packed_gb"
+       && not (has "float tile_")
+     else not (has "tmma_"))
 
 (* === Mixed grid-outermost composition (autotune's [sk_pack_rest] seeds, gh-ocannl-473): the
    hoisted-pack shape with the non-hoistable A operand packed in-kernel — Grid row blocks stay
@@ -450,24 +434,19 @@ let () =
   let got = Context.get_values ctx mx1.Tensor.value in
   p "mixed grid-outermost matmul matches the serial twin bitwise"
     (Array.for_all2_exn got want ~f:Float.equal);
-  match read_generated "pmm_mixed" with
-  | None -> p "mixed shape: hoisted B~ panel plus per-chunk in-kernel A~ tile" false
-  | Some src ->
-      let has s = String.is_substring src ~substring:s in
-      p "mixed shape: hoisted B~ panel plus per-chunk in-kernel A~ tile"
-        (if on_cpu then
-           has_parallel_construct src && has "Tile_mma register tiling" && has "packed_mgb"
-           &&
-           (* Exactly one in-kernel tile (A~), declared per chunk inside the parallel construct. *)
-           let tile_positions =
-             String.substr_index_all src ~may_overlap:false ~pattern:"float tile_"
-           in
-           let par_pos =
-             Option.value_exn
-               (Option.first_some
-                  (String.substr_index src ~pattern:"dispatch_apply")
-                  (String.substr_index src ~pattern:"#pragma omp parallel for"))
-           in
-           List.length tile_positions = 1
-           && List.for_all tile_positions ~f:(fun pos -> pos > par_pos)
-         else not (has "tmma_"))
+  let src = Generated.read "pmm_mixed" in
+  let has s = String.is_substring src ~substring:s in
+  p "mixed shape: hoisted B~ panel plus per-chunk in-kernel A~ tile"
+    (if on_cpu then
+       has_parallel_construct src && has "Tile_mma register tiling" && has "packed_mgb"
+       &&
+       (* Exactly one in-kernel tile (A~), declared per chunk inside the parallel construct. *)
+       let tile_positions = String.substr_index_all src ~may_overlap:false ~pattern:"float tile_" in
+       let par_pos =
+         Option.value_exn
+           (Option.first_some
+              (String.substr_index src ~pattern:"dispatch_apply")
+              (String.substr_index src ~pattern:"#pragma omp parallel for"))
+       in
+       List.length tile_positions = 1 && List.for_all tile_positions ~f:(fun pos -> pos > par_pos)
+     else not (has "tmma_"))

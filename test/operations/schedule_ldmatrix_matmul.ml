@@ -48,15 +48,9 @@ let on_metal = String.is_substring backend_name ~substring:"metal"
 let on_cuda = String.is_substring backend_name ~substring:"cuda"
 let on_gpu = on_metal || on_cuda || String.is_substring backend_name ~substring:"hip"
 
-let read_generated base_name =
-  let ext =
-    if on_metal then ".metal"
-    else if String.is_substring backend_name ~substring:"hip" then ".hip"
-    else if on_gpu then ".cu"
-    else ".c"
-  in
-  let path = Utils.build_file (base_name ^ ext) in
-  if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
+module Generated = Test_utils.Generated
+
+let () = Generated.init ~backend_name
 
 (* The maximal single-child chains of statement-level loops: one symbol list per top-level nest. *)
 let nest_paths (llc : LL.t) : Ir.Indexing.symbol list list =
@@ -212,9 +206,8 @@ let leg ?schedule_of ~tag ~build ~src_a ~src_b ~swz_a ~swz_b ~check ~acc_prec ?(
        would plausibly produce all zeros, and zeros compare equal to zeros. *)
     p parity_label
       (Array.exists want ~f:(fun x -> Float.(x <> 0.)) && Array.for_all2_exn got want ~f:Float.equal);
-    match read_generated (name ^ "_mma") with
-    | None -> p struct_label false
-    | Some src -> p struct_label (check ~src ~census)
+    let src = Generated.read (name ^ "_mma") in
+    p struct_label (check ~src ~census)
   end
 
 (* The bf16 inputs are multiples of 1/4 and 1/2 with 32-term sums bounded by 16, so every product is

@@ -36,14 +36,11 @@ let has_barriers =
   || String.is_substring backend_name ~substring:"cuda"
   || String.is_substring backend_name ~substring:"hip"
 
+module Generated = Test_utils.Generated
+
+let () = Generated.init ~backend_name
 let single = Ir.Ops.single
 let iprec = Ir.Ops.index_prec ()
-
-let read_generated base_name =
-  let ext = if String.is_substring backend_name ~substring:"metal" then ".metal" else ".cu" in
-  let ext = if String.is_substring backend_name ~substring:"hip" then ".hip" else ext in
-  let path = Utils.build_file (base_name ^ ext) in
-  if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
 
 (* Replace the lowered serial sum with the hand-built workgroup tree reduction. *)
 let group_reduce ~(v : Tn.t) ~(s : Tn.t) (opt : LL.optimized) : LL.optimized =
@@ -141,16 +138,14 @@ let () =
     let ctx_a = Context.run ctx_a routine_a in
     let got_s1 = Context.get_values ctx_a s1.Tensor.value in
     p "workgroup reduction parity (GPU) or clean rejection (CPU)" (approx got_s1.(0) expected_sum);
-    match read_generated "sum_wg_reduce" with
-    | None -> p "shared tile and barrier rendered (GPU) or rejected (CPU)" false
-    | Some src ->
-        let has sub = String.is_substring src ~substring:sub in
-        let shared_ok =
-          if String.is_substring backend_name ~substring:"metal" then
-            has "threadgroup float partial_sums[64]" && has "threadgroup_barrier"
-          else has "__shared__ float partial_sums[64]" && has "__syncthreads()"
-        in
-        p "shared tile and barrier rendered (GPU) or rejected (CPU)" shared_ok)
+    let src = Generated.read "sum_wg_reduce" in
+    let has sub = String.is_substring src ~substring:sub in
+    let shared_ok =
+      if String.is_substring backend_name ~substring:"metal" then
+        has "threadgroup float partial_sums[64]" && has "threadgroup_barrier"
+      else has "__shared__ float partial_sums[64]" && has "__syncthreads()"
+    in
+    p "shared tile and barrier rendered (GPU) or rejected (CPU)" shared_ok)
   else (
     (match
        try

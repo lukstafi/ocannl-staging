@@ -53,6 +53,10 @@ let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~d
 let on_cpu = String.is_substring backend_name ~substring:"cc"
 let skipped = Verdict.skipped ~backend:backend_name
 
+module Generated = Test_utils.Generated
+
+let () = Generated.init ~backend_name
+
 (* Parity on the bits, not on the values: [Float.equal (-0.) 0.] is [true], and the sign of a zero
    is the entire difference this test is about. *)
 let bitwise a b = Int64.equal (Int64.bits_of_float a) (Int64.bits_of_float b)
@@ -70,13 +74,6 @@ let discriminating name (a : float array) =
 
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
-
-let read_generated base_name =
-  let ext = if String.is_substring backend_name ~substring:"metal" then ".metal" else ".c" in
-  let ext = if String.is_substring backend_name ~substring:"cuda" then ".cu" else ext in
-  let ext = if String.is_substring backend_name ~substring:"hip" then ".hip" else ext in
-  let path = Utils.build_file (base_name ^ ext) in
-  if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
 
 (* One context lineage per leg: a tensor's initialization code is consumed by the first computation
    that embeds it, so the second compile of a leg must inherit the context that already holds the
@@ -180,18 +177,16 @@ let () =
     let got = Context.get_values ctx_mma d_mma.Tensor.value in
     p "register-tiled Tile_mma preserves negative zero (bitwise vs the serial twin)"
       (Array.for_all2_exn got want ~f:bitwise);
-    match read_generated "nz_mma" with
-    | None -> p "register tiling renders a bit-preserving A splat" false
-    | Some src ->
-        let has s = String.is_substring src ~substring:s in
-        p "register tiling renders a bit-preserving A splat"
-          (has "Tile_mma register tiling" && has "full blocks 4x16 of 4x16"
-         (* An initializer of repeated copies of one bound scalar — no arithmetic, so no bit pattern
-            is altered. Both arithmetic spellings are pinned out by name: [(vtyp){0} + x] normalizes
-            a negative zero, and [x - (vtyp){0}] quiets a signaling NaN. *)
-         && has "tmma_as_0__, tmma_as_0__"
-          && (not (has "){0} + "))
-          && not (has " - (ocannl_vec")))
+    let src = Generated.read "nz_mma" in
+    let has s = String.is_substring src ~substring:s in
+    p "register tiling renders a bit-preserving A splat"
+      (has "Tile_mma register tiling" && has "full blocks 4x16 of 4x16"
+     (* An initializer of repeated copies of one bound scalar — no arithmetic, so no bit pattern is
+        altered. Both arithmetic spellings are pinned out by name: [(vtyp){0} + x] normalizes a
+        negative zero, and [x - (vtyp){0}] quiets a signaling NaN. *)
+     && has "tmma_as_0__, tmma_as_0__"
+      && (not (has "){0} + "))
+      && not (has " - (ocannl_vec")))
   else (
     skipped "register-tiled Tile_mma preserves negative zero (bitwise vs the serial twin)";
     skipped "register tiling renders a bit-preserving A splat")
@@ -242,12 +237,10 @@ let () =
     let got = Context.get_values ctx_vec c1.Tensor.value in
     p "vectorized FMA preserves a negative-zero uniform operand (bitwise vs the serial twin)"
       (Array.for_all2_exn got want ~f:bitwise);
-    match read_generated "nzv_vec" with
-    | None -> p "vectorized rendering renders a bit-preserving splat" false
-    | Some src ->
-        let has s = String.is_substring src ~substring:s in
-        p "vectorized rendering renders a bit-preserving splat"
-          (has "vector_size" && has "vunif" && (not (has "){0} + ")) && not (has " - (ocannl_vec")))
+    let src = Generated.read "nzv_vec" in
+    let has s = String.is_substring src ~substring:s in
+    p "vectorized rendering renders a bit-preserving splat"
+      (has "vector_size" && has "vunif" && (not (has "){0} + ")) && not (has " - (ocannl_vec")))
   else (
     skipped "vectorized reference carries zeros of both signs";
     skipped "vectorized FMA preserves a negative-zero uniform operand (bitwise vs the serial twin)";

@@ -52,12 +52,9 @@ let nonzero name (a : float array) =
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_cpu = String.is_substring backend_name ~substring:"cc"
 
-let read_generated base_name =
-  let ext = if String.is_substring backend_name ~substring:"metal" then ".metal" else ".c" in
-  let ext = if String.is_substring backend_name ~substring:"cuda" then ".cu" else ext in
-  let ext = if String.is_substring backend_name ~substring:"hip" then ".hip" else ext in
-  let path = Utils.build_file (base_name ^ ext) in
-  if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
+module Generated = Test_utils.Generated
+
+let () = Generated.init ~backend_name
 
 (* The zeroing nest is its own Grid loop and parallelizes independently of the accumulation loop:
    count constructs rather than testing presence. *)
@@ -214,22 +211,18 @@ let () =
        let want = nonzero "decl_serial" (Context.get_values sctx c2.Tensor.value) in
        p "per-chunk B~ re-pack matches the serial twin bitwise"
          (Array.for_all2_exn got want ~f:Float.equal));
-    read_generated name
+    Generated.read name
   in
-  (match compile_bpack ~run_parity:true ~name:"tmd_bpack_fits" ~dim:256 () with
-  | None -> p "per-chunk B~ re-pack under the cap pool-parallelizes" false
-  | Some src ->
-      (* Two parallel loops: the expanded zeroing nest and the packed accumulation loop. *)
-      p "per-chunk B~ re-pack under the cap pool-parallelizes"
-        ((not on_cpu)
-        || (count_parallel_constructs src = 2 && String.is_substring src ~substring:"tile_")));
-  match compile_bpack ~name:"tmd_bpack_over" ~dim:1024 () with
-  | None -> p "per-chunk B~ re-pack over the cap declines to serial" false
-  | Some src ->
-      (* Only the zeroing nest parallelizes; the accumulation loop's per-chunk tiles trip the cap
-         and it renders serial. *)
-      p "per-chunk B~ re-pack over the cap declines to serial"
-        ((not on_cpu) || count_parallel_constructs src = 1)
+  (let src = compile_bpack ~run_parity:true ~name:"tmd_bpack_fits" ~dim:256 () in
+   (* Two parallel loops: the expanded zeroing nest and the packed accumulation loop. *)
+   p "per-chunk B~ re-pack under the cap pool-parallelizes"
+     ((not on_cpu)
+     || (count_parallel_constructs src = 2 && String.is_substring src ~substring:"tile_")));
+  let src = compile_bpack ~name:"tmd_bpack_over" ~dim:1024 () in
+  (* Only the zeroing nest parallelizes; the accumulation loop's per-chunk tiles trip the cap and it
+     renders serial. *)
+  p "per-chunk B~ re-pack over the cap declines to serial"
+    ((not on_cpu) || count_parallel_constructs src = 1)
 
 (* === The seeding pre-filter (gh-ocannl-479) and the mixed grid-outermost seed (gh-ocannl-473).
    Synthetic limits pin the vector width (32 bytes = 8 f32 lanes), and seeds are enumerated on the

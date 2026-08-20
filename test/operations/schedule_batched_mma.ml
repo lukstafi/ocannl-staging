@@ -48,15 +48,9 @@ let skipped = Verdict.skipped ~backend:backend_name
 let on_gpu =
   List.exists [ "metal"; "cuda"; "hip" ] ~f:(fun s -> String.is_substring backend_name ~substring:s)
 
-let read_generated base_name =
-  let ext =
-    if String.is_substring backend_name ~substring:"metal" then ".metal"
-    else if String.is_substring backend_name ~substring:"hip" then ".hip"
-    else if on_gpu then ".cu"
-    else ".c"
-  in
-  let path = Utils.build_file (base_name ^ ext) in
-  if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
+module Generated = Test_utils.Generated
+
+let () = Generated.init ~backend_name
 
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
@@ -143,12 +137,8 @@ let check_leg ~tag ~serial ~tensorized =
     p
       (tag ^ " tensorized matches the serial twin bitwise")
       (Array.for_all2_exn got want ~f:Float.equal);
-    (match read_generated (tag ^ "_mma") with
-    | None -> p (tag ^ " tensorized structure as expected") false
-    | Some src ->
-        p
-          (tag ^ " tensorized structure as expected")
-          (String.is_substring src ~substring:"Tile_mma register tiling"));
+    Generated.assert_emits ~routine:(tag ^ "_mma") ~contains:"Tile_mma register tiling"
+      (tag ^ " tensorized structure as expected");
     opt
 
 let () =
@@ -320,6 +310,12 @@ let () =
     let n_ran = (ref 0, ref 0) and n_close = (ref 0, ref 0) and n_intrinsic = (ref 0, ref 0) in
     let of_flavor (serial, grid) q = if q.Autotune.sk_batch_grid then grid else serial in
     List.iter cands ~f:(fun q ->
+        (* Every candidate compiles under the one routine name [<tag>_bf16_mma], so each overwrites
+           the previous one's artifact. Arming deletes it first, and the read below then sees this
+           candidate's kernel or nothing (gh-ocannl-655) -- which is what the per-flavor intrinsic
+           count above rests on: a batch-grid candidate running the scalar fallback is only caught
+           if the source judging it is really its own. *)
+        Generated.arm (tag ^ "_bf16_mma");
         match
           let ctx, routine =
             Context.compile
@@ -331,11 +327,8 @@ let () =
         | got ->
             Int.incr (of_flavor n_ran q);
             if Array.for_all2_exn got want ~f:close then Int.incr (of_flavor n_close q);
-            if
-              Option.value_map
-                (read_generated (tag ^ "_bf16_mma"))
-                ~default:false ~f:renders_intrinsic
-            then Int.incr (of_flavor n_intrinsic q)
+            if renders_intrinsic (Generated.read (tag ^ "_bf16_mma")) then
+              Int.incr (of_flavor n_intrinsic q)
         | exception _ -> ());
     p
       (tag ^ " bf16: the backend's advertised tile is seeded")

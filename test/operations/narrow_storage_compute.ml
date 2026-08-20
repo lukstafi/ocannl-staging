@@ -35,15 +35,16 @@ let p = Verdict.p
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_cpu = String.is_substring backend_name ~substring:"cc"
 
-let read_generated base_name =
-  let ext =
-    if String.is_substring backend_name ~substring:"metal" then ".metal"
-    else if String.is_substring backend_name ~substring:"cuda" then ".cu"
-    else if String.is_substring backend_name ~substring:"hip" then ".hip"
-    else ".c"
-  in
-  let path = Utils.build_file (base_name ^ ext) in
-  if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
+module Generated = Test_utils.Generated
+
+let () = Generated.init ~backend_name
+
+(* The structural checks below are CPU-only in substance -- the vector seam they pin is the C
+   backends' -- but their claims print on every backend, because the golden is shared. So the read
+   is what gets gated: on a GPU backend the kernels these name are never consulted, and asking for
+   an artifact that this run had no reason to emit would be a failure, not a skip. *)
+let read_on_cpu routine = if on_cpu then Generated.read routine else ""
+let src_has src s = String.is_substring src ~substring:s
 
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
@@ -164,7 +165,7 @@ let () =
       max_err reference vec
       /. Array.fold reference ~init:0. ~f:(fun m v -> Float.max m (Float.abs v))
       < 0.01);
-  let native_source = read_generated "nsc_vec_nat" in
+  let native_source = read_on_cpu "nsc_vec_nat" in
 
   (* Computing *in* fp16 means fp16's 65504 ceiling applies to the intermediates, not just to the
      stored result. [exp 12.] is 162754, which overflows it; scaling that back down recovers a
@@ -225,21 +226,18 @@ let () =
   in
   let fma_v = fma_leg () in
   p "per-operator half FMA computes 1.5 * 2 + 1.5" Float.(abs (fma_v - 4.5) < 0.01);
-  (match read_generated "nsc_half_fma" with
-  | None -> p "the shared half FMA converts rather than bit-casting" (not on_cpu)
-  | Some src ->
-      let has t = String.is_substring src ~substring:t in
-      p "the shared half FMA converts rather than bit-casting"
-        ((not on_cpu)
-        || (has "OCANNL_HALF_FMA" && has "HALF_TO_FLOAT(a)" && not (has "fmaf((float)(a)"))));
+  (let src = read_on_cpu "nsc_half_fma" in
+   let has t = String.is_substring src ~substring:t in
+   p "the shared half FMA converts rather than bit-casting"
+     ((not on_cpu)
+     || (has "OCANNL_HALF_FMA" && has "HALF_TO_FLOAT(a)" && not (has "fmaf((float)(a)"))));
 
   (* --- 3. Structure of the bf16 vectorized source. ---
 
      CPU-only in substance (the vector seam these pin is the C backends'), but printed on every
      backend: the golden is shared, so a GPU run that emitted fewer lines than cc could never match
      it however it behaved. *)
-  let vec_source = read_generated "nsc_vec_bf16" in
-  let src_has src s = Option.value_map src ~default:false ~f:(String.is_substring ~substring:s) in
+  let vec_source = read_on_cpu "nsc_vec_bf16" in
   p "bf16 loop vectorizes with a converting load/store"
     ((not on_cpu)
     || src_has vec_source "vector_size"
@@ -258,9 +256,6 @@ let () =
   p "fp16 policy is honored exactly where the target reports the capability"
     ((not on_cpu)
     ||
-    match native_source with
-    | None -> true
-    | Some nsrc ->
-        let nhas t = String.is_substring nsrc ~substring:t in
-        if native_fp16 then nhas "HALF_T ocannl_vec" && not (nhas "OCANNL_VEC_WIDEN_HALF")
-        else nhas "OCANNL_VEC_WIDEN_HALF" || nhas "HALF_TO_FLOAT")
+    let nhas t = String.is_substring native_source ~substring:t in
+    if native_fp16 then nhas "HALF_T ocannl_vec" && not (nhas "OCANNL_VEC_WIDEN_HALF")
+    else nhas "OCANNL_VEC_WIDEN_HALF" || nhas "HALF_TO_FLOAT")

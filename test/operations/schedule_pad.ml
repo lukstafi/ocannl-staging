@@ -56,15 +56,9 @@ let on_gpu =
   || String.is_substring backend_name ~substring:"cuda"
   || String.is_substring backend_name ~substring:"hip"
 
-let read_generated base_name =
-  let ext =
-    if on_metal then ".metal"
-    else if String.is_substring backend_name ~substring:"hip" then ".hip"
-    else if on_gpu then ".cu"
-    else ".c"
-  in
-  let path = Utils.build_file (base_name ^ ext) in
-  if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
+module Generated = Test_utils.Generated
+
+let () = Generated.init ~backend_name
 
 (* The maximal single-child chains of statement-level loops: one symbol list per top-level nest. *)
 let nest_paths (llc : LL.t) : Ir.Indexing.symbol list list =
@@ -150,20 +144,18 @@ let () =
   let got = Context.get_values ctx pc1.Tensor.value in
   p "padded packed matmul matches the serial twin bitwise"
     (Array.for_all2_exn got want ~f:Float.equal);
-  match read_generated "pad_packed" with
-  | None -> p "padded 33x65x70 runs the register-tiled micro-kernel" false
-  | Some src ->
-      let has s = String.is_substring src ~substring:s in
-      p "padded 33x65x70 runs the register-tiled micro-kernel"
-        (if on_cpu then
-           has "Tile_mma register tiling" && not (has "Tile_mma renders the lane-0 scalar fallback")
-         else not (has "tmma_"));
-      (* The zero-filled fringe of the staged tiles: the load nests keep Where-form edge guards
-         (rendered as conditional expressions storing 0 past the source extents), and the masked
-         store-back writes only the valid rows. *)
-      p "staged tiles zero-fill their fringe and the store-back is masked"
-        ((not on_cpu)
-        || (has "!= 0.0 ? " && has "(float)(0)" && has (Printf.sprintf "< (int)(%d))) {" m_ext)))
+  let src = Generated.read "pad_packed" in
+  let has s = String.is_substring src ~substring:s in
+  p "padded 33x65x70 runs the register-tiled micro-kernel"
+    (if on_cpu then
+       has "Tile_mma register tiling" && not (has "Tile_mma renders the lane-0 scalar fallback")
+     else not (has "tmma_"));
+  (* The zero-filled fringe of the staged tiles: the load nests keep Where-form edge guards
+     (rendered as conditional expressions storing 0 past the source extents), and the masked
+     store-back writes only the valid rows. *)
+  p "staged tiles zero-fill their fringe and the store-back is masked"
+    ((not on_cpu)
+    || (has "!= 0.0 ? " && has "(float)(0)" && has (Printf.sprintf "< (int)(%d))) {" m_ext)))
 
 (* === GPU leg: padded shared cooperative composition (mirrors autotune's [gpu_mma_sketch_schedule],
    plus the pads — including the unsplit column panel, which the intrinsic n-extent needs). The
@@ -239,20 +231,18 @@ let () =
     let ctx = Context.run ctx routine in
     let got = Context.get_values ctx gc1.Tensor.value in
     p "padded staged+tensorized matmul parity (GPU)" (Array.for_all2_exn got want ~f:approx);
-    match read_generated "pad_gpu_mma" with
-    | None -> p "padded GPU intrinsics fire against the threadgroup fragment" false
-    | Some src ->
-        let has s = String.is_substring src ~substring:s in
-        if on_metal then
-          p "padded GPU intrinsics fire against the threadgroup fragment"
-            (has "simdgroup_multiply_accumulate"
-            && has "threadgroup float fragment_"
-            && not (has "Tile_mma renders the lane-0 scalar fallback"))
-        else
-          (* CUDA/HIP: the wmma tile is 16x16x16; the 8-padded n extent (72) declines the intrinsic
-             and the lane-0 fallback must still be correct — parity above is the pin. Pad-to-16 on
-             all axes is the autotune-seeded variant for these backends, so nothing here fires. *)
-          skipped "padded GPU intrinsics fire against the threadgroup fragment")
+    let src = Generated.read "pad_gpu_mma" in
+    let has s = String.is_substring src ~substring:s in
+    if on_metal then
+      p "padded GPU intrinsics fire against the threadgroup fragment"
+        (has "simdgroup_multiply_accumulate"
+        && has "threadgroup float fragment_"
+        && not (has "Tile_mma renders the lane-0 scalar fallback"))
+    else
+      (* CUDA/HIP: the wmma tile is 16x16x16; the 8-padded n extent (72) declines the intrinsic and
+         the lane-0 fallback must still be correct — parity above is the pin. Pad-to-16 on all axes
+         is the autotune-seeded variant for these backends, so nothing here fires. *)
+      skipped "padded GPU intrinsics fire against the threadgroup fragment")
   else
     (* Keep the printed transcript identical across backends. *)
     skipped "padded staged+tensorized matmul parity (GPU)";

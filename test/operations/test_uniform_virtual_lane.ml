@@ -14,12 +14,9 @@ open Ocannl.Nn_blocks.DSL_modules
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 
-let read_generated base_name =
-  let ext = if String.is_substring backend_name ~substring:"metal" then ".metal" else ".c" in
-  let ext = if String.is_substring backend_name ~substring:"cuda" then ".cu" else ext in
-  let ext = if String.is_substring backend_name ~substring:"hip" then ".hip" else ext in
-  let path = Utils.build_file (base_name ^ ext) in
-  if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
+module Generated = Test_utils.Generated
+
+let () = Generated.init ~backend_name
 
 (* The consumer multiplies by 1: exact in every precision (including the fp8 float bridge), and
    reads each cell of [u] exactly once so [u] stays a virtualization candidate. Both runs create
@@ -33,23 +30,25 @@ let run ~virtual_ ~prec ?input_dims output_dims =
   if not virtual_ then Train.set_materialized u.value;
   let%op uvl = u *. 1. in
   Ir.Tnode.update_prec uvl.value prec;
+  (* Every leg of every precision compiles under the one routine name [uvl_fwd], so each compile
+     overwrites the previous one's artifact. Arming deletes it first: what is read back below is
+     this run's kernel or nothing, never the previous leg's. *)
+  Generated.arm "uvl_fwd";
   let ctx = Train.forward_once ctx uvl in
   let values = Context.get_values ctx uvl.value in
-  (values, read_generated "uvl_fwd")
+  (values, Generated.read "uvl_fwd")
 
 let bits_equal a b = Int64.equal (Int64.bits_of_float a) (Int64.bits_of_float b)
 
 (* Structural checks scan only the routine body: the prepended builtin definitions mention both the
    vectorized and the lane builtins (the lane builtins are implemented via the _vec ones). *)
-let has sub = function
-  | None -> false
-  | Some s ->
-      let body =
-        match String.substr_index s ~pattern:"Main logic" with
-        | Some i -> String.subo s ~pos:i
-        | None -> s
-      in
-      String.is_substring body ~substring:sub
+let has sub s =
+  let body =
+    match String.substr_index s ~pattern:"Main logic" with
+    | Some i -> String.subo s ~pos:i
+    | None -> s
+  in
+  String.is_substring body ~substring:sub
 
 let check ~name ~prec ?input_dims output_dims =
   let ref_vals, ref_src = run ~virtual_:false ~prec ?input_dims output_dims in

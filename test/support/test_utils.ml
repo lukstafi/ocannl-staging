@@ -25,6 +25,11 @@ module Verdict_scan = Verdict_scan
 (** Scanning test sources for claims a test decides itself and prints outside [Verdict], where a
     failing one is [dune promote]-able into the golden. *)
 
+module Generated = Generated
+(** Freshness-checked reads of the generated kernels under [build_files/], for tests that assert on
+    emitted code. Artifacts outlive the run that wrote them, so a read that does not establish
+    provenance can keep asserting on a kernel that is no longer emitted at all. *)
+
 (** [concise_float ~prec v] formats [v] with [prec] decimals, normalizing exponent digits portably.
     Re-export of [Ir.Ndarray.concise_float]. *)
 let concise_float = Ir.Ndarray.concise_float

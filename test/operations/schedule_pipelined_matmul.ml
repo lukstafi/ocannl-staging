@@ -71,15 +71,9 @@ let on_gpu =
   || String.is_substring backend_name ~substring:"cuda"
   || String.is_substring backend_name ~substring:"hip"
 
-let read_generated base_name =
-  let ext =
-    if on_metal then ".metal"
-    else if String.is_substring backend_name ~substring:"hip" then ".hip"
-    else if on_gpu then ".cu"
-    else ".c"
-  in
-  let path = Utils.build_file (base_name ^ ext) in
-  if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
+module Generated = Test_utils.Generated
+
+let () = Generated.init ~backend_name
 
 (* The maximal single-child chains of statement-level loops: one symbol list per top-level nest. *)
 let nest_paths (llc : LL.t) : Ir.Indexing.symbol list list =
@@ -285,22 +279,19 @@ let () =
      let count_sub src sub =
        String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
      in
-     (match (read_generated "pipe_mm_d1", read_generated "pipe_mm_d2") with
-     | Some src1, Some src2 ->
-         (* The depth-2 kernel rotates both tile buffers ([% 2] terms on reads and writes) and
-            allocates each tile at twice the depth-1 size (16x16 -> [512] and 16x32 -> [1024]
-            floats); the depth-1 kernel has no rotation and single-size tiles. *)
-         let decl_ok src d =
-           if on_metal then
-             count_sub src ("[" ^ Int.to_string (256 * d) ^ "]") >= 1
-             && count_sub src ("[" ^ Int.to_string (512 * d) ^ "]") >= 1
-           else true
-         in
-         p "depth 2 rotates the buffers the depth-1 kernel does not"
-           (count_sub src2 "% 2" >= 4
-           && count_sub src1 "% 2" = 0
-           && decl_ok src1 1 && decl_ok src2 2)
-     | _ -> p "depth 2 rotates the buffers the depth-1 kernel does not" false);
+     (let src1 = Generated.read "pipe_mm_d1" in
+      let src2 = Generated.read "pipe_mm_d2" in
+      (* The depth-2 kernel rotates both tile buffers ([% 2] terms on reads and writes) and
+         allocates each tile at twice the depth-1 size (16x16 -> [512] and 16x32 -> [1024] floats);
+         the depth-1 kernel has no rotation and single-size tiles. *)
+      let decl_ok src d =
+        if on_metal then
+          count_sub src ("[" ^ Int.to_string (256 * d) ^ "]") >= 1
+          && count_sub src ("[" ^ Int.to_string (512 * d) ^ "]") >= 1
+        else true
+      in
+      p "depth 2 rotates the buffers the depth-1 kernel does not"
+        (count_sub src2 "% 2" >= 4 && count_sub src1 "% 2" = 0 && decl_ok src1 1 && decl_ok src2 2));
      (* gh-487 phase 2: where the backend has an async-copy arm, the depth-2 staging renders as
         async copies — both prologues and both prefetches, 4 call sites — with one wait-then-barrier
         opening each rotor iteration, while depth 1 stays fully synchronous: the pd1/pd2 pair keeps
@@ -310,31 +301,29 @@ let () =
         on PR #317). Backends without the arm (Metal — which advertises depths for the portable form
         — and HIP) keep the synchronous rendering at both depths: a real check that the hook does
         not leak, not a skip. *)
-     (match (read_generated "pipe_mm_d1", read_generated "pipe_mm_d2") with
-     | Some src1, Some src2 ->
-         let cuda_async =
-           String.is_substring backend_name ~substring:"cuda"
-           &&
-           match (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.mma with
-           | Some m -> not (List.is_empty m.Ir.Backend_intf.mma_pipeline_depths)
-           | None -> false
-         in
-         p "async copies appear exactly on the depth-2 async arm"
-           (if cuda_async then
-              count_sub src2 "ocannl_cp_async4(&" = 4
-              && count_sub src2 "ocannl_cp_async_wait_all();" = 1
-              && count_sub src1 "ocannl_cp_async" = 0
-            else count_sub src2 "ocannl_cp_async" = 0 && count_sub src1 "ocannl_cp_async" = 0)
-     | _ -> p "async copies appear exactly on the depth-2 async arm" false);
+     (let src1 = Generated.read "pipe_mm_d1" in
+      let src2 = Generated.read "pipe_mm_d2" in
+      let cuda_async =
+        String.is_substring backend_name ~substring:"cuda"
+        &&
+        match (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.mma with
+        | Some m -> not (List.is_empty m.Ir.Backend_intf.mma_pipeline_depths)
+        | None -> false
+      in
+      p "async copies appear exactly on the depth-2 async arm"
+        (if cuda_async then
+           count_sub src2 "ocannl_cp_async4(&" = 4
+           && count_sub src2 "ocannl_cp_async_wait_all();" = 1
+           && count_sub src1 "ocannl_cp_async" = 0
+         else count_sub src2 "ocannl_cp_async" = 0 && count_sub src1 "ocannl_cp_async" = 0));
      (* The count in the EMITTED kernel, where the intrinsic's own brackets are visible too: the
         reference and depth 1 differ by exactly the two barrier statements gh-567 dropped (the
         k-block has one loop body in the source, so this counts statements, not executions). *)
-     match (read_generated "pipe_mm_d1", read_generated "pipe_mm_d1_barriers") with
-     | Some src1, Some src_ref ->
-         let barrier_kw = if on_metal then "threadgroup_barrier" else "__syncthreads" in
-         p "the emitted depth-1 kernel sheds exactly the two elided barriers"
-           (count_sub src_ref barrier_kw - count_sub src1 barrier_kw = 2)
-     | _ -> p "the emitted depth-1 kernel sheds exactly the two elided barriers" false)
+     let src1 = Generated.read "pipe_mm_d1" in
+     let src_ref = Generated.read "pipe_mm_d1_barriers" in
+     let barrier_kw = if on_metal then "threadgroup_barrier" else "__syncthreads" in
+     p "the emitted depth-1 kernel sheds exactly the two elided barriers"
+       (count_sub src_ref barrier_kw - count_sub src1 barrier_kw = 2))
    else
      (* The C backends reject the shared staging composition at compile (workgroup-shared placement
         is not renderable there) — same clean rejection as the SMEM matmul test, at any depth. *)
