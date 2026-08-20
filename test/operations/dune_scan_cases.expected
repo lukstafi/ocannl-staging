@@ -88,6 +88,9 @@ ok: raw stanzas -- the same one twice in a stanza is one entry
 ok: raw stanzas -- the same one in two stanzas is two stanzas
 ok: raw stanzas -- a chdir names where it runs
 ok: raw stanzas -- one executable under two chdirs is two entries
+ok: raw stanzas -- a quoted chdir destination
+ok: raw stanzas -- a quoted command
+ok: raw stanzas -- an escape inside a quoted atom
 ok: raw stanzas -- nested chdirs compose
 ok: raw stanzas -- an alias runs things too
 ok: raw stanzas -- a test's custom action

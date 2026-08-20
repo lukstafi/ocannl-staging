@@ -513,6 +513,17 @@ let raw_stanza_cases =
     ( "one executable under two chdirs is two entries",
       {dune|(rule (action (progn (chdir d1 (run %{dep:a.exe})) (chdir d2 (run %{dep:a.exe})))))|dune},
       [ "rule{d1:a.exe d2:a.exe}" ] );
+    (* A quoted atom is an atom: sexplib hands the walk `(chdir "scratch dir" …)` as one, so the
+       reader has to read it as one too or it keeps the enclosing directory. *)
+    ( "a quoted chdir destination",
+      {dune|(rule (action (chdir "scratch dir" (run %{dep:probe.exe}))))|dune},
+      [ "rule{scratch dir:probe.exe}" ] );
+    ( "a quoted command",
+      {dune|(rule (action (run "./probe.exe")))|dune},
+      [ "rule{probe.exe}" ] );
+    ( "an escape inside a quoted atom",
+      {dune|(rule (action (chdir "with\"quote" (run %{dep:probe.exe}))))|dune},
+      [ "rule{with\"quote:probe.exe}" ] );
     ( "nested chdirs compose",
       {dune|(rule (action (chdir a (chdir b (run %{dep:x.exe})))))|dune},
       [ "rule{a/b:x.exe}" ] );

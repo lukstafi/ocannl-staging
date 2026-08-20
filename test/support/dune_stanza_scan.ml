@@ -712,13 +712,32 @@ let raw_stanzas content =
     done;
     String.sub content ~pos ~len:(!stop - pos)
   in
-  (* The next atom after [pos], if the next thing is an atom rather than a form. *)
+  (* The next atom after [pos], if the next thing is an atom rather than a form. A QUOTED atom is
+     one too: sexplib hands the walk `(chdir "scratch dir" …)` as the atom [scratch dir], so a
+     reader that stopped at the quote would keep the enclosing directory and report a hole in a
+     correct rule (Codex P2, round 4). *)
   let token_after pos =
     let pos = ref pos in
     while !pos < length && Char.is_whitespace content.[!pos] do
       Int.incr pos
     done;
-    if !pos < length && not (delimiter content.[!pos]) then Some (token_at !pos) else None
+    if !pos >= length then None
+    else if Char.equal content.[!pos] '"' then (
+      let buf = Buffer.create 16 in
+      let i = ref (!pos + 1) in
+      let closed = ref false in
+      while (not !closed) && !i < length do
+        (match content.[!i] with
+        | '\\' when !i + 1 < length ->
+            Buffer.add_char buf content.[!i + 1];
+            Int.incr i
+        | '"' -> closed := true
+        | c -> Buffer.add_char buf c);
+        Int.incr i
+      done;
+      if !closed then Some (Buffer.contents buf) else None)
+    else if delimiter content.[!pos] then None
+    else Some (token_at !pos)
   in
   (* The program a command token names, mirroring [classify_command] for the spellings the text can
      resolve on its own: a `.exe`, any explicit relative path (`./probe` is ours whatever its
