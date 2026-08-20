@@ -150,10 +150,14 @@ module Calibration : sig
     backend : string;
     digest : string;  (** The candidate's digest tag, already shortened at emission. *)
     routine : string;
-        (** The tuned computation's name (gh-ocannl-635) — the routine name [Autotune.tune]'s
-            candidate compiles derive from the comp's block comment, so it also names the
-            candidate's generated sources. Without it a row (and every fit witness quoting one)
-            identifies the candidate but not the kernel it measured, which is what forced
+        (** The tuned computation's name (gh-ocannl-635) — the very name [Autotune.tune] gives its
+            candidate compiles (its own [?name], or the comp's block comment when no name was
+            passed), so it also names the candidate's generated sources. It is READ from there
+            rather than derived a second time alongside them (gh-ocannl-669): the two agreed only
+            while no compile of a search was ever given a name, and a divergence would have been
+            silent — every row naming the block comment while the kernels it measured carried the
+            other name. Without the column a row (and every fit witness quoting one) identifies the
+            candidate but not the kernel it measured, which is what forced
             [tools/calibrate_bandwidth.exe] to reconstruct per-kernel rates outside the schema.
             Empty for rows recorded before the column existed; see {!of_line}. *)
     label : string;

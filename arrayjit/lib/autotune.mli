@@ -616,6 +616,7 @@ type placement_surface = {
     inline/materialize levels of the joint placement x sketch x fission space. *)
 
 val placement_surface :
+  ?name:string ->
   ?ordering:[ `Cost | `Enablement ] ->
   Context.t ->
   Ir.Assignments.comp ->
@@ -623,9 +624,11 @@ val placement_surface :
   placement_surface
 (** Read and rank the decision surface from [ctx] (analyze-only — two hermetic lowerings via
     {!Context.lowered_for_decisions}, sharing the gh-560 analysis cache; no backend codegen, no
-    effect on [ctx]). [ordering] defaults from config [tune_flip_ordering] ([enablement]). Consumed
-    by [Train.tune_placements]' flip refinement and by {!model_default}'s placement search (config
-    [model_default_placements]). *)
+    effect on [ctx]). [name] names the computation for those lowerings exactly as
+    {!Context.compile}'s does, and is what makes this work for a comp carrying no
+    {!Ir.Assignments.Block_comment} (gh-ocannl-669). [ordering] defaults from config
+    [tune_flip_ordering] ([enablement]). Consumed by [Train.tune_placements]' flip refinement and by
+    {!model_default}'s placement search (config [model_default_placements]). *)
 
 type model_choice = {
   mc_label : string;
@@ -651,6 +654,7 @@ val model_default_enabled : bool Lazy.t
     {!Context.compile}. *)
 
 val compile_advisory :
+  ?name:string ->
   ?on_fallback:(exn -> unit) ->
   ?fallback_if:(unit -> bool) ->
   (Ir.Low_level.optimized -> Ir.Low_level.optimized list) ->
@@ -665,9 +669,12 @@ val compile_advisory :
     [fallback_if] (default: always) is consulted first, for transforms that may themselves have
     degraded to the default pipeline — [false] re-raises the original exception, backtrace included,
     instead of duplicating a compile that has nothing to fall back to. For advisory transforms only:
-    a failure of the default pipeline itself propagates. See {!model_default} (gh-ocannl-519). *)
+    a failure of the default pipeline itself propagates. [name] names the routine, exactly as
+    {!Context.compile}'s does, and reaches the fallback compile too. See {!model_default}
+    (gh-ocannl-519). *)
 
 val model_default :
+  ?name:string ->
   ?report:(model_choice -> unit) ->
   Context.t ->
   Ir.Assignments.comp ->
@@ -685,7 +692,12 @@ val model_default :
     compile is on that pipeline there is nothing left to fall back to, so its failures propagate as
     they would from {!Context.compile}, without a duplicate attempt. Unlike {!tune}, nothing is
     executed and no cache is involved — results depend only on the computation, backend, and
-    envelope constants. *)
+    envelope constants.
+
+    Being a drop-in for {!Context.compile} includes its [name] (gh-ocannl-669): it names the routine
+    and every artifact of this compile — the model pick's, the fallback's, and the hermetic lowerings
+    of the placement search alike — and, as there, a comp carrying no {!Ir.Assignments.Block_comment}
+    requires it. *)
 
 val set_test_bindings : Context.routine -> unit
 (** Binds representative values for timing runs: ranged static indices at [range / 2], and gh-490
@@ -720,6 +732,13 @@ val on_candidate_preflight : (string -> unit) ref
     mirror where a real one is now raised. Default a no-op; no configuration selects it. *)
 
 val tune :
+  ?name:string ->
+  (* Names the computation, exactly as {!Context.compile}'s [name] names its single routine
+     (gh-ocannl-669): every compile of this search -- each candidate, the baseline, the cache replay,
+     the winner, the untuned fallbacks, the [autotune_log] control -- is named alike, and so is the
+     [routine] column of the calibration rows this search emits. Required, as there, for a comp
+     carrying no {!Ir.Assignments.Block_comment}; omitted, the name is derived per compile via
+     {!Ir.Assignments.get_name_exn}. *)
   ?search:bool ->
   (* Whether to search at all; default from config [autotune_search] (true). With [false]
      (gh-ocannl-559: the [reproducible] profile) a committed cache entry still replays -- a pinned
@@ -773,6 +792,15 @@ val tune :
     candidates. The returned context/routine come from an ordinary sibling compile of [ctx], so
     execution-dependency tracking behaves as if the winning compile were the only one. Raises like
     {!Context.run} would (e.g. uninitialized inputs) — tune in the same state you would run in.
+
+    "Like {!Context.compile}" includes its [name] (gh-ocannl-669) — without which a comp that carries
+    no {!Ir.Assignments.Block_comment} but that {!Context.compile} can name (as [Parallel]'s
+    collective routines are named) could be compiled but not tuned. The schedule cache deliberately
+    does not see it: a cache key is [Ir.Schedule_cache.cache_key] over the canonical lowering, the
+    backend, the numerics and codegen tags, and the worker pool — and the name reaches only codegen's
+    artifact and kernel naming, never the lowering. Two identical computations under different names
+    therefore share one tuned entry, which is what the cache is for; naming a routine neither
+    invalidates a crown nor mints a private one.
 
     Memory (gh-ocannl-550): every candidate this searches is {!Context.release}d as soon as it stops
     being a beam survivor, so the search's live {e working} pools and contexts are bounded by

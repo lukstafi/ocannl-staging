@@ -1,0 +1,14 @@
+the comp carries no derivable name: true
+tune ~name searches and runs a comp with no block comment: true
+the tuned routine carries the name the search was given: true
+model_default ~name compiles and runs the same comp: true
+model_default's routine carries the name it was given: true
+placement_surface ~name reads a nameless comp's decision surface: true
+the second comp does carry a derivable name: true
+the overriding name wins over the block comment for the routine: true
+the overridingly named search still computes correct values: true
+the search timed at least one candidate: true
+calibration rows were appended: true
+the overriding name reached the calibration rows: true
+no calibration row names the block comment the search overrode: true
+every calibration row names one of the searches by the name it was given: true

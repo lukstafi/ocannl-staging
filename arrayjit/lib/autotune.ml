@@ -1056,8 +1056,8 @@ let spec_label = function
    buffers the kernels reference. Candidate hermeticity is unchanged: each compile forks the lineage
    table anew. The traced store is copied from the base (schedule ops register their tiles in
    it). *)
-let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu ~provenance ctx comp
-    bindings spec : compiled Outcome.outcome =
+let compile_candidate ?name ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu ~provenance ctx
+    comp bindings spec : compiled Outcome.outcome =
   let candidate = spec_label spec in
   let rebase (fresh : LL.optimized) =
     {
@@ -1102,7 +1102,7 @@ let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu ~
                 digest_after );
           opt'
         in
-        Context.compile_outcome ~lowered_transform:transform ~provenance ~candidate ctx comp
+        Context.compile_outcome ?name ~lowered_transform:transform ~provenance ~candidate ctx comp
           bindings
     | Fiss flavor ->
         let transforms fresh =
@@ -1227,7 +1227,7 @@ let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu ~
           captured := Some (form, units, posts, digest_after);
           posts
         in
-        Context.compile_outcome ~lowered_transforms:transforms ~provenance ~candidate ctx comp
+        Context.compile_outcome ?name ~lowered_transforms:transforms ~provenance ~candidate ctx comp
           bindings
   in
   (* Collect the Tile_mma rendering census across this candidate's kernel compiles (fissioned
@@ -1625,11 +1625,11 @@ type placement_surface = {
   ps_floor_ms : materialized:Ir.Tnode.t list -> float option;
 }
 
-let placement_surface ?ordering ctx comp bindings =
+let placement_surface ?name ?ordering ctx comp bindings =
   let ordering = match ordering with Some o -> o | None -> flip_ordering () in
   let limits = Context.hardware_limits ctx in
   let static_indices = Idx.bound_symbols bindings in
-  let base = Context.lowered_for_decisions ctx comp bindings in
+  let base = Context.lowered_for_decisions ?name ctx comp bindings in
   let candidates = base.LL.flip_candidates in
   (* The all-materialized specialization of the decision surface: the [`Materialize] flips are the
      default-virtual candidates, so deciding exactly those materialized makes every open node's work
@@ -1639,7 +1639,9 @@ let placement_surface ?ordering ctx comp bindings =
     List.filter_map candidates ~f:(fun fc ->
         match fc.LL.fc_flip with `Materialize -> Some fc.LL.fc_tn | `Inline -> None)
   in
-  let allmat = Context.lowered_for_decisions ~materialized:to_materialize ctx comp bindings in
+  let allmat =
+    Context.lowered_for_decisions ?name ~materialized:to_materialize ctx comp bindings
+  in
   let enablement, disablement = placement_enablement ~limits ~static_indices ~base ~allmat in
   let ps_candidates = rank_flip_candidates ~ordering ~enablement ~disablement candidates in
   let candidate_set =
@@ -1700,9 +1702,9 @@ let validate_segments_for_model (segs : LL.optimized list) =
       LL.validate_parallel_classified o.LL.optimize_ctx.LL.placements o.LL.llc);
   segs
 
-let compile_advisory ?on_fallback ?fallback_if lowered_transforms ctx comp bindings =
+let compile_advisory ?name ?on_fallback ?fallback_if lowered_transforms ctx comp bindings =
   match
-    Context.compile_outcome ~lowered_transforms ~provenance:Outcome.Advisory ctx comp bindings
+    Context.compile_outcome ?name ~lowered_transforms ~provenance:Outcome.Advisory ctx comp bindings
   with
   | Ok result -> result
   | Error (Outcome.Fatal _ as failure) -> Outcome.raise_failure failure
@@ -1717,9 +1719,9 @@ let compile_advisory ?on_fallback ?fallback_if lowered_transforms ctx comp bindi
       (* Typed compiler rejection is the advisory fallback boundary. Fatal failures are propagated
          above without paying for a second compile. *)
       Option.iter on_fallback ~f:(fun f -> f (Outcome.exception_of_cause classified.cause));
-      Context.compile ctx comp bindings
+      Context.compile ?name ctx comp bindings
 
-let model_default ?report ctx comp bindings =
+let model_default ?name ?report ctx comp bindings =
   let backend = Context.backend_name ctx in
   let is_gpu = Sched.backend_is_gpu backend and is_cpu = Sched.backend_is_cpu backend in
   let limits = Context.hardware_limits ctx in
@@ -1734,7 +1736,7 @@ let model_default ?report ctx comp bindings =
     || not (Sched.automatic_schedule_active ~backend_name:backend)
   then (
     emit no_selection;
-    Context.compile ctx comp bindings)
+    Context.compile ?name ctx comp bindings)
   else
     let choice = ref no_selection in
     (* Whether the segments the compile actually received came from a model pick rather than the
@@ -2043,7 +2045,7 @@ let model_default ?report ctx comp bindings =
       if placement_budget <= 0 then None
       else
         match
-          let surface = placement_surface ctx comp bindings in
+          let surface = placement_surface ?name ctx comp bindings in
           let cands = List.take surface.ps_candidates placement_budget in
           if List.is_empty cands then None
           else
@@ -2077,7 +2079,7 @@ let model_default ?report ctx comp bindings =
             let score vector =
               let mat, inl = decisions vector in
               match
-                Context.lowered_for_decisions ~materialized:mat ~inline:inl ctx comp bindings
+                Context.lowered_for_decisions ?name ~materialized:mat ~inline:inl ctx comp bindings
               with
               | opt_v ->
                   let _lbl, s, _act = select opt_v in
@@ -2124,7 +2126,7 @@ let model_default ?report ctx comp bindings =
        validation above), the compile that just failed IS the fallback: retrying it would duplicate
        an expensive failure and delay the honest error, so the exception propagates instead. *)
     let compile_from base_ctx =
-      compile_advisory ~on_fallback
+      compile_advisory ?name ~on_fallback
         ~fallback_if:(fun () -> !applied_pick)
         transforms base_ctx comp bindings
     in
@@ -2178,7 +2180,7 @@ let model_default ?report ctx comp bindings =
    [Train.tune_placements] exists for. *)
 let on_candidate_attempt : (string -> unit) ref = ref (fun _label -> ())
 
-let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fraction
+let tune ?name ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fraction
     ?max_split_reduce_sites ?timing_ctx ?report ctx comp bindings =
   (* gh-ocannl-559: with the search off, [tune] still replays an explicitly provided cache -- a
      pinned schedule is deterministic, and committing one is how a reproducible run keeps a tuned
@@ -2242,16 +2244,19 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
   let backend = Context.backend_name ctx in
   let device = Context.device_id ctx in
   (* The tuned computation's name, for the calibration rows and log lines of every candidate
-     (gh-ocannl-635). Derived exactly as the candidate compiles below derive theirs — none passes
-     [~name], so each lowers under [Assignments.get_name_exn] — hence a row names the code the way
-     its generated sources are named. Lazy and total on purpose: this is a diagnostic label, while
-     the "a comp must be named" contract belongs to the compiles, and deriving it eagerly would move
-     that failure ahead of them (and impose it on a search that emits nothing). *)
+     (gh-ocannl-635). READ from [name] rather than re-derived (gh-ocannl-669): every compile below
+     is passed the same [?name], and this is the same [Option.value_or_thunk ... get_name_exn] they
+     resolve it by ([Backends.lower_assignments]), so a row names the code exactly the way its
+     generated sources and debug artifacts are named — by construction now, rather than by the
+     coincidence that no compile here passed a name. Lazy and total on purpose: this is a diagnostic
+     label, while the "a comp must be named" contract belongs to the compiles, and deriving it
+     eagerly would move that failure ahead of them (and impose it on a search that emits nothing). *)
   let routine_name =
     lazy
-      (match Ir.Assignments.get_name_exn comp.Ir.Assignments.asgns with
-      | name -> name
-      | exception Invalid_argument _ -> "")
+      (Option.value_or_thunk name ~default:(fun () ->
+           match Ir.Assignments.get_name_exn comp.Ir.Assignments.asgns with
+           | derived -> derived
+           | exception Invalid_argument _ -> ""))
   in
   let emit_report r = Option.iter report ~f:(fun f -> f r) in
   (* [tune] reports exactly once per call, on every path (gh-ocannl-550). The failures that happen
@@ -2324,7 +2329,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
      what [raise_pre_search] ends with, so the caller sees the same exception either way. *)
   let compile_untuned_default ?base () =
     match
-      Context.compile_outcome ~provenance:Ir.Schedule_outcome.User_schedule ctx comp bindings
+      Context.compile_outcome ?name ~provenance:Ir.Schedule_outcome.User_schedule ctx comp bindings
     with
     | Ok result -> result
     | Error failure -> raise_pre_search ?base failure
@@ -2406,7 +2411,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
        a new baseline. *)
     let base_capture = ref None in
     let base_outcome =
-      Context.compile_outcome
+      Context.compile_outcome ?name
         ~lowered_transform:(fun opt ->
           (* Inside the transform, so an injected fault is classified by the ordinary machinery
              (phase [Transform], provenance [Candidate]) and reaches [raise_pre_search] below with a
@@ -2447,14 +2452,14 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
     let codegen_tag = SC.codegen_tag ~limits () in
     let key = SC.cache_key ~limits canon ~backend in
     let compile_spec =
-      compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu
+      compile_candidate ?name ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu
         ~provenance:Outcome.Candidate search_ctx comp bindings
     in
     (* Winner (and cache-hit) compiles target the caller's context; they replay against the same
        base lowering as the search's candidates. *)
     let compile_spec_real provenance =
-      compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu ~provenance ctx
-        comp bindings
+      compile_candidate ?name ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu ~provenance
+        ctx comp bindings
     in
     let flat_schedule = function
       | Whole_saved saved -> saved
@@ -2959,7 +2964,8 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
            [emit_partial_and_raise] ends in [raise_failure], exactly as [Context.compile] does. *)
         let untuned_default_or_raise () =
           match
-            Context.compile_outcome ~provenance:Ir.Schedule_outcome.User_schedule ctx comp bindings
+            Context.compile_outcome ?name ~provenance:Ir.Schedule_outcome.User_schedule ctx comp
+              bindings
           with
           | Ok result -> result
           | Error (Outcome.Fatal fatal) -> emit_partial_and_raise fatal
@@ -3551,7 +3557,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
              program yet a separately-run untuned process measures faster (PR #140 round 6: same
              digest, 3.4x runtime difference across processes on cuda). *)
           (if Lazy.force log_enabled then
-             match Context.compile search_ctx comp bindings with
+             match Context.compile ?name search_ctx comp bindings with
              | cctx, croutine ->
                  (match time_routine ~repeats cctx croutine with
                  | ms -> logf "untuned-default in-process control: %.4f ms" ms
