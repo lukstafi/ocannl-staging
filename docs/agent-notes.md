@@ -83,6 +83,28 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   seed stages operands (`sk_bk > 0`) or not. When a whole autotune family declines structurally,
   check the operands' index expressions before suspecting the scheduler.
 
+- The solver's fixpoint is list equality over CONSECUTIVE iterations, so a constraint is deferred by
+  re-emitting the SAME value, never a freshly built one: re-emitting a fresh `Rows_constr` from an
+  `eliminate_*` arm churns origins and substitutions, defeats that equality and livelocks the
+  per-stage loop (gh-ocannl-509 task 5) — defer through the stored-constraint path
+  (`keep_constr`/`apply_rows_constraint`) instead. Same discipline the `unify_dim` deferral rule
+  above states for dim constraints.
+- `Shape_row` constraints (added in `finish_inference` from every update row) are the ONLY mechanism
+  that finalizes NON-terminal variables — `Terminal_dim`/`Terminal_row` cover leaf tensors alone. So
+  a `process_shape_row` arm that closes a row var via its GLB must RE-EMIT the `Shape_row` unless it
+  is the final stage (row.ml's `keep`), or a dim var in that row whose elimination is deferred (a
+  fixed-index `=> …|0` axis: `At_least_dim 1`, guessed 1 at stage 7) is silently orphaned and
+  lowering dies with "Not enough shape information: unresolved variable". Recipe for that message:
+  dump `unsolved` (`[%sexp_of: Row.environment]`) after each stage of `finish_inference` and find the
+  stage where the variable's `Shape_row` vanishes. The same orphaning surfaces instead as "You forgot
+  to specify the hidden dimension(s)" when the var `is_in_param` — which is also the correct message
+  for a genuinely underdetermined param dim, so the message does not tell you which you have.
+- `unify_dim` and `solve_dim_ineq` end in CATCH-ALL arms, so adding a `Row.dim` constructor does not
+  break the build. The equal-constructor arm in `unify_dim`, the inequality's final mismatch arm, and
+  `join_dim` in `solve_row_ineq`'s GLB merge (whose wildcards keep a side instead of demoting to the
+  top) each need a hand-written arm; that audit is the checklist a new dim constructor comes with
+  (learned adding `Row.Sym`, gh-ocannl-490).
+
 ## Syntax extensions (%op / %cd)
 
 - Block-tensor delimiters map array `[|…|]` → batch, list `[…]` → output, tuple `(…)` → input
@@ -785,6 +807,31 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   pipeline exactly and its time is attributed by digest (so a seed that dedups against a timed twin,
   the CPU serial baseline included, still reports).
 
+- **Lowering never puts two DISTINCT tensor nodes under one `For_loop`**: every assignment gets its
+  own `Low_level.loop_over_dims` (`Assignments.to_low_level`), and concat/block produce several loops
+  that all write the SAME node. Shared-loop behaviour — one traced loop symbol owning several virtual
+  candidates (`reverse_node_map : Symbol.t -> Tnode.t list`, gh-ocannl-134) — is therefore unreachable
+  from the DSL, and can only be exercised from hand-built `Low_level.t` (`ll_test`,
+  `test/operations/virtual_shared_loop.ml`).
+- A lowering-time reader of `Indexing.variable_ref` must force a dims lazy (or otherwise finish
+  inference) FIRST: forcing dims is what runs `Shape.finish_inference` and fills row-var-bound refs
+  (`..d..` captures such as layer norm's `/. dim d`). "Inference is already forced by now" is not an
+  invariant at the top of `to_low_level` — in a deep model the first statement lowered can be exactly
+  that `Fetch Embed_dim`, which then raises "no solved dimension" (gh-ocannl-490; fast tests miss it
+  because their row vars solve eagerly at stage 1 during graph construction).
+- A `Fetch.Slice` (`@|`) alias is not a view of any shape-compatible parent. The materializing copy
+  loop it replaces goes through scalar precision CONVERSION, so a slice legitimately has a different
+  precision from its parent (`primitive_ops` slices a float `x_flat` into a uint4x32 `x`), and shared
+  storage cannot convert — `Tnode.alias_of` eligibility requires `Ops.equal_prec` alongside the
+  leading-axis rank drop and an unpadded, materializable parent. Host access of an alias view raises:
+  read and write the parent, since `from_host` would otherwise allocate a detached buffer and break
+  write-through. The alias never enters `ctx_buffers`, so finalization and pool resolution never see it.
+- `Ops.promote_prec` lets ANY float precision dominate ANY integer one — fp8 over int64 included — so
+  a precision-inference join through a float operand destroys integrality. Integer id chains (class
+  ids, gather indices) must be pinned rather than inferred; `Tn.update_infer_prec` under a
+  `not (Lazy.is_val prec)` guard is the threefry/one-hot precedent, and the gather guard's precision
+  flavors (unsigned/signed/float) branch on the ids' storage precision, not on `index_prec`.
+
 ## Backends
 
 - **Device buffers are not GC-reclaimable, and the reason is a table, not GC pressure**
@@ -1387,6 +1434,20 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   pre-filter cut that forgets to reverse keeps exactly the flips a budget would least want to pay
   for.
 
+- **Every GPU backend compiles with fast math**: CUDA passes `--use_fast_math`, HIP `-ffast-math`,
+  and MSL defaults it on — `cc` is the exception (opt-in `cc_backend_fast_math`). So a device-side
+  non-finiteness test must be a RANGE COMPARE of a runtime value (`-3e38 < x && x < 3e38`); `x <> x`
+  and `x - x = 0` fold to a constant, silently disabling an overflow gate (the shape
+  `Mixed_prec.gated_scaled_update` needs). It is the same reason `Builtins_metal`'s fp8 codec is
+  written in integer/bitcast form rather than float arithmetic.
+- A backend's `C_syntax_config` binds what it inherits at `include Pure_C_config` time, and that has
+  bitten three ways: emission code defined ABOVE the backend's `typ_of_prec` override captures
+  Pure_C's C spelling (half renders as `HALF_T`); a module-level function whose name matches a config
+  field is shadowed by the include (hence `cc_backend.ml`'s `_setting` suffix convention); and
+  overriding one member of a paired default (`compute_prec` without `accum_prec`) silently keeps the
+  other's default pairing. Define overrides before the code that reads them, and restate both halves
+  of a pair.
+
 ## Training and performance
 
 - `t.params` contains only `Tensor.param`-registered tensors (`{ w }` in `%op`, `TDSL.param`,
@@ -1516,6 +1577,34 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   the median of several warm repetitions; a lone run after an idle gap is not comparable to one
   taken mid-sweep.
 
+- The A/B protocol that makes a small effect legible: alternate the arms RUN BY RUN (a fixed order
+  confounds the treatment with position in the session — worth ~1.4pp of an apparent 7.1% once),
+  wipe the schedule cache between arms (it is keyed by base-code digest and shared across binaries,
+  so one arm otherwise replays the other's winner), and keep as a drift control a variant whose
+  EMITTED kernel is byte-identical across the arms in the same process. Diff the generated
+  `.metal`/`.cu` per variant before trusting a control: gh-ocannl-567 learned that way that two of
+  its intended controls had also changed, and that the surviving control's own spread (±3–7% on
+  Metal kernel timings) was larger than the effect under test. After `Train.tune_placements` the
+  debug source left on disk is arm B's — the returned already-compiled arm — so grep the artifact you
+  actually mean.
+- Benchmark drivers should START hermetic rather than be hardened into it: unset ambient
+  `OCANNL_*`/`BENCH_*` wholesale, pin every treatment on argv (the command line outranks every other
+  config source), content-stamp the fixtures, fail loudly per cell — and name the DRIVER, not a
+  hand-typed command, as the reproduction. `benchmarks/gh514_cells.sh` is the model, and it looks
+  like that because a ten-round review was a long tail of "pin one more ambient knob". Note that
+  `Utils.config_file_args`' `find_up` takes the NEAREST `ocannl_config`, so running from
+  `benchmarks/` shadows a personal root config — a feature to rely on, and a trap when reproducing
+  someone else's numbers from a different cwd.
+- Cleanup, release and decline paths are acceptance-tested by fault INJECTION, not by the happy path:
+  of the review findings on the gh-ocannl-550 release work, 14 of 14 lived on error paths
+  (decline / raise / abort / cache-hit / callback-failure), where a flattened memory curve over three
+  clean replicates is almost no evidence — the code exists for the error moments.
+  `Autotune.on_candidate_attempt` / `on_candidate_preflight` are the injection seams.
+- When a change re-promotes a WAVE of goldens (an init-stream change, a reduction-order change), grep
+  the full new outputs for `nan`/`inf`, not just the loss lines. A promoted golden records whatever it
+  is given: a trailing dim-1 projection bug once filled conv kernels with NaN behind numbers that
+  still looked plausible line by line.
+
 ## Build and test mechanics
 
 CLAUDE.md holds the workflow rules; these are the dune/OCaml mechanics behind them, narrow enough
@@ -1611,6 +1700,23 @@ that they earn a lookup rather than always-loaded space.
   consumers, grep the sexp shape: `rg -F "(field_name " --glob '*.expected'` (the trailing space
   disambiguates longer identifiers). Budget the resulting promote as expected work, in its own
   commit, after diff-confirming the delta is rename-only.
+
+- `dune build @check` type-checks; it does NOT link executables. A "rebuilt" test or benchmark exe
+  after a library change is therefore the STALE binary — this has produced a false verdict three
+  separate times (a timing rerun, a negative control, a guard "verified" against the old code). Build
+  the thing you are about to run (`dune build <dir>/<name>.exe`, or the test's alias / `.exe.output`
+  rule) and check its mtime against the sources you edited. In the other direction, a plain
+  `dune build` RUNS every cram-style test executable, so it must not overlap a GPU timing window.
+- Most `test/operations` stanzas preprocess with `(pps ppx_here ppx_ocannl)` and nothing else, so
+  `[%equal: …]` / `[%compare: …]` are unavailable — spell the comparison out (`Option.equal
+  Int.equal`) rather than extending the stanza for one line.
+- OCaml/Base traps that each cost a debugging session here: `Base.List.init` applies its function in
+  DECREASING index order, so building a list of runs with it executes them backwards (use an explicit
+  loop when the elements have effects); OCaml 5's `Lazy.is_val` returns TRUE for a lazy that is
+  mid-force (forcing it then raises `Lazy.Undefined`), so it cannot guard a force reachable from
+  inside that lazy's own computation; two record types sharing a field name resolve to the
+  LAST-defined type, silently mistyping `x.a.b` (which is why the scheduler's event field is
+  `dev_state`); and `Base.Float.max_value` is INFINITY — the finite maximum is `max_finite_value`.
 
 ### What CI actually covers
 
@@ -1790,3 +1896,26 @@ that they earn a lookup rather than always-loaded space.
   gates (`mixed_prec_parity`, `precision_policy_parity`) or that distinct inputs give distinct
   outputs (`gpt2_dry_run`'s positions-differ). "All finite" is not such a guard — all-zeros is
   finite.
+- A new configuration key must not have an existing key as a NAME PREFIX. `Utils.read_cmdline_var`
+  matches an argument against `key ^ ("_" | "-" | "=" | "")` and takes whatever follows as the value,
+  so `--ocannl_cc_parallel_grid_private_bytes_cap=N` was read as `cc_parallel_grid` with the value
+  `private_bytes_cap=N` and crashed the run — the key was renamed `cc_grid_private_bytes_cap`.
+  Nothing checks this: the consistency tests check documentation, classification and read sites, not
+  name disjointness.
+- Stacked PRs: once the base PR merges, RETARGET the stacked one to master BEFORE merging it. A merge
+  into the now-stale base branch lands the work on that branch and nowhere else while GitHub still
+  reports the PR as "merged" — staging#168's conv sketches were stranded exactly that way and had to
+  be re-landed as #170. The same audit question ("is this on master?") is worth asking of any PR whose
+  base was not master.
+- For a measurement or report PR, substance stabilizes early: two full review rounds plus one
+  verdict-stability check, after which findings are answered rather than actioned unless they touch
+  validity, consequence, or arithmetic (validated on the gh-ocannl-530 campaign, where rounds 5–7 were
+  framing churn). The failure mode review is actually there to catch runs in both directions — quoting
+  whichever control flatters the story — so a report shows ALL matched contrasts side by side rather
+  than the decisive one.
+- When the next review finding is "leg X missed guard Y", look for the unfactored duplication instead
+  of patching leg X. In `tools/sweep.sh`'s nine rounds every point-wise guard had a leg, a path or a
+  machine it had not been applied to, and the fixes that actually closed a class REMOVED or UNIFIED
+  mechanism: one `flock` replacing a directory-plus-pid-file dance with its reclaim races and
+  `kill -0` pid-reuse hole, one `run_capped` replacing three hand-rolled background-and-publish-pid
+  call sites.

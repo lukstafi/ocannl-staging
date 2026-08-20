@@ -154,6 +154,7 @@ design history) that is not derivable from the code alone.
 - When you notice unrelated code smells or design problems, file separate issues
 - Follow-up fixing commits are fine, and test-expectation promotions that span several topics can land in a final tests/promotions commit
 - Each commit should at least compile: loop `git checkout <rev> && dune build @check` over `git rev-list --reverse master..HEAD` (interactive rebase is unavailable in this harness)
+- **Two remotes**: `origin` is the development repo (PRs, master, what a plain `git push` reaches), `upstream` is the public one — it owns the ISSUES this codebase refers to as `gh-ocannl-NNN`, the milestones and the GitHub releases, and receives release-relevant changes. So file and close issues against `upstream`, open PRs against `origin`, and never assume a `gh` command without `--repo` addressed the repo you meant
 
 ### Configuration
 
