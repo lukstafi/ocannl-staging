@@ -1580,11 +1580,12 @@ that they earn a lookup rather than always-loaded space.
   ~backend_name`, called before the first compile, empties this executable's own subdirectory, so
   existence IS freshness — no mtime, no clock granularity. What licenses that sweep is narrower than
   "the directory is scoped": only the DEFAULT, executable-derived subdirectory is inherently
-  process-private, since dune runs one process per executable. An explicit `build_files_prefix` can
-  be given to two executables alike, so emptying it could delete a concurrent test's kernel between
-  its compile and its read — there the sweep is skipped and freshness is established per routine by
-  `arm` instead, which deletes one path; the flat layout (`build_files_prefix=.`) is refused
-  outright. `Generated.read` fails through `Verdict` on a
+  process-private, since dune runs one process per executable. Any configured `build_files_prefix`
+  is refused outright — a second executable can be given the same prefix, so deleting there is
+  unsafe, and without deletion a deterministic compile's re-emitted identical kernel is
+  indistinguishable from a stale one (deletion is the only write signal that does not depend on
+  timestamp granularity). Tests that assert on generated code therefore leave the prefix at its
+  default. `Generated.read` fails through `Verdict` on a
   missing artifact instead of answering `None` — the arm that some call sites recorded as `false` and
   others forgot. `Generated.arm` deletes one routine's artifact before a candidate's compile, which
   is what a loop reusing a routine name needs in order to attribute what it reads; reading one

@@ -3,14 +3,14 @@
    That module is what ~30 tests' structural assertions now rest on, so its preconditions are
    load-bearing in a way that is easy to break silently: every one of them fires only when something
    has ALREADY gone wrong, which is precisely the kind of code that rots unobserved. Two review
-   rounds on the introducing PR found three such defects by inspection alone — a swallowed deletion
+   rounds on the introducing PR found three such defects by inspection alone -- a swallowed deletion
    failure, a directory-scoping test that misread a valid configuration, and a sweep that was not
    this process's to perform. This probe exists so that the next one fails a test instead.
 
    Each mode is one guarantee, and the dune rules assert the EXIT STATUS rather than the output.
    [Verdict] failures exit 1 from a shared teardown, so "this call must be refused" is exactly a
    nonzero exit, and [with-accepted-exit-codes] states which way each mode must go. The modes that
-   must be refused therefore make no claim of their own — the refusal IS the assertion, and a
+   must be refused therefore make no claim of their own -- the refusal IS the assertion, and a
    designed-false [Verdict.p] would only add a promotable line saying so. The modes that must
    succeed claim normally, so that a module which refused everything could not pass them.
 
@@ -66,36 +66,6 @@ let () =
       emit "gp_twice" "kernel body: candidate 2\n";
       Verdict.p "an armed second reading is attributed to its own compile"
         (String.is_substring (Generated.read "gp_twice") ~substring:"candidate 2")
-  (* An explicit build_files_prefix is not this executable's to empty — two tests can be given the
-     same one — but it is not fatal either: the per-routine route stays open. Both halves are pinned
-     here, and the surviving decoy is what shows the sweep did NOT run. *)
-  (* The converse of the stale case, and the reason the snapshot keeps mtimes at all: a kernel that
-     this run re-emitted BYTE-IDENTICALLY is fresh, and refusing it would break every re-run of a
-     deterministic compile under an explicit prefix. Contents alone cannot tell that apart from a
-     stale file; the recorded mtime can. (The timestamp is set rather than slept for, so the mode is
-     deterministic and costs nothing.) *)
-  | "shared_prefix_reemit" ->
-      emit "gp_reemit" "kernel body: deterministic\n";
-      Generated.init ~backend_name;
-      let later = Unix.gettimeofday () +. 5. in
-      Unix.utimes (path "gp_reemit") later later;
-      Verdict.p "an identical kernel re-emitted by this run is accepted"
-        (String.is_substring (Generated.read "gp_reemit") ~substring:"deterministic")
-  (* The other half: an explicitly prefixed directory must keep working for the ordinary caller, who
-     calls init once and then reads — no arming — and a concurrent test's artifact in the same
-     directory must survive, since nothing may be swept here. *)
-  | "shared_prefix_fresh" ->
-      let decoy = path "gp_other_tests_kernel" in
-      Stdio.Out_channel.write_all decoy ~data:"another concurrent test's kernel\n";
-      Generated.init ~backend_name;
-      Verdict.p "an explicitly prefixed directory is left alone" (Stdlib.Sys.file_exists decoy);
-      emit "gp_shared" "kernel body: mine\n";
-      Verdict.p "an unarmed read of a freshly emitted artifact succeeds under an explicit prefix"
-        (String.is_substring (Generated.read "gp_shared") ~substring:"mine");
-      Generated.arm "gp_shared";
-      emit "gp_shared" "kernel body: armed\n";
-      Verdict.p "an armed read under an explicit prefix succeeds"
-        (String.is_substring (Generated.read "gp_shared") ~substring:"armed")
   (* === Must be refused (the refusal is the assertion; see the header) === *)
   (* The issue's own failure: an artifact left by an EARLIER run, which the readers this replaced
      accepted because it happened to exist. Written before init, so init's sweep must remove it. *)
@@ -116,7 +86,7 @@ let () =
       emit "gp_twice" "kernel body: candidate 2\n";
       ignore (Generated.read "gp_twice" : string);
       Stdio.printf "second unarmed reading completed\n"
-  (* Armed, but the compile emitted nothing — the case [arm] exists for. The previous candidate's
+  (* Armed, but the compile emitted nothing -- the case [arm] exists for. The previous candidate's
      kernel is gone, so nothing can be credited to this one. *)
   | "armed_no_emission" ->
       Generated.init ~backend_name;
@@ -124,33 +94,21 @@ let () =
       ignore (Generated.read "gp_twice" : string);
       Generated.arm "gp_twice";
       Stdio.printf "read after an armed compile emitted nothing: %S\n" (Generated.read "gp_twice")
-  (* The flat layout is shared with every concurrently running test, so init must refuse it outright
-     rather than empty it. *)
-  | "flat" ->
-      Generated.init ~backend_name;
-      Stdio.printf "init returned under the flat layout\n"
-  (* Under an explicit prefix nothing is swept, so provenance comes from the timestamp floor: an
-     artifact predating the run is exactly the stale file the old readers accepted, and must be
-     refused even though it exists. *)
-  | "shared_prefix_stale" ->
-      emit "gp_shared" "kernel body: from a previous run\n";
-      Generated.init ~backend_name;
-      Stdio.printf "stale read under an explicit prefix: %S\n" (Generated.read "gp_shared")
   (* Before init the directory may hold anything, so no read may be answered. *)
   | "uninitialized" -> Stdio.printf "read before init: %S\n" (Generated.read "gp_anything")
   (* === The symlinked artifact directory ===
 
      [Sys.is_directory] follows symlinks, so a symlinked build_files/<exe>/ reads as an ordinary
-     directory and a sweep would unlink real files in the link's TARGET — outside the artifact tree
+     directory and a sweep would unlink real files in the link's TARGET -- outside the artifact tree
      entirely. Two things make this mode's shape what it is.
 
-     Refusal now ABORTS the process, so [init] cannot be called in-process and observed; it is run
-     in a child, whose exit status carries the refusal. And symlink creation is a privilege on
-     Windows (Developer Mode, or SeCreateSymbolicLink) that the CI matrix does not necessarily have,
-     so the staging is attempted rather than assumed: where links cannot be made the leg is reported
-     as skipped instead of failing for the host's permissions. Both halves are then checked here —
-     the child refused, AND the planted file in the link target is still there — so this stays a
-     single mode that must SUCCEED. *)
+     Refusal ABORTS the process, so [init] cannot be called in-process and observed; it runs in a
+     child, whose exit status carries the refusal. And symlink creation is a privilege on Windows
+     (Developer Mode, or SeCreateSymbolicLink) that the CI matrix does not necessarily have, so the
+     staging is attempted rather than assumed: where links cannot be made the leg is reported as
+     skipped instead of failing for the host's permissions. Both halves are then checked here -- the
+     child refused, AND the planted file in the link target is still there -- so this stays a single
+     mode that must SUCCEED. *)
   | "symlink" -> (
       ignore_unix (fun d -> Unix.mkdir d 0o777) artifacts_root;
       ignore_unix (fun d -> Unix.mkdir d 0o777) (link_target ());
@@ -165,7 +123,7 @@ let () =
        with Stdlib.Sys_error _ -> ());
       (* Relative, so it resolves inside build_files/ wherever the tree is checked out.
          [~to_dir:true] is ignored on Unix and load-bearing on Windows, where a link created without
-         it is a FILE symlink that would not stand in for a directory at all. *)
+         it is a FILE symlink that would not stand in for a directory. *)
       match Unix.symlink ~to_dir:true "gp_symlink_target" scoped with
       | exception Unix.Unix_error (err, _, _) ->
           Stdio.eprintf "symbolic links unavailable here (%s)\n" (Unix.error_message err);
@@ -188,10 +146,19 @@ let () =
      STOPPED the run from one that merely recorded a failure and returned, and the difference is
      whether the deletions that follow go through the link. Under a terminating refusal this line is
      never reached; under a non-terminating one it unlinks the planted file in the link target, and
-     the parent's survival check fails. That regression shipped once — a lost edit left this branch
-     calling Verdict.fail — so the probe now discriminates it rather than trusting the exit code. *)
+     the parent's survival check fails. That regression shipped once -- a lost edit left the branch
+     calling Verdict.fail -- so the probe discriminates it rather than trusting the exit code. *)
   | "symlink_child" ->
       Generated.init ~backend_name;
       Generated.arm "gp_precious";
       Stdio.printf "init returned on a symlinked artifact directory\n"
+  (* A configured prefix names a directory this process does not own: another executable can be
+     given the same one. Deleting there could take a running test's kernel out from under it, and
+     without deletion there is no write signal independent of timestamp granularity -- a
+     deterministic compile re-emits byte-identical bytes, possibly within one mtime quantum. So the
+     configuration is refused rather than supported approximately, and that refusal is pinned here
+     for both spellings. *)
+  | "explicit_prefix" ->
+      Generated.init ~backend_name;
+      Stdio.printf "init returned under a configured build_files_prefix\n"
   | m -> failwith ("generated_provenance: unknown mode " ^ m)

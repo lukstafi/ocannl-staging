@@ -2915,38 +2915,33 @@
   %{dep:generated_provenance.exe})
  (action
   (progn
-   (run ./generated_provenance.exe symlink)
-   (run ./generated_provenance.exe fresh)
-   (run ./generated_provenance.exe armed_overwrite)
+   (run ./generated_provenance.exe symlink --ocannl_build_files_prefix=)
+   (run ./generated_provenance.exe fresh --ocannl_build_files_prefix=)
+   (run ./generated_provenance.exe armed_overwrite --ocannl_build_files_prefix=)
    (with-accepted-exit-codes
     1
-    (run ./generated_provenance.exe stale))
+    (run ./generated_provenance.exe stale --ocannl_build_files_prefix=))
    (with-accepted-exit-codes
     1
-    (run ./generated_provenance.exe missing))
+    (run ./generated_provenance.exe missing --ocannl_build_files_prefix=))
    (with-accepted-exit-codes
     1
-    (run ./generated_provenance.exe overwrite))
+    (run ./generated_provenance.exe overwrite --ocannl_build_files_prefix=))
    (with-accepted-exit-codes
     1
-    (run ./generated_provenance.exe armed_no_emission))
+    (run ./generated_provenance.exe armed_no_emission --ocannl_build_files_prefix=))
    (with-accepted-exit-codes
     1
-    (run ./generated_provenance.exe uninitialized))
-   (with-accepted-exit-codes
-    1
-    (run ./generated_provenance.exe flat --ocannl_build_files_prefix=.))
+    (run ./generated_provenance.exe uninitialized --ocannl_build_files_prefix=))
    (with-accepted-exit-codes
     1
     (run
      ./generated_provenance.exe
-     shared_prefix_stale
-     --ocannl_build_files_prefix=gp_shared_dir))
-   (run
-    ./generated_provenance.exe
-    shared_prefix_reemit
-    --ocannl_build_files_prefix=gp_shared_dir)
-   (run
-    ./generated_provenance.exe
-    shared_prefix_fresh
-    --ocannl_build_files_prefix=gp_shared_dir))))
+     explicit_prefix
+     --ocannl_build_files_prefix=.))
+   (with-accepted-exit-codes
+    1
+    (run
+     ./generated_provenance.exe
+     explicit_prefix
+     --ocannl_build_files_prefix=gp_shared_dir)))))
