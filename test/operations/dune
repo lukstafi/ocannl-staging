@@ -1678,10 +1678,11 @@
  (name test_one_hot_embedding_lookup)
  (package neural_nets_lib)
  (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_one_hot_embedding_lookup)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1689,10 +1690,11 @@
  (name test_one_hot_embedding_backward)
  (package neural_nets_lib)
  (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_one_hot_embedding_backward)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1700,10 +1702,11 @@
  (name test_bounds_folded_gather)
  (package neural_nets_lib)
  (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_bounds_folded_gather)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1711,10 +1714,11 @@
  (name hardware_axes_parity)
  (package neural_nets_lib)
  (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules hardware_axes_parity)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1722,10 +1726,11 @@
  (name hardware_workgroup_reduce)
  (package neural_nets_lib)
  (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules hardware_workgroup_reduce)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1733,10 +1738,11 @@
  (name hardware_warp_shuffle)
  (package neural_nets_lib)
  (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules hardware_warp_shuffle)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1744,10 +1750,11 @@
  (name cpu_vectorized)
  (package neural_nets_lib)
  (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules cpu_vectorized)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1755,10 +1762,11 @@
  (name vec_signed_zero)
  (package neural_nets_lib)
  (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules vec_signed_zero)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1777,10 +1785,11 @@
  (name narrow_storage_compute)
  (package neural_nets_lib)
  (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules narrow_storage_compute)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1795,10 +1804,11 @@
  (name accum_width)
  (package neural_nets_lib)
  (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules accum_width)
- (libraries base ocannl stdio arrayjit.verdict ll_test)
+ (libraries base ocannl stdio arrayjit.verdict ll_test test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1806,10 +1816,11 @@
  (name cpu_simd_reduction)
  (package neural_nets_lib)
  (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules cpu_simd_reduction)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1820,10 +1831,11 @@
  (name cpu_parallel)
  (package neural_nets_lib)
  (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules cpu_parallel)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1831,10 +1843,11 @@
  (name schedule_ops)
  (package neural_nets_lib)
  (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_ops)
- (libraries base ocannl stdio pprint arrayjit.verdict)
+ (libraries base ocannl stdio pprint arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1963,10 +1976,11 @@
  (name fission_schedule)
  (package neural_nets_lib)
  (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules fission_schedule)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1996,10 +2010,11 @@
  (name schedule_smem_matmul)
  (package neural_nets_lib)
  (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_smem_matmul)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2007,10 +2022,11 @@
  (name schedule_batched_mma)
  (package neural_nets_lib)
  (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_batched_mma)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2018,10 +2034,11 @@
  (name schedule_batch_grid)
  (package neural_nets_lib)
  (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_batch_grid)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2036,10 +2053,11 @@
  (name schedule_mma_matmul)
  (package neural_nets_lib)
  (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_mma_matmul)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2056,10 +2074,11 @@
  (name schedule_pipelined_matmul)
  (package neural_nets_lib)
  (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_pipelined_matmul)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2067,10 +2086,11 @@
  (name schedule_ldmatrix_matmul)
  (package neural_nets_lib)
  (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_ldmatrix_matmul)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2078,10 +2098,11 @@
  (name schedule_swizzle_matmul)
  (package neural_nets_lib)
  (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_swizzle_matmul)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2089,10 +2110,11 @@
  (name schedule_register_matmul)
  (package neural_nets_lib)
  (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_register_matmul)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2100,10 +2122,11 @@
  (name schedule_cpu_pack_matmul)
  (package neural_nets_lib)
  (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_cpu_pack_matmul)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2111,10 +2134,11 @@
  (name schedule_pack_mma_matmul)
  (package neural_nets_lib)
  (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_pack_mma_matmul)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2122,11 +2146,12 @@
  (name tile_mma_narrow)
  (package neural_nets_lib)
  (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND)
   (env_var OCANNL_CC_FP16_ARITHMETIC))
  (modules tile_mma_narrow)
- (libraries base ocannl stdio unix arrayjit.verdict)
+ (libraries base ocannl stdio unix arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2134,10 +2159,11 @@
  (name tile_mma_declines)
  (package neural_nets_lib)
  (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules tile_mma_declines)
- (libraries base ocannl arrayjit.autotune stdio arrayjit.verdict)
+ (libraries base ocannl arrayjit.autotune stdio arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2145,10 +2171,11 @@
  (name schedule_packed_constants)
  (package neural_nets_lib)
  (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_packed_constants)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2240,10 +2267,11 @@
  (name schedule_epilogue_fusion)
  (package neural_nets_lib)
  (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_epilogue_fusion)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2262,10 +2290,11 @@
  (name schedule_pad)
  (package neural_nets_lib)
  (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_pad)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2284,10 +2313,11 @@
  (name schedule_conv_gemm)
  (package neural_nets_lib)
  (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_conv_gemm)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2648,10 +2678,11 @@
  (enabled_if
   (<> %{env:OCANNL_BACKEND=cc} metal))
  (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_uniform_virtual_lane)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2934,3 +2965,68 @@
  (deps ocannl_config)
  (modules bench_args_parsing)
  (libraries base stdio bench_args arrayjit.verdict))
+
+; gh-ocannl-655: the provenance guarantees of Test_utils.Generated, which ~30 tests' structural
+; assertions now rest on. Every one of those guarantees fires only when something has already gone
+; wrong, so none of them is exercised by the tests that depend on them -- the code that decides a
+; kernel is NOT this run's runs, in a green suite, never. Hence a probe whose modes stage each
+; failure deliberately.
+;
+; The assertion is the EXIT STATUS, not the output: Verdict failures exit 1 from a shared teardown,
+; so `(with-accepted-exit-codes 1 ...)` is exactly "this must be refused", and a mode that starts
+; passing fails the build rather than printing a promotable line. `ignore-exit-codes` would not do:
+; a run that stops for some other reason has to fail here too.
+;
+; One rule, one progn: every mode shares this executable's artifact directory, so running them as
+; separate rules would let dune schedule them concurrently and have one mode's init sweep away
+; another's staged artifact. A single action is sequential by construction. The two explicit-prefix
+; modes take a prefix that is NOT this executable's name, which is what puts Generated on its
+; shared-directory path (no sweep, arming required); the flat mode takes the legacy `.`.
+
+(executable
+ (name generated_provenance)
+ (modules generated_provenance)
+ (libraries base stdio unix arrayjit.utils arrayjit.verdict test_utils))
+
+(rule
+ (aliases runtest generated_provenance)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BUILD_FILES_PREFIX)
+  %{dep:generated_provenance.exe})
+ (action
+  (setenv
+   OCANNL_BUILD_FILES_PREFIX
+   ""
+   (progn
+    (run ./generated_provenance.exe symlink)
+    (run ./generated_provenance.exe fresh)
+    (run ./generated_provenance.exe armed_overwrite)
+    (with-accepted-exit-codes
+     1
+     (run ./generated_provenance.exe stale))
+    (with-accepted-exit-codes
+     1
+     (run ./generated_provenance.exe missing))
+    (with-accepted-exit-codes
+     1
+     (run ./generated_provenance.exe overwrite))
+    (with-accepted-exit-codes
+     1
+     (run ./generated_provenance.exe armed_no_emission))
+    (with-accepted-exit-codes
+     1
+     (run ./generated_provenance.exe uninitialized))
+    (with-accepted-exit-codes
+     1
+     (run
+      ./generated_provenance.exe
+      explicit_prefix
+      --ocannl_build_files_prefix=.))
+    (with-accepted-exit-codes
+     1
+     (run
+      ./generated_provenance.exe
+      explicit_prefix
+      --ocannl_build_files_prefix=gp_shared_dir))))))

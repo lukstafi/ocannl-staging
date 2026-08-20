@@ -36,12 +36,9 @@ let approx a b = Float.(abs (a - b) < 1e-4)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_cpu = String.is_substring backend_name ~substring:"cc"
 
-let read_generated base_name =
-  let ext = if String.is_substring backend_name ~substring:"metal" then ".metal" else ".c" in
-  let ext = if String.is_substring backend_name ~substring:"cuda" then ".cu" else ext in
-  let ext = if String.is_substring backend_name ~substring:"hip" then ".hip" else ext in
-  let path = Utils.build_file (base_name ^ ext) in
-  if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
+module Generated = Test_utils.Generated
+
+let () = Generated.init ~backend_name
 
 let has_hardware_regs src =
   String.is_substring src ~substring:"gid." || String.is_substring src ~substring:"blockIdx."
@@ -88,12 +85,10 @@ let () =
   let ctx = Context.run ctx routine in
   let got2 = Context.get_values ctx e.Tensor.value in
   p "chain rerun deterministic" (Array.equal Float.( = ) got got2);
-  (match read_generated "fission_chain" with
-  | None -> p "chain stays a single aligned kernel" false
-  | Some src ->
-      p "chain stays a single aligned kernel" (count_substr src "__seg0" = 0);
-      let parallel_ok = if on_cpu then has_parallel_construct src else has_hardware_regs src in
-      p "the merged chain kernel parallelizes" parallel_ok);
+  (let src = Generated.read "fission_chain" in
+   p "chain stays a single aligned kernel" (count_substr src "__seg0" = 0);
+   let parallel_ok = if on_cpu then has_parallel_construct src else has_hardware_regs src in
+   p "the merged chain kernel parallelizes" parallel_ok);
 
   (* --- 2. Structural: the same chain analyzed for the metal backend, on captured lowered code
      (runs identically under every configured backend). --- *)
@@ -516,6 +511,4 @@ let () =
   let wg = Context.get_values ctx (grad_of w) in
   (* dl/dw = x. *)
   p "backward gradient values correct" (Array.for_all2_exn wg xv ~f:approx);
-  match read_generated "fission_bwd__seg" with
-  | None -> p "backward pass fissioned" false
-  | Some src -> p "backward pass fissioned" (count_substr src "__seg0" >= 1)
+  Generated.assert_emits ~routine:"fission_bwd__seg" ~contains:"__seg0" "backward pass fissioned"

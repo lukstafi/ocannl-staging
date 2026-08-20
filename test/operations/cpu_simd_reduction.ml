@@ -33,12 +33,9 @@ let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~d
 let on_cpu = String.is_substring backend_name ~substring:"cc"
 let single = Ir.Ops.single
 
-let read_generated base_name =
-  let ext = if String.is_substring backend_name ~substring:"metal" then ".metal" else ".c" in
-  let ext = if String.is_substring backend_name ~substring:"cuda" then ".cu" else ext in
-  let ext = if String.is_substring backend_name ~substring:"hip" then ".hip" else ext in
-  let path = Utils.build_file (base_name ^ ext) in
-  if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
+module Generated = Test_utils.Generated
+
+let () = Generated.init ~backend_name
 
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
@@ -78,13 +75,11 @@ let it i = Idx.Iterator i
 let f0 = Idx.Fixed_idx 0
 
 let check_generated ~expect_chains name =
-  match read_generated name with
-  | None -> false
-  | Some src ->
-      let has sub = String.is_substring src ~substring:sub in
-      if on_cpu then
-        Bool.equal expect_chains (has "Vectorized reduction rendering") && not (has "#pragma")
-      else (not (has "Vectorized reduction rendering")) && not (has "vector_size")
+  let src = Generated.read name in
+  let has sub = String.is_substring src ~substring:sub in
+  if on_cpu then
+    Bool.equal expect_chains (has "Vectorized reduction rendering") && not (has "#pragma")
+  else (not (has "Vectorized reduction rendering")) && not (has "vector_size")
 
 let () =
   (* --- Retype the innermost loop of a real lowered sum (extent 517: serial tail executes). --- *)

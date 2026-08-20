@@ -50,9 +50,9 @@ let widens_bf16 = on_cpu || String.equal backend_name "cuda"
    CPU-only rendering or greps cc's generated C). *)
 let cc_only claim leg = if on_cpu then leg () else skipped claim
 
-let read_generated base_name =
-  let path = Utils.build_file (base_name ^ ".c") in
-  if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
+module Generated = Test_utils.Generated
+
+let () = Generated.init ~backend_name
 
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
@@ -291,11 +291,9 @@ let () =
     let want = run ~name:"aw_bf16_ref" mref in
     p claim_parity (Array.for_all2_exn got want ~f:Float.equal);
     cc_only claim_shape (fun () ->
-        match read_generated "aw_bf16_naive" with
-        | None -> Verdict.fail (claim_shape ^ " — generated source not found")
-        | Some src ->
-            let has s = String.is_substring src ~substring:s in
-            p claim_shape ((not (has "single_to_bfloat16(fmaf(")) && has "fmaf("));
+        let src = Generated.read ~ext:".c" "aw_bf16_naive" in
+        let has s = String.is_substring src ~substring:s in
+        p claim_shape ((not (has "single_to_bfloat16(fmaf(")) && has "fmaf("));
     (* Structural: a merge-buffer read is a separate read-only staging buffer, so [p =+ p.merge]
        stays a recognizable accumulation (no same-node merge REDUCTION is constructible — merge
        buffers are node-shaped — so the recognizer shape is the whole reachable surface). *)
@@ -441,9 +439,9 @@ let () =
             ()
         in
         let vecn_fired =
-          match read_generated "aw_vecnest_vec" with
-          | Some src -> String.is_substring src ~substring:"Vectorized reduction rendering"
-          | None -> false
+          String.is_substring
+            (Generated.read ~ext:".c" "aw_vecnest_vec")
+            ~substring:"Vectorized reduction rendering"
         in
         p claim_vec_nested (vecn_fired && Array.for_all2_exn got_vnv got_vn ~f:Float.equal));
     (* A hardware-annotated inner reduction axis the backend serializes (cc binds no workgroup
@@ -795,9 +793,9 @@ let () =
           run_sum ~cols:67 ~name:"aw_vec_tail" ~schedule:(retype_reduction LL.Vectorized) ()
         in
         let vec_fired =
-          match read_generated "aw_vec_tail" with
-          | Some src -> String.is_substring src ~substring:"Vectorized reduction rendering"
-          | None -> false
+          String.is_substring
+            (Generated.read ~ext:".c" "aw_vec_tail")
+            ~substring:"Vectorized reduction rendering"
         in
         p claim_simd_tail (vec_fired && Array.for_all2_exn got_vt got_v ~f:Float.equal));
     fp8_leg ();
@@ -821,9 +819,7 @@ let () =
     p claim_off_fp8 (Float.equal (fp8_sum ~name:"aw_fp8_off" ~first_id:9720 ()) 16.0);
     Numerics.set_policy saved_policy;
     cc_only claim_off_shape (fun () ->
-        match read_generated "aw_bf16_naive_off" with
-        | None -> Verdict.fail (claim_off_shape ^ " — generated source not found")
-        | Some src ->
-            let has s = String.is_substring src ~substring:s in
-            p claim_off_shape (has "single_to_bfloat16(fmaf("))
+        let src = Generated.read ~ext:".c" "aw_bf16_naive_off" in
+        let has s = String.is_substring src ~substring:s in
+        p claim_off_shape (has "single_to_bfloat16(fmaf("))
   end

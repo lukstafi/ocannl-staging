@@ -119,6 +119,29 @@ that they earn a lookup rather than always-loaded space.
   from a clean state (`dune clean && dune build @alias`): stale `_build/` intermediates can satisfy
   an undeclared dep, so an incomplete build passes while the artifact is wrong. Assert content
   (size, object counts), not mere existence.
+- A test asserting on generated code must establish that the artifact it reads is the one THIS run
+  emitted; `Test_utils.Generated` is how (gh-ocannl-655). `build_files/<exe>/<routine>.<ext>` is a
+  side effect of a compile, not a value the test holds, and two things detach it from the compile it
+  describes: `test/config/ocannl_config` keeps `clean_up_build_files_on_startup=false`, so an
+  artifact outlives its run indefinitely, and a second compile under the same routine name overwrites
+  it within a run. Either way the assertion outlives the kernel it asserts on — it keeps passing, and
+  keeps counting as coverage, after that kernel stopped being emitted at all (folded to a constant,
+  erased by precision inference, fissioned into a differently-named routine). `Generated.init
+  ~backend_name`, called before the first compile, empties this executable's own subdirectory, so
+  existence IS freshness — no mtime, no clock granularity. What licenses that sweep is narrower than
+  "the directory is scoped": only the DEFAULT, executable-derived subdirectory is inherently
+  process-private, since dune runs one process per executable. Any configured `build_files_prefix`
+  is refused outright — a second executable can be given the same prefix, so deleting there is
+  unsafe, and without deletion a deterministic compile's re-emitted identical kernel is
+  indistinguishable from a stale one (deletion is the only write signal that does not depend on
+  timestamp granularity). Tests that assert on generated code therefore leave the prefix at its
+  default. `Generated.read` fails through `Verdict` on a
+  missing artifact instead of answering `None` — the arm that some call sites recorded as `false` and
+  others forgot. `Generated.arm` deletes one routine's artifact before a candidate's compile, which
+  is what a loop reusing a routine name needs in order to attribute what it reads; reading one
+  routine twice across changed contents is otherwise reported as an unattributed overwrite. Corollary
+  for a leg this backend cannot evaluate: gate it and report `Verdict.skipped` rather than letting it
+  reach the read, because an absent artifact is a failure here by design.
 - Dune roots at the OUTERMOST ancestor holding a `dune-workspace` (failing that, a `dune-project`)
   and ignores dot-directories, so from a worktree under `.claude/worktrees/` the main checkout wins
   and the worktree is invisible to dune: targeted commands fail with `Don't know about directory

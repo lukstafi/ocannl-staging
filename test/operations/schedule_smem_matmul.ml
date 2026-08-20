@@ -47,11 +47,9 @@ let has_shared =
   || String.is_substring backend_name ~substring:"cuda"
   || String.is_substring backend_name ~substring:"hip"
 
-let read_generated base_name =
-  let ext = if String.is_substring backend_name ~substring:"metal" then ".metal" else ".cu" in
-  let ext = if String.is_substring backend_name ~substring:"hip" then ".hip" else ext in
-  let path = Utils.build_file (base_name ^ ext) in
-  if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
+module Generated = Test_utils.Generated
+
+let () = Generated.init ~backend_name
 
 (* The maximal single-child chains of statement-level loops: one symbol list per top-level nest. *)
 let nest_paths (llc : LL.t) : Ir.Indexing.symbol list list =
@@ -148,24 +146,21 @@ let () =
     let got_smem = Context.get_values ctx_a mc1.Tensor.value in
     p "SMEM matmul parity (GPU) or clean rejection (CPU)"
       (Array.for_all2_exn got_smem got_serial ~f:approx);
-    match read_generated "mm_smem" with
-    | None -> p "shared tiles, barriers, no edge guards (GPU) or rejected (CPU)" false
-    | Some src ->
-        let has sub = String.is_substring src ~substring:sub in
-        let count_sub sub =
-          String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
-        in
-        let shared_ok =
-          if String.is_substring backend_name ~substring:"metal" then
-            count_sub "threadgroup float tile_" = 2 && has "threadgroup_barrier"
-          else count_sub "__shared__ float tile_" = 2 && has "__syncthreads()"
-        in
-        (* All tile sizes divide the extents: Split remainder guards and Stage/Privatize edge guards
-           fold; the only Ifs left are the two thread-0 load restrictions. The k loop accumulates
-           into the privatized scalar [acc_mc1] instead of round-tripping mc1 through global
-           memory. *)
-        p "shared tiles, barriers, no edge guards (GPU) or rejected (CPU)"
-          (shared_ok && count_sub "if (" = 2 && has "acc_mc1"))
+    let src = Generated.read "mm_smem" in
+    let has sub = String.is_substring src ~substring:sub in
+    let count_sub sub =
+      String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
+    in
+    let shared_ok =
+      if String.is_substring backend_name ~substring:"metal" then
+        count_sub "threadgroup float tile_" = 2 && has "threadgroup_barrier"
+      else count_sub "__shared__ float tile_" = 2 && has "__syncthreads()"
+    in
+    (* All tile sizes divide the extents: Split remainder guards and Stage/Privatize edge guards
+       fold; the only Ifs left are the two thread-0 load restrictions. The k loop accumulates into
+       the privatized scalar [acc_mc1] instead of round-tripping mc1 through global memory. *)
+    p "shared tiles, barriers, no edge guards (GPU) or rejected (CPU)"
+      (shared_ok && count_sub "if (" = 2 && has "acc_mc1"))
   else (
     (match
        try
@@ -229,21 +224,19 @@ let () =
     let got_b = Context.get_values ctx_b cb.Tensor.value in
     p "broadcast staging values correct (GPU) or clean rejection (CPU)"
       (Array.for_all2_exn got_b bcast_expected ~f:approx);
-    match read_generated "bcast_staged" with
-    | None -> p "broadcast load is thread-0 guarded under the workgroup axis" false
-    | Some src ->
-        let count_sub sub =
-          String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
-        in
-        (* One shared tile; the single If is the thread-0 restriction of the cooperative load — its
-           presence is exactly what the review fix guarantees (previously the load sat unguarded at
-           routine top level). *)
-        p "broadcast load is thread-0 guarded under the workgroup axis"
-          (count_sub "if (" = 1
-          &&
-          if String.is_substring backend_name ~substring:"metal" then
-            count_sub "threadgroup float tile_" = 1
-          else count_sub "__shared__ float tile_" = 1))
+    let src = Generated.read "bcast_staged" in
+    let count_sub sub =
+      String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
+    in
+    (* One shared tile; the single If is the thread-0 restriction of the cooperative load — its
+       presence is exactly what the review fix guarantees (previously the load sat unguarded at
+       routine top level). *)
+    p "broadcast load is thread-0 guarded under the workgroup axis"
+      (count_sub "if (" = 1
+      &&
+      if String.is_substring backend_name ~substring:"metal" then
+        count_sub "threadgroup float tile_" = 1
+      else count_sub "__shared__ float tile_" = 1))
   else (
     (match
        try

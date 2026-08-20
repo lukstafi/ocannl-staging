@@ -20,6 +20,7 @@ Directories whose sources this scan reads:
 Configuration keys tracked as ambient dependencies, in the one spelling OCANNL reads:
   backend
   buffer_aliasing
+  build_files_prefix
   cc_fp16_arithmetic
   log_config_sourcing
   log_level

@@ -43,11 +43,9 @@ let has_shared =
   || String.is_substring backend_name ~substring:"cuda"
   || String.is_substring backend_name ~substring:"hip"
 
-let read_generated base_name =
-  let ext = if String.is_substring backend_name ~substring:"metal" then ".metal" else ".cu" in
-  let ext = if String.is_substring backend_name ~substring:"hip" then ".hip" else ext in
-  let path = Utils.build_file (base_name ^ ext) in
-  if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
+module Generated = Test_utils.Generated
+
+let () = Generated.init ~backend_name
 
 let nest_paths (llc : LL.t) : Ir.Indexing.symbol list list =
   let strip stmts = List.filter stmts ~f:(function LL.Noop | LL.Comment _ -> false | _ -> true) in
@@ -151,23 +149,21 @@ let () =
     let got_reg = Context.get_values ctx_a mc1.Tensor.value in
     p "register-tiled matmul parity (GPU) or clean rejection (CPU)"
       (Array.for_all2_exn got_reg got_serial ~f:approx);
-    match read_generated "mmr_tiled" with
-    | None -> p "unrolled register tile structure (GPU) or rejected (CPU)" false
-    | Some src ->
-        let count_sub sub =
-          String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
-        in
-        (* TM * TN fma statements from the materialized unrolls, two shared tiles, and only the two
-           thread-0 load guards survive. Metal spells single-precision FMA [fma(], CUDA [fmaf(]; the
-           patterns are disjoint so the counts add. *)
-        p "unrolled register tile structure (GPU) or rejected (CPU)"
-          (count_sub "fma(" + count_sub "fmaf(" = tm * tn
-          && count_sub "if (" = 2
-          && String.is_substring src ~substring:"acc_mc1"
-          &&
-          if String.is_substring backend_name ~substring:"metal" then
-            count_sub "threadgroup float tile_" = 2
-          else count_sub "__shared__ float tile_" = 2))
+    let src = Generated.read "mmr_tiled" in
+    let count_sub sub =
+      String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
+    in
+    (* TM * TN fma statements from the materialized unrolls, two shared tiles, and only the two
+       thread-0 load guards survive. Metal spells single-precision FMA [fma(], CUDA [fmaf(]; the
+       patterns are disjoint so the counts add. *)
+    p "unrolled register tile structure (GPU) or rejected (CPU)"
+      (count_sub "fma(" + count_sub "fmaf(" = tm * tn
+      && count_sub "if (" = 2
+      && String.is_substring src ~substring:"acc_mc1"
+      &&
+      if String.is_substring backend_name ~substring:"metal" then
+        count_sub "threadgroup float tile_" = 2
+      else count_sub "__shared__ float tile_" = 2))
   else (
     (match
        try

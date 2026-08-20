@@ -38,12 +38,9 @@ let nonzero name (a : float array) =
 let approx a b = Float.(abs (a - b) < 1e-3)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 
-let read_generated base_name =
-  let ext = if String.is_substring backend_name ~substring:"metal" then ".metal" else ".c" in
-  let ext = if String.is_substring backend_name ~substring:"cuda" then ".cu" else ext in
-  let ext = if String.is_substring backend_name ~substring:"hip" then ".hip" else ext in
-  let path = Utils.build_file (base_name ^ ext) in
-  if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
+module Generated = Test_utils.Generated
+
+let () = Generated.init ~backend_name
 
 let nest_paths (llc : LL.t) : Ir.Indexing.symbol list list =
   let strip stmts = List.filter stmts ~f:(function LL.Noop | LL.Comment _ -> false | _ -> true) in
@@ -130,17 +127,13 @@ let () =
   let ctx_a = Context.run ctx_a routine_a in
   let got_packed = Context.get_values ctx_a mc1.Tensor.value in
   p "packed tiled matmul matches the naive twin" (Array.for_all2_exn got_packed got_naive ~f:approx);
-  match read_generated "mmp_packed" with
-  | None -> p "packed tiles are plain local arrays, no barriers, no guards" false
-  | Some src ->
-      let has sub = String.is_substring src ~substring:sub in
-      let count_sub sub =
-        String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
-      in
-      p "packed tiles are plain local arrays, no barriers, no guards"
-        (count_sub "float tile_" = 2
-        && has "acc_mc1"
-        && (not (has "threadgroup float tile_"))
-        && (not (has "__shared__"))
-        && (not (has "barrier"))
-        && not (has "if ("))
+  let src = Generated.read "mmp_packed" in
+  let has sub = String.is_substring src ~substring:sub in
+  let count_sub sub = String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length in
+  p "packed tiles are plain local arrays, no barriers, no guards"
+    (count_sub "float tile_" = 2
+    && has "acc_mc1"
+    && (not (has "threadgroup float tile_"))
+    && (not (has "__shared__"))
+    && (not (has "barrier"))
+    && not (has "if ("))

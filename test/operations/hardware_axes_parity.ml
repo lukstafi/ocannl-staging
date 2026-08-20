@@ -29,12 +29,9 @@ let p = Verdict.p
 let approx a b = Float.(abs (a - b) < 1e-5)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 
-let read_generated base_name =
-  let ext = if String.is_substring backend_name ~substring:"metal" then ".metal" else ".c" in
-  let ext = if String.is_substring backend_name ~substring:"cuda" then ".cu" else ext in
-  let ext = if String.is_substring backend_name ~substring:"hip" then ".hip" else ext in
-  let path = Utils.build_file (base_name ^ ext) in
-  if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
+module Generated = Test_utils.Generated
+
+let () = Generated.init ~backend_name
 
 (* Annotate every top-level loop nest of the optimized code: the outermost loop gets [outer_axis],
    the immediately nested loop [inner_axis]; deeper loops stay [Serial]. *)
@@ -98,25 +95,23 @@ let () =
   let got_c2a = Context.get_values ctx_a c2a.Tensor.value in
   p "annotated combo values match the serial twin"
     (Array.for_all2_exn got_c1a got_c1s ~f:approx && Array.for_all2_exn got_c2a got_c2s ~f:approx);
-  (match read_generated "combo_annot" with
-  | None -> p "annotated kernel structure as expected" false
-  | Some src ->
-      let has s = String.is_substring src ~substring:s in
-      let structure_ok =
-        if String.is_substring backend_name ~substring:"metal" then
-          (* Hardware bindings from the gid/lid extra args, no loops left, and the launch-extent
-             guard on the smaller Grid nest. *)
-          has "gid.x" && has "lid.x" && has "if (" && not (has "for (")
-        else if
-          String.is_substring backend_name ~substring:"cuda"
-          || String.is_substring backend_name ~substring:"hip"
-        then has "blockIdx.x" && has "threadIdx.x" && has "if (" && not (has "for (")
-        else
-          (* C backends: legal serial fallback, no hardware registers, no guard (the serial loop
-             iterates the true extent). *)
-          has "for (" && (not (has "gid")) && not (has "blockIdx")
-      in
-      p "annotated kernel structure as expected" structure_ok);
+  (let src = Generated.read "combo_annot" in
+   let has s = String.is_substring src ~substring:s in
+   let structure_ok =
+     if String.is_substring backend_name ~substring:"metal" then
+       (* Hardware bindings from the gid/lid extra args, no loops left, and the launch-extent guard
+          on the smaller Grid nest. *)
+       has "gid.x" && has "lid.x" && has "if (" && not (has "for (")
+     else if
+       String.is_substring backend_name ~substring:"cuda"
+       || String.is_substring backend_name ~substring:"hip"
+     then has "blockIdx.x" && has "threadIdx.x" && has "if (" && not (has "for (")
+     else
+       (* C backends: legal serial fallback, no hardware registers, no guard (the serial loop
+          iterates the true extent). *)
+       has "for (" && (not (has "gid")) && not (has "blockIdx")
+   in
+   p "annotated kernel structure as expected" structure_ok);
 
   (* --- Unrolled inner loop (backend-independent rendering) --- *)
   let%op c3u = a + b in
@@ -130,12 +125,10 @@ let () =
   let ctx_u = Context.run ctx_u routine_u in
   let got_c3u = Context.get_values ctx_u c3u.Tensor.value in
   p "unrolled variant values correct" (Array.for_all2_exn got_c3u expected_c1 ~f:approx);
-  (match read_generated "unroll_annot" with
-  | None -> p "unrolled kernel repeats the body with constant bindings" false
-  | Some src ->
-      (* The inner extent-8 loop unrolls into blocks binding the index to 0..7. *)
-      p "unrolled kernel repeats the body with constant bindings"
-        (String.is_substring src ~substring:" = 0;" && String.is_substring src ~substring:" = 7;"));
+  (let src = Generated.read "unroll_annot" in
+   (* The inner extent-8 loop unrolls into blocks binding the index to 0..7. *)
+   p "unrolled kernel repeats the body with constant bindings"
+     (String.is_substring src ~substring:" = 0;" && String.is_substring src ~substring:" = 7;"));
 
   (* --- Negative: partial hardware coverage is rejected (PR #89 review) --- *)
   (* Launch dimensions are global to the kernel: with the first nest annotated Grid+Workgroup

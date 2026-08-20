@@ -63,15 +63,9 @@ let on_gpu =
   || String.is_substring backend_name ~substring:"cuda"
   || String.is_substring backend_name ~substring:"hip"
 
-let read_generated base_name =
-  let ext =
-    if on_metal then ".metal"
-    else if String.is_substring backend_name ~substring:"hip" then ".hip"
-    else if on_gpu then ".cu"
-    else ".c"
-  in
-  let path = Utils.build_file (base_name ^ ext) in
-  if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
+module Generated = Test_utils.Generated
+
+let () = Generated.init ~backend_name
 
 (* The maximal single-child chains of statement-level loops: one symbol list per top-level nest. *)
 let nest_paths (llc : LL.t) : Ir.Indexing.symbol list list =
@@ -172,21 +166,19 @@ let () =
     let got_smem = Context.get_values ctx_a mc1.Tensor.value in
     p "swizzled SMEM matmul parity (GPU) or clean rejection (CPU)"
       (Array.for_all2_exn got_smem got_serial ~f:approx);
-    match read_generated "mm_swizzled_smem" with
-    | None -> p "tile accesses XOR-swizzled (GPU) or rejected (CPU)" false
-    | Some src ->
-        let has sub = String.is_substring src ~substring:sub in
-        let count_sub sub =
-          String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
-        in
-        let shared_ok =
-          if on_metal then count_sub "threadgroup float tile_" = 2 && has "threadgroup_barrier"
-          else count_sub "__shared__ float tile_" = 2 && has "__syncthreads()"
-        in
-        (* Each tile is written by its cooperative load and read by the micro-kernel, all through
-           the swizzled offset [P*8 + (col ^ (P & 7))]: at least 4 masked-XOR sites. *)
-        p "tile accesses XOR-swizzled (GPU) or rejected (CPU)"
-          (shared_ok && count_sub " & 7)" >= 4 && count_sub " ^ " >= 4))
+    let src = Generated.read "mm_swizzled_smem" in
+    let has sub = String.is_substring src ~substring:sub in
+    let count_sub sub =
+      String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
+    in
+    let shared_ok =
+      if on_metal then count_sub "threadgroup float tile_" = 2 && has "threadgroup_barrier"
+      else count_sub "__shared__ float tile_" = 2 && has "__syncthreads()"
+    in
+    (* Each tile is written by its cooperative load and read by the micro-kernel, all through the
+       swizzled offset [P*8 + (col ^ (P & 7))]: at least 4 masked-XOR sites. *)
+    p "tile accesses XOR-swizzled (GPU) or rejected (CPU)"
+      (shared_ok && count_sub " & 7)" >= 4 && count_sub " ^ " >= 4))
   else (
     (match
        try
@@ -223,21 +215,19 @@ let () =
     let got = Context.get_values ctx_b mc1b.Tensor.value in
     p "b128-swizzled SMEM matmul parity (GPU) or clean rejection (CPU)"
       (Array.for_all2_exn got got_serial ~f:approx);
-    match read_generated "mm_swz128_smem" with
-    | None -> p "tile accesses b128-swizzled (GPU) or rejected (CPU)" false
-    | Some src ->
-        let count_sub sub =
-          String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
-        in
-        (* Four access sites (two cooperative loads, two micro-kernel reads), each rendering the
-           unit index, its XOR mask, the shift back and the within-unit remainder. The element
-           flavor's [& 7] mask must NOT appear: that would be the wrong granularity. *)
-        p "tile accesses b128-swizzled (GPU) or rejected (CPU)"
-          (count_sub " >> 2)" >= 4
-          && count_sub " & 1)" >= 4
-          && count_sub " << 2)" >= 4
-          && count_sub " & 3)" >= 4
-          && count_sub " & 7)" = 0))
+    let src = Generated.read "mm_swz128_smem" in
+    let count_sub sub =
+      String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
+    in
+    (* Four access sites (two cooperative loads, two micro-kernel reads), each rendering the unit
+       index, its XOR mask, the shift back and the within-unit remainder. The element flavor's [& 7]
+       mask must NOT appear: that would be the wrong granularity. *)
+    p "tile accesses b128-swizzled (GPU) or rejected (CPU)"
+      (count_sub " >> 2)" >= 4
+      && count_sub " & 1)" >= 4
+      && count_sub " << 2)" >= 4
+      && count_sub " & 3)" >= 4
+      && count_sub " & 7)" = 0))
   else (
     (match
        try
@@ -272,21 +262,19 @@ let () =
     let got = Context.get_values ctx_p mc1p.Tensor.value in
     p "pad_stride SMEM matmul parity (GPU) or clean rejection (CPU)"
       (Array.for_all2_exn got got_serial ~f:approx);
-    match read_generated "mm_padstride_smem" with
-    | None -> p "pad_stride widens the tile stride (GPU) or rejected (CPU)" false
-    | Some src ->
-        let has sub = String.is_substring src ~substring:sub in
-        let count_sub sub =
-          String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
-        in
-        let decl = if on_metal then "threadgroup float tile_" else "__shared__ float tile_" in
-        p "pad_stride widens the tile stride (GPU) or rejected (CPU)"
-          (count_sub decl = 2
-          && count_sub "[96]" = 2
-          && count_sub " * 12 + " >= 4
-          && (not (has " * 8 + "))
-          (* Padding alone is not a swizzle: the offsets stay plain row-major. *)
-          && not (has " ^ ")))
+    let src = Generated.read "mm_padstride_smem" in
+    let has sub = String.is_substring src ~substring:sub in
+    let count_sub sub =
+      String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
+    in
+    let decl = if on_metal then "threadgroup float tile_" else "__shared__ float tile_" in
+    p "pad_stride widens the tile stride (GPU) or rejected (CPU)"
+      (count_sub decl = 2
+      && count_sub "[96]" = 2
+      && count_sub " * 12 + " >= 4
+      && (not (has " * 8 + "))
+      (* Padding alone is not a swizzle: the offsets stay plain row-major. *)
+      && not (has " ^ ")))
   else (
     (match
        try
@@ -365,27 +353,25 @@ let () =
     let got_staged = Context.get_values ctx_c mc2.Tensor.value in
     p "swizzled staged+tensorized parity (GPU) or clean rejection (CPU)"
       (Array.for_all2_exn got_staged got_serial ~f:approx);
-    match read_generated "mm_swizzled_mma" with
-    | None -> p "swizzled operands decline the MMA intrinsics to the lane-0 fallback" false
-    | Some src ->
-        let has sub = String.is_substring src ~substring:sub in
-        let count_sub sub =
-          String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
-        in
-        let shared_ok =
-          if on_metal then count_sub "threadgroup float tile_" = 2
-          else count_sub "__shared__ float tile_" = 2
-        in
-        let no_intrinsics =
-          if on_metal then (not (has "simdgroup_multiply_accumulate")) && not (has "simdgroup_load")
-          else not (has "wmma")
-        in
-        (* The ma tile is [16 x 16] (mask 15), the mb tile [16 x 32] (mask 31); each is written by
-           its cooperative load and read by the fallback micro-kernel: >= 4 XOR sites total. *)
-        p "swizzled operands decline the MMA intrinsics to the lane-0 fallback"
-          (shared_ok && no_intrinsics && has "== 0)"
-          && count_sub " ^ " >= 4
-          && has " & 15)" && has " & 31)"))
+    let src = Generated.read "mm_swizzled_mma" in
+    let has sub = String.is_substring src ~substring:sub in
+    let count_sub sub =
+      String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
+    in
+    let shared_ok =
+      if on_metal then count_sub "threadgroup float tile_" = 2
+      else count_sub "__shared__ float tile_" = 2
+    in
+    let no_intrinsics =
+      if on_metal then (not (has "simdgroup_multiply_accumulate")) && not (has "simdgroup_load")
+      else not (has "wmma")
+    in
+    (* The ma tile is [16 x 16] (mask 15), the mb tile [16 x 32] (mask 31); each is written by its
+       cooperative load and read by the fallback micro-kernel: >= 4 XOR sites total. *)
+    p "swizzled operands decline the MMA intrinsics to the lane-0 fallback"
+      (shared_ok && no_intrinsics && has "== 0)"
+      && count_sub " ^ " >= 4
+      && has " & 15)" && has " & 31)"))
   else (
     (match
        try

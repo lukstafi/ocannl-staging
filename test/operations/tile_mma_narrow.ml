@@ -51,12 +51,9 @@ let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~d
 let skipped = Verdict.skipped ~backend:backend_name
 let on_cpu = String.is_substring backend_name ~substring:"cc"
 
-let read_generated base_name =
-  let ext = if String.is_substring backend_name ~substring:"metal" then ".metal" else ".c" in
-  let ext = if String.is_substring backend_name ~substring:"cuda" then ".cu" else ext in
-  let ext = if String.is_substring backend_name ~substring:"hip" then ".hip" else ext in
-  let path = Utils.build_file (base_name ^ ext) in
-  if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
+module Generated = Test_utils.Generated
+
+let () = Generated.init ~backend_name
 
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
@@ -161,22 +158,18 @@ let () =
   in
   p "bf16 packed+tensorized matmul matches the serial twin bitwise"
     (Array.for_all2_exn got_b want_b ~f:Float.equal);
-  (match read_generated "nrw_bf16_packed" with
-  | None -> p "bf16 packing widens into f32 panels; only d crosses the narrow bridge" false
-  | Some src ->
-      let has s = String.is_substring src ~substring:s in
-      let count_sub sub =
-        String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
-      in
-      p "bf16 packing widens into f32 panels; only d crosses the narrow bridge"
-        (if on_cpu then
-           (* Two f32 tile arrays: the widening (the C backends' [bfloat16_to_single]) rides the
-              packing copy; the register tiling sees f32 panels, bridging only the accumulator. *)
-           count_sub "float tile_" = 2
-           && has "bfloat16_to_single" && has "Tile_mma register tiling"
-           && has "narrow storage bridged: d:bfloat16."
-           && has "OCANNL_VEC_WIDEN_BFLOAT16" && has "OCANNL_VEC_NARROW_BFLOAT16"
-         else count_sub "float tile_" = 2 && not (has "tmma_")));
+  (let src = Generated.read "nrw_bf16_packed" in
+   let has s = String.is_substring src ~substring:s in
+   let count_sub sub = String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length in
+   p "bf16 packing widens into f32 panels; only d crosses the narrow bridge"
+     (if on_cpu then
+        (* Two f32 tile arrays: the widening (the C backends' [bfloat16_to_single]) rides the
+           packing copy; the register tiling sees f32 panels, bridging only the accumulator. *)
+        count_sub "float tile_" = 2
+        && has "bfloat16_to_single" && has "Tile_mma register tiling"
+        && has "narrow storage bridged: d:bfloat16."
+        && has "OCANNL_VEC_WIDEN_BFLOAT16" && has "OCANNL_VEC_NARROW_BFLOAT16"
+      else count_sub "float tile_" = 2 && not (has "tmma_")));
 
   (* === gh-ocannl-639: bf16 with partial sums that are NOT bf16-exact === *)
   (* Products are multiples of 15/128 with a nonzero mean (~0.23 drift per k step), so the running
@@ -243,23 +236,19 @@ let () =
   in
   p "half hoisted-packed matmul matches the serial twin bitwise"
     (Array.for_all2_exn got_h want_h ~f:Float.equal);
-  (match read_generated "nrw_half_hoisted" with
-  | None -> p "half hoisted pack converts on the host; only d crosses the narrow bridge" false
-  | Some src ->
-      let has s = String.is_substring src ~substring:s in
-      let count_sub sub =
-        String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
-      in
-      p "half hoisted pack converts on the host; only d crosses the narrow bridge"
-        ((* One in-kernel tile (A~); the B~ panel is a constant-pool buffer packed (and widened) on
-            the host, so no in-kernel copy of it exists. *)
-         count_sub "float tile_" = 1
-        &&
-        if on_cpu then
-          has "Tile_mma register tiling"
-          && has "narrow storage bridged: d:half."
-          && has "OCANNL_VEC_WIDEN_HALF" && has "OCANNL_VEC_NARROW_HALF"
-        else not (has "tmma_")));
+  (let src = Generated.read "nrw_half_hoisted" in
+   let has s = String.is_substring src ~substring:s in
+   let count_sub sub = String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length in
+   p "half hoisted pack converts on the host; only d crosses the narrow bridge"
+     ((* One in-kernel tile (A~); the B~ panel is a constant-pool buffer packed (and widened) on the
+         host, so no in-kernel copy of it exists. *)
+      count_sub "float tile_" = 1
+     &&
+     if on_cpu then
+       has "Tile_mma register tiling"
+       && has "narrow storage bridged: d:half."
+       && has "OCANNL_VEC_WIDEN_HALF" && has "OCANNL_VEC_NARROW_HALF"
+     else not (has "tmma_")));
 
   (* === pure fp16: native (forced) f16 arithmetic, f16 accumulators, doubled lanes === *)
   let saved_policy = Numerics.get () in
@@ -280,24 +269,22 @@ let () =
      in
      (want_f, got_f)
    with
-   | want_f, got_f -> (
+   | want_f, got_f ->
        p parity_name (Array.for_all2_exn got_f want_f ~f:Float.equal);
-       match read_generated "nrw_f16_packed" with
-       | None -> p structure_name false
-       | Some src ->
-           let has s = String.is_substring src ~substring:s in
-           let count_sub sub =
-             String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
-           in
-           p structure_name
-             (if on_cpu then
-                (* Half-typed tiles, an [ocannl_vec<2*f32 lanes>h] register file, no narrow bridge —
-                   storage and compute coincide. *)
-                count_sub "HALF_T tile_" = 2
-                && has "Tile_mma register tiling"
-                && (not (has "narrow storage bridged"))
-                && has half_vec_typ
-              else not (has "tmma_")))
+       let src = Generated.read "nrw_f16_packed" in
+       let has s = String.is_substring src ~substring:s in
+       let count_sub sub =
+         String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
+       in
+       p structure_name
+         (if on_cpu then
+            (* Half-typed tiles, an [ocannl_vec<2*f32 lanes>h] register file, no narrow bridge —
+               storage and compute coincide. *)
+            count_sub "HALF_T tile_" = 2
+            && has "Tile_mma register tiling"
+            && (not (has "narrow storage bridged"))
+            && has half_vec_typ
+          else not (has "tmma_"))
    | exception e ->
        (* The one condition verified to warrant a skip: the generated kernel failed to COMPILE over
           the half type ([Backend_rejected]'s detail quotes the compiler output, which names
