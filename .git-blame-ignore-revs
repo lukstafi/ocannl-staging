@@ -2,3 +2,6 @@
 # tools/format-sweep.sh appends each sweep's SHA here in a follow-up commit.
 # GitHub's blame view honors this file automatically; locally, run once:
 #   git config blame.ignoreRevsFile .git-blame-ignore-revs
+
+# 2026-08-20 formatting sweep
+e5f4475d75ca23bce2fb3b9ea343e61fb3cea74c
