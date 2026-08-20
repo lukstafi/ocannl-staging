@@ -156,6 +156,28 @@ ok: unclassified heads -- inside a subdir, too
 ok: unclassified heads -- something that is not a stanza at all
 ok: accepted marker -- the marker inside a string is not a comment to either reader
 ok: accepted marker -- nor is one in a line comment
+ok: backend marker grammar -- ordinary prose is not a marker
+ok: backend marker grammar -- the plain shape
+ok: backend marker grammar -- an em dash separates too
+ok: backend marker grammar -- spacing around the colon is free
+ok: backend marker grammar -- two backends, for a stanza that names both
+ok: backend marker grammar -- none and a backend at once is a contradiction
+ok: backend marker grammar -- a backend the repository does not have
+ok: backend marker grammar -- no separator at all
+ok: backend marker grammar -- a one-word reason is a label, not a reason
+ok: backend marker grammar -- an empty reason
+ok: backend marker grammar -- an em dash before a double dash in the reason
+ok: backend marker grammar -- annotated prose before it
+ok: backend marker placement -- inside the stanza it is about
+ok: backend marker placement -- between two stanzas it belongs to neither
+ok: backend marker placement -- a comment above the stanza, blank line and all
+ok: backend marker placement -- on an executable, which runs nothing
+ok: backend marker placement -- a subdir's stanzas keep their own markers
+ok: backend marker placement -- one in the subdir but in no stanza of it
+ok: backend marker placement -- the declaration and the marker are read independently
+ok: backend marker sentinel -- in a comment
+ok: backend marker sentinel -- inside a quoted argument, where it declares nothing
+ok: backend marker sentinel -- none at all
 ok: refused -- a marker nested inside a stanza
 ok: refused -- a block comment
 ok: refused -- a datum comment
