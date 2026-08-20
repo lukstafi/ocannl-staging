@@ -145,9 +145,13 @@ let scope ast =
 let uses content =
   let ast = structure_of content in
   let literals, parameters, cache_modules = scope ast in
-  let resolve argument =
+    (* The empty string disables the cache only where [Autotune.tune] reads it that way: it checks
+       [String.is_empty] before consulting or writing the cache at all. A direct store has no such
+       reading -- [ensure_dir ""] is a no-op and [cache_file] then yields [<key>.sexp], written into
+       the working directory, where the glob does not reach it (Codex P2, round 2). *)
+  let resolve ~disabling_allowed argument =
     match string_literal argument with
-    | Some "" -> Disabled
+    | Some "" when disabling_allowed -> Disabled
     | Some value -> Names value
     | None -> (
         match Option.bind (longident_of argument) ~f:List.last with
@@ -180,26 +184,42 @@ let uses content =
           | Pexp_apply (callee, args) ->
               let into_cache = calls_cache_module callee in
               List.iter args ~f:(fun (lbl, argument) ->
+                  (* [Some disabling_allowed] where this argument names a directory. *)
                   let names_a_directory =
                     match label_name lbl with
-                    | Some name when String.equal name tune_label -> true
-                    | Some name when String.equal name store_label -> into_cache
-                    | _ -> false
+                    | Some name when String.equal name tune_label -> Some true
+                    | Some name when String.equal name store_label && into_cache -> Some false
+                    | _ -> None
                   in
-                  if names_a_directory then
+                  Option.iter names_a_directory ~f:(fun disabling_allowed ->
                     found :=
                       {
-                        resolution = resolve argument;
+                        resolution = resolve ~disabling_allowed argument;
                         line = argument.pexp_loc.loc_start.pos_lnum;
                         spelling = "~" ^ Option.value (label_name lbl) ~default:tune_label;
                       }
-                      :: !found)
+                      :: !found))
           | _ -> ());
           Ast_iterator.default_iterator.expr self expr);
     }
   in
   iterator.structure iterator ast;
   List.rev !found
+
+type ignore_line = { pattern : string; negated : bool }
+
+(** The patterns of an ignore file, in order: comments and blank lines dropped, a leading [!]
+    recorded rather than swallowed. Order is kept because gitignore's rule is last-match-wins, so a
+    set of patterns is not enough to answer whether anything is ignored. *)
+let ignore_patterns content =
+  String.split_lines content
+  |> List.filter_map ~f:(fun line ->
+      let line = String.strip line in
+      if String.is_empty line || String.is_prefix line ~prefix:"#" then None
+      else
+        match String.chop_prefix line ~prefix:"!" with
+        | Some rest -> Some { pattern = String.strip rest; negated = true }
+        | None -> Some { pattern = line; negated = false })
 
 (** The glob that has to be in the root [.gitignore] for the prefix rule to ignore anything.
     Root-anchored and directory-only: a cache directory is only ever created in the working
@@ -208,7 +228,54 @@ let uses content =
 let required_glob = "/" ^ required_prefix ^ "*/"
 
 (** Whether an ignore file carries [required_glob] as an ignore rather than a negation. Read line by
-    line rather than as a glob engine: what is asked is whether this exact rule is present. *)
+    line rather than as a glob engine: what is asked is whether this exact rule is present, which is
+    what keeps the ignore list from creeping back into a name-by-name list even while
+    {!effectively_ignored} would be satisfied by bespoke entries. *)
 let declares_required_glob content =
   String.split_lines content
   |> List.exists ~f:(fun line -> String.equal (String.strip line) required_glob)
+
+(* A glob over one path component: [*] and [?], no separators to consider. Bounded by the pattern
+   and name lengths, both tiny here. *)
+let glob_matches pattern name =
+  let np = String.length pattern and nn = String.length name in
+  let rec go i j =
+    if i = np then j = nn
+    else
+      match pattern.[i] with
+      | '*' -> go (i + 1) j || (j < nn && go i (j + 1))
+      | '?' -> j < nn && go (i + 1) (j + 1)
+      | c -> j < nn && Char.equal name.[j] c && go (i + 1) (j + 1)
+  in
+  go 0 0
+
+(** The glob a pattern imposes on a root-level DIRECTORY name, where it can match one at all.
+    gitignore anchors a pattern that contains a slash anywhere but the end to the ignore file's own
+    directory, so [docs/*.log] cannot match a bare root-level name; a pattern without one matches by
+    basename at any depth, the root included. A trailing slash restricts a pattern to directories,
+    which every candidate here is. *)
+let root_directory_glob pattern =
+  let p = Option.value (String.chop_suffix pattern ~suffix:"/") ~default:pattern in
+  let p = Option.value (String.chop_prefix p ~prefix:"/") ~default:p in
+  if String.contains p '/' || String.is_empty p then None else Some p
+
+(** Patterns that could bear on a root-level directory name and that {!glob_matches} cannot read.
+    Reported by the caller rather than silently treated as non-matching: a scan that cannot read its
+    input has to say so, and "not ignored" and "not understood" are different answers. *)
+let unreadable_patterns content =
+  List.filter_map content ~f:(fun { pattern; negated = _ } ->
+      match root_directory_glob pattern with
+      | Some glob
+        when String.is_substring glob ~substring:"**" || String.contains glob '[' ->
+          Some pattern
+      | _ -> None)
+
+(** Whether git ignores a root-level directory of this name, by gitignore's own rule: every pattern
+    is considered in order and the LAST one that matches decides, so a later [!] un-ignores what an
+    earlier line ignored. Reading only for the required glob's presence would report coverage that a
+    subsequent negation has taken away (Codex P2, round 2). *)
+let effectively_ignored patterns name =
+  List.fold patterns ~init:false ~f:(fun ignored { pattern; negated } ->
+      match root_directory_glob pattern with
+      | Some glob when glob_matches glob name -> not negated
+      | _ -> ignored)

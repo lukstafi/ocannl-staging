@@ -28,6 +28,14 @@
    `autotune_cache/../leaked_cache` carries the prefix and creates `leaked_cache` beside it, which a
    glob segment -- stopping at the separator -- does not match.
 
+   What is deliberately NOT covered: the `autotune_cache_dir` configuration key, which can point the
+   cache anywhere from a config file, the environment or the commandline. That is the user-facing
+   knob, and its value is legitimately an absolute path outside the repository -- benchmarks already
+   set it to a temp directory -- so a repository naming convention is the wrong rule to hold it to.
+   No config file in the tree sets it today; if one ever does with a bare relative name, that is a
+   reviewed edit to a tracked config rather than a literal buried in a new test, which is the case
+   this check exists for.
+
    The built-in default needs no special case: the prefix IS its name, so a library that stops
    naming it fails the second requirement rather than slipping past this one.
 
@@ -88,13 +96,26 @@ let () =
   if List.is_empty sources then (
     fail "no OCaml sources among the arguments -- the rule's globs match nothing";
     Stdlib.exit 1);
-  if not (Scan.declares_required_glob (In_channel.read_all ignore_file)) then
+  let ignore_content = In_channel.read_all ignore_file in
+  let patterns = Scan.ignore_patterns ignore_content in
+  if not (Scan.declares_required_glob ignore_content) then
     fail
       (Printf.sprintf
-         "the root .gitignore no longer carries `%s` -- without it nothing ignores the cache \
-          directories the sources name, and the prefix this check enforces buys nothing"
+         "the root .gitignore no longer carries `%s` -- the prefix this check enforces buys nothing \
+          without it, and covering the current names with bespoke entries instead is the \
+          name-by-name list this replaced"
          Scan.required_glob);
-  let naming = ref [] in
+  (* A pattern that bears on a root-level directory and that the matcher cannot read: reported,
+     because "not ignored" and "not understood" are different answers and only one of them is this
+     check's to report. *)
+  List.iter (Scan.unreadable_patterns patterns) ~f:(fun pattern ->
+      fail
+        (Printf.sprintf
+           "the root .gitignore pattern `%s` could match a root-level directory and uses a glob \
+            form Cache_dir_scan.glob_matches does not implement -- teach it that form rather than \
+            letting the pattern count as non-matching"
+           pattern));
+  let naming = ref [] and names = ref [] in
   List.iter sources ~f:(fun (source, on_disk) ->
       let content = In_channel.read_all on_disk in
       match Or_error.try_with (fun () -> Scan.uses content) with
@@ -109,11 +130,13 @@ let () =
       | Ok uses ->
           List.iter uses ~f:(fun { Scan.resolution; line; spelling } ->
               match resolution with
-              | Scan.Names name when Scan.covered_by_glob name -> naming := source :: !naming
+              | Scan.Names name when Scan.covered_by_glob name ->
+                  naming := source :: !naming;
+                  names := name :: !names
               | Scan.Names name ->
                   fail
                     (Printf.sprintf
-                       "%s:%d: `%s` names the cache directory %s, which `%s` does not cover -- it \
+                       "%s:%d: `%s` names the cache directory %S, which `%s` does not cover -- it \
                         has to be a single directory name starting with `%s`, since a glob segment \
                         stops at a separator and `ensure_dir` follows one wherever it leads"
                        source line spelling name Scan.required_glob Scan.required_prefix)
@@ -125,6 +148,18 @@ let () =
                         -- pass the directory as a literal here, or bind it to a name mentioning \
                         `%s` whose right-hand side is one, so that the prefix can be checked"
                        source line spelling (Scan.describe resolution) Scan.tune_label)));
+  (* The prefix rule says the glob would cover these names; whether git ACTUALLY ignores them is a
+     separate question, and the one that matters. gitignore is last-match-wins, so a negation after
+     the glob takes coverage away while the glob line sits there looking intact (Codex P2, round
+     2). Asked per name, against the file's patterns in order. *)
+  List.iter (List.dedup_and_sort !names ~compare:String.compare) ~f:(fun name ->
+      if not (Scan.effectively_ignored patterns name) then
+        fail
+          (Printf.sprintf
+             "the sources name the cache directory %s, and the root .gitignore does not ignore it \
+              -- some pattern after `%s` un-ignores it, so the directory would be left untracked in \
+              the repository root"
+             name Scan.required_glob));
   (* The sources that name one, not the names themselves: what the check establishes is a property
      every name has, so listing them would only make the golden churn on each new tuning test --
      the maintenance burden this check exists to remove. *)
