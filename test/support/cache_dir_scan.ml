@@ -297,19 +297,39 @@ let declares_required_glob content =
   String.split_lines content
   |> List.exists ~f:(fun line -> String.equal (strip_trailing_spaces line) required_glob)
 
-(* A glob over one path component: [*] and [?], no separators to consider. Bounded by the pattern
-   and name lengths, both tiny here. *)
+(* A glob over one path component: [*] and [?], a backslash making the next character literal, and
+   no separators to consider. Bounded by the pattern and name lengths, both tiny here.
+
+   The escape is git's and it is load-bearing in both directions: [\_] is an underscore, so
+   [!/autotune_cache\_test/] really does expose [autotune_cache_test] while a matcher reading the
+   backslash literally sees no match and reports the directory still ignored; and [\*] is a literal
+   asterisk rather than a wildcard, so ignoring the escape over-matches as readily as it
+   under-matches. Both checked against `git check-ignore` (Codex P2, round 5). *)
 let glob_matches pattern name =
   let np = String.length pattern and nn = String.length name in
   let rec go i j =
     if i = np then j = nn
     else
       match pattern.[i] with
+      | '\\' when i + 1 < np ->
+          j < nn && Char.equal name.[j] pattern.[i + 1] && go (i + 2) (j + 1)
       | '*' -> go (i + 1) j || (j < nn && go i (j + 1))
       | '?' -> j < nn && go (i + 1) (j + 1)
       | c -> j < nn && Char.equal name.[j] c && go (i + 1) (j + 1)
   in
   go 0 0
+
+(* Whether a pattern contains a separator that git reads as one -- an escaped [\/] is a literal
+   slash in a name, not the anchoring separator, so the two cannot be counted together. *)
+let has_unescaped_slash pattern =
+  let n = String.length pattern in
+  let rec go i =
+    if i >= n then false
+    else if Char.equal pattern.[i] '\\' then go (i + 2)
+    else if Char.equal pattern.[i] '/' then true
+    else go (i + 1)
+  in
+  go 0
 
 (** The glob a pattern imposes on a root-level DIRECTORY name, where it can match one at all.
     gitignore anchors a pattern that contains a slash anywhere but the end to the ignore file's own
@@ -319,7 +339,7 @@ let glob_matches pattern name =
 let root_directory_glob pattern =
   let p = Option.value (String.chop_suffix pattern ~suffix:"/") ~default:pattern in
   let p = Option.value (String.chop_prefix p ~prefix:"/") ~default:p in
-  if String.contains p '/' || String.is_empty p then None else Some p
+  if has_unescaped_slash p || String.is_empty p then None else Some p
 
 (** Patterns that could bear on a root-level directory name and that {!glob_matches} cannot read.
     Reported by the caller rather than silently treated as non-matching: a scan that cannot read its

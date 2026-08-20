@@ -1479,7 +1479,13 @@ that they earn a lookup rather than always-loaded space.
 - `git` strips TRAILING spaces from a `.gitignore` pattern (unless backslash-quoted) and keeps
   LEADING ones, so an accidentally indented ` /foo/` is a pattern beginning with a space and matches
   nothing. Any code reading that file must not `String.strip` both ends, or it reports coverage git
-  does not give; `#` likewise opens a comment only at column 0. Verified against `git check-ignore`.
+  does not give; `#` likewise opens a comment only at column 0. A backslash escapes the next
+  character, in both directions that matter: `\_` is an underscore, so `!/foo\_bar/` really does
+  un-ignore `foo_bar` while a matcher reading the backslash literally sees no match and reports it
+  still ignored, and `\*` is a literal asterisk rather than a wildcard, so ignoring the escape
+  over-matches as readily as it under-matches. All of this verified against `git check-ignore`
+  rather than read off the documentation — which is the cheaper move whenever the question is what
+  git actually does.
 - `tools/test-run.sh` is the one way to run `dune runtest` / `dune build @slow` from a session;
   its header documents usage. It exists because every hand-rolled alternative has failed in
   practice, each differently: piping dune to `tail` reports tail's status (no pipefail), so
