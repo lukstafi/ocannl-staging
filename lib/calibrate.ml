@@ -73,7 +73,11 @@ let stream ?(elems = 1 lsl 26) ?repeats ctx =
       List.map kernels ~f:(fun (name, comp) ->
           let report = ref None in
           let tuned_ctx, (_routine : Context.routine) =
-            Autotune.tune ~search:true ~rounds:0 ?repeats ~cache_dir:""
+            (* [~name] as well as the block comment (gh-ocannl-669): the kernel's name is right
+               here, so the rows' [routine] column is this string by construction, rather than by
+               the coincidence that [get_name_exn]'s punctuation mangling leaves these names alone.
+               The block comment stays — it is what labels the code in the generated artifacts. *)
+            Autotune.tune ~name ~search:true ~rounds:0 ?repeats ~cache_dir:""
               ~report:(fun r -> report := Some r)
               init_ctx (named name comp) Idx.Empty
           in

@@ -56,6 +56,8 @@
   it rested on — that no compile of a search passes `~name` — and this change is exactly what would
   have broken it: every row would have gone on naming the block comment while the kernels it
   measured, and their generated sources, carried the other name, with nothing failing.
+  `Calibrate.stream` now passes the kernel name it already has, so its rows are that string by
+  construction rather than by `get_name_exn`'s punctuation mangling happening to leave it alone.
 
 - **The pre-driver launch gate covers the `.y` grid dimension** (gh-ocannl-643 follow-up). CUDA and
   HIP cap `gridDim.y` and `gridDim.z` at the same 65535 (`gridDim.x` is 2^31-scale), but only the
