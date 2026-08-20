@@ -71,8 +71,25 @@ let path ?ext routine =
   let ext = match ext with Some e -> e | None -> extension () in
   Utils.build_file (routine ^ ext)
 
-let remove_if_exists p =
-  try if Stdlib.Sys.file_exists p then Stdlib.Sys.remove p with Stdlib.Sys_error _ -> ()
+(* Deletion IS the freshness guarantee here, so a delete that does not happen cannot be swallowed: a
+   surviving file is one a later {!read} would accept as this run's, which is the whole failure this
+   module exists to prevent. Absence is therefore verified rather than inferred from the call not
+   raising — a Windows sharing violation, a read-only directory, or a file another process holds
+   open all leave the path in place. Deleting something that was not there is not a failure, which
+   is why the verdict is on [file_exists] afterwards rather than on the exception. *)
+let remove_or_fail ~context p =
+  let err =
+    try
+      Stdlib.Sys.remove p;
+      None
+    with Stdlib.Sys_error msg -> Some msg
+  in
+  if Stdlib.Sys.file_exists p then
+    Verdict.fail
+      (Printf.sprintf
+         "%s: could not delete %s%s — a stale artifact left in place would be read as this run's"
+         context p
+         (match err with Some msg -> " (" ^ msg ^ ")" | None -> ""))
 
 (** [init ~backend_name] empties this executable's [build_files/] subdirectory, so that every
     artifact found later was emitted by this run. Call it once at the top of the test, before any
@@ -86,7 +103,11 @@ let init ~backend_name =
   backend := Some (String.lowercase backend_name);
   Hashtbl.clear read_digests;
   let dir = Utils.build_files_dir () in
-  if String.equal (Stdlib.Filename.basename dir) "build_files" then
+  (* Whether the layout is flat is asked of the resolution itself — [artifacts_subdir] answering
+     [None] — not inferred from the directory's name: [build_files_prefix=build_files] is a
+     perfectly ordinary scoped prefix that resolves to [build_files/build_files], whose basename is
+     indistinguishable from the flat root's. *)
+  if Option.is_none (Utils.artifacts_subdir ()) then
     (* The flat legacy layout is shared by every concurrently running test, so emptying it would
        delete artifacts belonging to other processes. Fail loudly: freshness cannot be established
        here, and a test that silently gave it up would be back where this module started. *)
@@ -97,7 +118,7 @@ let init ~backend_name =
     Array.iter (Stdlib.Sys.readdir dir) ~f:(fun entry ->
         let p = Stdlib.Filename.concat dir entry in
         let is_dir = try Stdlib.Sys.is_directory p with Stdlib.Sys_error _ -> true in
-        if not is_dir then remove_if_exists p)
+        if not is_dir then remove_or_fail ~context:"Generated.init" p)
 
 (** [arm ?ext routine] deletes [routine]'s artifact, so that the next {!read} of it sees only what
     the *next* compile emits. Use it in a loop that compiles several candidates under one routine
@@ -106,7 +127,7 @@ let init ~backend_name =
 let arm ?ext routine =
   let p = path ?ext routine in
   Hashtbl.remove read_digests p;
-  remove_if_exists p
+  remove_or_fail ~context:("Generated.arm " ^ routine) p
 
 (** [read ?ext routine] is the generated source [routine]'s compile emitted during this run.
 
