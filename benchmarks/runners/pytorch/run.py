@@ -18,7 +18,12 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from bench_common import emit, percentiles, read_st_metadata
+from bench_common import (
+    emit,
+    percentiles,
+    read_st_metadata,
+    torch_searched,
+)
 
 import torch
 import torch.nn.functional as F
@@ -272,6 +277,10 @@ def main():
         "variant": "compiled" if args.compile else "eager",
         "workload": meta["name"],
         "compile_s": round(compile_s, 3),
+        # Whether inductor's codegen ran here or came from its cache (gh-ocannl-644). A compiled
+        # cell compiles in the process that then times steps, unlike an OCANNL tuned cell; the
+        # report states that rather than leaving it assumed (gh-ocannl-675).
+        "searched": torch_searched(torch, args.compile),
         "step_ms": percentiles(synced),
         "queued_step_ms": queued,
         "timed_steps": timed_steps,

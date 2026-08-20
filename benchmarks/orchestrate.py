@@ -56,11 +56,23 @@ PARITY_TOL_PRECISION = {"bf16": 4e-3, "f16": 2e-3}
 # slowly. Require at least one part per million of relative loss variation over the parity window.
 LOSS_MOVE_MIN_REL = 1e-6
 REFERENCE = ("pytorch", "cpu", "eager")
-# How a tuned cell's measurement pass is rendered in the report's `pass` column (gh-ocannl-644).
-# A runner predating the `searched` field cannot answer, which is not the same as a violation.
+# Cells whose protocol splits the search and the timing into two processes (gh-ocannl-644): the
+# search leaves an OCANNL process measurably slower per launch, so step times from it are not the
+# artifact's. These are the only cells a searching process is a violation for.
+TWO_PASS_CELLS = {("ocannl", "tuned")}
+# Cells that search or compile in the process that then times steps — by protocol, not by
+# mistake. Whether that costs them anything is unmeasured (gh-ocannl-675), so they are stated in
+# the report and never gated; the alternative, saying nothing, reads as though the question
+# applied to OCANNL alone.
+SAME_PROCESS_CELLS = {("tinygrad", "beam"), ("pytorch", "compiled")}
+# How a cell's measurement pass is rendered in the report's `pass` column (gh-ocannl-644). A
+# runner predating the `searched` field, or one whose probe could not read its framework's
+# internals, cannot answer — which is not the same as a violation.
 PROVENANCE_MARK = {
     "REPLAY": "replay",
     "SEARCH-PASS": "**SEARCH PASS**",
+    "SAME-PROCESS": "same-process",
+    "CACHED": "cached",
     "UNKNOWN": "?",
 }
 # Report row order within a workload: precision-major, f32 first (it is the reference's precision
@@ -322,31 +334,39 @@ def check_fixture_digests(fixtures, digests_path=None, allow_unpinned=False):
 
 
 def provenance_check(results):
-    """Annotate each OCANNL tuned cell with which pass produced its step times (gh-ocannl-644).
+    """Annotate each searching cell with which process produced its step times (gh-ocannl-644).
 
-    The two-pass protocol exists because a searching process is measurably slower per launch, so
-    pass-1 step times understate the tuned artifact. Both passes emit the same
+    OCANNL's two-pass protocol exists because a searching process is measurably slower per launch,
+    so pass-1 step times understate the tuned artifact. Both passes emit the same
     framework/backend/variant/precision, and until the runner carried `searched` nothing in the
     artifact distinguished them: `report-gh612-hip.md` quoted pass-1 timings for fifteen revisions
     and only a reviewer reading the driver caught it.
 
-    Sets `provenance` to REPLAY (the protocol-compliant case), SEARCH-PASS (the timings came from a
-    process that searched — a protocol violation, returned as a violation), or UNKNOWN (a runner
-    predating the field; not a violation, since the old artifacts cannot answer). Untuned cells and
-    non-OCANNL cells get no annotation: they have no second pass to be from.
+    A two-pass cell is REPLAY (compliant) or SEARCH-PASS (its timings came from a process that
+    searched — returned as a violation). A cell whose protocol searches in the timing process is
+    SAME-PROCESS or, when it replayed its framework's own cache instead, CACHED; neither is a
+    violation, because nothing yet says those frameworks pay for it (gh-ocannl-675) — the point of
+    annotating them is that the report stops implying the question is OCANNL's alone. UNKNOWN is a
+    runner predating the field, or a probe that could not read its framework's internals.
+
+    Cells that neither search nor compile — eager, jit, an untuned OCANNL default — get no
+    annotation: there is no process distinction for them to be on the wrong side of.
     """
     violations = []
     for r in results:
-        if r.get("framework") != "ocannl" or r.get("variant") != "tuned":
+        cell = (r.get("framework"), r.get("variant"))
+        two_pass = cell in TWO_PASS_CELLS
+        if not two_pass and cell not in SAME_PROCESS_CELLS:
             continue
         searched = r.get("searched")
         if searched is None:
             r["provenance"] = "UNKNOWN"
-        elif searched:
-            r["provenance"] = "SEARCH-PASS"
-            violations.append(r)
+        elif two_pass:
+            r["provenance"] = "SEARCH-PASS" if searched else "REPLAY"
+            if searched:
+                violations.append(r)
         else:
-            r["provenance"] = "REPLAY"
+            r["provenance"] = "SAME-PROCESS" if searched else "CACHED"
     return violations
 
 
@@ -390,17 +410,20 @@ def report(results, out_dir, unavailable=()):
                 "Rows are grouped by precision (f32 first), p50-ascending within each group.\n"
             )
         with_tokens = any(r.get("tokens_per_step") for r in rows)
-        # gh-ocannl-644: which pass produced the step times. Only a tuned cell has two passes, so
-        # the column appears only where one was measured.
+        # gh-ocannl-644: which process produced the step times. Only a cell that searches or
+        # compiles has the distinction, so the column appears only where one was measured.
         with_provenance = any(r.get("provenance") for r in rows)
         if with_provenance:
             lines.append(
-                "`pass` says which process produced a tuned cell's step times: `replay` is the "
-                "protocol's fresh pass-2 process replaying the cached winner, **`SEARCH PASS`** is "
-                "the searching process itself — whose accumulated modules and buffers inflate every "
-                "launch, so those numbers are not comparable with the others. A `compile s` marked "
-                "`(cached)` came from a search pass that hit the schedule cache, so it is a replay "
-                "cost rather than a from-scratch search.\n"
+                "`pass` says which process produced a searching cell's step times. For the OCANNL "
+                "tuned cell, whose protocol splits them: `replay` is the fresh pass-2 process "
+                "replaying the cached winner, **`SEARCH PASS`** is the searching process itself — "
+                "whose accumulated modules and buffers inflate every launch, so those numbers are "
+                "not comparable with the others. For a tinygrad `beam` or a `torch.compile` cell, "
+                "which search in the timing process by protocol: `same-process` searched here, "
+                "`cached` replayed its framework's own cache (so its `compile s` is a replay cost). "
+                "A `compile s` marked `(cached)` is the same statement about a tuned cell's "
+                "carried-over search pass.\n"
             )
         header = "| framework | backend | variant | precision | step p50 ms | p10 | p90 | queued ms | compile s |"
         rule = "|---|---|---|---|---|---|---|---|---|"

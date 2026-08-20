@@ -152,9 +152,10 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   "it ranked below `tune_inline_flips`" (gh-ocannl-558,
   [report-gh558-hip-flips.md](report-gh558-hip-flips.md)).
 - `runners/pytorch/run.py` — flags: `--device cpu|mps|cuda`, `--compile` (torch.compile
-  variant).
+  variant, which reports whether inductor's codegen ran here or came from its cache).
 - `runners/tinygrad/run.py` — flags: `--device CPU|METAL|CUDA|AMD|CL|HIP`, `--jit 0|1`, `--beam N`
-  (BEAM=N kernel search, implies jit; the search cost lands in `compile_s`).
+  (BEAM=N kernel search, implies jit; the search cost lands in `compile_s`, and the result line
+  reports whether the beam actually searched or replayed `~/.cache/tinygrad`).
 - `orchestrate.py` — runs the matrix (dispatching the OCANNL executable on the fixture's
   `model`), enforces the parity gate, writes `results/results.jsonl` and
   `results/report.md`. Flags: `--workloads mlp_small ...`, `--tuned`, `--materialized`,
@@ -366,9 +367,18 @@ than the driver (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION` at module load), run it wi
   `report-gh612-hip.md` quoted pass-1 step times for fifteen revisions, and it took a reviewer
   noticing that the driver never started a second process to find it.
   A checked-in driver should assert `searched == false` rather than infer a replay from
-  `compile_s` being small. (The asymmetry to keep in mind when reading a matrix: tinygrad's
-  `--beam N` cell searches *in the timing process*, as does `torch.compile`; only the OCANNL
-  tuned cell splits the two passes, and only it is gated here.)
+  `compile_s` being small.
+
+  **Every runner reports it, but only the OCANNL tuned cell is gated on it.** tinygrad's
+  `--beam N` cell and `torch.compile` search or codegen *in the timing process* by protocol, so
+  their rows read `same-process` — or `cached`, when the beam result came from
+  `~/.cache/tinygrad` or the graph from inductor's cache, in which case their `compile_s` is a
+  replay cost too. Whether those frameworks pay for searching in the timing process the way
+  OCANNL does is **unmeasured** (gh-ocannl-675); saying so in the report is the point, since
+  silence there reads as though the question applied to OCANNL alone. The two probes read
+  framework internals (tinygrad's beam disk cache, torch's FX-graph cache counters) and answer
+  `null` — reported as `?` — when they cannot tell, rather than guessing a `false` that would be
+  exactly the silent claim this field exists to prevent.
 - **A report states the fixture digest its numbers are on.** `orchestrate.py` puts it in each
   workload section of `results/report.md` and in every `results.jsonl` row (`fixture`,
   `fixture_sha256`); a hand-written report quotes the same `fixtures/DIGESTS.txt` line, and a

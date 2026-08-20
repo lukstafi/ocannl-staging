@@ -1,12 +1,16 @@
 import contextlib
 import io
 import json
+import sys
 import tempfile
+import types
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import fixture_digest
 import orchestrate
+from runners import bench_common
 
 HERE = Path(__file__).resolve().parent
 
@@ -219,20 +223,120 @@ class ProvenanceTest(unittest.TestCase):
         self.assertEqual(orchestrate.provenance_check([old]), [])
         self.assertEqual(old["provenance"], "UNKNOWN")
 
-    def test_untuned_and_non_ocannl_cells_are_not_annotated(self):
-        # They have no second pass to be from; a `pass` column entry for them would be a claim
-        # about a protocol they do not run.
+    def test_cells_that_neither_search_nor_compile_are_not_annotated(self):
+        # They have no process distinction to be on the wrong side of; a `pass` entry for them
+        # would be a claim about a protocol they do not run.
         default = result("ocannl", "hip", "default", [2.3, 2.2, 2.1])
         default["searched"] = False
-        torch = result("pytorch", "cpu", "eager", [2.3, 2.2, 2.1])
+        eager = result("pytorch", "cpu", "eager", [2.3, 2.2, 2.1])
+        jit = result("tinygrad", "CPU", "jit", [2.3, 2.2, 2.1])
 
-        self.assertEqual(orchestrate.provenance_check([default, torch]), [])
-        self.assertNotIn("provenance", default)
-        self.assertNotIn("provenance", torch)
+        self.assertEqual(orchestrate.provenance_check([default, eager, jit]), [])
+        for r in (default, eager, jit):
+            self.assertNotIn("provenance", r)
+
+    def test_a_single_pass_framework_states_its_search_without_being_gated(self):
+        # gh-ocannl-675: tinygrad's beam search and torch.compile run in the timing process by
+        # protocol. Nothing yet says they pay for it, so the report states it and the gate keeps
+        # its hands off — the alternative, saying nothing, reads as though only OCANNL searches.
+        beam = result("tinygrad", "AMD", "beam", [2.3, 2.2, 2.1])
+        beam["searched"] = True
+        compiled = result("pytorch", "cuda", "compiled", [2.3, 2.2, 2.1])
+        compiled["searched"] = False
+
+        self.assertEqual(orchestrate.provenance_check([beam, compiled]), [])
+        self.assertEqual(beam["provenance"], "SAME-PROCESS")
+        self.assertEqual(compiled["provenance"], "CACHED")
+
+    def test_a_single_pass_cell_that_cannot_tell_is_unknown(self):
+        beam = result("tinygrad", "AMD", "beam", [2.3, 2.2, 2.1])
+        beam["searched"] = None
+
+        self.assertEqual(orchestrate.provenance_check([beam]), [])
+        self.assertEqual(beam["provenance"], "UNKNOWN")
 
     def test_every_verdict_renders(self):
-        for verdict in ("REPLAY", "SEARCH-PASS", "UNKNOWN"):
+        for verdict in ("REPLAY", "SEARCH-PASS", "SAME-PROCESS", "CACHED", "UNKNOWN"):
             self.assertIn(verdict, orchestrate.PROVENANCE_MARK)
+
+    def test_the_gated_and_stated_cell_sets_do_not_overlap(self):
+        self.assertFalse(orchestrate.TWO_PASS_CELLS & orchestrate.SAME_PROCESS_CELLS)
+
+
+class RunnerProvenanceProbeTest(unittest.TestCase):
+    """gh-ocannl-644: what the Python runners report, and what they refuse to claim."""
+
+    def test_a_cell_that_runs_no_search_says_so(self):
+        self.assertIs(bench_common.tinygrad_searched(None, beam=0), False)
+        self.assertIs(bench_common.torch_searched(object(), compiled=False), False)
+
+    def test_beam_counts_distinguish_a_search_from_a_kernel_cache_replay(self):
+        self.assertIs(bench_common.tinygrad_searched({"hit": 3, "put": 1}, beam=4), True)
+        self.assertIs(bench_common.tinygrad_searched({"hit": 3, "put": 0}, beam=4), False)
+
+    def test_a_probe_that_saw_nothing_says_unknown_rather_than_no(self):
+        # The internals moved under the probe. A wrong False is exactly the silent claim the
+        # field exists to prevent, so this must not read as "replayed a cache".
+        self.assertIsNone(bench_common.tinygrad_searched(None, beam=4))
+        self.assertIsNone(bench_common.tinygrad_searched({"hit": 0, "put": 0}, beam=4))
+
+    def test_torch_reads_the_fx_graph_cache_counters(self):
+        class Torch:
+            def __init__(self, **counters):
+                self._dynamo = type(
+                    "d", (), {"utils": type("u", (), {"counters": {"inductor": counters}})}
+                )
+
+        self.assertIs(bench_common.torch_searched(Torch(fxgraph_cache_miss=2), True), True)
+        self.assertIs(
+            bench_common.torch_searched(Torch(fxgraph_cache_hit=2), compiled=True), False
+        )
+        self.assertIsNone(bench_common.torch_searched(Torch(), compiled=True))
+        self.assertIsNone(bench_common.torch_searched(object(), compiled=True))
+
+    def test_the_beam_instrument_counts_only_beam_entries_and_passes_values_through(self):
+        stored = {("beam_search", "k1"): "winner"}
+        calls = []
+
+        class Search:
+            @staticmethod
+            def diskcache_get(table, key):
+                calls.append(("get", table, key))
+                return stored.get((table, key))
+
+            @staticmethod
+            def diskcache_put(table, key, val):
+                stored[(table, key)] = val
+                return val
+
+        module = types.ModuleType("tinygrad.engine.search")
+        module.diskcache_get, module.diskcache_put = Search.diskcache_get, Search.diskcache_put
+        packages = {
+            "tinygrad": types.ModuleType("tinygrad"),
+            "tinygrad.engine": types.ModuleType("tinygrad.engine"),
+            "tinygrad.engine.search": module,
+        }
+        packages["tinygrad.engine"].search = module
+        with unittest.mock.patch.dict(sys.modules, packages):
+            counts = bench_common.instrument_tinygrad_beam()
+            self.assertEqual(module.diskcache_get("beam_search", "k1"), "winner")
+            self.assertIsNone(module.diskcache_get("beam_search", "k2"))
+            module.diskcache_put("beam_search", "k2", "found")
+            module.diskcache_get("compile", "unrelated")
+            module.diskcache_put("compile", "unrelated", "x")
+
+        self.assertEqual(counts, {"hit": 1, "put": 1})
+        self.assertIn(("get", "compile", "unrelated"), calls)
+
+    def test_an_uninstrumentable_tinygrad_is_not_an_error(self):
+        module = types.ModuleType("tinygrad.engine.search")  # no diskcache helpers
+        packages = {
+            "tinygrad": types.ModuleType("tinygrad"),
+            "tinygrad.engine": types.ModuleType("tinygrad.engine"),
+            "tinygrad.engine.search": module,
+        }
+        with unittest.mock.patch.dict(sys.modules, packages):
+            self.assertIsNone(bench_common.instrument_tinygrad_beam())
 
 
 class FixtureDigestTest(unittest.TestCase):
