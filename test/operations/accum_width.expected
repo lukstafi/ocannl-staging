@@ -16,10 +16,13 @@ a vectorized inner reduction axis folds into the whole-nest wide accumulator (eq
 a serialized nested Workgroup_reduce keeps the whole-nest accumulator (equals the serial result): true
 adjacent accumulations into one cell keep their per-assignment narrowing (256 +1 +1 stays 256 at bf16): true
 index-guarded bf16 reduction accumulates wide across the guard (256 +1x5 narrows once to 260): true
+an index-guarded Where-form update (virtualization's guarded-read shape) keeps the wide accumulator (256 +1x5 narrows once to 260): true
 a non-reduction recurrence through a pre-existing scope keeps its per-iteration narrowing (256 -0.5 -0.5 stays 256 at bf16): true
 a mixed-operator scope is not a reduction and keeps its per-iteration narrowing (256 +1 *1 stays 256 at bf16): true
+a widened scope's opening init keeps its own assignment's rounding (128 + 0.5 rounds before the x3 reduction): true
 a Workgroup_reduce loop serialized on cc keeps the Serial accumulator width (equals the serial result): true
 the SIMD reduction folds its non-divisible tail into the wide total (equals the serial result): true
 fp8 e5m2 reduction accumulates wide and narrows once (16 + 8x0.5 reaches 20, not 16): true
 narrow_compute_f32=false recovers per-operator rounding: the result differs from the widened default: true
+narrow_compute_f32=false recovers per-step fp8 narrowing (16 + 8x0.5 stays 16): true
 narrow_compute_f32=false brings back the per-k-step narrowing in the k-loop: true

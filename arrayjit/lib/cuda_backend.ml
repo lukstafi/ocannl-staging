@@ -585,10 +585,15 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
        registers across the whole [k] extent and narrows once at the [d] boundary — so serial bf16
        accumulation resides in f32 and narrows once per nest. fp8 likewise accumulates f32-only
        (and its serial arithmetic already bridges through float per operator); f16 accumulates
-       natively at f16 in its seeded wmma triple and stays at storage width. Governed by the same
-       [narrow_compute_f32] policy knob that sets the CPU accumulator width (gh-ocannl-639), so
-       policy-off recovers per-step narrowing here as there; compute precision stays the identity
-       either way, so pointwise narrow arithmetic OUTSIDE recognized accumulations remains native.
+       natively at f16 in its seeded wmma triple and stays at storage width.
+
+       The bf16 residency is STRUCTURAL — not gated on [narrow_compute_f32] — for the same reason
+       Metal's fp8 one is: the seeded uniform-bf16 [mma.sync] arm accumulates f32 in hardware
+       unconditionally, so honoring the off setting on the serial legs would re-introduce the
+       schedule-dependent width this hook exists to remove (Codex P1 round 3 on PR #396). fp8 DOES
+       honor the policy: no backend seeds an fp8-destination mma triple, so per-step fp8 semantics
+       under policy-off are schedule-uniform. Compute precision stays the identity either way, so
+       pointwise narrow arithmetic OUTSIDE recognized accumulations remains native.
        Within one, the whole update — contribution included — renders at the accumulator's
        residency, deliberately (Codex P1 on PR #396): operand widenings are exact, a bf16xbf16
        product is exact in f32 — the same full-precision-product-into-f32 semantics the tensor
@@ -597,9 +602,8 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
        rendering, whose f32 chain accum_width.ml pins bitwise across cc and CUDA. *)
     let accum_prec prec =
       match prec with
-      | (Ops.Bfloat16_prec _ | Ops.Fp8_prec _) when (Numerics.get ()).Numerics.narrow_compute_f32
-        ->
-          Ops.single
+      | Ops.Bfloat16_prec _ -> Ops.single
+      | Ops.Fp8_prec _ when (Numerics.get ()).Numerics.narrow_compute_f32 -> Ops.single
       | _ -> prec
 
     let typ_of_prec = function

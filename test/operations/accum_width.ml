@@ -176,6 +176,17 @@ let claim_adjacent =
 let claim_guarded =
   "index-guarded bf16 reduction accumulates wide across the guard (256 +1x5 narrows once to 260)"
 
+let claim_where_guarded =
+  "an index-guarded Where-form update (virtualization's guarded-read shape) keeps the wide \
+   accumulator (256 +1x5 narrows once to 260)"
+
+let claim_init_round =
+  "a widened scope's opening init keeps its own assignment's rounding (128 + 0.5 rounds before \
+   the x3 reduction)"
+
+let claim_off_fp8 =
+  "narrow_compute_f32=false recovers per-step fp8 narrowing (16 + 8x0.5 stays 16)"
+
 let claim_wgreduce =
   "a Workgroup_reduce loop serialized on cc keeps the Serial accumulator width (equals the serial \
    result)"
@@ -190,11 +201,11 @@ let claim_fp8 =
    riding the bf16 gate (Codex P2 on PR #396). e5m2's 2-bit mantissa makes the discrimination
    cheap: at 16 the spacing is 4, so per-step narrowing absorbs every +0.5 and leaves 16, while
    the wide accumulator reaches 20, exactly representable. *)
-let fp8_leg () =
+let fp8_sum ~name ~first_id () =
   let fp8 = Ir.Ops.fp8 in
-  let f8node = Ll_test.node_factory ~prec:fp8 ~first_id:9700 ~dims:[| 8 |] () in
-  let f8acc = f8node ~dims:[| 1 |] "aw_f8acc" in
-  let f8xs = f8node "aw_f8xs" in
+  let f8node = Ll_test.node_factory ~prec:fp8 ~first_id ~dims:[| 8 |] () in
+  let f8acc = f8node ~dims:[| 1 |] (name ^ "_acc") in
+  let f8xs = f8node (name ^ "_xs") in
   Ll_test.materialize f8acc;
   Ll_test.materialize f8xs;
   let f8i = Ll_test.sym () in
@@ -206,15 +217,15 @@ let fp8_leg () =
            (Ll_test.get f8acc [| Ll_test.fixed 0 |], fp8),
            (Ll_test.get f8xs [| Ll_test.iter f8i |], fp8) ))
   in
-  let f8o =
-    Ll_test.optimize ~materialized:[ f8acc; f8xs ] ~name:"aw_fp8" (Ll_test.loop_n f8i 8 f8upd)
-  in
+  let f8o = Ll_test.optimize ~materialized:[ f8acc; f8xs ] ~name (Ll_test.loop_n f8i 8 f8upd) in
   let f8vals =
-    Ll_test.execute ~name:"aw_fp8" f8o
+    Ll_test.execute ~name f8o
       ~seed:[ (f8acc, [| 16.0 |]); (f8xs, Array.create ~len:8 0.5) ]
       ~read:[ f8acc ]
   in
-  p claim_fp8 (Float.equal (List.hd_exn f8vals).(0) 20.0)
+  (List.hd_exn f8vals).(0)
+
+let fp8_leg () = p claim_fp8 (Float.equal (fp8_sum ~name:"aw_fp8" ~first_id:9700 ()) 20.0)
 
 (* In execution order — the GPU skip lines must match the cc run's golden line for line. *)
 let all_claims =
@@ -237,12 +248,15 @@ let all_claims =
     claim_wgr_nested;
     claim_adjacent;
     claim_guarded;
+    claim_where_guarded;
     claim_scope_recurrence;
     claim_mixed_scope;
+    claim_init_round;
     claim_wgreduce;
     claim_simd_tail;
     claim_fp8;
     claim_off_value;
+    claim_off_fp8;
     claim_off_shape;
   ]
 
@@ -506,6 +520,79 @@ let () =
         ~read:[ gacc ]
     in
     p claim_guarded (Float.equal (List.hd_exn gvals).(0) 260.0);
+    (* Scope-form legs below: a [Local_scope] over a MATERIALIZED node is a POST-optimize shape —
+       the schedule mints and the codegen rewrite create it after [LL.optimize] has run, and the
+       optimizer itself NORMALIZES such a scope to a plain [Get] of the node (the inlined
+       computation of a non-virtual node is a read). So a hand-built scope must be injected past
+       the optimizer: optimize a raw twin with the same nodes, reads and writes (for a valid
+       traced store), then carry the scope form through the prelowered seam. The gh-639
+       recurrence and mixed-operator legs used to optimize the scope form directly and were
+       collapsing to identity copies whose value coincided with the expected one — green for the
+       wrong reason; this helper is what makes all four scope-form legs genuinely execute. *)
+    let optimize_scoped ~materialized ~name ~raw scoped =
+      let o = Ll_test.optimize ~materialized ~name raw in
+      { o with LL.llc = scoped }
+    in
+    (* === virtualization's guarded-read update form === *)
+    (* [inline_computation] guards a specialized reduction's update as [Set_local (id,
+       Where (index cond, update, Get_local id))] — an expression-spelled guarded update whose
+       else-arm carries the accumulator through. The census must classify it as a reduction
+       (via [LL.accum_local_update_op]): treating the guarded self-read as a recurrence would
+       leave a virtualized reduction narrow while its materialized serial twin widens —
+       placement-dependent width. Same arithmetic as the [If]-guarded leg above: 256 seeded,
+       eight guarded to five 1.0 contributions, wide 261 narrowing once to 260 (round-to-even);
+       per-step narrowing would absorb every +1 and leave 256. *)
+    let wacc = node ~dims:[| 1 |] "aw_wacc" in
+    let wxs = node "aw_wxs" in
+    Ll_test.materialize wacc;
+    Ll_test.materialize wxs;
+    let wi = Ll_test.sym () in
+    let wid = LL.get_scope wacc in
+    let w_guard = LL.Binop (Ir.Ops.Cmplt, (Ll_test.embed wi, iprec), (LL.Constant 5.0, iprec)) in
+    let w_upd =
+      LL.Binop
+        (Ir.Ops.Add, (LL.Get_local wid, bf16), (Ll_test.get wxs [| Ll_test.iter wi |], bf16))
+    in
+    let w_body =
+      LL.Seq
+        ( LL.Set_local (wid, LL.Get (wacc, [| Ll_test.fixed 0 |])),
+          Ll_test.loop_n wi 8
+            (LL.Set_local
+               ( wid,
+                 LL.Ternop (Ir.Ops.Where, (w_guard, iprec), (w_upd, bf16), (LL.Get_local wid, bf16))
+               )) )
+    in
+    let w_llc =
+      LL.Set
+        {
+          tn = wacc;
+          idcs = [| Ll_test.fixed 0 |];
+          llsc = LL.Local_scope { id = wid; body = w_body; orig_indices = [| Ll_test.fixed 0 |] };
+          debug = "";
+        }
+    in
+    (* Raw twin: the same guarded accumulation spelled per-step, for the traced store. *)
+    let w_raw =
+      Ll_test.loop_n wi 8
+        (Ll_test.set wacc
+           [| Ll_test.fixed 0 |]
+           (LL.Ternop
+              ( Ir.Ops.Where,
+                (w_guard, iprec),
+                ( LL.Binop
+                    ( Ir.Ops.Add,
+                      (Ll_test.get wacc [| Ll_test.fixed 0 |], bf16),
+                      (Ll_test.get wxs [| Ll_test.iter wi |], bf16) ),
+                  bf16 ),
+                (Ll_test.get wacc [| Ll_test.fixed 0 |], bf16) )))
+    in
+    let wo = optimize_scoped ~materialized:[ wacc; wxs ] ~name:"aw_whereg" ~raw:w_raw w_llc in
+    let wvals =
+      Ll_test.execute ~name:"aw_whereg" wo
+        ~seed:[ (wacc, [| 256.0 |]); (wxs, Array.create ~len:8 1.0) ]
+        ~read:[ wacc ]
+    in
+    p claim_where_guarded (Float.equal (List.hd_exn wvals).(0) 260.0);
     (* === a pre-existing scope carrying a NON-reduction recurrence must not be hoisted === *)
     (* The scope-base arm of the peel is licensed by the reduction reading alone: [local :=
        local - 0.5] narrows per enclosing iteration by the source's own semantics (256 - 0.5
@@ -533,7 +620,16 @@ let () =
              debug = "";
            })
     in
-    let ro = Ll_test.optimize ~materialized:[ gacc2 ] ~name:"aw_recurrence" rec_llc in
+    let rec_raw =
+      Ll_test.loop_n ri 2
+        (Ll_test.set gacc2
+           [| Ll_test.fixed 0 |]
+           (LL.Binop
+              ( Ir.Ops.Sub,
+                (Ll_test.get gacc2 [| Ll_test.fixed 0 |], bf16),
+                (LL.Constant 0.5, bf16) )))
+    in
+    let ro = optimize_scoped ~materialized:[ gacc2 ] ~name:"aw_recurrence" ~raw:rec_raw rec_llc in
     let rvals =
       Ll_test.execute ~name:"aw_recurrence" ro ~seed:[ (gacc2, [| 256.0 |]) ] ~read:[ gacc2 ]
     in
@@ -567,9 +663,91 @@ let () =
              debug = "";
            })
     in
-    let mo = Ll_test.optimize ~materialized:[ macc ] ~name:"aw_mixed" mix_llc in
+    let mix_raw =
+      Ll_test.loop_n mi 2
+        (LL.Seq
+           ( Ll_test.set macc
+               [| Ll_test.fixed 0 |]
+               (LL.Binop
+                  ( Ir.Ops.Add,
+                    (Ll_test.get macc [| Ll_test.fixed 0 |], bf16),
+                    (LL.Constant 1.0, bf16) )),
+             Ll_test.set macc
+               [| Ll_test.fixed 0 |]
+               (LL.Binop
+                  ( Ir.Ops.Mul,
+                    (Ll_test.get macc [| Ll_test.fixed 0 |], bf16),
+                    (LL.Constant 1.0, bf16) )) ))
+    in
+    let mo = optimize_scoped ~materialized:[ macc ] ~name:"aw_mixed" ~raw:mix_raw mix_llc in
     let mvals = Ll_test.execute ~name:"aw_mixed" mo ~seed:[ (macc, [| 256.0 |]) ] ~read:[ macc ] in
     p claim_mixed_scope (Float.equal (List.hd_exn mvals).(0) 256.0);
+    (* === a widened scope's opening init keeps its own assignment's rounding === *)
+    (* A virtual node initialized by one source assignment and reduced by another: the init
+       [Set_local] is the inlined image of a SEPARATE assignment, so it renders at compute
+       precision (its own store rounding) and only its result enters the residency — the
+       provenance boundary of the adjacent-accumulations rule, seen from inside one scope. Here
+       128 + 0.5 = 128.5, whose bf16 rounding is 128 (tie to even), then one multiplicative
+       update by 3. Where the backend's compute precision is native bf16 (CUDA), the init rounds:
+       128 * 3 = 384. On cc the compute precision IS f32 ([narrow_compute_f32]'s blanket over
+       every intermediate — the pre-existing CPU semantics), so the init stays 128.5 and
+       128.5 * 3 = 385.5 stores as 386; the invariant pinned is that the init renders at COMPUTE
+       precision, never at the accumulator's residency. *)
+    let iacc = node ~dims:[| 1 |] "aw_iacc" in
+    let ia = node ~dims:[| 1 |] "aw_ia" in
+    let ib = node ~dims:[| 1 |] "aw_ib" in
+    let im = node ~dims:[| 1 |] "aw_im" in
+    List.iter [ iacc; ia; ib; im ] ~f:Ll_test.materialize;
+    let iid = LL.get_scope iacc in
+    let i_body =
+      LL.Seq
+        ( LL.Set_local
+            ( iid,
+              LL.Binop
+                ( Ir.Ops.Add,
+                  (Ll_test.get ia [| Ll_test.fixed 0 |], bf16),
+                  (Ll_test.get ib [| Ll_test.fixed 0 |], bf16) ) ),
+          LL.Set_local
+            ( iid,
+              LL.Binop
+                (Ir.Ops.Mul, (LL.Get_local iid, bf16), (Ll_test.get im [| Ll_test.fixed 0 |], bf16))
+            ) )
+    in
+    let i_llc =
+      LL.Set
+        {
+          tn = iacc;
+          idcs = [| Ll_test.fixed 0 |];
+          llsc = LL.Local_scope { id = iid; body = i_body; orig_indices = [| Ll_test.fixed 0 |] };
+          debug = "";
+        }
+    in
+    (* Raw twin: the two source assignments materialized, for the traced store. *)
+    let i_raw =
+      LL.Seq
+        ( Ll_test.set iacc
+            [| Ll_test.fixed 0 |]
+            (LL.Binop
+               ( Ir.Ops.Add,
+                 (Ll_test.get ia [| Ll_test.fixed 0 |], bf16),
+                 (Ll_test.get ib [| Ll_test.fixed 0 |], bf16) )),
+          Ll_test.set iacc
+            [| Ll_test.fixed 0 |]
+            (LL.Binop
+               ( Ir.Ops.Mul,
+                 (Ll_test.get iacc [| Ll_test.fixed 0 |], bf16),
+                 (Ll_test.get im [| Ll_test.fixed 0 |], bf16) )) )
+    in
+    let io =
+      optimize_scoped ~materialized:[ iacc; ia; ib; im ] ~name:"aw_init_round" ~raw:i_raw i_llc
+    in
+    let ivals =
+      Ll_test.execute ~name:"aw_init_round" io
+        ~seed:[ (ia, [| 128.0 |]); (ib, [| 0.5 |]); (im, [| 3.0 |]) ]
+        ~read:[ iacc ]
+    in
+    p claim_init_round
+      (Float.equal (List.hd_exn ivals).(0) (if on_cpu then 386.0 else 384.0));
     (* === Workgroup_reduce serialized on cc: retyping the reduction axis to a hardware kind the
        backend cannot bind must not change the accumulator width relative to the Serial spelling.
        16 terms push the running sums past 4, where bf16 can no longer represent the 1/64
@@ -623,19 +801,25 @@ let () =
         in
         p claim_simd_tail (vec_fired && Array.for_all2_exn got_vt got_v ~f:Float.equal));
     fp8_leg ();
-    (* Negative control: turning the policy off recovers the pre-gh-517/pre-gh-639 semantics — every
-       operator, the accumulation update included, rounds to storage precision — which on these
-       inputs must visibly differ from the widened default, proving the inputs discriminate the
-       accumulator width. *)
+    (* Negative controls: turning the policy off recovers per-step narrowing wherever that is
+       schedule-uniform — which on these inputs must visibly differ from the widened default,
+       proving the inputs discriminate the accumulator width. The bf16 control is cc-only: CUDA's
+       bf16 residency is structural (its mma legs accumulate f32 in hardware, so a policy-narrowed
+       serial leg would resurrect the schedule-dependent width — the serial legs stay wide there
+       under either setting). The fp8 control runs on cc AND CUDA, where nothing tensorizes fp8
+       destinations and the policy genuinely restores per-step semantics; on Metal it would stay
+       wide (fp8 computes in f32 structurally), which the bf16 gate already skips. *)
     let saved_policy = Numerics.get () in
     Numerics.set_policy { saved_policy with narrow_compute_f32 = false };
-    let ma2 = NTDSL.init ~l:"ma2" ~prec:Ir.Ops.bfloat16 ~i:[ n ] ~o:[ n ] ~f:fa () in
-    let mb2 = NTDSL.init ~l:"mb2" ~prec:Ir.Ops.bfloat16 ~i:[ n ] ~o:[ n ] ~f:fb () in
-    let%op mc2 = ma2 * mb2 in
-    Tn.update_prec mc2.Tensor.value Ir.Ops.bfloat16;
-    let got_off = run ~name:"aw_bf16_naive_off" mc2 in
+    cc_only claim_off_value (fun () ->
+        let ma2 = NTDSL.init ~l:"ma2" ~prec:Ir.Ops.bfloat16 ~i:[ n ] ~o:[ n ] ~f:fa () in
+        let mb2 = NTDSL.init ~l:"mb2" ~prec:Ir.Ops.bfloat16 ~i:[ n ] ~o:[ n ] ~f:fb () in
+        let%op mc2 = ma2 * mb2 in
+        Tn.update_prec mc2.Tensor.value Ir.Ops.bfloat16;
+        let got_off = run ~name:"aw_bf16_naive_off" mc2 in
+        p claim_off_value (not (Array.for_all2_exn got_off got ~f:Float.equal)));
+    p claim_off_fp8 (Float.equal (fp8_sum ~name:"aw_fp8_off" ~first_id:9720 ()) 16.0);
     Numerics.set_policy saved_policy;
-    p claim_off_value (not (Array.for_all2_exn got_off got ~f:Float.equal));
     cc_only claim_off_shape (fun () ->
         match read_generated "aw_bf16_naive_off" with
         | None -> Verdict.fail (claim_off_shape ^ " — generated source not found")

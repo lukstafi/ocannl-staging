@@ -827,13 +827,15 @@
 # renderings reachable for narrow-storage kernels. Set to false to recover per-operator rounding
 # (per-reduction-step included).
 # GPU backends compute narrow arithmetic natively and their pointwise numerics are unaffected
-# either way; the same knob governs their reduction-accumulator width where the tensor-unit
-# formats force a wider accumulate (gh-ocannl-663): serial bf16 reductions on CUDA and fp8
-# reductions everywhere accumulate in f32 and narrow once per nest, mirroring the mma legs, while
-# f16 (and bf16 on HIP/Metal, whose tiles accumulate in storage-width fragments) keeps storage
-# residency. One structural exception: Metal has no fp8 type at all — every fp8 computation there
-# runs in f32, so its fp8 accumulators stay wide even with this policy off (there is no fp8
-# arithmetic to narrow back to); CUDA and HIP honor the off setting per reduction step.
+# either way; their reduction-accumulator width follows the tensor-unit formats (gh-ocannl-663):
+# serial bf16 reductions on CUDA and fp8 reductions everywhere accumulate in f32 and narrow once
+# per nest, mirroring the mma legs, while f16 (and bf16 on HIP/Metal, whose tiles accumulate in
+# storage-width fragments) keeps storage residency. This knob reaches the GPU accumulators only
+# where per-step narrowing can be restored SCHEDULE-UNIFORMLY, which is fp8 on CUDA and HIP (no
+# backend tensorizes fp8 destinations). It cannot reach bf16 on CUDA — the seeded uniform-bf16
+# mma arm accumulates f32 in hardware, so narrowing only the serial legs would make results
+# depend on the schedule again; those accumulators stay wide even with the policy off. Nor fp8 on
+# Metal, which has no fp8 type at all: every fp8 computation there runs in f32 regardless.
 # Programmatic override: `Ir.Numerics.set_policy`.
 #narrow_compute_f32=true
 

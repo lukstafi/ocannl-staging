@@ -1080,8 +1080,13 @@ module C_syntax (B : C_syntax_config) = struct
   let accum_scope_ids =
     let verdicts = Hashtbl.create (module Int) in
     let classify (id : Low_level.scope_id) v =
-      match Low_level.accum_local_update_parts ~id v with
-      | Some (op, _) ->
+      (* [accum_local_update_op] rather than [accum_local_update_parts]: virtualization's
+         guarded-read updates — [Where (index-only cond, update, Get_local id)] — are reductions
+         for residency purposes (Codex P1 round 3 on PR #396); treating their self-read as a
+         recurrence left a virtualized reduction narrow while its materialized serial twin
+         widened, a placement-dependent width. *)
+      match Low_level.accum_local_update_op ~id v with
+      | Some op ->
           Hashtbl.update verdicts id.scope_id ~f:(function
             | None -> `Accum op
             | Some (`Accum op0) when Ops.equal_binop op0 op -> `Accum op
@@ -4033,18 +4038,36 @@ module C_syntax (B : C_syntax_config) = struct
           lbrace ^^ nest 2 (hardline ^^ block_content) ^^ hardline ^^ rbrace
     | Set_local (({ tn = { storage_prec = _; _ }; _ } as id), value) ->
         (* A scope-local scalar is declared at [scope_prec_of] its node (see [Declare_local] and
-           [pp_scalar]'s [Local_scope]), so its value renders there too: an inlined narrow
-           intermediate keeps f32 mantissa across the whole scope instead of being rounded at every
-           assignment to it. *)
+           [pp_scalar]'s [Local_scope]), so a self-referential update renders there too: an inlined
+           narrow intermediate keeps its residency's mantissa across the whole scope instead of
+           being rounded at every assignment to it.
+
+           A [Set_local] that does NOT read its own local is an INIT — the inlined image of a
+           separate source assignment — and renders as that assignment's store would: at
+           [comp_prec] (the rng carve-out rides [scope_prec_of]'s storage pin), converted once
+           into the scope's residency. Where scope and compute precision coincide (the CPU
+           backends, non-accumulator scopes) this is the identity; where an accumulator resides
+           wider than the arithmetic (gh-ocannl-663), it preserves the initializer's own
+           per-assignment rounding — e.g. a virtual bf16 node initialized by [a + b] and then
+           reduced narrows the init to bf16 exactly as its materialized twin's store does, instead
+           of leaking f32 residency into a different source assignment's semantics (Codex P2
+           round 3 on PR #396; the provenance boundary of gh-ocannl-639's adjacent-accumulations
+           rule). *)
         let prec = scope_prec_of id in
-        let local_defs, value_doc = pp_scalar prec value in
+        let value_prec =
+          if Low_level.scalar_reads_scope ~id value then prec
+          else if Hash_set.mem rng_scope_ids id.Low_level.scope_id then prec
+          else comp_prec (Lazy.force id.Low_level.tn.Tn.storage_prec)
+        in
+        let local_defs, value_doc = pp_scalar value_prec value in
+        let value_doc = wrap_conversion (B.convert_precision ~from:value_prec ~to_:prec) value_doc in
         let local_defs = pp_local_defs local_defs in
         let assignment = pp_scope_id id ^^ string " = " ^^ value_doc ^^ semi in
         if Utils.debug_log_from_routines () && log_set_locals then
           let new_var = string "new_set_local_v" in
           let num_typ = string (B.typ_of_prec prec) in
           let decl = num_typ ^^ space ^^ new_var ^^ string " = " ^^ value_doc ^^ semi in
-          let debug_val_doc, debug_args_docs = debug_float prec value in
+          let debug_val_doc, debug_args_docs = debug_float value_prec value in
           let debug_val_str = doc_to_string debug_val_doc in
           let pp_args_docs =
             List.map debug_args_docs ~f:(function

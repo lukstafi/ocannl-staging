@@ -4986,6 +4986,43 @@ let accum_local_update_parts ~id (llsc : scalar_t) =
       Some (Ops.Add, Binop (Ops.Mul, (a, pa), (b, pb)))
   | _ -> None
 
+(* A scalar reading only embedded indices and constants — the semantic notion behind
+   {!pure_index_guard}, closed over the index arithmetic ([And]-joined range conditions, [Cmpeq]
+   unit-solve conditions) that virtualization's guarded reads build. Such an expression cannot
+   observe any precision residency. *)
+let rec index_only_scalar (llsc : scalar_t) =
+  match llsc with
+  | Embed_index _ | Constant _ | Constant_bits _ -> true
+  | Get _ | Get_local _ | Get_merge_buffer _ | Get_dynamic _ | Local_scope _ -> false
+  | Ternop (_, (a, _), (b, _), (c, _)) ->
+      index_only_scalar a && index_only_scalar b && index_only_scalar c
+  | Binop (_, (a, _), (b, _)) -> index_only_scalar a && index_only_scalar b
+  | Unop (_, (a, _)) -> index_only_scalar a
+
+(* The reduction operator of a scope-local update in EITHER spelling: the plain
+   [accum_local_update_parts] form, or virtualization's guarded-read form — [Set_local (id,
+   Where (index-only cond, update, Get_local id))], possibly nested per condition
+   ([inline_computation] folds one [Where] per range/unit-solve guard). The guarded form is a
+   reduction for RESIDENCY purposes (gh-ocannl-663): the condition observes no precision, the
+   off-condition arm carries the accumulator through unchanged, and the on-condition arm is the
+   reduce-shaped update — so the accumulator-scope census accepts it where treating the guarded
+   self-read as a recurrence would leave a virtualized reduction narrow while its materialized
+   serial twin widens (placement-dependent width). Deliberately NOT merged into
+   {!accum_local_update_parts}: its [(op, contrib)] decomposition licenses consumers (the SIMD
+   folding, [subst_accum_read]-style rewrites) to rebuild an unguarded [op(local, contrib)], which
+   the guarded form is not; and not into {!scope_updates_reduce_op}: that is the HOIST license,
+   and hoisting a guarded update across further levels is a separate question from what width its
+   accumulator resides at. *)
+let accum_local_update_op ~id (llsc : scalar_t) : Ops.binop option =
+  let rec go llsc =
+    match llsc with
+    | Ternop (Ops.Where, (c, _), (t, _), (Get_local id', _))
+      when Scope_id.equal id id' && index_only_scalar c ->
+        go t
+    | _ -> Option.map (accum_local_update_parts ~id llsc) ~f:fst
+  in
+  go llsc
+
 (* Whether a scope body's update statements (everything after the opening init) fit the grammar the
    scope-form mint emits: Serial/[Unrolled]/[Vectorized] loops, pure-index-guarded [If]s, comments,
    and reduce-shaped [Set_local]s of the scope's own local — all carrying ONE reduction operator

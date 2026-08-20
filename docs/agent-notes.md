@@ -1011,9 +1011,18 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   bf16 accumulate) and fp8→f32; HIP widens only fp8 (RDNA WMMA has genuine bf16/f16 accumulator
   variants and the uniform triples are seeded, so bf16 serial legs deliberately stay narrow —
   width-uniform with the mma legs); Metal's `accum_prec = compute_prec` (fp8→f32); cc's likewise
-  (the CPU accumulator IS a compute intermediate). CUDA/HIP widening is gated on the same
-  `narrow_compute_f32` policy knob as the CPU width, so policy-off recovers per-step narrowing
-  everywhere at once, and the knob is already in the schedule-cache key (gh-ocannl-568). fp16 is
+  (the CPU accumulator IS a compute intermediate). `narrow_compute_f32` (already in the
+  schedule-cache key, gh-ocannl-568) reaches a GPU accumulator only where policy-off can restore
+  per-step narrowing SCHEDULE-UNIFORMLY: fp8 on CUDA/HIP (nothing tensorizes fp8 destinations).
+  CUDA's bf16 residency is structural like Metal's fp8 — the mma accumulate is hardware-f32, so a
+  policy-narrowed serial leg would resurrect the schedule dependence. Scope INITS (a `Set_local`
+  not reading its own local — the inlined image of a separate source assignment) render at
+  `comp_prec` and convert once into the residency, preserving each source assignment's own
+  narrowing (the adjacent-accumulations provenance boundary); virtualization's guarded-read
+  updates `Where (index-only cond, update, Get_local id)` classify as reductions via
+  `Low_level.accum_local_update_op` — a recognizer deliberately separate from both
+  `accum_local_update_parts` (whose `(op, contrib)` licenses rebuilding an unguarded update) and
+  `scope_updates_reduce_op` (the hoist license). fp16 is
   everywhere width-uniform at f16 (native accumulate in every seeded triple); aligning it with
   `fp16_arithmetic` would need seeding restrictions or an f32-accumulate uniform-f16 emission and
   remains open. Two traps: `compute_prec`/`accum_prec` bind at `include Pure_C_config` time, so
