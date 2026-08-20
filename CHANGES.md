@@ -183,6 +183,18 @@
   pipeline never emits; `test/operations/prelowered_seam` pins the sibling-`Local_scope`
   read-before-write case that motivated it.
 
+### Added
+
+- **The virtualizer's rejection boundary is pinned row by row** (gh-ocannl-658).
+  `test/operations/virtual_rejection_boundary.ml` states, for one minimal IR shape per outcome,
+  which of four phases decides it and under which provenance: the heuristic caps in
+  `decide_placements` (ahead of every legality question), the store-time rejections in
+  `check_and_store_virtual`, the consumption-time ones in `inline_computation`, and acceptance. Each
+  row also executes the shape against a reference and against the same program re-specialized with
+  the candidate materialized, so a row that later becomes inlineable needs only its verdict changed
+  and then goes on to pin that inlining preserved the values. Which codes have no minimal shape, and
+  why each was ruled out rather than skipped, is recorded in the file's header.
+
 ### Fixed
 
 - **A candidate's computation is no longer inlined without an enclosing repetition loop**
