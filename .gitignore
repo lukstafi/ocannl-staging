@@ -69,7 +69,9 @@ build_files/
 /conv_tune_cache_blocked/
 /conv_tune_cache_gpu/
 /conv_tune_cache_merged_blocked/
+/conv_tune_cache_s2/
 /epilogue_tune_cache/
+/lm_head_cache/
 /mma_companion_cache/
 /symbolic_extent_tune_cache/
 
