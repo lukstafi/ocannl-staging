@@ -588,7 +588,13 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
        natively at f16 in its seeded wmma triple and stays at storage width. Governed by the same
        [narrow_compute_f32] policy knob that sets the CPU accumulator width (gh-ocannl-639), so
        policy-off recovers per-step narrowing here as there; compute precision stays the identity
-       either way — pointwise narrow arithmetic remains native. *)
+       either way, so pointwise narrow arithmetic OUTSIDE recognized accumulations remains native.
+       Within one, the whole update — contribution included — renders at the accumulator's
+       residency, deliberately (Codex P1 on PR #396): operand widenings are exact, a bf16xbf16
+       product is exact in f32 — the same full-precision-product-into-f32 semantics the tensor
+       cores apply per element — and the FMA form stays one [fmaf]. Rounding the contribution to
+       bf16 first would mint a third numerics matching neither the mma legs nor the CPU serial
+       rendering, whose f32 chain accum_width.ml pins bitwise across cc and CUDA. *)
     let accum_prec prec =
       match prec with
       | (Ops.Bfloat16_prec _ | Ops.Fp8_prec _) when (Numerics.get ()).Numerics.narrow_compute_f32

@@ -201,6 +201,12 @@ module type C_syntax_config = sig
       backend and follows the CPU policy (f32) everywhere; f16 accumulates natively at f16 in every
       seeded GPU triple and stays put.
 
+      The recognized accumulation update renders {e wholly} at this precision, contribution
+      included — gh-ocannl-639's rendering shape, kept on GPU deliberately: operand widenings are
+      exact, a narrow-by-narrow product is exact at the wider precision (the same
+      full-precision-product semantics the tensor units apply per element), and the FMA form stays
+      a single fused operation. Statements outside recognized accumulations keep {!compute_prec}.
+
       Must resolve at least as wide as {!compute_prec} (asserted at codegen setup: narrowing an
       intermediate below its own arithmetic precision would round-trip every update), and like it
       must be a function of the storage precision alone. When overriding {!compute_prec}, override

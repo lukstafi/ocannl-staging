@@ -47,7 +47,10 @@ type t = {
           f32 per-lane registers, so its serial bf16 legs widen to match, and fp8 — which has an
           accumulator format on no backend — takes f32 residency everywhere; f16, and bf16 on
           HIP/Metal (whose tiles accumulate in storage-width fragments), keep storage residency so
-          serial and tensorized legs stay width-uniform per backend. *)
+          serial and tensorized legs stay width-uniform per backend. Metal's fp8 residency is
+          structural rather than policy-gated: MSL has no fp8 type, every fp8 computation there
+          runs in f32 ([Metal_backend]'s [compute_prec]), so turning this off cannot restore
+          per-step fp8 narrowing on Metal the way it does on CUDA/HIP. *)
   fp16_arithmetic : bool;
       (** Compute fp16 in fp16 on CPU targets that have native 16-bit arithmetic (ARMv8.2-FP16,
           AVX512-FP16), instead of widening to f32 (gh-ocannl-516). This is the one narrow format a

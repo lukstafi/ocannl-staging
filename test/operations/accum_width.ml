@@ -22,7 +22,8 @@
    hold f32 per-lane registers across the whole k extent — the hardware has no bf16 accumulate —
    so its serial legs must match. On HIP and Metal the tensor units accumulate in bf16 fragments
    and the serial legs deliberately keep bf16 storage residency (width-uniform with their mma
-   legs), so the widened claims are false there BY DESIGN and every leg is skipped. The structural
+   legs), so the bf16 widened claims are false there BY DESIGN and skipped — while the fp8 claim,
+   which holds universally, executes on every backend. The structural
    claims grep cc's generated C and the SIMD/Workgroup_reduce-serialization legs exercise CPU-only
    renderings; they stay cc-only and print their passing golden line as skipped elsewhere. *)
 
@@ -182,6 +183,39 @@ let claim_wgreduce =
 let claim_fp8 =
   "fp8 e5m2 reduction accumulates wide and narrows once (16 + 8x0.5 reaches 20, not 16)"
 
+(* === fp8 accumulates wide on every backend (gh-ocannl-663) === *)
+(* No backend has an fp8 accumulator format (its arithmetic bridges through float per operator
+   everywhere, and Metal computes fp8 in f32 wholesale), so fp8 reductions take f32 residency
+   universally — the one leg that EXECUTES on every backend, HIP and Metal included, rather than
+   riding the bf16 gate (Codex P2 on PR #396). e5m2's 2-bit mantissa makes the discrimination
+   cheap: at 16 the spacing is 4, so per-step narrowing absorbs every +0.5 and leaves 16, while
+   the wide accumulator reaches 20, exactly representable. *)
+let fp8_leg () =
+  let fp8 = Ir.Ops.fp8 in
+  let f8node = Ll_test.node_factory ~prec:fp8 ~first_id:9700 ~dims:[| 8 |] () in
+  let f8acc = f8node ~dims:[| 1 |] "aw_f8acc" in
+  let f8xs = f8node "aw_f8xs" in
+  Ll_test.materialize f8acc;
+  Ll_test.materialize f8xs;
+  let f8i = Ll_test.sym () in
+  let f8upd =
+    Ll_test.set f8acc
+      [| Ll_test.fixed 0 |]
+      (LL.Binop
+         ( Ir.Ops.Add,
+           (Ll_test.get f8acc [| Ll_test.fixed 0 |], fp8),
+           (Ll_test.get f8xs [| Ll_test.iter f8i |], fp8) ))
+  in
+  let f8o =
+    Ll_test.optimize ~materialized:[ f8acc; f8xs ] ~name:"aw_fp8" (Ll_test.loop_n f8i 8 f8upd)
+  in
+  let f8vals =
+    Ll_test.execute ~name:"aw_fp8" f8o
+      ~seed:[ (f8acc, [| 16.0 |]); (f8xs, Array.create ~len:8 0.5) ]
+      ~read:[ f8acc ]
+  in
+  p claim_fp8 (Float.equal (List.hd_exn f8vals).(0) 20.0)
+
 (* In execution order — the GPU skip lines must match the cc run's golden line for line. *)
 let all_claims =
   [
@@ -213,7 +247,10 @@ let all_claims =
   ]
 
 let () =
-  if not widens_bf16 then List.iter all_claims ~f:skipped
+  if not widens_bf16 then
+    (* The fp8 claim holds on HIP and Metal too, so it executes rather than printing a
+       green-by-skip line; every bf16-widening leg is skipped. *)
+    List.iter all_claims ~f:(fun c -> if String.equal c claim_fp8 then fp8_leg () else skipped c)
   else begin
     let ma = NTDSL.init ~l:"ma" ~prec:Ir.Ops.bfloat16 ~i:[ n ] ~o:[ n ] ~f:fa () in
     let mb = NTDSL.init ~l:"mb" ~prec:Ir.Ops.bfloat16 ~i:[ n ] ~o:[ n ] ~f:fb () in
@@ -585,37 +622,7 @@ let () =
           | None -> false
         in
         p claim_simd_tail (vec_fired && Array.for_all2_exn got_vt got_v ~f:Float.equal));
-    (* === fp8 accumulates wide on every backend (gh-ocannl-663) === *)
-    (* No backend has an fp8 accumulator format (its arithmetic bridges through float per operator
-       everywhere), so fp8 reductions take f32 residency universally — unlike the bf16 legs, this
-       claim holds on HIP and Metal too; it merely rides the bf16 gate and prints as skipped
-       there until that hardware runs the suite. e5m2's 2-bit mantissa makes the discrimination
-       cheap: at 16 the spacing is 4, so per-step narrowing absorbs every +0.5 and leaves 16,
-       while the wide accumulator reaches 20, exactly representable. *)
-    let fp8 = Ir.Ops.fp8 in
-    let f8node = Ll_test.node_factory ~prec:fp8 ~first_id:9700 ~dims:[| 8 |] () in
-    let f8acc = f8node ~dims:[| 1 |] "aw_f8acc" in
-    let f8xs = f8node "aw_f8xs" in
-    Ll_test.materialize f8acc;
-    Ll_test.materialize f8xs;
-    let f8i = Ll_test.sym () in
-    let f8upd =
-      Ll_test.set f8acc
-        [| Ll_test.fixed 0 |]
-        (LL.Binop
-           ( Ir.Ops.Add,
-             (Ll_test.get f8acc [| Ll_test.fixed 0 |], fp8),
-             (Ll_test.get f8xs [| Ll_test.iter f8i |], fp8) ))
-    in
-    let f8o =
-      Ll_test.optimize ~materialized:[ f8acc; f8xs ] ~name:"aw_fp8" (Ll_test.loop_n f8i 8 f8upd)
-    in
-    let f8vals =
-      Ll_test.execute ~name:"aw_fp8" f8o
-        ~seed:[ (f8acc, [| 16.0 |]); (f8xs, Array.create ~len:8 0.5) ]
-        ~read:[ f8acc ]
-    in
-    p claim_fp8 (Float.equal (List.hd_exn f8vals).(0) 20.0);
+    fp8_leg ();
     (* Negative control: turning the policy off recovers the pre-gh-517/pre-gh-639 semantics — every
        operator, the accumulation update included, rounds to storage precision — which on these
        inputs must visibly differ from the widened default, proving the inputs discriminate the

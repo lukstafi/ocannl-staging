@@ -831,7 +831,9 @@
 # formats force a wider accumulate (gh-ocannl-663): serial bf16 reductions on CUDA and fp8
 # reductions everywhere accumulate in f32 and narrow once per nest, mirroring the mma legs, while
 # f16 (and bf16 on HIP/Metal, whose tiles accumulate in storage-width fragments) keeps storage
-# residency.
+# residency. One structural exception: Metal has no fp8 type at all — every fp8 computation there
+# runs in f32, so its fp8 accumulators stay wide even with this policy off (there is no fp8
+# arithmetic to narrow back to); CUDA and HIP honor the off setting per reduction step.
 # Programmatic override: `Ir.Numerics.set_policy`.
 #narrow_compute_f32=true
 
