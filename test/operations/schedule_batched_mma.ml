@@ -311,8 +311,14 @@ let () =
         tag (List.length cands) (List.length seeds) (flavors cands) (flavors seeds)
         (List.length cands - flavors cands)
         (List.length seeds - flavors seeds);
-    let n_ran = ref 0 and n_close = ref 0 and n_intrinsic = ref 0 in
-    let ran_grid = ref 0 in
+    (* Counted per flavor, not in aggregate: with a mixed sample every aggregate counter reads the
+       same whether both flavors were covered or one flavor was covered twice, so a batch-serial
+       candidate that fails to compile, or a batch-grid candidate that runs [Tile_mma]'s scalar
+       fallback while its serial neighbour renders the intrinsic, would leave the claims green over
+       exactly the coverage this sampling exists to provide. *)
+    let sampled = List.count cands ~f:(fun q -> q.Autotune.sk_batch_grid) in
+    let n_ran = (ref 0, ref 0) and n_close = (ref 0, ref 0) and n_intrinsic = (ref 0, ref 0) in
+    let of_flavor (serial, grid) q = if q.Autotune.sk_batch_grid then grid else serial in
     List.iter cands ~f:(fun q ->
         match
           let ctx, routine =
@@ -323,33 +329,39 @@ let () =
           Context.get_values (Context.run ctx routine) cand.Tensor.value
         with
         | got ->
-            Int.incr n_ran;
-            if q.Autotune.sk_batch_grid then Int.incr ran_grid;
-            if Array.for_all2_exn got want ~f:close then Int.incr n_close;
+            Int.incr (of_flavor n_ran q);
+            if Array.for_all2_exn got want ~f:close then Int.incr (of_flavor n_close q);
             if
               Option.value_map
                 (read_generated (tag ^ "_bf16_mma"))
                 ~default:false ~f:renders_intrinsic
-            then Int.incr n_intrinsic
+            then Int.incr (of_flavor n_intrinsic q)
         | exception _ -> ());
-    if has_uniform_bf16_tile then
-      Stdio.eprintf "%s: %d of %d executed candidates ran, %d of them batch-grid\n" tag !n_ran
-        (List.length cands) !ran_grid;
     p
       (tag ^ " bf16: the backend's advertised tile is seeded")
       ((not has_uniform_bf16_tile) || not (List.is_empty seeds));
-    p (tag ^ " bf16: some candidate compiles and runs") ((not has_uniform_bf16_tile) || !n_ran >= 1);
-    (* The stderr split above is not a gate; this is. Without it the sample could silently drift
-       back to one flavor the next time seed enumeration is reordered. *)
-    p
-      (tag ^ " bf16: a batch-grid candidate ran wherever the site seeds twins")
-      ((not has_uniform_bf16_tile)
-      || List.for_all seeds ~f:(fun q -> not q.Autotune.sk_batch_grid)
-      || !ran_grid >= 1);
-    p (tag ^ " bf16: every running candidate matches the serial twin") (!n_ran = !n_close);
-    p
-      (tag ^ " bf16: some running candidate renders the tensor-core intrinsic")
-      ((not has_uniform_bf16_tile) || !n_intrinsic >= 1)
+    (* One set of claims per flavor. A flavor the site does not seed contributes no sampled
+       candidate and its claims stand vacuously, which is what keeps the golden backend-uniform;
+       a flavor that IS sampled has to compile, run, agree with the serial twin, and reach the
+       backend's mma hook on its own. *)
+    let flavor_claims ~label ~grid =
+      let n_sampled = if grid then sampled else List.length cands - sampled in
+      let count refs = !(if grid then snd refs else fst refs) in
+      if has_uniform_bf16_tile then
+        Stdio.eprintf "%s: %d of %d %s candidates ran, %d matched, %d rendered the intrinsic\n" tag
+          (count n_ran) n_sampled label (count n_close) (count n_intrinsic);
+      p
+        (tag ^ " bf16: a sampled " ^ label ^ " candidate compiles and runs")
+        ((not has_uniform_bf16_tile) || n_sampled = 0 || count n_ran >= 1);
+      p
+        (tag ^ " bf16: every running " ^ label ^ " candidate matches the serial twin")
+        (count n_ran = count n_close);
+      p
+        (tag ^ " bf16: a running " ^ label ^ " candidate renders the tensor-core intrinsic")
+        ((not has_uniform_bf16_tile) || n_sampled = 0 || count n_intrinsic >= 1)
+    in
+    flavor_claims ~label:"batch-serial" ~grid:false;
+    flavor_claims ~label:"batch-grid" ~grid:true
   in
   let bf16_init ~l ~o ~f = NTDSL.init ~l ~prec:Ir.Ops.bfloat16 ~o ~f () in
   (* Products are multiples of 1/8 and every partial sum is bounded by 16, so the serial twin is
