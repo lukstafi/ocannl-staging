@@ -1134,7 +1134,8 @@ let trace_node_facts traced_store ~merge_node_ref reverse_node_map ~static_indic
   in
   loop_proc ~loop_ranges:(Map.empty (module Indexing.Symbol)) ~scope_reads:None llc
 
-let%diagn2_sexp check_and_store_virtual (optim_ctx : optimize_ctx) traced static_indices top_llc =
+let%diagn2_sexp check_and_store_virtual (optim_ctx : optimize_ctx) ~guarded traced static_indices
+    top_llc =
   let exception Non_virtual of int in
   let static_indices =
     Set.of_list (module Indexing.Symbol)
@@ -1261,8 +1262,11 @@ let%diagn2_sexp check_and_store_virtual (optim_ctx : optimize_ctx) traced static
        Defensive: [rewrite_one_hot_reductions] runs after virtualization. *)
     | Set_dynamic _ -> raise @@ Non_virtual 144
     (* Conservative in v1: a guarded computation is not inlined (a conditional write is not a
-       definite write, so recomputing it at the read site could read an unset scope). Defensive:
-       launch-extent guards are introduced at backend-compile time, after virtualization. *)
+       definite write, so recomputing it at the read site could read an unset scope). This arm sees
+       guards INTERIOR to the captured subtree; a guard ENCLOSING it is reported by the caller via
+       [~guarded] (gh-651). Reachable pre-virtualization: [Assignments.to_low_level] emits interval
+       guards for clamped-window pooling (gh-504) and extent guards for symbolic extents (gh-490),
+       besides the launch-extent guards introduced at backend-compile time. *)
     | If _ -> raise @@ Non_virtual 142
   and loop_scalar ~env_dom ~loop_ranges llsc =
     match llsc with
@@ -1314,6 +1318,11 @@ let%diagn2_sexp check_and_store_virtual (optim_ctx : optimize_ctx) traced static
   in
   try
     if Tn.Placements.known_non_virtual optim_ctx.placements traced.tn then raise @@ Non_virtual 11;
+    (* gh-651: the candidate's whole nest sits inside an enclosing [If], which is NOT part of
+       [top_llc] — the walk below would never see it, and the stored computation would replay
+       unguarded at every read site. Same verdict as the interior-guard arm, decided here because
+       only the caller knows the context the subtree was captured from. *)
+    if guarded then raise @@ Non_virtual 142;
     loop_proc ~env_dom:static_indices ~loop_ranges:(Map.empty (module Indexing.Symbol)) top_llc;
     if not !has_setter then raise @@ Non_virtual 12;
     let current_computations =
@@ -2030,8 +2039,8 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
      [process_for] -- reads of them are still inlined, so surviving sibling readers can inline a
      virtualized provider. [in_storage_pass] is set within a per-candidate storage sub-pass so it
      does not recursively re-store nested-loop candidates. See #134. *)
-  let rec loop_proc ~process_for ~owned ~in_storage_pass (llc : t) : t =
-    let loop = loop_proc ~process_for ~owned ~in_storage_pass in
+  let rec loop_proc ~process_for ~owned ~in_storage_pass ~guarded (llc : t) : t =
+    let loop = loop_proc ~process_for ~owned ~in_storage_pass ~guarded in
     match llc with
     | Noop -> Noop
     | Seq (c1, c2) ->
@@ -2047,7 +2056,10 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
     | For_loop ({ index; body; _ } as for_config) -> (
         if in_storage_pass then
           For_loop
-            { for_config with body = loop_proc ~process_for ~owned ~in_storage_pass:true body }
+            {
+              for_config with
+              body = loop_proc ~process_for ~owned ~in_storage_pass:true ~guarded body;
+            }
         else
           let tns = Hashtbl.find reverse_node_map index |> Option.value ~default:[] in
           let candidates =
@@ -2061,7 +2073,10 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
           match candidates with
           | [] ->
               For_loop
-                { for_config with body = loop_proc ~process_for ~owned ~in_storage_pass:false body }
+                {
+                  for_config with
+                  body = loop_proc ~process_for ~owned ~in_storage_pass:false ~guarded body;
+                }
           | _ ->
               let owned' = List.fold candidates ~init:owned ~f:Set.add in
               (* Phase 1 -- store, sequentially in source order. For candidate [k], its stored loop
@@ -2087,10 +2102,11 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
                         {
                           for_config with
                           body =
-                            loop_proc ~process_for:store_pf ~owned:owned' ~in_storage_pass:true body;
+                            loop_proc ~process_for:store_pf ~owned:owned' ~in_storage_pass:true
+                              ~guarded body;
                         }
                   in
-                  check_and_store_virtual optim_ctx node static_indices stored);
+                  check_and_store_virtual optim_ctx ~guarded node static_indices stored);
               (* Phase 2 -- emit. Candidates are NOT in [process_for], so surviving readers
                  (materialized siblings, and later virtual siblings, all now stored) inline the
                  provider; [owned'] still suppresses candidate auto-store; each candidate setter
@@ -2099,7 +2115,7 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
               For_loop
                 {
                   for_config with
-                  body = loop_proc ~process_for ~owned:owned' ~in_storage_pass:false body;
+                  body = loop_proc ~process_for ~owned:owned' ~in_storage_pass:false ~guarded body;
                 })
     | Zero_out tn ->
         let traced : traced_array = get_node traced_store tn in
@@ -2107,7 +2123,7 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
           (not @@ Set.mem process_for tn)
           && (not @@ Set.mem owned tn)
           && (not @@ Tn.Placements.known_non_virtual plc traced.tn)
-        then check_and_store_virtual optim_ctx traced static_indices llc;
+        then check_and_store_virtual optim_ctx ~guarded traced static_indices llc;
         llc
     | Set { tn; idcs; llsc; debug } ->
         let traced : traced_array = get_node traced_store tn in
@@ -2116,13 +2132,19 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
           else Set.add process_for tn
         in
         let result =
-          Set { tn; idcs; llsc = loop_scalar ~process_for:next ~owned ~in_storage_pass llsc; debug }
+          Set
+            {
+              tn;
+              idcs;
+              llsc = loop_scalar ~process_for:next ~owned ~in_storage_pass ~guarded llsc;
+              debug;
+            }
         in
         if
           (not @@ Set.mem process_for tn)
           && (not @@ Set.mem owned tn)
           && (not @@ Tn.Placements.known_non_virtual plc traced.tn)
-        then check_and_store_virtual optim_ctx traced static_indices result;
+        then check_and_store_virtual optim_ctx ~guarded traced static_indices result;
         result
     | Set_from_vec { tn; idcs; length; vec_unop; arg = arg_scalar, arg_prec; debug } ->
         let traced : traced_array = get_node traced_store tn in
@@ -2137,7 +2159,8 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
               idcs;
               length;
               vec_unop;
-              arg = (loop_scalar ~process_for:next ~owned ~in_storage_pass arg_scalar, arg_prec);
+              arg =
+                (loop_scalar ~process_for:next ~owned ~in_storage_pass ~guarded arg_scalar, arg_prec);
               debug;
             }
         in
@@ -2148,9 +2171,10 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
         then
           (* gh-509 task 4: store the raw statement (argument not rewritten), see
              [proc_contains_set_from_vec]. The emitted statement remains [result]. *)
-          check_and_store_virtual optim_ctx traced static_indices llc;
+          check_and_store_virtual optim_ctx ~guarded traced static_indices llc;
         result
-    | Set_local (id, llsc) -> Set_local (id, loop_scalar ~process_for ~owned ~in_storage_pass llsc)
+    | Set_local (id, llsc) ->
+        Set_local (id, loop_scalar ~process_for ~owned ~in_storage_pass ~guarded llsc)
     | Declare_local _ -> llc
     | Comment _ -> llc
     | Staged_compilation _ -> llc
@@ -2159,14 +2183,21 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
     | Tile_mma _ -> llc
     (* gh-466: unreachable — [Set_dynamic] is produced after virtualization; kept opaque. *)
     | Set_dynamic _ -> llc
+    (* gh-651: a candidate captured inside the guard would be stored without it and replayed
+       unguarded at every read site. The flag rides down into [check_and_store_virtual], which
+       rejects such a candidate as [Non_virtual 142] — the same verdict the walk's own [If] arm
+       gives an interior guard. The CONDITION is evaluated whenever this statement is reached, so it
+       inherits the enclosing flag rather than the one this [If] establishes.
+       Lifting this (prepending the guard to the stored computation) is adjacent to the Block
+       virtualizer's range-guard machinery. *)
     | If { cond = c, prec; body } ->
         If
           {
-            cond = (loop_scalar ~process_for ~owned ~in_storage_pass c, prec);
-            body = loop_proc ~process_for ~owned ~in_storage_pass body;
+            cond = (loop_scalar ~process_for ~owned ~in_storage_pass ~guarded c, prec);
+            body = loop_proc ~process_for ~owned ~in_storage_pass ~guarded:true body;
           }
-  and loop_scalar ~process_for ~owned ~in_storage_pass (llsc : scalar_t) : scalar_t =
-    let loop = loop_scalar ~process_for ~owned ~in_storage_pass in
+  and loop_scalar ~process_for ~owned ~in_storage_pass ~guarded (llsc : scalar_t) : scalar_t =
+    let loop = loop_scalar ~process_for ~owned ~in_storage_pass ~guarded in
     match llsc with
     | Constant _ -> llsc
     | Constant_bits _ -> llsc
@@ -2224,7 +2255,7 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
             opts with
             body =
               loop_proc ~process_for:(Set.add process_for opts.id.tn) ~owned ~in_storage_pass
-                opts.body;
+                ~guarded opts.body;
           }
     | Get_local _ -> llsc
     | Get_merge_buffer (_, _) -> llsc
@@ -2244,7 +2275,7 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
     loop_proc
       ~process_for:(Set.empty (module Tnode))
       ~owned:(Set.empty (module Tnode))
-      ~in_storage_pass:false llc
+      ~in_storage_pass:false ~guarded:false llc
   in
   (result, spliced_reads)
 

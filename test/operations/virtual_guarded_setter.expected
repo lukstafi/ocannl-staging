@@ -1,0 +1,16 @@
+guarded RMW: candidate rejected (stays non-virtual): true
+guarded RMW: the consumer reads the candidate through a buffer: true
+guarded RMW: the guard survives in the emitted code: true
+guarded RMW: flag off leaves the zero init: true
+guarded RMW: flag on applies the update: true
+guarded RMW: agrees with the materialized arm at both flag values: true
+guarded reset: candidate rejected (stays non-virtual): true
+guarded reset: the consumer reads the candidate through a buffer: true
+guarded reset: the guard survives in the emitted code: true
+guarded reset: flag off keeps the unguarded write: true
+guarded reset: flag on applies the reset: true
+guarded reset: agrees with the materialized arm at both flag values: true
+interior guard: candidate rejected (stays non-virtual): true
+interior guard: the consumer reads the candidate through a buffer: true
+interior guard: only the masked-in cells carry the write: true
+interior guard: agrees with the materialized arm: true

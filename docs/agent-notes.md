@@ -427,6 +427,15 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   the recursion, defaulting to `true` for mutually-recursive callers that don't carry it. When a
   codegen decision consults a `traced_array`-style boolean, ask whether it is node-level or
   occurrence-level; they coincide only at first touch on the linear path.
+- **A virtualization candidate under an `If` is rejected, and the guard's position decides which
+  arm rejects it** (gh-ocannl-651). `check_and_store_virtual`'s walk sees only the subtree it is
+  handed, so a guard INTERIOR to that subtree hits its own `If` arm while a guard ENCLOSING it is
+  invisible there — `virtual_llc` threads a `~guarded` flag down its walk and reports it, and both
+  paths land on `Non_virtual 142`. Guards are NOT confined to the backend-compile-time launch-extent
+  pass: `Assignments.to_low_level` emits interval guards for clamped-window pooling (gh-ocannl-504)
+  and extent guards for symbolic extents (gh-ocannl-490), both before virtualization. When adding a
+  pass that captures a subtree for later replay, ask what context the subtree was captured FROM —
+  a walk of the subtree alone cannot see it.
 - Big-reduction producers are forced `Never_virtual` by `virtualize_max_inline_reduction`
   (default 16) — remember it when a structural expectation assumes inlining.
 - Wide-fanin producers are forced `Never_virtual 41` by `virtualize_max_inline_fanin` (default 8,

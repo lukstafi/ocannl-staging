@@ -185,6 +185,20 @@
 
 ### Fixed
 
+- **A guarded setter's computation is no longer inlined without its guard** (gh-ocannl-651). The
+  `Low_level.t` doc's v1 contract — a conditional write is not a definite write, so virtualization
+  treats guarded computations as non-inlineable — was enforced for a guard INTERIOR to the captured
+  subtree only. `virtual_llc`'s `If` arm recursed plainly and the setter/loop arms handed
+  `check_and_store_virtual` the subtree rooted BELOW the guard, so a candidate whose whole nest sat
+  inside an `If` stored its computation guardless and every read site replayed it unconditionally:
+  the guard was silently dropped rather than the candidate rejected. The walk now carries an
+  enclosing-guard flag and rejects such a candidate as `Non_virtual 142` at store time, the same
+  verdict the interior case already gave. Guards do reach virtualization from the front end, not
+  only from the backend-compile-time launch-extent pass the old comment assumed: `Assignments`
+  lowering emits interval guards for clamped-window pooling (gh-ocannl-504) and extent guards for
+  symbolic extents (gh-ocannl-490). Lifting the restriction — prepending the guard to the stored
+  computation — is adjacent to the Block virtualizer's range-guard machinery and remains future work.
+
 - **`uint32` and `uint64` ndarrays convert to and from floats as unsigned.** They are stored in
   *signed* int32/int64 bigarrays, and every float-facing conversion in `Ndarray` — `get_as_float`,
   the folds behind `retrieve_flat_values`, `set_from_float`, `fill_from_float` — went through the
