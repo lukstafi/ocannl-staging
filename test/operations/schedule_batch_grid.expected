@@ -38,4 +38,7 @@ qkv_mma: tensorized batch-grid twins are seeded: true
 qkv_mma: every tensorized batch-grid twin constructs, validates, and folds the batch onto .z: true
 limit gate: a folded .z extent at the device limit passes: true
 limit gate: a folded .z extent beyond the device limit is a typed Resource_exceeded: true
-limit gate: a max_grid_z below the batch product stops the twins at seeding: true
+limit gate: a max_grid_yz below the batch product stops the twins at seeding: true
+limit gate: the .y reference isolates the row blocks — its .z extent is 1 and its .y exceeds 1: true
+limit gate: a .y grid extent at the device limit passes: true
+limit gate: a .y grid extent beyond the device limit is a typed Resource_exceeded: true

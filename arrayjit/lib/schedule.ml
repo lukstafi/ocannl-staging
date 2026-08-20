@@ -5858,18 +5858,41 @@ let check_hardware_limits_classified ~name ~(limits : Backend_intf.hardware_limi
                    limit = Some max_bytes;
                    detail;
                  } )));
-  (* The [.z] grid fold (gh-ocannl-643) multiplies every Grid slot [>= 2] into [grid.(2)], and
-     CUDA/HIP cap that hardware dimension at 65535 — [validate_parallel] deliberately accepts any
-     fold (it is backend-independent), so this is where an over-cap launch is refused before
-     reaching the driver. The autotune batch-grid twins pre-filter at seeding against the same
-     limit; this gate also covers hand-built schedules and future annotators. *)
-  Option.iter limits.max_grid_z ~f:(fun max_z ->
+  (* The [.y] and [.z] grid dimensions share one 16-bit cap on CUDA/HIP ([max_grid_yz]; [.x] is
+     2^31-scale), and [validate_parallel] deliberately accepts any grid geometry (it is
+     backend-independent), so this is where an over-cap launch is refused before reaching the
+     driver. Both gates also cover hand-built schedules and future annotators, not only the
+     autotune seeds. *)
+  Option.iter limits.max_grid_yz ~f:(fun max_yz ->
+      (* [.y] is the grid slot-1 extent — the row-block count of a blocktiled matmul, which grows
+         with the site's m-extent rather than with any fold: at [bm = 16] an m-extent past ~1M rows
+         is already over the cap. *)
+      let grid_y = (Low_level.launch_dims opt.llc).grid.(1) in
+      if grid_y > max_yz then
+        let detail =
+          [%string
+            "Schedule: kernel %{name} requests a .y grid extent of %{grid_y#Int}, exceeding the \
+             device limit of %{max_yz#Int}"]
+        in
+        raise
+          (Schedule_outcome.Cause_at
+             ( Schedule_outcome.Hardware_limits,
+               Schedule_outcome.Resource_exceeded
+                 {
+                   resource = Schedule_outcome.Grid_y_extent;
+                   requested = grid_y;
+                   limit = Some max_yz;
+                   detail;
+                 } )));
+  (* The [.z] grid fold (gh-ocannl-643) multiplies every Grid slot [>= 2] into [grid.(2)]. The
+     autotune batch-grid twins pre-filter at seeding against the same limit. *)
+  Option.iter limits.max_grid_yz ~f:(fun max_yz ->
       let grid_z = (Low_level.launch_dims opt.llc).grid.(2) in
-      if grid_z > max_z then
+      if grid_z > max_yz then
         let detail =
           [%string
             "Schedule: kernel %{name} folds grid slots >= 2 to a .z extent of %{grid_z#Int}, \
-             exceeding the device limit of %{max_z#Int}"]
+             exceeding the device limit of %{max_yz#Int}"]
         in
         raise
           (Schedule_outcome.Cause_at
@@ -5878,7 +5901,7 @@ let check_hardware_limits_classified ~name ~(limits : Backend_intf.hardware_limi
                  {
                    resource = Schedule_outcome.Grid_z_extent;
                    requested = grid_z;
-                   limit = Some max_z;
+                   limit = Some max_yz;
                    detail;
                  } )))
 

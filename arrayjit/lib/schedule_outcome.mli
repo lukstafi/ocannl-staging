@@ -20,8 +20,18 @@ type phase =
   | Sync
 [@@deriving sexp_of, compare, equal]
 
-type resource = Workgroup_threads | Workgroup_memory | Thread_scratch | Grid_z_extent
+type resource =
+  | Workgroup_threads
+  | Workgroup_memory
+  | Thread_scratch
+  | Grid_y_extent
+  | Grid_z_extent
 [@@deriving sexp_of, compare, equal]
+(** What a {!Resource_exceeded} candidate asked too much of. The two grid dimensions are separate
+    variants although both are capped by the single {!Backend_intf.max_grid_yz}: they are shrunk by
+    different knobs — an over-[.y] launch by coarsening the row blocking, an over-[.z] one by
+    keeping batch loops serial — and this is the rejection key an autotune search groups declines
+    under ({!key_of_cause}). *)
 
 type severity = Expected | Compiler_bug [@@deriving sexp_of, compare, equal]
 

@@ -354,7 +354,7 @@ module Impl = struct
                  Unsigned.ULong.to_int a.max_threadgroup_memory_length);
            (* Metal's threadgroups-per-grid dimensions are not 16-bit like CUDA/HIP's
               gridDim.y/z; no practical cap to enforce here. *)
-           max_grid_z = None;
+           max_grid_yz = None;
            (* [simdgroup_matrix] (docs/proposals/tensorize-mma.md): 8×8×8 tiles cooperatively held
               by the 32-thread simdgroup, available on Apple7+ (M1 and later). Supported operand
               precisions are decided per call by [mma_syntax] (f32/f16/bf16, uniform). *)
