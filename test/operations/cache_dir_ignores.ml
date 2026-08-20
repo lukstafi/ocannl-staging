@@ -9,18 +9,24 @@
    them, one of them months after the test landed.
 
    A list that has to be maintained is the wrong shape for that. The ignore list is one glob over a
-   name prefix instead, and what this check holds is the premise the glob rests on: every
-   `~cache_dir` names a directory carrying the prefix, so a new tuning test is ignored the day it
-   is written and neither the ignore list nor this test's golden has anything to say about it.
+   name prefix instead, and what this check holds is the premise the glob rests on: every argument
+   naming a cache directory names one the glob covers, so a new tuning test is ignored the day it is
+   written and neither the ignore list nor this test's golden has anything to say about it.
 
    Two requirements, over every OCaml source in the repository:
 
-   - every `~cache_dir` argument resolves to a string literal -- a directory carrying the prefix,
-     or the empty string, which turns the cache off -- or to a parameter forwarded from a call site
-     scanned in its own right. A spelling that resolves to none of those is reported rather than
-     assumed harmless;
+   - every argument that names a cache directory -- an `Autotune.tune ~cache_dir`, and the `~dir` of
+     a direct `Schedule_cache` operation, which creates the directory just as surely -- resolves to
+     a string literal the glob covers, to the empty string, which turns the cache off, or to a
+     parameter forwarded from a call site scanned in its own right. A spelling that resolves to none
+     of those is reported rather than assumed harmless;
    - and the root `.gitignore` still carries the glob, so that the first requirement is not being
      enforced in support of a rule that has been edited away.
+
+   "Covered by the glob" is a single directory name carrying the prefix, not merely a string
+   starting with it: `Schedule_cache.ensure_dir` walks the path it is handed, so
+   `autotune_cache/../leaked_cache` carries the prefix and creates `leaked_cache` beside it, which a
+   glob segment -- stopping at the separator -- does not match.
 
    The built-in default needs no special case: the prefix IS its name, so a library that stops
    naming it fails the second requirement rather than slipping past this one.
@@ -101,24 +107,24 @@ let () =
                source
                (String.concat ~sep:" " (String.split_lines (Error.to_string_hum error))))
       | Ok uses ->
-          List.iter uses ~f:(fun { Scan.resolution; line } ->
+          List.iter uses ~f:(fun { Scan.resolution; line; spelling } ->
               match resolution with
-              | Scan.Names name when String.is_prefix name ~prefix:Scan.required_prefix ->
-                  naming := source :: !naming
+              | Scan.Names name when Scan.covered_by_glob name -> naming := source :: !naming
               | Scan.Names name ->
                   fail
                     (Printf.sprintf
-                       "%s:%d names the cache directory %s, which does not start with `%s` -- \
-                        rename it to `%s_…` so that the root .gitignore's `%s` covers it"
-                       source line name Scan.required_prefix Scan.required_prefix Scan.required_glob)
+                       "%s:%d: `%s` names the cache directory %s, which `%s` does not cover -- it \
+                        has to be a single directory name starting with `%s`, since a glob segment \
+                        stops at a separator and `ensure_dir` follows one wherever it leads"
+                       source line spelling name Scan.required_glob Scan.required_prefix)
               | Scan.Disabled | Scan.Forwarded _ -> ()
               | Scan.Unresolved _ ->
                   fail
                     (Printf.sprintf
-                       "%s:%d: this `~%s` argument %s, which this scan cannot resolve to a literal \
+                       "%s:%d: this `%s` argument %s, which this scan cannot resolve to a literal \
                         -- pass the directory as a literal here, or bind it to a name mentioning \
                         `%s` whose right-hand side is one, so that the prefix can be checked"
-                       source line Scan.label (Scan.describe resolution) Scan.label)));
+                       source line spelling (Scan.describe resolution) Scan.tune_label)));
   (* The sources that name one, not the names themselves: what the check establishes is a property
      every name has, so listing them would only make the golden churn on each new tuning test --
      the maintenance burden this check exists to remove. *)

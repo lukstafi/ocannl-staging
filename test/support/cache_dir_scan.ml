@@ -13,25 +13,36 @@
     {1 Reading these sources as OCaml}
 
     Parsed, not grepped, for the reasons {!Config_key_scan} sets out at length — and this scan needs
-    the parse tree more than that one does, because the name is usually not written at the call
-    site. Of the two dozen [~cache_dir] arguments that name a directory, most arrive through a
-    binding ([let cache_dir = "…" in … Autotune.tune ~cache_dir]) rather than as a literal, so a
-    scan matching [~cache_dir:"…"] would see a minority of them and vouch for nothing about the
-    rest.
+    the parse tree more than that one does, on two counts. The name is usually not written at the
+    call site: of the two dozen arguments that name a directory, most arrive through a binding
+    ([let cache_dir = "…" in … Autotune.tune ~cache_dir]) rather than as a literal, so a scan
+    matching [~cache_dir:"…"] would see a minority of them and vouch for nothing about the rest. And
+    the second spelling, a direct [Schedule_cache] operation's [~dir], can only be told from any
+    other [~dir] in the repository by resolving the module alias it is called through — which the
+    tests bind three different ways.
 
     {1 What is resolved, and how far}
 
     Resolution is per FILE and flat: a binding's literal is available to every use in the same
     source, regardless of scope. A use that resolves to no literal is reported as such rather than
     dropped, so a spelling this module cannot follow fails the check that uses it instead of quietly
-    shrinking the census. The one such spelling in the tree is a pass-through: a function taking
-    [~cache_dir] and forwarding it, whose directory is named at ITS call sites and checked there. *)
+    shrinking the census. The one such spelling in the tree is a pass-through: a function taking the
+    directory as a parameter and forwarding it, whose value is named at ITS call sites and checked
+    there. *)
 
 open Base
 open Parsetree
 
-(** The label whose argument names a schedule cache directory. *)
-let label = "cache_dir"
+(** The two labels whose argument names a schedule cache directory: [~cache_dir], which
+    [Autotune.tune] and [Train.tune_placements] take, and the [~dir] of a direct
+    {!Ir.Schedule_cache} operation. Both create the directory — [Schedule_cache.store] runs
+    [ensure_dir] over the path — so a census of one is not a census of caches. A test that only
+    seeds an entry, never tuning against it, is an established pattern here and would otherwise
+    leave an unignored directory with this check green (Codex P2, round 1). *)
+let tune_label = "cache_dir"
+
+let cache_module = "Schedule_cache"
+let store_label = "dir"
 
 (** The prefix every such directory carries, so that one [.gitignore] glob covers all of them. It is
     the built-in default's own name, which is why the default needs no special case: [autotune_cache]
@@ -43,11 +54,20 @@ let structure_of = Config_key_scan.structure_of
 let longident_of = Config_key_scan.longident_of
 let pattern_name = Config_key_scan.pattern_name
 
-let is_our_label = function
-  | Asttypes.Labelled name | Asttypes.Optional name -> String.equal name label
-  | Asttypes.Nolabel -> false
+let label_name = function
+  | Asttypes.Labelled name | Asttypes.Optional name -> Some name
+  | Asttypes.Nolabel -> None
 
-let mentions_label name = String.is_substring name ~substring:label
+let mentions_label name = String.is_substring name ~substring:tune_label
+
+(** Whether a directory name is one the ignore glob covers: a single path component carrying the
+    prefix. The component matters as much as the prefix — [Schedule_cache.ensure_dir] walks the path
+    it is given, so ["autotune_cache/../leaked_cache"] carries the prefix and creates [leaked_cache]
+    in the working directory, which [/autotune_cache*/] does not match (Codex P2, round 1). A glob
+    segment does not cross a separator, which is exactly the property required here. *)
+let covered_by_glob name =
+  String.is_prefix name ~prefix:required_prefix
+  && not (String.exists name ~f:(fun c -> Char.equal c '/' || Char.equal c '\\'))
 
 (** How a [~cache_dir] argument names its directory. [Names] carries a directory the prefix rule
     applies to; [Disabled] is the empty string, which turns the disk cache off and creates nothing;
@@ -56,7 +76,9 @@ let mentions_label name = String.is_substring name ~substring:label
     check reports rather than assumes. *)
 type resolution = Names of string | Disabled | Forwarded of string | Unresolved of string
 
-type use = { resolution : resolution; line : int }
+type use = { resolution : resolution; line : int; spelling : string }
+(** [spelling] is the label as written ([~cache_dir] or [~dir]), so a failure names the argument the
+    author has to change rather than a canonical one they never typed. *)
 
 let describe = function
   | Names name -> "names " ^ name
@@ -70,9 +92,23 @@ let describe = function
 let scope ast =
   let literals = Hashtbl.create (module String) in
   let parameters = Hash_set.create (module String) in
+  (* The names {!cache_module} goes by in this file. Resolved from the aliases rather than assumed,
+     because the tests bind it three ways -- `module SC = Ir.Schedule_cache`, `module Cache = …`,
+     and the qualified path itself -- and matching on the function name alone would take any
+     `store ~dir:` in the repository for a cache write. *)
+  let cache_modules = Hash_set.of_list (module String) [ cache_module ] in
   let iterator =
     {
       Ast_iterator.default_iterator with
+      structure_item =
+        (fun self item ->
+          (match item.pstr_desc with
+          | Pstr_module
+              { pmb_name = { txt = Some alias; _ }; pmb_expr = { pmod_desc = Pmod_ident { txt; _ }; _ }; _ }
+            when Option.equal String.equal (List.last (Longident.flatten txt)) (Some cache_module) ->
+              Hash_set.add cache_modules alias
+          | _ -> ());
+          Ast_iterator.default_iterator.structure_item self item);
       value_binding =
         (fun self binding ->
           (match (pattern_name binding.pvb_pat, string_literal binding.pvb_expr) with
@@ -102,12 +138,13 @@ let scope ast =
     }
   in
   iterator.structure iterator ast;
-  (literals, parameters)
+  (literals, parameters, cache_modules)
 
-(** Every [~cache_dir] / [?cache_dir] argument in [content], and what each resolves to. *)
+(** Every argument in [content] that names a schedule cache directory, and what each resolves to:
+    the [~cache_dir] of a tuning call, and the [~dir] of a direct {!cache_module} operation. *)
 let uses content =
   let ast = structure_of content in
-  let literals, parameters = scope ast in
+  let literals, parameters, cache_modules = scope ast in
   let resolve argument =
     match string_literal argument with
     | Some "" -> Disabled
@@ -122,6 +159,17 @@ let uses content =
                 if Hash_set.mem parameters name then Forwarded name
                 else Unresolved ("`" ^ name ^ "`")))
   in
+  (* Whether an application is a call INTO the cache module: its callee is a qualified path whose
+     qualifier is one of the module's names here. A bare `store ~dir:` is not one -- inside
+     schedule_cache.ml itself the directory is a parameter, named by whoever called in. *)
+  let calls_cache_module callee =
+    match longident_of callee with
+    | Some path -> (
+        match List.rev path with
+        | _ :: qualifier :: _ -> Hash_set.mem cache_modules qualifier
+        | _ -> false)
+    | None -> false
+  in
   let found = ref [] in
   let iterator =
     {
@@ -129,11 +177,22 @@ let uses content =
       expr =
         (fun self expr ->
           (match expr.pexp_desc with
-          | Pexp_apply (_, args) ->
+          | Pexp_apply (callee, args) ->
+              let into_cache = calls_cache_module callee in
               List.iter args ~f:(fun (lbl, argument) ->
-                  if is_our_label lbl then
+                  let names_a_directory =
+                    match label_name lbl with
+                    | Some name when String.equal name tune_label -> true
+                    | Some name when String.equal name store_label -> into_cache
+                    | _ -> false
+                  in
+                  if names_a_directory then
                     found :=
-                      { resolution = resolve argument; line = argument.pexp_loc.loc_start.pos_lnum }
+                      {
+                        resolution = resolve argument;
+                        line = argument.pexp_loc.loc_start.pos_lnum;
+                        spelling = "~" ^ Option.value (label_name lbl) ~default:tune_label;
+                      }
                       :: !found)
           | _ -> ());
           Ast_iterator.default_iterator.expr self expr);

@@ -52,7 +52,9 @@ build_files/
 # only when a test exe is run from the repo root by hand; under dune runtest the cwd is
 # inside _build/, which is why a missing entry used to stay invisible for months.
 # One glob instead of a hand-maintained list: test/operations/cache_dir_ignores requires
-# every ~cache_dir to name a directory with this prefix, so the glob cannot fall behind.
+# every argument that names a cache directory -- Autotune.tune's ~cache_dir and a direct
+# Schedule_cache operation's ~dir -- to be a single name with this prefix, so it cannot
+# fall behind.
 # Root-anchored deliberately: a cache directory is only ever created in the working
 # directory, and an unanchored pattern would hide a stray copy anywhere in the tree.
 /autotune_cache*/
