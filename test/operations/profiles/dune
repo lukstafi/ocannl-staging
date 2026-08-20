@@ -1,3 +1,21 @@
+; The ambient-environment gate (gh-ocannl-652). `(universe)` makes dune rerun it on every
+; invocation, which is the only way a rejected environment spelling reaches a check at all:
+; every other rule here is cached against declarations that no longer name those spellings,
+; so `ocannl_backend=cuda dune build @test/operations/profiles/runtest` would otherwise serve this
+; directory's previous run wholesale. One per test directory, because dune aliases are per
+; directory; the source is shared, and its header says why the dependency is the world
+; rather than 112 key names.
+
+(copy_files
+ (files ../../config/env_spelling_gate.ml))
+
+(test
+ (name env_spelling_gate)
+ (package neural_nets_lib)
+ (deps ocannl_config (universe))
+ (modules env_spelling_gate)
+ (libraries base stdio arrayjit.utils arrayjit.verdict))
+
 ; gh-ocannl-559: the same executable, resolved against four different pickers. The local
 ; ocannl_config (not the shared test/config one -- the config search stops at the first file
 ; walking up from the working directory) is deliberately "exhaustive": it picks a profile and
@@ -9,33 +27,26 @@
  (libraries base arrayjit.utils stdio))
 
 ; An ambient profile variable would outrank this directory's config file and turn the file-picked
-; rules into env-picked ones, so every rule clears both spellings OCANNL accepts in the environment
-; (an empty value counts as unset at every source) -- including the lowercase `ocannl_profile`,
-; which `Utils.read_env_var` consults BEFORE `OCANNL_PROFILE` and which would therefore beat the
-; env-picked rule's own setting (Codex P2 on PR #291). The dash-prefixed spellings were dropped in
-; gh-ocannl-605, so there is no longer anything else to clear. For the other keys the executable
-; itself refuses to run when one is set: a clear failure rather than a rewritten golden. That guard
-; covers `no_config_file` too -- it cannot prevent its effect, that being read during Utils'
-; initialization, but a rule that exits nonzero writes no golden. The startup chatter needs no
-; guard: it goes to stderr (gh-ocannl-581) and these rules capture stdout only.
-;
-; Windows environment names are case-INSENSITIVE, so the two spellings are ONE variable there: in a
-; rule that clears one and sets the other, the value that must survive has to be the INNER (last)
-; `setenv`, or Windows clears it. Same constraint as `config_var_spellings` in ../dune.
+; rules into env-picked ones, so every rule clears `OCANNL_PROFILE` (an empty value counts as unset
+; at every source). ONE clear per rule since gh-ocannl-652: the lowercase `ocannl_profile` used to
+; be read FIRST -- it beat even the env-picked rule's own setting (Codex P2 on PR #291) -- and is
+; now not read at all, and the dash-prefixed spellings were dropped in gh-ocannl-605, so there is
+; nothing else to clear. For the other keys the executable itself refuses to run when one is set: a
+; clear failure rather than a rewritten golden. That guard covers `no_config_file` too -- it cannot
+; prevent its effect, that being read during Utils' initialization, but a rule that exits nonzero
+; writes no golden. The startup chatter needs no guard: it goes to stderr (gh-ocannl-581) and these
+; rules capture stdout only.
 
 (rule
  (target from_config_file.actual)
  (deps ocannl_config)
  (action
   (setenv
-   ocannl_profile
+   OCANNL_PROFILE
    ""
-   (setenv
-    OCANNL_PROFILE
-    ""
-    (with-stdout-to
-     %{target}
-     (run %{dep:profile_precedence.exe}))))))
+   (with-stdout-to
+    %{target}
+    (run %{dep:profile_precedence.exe})))))
 
 (rule
  (alias runtest)
@@ -48,14 +59,11 @@
  (deps ocannl_config)
  (action
   (setenv
-   ocannl_profile
+   OCANNL_PROFILE
    ""
-   (setenv
-    OCANNL_PROFILE
-    ""
-    (with-stdout-to
-     %{target}
-     (run %{dep:profile_precedence.exe} --ocannl_profile=performance))))))
+   (with-stdout-to
+    %{target}
+    (run %{dep:profile_precedence.exe} --ocannl_profile=performance)))))
 
 (rule
  (alias runtest)
@@ -63,21 +71,16 @@
  (action
   (diff from_cmdline.expected from_cmdline.actual)))
 
-; The env-picked rule clears the spelling that could preempt the one it sets.
-
 (rule
  (target from_env.actual)
  (deps ocannl_config)
  (action
   (setenv
-   ocannl_profile
-   ""
-   (setenv
-    OCANNL_PROFILE
-    performance
-    (with-stdout-to
-     %{target}
-     (run %{dep:profile_precedence.exe}))))))
+   OCANNL_PROFILE
+   performance
+   (with-stdout-to
+    %{target}
+    (run %{dep:profile_precedence.exe})))))
 
 (rule
  (alias runtest)
@@ -95,14 +98,11 @@
  (deps ocannl_config)
  (action
   (setenv
-   ocannl_profile
+   OCANNL_PROFILE
    ""
-   (setenv
-    OCANNL_PROFILE
-    ""
-    (with-stdout-to
-     %{target}
-     (run %{dep:profile_precedence.exe} --profile=prod))))))
+   (with-stdout-to
+    %{target}
+    (run %{dep:profile_precedence.exe} --profile=prod)))))
 
 (rule
  (alias runtest)
@@ -118,17 +118,14 @@
  (deps ocannl_config)
  (action
   (setenv
-   ocannl_profile
+   OCANNL_PROFILE
    ""
-   (setenv
-    OCANNL_PROFILE
-    ""
-    (with-stdout-to
-     %{target}
-     (run
-      %{dep:profile_precedence.exe}
-      --ocannl_profile=performance
-      --ocannl_autotune_rounds=3))))))
+   (with-stdout-to
+    %{target}
+    (run
+     %{dep:profile_precedence.exe}
+     --ocannl_profile=performance
+     --ocannl_autotune_rounds=3)))))
 
 (rule
  (alias runtest)
@@ -146,14 +143,11 @@
  (deps ocannl_config)
  (action
   (setenv
-   ocannl_profile
-   ""
-   (setenv
-    OCANNL_PROFILE
-    performance
-    (with-stdout-to
-     %{target}
-     (run %{dep:profile_precedence.exe} --ocannl_profile=))))))
+   OCANNL_PROFILE
+   performance
+   (with-stdout-to
+    %{target}
+    (run %{dep:profile_precedence.exe} --ocannl_profile=)))))
 
 (rule
  (alias runtest)

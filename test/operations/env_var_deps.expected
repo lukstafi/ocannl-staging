@@ -5,6 +5,7 @@ Directories whose sources this scan reads:
   bin
   lib
   tensor
+  test/config
   test/einsum
   test/gpt2
   test/operations
@@ -16,7 +17,7 @@ Directories whose sources this scan reads:
   test/training
   tools
 
-Configuration keys tracked as ambient dependencies, in both spellings everywhere:
+Configuration keys tracked as ambient dependencies, in the one spelling OCANNL reads:
   backend
   buffer_aliasing
   cc_fp16_arithmetic
@@ -52,9 +53,23 @@ Per-module tracing gates, and the library whose preprocessor_deps declares each:
 Ambient variables a module reads by name at run time, and the stanza that declares each:
   OCANNL_TOOL_TEST_RESTRICT_MASK test/operations/dune, test test_cpu_topology (test/operations/test_cpu_topology.ml)
 
+Ambient environment gates, by dune file and the alias each is attached to:
+  arrayjit/test/dune                       @runtest
+  test/einsum/dune                         @runtest
+  test/gpt2/dune                           @runtest
+  test/gpt2/dune                           @slow
+  test/operations/dune                     @runtest
+  test/operations/dune                     @slow
+  test/operations/profiles/dune            @runtest
+  test/operations/startup_streams/dune     @runtest
+  test/ppx/dune                            @runtest
+  test/training/dune                       @runtest
+  test/training/dune                       @slow
+  benchmarks/dune -- no gate: its one runtest action runs python3 over the benchmark orchestrator's own unit tests, which import no OCANNL executable -- there is no startup check in reach to gate, the same reason `config_dep_completeness` exempts it from the ocannl_config dependency
+
 Declarations of a name OCANNL does not read as a configuration key, exempt by design:
   test/operations/dune:ocannl_backedn -- the fixture behind the `config_var_warnings` golden, which captures the warning a mistyped key draws; the rule tracks the name so that an ambient one arriving does not leave the golden stale
-  test/operations/dune:OCANNL_BACKEDN -- the same fixture, in the other spelling
-  test/operations/dune:ocannl-log_level -- the same fixture's second case: a known key in the dashed spelling that gh-ocannl-605 dropped, which draws the other of the two warnings
+  test/operations/dune:OCANNL_BACKEDN -- the same fixture, in the casing OCANNL reads -- a lowercase one is reported rather than read, so both write to the stream the golden holds
+  test/operations/dune:ocannl-log_level -- the `config_var_fatal_spelling` fixture: a known key in the dashed spelling that gh-ocannl-605 dropped, which since gh-ocannl-652 aborts the run rather than warning
 
-OK: every `(env_var ...)` naming a configuration key declares both spellings in the same field, and every per-module tracing gate is declared by the library whose modules read it.
+OK: every `(env_var ...)` addressed to OCANNL names a spelling a run reads, every test directory carries the ambient gate, and every per-module tracing gate is declared by the library whose modules read it.

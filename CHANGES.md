@@ -1,5 +1,39 @@
 ## [Unreleased]
 
+### Changed
+
+- **One environment spelling, and no silent demotion** (gh-ocannl-652): a configuration key is read
+  from `OCANNL_<KEY>` and from nothing else. The lowercase `ocannl_<key>`, which `read_env_var`
+  used to consult FIRST, is gone — no caller in the repository spelled a variable that way and no
+  documentation recommended it, while every dune rule declaring the ambient variables it is
+  invalidated by paid two lines per key (228 of them; gh-ocannl-628 had just swept them in).
+  Dropping a spelling someone may have exported would be a silent demotion, so it is not merely
+  ignored: an environment variable naming a KNOWN key in a spelling nothing reads is now a FATAL
+  startup error that names the spelling that works, rather than a warning. Names that address
+  OCANNL without naming a key, and lowercase names in the reserved `OCANNL_TOOL_` /
+  `OCANNL_LOG_LEVEL_` namespaces, keep their warnings; an empty value counts as unset everywhere
+  and is never reported. A key written with dashed separators (`OCANNL_PRINT-DECIMALS-PRECISION`,
+  the shape the commandline reads) is recognized as the key it names, so it aborts rather than
+  warning as an unknown key. Commandline spellings are untouched — `--ocannl_backend=cuda` and
+  `--backend=cuda` still work, dashes and all. `Utils.env_var_names` became `Utils.env_var_name`.
+
+  Because no dune rule declares the rejected spellings any more, each test directory carries an
+  `env_spelling_gate` whose `(universe)` dependency makes dune rerun it on every invocation:
+  `ocannl_backend=cuda dune build @test/einsum/runtest` fails there naming the variable, instead of
+  serving that directory's cached passes. One per directory and per alias, since dune aliases are per
+  directory and a `(test)` stanza is a `runtest` action alone — `@slow` carries its own gate rule
+  in the three directories that have slow rules. `test/operations/env_var_deps` fails if a
+  directory has actions on an alias with no gate attached to that alias.
+
+  Also fixes two latent bugs in the same predicate. The case-insensitivity allowance answered
+  "read" for every candidate rather than for case-only variants, so a DASHED spelling classified as
+  a config key on Windows; punctuation is not case, and `Utils.same_env_name` no longer folds it.
+  And it applied on Cygwin, whose POSIX environment is case-SENSITIVE — folding there would have
+  called a lowercase spelling read while `read_env_var` found nothing, which is the demotion the
+  check exists to prevent. The check now runs before every configuration-driven startup effect, so
+  a rejected `ocannl_clean_up_build_files_on_startup=false` no longer loses the artifacts it asked
+  to keep on the way to the abort.
+
 ### Added
 
 - **Training-loop utilities** (gh-ocannl-465), ports of llm.c's loop scaffolding sized for the

@@ -1,19 +1,19 @@
 arrayjit/lib/dune: nothing that runs a test executable
-arrayjit/test/dune: 20 tests
+arrayjit/test/dune: 21 tests
 benchmarks/dune: 1 exempt rule (python3, handed %{dep:test_orchestrate.py})
 benchmarks/runners/ocannl/dune: nothing that runs a test executable
 bin/dune: nothing that runs a test executable
 lib/dune: nothing that runs a test executable
 tensor/dune: nothing that runs a test executable
-test/einsum/dune: 29 tests, 1 inline-test library, 2 exe-running rules
-test/gpt2/dune: 1 test, 1 exe-running rule
+test/einsum/dune: 30 tests, 1 inline-test library, 2 exe-running rules
+test/gpt2/dune: 2 tests, 2 exe-running rules
 test/operations/config/dune: nothing that runs a test executable
-test/operations/dune: 165 tests, 1 inline-test library, 23 exe-running rules
-test/operations/profiles/dune: 6 exe-running rules
-test/operations/startup_streams/dune: 3 exe-running rules
-test/ppx/dune: 2 tests, 3 exempt rules (pp.exe)
+test/operations/dune: 166 tests, 1 inline-test library, 25 exe-running rules
+test/operations/profiles/dune: 1 test, 6 exe-running rules
+test/operations/startup_streams/dune: 1 test, 3 exe-running rules
+test/ppx/dune: 3 tests, 3 exempt rules (pp.exe)
 test/support/dune: nothing that runs a test executable
-test/training/dune: 12 tests, 4 exe-running rules
+test/training/dune: 13 tests, 5 exe-running rules
 tools/dune: nothing that runs a test executable
 
 Stanza kinds that can run a test executable: rule, alias (plus `test`, `tests` and a `library`'s `inline_tests`, which dune runs itself).
@@ -25,4 +25,4 @@ Exempt from the dependency, running an executable that reads no configuration:
   test/ppx:pp.exe -- the ppx driver, run to expand a source file and diff the expansion: `ppx_ocannl` links base, ppxlib, str and einsum_parser -- no configuration reader -- so no `ocannl_config` can reach its output
   benchmarks:python3, handed %{dep:test_orchestrate.py} -- the benchmark orchestrator's own unit tests, in Python: the interpreter runs a script that imports orchestrate.py and runners/bench_common.py and calls no OCANNL executable, so there is no configuration in reach -- and a Python process would not read one anyway
 
-OK: 17 dune files; 229 test stanzas, 2 inline-test libraries and 39 exe-running rules declare ocannl_config; 4 exempt.
+OK: 17 dune files; 237 test stanzas, 2 inline-test libraries and 43 exe-running rules declare ocannl_config; 4 exempt.

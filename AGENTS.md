@@ -93,13 +93,22 @@ Testing notes:
   with `pgrep -f`, which can match the waiter itself.
 - Do not judge a Dune test through a pipe unless `pipefail` is set; otherwise the consumer's exit
   status can hide expectation diffs.
-- Dune re-runs a rule for an environment variable only where the stanza DECLARES it, in BOTH
-  spellings `Utils.env_var_names` builds (`ocannl_<key>` and `OCANNL_<KEY>` — the lowercase one is
-  what `read_env_var` consults first). Every test stanza that can select a backend declares `backend`; one that names its backend or
-  links none declares neither spelling. To pin any other key on a probe, add both spellings to
-  that stanza's deps first. `test/operations/env_var_deps`
-  checks the pairing, and that each library declares the `OCANNL_LOG_LEVEL_<MODULE>` tracing gates
-  its modules read (gh-ocannl-628).
+- Dune re-runs a rule for an environment variable only where the stanza DECLARES it, under the
+  ONE spelling `Utils.env_var_name` builds (`OCANNL_<KEY>`; gh-ocannl-652 dropped the lowercase
+  `ocannl_<key>`, and setting it now aborts the run rather than being read or ignored). Every test
+  stanza that can select a backend declares `OCANNL_BACKEND`; one that names its backend or links
+  none declares nothing. To pin any other key on a probe, add `OCANNL_<KEY>` to that stanza's deps
+  first. `test/operations/env_var_deps` checks that every declaration names a spelling a run reads,
+  and that each library declares the `OCANNL_LOG_LEVEL_<MODULE>` tracing gates its modules read
+  (gh-ocannl-628). Since nothing declares the REJECTED spellings, nothing would rerun for one
+  either: every test directory carries an `env_spelling_gate` depending on `(universe)`, so it
+  reruns every invocation and no directory's suite can come back green with `ocannl_backend=…`
+  ambient. `env_var_deps` fails if a directory has actions on an alias with no gate attached to THAT
+  alias — `runtest` and `slow` are asked separately, a `(test)` stanza being a runtest action and
+  nothing else — and fails if a file that serializes on `ocannl_training_test` has a gate that does
+  not take the lock (the gate starts no pool; an unlocked action in a locked file is what the next
+  training test gets copied from). A single test run by its own alias (`@…/runtest-<name>`) does not build the gate,
+  and can still be served stale.
 - Tests read `test/config/ocannl_config` and can emit .ll/.c/.cu/.metal into build_files/.
 - Config startup chatter (the welcome message, the `log_config_sourcing` trace, the profile
   banner) goes to stderr, so an OCANNL-linked executable's stdout stays a clean data channel and

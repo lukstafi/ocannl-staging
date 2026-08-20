@@ -2,8 +2,8 @@
 # or as a template for writing `ocannl_config` files. The `ocannl_` prefix is optional
 # everywhere: commandline arguments accept both `--ocannl_<name>=<value>` and
 # `--<name>=<value>`; environment variables still require the prefix (to avoid
-# conflicts with other tools) and are spelled `ocannl_<name>` or `OCANNL_<NAME>`,
-# those two and nothing else; in `ocannl_config` files the prefix has always been
+# conflicts with other tools) and are spelled `OCANNL_<NAME>`, uppercase, that one
+# and nothing else; in `ocannl_config` files the prefix has always been
 # optional. Commandline arguments additionally accept dashes in place of underscores,
 # as two independent choices: the prefix separator on its own, and the name's own
 # separators all together -- `--ocannl_log_level=1`, `--ocannl-log_level=1`,
@@ -48,8 +48,18 @@
 # A mistake is reported by every source, and by name: an unknown key in an `ocannl_config`
 # file draws `OCANNL warning: unknown config key "..." in <file>` and the run continues on
 # the defaults, an `--ocannl_`-prefixed commandline argument no key would read draws a
-# warning, and so does an `ocannl_`-prefixed environment variable that names no key or is
-# spelled in a way nothing reads (`ocannl-log_level`). Only a built-in profile's payload is
+# warning, and so does an `ocannl_`-prefixed environment variable that names no key.
+# One mistake is FATAL rather than warned about: an environment variable that names a
+# KNOWN key in a spelling nothing reads -- `ocannl_backend=cuda`, `ocannl-log_level=1`,
+# `OCANNL_PRINT-DECIMALS-PRECISION=7` (dashes separate a key on the commandline, never here) --
+# since a value written to decide something would otherwise be dropped in silence and the
+# run would proceed on the default. The message names the spelling that works, and the fix
+# is to write that: uppercase the name, and replace any dash inside the key with an
+# underscore -- `OCANNL_PRINT-DECIMALS-PRECISION` becomes `OCANNL_PRINT_DECIMALS_PRECISION`,
+# not merely an uppercased form of itself. (Windows environment names are case-insensitive,
+# so there `ocannl_backend` IS `OCANNL_BACKEND` and is read; a dashed name is unread on every
+# platform, case-insensitivity being about case and not punctuation.) An empty value counts
+# as unset everywhere and is never reported. Only a built-in profile's payload is otherwise
 # fatal about an unknown key, that being this file's own mistake rather than yours. Two
 # environment namespaces are reserved for names that address OCANNL without being
 # configuration, and are never reported: `OCANNL_TOOL_...`, which this repository's scripts

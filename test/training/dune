@@ -1,6 +1,44 @@
 (copy_files
  (files ../config/ocannl_config))
 
+; The ambient-environment gate (gh-ocannl-652). `(universe)` makes dune rerun it on every
+; invocation, which is the only way a rejected environment spelling reaches a check at all:
+; every other rule here is cached against declarations that no longer name those spellings,
+; so `ocannl_backend=cuda dune build @test/training/runtest` would otherwise serve this
+; directory's previous run wholesale. One per test directory, because dune aliases are per
+; directory; the source is shared, and its header says why the dependency is the world
+; rather than 112 key names.
+;
+; Takes `ocannl_training_test` like every other action in this file. Not for contention of its
+; own -- the gate links `arrayjit.utils` and starts no OpenMP pool, so the reason the lock exists
+; does not reach it -- but because an unlocked action here is a trap for whoever copies the
+; nearest stanza to write a real training test (Codex P1 round 4). It holds the lock for the
+; microseconds it takes to read the environment.
+
+(copy_files
+ (files ../config/env_spelling_gate.ml))
+
+(test
+ (name env_spelling_gate)
+ (package neural_nets_lib)
+ (locks ocannl_training_test)
+ (deps ocannl_config (universe))
+ (modules env_spelling_gate)
+ (libraries base stdio arrayjit.utils arrayjit.verdict))
+
+; The same gate on the `slow` alias, which is a separate entry point: `dune build @slow` builds no
+; `(test)` stanza, so without this rule a cached `@slow` run would serve every slow result with a
+; rejected spelling ambient (Codex P1 round 3). Runs the executable the `(test)` stanza above
+; builds, so there is one gate binary per directory however many aliases reach it.
+
+(rule
+ (alias slow)
+ (package neural_nets_lib)
+ (locks ocannl_training_test)
+ (deps ocannl_config (universe))
+ (action
+  (run %{dep:env_spelling_gate.exe})))
+
 ; Training executables can each saturate the CPU through the cc backend's process-local OpenMP
 ; pool. Serialize their actions by default: concurrent pools oversubscribe non-macOS hosts badly,
 ; while compilation and tests outside this directory remain parallel.
@@ -22,7 +60,6 @@
  (locks ocannl_training_test)
  (deps
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
@@ -35,7 +72,6 @@
  (locks ocannl_training_test)
  (deps
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (libraries ocannl dataprep)
  (preprocess
@@ -50,7 +86,6 @@
  (locks ocannl_training_test)
  (deps
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules bigram)
  (libraries ocannl dataprep)
@@ -64,7 +99,6 @@
  (locks ocannl_training_test)
  (deps
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (libraries ocannl dataprep arrayjit.verdict)
  (preprocess
@@ -86,7 +120,6 @@
  (deps
   mlp_names.expected
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  ; no-infer keeps mlp_names.actual from becoming a build target, so plain
  ; `dune build` (@all) does not run this slow exe -- only `dune build @slow` does.
@@ -114,7 +147,6 @@
  (deps
   mlp_bn_names.expected
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  ; no-infer keeps mlp_bn_names.actual from becoming a build target (see mlp_names).
  (action
@@ -138,7 +170,6 @@
  (locks ocannl_training_test)
  (deps
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules circles_conv)
  (libraries ocannl dataprep)
@@ -167,7 +198,6 @@
  (deps
   mnist_conv.expected
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  ; no-infer keeps mnist_conv.actual from becoming a build target (see mlp_names).
  (action
@@ -196,7 +226,6 @@
  (deps
   cifar_conv.expected
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  ; no-infer keeps cifar_conv.actual from becoming a build target (see mlp_names).
  (action
@@ -216,7 +245,6 @@
  (locks ocannl_training_test)
  (deps
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules fsm_transformer)
  (libraries ocannl)
@@ -235,7 +263,6 @@
  (locks ocannl_training_test)
  (deps
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules transformer_names)
  (libraries ocannl dataprep)
@@ -251,7 +278,6 @@
  (locks ocannl_training_test)
  (deps
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules tokenizer_roundtrip)
  (libraries base ocannl stdio dataprep)
@@ -277,7 +303,6 @@
  (locks ocannl_training_test)
  (deps
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules virtual_grads_parity)
  (libraries base ocannl stdio)
@@ -294,7 +319,6 @@
  (locks ocannl_training_test)
  (deps
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules mixed_prec_parity)
  (libraries base ocannl stdio arrayjit.verdict)
@@ -311,7 +335,6 @@
  (locks ocannl_training_test)
  (deps
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (modules loop_utils)
  (libraries base ocannl stdio arrayjit.verdict test_utils)

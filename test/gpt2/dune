@@ -1,6 +1,36 @@
 (copy_files
  (files ../config/ocannl_config))
 
+; The ambient-environment gate (gh-ocannl-652). `(universe)` makes dune rerun it on every
+; invocation, which is the only way a rejected environment spelling reaches a check at all:
+; every other rule here is cached against declarations that no longer name those spellings,
+; so `ocannl_backend=cuda dune build @test/gpt2/runtest` would otherwise serve this
+; directory's previous run wholesale. One per test directory, because dune aliases are per
+; directory; the source is shared, and its header says why the dependency is the world
+; rather than 112 key names.
+
+(copy_files
+ (files ../config/env_spelling_gate.ml))
+
+(test
+ (name env_spelling_gate)
+ (package neural_nets_lib)
+ (deps ocannl_config (universe))
+ (modules env_spelling_gate)
+ (libraries base stdio arrayjit.utils arrayjit.verdict))
+
+; The same gate on the `slow` alias, which is a separate entry point: `dune build @slow` builds no
+; `(test)` stanza, so without this rule a cached `@slow` run would serve every slow result with a
+; rejected spelling ambient (Codex P1 round 3). Runs the executable the `(test)` stanza above
+; builds, so there is one gate binary per directory however many aliases reach it.
+
+(rule
+ (alias slow)
+ (package neural_nets_lib)
+ (deps ocannl_config (universe))
+ (action
+  (run %{dep:env_spelling_gate.exe})))
+
 (library
  (name gpt2_model)
  (package neural_nets_lib)
@@ -30,7 +60,6 @@
  (modules gpt2_tiny_dry_run)
  (deps
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  (libraries base ocannl stdio gpt2_model arrayjit.verdict)
  (preprocess
@@ -42,7 +71,6 @@
  (deps
   gpt2_dry_run.expected
   ocannl_config
-  (env_var ocannl_backend)
   (env_var OCANNL_BACKEND))
  ; no-infer keeps gpt2_dry_run.actual from becoming a build target, so plain
  ; `dune build` (@all) does not run this slow exe -- only `dune build @slow` does.
