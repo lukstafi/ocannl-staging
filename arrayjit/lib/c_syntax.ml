@@ -1006,8 +1006,14 @@ module C_syntax (B : C_syntax_config) = struct
   (* Scope-local scalars an RNG conversion writes. Their declaration, their assignments and their
      reads all have to agree on a precision, and only a whole-proc scan sees all three (a
      [Declare_local] carries no value), so the exclusion is resolved once here rather than per
-     statement. A superset would only forgo an optimization, never mis-render. *)
-  let rng_scope_local_uids =
+     statement. A superset would only forgo an optimization, never mis-render. Keyed per
+     [scope_id], not per tnode (Codex P2 round 2 on PR #396): virtualization copies of an
+     rng-consuming node each carry their own rng-mentioning [Set_local], so every copy is marked
+     on its own, while an UNRELATED scope over the same tnode — a schedule-minted accumulation
+     into a node that elsewhere consumes rng — keeps its accumulator residency instead of being
+     pinned to storage by the shared uid. A [Tile_mma]'s scalar fallback renders through the same
+     [scope_prec_of], so the scan descends into it. *)
+  let rng_scope_ids =
     let acc = Hash_set.create (module Int) in
     let rec scan_sc (llsc : Low_level.scalar_t) =
       match llsc with
@@ -1033,15 +1039,16 @@ module C_syntax (B : C_syntax_config) = struct
           scan_sc c;
           scan body
       | Set_local (id, v) ->
-          if mentions_rng_conversion v then Hash_set.add acc id.Low_level.tn.Tn.uid;
+          if mentions_rng_conversion v then Hash_set.add acc id.Low_level.scope_id;
           scan_sc v
       | Set { llsc; _ } -> scan_sc llsc
       | Set_dynamic { dyn_value = v, _; llsc; _ } ->
           scan_sc v;
           scan_sc llsc
       | Set_from_vec { arg = a, _; _ } -> scan_sc a
+      | Tile_mma { fallback; _ } -> scan fallback
       | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _ | Workgroup_barrier
-      | Tile_mma _ ->
+        ->
           ()
     in
     Array.iter B.procs ~f:(fun l -> scan l.Low_level.llc);
@@ -1056,8 +1063,20 @@ module C_syntax (B : C_syntax_config) = struct
      accumulator (Unroll ~materialize / Partition) resides at the same width as the widened serial
      fallback below ([try_widen_serial_reduce], which registers its codegen-minted scopes here) —
      on the backends where the two precisions coincide this census is inert. Classified per
-     [scope_id] over the scope's own updates wherever they sit, which covers both [Local_scope]
-     values and the [Declare_local]-lifted form of [hoist_cross_statement_cse]. *)
+     [scope_id] over the scope's own updates wherever they sit, which covers [Local_scope] values,
+     the [Declare_local]-lifted form of [hoist_cross_statement_cse], and scopes inside a
+     [Tile_mma]'s scalar fallback (rendered on decline through the same [scope_prec_of]).
+
+     The residency must be observation-neutral, and it is only while no control flow reads the
+     local mid-reduction: a guard observing the accumulator (e.g. [If (local < c)] around
+     [local += x]) would execute a DIFFERENT set of iterations under a widened local, since the
+     wide value reaches sums the per-step-narrowed one rounds away. So any local read by an [If]
+     condition is disqualified (Codex P1 round 2 on PR #396) — a stronger condition than the
+     hoisting license ([scope_updates_reduce_op] demands guard PURITY, because hoisting moves the
+     init and store across the guard; residency moves nothing, so a data-dependent guard that
+     does not read the local stays eligible). A nested [Local_scope] inside a condition is not a
+     read of ITS local at this level: the condition observes only that scope's once-narrowed
+     result, which is residency-neutral, and the main walk classifies its interior. *)
   let accum_scope_ids =
     let verdicts = Hashtbl.create (module Int) in
     let classify (id : Low_level.scope_id) v =
@@ -1069,6 +1088,22 @@ module C_syntax (B : C_syntax_config) = struct
             | Some _ -> `Bad)
       | None ->
           if Low_level.scalar_reads_scope ~id v then Hashtbl.set verdicts ~key:id.scope_id ~data:`Bad
+    in
+    let rec guarding_reads_sc (llsc : Low_level.scalar_t) =
+      match llsc with
+      | Low_level.Get_local id -> Hashtbl.set verdicts ~key:id.Low_level.scope_id ~data:`Bad
+      | Local_scope _ | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _
+        ->
+          ()
+      | Get_dynamic { dyn_value = v, _; _ } -> guarding_reads_sc v
+      | Ternop (_, (a, _), (b, _), (c, _)) ->
+          guarding_reads_sc a;
+          guarding_reads_sc b;
+          guarding_reads_sc c
+      | Binop (_, (a, _), (b, _)) ->
+          guarding_reads_sc a;
+          guarding_reads_sc b
+      | Unop (_, (a, _)) -> guarding_reads_sc a
     in
     let rec scan_sc (llsc : Low_level.scalar_t) =
       match llsc with
@@ -1091,6 +1126,7 @@ module C_syntax (B : C_syntax_config) = struct
           scan b
       | For_loop { body; _ } -> scan body
       | If { cond = c, _; body } ->
+          guarding_reads_sc c;
           scan_sc c;
           scan body
       | Set_local (id, v) ->
@@ -1101,8 +1137,9 @@ module C_syntax (B : C_syntax_config) = struct
           scan_sc v;
           scan_sc llsc
       | Set_from_vec { arg = a, _; _ } -> scan_sc a
+      | Tile_mma { fallback; _ } -> scan fallback
       | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _ | Workgroup_barrier
-      | Tile_mma _ ->
+        ->
           ()
     in
     Array.iter B.procs ~f:(fun l -> scan l.Low_level.llc);
@@ -1116,7 +1153,7 @@ module C_syntax (B : C_syntax_config) = struct
      wholesale (gh-ocannl-517), reduction-shaped or not. *)
   let scope_prec_of (id : Low_level.scope_id) =
     let p = Lazy.force id.tn.Tn.storage_prec in
-    if Hash_set.mem rng_scope_local_uids id.tn.Tn.uid then p
+    if Hash_set.mem rng_scope_ids id.Low_level.scope_id then p
     else if Hash_set.mem accum_scope_ids id.scope_id then acc_prec p
     else comp_prec p
 
