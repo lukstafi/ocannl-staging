@@ -20,6 +20,16 @@
    has no `deps` field at all, so the dep belongs on its companion rule; - and a directory with any
    such stanza has an `ocannl_config` to depend on in the first place.
 
+   What the golden holds, and what it deliberately does not: the KINDS of test-running stanza each
+   dune file has, not how many of each. A tally there moved on every test added anywhere in the
+   repository, so every contributor had to promote this file over a change that never touched it --
+   a promote indistinguishable from blessing a real regression here -- and one hot line collected a
+   textual conflict from every parallel branch (gh-ocannl-665). The tallies were the "the scan did
+   not go blind" signal, which survives in two churn-free forms: a directory that stops being read
+   loses its kinds from its line below, and within a directory `Scan.head_occurrences` reads a floor
+   off the raw text that the sexp walk is held to. The exact numbers go to stderr, which a `(test)`
+   stanza does not diff.
+
    An `(executable)` no rule runs is structurally not a site and needs no exemption: that is how the
    diagnostic and tutorial executables (`bench_circles_step`, `gpt2_generate`, the `@slow` runners'
    companions) stay off this list without anyone maintaining one. What does need an exemption is a
@@ -104,6 +114,18 @@ let () =
   let exemptions_used = ref (Set.empty (module String)) in
   let counts = Hashtbl.create (module String) in
   let bump kind = Hashtbl.update counts kind ~f:(fun n -> 1 + Option.value n ~default:0) in
+  (* The per-directory tallies, reported on stderr rather than in the golden, and how many of them
+     the raw-text floor below had anything to say about -- a floor that applies nowhere would be a
+     silent way for this check to become decoration. *)
+  let inventory = ref [] in
+  let floors_checked = ref 0 in
+  let floor_holes = ref 0 in
+  printf
+    "Which kinds of test-running stanza each dune file has: presence, not tallies. A tally here\n\
+     moved whenever a test was added anywhere in the repository, so the numbers go to stderr\n\
+     instead (gh-ocannl-665). What they guarded is guarded still: a line below changes when a\n\
+     directory gains its first stanza of a kind or loses its last, and within a directory the\n\
+     raw-text floor reported by the claim at the end holds the count up.\n\n";
   List.iter dune_files ~f:(fun (dune_file, on_disk) ->
       let dir = Stdlib.Filename.dirname dune_file in
       let content = In_channel.read_all on_disk in
@@ -242,22 +264,55 @@ let () =
         |> List.dedup_and_sort ~compare:String.compare
         |> String.concat ~sep:", "
       in
-      let counted =
+      (* The floor the raw text puts under the sexp walk: every `(test …)` and `(tests …)` form is
+         at least one test site, every `(inline_tests …)` field at least one inline-test library.
+         Read by [Scan.head_occurrences], which shares nothing with the walk, so a walk that stops
+         seeing stanzas is caught here instead of quietly reporting a smaller number. Sites are
+         counted including exempt ones -- an exemption is about the config dependency, not about
+         whether the stanza was seen. *)
+      let seen kind = List.count described ~f:(fun (k, _, _) -> Poly.equal k kind) in
+      let floor head = Scan.head_occurrences content ~head in
+      let floors =
         [
-          (tally Scan.Test, "test", "tests");
-          (tally Scan.Inline_tests, "inline-test library", "inline-test libraries");
-          (tally Scan.Runs_executable, "exe-running rule", "exe-running rules");
-          ( List.length exempted,
-            "exempt rule (" ^ exempt_names ^ ")",
-            "exempt rules (" ^ exempt_names ^ ")" );
+          (seen Scan.Test, floor "test" + floor "tests", "test stanzas");
+          (seen Scan.Inline_tests, floor "inline_tests", "inline-test libraries");
         ]
-        |> List.filter_map ~f:(fun (n, singular, plural) ->
-            if n = 0 then None
-            else Some (Printf.sprintf "%d %s" n (if n = 1 then singular else plural)))
+      in
+      List.iter floors ~f:(fun (seen, floor, what) ->
+          if seen < floor then (
+            Int.incr floor_holes;
+            fail
+              (Printf.sprintf
+                 "%s: the raw text shows %d %s but the scan placed only %d -- it is reading the \
+                  file with a hole in it"
+                 dune_file floor what seen)));
+      if List.exists floors ~f:(fun (_, floor, _) -> floor > 0) then Int.incr floors_checked;
+      (* The golden holds which KINDS a dune file has, not how many of each: a tally there made
+         every test added anywhere in the repository churn this file, and put a single hot line in
+         the way of every parallel branch (gh-ocannl-665). What blindness costs is still visible --
+         a directory whose stanzas stop being seen loses its kinds from the line below, and within a
+         directory the floor above holds the count up. The exact numbers go to stderr, which a
+         `(test)` stanza does not diff. *)
+      let present =
+        [
+          (tally Scan.Test, "tests");
+          (tally Scan.Inline_tests, "inline-test libraries");
+          (tally Scan.Runs_executable, "exe-running rules");
+          (List.length exempted, "exempt rules (" ^ exempt_names ^ ")");
+        ]
+        |> List.filter_map ~f:(fun (n, what) -> if n = 0 then None else Some what)
       in
       printf "%s: %s\n" dune_file
-        (if List.is_empty counted then "nothing that runs a test executable"
-         else String.concat ~sep:", " counted));
+        (if List.is_empty present then "nothing that runs a test executable"
+         else String.concat ~sep:", " present);
+      inventory :=
+        Printf.sprintf "  %s: %d tests (floor %d), %d inline-test libraries (floor %d), %d \
+                        exe-running rules, %d exempt"
+          dune_file (tally Scan.Test)
+          (floor "test" + floor "tests")
+          (tally Scan.Inline_tests) (floor "inline_tests")
+          (tally Scan.Runs_executable) (List.length exempted)
+        :: !inventory);
   let stale =
     Set.diff (Set.of_list (module String) (List.map exempt_sites ~f:fst)) !exemptions_used
   in
@@ -281,10 +336,26 @@ let () =
   printf "\nExempt from the dependency, running an executable that reads no configuration:\n";
   List.iter exempt_sites ~f:(fun (key, why) -> printf "  %s -- %s\n" key why);
   let count kind = Option.value (Hashtbl.find counts kind) ~default:0 in
+  (* Not a golden line: stderr is where a number that moves with every added test can be read
+     without being diffed (gh-ocannl-665). A `(test)` stanza diffs stdout only. *)
+  eprintf "Stanzas that run a test executable, by dune file (not diffed -- see gh-ocannl-665):\n%s\n"
+    (String.concat ~sep:"\n" (List.rev !inventory));
+  eprintf
+    "Totals: %d dune files; %d test stanzas, %d inline-test libraries and %d exe-running rules \
+     declare %s; %d exempt.\n"
+    (List.length dune_files) (count "test") (count "inline tests") (count "rule running")
+    Scan.config_file (count "exempt");
+  (* The blindness check, stated so that its passing reading is `true`: the sexp walk placed at
+     least as many stanzas as a reader that shares none of its machinery finds in the raw text. This
+     is what the pinned tallies used to be for, minus the churn -- and unlike a golden line it
+     cannot be `dune promote`d into passing. *)
+  printf "\n";
+  Verdict.p "the scan places every test stanza and inline-test library the dune sources show"
+    (!floor_holes = 0);
+  Verdict.p "that floor applies to more than one dune file" (!floors_checked > 1);
   if not (Verdict.any_failed ()) then
     printf
       "\n\
-       OK: %d dune files; %d test stanzas, %d inline-test libraries and %d exe-running rules \
-       declare %s; %d exempt.\n"
-      (List.length dune_files) (count "test") (count "inline tests") (count "rule running")
-      Scan.config_file (count "exempt")
+       OK: every test stanza, inline-test library and exe-running rule in these files declares %s, \
+       apart from the sites exempted above.\n"
+      Scan.config_file

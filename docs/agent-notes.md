@@ -1503,6 +1503,22 @@ that they earn a lookup rather than always-loaded space.
   is anchored to the directory that generates them. And where the premise is "this value happens to
   equal that constant", read the constant from where it is defined rather than restating the
   coincidence: an unchecked default is the one name no call site spells.
+- The `.expected` golden of such a repository-wide check should hold what is TRUE of the repository,
+  not how much of it there is. A tally — "170 tests in this directory", "241 test stanzas declare
+  the config" — moves on every correct addition anywhere, so every unrelated contributor has to
+  promote a file they did not touch, and the promote is indistinguishable from blessing a real
+  regression in that same file; worse, one hot line in one file collects a textual conflict from
+  every parallel branch at once (gh-ocannl-665, where it was an arc's only rebase conflict). The
+  counts are usually there as the "the scan did not go blind" signal, which is a real thing to keep
+  — so keep it, elsewhere. Three places it can live, all churn-free: PRESENCE in the golden (which
+  kinds of stanza a directory has, changing only when it gains its first or loses its last), a floor
+  read by a SECOND reader that shares no machinery with the first (`Dune_stanza_scan.head_occurrences`
+  counts `(test` off the raw text, and a sexp walk going blind cannot take it down too), and the
+  exact numbers on STDERR, which a `(test)` stanza does not diff. Assert the floor through `Verdict`
+  rather than as a golden line, so a scan that goes blind cannot be promoted back to green. The
+  sibling checks are worth a glance when touching this genre and were both fine: `env_var_deps` lists
+  names only, and `digest_completeness`'s key count moves only alongside its own enumerated key list
+  — a number in the same commit as the change it describes costs nothing.
 - `git` strips TRAILING spaces from a `.gitignore` pattern (unless backslash-quoted) and keeps
   LEADING ones, so an accidentally indented ` /foo/` is a pattern beginning with a space and matches
   nothing. Any code reading that file must not `String.strip` both ends, or it reports coverage git
