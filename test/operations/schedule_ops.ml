@@ -31,12 +31,9 @@ let on_gpu =
   || String.is_substring backend_name ~substring:"cuda"
   || String.is_substring backend_name ~substring:"hip"
 
-let read_generated base_name =
-  let ext = if String.is_substring backend_name ~substring:"metal" then ".metal" else ".c" in
-  let ext = if String.is_substring backend_name ~substring:"cuda" then ".cu" else ext in
-  let ext = if String.is_substring backend_name ~substring:"hip" then ".hip" else ext in
-  let path = Utils.build_file (base_name ^ ext) in
-  if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
+module Generated = Test_utils.Generated
+
+let () = Generated.init ~backend_name
 
 let has_hardware_regs src =
   String.is_substring src ~substring:"gid." || String.is_substring src ~substring:"blockIdx."
@@ -76,18 +73,16 @@ let () =
         Sched.apply [ op ] opt)
   in
   p "split (dividing factor) values correct" (Array.for_all2_exn got_div expected_c ~f:approx);
-  (match read_generated "split_div" with
-  | None -> p "split (dividing factor) structure as expected" false
-  | Some src ->
-      let has s = String.is_substring src ~substring:s in
-      let ok =
-        if on_gpu then
-          (* Hardware bindings for the split pair, the inner elementwise loop stays serial, and no
-             guard: 2 divides 4 (fold) and extents are slot-uniform (no launch guard). *)
-          has_hardware_regs src && has "for (" && not (has "if (")
-        else (not (has_hardware_regs src)) && has "for (" && not (has "if (")
-      in
-      p "split (dividing factor) structure as expected" ok);
+  (let src = Generated.read "split_div" in
+   let has s = String.is_substring src ~substring:s in
+   let ok =
+     if on_gpu then
+       (* Hardware bindings for the split pair, the inner elementwise loop stays serial, and no
+          guard: 2 divides 4 (fold) and extents are slot-uniform (no launch guard). *)
+       has_hardware_regs src && has "for (" && not (has "if (")
+     else (not (has_hardware_regs src)) && has "for (" && not (has "if (")
+   in
+   p "split (dividing factor) structure as expected" ok);
 
   (* --- Split with a non-dividing factor: the remainder guard survives on every backend --- *)
   let got_rem =
@@ -97,9 +92,7 @@ let () =
         Sched.apply [ op ] opt)
   in
   p "split (remainder) values correct" (Array.for_all2_exn got_rem expected_c ~f:approx);
-  (match read_generated "split_rem" with
-  | None -> p "split (remainder) guard survives" false
-  | Some src -> p "split (remainder) guard survives" (String.is_substring src ~substring:"if ("));
+  Generated.assert_emits ~routine:"split_rem" ~contains:"if (" "split (remainder) guard survives";
 
   (* --- Swap of the perfectly nested elementwise pair --- *)
   let got_swap =
@@ -109,14 +102,12 @@ let () =
         Sched.apply [ Sched.Swap { outer = i; inner = j } ] opt)
   in
   p "swap values correct" (Array.for_all2_exn got_swap expected_c ~f:approx);
-  (match read_generated "swap_ij" with
-  | None -> p "swap reorders the loop bounds" false
-  | Some src ->
-      (* After the interchange the extent-8 loop is outermost: [<= 7] appears before [<= 3]. *)
-      let idx7 = String.substr_index src ~pattern:"<= 7" in
-      let idx3 = String.substr_index src ~pattern:"<= 3" in
-      p "swap reorders the loop bounds"
-        (match (idx7, idx3) with Some i7, Some i3 -> i7 < i3 | _ -> false));
+  (let src = Generated.read "swap_ij" in
+   (* After the interchange the extent-8 loop is outermost: [<= 7] appears before [<= 3]. *)
+   let idx7 = String.substr_index src ~pattern:"<= 7" in
+   let idx3 = String.substr_index src ~pattern:"<= 3" in
+   p "swap reorders the loop bounds"
+     (match (idx7, idx3) with Some i7, Some i3 -> i7 < i3 | _ -> false));
 
   (* --- Retype to Vectorized (gh-ocannl-164): a pragma-annotated serial loop on the C backends, a
      plain serial loop on GPU backends (empty [vectorize_pragma]); values must match either way, and
@@ -128,18 +119,16 @@ let () =
         Sched.apply [ Sched.Retype { axis = j; ty = LL.Vectorized } ] opt)
   in
   p "vectorized retype values correct" (Array.for_all2_exn got_vec expected_c ~f:approx);
-  (match read_generated "vec_inner" with
-  | None -> p "vectorized retype structure as expected" false
-  | Some src ->
-      let has s = String.is_substring src ~substring:s in
-      let ok =
-        if on_gpu then has "for (" && not (has "#pragma")
-        else
-          (* Explicit SIMD emission (GCC/Clang vector extensions) supersedes the pragma hints for
-             eligible bodies; the serial remainder loop follows the vector main loop. *)
-          has "vector_size" && has "__builtin_memcpy" && not (has "#pragma")
-      in
-      p "vectorized retype structure as expected" ok);
+  (let src = Generated.read "vec_inner" in
+   let has s = String.is_substring src ~substring:s in
+   let ok =
+     if on_gpu then has "for (" && not (has "#pragma")
+     else
+       (* Explicit SIMD emission (GCC/Clang vector extensions) supersedes the pragma hints for
+          eligible bodies; the serial remainder loop follows the vector main loop. *)
+       has "vector_size" && has "__builtin_memcpy" && not (has "#pragma")
+   in
+   p "vectorized retype structure as expected" ok);
 
   (* --- The default GPU annotator on a two-nest elementwise kernel (4x8 and 6x8: unequal Grid
      extents => launch-extent guard on GPU backends) --- *)
@@ -168,17 +157,15 @@ let () =
     (Array.for_all2_exn got_c1 expected_c ~f:approx
     && Array.for_all2_exn got_c2 expected_c2 ~f:approx);
   p "default annotator schedules both nests" (!sched_len = 4);
-  (match read_generated "combo_default" with
-  | None -> p "default annotator structure as expected" false
-  | Some src ->
-      let has s = String.is_substring src ~substring:s in
-      let ok =
-        if on_gpu then
-          (* Both nests fully hardware-bound (no loops left) and the smaller Grid nest guarded. *)
-          has_hardware_regs src && has "if (" && not (has "for (")
-        else (not (has_hardware_regs src)) && has "for ("
-      in
-      p "default annotator structure as expected" ok);
+  (let src = Generated.read "combo_default" in
+   let has s = String.is_substring src ~substring:s in
+   let ok =
+     if on_gpu then
+       (* Both nests fully hardware-bound (no loops left) and the smaller Grid nest guarded. *)
+       has_hardware_regs src && has "if (" && not (has "for (")
+     else (not (has_hardware_regs src)) && has "for ("
+   in
+   p "default annotator structure as expected" ok);
 
   (* --- The default GPU annotator on a matmul: values must match the unscheduled twin whatever the
      conservative analysis decides (reduction loops stay serial in the preset) --- *)

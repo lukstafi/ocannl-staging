@@ -1793,7 +1793,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_ops)
- (libraries base ocannl stdio pprint arrayjit.verdict)
+ (libraries base ocannl stdio pprint arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
