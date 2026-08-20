@@ -502,11 +502,29 @@ type env_var_class =
     shell scripts and the [%%global_debug_log_level_from_env_var] arguments spell. Since
     gh-ocannl-652 those two answers are the same one: uppercase, everywhere under the prefix.
 
-    Both answers collapse on Windows, where the environment is case-insensitive and every casing of
-    a name is the same variable. *)
+    Case, and only case, collapses on Windows: the environment folds [ocannl_backend] onto
+    [OCANNL_BACKEND] there, so the same name is read on one platform and not the other. It does NOT
+    fold punctuation -- [getenv "OCANNL_LOG_LEVEL"] finds nothing set as [ocannl-log_level] on any
+    platform -- so {!same_env_name} compares the whole name rather than answering "true" to every
+    candidate wherever the environment is case-insensitive (Codex P1 on PR #389). The earlier form
+    classified every dashed spelling as read on Windows, which is where the dashed spellings this
+    file's goldens lean on would have stopped being unread.
+
+    A key's separators are normalized before the known-key lookup, and only for it:
+    [OCANNL_PRINT-DECIMALS-PRECISION] names [print_decimals_precision] recognizably, so it is an
+    unread SPELLING of a known key -- fatal, per {!unread_env_vars} -- rather than an unknown key
+    that would warn and let the run continue on the default (Codex P2 on PR #389). The dashes are
+    idiomatic on the commandline, where {!cmdline_var_names} reads exactly this shape, which is why
+    someone writes one here. What the normalization does not do is make it a spelling: the
+    canonical name it is compared against is still the undashed one. *)
+
+(** Whether two environment variable names denote the same variable on this platform: case-folded
+    where the environment is, and otherwise exactly. *)
+let same_env_name a b =
+  if env_names_case_insensitive then String.Caseless.equal a b else String.equal a b
+
 let classify_env_var name =
   let lower = String.lowercase name in
-  let reads spellings = env_names_case_insensitive || List.mem spellings name ~equal:String.equal in
   let addressed =
     List.find_map [ "ocannl_"; "ocannl-" ] ~f:(fun prefix -> String.chop_prefix lower ~prefix)
   in
@@ -516,13 +534,23 @@ let classify_env_var name =
       match
         List.find env_var_reserved_prefixes ~f:(fun prefix -> String.is_prefix lower ~prefix)
       with
+      (* A reserved name has no canonical spelling of its own -- the module or tool after the
+         prefix names it -- so the question is whether THIS name is the uppercase its reader
+         spells. Vacuously yes on Windows, which is the right answer there. *)
       | Some prefix ->
-          if reads [ String.uppercase name ] then Env_reserved prefix
+          if same_env_name name (String.uppercase name) then Env_reserved prefix
           else Env_unread_reserved (String.uppercase prefix)
-      | None ->
-          if not (Set.mem known_config_keys key) then Env_unknown_key key
-          else if reads [ env_var_name key ] then Env_config_key key
-          else Env_unread_spelling key)
+      | None -> (
+          let known =
+            List.find [ key; String.tr key ~target:'-' ~replacement:'_' ]
+              ~f:(Set.mem known_config_keys)
+          in
+          match known with
+          (* Reported under the name as written, the normalization having recognized nothing. *)
+          | None -> Env_unknown_key key
+          | Some key ->
+              if same_env_name name (env_var_name key) then Env_config_key key
+              else Env_unread_spelling key))
 
 (** Every environment variable that addresses OCANNL's configuration and that nothing reads: the
     name, whether it is fatal, and the reason, in the order the names sort.

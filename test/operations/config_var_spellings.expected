@@ -45,6 +45,7 @@ Environment variable names, as classified by `Utils.classify_env_var`:
   "OCANNL_BACKEND"           configuration key backend
   "ocannl-backend"           unread spelling of backend
   "OCANNL-BACKEND"           unread spelling of backend
+  "OCANNL_PRINT-DECIMALS-PRECISION" unread spelling of print_decimals_precision
   "OCANNL_BACKEDN"           addressed to OCANNL, unknown key backedn
   "OCANNL_TOOL_SWEEP_STATE"  reserved namespace ocannl_tool_
   "OCANNL_LOG_LEVEL"         configuration key log_level

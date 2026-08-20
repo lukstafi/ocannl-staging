@@ -76,8 +76,11 @@ let () =
 
    No case-only variant is listed: `ocannl_backend` is one variable with `OCANNL_BACKEND` on
    Windows and a different one everywhere else, so its classification is correct and different per
-   platform, which is not something a golden can hold. The dashed spellings, which are unread on
-   every platform, carry that leg instead, and the case-only ones are claimed below. *)
+   platform, which is not something a golden can hold. The dashed spellings carry that leg instead:
+   they are unread on every platform, punctuation being the one thing a case-insensitive
+   environment does NOT fold -- which is a property of `Utils.same_env_name` rather than a wish,
+   since the predicate it replaced answered "read" to every candidate on Windows (Codex P1 on PR
+   #389). The case-only variants are claimed below. *)
 let describe = function
   | Utils.Env_not_addressed -> "not addressed to OCANNL"
   | Utils.Env_reserved prefix -> "reserved namespace " ^ prefix
@@ -93,6 +96,10 @@ let () =
       "OCANNL_BACKEND";
       "ocannl-backend";
       "OCANNL-BACKEND";
+      (* A key whose own separators are dashed, which is a spelling the COMMANDLINE reads -- so it
+         is written here by someone carrying that habit over. Recognized as the key it names, and
+         therefore fatal, rather than warned about as an unknown one (Codex P2 on PR #389). *)
+      "OCANNL_PRINT-DECIMALS-PRECISION";
       "OCANNL_BACKEDN";
       "OCANNL_TOOL_SWEEP_STATE";
       "OCANNL_LOG_LEVEL";

@@ -12,8 +12,18 @@
   startup error that names the spelling that works, rather than a warning. Names that address
   OCANNL without naming a key, and lowercase names in the reserved `OCANNL_TOOL_` /
   `OCANNL_LOG_LEVEL_` namespaces, keep their warnings; an empty value counts as unset everywhere
-  and is never reported. Commandline spellings are untouched — `--ocannl_backend=cuda` and
+  and is never reported. A key written with dashed separators (`OCANNL_PRINT-DECIMALS-PRECISION`,
+  the shape the commandline reads) is recognized as the key it names, so it aborts rather than
+  warning as an unknown key. Commandline spellings are untouched — `--ocannl_backend=cuda` and
   `--backend=cuda` still work, dashes and all. `Utils.env_var_names` became `Utils.env_var_name`.
+
+  Because no dune rule declares the rejected spellings any more, `test/operations/env_spelling_gate`
+  carries a `(universe)` dependency and so reruns on every invocation: `ocannl_backend=cuda dune
+  runtest` fails there naming the variable, instead of serving the previous run's cached passes.
+
+  Also fixes a latent Windows bug in the same predicate: the case-insensitivity allowance answered
+  "read" for every candidate rather than for case-only variants, so a DASHED spelling classified as
+  a config key there. Punctuation is not case, and `Utils.same_env_name` no longer folds it.
 
 ### Added
 

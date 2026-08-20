@@ -50,7 +50,8 @@
 # the defaults, an `--ocannl_`-prefixed commandline argument no key would read draws a
 # warning, and so does an `ocannl_`-prefixed environment variable that names no key.
 # One mistake is FATAL rather than warned about: an environment variable that names a
-# KNOWN key in a spelling nothing reads -- `ocannl_backend=cuda`, `ocannl-log_level=1` --
+# KNOWN key in a spelling nothing reads -- `ocannl_backend=cuda`, `ocannl-log_level=1`,
+# `OCANNL_PRINT-DECIMALS-PRECISION=7` (dashes separate a key on the commandline, never here) --
 # since a value written to decide something would otherwise be dropped in silence and the
 # run would proceed on the default. Uppercase it. (Windows environment names are
 # case-insensitive, so there `ocannl_backend` IS `OCANNL_BACKEND` and is read.) An empty
