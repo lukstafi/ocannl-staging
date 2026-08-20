@@ -357,84 +357,6 @@ let is_absolute path =
 let is_explicit_path path =
   (not (is_absolute path)) && (String.is_prefix path ~prefix:"./" || String.contains path '/')
 
-(** [run_executables content] names the executables [content] runs, read off the raw text: the token
-    in the command position of a [run] or [dynamic-run] form, kept when it names a [.exe], and
-    normalised the way {!classify_command} normalises a [Runs] name — so the results are comparable
-    with the [name] of a site.
-
-    The companion to {!head_occurrences} for the rules, and it compares as a SET rather than a
-    count, because counting cannot be made sound here: {!sites} reports one site per distinct
-    executable per stanza, so a [progn] running the same executable twice is two occurrences and one
-    site, and a count would fail a correct scan. Set inclusion has no such hazard — every name the
-    text runs must be a name the walk placed — and it says which executable went missing rather than
-    only how many did.
-
-    It under-reports by design, which is the safe direction: a program named through [%{test}], a
-    [(bash …)] line, or a [%{name}] bound by a named dependency is not counted here, because the
-    text alone does not say what those resolve to. What it does catch is the failure the rules had
-    no guard for once the tally left the golden — a stanza whose command this walk stops reading. *)
-let run_executables content =
-  let found = ref [] in
-  let i = ref 0 in
-  let length = String.length content in
-  let delimiter c = Char.is_whitespace c || List.mem [ '('; ')'; ';'; '"' ] c ~equal:Char.equal in
-  let token_at pos =
-    let stop = ref pos in
-    while !stop < length && not (delimiter content.[!stop]) do
-      Int.incr stop
-    done;
-    String.sub content ~pos ~len:(!stop - pos)
-  in
-  (* The program a command token names, when the text is enough to say: a bare path, or one of the
-     pforms that resolve to a path in this workspace. Anything else is left out. *)
-  let program token =
-    let path =
-      match String.chop_prefix token ~prefix:"%{" with
-      | None -> Some token
-      | Some rest -> (
-          match String.chop_suffix rest ~suffix:"}" with
-          | None -> None
-          | Some inner -> (
-              match String.lsplit2 inner ~on:':' with
-              | Some (("dep" | "exe" | "path" | "file"), path) -> Some path
-              | _ -> None))
-    in
-    match path with
-    | Some path when is_executable path -> Some (program_path path)
-    | _ -> None
-  in
-  while !i < length do
-    (match content.[!i] with
-    | ';' ->
-        while !i < length && not (Char.equal content.[!i] '\n') do
-          Int.incr i
-        done
-    | '"' ->
-        Int.incr i;
-        let closed = ref false in
-        while (not !closed) && !i < length do
-          (match content.[!i] with '\\' -> Int.incr i | '"' -> closed := true | _ -> ());
-          Int.incr i
-        done;
-        Int.decr i
-    | '(' ->
-        let head = token_at (!i + 1) in
-        if List.mem [ "run"; "dynamic-run" ] head ~equal:String.equal then (
-          (* The command position: the first token after the head, whitespace skipped. A form there
-             instead of a token says nothing this reader can use, so it is passed over. *)
-          let pos = ref (!i + 1 + String.length head) in
-          while !pos < length && Char.is_whitespace content.[!pos] do
-            Int.incr pos
-          done;
-          if !pos < length && not (delimiter content.[!pos]) then
-            match program (token_at !pos) with
-            | Some path -> found := path :: !found
-            | None -> ())
-    | _ -> ());
-    Int.incr i
-  done;
-  List.dedup_and_sort !found ~compare:String.compare
-
 let classify_command ~named_deps cmd =
   let explicit = is_explicit_path cmd in
   let cmd = program_path cmd in
@@ -705,6 +627,12 @@ type site = {
       (** whether the deps depend on any config file at all; WHICH one had to be named is
           {!declared_config_paths}, since only the caller knows where configs exist *)
   declared_config_paths : string list;
+  executables : string list;
+      (** for a {!Runs_executable} site, the executables it covers, each as {!classify_command}
+          named it — the identities kept apart, rather than the display [name] that joins them with
+          ", ". A caller matching sites against executables must read them from here: recovering
+          them by splitting [name] loses a path that itself contains a comma (Codex P2, round 2).
+          Empty for every other kind. *)
   subdir : string;
   cwd : string;
 }
@@ -768,6 +696,110 @@ let inert_heads =
     "deprecated_library_name";
   ]
 
+(** [run_executables content] groups the executables [content] runs BY THE STANZA that runs them:
+    one entry per stanza that runs at least one, each entry that stanza's executables, read straight
+    off the raw text and sharing none of the sexp machinery {!sites} is built on.
+
+    The independent opinion on {!sites} for the exe-running rules, and it has to agree with the walk
+    about three things, or it fails a correct scan rather than a blind one.
+
+    - WHICH stanzas run things. A [(run …)] inside [(library … (preprocess (action (run …))))] is a
+      build-time action, and {!sites} deliberately makes a site of no such thing — only of [test],
+      [tests] and the {!action_heads}. So this tracks the forms it is inside as it descends and
+      attributes a command to the nearest enclosing STANZA, keeping it only when that stanza is one
+      of those (Codex P2, round 2). A [(subdir …)] is transparent: the stanza within it is the
+      nearest one.
+    - GROUPING. A flat set would lose the six separate rules of [test/operations/profiles/dune] that
+      each run [profile_precedence.exe] — dropping five would leave the sixth answering for all six.
+      Grouped per stanza, the caller can require as many placements as there are stanzas. WITHIN a
+      stanza the names are deduplicated, because {!sites} reports one site per distinct executable:
+      a [progn] running one executable twice is one site, and counting it twice would fail a correct
+      scan.
+    - IDENTITY. The names are normalised as {!classify_command} normalises a [Runs] name, so they
+      compare against a site's {!site.executables} — the structured field, never the display [name].
+
+    It under-reports by design, which is the safe direction for a floor: a program named through
+    [%{test}], a [(bash …)] line, or a [%{name}] bound by a named dependency is not counted, because
+    the text alone does not say what those resolve to. *)
+let run_executables content =
+  let stanza_heads = "test" :: "tests" :: "library" :: "subdir" :: (action_heads @ inert_heads) in
+  let counted_heads = "test" :: "tests" :: action_heads in
+  let results = ref [] in
+  (* The forms enclosing the point being read, innermost first, each with what has been attributed
+     to it. Only the frames of counted stanzas ever collect anything. *)
+  let stack = ref [] in
+  let i = ref 0 in
+  let length = String.length content in
+  let delimiter c = Char.is_whitespace c || List.mem [ '('; ')'; ';'; '"' ] c ~equal:Char.equal in
+  let token_at pos =
+    let stop = ref pos in
+    while !stop < length && not (delimiter content.[!stop]) do
+      Int.incr stop
+    done;
+    String.sub content ~pos ~len:(!stop - pos)
+  in
+  (* The program a command token names, when the text alone is enough to say: a bare path, or one of
+     the pforms that resolve to a path in this workspace. Anything else is left out. *)
+  let program token =
+    let path =
+      match String.chop_prefix token ~prefix:"%{" with
+      | None -> Some token
+      | Some rest -> (
+          match String.chop_suffix rest ~suffix:"}" with
+          | None -> None
+          | Some inner -> (
+              match String.lsplit2 inner ~on:':' with
+              | Some (("dep" | "exe" | "path" | "file"), path) -> Some path
+              | _ -> None))
+    in
+    match path with Some path when is_executable path -> Some (program_path path) | _ -> None
+  in
+  while !i < length do
+    (match content.[!i] with
+    | ';' ->
+        while !i < length && not (Char.equal content.[!i] '\n') do
+          Int.incr i
+        done
+    | '"' ->
+        Int.incr i;
+        let closed = ref false in
+        while (not !closed) && !i < length do
+          (match content.[!i] with '\\' -> Int.incr i | '"' -> closed := true | _ -> ());
+          Int.incr i
+        done;
+        Int.decr i
+    | '(' ->
+        let head = token_at (!i + 1) in
+        (if List.mem [ "run"; "dynamic-run" ] head ~equal:String.equal then (
+           (* The command position: the first token after the head, whitespace skipped. A form there
+              instead of a token says nothing this reader can use, so it is passed over. *)
+           let pos = ref (!i + 1 + String.length head) in
+           while !pos < length && Char.is_whitespace content.[!pos] do
+             Int.incr pos
+           done;
+           if !pos < length && not (delimiter content.[!pos]) then
+             match program (token_at !pos) with
+             | None -> ()
+             | Some path -> (
+                 match
+                   List.find !stack ~f:(fun (h, _) -> List.mem stanza_heads h ~equal:String.equal)
+                 with
+                 | Some (h, collected) when List.mem counted_heads h ~equal:String.equal ->
+                     collected := path :: !collected
+                 | _ -> ())));
+        stack := (head, ref []) :: !stack
+    | ')' -> (
+        match !stack with
+        | [] -> ()
+        | (head, collected) :: rest ->
+            stack := rest;
+            if List.mem counted_heads head ~equal:String.equal && not (List.is_empty !collected)
+            then results := List.dedup_and_sort !collected ~compare:String.compare :: !results)
+    | _ -> ());
+    Int.incr i
+  done;
+  List.rev !results
+
 (** Every place in [content] that runs a test executable.
 
     An [(executable)] stanza is not one: it declares something to build, and dune runs it only where
@@ -781,13 +813,14 @@ let inert_heads =
 let sites content =
   walk "" (stanzas content) ~f:(fun subdir stanza ->
       let deps () = field stanza "deps" in
-      let site ?(cwd = "") ?deps:(deps_field = deps ()) kind name =
+      let site ?(cwd = "") ?deps:(deps_field = deps ()) ?(executables = []) kind name =
         [
           {
             kind;
             name;
             declares_config = not (List.is_empty (declared_config_paths deps_field));
             declared_config_paths = declared_config_paths deps_field;
+            executables;
             subdir;
             cwd;
           };
@@ -817,7 +850,7 @@ let sites content =
             let unreadable = for_cwd (function Unrecognized cmd -> Some cmd | _ -> None) in
             let unlocatable = for_cwd (function Unknown_directory cmd -> Some cmd | _ -> None) in
             (if List.is_empty exes then []
-             else site ~cwd Runs_executable (String.concat ~sep:", " exes))
+             else site ~cwd ~executables:exes Runs_executable (String.concat ~sep:", " exes))
             @ List.concat_map unreadable ~f:(fun cmd -> site ~cwd Unreadable_command cmd)
             @ List.concat_map unlocatable ~f:(fun cmd -> site ~cwd Unreadable_directory cmd))
       in

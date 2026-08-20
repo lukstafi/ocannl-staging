@@ -26,9 +26,20 @@
    a promote indistinguishable from blessing a real regression here -- and one hot line collected a
    textual conflict from every parallel branch (gh-ocannl-665). The tallies were the "the scan did
    not go blind" signal, which survives in two churn-free forms: a directory that stops being read
-   loses its kinds from its line below, and within a directory `Scan.head_occurrences` reads a floor
-   off the raw text that the sexp walk is held to. The exact numbers go to stderr, which a `(test)`
-   stanza does not diff.
+   loses its kinds from its line below, and within a directory a SECOND reader of the raw text --
+   sharing none of the sexp walk's machinery -- puts a floor under it. `Scan.head_occurrences`
+   counts the `(test`/`(tests`/`(inline_tests` forms, and `Scan.run_executables` names the
+   executables each stanza runs; the walk must place at least as many of each. The exact numbers go
+   to stderr, which a `(test)` stanza does not diff.
+
+   The two floors compare differently, and the asymmetry is forced by how the walk groups what it
+   finds. Tests compare as COUNTS: one site per name, so more forms than sites is a hole. Rules
+   compare as a MULTISET OVER STANZAS, because the walk emits one site per distinct executable per
+   stanza -- a `progn` running one executable twice is one site, so counting occurrences would fail
+   a correct scan, while a flat set would let five of the six rules that each run
+   `profile_precedence.exe` be dropped with the sixth answering for all six (Codex P2, round 2).
+   Those comparisons read a site's structured `executables`, never its display `name`, which joins
+   several with ", " and so cannot be taken apart again where a path contains a comma.
 
    An `(executable)` no rule runs is structurally not a site and needs no exemption: that is how the
    diagnostic and tutorial executables (`bench_circles_step`, `gpt2_generate`, the `@slow` runners'
@@ -180,7 +191,15 @@ let () =
       let described =
         List.map sites
           ~f:(fun
-              ({ Scan.kind; name; declared_config_paths; declares_config = _; subdir = _; cwd = _ }
+              ({
+                 Scan.kind;
+                 name;
+                 declared_config_paths;
+                 declares_config = _;
+                 executables = _;
+                 subdir = _;
+                 cwd = _;
+               }
                as site)
             ->
             let key = directory_of site ^ ":" ^ name in
@@ -253,14 +272,14 @@ let () =
                 fail
                   (Printf.sprintf "%s: the %s %s does not declare %s in its deps" dune_file
                      (Scan.kind_name kind) name Scan.config_file));
-            (kind, name, exempt))
+            (site, kind, name, exempt))
       in
       let tally kind =
-        List.count described ~f:(fun (k, _, exempt) -> Poly.equal k kind && not exempt)
+        List.count described ~f:(fun (_, k, _, exempt) -> Poly.equal k kind && not exempt)
       in
-      let exempted = List.filter described ~f:(fun (_, _, exempt) -> exempt) in
+      let exempted = List.filter described ~f:(fun (_, _, _, exempt) -> exempt) in
       let exempt_names =
-        List.map exempted ~f:(fun (_, name, _) -> name)
+        List.map exempted ~f:(fun (_, _, name, _) -> name)
         |> List.dedup_and_sort ~compare:String.compare
         |> String.concat ~sep:", "
       in
@@ -270,7 +289,7 @@ let () =
          seeing stanzas is caught here instead of quietly reporting a smaller number. Sites are
          counted including exempt ones -- an exemption is about the config dependency, not about
          whether the stanza was seen. *)
-      let seen kind = List.count described ~f:(fun (k, _, _) -> Poly.equal k kind) in
+      let seen kind = List.count described ~f:(fun (_, k, _, _) -> Poly.equal k kind) in
       let floor head = Scan.head_occurrences content ~head in
       let floors =
         [
@@ -292,26 +311,31 @@ let () =
          executable the raw text runs must be one the walk named -- which catches a regression in
          `commands_in` / `classify_command` / `sites_for` that drops a rule, the failure the old
          per-directory tally was the only guard against. *)
-      (* One site covers every executable a stanza runs in one directory, its name joining them with
-         ", " -- so the names are split apart again before asking whether one is there. *)
-      let placed =
-        List.concat_map described ~f:(fun (kind, name, _) ->
-            match kind with
-            | Scan.Runs_executable ->
-                String.split name ~on:',' |> List.map ~f:String.strip
-            | _ -> [])
+      (* Executables are compared as a MULTISET over stanzas, not as a flat set: six separate rules
+         running one executable need six placements, and requiring only that the name appear
+         somewhere would let five of them be dropped with the sixth answering for all six (Codex P2,
+         round 2). Read from the site's structured [executables] rather than from its display name,
+         which joins them with ", " and so cannot be taken apart again where a path contains a
+         comma. *)
+      let occurrences lists =
+        List.concat lists
+        |> List.fold ~init:(Map.empty (module String)) ~f:(fun counts exe ->
+            Map.update counts exe ~f:(fun n -> 1 + Option.value n ~default:0))
       in
+      let placed = occurrences (List.map described ~f:(fun (site, _, _, _) -> site.Scan.executables)) in
       let run_floor = Scan.run_executables content in
-      List.iter run_floor ~f:(fun exe ->
-          if not (List.mem placed exe ~equal:String.equal) then (
+      Map.iteri (occurrences run_floor) ~f:(fun ~key:exe ~data:in_text ->
+          let in_walk = Option.value (Map.find placed exe) ~default:0 in
+          if in_walk < in_text then (
             Int.incr floor_holes;
             fail
               (Printf.sprintf
-                 "%s: the raw text runs `%s`, and the scan placed no exe-running site naming it -- \
-                  it is reading the file with a hole in it"
-                 dune_file exe)));
-      if
-        List.exists floors ~f:(fun (_, floor, _) -> floor > 0) || not (List.is_empty run_floor)
+                 "%s: the raw text runs `%s` in %d %s, and the scan placed it in only %d -- it is \
+                  reading the file with a hole in it"
+                 dune_file exe in_text
+                 (if in_text = 1 then "stanza" else "stanzas")
+                 in_walk)));
+      if List.exists floors ~f:(fun (_, floor, _) -> floor > 0) || not (List.is_empty run_floor)
       then Int.incr floors_checked;
       (* The golden holds which KINDS a dune file has, not how many of each: a tally there made
          every test added anywhere in the repository churn this file, and put a single hot line in

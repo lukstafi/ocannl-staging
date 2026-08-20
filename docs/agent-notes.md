@@ -1515,14 +1515,20 @@ that they earn a lookup rather than always-loaded space.
   read by a SECOND reader that shares no machinery with the first (`Dune_stanza_scan.head_occurrences`
   counts `(test` off the raw text, and a sexp walk going blind cannot take it down too), and the
   exact numbers on STDERR, which a `(test)` stanza does not diff. Assert the floor through `Verdict`
-  rather than as a golden line, so a scan that goes blind cannot be promoted back to green. Whether
-  that floor can be a COUNT depends on how the walk groups what it finds, and getting this backwards
-  fails correct scans: `sites` emits one exe-running site per distinct executable per stanza, so a
-  `progn` running one executable twice is two occurrences and one site. Where the grouping is
-  many-to-one like that, compare as a SET instead (`run_executables`: every `.exe` the text runs must
-  be a name the walk placed) — no dedup hazard, and the failure names which one went missing rather
-  than only how many did. Watch for the walk's own name format when doing so: a site covering several
-  executables joins them with `", "`, so the names split apart again before the membership test. The
+  rather than as a golden line, so a scan that goes blind cannot be promoted back to green. Getting
+  the SHAPE of that comparison right is most of the work, and each way of getting it wrong fails
+  correct scans rather than blind ones — three rounds of review on gh-ocannl-665 were spent on
+  exactly this. (a) Match the walk's GROUPING: `sites` emits one exe-running site per distinct
+  executable per stanza, so a plain occurrence count fails a `progn` that runs one executable twice,
+  while a flat set lets five of six rules running the same executable be dropped with the sixth
+  answering for all six. A multiset over stanzas — dedup within a stanza, one entry per stanza — is
+  the shape that matches. (b) Match its SCOPE: the walk makes sites only of tests, rules and aliases,
+  so a text reader that counts every `(run …)` in the file flags a library's `(preprocess (action
+  (run …)))` that was never a site. The reader has to track the enclosing stanza, which a paren-depth
+  stack does without giving up independence from the sexp parse. (c) Compare STRUCTURED identities,
+  not display strings: a site covering several executables joins their names with `", "`, and
+  recovering them by splitting that string corrupts any path containing a comma. Give the record a
+  real field (`site.executables`) and read it. The
   sibling checks are worth a glance when touching this genre and were both fine: `env_var_deps` lists
   names only, and `digest_completeness`'s key count moves only alongside its own enumerated key list
   — a number in the same commit as the change it describes costs nothing.

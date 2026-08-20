@@ -83,8 +83,15 @@ ok: run executables -- a dep pform
 ok: run executables -- a bare path
 ok: run executables -- a path elsewhere keeps it
 ok: run executables -- the exe pform too
-ok: run executables -- several in one action
-ok: run executables -- the same one twice is one name
+ok: run executables -- a comma in the path is part of it
+ok: run executables -- several in one action, one stanza
+ok: run executables -- the same one twice in a stanza is one name
+ok: run executables -- the same one in two stanzas is two entries
+ok: run executables -- an alias stanza runs things too
+ok: run executables -- a test's custom action
+ok: run executables -- inside a subdir
+ok: run executables -- a library's preprocessor is not a test-running rule
+ok: run executables -- nor is an executable's
 ok: run executables -- a tool on PATH is not ours
 ok: run executables -- the test pform
 ok: run executables -- a shell line
