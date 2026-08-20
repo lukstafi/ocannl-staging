@@ -599,6 +599,11 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   rejection key is what an autotune search groups declines by and the fixes differ.
   Pinned end-to-end by `test/operations/schedule_batch_grid.ml` (structure everywhere, execution
   and emitted-source fold on GPU backends).
+  The HIP backend's `static_properties` dump lists the queried `max_grid_size` and
+  `max_threads_dim` next to `max_threads_per_block`, so a run on hardware can read back what those
+  gates compare against — without them the only evidence the query is not degenerate is that no
+  kernel got rejected. On gfx1151/ROCm/WSL2 they read `(2147483647 65535 65535)` and
+  `(1024 1024 1024)`, i.e. `max_grid_yz = 65535`.
 - "`Tile_mma` is a barrier" is only half true, and the half that fails is the one barrier elision
   wants. Every rendering form ENDS the intrinsic block with a workgroup barrier, so a staging
   barrier that follows one is always redundant (`Schedule.elide_staged_barriers` drops it, and the
