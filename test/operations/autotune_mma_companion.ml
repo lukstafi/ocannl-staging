@@ -27,7 +27,7 @@ let clean_cache dir =
         Stdlib.Sys.remove (Stdlib.Filename.concat dir f))
 
 let () =
-  clean_cache "mma_companion_cache";
+  clean_cache "autotune_cache_mma_companion";
   let n = 64 in
   let xv = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 7) *. 0.25) in
   let wv = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 5) *. 0.125) in
@@ -100,7 +100,7 @@ let () =
   let reports = ref [] in
   let ctx = Context.auto () in
   let ctx, routine =
-    Autotune.tune ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:"mma_companion_cache"
+    Autotune.tune ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:"autotune_cache_mma_companion"
       ~timing_ctx:(Context.auto ())
       ~report:(fun r -> reports := r :: !reports)
       ctx comp Ir.Indexing.Empty

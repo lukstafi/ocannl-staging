@@ -273,12 +273,12 @@ let () =
       Array.iter (Stdlib.Sys.readdir dir) ~f:(fun f ->
           Stdlib.Sys.remove (Stdlib.Filename.concat dir f))
   in
-  clean_cache "epilogue_tune_cache";
+  clean_cache "autotune_cache_epilogue";
   let _, _, _, mct = make_graph () in
   let reports = ref [] in
   let tctx = Context.auto () in
   let tctx, troutine =
-    Autotune.tune ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:"epilogue_tune_cache"
+    Autotune.tune ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:"autotune_cache_epilogue"
       ~timing_ctx:(Context.auto ())
       ~report:(fun r -> reports := r :: !reports)
       tctx
