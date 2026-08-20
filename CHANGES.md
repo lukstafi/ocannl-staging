@@ -36,6 +36,27 @@
 
 ### Added
 
+- **A computation you can name is a computation you can tune** (gh-ocannl-669). `Autotune.tune`
+  takes `?name`, exactly as `Context.compile` does, and passes it to every compile of one search:
+  each candidate, the baseline, the cache replay, the winner, both untuned fallbacks and the
+  `autotune_log` control — so all of them, and the search's calibration rows, name the computation
+  alike. Without it, a comp carrying no `Assignments.Block_comment` but that `Context.compile ?name`
+  can name — as `Parallel`'s broadcast and all-reduce routines are named — could be compiled but not
+  tuned: the search died at its first lowering with `get_name_exn`'s `Invalid_argument`, deep inside
+  the search and saying nothing about names. `Autotune.model_default`, `Autotune.compile_advisory`
+  and `Autotune.placement_surface` — the other drop-ins for `Context.compile` and its analyze-only
+  sibling — take it too, and `Train.tune_placements` forwards it to both arms and to the flip
+  refinement's decision surface. The schedule cache deliberately does not see the name: a cache key
+  covers the canonical lowering, the backend, the numerics and codegen tags and the worker pool,
+  while the name reaches only codegen's artifact and kernel naming, so two identical computations
+  under different names share one tuned entry.
+
+  The calibration schema's `routine` column (gh-ocannl-635) now READS that name rather than deriving
+  it a second time from the block comment. The comment on the old derivation stated the assumption
+  it rested on — that no compile of a search passes `~name` — and this change is exactly what would
+  have broken it: every row would have gone on naming the block comment while the kernels it
+  measured, and their generated sources, carried the other name, with nothing failing.
+
 - **The pre-driver launch gate covers the `.y` grid dimension** (gh-ocannl-643 follow-up). CUDA and
   HIP cap `gridDim.y` and `gridDim.z` at the same 65535 (`gridDim.x` is 2^31-scale), but only the
   folded `.z` extent was checked, so a blocktiled matmul over a large enough m-extent — past ~1M
