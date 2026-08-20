@@ -177,7 +177,14 @@ files.
   each with the outer index substituted by a different constant, so copies of ONE source guard flip
   at different points and `partition_breakpoints` must return their union (a first-copy answer
   leaves the siblings' guards mixed after the `Partition` rewrites them all). Same rule for
-  legality: `loops_independent` combines the verdicts of every binding, worst-of.
+  legality: `loops_independent` combines the verdicts of every binding, worst-of. The autotuner's
+  own enumeration obeys the same law (gh-ocannl-666): `Autotune.collect_loops` descends scope
+  bodies and treats binder-sharing mint copies as ONE decision (one proposal per binder, exactly
+  as `rewrite_loop` rewrites every copy), so a materialized unroll or partition no longer hides
+  the inner loops from the beam's later rounds; `collect_serial_triples` stays statement-level on
+  purpose — `Tensorize`'s `Workgroup` lane loop is refused inside a scope by `validate_parallel`
+  (which `op_legality` does not decide: races, not scope nesting), and mint interiors reduce into
+  one loop-invariant cell, so no viable micro-kernel triple can sit there anyway.
   `apply_split_reduce` is the one caller taking the first statement-level match, and for a contract
   reason: it inserts its combine statement at statement level, which only sequences correctly if
   the reduction runs there too. A MATERIALIZED unroll never reaches codegen as bare copies:

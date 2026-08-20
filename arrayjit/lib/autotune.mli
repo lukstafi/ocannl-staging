@@ -102,7 +102,12 @@
       reduction-chains rendering of accumulations — gh-ocannl-468 — while GPU accumulations stay
       excluded; 128-bit packed loads/stores on GPU — gh-ocannl-463), and Tensorize role permutations
       when the backend reports an mma capability — including the CPU backends, whose [Tile_mma]
-      renders as the register-tiled vector micro-kernel (gh-ocannl-469).
+      renders as the register-tiled vector micro-kernel (gh-ocannl-469). The loop enumeration
+      descends into the [Local_scope] bodies the accumulation mints of [Unroll ~materialize:true] /
+      [Partition] create (gh-ocannl-666, matching [Schedule.rewrite_loop]'s reach since
+      gh-ocannl-639), so a materialized unroll or partition does not hide the segment/inner loops
+      from later rounds; scope-nested loops are proposed only for the ops that survive scope nesting
+      — [Tensorize]'s hardware lane loop does not, so its triples stay statement-level.
 
     Caveats (v1):
 
@@ -319,6 +324,23 @@ val split_reduce_sites :
     ({!Ir.Schedule.split_reduce_hoist} names the loops, each [Swap] confirmed [Op_legal] on the code
     it acts on); the chain is recorded in [sr_swaps] and replayed by the candidate's prelude.
     [static_indices] only reaches the interchange probe's [Sched.apply]. Exposed for tests. *)
+
+val menu :
+  is_cpu:bool ->
+  is_gpu:bool ->
+  limits:Ir.Backend_intf.hardware_limits ->
+  registry:Ir.Schedule_cache.registry ->
+  Ir.Low_level.optimized ->
+  Ir.Schedule_cache.saved_optop list
+(** The beam-round action menu over one unit's transformed code — [registry] must resolve its loop
+    binders, including symbols minted by the schedule applied so far (the search harness builds it
+    with {!Ir.Schedule_cache.to_saved} over that schedule): dividing serial [Split]s, [Swap]s of
+    perfect serial pairs, [Unroll]s, [Retype]-[Vectorized] on innermost loops, and [Tensorize] role
+    permutations, each proposal vetted by {!Ir.Schedule.op_legality} (proven-illegal ones are pruned
+    before they cost a candidate compile; [Op_unknown] proceeds to compile-and-time). The loop
+    enumeration descends into accumulation-minted [Local_scope] bodies and treats binder-sharing
+    mint copies as one decision (gh-ocannl-666); see the candidate-space overview above. Exposed for
+    tests. *)
 
 type decline_summary = {
   key : Ir.Schedule_outcome.rejection_key;
