@@ -182,6 +182,31 @@ module type C_syntax_config = sig
       identical across sibling autotune candidates — or schedule transforms would stop being
       numerics-preserving. *)
 
+  val accum_prec : Ops.prec -> Ops.prec
+  (** The precision a reduction {e accumulator} resides at across its whole nest, given the
+      precision the accumulated node is stored at (gh-ocannl-663). Where it differs from the
+      storage precision, every serial-rendered form of a recognized accumulation — the plain serial
+      fallback, unrolled and partitioned nests, and reduction-shaped scope locals — holds the
+      accumulator here and narrows once at the store, so a reduction's effective accumulation width
+      is a per-backend policy, never a property of which schedule or rendering ran (gh-ocannl-639's
+      guarantee, extended beyond [compute_prec]).
+
+      On the CPU backends this {e is} [compute_prec]: the accumulator is an assignment intermediate
+      like any other. The GPU backends compute where they store ([compute_prec] is the identity on
+      their native narrow arithmetic) but accumulate per their tensor-unit format triples, and this
+      hook is where a backend mirrors those: CUDA's bf16 mma legs hold f32 per-lane registers
+      across the whole [k] extent (the hardware has no bf16 accumulate), so its serial legs must
+      widen bf16 the same way, while HIP's and Metal's uniform-bf16 tiles accumulate in bf16
+      fragments, so their serial legs keep bf16 residency. fp8 has an accumulator format on no
+      backend and follows the CPU policy (f32) everywhere; f16 accumulates natively at f16 in every
+      seeded GPU triple and stays put.
+
+      Must resolve at least as wide as {!compute_prec} (asserted at codegen setup: narrowing an
+      intermediate below its own arithmetic precision would round-trip every update), and like it
+      must be a function of the storage precision alone. When overriding {!compute_prec}, override
+      this together with it — the two are bound at [include] time, so a stale pairing does not
+      track the override. *)
+
   val vector_prec_ok : Ops.prec -> bool
   (** Whether the explicit vector renderings ([Vectorized] loops) can operate at this {e compute}
       precision. f32 and f64 everywhere; fp16 additionally on CPU targets with native 16-bit
@@ -751,6 +776,11 @@ struct
   (* Compute where you store. The backends that override this are the ones without native narrow
      arithmetic; see the signature. *)
   let compute_prec prec = prec
+
+  (* Accumulate where you compute. Every backend overrides at least one of the pair (see the
+     signature's coupling note); this default only serves a hypothetical backend whose reductions
+     have no wider residency than its arithmetic. *)
+  let accum_prec = compute_prec
   let vector_prec_ok = function Ops.Single_prec _ | Ops.Double_prec _ -> true | _ -> false
 
   (* The names the *language* reserves and the scaffolding this module emits. The names an operator
@@ -884,13 +914,33 @@ module C_syntax (B : C_syntax_config) = struct
      [comp_prec] is the one-way map between them, and the rule is: declarations and buffer element
      types take the storage precision, rendered arithmetic takes [comp_prec] of it.
 
-     A corollary (gh-ocannl-639): a reduction accumulator RESIDES at [comp_prec] across its whole
+     A corollary (gh-ocannl-639): a reduction accumulator RESIDES at [acc_prec] across its whole
      reduction nest and narrows once at the store, in every rendering — virtual scopes
      ([scope_prec_of]), [try_vectorize_reduce]'s epilogue, [try_register_tile]'s C-tile, and the
      plain serial fallback ([try_widen_serial_reduce]) — so the effective accumulation width is the
-     numerics policy's, never an artifact of which rendering or schedule ran. *)
+     numerics policy's, never an artifact of which rendering or schedule ran. On the CPU backends
+     [acc_prec] IS [comp_prec]; the GPU backends resolve accumulators wider than their (native,
+     identity) compute precision where their tensor-unit triples do (gh-ocannl-663). *)
 
   let comp_prec = B.compute_prec
+  let acc_prec = B.accum_prec
+
+  (* The signature's coupling contract: an accumulator resides at least as wide as the arithmetic
+     that feeds it. The failure mode this catches is an [include]-time stale pairing — a backend
+     overriding [compute_prec] without restating [accum_prec] keeps the default bound to the
+     PRE-override compute precision, which would silently narrow every reduction accumulator. *)
+  let () =
+    List.iter
+      [ Ops.half; Ops.bfloat16; Ops.fp8; Ops.single; Ops.double ]
+      ~f:(fun p ->
+        if Ops.prec_in_bytes (acc_prec p) < Ops.prec_in_bytes (comp_prec p) then
+          invalid_arg
+            (Printf.sprintf
+               "C_syntax: accum_prec (%s) resolves narrower than compute_prec (%s) for storage %s \
+                — accum_prec must be overridden together with compute_prec"
+               (Ops.prec_string (acc_prec p))
+               (Ops.prec_string (comp_prec p))
+               (Ops.prec_string p)))
 
   (* The RNG lane conversions pick both their result type and which of the 128 random bits they
      consume from the precision they are rendered at ([uint4x32_to_fp8_uniform_lane] is a different
@@ -991,10 +1041,78 @@ module C_syntax (B : C_syntax_config) = struct
     Array.iter B.procs ~f:(fun l -> scan l.Low_level.llc);
     acc
 
-  (* The precision a scope-local scalar is declared, written and read at. *)
+  (* Scope locals that are reduction ACCUMULATORS (gh-ocannl-663): every [Set_local] to the scope
+     is either an opening init (its value free of the local) or a reduce-shaped update
+     ([Low_level.accum_local_update_parts]'s grammar, the FMA form counting as Add), all updates
+     under ONE reduction operator — a general recurrence or a mixed-operator sequence keeps its
+     per-iteration narrowing by the source's own semantics and disqualifies the scope. Such locals
+     take [acc_prec] instead of [comp_prec] in [scope_prec_of], so a virtualized or schedule-minted
+     accumulator (Unroll ~materialize / Partition) resides at the same width as the widened serial
+     fallback below ([try_widen_serial_reduce], which registers its codegen-minted scopes here) —
+     on the backends where the two precisions coincide this census is inert. Classified per
+     [scope_id] over the scope's own updates wherever they sit, which covers both [Local_scope]
+     values and the [Declare_local]-lifted form of [hoist_cross_statement_cse]. *)
+  let accum_scope_ids =
+    let verdicts = Hashtbl.create (module Int) in
+    let classify (id : Low_level.scope_id) v =
+      match Low_level.accum_local_update_parts ~id v with
+      | Some (op, _) ->
+          Hashtbl.update verdicts id.scope_id ~f:(function
+            | None -> `Accum op
+            | Some (`Accum op0) when Ops.equal_binop op0 op -> `Accum op
+            | Some _ -> `Bad)
+      | None ->
+          if Low_level.scalar_reads_scope ~id v then Hashtbl.set verdicts ~key:id.scope_id ~data:`Bad
+    in
+    let rec scan_sc (llsc : Low_level.scalar_t) =
+      match llsc with
+      | Low_level.Local_scope { body; _ } -> scan body
+      | Get _ | Get_local _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ ->
+          ()
+      | Get_dynamic { dyn_value = v, _; _ } -> scan_sc v
+      | Ternop (_, (a, _), (b, _), (c, _)) ->
+          scan_sc a;
+          scan_sc b;
+          scan_sc c
+      | Binop (_, (a, _), (b, _)) ->
+          scan_sc a;
+          scan_sc b
+      | Unop (_, (a, _)) -> scan_sc a
+    and scan (llc : Low_level.t) =
+      match llc with
+      | Low_level.Seq (a, b) ->
+          scan a;
+          scan b
+      | For_loop { body; _ } -> scan body
+      | If { cond = c, _; body } ->
+          scan_sc c;
+          scan body
+      | Set_local (id, v) ->
+          classify id v;
+          scan_sc v
+      | Set { llsc; _ } -> scan_sc llsc
+      | Set_dynamic { dyn_value = v, _; llsc; _ } ->
+          scan_sc v;
+          scan_sc llsc
+      | Set_from_vec { arg = a, _; _ } -> scan_sc a
+      | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _ | Workgroup_barrier
+      | Tile_mma _ ->
+          ()
+    in
+    Array.iter B.procs ~f:(fun l -> scan l.Low_level.llc);
+    let acc = Hash_set.create (module Int) in
+    Hashtbl.iteri verdicts ~f:(fun ~key ~data ->
+        match data with `Accum _ -> Hash_set.add acc key | `Bad -> ());
+    acc
+
+  (* The precision a scope-local scalar is declared, written and read at. The rng carve-out takes
+     precedence: a scope whose value consumes an RNG conversion is pinned to the storage precision
+     wholesale (gh-ocannl-517), reduction-shaped or not. *)
   let scope_prec_of (id : Low_level.scope_id) =
     let p = Lazy.force id.tn.Tn.storage_prec in
-    if Hash_set.mem rng_scope_local_uids id.tn.Tn.uid then p else comp_prec p
+    if Hash_set.mem rng_scope_local_uids id.tn.Tn.uid then p
+    else if Hash_set.mem accum_scope_ids id.scope_id then acc_prec p
+    else comp_prec p
 
   let wrap_conversion (pre, post) doc =
     let open PPrint in
@@ -3347,17 +3465,20 @@ module C_syntax (B : C_syntax_config) = struct
                   ^^ hardline ^^ rbrace)
         in
         (* gh-ocannl-639: the plain-serial fallback of a reduction nest holds its accumulator at
-           compute precision across the whole nest and narrows once at the store — the same
+           the backend's accumulator precision ([acc_prec], gh-ocannl-663 — on CPU that is the
+           compute precision) across the whole nest and narrows once at the store — the same
            once-per-cell narrowing as [try_vectorize_reduce]'s epilogue, [try_register_tile]'s
            C-tile and virtual scopes ([scope_prec_of]) — so a reduction's effective accumulation
            width is set by the numerics policy, never by which schedule happened to place the
            accumulator in a register. Implemented as a local rewrite into exactly the [Local_scope]
-           form virtualization gives virtual accumulators, rendered recursively: [scope_prec_of] and
-           the [Set_local]/[Get_local]/[Local_scope] arms already carry the widening and the single
-           narrowing, so nothing new is emitted. Inert ([None]) where [comp_prec] is the identity on
-           the target's storage precision — f32/f64/integers, the GPU backends' native narrow
-           arithmetic, [narrow_compute_f32 = false], native fp16 — those render the plain serial
-           loop unchanged. The nest is peeled through Serial/Unrolled single-statement loop levels
+           form virtualization gives virtual accumulators, rendered recursively: [scope_prec_of]
+           (the minted scope is registered in [accum_scope_ids]) and the
+           [Set_local]/[Get_local]/[Local_scope] arms already carry the widening and the single
+           narrowing, so nothing new is emitted. Inert ([None]) where [acc_prec] is the identity on
+           the target's storage precision — f32/f64/integers, [narrow_compute_f32 = false], native
+           fp16, and the GPU backends' 16-bit precisions whose tensor units accumulate at storage
+           width (f16 everywhere; bf16 on HIP/Metal, but NOT on CUDA, whose mma legs hold f32
+           per-lane registers) — those render the plain serial loop unchanged. The nest is peeled through Serial/Unrolled single-statement loop levels
            ([Unrolled] so a [Sched.Unroll ~materialize:false] over a reduction axis keeps the wide
            local, its repeated bodies updating the scope local); a guard ([If]), a sibling
            statement, or any other inner loop stops the widening at that level (the recognizer then
@@ -3375,7 +3496,7 @@ module C_syntax (B : C_syntax_config) = struct
           else
             let widen (tn, idcs, base, debug, rebuild) =
               let store_prec = Lazy.force tn.Tn.storage_prec in
-              if Ops.equal_prec (comp_prec store_prec) store_prec then None
+              if Ops.equal_prec (acc_prec store_prec) store_prec then None
               else
                 match base with
                 | `Update llsc when mentions_rng_conversion llsc -> None
@@ -3384,6 +3505,12 @@ module C_syntax (B : C_syntax_config) = struct
                       match base with
                       | `Update llsc ->
                           let id = Low_level.get_scope tn in
+                          (* Codegen-minted, so the census over [B.procs] never saw it: register
+                             the scope as an accumulator or [scope_prec_of] would resolve it at
+                             [comp_prec] and defeat the widening on the backends where the two
+                             differ (gh-ocannl-663). Fresh ids per mint, so no collision with a
+                             censused verdict. *)
+                          Hash_set.add accum_scope_ids id.Low_level.scope_id;
                           ( id,
                             Low_level.Set_local (id, Low_level.subst_accum_read ~tn ~idcs ~id llsc)
                           )

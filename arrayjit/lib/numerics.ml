@@ -38,8 +38,16 @@ type t = {
           On by default: it strictly increases accuracy relative to per-operator rounding and is the
           precondition for narrow storage being a speedup rather than a pessimization on CPU. Turn
           it off to recover the pre-gh-517 semantics, where every operator rounds to the target
-          node's storage precision. The GPU backends are unaffected either way — they have native
-          16-bit types and arithmetic, so their compute precision is their storage precision. *)
+          node's storage precision.
+
+          The GPU backends' {e compute} precision is unaffected either way — they have native
+          16-bit types and arithmetic, so pointwise narrow arithmetic computes where it stores. The
+          same knob does govern their reduction-{e accumulator} residency where the backend's
+          tensor-unit formats force a wider accumulate (gh-ocannl-663): CUDA's bf16 mma legs hold
+          f32 per-lane registers, so its serial bf16 legs widen to match, and fp8 — which has an
+          accumulator format on no backend — takes f32 residency everywhere; f16, and bf16 on
+          HIP/Metal (whose tiles accumulate in storage-width fragments), keep storage residency so
+          serial and tensorized legs stay width-uniform per backend. *)
   fp16_arithmetic : bool;
       (** Compute fp16 in fp16 on CPU targets that have native 16-bit arithmetic (ARMv8.2-FP16,
           AVX512-FP16), instead of widening to f32 (gh-ocannl-516). This is the one narrow format a

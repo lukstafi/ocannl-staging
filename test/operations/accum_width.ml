@@ -17,9 +17,14 @@
    kernel's fmaf chain exactly, and narrowing it once through the library's own bf16 conversion
    gives the normative result the widened kernel must match bitwise.
 
-   The claims are CPU-emission claims ([comp_prec] is the identity on the GPU backends' native
-   narrow arithmetic, so their serial legs keep storage-precision accumulation); on other backends
-   they are skipped. *)
+   The value claims are policy claims and run wherever the backend's accumulator resolution widens
+   bf16 (gh-ocannl-663): the CPU backends ([Numerics.cpu_compute_prec]) and CUDA, whose mma legs
+   hold f32 per-lane registers across the whole k extent — the hardware has no bf16 accumulate —
+   so its serial legs must match. On HIP and Metal the tensor units accumulate in bf16 fragments
+   and the serial legs deliberately keep bf16 storage residency (width-uniform with their mma
+   legs), so the widened claims are false there BY DESIGN and every leg is skipped. The structural
+   claims grep cc's generated C and the SIMD/Workgroup_reduce-serialization legs exercise CPU-only
+   renderings; they stay cc-only and print their passing golden line as skipped elsewhere. *)
 
 open Base
 open Ocannl
@@ -35,6 +40,14 @@ let p = Verdict.p
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let skipped = Verdict.skipped ~backend:backend_name
 let on_cpu = String.is_substring backend_name ~substring:"cc"
+
+(* Where the serial legs widen bf16 accumulators (see the header): CPU policy or CUDA's mma
+   mirror. *)
+let widens_bf16 = on_cpu || String.equal backend_name "cuda"
+
+(* Runs the leg only on cc; elsewhere prints the golden line as skipped (the leg exercises a
+   CPU-only rendering or greps cc's generated C). *)
+let cc_only claim leg = if on_cpu then leg () else skipped claim
 
 let read_generated base_name =
   let path = Utils.build_file (base_name ^ ".c") in
@@ -166,6 +179,9 @@ let claim_wgreduce =
   "a Workgroup_reduce loop serialized on cc keeps the Serial accumulator width (equals the serial \
    result)"
 
+let claim_fp8 =
+  "fp8 e5m2 reduction accumulates wide and narrows once (16 + 8x0.5 reaches 20, not 16)"
+
 (* In execution order — the GPU skip lines must match the cc run's golden line for line. *)
 let all_claims =
   [
@@ -191,12 +207,13 @@ let all_claims =
     claim_mixed_scope;
     claim_wgreduce;
     claim_simd_tail;
+    claim_fp8;
     claim_off_value;
     claim_off_shape;
   ]
 
 let () =
-  if not on_cpu then List.iter all_claims ~f:skipped
+  if not widens_bf16 then List.iter all_claims ~f:skipped
   else begin
     let ma = NTDSL.init ~l:"ma" ~prec:Ir.Ops.bfloat16 ~i:[ n ] ~o:[ n ] ~f:fa () in
     let mb = NTDSL.init ~l:"mb" ~prec:Ir.Ops.bfloat16 ~i:[ n ] ~o:[ n ] ~f:fb () in
@@ -222,11 +239,12 @@ let () =
     in
     let want = run ~name:"aw_bf16_ref" mref in
     p claim_parity (Array.for_all2_exn got want ~f:Float.equal);
-    (match read_generated "aw_bf16_naive" with
-    | None -> Verdict.fail (claim_shape ^ " — generated source not found")
-    | Some src ->
-        let has s = String.is_substring src ~substring:s in
-        p claim_shape ((not (has "single_to_bfloat16(fmaf(")) && has "fmaf("));
+    cc_only claim_shape (fun () ->
+        match read_generated "aw_bf16_naive" with
+        | None -> Verdict.fail (claim_shape ^ " — generated source not found")
+        | Some src ->
+            let has s = String.is_substring src ~substring:s in
+            p claim_shape ((not (has "single_to_bfloat16(fmaf(")) && has "fmaf("));
     (* Structural: a merge-buffer read is a separate read-only staging buffer, so [p =+ p.merge]
        stays a recognizable accumulation (no same-node merge REDUCTION is constructible — merge
        buffers are node-shaped — so the recognizer shape is the whole reachable surface). *)
@@ -353,27 +371,30 @@ let () =
        accumulator. Inner extent 32 clears the SIMD profitability gate; the reduction is exact in
        f32, so the vector reassociation is harmless and the comparison is bitwise. The structural
        conjunct asserts the vectorized rendering actually fired inside the scope. *)
-    let nvr, nvs = (4, 32) in
-    let fxv = Ll_test.drift ~dims:[| ni; nvr; nvs |] in
-    let run2v ~name ?schedule () =
-      let xv = NTDSL.init ~l:(name ^ "_x") ~prec:Ir.Ops.bfloat16 ~o:[ ni; nvr; nvs ] ~f:fxv () in
-      let%op outv = xv ++ "irs => i" in
-      Tn.update_prec outv.Tensor.value Ir.Ops.bfloat16;
-      run ~name ?schedule outv
-    in
-    let got_vn = run2v ~name:"aw_vecnest_serial" () in
-    let got_vnv =
-      run2v ~name:"aw_vecnest_vec"
-        ~schedule:
-          (two_axis_sched ~f:(fun ~r:_ ~s -> [ Sched.Retype { axis = s; ty = LL.Vectorized } ]))
-        ()
-    in
-    let vecn_fired =
-      match read_generated "aw_vecnest_vec" with
-      | Some src -> String.is_substring src ~substring:"Vectorized reduction rendering"
-      | None -> false
-    in
-    p claim_vec_nested (vecn_fired && Array.for_all2_exn got_vnv got_vn ~f:Float.equal);
+    cc_only claim_vec_nested (fun () ->
+        let nvr, nvs = (4, 32) in
+        let fxv = Ll_test.drift ~dims:[| ni; nvr; nvs |] in
+        let run2v ~name ?schedule () =
+          let xv =
+            NTDSL.init ~l:(name ^ "_x") ~prec:Ir.Ops.bfloat16 ~o:[ ni; nvr; nvs ] ~f:fxv ()
+          in
+          let%op outv = xv ++ "irs => i" in
+          Tn.update_prec outv.Tensor.value Ir.Ops.bfloat16;
+          run ~name ?schedule outv
+        in
+        let got_vn = run2v ~name:"aw_vecnest_serial" () in
+        let got_vnv =
+          run2v ~name:"aw_vecnest_vec"
+            ~schedule:
+              (two_axis_sched ~f:(fun ~r:_ ~s -> [ Sched.Retype { axis = s; ty = LL.Vectorized } ]))
+            ()
+        in
+        let vecn_fired =
+          match read_generated "aw_vecnest_vec" with
+          | Some src -> String.is_substring src ~substring:"Vectorized reduction rendering"
+          | None -> false
+        in
+        p claim_vec_nested (vecn_fired && Array.for_all2_exn got_vnv got_vn ~f:Float.equal));
     (* A hardware-annotated inner reduction axis the backend serializes (cc binds no workgroup
        dimension) is a serial level to the peel, so the whole nest keeps one accumulator instead of
        narrowing once per outer iteration. The [=+]-into-pre-zeroed form again: the einsum
@@ -393,15 +414,16 @@ let () =
       let ctx = Context.run ctx routine in
       Context.get_values ctx outw.Tensor.value
     in
-    let got_wn = run_sum2 ~name:"aw2_wgr_serial" () in
-    let got_wnn =
-      run_sum2 ~name:"aw2_wgr_hw"
-        ~schedule:
-          (two_axis_sched ~f:(fun ~r:_ ~s ->
-               [ Sched.Retype { axis = s; ty = LL.Workgroup_reduce } ]))
-        ()
-    in
-    p claim_wgr_nested (Array.for_all2_exn got_wnn got_wn ~f:Float.equal);
+    cc_only claim_wgr_nested (fun () ->
+        let got_wn = run_sum2 ~name:"aw2_wgr_serial" () in
+        let got_wnn =
+          run_sum2 ~name:"aw2_wgr_hw"
+            ~schedule:
+              (two_axis_sched ~f:(fun ~r:_ ~s ->
+                   [ Sched.Retype { axis = s; ty = LL.Workgroup_reduce } ]))
+            ()
+        in
+        p claim_wgr_nested (Array.for_all2_exn got_wnn got_wn ~f:Float.equal));
     (* === adjacent accumulations: two SOURCE assignments into one cell are two stores, and each
        store narrows — they must NOT share an accumulator residency (that is the provenance
        boundary: only unrolled copies of one assignment may). 256 + 1 rounds to 256 at bf16 twice
@@ -540,27 +562,60 @@ let () =
       | [ _; s ] -> [ Sched.Retype { axis = s; ty } ]
       | _ -> assert false
     in
-    let got_w = run_sum ~cols:16 ~name:"aw_wgr_serial" () in
-    let got_wg =
-      run_sum ~cols:16 ~name:"aw_wgr_hw" ~schedule:(retype_reduction LL.Workgroup_reduce) ()
-    in
-    p claim_wgreduce (Array.for_all2_exn got_wg got_w ~f:Float.equal);
+    cc_only claim_wgreduce (fun () ->
+        let got_w = run_sum ~cols:16 ~name:"aw_wgr_serial" () in
+        let got_wg =
+          run_sum ~cols:16 ~name:"aw_wgr_hw" ~schedule:(retype_reduction LL.Workgroup_reduce) ()
+        in
+        p claim_wgreduce (Array.for_all2_exn got_wg got_w ~f:Float.equal));
     (* === the SIMD reduction's scalar remainder === *)
     (* 67 is no multiple of any chains*lanes step, so the vector partial must fold into the wide
        total together with the tail contributions and narrow once — the pre-fix rendering stored
        the partial to bf16 mid-way (at running sums ~25, where 1/64 increments are lost) and then
        narrowed per tail step. The structural conjunct keeps the leg honest: if the vectorized
        rendering declines, serial-equals-serial would be a false green. *)
-    let got_v = run_sum ~cols:67 ~name:"aw_vec_serial" () in
-    let got_vt =
-      run_sum ~cols:67 ~name:"aw_vec_tail" ~schedule:(retype_reduction LL.Vectorized) ()
+    cc_only claim_simd_tail (fun () ->
+        let got_v = run_sum ~cols:67 ~name:"aw_vec_serial" () in
+        let got_vt =
+          run_sum ~cols:67 ~name:"aw_vec_tail" ~schedule:(retype_reduction LL.Vectorized) ()
+        in
+        let vec_fired =
+          match read_generated "aw_vec_tail" with
+          | Some src -> String.is_substring src ~substring:"Vectorized reduction rendering"
+          | None -> false
+        in
+        p claim_simd_tail (vec_fired && Array.for_all2_exn got_vt got_v ~f:Float.equal));
+    (* === fp8 accumulates wide on every backend (gh-ocannl-663) === *)
+    (* No backend has an fp8 accumulator format (its arithmetic bridges through float per operator
+       everywhere), so fp8 reductions take f32 residency universally — unlike the bf16 legs, this
+       claim holds on HIP and Metal too; it merely rides the bf16 gate and prints as skipped
+       there until that hardware runs the suite. e5m2's 2-bit mantissa makes the discrimination
+       cheap: at 16 the spacing is 4, so per-step narrowing absorbs every +0.5 and leaves 16,
+       while the wide accumulator reaches 20, exactly representable. *)
+    let fp8 = Ir.Ops.fp8 in
+    let f8node = Ll_test.node_factory ~prec:fp8 ~first_id:9700 ~dims:[| 8 |] () in
+    let f8acc = f8node ~dims:[| 1 |] "aw_f8acc" in
+    let f8xs = f8node "aw_f8xs" in
+    Ll_test.materialize f8acc;
+    Ll_test.materialize f8xs;
+    let f8i = Ll_test.sym () in
+    let f8upd =
+      Ll_test.set f8acc
+        [| Ll_test.fixed 0 |]
+        (LL.Binop
+           ( Ir.Ops.Add,
+             (Ll_test.get f8acc [| Ll_test.fixed 0 |], fp8),
+             (Ll_test.get f8xs [| Ll_test.iter f8i |], fp8) ))
     in
-    let vec_fired =
-      match read_generated "aw_vec_tail" with
-      | Some src -> String.is_substring src ~substring:"Vectorized reduction rendering"
-      | None -> false
+    let f8o =
+      Ll_test.optimize ~materialized:[ f8acc; f8xs ] ~name:"aw_fp8" (Ll_test.loop_n f8i 8 f8upd)
     in
-    p claim_simd_tail (vec_fired && Array.for_all2_exn got_vt got_v ~f:Float.equal);
+    let f8vals =
+      Ll_test.execute ~name:"aw_fp8" f8o
+        ~seed:[ (f8acc, [| 16.0 |]); (f8xs, Array.create ~len:8 0.5) ]
+        ~read:[ f8acc ]
+    in
+    p claim_fp8 (Float.equal (List.hd_exn f8vals).(0) 20.0);
     (* Negative control: turning the policy off recovers the pre-gh-517/pre-gh-639 semantics — every
        operator, the accumulation update included, rounds to storage precision — which on these
        inputs must visibly differ from the widened default, proving the inputs discriminate the
@@ -574,9 +629,10 @@ let () =
     let got_off = run ~name:"aw_bf16_naive_off" mc2 in
     Numerics.set_policy saved_policy;
     p claim_off_value (not (Array.for_all2_exn got_off got ~f:Float.equal));
-    match read_generated "aw_bf16_naive_off" with
-    | None -> Verdict.fail (claim_off_shape ^ " — generated source not found")
-    | Some src ->
-        let has s = String.is_substring src ~substring:s in
-        p claim_off_shape (has "single_to_bfloat16(fmaf(")
+    cc_only claim_off_shape (fun () ->
+        match read_generated "aw_bf16_naive_off" with
+        | None -> Verdict.fail (claim_off_shape ^ " — generated source not found")
+        | Some src ->
+            let has s = String.is_substring src ~substring:s in
+            p claim_off_shape (has "single_to_bfloat16(fmaf("))
   end

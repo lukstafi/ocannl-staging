@@ -826,7 +826,12 @@
 # it is strictly more accurate than per-operator rounding, and it is what makes the vectorized
 # renderings reachable for narrow-storage kernels. Set to false to recover per-operator rounding
 # (per-reduction-step included).
-# GPU backends have native 16-bit types and are unaffected either way.
+# GPU backends compute narrow arithmetic natively and their pointwise numerics are unaffected
+# either way; the same knob governs their reduction-accumulator width where the tensor-unit
+# formats force a wider accumulate (gh-ocannl-663): serial bf16 reductions on CUDA and fp8
+# reductions everywhere accumulate in f32 and narrow once per nest, mirroring the mma legs, while
+# f16 (and bf16 on HIP/Metal, whose tiles accumulate in storage-width fragments) keeps storage
+# residency.
 # Programmatic override: `Ir.Numerics.set_policy`.
 #narrow_compute_f32=true
 

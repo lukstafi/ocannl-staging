@@ -258,6 +258,11 @@ val subst_accum_read :
 (** Retarget an {!accum_update_parts}-shaped update's read of [tn[idcs]] to the scope local [id].
     Raises on any other shape. *)
 
+val scalar_reads_scope : id:scope_id -> scalar_t -> bool
+(** Whether the scalar reads the scope local [id], descending into nested scope bodies — the
+    scope-local counterpart of {!scalar_touches_tn}. Distinguishes a scope-opening init (a
+    [Set_local] whose value is free of the local) from a self-referential update. *)
+
 val accum_local_update_parts : id:scope_id -> scalar_t -> (Ops.binop * scalar_t) option
 (** The reduce-shaped update of a scope LOCAL, [local = op(local, contrib)] (or its FMA form) with
     [contrib] free of the local — [subst_accum_read]'s output shape; returns [(op, contrib)]. The

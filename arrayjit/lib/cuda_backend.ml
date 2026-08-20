@@ -579,6 +579,23 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     let vector_bytes = 16
     let vector_style = `Packed_struct
 
+    (* gh-ocannl-663: serial-rendered reduction accumulators mirror the mma legs' residency, so a
+       narrow reduction's width does not depend on whether a schedule tensorized it. bf16 has no
+       accumulator format on NVIDIA hardware — the uniform-bf16 [mma.sync] arm holds f32 per-lane
+       registers across the whole [k] extent and narrows once at the [d] boundary — so serial bf16
+       accumulation resides in f32 and narrows once per nest. fp8 likewise accumulates f32-only
+       (and its serial arithmetic already bridges through float per operator); f16 accumulates
+       natively at f16 in its seeded wmma triple and stays at storage width. Governed by the same
+       [narrow_compute_f32] policy knob that sets the CPU accumulator width (gh-ocannl-639), so
+       policy-off recovers per-step narrowing here as there; compute precision stays the identity
+       either way — pointwise narrow arithmetic remains native. *)
+    let accum_prec prec =
+      match prec with
+      | (Ops.Bfloat16_prec _ | Ops.Fp8_prec _) when (Numerics.get ()).Numerics.narrow_compute_f32
+        ->
+          Ops.single
+      | _ -> prec
+
     let typ_of_prec = function
       | Ops.Byte_prec _ -> "unsigned char"
       | Ops.Uint16_prec _ -> "unsigned short"

@@ -513,6 +513,18 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     let vector_bytes = 16
     let vector_style = `Packed_struct
 
+    (* gh-ocannl-663: serial-rendered reduction accumulators mirror the mma legs' residency.
+       Unlike CUDA, RDNA WMMA has genuine bf16 (and f16) accumulator variants and the uniform
+       16-bit triples are seeded, so narrow 16-bit accumulators keep their storage residency —
+       widening the serial legs here would re-introduce the serial-vs-mma width dependence
+       gh-ocannl-639 removes. fp8 has an accumulator format on no backend (its serial arithmetic
+       already bridges through float per operator), so it follows the CPU policy: f32 residency,
+       one narrowing per nest, governed by the same [narrow_compute_f32] knob. *)
+    let accum_prec prec =
+      match prec with
+      | Ops.Fp8_prec _ when (Numerics.get ()).Numerics.narrow_compute_f32 -> Ops.single
+      | _ -> prec
+
     let typ_of_prec = function
       | Ops.Byte_prec _ -> "unsigned char"
       | Ops.Uint16_prec _ -> "unsigned short"

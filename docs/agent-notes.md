@@ -999,10 +999,28 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   leg a whole-k tile (`tile_mma_narrow`'s gh-639 leg uses `bk = n`); (2) discriminating inputs
   must DRIFT out of storage exactness — a zero-mean operand random-walks small enough that every
   bf16 partial sum stays exact and per-step narrowing is invisible (`accum_width.ml`'s policy-off
-  negative control is the canary). GPU serial legs keep storage-precision accumulation (their
-  `compute_prec` is the identity) while their mma legs accumulate per the seeded format triple —
-  at narrow storage, cross-schedule numerics on GPU remain schedule-dependent, stated scope of
-  gh-ocannl-639.
+  negative control is the canary).
+- **On GPU the accumulator residency follows the backend's tensor-unit formats, per backend**
+  (gh-ocannl-663): `C_syntax_config.accum_prec` — the width a recognized reduction accumulator
+  resides at given the storage precision — feeds the try_widen gate AND `scope_prec_of`, whose
+  reduction-shaped scopes a codegen census (`C_syntax.accum_scope_ids`, per `scope_id`, verdicts
+  from `Low_level.accum_local_update_parts`) resolves at accumulator width, so schedule-minted
+  scopes (materialized `Unroll`, `Partition`) and virtual accumulators match the widened serial
+  fallback on every backend; the codegen-minted scope registers itself there. The per-backend
+  table: CUDA widens bf16→f32 (its mma legs hold f32 per-lane registers whole-k — NVIDIA has no
+  bf16 accumulate) and fp8→f32; HIP widens only fp8 (RDNA WMMA has genuine bf16/f16 accumulator
+  variants and the uniform triples are seeded, so bf16 serial legs deliberately stay narrow —
+  width-uniform with the mma legs); Metal's `accum_prec = compute_prec` (fp8→f32); cc's likewise
+  (the CPU accumulator IS a compute intermediate). CUDA/HIP widening is gated on the same
+  `narrow_compute_f32` policy knob as the CPU width, so policy-off recovers per-step narrowing
+  everywhere at once, and the knob is already in the schedule-cache key (gh-ocannl-568). fp16 is
+  everywhere width-uniform at f16 (native accumulate in every seeded triple); aligning it with
+  `fp16_arithmetic` would need seeding restrictions or an f32-accumulate uniform-f16 emission and
+  remains open. Two traps: `compute_prec`/`accum_prec` bind at `include Pure_C_config` time, so
+  overriding one without restating the other silently keeps the default pairing — a startup
+  width assert in the `C_syntax` functor catches the narrow direction; and `Workgroup_reduce`'s
+  warp-shuffle rendering still hard-errors on narrow accumulators (an error, not a width
+  divergence — extending it to accumulate at `accum_prec` is a separable follow-up).
 - **A "packmma" timing is not evidence that anything tensorized.** A `Tile_mma` whose register-tile
   preconditions fail renders the scalar fallback and the run still reports under whatever the
   variant was named — the column extent below the compute vector width is the easiest way in (at
