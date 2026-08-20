@@ -333,23 +333,25 @@ let () =
              Stdio.eprintf "qkv_mma: construct FAILED: %s\n" (Exn.to_string exn);
              false));
 
-  (* --- The pre-driver gate for the folded launch: [validate_parallel] deliberately accepts any
-     fold (it is backend-independent), so [Schedule.check_hardware_limits_classified] is where a
-     backend's [max_grid_z] refuses an over-cap fold as a typed [Resource_exceeded] — covering
-     hand-built schedules and future annotators, not only these seeds; and the seeding guard reads
-     the same limit, so a tight cap also stops the twins from being proposed at all. --- *)
+  (* --- The pre-driver gate for the launch dimensions: [validate_parallel] deliberately accepts
+     any grid geometry (it is backend-independent), so [Schedule.check_hardware_limits_classified]
+     is where a backend's [max_grid_yz] refuses an over-cap extent as a typed [Resource_exceeded] —
+     covering hand-built schedules and future annotators, not only these seeds; and the seeding
+     guard reads the same limit, so a tight cap also stops the twins from being proposed at all.
+     One limit field (CUDA and HIP cap [gridDim.y] and [gridDim.z] at the same 65535), two typed
+     resources, because the two extents are shrunk by different knobs. --- *)
   let bg_seed = List.find_exn (blocktile_seeds opt) ~f:(fun q -> q.Autotune.sk_batch_grid) in
   let o = Sched.apply (Autotune.sketch_schedule ~p:bg_seed opt) opt in
-  let limits_z z = { Ir.Backend_intf.no_hardware_limits with max_grid_z = Some z } in
+  let limits_yz n = { Ir.Backend_intf.no_hardware_limits with max_grid_yz = Some n } in
   p "limit gate: a folded .z extent at the device limit passes"
     (match
-       Sched.check_hardware_limits_classified ~name:"qkv_bg" ~limits:(limits_z (bb * hh)) o
+       Sched.check_hardware_limits_classified ~name:"qkv_bg" ~limits:(limits_yz (bb * hh)) o
      with
     | () -> true
     | exception _ -> false);
   p "limit gate: a folded .z extent beyond the device limit is a typed Resource_exceeded"
     (match
-       Sched.check_hardware_limits_classified ~name:"qkv_bg" ~limits:(limits_z ((bb * hh) - 1)) o
+       Sched.check_hardware_limits_classified ~name:"qkv_bg" ~limits:(limits_yz ((bb * hh) - 1)) o
      with
     | () -> false
     | exception
@@ -359,6 +361,36 @@ let () =
               { resource = Ir.Schedule_outcome.Grid_z_extent; _ } ) ->
         true
     | exception _ -> false);
-  p "limit gate: a max_grid_z below the batch product stops the twins at seeding"
-    (Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false ~limits:(limits_z ((bb * hh) - 1)) opt
-    |> List.for_all ~f:(fun q -> not q.Autotune.sk_batch_grid))
+  p "limit gate: a max_grid_yz below the batch product stops the twins at seeding"
+    (Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false ~limits:(limits_yz ((bb * hh) - 1)) opt
+    |> List.for_all ~f:(fun q -> not q.Autotune.sk_batch_grid));
+
+  (* The [.y] gate is the same check one dimension over, and has nothing to do with the fold:
+     [grid.(1)] is a blocktiled matmul's row-block count, which grows with the site's m-extent
+     alone (at [bm = 16] an m-extent past ~1M rows is already over the 65535 cap). A serial-batch
+     seed isolates it: its [.z] extent is 1, so only the [.y] check can fire, and the typed
+     resource says which dimension asked too much. *)
+  let serial_seed =
+    List.find_exn (blocktile_seeds opt) ~f:(fun q -> not q.Autotune.sk_batch_grid)
+  in
+  let os = Sched.apply (Autotune.sketch_schedule ~p:serial_seed opt) opt in
+  let sdims = LL.launch_dims os.LL.llc in
+  let grid_y = sdims.LL.grid.(1) in
+  p "limit gate: the .y reference isolates the row blocks — its .z extent is 1 and its .y exceeds 1"
+    (sdims.LL.grid.(2) = 1 && grid_y > 1);
+  p "limit gate: a .y grid extent at the device limit passes"
+    (match Sched.check_hardware_limits_classified ~name:"qkv_y" ~limits:(limits_yz grid_y) os with
+    | () -> true
+    | exception _ -> false);
+  p "limit gate: a .y grid extent beyond the device limit is a typed Resource_exceeded"
+    (match
+       Sched.check_hardware_limits_classified ~name:"qkv_y" ~limits:(limits_yz (grid_y - 1)) os
+     with
+    | () -> false
+    | exception
+        Ir.Schedule_outcome.Cause_at
+          ( _,
+            Ir.Schedule_outcome.Resource_exceeded
+              { resource = Ir.Schedule_outcome.Grid_y_extent; _ } ) ->
+        true
+    | exception _ -> false)

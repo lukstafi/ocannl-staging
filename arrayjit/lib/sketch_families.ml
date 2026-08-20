@@ -127,7 +127,7 @@ type sketch_params = {
           peaked near 128 blocks and regressed by 1024): the tuner, not a heuristic, decides
           whether the extra parallelism beats the occupancy it costs. Never seeded when the batch
           extents' product exceeds the backend's [.z] launch-dimension limit
-          ([hardware_limits.max_grid_z], falling back to [max_grid_fold_extent] where the backend
+          ([hardware_limits.max_grid_yz], falling back to [max_grid_fold_extent] where the backend
           advertises none — the same limit [Schedule.check_hardware_limits_classified] enforces
           pre-driver for schedules that do not come from these seeds). *)
   sk_swizzle : LL.swizzle_kind option;
@@ -1261,9 +1261,10 @@ let companion_role_ops ~(roles : [ `Batch | `Row | `Col ] array)
    ones the pipelines hoist above the row loop — the final nest order). *)
 let matmul_batch_loops (site : matmul_site) : (Idx.symbol * int) list = site.m_bo @ site.m_bi
 
-(* The batch fold lands whole batch-extent products on [.z], and CUDA/HIP cap [gridDim.z] at 65535
-   ([gridDim.x] alone is 2^31-scale; Metal is larger still). The authoritative per-backend cap is
-   [hardware_limits.max_grid_z], enforced pre-driver by [Schedule.check_hardware_limits_classified];
+(* The batch fold lands whole batch-extent products on [.z], and CUDA/HIP cap [gridDim.z] (like
+   [gridDim.y]) at 65535 ([gridDim.x] alone is 2^31-scale; Metal is larger still). The
+   authoritative per-backend cap is [hardware_limits.max_grid_yz], enforced pre-driver by
+   [Schedule.check_hardware_limits_classified];
    this constant is the conservative fallback when a backend advertises no limit, so seeding stays
    deterministic across machines. A product beyond the cap must not be seeded: the candidate could
    only fail at launch, on the GPU backends only, after compiling. *)
@@ -1272,7 +1273,7 @@ let max_grid_fold_extent = 65535
 (* Whether the [sk_batch_grid] twins are seedable for this site: there are batch loops to spread,
    and their product fits the backend's [.z] launch dimension. *)
 let batch_grid_twin_ok ~(limits : Ir.Backend_intf.hardware_limits) (site : matmul_site) : bool =
-  let cap = Option.value limits.Ir.Backend_intf.max_grid_z ~default:max_grid_fold_extent in
+  let cap = Option.value limits.Ir.Backend_intf.max_grid_yz ~default:max_grid_fold_extent in
   let product = List.fold (matmul_batch_loops site) ~init:1 ~f:(fun acc (_, n) -> acc * n) in
   (not (List.is_empty (matmul_batch_loops site))) && product >= 2 && product <= cap
 

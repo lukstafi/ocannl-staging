@@ -36,6 +36,18 @@
 
 ### Added
 
+- **The pre-driver launch gate covers the `.y` grid dimension** (gh-ocannl-643 follow-up). CUDA and
+  HIP cap `gridDim.y` and `gridDim.z` at the same 65535 (`gridDim.x` is 2^31-scale), but only the
+  folded `.z` extent was checked, so a blocktiled matmul over a large enough m-extent — past ~1M
+  rows at `bm = 16`, with no batch axis in sight — still failed at the driver rather than as a
+  named, typed error. `Backend_intf.max_grid_z` is therefore now `max_grid_yz`, one field for the
+  one hardware fact (CUDA fills the architectural constant; HIP queries the smaller of the device's
+  `max_grid_size` y and z components; Metal and the C backends stay `None`), and
+  `Schedule.check_hardware_limits{,_classified}` checks both extents against it. The typed causes
+  stay distinct — `Schedule_outcome.Grid_y_extent` beside `Grid_z_extent` — because an autotune
+  search groups declines by resource and the two are shrunk by different knobs: coarser row
+  blocking for `.y`, serial batch loops for `.z`.
+
 - **Training-loop utilities** (gh-ocannl-465), ports of llm.c's loop scaffolding sized for the
   GPT-2 training example: `Train.Lr_schedule` (cosine / linear / constant / WSD host-side
   learning-rate schedules with linear warmup, fed to the device through the new

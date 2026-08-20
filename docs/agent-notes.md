@@ -592,6 +592,11 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   verdict still never depends on what `annotate` emits, so the gh-577 static witness stays sound;
   and batch products beyond 65535 are never seeded (`max_grid_fold_extent` — the CUDA/HIP
   `gridDim.z` cap; such a candidate could only fail at launch, GPU-only, after compiling).
+  The pre-driver gate that backs that seeding filter (`Schedule.check_hardware_limits_classified`)
+  covers BOTH 16-bit grid dimensions against the single `hardware_limits.max_grid_yz`: `grid.(2)`
+  (the fold) and `grid.(1)` (the row-block count, which overflows on m-extent alone — no batch axis
+  involved). One limit field, two typed resources (`Grid_y_extent` / `Grid_z_extent`), since the
+  rejection key is what an autotune search groups declines by and the fixes differ.
   Pinned end-to-end by `test/operations/schedule_batch_grid.ml` (structure everywhere, execution
   and emitted-source fold on GPU backends).
 - "`Tile_mma` is a barrier" is only half true, and the half that fails is the one barrier elision

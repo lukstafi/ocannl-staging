@@ -739,14 +739,16 @@ val check_hardware_limits :
 (** Validates the scheduled kernel [name] against the device limits, raising [Utils.User_error] on
     violation: the launch's workgroup size (the product of {!Low_level.launch_dims}' block
     dimensions) against {!field:Backend_intf.max_threads_per_workgroup}, the total bytes of
-    [workgroup_shared] tiles against {!field:Backend_intf.max_workgroup_memory_bytes}, and the
-    folded [.z] grid extent ({!Low_level.launch_dims}' [grid.(2)], the product of the Grid slots
-    [>= 2] — gh-ocannl-643) against {!field:Backend_intf.max_grid_z}. Backend [compile] calls this
-    after any [?lowered_transform] (or the default annotator, which already respects the limits),
+    [workgroup_shared] tiles against {!field:Backend_intf.max_workgroup_memory_bytes}, and both
+    16-bit-capped grid dimensions — the [.y] extent ({!Low_level.launch_dims}' [grid.(1)], a
+    blocktiled matmul's row-block count) and the folded [.z] extent ([grid.(2)], the product of the
+    Grid slots [>= 2] — gh-ocannl-643) — against {!field:Backend_intf.max_grid_yz}. Backend
+    [compile] calls this after any [?lowered_transform] (or the default annotator, which already respects the limits),
     turning driver-level launch failures into early, named errors. A no-op for all-[None] limits. *)
 
 val check_hardware_limits_classified :
   name:string -> limits:Backend_intf.hardware_limits -> Low_level.optimized -> unit
 (** Internal candidate-facing variant of {!check_hardware_limits}; transports excess thread,
-    workgroup-memory, or folded-grid requests as typed {!Schedule_outcome.Resource_exceeded}
-    causes. *)
+    workgroup-memory, [.y]-grid or folded-[.z]-grid requests as typed
+    {!Schedule_outcome.Resource_exceeded} causes (the last two discriminated as
+    {!Schedule_outcome.Grid_y_extent} / {!Schedule_outcome.Grid_z_extent}). *)

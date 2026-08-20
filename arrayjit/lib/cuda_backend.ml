@@ -2285,10 +2285,10 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
              min_over (fun (a : Cu.Device.attributes) -> a.max_threads_per_block);
            max_workgroup_memory_bytes =
              min_over (fun (a : Cu.Device.attributes) -> a.max_shared_memory_per_block);
-           (* CUDA's gridDim.y/z cap is 65535 on every architecture (the Compute Capability
-              tables), unlike the per-device limits queried above — a constant, not an
-              attribute. *)
-           max_grid_z = Some 65535;
+           (* CUDA's gridDim.y and gridDim.z cap is 65535 on every architecture (the Compute
+              Capability tables), unlike the per-device limits queried above — a constant, not an
+              attribute. gridDim.x is 2^31-1 and needs no gate. *)
+           max_grid_yz = Some 65535;
            (* Tensor cores (tensorize-mma T3): the 32-thread warp cooperates on 16x16x16 wmma tiles
               from sm_70 up; [mma_format_tiles] advertises the divergent fp8 16x8x32, tf32 16x16x8
               and uniform-bf16 16x8x16 shapes to typed autotune seeds. Precision combinations are
