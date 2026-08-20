@@ -318,7 +318,9 @@ than the driver (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION` at module load), run it wi
   fallback, the seeded/timed tensorized counts, and the best *timed* tensorized candidate's time.
   A tensorized win in the arm that loses the A/B reaches no artifact and shows up in no step time,
   so without this the sweep can only find it by grepping `OCANNL_AUTOTUNE_LOG` output that a
-  successful cell discards. Read `mma_best_ms` against `best_ms` for the margin: tensorization
+  successful cell discards. Each arm also states whether it searched or replayed a cached winner
+  (`cache_hit`), which is what makes a *mixed* cell readable — one arm cached, the other searched
+  because its half of the A/B never was. Read `mma_best_ms` against `best_ms` for the margin: tensorization
   losing by 1% and by 40% are different findings.
 - tinygrad's loss must be realized before `opt.step()` (in-place assigns; a later realize
   would recompute the loss from updated weights). tinygrad JIT capture happens during the
@@ -332,6 +334,23 @@ than the driver (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION` at module load), run it wi
   modules/buffers; 2.5–3.5x on small CUDA kernels), which would penalize the tuned artifact for
   the one-time search it already paid for in `compile_s`. Wipe `autotune_cache/` before a run
   whose `compile_s` should reflect a from-scratch search.
+
+  **The result line says which pass produced it** (gh-ocannl-644): `"searched": true|false` is
+  whether *this process* ran a search, and the `tune` object breaks it down per arm
+  (`cache_hit`) and in total (`searches` / `replays`, counting the gh-555 flip refinements too,
+  which are searches this process ran even though they are not arms). `orchestrate.py` gates on
+  it — a tuned cell whose step times came from a searching process fails the **PROVENANCE
+  GATE** and is marked `SEARCH PASS` in the report's `pass` column — and stamps
+  `search_pass_searched`, so a `compile_s` that was itself a cache replay reads as
+  `(cached)` rather than as a from-scratch search cost. Before this, both passes emitted an
+  identical `framework`/`backend`/`variant`/`precision`, and the only trace of the difference was
+  a `cache hit:` line on the stderr of a run whose output a successful cell discards:
+  `report-gh612-hip.md` quoted pass-1 step times for fifteen revisions, and it took a reviewer
+  noticing that the driver never started a second process to find it.
+  A checked-in driver should assert `searched == false` rather than infer a replay from
+  `compile_s` being small. (The asymmetry to keep in mind when reading a matrix: tinygrad's
+  `--beam N` cell searches *in the timing process*, as does `torch.compile`; only the OCANNL
+  tuned cell splits the two passes, and only it is gated here.)
 - Timing on a laptop: prefer the p50 of the per-step synced times; rerun and compare rounds
   if thermals are suspect. Keep timing out of CI; the parity gate is the CI-worthy part.
 - Untuned-default before/after (gh-ocannl-491): the model-picked default is config-gated, so

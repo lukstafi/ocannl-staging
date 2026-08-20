@@ -182,5 +182,50 @@ class PrecisionLegTest(unittest.TestCase):
         self.assertIn("conv", reason)
 
 
+class ProvenanceTest(unittest.TestCase):
+    """gh-ocannl-644: a tuned cell's result says which pass timed it."""
+
+    def tuned(self, searched):
+        r = result("ocannl", "hip", "tuned", [2.3, 2.2, 2.1])
+        if searched is not None:
+            r["searched"] = searched
+        return r
+
+    def test_a_replay_is_the_compliant_case(self):
+        replay = self.tuned(False)
+
+        self.assertEqual(orchestrate.provenance_check([replay]), [])
+        self.assertEqual(replay["provenance"], "REPLAY")
+
+    def test_search_pass_timings_are_a_violation(self):
+        # The failure this exists to catch: both passes emit the same framework/backend/variant/
+        # precision, so before `searched` a report could quote pass-1 numbers indefinitely.
+        searching = self.tuned(True)
+
+        self.assertEqual(orchestrate.provenance_check([searching]), [searching])
+        self.assertEqual(searching["provenance"], "SEARCH-PASS")
+
+    def test_a_runner_without_the_field_is_unknown_not_a_violation(self):
+        old = self.tuned(None)
+
+        self.assertEqual(orchestrate.provenance_check([old]), [])
+        self.assertEqual(old["provenance"], "UNKNOWN")
+
+    def test_untuned_and_non_ocannl_cells_are_not_annotated(self):
+        # They have no second pass to be from; a `pass` column entry for them would be a claim
+        # about a protocol they do not run.
+        default = result("ocannl", "hip", "default", [2.3, 2.2, 2.1])
+        default["searched"] = False
+        torch = result("pytorch", "cpu", "eager", [2.3, 2.2, 2.1])
+
+        self.assertEqual(orchestrate.provenance_check([default, torch]), [])
+        self.assertNotIn("provenance", default)
+        self.assertNotIn("provenance", torch)
+
+    def test_every_verdict_renders(self):
+        for verdict in ("REPLAY", "SEARCH-PASS", "UNKNOWN"):
+            self.assertIn(verdict, orchestrate.PROVENANCE_MARK)
+
+
 if __name__ == "__main__":
     unittest.main()

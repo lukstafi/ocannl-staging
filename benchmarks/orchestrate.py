@@ -54,6 +54,13 @@ PARITY_TOL_PRECISION = {"bf16": 4e-3, "f16": 2e-3}
 # slowly. Require at least one part per million of relative loss variation over the parity window.
 LOSS_MOVE_MIN_REL = 1e-6
 REFERENCE = ("pytorch", "cpu", "eager")
+# How a tuned cell's measurement pass is rendered in the report's `pass` column (gh-ocannl-644).
+# A runner predating the `searched` field cannot answer, which is not the same as a violation.
+PROVENANCE_MARK = {
+    "REPLAY": "replay",
+    "SEARCH-PASS": "**SEARCH PASS**",
+    "UNKNOWN": "?",
+}
 # Report row order within a workload: precision-major, f32 first (it is the reference's precision
 # and every non-OCANNL cell's), then the reduced precisions; a gate-cost leg sorts directly after
 # the storage precision it varies; p50-ascending within each group.
@@ -275,6 +282,35 @@ def parity_check(results):
             r["parity"] = "PASS" if max_rel < tol and r["parity_loss_moved"] else "FAIL"
 
 
+def provenance_check(results):
+    """Annotate each OCANNL tuned cell with which pass produced its step times (gh-ocannl-644).
+
+    The two-pass protocol exists because a searching process is measurably slower per launch, so
+    pass-1 step times understate the tuned artifact. Both passes emit the same
+    framework/backend/variant/precision, and until the runner carried `searched` nothing in the
+    artifact distinguished them: `report-gh612-hip.md` quoted pass-1 timings for fifteen revisions
+    and only a reviewer reading the driver caught it.
+
+    Sets `provenance` to REPLAY (the protocol-compliant case), SEARCH-PASS (the timings came from a
+    process that searched — a protocol violation, returned as a violation), or UNKNOWN (a runner
+    predating the field; not a violation, since the old artifacts cannot answer). Untuned cells and
+    non-OCANNL cells get no annotation: they have no second pass to be from.
+    """
+    violations = []
+    for r in results:
+        if r.get("framework") != "ocannl" or r.get("variant") != "tuned":
+            continue
+        searched = r.get("searched")
+        if searched is None:
+            r["provenance"] = "UNKNOWN"
+        elif searched:
+            r["provenance"] = "SEARCH-PASS"
+            violations.append(r)
+        else:
+            r["provenance"] = "REPLAY"
+    return violations
+
+
 def report(results, out_dir, unavailable=()):
     out_dir.mkdir(parents=True, exist_ok=True)
     with open(out_dir / "results.jsonl", "w") as f:
@@ -307,8 +343,25 @@ def report(results, out_dir, unavailable=()):
                 "Rows are grouped by precision (f32 first), p50-ascending within each group.\n"
             )
         with_tokens = any(r.get("tokens_per_step") for r in rows)
-        header = "| framework | backend | variant | precision | step p50 ms | p10 | p90 | queued ms | compile s | parity |"
-        rule = "|---|---|---|---|---|---|---|---|---|---|"
+        # gh-ocannl-644: which pass produced the step times. Only a tuned cell has two passes, so
+        # the column appears only where one was measured.
+        with_provenance = any(r.get("provenance") for r in rows)
+        if with_provenance:
+            lines.append(
+                "`pass` says which process produced a tuned cell's step times: `replay` is the "
+                "protocol's fresh pass-2 process replaying the cached winner, **`SEARCH PASS`** is "
+                "the searching process itself — whose accumulated modules and buffers inflate every "
+                "launch, so those numbers are not comparable with the others. A `compile s` marked "
+                "`(cached)` came from a search pass that hit the schedule cache, so it is a replay "
+                "cost rather than a from-scratch search.\n"
+            )
+        header = "| framework | backend | variant | precision | step p50 ms | p10 | p90 | queued ms | compile s |"
+        rule = "|---|---|---|---|---|---|---|---|---|"
+        if with_provenance:
+            header += " pass |"
+            rule += "---|"
+        header += " parity |"
+        rule += "---|"
         if with_tokens:
             header += " tok/s |"
             rule += "---|"
@@ -325,11 +378,17 @@ def report(results, out_dir, unavailable=()):
             if with_tokens:
                 tps = r.get("tokens_per_step")
                 tokens = f" {tps * 1000 / s['p50']:,.0f} |" if tps else " |"
+            compile_s = f"{r['compile_s']:.2f}"
+            if r.get("search_pass_searched") is False:
+                compile_s += " (cached)"
+            provenance = ""
+            if with_provenance:
+                provenance = " %s |" % PROVENANCE_MARK.get(r.get("provenance"), "—")
             lines.append(
                 f"| {r['framework']} | {r['backend']} | {r['variant']} "
                 f"| {r.get('precision', 'f32')} "
                 f"| {s['p50']:.3f} | {s['p10']:.3f} | {s['p90']:.3f} "
-                f"| {r['queued_step_ms']:.3f} | {r['compile_s']:.2f} | {parity} |{tokens}"
+                f"| {r['queued_step_ms']:.3f} | {compile_s} |{provenance} {parity} |{tokens}"
             )
     if unavailable:
         # Stated where the matrix is read: a cell missing because the workload cannot express it
@@ -510,8 +569,17 @@ def main():
                             if pass1 is None:
                                 failures.append(f"{label} (search pass)")
                                 continue
+                            if pass1.get("searched") is False:
+                                # A warm autotune_cache makes pass 1 a replay too, so the
+                                # compile_s carried over is a replay cost, not the search cost the
+                                # report calls it. Legitimate (the README says to wipe the cache
+                                # when the number must be from scratch) but not derivable from the
+                                # number itself — stamped so the report can say so.
+                                print("    search pass hit the schedule cache: compile_s is a "
+                                      "replay cost, not a from-scratch search", flush=True)
                             collect(label, cmd, env=env, cwd=HERE,
-                                    override={**ident, "compile_s": pass1["compile_s"]})
+                                    override={**ident, "compile_s": pass1["compile_s"],
+                                              "search_pass_searched": pass1.get("searched")})
                         else:
                             collect(label, cmd, env=env, cwd=HERE, override=ident)
         if "pytorch" in args.only:
@@ -536,6 +604,7 @@ def main():
                     )
 
     parity_check(results)
+    provenance_violations = provenance_check(results)
     report(results, HERE / "results", unavailable)
     ok = True
     if unavailable:
@@ -558,6 +627,21 @@ def main():
         # The reference cell was requested but is missing — the gate would be vacuous.
         ok = False
         print(f"PARITY GATE: {len(no_ref)} cell(s) have no reference to compare against", flush=True)
+    if provenance_violations:
+        # Not a parity problem: these cells computed the right thing. Their step times are the
+        # search process's, which the two-pass protocol exists to keep out of a report — and which
+        # nothing downstream can detect once the numbers are quoted (gh-ocannl-644).
+        ok = False
+        labels = ", ".join(
+            f"{r['workload']} {r['backend']}/"
+            f"{cell_name(r['variant'], r.get('precision', 'f32'))}"
+            for r in provenance_violations
+        )
+        print(
+            f"PROVENANCE GATE: {len(provenance_violations)} tuned cell(s) reported step times "
+            f"from a process that searched: {labels}",
+            flush=True,
+        )
     failed = [r for r in results if r["parity"] == "FAIL"]
     if failed:
         ok = False

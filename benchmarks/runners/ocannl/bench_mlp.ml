@@ -205,7 +205,15 @@ let () =
         H.collect_arm arms r;
         print_report "tune arm" r)
   in
-  let flip_report = Some (fun (r : Autotune.report) -> print_report "tune flip" r) in
+  let flip_report =
+    Some
+      (fun (r : Autotune.report) ->
+        (* Not an arm — but a flip refinement that actually searched leaves this process just as
+           loaded as an arm search, so it counts toward the result line's [searched]
+           (gh-ocannl-644). *)
+        H.collect_search arms r;
+        print_report "tune flip" r)
+  in
   (* BENCH_TUNE composes with every precision leg (gh-ocannl-529). It used to be rejected outright
      with BENCH_PRECISION, which made bf16 unmeasurable under autotuning — and bf16 is the ONLY
      tensor-core route on RDNA3/3.5, whose WMMA has no f32-input shape, so whether HIP even seeds a
