@@ -81,6 +81,11 @@ let get tn idcs : LL.scalar_t = LL.Get (tn, idcs)
 let zero tn : LL.t = LL.Zero_out tn
 let seq a b : LL.t = LL.Seq (a, b)
 
+(** [if_ cond body] guards [body] on [cond] being nonzero ({!Ir.Low_level.If}). The condition is
+    read at index precision only when it is an index expression; a value read (the usual flag
+    tensor) keeps the node's precision, which is what {!single} is here. *)
+let if_ cond body : LL.t = LL.If { cond = (cond, single); body }
+
 (** [loop ~upto s body] iterates [s] over [0 .. upto] INCLUSIVE, mirroring
     {!Ir.Low_level.For_loop}'s own bounds; [upto < 0] is a dead loop, which is a case worth
     building. *)
@@ -223,6 +228,21 @@ let known_virtual (o : LL.optimized) tn =
 let known_non_virtual (o : LL.optimized) tn =
   Tn.Placements.known_non_virtual o.LL.optimize_ctx.placements tn
 
+(** The [Non_virtual] code the virtualizer recorded for [tn], as the leading factor of its
+    placement's provenance.
+
+    Provenances COMPOSE: {!Ir.Tnode.Placements.default_to_most_local} folds the prior provenance in
+    as [1000 * prior + its own] when it resolves a [Never_virtual] decision into a concrete
+    placement, so the rejection code is not the whole number. Stripping the trailing factors is
+    sound only while every code is below 1000, which they are — {!Ir.Low_level}'s two [Non_virtual]
+    exceptions use disjoint two- and three-digit codes, which is also what lets a reader tell the
+    store-time verdicts from the consumption-time ones. [None] means no decision was recorded (the
+    node is still undecided, which after a full {!optimize} means it was never a candidate). *)
+let rejection_code (o : LL.optimized) tn =
+  Option.map (Tn.Placements.get o.LL.optimize_ctx.placements tn) ~f:(fun (_, prov) ->
+      let rec strip p = if p >= 1000 then strip (p / 1000) else p in
+      strip prov)
+
 (** {1 The executed leg} *)
 
 (* One root context per executable: [Context.compile] forks the lineage for each compile, so sibling
@@ -304,9 +324,9 @@ let p = Verdict.p
     below is derived. Every new IR constructor is handled HERE, once — three hand-maintained copies
     of this pair is what gh-ocannl-600 retired. *)
 
-let rec walk_t ~on_set ~on_get ~on_binop ~on_ternop ~on_scope (llc : LL.t) =
-  let recur_t = walk_t ~on_set ~on_get ~on_binop ~on_ternop ~on_scope in
-  let recur_s = walk_s ~on_set ~on_get ~on_binop ~on_ternop ~on_scope in
+let rec walk_t ~on_set ~on_get ~on_binop ~on_ternop ~on_scope ~on_if (llc : LL.t) =
+  let recur_t = walk_t ~on_set ~on_get ~on_binop ~on_ternop ~on_scope ~on_if in
+  let recur_s = walk_s ~on_set ~on_get ~on_binop ~on_ternop ~on_scope ~on_if in
   match llc with
   | LL.Noop | LL.Declare_local _ | LL.Comment _ | LL.Staged_compilation _ | LL.Workgroup_barrier
   | LL.Tile_mma _ ->
@@ -328,12 +348,13 @@ let rec walk_t ~on_set ~on_get ~on_binop ~on_ternop ~on_scope (llc : LL.t) =
       recur_s s
   | LL.Set_local (_, s) -> recur_s s
   | LL.If { cond = c, _; body } ->
+      on_if c;
       recur_s c;
       recur_t body
 
-and walk_s ~on_set ~on_get ~on_binop ~on_ternop ~on_scope (s : LL.scalar_t) =
-  let recur_t = walk_t ~on_set ~on_get ~on_binop ~on_ternop ~on_scope in
-  let recur_s = walk_s ~on_set ~on_get ~on_binop ~on_ternop ~on_scope in
+and walk_s ~on_set ~on_get ~on_binop ~on_ternop ~on_scope ~on_if (s : LL.scalar_t) =
+  let recur_t = walk_t ~on_set ~on_get ~on_binop ~on_ternop ~on_scope ~on_if in
+  let recur_s = walk_s ~on_set ~on_get ~on_binop ~on_ternop ~on_scope ~on_if in
   match s with
   | LL.Constant _ | LL.Constant_bits _ | LL.Get_local _ | LL.Embed_index _ | LL.Get_merge_buffer _
     ->
@@ -360,13 +381,13 @@ let ignore1 _ = ()
 
 (** [walk] over a statement, with only the callbacks the caller cares about. *)
 let walk ?(on_set = ignore1) ?(on_get = ignore1) ?(on_binop = ignore1) ?(on_ternop = ignore1)
-    ?(on_scope = ignore1) llc =
-  walk_t ~on_set ~on_get ~on_binop ~on_ternop ~on_scope llc
+    ?(on_scope = ignore1) ?(on_if = ignore1) llc =
+  walk_t ~on_set ~on_get ~on_binop ~on_ternop ~on_scope ~on_if llc
 
 (** [walk_scalar] over a scalar expression, likewise. *)
 let walk_scalar ?(on_set = ignore1) ?(on_get = ignore1) ?(on_binop = ignore1) ?(on_ternop = ignore1)
-    ?(on_scope = ignore1) s =
-  walk_s ~on_set ~on_get ~on_binop ~on_ternop ~on_scope s
+    ?(on_scope = ignore1) ?(on_if = ignore1) s =
+  walk_s ~on_set ~on_get ~on_binop ~on_ternop ~on_scope ~on_if s
 
 let count f =
   let n = ref 0 in
@@ -380,6 +401,11 @@ let count_set (o : LL.optimized) tn =
 (** How many array READS of [tn] survive — [0] is what "the producer was inlined" means. *)
 let count_get (o : LL.optimized) tn =
   count (fun bump -> walk o.LL.llc ~on_get:(fun t -> if Tn.equal t tn then bump ()))
+
+(** How many guarded statements ({!Ir.Low_level.If}) survive in the optimized form. A guard whose
+    condition an interval proves is erased by [simplify_llc], so this counts the ones that still
+    decide something at run time. *)
+let count_if (o : LL.optimized) = count (fun bump -> walk o.LL.llc ~on_if:(fun _ -> bump ()))
 
 (** How many [Where] ternops survive: the shape a virtualization equality/range guard renders as. *)
 let count_where (o : LL.optimized) =

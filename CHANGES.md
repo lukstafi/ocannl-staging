@@ -183,7 +183,48 @@
   pipeline never emits; `test/operations/prelowered_seam` pins the sibling-`Local_scope`
   read-before-write case that motivated it.
 
+### Added
+
+- **The virtualizer's rejection boundary is pinned row by row** (gh-ocannl-658).
+  `test/operations/virtual_rejection_boundary.ml` states, for one minimal IR shape per outcome,
+  which of four phases decides it and under which provenance: the heuristic caps in
+  `decide_placements` (ahead of every legality question), the store-time rejections in
+  `check_and_store_virtual`, the consumption-time ones in `inline_computation`, and acceptance. Each
+  row also executes the shape against a reference and against the same program re-specialized with
+  the candidate materialized, so a row that later becomes inlineable needs only its verdict changed
+  and then goes on to pin that inlining preserved the values. Which codes have no minimal shape, and
+  why each was ruled out rather than skipped, is recorded in the file's header.
+
 ### Fixed
+
+- **A candidate's computation is no longer inlined without an enclosing repetition loop**
+  (gh-ocannl-674), the `For_loop` half of the defect below. `virtual_llc` captures a candidate's
+  computation at the outermost loop whose index appears in the candidate's assignment indices, so a
+  reduction loop BELOW that point rides along inside the stored subtree — the ordinary
+  `x[t] += a[s]` shape, whose replay cost `virtualize_max_inline_reduction` prices — while a
+  repetition loop ABOVE it does not, and a symbol-free (fixed-index) map makes no loop a capture
+  site at all. `inline_computation` then spliced the setter once and the fold lost every iteration
+  but one: `for k in 0..1: for t: x[t] += 1.` read back 1 per cell instead of 2. The walk now
+  carries the enclosing loops and rejects such a candidate as `Non_virtual 147`. Loops of width 1
+  stay exempt (replaying one iteration once is exact), and the array spelling of the same reduction
+  was already rejected for an unrelated reason — the sibling read `a[s]` escapes the captured
+  statement — so what reached the miscompile was a reduction whose right-hand side does not mention
+  the reduction symbol, with the accumulator read few enough times to stay under
+  `virtualize_max_visits`.
+
+- **A guarded setter's computation is no longer inlined without its guard** (gh-ocannl-651). The
+  `Low_level.t` doc's v1 contract — a conditional write is not a definite write, so virtualization
+  treats guarded computations as non-inlineable — was enforced for a guard INTERIOR to the captured
+  subtree only. `virtual_llc`'s `If` arm recursed plainly and the setter/loop arms handed
+  `check_and_store_virtual` the subtree rooted BELOW the guard, so a candidate whose whole nest sat
+  inside an `If` stored its computation guardless and every read site replayed it unconditionally:
+  the guard was silently dropped rather than the candidate rejected. The walk now carries an
+  enclosing-guard flag and rejects such a candidate as `Non_virtual 142` at store time, the same
+  verdict the interior case already gave. Guards do reach virtualization from the front end, not
+  only from the backend-compile-time launch-extent pass the old comment assumed: `Assignments`
+  lowering emits interval guards for clamped-window pooling (gh-ocannl-504) and extent guards for
+  symbolic extents (gh-ocannl-490). Lifting the restriction — prepending the guard to the stored
+  computation — is adjacent to the Block virtualizer's range-guard machinery and remains future work.
 
 - **`uint32` and `uint64` ndarrays convert to and from floats as unsigned.** They are stored in
   *signed* int32/int64 bigarrays, and every float-facing conversion in `Ndarray` — `get_as_float`,

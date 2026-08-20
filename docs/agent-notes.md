@@ -427,6 +427,39 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   the recursion, defaulting to `true` for mutually-recursive callers that don't carry it. When a
   codegen decision consults a `traced_array`-style boolean, ask whether it is node-level or
   occurrence-level; they coincide only at first touch on the linear path.
+- **A virtualization candidate under an `If` is rejected, and the guard's position decides which
+  arm rejects it** (gh-ocannl-651). `check_and_store_virtual`'s walk sees only the subtree it is
+  handed, so a guard INTERIOR to that subtree hits its own `If` arm while a guard ENCLOSING it is
+  invisible there — `virtual_llc` threads a `~guarded` flag down its walk and reports it, and both
+  paths land on `Non_virtual 142`. Guards are NOT confined to the backend-compile-time launch-extent
+  pass: `Assignments.to_low_level` emits interval guards for clamped-window pooling (gh-ocannl-504)
+  and extent guards for symbolic extents (gh-ocannl-490), both before virtualization. When adding a
+  pass that captures a subtree for later replay, ask what context the subtree was captured FROM —
+  a walk of the subtree alone cannot see it.
+- **The same question for loops: a candidate is captured at the outermost `For_loop` whose index
+  occurs in its assignment indices** (`track_symbol` / `reverse_node_map`), so a reduction loop
+  BELOW that point is part of the stored computation (the ordinary `x[t] += a[s]`, priced by
+  `virtualize_max_inline_reduction`) while a repetition loop ABOVE it is not — and a symbol-free
+  (all-`Fixed_idx`) index map has no capture site at all. Such a candidate is rejected as
+  `Non_virtual 147` (gh-ocannl-674); width-1 loops stay exempt, since replaying one iteration once
+  is exact. Two arms hide most of this shape and neither is a guarantee: an array reduction
+  `x[0] += a[s]` is rejected because the sibling read escapes (`Non_virtual 9`), and an accumulator
+  read more than `virtualize_max_visits` times is capped (`Non_virtual 1`) — a flippable policy
+  prior, decided in `decide_placements` before any legality question is asked.
+- **Where a virtualization candidate is refused is readable off its placement PROVENANCE, and four
+  phases write into the same table** (gh-ocannl-658, pinned row by row in
+  `test/operations/virtual_rejection_boundary.ml`): `decide_placements` applies the heuristic caps
+  (1 visit cap / uncovered read, 39 reduction extent, 41 fan-in) BEFORE any legality question, so a
+  shape capped there may be perfectly inlineable; `check_and_store_virtual` rejects at store time
+  (4, 5, 7, 9, 10, 11, 12, 51, 52, 142, 147 and the defensive-constructor codes);
+  `inline_computation` rejects at consumption time (13, 14, 140, 145, 146), which is why two setters
+  with different index maps as separate statements store fine as components and only fail once a
+  read site cannot be served; and `cleanup_virtual_llc` commits a surviving read as 17, which is the
+  absence of a rejection rather than one. Provenances compose — `default_to_most_local` folds a
+  prior one in as `1000 * prior + its own` — so read the leading factor (`Ll_test.rejection_code`).
+  Do not infer the boundary from the `Non_virtual` comments at the raise sites: several describe
+  reachability that has since changed, and 52 is enforced earlier still (`trace_node_facts` raises
+  `invalid_arg` on a `Concat` index, so the virtualizer's arm never sees one).
 - Big-reduction producers are forced `Never_virtual` by `virtualize_max_inline_reduction`
   (default 16) — remember it when a structural expectation assumes inlining.
 - Wide-fanin producers are forced `Never_virtual 41` by `virtualize_max_inline_fanin` (default 8,
