@@ -67,6 +67,24 @@ that they earn a lookup rather than always-loaded space.
   sibling checks are worth a glance when touching this genre and were both fine: `env_var_deps` lists
   names only, and `digest_completeness`'s key count moves only alongside its own enumerated key list
   — a number in the same commit as the change it describes costs nothing.
+- A ratchet whose corpus is the repository's own test sources will scan its OWN fixture, and a
+  fixture that pins a shape has to spell that shape out to pin it — so the fixture matches, every
+  time, by construction (gh-ocannl-668). Exempt the FILE rather than its matches one at a time: the
+  case table grows a row whenever the reader learns a distinction, and a list of its labels
+  elsewhere is a second copy of it, maintained by whoever adds the row and read by nobody. What
+  keeps that blanket exemption from being a hole is a CANARY — name two of the fixture's literals
+  and fail if the scan stops finding them — which is also the churn-free anti-blindness signal for
+  this genre, since an empty offender list and an unread corpus are otherwise the same result.
+  Spell one canary in a form only the real reader can see (a string literal broken over a line
+  continuation, whose decoded value spans no single line of the file): it fails a scan that has
+  quietly regressed to matching text, which the plain spelling would not.
+- Scanning OCaml sources with `compiler-libs`: a documentation comment survives into the parse tree
+  as an `[@@@ocaml.doc "…"]` attribute holding a STRING, so `Ast_iterator` hands it to an expression
+  hook exactly like code would (verified by removing the guard — the prose cases flip to findings).
+  Any scan over string literals must therefore set `attribute = (fun _ _ -> ())`, or this file's own
+  documentation of the pattern it hunts becomes a finding. Ordinary `(* … *)` comments need no such
+  care, the parser drops them outright. Extension payloads are the opposite call and must stay
+  visited: `[%cd …]`, `[%expect {|…|}]` carry code, or the golden text of some.
 - `git` strips TRAILING spaces from a `.gitignore` pattern (unless backslash-quoted) and keeps
   LEADING ones, so an accidentally indented ` /foo/` is a pattern beginning with a space and matches
   nothing. Any code reading that file must not `String.strip` both ends, or it reports coverage git
