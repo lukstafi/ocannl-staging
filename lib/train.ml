@@ -675,7 +675,10 @@ let placement_arm_name = function
     against [best_ms] for the margin. The same conclusion is logged here under config
     [autotune_log]. Other arguments are forwarded to {!Autotune.tune}; the same caveats apply
     (notably [timing_ctx] and non-idempotent routines — both arms share [timing_ctx]'s device for
-    their searches).
+    their searches). [name] included (gh-ocannl-669): it names both arms' compiles and the flip
+    refinement's decision-surface lowerings, and is what lets a comp carrying no
+    {!Ir.Assignments.Block_comment} — one {!Context.compile} would name at the call site — be tuned
+    here at all.
 
     An arm that fails is a {e losing} arm, not a failed run (gh-ocannl-550): a search that
     terminates on a fatal failure ranks at [infinity], the other arm's completed winner ships and
@@ -744,7 +747,7 @@ let placement_arm_name = function
     artifact by: deriving the shipped arm from the reports' [best_ms] is only valid while nothing
     can override the comparison, which [ship_arm] now can, and it never described a flip-refined
     result at all. *)
-let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report ?flip_report
+let tune_placements ?name ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report ?flip_report
     ?inline_flips ?ship_arm ?on_ship ctx loss comp bindings =
   (* Arm attribution on the same stderr trace as Autotune's config [autotune_log] — winner-arm
      ambiguity misdirected the CUDA benchmark debugging on PR #140. *)
@@ -849,8 +852,8 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
     last := None;
     let result =
       match
-        Autotune.tune ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ~report:capture ctx comp
-          bindings
+        Autotune.tune ?name ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ~report:capture ctx
+          comp bindings
       with
       | compiled -> Ok compiled
       (* Unwrapped, so the caller sees its own exception with its own backtrace: the wrapper is an
@@ -1147,7 +1150,7 @@ let tune_placements ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?report 
     let surface =
       (* Outside the tuner's failure containment; a lowering failure (the A/B searches above can
          still have crowned a winner) must skip the refinement, not fail the tune. *)
-      match Autotune.placement_surface ctx comp bindings with
+      match Autotune.placement_surface ?name ctx comp bindings with
       | s -> Some s
       | exception exn ->
           logf "flip refinement skipped: the decision-surface lowering failed: %s"

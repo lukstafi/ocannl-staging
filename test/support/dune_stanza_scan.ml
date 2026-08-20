@@ -281,6 +281,11 @@ type command =
   | External  (** a tool on PATH or in the toolchain, which this repository does not build *)
   | Unrecognized of string  (** command position this scan cannot read — reported, never ignored *)
   | Unknown_directory of string
+  | Path_rewritten of string
+      (** a bare command under [(setenv PATH …)]: unnameable for a REASON of its own, kept apart
+          from the other unnameable programs so a check can tell them apart. Grouping them all as
+          {!Unknown_directory} let a surviving [(bash …)] site answer for a dropped one (Codex P2,
+          round 10). *)
       (** a shell command line: not only is the program unreadable, the directory it runs in is too,
           because [cd] inside the line moves it without dune knowing (Codex P2, round 8) *)
 
@@ -534,7 +539,7 @@ let executables_run stanza =
               List.filter args ~f:(fun arg ->
                   match classify_command ~named_deps arg with
                   | Runs _ | Unrecognized _ -> true
-                  | External | Unknown_directory _ -> false)
+                  | External | Unknown_directory _ | Path_rewritten _ -> false)
             in
             match handed with
             | [] -> External
@@ -551,7 +556,7 @@ let executables_run stanza =
        off a bare name, and PATH is what gives a bare name its meaning. A path-qualified command
        still names what it names (Codex P2, round 16). *)
     | Unnameable (what, command) -> (
-        match classify command with External -> Unknown_directory what | other -> other)
+        match classify command with External -> Path_rewritten what | other -> other)
   in
   List.filter_map (commands_in stanza) ~f:(fun (cwd, command) ->
       match classify command with External -> None | classified -> Some (cwd, classified))
@@ -580,6 +585,16 @@ type site = {
       (** whether the deps depend on any config file at all; WHICH one had to be named is
           {!declared_config_paths}, since only the caller knows where configs exist *)
   declared_config_paths : string list;
+  path_rewritten : bool;
+      (** whether this site is a program the walk refuses to name because [(setenv PATH …)] decides
+          what it resolves to — as opposed to the other reasons a site can be unnameable, which a
+          caller must be able to tell apart (Codex P2, round 10). *)
+  executables : string list;
+      (** for a {!Runs_executable} site, the executables it covers, each as {!classify_command}
+          named it — the identities kept apart, rather than the display [name] that joins them with
+          ", ". A caller matching sites against executables must read them from here: recovering
+          them by splitting [name] loses a path that itself contains a comma (Codex P2, round 2).
+          Empty for every other kind. *)
   subdir : string;
   cwd : string;
 }
@@ -643,6 +658,219 @@ let inert_heads =
     "deprecated_library_name";
   ]
 
+(** One stanza as a SECOND reader sees it. *)
+type raw_stanza = {
+  raw_head : string;  (** the atom the stanza opens with *)
+  raw_inline_tests : bool;  (** whether it has an [(inline_tests …)] field of its own *)
+  raw_unnameable : string list;
+      (** the directories of the bare commands the stanza runs under a [(setenv PATH …)] — each one
+          a program the walk refuses to name for that reason, and so a site it must have placed
+          carrying {!site.path_rewritten}. *)
+  raw_subdir : string;
+      (** the directory the stanza's [(subdir …)] nesting puts it in — where dune runs what it
+          declares, and so where the config is resolved from. [""] for a top-level stanza. *)
+  raw_runs : (string * string) list;
+      (** the executables it runs, each with the directory the process ends up in — the stanza's
+          [(subdir …)] composed with the [chdir] actions around the command, which is the directory
+          whose config the executable will find. Deduplicated within the stanza, since {!sites}
+          reports one site per distinct executable per directory, and named as {!classify_command}
+          names a [Runs]. *)
+  raw_test_cwds : string list;
+      (** for a [test]/[tests] stanza, the directories its own binary runs in: one per [chdir]
+          branch running [%{test}], and [[""]] composed with the subdirectory when the stanza has no
+          custom action — which is how {!sites} counts its [Test] sites, one per directory. Empty
+          for every other head. *)
+}
+
+(** [raw_stanzas content] reads [content] as a second opinion on {!sites}: the stanzas it declares,
+    with what each of them runs and where.
+
+    This is the independent floor the checks are held to. A check phrased in terms of {!sites}
+    cannot notice that walk going blind — a stanza it stops recognising looks exactly like a stanza
+    that is not there — so the numbers it reports need a source that cannot go blind with it.
+
+    {2 Where the independence lies, and where it deliberately does not}
+
+    In the CLASSIFICATION, not in the parsing. What can go blind is {!sites}' own machinery — its
+    traversal, {!executables_run}, {!classify_command} — and none of that is shared here: this
+    module answers the same questions with its own small traversal, so a regression in one shows up
+    as a disagreement with the other.
+
+    The LEXING is not re-derived, and an earlier version of this reader that did re-derive it is why
+    the point is worth stating. Dune's syntax has quoted atoms, comments, and whitespace wherever an
+    atom may begin — and a hand-rolled scan of the raw text got each of those wrong in turn, in one
+    position after another, every mistake either failing a correct scan or silently covering
+    nothing. That is this module's own opening lesson, arrived at from the other side: an
+    approximation of a grammar has no natural stopping point. So the text is PARSED, by the same
+    reader dune's own syntax admits, and only the meaning is worked out here.
+
+    {2 Agreeing with the walk about scope}
+
+    Independent, but not free to disagree about what it is looking at:
+
+    - STANZA POSITION. A stanza is a top-level form, or one inside a [(subdir …)], recursively.
+      [(env (test (flags …)))] declares a build PROFILE named [test], and {!sites} rightly makes no
+      test site of it. [inline_tests] counts only as a direct field of its stanza.
+    - WHAT RUNS THINGS. Only [test], [tests] and the {!action_heads} — a [(run …)] under a library's
+      [(preprocess …)] is a build-time action that {!sites} makes no site of.
+    - WHERE IT RUNS. [(subdir …)] and [(chdir …)] both move the process, and {!sites} emits one site
+      per resulting directory because each resolves a different config. The two compose through
+      {!in_subdir}, and what is recorded here is the composition, ready to compare against
+      [in_subdir site.subdir site.cwd].
+    - WHAT CANNOT BE RESOLVED. Under a [chdir] whose destination holds a pform the walk cannot say
+      where the process runs and emits an {!Unreadable_directory} site carrying no executables, so
+      nothing beneath it is reported here either.
+    - IDENTITY. Commands are recognised as {!classify_command} recognises them, [(:name …)]
+      bindings included, and normalised to the same string.
+
+    What it still declines is a [(bash …)] line and a pform naming nothing the stanza binds: the
+    text does not say what those run. Those under-report, which is the safe direction for a floor —
+    blindness makes things DISAPPEAR, so a floor that under-counts still fails on it and never fails
+    on a correct scan. *)
+let raw_stanzas content =
+  let counted_heads = "test" :: "tests" :: action_heads in
+  let test_heads = [ "test"; "tests" ] in
+  (* Parsed rather than scanned. [sites] has already refused any file the two readers disagree
+     about, so what arrives here is a file both read the same way. *)
+  let parsed = Sexplib.Sexp.scan_sexps (Lexing.from_string content) in
+  (* Every `(:name …)` the stanza binds, with the first executable it names -- the binding may wrap
+     its path in a dependency form, and it is found wherever in the stanza it sits. *)
+  (* A binding's paths, the way [named_deps_of] reads them: atoms, and the forms that CARRY paths.
+     Descending into any form instead would take `(:runner (alias fake.exe) (file real.exe))` for
+     the alias -- which dune does not run and the walk does not name (Codex P2, round 9). *)
+  let rec first_executable sexp =
+    match sexp with
+    | Sexp.Atom a when is_executable a -> Some (program_path a)
+    | Sexp.Atom _ -> None
+    | Sexp.List (Sexp.Atom head :: rest) when List.mem path_bearing_forms head ~equal:String.equal
+      ->
+        List.find_map rest ~f:first_executable
+    | Sexp.List _ -> None
+  in
+  (* And only from the stanza's own `deps` field, which is the only place [named_deps_of] looks. *)
+  let bindings_of fields =
+    match
+      List.find_map fields ~f:(function
+        | Sexp.List (Sexp.Atom "deps" :: args) -> Some args
+        | _ -> None)
+    with
+    | None -> []
+    | Some args ->
+        List.filter_map args ~f:(function
+          | Sexp.List (Sexp.Atom name :: values)
+            when String.is_prefix name ~prefix:":" && String.length name > 1 -> (
+              match List.find_map values ~f:first_executable with
+              | Some path -> Some (String.drop_prefix name 1, path)
+              | None -> None)
+          | _ -> None)
+  in
+  (* The program a command token names, mirroring [classify_command] for the spellings the stanza
+     itself settles: a `.exe`, any explicit relative path (`./probe` is ours whatever its
+     extension), the pforms naming a path in this workspace, and a `%{name}` the deps bind. *)
+  let program ~bindings token =
+    let bare = program_path token in
+    match String.chop_prefix bare ~prefix:"%{" with
+    | None when String.is_substring bare ~substring:"%{" -> None
+    | None ->
+        if is_executable token || is_explicit_path token then Some (program_path token) else None
+    | Some rest -> (
+        match String.chop_suffix rest ~suffix:"}" with
+        | None -> None
+        | Some inner -> (
+            match String.lsplit2 inner ~on:':' with
+            | Some (("dep" | "exe" | "path" | "file"), path) ->
+                if is_executable path then Some (program_path path) else None
+            | Some ("bin", name) -> Some name
+            | Some _ -> None
+            | None -> List.Assoc.find bindings inner ~equal:String.equal))
+  in
+  (* Every command the stanza runs, with the directory it runs in. Its own traversal, deliberately:
+     this is the question [executables_run] answers, and answering it twice is the point. *)
+  let rec commands ~cwd ~unresolved ~under_path sexp =
+    match sexp with
+    | Sexp.Atom _ -> []
+    (* `(setenv PATH …)` changes what a BARE command name resolves to, so the walk stops vouching
+       for where such a program runs. Descending through it as an ordinary form would lose that
+       (Codex P2, round 9); what is beneath it is marked instead. *)
+    | Sexp.List (Sexp.Atom "setenv" :: Sexp.Atom "PATH" :: _value :: rest) ->
+        List.concat_map rest ~f:(commands ~cwd ~unresolved ~under_path:true)
+    | Sexp.List (Sexp.Atom "chdir" :: Sexp.Atom dir :: rest) ->
+        if String.is_substring dir ~substring:"%{" then
+          List.concat_map rest ~f:(commands ~cwd ~unresolved:true ~under_path)
+        else List.concat_map rest ~f:(commands ~cwd:(in_subdir cwd dir) ~unresolved ~under_path)
+    | Sexp.List (Sexp.Atom ("run" | "dynamic-run") :: Sexp.Atom cmd :: _) ->
+        if unresolved then [] else [ (cwd, cmd, under_path) ]
+    | Sexp.List l -> List.concat_map l ~f:(commands ~cwd ~unresolved ~under_path)
+  in
+  let of_stanza ~subdir sexp =
+    match sexp with
+    | Sexp.Atom _ | Sexp.List [] | Sexp.List (Sexp.List _ :: _) -> []
+    | Sexp.List (Sexp.Atom head :: fields) ->
+        let inline =
+          List.exists fields ~f:(function
+            | Sexp.List (Sexp.Atom "inline_tests" :: _) -> true
+            | _ -> false)
+        in
+        let ran =
+          if List.mem counted_heads head ~equal:String.equal then
+            commands ~cwd:subdir ~unresolved:false ~under_path:false sexp
+          else []
+        in
+        let bindings = bindings_of fields in
+        let is_test = List.mem test_heads head ~equal:String.equal in
+        let test_cwds =
+          if not is_test then []
+          else
+            match
+              List.filter_map ran ~f:(fun (cwd, cmd, _) ->
+                  (* `./%{test}` is the test binary too: the `./` says only "here". *)
+                  if String.equal (program_path cmd) test_pform then Some cwd else None)
+            with
+            | [] -> [ subdir ]
+            | cwds -> List.dedup_and_sort cwds ~compare:String.compare
+        in
+        [
+          {
+            raw_head = head;
+            raw_inline_tests = inline;
+            raw_subdir = subdir;
+            raw_runs =
+              List.filter_map ran ~f:(fun (cwd, cmd, _) ->
+                  if String.equal (program_path cmd) test_pform then None
+                  else
+                    match program ~bindings cmd with
+                    | Some path -> Some (cwd, path)
+                    | None -> None)
+              |> List.dedup_and_sort ~compare:(fun (c1, e1) (c2, e2) ->
+                     match String.compare c1 c2 with 0 -> String.compare e1 e2 | n -> n);
+            raw_test_cwds = test_cwds;
+            (* A bare name under `(setenv PATH …)`: the only shape whose site the walk is certain to
+               make {!Unreadable_directory}, since a command it CAN name stays a [Runs] even there.
+               Deduplicated by (directory, command), which is how the walk's own sites collapse. *)
+            raw_unnameable =
+              List.filter_map ran ~f:(fun (cwd, cmd, under_path) ->
+                  if
+                    under_path
+                    && (not (String.is_substring cmd ~substring:"%{"))
+                    && (not (is_executable cmd))
+                    && not (is_explicit_path cmd)
+                  then Some (cwd, cmd)
+                  else None)
+              |> List.dedup_and_sort ~compare:Poly.compare
+              |> List.map ~f:fst;
+          };
+        ]
+  in
+  (* A `(subdir …)` holds stanzas, and the directory it names is where they run. *)
+  let rec walk_stanzas ~subdir sexp =
+    match sexp with
+    | Sexp.List (Sexp.Atom "subdir" :: Sexp.Atom dir :: rest) ->
+        of_stanza ~subdir sexp
+        @ List.concat_map rest ~f:(walk_stanzas ~subdir:(in_subdir subdir dir))
+    | sexp -> of_stanza ~subdir sexp
+  in
+  List.concat_map parsed ~f:(walk_stanzas ~subdir:"")
+
 (** Every place in [content] that runs a test executable.
 
     An [(executable)] stanza is not one: it declares something to build, and dune runs it only where
@@ -656,13 +884,16 @@ let inert_heads =
 let sites content =
   walk "" (stanzas content) ~f:(fun subdir stanza ->
       let deps () = field stanza "deps" in
-      let site ?(cwd = "") ?deps:(deps_field = deps ()) kind name =
+      let site ?(cwd = "") ?deps:(deps_field = deps ()) ?(executables = [])
+          ?(path_rewritten = false) kind name =
         [
           {
             kind;
             name;
             declares_config = not (List.is_empty (declared_config_paths deps_field));
             declared_config_paths = declared_config_paths deps_field;
+            path_rewritten;
+            executables;
             subdir;
             cwd;
           };
@@ -691,10 +922,13 @@ let sites content =
             in
             let unreadable = for_cwd (function Unrecognized cmd -> Some cmd | _ -> None) in
             let unlocatable = for_cwd (function Unknown_directory cmd -> Some cmd | _ -> None) in
+            let rewritten = for_cwd (function Path_rewritten cmd -> Some cmd | _ -> None) in
             (if List.is_empty exes then []
-             else site ~cwd Runs_executable (String.concat ~sep:", " exes))
+             else site ~cwd ~executables:exes Runs_executable (String.concat ~sep:", " exes))
             @ List.concat_map unreadable ~f:(fun cmd -> site ~cwd Unreadable_command cmd)
-            @ List.concat_map unlocatable ~f:(fun cmd -> site ~cwd Unreadable_directory cmd))
+            @ List.concat_map unlocatable ~f:(fun cmd -> site ~cwd Unreadable_directory cmd)
+            @ List.concat_map rewritten ~f:(fun cmd ->
+                  site ~cwd ~path_rewritten:true Unreadable_directory cmd))
       in
       match head stanza with
       | Some ("test" | "tests") ->

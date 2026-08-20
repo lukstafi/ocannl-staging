@@ -69,6 +69,69 @@ ok: a subdir's stanzas are the same kinds of site
 ok: a nested subdir names the path it applies to
 ok: stanzas outside the subdir keep the dune file's own directory
 ok: stanzas are reported in file order
+ok: raw stanzas -- a test stanza
+ok: raw stanzas -- two of them
+ok: raw stanzas -- a plural stanza is one stanza
+ok: raw stanzas -- a build profile named test is not a test stanza
+ok: raw stanzas -- a stanza inside a subdir runs there
+ok: raw stanzas -- and a rule inside one too
+ok: raw stanzas -- nested subdirs compose
+ok: raw stanzas -- a subdir composes with a chdir
+ok: raw stanzas -- a library with inline tests
+ok: raw stanzas -- a library without
+ok: raw stanzas -- an inline_tests nested deeper is not the library's field
+ok: raw stanzas -- a library with inline tests inside a subdir
+ok: raw stanzas -- a rule running a dep pform
+ok: raw stanzas -- a bare path
+ok: raw stanzas -- an extensionless explicit path
+ok: raw stanzas -- but a bare word is a tool on PATH
+ok: raw stanzas -- a path elsewhere keeps its path
+ok: raw stanzas -- a comma in the path is part of it
+ok: raw stanzas -- several in one stanza
+ok: raw stanzas -- the same one twice in a stanza is one entry
+ok: raw stanzas -- the same one in two stanzas is two stanzas
+ok: raw stanzas -- a chdir names where it runs
+ok: raw stanzas -- one executable under two chdirs is two entries
+ok: raw stanzas -- the test pform behind a ./
+ok: raw stanzas -- a quoted head is the same head
+ok: raw stanzas -- a quoted path in a binding
+ok: raw stanzas -- a quoted stanza head
+ok: raw stanzas -- a quoted chdir destination
+ok: raw stanzas -- a quoted command
+ok: raw stanzas -- an escape inside a quoted atom
+ok: raw stanzas -- nested chdirs compose
+ok: raw stanzas -- an alias runs things too
+ok: raw stanzas -- a test's custom action
+ok: raw stanzas -- a test's own binary under a chdir
+ok: raw stanzas -- and in two branches, two directories
+ok: raw stanzas -- a run under an unresolvable chdir is declined
+ok: raw stanzas -- a test's own binary under one falls back to its own directory
+ok: raw stanzas -- the whole subtree beneath it, however deep
+ok: raw stanzas -- whitespace before the head
+ok: raw stanzas -- a comment before the head
+ok: raw stanzas -- and before a chdir destination
+ok: raw stanzas -- a library's preprocessor is not a test-running rule
+ok: raw stanzas -- nor is an executable's
+ok: raw stanzas -- the test pform runs where the action puts it
+ok: raw stanzas -- a shell line
+ok: raw stanzas -- a name bound by a dep
+ok: raw stanzas -- and one behind a ./, which says only "here"
+ok: raw stanzas -- a binding may wrap its path in a dependency form
+ok: raw stanzas -- a binding written after the action
+ok: raw stanzas -- a binding does not leak to the next stanza
+ok: raw stanzas -- a non-path form in a binding is not its value
+ok: raw stanzas -- and a binding of only a non-path form resolves to nothing
+ok: raw stanzas -- a binding outside the deps field is not a binding
+ok: raw stanzas -- a bare command under setenv PATH is unnameable
+ok: raw stanzas -- but a named executable under one is still a run
+ok: raw stanzas -- two bare ones are two, and repeats collapse
+ok: raw stanzas -- a shell line alongside one is a different thing
+ok: raw stanzas -- a chdir under one still names where it runs
+ok: raw stanzas -- a binding resolving to no executable stays declined
+ok: raw stanzas -- a toolchain pform is not ours
+ok: raw stanzas -- an executable only depended on
+ok: raw stanzas -- one named in a comment
+ok: raw stanzas -- one inside a string
 ok: path-rewriting stanzas -- an env stanza setting PATH
 ok: path-rewriting stanzas -- one setting something else to PATH
 ok: path-rewriting stanzas -- an env stanza that touches neither

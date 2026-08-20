@@ -1056,8 +1056,8 @@ let spec_label = function
    buffers the kernels reference. Candidate hermeticity is unchanged: each compile forks the lineage
    table anew. The traced store is copied from the base (schedule ops register their tiles in
    it). *)
-let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu ~provenance ctx comp
-    bindings spec : compiled Outcome.outcome =
+let compile_candidate ?name ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu ~provenance ctx
+    comp bindings spec : compiled Outcome.outcome =
   let candidate = spec_label spec in
   let rebase (fresh : LL.optimized) =
     {
@@ -1102,7 +1102,7 @@ let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu ~
                 digest_after );
           opt'
         in
-        Context.compile_outcome ~lowered_transform:transform ~provenance ~candidate ctx comp
+        Context.compile_outcome ?name ~lowered_transform:transform ~provenance ~candidate ctx comp
           bindings
     | Fiss flavor ->
         let transforms fresh =
@@ -1227,7 +1227,7 @@ let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu ~
           captured := Some (form, units, posts, digest_after);
           posts
         in
-        Context.compile_outcome ~lowered_transforms:transforms ~provenance ~candidate ctx comp
+        Context.compile_outcome ?name ~lowered_transforms:transforms ~provenance ~candidate ctx comp
           bindings
   in
   (* Collect the Tile_mma rendering census across this candidate's kernel compiles (fissioned
@@ -1256,6 +1256,12 @@ let compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu ~
 type loop_desc = {
   ld_ref : SC.sym_ref;
   ld_sym : Idx.symbol;  (** The raw binder, for consulting {!Sched.op_legality}. *)
+  ld_from_ : int;
+      (** The loop's lower bound. [Partition] segments after the first start at their breakpoint
+          (segment ranges stay absolute), and only [Split] among the proposed ops requires a
+          zero-origin loop — [Swap], [Unroll] (either representation) and non-hardware [Retype]s
+          are origin-agnostic, so nonzero-origin loops stay enumerated for them (Codex P2 on PR
+          #403). *)
   ld_extent : int;
   ld_axis : LL.axis_type;
   ld_innermost : bool;
@@ -1263,18 +1269,55 @@ type loop_desc = {
   ld_perfect_child : (SC.sym_ref * Idx.symbol * LL.axis_type) option;
 }
 
+(* The [Local_scope] bodies in the scalar positions of one statement (empty for non-writes) — where
+   the accumulation mints of [Unroll ~materialize:true] and [Partition] (gh-ocannl-639) and
+   virtualization's inlined computations put loops. This is the scalar-position reach of
+   [Schedule.rewrite_loop] and [Schedule.find_loops_env]; like them it enters neither [If]
+   conditions nor [Tile_mma] fallbacks (transforming those is never profitable and often
+   invalid). *)
+let stmt_scope_bodies (stmt : LL.t) : LL.t list =
+  let rec scalar (llsc : LL.scalar_t) =
+    match llsc with
+    | LL.Local_scope { body; _ } -> [ body ]
+    | LL.Get_dynamic { dyn_value = v, _; _ } -> scalar v
+    | LL.Ternop (_, (a, _), (b, _), (c, _)) -> scalar a @ scalar b @ scalar c
+    | LL.Binop (_, (a, _), (b, _)) -> scalar a @ scalar b
+    | LL.Unop (_, (a, _)) -> scalar a
+    | LL.Get_local _ | LL.Get _ | LL.Get_merge_buffer _ | LL.Constant _ | LL.Constant_bits _
+    | LL.Embed_index _ ->
+        []
+  in
+  match stmt with
+  | LL.Set { llsc; _ } | LL.Set_local (_, llsc) -> scalar llsc
+  | LL.Set_dynamic { dyn_value = v, _; llsc; _ } -> scalar v @ scalar llsc
+  | LL.Set_from_vec { arg = a, _; _ } -> scalar a
+  | _ -> []
+
+(* Whether [llc] contains a loop a schedule op could target — [Local_scope] bodies included
+   (gh-ocannl-666), so a loop whose only inner loops sit inside an accumulator's scope does not read
+   as innermost. *)
 let rec contains_loop = function
   | LL.Seq (a, b) -> contains_loop a || contains_loop b
   | LL.If { body; _ } -> contains_loop body
   | LL.For_loop _ -> true
-  | _ -> false
+  | stmt -> List.exists (stmt_scope_bodies stmt) ~f:contains_loop
 
-(* Loops proposable for schedule ops: the statement-level nest structure (we do not descend into
-   [Local_scope] bodies or [Tile_mma] fallbacks — transforming those is never profitable and often
-   invalid), restricted to loops whose binder the registry can name (Stage-internal copy loops
-   cannot be referenced by a persisted schedule). *)
+(* Loops proposable for schedule ops: the statement-level nest structure plus the loops inside
+   [Local_scope] bodies (gh-ocannl-666) — since gh-ocannl-639 the accumulation mints of [Unroll
+   ~materialize:true] and [Partition] move segment/inner loops inside the accumulator's scope, and
+   [Schedule.rewrite_loop] reaches them there, so the menu must enumerate them or the moment such an
+   op joins an incumbent every inner loop vanishes from the rest of the search. Restricted to loops
+   whose binder the registry can name (Stage-internal copy loops cannot be referenced by a persisted
+   schedule), and deduplicated by binder: a materializing mint copies its body per step/segment
+   WITHOUT refreshing loop symbols, so sibling copies share binders and [rewrite_loop] rewrites them
+   all — one binder is one scheduling decision. Scope-nested descriptors are safe for every op the
+   menu proposes from them (serial [Split]s, [Swap]s, [Unroll]s, [Vectorized] retypes — none
+   introduces a hardware annotation, which [Low_level.validate_parallel] rejects inside a
+   [Local_scope]); [Tensorize] is the exception, which is why [collect_serial_triples] below stays
+   out of scopes. *)
 let collect_loops registry llc =
   let acc = ref [] in
+  let seen = Hash_set.create (module Idx.Symbol) in
   let rec walk = function
     | LL.Seq (a, b) ->
         walk a;
@@ -1282,10 +1325,11 @@ let collect_loops registry llc =
     | LL.If { body; _ } -> walk body
     | LL.For_loop { index; from_; to_; body; axis; _ } ->
         (match SC.resolve registry index with
-        | Some ld_ref when from_ = 0 ->
+        | Some ld_ref when not (Hash_set.mem seen index) ->
+            Hash_set.add seen index;
             let ld_perfect_child =
               match body with
-              | LL.For_loop { index = ci; from_ = 0; axis = cax; _ } ->
+              | LL.For_loop { index = ci; axis = cax; _ } ->
                   Option.map (SC.resolve registry ci) ~f:(fun r -> (r, ci, cax))
               | _ -> None
             in
@@ -1293,7 +1337,8 @@ let collect_loops registry llc =
               {
                 ld_ref;
                 ld_sym = index;
-                ld_extent = to_ + 1;
+                ld_from_ = from_;
+                ld_extent = to_ - from_ + 1;
                 ld_axis = axis;
                 ld_innermost = not (contains_loop body);
                 ld_accumulating = LL.has_accumulation body;
@@ -1302,20 +1347,30 @@ let collect_loops registry llc =
               :: !acc
         | _ -> ());
         walk body
-    | _ -> ()
+    | stmt -> List.iter (stmt_scope_bodies stmt) ~f:walk
   in
   walk llc;
   List.rev !acc
 
-(* Perfectly nested serial triples (with extents), for Tensorize proposals. *)
+(* Perfectly nested serial triples (with extents), for Tensorize proposals. Statement-level only,
+   deliberately (gh-ocannl-666): [Tensorize] wraps the micro-kernel in a hardware-annotated
+   [Workgroup] lane loop, which [Low_level.validate_parallel] rejects inside a [Local_scope] body —
+   a scope-nested triple can never compile ([Schedule.op_legality] would not prune it: it answers
+   about races, not scope nesting). No candidates are lost: the loops inside an accumulation mint
+   all reduce into the scope's single loop-invariant cell, so none can play the micro-kernel's
+   output-dim [i]/[j] roles and every role assignment over such a triple would be refuted anyway.
+   Deduplicated by the outer binder, since a non-minting materializing [Unroll] leaves
+   statement-level copies sharing loop symbols. *)
 let collect_serial_triples registry llc =
   let acc = ref [] in
+  let seen = Hash_set.create (module Idx.Symbol) in
   let rec walk = function
     | LL.Seq (a, b) ->
         walk a;
         walk b
     | LL.If { body; _ } -> walk body
-    | LL.For_loop { index = i; from_ = 0; to_ = ti; axis = LL.Serial; body; _ } ->
+    | LL.For_loop { index = i; from_ = 0; to_ = ti; axis = LL.Serial; body; _ }
+      when not (Hash_set.mem seen i) ->
         (match body with
         | LL.For_loop
             {
@@ -1329,6 +1384,7 @@ let collect_serial_triples registry llc =
           when not (contains_loop b3) -> (
             match (SC.resolve registry i, SC.resolve registry j, SC.resolve registry k) with
             | Some ri, Some rj, Some rk ->
+                Hash_set.add seen i;
                 acc := ((ri, i, ti + 1), (rj, j, tj + 1), (rk, k, tk + 1)) :: !acc
             | _ -> ())
         | _ -> ());
@@ -1342,14 +1398,14 @@ let collect_serial_triples registry llc =
 let split_factors = [ 2; 4; 8; 16; 32 ]
 let max_actions_per_unit = 48
 
-let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) (u : unit_gen) :
-    SC.saved_optop list =
-  let loops = collect_loops u.u_registry u.u_opt.LL.llc in
+let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) ~registry
+    (opt : LL.optimized) : SC.saved_optop list =
+  let loops = collect_loops registry opt.LL.llc in
   (* Menu proposals carry their raw-symbol counterpart so the op-legality oracle (gh-494 waypoint 3)
      can veto proven-illegal ones before they cost a candidate compile; [Op_unknown] proposals
      proceed to compile-and-time exactly as before (the oracle's Unknown is never a rejection). *)
   let gate (saved, raw) =
-    match Sched.op_legality u.u_opt raw with
+    match Sched.op_legality opt raw with
     | Sched.Op_illegal witness ->
         logf "menu prune (illegal): %s" witness;
         None
@@ -1357,7 +1413,10 @@ let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) (u : unit_g
   in
   let splits =
     List.concat_map loops ~f:(fun ld ->
-        if not (LL.equal_axis_type ld.ld_axis LL.Serial) then []
+        (* [Sched.Split]'s index arithmetic requires a zero-origin loop (its apply raises
+           otherwise); nonzero-origin loops — [Partition] segments after the first — are still in
+           [loops] for the origin-agnostic families below. *)
+        if not (LL.equal_axis_type ld.ld_axis LL.Serial) || ld.ld_from_ <> 0 then []
         else
           List.filter_map split_factors ~f:(fun factor ->
               if factor < ld.ld_extent && ld.ld_extent % factor = 0 then
@@ -1408,7 +1467,7 @@ let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) (u : unit_g
                 Sched.Retype { axis = ld.ld_sym; ty = LL.Vectorized } )
           else None)
   in
-  let triples = collect_serial_triples u.u_registry u.u_opt.LL.llc in
+  let triples = collect_serial_triples registry opt.LL.llc in
   let tensorizes =
     match limits.Ir.Backend_intf.mma with
     | None -> []
@@ -1566,11 +1625,11 @@ type placement_surface = {
   ps_floor_ms : materialized:Ir.Tnode.t list -> float option;
 }
 
-let placement_surface ?ordering ctx comp bindings =
+let placement_surface ?name ?ordering ctx comp bindings =
   let ordering = match ordering with Some o -> o | None -> flip_ordering () in
   let limits = Context.hardware_limits ctx in
   let static_indices = Idx.bound_symbols bindings in
-  let base = Context.lowered_for_decisions ctx comp bindings in
+  let base = Context.lowered_for_decisions ?name ctx comp bindings in
   let candidates = base.LL.flip_candidates in
   (* The all-materialized specialization of the decision surface: the [`Materialize] flips are the
      default-virtual candidates, so deciding exactly those materialized makes every open node's work
@@ -1580,7 +1639,9 @@ let placement_surface ?ordering ctx comp bindings =
     List.filter_map candidates ~f:(fun fc ->
         match fc.LL.fc_flip with `Materialize -> Some fc.LL.fc_tn | `Inline -> None)
   in
-  let allmat = Context.lowered_for_decisions ~materialized:to_materialize ctx comp bindings in
+  let allmat =
+    Context.lowered_for_decisions ?name ~materialized:to_materialize ctx comp bindings
+  in
   let enablement, disablement = placement_enablement ~limits ~static_indices ~base ~allmat in
   let ps_candidates = rank_flip_candidates ~ordering ~enablement ~disablement candidates in
   let candidate_set =
@@ -1641,9 +1702,9 @@ let validate_segments_for_model (segs : LL.optimized list) =
       LL.validate_parallel_classified o.LL.optimize_ctx.LL.placements o.LL.llc);
   segs
 
-let compile_advisory ?on_fallback ?fallback_if lowered_transforms ctx comp bindings =
+let compile_advisory ?name ?on_fallback ?fallback_if lowered_transforms ctx comp bindings =
   match
-    Context.compile_outcome ~lowered_transforms ~provenance:Outcome.Advisory ctx comp bindings
+    Context.compile_outcome ?name ~lowered_transforms ~provenance:Outcome.Advisory ctx comp bindings
   with
   | Ok result -> result
   | Error (Outcome.Fatal _ as failure) -> Outcome.raise_failure failure
@@ -1658,9 +1719,9 @@ let compile_advisory ?on_fallback ?fallback_if lowered_transforms ctx comp bindi
       (* Typed compiler rejection is the advisory fallback boundary. Fatal failures are propagated
          above without paying for a second compile. *)
       Option.iter on_fallback ~f:(fun f -> f (Outcome.exception_of_cause classified.cause));
-      Context.compile ctx comp bindings
+      Context.compile ?name ctx comp bindings
 
-let model_default ?report ctx comp bindings =
+let model_default ?name ?report ctx comp bindings =
   let backend = Context.backend_name ctx in
   let is_gpu = Sched.backend_is_gpu backend and is_cpu = Sched.backend_is_cpu backend in
   let limits = Context.hardware_limits ctx in
@@ -1675,7 +1736,7 @@ let model_default ?report ctx comp bindings =
     || not (Sched.automatic_schedule_active ~backend_name:backend)
   then (
     emit no_selection;
-    Context.compile ctx comp bindings)
+    Context.compile ?name ctx comp bindings)
   else
     let choice = ref no_selection in
     (* Whether the segments the compile actually received came from a model pick rather than the
@@ -1984,7 +2045,7 @@ let model_default ?report ctx comp bindings =
       if placement_budget <= 0 then None
       else
         match
-          let surface = placement_surface ctx comp bindings in
+          let surface = placement_surface ?name ctx comp bindings in
           let cands = List.take surface.ps_candidates placement_budget in
           if List.is_empty cands then None
           else
@@ -2018,7 +2079,7 @@ let model_default ?report ctx comp bindings =
             let score vector =
               let mat, inl = decisions vector in
               match
-                Context.lowered_for_decisions ~materialized:mat ~inline:inl ctx comp bindings
+                Context.lowered_for_decisions ?name ~materialized:mat ~inline:inl ctx comp bindings
               with
               | opt_v ->
                   let _lbl, s, _act = select opt_v in
@@ -2065,7 +2126,7 @@ let model_default ?report ctx comp bindings =
        validation above), the compile that just failed IS the fallback: retrying it would duplicate
        an expensive failure and delay the honest error, so the exception propagates instead. *)
     let compile_from base_ctx =
-      compile_advisory ~on_fallback
+      compile_advisory ?name ~on_fallback
         ~fallback_if:(fun () -> !applied_pick)
         transforms base_ctx comp bindings
     in
@@ -2119,7 +2180,7 @@ let model_default ?report ctx comp bindings =
    [Train.tune_placements] exists for. *)
 let on_candidate_attempt : (string -> unit) ref = ref (fun _label -> ())
 
-let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fraction
+let tune ?name ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep_fraction
     ?max_split_reduce_sites ?timing_ctx ?report ctx comp bindings =
   (* gh-ocannl-559: with the search off, [tune] still replays an explicitly provided cache -- a
      pinned schedule is deterministic, and committing one is how a reproducible run keeps a tuned
@@ -2183,16 +2244,19 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
   let backend = Context.backend_name ctx in
   let device = Context.device_id ctx in
   (* The tuned computation's name, for the calibration rows and log lines of every candidate
-     (gh-ocannl-635). Derived exactly as the candidate compiles below derive theirs — none passes
-     [~name], so each lowers under [Assignments.get_name_exn] — hence a row names the code the way
-     its generated sources are named. Lazy and total on purpose: this is a diagnostic label, while
-     the "a comp must be named" contract belongs to the compiles, and deriving it eagerly would move
-     that failure ahead of them (and impose it on a search that emits nothing). *)
+     (gh-ocannl-635). READ from [name] rather than re-derived (gh-ocannl-669): every compile below
+     is passed the same [?name], and this is the same [Option.value_or_thunk ... get_name_exn] they
+     resolve it by ([Backends.lower_assignments]), so a row names the code exactly the way its
+     generated sources and debug artifacts are named — by construction now, rather than by the
+     coincidence that no compile here passed a name. Lazy and total on purpose: this is a diagnostic
+     label, while the "a comp must be named" contract belongs to the compiles, and deriving it
+     eagerly would move that failure ahead of them (and impose it on a search that emits nothing). *)
   let routine_name =
     lazy
-      (match Ir.Assignments.get_name_exn comp.Ir.Assignments.asgns with
-      | name -> name
-      | exception Invalid_argument _ -> "")
+      (Option.value_or_thunk name ~default:(fun () ->
+           match Ir.Assignments.get_name_exn comp.Ir.Assignments.asgns with
+           | derived -> derived
+           | exception Invalid_argument _ -> ""))
   in
   let emit_report r = Option.iter report ~f:(fun f -> f r) in
   (* [tune] reports exactly once per call, on every path (gh-ocannl-550). The failures that happen
@@ -2265,7 +2329,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
      what [raise_pre_search] ends with, so the caller sees the same exception either way. *)
   let compile_untuned_default ?base () =
     match
-      Context.compile_outcome ~provenance:Ir.Schedule_outcome.User_schedule ctx comp bindings
+      Context.compile_outcome ?name ~provenance:Ir.Schedule_outcome.User_schedule ctx comp bindings
     with
     | Ok result -> result
     | Error failure -> raise_pre_search ?base failure
@@ -2347,7 +2411,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
        a new baseline. *)
     let base_capture = ref None in
     let base_outcome =
-      Context.compile_outcome
+      Context.compile_outcome ?name
         ~lowered_transform:(fun opt ->
           (* Inside the transform, so an injected fault is classified by the ordinary machinery
              (phase [Transform], provenance [Candidate]) and reaches [raise_pre_search] below with a
@@ -2388,14 +2452,14 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
     let codegen_tag = SC.codegen_tag ~limits () in
     let key = SC.cache_key ~limits canon ~backend in
     let compile_spec =
-      compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu
+      compile_candidate ?name ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu
         ~provenance:Outcome.Candidate search_ctx comp bindings
     in
     (* Winner (and cache-hit) compiles target the caller's context; they replay against the same
        base lowering as the search's candidates. *)
     let compile_spec_real provenance =
-      compile_candidate ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu ~provenance ctx
-        comp bindings
+      compile_candidate ?name ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is_cpu ~provenance
+        ctx comp bindings
     in
     let flat_schedule = function
       | Whole_saved saved -> saved
@@ -2900,7 +2964,8 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
            [emit_partial_and_raise] ends in [raise_failure], exactly as [Context.compile] does. *)
         let untuned_default_or_raise () =
           match
-            Context.compile_outcome ~provenance:Ir.Schedule_outcome.User_schedule ctx comp bindings
+            Context.compile_outcome ?name ~provenance:Ir.Schedule_outcome.User_schedule ctx comp
+              bindings
           with
           | Ok result -> result
           | Error (Outcome.Fatal fatal) -> emit_partial_and_raise fatal
@@ -3400,7 +3465,8 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                      refusal stays visible where it was before. *)
                   let elem_dispatchable = dispatchable ~is_gpu elem.all_opts in
                   List.concat_map elem.units ~f:(fun u ->
-                      List.filter_map (menu ~is_cpu ~is_gpu ~limits u) ~f:(fun op ->
+                      List.filter_map (menu ~is_cpu ~is_gpu ~limits ~registry:u.u_registry u.u_opt)
+                        ~f:(fun op ->
                           if elem_dispatchable || optop_can_bind_hardware op then
                             extend_spec elem u op
                           else (
@@ -3491,7 +3557,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
              program yet a separately-run untuned process measures faster (PR #140 round 6: same
              digest, 3.4x runtime difference across processes on cuda). *)
           (if Lazy.force log_enabled then
-             match Context.compile search_ctx comp bindings with
+             match Context.compile ?name search_ctx comp bindings with
              | cctx, croutine ->
                  (match time_routine ~repeats cctx croutine with
                  | ms -> logf "untuned-default in-process control: %.4f ms" ms
