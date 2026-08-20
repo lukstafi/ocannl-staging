@@ -59,6 +59,10 @@ let skipped = Verdict.skipped ~backend:backend_name
 let on_cpu = String.is_substring backend_name ~substring:"cc"
 let on_metal = String.is_substring backend_name ~substring:"metal"
 
+module Generated = Test_utils.Generated
+
+let () = Generated.init ~backend_name
+
 let nest_paths (llc : LL.t) : Ir.Indexing.symbol list list =
   let strip stmts = List.filter stmts ~f:(function LL.Noop | LL.Comment _ -> false | _ -> true) in
   let rec path (llc : LL.t) : Ir.Indexing.symbol list =
@@ -300,16 +304,15 @@ let () =
      legs — and the seeding wave proposes it (asserted above, executed below). *)
   pipeline_leg "cvg2" make_conv_s2v;
   if on_cpu then (
-    let has_in file s =
-      String.is_substring (Stdio.In_channel.read_all (Utils.build_file file)) ~substring:s
-    in
-    let struct_pin file =
-      has_in file "Tile_mma register tiling" && has_in file "fragment_" && has_in file "tile_"
+    let struct_pin routine =
+      let src = Generated.read routine in
+      let has s = String.is_substring src ~substring:s in
+      has "Tile_mma register tiling" && has "fragment_" && has "tile_"
     in
     p "conv pipeline structure: im2col packs, register tiling, resident fragment"
-      (struct_pin "cvg_gemm.c");
+      (struct_pin "cvg_gemm");
     p "cvg2 pipeline structure: compacted im2col packs, register tiling fires on the strided row"
-      (struct_pin "cvg2_gemm.c"))
+      (struct_pin "cvg2_gemm"))
   else (
     skipped "conv pipeline structure: im2col packs, register tiling, resident fragment";
     skipped

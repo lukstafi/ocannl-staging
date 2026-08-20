@@ -33,10 +33,15 @@ let embed = 4
 let positions = 3
 let p = Verdict.p
 let approx a b = Float.(abs (a - b) < 1e-4)
+let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 
-let read_generated_c base_name =
-  let path = Utils.build_file (base_name ^ ".c") in
-  if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
+module Generated = Test_utils.Generated
+
+let () = Generated.init ~backend_name
+
+(* Every kernel here is compiled on an explicit [Context.cpu ()] lineage, so the artifacts are the C
+   backend's regardless of the run's configured backend: the read below pins [.c] rather than
+   deriving the extension from the configured backend. *)
 
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
@@ -157,18 +162,16 @@ let () =
   (* Generated C: the backward writes at a dynamically computed offset (cast to the index
      precision), and the only loop over the vocabulary axis ([<= 4]) is the gradient's zero-init
      expansion — the dense reduction nest would add a second one. *)
-  (match read_generated_c "onehot_scatter_bwd" with
-  | None -> p "generated C: dynamic scatter write, no vocab loop (skipped: non-C backend)" true
-  | Some src ->
-      let has_index_prec_cast =
-        String.is_substring src ~substring:"((int)("
-        || String.is_substring src ~substring:"((long long)("
-      in
-      p "generated C contains a dynamically indexed write" has_index_prec_cast;
-      let vocab_loop_count =
-        List.length (String.substr_index_all src ~may_overlap:false ~pattern:"<= 4")
-      in
-      p "generated C has no vocabulary reduction loop (zero-init only)" (vocab_loop_count <= 1));
+  (let src = Generated.read ~ext:".c" "onehot_scatter_bwd" in
+   let has_index_prec_cast =
+     String.is_substring src ~substring:"((int)("
+     || String.is_substring src ~substring:"((long long)("
+   in
+   p "generated C contains a dynamically indexed write" has_index_prec_cast;
+   let vocab_loop_count =
+     List.length (String.substr_index_all src ~may_overlap:false ~pattern:"<= 4")
+   in
+   p "generated C has no vocabulary reduction loop (zero-init only)" (vocab_loop_count <= 1));
 
   (* --- Out-of-range and fractional ids contribute nothing --- *)
   let id_oob = [| 2.; Float.of_int vocab; 1.5 |] in

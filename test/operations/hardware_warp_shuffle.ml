@@ -36,12 +36,9 @@ let on_gpu =
 
 let single = Ir.Ops.single
 
-let read_generated base_name =
-  let ext = if String.is_substring backend_name ~substring:"metal" then ".metal" else ".c" in
-  let ext = if String.is_substring backend_name ~substring:"cuda" then ".cu" else ext in
-  let ext = if String.is_substring backend_name ~substring:"hip" then ".hip" else ext in
-  let path = Utils.build_file (base_name ^ ext) in
-  if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
+module Generated = Test_utils.Generated
+
+let () = Generated.init ~backend_name
 
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
@@ -97,15 +94,13 @@ let () =
       s1
   in
   p "warp-shuffle sum parity" (approx got expected_sum);
-  (match read_generated "sum_wshfl" with
-  | None -> p "two-phase shuffle rendering (GPU) or serial fallback (CPU)" false
-  | Some src ->
-      let has sub = String.is_substring src ~substring:sub in
-      let ok =
-        if on_gpu then has "ocannl_shfl_xor" && has "wred_partials_"
-        else (not (has "ocannl_shfl_xor")) && not (has "wred_partials_")
-      in
-      p "two-phase shuffle rendering (GPU) or serial fallback (CPU)" ok);
+  (let src = Generated.read "sum_wshfl" in
+   let has sub = String.is_substring src ~substring:sub in
+   let ok =
+     if on_gpu then has "ocannl_shfl_xor" && has "wred_partials_"
+     else (not (has "ocannl_shfl_xor")) && not (has "wred_partials_")
+   in
+   p "two-phase shuffle rendering (GPU) or serial fallback (CPU)" ok);
 
   (* --- Single-warp FMA dot-product: 32 = 1 warp (no staging, no barrier). --- *)
   let m = 32 in
@@ -134,15 +129,13 @@ let () =
       d1
   in
   p "warp-shuffle fma dot parity" (approx got_dot expected_dot);
-  (match read_generated "dot_wshfl" with
-  | None -> p "single-warp shuffle rendering (GPU) or serial fallback (CPU)" false
-  | Some src ->
-      let has sub = String.is_substring src ~substring:sub in
-      let ok =
-        if on_gpu then has "ocannl_shfl_xor" && not (has "wred_partials_")
-        else not (has "ocannl_shfl_xor")
-      in
-      p "single-warp shuffle rendering (GPU) or serial fallback (CPU)" ok);
+  (let src = Generated.read "dot_wshfl" in
+   let has sub = String.is_substring src ~substring:sub in
+   let ok =
+     if on_gpu then has "ocannl_shfl_xor" && not (has "wred_partials_")
+     else not (has "ocannl_shfl_xor")
+   in
+   p "single-warp shuffle rendering (GPU) or serial fallback (CPU)" ok);
 
   (* --- 2-warp max-reduce: a non-Add combine. The max is positive, so the allocation-zeroed
      accumulator start does not affect the result. --- *)

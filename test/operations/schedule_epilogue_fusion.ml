@@ -59,16 +59,9 @@ let on_metal = String.is_substring backend_name ~substring:"metal"
 let on_gpu =
   List.exists [ "metal"; "cuda"; "hip" ] ~f:(fun s -> String.is_substring backend_name ~substring:s)
 
-let read_generated base_name =
-  let ext =
-    if on_metal then ".metal"
-    else if String.is_substring backend_name ~substring:"hip" then ".hip"
-    else if on_gpu then ".cu"
-    else ".c"
-  in
-  let path = Utils.build_file (base_name ^ ext) in
-  if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
+module Generated = Test_utils.Generated
 
+let () = Generated.init ~backend_name
 let n = 32
 let bm = 16
 let simd_width = 32
@@ -239,32 +232,29 @@ let () =
   p "staged fused values match two-kernel"
     (Array.for_all2_exn got3 want ~f:(fun a b -> Float.(abs (a - b) < 1e-2)));
   p "staged fused bitwise on C backends" (on_gpu || Array.for_all2_exn got3 want ~f:Float.equal);
-  (match read_generated "epf_mma" with
-  | None -> p "staged fused structure as expected" false
-  | Some src ->
-      let has s = String.is_substring src ~substring:s in
-      let ok =
-        if on_metal then
-          (* The intrinsic fragment path fires against the workgroup-shared accumulator, and the
-             fused epilogue renders after the fragment store and its trailing barrier, in the same
-             kernel. *)
-          match
-            ( String.substr_index src ~pattern:"simdgroup_store(__mma_fragment_",
-              String.substr_index src ~pattern:"relu_mc[" )
-          with
-          | Some store, Some ep ->
-              has "threadgroup float" && has "simdgroup_multiply_accumulate" && store < ep
-          | _ -> false
-        else if on_gpu then
-          (* CUDA/HIP decline uniform f32 to the lane-0 scalar fallback; the epilogue still fuses
-             into the same kernel. *)
-          has "== 0)" && has "relu_mc["
-        else
-          (* cc: the register tiling fires on the fragment array; the fused epilogue is in the same
-             routine. *)
-          has "Tile_mma register tiling" && has "relu_mc["
-      in
-      p "staged fused structure as expected" ok);
+  (let src = Generated.read "epf_mma" in
+   let has s = String.is_substring src ~substring:s in
+   let ok =
+     if on_metal then
+       (* The intrinsic fragment path fires against the workgroup-shared accumulator, and the fused
+          epilogue renders after the fragment store and its trailing barrier, in the same kernel. *)
+       match
+         ( String.substr_index src ~pattern:"simdgroup_store(__mma_fragment_",
+           String.substr_index src ~pattern:"relu_mc[" )
+       with
+       | Some store, Some ep ->
+           has "threadgroup float" && has "simdgroup_multiply_accumulate" && store < ep
+       | _ -> false
+     else if on_gpu then
+       (* CUDA/HIP decline uniform f32 to the lane-0 scalar fallback; the epilogue still fuses into
+          the same kernel. *)
+       has "== 0)" && has "relu_mc["
+     else
+       (* cc: the register tiling fires on the fragment array; the fused epilogue is in the same
+          routine. *)
+       has "Tile_mma register tiling" && has "relu_mc["
+   in
+   p "staged fused structure as expected" ok);
 
   (* --- Autotune seeding: every matmul sketch gets a fused-epilogue twin on this graph, and the
      tuned routine (whichever candidate wins) matches the two-kernel reference. --- *)

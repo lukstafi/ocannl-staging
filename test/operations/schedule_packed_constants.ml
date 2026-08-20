@@ -40,12 +40,9 @@ let nonzero name (a : float array) =
 let approx a b = Float.(abs (a - b) < 1e-3)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 
-let read_generated base_name =
-  let ext = if String.is_substring backend_name ~substring:"metal" then ".metal" else ".c" in
-  let ext = if String.is_substring backend_name ~substring:"cuda" then ".cu" else ext in
-  let ext = if String.is_substring backend_name ~substring:"hip" then ".hip" else ext in
-  let path = Utils.build_file (base_name ^ ext) in
-  if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
+module Generated = Test_utils.Generated
+
+let () = Generated.init ~backend_name
 
 let nest_paths (llc : LL.t) : Ir.Indexing.symbol list list =
   let strip stmts = List.filter stmts ~f:(function LL.Noop | LL.Comment _ -> false | _ -> true) in
@@ -139,18 +136,16 @@ let () =
   let got_hoisted = Context.get_values ctx mc1.Tensor.value in
   p "hoisted-packed matmul matches the naive twin"
     (Array.for_all2_exn got_hoisted got_naive ~f:approx);
-  match read_generated "mmh_hoisted" with
-  | None -> p "no in-kernel scratch or copy nests; packed constants are buffer params" false
-  | Some src ->
-      let has sub = String.is_substring src ~substring:sub in
-      p "no in-kernel scratch or copy nests; packed constants are buffer params"
-        (has "packed_ma" && has "packed_mb"
-        && (not (has "float tile_"))
-        (* Shared-tile declarations — not the [[..._in_threadgroup]] parameter attributes every
-           Metal kernel carries. *)
-        && (not (has "threadgroup float"))
-        && (not (has "__shared__"))
-        && not (has "barrier("))
+  let src = Generated.read "mmh_hoisted" in
+  let has sub = String.is_substring src ~substring:sub in
+  p "no in-kernel scratch or copy nests; packed constants are buffer params"
+    (has "packed_ma" && has "packed_mb"
+    && (not (has "float tile_"))
+    (* Shared-tile declarations — not the [[..._in_threadgroup]] parameter attributes every Metal
+       kernel carries. *)
+    && (not (has "threadgroup float"))
+    && (not (has "__shared__"))
+    && not (has "barrier("))
 
 (* --- 2. Mixed flavors, non-dividing extents (edge tiles) --- *)
 let () =

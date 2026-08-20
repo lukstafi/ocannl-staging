@@ -27,6 +27,10 @@ let approx a b = Float.(abs (a - b) < 1e-4)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_cpu = String.is_substring backend_name ~substring:"cc"
 
+module Generated = Test_utils.Generated
+
+let () = Generated.init ~backend_name
+
 (* The vector width is a per-machine fact (16 NEON, 32 AVX2, 64 AVX-512), so the split factor of the
    second leg is derived from it rather than spelled: a factor below one vector leaves the retyped
    inner loop unable to fill a single vector, and the leg would then assert the absence of the
@@ -36,13 +40,6 @@ let simd_vector_bytes =
   (Context.hardware_limits (Context.auto ())).Ir.Backend_intf.simd_vector_bytes
 
 let split_factor = max 8 (simd_vector_bytes / Ir.Ops.prec_in_bytes Ir.Ops.single)
-
-let read_generated base_name =
-  let ext = if String.is_substring backend_name ~substring:"metal" then ".metal" else ".c" in
-  let ext = if String.is_substring backend_name ~substring:"cuda" then ".cu" else ext in
-  let ext = if String.is_substring backend_name ~substring:"hip" then ".hip" else ext in
-  let path = Utils.build_file (base_name ^ ext) in
-  if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
 
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
@@ -86,18 +83,16 @@ let () =
       c1
   in
   p "vectorized mul-add values match the serial twin" (Array.for_all2_exn got twin ~f:approx);
-  (match read_generated "simd_retype" with
-  | None -> p "vectorized rendering with serial remainder" false
-  | Some src ->
-      let has s = String.is_substring src ~substring:s in
-      let ok =
-        if on_cpu then has "vector_size" && has "__builtin_memcpy" && not (has "#pragma")
-        else
-          (* 517 is not a lane multiple: rows other than the first start at unaligned offsets, so
-             the packed rendering must decline and fall back to a plain serial loop. *)
-          (not (has "vector_size")) && not (has "reinterpret_cast")
-      in
-      p "vectorized rendering with serial remainder" ok);
+  (let src = Generated.read "simd_retype" in
+   let has s = String.is_substring src ~substring:s in
+   let ok =
+     if on_cpu then has "vector_size" && has "__builtin_memcpy" && not (has "#pragma")
+     else
+       (* 517 is not a lane multiple: rows other than the first start at unaligned offsets, so the
+          packed rendering must decline and fall back to a plain serial loop. *)
+       (not (has "vector_size")) && not (has "reinterpret_cast")
+   in
+   p "vectorized rendering with serial remainder" ok);
 
   (* --- Split by 8 then retype the inner loop: Affine last components (8*j_o + j_i). --- *)
   let cols2 = 512 in
@@ -120,13 +115,11 @@ let () =
       d1
   in
   p "split+vectorized values match the serial twin" (Array.for_all2_exn got2 twin2 ~f:approx);
-  match read_generated "simd_split" with
-  | None -> p "affine-indexed vector accesses rendered" false
-  | Some src ->
-      let has s = String.is_substring src ~substring:s in
-      p "affine-indexed vector accesses rendered"
-        (if on_cpu then has "vector_size" && not (has "#pragma")
-         else
-           (* Eligible on GPU: dims and the Affine coefficient are lane multiples, so the packed
-              rendering emits reinterpret_cast float4_t loads/stores (gh-ocannl-463). *)
-           has "reinterpret_cast" && has "float4_t" && not (has "vector_size"))
+  let src = Generated.read "simd_split" in
+  let has s = String.is_substring src ~substring:s in
+  p "affine-indexed vector accesses rendered"
+    (if on_cpu then has "vector_size" && not (has "#pragma")
+     else
+       (* Eligible on GPU: dims and the Affine coefficient are lane multiples, so the packed
+          rendering emits reinterpret_cast float4_t loads/stores (gh-ocannl-463). *)
+       has "reinterpret_cast" && has "float4_t" && not (has "vector_size"))

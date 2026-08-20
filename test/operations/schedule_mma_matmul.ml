@@ -55,15 +55,9 @@ let on_gpu =
   || String.is_substring backend_name ~substring:"cuda"
   || String.is_substring backend_name ~substring:"hip"
 
-let read_generated base_name =
-  let ext =
-    if on_metal then ".metal"
-    else if String.is_substring backend_name ~substring:"hip" then ".hip"
-    else if on_gpu then ".cu"
-    else ".c"
-  in
-  let path = Utils.build_file (base_name ^ ext) in
-  if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
+module Generated = Test_utils.Generated
+
+let () = Generated.init ~backend_name
 
 (* The maximal single-child chains of statement-level loops: one symbol list per top-level nest. *)
 let nest_paths (llc : LL.t) : Ir.Indexing.symbol list list =
@@ -260,16 +254,15 @@ let () =
         ~inspect:(fun opt -> off_seeded := tf32_mma_seeded opt)
         ~name:"mm_tf32_off_mma" c_off_mma
     in
-    let src_off = read_generated "mm_tf32_off_mma" in
+    let src_off = Generated.read "mm_tf32_off_mma" in
     p "tf32 policy-off matmul matches the serial twin bitwise"
       (Array.for_all2_exn got_off want_off ~f:Float.equal);
     p "tf32 policy-off renders and records the scalar fallback"
       (List.for_all census_off ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_scalar_fallback)
       && (not (List.is_empty census_off))
-      && Option.value_map src_off ~default:false ~f:(fun src ->
-          String.is_substring src ~substring:"== 0)"
-          && (not (String.is_substring src ~substring:"(wmma-tf32)"))
-          && not (String.is_substring src ~substring:"precision::tf32")));
+      && String.is_substring src_off ~substring:"== 0)"
+      && (not (String.is_substring src_off ~substring:"(wmma-tf32)"))
+      && not (String.is_substring src_off ~substring:"precision::tf32"));
     p "tf32 policy-off autotune omits tensorized candidates" (not !off_seeded);
 
     Numerics.set_policy { (Numerics.get ()) with tf32_matmuls = true };
@@ -278,16 +271,15 @@ let () =
     let%op c_on_mma = a_on * b_on in
     let want_on = compile_serial ~name:"mm_tf32_on_serial" c_on_serial in
     let got_on, census_on = compile_mma_with_census ~name:"mm_tf32_on_mma" c_on_mma in
-    let src_on = read_generated "mm_tf32_on_mma" in
+    let src_on = Generated.read "mm_tf32_on_mma" in
     p "tf32 policy-on matmul matches the serial twin within tolerance"
       (Array.for_all2_exn got_on want_on ~f:approx_rel);
     p "tf32 policy-on renders and records wmma tf32"
       (List.for_all census_on ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_intrinsics)
       && (not (List.is_empty census_on))
-      && Option.value_map src_on ~default:false ~f:(fun src ->
-          String.is_substring src ~substring:"(wmma-tf32)"
-          && String.is_substring src ~substring:"precision::tf32"
-          && String.is_substring src ~substring:"__float_to_tf32"));
+      && String.is_substring src_on ~substring:"(wmma-tf32)"
+      && String.is_substring src_on ~substring:"precision::tf32"
+      && String.is_substring src_on ~substring:"__float_to_tf32");
 
     let a_k24, b_k24 = tf32_inputs ~tag:"tf32_k24_" ~k:24 in
     let%op c_k24_serial = a_k24 * b_k24 in
@@ -299,11 +291,11 @@ let () =
         ~inspect:(fun opt -> k24_seeded := tf32_mma_seeded opt)
         ~name:"mm_tf32_k24_mma" c_k24_mma
     in
+    let src_k24 = Generated.read "mm_tf32_k24_mma" in
     p "tf32 k=24 divergent tile matches and emits"
       (Array.for_all2_exn got_k24 want_k24 ~f:approx_rel
       && List.exists census_k24 ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_intrinsics)
-      && Option.value_map (read_generated "mm_tf32_k24_mma") ~default:false ~f:(fun src ->
-          String.is_substring src ~substring:"tile_mma 16x32x24 (wmma-tf32)"));
+      && String.is_substring src_k24 ~substring:"tile_mma 16x32x24 (wmma-tf32)");
     p "tf32 k=24 autotune seeds tensorized candidates" !k24_seeded;
 
     let atv =
@@ -320,13 +312,13 @@ let () =
     let%op ct_mma = at +* "ki;kj=>ij" bt in
     let want_t = compile_serial ~name:"mm_tf32_ta_serial" ct_serial in
     let got_t, census_t = compile_mma_with_census ~name:"mm_tf32_ta_mma" ct_mma in
+    let src_t = Generated.read "mm_tf32_ta_mma" in
     p "tf32 transposed-A matmul matches and emits"
       (Array.for_all2_exn got_t want_t ~f:approx_rel
       && List.exists census_t ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_intrinsics)
-      && Option.value_map (read_generated "mm_tf32_ta_mma") ~default:false ~f:(fun src ->
-          String.is_substring src ~substring:"matrix_a, 16, 16, 8"
-          && String.is_substring src ~substring:"col_major"
-          && String.is_substring src ~substring:"(wmma-tf32)"));
+      && String.is_substring src_t ~substring:"matrix_a, 16, 16, 8"
+      && String.is_substring src_t ~substring:"col_major"
+      && String.is_substring src_t ~substring:"(wmma-tf32)");
     Numerics.set_policy { (Numerics.get ()) with tf32_matmuls = false })
   else (
     skipped "tf32 policy-off matmul matches the serial twin bitwise";
@@ -351,30 +343,28 @@ let () =
     (Array.for_all2_exn got_mma got_serial ~f:approx);
   p "C-backend fallback matches bitwise"
     (on_gpu || Array.for_all2_exn got_mma got_serial ~f:Float.equal);
-  (match read_generated "mm_mma" with
-  | None -> p "tensorized structure as expected" false
-  | Some src ->
-      let has s = String.is_substring src ~substring:s in
-      let ok =
-        if on_metal then
-          (* The intrinsic path: fragment loads and stores, the mma step, and the bracketing
-             barriers; no lane-0 fallback guard. *)
-          has "simdgroup_load"
-          && has "simdgroup_multiply_accumulate"
-          && has "simdgroup_store" && has "threadgroup_barrier"
-          && not (has "== 0)")
-        else if on_gpu then
-          (* CUDA: the wmma draft supports the half/bf16 combinations only, so uniform f32 declines
-             to the scalar fallback under the lane-0 guard (the register tiling is CPU-only — the
-             packed vector style never takes it). *)
-          has "== 0)" && has "fma" && not (has "simdgroup")
-        else
-          (* The register-tiled path (gh-ocannl-469): the vector C-tile under the lane-0 guard (a
-             serial loop of extent 32 binds the lane on the C backends); fused per-element chains
-             are what makes the bitwise parity above hold. *)
-          has "== 0)" && has "Tile_mma register tiling" && has "fma" && not (has "simdgroup")
-      in
-      p "tensorized structure as expected" ok);
+  (let src = Generated.read "mm_mma" in
+   let has s = String.is_substring src ~substring:s in
+   let ok =
+     if on_metal then
+       (* The intrinsic path: fragment loads and stores, the mma step, and the bracketing barriers;
+          no lane-0 fallback guard. *)
+       has "simdgroup_load"
+       && has "simdgroup_multiply_accumulate"
+       && has "simdgroup_store" && has "threadgroup_barrier"
+       && not (has "== 0)")
+     else if on_gpu then
+       (* CUDA: the wmma draft supports the half/bf16 combinations only, so uniform f32 declines to
+          the scalar fallback under the lane-0 guard (the register tiling is CPU-only — the packed
+          vector style never takes it). *)
+       has "== 0)" && has "fma" && not (has "simdgroup")
+     else
+       (* The register-tiled path (gh-ocannl-469): the vector C-tile under the lane-0 guard (a
+          serial loop of extent 32 binds the lane on the C backends); fused per-element chains are
+          what makes the bitwise parity above hold. *)
+       has "== 0)" && has "Tile_mma register tiling" && has "fma" && not (has "simdgroup")
+   in
+   p "tensorized structure as expected" ok);
 
   (* --- Half precision: [simdgroup_half8x8] on Metal, the wmma f16 path on CUDA (T3 draft), rocWMMA
      on HIP, the scalar fallback on the C backends. The inputs are multiples of 1/8 and 1/4 with
@@ -416,25 +406,23 @@ let () =
   let got_h = Context.get_values ctx_h mch1.Tensor.value in
   p "half tensorized matmul matches the serial twin bitwise"
     (Array.for_all2_exn got_h got_h_serial ~f:Float.equal);
-  (match read_generated "mm_h_mma" with
-  | None -> p "half tensorized structure as expected" false
-  | Some src ->
-      let has s = String.is_substring src ~substring:s in
-      let ok =
-        if on_metal then has "simdgroup_half8x8" && not (has "== 0)")
-        else if String.is_substring backend_name ~substring:"hip" then
-          (* HIP: the rocWMMA f16 intrinsic (verified on gfx1151), no lane-0 fallback guard. *)
-          has "rocwmma::mma_sync" && not (has "== 0)")
-        else if on_gpu then
-          (* CUDA: the wmma f16 intrinsic, or the lane-0 fallback on older devices. *)
-          has "nvcuda::wmma" || has "== 0)"
-        else
-          (* gh-ocannl-575: the register tiling fires over narrow storage — the compute precision is
-             f32 under the default [narrow_compute_f32] policy ([fp16_arithmetic] is off), and all
-             three operands widen/narrow at the memory boundary. *)
-          has "Tile_mma register tiling" && has "narrow storage bridged: d:half a:half b:half"
-      in
-      p "half tensorized structure as expected" ok);
+  (let src = Generated.read "mm_h_mma" in
+   let has s = String.is_substring src ~substring:s in
+   let ok =
+     if on_metal then has "simdgroup_half8x8" && not (has "== 0)")
+     else if String.is_substring backend_name ~substring:"hip" then
+       (* HIP: the rocWMMA f16 intrinsic (verified on gfx1151), no lane-0 fallback guard. *)
+       has "rocwmma::mma_sync" && not (has "== 0)")
+     else if on_gpu then
+       (* CUDA: the wmma f16 intrinsic, or the lane-0 fallback on older devices. *)
+       has "nvcuda::wmma" || has "== 0)"
+     else
+       (* gh-ocannl-575: the register tiling fires over narrow storage — the compute precision is
+          f32 under the default [narrow_compute_f32] policy ([fp16_arithmetic] is off), and all
+          three operands widen/narrow at the memory boundary. *)
+       has "Tile_mma register tiling" && has "narrow storage bridged: d:half a:half b:half"
+   in
+   p "half tensorized structure as expected" ok);
 
   (* --- Bfloat16 (gh-ocannl-545): the two accumulator shapes, which are NOT interchangeable on
      CUDA. [nvcuda::wmma] has no bf16 accumulator fragment (mma.hpp declares [__nv_bfloat16]
@@ -521,9 +509,8 @@ let () =
     p
       (Printf.sprintf "%s tensorized matmul matches the serial twin" tag)
       (Array.for_all2_exn got want ~f:eq);
-    match read_generated ("mm_" ^ tag ^ "_mma") with
-    | None -> p (Printf.sprintf "%s tensorized structure as expected" tag) false
-    | Some src -> p (Printf.sprintf "%s tensorized structure as expected" tag) (check src)
+    let src = Generated.read ("mm_" ^ tag ^ "_mma") in
+    p (Printf.sprintf "%s tensorized structure as expected" tag) (check src)
   in
   let mul () =
     let%op t = mab * mbb in
@@ -641,24 +628,22 @@ let () =
      p
        (Printf.sprintf "%s tensorized matmul matches the serial twin bitwise" tag)
        (Array.for_all2_exn got want ~f:Float.equal);
-     match read_generated ("mm_" ^ tag ^ "_mma") with
-     | None -> p (Printf.sprintf "%s tensorized structure as expected" tag) false
-     | Some src ->
-         let has s = String.is_substring src ~substring:s in
-         let ok =
-           if on_gpu then
-             (* CUDA sm_89+: the inline-PTX path; the lane-0 fallback on older devices. *)
-             has "mma.sync.aligned.m16n8k32" || has "== 0)"
-           else if String.equal tag "f8_tb" then
-             (* Transposed B declines the register tiling on the C backends. *)
-             has "== 0)" && (not (has "simdgroup")) && not (has "Tile_mma register tiling")
-           else
-             (* gh-ocannl-575: fp8 storage register-tiles at the f32 accumulator precision; fp8 has
-                no whole-vector conversion, so the operand loads convert per lane (the [vec_bridge]
-                fallback arm) while the arithmetic stays vectorized. *)
-             has "Tile_mma register tiling" && has "narrow storage bridged: a:fp8 b:fp8"
-         in
-         p (Printf.sprintf "%s tensorized structure as expected" tag) ok
+     let src = Generated.read ("mm_" ^ tag ^ "_mma") in
+     let has s = String.is_substring src ~substring:s in
+     let ok =
+       if on_gpu then
+         (* CUDA sm_89+: the inline-PTX path; the lane-0 fallback on older devices. *)
+         has "mma.sync.aligned.m16n8k32" || has "== 0)"
+       else if String.equal tag "f8_tb" then
+         (* Transposed B declines the register tiling on the C backends. *)
+         has "== 0)" && (not (has "simdgroup")) && not (has "Tile_mma register tiling")
+       else
+         (* gh-ocannl-575: fp8 storage register-tiles at the f32 accumulator precision; fp8 has no
+            whole-vector conversion, so the operand loads convert per lane (the [vec_bridge]
+            fallback arm) while the arithmetic stays vectorized. *)
+         has "Tile_mma register tiling" && has "narrow storage bridged: a:fp8 b:fp8"
+     in
+     p (Printf.sprintf "%s tensorized structure as expected" tag) ok
    in
    fp8_leg ~tag:"f8" ~build:(fun () ->
        let%op t = maf * mbf in
@@ -721,12 +706,10 @@ let () =
     let got_edge = Context.get_values ctx_e ec1.Tensor.value in
     p "edge-extent tensorized matmul matches the serial twin bitwise"
       (Array.for_all2_exn got_edge got_edge_serial ~f:Float.equal);
-    match read_generated "mm_edge_mma" with
-    | None -> p "edge-extent register tiling with peeled edges" false
-    | Some src ->
-        let has s = String.is_substring src ~substring:s in
-        p "edge-extent register tiling with peeled edges"
-          (has "Tile_mma register tiling" && has "full blocks 4x"))
+    let src = Generated.read "mm_edge_mma" in
+    let has s = String.is_substring src ~substring:s in
+    p "edge-extent register tiling with peeled edges"
+      (has "Tile_mma register tiling" && has "full blocks 4x"))
   else (
     skipped "edge-extent tensorized matmul matches the serial twin bitwise";
     skipped "edge-extent register tiling with peeled edges");
@@ -787,12 +770,10 @@ let () =
     let got_width = Context.get_values ctx_w wc1.Tensor.value in
     p "extent-adapted tensorized matmul matches the serial twin bitwise"
       (Array.for_all2_exn got_width got_width_serial ~f:Float.equal);
-    match read_generated "mm_width_mma" with
-    | None -> p "extent-adapted tile width covers the column extent" false
-    | Some src ->
-        let has s = String.is_substring src ~substring:s in
-        p "extent-adapted tile width covers the column extent"
-          (has "Tile_mma register tiling" && has "full blocks 8x40 of 8x40"))
+    let src = Generated.read "mm_width_mma" in
+    let has s = String.is_substring src ~substring:s in
+    p "extent-adapted tile width covers the column extent"
+      (has "Tile_mma register tiling" && has "full blocks 8x40 of 8x40"))
   else (
     skipped "extent-adapted tensorized matmul matches the serial twin bitwise";
     skipped "extent-adapted tile width covers the column extent");
@@ -862,19 +843,17 @@ let () =
          ~f:(fun x -> inexact_in_f32 (fav.(x) *. fbv.(x % (fk * fj)))));
     p "full-mantissa tensorized matmul matches the serial twin bitwise"
       (Array.for_all2_exn got_fused want_fused ~f:Float.equal);
-    match read_generated "mm_fused_mma" with
-    | None -> p "register tiling offers a whole-vector fused accumulator update" false
-    | Some src ->
-        let has s = String.is_substring src ~substring:s in
-        p "register tiling offers a whole-vector fused accumulator update"
-          (has "Tile_mma register tiling" && has "__builtin_elementwise_fma"
-         (* The gcc arm: a whole-vector builtin, not the per-lane subscripted loop the spill lives
-            in. Every arm is emitted target-independently, behind an [#elif] — which one carries the
-            x86 builtin depends on the machine's lane count ([__FMA__] at 4 and 8 lanes,
-            [__AVX512F__] at 16), so the pin is that an x86 whole-vector arm exists at this width,
-            not how its guard reads. *)
-         && has "#elif "
-          && has "__builtin_ia32_vfmadd"))
+    let src = Generated.read "mm_fused_mma" in
+    let has s = String.is_substring src ~substring:s in
+    p "register tiling offers a whole-vector fused accumulator update"
+      (has "Tile_mma register tiling" && has "__builtin_elementwise_fma"
+     (* The gcc arm: a whole-vector builtin, not the per-lane subscripted loop the spill lives in.
+        Every arm is emitted target-independently, behind an [#elif] — which one carries the x86
+        builtin depends on the machine's lane count ([__FMA__] at 4 and 8 lanes, [__AVX512F__] at
+        16), so the pin is that an x86 whole-vector arm exists at this width, not how its guard
+        reads. *)
+     && has "#elif "
+      && has "__builtin_ia32_vfmadd"))
   else (
     skipped "full-mantissa products are inexact in f32";
     skipped "full-mantissa tensorized matmul matches the serial twin bitwise";
@@ -954,57 +933,54 @@ let () =
     let got_staged = Context.get_values ctx_c mc3.Tensor.value in
     p "staged+tensorized matmul parity (GPU) or clean rejection (CPU)"
       (Array.for_all2_exn got_staged got_serial ~f:approx);
-    match read_generated "mm_staged_mma" with
-    | None -> p "staged+tensorized structure as expected" false
-    | Some src ->
-        let has s = String.is_substring src ~substring:s in
-        let count_sub sub =
-          String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
+    let src = Generated.read "mm_staged_mma" in
+    let has s = String.is_substring src ~substring:s in
+    let count_sub sub =
+      String.substr_index_all src ~may_overlap:false ~pattern:sub |> List.length
+    in
+    let ok =
+      if on_metal then
+        (* Two shared tiles cooperatively loaded, the mma reading them from threadgroup memory; the
+           ma tile's partial-width load keeps its [lane < 8] guard. The marked accumulator fragment
+           is loaded before the serial [k_o] body and stored after it; the body itself contains
+           update-only MMA calls (gh-ocannl-480). *)
+        let body_begin = "/* simdgroup fragment reduction body begins */" in
+        let body_end = "/* simdgroup fragment reduction body ends */" in
+        let fragment_load = "simdgroup_load(__mma_fragment_" in
+        let fragment_store = "simdgroup_store(__mma_fragment_" in
+        let resident =
+          match
+            ( String.substr_index src ~pattern:fragment_load,
+              String.substr_index src ~pattern:body_begin,
+              String.substr_index src ~pattern:body_end,
+              String.substr_index src ~pattern:fragment_store )
+          with
+          | Some load, Some beg, Some fin, Some store when load < beg && beg < fin && fin < store ->
+              let reduction_body = String.sub src ~pos:beg ~len:(fin - beg) in
+              let update = "/* tile_mma fragment update" in
+              let barrier = "threadgroup_barrier(mem_flags::mem_threadgroup);" in
+              let update_has_trailing_barrier =
+                match String.substr_index reduction_body ~pattern:update with
+                | Some update_pos ->
+                    String.is_substring
+                      (String.drop_prefix reduction_body update_pos)
+                      ~substring:barrier
+                | None -> false
+              in
+              (not (String.is_substring reduction_body ~substring:fragment_load))
+              && (not (String.is_substring reduction_body ~substring:fragment_store))
+              && update_has_trailing_barrier
+          | _ -> false
         in
-        let ok =
-          if on_metal then
-            (* Two shared tiles cooperatively loaded, the mma reading them from threadgroup memory;
-               the ma tile's partial-width load keeps its [lane < 8] guard. The marked accumulator
-               fragment is loaded before the serial [k_o] body and stored after it; the body itself
-               contains update-only MMA calls (gh-ocannl-480). *)
-            let body_begin = "/* simdgroup fragment reduction body begins */" in
-            let body_end = "/* simdgroup fragment reduction body ends */" in
-            let fragment_load = "simdgroup_load(__mma_fragment_" in
-            let fragment_store = "simdgroup_store(__mma_fragment_" in
-            let resident =
-              match
-                ( String.substr_index src ~pattern:fragment_load,
-                  String.substr_index src ~pattern:body_begin,
-                  String.substr_index src ~pattern:body_end,
-                  String.substr_index src ~pattern:fragment_store )
-              with
-              | Some load, Some beg, Some fin, Some store
-                when load < beg && beg < fin && fin < store ->
-                  let reduction_body = String.sub src ~pos:beg ~len:(fin - beg) in
-                  let update = "/* tile_mma fragment update" in
-                  let barrier = "threadgroup_barrier(mem_flags::mem_threadgroup);" in
-                  let update_has_trailing_barrier =
-                    match String.substr_index reduction_body ~pattern:update with
-                    | Some update_pos ->
-                        String.is_substring
-                          (String.drop_prefix reduction_body update_pos)
-                          ~substring:barrier
-                    | None -> false
-                  in
-                  (not (String.is_substring reduction_body ~substring:fragment_load))
-                  && (not (String.is_substring reduction_body ~substring:fragment_store))
-                  && update_has_trailing_barrier
-              | _ -> false
-            in
-            count_sub "threadgroup float tile_" = 2
-            && has "simdgroup_multiply_accumulate"
-            && has "threadgroup_barrier" && has "tile_mma fragment update" && resident
-            && not (has "float fragment_")
-          else
-            (* CUDA: shared tiles; the wmma draft declines f32, so the lane-0 fallback guard. *)
-            count_sub "__shared__ float tile_" = 2 && has "__syncthreads()"
-        in
-        p "staged+tensorized structure as expected" ok)
+        count_sub "threadgroup float tile_" = 2
+        && has "simdgroup_multiply_accumulate"
+        && has "threadgroup_barrier" && has "tile_mma fragment update" && resident
+        && not (has "float fragment_")
+      else
+        (* CUDA: shared tiles; the wmma draft declines f32, so the lane-0 fallback guard. *)
+        count_sub "__shared__ float tile_" = 2 && has "__syncthreads()"
+    in
+    p "staged+tensorized structure as expected" ok)
   else (
     (match
        try
@@ -1056,22 +1032,19 @@ let () =
     in
     p "staged+tensorized half matmul matches the serial twin"
       (Array.for_all2_exn got_h_staged got_h_serial ~f:h32_eq);
-    match read_generated "mm_h_staged_mma" with
-    | None -> p "staged+tensorized half fragment residency" false
-    | Some src ->
-        let has s = String.is_substring src ~substring:s in
-        (* f16 operands with an f32 accumulator: the wmma backends (HIP rocWMMA, CUDA wmma) render
-           the marked accumulator as an f32 fragment array resident across [k_o]. Metal's
-           [simdgroup_matrix] is uniform-precision only, so this mixed combination declines there to
-           the scalar fallback — the uniform-f16 leg below is the one that exercises Metal's
-           fragment path. HIP is verified on gfx1151, so its pin is strict; CUDA also accepts the
-           pre-sm_70 lane-0 fallback. *)
-        let ok =
-          if on_metal then has "== 0)"
-          else if String.is_substring backend_name ~substring:"hip" then staged_half_resident src
-          else staged_half_resident src || has "== 0)"
-        in
-        p "staged+tensorized half fragment residency" ok)
+    let src = Generated.read "mm_h_staged_mma" in
+    let has s = String.is_substring src ~substring:s in
+    (* f16 operands with an f32 accumulator: the wmma backends (HIP rocWMMA, CUDA wmma) render the
+       marked accumulator as an f32 fragment array resident across [k_o]. Metal's [simdgroup_matrix]
+       is uniform-precision only, so this mixed combination declines there to the scalar fallback —
+       the uniform-f16 leg below is the one that exercises Metal's fragment path. HIP is verified on
+       gfx1151, so its pin is strict; CUDA also accepts the pre-sm_70 lane-0 fallback. *)
+    let ok =
+      if on_metal then has "== 0)"
+      else if String.is_substring backend_name ~substring:"hip" then staged_half_resident src
+      else staged_half_resident src || has "== 0)"
+    in
+    p "staged+tensorized half fragment residency" ok)
   else (
     skipped "staged+tensorized half matmul matches the serial twin";
     skipped "staged+tensorized half fragment residency");
@@ -1099,18 +1072,16 @@ let () =
     let got_hu = Context.get_values ctx_u mchu.Tensor.value in
     p "staged+tensorized uniform-f16 matmul matches the serial twin bitwise"
       (Array.for_all2_exn got_hu got_h_serial ~f:Float.equal);
-    match read_generated "mm_hu_staged_mma" with
-    | None -> p "staged+tensorized uniform-f16 fragment residency" false
-    | Some src ->
-        let has s = String.is_substring src ~substring:s in
-        (* Uniform f16->f16 is a valid combination on all three tensor-core backends, so the
-           accumulator fragment stays resident across [k_o] on each. HIP strict (verified on
-           gfx1151); Metal/CUDA also accept the pre-Apple7 / pre-sm_70 lane-0 fallback. *)
-        let ok =
-          if String.is_substring backend_name ~substring:"hip" then staged_half_resident src
-          else staged_half_resident src || has "== 0)"
-        in
-        p "staged+tensorized uniform-f16 fragment residency" ok)
+    let src = Generated.read "mm_hu_staged_mma" in
+    let has s = String.is_substring src ~substring:s in
+    (* Uniform f16->f16 is a valid combination on all three tensor-core backends, so the accumulator
+       fragment stays resident across [k_o] on each. HIP strict (verified on gfx1151); Metal/CUDA
+       also accept the pre-Apple7 / pre-sm_70 lane-0 fallback. *)
+    let ok =
+      if String.is_substring backend_name ~substring:"hip" then staged_half_resident src
+      else staged_half_resident src || has "== 0)"
+    in
+    p "staged+tensorized uniform-f16 fragment residency" ok)
   else (
     skipped "staged+tensorized uniform-f16 matmul matches the serial twin bitwise";
     skipped "staged+tensorized uniform-f16 fragment residency");
@@ -1152,26 +1123,24 @@ let () =
     p
       (Printf.sprintf "%s C-backend fallback matches bitwise" tag)
       (on_gpu || Array.for_all2_exn got want ~f:Float.equal);
-    match read_generated ("mm_" ^ tag ^ "_mma") with
-    | None -> p (Printf.sprintf "%s tensorized structure as expected" tag) false
-    | Some src ->
-        let has s = String.is_substring src ~substring:s in
-        let ok =
-          if on_metal then
-            (* The intrinsic path with the transposing load; no lane-0 fallback guard. *)
-            has "ulong2(0), true)" && has "simdgroup_multiply_accumulate" && not (has "== 0)")
-          else if on_gpu then
-            (* CUDA/HIP decline uniform f32 to the scalar fallback. *)
-            has "== 0)" && not (has "Tile_mma register tiling")
-          else if c_tiled then
-            (* C backends, transposed A: the register tiling fires (lane-0 guarded) with the A index
-               arithmetic swapped. *)
-            has "== 0)" && has "Tile_mma register tiling"
-          else
-            (* C backends, transposed B: the register tiling declines to the scalar fallback. *)
-            has "== 0)" && not (has "Tile_mma register tiling")
-        in
-        p (Printf.sprintf "%s tensorized structure as expected" tag) ok
+    let src = Generated.read ("mm_" ^ tag ^ "_mma") in
+    let has s = String.is_substring src ~substring:s in
+    let ok =
+      if on_metal then
+        (* The intrinsic path with the transposing load; no lane-0 fallback guard. *)
+        has "ulong2(0), true)" && has "simdgroup_multiply_accumulate" && not (has "== 0)")
+      else if on_gpu then
+        (* CUDA/HIP decline uniform f32 to the scalar fallback. *)
+        has "== 0)" && not (has "Tile_mma register tiling")
+      else if c_tiled then
+        (* C backends, transposed A: the register tiling fires (lane-0 guarded) with the A index
+           arithmetic swapped. *)
+        has "== 0)" && has "Tile_mma register tiling"
+      else
+        (* C backends, transposed B: the register tiling declines to the scalar fallback. *)
+        has "== 0)" && not (has "Tile_mma register tiling")
+    in
+    p (Printf.sprintf "%s tensorized structure as expected" tag) ok
   in
   let%op tc0 = mta +* "ki;kj=>ij" mtb in
   let%op tc1 = mta +* "ki;kj=>ij" mtb in

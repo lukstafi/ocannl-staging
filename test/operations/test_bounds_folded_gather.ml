@@ -37,9 +37,15 @@ let expected =
   Array.concat_map (Array.of_list id_ints) ~f:(fun idx ->
       Array.init embed ~f:(fun o -> Float.of_int ((o * vocab) + idx)))
 
-let read_generated_c base_name =
-  let path = Utils.build_file (base_name ^ ".c") in
-  if Stdlib.Sys.file_exists path then Some (Stdio.In_channel.read_all path) else None
+let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
+
+module Generated = Test_utils.Generated
+
+let () = Generated.init ~backend_name
+
+(* Every kernel here is compiled on an explicit [Context.cpu ()] lineage, so the artifacts are the C
+   backend's regardless of the run's configured backend: the reads below pin [.c] rather than
+   deriving the extension from the configured backend. *)
 
 (* Count (#Get_dynamic, #Where, #Trunc) in the freshly re-lowered forward comp of [t]. Because
    lowering consults the CURRENT bounds state, this reflects post-upload structure -- use the
@@ -103,9 +109,8 @@ let () =
     (* [Where] renders as [(cond != 0 ? ... : ...)] (or [!= 0.0] at float guard precisions). *)
     String.is_substring c ~substring:"!= 0 ?" || String.is_substring c ~substring:"!= 0.0 ?"
   in
-  (match read_generated_c "guarded_emb_fwd" with
-  | None -> p "guarded baseline C contains the guard ternary (skipped: non-C backend)" true
-  | Some c -> p "guarded baseline C contains the guard ternary" (has_guard_ternary c));
+  (let c = Generated.read ~ext:".c" "guarded_emb_fwd" in
+   p "guarded baseline C contains the guard ternary" (has_guard_ternary c));
 
   (* --- Fold: reader compiled AFTER the upload --- *)
   let c_b = TDSL.ndarray cvals ~label:[ "C_b" ] ~input_dims:[ vocab ] ~output_dims:[ embed ] () in
@@ -120,9 +125,8 @@ let () =
   let dyn_b, wheres_b, truncs_b = inspect folded_emb in
   p "folded IR keeps the Get_dynamic gather" (dyn_b >= 1);
   p "folded IR has no Where guard and no Trunc" (wheres_b = 0 && truncs_b = 0);
-  (match read_generated_c "folded_emb_fwd" with
-  | None -> p "folded C has no guard ternary (skipped: non-C backend)" true
-  | Some c -> p "folded C has no guard ternary" (not (has_guard_ternary c)));
+  (let c = Generated.read ~ext:".c" "folded_emb_fwd" in
+   p "folded C has no guard ternary" (not (has_guard_ternary c)));
   p "ids bounds are settled by the fold"
     (match ids.Tensor.value.Tn.bounds with Tn.Bounds_settled _ -> true | _ -> false);
 
