@@ -153,43 +153,64 @@ let is_symlink p =
 let init ~backend_name =
   backend := Some (String.lowercase backend_name);
   Hashtbl.clear read_digests;
-  let dir = Utils.build_files_dir () in
-  if is_symlink dir || is_symlink (Stdlib.Filename.dirname dir) then
-    (* Refused rather than skipped, and aborted rather than merely recorded: following the link
-       would delete files that are not this test's -- strictly worse than any stale artifact -- and
-       a refusal the run continues past would do exactly that at the next {!arm}. *)
+  (* The ROOT is inspected before anything that could create through it. [Utils.build_files_dir]
+     creates the per-executable subdirectory when it is missing, and [Sys.is_directory] follows
+     links, so calling it first would materialize that subdirectory inside a symlinked root's target
+     -- an external write performed by the very check whose purpose is to refuse one. *)
+  let root = "build_files" in
+  if is_symlink root then
     abort
       (Printf.sprintf
-         "Generated.init: %s (or its parent) is a symbolic link; refusing to use it, since \
-          following it would delete files outside the artifact tree"
-         dir)
+         "Generated.init: the artifact root %s is a symbolic link; refusing to use it, since \
+          resolving through it would create and delete files outside the artifact tree"
+         root)
   else
-    match scoping () with
-    | Private_to_this_exe ->
-        (* Derived from this executable's own name, so nothing else writes here: emptying it makes
-           existence mean "written by this run" for every routine at once. *)
-        Array.iter (Stdlib.Sys.readdir dir) ~f:(fun entry ->
-            let p = Stdlib.Filename.concat dir entry in
-            let is_dir = try Stdlib.Sys.is_directory p with Stdlib.Sys_error _ -> true in
-            if not is_dir then remove_or_fail ~context:"Generated.init" p)
-    | Flat | Shared_prefix _ ->
-        (* Any configured prefix, flat or named, is a directory this process does not own: another
-           executable can be given the same one, and dune schedules tests concurrently. Deleting
-           there could take a running test's kernel out from under it, and NOT deleting leaves no
-           way to tell this run's artifact from a previous run's -- deletion is the only write
-           signal that does not depend on timestamp granularity, and two successive runs of a
-           deterministic compile produce byte-identical files. Both halves of that were tried and
-           both have corners that cannot be closed (gh-ocannl-655 review rounds 5-7), so the
-           configuration is refused instead of being supported approximately.
+    let dir = Utils.build_files_dir () in
+    if is_symlink dir then
+      (* Refused rather than skipped, and aborted rather than merely recorded: following the link
+         would delete files that are not this test's -- strictly worse than any stale artifact --
+         and a refusal the run continues past would do exactly that at the next {!arm}. *)
+      abort
+        (Printf.sprintf
+           "Generated.init: %s is a symbolic link; refusing to use it, since following it would \
+            delete files outside the artifact tree"
+           dir)
+    else
+      match scoping () with
+      | Private_to_this_exe ->
+          (* Derived from this executable's own name, so nothing else writes here: emptying it makes
+             existence mean "written by this run" for every routine at once.
 
-           The remedy is to let the prefix default: it is derived from the executable's own name,
-           which is what makes the directory this process's to empty. *)
-        abort
-          "Generated.init: build_files_prefix is set, so the artifact directory is not this \
-           executable's own and provenance cannot be established in it -- another executable may \
-           be configured with the same prefix, deletion there is unsafe, and without deletion a \
-           re-emitted identical kernel is indistinguishable from a stale one. Unset \
-           build_files_prefix for tests that assert on generated code."
+             Entries are classified by [lstat], never by [Sys.is_directory]: that follows links and
+             RAISES on a dangling one, so a "treat what we cannot stat as a directory" fallback
+             would leave exactly the entries most worth removing. A surviving link is not merely
+             stale -- the backend's next write to that routine name follows it and lands outside the
+             artifact tree. Unlinking a symlink removes the link and not its target, which is what
+             makes this safe and is the same distinction arrayjit's own startup cleanup draws. *)
+          Array.iter (Stdlib.Sys.readdir dir) ~f:(fun entry ->
+              let p = Stdlib.Filename.concat dir entry in
+              match Unix.lstat p with
+              | { Unix.st_kind = Unix.S_DIR; _ } -> ()
+              | _ -> remove_or_fail ~context:"Generated.init" p
+              | exception Unix.Unix_error _ -> remove_or_fail ~context:"Generated.init" p)
+      | Flat | Shared_prefix _ ->
+          (* Any configured prefix, flat or named, is a directory this process does not own: another
+             executable can be given the same one, and dune schedules tests concurrently. Deleting
+             there could take a running test's kernel out from under it, and NOT deleting leaves no
+             way to tell this run's artifact from a previous run's -- deletion is the only write
+             signal that does not depend on timestamp granularity, and two successive runs of a
+             deterministic compile produce byte-identical files. Both halves of that were tried and
+             both have corners that cannot be closed (gh-ocannl-655 review rounds 5-7), so the
+             configuration is refused instead of being supported approximately.
+
+             The remedy is to let the prefix default: it is derived from the executable's own name,
+             which is what makes the directory this process's to empty. *)
+          abort
+            "Generated.init: build_files_prefix is set, so the artifact directory is not this \
+             executable's own and provenance cannot be established in it -- another executable may \
+             be configured with the same prefix, deletion there is unsafe, and without deletion a \
+             re-emitted identical kernel is indistinguishable from a stale one. Unset \
+             build_files_prefix for tests that assert on generated code."
 
 (** [arm ?ext routine] deletes [routine]'s artifact, so that the next {!read} of it sees only what
     the *next* compile emits. Use it in a loop that compiles several candidates under one routine

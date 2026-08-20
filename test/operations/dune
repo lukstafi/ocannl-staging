@@ -2914,34 +2914,37 @@
   (env_var OCANNL_BUILD_FILES_PREFIX)
   %{dep:generated_provenance.exe})
  (action
-  (progn
-   (run ./generated_provenance.exe symlink --ocannl_build_files_prefix=)
-   (run ./generated_provenance.exe fresh --ocannl_build_files_prefix=)
-   (run ./generated_provenance.exe armed_overwrite --ocannl_build_files_prefix=)
-   (with-accepted-exit-codes
-    1
-    (run ./generated_provenance.exe stale --ocannl_build_files_prefix=))
-   (with-accepted-exit-codes
-    1
-    (run ./generated_provenance.exe missing --ocannl_build_files_prefix=))
-   (with-accepted-exit-codes
-    1
-    (run ./generated_provenance.exe overwrite --ocannl_build_files_prefix=))
-   (with-accepted-exit-codes
-    1
-    (run ./generated_provenance.exe armed_no_emission --ocannl_build_files_prefix=))
-   (with-accepted-exit-codes
-    1
-    (run ./generated_provenance.exe uninitialized --ocannl_build_files_prefix=))
-   (with-accepted-exit-codes
-    1
-    (run
-     ./generated_provenance.exe
-     explicit_prefix
-     --ocannl_build_files_prefix=.))
-   (with-accepted-exit-codes
-    1
-    (run
-     ./generated_provenance.exe
-     explicit_prefix
-     --ocannl_build_files_prefix=gp_shared_dir)))))
+  (setenv
+   OCANNL_BUILD_FILES_PREFIX
+   ""
+   (progn
+    (run ./generated_provenance.exe symlink)
+    (run ./generated_provenance.exe fresh)
+    (run ./generated_provenance.exe armed_overwrite)
+    (with-accepted-exit-codes
+     1
+     (run ./generated_provenance.exe stale))
+    (with-accepted-exit-codes
+     1
+     (run ./generated_provenance.exe missing))
+    (with-accepted-exit-codes
+     1
+     (run ./generated_provenance.exe overwrite))
+    (with-accepted-exit-codes
+     1
+     (run ./generated_provenance.exe armed_no_emission))
+    (with-accepted-exit-codes
+     1
+     (run ./generated_provenance.exe uninitialized))
+    (with-accepted-exit-codes
+     1
+     (run
+      ./generated_provenance.exe
+      explicit_prefix
+      --ocannl_build_files_prefix=.))
+    (with-accepted-exit-codes
+     1
+     (run
+      ./generated_provenance.exe
+      explicit_prefix
+      --ocannl_build_files_prefix=gp_shared_dir))))))

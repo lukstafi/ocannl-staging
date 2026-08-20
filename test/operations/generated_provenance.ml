@@ -132,6 +132,13 @@ let () =
       | () ->
           let exe = Stdlib.Sys.executable_name in
           let pid =
+            (* The child inherits this process's environment, in which the dune rule has cleared
+               OCANNL_BUILD_FILES_PREFIX. That matters: init refuses every configured prefix, so a
+               child that inherited an ambient one would exit 1 without ever looking at the staged
+               link, leaving the parent to see a refused child and a surviving file and to pass this
+               safety probe for the wrong reason. An empty --ocannl_build_files_prefix= argument
+               would NOT do instead -- an empty command-line value reads as "not given" and falls
+               through to the environment. *)
             Unix.create_process exe [| exe; "symlink_child" |] Unix.stdin Unix.stdout Unix.stderr
           in
           let refused = match Unix.waitpid [] pid with _, Unix.WEXITED 1 -> true | _ -> false in
