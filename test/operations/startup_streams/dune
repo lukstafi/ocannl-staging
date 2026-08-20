@@ -10,6 +10,8 @@
  (files ../../config/env_spelling_gate.ml))
 
 (test
+ ; ocannl-backend: none -- links arrayjit.utils alone and only classifies variable NAMES;
+ ; its `(universe)` dependency reruns it whatever any variable is set to.
  (name env_spelling_gate)
  (package neural_nets_lib)
  (deps ocannl_config (universe))
@@ -34,6 +36,8 @@
 ; file rather than reading it, and depending on it anyway keeps the two claims independent.
 
 (rule
+ ; ocannl-backend: none -- startup_streams.exe links no backend; the claim is about which stream
+ ; the startup banner and the unknown-key warning go to, neither of which names a backend.
  (target stdout_clean.actual)
  (deps ocannl_config)
  (action
@@ -68,6 +72,8 @@
 ; be reached from the environment.
 
 (rule
+ ; ocannl-backend: none -- startup_streams.exe links no backend; the claim is about which stream
+ ; the startup banner and the unknown-key warning go to, neither of which names a backend.
  (target default_stderr.raw)
  (deps
   ocannl_config
@@ -86,6 +92,8 @@
     --ocannl_clean_up_log_files_on_startup=false))))
 
 (rule
+ ; ocannl-backend: none -- startup_streams.exe links no backend; the claim is about which stream
+ ; the startup banner and the unknown-key warning go to, neither of which names a backend.
  (target default_stderr.actual)
  (deps ocannl_config)
  (action

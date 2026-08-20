@@ -42,6 +42,29 @@
    trace shows nothing" rather than as "the trace was never compiled in". Each gate is checked
    against the library whose modules read it.
 
+   {2 A stanza that declares neither spelling}
+
+   The pairing check above sees a stanza that declares ONE spelling. What it cannot see is a stanza
+   that declares NEITHER: a backend-sensitive test added with no `(env_var ...)` at all is invisible
+   to a check phrased over the declarations that exist, and dune then serves the previous backend's
+   output as a pass under `OCANNL_BACKEND=cuda dune build @…` -- the exact failure this file exists
+   to prevent, arrived at from the other side (gh-ocannl-659, found on lukstafi/ocannl-staging#374
+   where `simd_lane_choice` was added with no declaration; it is genuinely backend-free, and nothing
+   in the build would have said otherwise had it been a `Context.auto` test).
+
+   So the rule below is an exclusive or, asked of every stanza that runs an executable: either it
+   declares `(env_var OCANNL_BACKEND)`, or it carries a marker comment inside its parentheses naming
+   the backend it is pinned to -- or `none` -- and why. Both absent is the hole; both present is
+   contradictory intent, since a stanza that names its backend has nothing to invalidate on.
+
+   The conditional rule is kept, deliberately. Declaring the variable universally would be simpler
+   to check and would claim a sensitivity most of these stanzas do not have: `test_einsum_parser`
+   calls a parser, `test_metal_pool_bindings` pins Metal's emission, and the seven `Context.auto`
+   rules in this directory pin `--ocannl_backend=cc` on the command line, which outranks the
+   environment. A declaration on those would be noise, and noise is what the next reader learns to
+   skip. What the marker costs instead is a sentence of classification per stanza, written where the
+   next author will copy it from.
+
    {1 What decides "addressed to the configuration"}
 
    `Utils.classify_env_var`, the same function the startup check uses (gh-ocannl-629), so a name a
@@ -167,6 +190,17 @@ let () =
   let gateless = Map.of_alist_exn (module String) gateless_dirs in
   let gateless_used = ref (Set.empty (module String)) in
   let gated = ref [] in
+  (* The gh-ocannl-659 half: one line per stanza that runs an executable, and the per-file summary
+     the golden holds. *)
+  let classification = ref [] in
+  let by_file = ref [] in
+  let placed_subjects = ref 0 in
+  let subject_floor = ref 0 in
+  (* Kept apart on purpose: a stanza declaring neither is the hole gh-ocannl-659 is about, while a
+     marker the scan could not place is the scan going blind to it -- and a claim that conflated the
+     two would pass while the second was true. *)
+  let xor_violations = ref 0 in
+  let marker_holes = ref 0 in
   let tracked_keys = ref (Set.empty (module String)) in
   let gate_table = ref [] in
   let read_table = ref [] in
@@ -186,7 +220,168 @@ let () =
   in
   List.iter dune_files ~f:(fun (dune_file, on_disk) ->
       let dir = match Stdlib.Filename.dirname dune_file with "." -> "" | dir -> dir in
-      let stanzas = Scan.stanzas (In_channel.read_all on_disk) in
+      let content = In_channel.read_all on_disk in
+      let stanzas = Scan.stanzas content in
+      (* gh-ocannl-659: the exclusive or, over every stanza that runs an executable. *)
+      let marked = Scan.marked_stanzas content in
+      let attributed = ref [] in
+      let words = ref (Set.empty (module String)) in
+      let any_declared = ref false in
+      List.iter marked ~f:(fun stanza ->
+          (* A `(rule ...)` has no `(name ...)`, so it is named by what it runs -- which is what the
+             reader has to go and look at anyway. *)
+          let what =
+            if not (String.is_empty stanza.Scan.marked_name) then stanza.Scan.marked_name
+            else
+              match
+                List.map stanza.Scan.marked_sites ~f:(fun s -> s.Scan.name)
+                |> List.dedup_and_sort ~compare:String.compare
+              with
+              | [] -> "<unnamed>"
+              | names -> "running " ^ String.concat ~sep:", " names
+          in
+          let where =
+            Printf.sprintf "%s:%d, the %s %s" dune_file stanza.Scan.marked_line
+              stanza.Scan.marked_head what
+          in
+          let markers =
+            List.filter_map stanza.Scan.marked_comments ~f:(fun (line, text) ->
+                Option.map (Scan.parse_marker text) ~f:(fun marker -> (line, text, marker)))
+          in
+          List.iter markers ~f:(fun (line, _, _) -> attributed := line :: !attributed);
+          let subject = not (List.is_empty stanza.Scan.marked_sites) in
+          let declares = stanza.Scan.marked_declares_backend in
+          List.iter markers ~f:(function
+            | line, text, Scan.Malformed why ->
+                Int.incr xor_violations;
+                fail
+                  (Printf.sprintf
+                     "%s:%d has a `%s` comment that does not parse as a marker: %s. The line reads \
+                      `;%s`"
+                     dune_file line Scan.marker_sentinel why text)
+            | _ -> ());
+          let well_formed =
+            List.filter_map markers ~f:(function
+              | line, _, Scan.Marker m -> Some (line, m)
+              | _, _, Scan.Malformed _ -> None)
+          in
+          match (subject, declares, well_formed) with
+          (* A marker on a stanza that runs nothing declares nothing. An `(executable)` has no
+             `deps` field at all, which is why its companion rule is where both the `ocannl_config`
+             dep and this marker go -- putting it on the executable reads as a declaration and is
+             not one. *)
+          | false, _, (line, _) :: _ ->
+              Int.incr xor_violations;
+              fail
+                (Printf.sprintf
+                   "%s carries a backend marker at line %d and runs no executable -- the marker \
+                    belongs on the stanza that RUNS it, which for an `(executable)` is its \
+                    companion rule, the same placement as the `%s` dep"
+                   where line Scan.config_file)
+          | false, _, [] -> ()
+          | true, _, _ :: (line, _) :: _ ->
+              Int.incr xor_violations;
+              fail
+                (Printf.sprintf
+                   "%s carries more than one backend marker (the second at line %d) -- one stanza \
+                    runs on one backend, so say so once"
+                   where line)
+          | true, true, [ (line, m) ] ->
+              Int.incr xor_violations;
+              fail
+                (Printf.sprintf
+                   "%s both declares `(env_var %s)` and carries a marker at line %d saying `%s` -- \
+                    those are contradictory: a stanza that names its backend has nothing for the \
+                    variable to invalidate, and a stanza that selects one has no business claiming \
+                    otherwise. Keep whichever is true"
+                   where Scan.backend_env_var line m.Scan.backend)
+          | true, true, [] ->
+              Int.incr placed_subjects;
+              any_declared := true;
+              classification :=
+                Printf.sprintf "  %-58s declares %s" where Scan.backend_env_var :: !classification
+          | true, false, [ (_, m) ] ->
+              Int.incr placed_subjects;
+              List.iter (String.split m.Scan.backend ~on:',') ~f:(fun word ->
+                  words := Set.add !words word);
+              classification :=
+                Printf.sprintf "  %-58s %s -- %s" where m.Scan.backend m.Scan.reason
+                :: !classification
+          | true, false, [] ->
+              Int.incr placed_subjects;
+              Int.incr xor_violations;
+              fail
+                (Printf.sprintf
+                   "%s runs an executable and declares neither `(env_var %s)` nor a backend marker \
+                    -- so `%s=cuda dune build @…` would serve this stanza's previous result as a \
+                    pass. Add the declaration if the run SELECTS a backend, or the marker `; %s \
+                    <%s> -- <reason>` if it names one or links none"
+                   where Scan.backend_env_var Scan.backend_env_var Scan.marker_sentinel
+                   (String.concat ~sep:"|" Scan.marker_backends)));
+      (* Every marker in the file, against the ones a stanza claimed. A marker the walk attributed
+         to nothing is one whose author believed they had declared something. *)
+      let attributed = Set.of_list (module Int) !attributed in
+      List.iter (Scan.marker_comments content) ~f:(fun (line, text) ->
+          if not (Set.mem attributed line) then (
+            Int.incr marker_holes;
+            fail
+              (Printf.sprintf
+                 "%s:%d has a backend marker that sits inside no stanza -- a comment between \
+                  stanzas declares nothing; move it inside the parentheses of the stanza it is \
+                  about. The line reads `;%s`"
+                 dune_file line text)));
+      (* And every marker in the file against every occurrence of the sentinel ANYWHERE in it: the
+         difference between the two is a marker the comment lexer did not place -- written into a
+         quoted argument, into a stanza field, or into a comment shape this scan reads differently
+         than dune does. *)
+      let in_comments =
+        List.sum
+          (module Int)
+          (Scan.marker_comments content)
+          ~f:(fun (_, text) ->
+            let rec count from found =
+              match String.substr_index text ~pos:from ~pattern:Scan.marker_sentinel with
+              | None -> found
+              | Some at -> count (at + 1) (found + 1)
+            in
+            count 0 0)
+      in
+      let in_text = Scan.sentinel_occurrences content in
+      if in_text <> in_comments then (
+        Int.incr marker_holes;
+        fail
+          (Printf.sprintf
+             "%s spells `%s` %d times and only %d of them are in a comment this scan places -- a \
+              marker outside a comment declares nothing, and one in a comment this scan cannot see \
+              is one it will not read"
+             dune_file Scan.marker_sentinel in_text in_comments));
+      (* The floor under the walk, read by the second reader that shares none of its machinery: a
+         stanza it stops seeing is a stanza the rule above stops applying to, which looks exactly
+         like a file with nothing to check (the gh-ocannl-665 argument, and config_dep_completeness'
+         floors). *)
+      let raw_subjects =
+        List.count (Scan.raw_stanzas content) ~f:(fun r ->
+            (not (List.is_empty r.Scan.raw_runs)) || not (List.is_empty r.Scan.raw_test_cwds))
+      in
+      let placed_here = List.count marked ~f:(fun s -> not (List.is_empty s.Scan.marked_sites)) in
+      subject_floor := !subject_floor + raw_subjects;
+      if placed_here < raw_subjects then (
+        Int.incr marker_holes;
+        fail
+          (Printf.sprintf
+             "%s: the raw text shows %d %s running an executable and the walk placed only %d -- it \
+              is reading the file with a hole in it, and a stanza it stops seeing is one this rule \
+              stops applying to"
+             dune_file raw_subjects
+             (if raw_subjects = 1 then "stanza" else "stanzas")
+             placed_here));
+      by_file :=
+        ( dune_file,
+          (if !any_declared then [ "declares " ^ Scan.backend_env_var ] else [])
+          @ (match Set.to_list !words with
+            | [] -> []
+            | words -> [ "markers: " ^ String.concat ~sep:", " words ]) )
+        :: !by_file;
       (* The ambient gate, per directory AND per alias (gh-ocannl-652). *)
       List.iter run_aliases ~f:(fun alias ->
           let attaches stanza = List.mem (aliases_of stanza) alias ~equal:String.equal in
@@ -384,6 +579,43 @@ let () =
   List.iter gateless_dirs ~f:(fun (dir, why) -> printf "  %s -- no gate: %s\n" dir why);
   printf "\nDeclarations of a name OCANNL does not read as a configuration key, exempt by design:\n";
   List.iter exempt_declarations ~f:(fun (key, why) -> printf "  %s -- %s\n" key why);
+  (* gh-ocannl-659. The golden holds which backend WORDS a dune file's markers use, not how many
+     stanzas carry each: a tally there would move on every test added anywhere in the repository,
+     which is the churn gh-ocannl-665 took out of `config_dep_completeness` for the same reason. The
+     per-stanza classification is not centralized here at all -- it lives in the marker comment next
+     to the stanza, which is the point of putting it there; what this file pins is that a directory
+     did not quietly lose a whole class of them. *)
+  printf
+    "\n\
+     Backend declarations, by dune file. Every stanza that runs an executable either declares\n\
+     `(env_var %s)`, or carries the marker comment\n\
+    \    ; %s <%s> -- <reason>\n\
+     inside its parentheses. What is held here is which WORDS a file's markers use, not how many\n\
+     stanzas carry each: the per-stanza reasons live next to the stanzas, where the next author\n\
+     will copy them from, and the tallies go to stderr (gh-ocannl-659, gh-ocannl-665).\n"
+    Scan.backend_env_var Scan.marker_sentinel
+    (String.concat ~sep:"|" Scan.marker_backends);
+  List.sort !by_file ~compare:(fun (a, _) (b, _) -> String.compare a b)
+  |> List.iter ~f:(fun (dune_file, present) ->
+      printf "  %s: %s\n" dune_file
+        (if List.is_empty present then "nothing that runs a test executable"
+         else String.concat ~sep:"; " present));
+  eprintf
+    "Backend classification of every stanza that runs an executable (not diffed -- see \
+     gh-ocannl-665):\n\
+     %s\n"
+    (String.concat ~sep:"\n" (List.rev !classification));
+  eprintf "Totals: %d such stanzas, against a raw-text floor of %d.\n" !placed_subjects
+    !subject_floor;
+  printf "\n";
+  Verdict.p
+    "every stanza that runs an executable either declares the backend variable or says in place \
+     why it does not"
+    (!xor_violations = 0);
+  Verdict.p
+    "every marker the text spells was read as one, and the walk places at least as many stanzas as \
+     a second reader finds"
+    (!marker_holes = 0 && !placed_subjects >= !subject_floor && !subject_floor > 0);
   if not (Verdict.any_failed ()) then
     printf
       "\n\

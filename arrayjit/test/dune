@@ -10,6 +10,8 @@
  (files ../../test/config/env_spelling_gate.ml))
 
 (test
+ ; ocannl-backend: none -- links arrayjit.utils alone and only classifies variable NAMES;
+ ; its `(universe)` dependency reruns it whatever any variable is set to.
  (name env_spelling_gate)
  (package arrayjit)
  (deps ocannl_config (universe))
@@ -28,6 +30,8 @@
   (pps ppx_here)))
 
 (test
+ ; ocannl-backend: none -- links arrayjit.ir alone and calls pure Ir.Schedule_outcome functions
+ ; with a hand-written classifier; the backend names in its causes are data, not selections.
  (name test_schedule_outcome)
  (package arrayjit)
  (modules test_schedule_outcome)
@@ -144,6 +148,9 @@
 ; selected and reproduces the recorded golden so the test passes trivially.
 
 (test
+ ; ocannl-backend: metal -- goes at Metal_backend.Impl by name (get_device, alloc_pool,
+ ; storage_mode_of_pool). The `select` above picks the arm by library availability, not by the
+ ; environment, and the off-platform arm replays the golden.
  (name test_metal_storage_mode)
  (package arrayjit)
  (modules test_metal_storage_mode)
@@ -162,6 +169,8 @@
    (-> test_metal_storage_mode.missing.ml))))
 
 (test
+ ; ocannl-backend: metal -- drives Metal_backend.Impl directly (alloc_pool, make_context,
+ ; from_host/to_host); the `select` arm follows library availability, not OCANNL_BACKEND.
  (name test_metal_alloc)
  (package arrayjit)
  (modules test_metal_alloc)
@@ -180,6 +189,8 @@
 ; stop dune from resolving the hidden library.
 
 (test
+ ; ocannl-backend: cuda -- calls Cuda_backend.Impl.classify_failure and raises through the CUDA
+ ; bindings; it self-skips on a machine with no device, which is hardware, not configuration.
  (name test_cuda_classify_failure)
  (package arrayjit)
  (modules test_cuda_classify_failure)
@@ -202,6 +213,8 @@
 ; above; the checks themselves need no GPU, the policy being a pure function.
 
 (test
+ ; ocannl-backend: cuda -- calls Cuda_backend.gpu_arch_options, a pure function over a literal
+ ; device capability and literal source strings.
  (name test_cuda_arch_flags)
  (package arrayjit)
  (modules test_cuda_arch_flags)
@@ -216,6 +229,9 @@
    (-> test_cuda_arch_flags.missing.ml))))
 
 (test
+ ; ocannl-backend: none -- links arrayjit.context for one pure function of it,
+ ; `Backends.plan_pool_segments`: a bump allocator over synthetic sizes with an explicit cap.
+ ; Nothing in that closure reads the backend key unless get_backend or Context.auto is called.
  (name test_pool_segments)
  (package arrayjit)
  (modules test_pool_segments)

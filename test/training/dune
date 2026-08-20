@@ -19,6 +19,8 @@
  (files ../config/env_spelling_gate.ml))
 
 (test
+ ; ocannl-backend: none -- links arrayjit.utils alone and only classifies variable NAMES;
+ ; its `(universe)` dependency reruns it whatever any variable is set to.
  (name env_spelling_gate)
  (package neural_nets_lib)
  (locks ocannl_training_test)
@@ -32,6 +34,8 @@
 ; builds, so there is one gate binary per directory however many aliases reach it.
 
 (rule
+ ; ocannl-backend: none -- links arrayjit.utils alone and only classifies variable NAMES;
+ ; its `(universe)` dependency reruns it whatever any variable is set to.
  (alias slow)
  (package neural_nets_lib)
  (locks ocannl_training_test)
@@ -44,6 +48,9 @@
 ; while compilation and tests outside this directory remain parallel.
 
 (test
+ ; ocannl-backend: cc,multidev_cc -- every entry point names its backend,
+ ; `Parallel.data_parallel ~backend_name:"cc"` or `"multidev_cc"`, so get_backend never falls
+ ; through to the configured one. Dropping a `~backend_name` here would make it selecting.
  (name data_parallel)
  (package neural_nets_lib)
  (modules data_parallel)

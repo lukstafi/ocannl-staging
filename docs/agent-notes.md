@@ -1551,8 +1551,8 @@ that they earn a lookup rather than always-loaded space.
   counts are usually there as the "the scan did not go blind" signal, which is a real thing to keep
   — so keep it, elsewhere. Three places it can live, all churn-free: PRESENCE in the golden (which
   kinds of stanza a directory has, changing only when it gains its first or loses its last), a floor
-  read by a SECOND reader that shares no machinery with the first (`Dune_stanza_scan.head_occurrences`
-  counts `(test` off the raw text, and a sexp walk going blind cannot take it down too), and the
+  read by a SECOND reader that shares no machinery with the first (`Dune_stanza_scan.raw_stanzas`
+  reads the stanzas and what each runs off the raw text, and a sexp walk going blind cannot take it down too), and the
   exact numbers on STDERR, which a `(test)` stanza does not diff. Assert the floor through `Verdict`
   rather than as a golden line, so a scan that goes blind cannot be promoted back to green. Put the
   independence in the CLASSIFICATION and nowhere else: what can go blind is the checker's own
@@ -1587,6 +1587,30 @@ that they earn a lookup rather than always-loaded space.
   sibling checks are worth a glance when touching this genre and were both fine: `env_var_deps` lists
   names only, and `digest_completeness`'s key count moves only alongside its own enumerated key list
   — a number in the same commit as the change it describes costs nothing.
+- Where a check needs an EXEMPTION per site, prefer an in-place marker comment to a central list,
+  and give it a grammar rigid enough to be wrong out loud (gh-ocannl-659, the XOR between
+  `(env_var OCANNL_BACKEND)` and `; ocannl-backend: <word> -- <reason>`). Two reasons, and the
+  second is the one that decides it. A central per-site list is the churn and conflict magnet the
+  bullet above is about. But the recurrence mechanism is that the next author copies the stanza
+  NEXT TO the one they are writing — so the classification has to live there, in the file they are
+  already editing, not in a list they will never open. Three things make such a marker checkable
+  rather than decorative. (i) ATTRIBUTION BY CONTAINMENT, not adjacency: a comment counts for the
+  stanza whose parentheses it sits between, because this repository's dune files habitually leave a
+  blank line between a comment block and the stanza it introduces, and "the comment above" would
+  have to guess how far above — and would hand a marker to the wrong stanza the first time someone
+  left a note between two rules. (ii) A MALFORMED MARKER IS A FAILURE, never a shrug: a grammar that
+  silently declines to parse leaves its stanza declaring nothing and reports it as if the author had
+  written none, which is the worst of both. So the vocabulary is closed (`none|cc|multidev_cc|cuda|
+  hip|metal`), the reason is required and must be more than one word, and the separator is the
+  EARLIEST of the spellings admitted rather than the first one that occurs anywhere. (iii) An
+  ACCOUNTING CHECK over the sentinel: every occurrence of `ocannl-backend:` in the file, found by
+  the dumbest possible substring scan, must have been read as a marker attributed to a stanza that
+  runs something. That is what catches the marker written into a quoted argument, into a field, or
+  into a stanza that runs nothing — cases where the author believed they had declared something.
+  The mechanical cost is that comments are what a sexp reader throws away, so the scan needs
+  positions: `Dune_stanza_scan.read_raw` returns forms with their byte ranges plus every `;`
+  comment, and its tree is compared SHAPE FOR SHAPE against sexplib's, which is strictly stronger
+  than the flat form count it replaced and is what keeps a hand-written lexer honest.
 - A ratchet whose corpus is the repository's own test sources will scan its OWN fixture, and a
   fixture that pins a shape has to spell that shape out to pin it — so the fixture matches, every
   time, by construction (gh-ocannl-668). Exempt the FILE rather than its matches one at a time: the
