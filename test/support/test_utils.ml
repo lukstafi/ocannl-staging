@@ -21,6 +21,10 @@ module Cache_dir_scan = Cache_dir_scan
 (** Scanning OCaml sources for the autotune schedule cache directories they name, so that the one
     root [.gitignore] glob over their shared prefix covers all of them. *)
 
+module Verdict_scan = Verdict_scan
+(** Scanning test sources for claims a test decides itself and prints outside [Verdict], where a
+    failing one is [dune promote]-able into the golden. *)
+
 module Generated = Generated
 (** Freshness-checked reads of the generated kernels under [build_files/], for tests that assert on
     emitted code. Artifacts outlive the run that wrote them, so a read that does not establish
