@@ -2852,3 +2852,64 @@
  (deps ocannl_config)
  (modules bench_args_parsing)
  (libraries base stdio bench_args arrayjit.verdict))
+
+; gh-ocannl-655: the provenance guarantees of Test_utils.Generated, which ~30 tests' structural
+; assertions now rest on. Every one of those guarantees fires only when something has already gone
+; wrong, so none of them is exercised by the tests that depend on them -- the code that decides a
+; kernel is NOT this run's runs, in a green suite, never. Hence a probe whose modes stage each
+; failure deliberately.
+;
+; The assertion is the EXIT STATUS, not the output: Verdict failures exit 1 from a shared teardown,
+; so `(with-accepted-exit-codes 1 ...)` is exactly "this must be refused", and a mode that starts
+; passing fails the build rather than printing a promotable line. `ignore-exit-codes` would not do:
+; a run that stops for some other reason has to fail here too.
+;
+; One rule, one progn: every mode shares this executable's artifact directory, so running them as
+; separate rules would let dune schedule them concurrently and have one mode's init sweep away
+; another's staged artifact. A single action is sequential by construction. The two explicit-prefix
+; modes take a prefix that is NOT this executable's name, which is what puts Generated on its
+; shared-directory path (no sweep, arming required); the flat mode takes the legacy `.`.
+
+(executable
+ (name generated_provenance)
+ (modules generated_provenance)
+ (libraries base stdio arrayjit.utils arrayjit.verdict test_utils))
+
+(rule
+ (aliases runtest generated_provenance)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  %{dep:generated_provenance.exe})
+ (action
+  (progn
+   (run ./generated_provenance.exe fresh)
+   (run ./generated_provenance.exe armed_overwrite)
+   (with-accepted-exit-codes
+    1
+    (run ./generated_provenance.exe stale))
+   (with-accepted-exit-codes
+    1
+    (run ./generated_provenance.exe missing))
+   (with-accepted-exit-codes
+    1
+    (run ./generated_provenance.exe overwrite))
+   (with-accepted-exit-codes
+    1
+    (run ./generated_provenance.exe armed_no_emission))
+   (with-accepted-exit-codes
+    1
+    (run ./generated_provenance.exe uninitialized))
+   (with-accepted-exit-codes
+    1
+    (run ./generated_provenance.exe flat --ocannl_build_files_prefix=.))
+   (with-accepted-exit-codes
+    1
+    (run
+     ./generated_provenance.exe
+     shared_prefix_unarmed
+     --ocannl_build_files_prefix=gp_shared_dir))
+   (run
+    ./generated_provenance.exe
+    shared_prefix_armed
+    --ocannl_build_files_prefix=gp_shared_dir))))

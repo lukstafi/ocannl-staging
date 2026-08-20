@@ -19,10 +19,12 @@
 
     - {!init} — called once, before any compile — empties this process's own [build_files/<exe>/]
       subdirectory. Every artifact present afterwards was written by this run, so existence *is*
-      freshness and no clock is involved. The deletion is scoped to the per-executable subdirectory
-      [Utils.build_files_dir] resolves to, which no other process writes to; a run configured for
-      the flat legacy layout ([build_files_prefix=.], shared between concurrent tests) is rejected
-      instead of being cleaned.
+      freshness and no clock is involved. What makes that safe is that the DEFAULT subdirectory is
+      derived from the executable's own name and dune runs one process per executable, so nothing
+      else writes there. The other two resolutions are not this process's to empty and get their own
+      treatment: the flat legacy layout ([build_files_prefix=.]) is rejected outright, and an
+      explicit [build_files_prefix] — which two executables can be given alike — skips the sweep and
+      requires {!arm} per routine instead, deleting one path rather than a directory.
     - {!read} fails the run (through {!Verdict}, so the exit status carries it and no [dune promote]
       can bless it) when the artifact is missing. Silence must not be indistinguishable from a pass,
       which is what a [string option] returning [None] invited: some call sites recorded that as
@@ -46,6 +48,35 @@ let backend : string option ref = ref None
 (* Contents digest of each artifact path already read, so that a second read of a path whose
    contents changed is reported instead of silently attributed to the wrong compile. *)
 let read_digests : (string, string) Hashtbl.t = Hashtbl.create (module String)
+
+(* Artifact paths deleted by {!arm} since {!init}, i.e. those whose freshness has been established
+   one path at a time rather than by emptying the directory. Only consulted where the directory is
+   not this process's own. *)
+let armed : (string, unit) Hashtbl.t = Hashtbl.create (module String)
+
+(* Whether wholesale cleanup of the artifact directory is this process's to do.
+
+   Only the DEFAULT, executable-derived subdirectory is inherently process-private: dune runs one
+   process per executable, so nothing else writes there. Every other resolution can be shared — the
+   flat layout by definition, and an explicit [build_files_prefix] because two executables can be
+   given the same one — and emptying a shared directory would delete a concurrently running test's
+   kernel between its compile and its read. So the three cases get three behaviours rather than one:
+   sweep, refuse, or establish freshness per routine through {!arm}. *)
+type scoping = Private_to_this_exe | Shared_prefix of string | Flat
+
+let scoping () =
+  match Utils.artifacts_subdir () with
+  | None -> Flat
+  | Some subdir ->
+      let exe_derived =
+        Utils.clean_filename @@ Stdlib.Filename.remove_extension
+        @@ Stdlib.Filename.basename Stdlib.Sys.executable_name
+      in
+      if String.equal subdir exe_derived then Private_to_this_exe else Shared_prefix subdir
+
+(* [Flat] never reaches a read (init fails), so the remaining question at read time is whether the
+   directory was swept or has to be armed path by path. *)
+let sweeps_directory = ref true
 
 let uninitialized where =
   Verdict.fail
@@ -102,23 +133,33 @@ let remove_or_fail ~context p =
 let init ~backend_name =
   backend := Some (String.lowercase backend_name);
   Hashtbl.clear read_digests;
+  Hashtbl.clear armed;
   let dir = Utils.build_files_dir () in
-  (* Whether the layout is flat is asked of the resolution itself — [artifacts_subdir] answering
-     [None] — not inferred from the directory's name: [build_files_prefix=build_files] is a
-     perfectly ordinary scoped prefix that resolves to [build_files/build_files], whose basename is
-     indistinguishable from the flat root's. *)
-  if Option.is_none (Utils.artifacts_subdir ()) then
-    (* The flat legacy layout is shared by every concurrently running test, so emptying it would
-       delete artifacts belonging to other processes. Fail loudly: freshness cannot be established
-       here, and a test that silently gave it up would be back where this module started. *)
-    Verdict.fail
-      "Generated.init: build_files is flat (build_files_prefix=.), shared with concurrently \
-       running tests; artifact freshness cannot be scoped to this process"
-  else
-    Array.iter (Stdlib.Sys.readdir dir) ~f:(fun entry ->
-        let p = Stdlib.Filename.concat dir entry in
-        let is_dir = try Stdlib.Sys.is_directory p with Stdlib.Sys_error _ -> true in
-        if not is_dir then remove_or_fail ~context:"Generated.init" p)
+  match scoping () with
+  | Flat ->
+      (* Shared with every concurrently running test by definition, so there is no cleanup this
+         process may perform and no per-routine deletion that would be safe either: another test can
+         be writing the very name this one is about to read. Fail loudly — a test that silently gave
+         freshness up would be back where this module started. *)
+      sweeps_directory := false;
+      Verdict.fail
+        "Generated.init: build_files is flat (build_files_prefix=.), shared with concurrently \
+         running tests; artifact freshness cannot be established here"
+  | Private_to_this_exe ->
+      (* Derived from this executable's own name, so nothing else writes here: emptying it makes
+         existence mean "written by this run" for every routine at once. *)
+      sweeps_directory := true;
+      Array.iter (Stdlib.Sys.readdir dir) ~f:(fun entry ->
+          let p = Stdlib.Filename.concat dir entry in
+          let is_dir = try Stdlib.Sys.is_directory p with Stdlib.Sys_error _ -> true in
+          if not is_dir then remove_or_fail ~context:"Generated.init" p)
+  | Shared_prefix _ ->
+      (* An explicit prefix is not this executable's to empty — two tests can be configured with the
+         same one, and a wholesale sweep would delete a concurrent test's kernel between its compile
+         and its read. Freshness is still available, one routine at a time: {!arm} deletes a single
+         path, which touches only the routine this test is about to compile. So the sweep is skipped
+         and {!read} requires that path to have been armed. *)
+      sweeps_directory := false
 
 (** [arm ?ext routine] deletes [routine]'s artifact, so that the next {!read} of it sees only what
     the *next* compile emits. Use it in a loop that compiles several candidates under one routine
@@ -127,6 +168,7 @@ let init ~backend_name =
 let arm ?ext routine =
   let p = path ?ext routine in
   Hashtbl.remove read_digests p;
+  Hashtbl.set armed ~key:p ~data:();
   remove_or_fail ~context:("Generated.arm " ^ routine) p
 
 (** [read ?ext routine] is the generated source [routine]'s compile emitted during this run.
@@ -142,7 +184,18 @@ let read ?ext routine =
     "")
   else
     let p = path ?ext routine in
-    if not (Stdlib.Sys.file_exists p) then (
+    if (not !sweeps_directory) && not (Hashtbl.mem armed p) then (
+      (* The directory was not swept (an explicit build_files_prefix, which another executable may
+         share), so existence does not establish provenance here: the file may be a previous run's,
+         or another process's. The per-routine route is still open — arm before the compile. *)
+      Verdict.fail
+        (Printf.sprintf
+           "Generated.read %s: build_files_prefix is set explicitly, so this directory is not this \
+            executable's to empty and existence does not establish freshness; call Generated.arm \
+            %s before the compile that should produce it"
+           routine routine);
+      "")
+    else if not (Stdlib.Sys.file_exists p) then (
       Verdict.fail
         (Printf.sprintf
            "no generated source for routine %s: %s was not emitted by this run (kernel folded \

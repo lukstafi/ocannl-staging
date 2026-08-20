@@ -1578,8 +1578,13 @@ that they earn a lookup rather than always-loaded space.
   keeps counting as coverage, after that kernel stopped being emitted at all (folded to a constant,
   erased by precision inference, fissioned into a differently-named routine). `Generated.init
   ~backend_name`, called before the first compile, empties this executable's own subdirectory, so
-  existence IS freshness — no mtime, no clock granularity, and the per-executable scoping keeps a
-  concurrently running test's artifacts out of it. `Generated.read` fails through `Verdict` on a
+  existence IS freshness — no mtime, no clock granularity. What licenses that sweep is narrower than
+  "the directory is scoped": only the DEFAULT, executable-derived subdirectory is inherently
+  process-private, since dune runs one process per executable. An explicit `build_files_prefix` can
+  be given to two executables alike, so emptying it could delete a concurrent test's kernel between
+  its compile and its read — there the sweep is skipped and freshness is established per routine by
+  `arm` instead, which deletes one path; the flat layout (`build_files_prefix=.`) is refused
+  outright. `Generated.read` fails through `Verdict` on a
   missing artifact instead of answering `None` — the arm that some call sites recorded as `false` and
   others forgot. `Generated.arm` deletes one routine's artifact before a candidate's compile, which
   is what a loop reusing a routine name needs in order to attribute what it reads; reading one
