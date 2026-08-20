@@ -482,7 +482,15 @@ let env_var_reserved_prefixes = [ "ocannl_tool_"; "ocannl_log_level_" ]
     not find [ocannl_backend] there. Folding case on that runtime would call the lowercase spelling
     read while {!read_env_var} found nothing, which is the silent demotion this whole check exists
     to prevent, delivered by the check itself. What matters is what the runtime's own [getenv] does,
-    not whether the host kernel is Windows. *)
+    not whether the host kernel is Windows.
+
+    The DEFAULT of a parameter, rather than the only answer (gh-ocannl-661). Baked in from
+    [Sys.win32] at definition, it made the Windows reading of {!classify_env_var} unreachable on
+    every other host: Linux and macOS CI could not execute that branch, so a change collapsing it
+    stayed green on the ordinary PR path and surfaced days later on a scheduled Windows run -- which
+    is how the dashed spellings came to be classified as read there in the first place. Every caller
+    in this file still takes the platform's answer; what the parameter buys is that
+    [test/operations/config_var_spellings] pins BOTH readings on EVERY host. *)
 let env_names_case_insensitive = Stdlib.Sys.win32
 
 (** What an environment variable name is, to OCANNL. The classification is shared by the startup
@@ -526,11 +534,14 @@ type env_var_class =
     name it is compared against is still the undashed one. *)
 
 (** Whether two environment variable names denote the same variable on this platform: case-folded
-    where the environment is, and otherwise exactly. *)
-let same_env_name a b =
-  if env_names_case_insensitive then String.Caseless.equal a b else String.equal a b
+    where the environment is, and otherwise exactly. [case_insensitive] defaults to
+    {!env_names_case_insensitive} and is passed explicitly only by the test that pins both readings
+    on every host -- see there for why the platform's answer is not the only one reachable. *)
+let same_env_name ?(case_insensitive = env_names_case_insensitive) a b =
+  if case_insensitive then String.Caseless.equal a b else String.equal a b
 
-let classify_env_var name =
+let classify_env_var ?(case_insensitive = env_names_case_insensitive) name =
+  let same_env_name = same_env_name ~case_insensitive in
   let lower = String.lowercase name in
   let addressed =
     List.find_map [ "ocannl_"; "ocannl-" ] ~f:(fun prefix -> String.chop_prefix lower ~prefix)

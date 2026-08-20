@@ -55,3 +55,18 @@ Environment variable names, as classified by `Utils.classify_env_var`:
 "ocannl_backend" is read exactly where the environment is case-insensitive: true
 "ocannl_log_level_row" is read exactly where the environment is case-insensitive: true
 "ocannl_tool_test_cap" is read exactly where the environment is case-insensitive: true
+
+As classified under each platform's environment semantics, on every host:
+                             case-sensitive (POSIX)                           case-insensitive (Windows)
+  "OCANNL_BACKEND"           configuration key backend                        configuration key backend
+  "ocannl_backend"           unread spelling of backend                       configuration key backend
+  "OCANNL-BACKEND"           unread spelling of backend                       unread spelling of backend
+  "ocannl-backend"           unread spelling of backend                       unread spelling of backend
+  "OCANNL_LOG_LEVEL_ROW"     reserved namespace ocannl_log_level_             reserved namespace ocannl_log_level_
+  "ocannl_log_level_row"     unread casing in the OCANNL_LOG_LEVEL_ namespace reserved namespace ocannl_log_level_
+  "OCANNL_TOOL_SWEEP_STATE"  reserved namespace ocannl_tool_                  reserved namespace ocannl_tool_
+  "ocannl_tool_sweep_state"  unread casing in the OCANNL_TOOL_ namespace      reserved namespace ocannl_tool_
+
+"OCANNL-BACKEND" is an unread spelling under both case sensitivities: true
+"ocannl-backend" is an unread spelling under both case sensitivities: true
+"OCANNL-LOG_LEVEL" is an unread spelling under both case sensitivities: true

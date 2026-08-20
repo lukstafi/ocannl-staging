@@ -80,7 +80,8 @@ let () =
    unread on every platform, punctuation being the one thing a case-insensitive environment does NOT
    fold -- which is a property of `Utils.same_env_name` rather than a wish, since the predicate it
    replaced answered "read" to every candidate on Windows (Codex P1 on PR #389). The case-only
-   variants are claimed below. *)
+   variants are claimed below, and pinned outright by the two-reading table after that -- which can
+   hold what THIS table cannot because it names the sensitivity instead of inheriting it. *)
 let describe = function
   | Utils.Env_not_addressed -> "not addressed to OCANNL"
   | Utils.Env_reserved prefix -> "reserved namespace " ^ prefix
@@ -134,3 +135,49 @@ let () =
         (Printf.sprintf "%S is read exactly where the environment is case-insensitive" name)
         (Option.equal Bool.equal (read_under_the_prefix name)
            (Some Utils.env_names_case_insensitive)))
+
+(* BOTH platform readings, on every host (gh-ocannl-661).
+
+   Everything above asks the classifier the platform's own question, which is the right question for
+   a run and the wrong one for CI: `Utils.env_names_case_insensitive` is `Sys.win32`, so the
+   case-insensitive branch was unreachable on Linux and macOS, and a change that collapsed it stayed
+   green on the ordinary PR path until a scheduled Windows run went red days later. That is the
+   history of this file -- the dashed spellings were classified as READ on Windows, and the golden
+   that would have said so could not run anywhere it mattered.
+
+   Naming the sensitivity makes both branches reachable everywhere, so this table is
+   platform-invariant by construction: the same bytes on Windows and Linux, and the Windows column
+   is checked by every PR. The list is chosen for the distinction it draws -- case-only variants,
+   where the two columns MUST differ, against dashed ones, where they must NOT, punctuation being
+   the thing a case-insensitive environment does not fold. *)
+let () =
+  printf "\nAs classified under each platform's environment semantics, on every host:\n";
+  printf "  %-26s %-48s %s\n" "" "case-sensitive (POSIX)" "case-insensitive (Windows)";
+  List.iter
+    [
+      "OCANNL_BACKEND";
+      "ocannl_backend";
+      "OCANNL-BACKEND";
+      "ocannl-backend";
+      "OCANNL_LOG_LEVEL_ROW";
+      "ocannl_log_level_row";
+      "OCANNL_TOOL_SWEEP_STATE";
+      "ocannl_tool_sweep_state";
+    ] ~f:(fun name ->
+      printf "  %-26s %-48s %s\n"
+        ("\"" ^ name ^ "\"")
+        (describe (Utils.classify_env_var ~case_insensitive:false name))
+        (describe (Utils.classify_env_var ~case_insensitive:true name)))
+
+(* The regression itself, as a claim rather than only as a table someone must read: a dashed
+   spelling is unread under BOTH readings. This is what went wrong in gh-ocannl-661, and it now
+   fails on any host rather than on Windows alone. *)
+let () =
+  printf "\n";
+  List.iter [ "OCANNL-BACKEND"; "ocannl-backend"; "OCANNL-LOG_LEVEL" ] ~f:(fun name ->
+      Verdict.p
+        (Printf.sprintf "%S is an unread spelling under both case sensitivities" name)
+        (List.for_all [ false; true ] ~f:(fun case_insensitive ->
+             match Utils.classify_env_var ~case_insensitive name with
+             | Utils.Env_unread_spelling _ -> true
+             | _ -> false)))
