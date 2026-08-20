@@ -21,6 +21,11 @@ module Cache_dir_scan = Cache_dir_scan
 (** Scanning OCaml sources for the autotune schedule cache directories they name, so that the one
     root [.gitignore] glob over their shared prefix covers all of them. *)
 
+module Generated = Generated
+(** Freshness-checked reads of the generated kernels under [build_files/], for tests that assert on
+    emitted code. Artifacts outlive the run that wrote them, so a read that does not establish
+    provenance can keep asserting on a kernel that is no longer emitted at all. *)
+
 (** [concise_float ~prec v] formats [v] with [prec] decimals, normalizing exponent digits portably.
     Re-export of [Ir.Ndarray.concise_float]. *)
 let concise_float = Ir.Ndarray.concise_float

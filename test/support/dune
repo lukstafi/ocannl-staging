@@ -1,6 +1,12 @@
-; Three support libraries, deliberately split by dependency (gh-ocannl-600). [test_utils] stays on
-; [arrayjit.ir] alone, because tests like config_scan_lexing and test_ndarray link nothing more;
+; Three support libraries, deliberately split by dependency (gh-ocannl-600). [test_utils] stays
+; below [ocannl] -- [arrayjit.utils], [arrayjit.ir] and [arrayjit.verdict], no backends and no
+; tensor layer -- because tests like config_scan_lexing and test_ndarray link nothing more;
 ; [ll_test] links [ocannl], for the hand-built-Low_level harness.
+;
+; [arrayjit.utils] and [arrayjit.verdict] arrived with the generated-artifact reader (gh-ocannl-655),
+; which resolves [build_files/] paths and reports a missing or overwritten artifact as a verdict.
+; Neither widens the set of tests that can link [test_utils]: [arrayjit.ir] already depends on
+; [arrayjit.utils], and [arrayjit.verdict] depends on nothing but base and stdio.
 ;
 ; [verdict] (gh-ocannl-601) depends on nothing but base and stdio, and is the one support library
 ; that is PUBLIC, because the tests of both packages report verdicts through it and a
@@ -23,8 +29,15 @@
 (library
  (name test_utils)
  (package neural_nets_lib)
- (modules test_utils config_key_scan cache_dir_scan dune_stanza_scan)
- (libraries base stdio arrayjit.ir compiler-libs.common sexplib))
+ (modules test_utils config_key_scan cache_dir_scan dune_stanza_scan generated)
+ (libraries
+  base
+  stdio
+  arrayjit.utils
+  arrayjit.ir
+  arrayjit.verdict
+  compiler-libs.common
+  sexplib))
 
 (library
  (name ll_test)
