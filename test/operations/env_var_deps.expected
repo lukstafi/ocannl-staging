@@ -53,15 +53,18 @@ Per-module tracing gates, and the library whose preprocessor_deps declares each:
 Ambient variables a module reads by name at run time, and the stanza that declares each:
   OCANNL_TOOL_TEST_RESTRICT_MASK test/operations/dune, test test_cpu_topology (test/operations/test_cpu_topology.ml)
 
-Test directories carrying the ambient environment gate:
-  arrayjit/test/dune
-  test/einsum/dune
-  test/gpt2/dune
-  test/operations/dune
-  test/operations/profiles/dune
-  test/operations/startup_streams/dune
-  test/ppx/dune
-  test/training/dune
+Ambient environment gates, by dune file and the alias each is attached to:
+  arrayjit/test/dune                       @runtest
+  test/einsum/dune                         @runtest
+  test/gpt2/dune                           @runtest
+  test/gpt2/dune                           @slow
+  test/operations/dune                     @runtest
+  test/operations/dune                     @slow
+  test/operations/profiles/dune            @runtest
+  test/operations/startup_streams/dune     @runtest
+  test/ppx/dune                            @runtest
+  test/training/dune                       @runtest
+  test/training/dune                       @slow
   benchmarks/dune -- no gate: its one runtest action runs python3 over the benchmark orchestrator's own unit tests, which import no OCANNL executable -- there is no startup check in reach to gate, the same reason `config_dep_completeness` exempts it from the ocannl_config dependency
 
 Declarations of a name OCANNL does not read as a configuration key, exempt by design:

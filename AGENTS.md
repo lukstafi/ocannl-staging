@@ -103,8 +103,10 @@ Testing notes:
   (gh-ocannl-628). Since nothing declares the REJECTED spellings, nothing would rerun for one
   either: every test directory carries an `env_spelling_gate` depending on `(universe)`, so it
   reruns every invocation and no directory's suite can come back green with `ocannl_backend=…`
-  ambient. `env_var_deps` fails if a directory with runtest actions has no gate. A single test run
-  by its own alias (`@…/runtest-<name>`) does not build the gate, and can still be served stale.
+  ambient. `env_var_deps` fails if a directory has actions on an alias with no gate attached to THAT
+  alias — `runtest` and `slow` are asked separately, a `(test)` stanza being a runtest action and
+  nothing else. A single test run by its own alias (`@…/runtest-<name>`) does not build the gate,
+  and can still be served stale.
 - Tests read `test/config/ocannl_config` and can emit .ll/.c/.cu/.metal into build_files/.
 - Config startup chatter (the welcome message, the `log_config_sourcing` trace, the profile
   banner) goes to stderr, so an OCANNL-linked executable's stdout stays a clean data channel and

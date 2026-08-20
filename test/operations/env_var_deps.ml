@@ -27,6 +27,12 @@
    check is what keeps the set whole, since dune aliases are per directory and the next test
    directory would otherwise be added without one.
 
+   Per ALIAS, not per directory (Codex P1 round 3). A `(test)` stanza is a runtest action and
+   nothing else, so a directory whose gate is a test stanza is ungated for `@slow` -- a separately
+   documented entry point that `dune build @slow` reaches without building one `(test)`. Asking
+   the question per directory let a runtest gate vouch for the slow rules beside it, which is the
+   shape of the hole it was written to prevent.
+
    {2 Gates the build does not see}
 
    The other direction: a variable that IS read and is declared nowhere. ppx_minidebug's per-module
@@ -77,32 +83,34 @@ let gateless_dirs =
        reason `config_dep_completeness` exempts it from the ocannl_config dependency" );
   ]
 
-(* A directory is gated when some rule in it depends on the state of the world: that is what makes
-   dune rerun the gate rather than serve the previous run. Matched structurally rather than by the
-   stanza's name, so a gate that is renamed or rewritten still counts. *)
+(* A gate is a stanza that depends on the state of the world: that is what makes dune rerun it
+   rather than serve the previous run. Matched structurally rather than by the stanza's name, so a
+   gate that is renamed or rewritten still counts. *)
 let rec depends_on_universe = function
   | Sexp.List [ Sexp.Atom "universe" ] -> true
   | Sexp.List l -> List.exists l ~f:depends_on_universe
   | Sexp.Atom _ -> false
 
-(* Whether anything here runs on `dune runtest` (or `@slow`): a `(test)`/`(tests)` stanza, or a
-   rule attached to either alias. A directory with none needs no gate, having nothing to serve. *)
-let rec has_runtest_action sexp =
-  match sexp with
-  | Sexp.List (Sexp.Atom ("test" | "tests") :: _) -> true
-  | Sexp.List (Sexp.Atom "rule" :: _)
-    when List.exists
-           [ "runtest"; "slow" ]
-           ~f:(fun a ->
-             let rec names_alias = function
-               | Sexp.List [ Sexp.Atom "alias"; Sexp.Atom n ] -> String.equal n a
-               | Sexp.List l -> List.exists l ~f:names_alias
-               | Sexp.Atom _ -> false
-             in
-             names_alias sexp) ->
-      true
-  | Sexp.List l -> List.exists l ~f:has_runtest_action
+(* The aliases that RUN things, and so can serve a cached result. Asked per alias rather than per
+   directory (Codex P1 round 3): a `(test)` stanza contributes to `runtest` alone, so a directory
+   whose gate is a test stanza is ungated for `@slow` -- which is a separately documented entry
+   point, and which `dune build @slow` reaches without building a single `(test)`. A gate on one
+   alias must not vouch for another. *)
+let run_aliases = [ "runtest"; "slow" ]
+
+let rec names_alias alias = function
+  | Sexp.List [ Sexp.Atom "alias"; Sexp.Atom n ] -> String.equal n alias
+  | Sexp.List l -> List.exists l ~f:(names_alias alias)
   | Sexp.Atom _ -> false
+
+(* Which of {!run_aliases} this stanza attaches to. A `(test)`/`(tests)` stanza is dune's shorthand
+   for a runtest action and names no alias of its own. *)
+let aliases_of stanza =
+  match stanza with
+  | Sexp.List (Sexp.Atom ("test" | "tests") :: _) -> [ "runtest" ]
+  | Sexp.List (Sexp.Atom "rule" :: _) ->
+      List.filter run_aliases ~f:(fun alias -> names_alias alias stanza)
+  | _ -> []
 
 (* The prefix `Utils.classify_env_var` reports for a per-module tracing gate. *)
 let gate_prefix = "ocannl_log_level_"
@@ -166,20 +174,26 @@ let () =
   List.iter dune_files ~f:(fun (dune_file, on_disk) ->
       let dir = match Stdlib.Filename.dirname dune_file with "." -> "" | dir -> dir in
       let stanzas = Scan.stanzas (In_channel.read_all on_disk) in
-      (* The ambient gate, per directory (gh-ocannl-652). *)
-      (if List.exists stanzas ~f:has_runtest_action then
-         if List.exists stanzas ~f:depends_on_universe then gated := dune_file :: !gated
-         else if Map.mem gateless dune_file then
-           gateless_used := Set.add !gateless_used dune_file
-         else
-           fail
-             (Printf.sprintf
-                "%s runs tests and has no ambient gate -- nothing here declares a rejected \
-                 environment spelling, so `ocannl_backend=cuda dune build @%s/runtest` would \
-                 serve this directory's cached passes with the fatal startup check never \
-                 reached; copy the `env_spelling_gate` pair from a neighbour, or exempt the \
-                 directory by name with the reason"
-                dune_file (Stdlib.Filename.dirname dune_file)));
+      (* The ambient gate, per directory AND per alias (gh-ocannl-652). *)
+      List.iter run_aliases ~f:(fun alias ->
+          let attaches stanza = List.mem (aliases_of stanza) alias ~equal:String.equal in
+          if List.exists stanzas ~f:attaches then
+            if List.exists stanzas ~f:(fun s -> attaches s && depends_on_universe s) then
+              gated := (dune_file, alias) :: !gated
+            else if Map.mem gateless dune_file then
+              gateless_used := Set.add !gateless_used dune_file
+            else
+              fail
+                (Printf.sprintf
+                   "%s has actions on the `%s` alias and no ambient gate attached to it -- \
+                    nothing here declares a rejected environment spelling, so \
+                    `ocannl_backend=cuda dune build @%s` would serve this directory's cached \
+                    results with the fatal startup check never reached; copy the \
+                    `env_spelling_gate` stanza for that alias from a neighbour, or exempt the \
+                    directory by name with the reason"
+                   dune_file alias
+                   (if String.equal alias "slow" then "slow"
+                    else Stdlib.Filename.dirname dune_file ^ "/" ^ alias)));
       let fields = List.concat_map stanzas ~f:dep_fields in
       let declared = List.concat_map fields ~f:(fun (_, args) -> List.concat_map args ~f:env_vars_in) in
       (* A declaration this scan did not look inside a dependency field for is one it cannot check,
@@ -337,8 +351,10 @@ let () =
          "directories exempted from the ambient gate that no longer run tests -- drop them from \
           the exemption list: %s"
          (String.concat ~sep:", " (Set.to_list stale_gateless)));
-  printf "\nTest directories carrying the ambient environment gate:\n";
-  List.iter (List.sort !gated ~compare:String.compare) ~f:(printf "  %s\n");
+  printf "\nAmbient environment gates, by dune file and the alias each is attached to:\n";
+  List.sort !gated ~compare:(fun (a, x) (b, y) ->
+      match String.compare a b with 0 -> String.compare x y | c -> c)
+  |> List.iter ~f:(fun (dune_file, alias) -> printf "  %-40s @%s\n" dune_file alias);
   List.iter gateless_dirs ~f:(fun (dir, why) -> printf "  %s -- no gate: %s\n" dir why);
   printf "\nDeclarations of a name OCANNL does not read as a configuration key, exempt by design:\n";
   List.iter exempt_declarations ~f:(fun (key, why) -> printf "  %s -- %s\n" key why);

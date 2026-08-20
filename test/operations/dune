@@ -19,6 +19,18 @@
  (modules env_spelling_gate)
  (libraries base stdio arrayjit.utils arrayjit.verdict))
 
+; The same gate on the `slow` alias, which is a separate entry point: `dune build @slow` builds no
+; `(test)` stanza, so without this rule a cached `@slow` run would serve every slow result with a
+; rejected spelling ambient (Codex P1 round 3). Runs the executable the `(test)` stanza above
+; builds, so there is one gate binary per directory however many aliases reach it.
+
+(rule
+ (alias slow)
+ (package neural_nets_lib)
+ (deps ocannl_config (universe))
+ (action
+  (run %{dep:env_spelling_gate.exe})))
+
 (test
  (name printbox_utils_test)
  (package neural_nets_lib)

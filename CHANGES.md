@@ -20,8 +20,10 @@
   Because no dune rule declares the rejected spellings any more, each test directory carries an
   `env_spelling_gate` whose `(universe)` dependency makes dune rerun it on every invocation:
   `ocannl_backend=cuda dune build @test/einsum/runtest` fails there naming the variable, instead of
-  serving that directory's cached passes. One per directory, since dune aliases are per directory;
-  `test/operations/env_var_deps` fails if a directory with runtest actions has no gate.
+  serving that directory's cached passes. One per directory and per alias, since dune aliases are per
+  directory and a `(test)` stanza is a `runtest` action alone — `@slow` carries its own gate rule
+  in the three directories that have slow rules. `test/operations/env_var_deps` fails if a
+  directory has actions on an alias with no gate attached to that alias.
 
   Also fixes two latent bugs in the same predicate. The case-insensitivity allowance answered
   "read" for every candidate rather than for case-only variants, so a DASHED spelling classified as
