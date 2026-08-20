@@ -599,6 +599,11 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   rejection key is what an autotune search groups declines by and the fixes differ.
   Pinned end-to-end by `test/operations/schedule_batch_grid.ml` (structure everywhere, execution
   and emitted-source fold on GPU backends).
+  The HIP backend's `static_properties` dump lists the queried `max_grid_size` and
+  `max_threads_dim` next to `max_threads_per_block`, so a run on hardware can read back what those
+  gates compare against — without them the only evidence the query is not degenerate is that no
+  kernel got rejected. On gfx1151/ROCm/WSL2 they read `(2147483647 65535 65535)` and
+  `(1024 1024 1024)`, i.e. `max_grid_yz = 65535`.
 - "`Tile_mma` is a barrier" is only half true, and the half that fails is the one barrier elision
   wants. Every rendering form ENDS the intrinsic block with a workgroup barrier, so a staging
   barrier that follows one is always redundant (`Schedule.elide_staged_barriers` drops it, and the
@@ -1033,7 +1038,14 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   each with the outer index substituted by a different constant, so copies of ONE source guard flip
   at different points and `partition_breakpoints` must return their union (a first-copy answer
   leaves the siblings' guards mixed after the `Partition` rewrites them all). Same rule for
-  legality: `loops_independent` combines the verdicts of every binding, worst-of.
+  legality: `loops_independent` combines the verdicts of every binding, worst-of. The autotuner's
+  own enumeration obeys the same law (gh-ocannl-666): `Autotune.collect_loops` descends scope
+  bodies and treats binder-sharing mint copies as ONE decision (one proposal per binder, exactly
+  as `rewrite_loop` rewrites every copy), so a materialized unroll or partition no longer hides
+  the inner loops from the beam's later rounds; `collect_serial_triples` stays statement-level on
+  purpose — `Tensorize`'s `Workgroup` lane loop is refused inside a scope by `validate_parallel`
+  (which `op_legality` does not decide: races, not scope nesting), and mint interiors reduce into
+  one loop-invariant cell, so no viable micro-kernel triple can sit there anyway.
   `apply_split_reduce` is the one caller taking the first statement-level match, and for a contract
   reason: it inserts its combine statement at statement level, which only sequences correctly if
   the reduction runs there too. A MATERIALIZED unroll never reaches codegen as bare copies:
@@ -1059,10 +1071,37 @@ named symbols still exist. Workflow rules live in CLAUDE.md; this file is subsys
   leg a whole-k tile (`tile_mma_narrow`'s gh-639 leg uses `bk = n`); (2) discriminating inputs
   must DRIFT out of storage exactness — a zero-mean operand random-walks small enough that every
   bf16 partial sum stays exact and per-step narrowing is invisible (`accum_width.ml`'s policy-off
-  negative control is the canary). GPU serial legs keep storage-precision accumulation (their
-  `compute_prec` is the identity) while their mma legs accumulate per the seeded format triple —
-  at narrow storage, cross-schedule numerics on GPU remain schedule-dependent, stated scope of
-  gh-ocannl-639.
+  negative control is the canary).
+- **On GPU the accumulator residency follows the backend's tensor-unit formats, per backend**
+  (gh-ocannl-663): `C_syntax_config.accum_prec` — the width a recognized reduction accumulator
+  resides at given the storage precision — feeds the try_widen gate AND `scope_prec_of`, whose
+  reduction-shaped scopes a codegen census (`C_syntax.accum_scope_ids`, per `scope_id`, verdicts
+  from `Low_level.accum_local_update_parts`) resolves at accumulator width, so schedule-minted
+  scopes (materialized `Unroll`, `Partition`) and virtual accumulators match the widened serial
+  fallback on every backend; the codegen-minted scope registers itself there. The per-backend
+  table: CUDA widens bf16→f32 (its mma legs hold f32 per-lane registers whole-k — NVIDIA has no
+  bf16 accumulate) and fp8→f32; HIP widens only fp8 (RDNA WMMA has genuine bf16/f16 accumulator
+  variants and the uniform triples are seeded, so bf16 serial legs deliberately stay narrow —
+  width-uniform with the mma legs); Metal's `accum_prec = compute_prec` (fp8→f32); cc's likewise
+  (the CPU accumulator IS a compute intermediate). `narrow_compute_f32` (already in the
+  schedule-cache key, gh-ocannl-568) reaches a GPU accumulator only where policy-off can restore
+  per-step narrowing SCHEDULE-UNIFORMLY: fp8 on CUDA/HIP (nothing tensorizes fp8 destinations).
+  CUDA's bf16 residency is structural like Metal's fp8 — the mma accumulate is hardware-f32, so a
+  policy-narrowed serial leg would resurrect the schedule dependence. Scope INITS (a `Set_local`
+  not reading its own local — the inlined image of a separate source assignment) render at
+  `comp_prec` and convert once into the residency, preserving each source assignment's own
+  narrowing (the adjacent-accumulations provenance boundary); virtualization's guarded-read
+  updates `Where (index-only cond, update, Get_local id)` classify as reductions via
+  `Low_level.accum_local_update_op` — a recognizer deliberately separate from both
+  `accum_local_update_parts` (whose `(op, contrib)` licenses rebuilding an unguarded update) and
+  `scope_updates_reduce_op` (the hoist license). fp16 is
+  everywhere width-uniform at f16 (native accumulate in every seeded triple); aligning it with
+  `fp16_arithmetic` would need seeding restrictions or an f32-accumulate uniform-f16 emission and
+  remains open. Two traps: `compute_prec`/`accum_prec` bind at `include Pure_C_config` time, so
+  overriding one without restating the other silently keeps the default pairing — a startup
+  width assert in the `C_syntax` functor catches the narrow direction; and `Workgroup_reduce`'s
+  warp-shuffle rendering still hard-errors on narrow accumulators (an error, not a width
+  divergence — extending it to accumulate at `accum_prec` is a separable follow-up).
 - **A "packmma" timing is not evidence that anything tensorized.** A `Tile_mma` whose register-tile
   preconditions fail renders the scalar fallback and the run still reports under whatever the
   variant was named — the column extent below the compute vector width is the easiest way in (at

@@ -513,6 +513,18 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     let vector_bytes = 16
     let vector_style = `Packed_struct
 
+    (* gh-ocannl-663: serial-rendered reduction accumulators mirror the mma legs' residency.
+       Unlike CUDA, RDNA WMMA has genuine bf16 (and f16) accumulator variants and the uniform
+       16-bit triples are seeded, so narrow 16-bit accumulators keep their storage residency —
+       widening the serial legs here would re-introduce the serial-vs-mma width dependence
+       gh-ocannl-639 removes. fp8 has an accumulator format on no backend (its serial arithmetic
+       already bridges through float per operator), so it follows the CPU policy: f32 residency,
+       one narrowing per nest, governed by the same [narrow_compute_f32] knob. *)
+    let accum_prec prec =
+      match prec with
+      | Ops.Fp8_prec _ when (Numerics.get ()).Numerics.narrow_compute_f32 -> Ops.single
+      | _ -> prec
+
     let typ_of_prec = function
       | Ops.Byte_prec _ -> "unsigned char"
       | Ops.Uint16_prec _ -> "unsigned short"
@@ -1876,6 +1888,13 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
               ("compute_capability_major", [%sexp_of: int] attributes.compute_capability_major);
               ("compute_capability_minor", [%sexp_of: int] attributes.compute_capability_minor);
               ("max_threads_per_block", [%sexp_of: int] attributes.max_threads_per_block);
+              (* The launch-dimension limits the schedule layer gates against: [max_grid_size]
+                 feeds [hardware_limits.max_grid_yz], and [max_threads_dim] bounds a workgroup
+                 per-dimension (beyond the [max_threads_per_block] product). Surfaced so a run on
+                 hardware can read back what the gates compare against -- otherwise the only
+                 evidence a query is not degenerate is that nothing got rejected. *)
+              ("max_grid_size", [%sexp_of: int * int * int] attributes.max_grid_size);
+              ("max_threads_dim", [%sexp_of: int * int * int] attributes.max_threads_dim);
               ("unified_addressing", [%sexp_of: bool] attributes.unified_addressing);
             ]
           in

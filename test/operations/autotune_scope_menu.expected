@@ -1,0 +1,15 @@
+the serial reference matches the host-side wide sum: true
+control: the untransformed nest proposes vectorizing its innermost loop: true
+scope-nested loops are enumerated (each inner reduction loop draws a proposal): true
+a dividing Split of the scope-nested innermost loop is proposed: true
+binder-sharing mint copies are one decision (one Split-by-2 of the copied loop): true
+a Swap of a perfect serial pair inside the scope is proposed: true
+an Unroll of a scope-nested loop is proposed: true
+the Vectorized retype moves to the scope-nested innermost accumulating loop: true
+the statement-level loop over the scope no longer reads as innermost (no Vectorized retype): true
+every menu proposal on the minted form compiles and matches the serial result: true
+the nonzero-origin partition segment draws an Unroll proposal: true
+the nonzero-origin partition segment draws the Vectorized retype: true
+no Split targets the nonzero-origin segment (Split alone requires a zero origin): true
+the zero-origin first segment still draws a dividing Split: true
+every menu proposal on the partitioned form compiles and matches the serial result: true

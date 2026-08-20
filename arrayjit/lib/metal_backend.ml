@@ -1121,6 +1121,13 @@ module Impl = struct
        precision alone, as the signature requires. *)
     let compute_prec = function Ops.Fp8_prec _ -> Ops.single | prec -> prec
 
+    (* gh-ocannl-663: [simdgroup_matrix] is uniform-precision only, so the seeded f16/bf16 tiles
+       accumulate in fragments of the storage precision — the serial legs keep the same residency,
+       and only fp8 (no accumulator format anywhere, and computed in f32 above regardless of
+       policy) widens, which the compute resolution already covers. Restated next to the
+       [compute_prec] override because the pair binds at [include] time (signature coupling note). *)
+    let accum_prec = compute_prec
+
     (* If we wanted to reintroduce the log_id parameter: [Some ("const int&", "log_id")]. *)
     let kernel_log_param = None
     let log_involves_file_management = false
