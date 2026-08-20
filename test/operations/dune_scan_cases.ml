@@ -462,8 +462,8 @@ let render_raw (r : Scan.raw_stanza) =
         if String.is_empty cwd then "%{test}" else cwd ^ ":%{test}")
   in
   let unnameable =
-    if r.Scan.raw_unnameable = 0 then []
-    else [ Printf.sprintf "!%d" r.Scan.raw_unnameable ]
+    List.map r.Scan.raw_unnameable ~f:(fun cwd ->
+        if String.is_empty cwd then "!" else "!" ^ cwd)
   in
   Printf.sprintf "%s%s%s{%s}" r.Scan.raw_head
     (if String.is_empty r.Scan.raw_subdir then "" else "@" ^ r.Scan.raw_subdir)
@@ -649,13 +649,19 @@ let raw_stanza_cases =
        stays an ordinary run even there, because the walk still names it. *)
     ( "a bare command under setenv PATH is unnameable",
       {dune|(rule (action (setenv PATH . (run probe))))|dune},
-      [ "rule{!1}" ] );
+      [ "rule{!}" ] );
     ( "but a named executable under one is still a run",
       {dune|(rule (action (setenv PATH . (run %{dep:probe.exe}))))|dune},
       [ "rule{probe.exe}" ] );
     ( "two bare ones are two, and repeats collapse",
       {dune|(rule (action (setenv PATH . (progn (run a) (run b) (run a)))))|dune},
-      [ "rule{!2}" ] );
+      [ "rule{! !}" ] );
+    (* The identity matters, not unnameability in general: a `(bash …)` in the same file is
+       unnameable for an unrelated reason and must not answer for this one. *)
+    ( "a shell line alongside one is a different thing",
+      {dune|(rule (action (setenv PATH . (run probe))))
+(rule (action (bash "./thing.exe")))|dune},
+      [ "rule{!}"; "rule{}" ] );
     ( "a chdir under one still names where it runs",
       {dune|(rule (action (setenv PATH . (chdir sub (run %{dep:a.exe})))))|dune},
       [ "rule{sub:a.exe}" ] );

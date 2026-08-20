@@ -1536,6 +1536,10 @@ that they earn a lookup rather than always-loaded space.
   one site per distinct executable per directory, so raw occurrence counts fail a `progn` running
   one executable twice while a flat set lets five of six rules be answered for by the sixth, and
   identities come from a structured field (`site.executables`), never from splitting a display name.
+  And where a floor matches against a CLASS of sites, check that the class is not wider than the
+  thing being protected: "any unnameable site" let a `(bash …)` answer for a dropped
+  PATH-rewritten one, and the fix was the same as for the executables — give the site a structured
+  reason of its own (`site.path_rewritten`) instead of grouping by a shared symptom.
   A last trap in the other direction: declining what you cannot resolve is the SAFE direction for a
   floor and therefore the easy thing to over-use — declining `./%{pp}` left all three `test/ppx`
   rules with no floor at all, and the fix was to resolve the `(:pp pp.exe)` binding from the same

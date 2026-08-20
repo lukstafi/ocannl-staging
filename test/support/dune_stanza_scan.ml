@@ -281,6 +281,11 @@ type command =
   | External  (** a tool on PATH or in the toolchain, which this repository does not build *)
   | Unrecognized of string  (** command position this scan cannot read — reported, never ignored *)
   | Unknown_directory of string
+  | Path_rewritten of string
+      (** a bare command under [(setenv PATH …)]: unnameable for a REASON of its own, kept apart
+          from the other unnameable programs so a check can tell them apart. Grouping them all as
+          {!Unknown_directory} let a surviving [(bash …)] site answer for a dropped one (Codex P2,
+          round 10). *)
       (** a shell command line: not only is the program unreadable, the directory it runs in is too,
           because [cd] inside the line moves it without dune knowing (Codex P2, round 8) *)
 
@@ -534,7 +539,7 @@ let executables_run stanza =
               List.filter args ~f:(fun arg ->
                   match classify_command ~named_deps arg with
                   | Runs _ | Unrecognized _ -> true
-                  | External | Unknown_directory _ -> false)
+                  | External | Unknown_directory _ | Path_rewritten _ -> false)
             in
             match handed with
             | [] -> External
@@ -551,7 +556,7 @@ let executables_run stanza =
        off a bare name, and PATH is what gives a bare name its meaning. A path-qualified command
        still names what it names (Codex P2, round 16). *)
     | Unnameable (what, command) -> (
-        match classify command with External -> Unknown_directory what | other -> other)
+        match classify command with External -> Path_rewritten what | other -> other)
   in
   List.filter_map (commands_in stanza) ~f:(fun (cwd, command) ->
       match classify command with External -> None | classified -> Some (cwd, classified))
@@ -580,6 +585,10 @@ type site = {
       (** whether the deps depend on any config file at all; WHICH one had to be named is
           {!declared_config_paths}, since only the caller knows where configs exist *)
   declared_config_paths : string list;
+  path_rewritten : bool;
+      (** whether this site is a program the walk refuses to name because [(setenv PATH …)] decides
+          what it resolves to — as opposed to the other reasons a site can be unnameable, which a
+          caller must be able to tell apart (Codex P2, round 10). *)
   executables : string list;
       (** for a {!Runs_executable} site, the executables it covers, each as {!classify_command}
           named it — the identities kept apart, rather than the display [name] that joins them with
@@ -653,9 +662,10 @@ let inert_heads =
 type raw_stanza = {
   raw_head : string;  (** the atom the stanza opens with *)
   raw_inline_tests : bool;  (** whether it has an [(inline_tests …)] field of its own *)
-  raw_unnameable : int;
-      (** how many bare commands the stanza runs under a [(setenv PATH …)] — each one a program the
-          walk refuses to name, and so an {!Unreadable_directory} site it must have placed. *)
+  raw_unnameable : string list;
+      (** the directories of the bare commands the stanza runs under a [(setenv PATH …)] — each one
+          a program the walk refuses to name for that reason, and so a site it must have placed
+          carrying {!site.path_rewritten}. *)
   raw_subdir : string;
       (** the directory the stanza's [(subdir …)] nesting puts it in — where dune runs what it
           declares, and so where the config is resolved from. [""] for a top-level stanza. *)
@@ -847,7 +857,7 @@ let raw_stanzas content =
                   then Some (cwd, cmd)
                   else None)
               |> List.dedup_and_sort ~compare:Poly.compare
-              |> List.length;
+              |> List.map ~f:fst;
           };
         ]
   in
@@ -874,13 +884,15 @@ let raw_stanzas content =
 let sites content =
   walk "" (stanzas content) ~f:(fun subdir stanza ->
       let deps () = field stanza "deps" in
-      let site ?(cwd = "") ?deps:(deps_field = deps ()) ?(executables = []) kind name =
+      let site ?(cwd = "") ?deps:(deps_field = deps ()) ?(executables = [])
+          ?(path_rewritten = false) kind name =
         [
           {
             kind;
             name;
             declares_config = not (List.is_empty (declared_config_paths deps_field));
             declared_config_paths = declared_config_paths deps_field;
+            path_rewritten;
             executables;
             subdir;
             cwd;
@@ -910,10 +922,13 @@ let sites content =
             in
             let unreadable = for_cwd (function Unrecognized cmd -> Some cmd | _ -> None) in
             let unlocatable = for_cwd (function Unknown_directory cmd -> Some cmd | _ -> None) in
+            let rewritten = for_cwd (function Path_rewritten cmd -> Some cmd | _ -> None) in
             (if List.is_empty exes then []
              else site ~cwd ~executables:exes Runs_executable (String.concat ~sep:", " exes))
             @ List.concat_map unreadable ~f:(fun cmd -> site ~cwd Unreadable_command cmd)
-            @ List.concat_map unlocatable ~f:(fun cmd -> site ~cwd Unreadable_directory cmd))
+            @ List.concat_map unlocatable ~f:(fun cmd -> site ~cwd Unreadable_directory cmd)
+            @ List.concat_map rewritten ~f:(fun cmd ->
+                  site ~cwd ~path_rewritten:true Unreadable_directory cmd))
       in
       match head stanza with
       | Some ("test" | "tests") ->

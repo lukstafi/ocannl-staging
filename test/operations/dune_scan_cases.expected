@@ -125,6 +125,7 @@ ok: raw stanzas -- a binding outside the deps field is not a binding
 ok: raw stanzas -- a bare command under setenv PATH is unnameable
 ok: raw stanzas -- but a named executable under one is still a run
 ok: raw stanzas -- two bare ones are two, and repeats collapse
+ok: raw stanzas -- a shell line alongside one is a different thing
 ok: raw stanzas -- a chdir under one still names where it runs
 ok: raw stanzas -- a binding resolving to no executable stays declined
 ok: raw stanzas -- a toolchain pform is not ours
