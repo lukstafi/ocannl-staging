@@ -51,8 +51,11 @@
 # own lock -- "I lost track of a run so I started another" is exactly the spiral
 # this script exists to prevent. `stop` the active run if it is truly stale.
 #
-# Windows (Git Bash) is best-effort: the flock and cap work under MSYS perl, but
-# process-group kills may only reach dune itself, not its compiler children.
+# Windows: run it from Git Bash, whose MSYS perl carries the flock and the cap.
+# Best-effort even there -- process-group kills may only reach dune itself, not
+# its compiler children. A Cygwin bash ships no perl by default, so the
+# preflight below refuses it outright rather than letting the lock misreport
+# what happened (gh-ocannl-662).
 
 set -u
 
@@ -64,6 +67,26 @@ die() { echo "test-run: $*" >&2; exit 2; }
 # -P: the physical path, so the same worktree entered through a symlink and
 # through its real path derive the same key, lock file, and recorded wt.
 cd -P "$(dirname "$0")/.." || die "cannot cd to repo root"
+
+# perl is load-bearing rather than a convenience: the per-worktree flock, the
+# cap supervisor and the atomic rename behind the `last` pointer are all
+# `perl -e` one-liners, and every subcommand reaches at least one of them.
+#
+# Checked ONCE, here, because the alternative is what this check was written
+# from: with perl absent, `take_lock`'s perl exited 127, which is not one of the
+# statuses that block assigns a meaning, so it fell through to the catch-all
+# "another test-run is active in this worktree" -- a phantom lock holder,
+# reported with recovery advice (`stop` it) that cannot work because there is
+# nothing to stop. That is how the Windows CI smoke step refused with exit 2
+# under the Cygwin bash `shell: bash` resolves to once setup-ocaml has prepended
+# opam's cygwin to PATH (gh-ocannl-662).
+#
+# The module is loaded rather than the binary merely found: `use Fcntl ":flock"`
+# is what the lock needs, and a perl that cannot provide it would fail in the
+# same misread place.
+perl -e 'use Fcntl ":flock"; exit 0' 2>/dev/null || die "perl with Fcntl not found; it carries the lock, the cap and the \`last\` pointer.
+  On Windows run this from Git Bash, whose MSYS perl has both; a Cygwin bash
+  ships neither unless its perl package is installed."
 
 # OCANNL_TOOL_ is the namespace the library reserves for names that address OCANNL
 # without being configuration: an OCANNL executable warns at startup about any other
