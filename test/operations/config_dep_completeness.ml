@@ -20,6 +20,28 @@
    has no `deps` field at all, so the dep belongs on its companion rule; - and a directory with any
    such stanza has an `ocannl_config` to depend on in the first place.
 
+   What the golden holds, and what it deliberately does not: the KINDS of test-running stanza each
+   dune file has, not how many of each. A tally there moved on every test added anywhere in the
+   repository, so every contributor had to promote this file over a change that never touched it --
+   a promote indistinguishable from blessing a real regression here -- and one hot line collected a
+   textual conflict from every parallel branch (gh-ocannl-665). The tallies were the "the scan did
+   not go blind" signal, which survives in two churn-free forms: a directory that stops being read
+   loses its kinds from its line below, and within a directory `Scan.raw_stanzas` -- a second reader
+   of the raw text, sharing none of the sexp walk's machinery -- puts a floor under it: the stanzas
+   it finds, and what each of them runs, are what the walk must place at least as many of. The exact
+   numbers go to stderr, which a `(test)` stanza does not diff.
+
+   The two floors compare differently, and the asymmetry is forced by how the walk groups what it
+   finds. Tests compare as COUNTS: one site per name, so more stanzas than sites is a hole. Rules
+   compare as a MULTISET OVER (working directory, executable), which is the pair the walk makes one
+   site of -- coarser fails to detect, finer fails a correct scan. A flat set would let five of the
+   six rules that each run `profile_precedence.exe` be answered for by the sixth; dropping the
+   directory would do the same to one rule running an executable under two `chdir`s, whose two sites
+   resolve two different configs; counting raw occurrences would fail a `progn` that runs one
+   executable twice, which is one site (Codex P2, rounds 1 to 3). Those comparisons read a site's
+   structured `executables`, never its display `name`, which joins several with ", " and so cannot
+   be taken apart again where a path contains a comma.
+
    An `(executable)` no rule runs is structurally not a site and needs no exemption: that is how the
    diagnostic and tutorial executables (`bench_circles_step`, `gpt2_generate`, the `@slow` runners'
    companions) stay off this list without anyone maintaining one. What does need an exemption is a
@@ -104,6 +126,18 @@ let () =
   let exemptions_used = ref (Set.empty (module String)) in
   let counts = Hashtbl.create (module String) in
   let bump kind = Hashtbl.update counts kind ~f:(fun n -> 1 + Option.value n ~default:0) in
+  (* The per-directory tallies, reported on stderr rather than in the golden, and how many of them
+     the raw-text floor below had anything to say about -- a floor that applies nowhere would be a
+     silent way for this check to become decoration. *)
+  let inventory = ref [] in
+  let floors_checked = ref 0 in
+  let floor_holes = ref 0 in
+  printf
+    "Which kinds of test-running stanza each dune file has: presence, not tallies. A tally here\n\
+     moved whenever a test was added anywhere in the repository, so the numbers go to stderr\n\
+     instead (gh-ocannl-665). What they guarded is guarded still: a line below changes when a\n\
+     directory gains its first stanza of a kind or loses its last, and within a directory the\n\
+     raw-text floor reported by the claim at the end holds the count up.\n\n";
   List.iter dune_files ~f:(fun (dune_file, on_disk) ->
       let dir = Stdlib.Filename.dirname dune_file in
       let content = In_channel.read_all on_disk in
@@ -158,7 +192,16 @@ let () =
       let described =
         List.map sites
           ~f:(fun
-              ({ Scan.kind; name; declared_config_paths; declares_config = _; subdir = _; cwd = _ }
+              ({
+                 Scan.kind;
+                 name;
+                 declared_config_paths;
+                 declares_config = _;
+                 path_rewritten = _;
+                 executables = _;
+                 subdir = _;
+                 cwd = _;
+               }
                as site)
             ->
             let key = directory_of site ^ ":" ^ name in
@@ -231,33 +274,170 @@ let () =
                 fail
                   (Printf.sprintf "%s: the %s %s does not declare %s in its deps" dune_file
                      (Scan.kind_name kind) name Scan.config_file));
-            (kind, name, exempt))
+            (site, kind, name, exempt))
       in
       let tally kind =
-        List.count described ~f:(fun (k, _, exempt) -> Poly.equal k kind && not exempt)
+        List.count described ~f:(fun (_, k, _, exempt) -> Poly.equal k kind && not exempt)
       in
-      let exempted = List.filter described ~f:(fun (_, _, exempt) -> exempt) in
+      let exempted = List.filter described ~f:(fun (_, _, _, exempt) -> exempt) in
       let exempt_names =
-        List.map exempted ~f:(fun (_, name, _) -> name)
+        List.map exempted ~f:(fun (_, _, name, _) -> name)
         |> List.dedup_and_sort ~compare:String.compare
         |> String.concat ~sep:", "
       in
-      let counted =
+      (* The floor the raw text puts under the sexp walk, read by [Scan.raw_stanzas]: a second
+         reader that shares none of the walk's machinery, so a walk that stops seeing stanzas is
+         caught here instead of quietly reporting a smaller number. Sites are counted including
+         exempt ones -- an exemption is about the config dependency, not about whether the stanza
+         was seen. *)
+      let raw = Scan.raw_stanzas content in
+      let inline_floor =
+        List.filter_map raw ~f:(fun r ->
+            if String.equal r.Scan.raw_head "library" && r.Scan.raw_inline_tests then
+              Some r.Scan.raw_subdir
+            else None)
+      in
+      (* Test stanzas are compared per WORKING DIRECTORY, not merely counted: a test action can run
+         `%{test}` in several `chdir` branches, and [sites] emits one Test site per directory
+         because each resolves a different config -- so counting the stanza once would let one of
+         those sites be dropped unnoticed (Codex P2, round 5). A stanza with no custom action runs
+         where it is, which is the "" both sides fall back to. *)
+      let test_floor = List.concat_map raw ~f:(fun r -> r.Scan.raw_test_cwds) in
+      (* The directory a process actually runs in is the stanza's `(subdir …)` composed with its
+         `chdir`s -- which is what `directory_of` above resolves the config against, so it is what
+         both sides must compare (Codex P2, round 7). *)
+      let effective site = Scan.in_subdir site.Scan.subdir site.Scan.cwd in
+      let placed_tests =
+        List.filter_map described ~f:(fun (site, kind, _, _) ->
+            match kind with Scan.Test -> Some (effective site) | _ -> None)
+      in
+      let tally_of = List.fold ~init:(Map.empty (module String)) ~f:(fun counts key ->
+          Map.update counts key ~f:(fun n -> 1 + Option.value n ~default:0))
+      in
+      let placed_test_cwds = tally_of placed_tests in
+      Map.iteri (tally_of test_floor) ~f:(fun ~key:cwd ~data:in_text ->
+          let in_walk = Option.value (Map.find placed_test_cwds cwd) ~default:0 in
+          if in_walk < in_text then (
+            Int.incr floor_holes;
+            fail
+              (Printf.sprintf
+                 "%s: the raw text shows %d test %s running%s but the scan placed only %d -- it is \
+                  reading the file with a hole in it"
+                 dune_file in_text
+                 (if in_text = 1 then "stanza" else "stanzas")
+                 (if String.is_empty cwd then " in its own directory" else " in " ^ cwd)
+                 in_walk)));
+      (* Inline-test libraries are compared the same way, per directory: a `(subdir …)` moves where
+         they run, so losing that placement would validate the dependency against the parent
+         directory (Codex P2, round 8). *)
+      let placed_inline =
+        List.filter_map described ~f:(fun (site, kind, _, _) ->
+            match kind with Scan.Inline_tests -> Some (effective site) | _ -> None)
+        |> tally_of
+      in
+      Map.iteri (tally_of inline_floor) ~f:(fun ~key:dir ~data:in_text ->
+          let in_walk = Option.value (Map.find placed_inline dir) ~default:0 in
+          if in_walk < in_text then (
+            Int.incr floor_holes;
+            fail
+              (Printf.sprintf
+                 "%s: the raw text shows %d inline-test %s in%s but the scan placed only %d -- it \
+                  is reading the file with a hole in it"
+                 dune_file in_text
+                 (if in_text = 1 then "library" else "libraries")
+                 (if String.is_empty dir then " its own directory" else " " ^ dir)
+                 in_walk)));
+      (* A bare command under `(setenv PATH …)` is one the walk refuses to name -- PATH decides what
+         it resolves to -- so it must have placed a site saying so. Compared as a total per file,
+         since the walk's own site for it carries a composed name rather than the command (Codex P2,
+         round 9). Any `Unreadable_directory` site counts: a `(bash …)` line makes one too, so the
+         walk's tally is a superset and the comparison stays a floor. *)
+      let unnameable_floor = List.concat_map raw ~f:(fun r -> r.Scan.raw_unnameable) in
+      (* Matched on the site's OWN identity, not on unnameability in general: a `(bash …)` site is
+         unnameable for an unrelated reason, and counting it here let it answer for a dropped
+         PATH-rewritten one (Codex P2, round 10). *)
+      let placed_rewritten =
+        List.filter_map described ~f:(fun (site, _, _, _) ->
+            if site.Scan.path_rewritten then Some (effective site) else None)
+        |> tally_of
+      in
+      Map.iteri (tally_of unnameable_floor) ~f:(fun ~key:dir ~data:in_text ->
+          let in_walk = Option.value (Map.find placed_rewritten dir) ~default:0 in
+          if in_walk < in_text then (
+            Int.incr floor_holes;
+            fail
+              (Printf.sprintf
+                 "%s: the raw text runs %d bare %s under `(setenv PATH ...)`%s, and the scan placed \
+                  only %d it refuses to name for that reason -- it is reading the file with a hole \
+                  in it"
+                 dune_file in_text
+                 (if in_text = 1 then "command" else "commands")
+                 (if String.is_empty dir then "" else " in " ^ dir)
+                 in_walk)));
+      (* The rules are compared as a MULTISET over (working directory, executable), which is the
+         pair [sites] makes one site of. Neither coarser comparison works: a flat set would let five
+         of the six rules that each run `profile_precedence.exe` be dropped with the sixth answering
+         for all six, and dropping the directory would do the same to one rule running an executable
+         under two `chdir`s, whose two sites resolve two different configs (Codex P2, rounds 2 and
+         3). Read from the site's structured [executables] rather than from its display name, which
+         joins several with ", " and so cannot be taken apart again where a path contains a comma. *)
+      let occurrences pairs =
+        List.fold pairs ~init:(Map.empty (module String)) ~f:(fun counts (cwd, exe) ->
+            let key = cwd ^ "\000" ^ exe in
+            Map.update counts key ~f:(fun n -> 1 + Option.value n ~default:0))
+      in
+      let placed =
+        occurrences
+          (List.concat_map described ~f:(fun (site, _, _, _) ->
+               List.map site.Scan.executables ~f:(fun exe -> (effective site, exe))))
+      in
+      let run_floor = List.concat_map raw ~f:(fun r -> r.Scan.raw_runs) in
+      Map.iteri (occurrences run_floor) ~f:(fun ~key ~data:in_text ->
+          let in_walk = Option.value (Map.find placed key) ~default:0 in
+          if in_walk < in_text then (
+            Int.incr floor_holes;
+            let cwd, exe = String.lsplit2_exn key ~on:'\000' in
+            fail
+              (Printf.sprintf
+                 "%s: the raw text runs `%s`%s in %d %s, and the scan placed it in only %d -- it is \
+                  reading the file with a hole in it"
+                 dune_file exe
+                 (if String.is_empty cwd then "" else " in " ^ cwd)
+                 in_text
+                 (if in_text = 1 then "stanza" else "stanzas")
+                 in_walk)));
+      if
+        (not (List.is_empty test_floor))
+        || (not (List.is_empty inline_floor))
+        || (not (List.is_empty run_floor))
+        || not (List.is_empty unnameable_floor)
+      then Int.incr floors_checked;
+      (* The golden holds which KINDS a dune file has, not how many of each: a tally there made
+         every test added anywhere in the repository churn this file, and put a single hot line in
+         the way of every parallel branch (gh-ocannl-665). What blindness costs is still visible --
+         a directory whose stanzas stop being seen loses its kinds from the line below, and within a
+         directory the floor above holds the count up. The exact numbers go to stderr, which a
+         `(test)` stanza does not diff. *)
+      let present =
         [
-          (tally Scan.Test, "test", "tests");
-          (tally Scan.Inline_tests, "inline-test library", "inline-test libraries");
-          (tally Scan.Runs_executable, "exe-running rule", "exe-running rules");
-          ( List.length exempted,
-            "exempt rule (" ^ exempt_names ^ ")",
-            "exempt rules (" ^ exempt_names ^ ")" );
+          (tally Scan.Test, "tests");
+          (tally Scan.Inline_tests, "inline-test libraries");
+          (tally Scan.Runs_executable, "exe-running rules");
+          (List.length exempted, "exempt rules (" ^ exempt_names ^ ")");
         ]
-        |> List.filter_map ~f:(fun (n, singular, plural) ->
-            if n = 0 then None
-            else Some (Printf.sprintf "%d %s" n (if n = 1 then singular else plural)))
+        |> List.filter_map ~f:(fun (n, what) -> if n = 0 then None else Some what)
       in
       printf "%s: %s\n" dune_file
-        (if List.is_empty counted then "nothing that runs a test executable"
-         else String.concat ~sep:", " counted));
+        (if List.is_empty present then "nothing that runs a test executable"
+         else String.concat ~sep:", " present);
+      inventory :=
+        Printf.sprintf
+          "  %s: %d tests (floor %d), %d inline-test libraries (floor %d), %d exe-running rules \
+           (%d named in the text), %d exempt"
+          dune_file (tally Scan.Test) (List.length test_floor) (tally Scan.Inline_tests)
+          (List.length inline_floor)
+          (tally Scan.Runs_executable) (List.length run_floor) (List.length exempted)
+        :: !inventory);
   let stale =
     Set.diff (Set.of_list (module String) (List.map exempt_sites ~f:fst)) !exemptions_used
   in
@@ -281,10 +461,27 @@ let () =
   printf "\nExempt from the dependency, running an executable that reads no configuration:\n";
   List.iter exempt_sites ~f:(fun (key, why) -> printf "  %s -- %s\n" key why);
   let count kind = Option.value (Hashtbl.find counts kind) ~default:0 in
+  (* Not a golden line: stderr is where a number that moves with every added test can be read
+     without being diffed (gh-ocannl-665). A `(test)` stanza diffs stdout only. *)
+  eprintf "Stanzas that run a test executable, by dune file (not diffed -- see gh-ocannl-665):\n%s\n"
+    (String.concat ~sep:"\n" (List.rev !inventory));
+  eprintf
+    "Totals: %d dune files; %d test stanzas, %d inline-test libraries and %d exe-running rules \
+     declare %s; %d exempt.\n"
+    (List.length dune_files) (count "test") (count "inline tests") (count "rule running")
+    Scan.config_file (count "exempt");
+  (* The blindness check, stated so that its passing reading is `true`: the sexp walk placed at
+     least as many stanzas as a reader that shares none of its machinery finds in the raw text. This
+     is what the pinned tallies used to be for, minus the churn -- and unlike a golden line it
+     cannot be `dune promote`d into passing. *)
+  printf "\n";
+  Verdict.p
+    "the scan places every test stanza, inline-test library and run executable the dune sources show"
+    (!floor_holes = 0);
+  Verdict.p "that floor applies to more than one dune file" (!floors_checked > 1);
   if not (Verdict.any_failed ()) then
     printf
       "\n\
-       OK: %d dune files; %d test stanzas, %d inline-test libraries and %d exe-running rules \
-       declare %s; %d exempt.\n"
-      (List.length dune_files) (count "test") (count "inline tests") (count "rule running")
-      Scan.config_file (count "exempt")
+       OK: every test stanza, inline-test library and exe-running rule in these files declares %s, \
+       apart from the sites exempted above.\n"
+      Scan.config_file
