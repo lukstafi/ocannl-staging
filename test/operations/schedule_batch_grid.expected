@@ -36,3 +36,6 @@ interior_companion: every candidate matches the serial reference bitwise: true
 interior_companion: the generated source folds the batch axes onto the .z register: true
 qkv_mma: tensorized batch-grid twins are seeded: true
 qkv_mma: every tensorized batch-grid twin constructs, validates, and folds the batch onto .z: true
+limit gate: a folded .z extent at the device limit passes: true
+limit gate: a folded .z extent beyond the device limit is a typed Resource_exceeded: true
+limit gate: a max_grid_z below the batch product stops the twins at seeding: true
