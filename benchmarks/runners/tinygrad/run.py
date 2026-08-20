@@ -40,7 +40,13 @@ from tinygrad.nn.optim import SGD
 # which shadows editable (finder-based) tinygrad installs, whose MetaPath finder is only
 # consulted when the path scan finds nothing.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from bench_common import emit, percentiles, read_st_metadata
+from bench_common import (
+    emit,
+    instrument_tinygrad_beam,
+    percentiles,
+    read_st_metadata,
+    tinygrad_searched,
+)
 
 
 def param(arr):
@@ -236,6 +242,13 @@ def main():
         xb, yb = batches[k % n_batches]
         return step_inner(xb, yb)
 
+    # Before the first launch, which is where the beam search happens: whether this process
+    # searched or replayed ~/.cache/tinygrad is what the result line's `searched` reports
+    # (gh-ocannl-644). Unlike an OCANNL tuned cell, a beam cell searches in the process that
+    # then times steps — the report says so rather than leaving it to be assumed either way
+    # (gh-ocannl-675).
+    beam_counts = instrument_tinygrad_beam() if args.beam else None
+
     def sync():
         from tinygrad import Device
 
@@ -283,6 +296,7 @@ def main():
         "variant": "beam" if args.beam else ("jit" if args.jit else "nojit"),
         "workload": meta["name"],
         "compile_s": round(compile_s, 3),
+        "searched": tinygrad_searched(beam_counts, args.beam),
         "step_ms": percentiles(synced),
         "queued_step_ms": queued,
         "timed_steps": timed_steps,

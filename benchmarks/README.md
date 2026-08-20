@@ -73,6 +73,19 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   axes then input axes; channels-last images — layouts documented per model in the
   generator), dataset, and all hyperparameters in the safetensors `__metadata__` map, so
   fixtures are self-describing and runners need only the fixture path.
+- `fixtures/DIGESTS.txt` + `fixture_digest.py` — **which bytes a published number is on**
+  (gh-ocannl-645). The fixtures are gitignored regenerable artifacts, so this file is the only
+  checked-in statement of what one contains: `gen_fixtures.py` records `<sha256>  <bytes>
+  <name>` as it generates (announcing a *changed* digest loudly, and leaving a reviewable git
+  diff), `orchestrate.py` refuses to measure a fixture whose bytes do not match it
+  (`--no-fixture-digest-check` opts out, for a deliberate regeneration you are about to
+  re-record), and every result row and report section states the digest it ran on. Fixture
+  bytes depend on the spec, on the generator, *and* on the numpy version that drew the random
+  streams — numpy promises no `Generator` stream stability across releases — so a mismatch is
+  real information even when `workloads/` is untouched. A fixture regenerated at a different
+  spec revision is otherwise invisible: it is consumed **uniformly** by every cell, and the
+  cross-cell parity gate compares cells with each other, not with the workload the report
+  names, so it certifies exactly as it certifies the intended one.
 - `runners/ocannl/bench_{mlp,conv,gpt}.ml` + `bench_harness.ml` — OCANNL runners
   (`dune build benchmarks/runners/ocannl/bench_mlp.exe` etc.). Env: `BENCH_FIXTURE` (path),
   `BENCH_TUNE=1` (`Train.tune_placements`: autotunes both the default placements graph and
@@ -139,9 +152,10 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   "it ranked below `tune_inline_flips`" (gh-ocannl-558,
   [report-gh558-hip-flips.md](report-gh558-hip-flips.md)).
 - `runners/pytorch/run.py` — flags: `--device cpu|mps|cuda`, `--compile` (torch.compile
-  variant).
+  variant, which reports whether inductor's codegen ran here or came from its cache).
 - `runners/tinygrad/run.py` — flags: `--device CPU|METAL|CUDA|AMD|CL|HIP`, `--jit 0|1`, `--beam N`
-  (BEAM=N kernel search, implies jit; the search cost lands in `compile_s`).
+  (BEAM=N kernel search, implies jit; the search cost lands in `compile_s`, and the result line
+  reports whether the beam actually searched or replayed `~/.cache/tinygrad`).
 - `orchestrate.py` — runs the matrix (dispatching the OCANNL executable on the fixture's
   `model`), enforces the parity gate, writes `results/results.jsonl` and
   `results/report.md`. Flags: `--workloads mlp_small ...`, `--tuned`, `--materialized`,
@@ -153,8 +167,9 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   retest whether an entry still applies in your environment),
   `--gpu metal|cuda|hip|none` (the GPU column of the matrix — OCANNL backend, PyTorch device,
   tinygrad device together; defaults to metal on macOS and cuda elsewhere, `none` runs a
-  CPU-only matrix). Env: `BENCH_CELL_LOG_DIR=<dir>` keeps every cell's raw combined output, one
-  file per cell label — a successful cell's output is otherwise discarded, which throws away the
+  CPU-only matrix), `--no-fixture-digest-check` (measure fixtures that do not match
+  `fixtures/DIGESTS.txt`). Env: `BENCH_CELL_LOG_DIR=<dir>` keeps every cell's raw combined
+  output, one file per cell label — a successful cell's output is otherwise discarded, which throws away the
   candidate-level evidence a measurement sweep has to report. Combined with
   `OCANNL_AUTOTUNE_LOG=true` it makes the seeded-vs-timed mma and split-reduce counts, the
   `FAILED` blocker breakdown and the split-reduce evictions fall out of the sweep's own search
@@ -292,6 +307,10 @@ benchmarks/.venv/bin/python benchmarks/gen_fixtures.py
 benchmarks/.venv/bin/python benchmarks/orchestrate.py
 ```
 
+`gen_fixtures.py` rewrites `fixtures/DIGESTS.txt` for whatever it regenerates. Review that diff
+before publishing numbers: a changed digest means the workload changed, and reports measured on
+either side of it are not comparable.
+
 tinygrad's CPU device JIT-compiles kernels with `clang`; on a machine without clang, point
 `CC` at a substitute (a `zig cc` wrapper script from `pip install ziglang` works — translate
 `--target=x86_64-none-unknown-elf` to `--target=x86_64-freestanding-none` and add `-g0`).
@@ -318,7 +337,9 @@ than the driver (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION` at module load), run it wi
   fallback, the seeded/timed tensorized counts, and the best *timed* tensorized candidate's time.
   A tensorized win in the arm that loses the A/B reaches no artifact and shows up in no step time,
   so without this the sweep can only find it by grepping `OCANNL_AUTOTUNE_LOG` output that a
-  successful cell discards. Read `mma_best_ms` against `best_ms` for the margin: tensorization
+  successful cell discards. Each arm also states whether it searched or replayed a cached winner
+  (`cache_hit`), which is what makes a *mixed* cell readable — one arm cached, the other searched
+  because its half of the A/B never was. Read `mma_best_ms` against `best_ms` for the margin: tensorization
   losing by 1% and by 40% are different findings.
 - tinygrad's loss must be realized before `opt.step()` (in-place assigns; a later realize
   would recompute the loss from updated weights). tinygrad JIT capture happens during the
@@ -332,6 +353,46 @@ than the driver (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION` at module load), run it wi
   modules/buffers; 2.5–3.5x on small CUDA kernels), which would penalize the tuned artifact for
   the one-time search it already paid for in `compile_s`. Wipe `autotune_cache/` before a run
   whose `compile_s` should reflect a from-scratch search.
+
+  **The result line says which pass produced it** (gh-ocannl-644): `"searched": true|false` is
+  whether *this process* ran a search, and the `tune` object breaks it down per arm (`searched`
+  and `cache_hit`, which are not complements) and in total (`searches` / `replays`, counting the
+  gh-555 flip refinements too, which are searches this process ran even though they are not
+  arms). A tuned cell under `autotune_search=false` — the `reproducible` profile — reports zero
+  of both: it shipped the untuned default, having neither searched nor replayed, and the report
+  says `no search` rather than crediting the row with a tuned artifact it does not have. `orchestrate.py` gates on
+  it — a tuned cell whose step times came from a searching process fails the **PROVENANCE
+  GATE** and is marked `SEARCH PASS` in the report's `pass` column — and stamps the search
+  pass's own verdict as `search_pass`, so a `compile_s` carried over from a process that
+  replayed the cache reads as `(cached)`, and one from a process that searched nothing at all as
+  `(no search)`, rather than either passing as a from-scratch search cost. One classifier
+  (`search_provenance`) reads `searched` for all three consumers: the fact is three-valued, and
+  every boolean spelling of it has been wrong somewhere. Before this, both passes emitted an
+  identical `framework`/`backend`/`variant`/`precision`, and the only trace of the difference was
+  a `cache hit:` line on the stderr of a run whose output a successful cell discards:
+  `report-gh612-hip.md` quoted pass-1 step times for fifteen revisions, and it took a reviewer
+  noticing that the driver never started a second process to find it.
+  A checked-in driver should assert `searched == false` rather than infer a replay from
+  `compile_s` being small.
+
+  **Every runner reports it, but only the OCANNL tuned cell is gated on it.** tinygrad's
+  `--beam N` cell and `torch.compile` search or codegen *in the timing process* by protocol, so
+  their rows read `same-process` — or `cached`, when the beam result came from
+  `~/.cache/tinygrad` or the graph from inductor's cache, in which case their `compile_s` is a
+  replay cost too. Whether those frameworks pay for searching in the timing process the way
+  OCANNL does is **unmeasured** (gh-ocannl-675); saying so in the report is the point, since
+  silence there reads as though the question applied to OCANNL alone. The two probes read
+  framework internals (tinygrad's beam disk cache, torch's FX-graph cache counters) and answer
+  `null` — reported as `?` — when they cannot tell, rather than guessing a `false` that would be
+  exactly the silent claim this field exists to prevent.
+- **A report states the fixture digest its numbers are on.** `orchestrate.py` puts it in each
+  workload section of `results/report.md` and in every `results.jsonl` row (`fixture`,
+  `fixture_sha256`); a hand-written report quotes the same `fixtures/DIGESTS.txt` line, and a
+  hand-written driver pins it (`gh612_cells.sh` refuses to run a cell whose fixture does not
+  match a pinned digest, with an env opt-out for deliberate re-generation). Cross-session
+  comparisons depend on it entirely: `report-gh569-hip.md`'s 46.65 ms denominator and
+  `report-gh612-hip.md`'s 32.33 ms are comparable only if both ran the same bytes, and until
+  gh-ocannl-645 that was an assumption no artifact recorded.
 - Timing on a laptop: prefer the p50 of the per-step synced times; rerun and compare rounds
   if thermals are suspect. Keep timing out of CI; the parity gate is the CI-worthy part.
 - Untuned-default before/after (gh-ocannl-491): the model-picked default is config-gated, so

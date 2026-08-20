@@ -22,6 +22,9 @@ search off without a cache times nothing: true
 search off without a cache returns the correct untuned routine: true
 search off still replays a committed cache entry: true
 cache replay under search off gives correct values: true
+exactly the call that ran a search reports searched: true
+no report both searches and replays: true
+a report that neither searched nor replayed timed nothing: true
 search off replays the default cache directory when asked for it: true
 search off ignores the unchosen default cache directory: true
 the ignored-cache fallback is still a correct routine: true

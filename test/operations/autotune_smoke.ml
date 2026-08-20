@@ -308,6 +308,22 @@ let () =
   p "cache replay under search off gives correct values"
     (Array.for_all2_exn got4 expected_c ~f:approx
     && Array.for_all2_exn got_mm4 mm_expected ~f:approx);
+  (* gh-ocannl-644: [searched] is the report's own statement that a search RAN, and [not cache_hit]
+     is not that statement -- the search-off call without a cache reports [cache_hit = false] having
+     searched nothing, and ships the untuned default. A measurement harness reads this to say which
+     process produced its step times (a searching process is measurably slower per launch), so all
+     four report states are pinned here rather than left to a caller's inference. *)
+  let states = [ r1; r2; r3; r4 ] in
+  p "exactly the call that ran a search reports searched"
+    (r1.Autotune.searched
+    && (not r2.Autotune.searched)
+    && (not r3.Autotune.searched)
+    && not r4.Autotune.searched);
+  p "no report both searches and replays"
+    (List.for_all states ~f:(fun r -> not (r.Autotune.searched && r.Autotune.cache_hit)));
+  p "a report that neither searched nor replayed timed nothing"
+    (List.for_all states ~f:(fun r ->
+         r.Autotune.searched || r.Autotune.cache_hit || r.Autotune.candidates_timed = 0));
   (* Only a CHOSEN cache replays (Codex P2 on PR #291): the SAME directory is replayed or ignored
      depending on whether someone asked for it. A search with no [cache_dir] populates the built-in
      default directory; a search-less call that likewise names no directory must not pick that entry

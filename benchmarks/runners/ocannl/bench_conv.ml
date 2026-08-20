@@ -98,8 +98,12 @@ let () =
       let scratch = Train.init_params (Context.auto ()) bindings batch_loss in
       (* Placement A/B: tune the default (virtual + promotion) graph and the materialize-all graph,
          keep the measured winner. *)
-      Train.tune_placements ~report:(H.collect_arm arms) ~on_ship:(H.collect_ship arms) ~rounds:0
-        ~timing_ctx:scratch ctx batch_loss step_comp bindings
+      (* [flip_report] only counts the gh-555 refinement searches toward the result line's
+         [searched] (gh-ocannl-644): they run whenever [tune_inline_flips] is configured, whether
+         or not a callback is wired, and a flip search loads this process like an arm search. *)
+      Train.tune_placements ~report:(H.collect_arm arms) ~flip_report:(H.collect_search arms)
+        ~on_ship:(H.collect_ship arms) ~rounds:0 ~timing_ctx:scratch ctx batch_loss step_comp
+        bindings
     else if Lazy.force Autotune.model_default_enabled then
       (* gh-ocannl-491: the model-picked untuned default (config [model_default_schedule=true]). *)
       Autotune.model_default ctx step_comp bindings

@@ -29,6 +29,8 @@ import sys
 import time
 from pathlib import Path
 
+import fixture_digest
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 # BENCH_VENV_PY overrides the venv interpreter — for environments where benchmarks/.venv
@@ -54,6 +56,26 @@ PARITY_TOL_PRECISION = {"bf16": 4e-3, "f16": 2e-3}
 # slowly. Require at least one part per million of relative loss variation over the parity window.
 LOSS_MOVE_MIN_REL = 1e-6
 REFERENCE = ("pytorch", "cpu", "eager")
+# Cells whose protocol splits the search and the timing into two processes (gh-ocannl-644): the
+# search leaves an OCANNL process measurably slower per launch, so step times from it are not the
+# artifact's. These are the only cells a searching process is a violation for.
+TWO_PASS_CELLS = {("ocannl", "tuned")}
+# Cells that search or compile in the process that then times steps — by protocol, not by
+# mistake. Whether that costs them anything is unmeasured (gh-ocannl-675), so they are stated in
+# the report and never gated; the alternative, saying nothing, reads as though the question
+# applied to OCANNL alone.
+SAME_PROCESS_CELLS = {("tinygrad", "beam"), ("pytorch", "compiled")}
+# How a cell's measurement pass is rendered in the report's `pass` column (gh-ocannl-644). A
+# runner predating the `searched` field, or one whose probe could not read its framework's
+# internals, cannot answer — which is not the same as a violation.
+PROVENANCE_MARK = {
+    "REPLAY": "replay",
+    "SEARCH-PASS": "**SEARCH PASS**",
+    "NO-SEARCH": "no search",
+    "SAME-PROCESS": "same-process",
+    "CACHED": "cached",
+    "UNKNOWN": "?",
+}
 # Report row order within a workload: precision-major, f32 first (it is the reference's precision
 # and every non-OCANNL cell's), then the reduced precisions; a gate-cost leg sorts directly after
 # the storage precision it varies; p50-ascending within each group.
@@ -275,6 +297,120 @@ def parity_check(results):
             r["parity"] = "PASS" if max_rel < tol and r["parity_loss_moved"] else "FAIL"
 
 
+def check_fixture_digests(fixtures, digests_path=None, allow_unpinned=False):
+    """What the fixtures ARE, checked before anything is measured on them (gh-ocannl-645).
+
+    Returns `{fixture path: sha256}` for stamping onto the results. Exits on a fixture whose
+    bytes are not the ones `fixtures/DIGESTS.txt` records unless `allow_unpinned` — a
+    differently generated fixture is consumed uniformly by every cell, so the cross-cell parity
+    gate certifies it exactly as it certifies the intended workload, and the digest is the only
+    thing that ties a published number to the workload the report names.
+    """
+    entries = fixture_digest.read_digests(
+        digests_path or HERE / "fixtures" / fixture_digest.DIGEST_FILE
+    )
+    shas = {}
+    unpinned = []
+    for fx in fixtures:
+        verdict, sha, size = fixture_digest.status(fx, entries)
+        shas[fx] = sha
+        print(f"fixture {fx.name}: sha256 {sha} ({size} bytes) — {verdict}", flush=True)
+        if verdict != "MATCH":
+            unpinned.append((fx, verdict))
+    named = ", ".join(f"{fx.name} ({verdict})" for fx, verdict in unpinned)
+    if unpinned and not allow_unpinned:
+        sys.exit(
+            f"refusing to measure {named}: these bytes are not the ones "
+            "fixtures/DIGESTS.txt records, so a report of them would name a workload nothing "
+            "pins. Re-run gen_fixtures.py to regenerate and re-record (the digest diff is the "
+            "review), or pass --no-fixture-digest-check to measure them as they are."
+        )
+    if unpinned:
+        print(
+            f"MEASURING UNPINNED FIXTURES: {named} — results carry their measured digest, but "
+            "nothing checked in describes them",
+            flush=True,
+        )
+    return shas
+
+
+def search_provenance(result):
+    """What one OCANNL process did about searching: SEARCHED, REPLAY, NO-SEARCH or UNKNOWN.
+
+    The single reading of `searched`, shared by every consumer, because the fact is three-valued
+    and each boolean spelling of it has been wrong in a different place (gh-ocannl-644 review):
+    a process can run a search, replay cached winners, or — under `autotune_search=false`, the
+    reproducible profile — do neither and ship the untuned default. `not searched` therefore does
+    not mean "replayed", which is what a `(cached)` label on its compile cost would claim.
+
+    The `tune` object's totals are the evidence separating the second case from the third: an
+    OCANNL cell that tuned anything reports them, and without them there is nothing to tell those
+    two apart with, so the answer is UNKNOWN rather than a guess.
+    """
+    searched = result.get("searched")
+    if searched is None:
+        return "UNKNOWN"
+    if searched:
+        return "SEARCHED"
+    tune = result.get("tune")
+    if not tune:
+        return "UNKNOWN"
+    return "NO-SEARCH" if not tune.get("searches") and not tune.get("replays") else "REPLAY"
+
+
+# How a two-pass cell's own verdict maps to the report's `pass` column: only a searching process
+# is a protocol violation, and only a genuine replay may call the carried-over compile cost cached.
+TWO_PASS_VERDICT = {
+    "SEARCHED": "SEARCH-PASS",
+    "REPLAY": "REPLAY",
+    "NO-SEARCH": "NO-SEARCH",
+    "UNKNOWN": "UNKNOWN",
+}
+# What a search pass's verdict says about the `compile s` carried over from it.
+COMPILE_S_NOTE = {"REPLAY": " (cached)", "NO-SEARCH": " (no search)"}
+
+
+def provenance_check(results):
+    """Annotate each searching cell with which process produced its step times (gh-ocannl-644).
+
+    OCANNL's two-pass protocol exists because a searching process is measurably slower per launch,
+    so pass-1 step times understate the tuned artifact. Both passes emit the same
+    framework/backend/variant/precision, and until the runner carried `searched` nothing in the
+    artifact distinguished them: `report-gh612-hip.md` quoted pass-1 timings for fifteen revisions
+    and only a reviewer reading the driver caught it.
+
+    A two-pass cell is REPLAY (compliant) or SEARCH-PASS (its timings came from a process that
+    searched — returned as a violation). NO-SEARCH is the third case: with `autotune_search=false`
+    (the reproducible profile) a tuned cell neither searches nor replays, it ships the untuned
+    default — nothing to gate, but calling that a replay would credit the row with a tuned artifact
+    it does not have. A cell whose protocol searches in the timing process is
+    SAME-PROCESS or, when it replayed its framework's own cache instead, CACHED; neither is a
+    violation, because nothing yet says those frameworks pay for it (gh-ocannl-675) — the point of
+    annotating them is that the report stops implying the question is OCANNL's alone. UNKNOWN is a
+    runner predating the field, or a probe that could not read its framework's internals.
+
+    Cells that neither search nor compile — eager, jit, an untuned OCANNL default — get no
+    annotation: there is no process distinction for them to be on the wrong side of.
+    """
+    violations = []
+    for r in results:
+        cell = (r.get("framework"), r.get("variant"))
+        two_pass = cell in TWO_PASS_CELLS
+        if not two_pass and cell not in SAME_PROCESS_CELLS:
+            continue
+        searched = r.get("searched")
+        if searched is None:
+            r["provenance"] = "UNKNOWN"
+        elif two_pass:
+            verdict = search_provenance(r)
+            r["provenance"] = TWO_PASS_VERDICT[verdict]
+            if verdict == "SEARCHED":
+                violations.append(r)
+        else:
+            r["provenance"] = "SAME-PROCESS" if searched else "CACHED"
+    return violations
+
+
 def report(results, out_dir, unavailable=()):
     out_dir.mkdir(parents=True, exist_ok=True)
     with open(out_dir / "results.jsonl", "w") as f:
@@ -295,6 +431,14 @@ def report(results, out_dir, unavailable=()):
     for workload in sorted({r["workload"] for r in results}):
         lines.append(f"\n## {workload}\n")
         rows = [r for r in results if r["workload"] == workload]
+        # Which bytes these numbers are on (gh-ocannl-645). A report is compared across sessions
+        # and machines; without this the comparison rests on the assumption that everyone
+        # regenerated the same fixture. More than one line here means the section mixes fixtures.
+        measured_on = sorted(
+            {(r.get("fixture"), r.get("fixture_sha256")) for r in rows if r.get("fixture_sha256")}
+        )
+        for fixture, sha in measured_on:
+            lines.append(f"measured on `{fixture}`, sha256 `{sha}`\n")
         # Precision-major, p50-ascending within a precision: scheduling variants are ranked
         # against the others computing in the same format, and a reduced-precision block reads as
         # its own group rather than being interleaved by a speed it owes to its storage format.
@@ -307,8 +451,31 @@ def report(results, out_dir, unavailable=()):
                 "Rows are grouped by precision (f32 first), p50-ascending within each group.\n"
             )
         with_tokens = any(r.get("tokens_per_step") for r in rows)
-        header = "| framework | backend | variant | precision | step p50 ms | p10 | p90 | queued ms | compile s | parity |"
-        rule = "|---|---|---|---|---|---|---|---|---|---|"
+        # gh-ocannl-644: which process produced the step times. Only a cell that searches or
+        # compiles has the distinction, so the column appears only where one was measured.
+        with_provenance = any(r.get("provenance") for r in rows)
+        if with_provenance:
+            lines.append(
+                "`pass` says which process produced a searching cell's step times. For the OCANNL "
+                "tuned cell, whose protocol splits them: `replay` is the fresh pass-2 process "
+                "replaying the cached winner, **`SEARCH PASS`** is the searching process itself — "
+                "whose accumulated modules and buffers inflate every launch, so those numbers are "
+                "not comparable with the others, and `no search` is a tuned cell that searched "
+                "nothing and replayed nothing (autotune_search=false), so it shipped the untuned "
+                "default. For a tinygrad `beam` or a `torch.compile` cell, "
+                "which search in the timing process by protocol: `same-process` searched here, "
+                "`cached` replayed its framework's own cache (so its `compile s` is a replay cost). "
+                "A tuned cell's `compile s` carries the same statement about the search pass it "
+                "came from: `(cached)` for one that replayed the schedule cache, `(no search)` "
+                "for one that searched nothing at all.\n"
+            )
+        header = "| framework | backend | variant | precision | step p50 ms | p10 | p90 | queued ms | compile s |"
+        rule = "|---|---|---|---|---|---|---|---|---|"
+        if with_provenance:
+            header += " pass |"
+            rule += "---|"
+        header += " parity |"
+        rule += "---|"
         if with_tokens:
             header += " tok/s |"
             rule += "---|"
@@ -325,11 +492,16 @@ def report(results, out_dir, unavailable=()):
             if with_tokens:
                 tps = r.get("tokens_per_step")
                 tokens = f" {tps * 1000 / s['p50']:,.0f} |" if tps else " |"
+            compile_s = f"{r['compile_s']:.2f}"
+            compile_s += COMPILE_S_NOTE.get(r.get("search_pass"), "")
+            provenance = ""
+            if with_provenance:
+                provenance = " %s |" % PROVENANCE_MARK.get(r.get("provenance"), "—")
             lines.append(
                 f"| {r['framework']} | {r['backend']} | {r['variant']} "
                 f"| {r.get('precision', 'f32')} "
                 f"| {s['p50']:.3f} | {s['p10']:.3f} | {s['p90']:.3f} "
-                f"| {r['queued_step_ms']:.3f} | {r['compile_s']:.2f} | {parity} |{tokens}"
+                f"| {r['queued_step_ms']:.3f} | {compile_s} |{provenance} {parity} |{tokens}"
             )
     if unavailable:
         # Stated where the matrix is read: a cell missing because the workload cannot express it
@@ -395,6 +567,13 @@ def main():
     )
     ap.add_argument("--skip-build", action="store_true")
     ap.add_argument(
+        "--no-fixture-digest-check",
+        action="store_true",
+        help="measure fixtures whose bytes do not match fixtures/DIGESTS.txt. The digest is "
+        "what says which workload a published number is on (gh-ocannl-645); use this only "
+        "for a deliberately regenerated fixture you are about to re-record",
+    )
+    ap.add_argument(
         "--no-skip-cells",
         action="store_true",
         help="run the SKIP_CELLS entries too. Each was observed pathological on one "
@@ -432,6 +611,8 @@ def main():
     if not fixtures:
         sys.exit("no fixtures found — run gen_fixtures.py first")
 
+    fixture_shas = check_fixture_digests(fixtures, allow_unpinned=args.no_fixture_digest_check)
+
     metas = {fx: read_st_metadata(fx) for fx in fixtures}
     models = {fx: metas[fx].get("model", "mlp") for fx in fixtures}
     if "ocannl" in args.only and not args.skip_build:
@@ -447,10 +628,16 @@ def main():
     partial.parent.mkdir(parents=True, exist_ok=True)
     partial.write_text("")  # fresh run
 
+    # The fixture the cells currently being dispatched are measuring — stamped onto every result
+    # so a row, and the report built from it, states its own workload identity (gh-ocannl-645)
+    # rather than leaving it to how the operator ran the sweep.
+    stamp = {}
+
     def collect(label, cmd, override=None, **kwargs):
         t0 = time.monotonic()
         r = run_cell(label, cmd, **kwargs)
         if r:
+            r.update(stamp)
             if override:
                 r.update(override)
             results.append(r)
@@ -464,6 +651,8 @@ def main():
     for fx in fixtures:
         name = fx.stem
         model = models[fx]
+        stamp.clear()
+        stamp.update(fixture=fx.name, fixture_sha256=fixture_shas[fx])
         if "ocannl" in args.only:
             variants = ["default"]
             if args.materialized:
@@ -510,8 +699,18 @@ def main():
                             if pass1 is None:
                                 failures.append(f"{label} (search pass)")
                                 continue
+                            # What the search pass actually did, which is not derivable from the
+                            # compile_s it hands over: a warm autotune_cache makes it a replay, and
+                            # autotune_search=false makes it neither a search nor a replay. Both
+                            # are legitimate, and both would otherwise be published as a search
+                            # cost. Stamped so the report can say which.
+                            pass1_verdict = search_provenance(pass1)
+                            if pass1_verdict != "SEARCHED":
+                                print(f"    search pass verdict {pass1_verdict}: its compile_s is "
+                                      "not a from-scratch search cost", flush=True)
                             collect(label, cmd, env=env, cwd=HERE,
-                                    override={**ident, "compile_s": pass1["compile_s"]})
+                                    override={**ident, "compile_s": pass1["compile_s"],
+                                              "search_pass": pass1_verdict})
                         else:
                             collect(label, cmd, env=env, cwd=HERE, override=ident)
         if "pytorch" in args.only:
@@ -536,6 +735,7 @@ def main():
                     )
 
     parity_check(results)
+    provenance_violations = provenance_check(results)
     report(results, HERE / "results", unavailable)
     ok = True
     if unavailable:
@@ -558,6 +758,21 @@ def main():
         # The reference cell was requested but is missing — the gate would be vacuous.
         ok = False
         print(f"PARITY GATE: {len(no_ref)} cell(s) have no reference to compare against", flush=True)
+    if provenance_violations:
+        # Not a parity problem: these cells computed the right thing. Their step times are the
+        # search process's, which the two-pass protocol exists to keep out of a report — and which
+        # nothing downstream can detect once the numbers are quoted (gh-ocannl-644).
+        ok = False
+        labels = ", ".join(
+            f"{r['workload']} {r['backend']}/"
+            f"{cell_name(r['variant'], r.get('precision', 'f32'))}"
+            for r in provenance_violations
+        )
+        print(
+            f"PROVENANCE GATE: {len(provenance_violations)} tuned cell(s) reported step times "
+            f"from a process that searched: {labels}",
+            flush=True,
+        )
     failed = [r for r in results if r["parity"] == "FAIL"]
     if failed:
         ok = False

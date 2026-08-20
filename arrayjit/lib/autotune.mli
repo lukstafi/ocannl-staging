@@ -338,6 +338,14 @@ type report = {
       (** The schedule came from the disk cache; no search ran. The census is then empty except for
           a declined baseline: the base compile precedes the lookup, so its rejection is real
           information about this process on this device even though nothing was searched. *)
+  searched : bool;
+      (** This call ran a search: it proposed candidates and compiled or timed them, leaving the
+          process loaded with their modules and buffers. [not cache_hit] is NOT this predicate —
+          with [autotune_search=false] (the reproducible profile, gh-ocannl-559) and on every
+          pre-search failure the call reports [cache_hit = false] having searched nothing, and the
+          caller ships the untuned default. The distinction is what a measurement harness needs to
+          say which process produced its timings (gh-ocannl-644), so it is stated here rather than
+          inferred from a counter that happens to be zero. *)
   candidates_timed : int;
       (** Including the serial baseline where it was dispatched — on GPU backends it is not
           (gh-ocannl-532), and neither is any other candidate that binds no hardware dimension. So

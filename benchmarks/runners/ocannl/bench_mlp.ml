@@ -185,12 +185,12 @@ let () =
             ^ Option.value_map failure.candidate ~default:"" ~f:(fun candidate -> ":" ^ candidate))
       in
       Stdlib.Printf.eprintf
-        "%s: cache_hit=%b partial=%b timed=%d failed=%d declines=[%s] terminal=%s rounds=%d \
+        "%s: searched=%b cache_hit=%b partial=%b timed=%d failed=%d declines=[%s] terminal=%s rounds=%d \
          sketch=%d mma_candidates=%d mma_timed=%d model_pruned=%d bound_pruned=%d fissioned=%b \
          baseline_ms=%.4f default_ms=%s best_ms=%.4f best=%s tensorized=%b mma_statements=%d \
          mma_scalar_fallbacks=%d mma_best_ms=%s\n\
          %!"
-        tag r.cache_hit r.partial r.candidates_timed r.candidates_failed declines terminal
+        tag r.searched r.cache_hit r.partial r.candidates_timed r.candidates_failed declines terminal
         r.rounds_run r.sketch_candidates r.mma_candidates r.mma_timed r.model_pruned r.bound_pruned
         r.fissioned r.baseline_ms
         (Option.value_map r.default_ms ~default:"none" ~f:(Printf.sprintf "%.4f"))
@@ -205,7 +205,15 @@ let () =
         H.collect_arm arms r;
         print_report "tune arm" r)
   in
-  let flip_report = Some (fun (r : Autotune.report) -> print_report "tune flip" r) in
+  let flip_report =
+    Some
+      (fun (r : Autotune.report) ->
+        (* Not an arm — but a flip refinement that actually searched leaves this process just as
+           loaded as an arm search, so it counts toward the result line's [searched]
+           (gh-ocannl-644). *)
+        H.collect_search arms r;
+        print_report "tune flip" r)
+  in
   (* BENCH_TUNE composes with every precision leg (gh-ocannl-529). It used to be rejected outright
      with BENCH_PRECISION, which made bf16 unmeasurable under autotuning — and bf16 is the ONLY
      tensor-core route on RDNA3/3.5, whose WMMA has no f32-input shape, so whether HIP even seeds a

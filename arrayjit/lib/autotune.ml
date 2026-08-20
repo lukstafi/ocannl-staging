@@ -13,6 +13,7 @@ type terminal_failure = { phase : Outcome.phase; candidate : string option; deta
 
 type report = {
   cache_hit : bool;
+  searched : bool;
   candidates_timed : int;
   candidates_failed : int;
   partial : bool;
@@ -63,6 +64,7 @@ type report = {
 let no_search_report =
   {
     cache_hit = false;
+    searched = false;
     candidates_timed = 0;
     candidates_failed = 0;
     partial = false;
@@ -2498,6 +2500,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                 emit_report
                   {
                     cache_hit = true;
+                    searched = false;
                     candidates_timed = 0;
                     (* No search ran, so the only rejection this can carry is the baseline's. *)
                     candidates_failed = failed_count declines;
@@ -2841,6 +2844,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
           let partial_report =
             {
               cache_hit = false;
+              searched = true;
               candidates_timed = !n_timed;
               candidates_failed = failed_count declines;
               partial = true;
@@ -3503,6 +3507,7 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
           let completed_report =
             {
               cache_hit = false;
+              searched = true;
               candidates_timed = !n_timed;
               candidates_failed = failed_count declines;
               partial = false;

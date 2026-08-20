@@ -1,6 +1,18 @@
+import contextlib
+import io
+import json
+import sys
+import tempfile
+import types
 import unittest
+import unittest.mock
+from pathlib import Path
 
+import fixture_digest
 import orchestrate
+from runners import bench_common
+
+HERE = Path(__file__).resolve().parent
 
 
 def result(framework, backend, variant, losses, precision="f32"):
@@ -180,6 +192,352 @@ class PrecisionLegTest(unittest.TestCase):
         reason = orchestrate.precision_unavailable("conv", "train", "bf16")
         self.assertIsNotNone(reason)
         self.assertIn("conv", reason)
+
+
+class ProvenanceTest(unittest.TestCase):
+    """gh-ocannl-644: a tuned cell's result says which pass timed it."""
+
+    def tuned(self, searched, searches=0, replays=0):
+        r = result("ocannl", "hip", "tuned", [2.3, 2.2, 2.1])
+        if searched is not None:
+            r["searched"] = searched
+            r["tune"] = {
+                "shipped": "A", "searches": searches, "replays": replays, "arms": []
+            }
+        return r
+
+    def test_a_replay_is_the_compliant_case(self):
+        replay = self.tuned(False, replays=2)
+
+        self.assertEqual(orchestrate.provenance_check([replay]), [])
+        self.assertEqual(replay["provenance"], "REPLAY")
+
+    def test_search_pass_timings_are_a_violation(self):
+        # The failure this exists to catch: both passes emit the same framework/backend/variant/
+        # precision, so before `searched` a report could quote pass-1 numbers indefinitely.
+        searching = self.tuned(True, searches=2)
+
+        self.assertEqual(orchestrate.provenance_check([searching]), [searching])
+        self.assertEqual(searching["provenance"], "SEARCH-PASS")
+
+    def test_one_classifier_reads_searched_for_every_consumer(self):
+        # The round-1 and round-2 findings were the same shape — a three-valued fact read through
+        # a boolean, wrong in a different place each time. There is now one reading of it, and the
+        # gate, the `pass` column and the carried-over compile_s label all go through it.
+        tune = lambda searches, replays: {  # noqa: E731
+            "shipped": "A", "searches": searches, "replays": replays, "arms": []
+        }
+        searched = {"searched": True, "tune": tune(2, 0)}
+        replay = {"searched": False, "tune": tune(0, 2)}
+        no_search = {"searched": False, "tune": tune(0, 0)}
+
+        self.assertEqual(orchestrate.search_provenance(searched), "SEARCHED")
+        self.assertEqual(orchestrate.search_provenance(replay), "REPLAY")
+        self.assertEqual(orchestrate.search_provenance(no_search), "NO-SEARCH")
+        self.assertEqual(orchestrate.search_provenance({"searched": None}), "UNKNOWN")
+        # No tune object: `searched: false` alone cannot separate a replay from a cell that
+        # searched nothing, and guessing either way has already been a bug.
+        self.assertEqual(orchestrate.search_provenance({"searched": False}), "UNKNOWN")
+
+    def test_only_a_real_replay_labels_the_carried_over_compile_cost_cached(self):
+        # A search pass under autotune_search=false hands over the cost of compiling the untuned
+        # default; calling that "(cached)" would claim a schedule cache it never touched.
+        self.assertEqual(orchestrate.COMPILE_S_NOTE.get("REPLAY"), " (cached)")
+        self.assertEqual(orchestrate.COMPILE_S_NOTE.get("NO-SEARCH"), " (no search)")
+        self.assertIsNone(orchestrate.COMPILE_S_NOTE.get("SEARCHED"))
+        self.assertIsNone(orchestrate.COMPILE_S_NOTE.get("UNKNOWN"))
+
+    def test_a_disabled_search_is_neither_a_violation_nor_a_replay(self):
+        # gh-ocannl-559's reproducible profile turns the search off: the cell ships the untuned
+        # default, having neither searched nor replayed. Gating it would fail BOTH passes of every
+        # tuned cell, and calling it a replay would credit the row with a tuned artifact it does
+        # not have.
+        cell = self.tuned(False, searches=0, replays=0)
+
+        self.assertEqual(orchestrate.provenance_check([cell]), [])
+        self.assertEqual(cell["provenance"], "NO-SEARCH")
+
+    def test_a_runner_without_the_field_is_unknown_not_a_violation(self):
+        old = self.tuned(None)
+
+        self.assertEqual(orchestrate.provenance_check([old]), [])
+        self.assertEqual(old["provenance"], "UNKNOWN")
+
+    def test_cells_that_neither_search_nor_compile_are_not_annotated(self):
+        # They have no process distinction to be on the wrong side of; a `pass` entry for them
+        # would be a claim about a protocol they do not run.
+        default = result("ocannl", "hip", "default", [2.3, 2.2, 2.1])
+        default["searched"] = False
+        eager = result("pytorch", "cpu", "eager", [2.3, 2.2, 2.1])
+        jit = result("tinygrad", "CPU", "jit", [2.3, 2.2, 2.1])
+
+        self.assertEqual(orchestrate.provenance_check([default, eager, jit]), [])
+        for r in (default, eager, jit):
+            self.assertNotIn("provenance", r)
+
+    def test_a_single_pass_framework_states_its_search_without_being_gated(self):
+        # gh-ocannl-675: tinygrad's beam search and torch.compile run in the timing process by
+        # protocol. Nothing yet says they pay for it, so the report states it and the gate keeps
+        # its hands off — the alternative, saying nothing, reads as though only OCANNL searches.
+        beam = result("tinygrad", "AMD", "beam", [2.3, 2.2, 2.1])
+        beam["searched"] = True
+        compiled = result("pytorch", "cuda", "compiled", [2.3, 2.2, 2.1])
+        compiled["searched"] = False
+
+        self.assertEqual(orchestrate.provenance_check([beam, compiled]), [])
+        self.assertEqual(beam["provenance"], "SAME-PROCESS")
+        self.assertEqual(compiled["provenance"], "CACHED")
+
+    def test_a_single_pass_cell_that_cannot_tell_is_unknown(self):
+        beam = result("tinygrad", "AMD", "beam", [2.3, 2.2, 2.1])
+        beam["searched"] = None
+
+        self.assertEqual(orchestrate.provenance_check([beam]), [])
+        self.assertEqual(beam["provenance"], "UNKNOWN")
+
+    def test_every_verdict_renders(self):
+        for verdict in (
+            "REPLAY",
+            "SEARCH-PASS",
+            "NO-SEARCH",
+            "SAME-PROCESS",
+            "CACHED",
+            "UNKNOWN",
+        ):
+            self.assertIn(verdict, orchestrate.PROVENANCE_MARK)
+
+    def test_the_gated_and_stated_cell_sets_do_not_overlap(self):
+        self.assertFalse(orchestrate.TWO_PASS_CELLS & orchestrate.SAME_PROCESS_CELLS)
+
+
+class RunnerProvenanceProbeTest(unittest.TestCase):
+    """gh-ocannl-644: what the Python runners report, and what they refuse to claim."""
+
+    def test_a_cell_that_runs_no_search_says_so(self):
+        self.assertIs(bench_common.tinygrad_searched(None, beam=0), False)
+        self.assertIs(bench_common.torch_searched(object(), compiled=False), False)
+
+    def test_beam_counts_distinguish_a_search_from_a_kernel_cache_replay(self):
+        self.assertIs(
+            bench_common.tinygrad_searched({"call": 4, "hit": 3, "put": 1}, beam=4), True
+        )
+        self.assertIs(
+            bench_common.tinygrad_searched({"call": 3, "hit": 3, "put": 0}, beam=4), False
+        )
+
+    def test_a_probe_that_saw_nothing_says_unknown_rather_than_no(self):
+        # The internals moved under the probe. A wrong False is exactly the silent claim the
+        # field exists to prevent, so this must not read as "replayed a cache".
+        self.assertIsNone(bench_common.tinygrad_searched(None, beam=4))
+        self.assertIsNone(
+            bench_common.tinygrad_searched({"call": 0, "hit": 0, "put": 0}, beam=4)
+        )
+
+    def test_torch_reads_the_fx_graph_cache_counters(self):
+        class Torch:
+            def __init__(self, **counters):
+                self._dynamo = type(
+                    "d", (), {"utils": type("u", (), {"counters": {"inductor": counters}})}
+                )
+
+        self.assertIs(bench_common.torch_searched(Torch(fxgraph_cache_miss=2), True), True)
+        self.assertIs(
+            bench_common.torch_searched(Torch(fxgraph_cache_hit=2), compiled=True), False
+        )
+        self.assertIsNone(bench_common.torch_searched(Torch(), compiled=True))
+        self.assertIsNone(bench_common.torch_searched(object(), compiled=True))
+
+    def test_a_beam_search_that_writes_no_cache_entry_still_counts_as_a_search(self):
+        # CACHELEVEL=0 / IGNORE_BEAM_CACHE: the search runs and touches no cache. Counting cache
+        # traffic alone cannot see it, which is why the probe counts calls too.
+        self.assertIs(bench_common.tinygrad_searched({"call": 4, "hit": 0, "put": 0}, beam=4), True)
+        self.assertIs(bench_common.tinygrad_searched({"call": 4, "hit": 1, "put": 0}, beam=4), True)
+        self.assertIs(bench_common.tinygrad_searched({"call": 4, "hit": 4, "put": 0}, beam=4), False)
+
+    def test_a_bypassed_torch_graph_is_codegen_not_a_replay(self):
+        # A run with more than one graph is mixed: one served from the cache, one the cache
+        # refused, is still a graph compiled in the timing process.
+        class Torch:
+            def __init__(self, **counters):
+                self._dynamo = type(
+                    "d", (), {"utils": type("u", (), {"counters": {"inductor": counters}})}
+                )
+
+        mixed = Torch(fxgraph_cache_hit=3, fxgraph_cache_bypass=1)
+        self.assertIs(bench_common.torch_searched(mixed, compiled=True), True)
+        self.assertIs(
+            bench_common.torch_searched(Torch(fxgraph_cache_bypass=2), compiled=True), True
+        )
+
+    def test_the_beam_instrument_counts_only_beam_entries_and_passes_values_through(self):
+        stored = {("beam_search", "k1"): "winner"}
+        calls = []
+
+        class Search:
+            @staticmethod
+            def diskcache_get(table, key):
+                calls.append(("get", table, key))
+                return stored.get((table, key))
+
+            @staticmethod
+            def diskcache_put(table, key, val):
+                stored[(table, key)] = val
+                return val
+
+        module = types.ModuleType("tinygrad.engine.search")
+        module.diskcache_get, module.diskcache_put = Search.diskcache_get, Search.diskcache_put
+        packages = {
+            "tinygrad": types.ModuleType("tinygrad"),
+            "tinygrad.engine": types.ModuleType("tinygrad.engine"),
+            "tinygrad.engine.search": module,
+        }
+        packages["tinygrad.engine"].search = module
+        with unittest.mock.patch.dict(sys.modules, packages):
+            counts = bench_common.instrument_tinygrad_beam()
+            self.assertEqual(module.diskcache_get("beam_search", "k1"), "winner")
+            self.assertIsNone(module.diskcache_get("beam_search", "k2"))
+            module.diskcache_put("beam_search", "k2", "found")
+            module.diskcache_get("compile", "unrelated")
+            module.diskcache_put("compile", "unrelated", "x")
+
+        self.assertEqual(counts, {"call": 0, "hit": 1, "put": 1})
+        self.assertIn(("get", "compile", "unrelated"), calls)
+
+    def test_an_uninstrumentable_tinygrad_is_not_an_error(self):
+        module = types.ModuleType("tinygrad.engine.search")  # no diskcache helpers
+        packages = {
+            "tinygrad": types.ModuleType("tinygrad"),
+            "tinygrad.engine": types.ModuleType("tinygrad.engine"),
+            "tinygrad.engine.search": module,
+        }
+        with unittest.mock.patch.dict(sys.modules, packages):
+            self.assertIsNone(bench_common.instrument_tinygrad_beam())
+
+
+class FixtureDigestTest(unittest.TestCase):
+    """gh-ocannl-645: what a report's numbers were measured on is recorded, not assumed."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+
+    def fixture(self, name, content=b"weights"):
+        path = self.dir / name
+        path.write_bytes(content)
+        return path
+
+    def check(self, *args, **kwargs):
+        """check_fixture_digests with its per-fixture log kept out of the test output."""
+        with contextlib.redirect_stdout(io.StringIO()):
+            return orchestrate.check_fixture_digests(*args, **kwargs)
+
+    def test_recording_round_trips(self):
+        fx = self.fixture("mlp_small.safetensors")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+
+        changes = fixture_digest.record(digests, [fx])
+
+        self.assertEqual([(name, was) for name, was, _ in changes], [("mlp_small.safetensors", None)])
+        entries = fixture_digest.read_digests(digests)
+        self.assertEqual(entries[fx.name], (fixture_digest.sha256_file(fx), fx.stat().st_size))
+        self.assertEqual(fixture_digest.status(fx, entries)[0], "MATCH")
+
+    def test_regenerating_different_bytes_is_announced_as_a_change(self):
+        fx = self.fixture("gpt2_mini.safetensors", b"generated at spec revision A")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        fixture_digest.record(digests, [fx])
+        was = fixture_digest.read_digests(digests)[fx.name]
+
+        fx.write_bytes(b"generated at spec revision B")
+        changes = fixture_digest.record(digests, [fx])
+
+        self.assertEqual(len(changes), 1)
+        name, previous, now = changes[0]
+        self.assertEqual((name, previous), (fx.name, was))
+        self.assertEqual(now, fixture_digest.read_digests(digests)[fx.name])
+
+    def test_regenerating_one_fixture_keeps_the_others_recorded(self):
+        # gen_fixtures.py takes a spec list; regenerating one workload must not drop the
+        # identities of the fixtures already on disk, or the pin silently narrows to one.
+        a, b = self.fixture("a.safetensors", b"aaa"), self.fixture("b.safetensors", b"bbb")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        fixture_digest.record(digests, [a, b])
+
+        fixture_digest.record(digests, [a])
+
+        self.assertEqual(set(fixture_digest.read_digests(digests)), {a.name, b.name})
+
+    def test_a_differently_generated_fixture_does_not_match(self):
+        # The hazard: the difference is applied uniformly to every cell, so the cross-cell parity
+        # gate certifies it. Only the digest contradicts the report's workload name.
+        fx = self.fixture("lenet.safetensors", b"the bytes the report was measured on")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        fixture_digest.record(digests, [fx])
+        entries = fixture_digest.read_digests(digests)
+
+        fx.write_bytes(b"the bytes someone regenerated later")
+
+        self.assertEqual(fixture_digest.status(fx, entries)[0], "MISMATCH")
+
+    def test_an_unrecorded_fixture_is_not_silently_accepted(self):
+        fx = self.fixture("mystery.safetensors")
+
+        self.assertEqual(fixture_digest.status(fx, {})[0], "UNRECORDED")
+
+    def test_a_malformed_line_is_an_error_not_a_dropped_pin(self):
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        digests.write_text(fixture_digest.HEADER + "deadbeef  lenet.safetensors\n")
+
+        with self.assertRaises(ValueError):
+            fixture_digest.read_digests(digests)
+
+    def test_the_checked_in_file_parses_and_names_live_workloads(self):
+        # A digest for a workload spec that no longer exists is stale: it pins bytes no current
+        # run can produce, and reads as coverage.
+        entries = fixture_digest.read_digests(HERE / "fixtures" / fixture_digest.DIGEST_FILE)
+        specs = {p.stem for p in (HERE / "workloads").glob("*.json")}
+        self.assertTrue(specs, "no workload specs found next to the test")
+        for name in entries:
+            self.assertTrue(name.endswith(".safetensors"), name)
+            self.assertIn(name[: -len(".safetensors")], specs, name)
+
+    def test_the_sweep_refuses_bytes_nothing_records(self):
+        fx = self.fixture("lenet.safetensors")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        fixture_digest.write_digests(digests, {})
+
+        with self.assertRaises(SystemExit) as refused:
+            self.check([fx], digests_path=digests)
+
+        self.assertIn("--no-fixture-digest-check", str(refused.exception))
+
+    def test_the_sweep_runs_and_stamps_a_recorded_fixture(self):
+        fx = self.fixture("lenet.safetensors")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        fixture_digest.record(digests, [fx])
+
+        shas = self.check([fx], digests_path=digests)
+
+        self.assertEqual(shas, {fx: fixture_digest.sha256_file(fx)})
+
+    def test_the_opt_out_measures_them_and_still_reports_the_digest(self):
+        # A deliberate regeneration is a legitimate reason to run unpinned; it must not also cost
+        # the run its record of what it ran on.
+        fx = self.fixture("lenet.safetensors")
+        digests = self.dir / fixture_digest.DIGEST_FILE
+        fixture_digest.record(digests, [fx])
+        fx.write_bytes(b"regenerated")
+
+        shas = self.check([fx], digests_path=digests, allow_unpinned=True)
+
+        self.assertEqual(shas, {fx: fixture_digest.sha256_file(fx)})
+
+    def test_generated_fixtures_are_named_after_their_spec(self):
+        # What the recorded-name check above relies on: gen_fixtures.py writes
+        # fixtures/<spec name>.safetensors, and every spec's `name` is its file stem.
+        for spec in (HERE / "workloads").glob("*.json"):
+            self.assertEqual(json.loads(spec.read_text())["name"], spec.stem, spec.name)
 
 
 if __name__ == "__main__":

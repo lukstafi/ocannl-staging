@@ -14,6 +14,8 @@ from pathlib import Path
 import numpy as np
 from safetensors.numpy import save_file
 
+import fixture_digest
+
 
 def gen_moons(rng, n, noise=0.1):
     """Two interleaved half-moons, n samples, inputs [n, 2], labels [n] in {0, 1}."""
@@ -180,10 +182,30 @@ def build(spec_path: Path, out_dir: Path):
     out_path = out_dir / f"{spec['name']}.safetensors"
     save_file(tensors, str(out_path), metadata=meta)
     print(f"wrote {out_path} ({out_path.stat().st_size} bytes)")
+    return out_path
 
 
 if __name__ == "__main__":
     here = Path(__file__).parent
     specs = [Path(a) for a in sys.argv[1:]] or sorted((here / "workloads").glob("*.json"))
-    for spec in specs:
-        build(spec, here / "fixtures")
+    out_dir = here / "fixtures"
+    written = [build(spec, out_dir) for spec in specs]
+    # fixtures/ is gitignored, so this file is the only record of what was just generated
+    # (gh-ocannl-645). Only the regenerated entries are rewritten: generating one workload must
+    # not drop the identities of the fixtures already on disk.
+    digests = out_dir / fixture_digest.DIGEST_FILE
+    changes = fixture_digest.record(digests, written)
+    print(f"recorded {len(written)} digest(s) in {digests}")
+    for name, was, now in changes:
+        if was is None:
+            print(f"  new: {name} sha256 {now[0]}")
+        else:
+            # Loudly, and not only in a git diff: numbers measured on the old bytes are not
+            # comparable with numbers measured on the new ones, whatever the report calls the
+            # workload.
+            print(f"  CHANGED: {name}")
+            print(f"    was  sha256 {was[0]} ({was[1]} bytes)")
+            print(f"    now  sha256 {now[0]} ({now[1]} bytes)")
+    if any(was is not None for _, was, _ in changes):
+        print("  a changed fixture is a changed workload: reports measured on the previous "
+              "digest are not comparable with reports measured on this one.")
