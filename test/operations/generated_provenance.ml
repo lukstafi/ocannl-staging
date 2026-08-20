@@ -25,6 +25,18 @@ let backend_name = "cc"
 let dir () = Utils.build_files_dir ()
 let path routine = Stdlib.Filename.concat (dir ()) (routine ^ ".c")
 
+(* The symlink modes below must NOT call [dir ()] first: it creates the directory whose place the
+   link has to take. They resolve the same path the way Generated does instead. *)
+let artifacts_root = "build_files"
+
+let scoped_dir () =
+  Stdlib.Filename.concat artifacts_root
+    (Stdlib.Filename.remove_extension (Stdlib.Filename.basename Stdlib.Sys.executable_name))
+
+let link_target () = Stdlib.Filename.concat artifacts_root "gp_symlink_target"
+let precious () = Stdlib.Filename.concat (link_target ()) "gp_precious.c"
+let ignore_unix f x = try f x with Unix.Unix_error _ -> ()
+
 (* Stands in for the backend emitting a kernel. *)
 let emit routine contents = Stdio.Out_channel.write_all (path routine) ~data:contents
 
@@ -107,4 +119,35 @@ let () =
       Stdio.printf "unarmed read under an explicit prefix: %S\n" (Generated.read "gp_shared")
   (* Before init the directory may hold anything, so no read may be answered. *)
   | "uninitialized" -> Stdio.printf "read before init: %S\n" (Generated.read "gp_anything")
+  (* === The symlinked artifact directory, in three steps ===
+
+     [Sys.is_directory] follows symlinks, so a symlinked build_files/<exe>/ reads as an ordinary
+     directory and a sweep would unlink real files in the link's TARGET — outside the artifact tree
+     entirely. One mode cannot pin this: init must be refused (exit 1), but "the decoy survived" has
+     to be observable in an exit status of its own, and an already-failing process cannot carry it.
+     So the survival check is a separate run, which exits 0 only if the file is still there. *)
+  | "symlink_setup" ->
+      ignore_unix (fun d -> Unix.mkdir d 0o777) artifacts_root;
+      ignore_unix (fun d -> Unix.mkdir d 0o777) (link_target ());
+      Stdio.Out_channel.write_all (precious ()) ~data:"a file that is not this test's to delete\n";
+      let scoped = scoped_dir () in
+      (* Whatever an earlier mode left here has to go, so the link can take its place. *)
+      ignore_unix Unix.unlink scoped;
+      (try
+         Array.iter (Stdlib.Sys.readdir scoped) ~f:(fun e ->
+             ignore_unix Unix.unlink (Stdlib.Filename.concat scoped e));
+         ignore_unix Unix.rmdir scoped
+       with Stdlib.Sys_error _ -> ());
+      (* Relative, so it resolves inside build_files/ wherever the tree is checked out. *)
+      Unix.symlink "gp_symlink_target" scoped;
+      Verdict.p "the symlinked artifact directory is staged"
+        (Generated.is_symlink scoped && Stdlib.Sys.file_exists (precious ()))
+  | "symlink_init" ->
+      Generated.init ~backend_name;
+      Stdio.printf "init returned on a symlinked artifact directory\n"
+  | "symlink_verify" ->
+      let survived = Stdlib.Sys.file_exists (precious ()) in
+      (* Restore a real directory for whatever runs next. *)
+      ignore_unix Unix.unlink (scoped_dir ());
+      Verdict.p "a symlinked artifact directory is refused rather than followed into" survived
   | m -> failwith ("generated_provenance: unknown mode " ^ m)

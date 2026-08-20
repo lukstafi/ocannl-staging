@@ -33,6 +33,7 @@
  (libraries
   base
   stdio
+  unix
   arrayjit.utils
   arrayjit.ir
   arrayjit.verdict

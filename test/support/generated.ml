@@ -122,6 +122,14 @@ let remove_or_fail ~context p =
          context p
          (match err with Some msg -> " (" ^ msg ^ ")" | None -> ""))
 
+(* [Stdlib.Sys.is_directory] follows symlinks, so a symlinked [build_files/] or [build_files/<exe>/]
+   is accepted as an ordinary directory — and a sweep would then [readdir] the LINK TARGET and
+   unlink real files outside the artifact tree. [arrayjit/lib/utils.ml]'s startup cleanup uses
+   [Unix.lstat] for exactly this reason; the same question has to be asked here, of the destructive
+   operation this module performs. Unlinking an individual symlinked ENTRY is not the hazard (that
+   removes the link, not its target, which is what the startup cleanup relies on too) — the
+   containing directory is. *)
+
 (** [init ~backend_name] empties this executable's [build_files/] subdirectory, so that every
     artifact found later was emitted by this run. Call it once at the top of the test, before any
     compile — [Verdict.fail]s if a read happens without it.
@@ -130,36 +138,53 @@ let remove_or_fail ~context p =
     [String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")]. It is passed in
     rather than read here to keep the dependency at [arrayjit.utils]: this module resolves paths, it
     does not choose backends. *)
+let is_symlink p =
+  match Unix.lstat p with
+  | { Unix.st_kind = Unix.S_LNK; _ } -> true
+  | _ -> false
+  | exception Unix.Unix_error _ -> false
+
 let init ~backend_name =
   backend := Some (String.lowercase backend_name);
   Hashtbl.clear read_digests;
   Hashtbl.clear armed;
   let dir = Utils.build_files_dir () in
-  match scoping () with
-  | Flat ->
-      (* Shared with every concurrently running test by definition, so there is no cleanup this
-         process may perform and no per-routine deletion that would be safe either: another test can
-         be writing the very name this one is about to read. Fail loudly — a test that silently gave
-         freshness up would be back where this module started. *)
-      sweeps_directory := false;
-      Verdict.fail
-        "Generated.init: build_files is flat (build_files_prefix=.), shared with concurrently \
-         running tests; artifact freshness cannot be established here"
-  | Private_to_this_exe ->
-      (* Derived from this executable's own name, so nothing else writes here: emptying it makes
-         existence mean "written by this run" for every routine at once. *)
-      sweeps_directory := true;
-      Array.iter (Stdlib.Sys.readdir dir) ~f:(fun entry ->
-          let p = Stdlib.Filename.concat dir entry in
-          let is_dir = try Stdlib.Sys.is_directory p with Stdlib.Sys_error _ -> true in
-          if not is_dir then remove_or_fail ~context:"Generated.init" p)
-  | Shared_prefix _ ->
-      (* An explicit prefix is not this executable's to empty — two tests can be configured with the
-         same one, and a wholesale sweep would delete a concurrent test's kernel between its compile
-         and its read. Freshness is still available, one routine at a time: {!arm} deletes a single
-         path, which touches only the routine this test is about to compile. So the sweep is skipped
-         and {!read} requires that path to have been armed. *)
-      sweeps_directory := false
+  if is_symlink dir || is_symlink (Stdlib.Filename.dirname dir) then (
+    (* Refused rather than skipped: silently declining to establish freshness is the state this
+       module exists to make impossible, and following the link would delete files that are not this
+       test's — a strictly worse outcome than any stale artifact. *)
+    sweeps_directory := false;
+    Verdict.fail
+      (Printf.sprintf
+         "Generated.init: %s (or its parent) is a symbolic link; refusing to sweep it, since \
+          following it would delete files outside the artifact tree"
+         dir))
+  else
+    match scoping () with
+    | Flat ->
+        (* Shared with every concurrently running test by definition, so there is no cleanup this
+           process may perform and no per-routine deletion that would be safe either: another test
+           can be writing the very name this one is about to read. Fail loudly — a test that
+           silently gave freshness up would be back where this module started. *)
+        sweeps_directory := false;
+        Verdict.fail
+          "Generated.init: build_files is flat (build_files_prefix=.), shared with concurrently \
+           running tests; artifact freshness cannot be established here"
+    | Private_to_this_exe ->
+        (* Derived from this executable's own name, so nothing else writes here: emptying it makes
+           existence mean "written by this run" for every routine at once. *)
+        sweeps_directory := true;
+        Array.iter (Stdlib.Sys.readdir dir) ~f:(fun entry ->
+            let p = Stdlib.Filename.concat dir entry in
+            let is_dir = try Stdlib.Sys.is_directory p with Stdlib.Sys_error _ -> true in
+            if not is_dir then remove_or_fail ~context:"Generated.init" p)
+    | Shared_prefix _ ->
+        (* An explicit prefix is not this executable's to empty — two tests can be configured with
+           the same one, and a wholesale sweep would delete a concurrent test's kernel between its
+           compile and its read. Freshness is still available, one routine at a time: {!arm} deletes
+           a single path, which touches only the routine this test is about to compile. So the sweep
+           is skipped and {!read} requires that path to have been armed. *)
+        sweeps_directory := false
 
 (** [arm ?ext routine] deletes [routine]'s artifact, so that the next {!read} of it sees only what
     the *next* compile emits. Use it in a loop that compiles several candidates under one routine

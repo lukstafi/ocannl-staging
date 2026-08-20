@@ -2873,7 +2873,7 @@
 (executable
  (name generated_provenance)
  (modules generated_provenance)
- (libraries base stdio arrayjit.utils arrayjit.verdict test_utils))
+ (libraries base stdio unix arrayjit.utils arrayjit.verdict test_utils))
 
 (rule
  (aliases runtest generated_provenance)
@@ -2883,6 +2883,11 @@
   %{dep:generated_provenance.exe})
  (action
   (progn
+   (run ./generated_provenance.exe symlink_setup)
+   (with-accepted-exit-codes
+    1
+    (run ./generated_provenance.exe symlink_init))
+   (run ./generated_provenance.exe symlink_verify)
    (run ./generated_provenance.exe fresh)
    (run ./generated_provenance.exe armed_overwrite)
    (with-accepted-exit-codes
