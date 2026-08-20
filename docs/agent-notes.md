@@ -1542,6 +1542,51 @@ that they earn a lookup rather than always-loaded space.
   is anchored to the directory that generates them. And where the premise is "this value happens to
   equal that constant", read the constant from where it is defined rather than restating the
   coincidence: an unchecked default is the one name no call site spells.
+- The `.expected` golden of such a repository-wide check should hold what is TRUE of the repository,
+  not how much of it there is. A tally — "170 tests in this directory", "241 test stanzas declare
+  the config" — moves on every correct addition anywhere, so every unrelated contributor has to
+  promote a file they did not touch, and the promote is indistinguishable from blessing a real
+  regression in that same file; worse, one hot line in one file collects a textual conflict from
+  every parallel branch at once (gh-ocannl-665, where it was an arc's only rebase conflict). The
+  counts are usually there as the "the scan did not go blind" signal, which is a real thing to keep
+  — so keep it, elsewhere. Three places it can live, all churn-free: PRESENCE in the golden (which
+  kinds of stanza a directory has, changing only when it gains its first or loses its last), a floor
+  read by a SECOND reader that shares no machinery with the first (`Dune_stanza_scan.head_occurrences`
+  counts `(test` off the raw text, and a sexp walk going blind cannot take it down too), and the
+  exact numbers on STDERR, which a `(test)` stanza does not diff. Assert the floor through `Verdict`
+  rather than as a golden line, so a scan that goes blind cannot be promoted back to green. Put the
+  independence in the CLASSIFICATION and nowhere else: what can go blind is the checker's own
+  traversal and command-recognition, so answer those questions a second way — but PARSE the input
+  with the same reader the format admits rather than re-deriving its grammar. Seven review rounds on
+  gh-ocannl-665 went into a floor that hand-scanned dune's text, and the same lesson kept arriving
+  from new directions: quoted atoms in a `chdir` destination, then in a command, then in a binding's
+  value, then in a form's HEAD; whitespace after an open paren; comments where an atom may begin.
+  Each was either a false failure or silent under-coverage, and the module's own opening line had
+  already said why — an approximation of a grammar has no natural stopping point. Rewriting the
+  floor on `Sexplib` dissolved four findings at once and shrank it.
+  What the second reader still must agree about is SCOPE, and getting it wrong fails correct scans
+  rather than blind ones: (a) STANZA POSITION — only top level and inside `subdir`, else `(env (test
+  (flags …)))` reads as a test stanza when it names a build profile; (b) WHAT RUNS THINGS — only
+  tests, rules and aliases, else a library's `(preprocess (action (run …)))` counts; (c) WHERE it
+  runs — `subdir` and `chdir` compose into the directory whose config the process finds, and the
+  comparison key is that composition, for a test's own `%{test}` as much as for a helper; (c')
+  what CANNOT be resolved — under a `chdir` holding a pform the walk emits a site with no
+  executables, so drop that subtree rather than report a literal `%{…}`; (d) GROUPING and IDENTITY —
+  one site per distinct executable per directory, so raw occurrence counts fail a `progn` running
+  one executable twice while a flat set lets five of six rules be answered for by the sixth, and
+  identities come from a structured field (`site.executables`), never from splitting a display name.
+  And where a floor matches against a CLASS of sites, check that the class is not wider than the
+  thing being protected: "any unnameable site" let a `(bash …)` answer for a dropped
+  PATH-rewritten one, and the fix was the same as for the executables — give the site a structured
+  reason of its own (`site.path_rewritten`) instead of grouping by a shared symptom.
+  A last trap in the other direction: declining what you cannot resolve is the SAFE direction for a
+  floor and therefore the easy thing to over-use — declining `./%{pp}` left all three `test/ppx`
+  rules with no floor at all, and the fix was to resolve the `(:pp pp.exe)` binding from the same
+  stanza, which in turn means resolving commands only once the stanza has been read.
+  The
+  sibling checks are worth a glance when touching this genre and were both fine: `env_var_deps` lists
+  names only, and `digest_completeness`'s key count moves only alongside its own enumerated key list
+  — a number in the same commit as the change it describes costs nothing.
 - `git` strips TRAILING spaces from a `.gitignore` pattern (unless backslash-quoted) and keeps
   LEADING ones, so an accidentally indented ` /foo/` is a pattern beginning with a space and matches
   nothing. Any code reading that file must not `String.strip` both ends, or it reports coverage git
