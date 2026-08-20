@@ -1,0 +1,38 @@
+qkv: batch-grid twins are seeded: true
+qkv: one batch-grid twin per serial-batch geometry: true
+qkv: batch-serial seeds precede their batch-grid twins: true
+qkv: every seed's schedule constructs and validates: true
+qkv: batch-grid twins launch grid.z = batch product; serial twins launch grid.z = 1: true
+qkv: the fold arithmetic decodes innermost-mod, outermost-div: true
+qkv: every seed compiles and runs: true
+qkv: every candidate matches the serial reference bitwise: true
+qkv: the generated source folds the batch axes onto the .z register: true
+qkv_companion: batch-grid twins are seeded: true
+qkv_companion: one batch-grid twin per serial-batch geometry: true
+qkv_companion: batch-serial seeds precede their batch-grid twins: true
+qkv_companion: every seed's schedule constructs and validates: true
+qkv_companion: batch-grid twins launch grid.z = batch product; serial twins launch grid.z = 1: true
+qkv_companion: the fold arithmetic decodes innermost-mod, outermost-div: true
+qkv_companion: every seed compiles and runs: true
+qkv_companion: every candidate matches the serial reference bitwise: true
+qkv_companion: the generated source folds the batch axes onto the .z register: true
+interior: batch-grid twins are seeded: true
+interior: one batch-grid twin per serial-batch geometry: true
+interior: batch-serial seeds precede their batch-grid twins: true
+interior: every seed's schedule constructs and validates: true
+interior: batch-grid twins launch grid.z = batch product; serial twins launch grid.z = 1: true
+interior: the fold arithmetic decodes innermost-mod, outermost-div: true
+interior: every seed compiles and runs: true
+interior: every candidate matches the serial reference bitwise: true
+interior: the generated source folds the batch axes onto the .z register: true
+interior_companion: batch-grid twins are seeded: true
+interior_companion: one batch-grid twin per serial-batch geometry: true
+interior_companion: batch-serial seeds precede their batch-grid twins: true
+interior_companion: every seed's schedule constructs and validates: true
+interior_companion: batch-grid twins launch grid.z = batch product; serial twins launch grid.z = 1: true
+interior_companion: the fold arithmetic decodes innermost-mod, outermost-div: true
+interior_companion: every seed compiles and runs: true
+interior_companion: every candidate matches the serial reference bitwise: true
+interior_companion: the generated source folds the batch axes onto the .z register: true
+qkv_mma: tensorized batch-grid twins are seeded: true
+qkv_mma: every tensorized batch-grid twin constructs, validates, and folds the batch onto .z: true

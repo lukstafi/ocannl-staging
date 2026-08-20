@@ -140,6 +140,7 @@ type sketch_params = {
   sk_pack_rest : bool;
   sk_conv : bool;
   sk_epilogue : bool;
+  sk_batch_grid : bool;
   sk_swizzle : Ir.Low_level.swizzle_kind option;
   sk_depth : int;
   sk_pack_prec : Ir.Ops.prec option;
