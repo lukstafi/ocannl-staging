@@ -91,6 +91,19 @@ let rec depends_on_universe = function
   | Sexp.List l -> List.exists l ~f:depends_on_universe
   | Sexp.Atom _ -> false
 
+(* The lock a directory's actions share, where it has one. A gate added to such a directory has to
+   take it too (Codex P1 round 4): not because the gate contends -- it links `arrayjit.utils` and
+   starts no OpenMP pool -- but because the one unlocked action in a file of locked ones is what
+   the next person copies when writing a real training test. Asked of the file rather than
+   hard-coded per directory, so a directory that adopts the lock later brings its gate along. *)
+let training_lock = "ocannl_training_test"
+
+let rec takes_training_lock = function
+  | Sexp.List (Sexp.Atom "locks" :: args) ->
+      List.exists args ~f:(function Sexp.Atom a -> String.equal a training_lock | _ -> false)
+  | Sexp.List l -> List.exists l ~f:takes_training_lock
+  | Sexp.Atom _ -> false
+
 (* The aliases that RUN things, and so can serve a cached result. Asked per alias rather than per
    directory (Codex P1 round 3): a `(test)` stanza contributes to `runtest` alone, so a directory
    whose gate is a test stanza is ungated for `@slow` -- which is a separately documented entry
@@ -178,8 +191,20 @@ let () =
       List.iter run_aliases ~f:(fun alias ->
           let attaches stanza = List.mem (aliases_of stanza) alias ~equal:String.equal in
           if List.exists stanzas ~f:attaches then
-            if List.exists stanzas ~f:(fun s -> attaches s && depends_on_universe s) then
-              gated := (dune_file, alias) :: !gated
+            if List.exists stanzas ~f:(fun s -> attaches s && depends_on_universe s) then (
+              gated := (dune_file, alias) :: !gated;
+              if
+                List.exists stanzas ~f:takes_training_lock
+                && not
+                     (List.exists stanzas ~f:(fun s ->
+                          attaches s && depends_on_universe s && takes_training_lock s))
+              then
+                fail
+                  (Printf.sprintf
+                     "%s serializes its actions on `%s` and its `%s` gate does not take the lock \
+                      -- the one unlocked action in a file of locked ones is what the next \
+                      training test gets copied from; add `(locks %s)` to it"
+                     dune_file training_lock alias training_lock))
             else if Map.mem gateless dune_file then
               gateless_used := Set.add !gateless_used dune_file
             else

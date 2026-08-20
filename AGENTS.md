@@ -105,7 +105,9 @@ Testing notes:
   reruns every invocation and no directory's suite can come back green with `ocannl_backend=…`
   ambient. `env_var_deps` fails if a directory has actions on an alias with no gate attached to THAT
   alias — `runtest` and `slow` are asked separately, a `(test)` stanza being a runtest action and
-  nothing else. A single test run by its own alias (`@…/runtest-<name>`) does not build the gate,
+  nothing else — and fails if a file that serializes on `ocannl_training_test` has a gate that does
+  not take the lock (the gate starts no pool; an unlocked action in a locked file is what the next
+  training test gets copied from). A single test run by its own alias (`@…/runtest-<name>`) does not build the gate,
   and can still be served stale.
 - Tests read `test/config/ocannl_config` and can emit .ll/.c/.cu/.metal into build_files/.
 - Config startup chatter (the welcome message, the `log_config_sourcing` trace, the profile

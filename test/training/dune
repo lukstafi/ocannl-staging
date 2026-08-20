@@ -8,6 +8,12 @@
 ; directory's previous run wholesale. One per test directory, because dune aliases are per
 ; directory; the source is shared, and its header says why the dependency is the world
 ; rather than 112 key names.
+;
+; Takes `ocannl_training_test` like every other action in this file. Not for contention of its
+; own -- the gate links `arrayjit.utils` and starts no OpenMP pool, so the reason the lock exists
+; does not reach it -- but because an unlocked action here is a trap for whoever copies the
+; nearest stanza to write a real training test (Codex P1 round 4). It holds the lock for the
+; microseconds it takes to read the environment.
 
 (copy_files
  (files ../config/env_spelling_gate.ml))
@@ -15,6 +21,7 @@
 (test
  (name env_spelling_gate)
  (package neural_nets_lib)
+ (locks ocannl_training_test)
  (deps ocannl_config (universe))
  (modules env_spelling_gate)
  (libraries base stdio arrayjit.utils arrayjit.verdict))
@@ -27,6 +34,7 @@
 (rule
  (alias slow)
  (package neural_nets_lib)
+ (locks ocannl_training_test)
  (deps ocannl_config (universe))
  (action
   (run %{dep:env_spelling_gate.exe})))
