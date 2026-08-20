@@ -1263,18 +1263,55 @@ type loop_desc = {
   ld_perfect_child : (SC.sym_ref * Idx.symbol * LL.axis_type) option;
 }
 
+(* The [Local_scope] bodies in the scalar positions of one statement (empty for non-writes) — where
+   the accumulation mints of [Unroll ~materialize:true] and [Partition] (gh-ocannl-639) and
+   virtualization's inlined computations put loops. This is the scalar-position reach of
+   [Schedule.rewrite_loop] and [Schedule.find_loops_env]; like them it enters neither [If]
+   conditions nor [Tile_mma] fallbacks (transforming those is never profitable and often
+   invalid). *)
+let stmt_scope_bodies (stmt : LL.t) : LL.t list =
+  let rec scalar (llsc : LL.scalar_t) =
+    match llsc with
+    | LL.Local_scope { body; _ } -> [ body ]
+    | LL.Get_dynamic { dyn_value = v, _; _ } -> scalar v
+    | LL.Ternop (_, (a, _), (b, _), (c, _)) -> scalar a @ scalar b @ scalar c
+    | LL.Binop (_, (a, _), (b, _)) -> scalar a @ scalar b
+    | LL.Unop (_, (a, _)) -> scalar a
+    | LL.Get_local _ | LL.Get _ | LL.Get_merge_buffer _ | LL.Constant _ | LL.Constant_bits _
+    | LL.Embed_index _ ->
+        []
+  in
+  match stmt with
+  | LL.Set { llsc; _ } | LL.Set_local (_, llsc) -> scalar llsc
+  | LL.Set_dynamic { dyn_value = v, _; llsc; _ } -> scalar v @ scalar llsc
+  | LL.Set_from_vec { arg = a, _; _ } -> scalar a
+  | _ -> []
+
+(* Whether [llc] contains a loop a schedule op could target — [Local_scope] bodies included
+   (gh-ocannl-666), so a loop whose only inner loops sit inside an accumulator's scope does not read
+   as innermost. *)
 let rec contains_loop = function
   | LL.Seq (a, b) -> contains_loop a || contains_loop b
   | LL.If { body; _ } -> contains_loop body
   | LL.For_loop _ -> true
-  | _ -> false
+  | stmt -> List.exists (stmt_scope_bodies stmt) ~f:contains_loop
 
-(* Loops proposable for schedule ops: the statement-level nest structure (we do not descend into
-   [Local_scope] bodies or [Tile_mma] fallbacks — transforming those is never profitable and often
-   invalid), restricted to loops whose binder the registry can name (Stage-internal copy loops
-   cannot be referenced by a persisted schedule). *)
+(* Loops proposable for schedule ops: the statement-level nest structure plus the loops inside
+   [Local_scope] bodies (gh-ocannl-666) — since gh-ocannl-639 the accumulation mints of [Unroll
+   ~materialize:true] and [Partition] move segment/inner loops inside the accumulator's scope, and
+   [Schedule.rewrite_loop] reaches them there, so the menu must enumerate them or the moment such an
+   op joins an incumbent every inner loop vanishes from the rest of the search. Restricted to loops
+   whose binder the registry can name (Stage-internal copy loops cannot be referenced by a persisted
+   schedule), and deduplicated by binder: a materializing mint copies its body per step/segment
+   WITHOUT refreshing loop symbols, so sibling copies share binders and [rewrite_loop] rewrites them
+   all — one binder is one scheduling decision. Scope-nested descriptors are safe for every op the
+   menu proposes from them (serial [Split]s, [Swap]s, [Unroll]s, [Vectorized] retypes — none
+   introduces a hardware annotation, which [Low_level.validate_parallel] rejects inside a
+   [Local_scope]); [Tensorize] is the exception, which is why [collect_serial_triples] below stays
+   out of scopes. *)
 let collect_loops registry llc =
   let acc = ref [] in
+  let seen = Hash_set.create (module Idx.Symbol) in
   let rec walk = function
     | LL.Seq (a, b) ->
         walk a;
@@ -1282,7 +1319,8 @@ let collect_loops registry llc =
     | LL.If { body; _ } -> walk body
     | LL.For_loop { index; from_; to_; body; axis; _ } ->
         (match SC.resolve registry index with
-        | Some ld_ref when from_ = 0 ->
+        | Some ld_ref when from_ = 0 && not (Hash_set.mem seen index) ->
+            Hash_set.add seen index;
             let ld_perfect_child =
               match body with
               | LL.For_loop { index = ci; from_ = 0; axis = cax; _ } ->
@@ -1302,20 +1340,30 @@ let collect_loops registry llc =
               :: !acc
         | _ -> ());
         walk body
-    | _ -> ()
+    | stmt -> List.iter (stmt_scope_bodies stmt) ~f:walk
   in
   walk llc;
   List.rev !acc
 
-(* Perfectly nested serial triples (with extents), for Tensorize proposals. *)
+(* Perfectly nested serial triples (with extents), for Tensorize proposals. Statement-level only,
+   deliberately (gh-ocannl-666): [Tensorize] wraps the micro-kernel in a hardware-annotated
+   [Workgroup] lane loop, which [Low_level.validate_parallel] rejects inside a [Local_scope] body —
+   a scope-nested triple can never compile ([Schedule.op_legality] would not prune it: it answers
+   about races, not scope nesting). No candidates are lost: the loops inside an accumulation mint
+   all reduce into the scope's single loop-invariant cell, so none can play the micro-kernel's
+   output-dim [i]/[j] roles and every role assignment over such a triple would be refuted anyway.
+   Deduplicated by the outer binder, since a non-minting materializing [Unroll] leaves
+   statement-level copies sharing loop symbols. *)
 let collect_serial_triples registry llc =
   let acc = ref [] in
+  let seen = Hash_set.create (module Idx.Symbol) in
   let rec walk = function
     | LL.Seq (a, b) ->
         walk a;
         walk b
     | LL.If { body; _ } -> walk body
-    | LL.For_loop { index = i; from_ = 0; to_ = ti; axis = LL.Serial; body; _ } ->
+    | LL.For_loop { index = i; from_ = 0; to_ = ti; axis = LL.Serial; body; _ }
+      when not (Hash_set.mem seen i) ->
         (match body with
         | LL.For_loop
             {
@@ -1329,6 +1377,7 @@ let collect_serial_triples registry llc =
           when not (contains_loop b3) -> (
             match (SC.resolve registry i, SC.resolve registry j, SC.resolve registry k) with
             | Some ri, Some rj, Some rk ->
+                Hash_set.add seen i;
                 acc := ((ri, i, ti + 1), (rj, j, tj + 1), (rk, k, tk + 1)) :: !acc
             | _ -> ())
         | _ -> ());
@@ -1342,14 +1391,14 @@ let collect_serial_triples registry llc =
 let split_factors = [ 2; 4; 8; 16; 32 ]
 let max_actions_per_unit = 48
 
-let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) (u : unit_gen) :
-    SC.saved_optop list =
-  let loops = collect_loops u.u_registry u.u_opt.LL.llc in
+let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) ~registry
+    (opt : LL.optimized) : SC.saved_optop list =
+  let loops = collect_loops registry opt.LL.llc in
   (* Menu proposals carry their raw-symbol counterpart so the op-legality oracle (gh-494 waypoint 3)
      can veto proven-illegal ones before they cost a candidate compile; [Op_unknown] proposals
      proceed to compile-and-time exactly as before (the oracle's Unknown is never a rejection). *)
   let gate (saved, raw) =
-    match Sched.op_legality u.u_opt raw with
+    match Sched.op_legality opt raw with
     | Sched.Op_illegal witness ->
         logf "menu prune (illegal): %s" witness;
         None
@@ -1408,7 +1457,7 @@ let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) (u : unit_g
                 Sched.Retype { axis = ld.ld_sym; ty = LL.Vectorized } )
           else None)
   in
-  let triples = collect_serial_triples u.u_registry u.u_opt.LL.llc in
+  let triples = collect_serial_triples registry opt.LL.llc in
   let tensorizes =
     match limits.Ir.Backend_intf.mma with
     | None -> []
@@ -3400,7 +3449,8 @@ let tune ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir ?keep
                      refusal stays visible where it was before. *)
                   let elem_dispatchable = dispatchable ~is_gpu elem.all_opts in
                   List.concat_map elem.units ~f:(fun u ->
-                      List.filter_map (menu ~is_cpu ~is_gpu ~limits u) ~f:(fun op ->
+                      List.filter_map (menu ~is_cpu ~is_gpu ~limits ~registry:u.u_registry u.u_opt)
+                        ~f:(fun op ->
                           if elem_dispatchable || optop_can_bind_hardware op then
                             extend_spec elem u op
                           else (
