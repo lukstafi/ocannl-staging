@@ -36,8 +36,12 @@
    reviewed edit to a tracked config rather than a literal buried in a new test, which is the case
    this check exists for.
 
-   The built-in default needs no special case: the prefix IS its name, so a library that stops
-   naming it fails the second requirement rather than slipping past this one.
+   The built-in default is a third requirement, not a free ride on the first two. Nothing in a
+   source names the directory a search falls back to when no `~cache_dir` is passed, so the prefix
+   holding over every explicit argument says nothing about it: change that default to a name without
+   the prefix and every default search creates an untracked directory with this check green. It is
+   read out of the library that defines it and held to the same rule, and its absence -- a default
+   this scan can no longer locate -- is itself a failure.
 
    How a directory name is recovered from a source -- and why only a parse can do it -- is
    {!Cache_dir_scan}. *)
@@ -74,7 +78,13 @@ let () =
      This check's own source is NOT excluded: a check that skipped it would carve out the one place
      a directory could be named without the prefix rule being applied to it. *)
   let derived path =
-    String.is_suffix path ~suffix:".pp.ml" || String.is_suffix path ~suffix:"_actual.ml"
+    (* `.pp.ml` is dune's own name for a source after preprocessing, so whatever one names its
+       source in the same directory names too. `_actual.ml` is narrowed to the directory that
+       generates them: as a bare suffix it was a repository-wide escape hatch, quietly excusing any
+       real source someone happened to name that way from a check that claims to read every source
+       (Codex P2, round 3). *)
+    String.is_suffix path ~suffix:".pp.ml"
+    || (String.is_prefix path ~prefix:"test/ppx/" && String.is_suffix path ~suffix:"_actual.ml")
   in
   let sources =
     List.filter paths ~f:(fun (path, _) ->
@@ -115,10 +125,10 @@ let () =
             form Cache_dir_scan.glob_matches does not implement -- teach it that form rather than \
             letting the pattern count as non-matching"
            pattern));
-  let naming = ref [] and names = ref [] in
+  let naming = ref [] and names = ref [] and defaults = ref [] in
   List.iter sources ~f:(fun (source, on_disk) ->
       let content = In_channel.read_all on_disk in
-      match Or_error.try_with (fun () -> Scan.uses content) with
+      match Or_error.try_with (fun () -> Scan.read content) with
       | Error error ->
           fail
             (Printf.sprintf
@@ -127,7 +137,8 @@ let () =
                 expansions"
                source
                (String.concat ~sep:" " (String.split_lines (Error.to_string_hum error))))
-      | Ok uses ->
+      | Ok { Scan.uses; builtin_defaults } ->
+          defaults := builtin_defaults @ !defaults;
           List.iter uses ~f:(fun { Scan.resolution; line; spelling } ->
               match resolution with
               | Scan.Names name when Scan.covered_by_glob name ->
@@ -148,11 +159,32 @@ let () =
                         -- pass the directory as a literal here, or bind it to a name mentioning \
                         `%s` whose right-hand side is one, so that the prefix can be checked"
                        source line spelling (Scan.describe resolution) Scan.tune_label)));
+  (* The directory a search uses when no `~cache_dir` is passed is named in no source, so the prefix
+     rule over explicit arguments says nothing about it. Read out of the library that defines the
+     default and held to the same rule -- and required to be found at all, since a default this scan
+     can no longer locate is one the glob has stopped being checked against (Codex P2, round 3). *)
+  let defaults = List.dedup_and_sort !defaults ~compare:String.compare in
+  (match defaults with
+  | [] ->
+      fail
+        (Printf.sprintf
+           "no source reads `%s` with a non-empty default -- the directory a search uses when no \
+            `~%s` is passed can no longer be recovered, so nothing checks that the glob still \
+            covers it. Point Cache_dir_scan.default_config_key at the key that names it now"
+           Scan.default_config_key Scan.tune_label)
+  | defaults ->
+      List.iter defaults ~f:(fun name ->
+          if not (Scan.covered_by_glob name) then
+            fail
+              (Printf.sprintf
+                 "the built-in default of `%s` is %S, which `%s` does not cover -- a search that \
+                  passes no `~%s` would create it in the working directory untracked"
+                 Scan.default_config_key name Scan.required_glob Scan.tune_label)));
   (* The prefix rule says the glob would cover these names; whether git ACTUALLY ignores them is a
      separate question, and the one that matters. gitignore is last-match-wins, so a negation after
      the glob takes coverage away while the glob line sits there looking intact (Codex P2, round
      2). Asked per name, against the file's patterns in order. *)
-  List.iter (List.dedup_and_sort !names ~compare:String.compare) ~f:(fun name ->
+  List.iter (List.dedup_and_sort (defaults @ !names) ~compare:String.compare) ~f:(fun name ->
       if not (Scan.effectively_ignored patterns name) then
         fail
           (Printf.sprintf

@@ -44,9 +44,15 @@ let tune_label = "cache_dir"
 let cache_module = "Schedule_cache"
 let store_label = "dir"
 
+(** The configuration key whose default value is the directory a search uses when no [~cache_dir] is
+    passed. Nothing in a source names that directory, so it has to be read out of the library that
+    defines it: the prefix rule holding over every explicit argument says nothing about the one
+    every implicit search uses (Codex P2, round 3). *)
+let default_config_key = "autotune_cache_dir"
+
 (** The prefix every such directory carries, so that one [.gitignore] glob covers all of them. It is
-    the built-in default's own name, which is why the default needs no special case: [autotune_cache]
-    starts with [autotune_cache]. *)
+    also, today, the built-in default's own name — but that is a fact to be checked rather than
+    relied on, which is what {!default_config_key} is read for. *)
 let required_prefix = "autotune_cache"
 
 let string_literal = Config_key_scan.string_literal
@@ -59,6 +65,13 @@ let label_name = function
   | Asttypes.Nolabel -> None
 
 let mentions_label name = String.is_substring name ~substring:tune_label
+
+(* The string literal an application passes under a given label, where it passes one. *)
+let labelled_literal args wanted =
+  List.find_map args ~f:(fun (lbl, argument) ->
+      match label_name lbl with
+      | Some name when String.equal name wanted -> string_literal argument
+      | _ -> None)
 
 (** Whether a directory name is one the ignore glob covers: a single path component carrying the
     prefix. The component matters as much as the prefix — [Schedule_cache.ensure_dir] walks the path
@@ -140,9 +153,17 @@ let scope ast =
   iterator.structure iterator ast;
   (literals, parameters, cache_modules)
 
-(** Every argument in [content] that names a schedule cache directory, and what each resolves to:
-    the [~cache_dir] of a tuning call, and the [~dir] of a direct {!cache_module} operation. *)
-let uses content =
+type report = {
+  uses : use list;
+      (** every argument that names a directory: the [~cache_dir] of a tuning call, and the [~dir]
+          of a direct {!cache_module} operation *)
+  builtin_defaults : string list;
+      (** the non-empty [~default:] literals of this file's reads of {!default_config_key} *)
+}
+
+(** What one source says about schedule cache directories. Parses once: both questions are asked of
+    every file in the repository, and each is a walk over the same tree. *)
+let read content =
   let ast = structure_of content in
   let literals, parameters, cache_modules = scope ast in
     (* The empty string disables the cache only where [Autotune.tune] reads it that way: it checks
@@ -174,7 +195,7 @@ let uses content =
         | _ -> false)
     | None -> false
   in
-  let found = ref [] in
+  let found = ref [] and defaults = ref [] in
   let iterator =
     {
       Ast_iterator.default_iterator with
@@ -182,6 +203,16 @@ let uses content =
         (fun self expr ->
           (match expr.pexp_desc with
           | Pexp_apply (callee, args) ->
+              (* The built-in default: the [~default:] literal of a read of the key by name. The
+                 library reads it twice and only one carries the directory -- the other asks merely
+                 whether the key was set, and defaults to the empty string. *)
+              if
+                Option.equal String.equal
+                  (labelled_literal args "arg_name")
+                  (Some default_config_key)
+              then
+                Option.iter (labelled_literal args "default") ~f:(fun value ->
+                    if not (String.is_empty value) then defaults := value :: !defaults);
               let into_cache = calls_cache_module callee in
               List.iter args ~f:(fun (lbl, argument) ->
                   (* [Some disabling_allowed] where this argument names a directory. *)
@@ -204,7 +235,7 @@ let uses content =
     }
   in
   iterator.structure iterator ast;
-  List.rev !found
+  { uses = List.rev !found; builtin_defaults = List.rev !defaults }
 
 type ignore_line = { pattern : string; negated : bool }
 
