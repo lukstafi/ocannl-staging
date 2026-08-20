@@ -101,9 +101,10 @@ Testing notes:
   first. `test/operations/env_var_deps` checks that every declaration names a spelling a run reads,
   and that each library declares the `OCANNL_LOG_LEVEL_<MODULE>` tracing gates its modules read
   (gh-ocannl-628). Since nothing declares the REJECTED spellings, nothing would rerun for one
-  either: `test/operations/env_spelling_gate` depends on `(universe)` so that it reruns every
-  invocation and a suite run cannot come back green with `ocannl_backend=…` ambient. A single test
-  run by its own alias does not build that gate, and can still be served stale.
+  either: every test directory carries an `env_spelling_gate` depending on `(universe)`, so it
+  reruns every invocation and no directory's suite can come back green with `ocannl_backend=…`
+  ambient. `env_var_deps` fails if a directory with runtest actions has no gate. A single test run
+  by its own alias (`@…/runtest-<name>`) does not build the gate, and can still be served stale.
 - Tests read `test/config/ocannl_config` and can emit .ll/.c/.cu/.metal into build_files/.
 - Config startup chatter (the welcome message, the `log_config_sourcing` trace, the profile
   banner) goes to stderr, so an OCANNL-linked executable's stdout stays a clean data channel and

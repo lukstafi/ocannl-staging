@@ -1,6 +1,24 @@
 (copy_files
  (files ../config/ocannl_config))
 
+; The ambient-environment gate (gh-ocannl-652). `(universe)` makes dune rerun it on every
+; invocation, which is the only way a rejected environment spelling reaches a check at all:
+; every other rule here is cached against declarations that no longer name those spellings,
+; so `ocannl_backend=cuda dune build @test/operations/runtest` would otherwise serve this
+; directory's previous run wholesale. One per test directory, because dune aliases are per
+; directory; the source is shared, and its header says why the dependency is the world
+; rather than 112 key names.
+
+(copy_files
+ (files ../config/env_spelling_gate.ml))
+
+(test
+ (name env_spelling_gate)
+ (package neural_nets_lib)
+ (deps ocannl_config (universe))
+ (modules env_spelling_gate)
+ (libraries base stdio arrayjit.utils arrayjit.verdict))
+
 (test
  (name printbox_utils_test)
  (package neural_nets_lib)
@@ -1338,19 +1356,6 @@
  (package neural_nets_lib)
  (action
   (diff test_config_consistency.expected test_config_consistency.actual)))
-
-; The suite's ambient-environment gate (gh-ocannl-652). `(universe)` makes dune rerun it on every
-; invocation, which is the only way a rejected environment spelling reaches a check at all: every
-; other rule here is cached against declarations that no longer name those spellings, so a
-; `ocannl_backend=cuda dune runtest` would otherwise serve the previous run wholesale. See the
-; header of env_spelling_gate.ml for why the dependency is the world rather than 112 key names.
-
-(test
- (name env_spelling_gate)
- (package neural_nets_lib)
- (deps ocannl_config (universe))
- (modules env_spelling_gate)
- (libraries base stdio arrayjit.utils arrayjit.verdict))
 
 ; How both consistency scanners read a source file, exercised on hostile input rather than only
 ; on whatever the library sources happen to contain today.

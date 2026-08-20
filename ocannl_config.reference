@@ -53,11 +53,14 @@
 # KNOWN key in a spelling nothing reads -- `ocannl_backend=cuda`, `ocannl-log_level=1`,
 # `OCANNL_PRINT-DECIMALS-PRECISION=7` (dashes separate a key on the commandline, never here) --
 # since a value written to decide something would otherwise be dropped in silence and the
-# run would proceed on the default. Uppercase it. (Windows environment names are
-# case-insensitive, so there `ocannl_backend` IS `OCANNL_BACKEND` and is read.) An empty
-# value counts as unset everywhere and is never reported. Only a built-in profile's payload
-# is otherwise fatal about an unknown key, that being this file's own mistake rather than
-# yours. Two
+# run would proceed on the default. The message names the spelling that works, and the fix
+# is to write that: uppercase the name, and replace any dash inside the key with an
+# underscore -- `OCANNL_PRINT-DECIMALS-PRECISION` becomes `OCANNL_PRINT_DECIMALS_PRECISION`,
+# not merely an uppercased form of itself. (Windows environment names are case-insensitive,
+# so there `ocannl_backend` IS `OCANNL_BACKEND` and is read; a dashed name is unread on every
+# platform, case-insensitivity being about case and not punctuation.) An empty value counts
+# as unset everywhere and is never reported. Only a built-in profile's payload is otherwise
+# fatal about an unknown key, that being this file's own mistake rather than yours. Two
 # environment namespaces are reserved for names that address OCANNL without being
 # configuration, and are never reported: `OCANNL_TOOL_...`, which this repository's scripts
 # and test harnesses use (`OCANNL_TOOL_SWEEP_STATE`, `OCANNL_TOOL_TEST_CAP`), and

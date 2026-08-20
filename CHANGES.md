@@ -17,13 +17,20 @@
   warning as an unknown key. Commandline spellings are untouched — `--ocannl_backend=cuda` and
   `--backend=cuda` still work, dashes and all. `Utils.env_var_names` became `Utils.env_var_name`.
 
-  Because no dune rule declares the rejected spellings any more, `test/operations/env_spelling_gate`
-  carries a `(universe)` dependency and so reruns on every invocation: `ocannl_backend=cuda dune
-  runtest` fails there naming the variable, instead of serving the previous run's cached passes.
+  Because no dune rule declares the rejected spellings any more, each test directory carries an
+  `env_spelling_gate` whose `(universe)` dependency makes dune rerun it on every invocation:
+  `ocannl_backend=cuda dune build @test/einsum/runtest` fails there naming the variable, instead of
+  serving that directory's cached passes. One per directory, since dune aliases are per directory;
+  `test/operations/env_var_deps` fails if a directory with runtest actions has no gate.
 
-  Also fixes a latent Windows bug in the same predicate: the case-insensitivity allowance answered
+  Also fixes two latent bugs in the same predicate. The case-insensitivity allowance answered
   "read" for every candidate rather than for case-only variants, so a DASHED spelling classified as
-  a config key there. Punctuation is not case, and `Utils.same_env_name` no longer folds it.
+  a config key on Windows; punctuation is not case, and `Utils.same_env_name` no longer folds it.
+  And it applied on Cygwin, whose POSIX environment is case-SENSITIVE — folding there would have
+  called a lowercase spelling read while `read_env_var` found nothing, which is the demotion the
+  check exists to prevent. The check now runs before every configuration-driven startup effect, so
+  a rejected `ocannl_clean_up_build_files_on_startup=false` no longer loses the artifacts it asked
+  to keep on the way to the abort.
 
 ### Added
 

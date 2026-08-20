@@ -1,3 +1,21 @@
+; The ambient-environment gate (gh-ocannl-652). `(universe)` makes dune rerun it on every
+; invocation, which is the only way a rejected environment spelling reaches a check at all:
+; every other rule here is cached against declarations that no longer name those spellings,
+; so `ocannl_backend=cuda dune build @test/operations/profiles/runtest` would otherwise serve this
+; directory's previous run wholesale. One per test directory, because dune aliases are per
+; directory; the source is shared, and its header says why the dependency is the world
+; rather than 112 key names.
+
+(copy_files
+ (files ../../config/env_spelling_gate.ml))
+
+(test
+ (name env_spelling_gate)
+ (package neural_nets_lib)
+ (deps ocannl_config (universe))
+ (modules env_spelling_gate)
+ (libraries base stdio arrayjit.utils arrayjit.verdict))
+
 ; gh-ocannl-559: the same executable, resolved against four different pickers. The local
 ; ocannl_config (not the shared test/config one -- the config search stops at the first file
 ; walking up from the working directory) is deliberately "exhaustive": it picks a profile and

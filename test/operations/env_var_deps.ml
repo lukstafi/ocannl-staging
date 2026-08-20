@@ -18,6 +18,15 @@
    declaration names the spelling that is read -- a stanza declaring `(env_var ocannl_backend)`
    tracks a variable no run will consult, and invalidates nothing.
 
+   {2 Suites a rejected spelling never reaches}
+
+   Nothing declares the REJECTED spellings, by design, so nothing reruns for one either: a cached
+   `@test/einsum/runtest` would serve its previous passes with `ocannl_backend=cuda` ambient and the
+   fatal startup check never reached (gh-ocannl-652, Codex P1 round 2). Each test directory carries
+   an `env_spelling_gate` whose `(universe)` dependency makes dune rerun it every invocation; this
+   check is what keeps the set whole, since dune aliases are per directory and the next test
+   directory would otherwise be added without one.
+
    {2 Gates the build does not see}
 
    The other direction: a variable that IS read and is declared nowhere. ppx_minidebug's per-module
@@ -58,6 +67,43 @@ let exempt_declarations =
        gh-ocannl-605 dropped, which since gh-ocannl-652 aborts the run rather than warning" );
   ]
 
+(* Directories with runtest actions that carry no ambient gate, and why. Same shape as the
+   declaration exemptions above: each is checked for still being needed. *)
+let gateless_dirs =
+  [
+    ( "benchmarks/dune",
+      "its one runtest action runs python3 over the benchmark orchestrator's own unit tests, \
+       which import no OCANNL executable -- there is no startup check in reach to gate, the same \
+       reason `config_dep_completeness` exempts it from the ocannl_config dependency" );
+  ]
+
+(* A directory is gated when some rule in it depends on the state of the world: that is what makes
+   dune rerun the gate rather than serve the previous run. Matched structurally rather than by the
+   stanza's name, so a gate that is renamed or rewritten still counts. *)
+let rec depends_on_universe = function
+  | Sexp.List [ Sexp.Atom "universe" ] -> true
+  | Sexp.List l -> List.exists l ~f:depends_on_universe
+  | Sexp.Atom _ -> false
+
+(* Whether anything here runs on `dune runtest` (or `@slow`): a `(test)`/`(tests)` stanza, or a
+   rule attached to either alias. A directory with none needs no gate, having nothing to serve. *)
+let rec has_runtest_action sexp =
+  match sexp with
+  | Sexp.List (Sexp.Atom ("test" | "tests") :: _) -> true
+  | Sexp.List (Sexp.Atom "rule" :: _)
+    when List.exists
+           [ "runtest"; "slow" ]
+           ~f:(fun a ->
+             let rec names_alias = function
+               | Sexp.List [ Sexp.Atom "alias"; Sexp.Atom n ] -> String.equal n a
+               | Sexp.List l -> List.exists l ~f:names_alias
+               | Sexp.Atom _ -> false
+             in
+             names_alias sexp) ->
+      true
+  | Sexp.List l -> List.exists l ~f:has_runtest_action
+  | Sexp.Atom _ -> false
+
 (* The prefix `Utils.classify_env_var` reports for a per-module tracing gate. *)
 let gate_prefix = "ocannl_log_level_"
 
@@ -97,6 +143,9 @@ let () =
   let fail = Verdict.fail in
   let exemptions = Map.of_alist_exn (module String) exempt_declarations in
   let exemptions_used = ref (Set.empty (module String)) in
+  let gateless = Map.of_alist_exn (module String) gateless_dirs in
+  let gateless_used = ref (Set.empty (module String)) in
+  let gated = ref [] in
   let tracked_keys = ref (Set.empty (module String)) in
   let gate_table = ref [] in
   let read_table = ref [] in
@@ -117,6 +166,20 @@ let () =
   List.iter dune_files ~f:(fun (dune_file, on_disk) ->
       let dir = match Stdlib.Filename.dirname dune_file with "." -> "" | dir -> dir in
       let stanzas = Scan.stanzas (In_channel.read_all on_disk) in
+      (* The ambient gate, per directory (gh-ocannl-652). *)
+      (if List.exists stanzas ~f:has_runtest_action then
+         if List.exists stanzas ~f:depends_on_universe then gated := dune_file :: !gated
+         else if Map.mem gateless dune_file then
+           gateless_used := Set.add !gateless_used dune_file
+         else
+           fail
+             (Printf.sprintf
+                "%s runs tests and has no ambient gate -- nothing here declares a rejected \
+                 environment spelling, so `ocannl_backend=cuda dune build @%s/runtest` would \
+                 serve this directory's cached passes with the fatal startup check never \
+                 reached; copy the `env_spelling_gate` pair from a neighbour, or exempt the \
+                 directory by name with the reason"
+                dune_file (Stdlib.Filename.dirname dune_file)));
       let fields = List.concat_map stanzas ~f:dep_fields in
       let declared = List.concat_map fields ~f:(fun (_, args) -> List.concat_map args ~f:env_vars_in) in
       (* A declaration this scan did not look inside a dependency field for is one it cannot check,
@@ -265,10 +328,23 @@ let () =
   printf "\nAmbient variables a module reads by name at run time, and the stanza that declares each:\n";
   List.sort !read_table ~compare:(fun (_, a, _) (_, b, _) -> String.compare a b)
   |> List.iter ~f:(fun (where, read, source) -> printf "  %-30s %s (%s)\n" read where source);
+  let stale_gateless =
+    Set.diff (Set.of_list (module String) (List.map gateless_dirs ~f:fst)) !gateless_used
+  in
+  if not (Set.is_empty stale_gateless) then
+    fail
+      (Printf.sprintf
+         "directories exempted from the ambient gate that no longer run tests -- drop them from \
+          the exemption list: %s"
+         (String.concat ~sep:", " (Set.to_list stale_gateless)));
+  printf "\nTest directories carrying the ambient environment gate:\n";
+  List.iter (List.sort !gated ~compare:String.compare) ~f:(printf "  %s\n");
+  List.iter gateless_dirs ~f:(fun (dir, why) -> printf "  %s -- no gate: %s\n" dir why);
   printf "\nDeclarations of a name OCANNL does not read as a configuration key, exempt by design:\n";
   List.iter exempt_declarations ~f:(fun (key, why) -> printf "  %s -- %s\n" key why);
   if not (Verdict.any_failed ()) then
     printf
       "\n\
-       OK: every `(env_var ...)` addressed to OCANNL names a spelling a run reads, and every \
-       per-module tracing gate is declared by the library whose modules read it.\n"
+       OK: every `(env_var ...)` addressed to OCANNL names a spelling a run reads, every test \
+       directory carries the ambient gate, and every per-module tracing gate is declared by the \
+       library whose modules read it.\n"

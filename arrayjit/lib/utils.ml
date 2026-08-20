@@ -475,8 +475,15 @@ let env_var_reserved_prefixes = [ "ocannl_tool_"; "ocannl_log_level_" ]
 
 (** Whether the platform resolves environment variable names case-insensitively. On Windows
     [ocannl_Log_level] and [OCANNL_LOG_LEVEL] are ONE variable, so a spelling this file would call
-    unread there is in fact read, and warning about it would be wrong on that platform only. *)
-let env_names_case_insensitive = Stdlib.Sys.win32 || Stdlib.Sys.cygwin
+    unread there is in fact read, and reporting it would be wrong on that platform only.
+
+    Native Windows only, NOT Cygwin (Codex P1 on PR #389): a Cygwin runtime sets [Sys.cygwin]
+    rather than [Sys.win32], and its POSIX environment is case-SENSITIVE -- [getenv "OCANNL_BACKEND"]
+    does not find [ocannl_backend] there. Folding case on that runtime would call the lowercase
+    spelling read while {!read_env_var} found nothing, which is the silent demotion this whole
+    check exists to prevent, delivered by the check itself. What matters is what the runtime's own
+    [getenv] does, not whether the host kernel is Windows. *)
+let env_names_case_insensitive = Stdlib.Sys.win32
 
 (** What an environment variable name is, to OCANNL. The classification is shared by the startup
     warning at the foot of this file and by [test/operations/env_var_deps], which asks it of every
@@ -593,6 +600,49 @@ let unread_env_vars () =
          | Env_unread_reserved prefix ->
              Some (name, false, "is not a spelling anything reads; " ^ prefix ^ " names are read \
                                  in uppercase only"))
+
+(* The same check on the other silent source (gh-ocannl-629). Of the three ways to set a
+   configuration key, the environment was the one that said nothing about a mistake: a config file
+   names the unknown key it holds (the warning at {!config_file_args}, which
+   [test/operations/startup_streams] pins), the commandline warns just above, and
+   `OCANNL_BACKEDN=cuda dune runtest` ran the whole suite on the default backend and reported
+   success. It is also the source people reach for in CI and in one-off shell invocations, where a
+   typo has no reviewer.
+
+   Reading it costs one walk over the environment, and what makes the walk safe is
+   {!env_var_reserved_prefixes}: without a namespace for the variables that are addressed to OCANNL
+   without being configuration -- the tooling's, and ppx_minidebug's per-module gates -- this
+   check would fire on every run of every OCANNL executable under `tools/sweep.sh`.
+
+   Since gh-ocannl-652 the strongest case is fatal rather than merely reported, and the exit is
+   here rather than inside {!unread_env_vars} so that the walk stays a value: every offending name
+   is printed before the process ends, so one run fixes the whole environment instead of one
+   variable per attempt. `Stdlib.exit` rather than an exception, this being the user's mistake and
+   not a bug to hand a backtrace for -- the same shape as the fatal unknown profile name, whose
+   `invalid_arg` predates the policy.
+
+   Placed HERE, immediately after the walk it consumes and before every configuration-driven
+   effect this file performs, rather than at the foot of the file where it started (Codex P2 on PR
+   #389). A run that is going to abort must abort before it has DONE anything: the startup cleanup
+   below deletes `log_files/` and `build_files/`, and it reads whether to do so through the
+   ordinary config path -- so a rejected `ocannl_clean_up_build_files_on_startup=false` was ignored
+   in favour of the default, the artifacts the user asked to keep were deleted, and only then did
+   the run stop to say the spelling was wrong. The check needs nothing but the environment and the
+   key set, so nothing forced it to be late. The commandline's unknown-argument warning stays at
+   the foot: it is not fatal and destroys nothing, so its only cost is that the two warnings no
+   longer share a neighbourhood in the output. *)
+let () =
+  let fatal = ref false in
+  List.iter (unread_env_vars ()) ~f:(fun (name, is_fatal, reason) ->
+      Stdio.eprintf "OCANNL %s: environment variable %S %s\n%!"
+        (if is_fatal then "error" else "warning")
+        name reason;
+      fatal := !fatal || is_fatal);
+  if !fatal then (
+    Stdio.eprintf
+      "OCANNL: aborting -- a configuration key set under a spelling nothing reads decides \
+       nothing, and continuing would run on the default as if it had never been set\n%!";
+    Stdlib.exit 1)
 
 (** The commandline spellings of a config key, up to the value separator: the [ocannl_]-qualified
     ones -- then, unless [qualified_only], the prefix-free ones.
@@ -1449,38 +1499,6 @@ let () =
   Array.iter Stdlib.Sys.argv ~f:(fun arg ->
       if addresses_ocannl arg && not (cmdline_arg_is_config_key arg) then
         Stdio.eprintf "OCANNL warning: unknown commandline argument %S\n%!" arg)
-
-(* The same check on the other silent source (gh-ocannl-629). Of the three ways to set a
-   configuration key, the environment was the one that said nothing about a mistake: a config file
-   names the unknown key it holds (the warning at {!config_file_args}, which
-   [test/operations/startup_streams] pins), the commandline warns just above, and
-   `OCANNL_BACKEDN=cuda dune runtest` ran the whole suite on the default backend and reported
-   success. It is also the source people reach for in CI and in one-off shell invocations, where a
-   typo has no reviewer.
-
-   Reading it costs one walk over the environment, and what makes the walk safe is
-   {!env_var_reserved_prefixes}: without a namespace for the variables that are addressed to OCANNL
-   without being configuration -- the tooling's, and ppx_minidebug's per-module gates -- this
-   check would fire on every run of every OCANNL executable under `tools/sweep.sh`.
-
-   Since gh-ocannl-652 the strongest case is fatal rather than merely reported, and the exit is
-   here rather than inside {!unread_env_vars} so that the walk stays a value: every offending name
-   is printed before the process ends, so one run fixes the whole environment instead of one
-   variable per attempt. `Stdlib.exit` rather than an exception, this being the user's mistake and
-   not a bug to hand a backtrace for -- the same shape as the fatal unknown profile name, whose
-   `invalid_arg` predates the policy. *)
-let () =
-  let fatal = ref false in
-  List.iter (unread_env_vars ()) ~f:(fun (name, is_fatal, reason) ->
-      Stdio.eprintf "OCANNL %s: environment variable %S %s\n%!"
-        (if is_fatal then "error" else "warning")
-        name reason;
-      fatal := !fatal || is_fatal);
-  if !fatal then (
-    Stdio.eprintf
-      "OCANNL: aborting -- a configuration key set under a spelling nothing reads decides \
-       nothing, and continuing would run on the default as if it had never been set\n%!";
-    Stdlib.exit 1)
 
 let with_runtime_debug () = settings.output_debug_files_in_build_directory && settings.log_level > 1
 let debug_log_from_routines () = settings.debug_log_from_routines && settings.log_level > 1
