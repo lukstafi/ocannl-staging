@@ -21,6 +21,10 @@ module Cache_dir_scan = Cache_dir_scan
 (** Scanning OCaml sources for the autotune schedule cache directories they name, so that the one
     root [.gitignore] glob over their shared prefix covers all of them. *)
 
+module Verdict_scan = Verdict_scan
+(** Scanning test sources for claims a test decides itself and prints outside [Verdict], where a
+    failing one is [dune promote]-able into the golden. *)
+
 (** [concise_float ~prec v] formats [v] with [prec] decimals, normalizing exponent digits portably.
     Re-export of [Ir.Ndarray.concise_float]. *)
 let concise_float = Ir.Ndarray.concise_float

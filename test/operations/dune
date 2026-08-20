@@ -1563,6 +1563,17 @@
  (action
   (diff config_dep_completeness.expected config_dep_completeness.actual)))
 
+; How the claim-shape reader behind verdict_ratchet reads a format and a source, on input built to
+; break it rather than on whatever the test directories happen to contain today. Also where the
+; literals that ratchet plants its canaries on live.
+
+(test
+ (name verdict_scan_cases)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules verdict_scan_cases)
+ (libraries base stdio test_utils arrayjit.verdict))
+
 (test
  (name test_metal_pool_bindings)
  (package neural_nets_lib)
