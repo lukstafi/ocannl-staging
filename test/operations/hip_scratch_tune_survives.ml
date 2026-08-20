@@ -129,7 +129,7 @@ let () =
      on a cache hit too — and the report has to say so consistently: [baseline_declined] with an
      empty census would claim a rejection the census cannot account for. Nothing else can be in
      there, since no search ran. *)
-  let cache_dir = "hip_scratch_tune_cache" in
+  let cache_dir = "autotune_cache_hip_scratch" in
   if Stdlib.Sys.file_exists cache_dir && Stdlib.Sys.is_directory cache_dir then
     Array.iter (Stdlib.Sys.readdir cache_dir) ~f:(fun f ->
         Stdlib.Sys.remove (Stdlib.Filename.concat cache_dir f));

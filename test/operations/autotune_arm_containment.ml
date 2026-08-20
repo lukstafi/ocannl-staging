@@ -101,7 +101,7 @@ let () =
 
   (* A cache directory of this test's own, emptied first: "arm A's winner is cached" is a claim
      about what run 1 stores, so run 1 has to be a genuine miss. *)
-  let cache_dir = "autotune_arm_containment_cache" in
+  let cache_dir = "autotune_cache_arm_containment" in
   clean_cache cache_dir;
 
   (* --- Run 1: arm B dies at its third candidate --- *)

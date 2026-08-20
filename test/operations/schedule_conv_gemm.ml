@@ -407,7 +407,7 @@ let () =
       Array.iter (Stdlib.Sys.readdir dir) ~f:(fun f ->
           Stdlib.Sys.remove (Stdlib.Filename.concat dir f))
   in
-  clean_cache "conv_tune_cache";
+  clean_cache "autotune_cache_conv";
   let make_tail sub =
     let x = make_x sub in
     let kern = make_kern sub in
@@ -430,7 +430,7 @@ let () =
   let reports = ref [] in
   let ctx = Context.auto () in
   let ctx, routine =
-    Autotune.tune ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:"conv_tune_cache"
+    Autotune.tune ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:"autotune_cache_conv"
       ~timing_ctx:(Context.auto ())
       ~report:(fun r -> reports := r :: !reports)
       ctx
@@ -642,12 +642,12 @@ let () =
   (* --- Seeding + tuning on the conv-alone graph: the C backends seed serial + Grid per fission
      segment (and whole-routine); metal seeds the staged GPU flavor per fission segment (the
      whole-routine site is zeroed, hence gated). --- *)
-  clean_cache "conv_tune_cache_gpu";
+  clean_cache "autotune_cache_conv_gpu";
   let _, _, y = make_conv8 "cvu_t" in
   let reports = ref [] in
   let ctx = Context.auto () in
   let ctx, routine =
-    Autotune.tune ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:"conv_tune_cache_gpu"
+    Autotune.tune ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:"autotune_cache_conv_gpu"
       ~timing_ctx:(Context.auto ())
       ~report:(fun r -> reports := r :: !reports)
       ctx
@@ -736,12 +736,12 @@ let () =
   (* --- The same stride-2 site through the seeding wave (gh-ocannl-502): the per-segment counts
      match the unit-stride [cvu] leg — the stride only changes the packing Stage's load arithmetic,
      not which flavors are proposable — and the tuned routine matches the untuned twin. --- *)
-  clean_cache "conv_tune_cache_s2";
+  clean_cache "autotune_cache_conv_s2";
   let _, _, y = make_conv8_s2 "cvu2_t" in
   let reports = ref [] in
   let ctx = Context.auto () in
   let ctx, routine =
-    Autotune.tune ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:"conv_tune_cache_s2"
+    Autotune.tune ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:"autotune_cache_conv_s2"
       ~timing_ctx:(Context.auto ())
       ~report:(fun r -> reports := r :: !reports)
       ctx
@@ -923,12 +923,12 @@ let () =
   (* --- Seeding: the fission segment now proposes the row-block flavors alongside the whole-extent
      ones — an extra CPU cache-panel seed (bm=8, two panels) and an extra GPU threadgroup-block seed
      — and the tuned routine still matches the untuned twin. --- *)
-  clean_cache "conv_tune_cache_blocked";
+  clean_cache "autotune_cache_conv_blocked";
   let _, _, y = make_conv16 "cvb_t" in
   let reports = ref [] in
   let ctx = Context.auto () in
   let ctx, routine =
-    Autotune.tune ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:"conv_tune_cache_blocked"
+    Autotune.tune ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:"autotune_cache_conv_blocked"
       ~timing_ctx:(Context.auto ())
       ~report:(fun r -> reports := r :: !reports)
       ctx
@@ -1017,12 +1017,12 @@ let () =
       (Array.for_all2_exn got want_mb ~f:(fun a b -> Float.(abs (a - b) < 1e-3)))
   else
     skipped "cvmb: merged-segment blocked conv pipeline matches the natural form within tolerance";
-  clean_cache "conv_tune_cache_merged_blocked";
+  clean_cache "autotune_cache_conv_merged_blocked";
   let _, _, y = make_merged16 "cvmb_t" in
   let reports = ref [] in
   let ctx = Context.auto () in
   let ctx, routine =
-    Autotune.tune ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:"conv_tune_cache_merged_blocked"
+    Autotune.tune ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:"autotune_cache_conv_merged_blocked"
       ~timing_ctx:(Context.auto ())
       ~report:(fun r -> reports := r :: !reports)
       ctx
@@ -1100,12 +1100,12 @@ let () =
     p "cva: aligned-grid conv pipeline on a merged segment matches within tolerance"
       (Array.for_all2_exn got want_m ~f:(fun a b -> Float.(abs (a - b) < 1e-3)))
   else skipped "cva: aligned-grid conv pipeline on a merged segment matches within tolerance";
-  clean_cache "conv_tune_cache_aligned";
+  clean_cache "autotune_cache_conv_aligned";
   let _, _, y = make_merged "cva_t" in
   let reports = ref [] in
   let ctx = Context.auto () in
   let ctx, routine =
-    Autotune.tune ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:"conv_tune_cache_aligned"
+    Autotune.tune ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:"autotune_cache_conv_aligned"
       ~timing_ctx:(Context.auto ())
       ~report:(fun r -> reports := r :: !reports)
       ctx

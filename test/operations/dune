@@ -1509,6 +1509,37 @@
  (action
   (diff env_var_deps.expected env_var_deps.actual)))
 
+; The prefix that lets one `.gitignore` glob cover every autotune schedule cache directory, held
+; over the sources that name them. Reads the same source set as env_var_deps above -- the library
+; directories plus the tests -- since a `~cache_dir` can be named from either side. `.gitignore` is
+; a direct dependency so that editing the glob away re-runs the check.
+
+(executable
+ (name cache_dir_ignores)
+ (modules cache_dir_ignores)
+ (libraries base stdio test_utils arrayjit.verdict))
+
+(rule
+ (target cache_dir_ignores.actual)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  ../../.gitignore
+  ; Every OCaml source in the repository, not a list of the directories that hold them today: a
+  ; fixed list makes the check's own claim false the moment code lands in a new top-level directory,
+  ; and it would fail by staying green rather than by failing to build (Codex P2, round 6).
+  (glob_files_rec ../../*.ml))
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:cache_dir_ignores.exe} %{workspace_root} %{deps}))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff cache_dir_ignores.expected cache_dir_ignores.actual)))
+
 (executable
  (name config_dep_completeness)
  (modules config_dep_completeness)

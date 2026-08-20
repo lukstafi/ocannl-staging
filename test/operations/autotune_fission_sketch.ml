@@ -60,7 +60,7 @@ let clean_cache dir =
 
 let () =
   List.iter
-    [ "autotune_fission_cache"; "autotune_fission_cache2"; "autotune_sketch_cache" ]
+    [ "autotune_cache_fission"; "autotune_cache_fission2"; "autotune_cache_sketch" ]
     ~f:clean_cache;
   (* === The fissionable chain: d = a + b (forced materialized), e = d *. d^T. The transposed read
      keeps the cross-nest edge misaligned, so the aligned cross-nest rule cannot merge the pair and
@@ -107,7 +107,7 @@ let () =
     (Array.for_all2_exn got_e expected_e ~f:approx);
 
   (* --- a hand-crafted fissioned cache entry replays through tune's cache-hit path --- *)
-  let cache_dir = "autotune_fission_cache" in
+  let cache_dir = "autotune_cache_fission" in
   let base_capture = ref None in
   let bctx = Context.auto () in
   let _bctx, _br =
@@ -181,7 +181,7 @@ let () =
     (Array.for_all2_exn got_hit expected_e ~f:approx);
 
   (* --- tune end-to-end on the fissionable chain (fresh cache dir: search, then hit) --- *)
-  let cache_dir2 = "autotune_fission_cache2" in
+  let cache_dir2 = "autotune_cache_fission2" in
   let reports = ref [] in
   let tune_chain () =
     let ctx = Context.auto () in
@@ -272,7 +272,7 @@ let () =
   let got_serial = nonzero "af_mm_serial" (Context.get_values sctx mc0.Tensor.value) in
   let%op mc1 = ma * mb in
   let mm_comp = named "af_mm_tuned" (Train.forward mc1) in
-  let cache_dir3 = "autotune_sketch_cache" in
+  let cache_dir3 = "autotune_cache_sketch" in
   let mm_reports = ref [] in
   let tune_mm () =
     let ctx = Context.auto () in

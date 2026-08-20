@@ -35,7 +35,7 @@ let clean_cache dir =
         Stdlib.Sys.remove (Stdlib.Filename.concat dir f))
 
 let () =
-  clean_cache "batched_companion_cache";
+  clean_cache "autotune_cache_batched_companion";
   let b = 4 and n = 32 and m = 64 and k = 16 in
   let xv = Array.init (b * n * k) ~f:(fun i -> Float.of_int (i % 7) *. 0.25) in
   let wv = Array.init (k * m) ~f:(fun i -> Float.of_int (i % 5) *. 0.125) in
@@ -155,7 +155,7 @@ let () =
   let reports = ref [] in
   let ctx = Context.auto () in
   let ctx, routine =
-    Autotune.tune ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:"batched_companion_cache"
+    Autotune.tune ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:"autotune_cache_batched_companion"
       ~timing_ctx:(Context.auto ())
       ~report:(fun r -> reports := r :: !reports)
       ctx comp Ir.Indexing.Empty
@@ -416,12 +416,12 @@ let () =
   (* Tune integration: the search on the lm_head shape (fine candidates seeded on GPU backends)
      crowns a winner that computes the right values, and a second tune replays it through the disk
      cache — exercising the [finer_fission] entry field when a fine candidate won. *)
-  clean_cache "lm_head_cache";
+  clean_cache "autotune_cache_lm_head";
   let tune_once () =
     let reports = ref [] in
     let ctx = Context.auto () in
     let ctx, routine =
-      Autotune.tune ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:"lm_head_cache"
+      Autotune.tune ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:"autotune_cache_lm_head"
         ~timing_ctx:(Context.auto ())
         ~report:(fun rep -> reports := rep :: !reports)
         ctx comp Ir.Indexing.Empty

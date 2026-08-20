@@ -206,7 +206,7 @@ let () =
 (* === Leg 4: a hand-crafted split-reduce cache entry replays (the F_split_saved path). === *)
 
 let () =
-  let cache_dir = "autotune_split_cache" in
+  let cache_dir = "autotune_cache_split" in
   clean_cache cache_dir;
   let y0 = make_matvec "hcref" in
   let want = nonzero "asr_hc_serial" (run_forward ~name:"asr_hc_serial" y0) in

@@ -73,7 +73,7 @@ let () =
   let ctx_ref = Context.run ctx_ref routine_ref in
   let expected = Context.get_values ctx_ref t2.Tensor.value in
 
-  let cache_dir = "autotune_candidate_release_cache" in
+  let cache_dir = "autotune_cache_candidate_release" in
   clean_cache cache_dir;
   let (ctx_t, routine_t), attempts =
     sample_between_candidates (fun () ->

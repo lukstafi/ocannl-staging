@@ -32,7 +32,7 @@ let () =
   (* The tuned run, bound pruning on (via the rule's command line). Fresh-search behavior is the
      assertion, so a cache entry left by an earlier run of this binary in the same build tree must
      not replay — clear the cache directory first. *)
-  let cache_dir = "autotune_bound_pruning_cache" in
+  let cache_dir = "autotune_cache_bound_pruning" in
   if Stdlib.Sys.file_exists cache_dir then
     Array.iter (Stdlib.Sys.readdir cache_dir) ~f:(fun f ->
         Stdlib.Sys.remove (Stdlib.Filename.concat cache_dir f));

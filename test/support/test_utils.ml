@@ -17,6 +17,10 @@ module Dune_stanza_scan = Dune_stanza_scan
 (** Reading dune files for the stanzas that run a test executable, and whether they declare the
     shared [ocannl_config]. *)
 
+module Cache_dir_scan = Cache_dir_scan
+(** Scanning OCaml sources for the autotune schedule cache directories they name, so that the one
+    root [.gitignore] glob over their shared prefix covers all of them. *)
+
 (** [concise_float ~prec v] formats [v] with [prec] decimals, normalizing exponent digits portably.
     Re-export of [Ir.Ndarray.concise_float]. *)
 let concise_float = Ir.Ndarray.concise_float

@@ -1,0 +1,17 @@
+Sources naming a schedule cache directory, all with the `autotune_cache` prefix that `/autotune_cache*/` covers:
+  test/operations/autotune_arm_containment.ml
+  test/operations/autotune_batched_companion.ml
+  test/operations/autotune_bound_pruning.ml
+  test/operations/autotune_candidate_release.ml
+  test/operations/autotune_fission_sketch.ml
+  test/operations/autotune_mma_companion.ml
+  test/operations/autotune_serial_baseline.ml
+  test/operations/autotune_smoke.ml
+  test/operations/autotune_split_reduce.ml
+  test/operations/hip_scratch_tune_survives.ml
+  test/operations/schedule_cache_numerics.ml
+  test/operations/schedule_conv_gemm.ml
+  test/operations/schedule_epilogue_fusion.ml
+  test/operations/symbolic_extent_launch.ml
+
+OK: 14 sources name one; the ignore list needs no entry per directory.

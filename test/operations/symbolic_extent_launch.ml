@@ -49,7 +49,7 @@ let () =
      upper bound, the schedule-cache identity is extent-value-independent (the extent is a kernel
      parameter, not part of the lowered program), so one tuned entry serves every extent -- a second
      tune of the same program hits the cache. *)
-  let cache_dir = "symbolic_extent_tune_cache" in
+  let cache_dir = "autotune_cache_symbolic_extent" in
   let comp = fwd_comp in
   let report1 = ref None in
   let tctx = Context.auto () in
