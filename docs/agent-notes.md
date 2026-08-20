@@ -1515,7 +1515,14 @@ that they earn a lookup rather than always-loaded space.
   read by a SECOND reader that shares no machinery with the first (`Dune_stanza_scan.head_occurrences`
   counts `(test` off the raw text, and a sexp walk going blind cannot take it down too), and the
   exact numbers on STDERR, which a `(test)` stanza does not diff. Assert the floor through `Verdict`
-  rather than as a golden line, so a scan that goes blind cannot be promoted back to green. The
+  rather than as a golden line, so a scan that goes blind cannot be promoted back to green. Whether
+  that floor can be a COUNT depends on how the walk groups what it finds, and getting this backwards
+  fails correct scans: `sites` emits one exe-running site per distinct executable per stanza, so a
+  `progn` running one executable twice is two occurrences and one site. Where the grouping is
+  many-to-one like that, compare as a SET instead (`run_executables`: every `.exe` the text runs must
+  be a name the walk placed) — no dedup hazard, and the failure names which one went missing rather
+  than only how many did. Watch for the walk's own name format when doing so: a site covering several
+  executables joins them with `", "`, so the names split apart again before the membership test. The
   sibling checks are worth a glance when touching this genre and were both fine: `env_var_deps` lists
   names only, and `digest_completeness`'s key count moves only alongside its own enumerated key list
   — a number in the same commit as the change it describes costs nothing.

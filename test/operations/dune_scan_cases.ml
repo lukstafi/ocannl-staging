@@ -477,6 +477,42 @@ let head_occurrence_cases =
       1 );
   ]
 
+(* [run_executables] is the floor for the exe-running RULES, where a count cannot be made sound:
+   `sites` reports one site per distinct executable per stanza, so a `progn` running one executable
+   twice is two occurrences and one site. It compares as a set instead, and the names it yields have
+   to match what `classify_command` puts in a site's name — the cases below pin that normalisation
+   along with the spellings it deliberately declines to read (Codex P2, round 1). *)
+let run_executable_cases =
+  [
+    ("a dep pform", {dune|(rule (action (run %{dep:probe.exe})))|dune}, [ "probe.exe" ]);
+    ("a bare path", {dune|(rule (action (run ./probe.exe)))|dune}, [ "probe.exe" ]);
+    (* A path outside the directory keeps its path: reducing it to a basename would make
+       `../../tools/pp.exe` and a local `pp.exe` one identity. *)
+    ( "a path elsewhere keeps it",
+      {dune|(rule (action (run %{dep:../../tools/minised.exe})))|dune},
+      [ "../../tools/minised.exe" ] );
+    ("the exe pform too", {dune|(rule (action (run %{exe:probe.exe})))|dune}, [ "probe.exe" ]);
+    (* Several in one action, and the same one twice: a SET, so the repetition collapses and the
+       count that would have failed a correct scan never arises. *)
+    ( "several in one action",
+      {dune|(rule (action (progn (run %{dep:a.exe} x) (run %{dep:b.exe}))))|dune},
+      [ "a.exe"; "b.exe" ] );
+    ( "the same one twice is one name",
+      {dune|(rule (action (progn (run %{dep:a.exe} x) (run %{dep:a.exe} y))))|dune},
+      [ "a.exe" ] );
+    (* What it declines to read, each because the text alone does not say what runs: all of these
+       under-report, which is the safe direction for a floor. *)
+    ("a tool on PATH is not ours", {dune|(rule (action (run python3 x.py)))|dune}, []);
+    ("the test pform", {dune|(test (name t) (action (run %{test} --flag)))|dune}, []);
+    ("a shell line", {dune|(rule (action (bash "./probe.exe")))|dune}, []);
+    ("a name bound by a dep", {dune|(rule (deps (:pp pp.exe)) (action (run %{pp})))|dune}, []);
+    ("an executable only depended on", {dune|(rule (deps %{dep:probe.exe}))|dune}, []);
+    ("one named in a comment", {dune|; (run %{dep:probe.exe})|dune}, []);
+    ( "one inside a string",
+      {dune|(rule (action (echo "(run %{dep:probe.exe})")))|dune},
+      [] );
+  ]
+
 let () =
   let check name expected found =
     if List.equal String.equal found expected then printf "ok: %s\n" name
@@ -497,6 +533,8 @@ let () =
       let found = Scan.head_occurrences source ~head in
       if found = expected then printf "ok: head occurrences -- %s\n" name
       else fail "head occurrences -- %s: expected %d `(%s`, found %d" name expected head found);
+  List.iter run_executable_cases ~f:(fun (name, source, expected) ->
+      check ("run executables -- " ^ name) expected (Scan.run_executables source));
   List.iter path_rewriting_cases ~f:(fun (name, source, expected) ->
       check ("path-rewriting stanzas -- " ^ name) expected (Scan.path_rewriting_stanzas source));
   List.iter declared_paths_cases ~f:(fun (name, source, expected) ->

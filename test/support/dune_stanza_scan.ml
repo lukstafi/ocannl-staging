@@ -357,6 +357,84 @@ let is_absolute path =
 let is_explicit_path path =
   (not (is_absolute path)) && (String.is_prefix path ~prefix:"./" || String.contains path '/')
 
+(** [run_executables content] names the executables [content] runs, read off the raw text: the token
+    in the command position of a [run] or [dynamic-run] form, kept when it names a [.exe], and
+    normalised the way {!classify_command} normalises a [Runs] name — so the results are comparable
+    with the [name] of a site.
+
+    The companion to {!head_occurrences} for the rules, and it compares as a SET rather than a
+    count, because counting cannot be made sound here: {!sites} reports one site per distinct
+    executable per stanza, so a [progn] running the same executable twice is two occurrences and one
+    site, and a count would fail a correct scan. Set inclusion has no such hazard — every name the
+    text runs must be a name the walk placed — and it says which executable went missing rather than
+    only how many did.
+
+    It under-reports by design, which is the safe direction: a program named through [%{test}], a
+    [(bash …)] line, or a [%{name}] bound by a named dependency is not counted here, because the
+    text alone does not say what those resolve to. What it does catch is the failure the rules had
+    no guard for once the tally left the golden — a stanza whose command this walk stops reading. *)
+let run_executables content =
+  let found = ref [] in
+  let i = ref 0 in
+  let length = String.length content in
+  let delimiter c = Char.is_whitespace c || List.mem [ '('; ')'; ';'; '"' ] c ~equal:Char.equal in
+  let token_at pos =
+    let stop = ref pos in
+    while !stop < length && not (delimiter content.[!stop]) do
+      Int.incr stop
+    done;
+    String.sub content ~pos ~len:(!stop - pos)
+  in
+  (* The program a command token names, when the text is enough to say: a bare path, or one of the
+     pforms that resolve to a path in this workspace. Anything else is left out. *)
+  let program token =
+    let path =
+      match String.chop_prefix token ~prefix:"%{" with
+      | None -> Some token
+      | Some rest -> (
+          match String.chop_suffix rest ~suffix:"}" with
+          | None -> None
+          | Some inner -> (
+              match String.lsplit2 inner ~on:':' with
+              | Some (("dep" | "exe" | "path" | "file"), path) -> Some path
+              | _ -> None))
+    in
+    match path with
+    | Some path when is_executable path -> Some (program_path path)
+    | _ -> None
+  in
+  while !i < length do
+    (match content.[!i] with
+    | ';' ->
+        while !i < length && not (Char.equal content.[!i] '\n') do
+          Int.incr i
+        done
+    | '"' ->
+        Int.incr i;
+        let closed = ref false in
+        while (not !closed) && !i < length do
+          (match content.[!i] with '\\' -> Int.incr i | '"' -> closed := true | _ -> ());
+          Int.incr i
+        done;
+        Int.decr i
+    | '(' ->
+        let head = token_at (!i + 1) in
+        if List.mem [ "run"; "dynamic-run" ] head ~equal:String.equal then (
+          (* The command position: the first token after the head, whitespace skipped. A form there
+             instead of a token says nothing this reader can use, so it is passed over. *)
+          let pos = ref (!i + 1 + String.length head) in
+          while !pos < length && Char.is_whitespace content.[!pos] do
+            Int.incr pos
+          done;
+          if !pos < length && not (delimiter content.[!pos]) then
+            match program (token_at !pos) with
+            | Some path -> found := path :: !found
+            | None -> ())
+    | _ -> ());
+    Int.incr i
+  done;
+  List.dedup_and_sort !found ~compare:String.compare
+
 let classify_command ~named_deps cmd =
   let explicit = is_explicit_path cmd in
   let cmd = program_path cmd in

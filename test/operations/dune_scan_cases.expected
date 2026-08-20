@@ -79,6 +79,19 @@ ok: head occurrences -- a head inside a line comment is not there
 ok: head occurrences -- nor is one inside a string
 ok: head occurrences -- an escaped quote does not end the string early
 ok: head occurrences -- a comment does not swallow what follows it
+ok: run executables -- a dep pform
+ok: run executables -- a bare path
+ok: run executables -- a path elsewhere keeps it
+ok: run executables -- the exe pform too
+ok: run executables -- several in one action
+ok: run executables -- the same one twice is one name
+ok: run executables -- a tool on PATH is not ours
+ok: run executables -- the test pform
+ok: run executables -- a shell line
+ok: run executables -- a name bound by a dep
+ok: run executables -- an executable only depended on
+ok: run executables -- one named in a comment
+ok: run executables -- one inside a string
 ok: path-rewriting stanzas -- an env stanza setting PATH
 ok: path-rewriting stanzas -- one setting something else to PATH
 ok: path-rewriting stanzas -- an env stanza that touches neither

@@ -286,7 +286,33 @@ let () =
                  "%s: the raw text shows %d %s but the scan placed only %d -- it is reading the \
                   file with a hole in it"
                  dune_file floor what seen)));
-      if List.exists floors ~f:(fun (_, floor, _) -> floor > 0) then Int.incr floors_checked;
+      (* The rules get the same guarantee, as a SET rather than a count: [sites] reports one site
+         per distinct executable per stanza, so a `progn` running one executable twice is two
+         occurrences and one site, and a count would fail a correct scan (Codex P2, round 1). Every
+         executable the raw text runs must be one the walk named -- which catches a regression in
+         `commands_in` / `classify_command` / `sites_for` that drops a rule, the failure the old
+         per-directory tally was the only guard against. *)
+      (* One site covers every executable a stanza runs in one directory, its name joining them with
+         ", " -- so the names are split apart again before asking whether one is there. *)
+      let placed =
+        List.concat_map described ~f:(fun (kind, name, _) ->
+            match kind with
+            | Scan.Runs_executable ->
+                String.split name ~on:',' |> List.map ~f:String.strip
+            | _ -> [])
+      in
+      let run_floor = Scan.run_executables content in
+      List.iter run_floor ~f:(fun exe ->
+          if not (List.mem placed exe ~equal:String.equal) then (
+            Int.incr floor_holes;
+            fail
+              (Printf.sprintf
+                 "%s: the raw text runs `%s`, and the scan placed no exe-running site naming it -- \
+                  it is reading the file with a hole in it"
+                 dune_file exe)));
+      if
+        List.exists floors ~f:(fun (_, floor, _) -> floor > 0) || not (List.is_empty run_floor)
+      then Int.incr floors_checked;
       (* The golden holds which KINDS a dune file has, not how many of each: a tally there made
          every test added anywhere in the repository churn this file, and put a single hot line in
          the way of every parallel branch (gh-ocannl-665). What blindness costs is still visible --
@@ -306,12 +332,13 @@ let () =
         (if List.is_empty present then "nothing that runs a test executable"
          else String.concat ~sep:", " present);
       inventory :=
-        Printf.sprintf "  %s: %d tests (floor %d), %d inline-test libraries (floor %d), %d \
-                        exe-running rules, %d exempt"
+        Printf.sprintf
+          "  %s: %d tests (floor %d), %d inline-test libraries (floor %d), %d exe-running rules \
+           (%d named in the text), %d exempt"
           dune_file (tally Scan.Test)
           (floor "test" + floor "tests")
           (tally Scan.Inline_tests) (floor "inline_tests")
-          (tally Scan.Runs_executable) (List.length exempted)
+          (tally Scan.Runs_executable) (List.length run_floor) (List.length exempted)
         :: !inventory);
   let stale =
     Set.diff (Set.of_list (module String) (List.map exempt_sites ~f:fst)) !exemptions_used
@@ -350,7 +377,8 @@ let () =
      is what the pinned tallies used to be for, minus the churn -- and unlike a golden line it
      cannot be `dune promote`d into passing. *)
   printf "\n";
-  Verdict.p "the scan places every test stanza and inline-test library the dune sources show"
+  Verdict.p
+    "the scan places every test stanza, inline-test library and run executable the dune sources show"
     (!floor_holes = 0);
   Verdict.p "that floor applies to more than one dune file" (!floors_checked > 1);
   if not (Verdict.any_failed ()) then
