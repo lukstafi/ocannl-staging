@@ -1552,8 +1552,8 @@ that they earn a lookup rather than always-loaded space.
   — so keep it, elsewhere. Three places it can live, all churn-free: PRESENCE in the golden (which
   kinds of stanza a directory has, changing only when it gains its first or loses its last), a floor
   read by a SECOND reader that shares no machinery with the first (`Dune_stanza_scan.raw_stanzas`
-  reads the stanzas and what each runs off the raw text, and a sexp walk going blind cannot take it down too), and the
-  exact numbers on STDERR, which a `(test)` stanza does not diff. Assert the floor through `Verdict`
+  reads the stanzas and what each runs off the raw text, and a sexp walk going blind cannot take it
+  down too), and the exact numbers on STDERR, which a `(test)` stanza does not diff. Assert the floor through `Verdict`
   rather than as a golden line, so a scan that goes blind cannot be promoted back to green. Put the
   independence in the CLASSIFICATION and nowhere else: what can go blind is the checker's own
   traversal and command-recognition, so answer those questions a second way — but PARSE the input
