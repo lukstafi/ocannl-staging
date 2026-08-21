@@ -21,7 +21,38 @@
     whatever escapes produced it, and a structure item covers exactly the source it covers. *)
 
 open Base
-open Parsetree
+open Ppxlib.Parsetree
+
+(* ppxlib's parse tree rather than [compiler-libs]'. Both read a source with the same parser --
+   ppxlib calls the compiler's -- but ppxlib then migrates the result to an AST of its own version,
+   which does not move when the compiler's does.
+
+   That is what a scanner needs, and what the compiler's own tree could not give it: these modules
+   are the one part of this repository a compiler release can break, and the 5.4/5.5 boundary broke
+   them twice -- [Ldot] gaining located components, then [let module M = … in] ceasing to be
+   [Pexp_letmodule] and becoming an ordinary structure item inside an expression. Neither was a
+   change in what the sources say; both were changes in how the tree spells it.
+
+   The selected AST is [Astlib.Ast_502], BELOW the floor the opam files declare, so a parse on any
+   supported compiler is a downgrade and the question is what a downgrade costs a scanner.
+
+   Not data: the 5.x chain performs no migration_error at all. What a newer AST spells differently
+   is either mapped onto the older constructor -- 5.5's structure-item-in-an-expression becomes the
+   [Pexp_letmodule] that {!Cache_dir_scan} matches -- or carried across in an attribute encoding.
+   And not recognition either, for what is matched here: applications, labelled arguments, string
+   constants, field accesses and module bindings all predate 5.2 and map across directly.
+
+   Checked rather than argued: the censuses built on these scanners are byte-identical to what
+   matching the compiler's own tree produced, over every source in the repository.
+
+   What this DOES rest on is the AST staying [Ast_502], which is a property of ppxlib rather than
+   of the compiler -- hence the upper bound on ppxlib in [dune-project], whose note explains why
+   the bound rather than a pinned versioned AST. *)
+module Ast_traverse = Ppxlib.Ast_traverse
+module Asttypes = Ppxlib.Asttypes
+module Location = Ppxlib.Location
+module Longident = Ppxlib.Longident
+module Parse = Ppxlib.Parse
 
 (** The label whose argument names a configuration key. *)
 let label = "arg_name"
@@ -34,14 +65,14 @@ let is_our_label = function
     spelled over two lines all arrive here decoded. *)
 let string_literal expr =
   match expr.pexp_desc with
-  | Pexp_constant { pconst_desc = Pconst_string (value, _, _); _ } -> Some value
+  | Pexp_constant (Pconst_string (value, _, _)) -> Some value
   | _ -> None
 
-(* The library's own function rather than a match on the constructors: [Ldot] carries located
-   components in 5.5 and bare ones in 5.3, and this scanner has to build across the whole floor the
-   opam files declare -- the scheduled 5.3 job caught exactly that.
+(* The library's own function rather than a match on the constructors. Matching [Ldot] would pin a
+   constructor shape into this file, which is the coupling the header has just moved off: ppxlib
+   guarantees the shape of the tree, not that any given spelling of it stays convenient.
 
-   [Longident.flatten] fatal-errors on a functor application, and it is worth recording why that
+   [Longident.flatten_exn] fatal-errors on a functor application, and it is worth recording why that
    cannot arise here rather than guarding against it (Codex P2 on PR #342, whose premise this is):
    in EXPRESSION position OCaml gives no [Pexp_ident] an applied path. [Set.Make(String).empty] and
    [F(X).Utils.settings.large_models] both parse as [Pexp_field] over a constructor application,
@@ -49,7 +80,7 @@ let string_literal expr =
    [Pexp_ident] alone, and a record-field label is never an application, every path reaching here is
    [Lident] or [Ldot]. A future parser that changed this would take the test down loudly, which
    beats a fallback silently dropping a read. *)
-let flatten_longident = Longident.flatten
+let flatten_longident = Longident.flatten_exn
 
 let longident_of expr =
   match expr.pexp_desc with Pexp_ident { txt; _ } -> Some (flatten_longident txt) | _ -> None
@@ -72,23 +103,23 @@ let tracing_gate_extension = "global_debug_log_level_from_env_var"
 let env_var_reads_in_source content =
   let found = ref [] in
   let iterator =
-    {
-      Ast_iterator.default_iterator with
-      expr =
-        (fun self expr ->
-          (match expr.pexp_desc with
-          | Pexp_apply (callee, [ (Asttypes.Nolabel, argument) ]) -> (
-              match (longident_of callee, string_literal argument) with
-              | Some path, Some name -> (
-                  match List.last path with
-                  | Some ("getenv" | "getenv_opt") -> found := name :: !found
-                  | _ -> ())
-              | _ -> ())
-          | _ -> ());
-          Ast_iterator.default_iterator.expr self expr);
-    }
+    object
+      inherit Ast_traverse.iter as super
+
+      method! expression expr =
+        (match expr with
+        | [%expr [%e? callee] [%e? argument]] -> (
+            match (longident_of callee, string_literal argument) with
+            | Some path, Some name -> (
+                match List.last path with
+                | Some ("getenv" | "getenv_opt") -> found := name :: !found
+                | _ -> ())
+            | _ -> ())
+        | _ -> ());
+        super#expression expr
+    end
   in
-  iterator.structure iterator (structure_of content);
+  iterator#structure (structure_of content);
   List.rev !found
 
 (** The environment variables ppx_minidebug reads while preprocessing [content]: the argument of
@@ -123,25 +154,25 @@ let label_uses content =
   let uses = ref [] in
   let record key (loc : Location.t) = uses := { key; offset = loc.loc_start.pos_cnum } :: !uses in
   let iterator =
-    {
-      Ast_iterator.default_iterator with
-      expr =
-        (fun self expr ->
-          (match expr.pexp_desc with
-          | Pexp_apply (_, args) ->
-              List.iter args ~f:(fun (lbl, arg) ->
-                  if is_our_label lbl then record (string_literal arg) arg.pexp_loc)
-          | Pexp_function (params, _, _) ->
-              List.iter params ~f:(fun param ->
-                  match param.pparam_desc with
-                  | Pparam_val (lbl, default, _) when is_our_label lbl ->
-                      record (Option.bind default ~f:string_literal) param.pparam_loc
-                  | _ -> ())
-          | _ -> ());
-          Ast_iterator.default_iterator.expr self expr);
-    }
+    object
+      inherit Ast_traverse.iter as super
+
+      method! expression expr =
+        (match expr.pexp_desc with
+        | Pexp_apply (_, args) ->
+            List.iter args ~f:(fun (lbl, arg) ->
+                if is_our_label lbl then record (string_literal arg) arg.pexp_loc)
+        | Pexp_function (params, _, _) ->
+            List.iter params ~f:(fun param ->
+                match param.pparam_desc with
+                | Pparam_val (lbl, default, _) when is_our_label lbl ->
+                    record (Option.bind default ~f:string_literal) param.pparam_loc
+                | _ -> ())
+        | _ -> ());
+        super#expression expr
+    end
   in
-  iterator.structure iterator (structure_of content);
+  iterator#structure (structure_of content);
   List.rev !uses
 
 type definition = { start : int; stop : int; name : string option; top_level : bool }
@@ -199,50 +230,49 @@ let definitions content =
     path := saved
   in
   let naming =
-    {
-      Ast_iterator.default_iterator with
-      structure_item =
-        (fun self item ->
-          match item.pstr_desc with
-          | Pstr_module { pmb_name = { txt = name; _ }; _ } ->
-              within (Option.value name ~default:"_") (fun () ->
-                  Ast_iterator.default_iterator.structure_item self item)
-          (* Anonymous nesting has no name to borrow; the reader gets a placeholder. Correctness
-             does not ride on this list being complete -- [top_level] does that. *)
-          | Pstr_recmodule _ | Pstr_open _ | Pstr_include _ | Pstr_extension _ ->
-              within "_" (fun () -> Ast_iterator.default_iterator.structure_item self item)
-          | _ -> Ast_iterator.default_iterator.structure_item self item);
-      value_binding =
-        (fun self binding ->
-          (match (pattern_name binding.pvb_pat, binding.pvb_expr.pexp_desc) with
-          | Some name, Pexp_function _ ->
-              Hashtbl.set named ~key:binding.pvb_expr.pexp_loc.loc_start.pos_cnum
-                ~data:(qualify name, Set.mem root_bindings binding.pvb_loc.loc_start.pos_cnum)
-          | _ -> ());
-          Ast_iterator.default_iterator.value_binding self binding);
-    }
+    object
+      inherit Ast_traverse.iter as super
+
+      method! structure_item item =
+        match item.pstr_desc with
+        | Pstr_module { pmb_name = { txt = name; _ }; _ } ->
+            within (Option.value name ~default:"_") (fun () -> super#structure_item item)
+        (* Anonymous nesting has no name to borrow; the reader gets a placeholder. Correctness
+           does not ride on this list being complete -- [top_level] does that. *)
+        | Pstr_recmodule _ | Pstr_open _ | Pstr_include _ | Pstr_extension _ ->
+            within "_" (fun () -> super#structure_item item)
+        | _ -> super#structure_item item
+
+      method! value_binding binding =
+        (match (pattern_name binding.pvb_pat, binding.pvb_expr.pexp_desc) with
+        | Some name, Pexp_function _ ->
+            Hashtbl.set named ~key:binding.pvb_expr.pexp_loc.loc_start.pos_cnum
+              ~data:(qualify name, Set.mem root_bindings binding.pvb_loc.loc_start.pos_cnum)
+        | _ -> ());
+        super#value_binding binding
+    end
   in
-  naming.structure naming ast;
+  naming#structure ast;
   let items = ref [] in
   let collecting =
-    {
-      Ast_iterator.default_iterator with
-      expr =
-        (fun self expr ->
-          (match expr.pexp_desc with
-          | Pexp_function _ ->
-              let start = expr.pexp_loc.loc_start.pos_cnum in
-              let name, top_level =
-                match Hashtbl.find named start with
-                | Some (name, top_level) -> (Some name, top_level)
-                | None -> (None, false)
-              in
-              items := { start; stop = expr.pexp_loc.loc_end.pos_cnum; name; top_level } :: !items
-          | _ -> ());
-          Ast_iterator.default_iterator.expr self expr);
-    }
+    object
+      inherit Ast_traverse.iter as super
+
+      method! expression expr =
+        (match expr.pexp_desc with
+        | Pexp_function _ ->
+            let start = expr.pexp_loc.loc_start.pos_cnum in
+            let name, top_level =
+              match Hashtbl.find named start with
+              | Some (name, top_level) -> (Some name, top_level)
+              | None -> (None, false)
+            in
+            items := { start; stop = expr.pexp_loc.loc_end.pos_cnum; name; top_level } :: !items
+        | _ -> ());
+        super#expression expr
+    end
   in
-  collecting.structure collecting ast;
+  collecting#structure ast;
   List.rev !items
 
 (** The function an offset sits in: the smallest one containing it, so a local helper wins over the
@@ -346,42 +376,37 @@ let settings_keys_in_source content =
     let extra = List.length path - List.length suffix in
     extra >= 0 && List.equal String.equal (List.drop path extra) suffix
   in
-  let is_unit expr =
-    match expr.pexp_desc with
-    | Pexp_construct ({ txt = Longident.Lident "()"; _ }, None) -> true
-    | _ -> false
-  in
   let iterator =
-    {
-      Ast_iterator.default_iterator with
-      expr =
-        (fun self expr ->
-          (match expr.pexp_desc with
-          (* Qualified: [Low_level.virtualize_settings] and friends are records of the same shape
-             whose field names are NOT config keys ([max_visits] against [virtualize_max_visits]),
-             so an unqualified match would attribute reads to keys that do not exist. *)
-          (* The field label may itself be module-qualified -- [r.Utils.large_models] is how one
-             disambiguates a field name -- so the read is named by its LAST component, not by the
-             whole label (Codex P2, round 7). The receiver check stays as it is. *)
-          | Pexp_field (record, { txt = field; _ }) -> (
-              match longident_of record with
-              | Some path when ends_with path [ "Utils"; "settings" ] -> (
-                  match List.last (flatten_longident field) with
-                  | Some field -> keys := field :: !keys
-                  | None -> ())
-              | _ -> ())
-          | Pexp_apply (f, [ (Asttypes.Nolabel, arg) ]) when is_unit arg -> (
-              match longident_of f with
-              | Some path when ends_with path [ "debug_log_from_routines" ] ->
-                  keys := "log_level" :: "debug_log_from_routines" :: !keys
-              | Some path when ends_with path [ "with_runtime_debug" ] ->
-                  keys := "log_level" :: "output_debug_files_in_build_directory" :: !keys
-              | _ -> ())
-          | _ -> ());
-          Ast_iterator.default_iterator.expr self expr);
-    }
+    object
+      inherit Ast_traverse.iter as super
+
+      method! expression expr =
+        (match expr with
+        (* Qualified: [Low_level.virtualize_settings] and friends are records of the same shape
+           whose field names are NOT config keys ([max_visits] against [virtualize_max_visits]), so
+           an unqualified match would attribute reads to keys that do not exist. *)
+        (* The field label may itself be module-qualified -- [r.Utils.large_models] is how one
+           disambiguates a field name -- so the read is named by its LAST component, not by the
+           whole label (Codex P2, round 7). The receiver check stays as it is. *)
+        | { pexp_desc = Pexp_field (record, { txt = field; _ }); _ } -> (
+            match longident_of record with
+            | Some path when ends_with path [ "Utils"; "settings" ] -> (
+                match List.last (flatten_longident field) with
+                | Some field -> keys := field :: !keys
+                | None -> ())
+            | _ -> ())
+        | [%expr [%e? f] ()] -> (
+            match longident_of f with
+            | Some path when ends_with path [ "debug_log_from_routines" ] ->
+                keys := "log_level" :: "debug_log_from_routines" :: !keys
+            | Some path when ends_with path [ "with_runtime_debug" ] ->
+                keys := "log_level" :: "output_debug_files_in_build_directory" :: !keys
+            | _ -> ())
+        | _ -> ());
+        super#expression expr
+    end
   in
-  iterator.structure iterator (structure_of content);
+  iterator#structure (structure_of content);
   List.rev !keys
 
 (** Where a file reads a field of a record called [settings] without the [Utils.] receiver that
@@ -422,48 +447,47 @@ let unqualified_settings_reads content =
     List.last path |> Option.value_map ~default:false ~f:(List.mem names ~equal:String.equal)
   in
   let iterator =
-    {
-      Ast_iterator.default_iterator with
-      expr =
-        (fun self expr ->
-          (match expr.pexp_desc with
-          | Pexp_apply (f, _) -> (
-              match longident_of f with
-              | Some path when ends_in predicates path ->
-                  Hash_set.add blessed f.pexp_loc.loc_start.pos_cnum
-              | _ -> ())
-          | _ -> ());
-          (match expr.pexp_desc with
-          (* A write is not a read -- the census counts none of these -- but it is the same
-             qualified use of the record, and `Utils.settings.k <- v` is how train.ml sets a few. *)
-          | Pexp_field (receiver, _) | Pexp_setfield (receiver, _, _) -> (
-              match longident_of receiver with
-              | Some path when is_utils_settings path ->
-                  Hash_set.add blessed receiver.pexp_loc.loc_start.pos_cnum
-              | Some path
-                when List.last path |> Option.value_map ~default:false ~f:(String.equal "settings")
-                ->
-                  (* A field read of something CALLED settings but not `Utils.settings`: a bare
-                     `settings.k` under an open, or `U.settings.k` under an alias. *)
-                  found := expr.pexp_loc.loc_start.pos_cnum :: !found
-              | _ -> ())
-          | Pexp_ident { txt; _ } when ends_in predicates (flatten_longident txt) ->
-              (* Blessed above if this is the function of an application. *)
-              found := expr.pexp_loc.loc_start.pos_cnum :: !found
-          | Pexp_ident { txt; _ }
-            when List.last (flatten_longident txt)
-                 |> Option.value_map ~default:false ~f:(String.equal "settings") ->
-              (* Any identifier ending in `settings`, not only the qualified one: under a local open
-                 the record is spelled bare, and `read settings` hands it on just as `read
-                 Utils.settings` does (Codex P2, round 18). Recorded now and discarded below if it
-                 turns out to be a blessed receiver -- a field access is visited before its
-                 receiver. *)
-              found := expr.pexp_loc.loc_start.pos_cnum :: !found
-          | _ -> ());
-          Ast_iterator.default_iterator.expr self expr);
-    }
+    object
+      inherit Ast_traverse.iter as super
+
+      method! expression expr =
+        (match expr.pexp_desc with
+        | Pexp_apply (f, _) -> (
+            match longident_of f with
+            | Some path when ends_in predicates path ->
+                Hash_set.add blessed f.pexp_loc.loc_start.pos_cnum
+            | _ -> ())
+        | _ -> ());
+        (match expr.pexp_desc with
+        (* A write is not a read -- the census counts none of these -- but it is the same
+           qualified use of the record, and `Utils.settings.k <- v` is how train.ml sets a few. *)
+        | Pexp_field (receiver, _) | Pexp_setfield (receiver, _, _) -> (
+            match longident_of receiver with
+            | Some path when is_utils_settings path ->
+                Hash_set.add blessed receiver.pexp_loc.loc_start.pos_cnum
+            | Some path
+              when List.last path |> Option.value_map ~default:false ~f:(String.equal "settings") ->
+                (* A field read of something CALLED settings but not `Utils.settings`: a bare
+                   `settings.k` under an open, or `U.settings.k` under an alias. *)
+                found := expr.pexp_loc.loc_start.pos_cnum :: !found
+            | _ -> ())
+        | Pexp_ident { txt; _ } when ends_in predicates (flatten_longident txt) ->
+            (* Blessed above if this is the function of an application. *)
+            found := expr.pexp_loc.loc_start.pos_cnum :: !found
+        | Pexp_ident { txt; _ }
+          when List.last (flatten_longident txt)
+               |> Option.value_map ~default:false ~f:(String.equal "settings") ->
+            (* Any identifier ending in `settings`, not only the qualified one: under a local open
+               the record is spelled bare, and `read settings` hands it on just as `read
+               Utils.settings` does (Codex P2, round 18). Recorded now and discarded below if it
+               turns out to be a blessed receiver -- a field access is visited before its
+               receiver. *)
+            found := expr.pexp_loc.loc_start.pos_cnum :: !found
+        | _ -> ());
+        super#expression expr
+    end
   in
-  iterator.structure iterator (structure_of content);
+  iterator#structure (structure_of content);
   List.rev !found |> List.filter ~f:(fun offset -> not (Hash_set.mem blessed offset))
 
 (** Every configuration read of a file — [arg_name] call sites and {!settings_keys_in_source} —

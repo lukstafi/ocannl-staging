@@ -31,7 +31,10 @@
     there. *)
 
 open Base
-open Parsetree
+open Ppxlib.Parsetree
+
+module Ast_traverse = Ppxlib.Ast_traverse
+module Asttypes = Ppxlib.Asttypes
 
 (** The two labels whose argument names a schedule cache directory: [~cache_dir], which
     [Autotune.tune] and [Train.tune_placements] take, and the [~dir] of a direct
@@ -59,6 +62,7 @@ let string_literal = Config_key_scan.string_literal
 let structure_of = Config_key_scan.structure_of
 let longident_of = Config_key_scan.longident_of
 let pattern_name = Config_key_scan.pattern_name
+let flatten_longident = Config_key_scan.flatten_longident
 
 let label_name = function
   | Asttypes.Labelled name | Asttypes.Optional name -> Some name
@@ -114,56 +118,65 @@ let scope ast =
      `module SC = Ir.Schedule_cache` does, and structure items are visited in order, so a name
      already recognised is available to the binding that borrows it (Codex P2, round 4). *)
   let names_cache_module path =
-    match List.last (Longident.flatten path) with
+    match List.last (flatten_longident path) with
     | Some last -> String.equal last cache_module || Hash_set.mem cache_modules last
     | None -> false
   in
   let iterator =
-    {
-      Ast_iterator.default_iterator with
-      structure_item =
-        (fun self item ->
-          (match item.pstr_desc with
-          | Pstr_module
-              { pmb_name = { txt = Some alias; _ }; pmb_expr = { pmod_desc = Pmod_ident { txt; _ }; _ }; _ }
-            when names_cache_module txt ->
-              Hash_set.add cache_modules alias
-          | _ -> ());
-          Ast_iterator.default_iterator.structure_item self item);
-      value_binding =
-        (fun self binding ->
-          (match (pattern_name binding.pvb_pat, string_literal binding.pvb_expr) with
-          | Some name, Some value when mentions_label name ->
-              Hashtbl.set literals ~key:name ~data:value
-          | _ -> ());
-          Ast_iterator.default_iterator.value_binding self binding);
-      expr =
-        (fun self expr ->
-          (match expr.pexp_desc with
-          (* `let module Cache = Ir.Schedule_cache in …` binds the same name in expression position,
-             which no structure item records. *)
-          | Pexp_letmodule ({ txt = Some alias; _ }, { pmod_desc = Pmod_ident { txt; _ }; _ }, _)
-            when names_cache_module txt ->
-              Hash_set.add cache_modules alias
-          | Pexp_function (params, _, _) ->
-              List.iter params ~f:(fun param ->
-                  match param.pparam_desc with
-                  | Pparam_val (lbl, _, pat) ->
-                      let named =
-                        match (lbl, pattern_name pat) with
-                        | (Asttypes.Labelled name | Asttypes.Optional name), _
-                          when mentions_label name ->
-                            Some name
-                        | _, Some name when mentions_label name -> Some name
-                        | _ -> None
-                      in
-                      Option.iter named ~f:(Hash_set.add parameters)
-                  | _ -> ())
-          | _ -> ());
-          Ast_iterator.default_iterator.expr self expr);
-    }
+    object
+      inherit Ast_traverse.iter as super
+
+      method! structure_item item =
+        (match item.pstr_desc with
+        | Pstr_module
+            {
+              pmb_name = { txt = Some alias; _ };
+              pmb_expr = { pmod_desc = Pmod_ident { txt; _ }; _ };
+              _;
+            }
+          when names_cache_module txt ->
+            Hash_set.add cache_modules alias
+        | _ -> ());
+        super#structure_item item
+
+      method! value_binding binding =
+        (match (pattern_name binding.pvb_pat, string_literal binding.pvb_expr) with
+        | Some name, Some value when mentions_label name ->
+            Hashtbl.set literals ~key:name ~data:value
+        | _ -> ());
+        super#value_binding binding
+
+      method! expression expr =
+        (match expr.pexp_desc with
+        (* `let module Cache = Ir.Schedule_cache in …` binds the same name in expression position,
+           which no structure item records.
+
+           Which node that is has moved: through 5.4 the compiler's own tree says
+           [Pexp_letmodule], and 5.5 replaced it with an ordinary [Pstr_module] wrapped in an
+           expression. Reading ppxlib's tree is what lets one arm answer for both -- ppxlib
+           migrates the 5.5 spelling back to this one. *)
+        | Pexp_letmodule ({ txt = Some alias; _ }, { pmod_desc = Pmod_ident { txt; _ }; _ }, _)
+          when names_cache_module txt ->
+            Hash_set.add cache_modules alias
+        | Pexp_function (params, _, _) ->
+            List.iter params ~f:(fun param ->
+                match param.pparam_desc with
+                | Pparam_val (lbl, _, pat) ->
+                    let named =
+                      match (lbl, pattern_name pat) with
+                      | (Asttypes.Labelled name | Asttypes.Optional name), _
+                        when mentions_label name ->
+                          Some name
+                      | _, Some name when mentions_label name -> Some name
+                      | _ -> None
+                    in
+                    Option.iter named ~f:(Hash_set.add parameters)
+                | _ -> ())
+        | _ -> ());
+        super#expression expr
+    end
   in
-  iterator.structure iterator ast;
+  iterator#structure ast;
   (literals, parameters, cache_modules)
 
 type report = {
@@ -210,32 +223,30 @@ let read content =
   in
   let found = ref [] and defaults = ref [] in
   let iterator =
-    {
-      Ast_iterator.default_iterator with
-      expr =
-        (fun self expr ->
-          (match expr.pexp_desc with
-          | Pexp_apply (callee, args) ->
-              (* The built-in default: the [~default:] literal of a read of the key by name. The
-                 library reads it twice and only one carries the directory -- the other asks merely
-                 whether the key was set, and defaults to the empty string. *)
-              if
-                Option.equal String.equal
-                  (labelled_literal args "arg_name")
-                  (Some default_config_key)
-              then
-                Option.iter (labelled_literal args "default") ~f:(fun value ->
-                    if not (String.is_empty value) then defaults := value :: !defaults);
-              let into_cache = calls_cache_module callee in
-              List.iter args ~f:(fun (lbl, argument) ->
-                  (* [Some disabling_allowed] where this argument names a directory. *)
-                  let names_a_directory =
-                    match label_name lbl with
-                    | Some name when String.equal name tune_label -> Some true
-                    | Some name when String.equal name store_label && into_cache -> Some false
-                    | _ -> None
-                  in
-                  Option.iter names_a_directory ~f:(fun disabling_allowed ->
+    object
+      inherit Ast_traverse.iter as super
+
+      method! expression expr =
+        (match expr.pexp_desc with
+        | Pexp_apply (callee, args) ->
+            (* The built-in default: the [~default:] literal of a read of the key by name. The
+               library reads it twice and only one carries the directory -- the other asks merely
+               whether the key was set, and defaults to the empty string. *)
+            if
+              Option.equal String.equal (labelled_literal args "arg_name") (Some default_config_key)
+            then
+              Option.iter (labelled_literal args "default") ~f:(fun value ->
+                  if not (String.is_empty value) then defaults := value :: !defaults);
+            let into_cache = calls_cache_module callee in
+            List.iter args ~f:(fun (lbl, argument) ->
+                (* [Some disabling_allowed] where this argument names a directory. *)
+                let names_a_directory =
+                  match label_name lbl with
+                  | Some name when String.equal name tune_label -> Some true
+                  | Some name when String.equal name store_label && into_cache -> Some false
+                  | _ -> None
+                in
+                Option.iter names_a_directory ~f:(fun disabling_allowed ->
                     found :=
                       {
                         resolution = resolve ~disabling_allowed argument;
@@ -243,11 +254,11 @@ let read content =
                         spelling = "~" ^ Option.value (label_name lbl) ~default:tune_label;
                       }
                       :: !found))
-          | _ -> ());
-          Ast_iterator.default_iterator.expr self expr);
-    }
+        | _ -> ());
+        super#expression expr
+    end
   in
-  iterator.structure iterator ast;
+  iterator#structure ast;
   { uses = List.rev !found; builtin_defaults = List.rev !defaults }
 
 type ignore_line = { pattern : string; negated : bool }

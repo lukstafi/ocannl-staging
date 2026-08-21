@@ -1,0 +1,16 @@
+ok: use -- a literal at the call site
+ok: use -- a literal reached through a binding
+ok: use -- the empty string turns the cache off
+ok: use -- a parameter is forwarded, and named at its own call sites
+ok: use -- anything else is reported rather than assumed harmless
+ok: use -- an unresolved name is reported by name
+ok: use -- a direct store through a structure-level alias
+ok: use -- a direct store through the qualified path
+ok: use -- a direct store through an alias bound in expression position
+ok: use -- an alias of an alias is an alias
+ok: use -- a bare store is not a call into the cache module
+ok: use -- nor is a same-named operation on another module
+ok: use -- a traversal keeps its separators, for the prefix rule to reject
+ok: built-in default -- the default a search falls back to
+ok: built-in default -- an empty default names no directory
+ok: built-in default -- another key's default is not this one's
