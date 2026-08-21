@@ -74,6 +74,8 @@ that they earn a lookup rather than always-loaded space.
   stanza, which in turn means resolving commands only once the stanza has been read.
   The
   sibling checks are worth a glance when touching this genre and were both fine: `env_var_deps` lists
+  names only, and `digest_completeness`'s key count moves only alongside its own enumerated key list
+  — a number in the same commit as the change it describes costs nothing.
 - Where a check needs an EXEMPTION per site, prefer an in-place marker comment to a central list,
   and give it a grammar rigid enough to be wrong out loud (gh-ocannl-659, the XOR between
   `(env_var OCANNL_BACKEND)` and `; ocannl-backend: <word> -- <reason>`). Two reasons, and the
@@ -113,8 +115,6 @@ that they earn a lookup rather than always-loaded space.
   positions: `Dune_stanza_scan.read_raw` returns forms with their byte ranges plus every `;`
   comment, and its tree is compared SHAPE FOR SHAPE against sexplib's, which is strictly stronger
   than the flat form count it replaced and is what keeps a hand-written lexer honest.
-  names only, and `digest_completeness`'s key count moves only alongside its own enumerated key list
-  — a number in the same commit as the change it describes costs nothing.
 - A ratchet whose corpus is the repository's own test sources will scan its OWN fixture, and a
   fixture that pins a shape has to spell that shape out to pin it — so the fixture matches, every
   time, by construction (gh-ocannl-668). Exempt the FILE rather than its matches one at a time: the

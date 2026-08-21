@@ -228,8 +228,11 @@ files.
   leading-axis rank drop and an unpadded, materializable parent. Host access of an alias view raises:
   read and write the parent, since `from_host` would otherwise allocate a detached buffer and break
   write-through. The alias never enters `ctx_buffers`, so finalization and pool resolution never see it.
-- `Ops.promote_prec` lets ANY float precision dominate ANY integer one — fp8 over int64 included — so
-  a precision-inference join through a float operand destroys integrality. Integer id chains (class
+- `Ops.promote_prec` is ordered `Uint4x32_prec` first, then the floats widest-first, then the
+  integers: the RNG state precision dominates EVERYTHING (a join of uint4x32 with double is
+  uint4x32, which is what keeps a threefry chain from being widened by a float consumer), and
+  below it any float dominates any integer — fp8 over int64 included — so a precision-inference
+  join through a float operand destroys integrality. Integer id chains (class
   ids, gather indices) must be pinned rather than inferred; `Tn.update_infer_prec` under a
   `not (Lazy.is_val prec)` guard is the threefry/one-hot precedent, and the gather guard's precision
   flavors (unsigned/signed/float) branch on the ids' storage precision, not on `index_prec`.
