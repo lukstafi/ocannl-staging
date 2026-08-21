@@ -1623,6 +1623,14 @@ that they earn a lookup rather than always-loaded space.
   the dumbest possible substring scan, must have been read as a marker attributed to a stanza that
   runs something. That is what catches the marker written into a quoted argument, into a field, or
   into a stanza that runs nothing — cases where the author believed they had declared something.
+  (iv) READ THE DECLARATION FROM THE FIELD THE ACTION RUNS UNDER, never from the stanza at large. A
+  stanza can carry several dependency fields and dune reruns an action under exactly one of them —
+  an inline-test library declares under `(inline_tests (deps …))`, and `(preprocessor_deps (env_var
+  OCANNL_BACKEND))` in the same stanza reruns nothing that matters while looking, to any
+  whole-stanza search, exactly like a declaration. So `site` carries `declares_backend` scoped to
+  the same deps field as `declares_config`, and the XOR reads it from the sites; the two answers
+  cannot drift because they come from one place. The general form: when a check pairs a claim with
+  the thing dune will act on, scope the claim the way dune scopes it.
   The mechanical cost is that comments are what a sexp reader throws away, so the scan needs
   positions: `Dune_stanza_scan.read_raw` returns forms with their byte ranges plus every `;`
   comment, and its tree is compared SHAPE FOR SHAPE against sexplib's, which is strictly stronger

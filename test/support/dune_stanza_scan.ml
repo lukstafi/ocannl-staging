@@ -305,6 +305,28 @@ let declared_config_paths args =
   | None -> []
   | Some args -> List.concat_map args ~f:collect |> List.dedup_and_sort ~compare:String.compare
 
+(** The one spelling OCANNL reads the backend under (gh-ocannl-652 dropped the lowercase form). *)
+let backend_env_var = "OCANNL_BACKEND"
+
+(** Whether [args] — ONE dependency field's arguments — declare [(env_var name)].
+
+    Scoped to a field rather than searched over a whole stanza, which is the whole point of it: a
+    stanza may carry several dependency fields and an action runs under exactly one of them, so a
+    declaration in a neighbouring field reruns nothing that matters while reading, to a whole-stanza
+    search, as a declaration (Codex P2, round 3). Recursion is through the dependency forms only —
+    the same shapes {!declared_config_paths} descends — so an [(env_var …)] appearing somewhere that
+    is not a dependency at all is not mistaken for one. *)
+let declares_env_var args name =
+  let rec collect sexp =
+    match sexp with
+    | Sexp.List [ Sexp.Atom "env_var"; Sexp.Atom declared ] -> String.equal declared name
+    | Sexp.List (Sexp.Atom head :: rest)
+      when String.is_prefix head ~prefix:":" || List.mem file_dep_forms head ~equal:String.equal ->
+        List.exists rest ~f:collect
+    | Sexp.List _ | Sexp.Atom _ -> false
+  in
+  match args with None -> false | Some args -> List.exists args ~f:collect
+
 (** The names a [(name …)] or [(names …)] field gives, in order. *)
 let names_of stanza =
   match field stanza "name" with
@@ -674,6 +696,14 @@ type site = {
       (** whether the deps depend on any config file at all; WHICH one had to be named is
           {!declared_config_paths}, since only the caller knows where configs exist *)
   declared_config_paths : string list;
+  declares_backend : bool;
+      (** whether THE DEPS THIS SITE RUNS UNDER declare [(env_var OCANNL_BACKEND)] — read from the
+          same field as {!declares_config}, and for the same reason. A stanza can carry dependency
+          fields that the action does not run under: an inline-test library's own
+          [(preprocessor_deps …)] is not [(inline_tests (deps …))], and a declaration in the former
+          leaves the test action just as undeclared as none at all while looking, to anything that
+          searches the stanza as a whole, exactly like a declaration (Codex P2, round 3). Scoping it
+          per site is what keeps that answer tied to the thing dune will actually rerun. *)
   path_rewritten : bool;
       (** whether this site is a program the walk refuses to name because [(setenv PATH …)] decides
           what it resolves to — as opposed to the other reasons a site can be unnameable, which a
@@ -1002,6 +1032,7 @@ let sites_of_stanza subdir stanza =
             name;
             declares_config = not (List.is_empty (declared_config_paths deps_field));
             declared_config_paths = declared_config_paths deps_field;
+            declares_backend = declares_env_var deps_field backend_env_var;
             path_rewritten;
             executables;
             subdir;
@@ -1153,7 +1184,9 @@ let config_copy_dirs content =
     to live there rather than in a file they will never open (the recurrence mechanism gh-ocannl-668
     diagnosed). *)
 
-let backend_env_var = "OCANNL_BACKEND"
+(* [backend_env_var] and [declares_env_var] are defined up with [declared_config_paths]: the
+   declaration is read from a site's own dependency field, so it has to be available where a site is
+   built. *)
 
 (** What makes a comment a marker rather than prose. Distinctive enough that a check can also ask
     whether every occurrence of it in a dune file became a marker, which is how a misplaced or
@@ -1323,11 +1356,6 @@ type marked_stanza = {
 let marked_stanzas content =
   let parsed = stanzas content in
   let raw, comments = read_raw content in
-  let rec declares = function
-    | Sexp.List [ Sexp.Atom "env_var"; Sexp.Atom name ] -> String.equal name backend_env_var
-    | Sexp.List l -> List.exists l ~f:declares
-    | Sexp.Atom _ -> false
-  in
   let enclosed form =
     List.filter_map comments ~f:(fun c ->
         if c.comment_start >= form.raw_start && c.comment_start < form.raw_stop then
@@ -1344,17 +1372,24 @@ let marked_stanzas content =
       when List.length body_forms = List.length body ->
         List.concat (List.map2_exn body_forms body ~f:(go (in_subdir dir sub)))
     | _ ->
+        let sites = sites_of_stanza dir sexp in
         [
           {
             marked_head = (match head sexp with Some h -> h | None -> "<not a stanza>");
             marked_name = String.concat ~sep:", " (names_of sexp);
             marked_line = line_of content form.raw_start;
-            marked_sites = sites_of_stanza dir sexp;
+            marked_sites = sites;
             (* The same stanza, put to the other reader. `raw_stanza_of` returns nothing for a form
                that is not a stanza at all, which is itself an honest "runs nothing". *)
             marked_raw_subject =
               List.exists (raw_stanza_of ~subdir:dir sexp) ~f:raw_runs_something;
-            marked_declares_backend = declares sexp;
+            (* Read from the SITES' own dependency fields, not from the stanza as a whole. Which
+               field carries a site's deps is already worked out per site -- an inline-test library
+               declares under `(inline_tests (deps …))`, not in the library stanza at large -- and
+               asking the stanza instead would certify a test action against a declaration it does
+               not run under (Codex P2, round 3). A stanza that runs nothing declares nothing, which
+               is what the XOR's "a marker here declares nothing" arm already says of it. *)
+            marked_declares_backend = List.exists sites ~f:(fun s -> s.declares_backend);
             marked_comments = enclosed form;
           };
         ]
