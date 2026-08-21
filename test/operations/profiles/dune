@@ -10,6 +10,8 @@
  (files ../../config/env_spelling_gate.ml))
 
 (test
+ ; ocannl-backend: none -- links arrayjit.utils alone and only classifies variable NAMES;
+ ; its `(universe)` dependency reruns it whatever any variable is set to.
  (name env_spelling_gate)
  (package neural_nets_lib)
  (deps ocannl_config (universe))
@@ -38,6 +40,8 @@
 ; rules capture stdout only.
 
 (rule
+ ; ocannl-backend: none -- profile_precedence.exe links base, arrayjit.utils and stdio; the twelve
+ ; keys it exercises do not include `backend`, and neither profile payload sets it.
  (target from_config_file.actual)
  (deps ocannl_config)
  (action
@@ -55,6 +59,8 @@
   (diff from_config_file.expected from_config_file.actual)))
 
 (rule
+ ; ocannl-backend: none -- profile_precedence.exe links base, arrayjit.utils and stdio; the twelve
+ ; keys it exercises do not include `backend`, and neither profile payload sets it.
  (target from_cmdline.actual)
  (deps ocannl_config)
  (action
@@ -72,6 +78,8 @@
   (diff from_cmdline.expected from_cmdline.actual)))
 
 (rule
+ ; ocannl-backend: none -- profile_precedence.exe links base, arrayjit.utils and stdio; the twelve
+ ; keys it exercises do not include `backend`, and neither profile payload sets it.
  (target from_env.actual)
  (deps ocannl_config)
  (action
@@ -94,6 +102,8 @@
 ; file-picked one, unchanged -- the flag reaches nothing.
 
 (rule
+ ; ocannl-backend: none -- profile_precedence.exe links base, arrayjit.utils and stdio; the twelve
+ ; keys it exercises do not include `backend`, and neither profile payload sets it.
  (target host_profile_flag.actual)
  (deps ocannl_config)
  (action
@@ -114,6 +124,8 @@
 ; commandline key wins over the payload of the profile the commandline picked.
 
 (rule
+ ; ocannl-backend: none -- profile_precedence.exe links base, arrayjit.utils and stdio; the twelve
+ ; keys it exercises do not include `backend`, and neither profile payload sets it.
  (target explicit_beats_profile.actual)
  (deps ocannl_config)
  (action
@@ -139,6 +151,8 @@
 ; OCANNL_PROFILE, and the output is the env-picked one.
 
 (rule
+ ; ocannl-backend: none -- profile_precedence.exe links base, arrayjit.utils and stdio; the twelve
+ ; keys it exercises do not include `backend`, and neither profile payload sets it.
  (target empty_cmdline_falls_through.actual)
  (deps ocannl_config)
  (action

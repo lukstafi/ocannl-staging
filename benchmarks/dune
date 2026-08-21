@@ -1,4 +1,6 @@
 (rule
+ ; ocannl-backend: none -- runs the benchmark orchestrator's own Python unit tests, which import
+ ; orchestrate.py and bench_common.py and launch no OCANNL executable.
  (alias runtest)
  ; The Python modules are globbed rather than named: the test grows imports faster than anyone
  ; remembers to pin them, and nothing is sandboxed, so an unlisted module is not a build error --

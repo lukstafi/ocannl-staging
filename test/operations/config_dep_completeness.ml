@@ -197,6 +197,9 @@ let () =
                  name;
                  declared_config_paths;
                  declares_config = _;
+                 (* gh-ocannl-659's business, checked by `env_var_deps`; this test is about the
+                    config dep. *)
+                 declares_backend = _;
                  path_rewritten = _;
                  executables = _;
                  subdir = _;

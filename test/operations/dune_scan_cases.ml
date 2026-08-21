@@ -679,6 +679,155 @@ let raw_stanza_cases =
       [ "rule{}" ] );
   ]
 
+(* gh-ocannl-659's marker: a comment inside a stanza's parentheses saying which backend the stanza
+   is pinned to -- or `none` -- and why, for the stanzas that do not declare `(env_var
+   OCANNL_BACKEND)`. The grammar is rigid on purpose, so the cases that matter are the near misses:
+   a marker the reader silently declines to parse leaves its stanza declaring nothing, reported as
+   if the author had written none at all.
+
+   Rendered as "<what>|<reason>" for a marker, "!<why>" for one the grammar rejects, and "-" for a
+   comment that is not a marker. *)
+let render_marker text =
+  match Scan.parse_marker text with
+  | None -> "-"
+  | Some (Scan.Marker m) -> m.Scan.backend ^ "|" ^ m.Scan.reason
+  | Some (Scan.Malformed why) -> "!" ^ why
+
+let marker_grammar_cases =
+  [
+    ("ordinary prose is not a marker", " a note about the backend", "-");
+    ("the plain shape", " ocannl-backend: none -- links no backend", "none|links no backend");
+    (* The em dash is what this repository's prose uses and `--` is what a keyboard produces;
+       refusing either would be a grammar that fails for a reason nobody can see in a diff. *)
+    ("an em dash separates too", " ocannl-backend: cc \xe2\x80\x94 names its backend", "cc|names its backend");
+    ("spacing around the colon is free", ";ocannl-backend:metal -- pins MSL emission", "metal|pins MSL emission");
+    (* A stanza may honestly name two backends; `none` makes no such pair. *)
+    ( "two backends, for a stanza that names both",
+      " ocannl-backend: cc,multidev_cc -- names both by argument",
+      "cc,multidev_cc|names both by argument" );
+    ( "none and a backend at once is a contradiction",
+      " ocannl-backend: none,cc -- both at once",
+      "!`none,cc` says both that the run depends on a backend and that it depends on none" );
+    (* The near misses. Each of these WOULD read as "no marker at all" under a looser grammar, and
+       its stanza would then be reported as undeclared -- or, worse, as declared. *)
+    ( "a backend the repository does not have",
+      " ocannl-backend: metl -- a typo for metal",
+      "!`metl` is not one of none, cc, multidev_cc, cuda, hip, metal" );
+    ( "no separator at all",
+      " ocannl-backend: none links no backend",
+      "!no `--` separating the backend from the reason -- the grammar is `; ocannl-backend: "
+      ^ "<none|cc|multidev_cc|cuda|hip|metal> -- <reason>`" );
+    ( "a one-word reason is a label, not a reason",
+      " ocannl-backend: none -- pure",
+      "!the reason `pure` is one word -- say why, not what" );
+    ("an empty reason", " ocannl-backend: cc --", "!the reason `` is one word -- say why, not what");
+    (* The separator is the EARLIEST one, not the first spelling that occurs anywhere: taking the
+       `--` here would put "cc \xe2\x80\x94 pinned" in the backend position and swallow half the sentence. *)
+    ( "an em dash before a double dash in the reason",
+      " ocannl-backend: cc \xe2\x80\x94 pinned -- really pinned",
+      "cc|pinned -- really pinned" );
+    (* Announced anywhere in the comment: a marker someone annotated is still a marker, and reading
+       it from the sentinel rather than from the start of the line is what keeps it one. *)
+    ("annotated prose before it", " NOTE ocannl-backend: hip -- names its backend", "hip|names its backend");
+    (* Refused rather than normalised. Each of these is a TYPO in the one comment whose whole job is
+       to be checkable, and a grammar that quietly repaired it would hand back a clean answer for a
+       marker its author got wrong -- which is the failure mode the malformed/absent distinction
+       exists to prevent (Codex P2, round 1). *)
+    ( "a trailing comma is an empty entry, not a clean single backend",
+      " ocannl-backend: cc, -- pins the backend",
+      "!`cc,` has an empty entry between commas -- name each backend, or drop the comma" );
+    ( "and so is a doubled comma between two real ones",
+      " ocannl-backend: cc,,metal -- names both",
+      "!`cc,,metal` has an empty entry between commas -- name each backend, or drop the comma" );
+    ( "the same backend twice is a typo, not a list",
+      " ocannl-backend: cc,cc -- names its backend",
+      "!`cc,cc` names the same backend twice" );
+    (* Reading from the earliest sentinel and letting the rest fall into the reason would absorb a
+       whole second declaration into prose -- and the accounting check cannot see it, since both
+       occurrences ARE in a comment the scan places. *)
+    ( "two declarations sharing one comment",
+      " ocannl-backend: none -- links no backend ocannl-backend: cc -- names its backend",
+      "!two `ocannl-backend:` declarations in one comment -- the second would be read as part of \
+       the first's reason; put each on its own line" );
+  ]
+
+(* Which stanza a marker belongs to. The attribution rule is containment -- between the stanza's
+   parentheses -- and these cases are the ones an adjacency rule gets wrong: this repository's dune
+   files habitually leave a blank line between a comment block and the stanza below it, so "the
+   comment above" would have to guess how far above.
+
+   Rendered as "<head> <name>[*] {<markers>}", where `*` marks a stanza that runs something. *)
+let render_marked (m : Scan.marked_stanza) =
+  Printf.sprintf "%s %s%s {%s}" m.Scan.marked_head
+    (if String.is_empty m.Scan.marked_name then "-" else m.Scan.marked_name)
+    (if List.is_empty m.Scan.marked_sites then "" else "*")
+    (String.concat ~sep:","
+       (List.filter_map m.Scan.marked_comments ~f:(fun (_, text) ->
+            match Scan.parse_marker text with
+            | Some (Scan.Marker m) -> Some m.Scan.backend
+            | Some (Scan.Malformed _) -> Some "!"
+            | None -> None)))
+
+let marker_placement_cases =
+  [
+    ( "inside the stanza it is about",
+      {dune|(test (name t)
+ ; ocannl-backend: none -- links no backend
+ (deps ocannl_config))|dune},
+      [ "test t* {none}" ] );
+    (* Between two stanzas it belongs to neither, which is what makes a misplaced one reportable
+       rather than silently absent. *)
+    ( "between two stanzas it belongs to neither",
+      {dune|(test (name a) (deps ocannl_config))
+; ocannl-backend: none -- links no backend
+(test (name b) (deps ocannl_config))|dune},
+      [ "test a* {}"; "test b* {}" ] );
+    (* The blank line an adjacency rule would have to see past. *)
+    ( "a comment above the stanza, blank line and all",
+      {dune|; ocannl-backend: none -- links no backend
+
+(test (name t) (deps ocannl_config))|dune},
+      [ "test t* {}" ] );
+    (* An `(executable)` has no `deps` field at all, so its companion rule is where both the config
+       dep and this marker go; a marker on the executable declares nothing. *)
+    ( "on an executable, which runs nothing",
+      {dune|(executable (name e)
+ ; ocannl-backend: none -- links no backend
+ (modules e))|dune},
+      [ "executable e {none}" ] );
+    ( "a subdir's stanzas keep their own markers",
+      {dune|(subdir sub (rule
+ ; ocannl-backend: cc -- pins the backend on the command line
+ (deps ocannl_config) (action (run %{dep:probe.exe}))))|dune},
+      [ "rule -* {cc}" ] );
+    (* Sitting in the subdir but in none of its stanzas: attributed to nothing, exactly as the
+       between-stanzas case above. *)
+    ( "one in the subdir but in no stanza of it",
+      {dune|(subdir sub
+ ; ocannl-backend: cc -- pins the backend on the command line
+ (rule (deps ocannl_config) (action (run %{dep:probe.exe}))))|dune},
+      [ "rule -* {}" ] );
+    ( "the declaration and the marker are read independently",
+      {dune|(test (name t)
+ ; ocannl-backend: none -- links no backend
+ (deps ocannl_config (env_var OCANNL_BACKEND)))|dune},
+      [ "test t* {none}" ] );
+  ]
+
+(* The dumb reading against the placed one. A marker written where the comment lexer does not look
+   -- into a quoted argument, into a field -- is the difference between the two counts, which is the
+   shape of "the author declared something the check did not read". *)
+let sentinel_counting_cases =
+  [
+    ("in a comment", {dune|(test (name t)
+ ; ocannl-backend: none -- links no backend
+ (deps ocannl_config))|dune}, (1, 1));
+    ( "inside a quoted argument, where it declares nothing",
+      {dune|(rule (deps ocannl_config) (action (echo "ocannl-backend: none -- links no backend")))|dune},
+      (1, 0) );
+    ("none at all", {dune|(test (name t) (deps ocannl_config))|dune}, (0, 0));
+  ]
+
 let () =
   let check name expected found =
     if List.equal String.equal found expected then printf "ok: %s\n" name
@@ -721,6 +870,25 @@ let () =
           []
       in
       check ("accepted marker -- " ^ name) expected found);
+  List.iter marker_grammar_cases ~f:(fun (name, text, expected) ->
+      check ("backend marker grammar -- " ^ name) [ expected ] [ render_marker text ]);
+  List.iter marker_placement_cases ~f:(fun (name, source, expected) ->
+      let found =
+        try List.map (Scan.marked_stanzas source) ~f:render_marked
+        with exn ->
+          fail "backend marker placement -- %s: the scan raised: %s" name (Exn.to_string exn);
+          []
+      in
+      check ("backend marker placement -- " ^ name) expected found);
+  List.iter sentinel_counting_cases ~f:(fun (name, source, (in_text, in_comments)) ->
+      let found =
+        Printf.sprintf "%d in the text, %d in comments" (Scan.sentinel_occurrences source)
+          (List.length (Scan.marker_comments source))
+      in
+      check
+        ("backend marker sentinel -- " ^ name)
+        [ Printf.sprintf "%d in the text, %d in comments" in_text in_comments ]
+        [ found ]);
   List.iter (nested_marker_case :: refused_cases) ~f:(fun (name, source) ->
       match Scan.sites source with
       | exception _ -> printf "ok: refused -- %s\n" name
