@@ -33,10 +33,21 @@ open Ppxlib.Parsetree
    [Pexp_letmodule] and becoming an ordinary structure item inside an expression. Neither was a
    change in what the sources say; both were changes in how the tree spells it.
 
-   The migration cannot lose anything here, by construction: every source these scanners read is a
-   source of this repository, which builds on the floor its opam files declare, and that floor is at
-   or below ppxlib's AST version. A construct ppxlib would have to drop is one this repository could
-   not contain. *)
+   The selected AST is [Astlib.Ast_502], BELOW the floor the opam files declare, so a parse on any
+   supported compiler is a downgrade and the question is what a downgrade costs a scanner.
+
+   Not data: the 5.x chain performs no migration_error at all. What a newer AST spells differently
+   is either mapped onto the older constructor -- 5.5's structure-item-in-an-expression becomes the
+   [Pexp_letmodule] that {!Cache_dir_scan} matches -- or carried across in an attribute encoding.
+   And not recognition either, for what is matched here: applications, labelled arguments, string
+   constants, field accesses and module bindings all predate 5.2 and map across directly.
+
+   Checked rather than argued: the censuses built on these scanners are byte-identical to what
+   matching the compiler's own tree produced, over every source in the repository.
+
+   What this DOES rest on is the AST staying [Ast_502], which is a property of ppxlib rather than
+   of the compiler -- hence the upper bound on ppxlib in [dune-project], whose note explains why
+   the bound rather than a pinned versioned AST. *)
 module Ast_traverse = Ppxlib.Ast_traverse
 module Asttypes = Ppxlib.Asttypes
 module Location = Ppxlib.Location

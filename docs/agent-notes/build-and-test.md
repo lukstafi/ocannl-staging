@@ -133,9 +133,13 @@ that they earn a lookup rather than always-loaded space.
   `Pexp_letmodule`, making it an ordinary structure item inside the expression — so no single arm
   compiles on both sides of that boundary. ppxlib parses with the compiler's own parser and then
   migrates the tree to an AST of ppxlib's version, which is what decouples a scanner from the
-  compiler it is built by. The migration cannot silently drop a construct here, and the reason is
-  worth keeping: every source these scanners read is a source of this repository, which builds on
-  the floor its opam files declare, and that floor is at or below ppxlib's AST version. Match with
+  compiler it is built by. That AST is `Astlib.Ast_502` — BELOW the declared OCaml floor, so every
+  parse is a downgrade, and the reassurance is not "nothing newer can arrive" but that the 5.x
+  downgrade chain performs no `migration_error`: a construct the older AST spells differently is
+  mapped onto the older constructor (5.5's structure-item-in-an-expression becomes
+  `Pexp_letmodule`) or carried in an attribute encoding. The corollary is that the coupling moves
+  to ppxlib — **`dune-project` bounds ppxlib above** for that reason, since the ppx matches the
+  same selected AST at some sixty sites. Match with
   ordinary patterns; metaquot quotations (`[%expr [%e? f] ()]`, `[%expr ()]`) are preferred wherever
   they express the WHOLE shape, since they ignore locations and attributes while keeping arity and
   labels exact. What they cannot reach — a variable-length argument list, a string constant's value,
