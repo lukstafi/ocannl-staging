@@ -19,6 +19,8 @@
  (files ../config/env_spelling_gate.ml))
 
 (test
+ ; ocannl-backend: none -- links arrayjit.utils alone and only classifies variable NAMES;
+ ; its `(universe)` dependency reruns it whatever any variable is set to.
  (name env_spelling_gate)
  (package neural_nets_lib)
  (locks ocannl_training_test)
@@ -32,6 +34,8 @@
 ; builds, so there is one gate binary per directory however many aliases reach it.
 
 (rule
+ ; ocannl-backend: none -- links arrayjit.utils alone and only classifies variable NAMES;
+ ; its `(universe)` dependency reruns it whatever any variable is set to.
  (alias slow)
  (package neural_nets_lib)
  (locks ocannl_training_test)
@@ -40,6 +44,7 @@
   (run %{dep:env_spelling_gate.exe})))
 
 (test
+ ; ocannl-backend: none -- links no backend: it reads synthetic Benchmark records through PrintBox_utils.table as text.
  (name printbox_utils_test)
  (package neural_nets_lib)
  (deps ocannl_config)
@@ -199,6 +204,8 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ ; ocannl-backend: none -- builds Row constraints by hand and calls the solver directly; there is
+ ; no lowering and no context in the run.
  (name row_beg_dims_regression)
  (package neural_nets_lib)
  (deps ocannl_config)
@@ -208,6 +215,8 @@
   (pps ppx_here)))
 
 (test
+ ; ocannl-backend: none -- hand-built Dim_ineq/Dim_eq through Row.solve_inequalities; the solver
+ ; runs before any backend is chosen.
  (name test_concat_dim_solver)
  (package neural_nets_lib)
  (deps ocannl_config)
@@ -324,6 +333,8 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ ; ocannl-backend: cc -- names its backend, `Backends.get_backend ~backend_name:"cc"`, and then
+ ; compiles, links and device_to_devices on it.
  (name merge_buffer_static_verification)
  (package neural_nets_lib)
  (deps ocannl_config)
@@ -333,6 +344,8 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ ; ocannl-backend: cc -- three `Backends.get_backend ~backend_name:"cc"` sites, each compiling a
+ ; routine and reading it back through Backend.to_host.
  (name test_buffer_loc)
  (package neural_nets_lib)
  (deps ocannl_config)
@@ -342,6 +355,8 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ ; ocannl-backend: cc -- part one is host-side sharding (Parallel.shard_along/gather), part two an
+ ; all-reduce on `~backend_name:"cc"`.
  (name shard_transfer)
  (package neural_nets_lib)
  (deps ocannl_config)
@@ -351,6 +366,7 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ ; ocannl-backend: cc -- `Context.cpu ()`, which names cc (multidev_cc only above one thread).
  (name local_host_access)
  (package neural_nets_lib)
  (deps ocannl_config)
@@ -360,6 +376,7 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ ; ocannl-backend: cc -- `Context.cpu ()` plus Train.forward_once and get_values/set_values.
  (name context_host_access)
  (package neural_nets_lib)
  (deps ocannl_config)
@@ -369,6 +386,8 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ ; ocannl-backend: cc -- `Context.cpu ()` and Train.printf, exercising the recompute-through-
+ ; to_host proxy path on that context.
  (name for_print_test)
  (package neural_nets_lib)
  (deps ocannl_config)
@@ -1046,6 +1065,8 @@
 ; Builds its contexts with an explicit [Context.cpu ()], so OCANNL_BACKEND is not a dependency.
 
 (test
+ ; ocannl-backend: cc -- every context here is an explicit `Context.cpu ()`, so OCANNL_BACKEND is
+ ; not a dependency.
  (name test_tensor_persistence)
  (package neural_nets_lib)
  (deps ocannl_config)
@@ -1055,6 +1076,7 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ ; ocannl-backend: cc -- `Context.cpu ()`, with one Train.forward_once on that context.
  (name test_tnode_namespaces)
  (package neural_nets_lib)
  (deps ocannl_config)
@@ -1093,6 +1115,8 @@
   (pps ppx_here ppx_ocannl)))
 
 (rule
+ ; ocannl-backend: cc -- the command line below pins `--ocannl_backend=cc`, which outranks the
+ ; environment, and the rule copies the cc artifact `build_files/.../c_fwd.c`.
  (target test_log_stmt_format.c.actual)
  (package neural_nets_lib)
  (deps ocannl_config)
@@ -1117,6 +1141,7 @@
   (diff "test_log_stmt_format.c.expected" "test_log_stmt_format.c.actual")))
 
 (test
+ ; ocannl-backend: none -- links no backend: it reads tnode names through Ir.Tnode.get_debug_name as text.
  (name test_debug_name_collapse)
  (package neural_nets_lib)
  (deps ocannl_config)
@@ -1159,6 +1184,8 @@
  (modes best))
 
 (test
+ ; ocannl-backend: none -- drives Utils.resolve_config_value over synthetic alists; neither
+ ; profile payload sets the backend key, so no precedence question here reaches one.
  (name config_profiles)
  (package neural_nets_lib)
  (deps ocannl_config config_profiles.expected)
@@ -1198,6 +1225,8 @@
  (libraries base arrayjit.utils stdio arrayjit.verdict))
 
 (rule
+ ; ocannl-backend: none -- classifies variable NAMES through Utils (env_var_name, classify_env_var);
+ ; it never resolves the backend key's value, and links no backend to resolve it on.
  (target config_var_spellings.actual)
  (deps ocannl_config)
  (action
@@ -1286,6 +1315,8 @@
 ; run that stops are two different claims.
 
 (rule
+ ; ocannl-backend: none -- classifies variable NAMES through Utils (env_var_name, classify_env_var);
+ ; it never resolves the backend key's value, and links no backend to resolve it on.
  (target config_var_warnings.actual)
  (deps
   ocannl_config
@@ -1349,6 +1380,8 @@
 ; same everywhere.
 
 (rule
+ ; ocannl-backend: none -- classifies variable NAMES through Utils (env_var_name, classify_env_var);
+ ; it never resolves the backend key's value, and links no backend to resolve it on.
  (target config_var_fatal_spelling.actual)
  (deps
   ocannl_config
@@ -1386,6 +1419,7 @@
 ; dependency set to the exe, which keeps the .ml files among them (Config_key_scan.sources_among).
 
 (rule
+ ; ocannl-backend: none -- links no backend: it reads ocannl_config.reference and the globbed sources as text.
  (target test_config_consistency.actual)
  (package neural_nets_lib)
  (deps
@@ -1414,6 +1448,7 @@
 ; on whatever the library sources happen to contain today.
 
 (test
+ ; ocannl-backend: none -- links no backend: it reads embedded OCaml snippets through Config_key_scan as text.
  (name config_scan_lexing)
  (package neural_nets_lib)
  (deps ocannl_config)
@@ -1424,6 +1459,7 @@
 ; it rather than on whatever the repository's dune files happen to say today.
 
 (test
+ ; ocannl-backend: none -- links no backend: it reads embedded dune-file text through Dune_stanza_scan as text.
  (name dune_scan_cases)
  (package neural_nets_lib)
  (deps ocannl_config)
@@ -1445,6 +1481,7 @@
 ; the first one's list, so it inherited the blind spot too.
 
 (rule
+ ; ocannl-backend: none -- links no backend: it reads the config-key classification table and the globbed sources as text.
  (target digest_completeness.actual)
  (package neural_nets_lib)
  (deps
@@ -1482,6 +1519,7 @@
  (libraries base stdio arrayjit.utils test_utils arrayjit.verdict))
 
 (rule
+ ; ocannl-backend: none -- links no backend: it reads dune files and OCaml sources as text.
  (target env_var_deps.actual)
  (package neural_nets_lib)
  (deps
@@ -1520,6 +1558,7 @@
  (libraries base stdio test_utils arrayjit.verdict))
 
 (rule
+ ; ocannl-backend: none -- links no backend: it reads `.gitignore` and every OCaml source in the repository as text.
  (target cache_dir_ignores.actual)
  (package neural_nets_lib)
  (deps
@@ -1546,6 +1585,7 @@
  (libraries base stdio test_utils arrayjit.verdict))
 
 (rule
+ ; ocannl-backend: none -- links no backend: it reads dune files as text.
  (target config_dep_completeness.actual)
  (package neural_nets_lib)
  (deps
@@ -1576,6 +1616,7 @@
  (libraries base stdio test_utils arrayjit.verdict))
 
 (rule
+ ; ocannl-backend: none -- links no backend: it reads test sources through Verdict_scan as text.
  (target verdict_ratchet.actual)
  (package neural_nets_lib)
  (deps
@@ -1598,6 +1639,7 @@
 ; literals that ratchet plants its canaries on live.
 
 (test
+ ; ocannl-backend: none -- links no backend: it reads embedded format strings through Verdict_scan as text.
  (name verdict_scan_cases)
  (package neural_nets_lib)
  (deps ocannl_config)
@@ -1605,6 +1647,8 @@
  (libraries base stdio test_utils arrayjit.verdict))
 
 (test
+ ; ocannl-backend: metal -- `Context.metal ()` and Train.forward_once, then reads the emitted MSL
+ ; for the pooled bindings; the `select` arm follows library availability, not the environment.
  (name test_metal_pool_bindings)
  (package neural_nets_lib)
  (modules test_metal_pool_bindings)
@@ -1622,6 +1666,8 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ ; ocannl-backend: metal -- `Context.metal ()`, then asserts on the guarded gather in the emitted
+ ; MSL; the off-platform `select` arm replays the golden.
  (name test_metal_guarded_gather_codegen)
  (package neural_nets_lib)
  (modules test_metal_guarded_gather_codegen)
@@ -1640,6 +1686,8 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ ; ocannl-backend: metal -- `Context.metal ()`, then asserts on the `__pool_slots` declaration in
+ ; the emitted MSL; the off-platform `select` arm replays the golden.
  (name test_metal_pool_slot_width)
  (package neural_nets_lib)
  (modules test_metal_pool_slot_width)
@@ -1658,6 +1706,8 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ ; ocannl-backend: cuda -- `Backends.get_backend ~backend_name:"cuda"` with an explicit compile
+ ; and link; the `select` arm follows cudajit's availability, not the environment.
  (name test_cuda_pool_offset)
  (package neural_nets_lib)
  (modules test_cuda_pool_offset)
@@ -1794,6 +1844,8 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ ; ocannl-backend: none -- uses ll_test's pure helpers (cycle, drift, blind_axis) and never its
+ ; optimize/run harness, so the `ocannl` on its link line builds no context.
  (name discriminating_values)
  (package neural_nets_lib)
  (deps ocannl_config)
@@ -2043,6 +2095,8 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ ; ocannl-backend: none -- links arrayjit.ir alone; pure arithmetic over the SIMD lane ladder.
+ ; This is the stanza gh-ocannl-659 was found on: correct, and correct by nobody's checking.
  (name simd_lane_choice)
  (package neural_nets_lib)
  (deps ocannl_config)
@@ -2388,6 +2442,8 @@
   (pps ppx_here ppx_ocannl)))
 
 (rule
+ ; ocannl-backend: cc -- the command line below pins `--ocannl_backend=cc`, which outranks the
+ ; environment, so the `Context.auto ()` in the source resolves to cc whatever is ambient.
  (target autotune_bound_pruning.actual)
  (package neural_nets_lib)
  (deps ocannl_config)
@@ -2485,6 +2541,8 @@
 ; (Ir.Cost_model.Calibration, gh-ocannl-514 phase 0): no backend, no config sensitivity.
 
 (test
+ ; ocannl-backend: none -- pure Cost_model.Calibration row round-trip and fitting; the `~backend`
+ ; arguments are TSV column values used to test per-backend grouping, not backend selections.
  (name envelope_fitting)
  (package neural_nets_lib)
  (deps ocannl_config)
@@ -2519,6 +2577,8 @@
   (pps ppx_here ppx_ocannl)))
 
 (rule
+ ; ocannl-backend: cc -- the command line below pins `--ocannl_backend=cc`, which outranks the
+ ; environment, so the `Context.auto ()` in the source resolves to cc whatever is ambient.
  (target cost_model_selection.actual)
  (package neural_nets_lib)
  (deps ocannl_config)
@@ -2549,6 +2609,8 @@
   (pps ppx_here ppx_ocannl)))
 
 (rule
+ ; ocannl-backend: cc -- the command line below pins `--ocannl_backend=cc`, which outranks the
+ ; environment, so the `Context.auto ()` in the source resolves to cc whatever is ambient.
  (target model_default_fallback.actual)
  (package neural_nets_lib)
  (deps ocannl_config)
@@ -2649,6 +2711,8 @@
 ; (gh-ocannl-586): without the dep it runs under whatever happens to be in the build directory.
 
 (test
+ ; ocannl-backend: none -- Ir.Low_level.Canonical_render.emit over hand-built Low_level.t with a
+ ; test-local policy record; the renderer is upstream of every backend.
  (name canonical_render)
  (package neural_nets_lib)
  (deps ocannl_config)
@@ -2836,6 +2900,8 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ ; ocannl-backend: none -- parses fabricated topology strings and decides pool uniformity on them.
+ ; It IS ambient-sensitive, to OCANNL_TOOL_TEST_RESTRICT_MASK, which it declares below.
  (name test_cpu_topology)
  (package neural_nets_lib)
  (modules test_cpu_topology)
@@ -2863,6 +2929,8 @@
   (pps ppx_here ppx_ocannl)))
 
 (rule
+ ; ocannl-backend: cc -- the command line below pins `--ocannl_backend=cc`, which outranks the
+ ; environment, so the `Context.auto ()` in the source resolves to cc whatever is ambient.
  (target placement_surface.actual)
  (package neural_nets_lib)
  (deps ocannl_config)
@@ -2893,6 +2961,8 @@
   (pps ppx_here ppx_ocannl)))
 
 (rule
+ ; ocannl-backend: cc -- the command line below pins `--ocannl_backend=cc`, which outranks the
+ ; environment, so the `Context.auto ()` in the source resolves to cc whatever is ambient.
  (target flip_bound_pruning.actual)
  (package neural_nets_lib)
  (deps ocannl_config)
@@ -2923,6 +2993,8 @@
   (pps ppx_here ppx_ocannl)))
 
 (rule
+ ; ocannl-backend: cc -- the command line below pins `--ocannl_backend=cc`, which outranks the
+ ; environment, so the `Context.auto ()` in the source resolves to cc whatever is ambient.
  (target model_default_placements.actual)
  (package neural_nets_lib)
  (deps ocannl_config)
@@ -2960,6 +3032,8 @@
 ; config_dep_completeness).
 
 (test
+ ; ocannl-backend: none -- parses a fixture argv; the `--ocannl_backend=cc` token in it is
+ ; classified as an option and never resolved, and bench_args links no backend.
  (name bench_args_parsing)
  (package neural_nets_lib)
  (deps ocannl_config)
@@ -2989,6 +3063,10 @@
  (libraries base stdio unix arrayjit.utils arrayjit.verdict test_utils))
 
 (rule
+ ; ocannl-backend: none -- links arrayjit.utils, test_utils and unix, and writes its artifacts by
+ ; hand rather than compiling any. Its `backend_name = "cc"` is the label a generated file's name
+ ; carries, not a backend it selects: what is under test is how Generated decides a file on disk
+ ; belongs to this run.
  (aliases runtest generated_provenance)
  (package neural_nets_lib)
  (deps

@@ -99,8 +99,15 @@ Testing notes:
   ONE spelling `Utils.env_var_name` builds (`OCANNL_<KEY>`; gh-ocannl-652 dropped the lowercase
   `ocannl_<key>`, and setting it now aborts the run rather than being read or ignored). Every test
   stanza that can select a backend declares `OCANNL_BACKEND`; one that names its backend or links
-  none declares nothing. To pin any other key on a probe, add `OCANNL_<KEY>` to that stanza's deps
-  first. `test/operations/env_var_deps` checks that every declaration names a spelling a run reads,
+  none carries, instead, a marker comment inside its own parentheses saying which and why —
+  `; ocannl-backend: none -- links arrayjit.ir alone` or `; ocannl-backend: metal -- pins MSL
+  emission` (words: `none`, `cc`, `multidev_cc`, `cuda`, `hip`, `metal`, comma-separated where a
+  stanza honestly names two; the reason is required and must be more than one word). Exactly one of
+  the two, never neither and never both, over every stanza that runs an executable; for an
+  `(executable)` plus a `(rule)`, the marker goes on the rule, the same placement as the
+  `ocannl_config` dep (gh-ocannl-659). To pin any other key on a probe, add `OCANNL_<KEY>` to that
+  stanza's deps first. `test/operations/env_var_deps` checks all of that, that every declaration
+  names a spelling a run reads,
   and that each library declares the `OCANNL_LOG_LEVEL_<MODULE>` tracing gates its modules read
   (gh-ocannl-628). Since nothing declares the REJECTED spellings, nothing would rerun for one
   either: every test directory carries an `env_spelling_gate` depending on `(universe)`, so it

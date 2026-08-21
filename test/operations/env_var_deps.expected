@@ -73,4 +73,31 @@ Declarations of a name OCANNL does not read as a configuration key, exempt by de
   test/operations/dune:OCANNL_BACKEDN -- the same fixture, in the casing OCANNL reads -- a lowercase one is reported rather than read, so both write to the stream the golden holds
   test/operations/dune:ocannl-log_level -- the `config_var_fatal_spelling` fixture: a known key in the dashed spelling that gh-ocannl-605 dropped, which since gh-ocannl-652 aborts the run rather than warning
 
+Backend declarations, by dune file. Every stanza that runs an executable either declares
+`(env_var OCANNL_BACKEND)`, or carries the marker comment
+    ; ocannl-backend: <none|cc|multidev_cc|cuda|hip|metal> -- <reason>
+inside its parentheses. What is held here is which WORDS a file's markers use, not how many
+stanzas carry each: the per-stanza reasons live next to the stanzas, where the next author
+will copy them from, and the tallies go to stderr (gh-ocannl-659, gh-ocannl-665).
+  arrayjit/lib/dune: nothing that runs a test executable
+  arrayjit/test/dune: declares OCANNL_BACKEND; markers: cuda, metal, none
+  benchmarks/dune: markers: none
+  benchmarks/runners/ocannl/dune: nothing that runs a test executable
+  bin/dune: nothing that runs a test executable
+  lib/dune: nothing that runs a test executable
+  tensor/dune: nothing that runs a test executable
+  test/einsum/dune: declares OCANNL_BACKEND; markers: none
+  test/gpt2/dune: declares OCANNL_BACKEND; markers: none
+  test/operations/config/dune: nothing that runs a test executable
+  test/operations/dune: declares OCANNL_BACKEND; markers: cc, cuda, metal, none
+  test/operations/profiles/dune: markers: none
+  test/operations/startup_streams/dune: markers: none
+  test/ppx/dune: declares OCANNL_BACKEND; markers: none
+  test/support/dune: nothing that runs a test executable
+  test/training/dune: declares OCANNL_BACKEND; markers: cc, multidev_cc, none
+  tools/dune: nothing that runs a test executable
+
+every stanza that runs an executable either declares the backend variable or says in place why it does not: true
+every marker the text spells was read as one, and the walk places at least as many stanzas as a second reader finds: true
+
 OK: every `(env_var ...)` addressed to OCANNL names a spelling a run reads, every test directory carries the ambient gate, and every per-module tracing gate is declared by the library whose modules read it.

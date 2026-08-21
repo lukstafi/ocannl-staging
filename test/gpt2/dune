@@ -13,6 +13,8 @@
  (files ../config/env_spelling_gate.ml))
 
 (test
+ ; ocannl-backend: none -- links arrayjit.utils alone and only classifies variable NAMES;
+ ; its `(universe)` dependency reruns it whatever any variable is set to.
  (name env_spelling_gate)
  (package neural_nets_lib)
  (deps ocannl_config (universe))
@@ -25,6 +27,8 @@
 ; builds, so there is one gate binary per directory however many aliases reach it.
 
 (rule
+ ; ocannl-backend: none -- links arrayjit.utils alone and only classifies variable NAMES;
+ ; its `(universe)` dependency reruns it whatever any variable is set to.
  (alias slow)
  (package neural_nets_lib)
  (deps ocannl_config (universe))

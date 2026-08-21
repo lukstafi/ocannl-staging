@@ -13,6 +13,8 @@
  (files ../config/env_spelling_gate.ml))
 
 (test
+ ; ocannl-backend: none -- links arrayjit.utils alone and only classifies variable NAMES;
+ ; its `(universe)` dependency reruns it whatever any variable is set to.
  (name env_spelling_gate)
  (package neural_nets_lib)
  (deps ocannl_config (universe))
@@ -220,6 +222,8 @@
   (pps ppx_here ppx_ocannl ppx_sexp_conv)))
 
 (test
+ ; ocannl-backend: none -- calls only Einsum_parser (base and menhirLib). It links `ocannl` for
+ ; the DSL modules and reaches no context, so no output of it can turn on the configured backend.
  (name test_einsum_parser)
  (package neural_nets_lib)
  (deps ocannl_config)

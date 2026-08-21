@@ -13,6 +13,8 @@
  (files ../config/env_spelling_gate.ml))
 
 (test
+ ; ocannl-backend: none -- links arrayjit.utils alone and only classifies variable NAMES;
+ ; its `(universe)` dependency reruns it whatever any variable is set to.
  (name env_spelling_gate)
  (package neural_nets_lib)
  (deps ocannl_config (universe))
@@ -28,6 +30,8 @@
  (modes exe))
 
 (rule
+ ; ocannl-backend: none -- pp.exe links ppx_ocannl, which is base, ppxlib, str and einsum_parser:
+ ; no arrayjit at all, so no OCANNL configuration is in reach. Its output is a printed AST.
  (targets test_ppx_op_actual.ml)
  (package neural_nets_lib)
  (deps
@@ -37,6 +41,8 @@
   (run ./%{pp} --impl %{input} -o %{targets})))
 
 (rule
+ ; ocannl-backend: none -- pp.exe links ppx_ocannl, which is base, ppxlib, str and einsum_parser:
+ ; no arrayjit at all, so no OCANNL configuration is in reach. Its output is a printed AST.
  (targets test_ppx_name_conflict_actual.ml)
  (package neural_nets_lib)
  (deps
@@ -46,6 +52,8 @@
   (run ./%{pp} --impl %{input} -o %{targets})))
 
 (rule
+ ; ocannl-backend: none -- pp.exe links ppx_ocannl, which is base, ppxlib, str and einsum_parser:
+ ; no arrayjit at all, so no OCANNL configuration is in reach. Its output is a printed AST.
  (targets test_compose_logic_err_actual.ml)
  (package neural_nets_lib)
  (deps

@@ -70,74 +70,163 @@ let in_subdir parent child =
   | parent, "" -> parent
   | parent, child -> parent ^ "/" ^ child
 
-(* How many forms a dune file has AT EVERY DEPTH, counted by nothing but parentheses and tokens,
-   skipping `;` comments and quoted strings. This is a CROSS-CHECK, not a second parser: it says how
-   many forms are there, and sexplib has to agree.
+type comment = { comment_start : int; comment_text : string }
+(** A [;] line comment, at the offset of its [;] and with everything after it up to the end of the
+    line. Comments are what sexplib throws away, and gh-ocannl-659 put a machine-checked declaration
+    in one, so this scan has to keep them. *)
 
-   Counting only the top level was not enough: `(progn (echo #|) (run ./probe.exe) (echo |#))` is
-   one stanza to both readers while sexplib drops the middle of it, and the executable action with
-   it (Codex P2, round 17 of PR #343). Agreement has to be about the whole file.
+type raw_form = {
+  raw_start : int;  (** offset of the form's first character *)
+  raw_stop : int;  (** one past its last, so a list's range includes its closing parenthesis *)
+  raw_atom : string option;  (** the atom as the source spells it; [None] for a list *)
+  raw_quoted : bool;  (** whether that atom arrived in quotes, and so may carry escapes *)
+  raw_children : raw_form list;
+}
+(** A form and where it sits, which is what turns "this comment is inside that stanza" into a
+    question the file's own structure answers. *)
+
+(* The raw reader: every form and every comment, by nothing but parentheses, quotes and tokens.
+
+   This is a CROSS-CHECK, not a second parser. What it produces is compared against sexplib's tree
+   SHAPE FOR SHAPE, so the two readers cannot quietly disagree; an earlier version compared only how
+   many forms there are in total, which was already enough to catch the disagreement that matters
+   and is strictly weaker than comparing the trees.
 
    The disagreement it exists to catch is `#|…|#` and `#;`, which sexplib reads as comments and dune
-   does not, so sexplib could swallow a whole stanza. An earlier version refused any file CONTAINING
-   those two characters, which is wrong in the ordinary case: inside a quoted argument or after a
-   `;`, sexplib does not treat them as comments either, and refusing there would take the whole
-   suite down over an unrelated string (Codex P2, round 12 of PR #343). Counting says precisely when
-   something was swallowed. *)
-let form_count content =
-  let count = ref 0 in
-  let i = ref 0 in
+   does not, so sexplib could swallow a whole stanza: `(progn (echo #|) (run ./probe.exe) (echo
+   |#))` is one stanza to both readers while sexplib drops the middle of it, and the executable
+   action with it (Codex P2, round 17 of PR #343). An even earlier version refused any file
+   CONTAINING those two characters, which is wrong in the ordinary case -- inside a quoted argument
+   or after a `;`, sexplib does not treat them as comments either, and refusing there would take the
+   whole suite down over an unrelated string (round 12).
+
+   Positions are the reason this reader now returns a tree rather than a number. gh-ocannl-659's
+   marker is a comment INSIDE a stanza's parentheses, and containment is the one attribution rule
+   that no whitespace convention can defeat: this repository's dune files habitually separate a
+   comment block from the stanza below it with a blank line, so "the comment above the stanza" would
+   have to guess how far above, and would hand a marker to the wrong stanza the first time someone
+   left a note between two rules. *)
+let read_raw content =
   let length = String.length content in
+  let comments = ref [] in
+  let pos = ref 0 in
   let delimiter c = Char.is_whitespace c || List.mem [ '('; ')'; ';'; '"' ] c ~equal:Char.equal in
-  while !i < length do
-    (match content.[!i] with
-    | ';' ->
-        while !i < length && not (Char.equal content.[!i] '\n') do
-          Int.incr i
-        done
-    | '"' ->
-        (* A quoted string is one form. *)
-        Int.incr count;
-        Int.incr i;
-        let closed = ref false in
-        while (not !closed) && !i < length do
-          (match content.[!i] with '\\' -> Int.incr i | '"' -> closed := true | _ -> ());
-          Int.incr i
-        done;
-        Int.decr i
-    | '(' -> Int.incr count
-    | ')' -> ()
-    | c when Char.is_whitespace c -> ()
-    | _ ->
-        (* A bare atom is a form too, at the top level as much as inside a stanza: dune would reject
-           one there and sexplib happily returns it, so the two still agree on the count and the
-           caller reports it. *)
-        Int.incr count;
-        while !i < length && not (delimiter content.[!i]) do
-          Int.incr i
-        done;
-        Int.decr i);
-    Int.incr i
-  done;
-  !count
+  let rec skip_trivia () =
+    if !pos < length then
+      match content.[!pos] with
+      | ';' ->
+          let start = !pos in
+          let stop = ref (start + 1) in
+          while !stop < length && not (Char.equal content.[!stop] '\n') do
+            Int.incr stop
+          done;
+          comments :=
+            { comment_start = start; comment_text = String.sub content ~pos:(start + 1) ~len:(!stop - start - 1) }
+            :: !comments;
+          pos := !stop;
+          skip_trivia ()
+      | c when Char.is_whitespace c ->
+          Int.incr pos;
+          skip_trivia ()
+      | _ -> ()
+  in
+  let rec form () =
+    skip_trivia ();
+    if !pos >= length then None
+    else
+      match content.[!pos] with
+      | ')' -> None
+      | '(' ->
+          let start = !pos in
+          Int.incr pos;
+          let children = forms () in
+          (* An unbalanced file is refused below rather than patched over here. *)
+          if !pos < length && Char.equal content.[!pos] ')' then Int.incr pos;
+          Some
+            {
+              raw_start = start;
+              raw_stop = !pos;
+              raw_atom = None;
+              raw_quoted = false;
+              raw_children = children;
+            }
+      | '"' ->
+          let start = !pos in
+          Int.incr pos;
+          let closed = ref false in
+          while (not !closed) && !pos < length do
+            (match content.[!pos] with
+            | '\\' -> Int.incr pos
+            | '"' -> closed := true
+            | _ -> ());
+            Int.incr pos
+          done;
+          Some
+            {
+              raw_start = start;
+              raw_stop = !pos;
+              raw_atom = Some (String.sub content ~pos:start ~len:(!pos - start));
+              raw_quoted = true;
+              raw_children = [];
+            }
+      | _ ->
+          (* A bare atom is a form too, at the top level as much as inside a stanza: dune would
+             reject one there and sexplib happily returns it, so the two still agree and the caller
+             reports it. *)
+          let start = !pos in
+          while !pos < length && not (delimiter content.[!pos]) do
+            Int.incr pos
+          done;
+          Some
+            {
+              raw_start = start;
+              raw_stop = !pos;
+              raw_atom = Some (String.sub content ~pos:start ~len:(!pos - start));
+              raw_quoted = false;
+              raw_children = [];
+            }
+  and forms () = match form () with None -> [] | Some f -> f :: forms () in
+  let top = forms () in
+  skip_trivia ();
+  if !pos < length then
+    failwith
+      (Printf.sprintf "dune file has a stray `%c` at offset %d -- it is not balanced" content.[!pos]
+         !pos);
+  (top, List.rev !comments)
+
+(* Shape for shape, and text for text wherever the text is unambiguous. A quoted atom's escapes are
+   decoded by sexplib and kept verbatim here, so only its ATOM-ness is compared; everything else --
+   how many children a list has, at every depth, and what each bare atom spells -- has to match. *)
+let rec shapes_agree raw sexp =
+  match (raw.raw_atom, sexp) with
+  | Some _, Sexp.Atom _ when raw.raw_quoted -> true
+  | Some atom, Sexp.Atom parsed -> String.equal atom parsed
+  | None, Sexp.List children ->
+      List.length raw.raw_children = List.length children
+      && List.for_all2_exn raw.raw_children children ~f:shapes_agree
+  | _ -> false
 
 (** Raises if [content] is not something both readers agree on: a scan that cannot read its input
     must say so rather than report a file with a hole in it. *)
 let stanzas content =
   let parsed = Sexplib.Sexp.scan_sexps (Lexing.from_string content) in
-  let rec nodes sexp =
-    match sexp with Sexp.Atom _ -> 1 | Sexp.List l -> 1 + List.sum (module Int) l ~f:nodes
-  in
-  let parsed_count = List.sum (module Int) parsed ~f:nodes in
-  let counted = form_count content in
-  if parsed_count <> counted then
+  let raw, _comments = read_raw content in
+  if
+    List.length raw <> List.length parsed
+    || not (List.for_all2_exn raw parsed ~f:shapes_agree)
+  then
     failwith
       (Printf.sprintf
-         "dune file parses as %d forms but has %d -- sexplib and dune disagree about what is a \
-          comment here (`#|…|#` and `#;` are comments to the one and atoms to the other), so this \
-          scan would read the file with a hole in it"
-         parsed_count counted);
+         "dune file parses as %d top-level forms and reads as %d, or the two trees differ in shape \
+          -- sexplib and dune disagree about what is a comment here (`#|…|#` and `#;` are comments \
+          to the one and atoms to the other), so this scan would read the file with a hole in it"
+         (List.length parsed) (List.length raw));
   parsed
+
+(** The 1-based line an offset falls on, for a diagnostic that a reader can go to. *)
+let line_of content offset =
+  let stop = min offset (String.length content) in
+  1 + String.count (String.sub content ~pos:0 ~len:stop) ~f:(Char.equal '\n')
 
 let head = function Sexp.List (Sexp.Atom h :: _) -> Some h | _ -> None
 
@@ -215,6 +304,28 @@ let declared_config_paths args =
   match args with
   | None -> []
   | Some args -> List.concat_map args ~f:collect |> List.dedup_and_sort ~compare:String.compare
+
+(** The one spelling OCANNL reads the backend under (gh-ocannl-652 dropped the lowercase form). *)
+let backend_env_var = "OCANNL_BACKEND"
+
+(** Whether [args] — ONE dependency field's arguments — declare [(env_var name)].
+
+    Scoped to a field rather than searched over a whole stanza, which is the whole point of it: a
+    stanza may carry several dependency fields and an action runs under exactly one of them, so a
+    declaration in a neighbouring field reruns nothing that matters while reading, to a whole-stanza
+    search, as a declaration (Codex P2, round 3). Recursion is through the dependency forms only —
+    the same shapes {!declared_config_paths} descends — so an [(env_var …)] appearing somewhere that
+    is not a dependency at all is not mistaken for one. *)
+let declares_env_var args name =
+  let rec collect sexp =
+    match sexp with
+    | Sexp.List [ Sexp.Atom "env_var"; Sexp.Atom declared ] -> String.equal declared name
+    | Sexp.List (Sexp.Atom head :: rest)
+      when String.is_prefix head ~prefix:":" || List.mem file_dep_forms head ~equal:String.equal ->
+        List.exists rest ~f:collect
+    | Sexp.List _ | Sexp.Atom _ -> false
+  in
+  match args with None -> false | Some args -> List.exists args ~f:collect
 
 (** The names a [(name …)] or [(names …)] field gives, in order. *)
 let names_of stanza =
@@ -585,6 +696,14 @@ type site = {
       (** whether the deps depend on any config file at all; WHICH one had to be named is
           {!declared_config_paths}, since only the caller knows where configs exist *)
   declared_config_paths : string list;
+  declares_backend : bool;
+      (** whether THE DEPS THIS SITE RUNS UNDER declare [(env_var OCANNL_BACKEND)] — read from the
+          same field as {!declares_config}, and for the same reason. A stanza can carry dependency
+          fields that the action does not run under: an inline-test library's own
+          [(preprocessor_deps …)] is not [(inline_tests (deps …))], and a declaration in the former
+          leaves the test action just as undeclared as none at all while looking, to anything that
+          searches the stanza as a whole, exactly like a declaration (Codex P2, round 3). Scoping it
+          per site is what keeps that answer tied to the thing dune will actually rerun. *)
   path_rewritten : bool;
       (** whether this site is a program the walk refuses to name because [(setenv PATH …)] decides
           what it resolves to — as opposed to the other reasons a site can be unnameable, which a
@@ -727,12 +846,17 @@ type raw_stanza = {
     text does not say what those run. Those under-report, which is the safe direction for a floor —
     blindness makes things DISAPPEAR, so a floor that under-counts still fails on it and never fails
     on a correct scan. *)
-let raw_stanzas content =
+(* The raw reading of ONE stanza, lifted out of {!raw_stanzas} so that a caller holding a stanza can
+   ask this reader about THAT stanza rather than about a whole file. {!raw_stanzas} is this over a
+   document; gh-ocannl-659's floor pairs it with the walk stanza by stanza, which needs both
+   classifiers reachable from one place (Codex P2, round 2).
+
+   Sharing the traversal costs nothing this module was protecting: the independence it documents
+   lives in the CLASSIFICATION -- how a stanza is decided to run something -- and that is still two
+   separate pieces of machinery, answering the same question from different sides. *)
+let raw_stanza_of =
   let counted_heads = "test" :: "tests" :: action_heads in
   let test_heads = [ "test"; "tests" ] in
-  (* Parsed rather than scanned. [sites] has already refused any file the two readers disagree
-     about, so what arrives here is a file both read the same way. *)
-  let parsed = Sexplib.Sexp.scan_sexps (Lexing.from_string content) in
   (* Every `(:name …)` the stanza binds, with the first executable it names -- the binding may wrap
      its path in a dependency form, and it is found wherever in the stanza it sits. *)
   (* A binding's paths, the way [named_deps_of] reads them: atoms, and the forms that CARRY paths.
@@ -861,29 +985,45 @@ let raw_stanzas content =
           };
         ]
   in
+  fun ~subdir sexp -> of_stanza ~subdir sexp
+
+(** Whether the raw reader thinks this stanza runs something — the floor's side of "is this stanza
+    subject to the backend rule", kept in ONE place so a caller cannot drift from it.
+
+    Deliberately a lower bound, and safe to be one. The raw reader sees fewer shapes than
+    {!sites_of_stanza} does: it reads [run]/[dynamic-run] and not [bash]/[system], and it drops what
+    sits under a [chdir] it cannot resolve, so a stanza the walk places as {!Unreadable_command},
+    {!Unreadable_directory} or {!Unclassified_action} can be invisible here. That gap is harmless
+    exactly as long as the comparison is made STANZA BY STANZA: under-claiming for one stanza
+    weakens the floor for that stanza alone. Compared in aggregate it is not harmless at all — a
+    stanza the walk counts and this reader does not contributes slack that hides a DIFFERENT
+    stanza dropping out of enforcement (Codex P2, round 2). *)
+let raw_runs_something r =
+  (not (List.is_empty r.raw_runs))
+  || (not (List.is_empty r.raw_test_cwds))
+  || r.raw_inline_tests
+  || not (List.is_empty r.raw_unnameable)
+
+let raw_stanzas content =
+  (* Parsed rather than scanned. [sites] has already refused any file the two readers disagree
+     about, so what arrives here is a file both read the same way. *)
+  let parsed = Sexplib.Sexp.scan_sexps (Lexing.from_string content) in
   (* A `(subdir …)` holds stanzas, and the directory it names is where they run. *)
   let rec walk_stanzas ~subdir sexp =
     match sexp with
     | Sexp.List (Sexp.Atom "subdir" :: Sexp.Atom dir :: rest) ->
-        of_stanza ~subdir sexp
+        raw_stanza_of ~subdir sexp
         @ List.concat_map rest ~f:(walk_stanzas ~subdir:(in_subdir subdir dir))
-    | sexp -> of_stanza ~subdir sexp
+    | sexp -> raw_stanza_of ~subdir sexp
   in
   List.concat_map parsed ~f:(walk_stanzas ~subdir:"")
 
-(** Every place in [content] that runs a test executable.
-
-    An [(executable)] stanza is not one: it declares something to build, and dune runs it only where
-    a rule says so — which is why a diagnostic executable such as [bench_circles_step] or a tutorial
-    such as [gpt2_generate] needs no exemption from the check built on this. It is structurally not
-    a site, rather than a name on a list someone has to keep true.
-
-    What a rule runs is read from the command position of its [run] actions, in every spelling
-    {!classify_command} places — and a command it cannot place becomes an {!Unreadable_command}
-    site, which the caller fails on. *)
-let sites content =
-  walk "" (stanzas content) ~f:(fun subdir stanza ->
-      let deps () = field stanza "deps" in
+(** Every place ONE stanza runs a test executable, given the directory a [(subdir …)] nesting puts
+    it in. {!sites} is this over a whole file; a caller that needs to ask a stanza something else at
+    the same time — gh-ocannl-659 asks what comments sit inside it — walks the file itself and calls
+    this per stanza, rather than re-deriving what counts as a site. *)
+let sites_of_stanza subdir stanza =
+  (let deps () = field stanza "deps" in
       let site ?(cwd = "") ?deps:(deps_field = deps ()) ?(executables = [])
           ?(path_rewritten = false) kind name =
         [
@@ -892,6 +1032,7 @@ let sites content =
             name;
             declares_config = not (List.is_empty (declared_config_paths deps_field));
             declared_config_paths = declared_config_paths deps_field;
+            declares_backend = declares_env_var deps_field backend_env_var;
             path_rewritten;
             executables;
             subdir;
@@ -957,6 +1098,18 @@ let sites content =
             | None, what -> site Unreadable_directory what)
       | _ -> [])
 
+(** Every place in [content] that runs a test executable.
+
+    An [(executable)] stanza is not one: it declares something to build, and dune runs it only where
+    a rule says so — which is why a diagnostic executable such as [bench_circles_step] or a tutorial
+    such as [gpt2_generate] needs no exemption from the check built on this. It is structurally not
+    a site, rather than a name on a list someone has to keep true.
+
+    What a rule runs is read from the command position of its [run] actions, in every spelling
+    {!classify_command} places — and a command it cannot place becomes an {!Unreadable_command}
+    site, which the caller fails on. *)
+let sites content = walk "" (stanzas content) ~f:sites_of_stanza
+
 (** Stanza heads in [content] that {!sites} has no classification for, each once. The caller fails
     on them: see {!inert_heads} for why silence is not an option here. *)
 let unclassified_heads content =
@@ -1011,3 +1164,259 @@ let config_copy_dirs content =
                  glob_could_match (Stdlib.Filename.basename atom) ~name:config_file) ->
           [ subdir ]
       | _ -> [])
+
+(** {1 The backend marker (gh-ocannl-659)}
+
+    [env_var_deps] (gh-ocannl-628) checks that a stanza declaring one spelling of an ambient
+    variable declares both. What it could not see is a stanza declaring NEITHER: a backend-sensitive
+    test added with no [(env_var OCANNL_BACKEND)] at all is invisible to a pairing check, and dune
+    then serves the previous backend's output as a pass under [OCANNL_BACKEND=cuda dune build @…] —
+    the exact failure the declaration exists to prevent.
+
+    The rule that closes it is an exclusive or, over every stanza that runs an executable: either
+    the stanza declares [(env_var OCANNL_BACKEND)], or it carries a marker comment saying which
+    backend it is pinned to — or none at all — and why. Both absent is the hole; both present is
+    contradictory intent, since a stanza that names its backend has nothing to invalidate on.
+
+    The marker is a COMMENT, in place, rather than a line in a central list. A central per-stanza
+    list is a churn and conflict magnet (the gh-ocannl-665 lesson), and — the reason that decides it
+    — the next author copies the stanza next to the one they are writing, so the teaching text has
+    to live there rather than in a file they will never open (the recurrence mechanism gh-ocannl-668
+    diagnosed). *)
+
+(* [backend_env_var] and [declares_env_var] are defined up with [declared_config_paths]: the
+   declaration is read from a site's own dependency field, so it has to be available where a site is
+   built. *)
+
+(** What makes a comment a marker rather than prose. Distinctive enough that a check can also ask
+    whether every occurrence of it in a dune file became a marker, which is how a misplaced or
+    misspelled one is caught rather than silently reading as no marker at all. *)
+let marker_sentinel = "ocannl-backend:"
+
+(** The words the marker admits in the backend position.
+
+    [none] says the run does not depend on the configured backend AT ALL — usually because it links
+    none, and sometimes because it links one and reaches no context. It is about the RUN, not the
+    link line, since what the declaration protects is the output: a test that links [ocannl] for its
+    DSL modules and calls a parser has nothing for [OCANNL_BACKEND] to invalidate.
+
+    The rest are the backends OCANNL has, for a stanza that NAMES one instead of selecting it.
+    Adding a backend adds a word here — and a marker naming a word that is not one of these fails,
+    which is the point: [; ocannl-backend: metl -- …] would otherwise read as a truthful exemption.
+
+    Kept as text rather than taken from [Backends.backend_of_name] on purpose: the scanning tests
+    link [arrayjit.utils] and the source scanners, and pulling the whole backend closure — Metal and
+    CUDA bindings included — into a check that reads dune files would trade a six-word list for a
+    link line that has to resolve on every platform. The check prints the list, so widening it is a
+    reviewable diff. *)
+let marker_backends = [ "none"; "cc"; "multidev_cc"; "cuda"; "hip"; "metal" ]
+
+(** The separators the marker admits between the backend and the reason. The em dash is what this
+    repository's prose uses; [--] is what an ASCII keyboard produces, and refusing it would be a
+    grammar that fails for a reason nobody can see in a diff. *)
+let marker_separators = [ "--"; "\xe2\x80\x94" ]
+
+type marker_body = { backend : string; reason : string }
+(** [backend] is the comma-separated list as normalised by {!parse_marker}: the words with their
+    spacing removed, so a caller can split it on [','] without re-trimming. *)
+
+type marker =
+  | Marker of marker_body
+  | Malformed of string  (** what is wrong with it, phrased for the author of the comment *)
+
+(** [parse_marker text] reads the text of one [;] comment (everything after the semicolon).
+
+    [None] means it is not a marker at all — ordinary prose, which a dune file is full of. [Some
+    (Malformed …)] means it announced itself as one and does not parse, which is a failure rather
+    than a shrug: a marker the grammar rejects would otherwise leave its stanza declaring nothing,
+    reported as if the author had written no marker.
+
+    The grammar, all of it:
+    {v ; ocannl-backend: <backend>[,<backend>…] -- <reason> v}
+    where each [<backend>] is one of {!marker_backends}, the separator is one of
+    {!marker_separators}, and [<reason>] is at least two words. A reason is required even for
+    [none], and a one-word reason is a label rather than a reason: writing down WHICH backend and
+    WHY is the friction that stops a reflexive exemption, and a grammar that accepts
+    [; ocannl-backend: none -- pure] has given that away. A reason too long for one line continues
+    as an ordinary comment on the next, which needs no grammar of its own.
+
+    Everything the grammar refuses it refuses OUT LOUD, and nothing it can repair does it repair.
+    That distinction is the whole value of the construct: this is the one comment in the tree whose
+    job is to be checkable, so an empty entry between commas, a backend named twice, or a second
+    declaration sharing the line are all {!Malformed} rather than normalised away — silently
+    reading [cc,] as [cc] would hand back a clean answer for a marker its author got wrong. *)
+let parse_marker text =
+  let trimmed = String.strip text in
+  match String.substr_index trimmed ~pattern:marker_sentinel with
+  | None -> None
+  | Some at ->
+      (* Announced anywhere in the comment, read from there on: `; NOTE ocannl-backend: …` is a
+         marker someone has annotated, not prose that happens to contain the sentinel. *)
+      let rest = String.strip (String.subo trimmed ~pos:(at + String.length marker_sentinel)) in
+      (* The EARLIEST separator, not the first spelling that occurs anywhere: a reason containing
+         one spelling would otherwise be cut at it while the real separator, written in the other,
+         sat further left -- and the backend position would swallow half the sentence. *)
+      let split =
+        List.filter_map marker_separators ~f:(fun separator ->
+            Option.map (String.substr_index rest ~pattern:separator) ~f:(fun index ->
+                (index, separator)))
+        |> List.min_elt ~compare:(fun (a, _) (b, _) -> Int.compare a b)
+        |> Option.map ~f:(fun (index, separator) ->
+               ( String.strip (String.sub rest ~pos:0 ~len:index),
+                 String.strip (String.subo rest ~pos:(index + String.length separator)) ))
+      in
+      Some
+        (* A SECOND sentinel in the same comment is refused before anything is read out of the
+           first. Reading from the earliest one and letting the rest fall into the reason would
+           absorb a whole second declaration into prose -- and the accounting check below cannot
+           see it, since both occurrences ARE in a comment this scan places. One comment, one
+           declaration; a second one goes on its own line, inside the stanza it is about. *)
+        (if Option.is_some (String.substr_index rest ~pattern:marker_sentinel) then
+           Malformed
+             (Printf.sprintf
+                "two `%s` declarations in one comment -- the second would be read as part of the \
+                 first's reason; put each on its own line"
+                marker_sentinel)
+         else
+           match split with
+           | None ->
+               Malformed
+                 (Printf.sprintf
+                    "no `--` separating the backend from the reason -- the grammar is `; %s <%s> -- \
+                     <reason>`"
+                    marker_sentinel
+                    (String.concat ~sep:"|" marker_backends))
+           | Some (backend, reason) ->
+               (* A stanza may name more than one backend -- `data_parallel` runs the same model on
+                  cc and on multidev_cc -- and writing both is more truthful than picking one.
+                  `none` makes no such pair: a run either depends on the configured backend or it
+                  does not.
+
+                  Every rejection below is a rejection rather than a normalisation. Dropping an
+                  empty entry would read `cc,` and `cc,,metal` as a clean `cc`/`cc,metal`, and
+                  deduplicating would read `cc,cc` as `cc` -- in both cases silently repairing a
+                  typo in the one place whose entire purpose is to be wrong out loud (Codex P2,
+                  round 1). *)
+               let named = String.split backend ~on:',' |> List.map ~f:String.strip in
+               if String.is_empty backend then Malformed "no backend named before the reason"
+               else if List.exists named ~f:String.is_empty then
+                 Malformed
+                   (Printf.sprintf
+                      "`%s` has an empty entry between commas -- name each backend, or drop the \
+                       comma"
+                      backend)
+               else if
+                 List.exists named ~f:(fun word ->
+                     not (List.mem marker_backends word ~equal:String.equal))
+               then
+                 Malformed
+                   (Printf.sprintf "`%s` is not one of %s" backend
+                      (String.concat ~sep:", " marker_backends))
+               else if List.contains_dup named ~compare:String.compare then
+                 Malformed
+                   (Printf.sprintf "`%s` names the same backend twice" backend)
+               else if List.mem named "none" ~equal:String.equal && List.length named > 1 then
+                 Malformed
+                   (Printf.sprintf
+                      "`%s` says both that the run depends on a backend and that it depends on none"
+                      backend)
+               else if
+                 List.length
+                   (String.split_on_chars reason ~on:[ ' '; '\t' ]
+                   |> List.filter ~f:(Fn.non String.is_empty))
+                 < 2
+               then Malformed (Printf.sprintf "the reason `%s` is one word -- say why, not what" reason)
+               else Marker { backend = String.concat ~sep:"," named; reason })
+
+type marked_stanza = {
+  marked_head : string;  (** the atom the stanza opens with, or ["<not a stanza>"] *)
+  marked_name : string;  (** its [(name …)]/[(names …)], joined, for a diagnostic *)
+  marked_line : int;  (** the line its opening parenthesis sits on *)
+  marked_sites : site list;  (** what it runs; empty means it is not subject to the rule *)
+  marked_raw_subject : bool;
+      (** what {!raw_runs_something} — the SECOND reader — makes of the same stanza. Carried here
+          so the floor can be checked per stanza against [marked_sites] instead of as a total: two
+          answers about one stanza cannot be traded off against a third stanza the way two counts
+          over a file can. *)
+  marked_declares_backend : bool;  (** whether it declares [(env_var OCANNL_BACKEND)] *)
+  marked_comments : (int * string) list;
+      (** the comments inside its parentheses, each with the line it sits on — not those of a
+          [(subdir …)] this walk descends past, since those belong to no stanza *)
+}
+
+(** [marked_stanzas content] is {!sites} again, per stanza and with the comments each stanza
+    encloses — the two questions gh-ocannl-659's rule asks of one stanza at once.
+
+    A comment belongs to a stanza when it sits BETWEEN ITS PARENTHESES. That is the whole
+    attribution rule, and it is deliberately not "the comment above the stanza": this repository's
+    dune files habitually leave a blank line between a comment block and the stanza it introduces,
+    so an adjacency rule would have to guess how far above to look, and would hand a marker to the
+    wrong stanza the first time someone left a note between two rules. Containment is decided by the
+    file's own structure and cannot be moved by whitespace. *)
+let marked_stanzas content =
+  let parsed = stanzas content in
+  let raw, comments = read_raw content in
+  let enclosed form =
+    List.filter_map comments ~f:(fun c ->
+        if c.comment_start >= form.raw_start && c.comment_start < form.raw_stop then
+          Some (line_of content c.comment_start, c.comment_text)
+        else None)
+  in
+  let rec go dir form sexp =
+    match (sexp, form.raw_children) with
+    (* A `(subdir …)` holds stanzas and is not one: the walk descends, exactly as {!walk} does, so
+       what is reported is the stanzas dune will apply -- and a comment sitting in the subdir but in
+       none of its stanzas is attributed to nothing, which is what makes a misplaced marker
+       reportable rather than invisible. *)
+    | Sexp.List (Sexp.Atom "subdir" :: Sexp.Atom sub :: body), _ :: _ :: body_forms
+      when List.length body_forms = List.length body ->
+        List.concat (List.map2_exn body_forms body ~f:(go (in_subdir dir sub)))
+    | _ ->
+        let sites = sites_of_stanza dir sexp in
+        [
+          {
+            marked_head = (match head sexp with Some h -> h | None -> "<not a stanza>");
+            marked_name = String.concat ~sep:", " (names_of sexp);
+            marked_line = line_of content form.raw_start;
+            marked_sites = sites;
+            (* The same stanza, put to the other reader. `raw_stanza_of` returns nothing for a form
+               that is not a stanza at all, which is itself an honest "runs nothing". *)
+            marked_raw_subject =
+              List.exists (raw_stanza_of ~subdir:dir sexp) ~f:raw_runs_something;
+            (* Read from the SITES' own dependency fields, not from the stanza as a whole. Which
+               field carries a site's deps is already worked out per site -- an inline-test library
+               declares under `(inline_tests (deps …))`, not in the library stanza at large -- and
+               asking the stanza instead would certify a test action against a declaration it does
+               not run under (Codex P2, round 3). A stanza that runs nothing declares nothing, which
+               is what the XOR's "a marker here declares nothing" arm already says of it. *)
+            marked_declares_backend = List.exists sites ~f:(fun s -> s.declares_backend);
+            marked_comments = enclosed form;
+          };
+        ]
+  in
+  List.concat (List.map2_exn raw parsed ~f:(go ""))
+
+(** Every comment in [content] that announces itself as a marker, with its line — the population
+    {!marked_stanzas} has to account for. A marker the walk attributes to no stanza is one whose
+    author believed they had declared something, so it is reported rather than passed over. *)
+let marker_comments content =
+  let _, comments = read_raw content in
+  List.filter_map comments ~f:(fun c ->
+      if String.is_substring c.comment_text ~substring:marker_sentinel then
+        Some (line_of content c.comment_start, c.comment_text)
+      else None)
+
+(** How many times the sentinel occurs in [content] AS TEXT, comments and everything else alike.
+
+    The dumbest possible reading, and its dumbness is the point: {!marker_comments} finds the
+    sentinel where the lexer says a comment is, and this finds it wherever it is. A marker written
+    into a quoted argument, or into a stanza field, or into a comment this lexer failed to place, is
+    the difference between the two — and a difference is exactly the shape of "the author declared
+    something the check did not read". *)
+let sentinel_occurrences content =
+  let rec count from found =
+    match String.substr_index content ~pos:from ~pattern:marker_sentinel with
+    | None -> found
+    | Some at -> count (at + 1) (found + 1)
+  in
+  count 0 0
