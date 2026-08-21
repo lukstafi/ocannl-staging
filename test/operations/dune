@@ -1638,6 +1638,18 @@
 ; break it rather than on whatever the test directories happen to contain today. Also where the
 ; literals that ratchet plants its canaries on live.
 
+; How the directory reader behind cache_dir_ignores resolves a name, on snippets built to break it.
+; The census over the tree exercises only the spellings some source uses today; these pin the rest,
+; including the module alias bound in expression position that no source spells yet.
+
+(test
+ ; ocannl-backend: none -- links no backend: it resolves directory names out of embedded OCaml snippets.
+ (name cache_dir_scan_cases)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules cache_dir_scan_cases)
+ (libraries base stdio test_utils arrayjit.verdict))
+
 (test
  ; ocannl-backend: none -- links no backend: it reads embedded format strings through Verdict_scan as text.
  (name verdict_scan_cases)
