@@ -46,11 +46,13 @@
     either an assertion or, by exemption, a documented exception. *)
 
 open Base
-open Parsetree
+open Ppxlib.Parsetree
+
+module Ast_traverse = Ppxlib.Ast_traverse
 
 (* The parse helpers are Config_key_scan's: one place in this repository decides how an OCaml source
-   is read for a scan, and it carries the notes on what varies between the compiler versions the
-   opam files declare a floor for (its [flatten_longident] comment). *)
+   is read for a scan, and it carries the note on why that reading goes through ppxlib's parse tree
+   rather than the compiler's. *)
 module Read = Config_key_scan
 
 type directive = { start : int; stop : int; conversion : char }
@@ -159,41 +161,42 @@ let scan content =
   let printers = Hashtbl.create (module Int) in
   let sites = ref [] and literals = ref 0 in
   let iterator =
-    {
-      Ast_iterator.default_iterator with
+    object
+      inherit Ast_traverse.iter as super
+
       (* Prose is not a print: see the note on attribute payloads above. *)
-      attribute = (fun _ _ -> ());
-      expr =
-        (fun self expr ->
-          (match expr.pexp_desc with
-          | Pexp_apply (callee, arguments) -> (
-              match Read.longident_of callee with
-              | Some path ->
-                  let name = String.concat ~sep:"." path in
-                  List.iter arguments ~f:(fun (_, argument) ->
-                      if Option.is_some (Read.string_literal argument) then
-                        Hashtbl.set printers ~key:argument.pexp_loc.loc_start.pos_cnum ~data:name)
-              | None -> ())
-          | _ -> ());
-          (match Read.string_literal expr with
-          | Some value -> (
-              Int.incr literals;
-              match claim_label value with
-              | Some label ->
-                  sites :=
-                    {
-                      label;
-                      format = value;
-                      line = expr.pexp_loc.loc_start.pos_lnum;
-                      printer = Hashtbl.find printers expr.pexp_loc.loc_start.pos_cnum;
-                    }
-                    :: !sites
-              | None -> ())
-          | None -> ());
-          Ast_iterator.default_iterator.expr self expr);
-    }
+      method! attribute _ = ()
+
+      method! expression expr =
+        (match expr.pexp_desc with
+        | Pexp_apply (callee, arguments) -> (
+            match Read.longident_of callee with
+            | Some path ->
+                let name = String.concat ~sep:"." path in
+                List.iter arguments ~f:(fun (_, argument) ->
+                    if Option.is_some (Read.string_literal argument) then
+                      Hashtbl.set printers ~key:argument.pexp_loc.loc_start.pos_cnum ~data:name)
+            | None -> ())
+        | _ -> ());
+        (match Read.string_literal expr with
+        | Some value -> (
+            Int.incr literals;
+            match claim_label value with
+            | Some label ->
+                sites :=
+                  {
+                    label;
+                    format = value;
+                    line = expr.pexp_loc.loc_start.pos_lnum;
+                    printer = Hashtbl.find printers expr.pexp_loc.loc_start.pos_cnum;
+                  }
+                  :: !sites
+            | None -> ())
+        | None -> ());
+        super#expression expr
+    end
   in
-  iterator.structure iterator ast;
+  iterator#structure ast;
   {
     sites = List.rev !sites;
     literals = !literals;

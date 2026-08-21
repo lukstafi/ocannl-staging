@@ -7,8 +7,9 @@
     escaped literal losing its value -- which is the argument for testing on hostile input rather
     than on the library sources that happen to exist today.
 
-    The scanner now runs the compiler's own lexer, so most of these are regression cases rather than
-    live hazards. They are kept because that is the point: they are what says so. *)
+    The scanner parses, with the compiler's own parser behind ppxlib, so most of these are
+    regression cases rather than live hazards. They are kept because that is the point: they are
+    what says so. *)
 
 open Base
 open Stdio
@@ -209,26 +210,20 @@ and other name = get ~arg_name:name|ocaml},
 (* let get_global_arg *)
 let other y = get ~arg_name:y|ocaml},
       Some "other" );
-  ]
+    (* `let module M = … in …` is `Pexp_letmodule`, which the path machinery does not descend, so
+       the binding's name arrives without M's prefix. What the case pins is the second half: the
+       binding is `(nested)`, and `top_level` is what an exemption reads, so a name introduced this
+       way is exempt nowhere.
 
-(* One case the compiler answers differently across the floor the opam files declare, so the test
-   accepts either answer rather than pinning the version it was recorded on.
-
-   5.5 represents `let module M = … in …` as a structure item inside the expression, so the binding
-   takes M's prefix like any other module's; through 5.4 it is `Pexp_letmodule`, which the path
-   machinery does not descend, and the name arrives bare. Matching that constructor would fix the
-   name below 5.5 and fail to compile at 5.5, where it no longer exists (PR #340 round 6 met this
-   from the other side) -- and the difference is cosmetic: what an exemption reads is `top_level`,
-   which is false in both readings, so a binding introduced this way is exempt nowhere either way.
-   That is what the case is here to pin, and both spellings pin it. *)
-let compiler_dependent_cases =
-  [
+       That the first half is stable enough to pin at all is the scanner reading ppxlib's parse tree
+       rather than the compiler's -- 5.5 spells this construct as a structure item inside an
+       expression, and ppxlib migrates it back to the constructor matched here. *)
     ( "a local module's binding is nested, so it is exempt nowhere",
       {ocaml|let real x = x
 let f () =
   let module M = struct let get_global_arg name = get ~arg_name:name end in
   M.get_global_arg|ocaml},
-      [ Some "M.get_global_arg (nested)"; Some "get_global_arg (nested)" ] );
+      Some "get_global_arg (nested)" );
   ]
 
 (* The other spelling of a read: a field of the resolved settings record. Prose naming one is not a
@@ -299,14 +294,6 @@ let () =
         printf "ok: enclosing definition -- %s\n" name
       else
         fail "enclosing definition -- %s: expected %s, found %s" name (show expected) (show found));
-  List.iter compiler_dependent_cases ~f:(fun (name, source, accepted) ->
-      let found = enclosing_definition source in
-      if List.mem accepted found ~equal:(Option.equal String.equal) then
-        printf "ok: enclosing definition -- %s\n" name
-      else
-        fail "enclosing definition -- %s: expected one of [%s], found %s" name
-          (String.concat ~sep:"; " (List.map accepted ~f:show))
-          (show found));
   List.iter settings_cases ~f:(fun (name, source, expected) ->
       let found = List.sort ~compare:String.compare (Scan.settings_keys_in_source source) in
       let expected = List.sort ~compare:String.compare expected in

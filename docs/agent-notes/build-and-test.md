@@ -126,11 +126,25 @@ that they earn a lookup rather than always-loaded space.
   Spell one canary in a form only the real reader can see (a string literal broken over a line
   continuation, whose decoded value spans no single line of the file): it fails a scan that has
   quietly regressed to matching text, which the plain spelling would not.
-- Scanning OCaml sources with `compiler-libs`: a documentation comment survives into the parse tree
-  as an `[@@@ocaml.doc "…"]` attribute holding a STRING, so `Ast_iterator` hands it to an expression
-  hook exactly like code would (verified by removing the guard — the prose cases flip to findings).
-  Any scan over string literals must therefore set `attribute = (fun _ _ -> ())`, or this file's own
-  documentation of the pattern it hunts becomes a finding. Ordinary `(* … *)` comments need no such
+- Scan OCaml sources through **ppxlib's** parse tree (`Ppxlib.Parse.implementation`,
+  `Ppxlib.Ast_traverse.iter`), never `compiler-libs`'. The compiler's `Parsetree` moves between
+  releases, and the breakage lands in the scanner as a compile error rather than in anything it
+  scans: 5.5 alone gave `Ldot` located components and stopped spelling `let module M = … in …` as
+  `Pexp_letmodule`, making it an ordinary structure item inside the expression — so no single arm
+  compiles on both sides of that boundary. ppxlib parses with the compiler's own parser and then
+  migrates the tree to an AST of ppxlib's version, which is what decouples a scanner from the
+  compiler it is built by. The migration cannot silently drop a construct here, and the reason is
+  worth keeping: every source these scanners read is a source of this repository, which builds on
+  the floor its opam files declare, and that floor is at or below ppxlib's AST version. Match with
+  ordinary patterns; metaquot quotations (`[%expr [%e? f] ()]`, `[%expr ()]`) are preferred wherever
+  they express the WHOLE shape, since they ignore locations and attributes while keeping arity and
+  labels exact. What they cannot reach — a variable-length argument list, a string constant's value,
+  a module binding — stays written against the constructors.
+- A documentation comment survives into the parse tree as an `[@@@ocaml.doc "…"]` attribute holding
+  a STRING, so an iterator hands it to an expression hook exactly like code would (verified by
+  removing the guard — the prose cases flip to findings). Any scan over string literals must
+  therefore override `method! attribute _ = ()`, or this file's own documentation of the pattern it
+  hunts becomes a finding. Ordinary `(* … *)` comments need no such
   care, the parser drops them outright. Extension payloads are the opposite call and must stay
   visited: `[%cd …]`, `[%expect {|…|}]` carry code, or the golden text of some.
 - `git` strips TRAILING spaces from a `.gitignore` pattern (unless backslash-quoted) and keeps
