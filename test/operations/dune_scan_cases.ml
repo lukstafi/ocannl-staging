@@ -729,6 +729,26 @@ let marker_grammar_cases =
     (* Announced anywhere in the comment: a marker someone annotated is still a marker, and reading
        it from the sentinel rather than from the start of the line is what keeps it one. *)
     ("annotated prose before it", " NOTE ocannl-backend: hip -- names its backend", "hip|names its backend");
+    (* Refused rather than normalised. Each of these is a TYPO in the one comment whose whole job is
+       to be checkable, and a grammar that quietly repaired it would hand back a clean answer for a
+       marker its author got wrong -- which is the failure mode the malformed/absent distinction
+       exists to prevent (Codex P2, round 1). *)
+    ( "a trailing comma is an empty entry, not a clean single backend",
+      " ocannl-backend: cc, -- pins the backend",
+      "!`cc,` has an empty entry between commas -- name each backend, or drop the comma" );
+    ( "and so is a doubled comma between two real ones",
+      " ocannl-backend: cc,,metal -- names both",
+      "!`cc,,metal` has an empty entry between commas -- name each backend, or drop the comma" );
+    ( "the same backend twice is a typo, not a list",
+      " ocannl-backend: cc,cc -- names its backend",
+      "!`cc,cc` names the same backend twice" );
+    (* Reading from the earliest sentinel and letting the rest fall into the reason would absorb a
+       whole second declaration into prose -- and the accounting check cannot see it, since both
+       occurrences ARE in a comment the scan places. *)
+    ( "two declarations sharing one comment",
+      " ocannl-backend: none -- links no backend ocannl-backend: cc -- names its backend",
+      "!two `ocannl-backend:` declarations in one comment -- the second would be read as part of \
+       the first's reason; put each on its own line" );
   ]
 
 (* Which stanza a marker belongs to. The attribution rule is containment -- between the stanza's

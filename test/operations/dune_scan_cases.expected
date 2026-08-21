@@ -168,6 +168,10 @@ ok: backend marker grammar -- a one-word reason is a label, not a reason
 ok: backend marker grammar -- an empty reason
 ok: backend marker grammar -- an em dash before a double dash in the reason
 ok: backend marker grammar -- annotated prose before it
+ok: backend marker grammar -- a trailing comma is an empty entry, not a clean single backend
+ok: backend marker grammar -- and so is a doubled comma between two real ones
+ok: backend marker grammar -- the same backend twice is a typo, not a list
+ok: backend marker grammar -- two declarations sharing one comment
 ok: backend marker placement -- inside the stanza it is about
 ok: backend marker placement -- between two stanzas it belongs to neither
 ok: backend marker placement -- a comment above the stanza, blank line and all

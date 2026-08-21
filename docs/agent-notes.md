@@ -1602,7 +1602,14 @@ that they earn a lookup rather than always-loaded space.
   silently declines to parse leaves its stanza declaring nothing and reports it as if the author had
   written none, which is the worst of both. So the vocabulary is closed (`none|cc|multidev_cc|cuda|
   hip|metal`), the reason is required and must be more than one word, and the separator is the
-  EARLIEST of the spellings admitted rather than the first one that occurs anywhere. (iii) An
+  EARLIEST of the spellings admitted rather than the first one that occurs anywhere. The sharper
+  form of the same rule, and the one a first draft gets wrong: NEVER NORMALISE WHAT YOU COULD
+  REJECT. Filtering empty elements out of a comma list reads `cc,` and `cc,,metal` as a clean
+  `cc`/`cc,metal`; deduplicating reads `cc,cc` as `cc`; reading from the earliest sentinel absorbs a
+  second declaration on the same line into the first one's reason, where even the accounting check
+  below cannot see it, both occurrences being in a comment the scan did place. Each of those is a
+  tidy-looking answer to a marker its author got WRONG — and a construct whose entire purpose is to
+  be checkable cannot afford to repair its own input. (iii) An
   ACCOUNTING CHECK over the sentinel: every occurrence of `ocannl-backend:` in the file, found by
   the dumbest possible substring scan, must have been read as a marker attributed to a stanza that
   runs something. That is what catches the marker written into a quoted argument, into a field, or

@@ -1171,13 +1171,19 @@ type marker =
     reported as if the author had written no marker.
 
     The grammar, all of it:
-    {v ; ocannl-backend: <backend> -- <reason> v}
-    where [<backend>] is one of {!marker_backends}, the separator is one of {!marker_separators},
-    and [<reason>] is at least two words. A reason is required even for [none], and a one-word
-    reason is a label rather than a reason: writing down WHICH backend and WHY is the friction that
-    stops a reflexive exemption, and a grammar that accepts [; ocannl-backend: none -- pure] has
-    given that away. A reason too long for one line continues as an ordinary comment on the next,
-    which needs no grammar of its own. *)
+    {v ; ocannl-backend: <backend>[,<backend>…] -- <reason> v}
+    where each [<backend>] is one of {!marker_backends}, the separator is one of
+    {!marker_separators}, and [<reason>] is at least two words. A reason is required even for
+    [none], and a one-word reason is a label rather than a reason: writing down WHICH backend and
+    WHY is the friction that stops a reflexive exemption, and a grammar that accepts
+    [; ocannl-backend: none -- pure] has given that away. A reason too long for one line continues
+    as an ordinary comment on the next, which needs no grammar of its own.
+
+    Everything the grammar refuses it refuses OUT LOUD, and nothing it can repair does it repair.
+    That distinction is the whole value of the construct: this is the one comment in the tree whose
+    job is to be checkable, so an empty entry between commas, a backend named twice, or a second
+    declaration sharing the line are all {!Malformed} rather than normalised away — silently
+    reading [cc,] as [cc] would hand back a clean answer for a marker its author got wrong. *)
 let parse_marker text =
   let trimmed = String.strip text in
   match String.substr_index trimmed ~pattern:marker_sentinel with
@@ -1199,42 +1205,67 @@ let parse_marker text =
                  String.strip (String.subo rest ~pos:(index + String.length separator)) ))
       in
       Some
-        (match split with
-        | None ->
-            Malformed
-              (Printf.sprintf
-                 "no `--` separating the backend from the reason -- the grammar is `; %s <%s> -- \
-                  <reason>`"
-                 marker_sentinel
-                 (String.concat ~sep:"|" marker_backends))
-        | Some (backend, reason) ->
-            (* A stanza may name more than one backend -- `data_parallel` runs the same model on cc
-               and on multidev_cc -- and writing both is more truthful than picking one. `none`
-               makes no such pair: a run either depends on the configured backend or it does not. *)
-            let named =
-              String.split backend ~on:',' |> List.map ~f:String.strip
-              |> List.filter ~f:(Fn.non String.is_empty)
-            in
-            if List.is_empty named then Malformed "no backend named before the reason"
-            else if
-              List.exists named ~f:(fun word ->
-                  not (List.mem marker_backends word ~equal:String.equal))
-            then
-              Malformed
-                (Printf.sprintf "`%s` is not one of %s" backend
-                   (String.concat ~sep:", " marker_backends))
-            else if List.mem named "none" ~equal:String.equal && List.length named > 1 then
-              Malformed
-                (Printf.sprintf
-                   "`%s` says both that the run depends on a backend and that it depends on none"
-                   backend)
-            else if List.length (String.split_on_chars reason ~on:[ ' '; '\t' ]
-                                 |> List.filter ~f:(Fn.non String.is_empty))
-                    < 2
-            then
-              Malformed
-                (Printf.sprintf "the reason `%s` is one word -- say why, not what" reason)
-            else Marker { backend = String.concat ~sep:"," named; reason })
+        (* A SECOND sentinel in the same comment is refused before anything is read out of the
+           first. Reading from the earliest one and letting the rest fall into the reason would
+           absorb a whole second declaration into prose -- and the accounting check below cannot
+           see it, since both occurrences ARE in a comment this scan places. One comment, one
+           declaration; a second one goes on its own line, inside the stanza it is about. *)
+        (if Option.is_some (String.substr_index rest ~pattern:marker_sentinel) then
+           Malformed
+             (Printf.sprintf
+                "two `%s` declarations in one comment -- the second would be read as part of the \
+                 first's reason; put each on its own line"
+                marker_sentinel)
+         else
+           match split with
+           | None ->
+               Malformed
+                 (Printf.sprintf
+                    "no `--` separating the backend from the reason -- the grammar is `; %s <%s> -- \
+                     <reason>`"
+                    marker_sentinel
+                    (String.concat ~sep:"|" marker_backends))
+           | Some (backend, reason) ->
+               (* A stanza may name more than one backend -- `data_parallel` runs the same model on
+                  cc and on multidev_cc -- and writing both is more truthful than picking one.
+                  `none` makes no such pair: a run either depends on the configured backend or it
+                  does not.
+
+                  Every rejection below is a rejection rather than a normalisation. Dropping an
+                  empty entry would read `cc,` and `cc,,metal` as a clean `cc`/`cc,metal`, and
+                  deduplicating would read `cc,cc` as `cc` -- in both cases silently repairing a
+                  typo in the one place whose entire purpose is to be wrong out loud (Codex P2,
+                  round 1). *)
+               let named = String.split backend ~on:',' |> List.map ~f:String.strip in
+               if String.is_empty backend then Malformed "no backend named before the reason"
+               else if List.exists named ~f:String.is_empty then
+                 Malformed
+                   (Printf.sprintf
+                      "`%s` has an empty entry between commas -- name each backend, or drop the \
+                       comma"
+                      backend)
+               else if
+                 List.exists named ~f:(fun word ->
+                     not (List.mem marker_backends word ~equal:String.equal))
+               then
+                 Malformed
+                   (Printf.sprintf "`%s` is not one of %s" backend
+                      (String.concat ~sep:", " marker_backends))
+               else if List.contains_dup named ~compare:String.compare then
+                 Malformed
+                   (Printf.sprintf "`%s` names the same backend twice" backend)
+               else if List.mem named "none" ~equal:String.equal && List.length named > 1 then
+                 Malformed
+                   (Printf.sprintf
+                      "`%s` says both that the run depends on a backend and that it depends on none"
+                      backend)
+               else if
+                 List.length
+                   (String.split_on_chars reason ~on:[ ' '; '\t' ]
+                   |> List.filter ~f:(Fn.non String.is_empty))
+                 < 2
+               then Malformed (Printf.sprintf "the reason `%s` is one word -- say why, not what" reason)
+               else Marker { backend = String.concat ~sep:"," named; reason })
 
 type marked_stanza = {
   marked_head : string;  (** the atom the stanza opens with, or ["<not a stanza>"] *)

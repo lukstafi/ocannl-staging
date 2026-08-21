@@ -358,10 +358,22 @@ let () =
       (* The floor under the walk, read by the second reader that shares none of its machinery: a
          stanza it stops seeing is a stanza the rule above stops applying to, which looks exactly
          like a file with nothing to check (the gh-ocannl-665 argument, and config_dep_completeness'
-         floors). *)
+         floors).
+
+         The predicate has to admit EVERY kind of subject `sites_of_stanza` places, or the floor is
+         blind to exactly the classes it omits: a regression in one of them would drop those stanzas
+         out of `marked_sites` while leaving this count unchanged, and the blindness check would
+         stay green over a class that had stopped being enforced (Codex P2, round 1). Beyond the
+         `run` actions and a test stanza's own binary, that means an `(inline_tests)` library --
+         which `sites_of_stanza` reports as an `Inline_tests` site -- and a bare command under a
+         rewritten `PATH`, which it reports as a `path_rewritten` site precisely because it refuses
+         to name the program. *)
       let raw_subjects =
         List.count (Scan.raw_stanzas content) ~f:(fun r ->
-            (not (List.is_empty r.Scan.raw_runs)) || not (List.is_empty r.Scan.raw_test_cwds))
+            (not (List.is_empty r.Scan.raw_runs))
+            || (not (List.is_empty r.Scan.raw_test_cwds))
+            || r.Scan.raw_inline_tests
+            || not (List.is_empty r.Scan.raw_unnameable))
       in
       let placed_here = List.count marked ~f:(fun s -> not (List.is_empty s.Scan.marked_sites)) in
       subject_floor := !subject_floor + raw_subjects;
