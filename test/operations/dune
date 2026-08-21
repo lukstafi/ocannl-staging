@@ -3108,3 +3108,15 @@
       ./generated_provenance.exe
       explicit_prefix
       --ocannl_build_files_prefix=gp_shared_dir))))))
+
+; The uint4x32 FFI stubs read four lanes out of an [int array], a type that carries no length, so
+; the C helper has to check the arity rather than assume it (gh-ocannl-688). Links arrayjit.ir
+; alone and calls the stubs directly -- no compilation, no device.
+
+(test
+ ; ocannl-backend: none -- links arrayjit.ir alone and calls the uint4x32 C stubs directly.
+ (name uint4x32_stub_bounds)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules uint4x32_stub_bounds)
+ (libraries base stdio arrayjit.ir arrayjit.verdict))

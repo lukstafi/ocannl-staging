@@ -904,8 +904,16 @@ uint8_t double_to_fp8(double f)
 /* OCaml wrapper functions */
 
 /* Helper functions to convert between OCaml and C uint4x32_t */
+/* The OCaml side of every uint4x32 stub is typed [int array], which carries no length, so the
+   four lanes have to be checked rather than assumed: reading Field(v_array, 1..3) off a shorter
+   array walks past the block, and a one-word array sitting at the top of the minor heap puts
+   those reads on the PROT_NONE guard beyond young_end -- a SIGBUS, not a silently wrong lane. */
 uint4x32_t ocaml_array_to_uint4x32(value v_array) {
     uint4x32_t result;
+    if (Wosize_val(v_array) != 4)
+    {
+        caml_invalid_argument("uint4x32 argument must be an int array of length 4");
+    }
     result.v[0] = (uint32_t)Long_val(Field(v_array, 0));
     result.v[1] = (uint32_t)Long_val(Field(v_array, 1));
     result.v[2] = (uint32_t)Long_val(Field(v_array, 2));
