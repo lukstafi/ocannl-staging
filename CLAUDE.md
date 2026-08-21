@@ -38,7 +38,7 @@ opam install cudajit  # for CUDA backend
 opam install hipjit   # for AMD HIP backend
 ```
 
-**Worktrees**: nested ones (`.claude/worktrees/`, the Claude Code default) need a `dune-workspace` at their root, or dune builds the PARENT checkout instead; the SessionStart hook writes it, so after a mid-session worktree switch run `scripts/setup-ocaml-env.sh` by hand. See docs/agent-notes.md for why.
+**Worktrees**: nested ones (`.claude/worktrees/`, the Claude Code default) need a `dune-workspace` at their root, or dune builds the PARENT checkout instead; the SessionStart hook writes it, so after a mid-session worktree switch run `scripts/setup-ocaml-env.sh` by hand. See docs/agent-notes/build-and-test.md for why.
 
 **Windows shells**: `opam env --shell=sh` emits cygwin-style paths that break under Git Bash (MSYS), so a Git Bash session without a primed environment gets a half-working toolchain (dune found but linking fails with `cygpath: error converting ... -lpthread`). Source `tools/opam-env.sh` first — it rewrites the paths for MSYS and works from any POSIX shell. On Windows, link steps also flood stderr with benign binutils warnings (`Warning: corrupt .drectve at end of def file`, from MSVC-produced import libraries like ROCm's/CUDA's); `tools/dune-quiet.sh <dune args>` runs dune with exactly those lines filtered, preserving the exit status. Use **Git Bash** specifically, not a Cygwin bash (opam's, or whatever `bash` resolves to once opam's cygwin is on PATH): the two are told apart by `uname -o` (`Msys` vs `Cygwin`, since both bashes report `OSTYPE=cygwin`), only the MSYS one gets `opam-env.sh`'s path rewrite, and Cygwin ships no `perl` — which `tools/test-run.sh` needs for its lock, cap and `last` pointer, and refuses without (gh-ocannl-662).
 
@@ -46,7 +46,8 @@ opam install hipjit   # for AMD HIP backend
 
 ## Architecture Overview
 
-**Before working on a subsystem, skim the matching section of `docs/agent-notes.md`** — distilled
+**Before working on a subsystem, read the matching file under `docs/agent-notes/`** (the index is
+`docs/agent-notes.md`) — distilled
 cross-session agent knowledge (solver/backend traps, known bugs with workarounds, debug recipes,
 design history) that is not derivable from the code alone.
 
@@ -155,6 +156,7 @@ design history) that is not derivable from the code alone.
 - When you notice unrelated code smells or design problems, file separate issues
 - Follow-up fixing commits are fine, and test-expectation promotions that span several topics can land in a final tests/promotions commit
 - Each commit should at least compile: loop `git checkout <rev> && dune build @check` over `git rev-list --reverse master..HEAD` (interactive rebase is unavailable in this harness)
+- **Two repositories, and remote names are not the contract**: development — branches, PRs, and the `master` they land on — happens in `lukstafi/ocannl-staging`, while `ahrefs/ocannl` is the public repo that owns the ISSUES this codebase cites as `gh-ocannl-NNN`, the milestones and the GitHub releases, and receives release-relevant changes. Which remote name points where is local: a clone has whatever names it was given, a clone of the public repo calls IT `origin`, and a fresh clone has no second remote at all. So check `git remote -v` before trusting a name, add the other repo explicitly when you need it (`git remote add upstream https://github.com/ahrefs/ocannl.git`), and pass `--repo <owner>/<name>` to every `gh` command rather than letting it infer: issues to `ahrefs/ocannl`, PRs to `lukstafi/ocannl-staging`
 
 ### Configuration
 

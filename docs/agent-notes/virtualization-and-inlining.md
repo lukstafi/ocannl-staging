@@ -1,0 +1,170 @@
+# Virtualization and inlining
+
+Which candidates inline, where each rejection is decided, the policy caps, and how to test a
+value-rewriting pass on hand-built IR.
+
+Part of the agent notes; the [index](../agent-notes.md) carries the scope discipline and the other
+files.
+
+- Value-rewriting passes need executed parity tests, not just structural pins (see CLAUDE.md).
+  To exercise a virtualized affine-LHS producer end-to-end, hand-build an `Assignments.comp`
+  (einsum result-side scatter specs don't parse; gradients accumulate → stay materialized): pass
+  `~name` to `Context.compile` (or wrap in `Asgns.Block_comment` for labeled debug dumps), set
+  `embedded_nodes`, force the output materialized, seed inputs with `Context.set_values`, then
+  compile→run→`get_values`. When the shape under test is NOT reachable through `Assignments` at
+  all (the optimizer never emits it), build the `Low_level.optimized` directly — `LL.optimize` over
+  a hand-written `LL.t`, or `analyze_proc`+`specialize_proc` — and pass it as
+  `Context.compile ?prelowered` with `~name` and `Ir.Assignments.empty_comp` (gh-ocannl-562).
+  It replaces the compile's lowering wholesale, so the analysis layer and the kernels see one IR;
+  add `~lowered_transform:(fun o -> o)` to keep the default schedule annotator off hand-built code.
+  See `test/operations/prelowered_seam.ml`, and mind the scope-purity contract below.
+- Do not re-derive that harness: `test/support/ll_test.ml` (library `ll_test`, links `ocannl`) holds
+  the LL builders, ONE exhaustive `Low_level.t`/`scalar_t` traversal with the counters derived from
+  it, and `optimize`/`run`/`execute` — add `ll_test` to the test's `(libraries ...)`. A new IR
+  constructor is handled there once instead of in every copy. `test_utils` stays separate on purpose:
+  it depends on `arrayjit.ir` alone, for tests that link no more than that.
+- Such a hand-built case gets its differential arm for free: pre-decide the placement in the
+  `optimize_ctx` you hand `LL.optimize` (`Low_level.decide_materialized`, which is what
+  `Context.decide_materialized` records for the `Assignments` pipeline; `Ll_test.optimize
+  ~materialized` wraps it) and re-specialize the SAME `LL.t`. The inlined and materialized readings
+  of one program must agree cell for cell, which is what pins a virtualization guard;
+  `Context.decide_materialized` on the context itself cannot do this, because `?prelowered` replaces
+  the lineage state with the record's own `optimize_ctx`.
+  Three traps: (a) `known_non_virtual` does NOT mean "has a context buffer" — a node written and read
+  within one routine and never observed is placed `Local`, routine-scoped scratch whose values never
+  reach a context buffer. Host access to a node this lineage placed `Local` raises in BOTH
+  directions (gh-ocannl-599; `test/operations/local_host_access.ml`), so the mistake fails loudly
+  rather than reporting the uploaded copy back as a computed value. Read back only nodes you
+  declared `On_device`, and mark them `Tn.set_observable` so the aliasing planner cannot hand their
+  bytes to another node. (b) Producer/consumer indices that run past a node's dims are
+  invisible while the node is virtual (the access is inlined away) and become real out-of-bounds
+  traffic the moment the case executes or the materialized arm runs — size hand-built arrays for the
+  materialized reading, and seed outputs with a sentinel so "wrote the wrong cells" fails the value
+  check instead of reading whatever the buffer held. (c) The oracle has to discriminate, not merely
+  exist: a producer must write a value that varies with EVERY symbol of its iteration and stays off
+  the init value (`1 + i`, `1 + 10*outer + inner` — the `tick`/`tag` helpers in
+  `test/operations/virtual_diagonal.ml`), because a constant producer just replays an identical
+  assignment under a too-wide range guard, a value omitting a symbol is constant along that axis
+  under a wrong substitution, and a value colliding with the zero-init hides a dropped first
+  iteration.
+- A `Local_scope` body's ONLY effect is on the locals it owns — its own scope id plus ids
+  `Declare_local`d lexically within it (gh-ocannl-584). Not a tensor node, not a sibling's or
+  enclosing scope's local, no `Workgroup_barrier`, no `Staged_compilation`. The reason is that a body
+  does not execute where it is written, in three different ways: `C_syntax.pp_scalar` returns it as
+  a local definition that `pp_local_defs` emits ahead of the enclosing statement ordered by
+  `scope_id`; `simplify_llc` collapses a single-assignment scope into the expression, moving its
+  reads the other way; and `hoist_cross_statement_cse` lifts a body shared by sibling statements to a
+  top-level `Declare_local` + body, running ONCE ahead of the first user. Purity makes all three
+  placements unobservable from outside the body, which is exactly what `Affine.path_before` assumes
+  when it refuses to order sibling `Arg` positions; the two would otherwise disagree. Purity governs
+  a body's EFFECTS, not its inputs — the hoist separately needs the body's reads untouched across
+  the statements it is lifted over, and its hazard check must cover scope locals (`Get_local` /
+  `Set_local`) as well as tensor nodes, or a shared body is lifted above a `Set_local` of a local it
+  reads and later users read a stale value (a real miscompile, pinned by `prelowered_seam` phase 5).
+  Bodies reading a local declared OUTSIDE them are ordinary pipeline output — CSE and the hoist
+  itself create them — so "a body may only read locals it owns" is not available as a rule.
+  `hoist_cross_statement_cse` is the ONLY pass that can move an effect out of a `Local_scope`
+  (`simplify_llc`'s collapse cannot match an impure body; CSE's dedup leaves the surviving
+  occurrence impure), so it guards its own precondition with `scope_purity_violation` and declines
+  to hoist an impure body, instead of every public door into `specialize_proc` needing a gate. That
+  is what keeps the raw analysis probes usable: an impure body reaching the pass would otherwise be
+  laundered to a top-level `Declare_local` + body, and `Context.compile ?prelowered` would compile a
+  silently changed routine. Rejected, never rewritten — pinned by `prelowered_seam` phase 6.
+  The contract governs a body's EFFECTS only; it deliberately says nothing about the ORDER of its
+  reads of other locals. A rule for that was written and reverted (gh-ocannl-584 review rounds 4-5):
+  deciding "is this local emitted before me?" means replicating codegen's emission algorithm
+  (`pp_local_defs` sorts by `scope_id`, per-statement def blocks, `Set_dynamic` concatenating two
+  operands' defs), and every divergence is a FALSE REJECTION of valid IR — three surfaced in one
+  review round, one of them rejecting CSE output inside a scope body, which the pipeline really
+  produces. What the rule would have caught (a hand-built read of a sibling emitted later) fails
+  loudly as a backend "use of undeclared identifier", not silently. If the guarantee is ever wanted,
+  it belongs in `pp_local_defs`, which HAS the emission order in hand and so cannot diverge from
+  it.
+  `Low_level.validate_scope_bodies` enforces it at BOTH ends of the pipeline: `optimize_proc` on the
+  way in (ahead of the analysis cache, so a digest hit cannot skip it — and before the hoist can
+  launder a body write into a top-level statement that no later gate would recognize) and
+  `C_syntax.compile_proc` on the way out (catching what a schedule transform constructs), the latter
+  ahead of `validate_parallel_classified` and NOT transported as an `Illegal_schedule` — no schedule
+  choice can rescue malformed IR. Its statement match is exhaustive with no catch-all, so a new
+  `Low_level.t` constructor breaks the build until someone classifies it as body-legal or not. The
+  pipeline complies by construction: `inline_computation` drops the inlined computation's `Set`s and
+  `Zero_out`s. The raw analysis entry points `analyze_proc`/`specialize_proc` deliberately do NOT
+  validate — they are the probes that must stay conservative on IR they may not trust
+  (`test/operations/affine_extraction.ml`); everything past them does.
+- A node-level "what happened at first touch" flag (`zero_initialized_by_code` and friends) cannot
+  soundly drive a PER-OCCURRENCE codegen decision, because nothing clears it across the traversal: a
+  guard keyed on it alone collapses `Zero_out; Set; Zero_out` to one zero and drops a `Zero_out`
+  inside a `For_loop` on every iteration. The shape that works is per-traversal state — a `seen` set
+  cleared at the single reset point (`compile_proc`) plus a positional `~in_loop` threaded through
+  the recursion, defaulting to `true` for mutually-recursive callers that don't carry it. When a
+  codegen decision consults a `traced_array`-style boolean, ask whether it is node-level or
+  occurrence-level; they coincide only at first touch on the linear path.
+- **A virtualization candidate under an `If` is rejected, and the guard's position decides which
+  arm rejects it** (gh-ocannl-651). `check_and_store_virtual`'s walk sees only the subtree it is
+  handed, so a guard INTERIOR to that subtree hits its own `If` arm while a guard ENCLOSING it is
+  invisible there — `virtual_llc` threads a `~guarded` flag down its walk and reports it, and both
+  paths land on `Non_virtual 142`. Guards are NOT confined to the backend-compile-time launch-extent
+  pass: `Assignments.to_low_level` emits interval guards for clamped-window pooling (gh-ocannl-504)
+  and extent guards for symbolic extents (gh-ocannl-490), both before virtualization. When adding a
+  pass that captures a subtree for later replay, ask what context the subtree was captured FROM —
+  a walk of the subtree alone cannot see it.
+- **The same question for loops: a candidate is captured at the outermost `For_loop` whose index
+  occurs in its assignment indices** (`track_symbol` / `reverse_node_map`), so a reduction loop
+  BELOW that point is part of the stored computation (the ordinary `x[t] += a[s]`, priced by
+  `virtualize_max_inline_reduction`) while a repetition loop ABOVE it is not — and a symbol-free
+  (all-`Fixed_idx`) index map has no capture site at all. Such a candidate is rejected as
+  `Non_virtual 147` (gh-ocannl-674); width-1 loops stay exempt, since replaying one iteration once
+  is exact. Two arms hide most of this shape and neither is a guarantee: an array reduction
+  `x[0] += a[s]` is rejected because the sibling read escapes (`Non_virtual 9`), and an accumulator
+  read more than `virtualize_max_visits` times is capped (`Non_virtual 1`) — a flippable policy
+  prior, decided in `decide_placements` before any legality question is asked.
+- **Where a virtualization candidate is refused is readable off its placement PROVENANCE, and four
+  phases write into the same table** (gh-ocannl-658, pinned row by row in
+  `test/operations/virtual_rejection_boundary.ml`): `decide_placements` applies the heuristic caps
+  (1 visit cap / uncovered read, 39 reduction extent, 41 fan-in) BEFORE any legality question, so a
+  shape capped there may be perfectly inlineable; `check_and_store_virtual` rejects at store time
+  (4, 5, 7, 9, 10, 11, 12, 51, 52, 142, 147 and the defensive-constructor codes);
+  `inline_computation` rejects at consumption time (13, 14, 140, 145, 146), which is why two setters
+  with different index maps as separate statements store fine as components and only fail once a
+  read site cannot be served; and `cleanup_virtual_llc` commits a surviving read as 17, which is the
+  absence of a rejection rather than one. Provenances compose — `default_to_most_local` folds a
+  prior one in as `1000 * prior + its own` — so read the leading factor (`Ll_test.rejection_code`).
+  Do not infer the boundary from the `Non_virtual` comments at the raise sites: several describe
+  reachability that has since changed, and 52 is enforced earlier still (`trace_node_facts` raises
+  `invalid_arg` on a `Concat` index, so the virtualizer's arm never sees one).
+- Big-reduction producers are forced `Never_virtual` by `virtualize_max_inline_reduction`
+  (default 16) — remember it when a structural expectation assumes inlining.
+- Wide-fanin producers are forced `Never_virtual 41` by `virtualize_max_inline_fanin` (default 8,
+  gh-573): a node whose fully-inlined computation would load more than that many distinct
+  materialized nodes — accumulated through chains of virtual producers, per setter — materializes,
+  resetting the fan-in downstream. This is the guard that breaks residual-stream-style running sums
+  (per-cell multiplicity passes the visit cap because copy-position reads are rmw-exempt, yet each
+  consumer re-sums the whole prefix); a structural expectation assuming a deep all-virtual chain
+  must disable it (`Low_level.virtualize_settings.max_inline_fanin <- -1`). Like the other caps it
+  is a flippable policy prior, not legality (`test/operations/virtual_chain_fanin.ml`). **The cap's
+  bite depends on how many distinct transitive materialized inputs a chain accumulates — which varies
+  with depth AND with graph shape at constant depth — so a cap conclusion holds for the graph it was
+  measured on and not for a size class.** On gpt2_mini specifically (4 layers, gfx1151,
+  `report-gh612-hip.md`), caps 16, 32 and −1 all emit a **135-kernel** arm A, yet only cap 32 is
+  actually placement-identical: at cap 16 one node's worth of placement difference appears (the final
+  layer norm gains a materialized `n792`) *behind an unchanged kernel count*. Node counts proxy guard
+  firings; nothing logs provenance-41 decisions, so they are not firing counts. **Equal fission width can absorb a changed
+  materialization decision, so a kernel count cannot establish that a cap did nothing — compare the
+  emitted PARAMETER-SIGNATURE multisets and the materialized-node sets** (`benchmarks/gh612_cells.sh
+  diff`, which needs only a snapshot). Three distinct levels, and conflating them is easy: a kernel's
+  pointer parameters are exactly the materialized nodes it touches, so signature multisets track
+  PLACEMENT and are insensitive to the crowned tile; kernel BODIES also move with the tile, so a body
+  diff is not evidence of a placement change; and the count of newly materialized NODES is the proxy
+  for guard firings, not the count of changed signatures — one materialization changes several
+  consumers' parameter lists (on gpt2_mini, cap 8's 16/17 exclusive signatures come from 4 nodes:
+  0/1/4/9/23 for caps 32/16/8/4/2). **A zero placement difference does NOT prove the guard was silent,
+  so no fan-in bound follows from it**: `decide_placements` assigns provenance 41 only to a node not
+  already placed, and `virtual_llc` afterwards rejects inlining for its own legality reasons, so with
+  the cap disabled a different mechanism can materialize the same node and yield an identical source.
+  The observable statement is all there is, and only at the caps actually swept (2, 4, 8, 16, 32, −1):
+  placement differed from cap −1 at 2, 4, 8 and 16, and matched at 32. Nothing is established for
+  caps between or above those. Cap 4 beat the default 8 by a
+  non-overlapping 5.7% in a block order-balanced in BOTH the searches and the pass-2 replays (5.5%
+  was the same six artifacts replayed in an unbalanced order; three replay sets of them spanned
+  5.5-6.5%, so an identical schedule varies ~1pp run to run -- all three non-overlapping), and balancing that order matters: a fixed order
+  confounds the cap with session position, which was worth ~1.4pp of an apparent 7.1%.

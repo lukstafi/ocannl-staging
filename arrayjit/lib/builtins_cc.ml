@@ -754,8 +754,9 @@ float fp8_to_single(uint8_t fp8)
    and finite overflow saturating to the max finite magnitude. Every one of those is the behavior
    of the native GPU fp8 types (CUDA __nv_fp8_e5m2, HIP __hip_fp8_e5m2), verified against both
    over all 2^32 float bit patterns, so a value narrowed on the host, on cc or on Metal lands on
-   the same code a CUDA or HIP kernel would produce. See docs/agent-notes.md for the two inputs
-   where the vendors themselves disagree (an already-infinite input, and the sign of a NaN). */
+   the same code a CUDA or HIP kernel would produce. See
+   docs/agent-notes/backend-precision-and-simd.md for the two inputs where the vendors themselves
+   disagree (an already-infinite input, and the sign of a NaN). */
 uint8_t single_to_fp8(float f)
 {
   uint32_t bits;

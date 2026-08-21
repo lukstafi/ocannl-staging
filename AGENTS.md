@@ -20,8 +20,9 @@ Key reference files:
 - docs/shape_inference.md (shape/projection inference pipeline)
 - arrayjit/lib/context.mli (context-based runtime API)
 - ocannl_config.reference (all configuration keys and defaults)
-- docs/agent-notes.md (distilled cross-session agent knowledge: subsystem traps, known bugs with
-  workarounds, debug recipes — skim the matching section before working on a subsystem)
+- docs/agent-notes.md (index) and docs/agent-notes/ (distilled cross-session agent knowledge:
+  subsystem traps, known bugs with workarounds, debug recipes — read the matching file before
+  working on a subsystem)
 
 ## Conceptual Map (How It Fits Together)
 - Tensor expressions (%op, Tensor.t) build a graph with shape inference and backprop rules.
@@ -47,7 +48,8 @@ Worktree and shell notes:
 - Put worktrees outside the repository when possible. For a nested worktree, run
   `scripts/setup-ocaml-env.sh` from its root to create a worktree-local `dune-workspace`;
   otherwise Dune can silently build the parent checkout. Normal Dune commands and
-  `dune promote` then work without `--root .`; see `docs/agent-notes.md` for the mechanics.
+  `dune promote` then work without `--root .`; see `docs/agent-notes/build-and-test.md` for the
+  mechanics.
 - In Windows Git Bash, source `tools/opam-env.sh` before building. Use
   `tools/dune-quiet.sh <dune args>` to filter only the known benign linker warnings.
 - In PowerShell, quote aliases (`dune build "@runtest" "@slow"`); unquoted `@name` is splatted

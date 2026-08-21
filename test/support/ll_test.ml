@@ -131,8 +131,9 @@ let ramp base s = add (c base) (embed s)
     symbol": the cells must be EXACT in the storage precision while their running sums are not, or
     the leg passes for the wrong reason. A zero-mean operand random-walks small enough that every
     bf16 partial sum stays bf16-exact, so per-step narrowing is invisible and a schedule-dependent
-    accumulator width reads as parity — the zero-mean trap that docs/agent-notes.md's gh-ocannl-639
-    entry records (trap 2), found the hard way by this test's first draft. Hence a cycle whose cells
+    accumulator width reads as parity — the zero-mean trap that
+    docs/agent-notes/backend-precision-and-simd.md's gh-ocannl-639 entry records (trap 2), found
+    the hard way by this test's first draft. Hence a cycle whose cells
     are exact and whose running sums DRIFT out of the storage format's exactness range.
 
     Both halves of that are arithmetic, not rules of thumb, and {!cycle} states each as a condition
