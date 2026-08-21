@@ -1110,20 +1110,23 @@ let () =
       (Bigarray.Genarray.create Bigarray.Float32 Bigarray.c_layout [| 1; 1 |])
       [| { left = 0; right = 0 }; { left = 0; right = 0 } |]
   in
-  let _ = threefry4x32 [| 0 |] [| 0 |] in
-  let _ = threefry4x32_crypto [| 0 |] [| 0 |] in
-  let _ = threefry4x32_light [| 0 |] [| 0 |] in
-  let _ = uint4x32_to_single_uniform [| 0 |] in
-  let _ = uint4x32_to_double_uniform [| 0 |] in
-  let _ = uint4x32_to_int32_uniform [| 0 |] in
-  let _ = uint4x32_to_int64_uniform [| 0 |] in
-  let _ = uint4x32_to_uint32_uniform [| 0 |] in
-  let _ = uint4x32_to_uint64_uniform [| 0 |] in
-  let _ = uint4x32_to_byte_uniform [| 0 |] in
-  let _ = uint4x32_to_uint16_uniform [| 0 |] in
-  let _ = uint4x32_to_bfloat16_uniform [| 0 |] in
-  let _ = uint4x32_to_half_uniform [| 0 |] in
-  let _ = uint4x32_to_fp8_uniform [| 0 |] in
+  (* A uint4x32 block is four lanes, and the stubs read all four: a shorter array is an
+     out-of-bounds read, which the C side now rejects. *)
+  let zero4 () = [| 0; 0; 0; 0 |] in
+  let _ = threefry4x32 (zero4 ()) (zero4 ()) in
+  let _ = threefry4x32_crypto (zero4 ()) (zero4 ()) in
+  let _ = threefry4x32_light (zero4 ()) (zero4 ()) in
+  let _ = uint4x32_to_single_uniform (zero4 ()) in
+  let _ = uint4x32_to_double_uniform (zero4 ()) in
+  let _ = uint4x32_to_int32_uniform (zero4 ()) in
+  let _ = uint4x32_to_int64_uniform (zero4 ()) in
+  let _ = uint4x32_to_uint32_uniform (zero4 ()) in
+  let _ = uint4x32_to_uint64_uniform (zero4 ()) in
+  let _ = uint4x32_to_byte_uniform (zero4 ()) in
+  let _ = uint4x32_to_uint16_uniform (zero4 ()) in
+  let _ = uint4x32_to_bfloat16_uniform (zero4 ()) in
+  let _ = uint4x32_to_half_uniform (zero4 ()) in
+  let _ = uint4x32_to_fp8_uniform (zero4 ()) in
   let _ = single_to_uint4x32 0.0 in
   let _ = double_to_uint4x32 0.0 in
   let _ = int32_to_uint4x32 0 in

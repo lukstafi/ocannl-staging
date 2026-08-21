@@ -416,3 +416,21 @@ files.
   and `x - x = 0` fold to a constant, silently disabling an overflow gate (the shape
   `Mixed_prec.gated_scaled_update` needs). It is the same reason `Builtins_metal`'s fp8 codec is
   written in integer/bitcast form rather than float arithmetic.
+
+- **An `external` typed `int array` carries no length, so a stub reading fixed fields must check
+  `Wosize_val` first** (gh-ocannl-688). `builtins.c`'s uint4x32 helpers take an OCaml array and read
+  lanes 0..3 out of it; nothing in the OCaml type says the caller passed four. An under-length array
+  is then an out-of-bounds read that is *usually invisible* — it picks up adjacent heap words and the
+  wrong random number is discarded — which is why such a mismatch can sit in the tree indefinitely.
+  `ocaml_array_to_uint4x32` now raises `Invalid_argument` on any arity but 4; `arrayjit_copy_with_padding`
+  is the older instance of the same check. When adding a stub that reads a fixed number of fields off
+  an OCaml block, validate the arity at the boundary — the type system is not doing it for you.
+- **Fingerprint: SIGBUS / `KERN_PROTECTION_FAILURE` inside `caml_c_call` under a `camlFoo$entry`
+  frame is an FFI over-read at module-initialization time, not a JIT or W^X problem.** The macOS
+  crash report names the faulting address; if it equals the top of a 2 MB `rw-` `VM_ALLOCATE` region
+  followed by a `---` one (OCaml 5 commits domain 0's minor heap at the low end of a 256 MB
+  PROT_NONE reservation), the stub read past a block that happened to be the topmost allocation in
+  the minor heap. Allocation-layout dependence is what makes it present as flakiness correlated with
+  nothing meaningful — load, launcher, concurrency — so do not chase the correlation. To reproduce
+  deterministically, put the short block at the top of a fresh minor heap: `Gc.minor (); let a =
+  Array.make 1 0 in <call>`. That turns a 3-in-5 flake into 5-in-5 (`test/operations/uint4x32_stub_bounds.ml`).

@@ -1,0 +1,3 @@
+every uint4x32 stub rejects an under-length array: true
+every uint4x32 stub accepts a four-lane array: true
+Ops module initialization completed: true
