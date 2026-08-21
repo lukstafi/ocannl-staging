@@ -1554,7 +1554,16 @@ that they earn a lookup rather than always-loaded space.
   read by a SECOND reader that shares no machinery with the first (`Dune_stanza_scan.raw_stanzas`
   reads the stanzas and what each runs off the raw text, and a sexp walk going blind cannot take it
   down too), and the exact numbers on STDERR, which a `(test)` stanza does not diff. Assert the floor through `Verdict`
-  rather than as a golden line, so a scan that goes blind cannot be promoted back to green. Put the
+  rather than as a golden line, so a scan that goes blind cannot be promoted back to green. And
+  compare the floor to the walk STANZA BY STANZA, never as two totals over a file: the second reader
+  recognises fewer shapes than the walk (in gh-ocannl-659's case no `bash`/`system`, and nothing
+  under an unresolvable `chdir`), so every stanza the walk places and the floor misses is a unit of
+  SLACK that can absorb a different stanza silently dropping out of enforcement. Not theoretical —
+  the tree stood at 296 placed against a floor of 295, one whole stanza of cover. Asked per stanza
+  the two answers are about the same stanza and cannot be traded against a third, and the narrower
+  vocabulary degrades to a weaker floor just where it is narrow instead of to a hole elsewhere. Note
+  what this licenses: once the comparison is per stanza, the two readers may share the TRAVERSAL
+  that pairs them, because the independence being protected was only ever in the classification. Put the
   independence in the CLASSIFICATION and nowhere else: what can go blind is the checker's own
   traversal and command-recognition, so answer those questions a second way — but PARSE the input
   with the same reader the format admits rather than re-deriving its grammar. Seven review rounds on

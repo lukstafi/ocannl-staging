@@ -816,12 +816,17 @@ type raw_stanza = {
     text does not say what those run. Those under-report, which is the safe direction for a floor —
     blindness makes things DISAPPEAR, so a floor that under-counts still fails on it and never fails
     on a correct scan. *)
-let raw_stanzas content =
+(* The raw reading of ONE stanza, lifted out of {!raw_stanzas} so that a caller holding a stanza can
+   ask this reader about THAT stanza rather than about a whole file. {!raw_stanzas} is this over a
+   document; gh-ocannl-659's floor pairs it with the walk stanza by stanza, which needs both
+   classifiers reachable from one place (Codex P2, round 2).
+
+   Sharing the traversal costs nothing this module was protecting: the independence it documents
+   lives in the CLASSIFICATION -- how a stanza is decided to run something -- and that is still two
+   separate pieces of machinery, answering the same question from different sides. *)
+let raw_stanza_of =
   let counted_heads = "test" :: "tests" :: action_heads in
   let test_heads = [ "test"; "tests" ] in
-  (* Parsed rather than scanned. [sites] has already refused any file the two readers disagree
-     about, so what arrives here is a file both read the same way. *)
-  let parsed = Sexplib.Sexp.scan_sexps (Lexing.from_string content) in
   (* Every `(:name …)` the stanza binds, with the first executable it names -- the binding may wrap
      its path in a dependency form, and it is found wherever in the stanza it sits. *)
   (* A binding's paths, the way [named_deps_of] reads them: atoms, and the forms that CARRY paths.
@@ -950,13 +955,36 @@ let raw_stanzas content =
           };
         ]
   in
+  fun ~subdir sexp -> of_stanza ~subdir sexp
+
+(** Whether the raw reader thinks this stanza runs something — the floor's side of "is this stanza
+    subject to the backend rule", kept in ONE place so a caller cannot drift from it.
+
+    Deliberately a lower bound, and safe to be one. The raw reader sees fewer shapes than
+    {!sites_of_stanza} does: it reads [run]/[dynamic-run] and not [bash]/[system], and it drops what
+    sits under a [chdir] it cannot resolve, so a stanza the walk places as {!Unreadable_command},
+    {!Unreadable_directory} or {!Unclassified_action} can be invisible here. That gap is harmless
+    exactly as long as the comparison is made STANZA BY STANZA: under-claiming for one stanza
+    weakens the floor for that stanza alone. Compared in aggregate it is not harmless at all — a
+    stanza the walk counts and this reader does not contributes slack that hides a DIFFERENT
+    stanza dropping out of enforcement (Codex P2, round 2). *)
+let raw_runs_something r =
+  (not (List.is_empty r.raw_runs))
+  || (not (List.is_empty r.raw_test_cwds))
+  || r.raw_inline_tests
+  || not (List.is_empty r.raw_unnameable)
+
+let raw_stanzas content =
+  (* Parsed rather than scanned. [sites] has already refused any file the two readers disagree
+     about, so what arrives here is a file both read the same way. *)
+  let parsed = Sexplib.Sexp.scan_sexps (Lexing.from_string content) in
   (* A `(subdir …)` holds stanzas, and the directory it names is where they run. *)
   let rec walk_stanzas ~subdir sexp =
     match sexp with
     | Sexp.List (Sexp.Atom "subdir" :: Sexp.Atom dir :: rest) ->
-        of_stanza ~subdir sexp
+        raw_stanza_of ~subdir sexp
         @ List.concat_map rest ~f:(walk_stanzas ~subdir:(in_subdir subdir dir))
-    | sexp -> of_stanza ~subdir sexp
+    | sexp -> raw_stanza_of ~subdir sexp
   in
   List.concat_map parsed ~f:(walk_stanzas ~subdir:"")
 
@@ -1272,6 +1300,11 @@ type marked_stanza = {
   marked_name : string;  (** its [(name …)]/[(names …)], joined, for a diagnostic *)
   marked_line : int;  (** the line its opening parenthesis sits on *)
   marked_sites : site list;  (** what it runs; empty means it is not subject to the rule *)
+  marked_raw_subject : bool;
+      (** what {!raw_runs_something} — the SECOND reader — makes of the same stanza. Carried here
+          so the floor can be checked per stanza against [marked_sites] instead of as a total: two
+          answers about one stanza cannot be traded off against a third stanza the way two counts
+          over a file can. *)
   marked_declares_backend : bool;  (** whether it declares [(env_var OCANNL_BACKEND)] *)
   marked_comments : (int * string) list;
       (** the comments inside its parentheses, each with the line it sits on — not those of a
@@ -1317,6 +1350,10 @@ let marked_stanzas content =
             marked_name = String.concat ~sep:", " (names_of sexp);
             marked_line = line_of content form.raw_start;
             marked_sites = sites_of_stanza dir sexp;
+            (* The same stanza, put to the other reader. `raw_stanza_of` returns nothing for a form
+               that is not a stanza at all, which is itself an honest "runs nothing". *)
+            marked_raw_subject =
+              List.exists (raw_stanza_of ~subdir:dir sexp) ~f:raw_runs_something;
             marked_declares_backend = declares sexp;
             marked_comments = enclosed form;
           };

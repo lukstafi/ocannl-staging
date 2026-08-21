@@ -355,38 +355,31 @@ let () =
               marker outside a comment declares nothing, and one in a comment this scan cannot see \
               is one it will not read"
              dune_file Scan.marker_sentinel in_text in_comments));
-      (* The floor under the walk, read by the second reader that shares none of its machinery: a
-         stanza it stops seeing is a stanza the rule above stops applying to, which looks exactly
-         like a file with nothing to check (the gh-ocannl-665 argument, and config_dep_completeness'
-         floors).
+      (* The floor under the walk, read by the second reader that shares none of its classification
+         machinery: a stanza the walk stops seeing is a stanza the rule above stops applying to,
+         which looks exactly like a file with nothing to check (the gh-ocannl-665 argument, and
+         config_dep_completeness' floors).
 
-         The predicate has to admit EVERY kind of subject `sites_of_stanza` places, or the floor is
-         blind to exactly the classes it omits: a regression in one of them would drop those stanzas
-         out of `marked_sites` while leaving this count unchanged, and the blindness check would
-         stay green over a class that had stopped being enforced (Codex P2, round 1). Beyond the
-         `run` actions and a test stanza's own binary, that means an `(inline_tests)` library --
-         which `sites_of_stanza` reports as an `Inline_tests` site -- and a bare command under a
-         rewritten `PATH`, which it reports as a `path_rewritten` site precisely because it refuses
-         to name the program. *)
-      let raw_subjects =
-        List.count (Scan.raw_stanzas content) ~f:(fun r ->
-            (not (List.is_empty r.Scan.raw_runs))
-            || (not (List.is_empty r.Scan.raw_test_cwds))
-            || r.Scan.raw_inline_tests
-            || not (List.is_empty r.Scan.raw_unnameable))
-      in
-      let placed_here = List.count marked ~f:(fun s -> not (List.is_empty s.Scan.marked_sites)) in
-      subject_floor := !subject_floor + raw_subjects;
-      if placed_here < raw_subjects then (
-        Int.incr marker_holes;
-        fail
-          (Printf.sprintf
-             "%s: the raw text shows %d %s running an executable and the walk placed only %d -- it \
-              is reading the file with a hole in it, and a stanza it stops seeing is one this rule \
-              stops applying to"
-             dune_file raw_subjects
-             (if raw_subjects = 1 then "stanza" else "stanzas")
-             placed_here));
+         Checked STANZA BY STANZA, not as two totals over the file. A total has slack in it, and the
+         slack is not hypothetical: the raw reader recognises fewer shapes than `sites_of_stanza`
+         does -- no `bash`/`system`, nothing under an unresolvable `chdir` -- so a stanza the walk
+         places and this reader misses adds one to the walk's count and nothing to the floor, which
+         is exactly enough to absorb a DIFFERENT stanza silently dropping out of enforcement (Codex
+         P2, round 2). Asked per stanza, the two answers are about the same stanza and cannot be
+         traded against a third; and the raw reader's narrower vocabulary degrades to a weaker floor
+         for the stanzas it cannot see, rather than to a hole somewhere else in the file. *)
+      List.iter marked ~f:(fun stanza ->
+          if stanza.Scan.marked_raw_subject && List.is_empty stanza.Scan.marked_sites then (
+            Int.incr marker_holes;
+            fail
+              (Printf.sprintf
+                 "%s:%d, the %s %s: the raw text shows it running an executable and the walk placed \
+                  no site for it -- it is reading the file with a hole in it, and a stanza it stops \
+                  seeing is one this rule stops applying to"
+                 dune_file stanza.Scan.marked_line stanza.Scan.marked_head
+                 (if String.is_empty stanza.Scan.marked_name then "<unnamed>"
+                  else stanza.Scan.marked_name)));
+          if stanza.Scan.marked_raw_subject then Int.incr subject_floor);
       by_file :=
         ( dune_file,
           (if !any_declared then [ "declares " ^ Scan.backend_env_var ] else [])
