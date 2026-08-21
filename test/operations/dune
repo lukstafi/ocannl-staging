@@ -3063,6 +3063,10 @@
  (libraries base stdio unix arrayjit.utils arrayjit.verdict test_utils))
 
 (rule
+ ; ocannl-backend: none -- links arrayjit.utils, test_utils and unix, and writes its artifacts by
+ ; hand rather than compiling any. Its `backend_name = "cc"` is the label a generated file's name
+ ; carries, not a backend it selects: what is under test is how Generated decides a file on disk
+ ; belongs to this run.
  (aliases runtest generated_provenance)
  (package neural_nets_lib)
  (deps
