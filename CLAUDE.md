@@ -156,7 +156,7 @@ design history) that is not derivable from the code alone.
 - When you notice unrelated code smells or design problems, file separate issues
 - Follow-up fixing commits are fine, and test-expectation promotions that span several topics can land in a final tests/promotions commit
 - Each commit should at least compile: loop `git checkout <rev> && dune build @check` over `git rev-list --reverse master..HEAD` (interactive rebase is unavailable in this harness)
-- **Two remotes**: `origin` is the development repo (PRs, master, what a plain `git push` reaches), `upstream` is the public one — it owns the ISSUES this codebase refers to as `gh-ocannl-NNN`, the milestones and the GitHub releases, and receives release-relevant changes. So file and close issues against `upstream`, open PRs against `origin`, and never assume a `gh` command without `--repo` addressed the repo you meant
+- **Two repositories, and remote names are not the contract**: development — branches, PRs, and the `master` they land on — happens in `lukstafi/ocannl-staging`, while `ahrefs/ocannl` is the public repo that owns the ISSUES this codebase cites as `gh-ocannl-NNN`, the milestones and the GitHub releases, and receives release-relevant changes. Which remote name points where is local: a clone has whatever names it was given, a clone of the public repo calls IT `origin`, and a fresh clone has no second remote at all. So check `git remote -v` before trusting a name, add the other repo explicitly when you need it (`git remote add upstream https://github.com/ahrefs/ocannl.git`), and pass `--repo <owner>/<name>` to every `gh` command rather than letting it infer: issues to `ahrefs/ocannl`, PRs to `lukstafi/ocannl-staging`
 
 ### Configuration
 

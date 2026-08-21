@@ -209,12 +209,17 @@ files.
   operator to a guard, give every such recognizer an arm for it. Per-node element counts must fit
   int32 unless `large_models`; launch params are bind-validated.
 
-- **Lowering never puts two DISTINCT tensor nodes under one `For_loop`**: every assignment gets its
-  own `Low_level.loop_over_dims` (`Assignments.to_low_level`), and concat/block produce several loops
-  that all write the SAME node. Shared-loop behaviour — one traced loop symbol owning several virtual
-  candidates (`reverse_node_map : Symbol.t -> Tnode.t list`, gh-ocannl-134) — is therefore unreachable
-  from the DSL, and can only be exercised from hand-built `Low_level.t` (`ll_test`,
-  `test/operations/virtual_shared_loop.ml`).
+- **An ordinary assignment never puts two DISTINCT tensor nodes under one `For_loop`** — each gets its
+  own `Low_level.loop_over_dims` (`Assignments.to_low_level`), and a `Block` concat produces several
+  loops that all write the SAME node. The exception is its mirror, `Rev_sides` (the `++^` gradient,
+  which scatters one RHS into the component gradients): `loop_accum_rev` emits a `For_loop` per
+  component of a product level SHARING ONE index symbol, and its basecase writes a different member
+  of `lhses` under each — so one symbol really does own several tnodes, and `track_symbol` records
+  them all. Shared-loop behaviour (`reverse_node_map : Symbol.t -> Tnode.t list`, gh-ocannl-134) is
+  therefore reachable from the DSL after all: `test/operations/test_block_tensor.ml`'s gradient
+  fixtures are the regression coverage to keep in mind when changing concat lowering or the
+  virtualizer's symbol ownership, alongside the hand-built `test/operations/virtual_shared_loop.ml`
+  (`ll_test`), which is still the way to reach shapes the DSL does not emit.
 - A lowering-time reader of `Indexing.variable_ref` must force a dims lazy (or otherwise finish
   inference) FIRST: forcing dims is what runs `Shape.finish_inference` and fills row-var-bound refs
   (`..d..` captures such as layer norm's `/. dim d`). "Inference is already forced by now" is not an
