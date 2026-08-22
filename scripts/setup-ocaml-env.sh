@@ -107,20 +107,40 @@ fi
 # noticed). A session never sees that by itself: dune builds what is checked
 # out. So fetch `origin master` and count.
 #
-# Best-effort and bounded: a hook must never hang on a credential prompt or a
-# dead network, so the fetch runs with prompts disabled, under `timeout` where
-# one exists, and with git's own low-speed abort as the fallback bound; any
-# failure prints `skip`. The count is then taken against whatever
-# `origin/master` the repository holds — after a failed fetch that is the
-# previous fetch's, which is still newer than the parent checkout's `master`
-# when the latter is the thing that lagged. The warning changes nothing and does
-# not mark the environment incomplete; it names the recovery instead.
+# Best-effort and bounded, and the bound must not depend on the transport or
+# on the platform: `GIT_TERMINAL_PROMPT=0` silences git's prompts but not
+# OpenSSH's (host-key confirmation, a passphrase), `http.lowSpeed*` reaches only
+# HTTP transfers, and GNU `timeout` is absent on a default macOS and on some
+# Git Bash installs. So the fetch runs under `bounded`, a watchdog that kills
+# the command after N seconds whatever it is stuck on — `timeout` where one
+# exists, a background killer otherwise — and the SSH leg additionally gets
+# `BatchMode=yes` (no prompts) with connect and keepalive timeouts, appended to
+# whatever ssh command the user already configured. Any failure prints `skip`.
+# The count is then taken against whatever `origin/master` the repository
+# holds — after a failed fetch that is the previous fetch's, which is still
+# newer than the parent checkout's `master` when the latter is the thing that
+# lagged. The warning changes nothing and does not mark the environment
+# incomplete; it names the recovery instead.
+bounded() {
+  # bounded SECS CMD...: run CMD, killing it if still running after SECS.
+  local secs="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"; return $?; fi
+  "$@" & local pid=$!
+  # The killer gets no inherited fds: a lingering `sleep` holding the hook's
+  # stdout would keep the harness waiting for EOF after the script exits.
+  ( sleep "$secs"; kill "$pid" 2>/dev/null ) >/dev/null 2>&1 </dev/null &
+  local watchdog=$!
+  wait "$pid"; local rc=$?
+  kill "$watchdog" 2>/dev/null; wait "$watchdog" 2>/dev/null
+  return $rc
+}
 if [ -n "$wt_top" ] && git -C "$wt_top" remote get-url origin >/dev/null 2>&1; then
-  fetch_cmd=(env GIT_TERMINAL_PROMPT=0 git -C "$wt_top" \
-    -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=15 \
-    fetch --quiet --no-tags origin +master:refs/remotes/origin/master)
-  if command -v timeout >/dev/null 2>&1; then fetch_cmd=(timeout 30 "${fetch_cmd[@]}"); fi
-  if "${fetch_cmd[@]}" >/dev/null 2>&1; then
+  ssh_cmd="$(git -C "$wt_top" config core.sshCommand 2>/dev/null || true)"
+  ssh_cmd="${ssh_cmd:-${GIT_SSH_COMMAND:-ssh}}"
+  ssh_cmd="$ssh_cmd -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2"
+  if bounded 30 env GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$ssh_cmd" \
+       git -C "$wt_top" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=15 \
+       fetch --quiet --no-tags origin +master:refs/remotes/origin/master >/dev/null 2>&1; then
     fetched="origin/master"
   else
     echo "  skip  fetching origin/master failed (offline?)"
