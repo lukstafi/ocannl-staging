@@ -131,9 +131,12 @@ bounded() {
   # the GROUP, so the ssh or credential helper git is blocked on dies with git
   # instead of being orphaned by a PID-only kill and accumulating across
   # session starts; TERM then CONT (for a job stopped on a tty read), then KILL
-  # 5s later for anything that ignores TERM, which an ignoring parent's
-  # children inherit. Job control is what gives a background job its own group;
-  # it is switched off again once both jobs are spawned.
+  # for anything still there 5s later, since an ignoring parent's children
+  # inherit the ignore. Job control is what gives a background job its own
+  # group; it is switched off again once both jobs are spawned. The contract is
+  # that nothing of the group survives the return: the command exiting does not
+  # by itself cancel the watchdog — git dying on TERM while its ssh child
+  # ignores it would otherwise return before the KILL — only an empty group does.
   local secs="$1"; shift
   local pid watchdog rc
   set -m
@@ -141,11 +144,16 @@ bounded() {
   # The killer gets no inherited fds: a lingering `sleep` holding the hook's
   # stdout would keep the harness waiting for EOF after the script exits.
   ( sleep "$secs"; kill -TERM -- -"$pid" 2>/dev/null; kill -CONT -- -"$pid" 2>/dev/null
-    sleep 5; kill -KILL -- -"$pid" 2>/dev/null ) >/dev/null 2>&1 </dev/null &
+    for _ in 1 2 3 4 5; do sleep 1; kill -0 -- -"$pid" 2>/dev/null || exit 0; done
+    kill -KILL -- -"$pid" 2>/dev/null ) >/dev/null 2>&1 </dev/null &
   watchdog=$!
   set +m
   wait "$pid" 2>/dev/null; rc=$?
-  kill -TERM -- -"$watchdog" 2>/dev/null; wait "$watchdog" 2>/dev/null
+  if kill -0 -- -"$pid" 2>/dev/null; then
+    wait "$watchdog" 2>/dev/null
+  else
+    kill -TERM -- -"$watchdog" 2>/dev/null; wait "$watchdog" 2>/dev/null
+  fi
   return $rc
 }
 if [ -n "$wt_top" ] && git -C "$wt_top" remote get-url origin >/dev/null 2>&1; then
@@ -204,9 +212,10 @@ if [ -n "$wt_top" ] && git -C "$wt_top" remote get-url origin >/dev/null 2>&1; t
       ok "up to date with origin/master$asof"
     else
       if [ "$ahead" = 0 ]; then
-        recovery="git merge --ff-only origin/master"
+        # Spelled in full for the same reason as the comparison above.
+        recovery="git merge --ff-only $upstream"
       else
-        recovery="git rebase origin/master  ($ahead local commit(s) to replay)"
+        recovery="git rebase $upstream  ($ahead local commit(s) to replay)"
       fi
       printf '  WARNING HEAD is %s commit(s) behind origin/master%s — a suite run here tests stale code.\n' "$behind" "$asof"
       printf '          recover with: %s\n' "$recovery"

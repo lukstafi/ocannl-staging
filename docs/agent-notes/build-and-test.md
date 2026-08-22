@@ -315,8 +315,8 @@ that they earn a lookup rather than always-loaded space.
   `tools/promote.sh` remains the Windows path, for the CRLF stripping. Worktrees placed outside the
   repo need none of this, but see no `ocannl_config` on their ancestor path.
   The same hook also fetches `origin master` (bounded, best-effort: offline prints `skip`) and
-  prints a `WARNING` with the commit count and the recovery (`git merge --ff-only origin/master`,
-  or a rebase when there are local commits) whenever HEAD is behind it — because a worktree is
+  prints a `WARNING` with the commit count and the recovery (`git merge --ff-only
+  refs/remotes/origin/master`, or a rebase when there are local commits) whenever HEAD is behind it — because a worktree is
   created from the MAIN checkout's HEAD, whose `master` only moves when someone fast-forwards it
   after a merge, so a new worktree can start dozens of commits stale (79 on 2026-08-22) and a
   full suite run then tests old code. Read the checklist before the first build.
