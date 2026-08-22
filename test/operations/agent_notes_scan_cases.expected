@@ -19,6 +19,10 @@ ok: bullets -- an ordered item written with a parenthesis
 ok: bullets -- a bullet-looking line inside a multiline code span
 ok: bullets -- a bullet-looking line inside an HTML comment
 ok: bullets -- a table-looking line inside a multiline code span
+ok: bullets -- a bullet marker inside the code closing a span
+ok: bullets -- a marker inside a closing span, under an open bullet
+ok: bullets -- a long digit run is prose, not an ordered item
+ok: bullets -- nine digits is still an ordered item
 ok: bullets -- a prose line that is a complete triple-backtick span
 ok: bullets -- a real fence is still a fence
 ok: bullets -- an autolink at column zero is not an HTML block
@@ -119,6 +123,7 @@ ok: index -- a backlink inside a multiline HTML comment
 ok: index -- a backlink whose bracket is escaped
 ok: index -- an anchor naming a heading that only appears inside a comment
 ok: index -- an index row with a third cell
+ok: index -- a backlink whose closing bracket is escaped
 ok: index -- a backlink between escaped backticks is navigable
 ok: index -- an anchor naming a heading indented into code
 ok: index -- an index whose single table has a row that does not close

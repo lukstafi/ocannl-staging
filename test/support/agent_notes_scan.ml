@@ -521,7 +521,10 @@ let foreign_list_marker stripped =
   let n = String.length stripped in
   let ordered =
     match String.lfindi stripped ~f:(fun _ c -> not (Char.is_digit c)) with
-    | Some i when i > 0 && i + 1 < n ->
+    (* CommonMark caps the numeric part at nine digits, so a longer run is not a marker at all --
+       and reporting one made ordinary prose opening with a long identifier a spurious failure
+       (Codex P2, round 7). *)
+    | Some i when i > 0 && i <= 9 && i + 1 < n ->
         let sep = stripped.[i] and after = stripped.[i + 1] in
         if (Char.equal sep '.' || Char.equal sep ')') && md_space after then
           Some (String.prefix stripped (i + 1))
@@ -641,8 +644,27 @@ let parse_file ~file contents =
          structure both invents findings about text no reader sees and lets the closing delimiter be
          reported as an illegal lazy continuation (Codex P2, round 5). Such a line is transparent
          here: it neither opens, continues nor closes anything. *)
-      if line_is_inert ~spans:(spans_at inert lineno) line then ()
+      let spans = spans_at inert lineno in
+      (* Whether this line's FIRST VISIBLE COLUMN is real text. A marker sitting inside a code span
+         is not a marker: "- sample`" on the line that closes a span is code, and reading it as a
+         bullet invented one out of somebody's example (Codex P2, round 7).
+
+         Gating the marker tests rather than masking the inert text, because masking moves the
+         indentation and the indentation is load-bearing: the notes contain a continuation line
+         whose first seventeen characters close a code span and whose remainder is prose, and it is
+         a continuation at depth two however much of its left edge is code. *)
+      let marker_is_text = not (in_any_span spans (indent_of line)) in
+      if line_is_inert ~spans line then ()
       else if is_blank line then close_all ()
+      else if not marker_is_text then
+        (* Text, with no structural marker of its own: it continues an open bullet, or it is prose
+           and closes the list. *)
+        if indent_of line = 0 then close_all ()
+        else (
+          match !stack with
+          | [] -> ()
+          | (b, texts) :: _ ->
+              if indent_of line = b.indent + 2 then texts := stripped :: !texts)
       else if has_leading_tab line then (
             bad lineno
               "a tab in the indentation: indentation here is spaces, two per nesting level";
@@ -975,7 +997,15 @@ let markdown_links ?spans line =
       (* An escaped bracket renders literally, so it opens no link. Same parity rule as pipes -- it
          was applied to one and not the other (Codex P2, round 5). *)
       let image = i > 0 && Char.equal line.[i - 1] '!' && not (escaped_at line (i - 1)) in
-      match String.index_from line i ']' with
+      (* The first UNESCAPED bracket: "[index\](...)" renders no link, and taking the escaped one
+         counted a target that a reader cannot follow (Codex P2, round 7). Third site of the same
+         parity rule, after pipes and opening brackets. *)
+      let rec unescaped_close from =
+        match String.index_from line from ']' with
+        | Some j when escaped_at line j -> unescaped_close (j + 1)
+        | other -> other
+      in
+      match unescaped_close i with
       | Some close
         when close + 1 < n
              && Char.equal line.[close + 1] '('

@@ -102,6 +102,20 @@ let structure_cases =
       [] );
     (* A backtick fence's info string may not contain a backtick, which is what keeps an inline
        triple-backtick span from opening a block. *)
+    (* A marker inside the code that CLOSES a span is not a marker. The line is not wholly inert --
+       prose follows the closer -- so the wholly-inert skip does not reach it. *)
+    ( "a bullet marker inside the code closing a span",
+      "# Title\n\nProse `\n- sample` afterward.\n",
+      [] );
+    ( "a marker inside a closing span, under an open bullet",
+      "# Title\n\n- A fact showing `\n  - sample` in passing.\n",
+      [] );
+    ( "a long digit run is prose, not an ordered item",
+      "# Title\n\n- A fact.\n\n1234567890. That is an identifier, not a list.\n",
+      [] );
+    ( "nine digits is still an ordered item",
+      "# Title\n\n123456789. A fact written as an ordered item.\n",
+      [ "bullet-integrity @ f.md:3" ] );
     ( "a prose line that is a complete triple-backtick span",
       "# Title\n\n```foo``` is how it is written.\n",
       [] );
@@ -378,6 +392,11 @@ let index_cases =
       "# Agent notes\n\nAn index.\n\n| File | Covers | Owner |\n| --- | --- | --- |\n|        [a.md](agent-notes/a.md) | the `Widget` seam | me |\n",
       [ ("agent-notes/a.md", file "- A fact about `Widget`.\n") ],
       [ "index-agreement @ agent-notes.md:7"; "reachability @ agent-notes/a.md" ] );
+    ( "a backlink whose closing bracket is escaped",
+      index [ row "a.md" "the `Widget` seam" ],
+      [ ("agent-notes/a.md",
+          "# A file\n\nWrite it [index\\](../agent-notes.md) to show the syntax.\n\n- A fact about `Widget`.\n") ],
+      [ "reachability @ agent-notes/a.md" ] );
     ( "a backlink between escaped backticks is navigable",
       index [ row "a.md" "the `Widget` seam" ],
       [ ("agent-notes/a.md",
