@@ -99,6 +99,133 @@ if [ -n "$wt_top" ] && [ -e "$wt_top/dune-project" ]; then
   # No ancestor holds either file: dune already roots at this checkout.
 fi
 
+# --- staleness against origin/master ------------------------------------
+# Claude Code creates a worktree from the MAIN checkout's HEAD, and the main
+# checkout's `master` only advances when someone fast-forwards it after a PR
+# merge — so a fresh worktree can start dozens of commits behind `origin/master`
+# (79 on 2026-08-22, and a full CUDA suite run tested stale code before anyone
+# noticed). A session never sees that by itself: dune builds what is checked
+# out. So fetch `origin master` and count.
+#
+# Best-effort and bounded, and the bound must not depend on the transport or
+# on the platform: `GIT_TERMINAL_PROMPT=0` silences git's prompts but not
+# OpenSSH's (host-key confirmation, a passphrase), `http.lowSpeed*` reaches only
+# HTTP transfers, and `timeout` is not something to lean on: absent on a default
+# macOS and on some Git Bash installs, and where present not necessarily GNU's —
+# uutils' (Ubuntu's since 25.10) takes `-k` but does not signal the process
+# group on the KILL escalation, so git's ssh child outlives it. So the fetch
+# runs under `bounded`, a watchdog of this script's own that kills the
+# command's whole process group after N seconds whatever it is stuck on, the
+# same on every platform — and the SSH leg additionally gets
+# `BatchMode=yes` (no prompts) with connect and keepalive timeouts, appended to
+# whatever ssh command the user already configured. Any failure prints `skip`.
+# The count is then taken against whatever `origin/master` the repository
+# holds — after a failed fetch that is the previous fetch's, which is still
+# newer than the parent checkout's `master` when the latter is the thing that
+# lagged. The warning changes nothing and does not mark the environment
+# incomplete; it names the recovery instead.
+bounded() {
+  # bounded SECS CMD...: run CMD, killing it if still running after SECS.
+  # What GNU timeout does, done here so that it holds whatever `timeout` is on
+  # PATH: the command runs in its own process group and the watchdog signals
+  # the GROUP, so the ssh or credential helper git is blocked on dies with git
+  # instead of being orphaned by a PID-only kill and accumulating across
+  # session starts; TERM then CONT (for a job stopped on a tty read), then KILL
+  # for anything still there 5s later, since an ignoring parent's children
+  # inherit the ignore. Job control is what gives a background job its own
+  # group; it is switched off again once both jobs are spawned. The contract is
+  # that nothing of the group survives the return: the command exiting does not
+  # by itself cancel the watchdog — git dying on TERM while its ssh child
+  # ignores it would otherwise return before the KILL — only an empty group does.
+  local secs="$1"; shift
+  local pid watchdog rc
+  set -m
+  "$@" </dev/null & pid=$!
+  # The killer gets no inherited fds: a lingering `sleep` holding the hook's
+  # stdout would keep the harness waiting for EOF after the script exits.
+  ( sleep "$secs"; kill -TERM -- -"$pid" 2>/dev/null; kill -CONT -- -"$pid" 2>/dev/null
+    for _ in 1 2 3 4 5; do sleep 1; kill -0 -- -"$pid" 2>/dev/null || exit 0; done
+    kill -KILL -- -"$pid" 2>/dev/null ) >/dev/null 2>&1 </dev/null &
+  watchdog=$!
+  set +m
+  wait "$pid" 2>/dev/null; rc=$?
+  if kill -0 -- -"$pid" 2>/dev/null; then
+    wait "$watchdog" 2>/dev/null
+  else
+    kill -TERM -- -"$watchdog" 2>/dev/null; wait "$watchdog" 2>/dev/null
+  fi
+  return $rc
+}
+if [ -n "$wt_top" ] && git -C "$wt_top" remote get-url origin >/dev/null 2>&1; then
+  # Git picks its SSH launcher as GIT_SSH_COMMAND, else core.sshCommand, else
+  # GIT_SSH, else `ssh`; the probe keeps that choice and only APPENDS the OpenSSH
+  # options where OpenSSH is CERTAIN: a shell-string launcher (the first two, or
+  # the default) whose program is `ssh` itself, or whose variant is explicitly
+  # `ssh` (`GIT_SSH_VARIANT`, which outranks `ssh.variant`). Everything else —
+  # plink and its kin, `simple`, a custom wrapper git would probe with `-G`, a
+  # `GIT_SSH` program (a path, not a shell string) — is passed through exactly
+  # as git would run it. This is deliberately narrower than git's own variant
+  # detection rather than a copy of it: the options are a courtesy bound, and
+  # `bounded` is the bound wherever they are not appended, so nothing is lost
+  # by declining to guess, while a wrong guess breaks every startup fetch.
+  ssh_opts="-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2"
+  ssh_variant="${GIT_SSH_VARIANT:-$(git -C "$wt_top" config ssh.variant 2>/dev/null || true)}"
+  fetch_env=()
+  if [ -n "${GIT_SSH_COMMAND:-}" ]; then ssh_launcher="$GIT_SSH_COMMAND"
+  elif ssh_launcher="$(git -C "$wt_top" config core.sshCommand 2>/dev/null)" && [ -n "$ssh_launcher" ]; then :
+  elif [ -n "${GIT_SSH:-}" ]; then ssh_launcher=""
+  else ssh_launcher="ssh"
+  fi
+  if [ -n "$ssh_launcher" ]; then
+    ssh_prog="$(basename "${ssh_launcher%% *}" | tr 'A-Z' 'a-z')"
+    case "${ssh_variant:-auto}:$ssh_prog" in
+      ssh:*|auto:ssh|auto:ssh.exe) fetch_env=(GIT_SSH_COMMAND="$ssh_launcher $ssh_opts") ;;
+    esac
+  fi
+  # `--no-write-fetch-head` (git >= 2.29): a startup probe must not clobber a
+  # FETCH_HEAD someone kept for a later `git merge FETCH_HEAD`;
+  # `--no-auto-maintenance`: housekeeping the watchdog would cut short at the
+  # bound, leaving its trigger in place for the next start to hit. The refspec
+  # names `refs/heads/master` in full because a remote TAG called `master`
+  # would otherwise win the short name, `--no-tags` notwithstanding, and the
+  # forced update would then write the tag's commit into the tracking ref.
+  # `${a[@]+"${a[@]}"}`, not `"${a[@]}"`: under `set -u`, bash before 4.4 (macOS
+  # ships 3.2) treats an EMPTY array's expansion as an unbound variable and
+  # exits the script — which is every leg where no options are appended.
+  if bounded 30 env GIT_TERMINAL_PROMPT=0 ${fetch_env[@]+"${fetch_env[@]}"} \
+       git -C "$wt_top" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=15 \
+       fetch --quiet --no-tags --no-write-fetch-head --no-auto-maintenance origin \
+       "+refs/heads/master:refs/remotes/origin/master" >/dev/null 2>&1; then
+    fetched="origin/master"
+  else
+    echo "  skip  fetching origin/master failed (offline?)"
+    fetched=""
+  fi
+  # The tracking ref is spelled in full here too: a branch or tag named
+  # `origin/master` would make the short form ambiguous. A comparison that
+  # fails anyway (an unborn HEAD, say) is reported, not read as 0.
+  upstream=refs/remotes/origin/master
+  if git -C "$wt_top" rev-parse --verify -q "$upstream" >/dev/null; then
+    behind="$(git -C "$wt_top" rev-list --count "HEAD..$upstream" 2>/dev/null || true)"
+    ahead="$(git -C "$wt_top" rev-list --count "$upstream..HEAD" 2>/dev/null || true)"
+    asof="${fetched:+}"; [ -n "$fetched" ] || asof=" (as of the last successful fetch)"
+    if [ -z "$behind" ] || [ -z "$ahead" ]; then
+      echo "  skip  could not compare HEAD with origin/master"
+    elif [ "$behind" = 0 ]; then
+      ok "up to date with origin/master$asof"
+    else
+      if [ "$ahead" = 0 ]; then
+        # Spelled in full for the same reason as the comparison above.
+        recovery="git merge --ff-only $upstream"
+      else
+        recovery="git rebase $upstream  ($ahead local commit(s) to replay)"
+      fi
+      printf '  WARNING HEAD is %s commit(s) behind origin/master%s — a suite run here tests stale code.\n' "$behind" "$asof"
+      printf '          recover with: %s\n' "$recovery"
+    fi
+  fi
+fi
+
 # --- opam itself ---------------------------------------------------------
 if command -v opam >/dev/null 2>&1; then
   ok "opam $(opam --version)"
