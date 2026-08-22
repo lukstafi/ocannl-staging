@@ -135,12 +135,38 @@ bounded() {
   return $rc
 }
 if [ -n "$wt_top" ] && git -C "$wt_top" remote get-url origin >/dev/null 2>&1; then
-  ssh_cmd="$(git -C "$wt_top" config core.sshCommand 2>/dev/null || true)"
-  ssh_cmd="${ssh_cmd:-${GIT_SSH_COMMAND:-ssh}}"
-  ssh_cmd="$ssh_cmd -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2"
-  if bounded 30 env GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$ssh_cmd" \
+  # Git picks its SSH launcher as GIT_SSH_COMMAND, else core.sshCommand, else
+  # GIT_SSH, else `ssh`; the probe keeps that choice and only APPENDS the OpenSSH
+  # options where they are known to apply: to a shell-string launcher (the first
+  # two, or the default) whose program is not a plink variant — judged the way
+  # git's own `ssh.variant` auto-detection does, by the program's basename, or
+  # by an explicit `ssh.variant`. A `GIT_SSH` program (a path, not a shell
+  # string — typically plink on Windows) is left entirely alone. Wherever the
+  # options are not appended, `bounded` is still the bound.
+  ssh_opts="-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2"
+  ssh_variant="$(git -C "$wt_top" config ssh.variant 2>/dev/null || true)"
+  fetch_env=()
+  if [ -n "${GIT_SSH_COMMAND:-}" ]; then ssh_launcher="$GIT_SSH_COMMAND"
+  elif ssh_launcher="$(git -C "$wt_top" config core.sshCommand 2>/dev/null)" && [ -n "$ssh_launcher" ]; then :
+  elif [ -n "${GIT_SSH:-}" ]; then ssh_launcher=""
+  else ssh_launcher="ssh"
+  fi
+  if [ -n "$ssh_launcher" ]; then
+    ssh_prog="$(basename "${ssh_launcher%% *}" | tr 'A-Z' 'a-z')"
+    case "${ssh_variant:-$ssh_prog}" in
+      plink|putty|tortoiseplink|plink.exe|putty.exe|tortoiseplink.exe) ;;
+      *) fetch_env=(GIT_SSH_COMMAND="$ssh_launcher $ssh_opts") ;;
+    esac
+  fi
+  # `--no-write-fetch-head` (git >= 2.29): a startup probe must not clobber a
+  # FETCH_HEAD someone kept for a later `git merge FETCH_HEAD`. The refspec
+  # names `refs/heads/master` in full because a remote TAG called `master`
+  # would otherwise win the short name, `--no-tags` notwithstanding, and the
+  # forced update would then write the tag's commit into the tracking ref.
+  if bounded 30 env GIT_TERMINAL_PROMPT=0 "${fetch_env[@]}" \
        git -C "$wt_top" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=15 \
-       fetch --quiet --no-tags origin +master:refs/remotes/origin/master >/dev/null 2>&1; then
+       fetch --quiet --no-tags --no-write-fetch-head origin \
+       "+refs/heads/master:refs/remotes/origin/master" >/dev/null 2>&1; then
     fetched="origin/master"
   else
     echo "  skip  fetching origin/master failed (offline?)"
