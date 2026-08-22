@@ -21,7 +21,11 @@
 # its one known benign cause is an ocamlformat-hostile golden missing from
 # .ocamlformat-ignore (the sweep formats it, its test's promotion reverts it,
 # forever) -- ppx-expectation files (test/ppx/*_expected.ml) must all be listed
-# there.
+# there. Every formatting round records dune's own output under
+# _build/format-sweep-logs/ (cleared per sweep) and an abort excerpts it, so a
+# round that failed for some OTHER reason -- an ocamlformat error, a
+# concurrent dune instance holding _build/.lock -- says so instead of being
+# read as that one benign cause.
 #
 # One sweep runs at a time per checkout (an atomic lock under _build), and
 # EXIT/INT/TERM traps reset the checkout to its pre-sweep state on any failure
@@ -158,6 +162,26 @@ cleanup() {
   rmdir "$LOCKDIR" 2>/dev/null
 }
 trap cleanup EXIT
+
+# Where the formatting rounds record dune's own output. The only evidence of
+# WHY a round failed is what dune printed -- an ocamlformat error, a refusal
+# from a concurrent dune instance, a promotion that wrote nothing -- and the
+# abort message cannot carry it; discarding that output leaves the generic
+# "did not converge" abort undiagnosable after the fact, which is exactly the
+# state a scheduled run reports from. Under _build: gitignored, so a log can
+# never ride a sweep commit or trip the clean-tree gate.
+# Placed between two constraints. AFTER the sweep lock: cleared per sweep
+# (rounds left by an earlier run would misattribute the failure), so a second
+# invocation refused at that lock must not wipe the running sweep's evidence.
+# AFTER the EXIT trap: these two are fallible (an unremovable directory, a
+# full disk, a plain FILE sitting at that path), and under `set -e` a failure
+# before the trap is installed would leave LOCKDIR behind -- which, the lock
+# being a bare mkdir with no staleness detection, wedges every later
+# scheduled sweep at "another format-sweep is running" until a human clears
+# it. Exiting through cleanup rmdir's it instead.
+FMT_LOGS="$ROOT/_build/format-sweep-logs"
+rm -rf "$FMT_LOGS"
+mkdir -p "$FMT_LOGS"
 
 # Run a long-lived child in the background under an interruptible `wait`:
 # bash defers signal traps while a foreground child runs, so a TERM arriving
@@ -305,16 +329,49 @@ SNAP_TREE=$(tree_hash)     # clean at BASE; every rewrite re-baselines it
 
 # --- Format / test / promote to a fixed point --------------------------------
 
+# Both fmt commands send their log through a redirection on the
+# run_interruptible CALL, and that redirection is itself fallible (a full
+# disk, a log directory removed mid-sweep). Bash then never enters the
+# function, so RC keeps whatever the PREVIOUS call left -- and a stale RC=0
+# reads as "@fmt found nothing to do", which in round 1 takes the
+# already-formatted branch and exits 0 with "repository already formatted":
+# an unattended sweep skipping its convergence check and reporting success,
+# the very genre of silent failure this logging exists to end. So open each
+# log as its own command first, where the failure can be caught and named.
+open_fmt_log() {
+  : >"$1" || abort "cannot write the formatting log $1 (disk full? _build removed mid-sweep?)"
+}
+
+# $1: file to record dune's output in. Nonzero for either reason dune has --
+# the tree differs from what ocamlformat would write, or dune itself failed
+# (a concurrent instance holding _build/.lock, a broken dune file) -- and the
+# log is what tells the two apart.
 fmt_clean() {
-  run_interruptible dune build @fmt >/dev/null 2>&1
+  RC=127 # never inherit a stale RC, even if some later path skips open_fmt_log
+  open_fmt_log "$1"
+  run_interruptible dune build @fmt >"$1" 2>&1
   [ "$RC" -eq 0 ]
+}
+
+# A scheduled sweep is read through its stdout/stderr alone, so an abort puts
+# the actionable head of each log in the message too, not just its path: dune
+# prints an error before the per-file diffs, so the first lines are the
+# diagnosis and the rest is bulk.
+fmt_log_excerpt() {
+  echo "format-sweep: --- $1" >&2
+  if [ -s "$1" ]; then
+    sed -n '1,15p' "$1" | sed 's/^/format-sweep:   | /' >&2
+  else
+    echo "format-sweep:   | (empty -- dune printed nothing)" >&2
+  fi
 }
 
 iter=0
 while :; do
   iter=$((iter + 1))
   [ "$iter" -le "$MAX_ITER" ] || abort "no fixed point after $MAX_ITER rounds; \
-likely an ocamlformat-hostile golden missing from .ocamlformat-ignore (see header)"
+likely an ocamlformat-hostile golden missing from .ocamlformat-ignore (see header); \
+the per-round formatting logs are in $FMT_LOGS"
   hold_test_run_lock \
     || abort "a tools/test-run.sh run held its lock past the bound; giving up"
   # The lock wait can be long; a foreign edit made during it must not be
@@ -322,9 +379,17 @@ likely an ocamlformat-hostile golden missing from .ocamlformat-ignore (see heade
   assert_tree_unchanged
   echo "format-sweep: round $iter: formatting"
 
-  if ! fmt_clean; then
-    run_interruptible dune fmt >/dev/null 2>&1 # promotes; RC not informative
-    fmt_clean || abort "dune fmt did not converge (ocamlformat error? run 'dune build @fmt')"
+  if ! fmt_clean "$FMT_LOGS/round$iter-check.log"; then
+    # RC is not informative here: dune fmt exits nonzero merely for having
+    # promoted. The recheck below is the verdict, and the promote log is
+    # where a failure to promote at all shows up.
+    open_fmt_log "$FMT_LOGS/round$iter-promote.log"
+    run_interruptible dune fmt >"$FMT_LOGS/round$iter-promote.log" 2>&1
+    if ! fmt_clean "$FMT_LOGS/round$iter-recheck.log"; then
+      fmt_log_excerpt "$FMT_LOGS/round$iter-promote.log"
+      fmt_log_excerpt "$FMT_LOGS/round$iter-recheck.log"
+      abort "dune fmt did not converge; see the excerpts above and the full logs in $FMT_LOGS"
+    fi
   fi
 
   if [ "$iter" -eq 1 ] && [ -z "$(git status --porcelain)" ]; then
