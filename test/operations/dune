@@ -28,20 +28,35 @@
  (modules env_spelling_gate)
  (libraries base stdio arrayjit.utils arrayjit.verdict))
 
-; The same gate on the `slow` alias, which is a separate entry point: `dune build @slow` builds no
+; The same gate for the `slow` suite, which is a separate entry point: `dune build @slow` builds no
 ; `(test)` stanza, so without this rule a cached `@slow` run would serve every slow result with a
 ; rejected spelling ambient (Codex P1 round 3). Runs the executable the `(test)` stanza above
-; builds, so there is one gate binary per directory however many aliases reach it.
+; builds, so there is one gate binary per directory however many aliases reach it. It sits on an
+; alias of its own so that every slow rule can DEPEND on it: `dune build @<dir>/slow-<name>` then
+; runs the gate first and that one test after it, and the `slow` alias below aggregates them all.
 
 (rule
  ; ocannl-backend: none -- links arrayjit.utils alone and only classifies variable NAMES;
  ; its `(universe)` dependency reruns it whatever any variable is set to.
- (alias slow)
+ (alias slow-env_spelling_gate)
  (package neural_nets_lib)
  (locks ocannl_training_test)
  (deps ocannl_config (universe))
  (action
   (run %{dep:env_spelling_gate.exe})))
+
+; This directory's `slow` suite. Each slow rule attaches to its own `slow-<name>` alias, so that
+; ONE slow test can be rerun after a change -- `OCANNL_BACKEND=cc dune build
+; @test/operations/slow-hip_scratch_budget` -- without rebuilding the whole `@slow` suite; this stanza is what
+; makes `dune build @slow` still run all of them. A `slow-<name>` rule missing from this list is one
+; `@slow` silently skips, which `test/operations/env_var_deps` checks.
+
+(alias
+ (name slow)
+ (deps
+  (alias slow-env_spelling_gate)
+  (alias slow-hip_scratch_budget)
+  (alias slow-hip_scratch_tune_survives)))
 
 (test
  ; ocannl-backend: none -- links no backend: it reads synthetic Benchmark records through PrintBox_utils.table as text.
@@ -2988,10 +3003,11 @@
   (pps ppx_here ppx_ocannl)))
 
 (rule
- (alias slow)
+ (alias slow-hip_scratch_budget)
  (package neural_nets_lib)
  (locks ocannl_training_test)
  (deps
+  (alias slow-env_spelling_gate)
   hip_scratch_budget.expected
   ocannl_config
   (env_var OCANNL_BACKEND))
@@ -3014,10 +3030,11 @@
   (pps ppx_here ppx_ocannl)))
 
 (rule
- (alias slow)
+ (alias slow-hip_scratch_tune_survives)
  (package neural_nets_lib)
  (locks ocannl_training_test)
  (deps
+  (alias slow-env_spelling_gate)
   hip_scratch_tune_survives.expected
   ocannl_config
   (env_var OCANNL_BACKEND))
@@ -3305,6 +3322,59 @@
  (package neural_nets_lib)
  (action
   (diff agent_notes_structure.expected agent_notes_structure.actual)))
+
+(test
+ ; This test asserts which FORM a reduction renders as and which accumulator reference its value
+ ; must match, so every configuration key that can move either is an ambient dependency of it --
+ ; undeclared, dune serves the previous run's result and the probe silently does not rerun
+ ; (gh-ocannl-628). The set, and what each one moves:
+ ;   NARROW_COMPUTE_F32, FP16_ARITHMETIC, CC_FP16_ARITHMETIC -- which reference the accumulator
+ ;     policy selects (Numerics.cpu_compute_prec and Context.hardware_limits are consulted here,
+ ;     not merely by the kernels).
+ ;   CC_VECTOR_BYTES, CC_BACKEND_ARCH_FLAGS, CC_BACKEND_SIMD_FLAGS -- whether try_vectorize_reduce
+ ;     renders at all (cc_vector_bytes=0 trips its vector_bytes < 8 guard), so the Vectorized
+ ;     members' form. The SIMD flags reach BOTH arms of this test: vector_bytes is gated on avx2
+ ;     appearing in simd_flags (cc_backend.ml), and the native-fp16 probe compiles under
+ ;     `arch_flags () ^ simd_flags ()' -- so they also move the accumulator-policy reference.
+ ;   CC_BACKEND_COMPILER_COMMAND -- the probes above run THROUGH it, so while the arch, SIMD and
+ ;     fp16 settings are `auto' a different compiler can answer them differently, moving the same
+ ;     two things.
+ ;   DEBUG_LOG_FROM_ROUTINES, LOG_LEVEL -- try_localize_serial_reduce declines wholesale under
+ ;     routine logging, which turns every localized member into a read-modify-write one. BOTH keys,
+ ;     because Utils.debug_log_from_routines () is their conjunction: the flag alone is inert until
+ ;     the log level clears 1, so tracking only the flag lets a level change reuse a green result.
+ ;   VIRTUALIZE_MAX_VISITS -- whether the virtual accumulator is inlined at its read site at all.
+ ;   PROFILE -- and it is NOT covered by naming the keys above: a profile applies at the sublevel
+ ;     just below the explicit keys of the source that picked it, so it moves them without any of
+ ;     their own variables being set. `reproducible' supplies cc_vector_bytes=0, which is exactly
+ ;     the knob that makes the SIMD members decline to localized forms; `performance' supplies
+ ;     fp16_arithmetic=true, which moves the accumulator reference at f16.
+ ;   DEFAULT_PREC -- the precision a node created without an explicit one takes, so it decides what
+ ;     the contraction leg compiles. Its operands now pass ~prec, which is the better fix and was
+ ;     made alongside this; the key stays declared because node creation still consults it wherever
+ ;     the ppx mints an intermediate this test does not name.
+ (name reduction_forms)
+ (package neural_nets_lib)
+ (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
+  ocannl_config
+  (env_var OCANNL_BACKEND)
+  (env_var OCANNL_NARROW_COMPUTE_F32)
+  (env_var OCANNL_FP16_ARITHMETIC)
+  (env_var OCANNL_CC_FP16_ARITHMETIC)
+  (env_var OCANNL_CC_VECTOR_BYTES)
+  (env_var OCANNL_CC_BACKEND_ARCH_FLAGS)
+  (env_var OCANNL_CC_BACKEND_SIMD_FLAGS)
+  (env_var OCANNL_CC_BACKEND_COMPILER_COMMAND)
+  (env_var OCANNL_DEBUG_LOG_FROM_ROUTINES)
+  (env_var OCANNL_LOG_LEVEL)
+  (env_var OCANNL_VIRTUALIZE_MAX_VISITS)
+  (env_var OCANNL_PROFILE)
+  (env_var OCANNL_DEFAULT_PREC))
+ (modules reduction_forms)
+ (libraries base ocannl stdio arrayjit.verdict ll_test test_utils)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
 
 (test
  (name schedule_contraction_nest)

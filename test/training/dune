@@ -28,20 +28,37 @@
  (modules env_spelling_gate)
  (libraries base stdio arrayjit.utils arrayjit.verdict))
 
-; The same gate on the `slow` alias, which is a separate entry point: `dune build @slow` builds no
+; The same gate for the `slow` suite, which is a separate entry point: `dune build @slow` builds no
 ; `(test)` stanza, so without this rule a cached `@slow` run would serve every slow result with a
 ; rejected spelling ambient (Codex P1 round 3). Runs the executable the `(test)` stanza above
-; builds, so there is one gate binary per directory however many aliases reach it.
+; builds, so there is one gate binary per directory however many aliases reach it. It sits on an
+; alias of its own so that every slow rule can DEPEND on it: `dune build @<dir>/slow-<name>` then
+; runs the gate first and that one test after it, and the `slow` alias below aggregates them all.
 
 (rule
  ; ocannl-backend: none -- links arrayjit.utils alone and only classifies variable NAMES;
  ; its `(universe)` dependency reruns it whatever any variable is set to.
- (alias slow)
+ (alias slow-env_spelling_gate)
  (package neural_nets_lib)
  (locks ocannl_training_test)
  (deps ocannl_config (universe))
  (action
   (run %{dep:env_spelling_gate.exe})))
+
+; This directory's `slow` suite. Each slow rule attaches to its own `slow-<name>` alias, so that
+; ONE slow test can be rerun after a change -- `OCANNL_BACKEND=cc dune build
+; @test/training/slow-mlp_names` -- without rebuilding the whole `@slow` suite; this stanza is what
+; makes `dune build @slow` still run all of them. A `slow-<name>` rule missing from this list is one
+; `@slow` silently skips, which `test/operations/env_var_deps` checks.
+
+(alias
+ (name slow)
+ (deps
+  (alias slow-env_spelling_gate)
+  (alias slow-mlp_names)
+  (alias slow-mlp_bn_names)
+  (alias slow-mnist_conv)
+  (alias slow-cifar_conv)))
 
 ; Training executables can each saturate the CPU through the cc backend's process-local OpenMP
 ; pool. Serialize their actions by default: concurrent pools oversubscribe non-macOS hosts badly,
@@ -121,15 +138,16 @@
   (pps ppx_here ppx_ocannl)))
 
 (rule
- (alias slow)
+ (alias slow-mlp_names)
  (package neural_nets_lib)
  (locks ocannl_training_test)
  (deps
+  (alias slow-env_spelling_gate)
   mlp_names.expected
   ocannl_config
   (env_var OCANNL_BACKEND))
  ; no-infer keeps mlp_names.actual from becoming a build target, so plain
- ; `dune build` (@all) does not run this slow exe -- only `dune build @slow` does.
+ ; `dune build` (@all) does not run this slow exe -- only `@slow` and `@slow-mlp_names` do.
  (action
   (no-infer
    (progn
@@ -148,10 +166,11 @@
   (pps ppx_here ppx_ocannl)))
 
 (rule
- (alias slow)
+ (alias slow-mlp_bn_names)
  (package neural_nets_lib)
  (locks ocannl_training_test)
  (deps
+  (alias slow-env_spelling_gate)
   mlp_bn_names.expected
   ocannl_config
   (env_var OCANNL_BACKEND))
@@ -199,10 +218,11 @@
   (pps ppx_here ppx_ocannl)))
 
 (rule
- (alias slow)
+ (alias slow-mnist_conv)
  (package neural_nets_lib)
  (locks ocannl_training_test)
  (deps
+  (alias slow-env_spelling_gate)
   mnist_conv.expected
   ocannl_config
   (env_var OCANNL_BACKEND))
@@ -217,7 +237,8 @@
 
 ; cifar_conv is a slow training run: gated behind the `slow` alias instead of
 ; `runtest` so `dune runtest` stays fast. Still compiled by `dune build @check`.
-; Run with: dune build @slow (or `dune build @runtest @slow` for everything).
+; Run with: dune build @slow (or `dune build @runtest @slow` for everything), or this one alone
+; with `dune build @test/training/slow-cifar_conv`.
 
 (executable
  (name cifar_conv)
@@ -227,10 +248,11 @@
   (pps ppx_here ppx_ocannl)))
 
 (rule
- (alias slow)
+ (alias slow-cifar_conv)
  (package neural_nets_lib)
  (locks ocannl_training_test)
  (deps
+  (alias slow-env_spelling_gate)
   cifar_conv.expected
   ocannl_config
   (env_var OCANNL_BACKEND))

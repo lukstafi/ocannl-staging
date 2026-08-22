@@ -21,14 +21,23 @@ Configuration keys tracked as ambient dependencies, in the one spelling OCANNL r
   backend
   buffer_aliasing
   build_files_prefix
+  cc_backend_arch_flags
+  cc_backend_compiler_command
+  cc_backend_simd_flags
   cc_fp16_arithmetic
+  cc_vector_bytes
+  debug_log_from_routines
+  default_prec
+  fp16_arithmetic
   log_config_sourcing
   log_level
   memory_budget
   model_default_schedule
+  narrow_compute_f32
   no_config_file
   profile
   suppress_welcome_message
+  virtualize_max_visits
 
 Per-module tracing gates, and the library whose preprocessor_deps declares each:
   OCANNL_LOG_LEVEL_ASSIGNMENTS   arrayjit/lib/dune, library ir (arrayjit/lib/assignments.ml)
@@ -54,18 +63,28 @@ Per-module tracing gates, and the library whose preprocessor_deps declares each:
 Ambient variables a module reads by name at run time, and the stanza that declares each:
   OCANNL_TOOL_TEST_RESTRICT_MASK test/operations/dune, test test_cpu_topology (test/operations/test_cpu_topology.ml)
 
-Ambient environment gates, by dune file and the alias each is attached to:
+Ambient environment gates, by dune file and every alias whose build runs one:
   arrayjit/test/dune                       @runtest
   test/einsum/dune                         @runtest
   test/gpt2/dune                           @runtest
   test/gpt2/dune                           @slow
+  test/gpt2/dune                           @slow-env_spelling_gate
+  test/gpt2/dune                           @slow-gpt2_dry_run
   test/operations/dune                     @runtest
   test/operations/dune                     @slow
+  test/operations/dune                     @slow-env_spelling_gate
+  test/operations/dune                     @slow-hip_scratch_budget
+  test/operations/dune                     @slow-hip_scratch_tune_survives
   test/operations/profiles/dune            @runtest
   test/operations/startup_streams/dune     @runtest
   test/ppx/dune                            @runtest
   test/training/dune                       @runtest
   test/training/dune                       @slow
+  test/training/dune                       @slow-cifar_conv
+  test/training/dune                       @slow-env_spelling_gate
+  test/training/dune                       @slow-mlp_bn_names
+  test/training/dune                       @slow-mlp_names
+  test/training/dune                       @slow-mnist_conv
   benchmarks/dune -- no gate: its one runtest action runs python3 over the benchmark orchestrator's own unit tests, which import no OCANNL executable -- there is no startup check in reach to gate, the same reason `config_dep_completeness` exempts it from the ocannl_config dependency
 
 Declarations of a name OCANNL does not read as a configuration key, exempt by design:

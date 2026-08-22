@@ -31,7 +31,16 @@
    nothing else, so a directory whose gate is a test stanza is ungated for `@slow` -- a separately
    documented entry point that `dune build @slow` reaches without building one `(test)`. Asking the
    question per directory let a runtest gate vouch for the slow rules beside it, which is the shape
-   of the hole it was written to prevent.
+   of the hole it was written to prevent. And per EVERY alias a build can start from, not a fixed
+   list of two: each slow rule sits on its own `slow-<name>` alias, so that one slow test can be
+   rerun after a change without the ~30 minutes the whole `@slow` suite takes, and
+   `ocannl_backend=cuda dune build @test/training/slow-mlp_names` is the same entry point with the
+   same hole. A gate "reaches" an alias when building the alias builds the gate: the gate's own
+   alias, a rule whose `deps` name it (which runs the gate BEFORE the rule, so a rejected spelling
+   fails before the slow run rather than beside it), or an `(alias (name …) (deps …))` stanza
+   aggregating either. That last shape is what keeps `dune build @slow` the whole suite, and the
+   check here is also what keeps the aggregation whole: a `slow-<name>` rule the `slow` alias does
+   not list is one `@slow` skips, silently.
 
    {2 Gates the build does not see}
 
@@ -127,26 +136,85 @@ let rec takes_training_lock = function
   | Sexp.List l -> List.exists l ~f:takes_training_lock
   | Sexp.Atom _ -> false
 
-(* The aliases that RUN things, and so can serve a cached result. Asked per alias rather than per
-   directory (Codex P1 round 3): a `(test)` stanza contributes to `runtest` alone, so a directory
-   whose gate is a test stanza is ungated for `@slow` -- which is a separately documented entry
-   point, and which `dune build @slow` reaches without building a single `(test)`. A gate on one
-   alias must not vouch for another. *)
-let run_aliases = [ "runtest"; "slow" ]
-
-let rec names_alias alias = function
-  | Sexp.List [ Sexp.Atom "alias"; Sexp.Atom n ] -> String.equal n alias
-  | Sexp.List l -> List.exists l ~f:(names_alias alias)
-  | Sexp.Atom _ -> false
-
-(* Which of {!run_aliases} this stanza attaches to. A `(test)`/`(tests)` stanza is dune's shorthand
-   for a runtest action and names no alias of its own. *)
+(* The aliases a stanza's actions attach to: a rule's own `(alias …)` field -- not an `(alias …)`
+   inside its `deps`, which is a dependency on another alias and is read by {!alias_deps} -- and
+   `runtest` for a `(test)`/`(tests)` stanza, dune's shorthand for a runtest action that names no
+   alias of its own. Asked per alias rather than per directory (Codex P1 round 3): a `(test)` stanza
+   contributes to `runtest` alone, so a directory whose gate is a test stanza is ungated for `@slow`
+   -- which is a separately documented entry point, and which `dune build @slow` reaches without
+   building a single `(test)`. A gate on one alias must not vouch for another. *)
 let aliases_of stanza =
   match stanza with
   | Sexp.List (Sexp.Atom ("test" | "tests") :: _) -> [ "runtest" ]
-  | Sexp.List (Sexp.Atom "rule" :: _) ->
-      List.filter run_aliases ~f:(fun alias -> names_alias alias stanza)
+  | Sexp.List (Sexp.Atom "rule" :: fields) ->
+      List.filter_map fields ~f:(function
+        | Sexp.List [ Sexp.Atom "alias"; Sexp.Atom n ] -> Some n
+        | _ -> None)
   | _ -> []
+
+(* The aliases a stanza's `deps` field names, which dune builds before it: before a rule's action
+   runs, or whenever the alias an `(alias (name A) (deps …))` stanza defines is built. *)
+let alias_deps stanza =
+  match Scan.field stanza "deps" with
+  | None -> []
+  | Some args ->
+      List.filter_map args ~f:(function
+        | Sexp.List [ Sexp.Atom "alias"; Sexp.Atom n ] -> Some n
+        | _ -> None)
+
+(* The alias an `(alias (name A) …)` stanza defines: since dune 2.0 it carries no action of its own
+   and only aggregates what its `deps` name. *)
+let alias_stanza_name = function
+  | Sexp.List (Sexp.Atom "alias" :: _) as stanza -> (
+      match Scan.names_of stanza with [ n ] -> Some n | _ -> None)
+  | _ -> None
+
+(* A gate is a stanza with an action that depends on the state of the world. *)
+let is_gate stanza = depends_on_universe stanza && not (List.is_empty (aliases_of stanza))
+
+(* Every alias a build can start from: those rules and tests attach to, and those `(alias …)`
+   stanzas define. *)
+let entry_points stanzas =
+  List.concat_map stanzas ~f:(fun s -> aliases_of s @ Option.to_list (alias_stanza_name s))
+  |> List.dedup_and_sort ~compare:String.compare
+
+(* The aliases `dune build @<alias>` runs a gate for: those a gate attaches to, closed under what
+   building an alias builds -- the `deps` of every rule attached to it and of the `(alias …)`
+   stanza defining it. A slow rule whose `deps` name the gate's alias is gated as much as one the
+   gate sits beside, and runs it first. *)
+let gated_aliases stanzas =
+  let rec close gated =
+    let next =
+      List.fold stanzas ~init:gated ~f:(fun gated stanza ->
+          if is_gate stanza || List.exists (alias_deps stanza) ~f:(Set.mem gated) then
+            List.fold
+              (aliases_of stanza @ Option.to_list (alias_stanza_name stanza))
+              ~init:gated ~f:Set.add
+          else gated)
+    in
+    if Set.equal next gated then gated else close next
+  in
+  close (Set.empty (module String))
+
+(* The aliases building `@<alias>` reaches, through the same two routes -- what a suite aggregates. *)
+let aliases_reached_from stanzas alias =
+  let rec close reached =
+    let next =
+      List.fold stanzas ~init:reached ~f:(fun reached stanza ->
+          let attached = aliases_of stanza @ Option.to_list (alias_stanza_name stanza) in
+          if List.exists attached ~f:(Set.mem reached) then
+            List.fold (alias_deps stanza) ~init:reached ~f:Set.add
+          else reached)
+    in
+    if Set.equal next reached then reached else close next
+  in
+  close (Set.singleton (module String) alias)
+
+(* The suite a per-test alias belongs to, by the naming convention: `slow-<name>` is one slow test
+   and `slow` the suite, an `(alias (name slow) (deps …))` stanza listing its members -- so a
+   member the list omits is one `dune build @slow` skips, silently. *)
+let slow_suite = "slow"
+let slow_member alias = String.is_prefix alias ~prefix:(slow_suite ^ "-")
 
 (* The prefix `Utils.classify_env_var` reports for a per-module tracing gate. *)
 let gate_prefix = "ocannl_log_level_"
@@ -390,36 +458,47 @@ let () =
             | words -> [ "markers: " ^ String.concat ~sep:", " words ]) )
         :: !by_file;
       (* The ambient gate, per directory AND per alias (gh-ocannl-652). *)
-      List.iter run_aliases ~f:(fun alias ->
-          let attaches stanza = List.mem (aliases_of stanza) alias ~equal:String.equal in
-          if List.exists stanzas ~f:attaches then
-            if List.exists stanzas ~f:(fun s -> attaches s && depends_on_universe s) then (
-              gated := (dune_file, alias) :: !gated;
-              if
-                List.exists stanzas ~f:takes_training_lock
-                && not
-                     (List.exists stanzas ~f:(fun s ->
-                          attaches s && depends_on_universe s && takes_training_lock s))
-              then
-                fail
-                  (Printf.sprintf
-                     "%s serializes its actions on `%s` and its `%s` gate does not take the lock \
-                      -- the one unlocked action in a file of locked ones is what the next \
-                      training test gets copied from; add `(locks %s)` to it"
-                     dune_file training_lock alias training_lock))
-            else if Map.mem gateless dune_file then
-              gateless_used := Set.add !gateless_used dune_file
-            else
+      let gated_here = gated_aliases stanzas in
+      let entry_points = entry_points stanzas in
+      (* The lock (Codex P1 round 4): a gate in a file whose actions take it has to take it too. *)
+      if List.exists stanzas ~f:takes_training_lock then
+        List.iter stanzas ~f:(fun s ->
+            if is_gate s && not (takes_training_lock s) then
               fail
                 (Printf.sprintf
-                   "%s has actions on the `%s` alias and no ambient gate attached to it -- nothing \
-                    here declares a rejected environment spelling, so `ocannl_backend=cuda dune \
-                    build @%s` would serve this directory's cached results with the fatal startup \
-                    check never reached; copy the `env_spelling_gate` stanza for that alias from a \
-                    neighbour, or exempt the directory by name with the reason"
-                   dune_file alias
-                   (if String.equal alias "slow" then "slow"
-                    else Stdlib.Filename.dirname dune_file ^ "/" ^ alias)));
+                   "%s serializes its actions on `%s` and its gate on `%s` does not take the lock \
+                    -- the one unlocked action in a file of locked ones is what the next training \
+                    test gets copied from; add `(locks %s)` to it"
+                   dune_file training_lock
+                   (String.concat ~sep:", " (aliases_of s))
+                   training_lock));
+      List.iter entry_points ~f:(fun alias ->
+          if Set.mem gated_here alias then gated := (dune_file, alias) :: !gated
+          else if Map.mem gateless dune_file then
+            gateless_used := Set.add !gateless_used dune_file
+          else
+            fail
+              (Printf.sprintf
+                 "%s has actions on the `%s` alias and no ambient gate reaches it -- nothing here \
+                  declares a rejected environment spelling, so `ocannl_backend=cuda dune build \
+                  @%s` would serve this directory's cached results with the fatal startup check \
+                  never reached; copy the `env_spelling_gate` stanza for that alias from a \
+                  neighbour, depend on the gate's alias from the rule, or exempt the directory by \
+                  name with the reason"
+                 dune_file alias
+                 (if String.equal alias "runtest" then
+                    Stdlib.Filename.dirname dune_file ^ "/" ^ alias
+                  else alias)));
+      (* The slow suite's members, against what it aggregates. *)
+      let slow_reaches = aliases_reached_from stanzas slow_suite in
+      List.iter entry_points ~f:(fun alias ->
+          if slow_member alias && not (Set.mem slow_reaches alias) then
+            fail
+              (Printf.sprintf
+                 "%s attaches a rule to `%s` that the `%s` alias does not aggregate -- `dune build \
+                  @%s` would skip it silently; list `(alias %s)` in the `(alias (name %s) (deps \
+                  …))` stanza"
+                 dune_file alias slow_suite slow_suite alias slow_suite));
       let fields = List.concat_map stanzas ~f:dep_fields in
       let declared =
         List.concat_map fields ~f:(fun (_, args) -> List.concat_map args ~f:env_vars_in)
@@ -579,7 +658,7 @@ let () =
          "directories exempted from the ambient gate that no longer run tests -- drop them from \
           the exemption list: %s"
          (String.concat ~sep:", " (Set.to_list stale_gateless)));
-  printf "\nAmbient environment gates, by dune file and the alias each is attached to:\n";
+  printf "\nAmbient environment gates, by dune file and every alias whose build runs one:\n";
   List.sort !gated ~compare:(fun (a, x) (b, y) ->
       match String.compare a b with 0 -> String.compare x y | c -> c)
   |> List.iter ~f:(fun (dune_file, alias) -> printf "  %-40s @%s\n" dune_file alias);
