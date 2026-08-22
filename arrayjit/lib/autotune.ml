@@ -1320,18 +1320,26 @@ let stmt_scope_bodies ?(mints = fun (_ : LL.scope_mint) -> true) (stmt : LL.t) :
   | LL.Set_from_vec { arg = a, _; _ } -> scalar a
   | _ -> []
 
-(* Whether [llc] contains a nested loop — [Local_scope] bodies of BOTH provenances included
-   (gh-ocannl-666), so a loop whose only inner loops sit inside an accumulator's scope does not read
-   as innermost. Deliberately not narrowed to the schedule mints the way [collect_loops] is
-   (gh-ocannl-687): innermost-ness is a fact about the loop nest the backend will emit, and an
-   inlined body's loops are emitted inside this loop whoever minted them. The two consumers ask
-   different questions of the same walk — "is a loop nested here" versus "is that loop mine to
-   propose for". *)
-let rec contains_loop = function
-  | LL.Seq (a, b) -> contains_loop a || contains_loop b
-  | LL.If { body; _ } -> contains_loop body
+(* Whether [llc] contains a nested loop, [Local_scope] bodies included (gh-ocannl-666), so a loop
+   whose only inner loops sit inside an accumulator's scope does not read as innermost. [mints]
+   selects which scopes count, and its two callers pass different things ON PURPOSE:
+
+   - [collect_loops]'s [ld_innermost] passes the schedule mints, matching its own enumeration. The
+     predicate there means "innermost among the loops this menu can propose for", and the two halves
+     must agree: with the enumeration narrowed to the schedule mints (gh-ocannl-687) but this walk
+     left wide, a nest whose inner loop is a virtualization inline would draw a [Vectorized] retype
+     at NEITHER level — not at the inner one (not enumerated) and not at the outer one (read as
+     non-innermost) — where before gh-666 the outer loop drew one and after it the inner loop did.
+     Losing a candidate at both levels is the regression that agreement avoids; gh-666's own purpose
+     survives it, since an accumulation mint's loops still count.
+   - [collect_serial_triples] passes the default, descending everything. Its question is the
+     structural one — is this triple perfectly nested with a scalar innermost body — and a
+     [Tile_mma] micro-kernel over a body that emits a loop is not one, whoever minted the scope. *)
+let rec contains_loop ?(mints = fun (_ : LL.scope_mint) -> true) = function
+  | LL.Seq (a, b) -> contains_loop ~mints a || contains_loop ~mints b
+  | LL.If { body; _ } -> contains_loop ~mints body
   | LL.For_loop _ -> true
-  | stmt -> List.exists (stmt_scope_bodies stmt) ~f:contains_loop
+  | stmt -> List.exists (stmt_scope_bodies ~mints stmt) ~f:(contains_loop ~mints)
 
 (* Loops proposable for schedule ops: the statement-level nest structure plus the loops inside
    [Local_scope] bodies (gh-ocannl-666) — since gh-ocannl-639 the accumulation mints of [Unroll
@@ -1349,11 +1357,14 @@ let rec contains_loop = function
 
    Only the SCHEDULE mints are entered (gh-ocannl-687). Virtualization mints the same construct at
    every inlined read, and gh-ocannl-666's widening — which had no provenance to go on — therefore
-   also enumerated the inlined interpolation and reduction loops of a base lowering, loops no
-   schedule op has ever been able to reach: nothing had proposed for them before, they are tiny
-   (re-instantiated per use site), and every descriptor they add costs a candidate compile and, under
-   the per-unit cap, displaces a proposal for the main nest. [Low_level.scope_mint] is the fact that
-   separates them. *)
+   also enumerated the inlined interpolation and reduction loops of a base lowering. Note what the
+   argument for excluding them is NOT: [Schedule.rewrite_loop] descends every [Local_scope] body, so
+   such a loop is mechanically rewritable and a proposal naming it would apply. The argument is
+   about where a capped budget goes — nothing had proposed for these before gh-666, they are tiny
+   (re-instantiated per use site, so a win on one is a win on one use), and every descriptor they add
+   costs a candidate compile and displaces a proposal for the main nest. [Low_level.scope_mint] is
+   the fact that separates them; [contains_loop] above is narrowed in step, so the enclosing loop
+   becomes proposable in their stead rather than the shape losing its candidate at both levels. *)
 let collect_loops ?(mints = LL.equal_scope_mint LL.Schedule_minted) registry llc =
   let acc = ref [] in
   let seen = Hash_set.create (module Idx.Symbol) in
@@ -1379,7 +1390,7 @@ let collect_loops ?(mints = LL.equal_scope_mint LL.Schedule_minted) registry llc
                 ld_from_ = from_;
                 ld_extent = to_ - from_ + 1;
                 ld_axis = axis;
-                ld_innermost = not (contains_loop body);
+                ld_innermost = not (contains_loop ~mints body);
                 ld_accumulating = LL.has_accumulation body;
                 ld_perfect_child;
               }
@@ -1473,8 +1484,9 @@ let share_cap ~cap (categories : (string * 'a list) list) : 'a list * (string * 
   in
   (kept, dropped)
 
-let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) ~registry
-    (opt : LL.optimized) : SC.saved_optop list =
+let menu ?(admits = fun (_ : SC.saved_optop) -> true) ~is_cpu ~is_gpu
+    ~(limits : Ir.Backend_intf.hardware_limits) ~registry (opt : LL.optimized) :
+    SC.saved_optop list =
   let loops = collect_loops registry opt.LL.llc in
   (* gh-ocannl-687: what the provenance filter held back, so the narrowing is visible rather than
      silent. Computed only when the search log is on -- it is a second walk of the program. *)
@@ -1579,15 +1591,26 @@ let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) ~registry
       "menu: %d loop(s) inside virtualization-inlined scopes not enumerated (gh-ocannl-687: no \
        schedule op reaches them)"
       withheld;
+  (* gh-ocannl-685 review: [admits] runs BEFORE the cap, so the budget is shared over the moves the
+     caller can actually use rather than over moves it is about to discard. The beam's GPU rule is
+     the case that matters: expanding an incumbent that binds no hardware dimension is worthwhile
+     only through moves that can bind one, and sharing 48 slots across five categories first would
+     leave a tensorize-rich unit ~10 tensorizes plus dozens of proposals the beam drops — where the
+     old prefix, by accident of ordering, handed all 48 to the tensorizes. Filtering first makes
+     that outcome the rule rather than the accident, and leaves the sharing to decide between
+     categories the caller is actually choosing among. It may record its refusals; the drop log
+     below is about the cap alone. *)
   let kept, dropped =
     share_cap ~cap:max_actions_per_unit
-      [
-        ("tensorize", tensorizes);
-        ("split", splits);
-        ("swap", swaps);
-        ("unroll", unrolls);
-        ("vectorize", vectorizes);
-      ]
+      (List.map
+         [
+           ("tensorize", tensorizes);
+           ("split", splits);
+           ("swap", swaps);
+           ("unroll", unrolls);
+           ("vectorize", vectorizes);
+         ]
+         ~f:(fun (name, l) -> (name, List.filter l ~f:admits)))
   in
   if not (List.is_empty dropped) then
     logf "menu: the per-unit cap of %d dropped %s" max_actions_per_unit
@@ -3534,21 +3557,29 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir
                      gh-ocannl-543 chain). Pruned moves are still counted in the census, so the
                      refusal stays visible where it was before. *)
                   let elem_dispatchable = dispatchable ~is_gpu elem.all_opts in
+                  (* Passed INTO [menu] so the refusal precedes its per-unit cap (gh-ocannl-685
+                     review): applied afterwards, the cap would first share its 48 slots across
+                     categories whose moves this predicate is about to reject, and a tensorize-rich
+                     unit would lose the very proposals that are the beam's only route out of an
+                     undispatchable incumbent. The census recording is unchanged and still happens
+                     per refused move, so the refusal stays as visible as it was. *)
+                  let admits op =
+                    if elem_dispatchable || optop_can_bind_hardware op then true
+                    else (
+                      logf "menu prune (cannot parallelize an undispatched incumbent): %s"
+                        (optop_family op);
+                      record_not_dispatched ~origin:"beam_move"
+                        ~detail:
+                          (Printf.sprintf
+                             "%s on an incumbent binding no hardware dimension cannot bind one \
+                              either"
+                             (optop_family op));
+                      false)
+                  in
                   List.concat_map elem.units ~f:(fun u ->
-                      List.filter_map (menu ~is_cpu ~is_gpu ~limits ~registry:u.u_registry u.u_opt)
-                        ~f:(fun op ->
-                          if elem_dispatchable || optop_can_bind_hardware op then
-                            extend_spec elem u op
-                          else (
-                            logf "menu prune (cannot parallelize an undispatched incumbent): %s"
-                              (optop_family op);
-                            record_not_dispatched ~origin:"beam_move"
-                              ~detail:
-                                (Printf.sprintf
-                                   "%s on an incumbent binding no hardware dimension cannot bind \
-                                    one either"
-                                   (optop_family op));
-                            None))))
+                      List.filter_map
+                        (menu ~admits ~is_cpu ~is_gpu ~limits ~registry:u.u_registry u.u_opt)
+                        ~f:(fun op -> extend_spec elem u op)))
             in
             (* gh-ocannl-550: bounded like the seed pass, but in a SECOND accumulator, because a
                round's decision compares its own best against the incumbent and, if it wins,

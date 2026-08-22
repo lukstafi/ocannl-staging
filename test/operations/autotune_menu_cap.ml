@@ -19,6 +19,9 @@
    revert fails the representation claim rather than quietly passing. *)
 
 open Base
+open Ocannl.Operation.DSL_modules
+module LL = Ir.Low_level
+module SC = Ir.Schedule_cache
 module V = Verdict
 
 let p = V.p
@@ -79,4 +82,57 @@ let () =
   p "the plain prefix this replaces would have starved every category after the first"
     (List.for_all non_empty ~f:(fun name ->
          String.equal name "tensorize" || not (represented prefix name)));
+  Stdio.printf "\n%!"
+
+(* === the cap's altitude (PR #424 review, P2): [Autotune.menu]'s [admits] runs BEFORE the cap ===
+
+   The beam expands a GPU incumbent that binds no hardware dimension only through moves that can
+   bind one; every other move provably yields another undispatchable candidate. That refusal used to
+   run AFTER [menu] had already capped, so a tensorize-rich unit spent its 48 slots across five
+   categories and kept only its share of the one category the beam could use — where the old plain
+   prefix, by accident of ordering, handed all 48 to the tensorizes. Filtering first makes that the
+   rule rather than the accident.
+
+   The pin needs a menu that genuinely overflows, so: twelve sibling loops of extent 8, each
+   innermost and zero-origin, which draw two Splits, two Unrolls and one Vectorized retype apiece.
+   The discriminator is that admitting ONE category yields MORE of that category than the uncapped
+   sharing leaves it — impossible if the filter ran after the cap. *)
+
+let overflowing_unit () =
+  let node = Ll_test.node_factory ~first_id:7300 ~dims:[| 8 |] () in
+  let x = node "amc_x" in
+  Ll_test.materialize x;
+  let outs = List.init 12 ~f:(fun k -> node (Printf.sprintf "amc_out%d" k)) in
+  List.iter outs ~f:Ll_test.materialize;
+  let body =
+    List.foldi outs ~init:LL.Noop ~f:(fun k acc out ->
+        let s = Ll_test.sym () in
+        LL.Seq
+          ( acc,
+            Ll_test.loop_n s 8
+              (Ll_test.set out
+                 [| Ll_test.iter s |]
+                 (Ll_test.add (Ll_test.get x [| Ll_test.iter s |]) (Ll_test.c (Float.of_int k))))
+          ))
+  in
+  let o = Ll_test.optimize ~materialized:(x :: outs) ~name:"amc_overflow" body in
+  let canon = SC.canonicalize ~static_indices:[] ~with_placements:false o in
+  (SC.base_registry canon, o)
+
+let () =
+  let registry, o = overflowing_unit () in
+  let limits = { Ir.Backend_intf.no_hardware_limits with simd_vector_bytes = 32 } in
+  let build ?admits () = Autotune.menu ?admits ~is_cpu:true ~is_gpu:false ~limits ~registry o in
+  let is_unroll = function SC.Unroll _ -> true | _ -> false in
+  let full = build () in
+  let unrolls_only = build ~admits:is_unroll () in
+  p "the probe unit really does overflow the per-unit cap" (List.length full = cap);
+  p "admitting one category yields only that category"
+    (List.for_all unrolls_only ~f:is_unroll && not (List.is_empty unrolls_only));
+  p "the admitted category is not itself capped (so it is the complete admitted set)"
+    (List.length unrolls_only < cap);
+  (* The discriminator. Were [admits] applied to the capped menu, this count could only ever be the
+     share the cap left that category -- never more. *)
+  p "admitting one category yields more of it than sharing the cap leaves it"
+    (List.length unrolls_only > List.count full ~f:is_unroll);
   Stdio.printf "\nDone.\n%!"

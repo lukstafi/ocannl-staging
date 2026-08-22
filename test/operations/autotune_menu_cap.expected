@@ -12,4 +12,9 @@ a menu that fits under the cap is unchanged: true
 a menu that fits under the cap reports no drops: true
 the plain prefix this replaces would have starved every category after the first: true
 
+the probe unit really does overflow the per-unit cap: true
+admitting one category yields only that category: true
+the admitted category is not itself capped (so it is the complete admitted set): true
+admitting one category yields more of it than sharing the cap leaves it: true
+
 Done.

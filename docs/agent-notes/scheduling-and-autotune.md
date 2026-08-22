@@ -296,11 +296,16 @@ files.
   mint over a MATERIALIZED cell — and `Low_level.scope_mint` on the node is what tells them apart.
   `Autotune.collect_loops` descends the schedule mints only: those bodies hold the per-step /
   per-segment loops `Schedule.rewrite_loop` retargets, while an inlined body's loops are the inlined
-  node's own iteration space, re-instantiated per use site and reachable by no schedule op. Note the
-  companion `contains_loop` deliberately keeps descending BOTH: innermost-ness is a fact about the
-  nest the backend emits, so an inlined loop still makes its enclosing loop non-innermost. Two
-  consumers, one walk, different questions — "is a loop nested here" versus "is that loop mine to
-  propose for". A flag on the node is the durable form of this fact; contrast `input_scope_ids`
+  node's own iteration space, re-instantiated per use site. Note what the exclusion is NOT about:
+  `rewrite_loop` descends every `Local_scope`, so an inlined loop is mechanically rewritable and a
+  proposal naming it would apply — the argument is where a capped budget goes, not reachability.
+  **`contains_loop` takes the same filter from that caller, and must.** Narrowing the enumeration
+  alone leaves a nest whose inner loop is a virtualization inline with no `Vectorized` retype at
+  either level — not the inner one (no longer enumerated), not the outer one (still reading as
+  non-innermost) — where pre-666 the outer drew it and post-666 the inner did. `collect_serial_triples`
+  is the caller that keeps the wide default, because its question is structural (is the innermost
+  body scalar) rather than about what the menu may target. A flag on the node is the durable form of
+  this fact; contrast `input_scope_ids`
   (gh-ocannl-681), which answers the per-call question of whether a scope was in the program a given
   `optimize` was HANDED, and must stay id-set-based: a mint is claimable, and hand-built IR has no
   honest way to spell "not mine".
@@ -315,4 +320,12 @@ files.
   now also reports what the cap DROPPED (it used to print only the per-category counts taken before
   the take, so a truncated menu logged the same numbers as an untruncated one) and what the
   provenance filter withheld.
+  **A cap must also sit at the right altitude, not just be shared fairly.** `menu`'s `?admits` runs
+  ahead of the cap so the budget is spent on moves the caller can use: the beam's GPU rule — an
+  incumbent binding no hardware dimension can only be expanded through a move that binds one — used
+  to filter *after* `menu` had capped, so a tensorize-rich unit got its share of five categories and
+  kept only a fraction of the one category the beam could use. The old plain prefix happened to hand
+  all 48 to the tensorizes, so sharing without moving the filter would have been a regression
+  exactly where #685 meant to help. When adding a consumer-side filter over a capped list, ask
+  whether the cap should see it.
 

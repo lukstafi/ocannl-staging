@@ -16,7 +16,15 @@
    widening's collateral and its [k] must not be. The control that makes the second claim
    discriminating: [k] is registry-nameable in the inlined copy too, so what keeps it out of the
    menu is the provenance filter and not an unresolvable binder — the pre-687 descend-everything
-   walk would have enumerated it, which is exactly the behaviour under test. *)
+   walk would have enumerated it, which is exactly the behaviour under test.
+
+   The last pair of claims is the one the exclusion has to earn (PR #424 review, P2). Narrowing the
+   enumeration WITHOUT narrowing [contains_loop] in step would leave this shape with no [Vectorized]
+   retype at either level: not at [k] (no longer enumerated) and not at [i] (still reading as
+   non-innermost because of [k]). Before gh-666 the outer loop drew that retype and after it the
+   inner one did; losing it at both levels would be a regression neither state had. So the two walks
+   share one provenance filter, and the two copies here must differ in WHICH loop is vectorizable,
+   never in whether one is. *)
 
 open Base
 open Ocannl.Operation.DSL_modules
@@ -96,14 +104,16 @@ let () =
     (count reg_inline menu_inline k = 0);
   (* Only the scope-nested descriptors differ: the statement-level nest is untouched by the
      provenance filter. *)
-  p "the statement-level loop draws the same proposals under either mint"
-    (count reg_mint menu_mint i = count reg_inline menu_inline i && count reg_mint menu_mint i > 0);
-  p "the inlined copy's menu is exactly the schedule mint's menu minus its scope-nested part"
-    (List.length menu_inline + count reg_mint menu_mint k = List.length menu_mint);
-  (* Innermost-ness stays a fact about the emitted nest, not about provenance: an inlined body's
-     loop is emitted inside the statement-level loop just as a mint's is, so neither copy proposes
-     vectorizing the outer loop. (Were this keyed off the mint, the inlined copy would offer a
-     [Vectorized] retype of a loop that is not innermost in the code the backend sees.) *)
+  p "the statement-level loop keeps its proposals under either mint (and gains one under the inline)"
+    (count reg_inline menu_inline i = count reg_mint menu_mint i + 1
+    && count reg_mint menu_mint i > 0);
+  p "the inlined copy's menu is the schedule mint's, minus its scope-nested part plus the outer \
+     retype that becomes available"
+    (List.length menu_inline + count reg_mint menu_mint k = List.length menu_mint + 1);
+  (* Innermost-ness is judged over the same loops the enumeration covers, so each copy offers the
+     retype at exactly one level: the mint at its scope-nested [k] (gh-ocannl-666's purpose), the
+     inline at the enclosing [i] (the pre-666 reading, restored for scopes no schedule op targets).
+     Neither copy is left without one. *)
   let vectorizes reg menu sym =
     match SC.resolve reg sym with
     | None -> 0
@@ -112,6 +122,11 @@ let () =
           | SC.Retype { axis; ty = LL.Vectorized } -> SC.equal_sym_ref axis rf
           | _ -> false)
   in
-  p "an inlined scope's loop still makes the enclosing loop non-innermost"
-    (vectorizes reg_inline menu_inline i = 0 && vectorizes reg_mint menu_mint i = 0);
+  p "the schedule mint offers the Vectorized retype at its scope-nested loop"
+    (vectorizes reg_mint menu_mint k = 1 && vectorizes reg_mint menu_mint i = 0);
+  p "the inlined copy offers it at the enclosing loop instead"
+    (vectorizes reg_inline menu_inline i = 1 && vectorizes reg_inline menu_inline k = 0);
+  p "neither copy is left with no Vectorized candidate at all"
+    (vectorizes reg_mint menu_mint k + vectorizes reg_mint menu_mint i > 0
+    && vectorizes reg_inline menu_inline k + vectorizes reg_inline menu_inline i > 0);
   Stdio.printf "\nDone.\n%!"

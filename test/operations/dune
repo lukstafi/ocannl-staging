@@ -2038,9 +2038,9 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules autotune_menu_cap)
- (libraries base stdio arrayjit.autotune arrayjit.verdict)
+ (libraries base stdio ocannl arrayjit.verdict ll_test)
  (preprocess
-  (pps ppx_here)))
+  (pps ppx_here ppx_ocannl)))
 
 (test
  ; ocannl-backend: none -- enumerates the action menu over hand-built IR through the post-optimize

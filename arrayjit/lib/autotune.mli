@@ -339,6 +339,7 @@ val share_cap : cap:int -> (string * 'a list) list -> 'a list * (string * int) l
     a plain prefix there starved every category after the first outright. Exposed for tests. *)
 
 val menu :
+  ?admits:(Ir.Schedule_cache.saved_optop -> bool) ->
   is_cpu:bool ->
   is_gpu:bool ->
   limits:Ir.Backend_intf.hardware_limits ->
@@ -353,10 +354,17 @@ val menu :
     before they cost a candidate compile; [Op_unknown] proceeds to compile-and-time). The loop
     enumeration descends into accumulation-minted [Local_scope] bodies and treats binder-sharing
     mint copies as one decision (gh-ocannl-666) -- into THOSE bodies only, not into virtualization's
-    inlined computations, which mint the same construct at every inlined read and whose loops no
-    schedule op reaches ([Ir.Low_level.scope_mint], gh-ocannl-687). The per-unit action cap is
-    shared across the categories by {!share_cap} rather than spent in category order
-    (gh-ocannl-685). See the candidate-space overview above. Exposed for tests. *)
+    inlined computations, which mint the same construct at every inlined read
+    ([Ir.Low_level.scope_mint], gh-ocannl-687); the enclosing loop is then judged innermost and
+    proposable in their stead, so such a nest keeps a candidate rather than losing one at both
+    levels.
+
+    The per-unit action cap is shared across the categories by {!share_cap} rather than spent in
+    category order (gh-ocannl-685). [admits] filters proposals BEFORE that cap, so the budget is
+    shared over moves the caller can use rather than over moves it is about to discard -- the beam
+    passes its GPU dispatchability rule here, since an incumbent binding no hardware dimension can
+    only be expanded through a move that binds one. It may record its refusals. Exposed for
+    tests. *)
 
 type decline_summary = {
   key : Ir.Schedule_outcome.rejection_key;
