@@ -215,12 +215,27 @@ files.
 - "Timed" is not "tensorized" either, and that failure is worse: a declined `Tile_mma` renders its
   scalar fallback, which compiles and runs, so the candidate is timed, ranked and possibly crowned
   under an `mma-*` label (gh-ocannl-545: 20 of 20 timed bf16 candidates on CUDA were scalar). The
-  emission is the source of truth — grep the emitted kernel for the intrinsic
-  (`wmma::`/`mma.sync`/`simdgroup_`), or read `C_syntax.mma_census`; `schedule_log_declines=true`
+  emission is the source of truth, and since gh-ocannl-626 it is carried, not fetched: every
+  compiled routine has `Context.routine.mma`, an `Ir.C_syntax.mma_summary` whose `tensorization`
+  field is `Tensorized` (at least one tensor-core / SIMD-register-tile emission), `Scalar_fallback`
+  (statements emitted, every one declined) or `Not_requested` (no `Tile_mma` emitted at all), with
+  the statement and fallback counts beside it. Read that; do NOT bracket `mma_census_enabled`
+  yourself (`C_syntax.with_census` is the bracket, it nests additively, and it is what
+  `Context.compile` calls). `Autotune.report.best_tensorization` is the crowned candidate's label,
+  `None` when nothing was crowned — and the pair to read is `best_tensorized` (what the SCHEDULE
+  asked) against `best_tensorization` (what the EMISSION delivered): a `true` beside anything but
+  `Tensorized` is a scalar timing under a tensorized label. `schedule_log_declines=true`
   names the rule that fired. When seeding and emission can disagree, fix the seeding side too, or the
   measurement budget keeps going to schedules that never tensorize: `mma_format_tiles` is keyed on
   the whole `(a, b, accumulator)` format triple, with per-entry arch floors, precisely so that a
   combination a backend supports at one accumulator width but not the other cannot be seeded.
+  Where a timing is REPORTED the label is now printed, so a mismatch is legible without re-deriving
+  anything: the `autotune_log` NOTE lines lead with it, `Train.tune_placements`' arm lines read
+  `[tensorized/<label>]`, `bin/schedule_bench` and `bin/narrow_gebp_bench` print
+  `C_syntax.mma_summary_string` on EVERY timing line (not only when something declined), the
+  benchmark harness prints it per segment in the per-kernel table, and the result line's `tune`
+  arms carry `tensorization` + `mma_statements`, which `orchestrate.py` renders in the report's
+  `mma` column (`SCALAR FALLBACK` / `NO MMA EMITTED` shouted) plus a `TENSORIZATION NOTICE`.
   `mma_staged_layouts` (gh-ocannl-481) is keyed the same way for the same reason: the swizzled
   staged twin is seeded only where the emission can actually read that layout, which on CUDA is
   the uniform-bf16 combination and not fp8 (whose B side has no 16-bit `ldmatrix` form at the
@@ -228,7 +243,7 @@ files.
   `Mma_intrinsics`, so "tensorized" and "fed at rate" are separable in a sweep.
 - "Crowned" is not "shipped", and neither is reproducible on a small routine. `Train.tune_placements`
   runs two searches and keeps one artifact, so a family can win the arm that is then discarded whole
-  — read `report.best_label` / `best_tensorized` / `mma_best_ms` per arm (the A/B calls `?report`
+  — read `report.best_label` / `best_tensorized` / `best_tensorization` / `mma_best_ms` per arm (the A/B calls `?report`
   for arm A first and ships the smaller `best_ms`), never the fact that some search crowned it.
   Since gh-ocannl-638, do not re-derive WHICH arm shipped from the reports' times either: config
   `tune_ship_arm=a|b` overrides the comparison, and `?on_ship` (`"A"` / `"B"` / `"flip"`) is the

@@ -161,7 +161,11 @@ let mma_summary_string summary =
     an inner compile does not disturb an outer collection; the summary covers only [f]'s own
     entries. This replaces the hand-rolled [Exn.protect] bracket that had been copied to six call
     sites — and, applied inside {!Context.compile}, makes collecting the census the default rather
-    than something a timing harness must remember to do. *)
+    than something a timing harness must remember to do.
+
+    The census is a process global, as it always was: compiles are sequential on the main domain,
+    and nothing here makes concurrent compiles from several domains attribute their renderings
+    correctly. *)
 let with_census f =
   let saved_enabled = !mma_census_enabled and saved_census = !mma_census in
   mma_census_enabled := true;
