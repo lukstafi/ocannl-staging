@@ -8,11 +8,14 @@
  ; depending on what ran before (the gh-ocannl-586/597 hazard, in Python). Today the test imports
  ; orchestrate, fixture_digest and runners.bench_common; add (glob_files runners/*/*.py) if it ever
  ; reaches the per-framework runners. fixtures/DIGESTS.txt and the workload specs are data it reads
- ; (gh-ocannl-645), pinned so a change to them fails the suite rather than drifting.
+ ; (gh-ocannl-645), pinned so a change to them fails the suite rather than drifting -- and so is
+ ; the golden of test/operations/bench_result_line, which holds OCANNL result lines this
+ ; orchestrator's own parser has to accept (gh-ocannl-676).
  (deps
   (glob_files *.py)
   (glob_files runners/*.py)
   fixtures/DIGESTS.txt
+  ../test/operations/bench_result_line.expected
   (glob_files workloads/*.json))
  (action
   (run python3 %{dep:test_orchestrate.py})))

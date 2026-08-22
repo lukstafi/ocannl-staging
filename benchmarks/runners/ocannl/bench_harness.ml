@@ -286,19 +286,6 @@ let searched t = t.searches > 0
     two flags are both [false] for an arm that neither searched nor replayed, which is what
     [autotune_search=false] and a pre-search failure produce. *)
 let tune_json t =
-  let ms_json v = if Float.is_inf v then "null" else Printf.sprintf "%.6g" v in
-  (* Quote-and-control-character scrubbing rather than escaping: these strings are diagnostics
-     (labels, an exception's message) and the result line has to stay one parseable JSON line. JSON
-     forbids every unescaped byte below U+0020, not just the whitespace ones, so the test is the
-     code point — a NUL or an ESC from a backend diagnostic would otherwise invalidate the record
-     and cost the whole measurement. *)
-  let json_string s =
-    String.map s ~f:(function
-      | '"' -> '\''
-      | '\\' -> '/'
-      | c when Char.to_int c < 0x20 || Char.to_int c = 0x7f -> ' '
-      | c -> c)
-  in
   match List.rev t.arm_reports with
   | [] -> None
   | reports ->
@@ -318,19 +305,18 @@ let tune_json t =
             |> Option.value_map ~default:"?" ~f:fst
       in
       let arm (name, (r : Autotune.report)) =
-        Printf.sprintf
-          {|{"arm":"%s","searched":%b,"cache_hit":%b,"best_ms":%s,"best_label":"%s","tensorized":%b,"mma_scalar_fallbacks":%d,"mma_seeded":%d,"mma_timed":%d,"mma_best_ms":%s,"terminal_failure":%s}|}
-          name r.Autotune.searched r.Autotune.cache_hit (ms_json r.Autotune.best_ms)
-          (json_string r.Autotune.best_label)
-          r.Autotune.best_tensorized r.Autotune.best_mma_scalar_fallbacks r.Autotune.mma_candidates
-          r.Autotune.mma_timed (ms_json r.Autotune.mma_best_ms)
-          (Option.value_map r.Autotune.terminal_failure ~default:"null" ~f:(fun tf ->
-               Printf.sprintf {|"%s"|} (json_string tf.Autotune.detail)))
+        Bench_json.tune_arm ~name ~searched:r.Autotune.searched ~cache_hit:r.Autotune.cache_hit
+          ~best_ms:r.Autotune.best_ms ~best_label:r.Autotune.best_label
+          ~tensorized:r.Autotune.best_tensorized
+          ~mma_scalar_fallbacks:r.Autotune.best_mma_scalar_fallbacks
+          ~mma_seeded:r.Autotune.mma_candidates ~mma_timed:r.Autotune.mma_timed
+          ~mma_best_ms:r.Autotune.mma_best_ms
+          ~terminal_failure:
+            (Option.map r.Autotune.terminal_failure ~f:(fun tf -> tf.Autotune.detail))
       in
       Some
-        (Printf.sprintf {|{"shipped":"%s","searches":%d,"replays":%d,"arms":[%s]}|} shipped
-           t.searches t.replays
-           (String.concat ~sep:"," (List.map named ~f:arm)))
+        (Bench_json.tune_object ~shipped ~searches:t.searches ~replays:t.replays
+           ~arms:(List.map named ~f:arm))
 
 let floats_of_gen g =
   let n = Array.fold (Bigarray.Genarray.dims g) ~init:1 ~f:( * ) in
@@ -616,6 +602,11 @@ let time_segments ?promote_locals ?(repeats = 20) ~backend ~limits ~static_indic
     binding and enqueues one step; [read_loss] returns the current loss value (awaits the device);
     [sync] awaits all queued work.
 
+    Every number in the line goes through {!Bench_json}, so a non-finite one is [null] rather than
+    OCaml's [nan] / [inf]: a training run that diverges is exactly the run whose loss trajectory
+    the report needs, and a line that does not parse is a cell [orchestrate.py] drops as a broken
+    runner after the whole measurement has been paid for (gh-ocannl-676).
+
     The line's [searched] field states whether {e this process} ran a schedule search
     (gh-ocannl-644). A tuned cell is measured by a two-pass protocol — pass 1 searches and populates
     [autotune_cache/], a fresh pass 2 replays the cached winner and provides the step times, because
@@ -664,21 +655,10 @@ let measure_and_emit ~st ~backend ~variant ?(precision = "f32") ~compile_s ?toke
   sync ();
   let queued_ms = elapsed_ms c0 /. Float.of_int timed_steps in
   Array.sort synced ~compare:Float.compare;
-  let json_floats arr =
-    String.concat ~sep:"," (Array.to_list (Array.map arr ~f:(Printf.sprintf "%.9g")))
-  in
-  let tokens_field =
-    match tokens_per_step with Some t -> Printf.sprintf {|"tokens_per_step":%d,|} t | None -> ""
-  in
-  let tune_field =
-    match Option.bind tune ~f:tune_json with
-    | Some j -> Printf.sprintf {|"tune":%s,|} j
-    | None -> ""
-  in
-  Stdio.printf
-    {|{"framework":"ocannl","backend":"%s","variant":"%s","precision":"%s","workload":"%s","compile_s":%.3f,"searched":%b,%s%s"step_ms":{"p10":%.6g,"p50":%.6g,"p90":%.6g},"queued_step_ms":%.6g,"timed_steps":%d,"losses":[%s]}|}
-    backend variant precision workload compile_s
-    (Option.value_map tune ~default:false ~f:searched)
-    tokens_field tune_field (percentile synced 10.) (percentile synced 50.) (percentile synced 90.)
-    queued_ms timed_steps (json_floats losses);
-  Stdio.printf "\n"
+  Stdio.printf "%s\n"
+    (Bench_json.result_line ~backend ~variant ~precision ~workload ~compile_s
+       ~searched:(Option.value_map tune ~default:false ~f:searched)
+       ?tokens_per_step
+       ?tune:(Option.bind tune ~f:tune_json)
+       ~p10:(percentile synced 10.) ~p50:(percentile synced 50.) ~p90:(percentile synced 90.)
+       ~queued_ms ~timed_steps ~losses ())

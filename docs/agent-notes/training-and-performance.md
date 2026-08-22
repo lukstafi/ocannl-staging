@@ -104,6 +104,17 @@ files.
   counter reads zero, which looks exactly like "the problem went away". Fixtures are also not in a
   fresh checkout (`benchmarks/fixtures/*.safetensors` is generated); `gen_fixtures.py` recreates
   them, and they are only valid while `gen_fixtures.py` and `benchmarks/workloads/` are unchanged.
+- A benchmark cell reports what it measured through ONE JSON line, so anything that line cannot
+  express is a measurement thrown away (gh-ocannl-676). Non-finite numbers are the whole class:
+  OCaml's `%g` spells them `nan`/`inf`, `json.dumps` writes `NaN`, JSON has neither, and
+  `orchestrate.py` drops a cell whose line does not parse — so a DIVERGED run, the thing the parity
+  gate exists to catch, was reported as a broken runner. All three runners emit `null` there
+  (`Bench_json.num`/`fixed`/`nums`, `bench_common.json_safe`) and the orchestrator reads it as the
+  DIVERGED verdict. The general trap: `json.loads` accepts `NaN` and `Infinity`, so the Python
+  runners' cells survived while OCANNL's vanished, and the report read as an OCANNL runner bug
+  rather than a numerics one — when a sweep loses only one framework's rows, suspect the emitter's
+  spelling before the framework.
+
 - A benchmark leg belongs to a WORKLOAD, not to a runner (gh-ocannl-551). `BENCH_STATIC_SCALE` /
   `BENCH_GATE_INTERVAL` lived in `bench_mlp` alone, so the gate-cost contract silently had no
   answer for `gpt2_mini` — and a forward-only workload has no loss scale to gate in the first

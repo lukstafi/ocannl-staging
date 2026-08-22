@@ -26,6 +26,28 @@ def result(framework, backend, variant, losses, precision="f32"):
     }
 
 
+def cell(framework, backend, variant, losses, precision="f32", p50=1.0):
+    """A result with the fields `report` reads, not just the parity ones."""
+    r = result(framework, backend, variant, losses, precision=precision)
+    r.update(
+        {
+            "step_ms": {"p10": p50, "p50": p50, "p90": p50},
+            "queued_step_ms": p50,
+            "compile_s": 1.5,
+        }
+    )
+    return r
+
+
+def _reject(token):
+    raise ValueError(f"not JSON: {token}")
+
+
+def strict_loads(text):
+    """`json.loads` without its NaN/Infinity extension -- JSON as every other reader has it."""
+    return json.loads(text, parse_constant=_reject)
+
+
 class ParityCheckTest(unittest.TestCase):
     def test_precision_tolerances_match_measured_headroom(self):
         self.assertEqual(orchestrate.PARITY_TOL_PRECISION, {"bf16": 4e-3, "f16": 2e-3})
@@ -52,6 +74,149 @@ class ParityCheckTest(unittest.TestCase):
 
         self.assertTrue(moving["parity_loss_moved"])
         self.assertEqual(moving["parity"], "PASS")
+
+
+class DivergenceTest(unittest.TestCase):
+    """gh-ocannl-676: a cell whose training diverged ran, and its trajectory is the finding.
+
+    The three runners now all emit `null` for a number JSON cannot express, and the OCANNL one
+    used to emit OCaml's `nan`, whose line `json.loads` refuses -- so the cell was reported as a
+    broken runner and the loss vector that shows the divergence was thrown away. Here the verdict
+    is DIVERGED: a parity failure that names its cause.
+    """
+
+    def test_null_loss_is_a_diverged_cell_not_a_missing_one(self):
+        ref = result("pytorch", "cpu", "eager", [2.3026, 2.3010, 2.3000])
+        blown = result("ocannl", "metal", "default", [2.3026, None, None], precision="f16")
+
+        orchestrate.parity_check([ref, blown])
+
+        self.assertEqual(blown["parity"], "DIVERGED")
+        self.assertEqual(blown["diverged_at"], 1)
+        self.assertEqual(ref["parity"], "REF")
+
+    def test_nan_from_a_python_runner_reads_the_same(self):
+        # Python's json.loads accepts its own `NaN` extension, so an older result file can still
+        # deliver one; it is the same fact as a null.
+        ref = result("pytorch", "cpu", "eager", [2.3026, 2.3010, 2.3000])
+        blown = result("tinygrad", "metal", "jit", [2.3026, float("nan"), float("inf")])
+
+        orchestrate.parity_check([ref, blown])
+
+        self.assertEqual(blown["parity"], "DIVERGED")
+        self.assertEqual(blown["diverged_at"], 1)
+
+    def test_a_diverged_cell_is_not_reported_as_stationary(self):
+        # Its finite prefix moved; and with fewer than two finite steps there is nothing to say
+        # about movement, which is reported as divergence rather than as a flat trajectory.
+        self.assertTrue(orchestrate.loss_moved([2.3026, 1.5, None]))
+        self.assertFalse(orchestrate.loss_moved([2.3026, None, None]))
+
+    def test_the_finite_prefix_is_still_compared(self):
+        ref = result("pytorch", "cpu", "eager", [2.0, 2.0, 2.0])
+        blown = result("ocannl", "cc", "default", [2.0, None, None])
+
+        orchestrate.parity_check([ref, blown])
+
+        self.assertEqual(blown["parity_max_rel"], 0.0)
+
+    def test_a_finite_value_after_the_divergence_is_not_evidence(self):
+        # A loss that comes back finite after a NaN is whatever the arithmetic settled on, not
+        # drift: comparing it would put a number on the DIVERGED row that its own contract calls
+        # meaningless, and reading it as movement would say the trajectory moved when what it did
+        # was blow up.
+        ref = result("pytorch", "cpu", "eager", [2.0, 2.0, 2.0])
+        blown = result("ocannl", "cc", "default", [2.0, None, 9.0])
+
+        orchestrate.parity_check([ref, blown])
+
+        self.assertEqual(blown["parity_max_rel"], 0.0)
+        self.assertFalse(blown["parity_loss_moved"])
+        self.assertEqual(orchestrate.finite_prefix([2.0, None, 9.0]), [2.0])
+
+    def test_the_reference_prefix_bounds_the_comparison_too(self):
+        ref = result("pytorch", "cpu", "eager", [2.0, float("nan"), 2.0])
+        other = result("ocannl", "cc", "default", [2.0, 5.0, 5.0])
+
+        orchestrate.parity_check([ref, other])
+
+        self.assertEqual(other["parity_max_rel"], 0.0)
+
+    def test_a_diverged_reference_is_no_reference(self):
+        ref = result("pytorch", "cpu", "eager", [2.3026, None, None])
+        other = result("ocannl", "cc", "default", [2.3026, 2.3010, 2.3000])
+
+        orchestrate.parity_check([ref, other])
+
+        self.assertEqual(ref["parity"], "DIVERGED")
+        self.assertEqual(other["parity"], "NO-REF")
+
+    def test_report_names_the_divergence_and_writes_parseable_json(self):
+        ref = cell("pytorch", "cpu", "eager", [2.3026, 2.3010, 2.3000])
+        blown = cell(
+            "ocannl", "metal", "default", [2.3026, None, None], precision="f16", p50=None
+        )
+        orchestrate.parity_check([ref, blown])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            with contextlib.redirect_stdout(io.StringIO()):
+                orchestrate.report([ref, blown], out)
+            text = (out / "report.md").read_text()
+            rows = [
+                strict_loads(line) for line in (out / "results.jsonl").read_text().splitlines()
+            ]
+
+        self.assertIn("DIVERGED", text)
+        self.assertIn("loss non-finite from step 1", text)
+        # A time the runner never measured prints as n/a rather than crashing the report.
+        self.assertIn("n/a", text)
+        self.assertEqual([r["parity"] for r in rows], ["REF", "DIVERGED"])
+
+    def test_emit_writes_null_for_a_non_finite_number(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            bench_common.emit({"losses": [1.0, float("nan")], "step_ms": {"p50": float("inf")}})
+
+        parsed = strict_loads(buf.getvalue().strip())
+        self.assertEqual(parsed, {"losses": [1.0, None], "step_ms": {"p50": None}})
+
+
+class OcannlResultLineTest(unittest.TestCase):
+    """The OCANNL runner's own result line, as this orchestrator reads it (gh-ocannl-676).
+
+    The golden of test/operations/bench_result_line holds the line built from fabricated values --
+    a diverged trajectory, times that were never measured, a diagnostic full of control characters
+    -- and this is the parser that has to accept it. Pinning it in OCaml alone would leave the
+    claim "this parses" resting on a second implementation of JSON.
+    """
+
+    GOLDEN = HERE.parent / "test/operations/bench_result_line.expected"
+
+    def lines(self):
+        return [
+            line
+            for line in self.GOLDEN.read_text().splitlines()
+            if line.startswith("{")  # what run_cell picks out of a cell's output
+        ]
+
+    def test_every_emitted_line_parses_strictly(self):
+        lines = self.lines()
+        self.assertGreaterEqual(len(lines), 2, self.GOLDEN)
+        for line in lines:
+            with self.subTest(line=line[:60]):
+                self.assertIn("losses", strict_loads(line))
+
+    def test_the_diverged_line_is_read_as_a_diverged_cell(self):
+        parsed = [strict_loads(line) for line in self.lines()]
+        blown = next(r for r in parsed if None in r["losses"])
+        ref = result("pytorch", "cpu", "eager", [2.5, 1.75, 1.25])
+        ref["workload"] = blown["workload"]
+
+        orchestrate.parity_check([ref, blown])
+
+        self.assertEqual(blown["parity"], "DIVERGED")
+        self.assertEqual(blown["diverged_at"], 1)
 
 
 class CellIdentityTest(unittest.TestCase):
