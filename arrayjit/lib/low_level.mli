@@ -313,8 +313,15 @@ val peel_accum_nest :
     sequences are not reductions and keep their per-iteration narrowing), with the accumulated cell
     invariant across the peeled levels ([free_of] seeds the invariance check with the caller's own
     loop). [rebuild] re-wraps a replacement base statement in the peeled levels. The ONE definition
-    shared by [C_syntax]'s widened serial fallback and the schedule mints, so transform and emission
-    cannot drift. *)
+    shared by [C_syntax]'s localizing serial fallback and the schedule mints, so transform and
+    emission cannot drift.
+
+    A DEAD level ([to_ < from_]) is never peeled, and that refusal is load-bearing rather than
+    tidiness: the body of a dead loop performs no accesses at all — the routine-interface walk
+    propagates liveness as [live && to_ >= from_], so a node reached only under one is absent from
+    the parameters and need not be allocated — while every form this peel licenses reads and writes
+    the accumulated cell OUTSIDE the levels, unconditionally. Peeling a dead level would invent
+    accesses the program does not make, possibly on an identifier the interface never declared. *)
 
 (** {2 Hardware axis analyses}
 

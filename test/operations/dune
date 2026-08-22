@@ -2345,6 +2345,14 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name peel_dead_level)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ ; ocannl-backend: none -- calls Low_level.peel_accum_nest on hand-built IR, links no backend
+ (modules peel_dead_level)
+ (libraries base ocannl stdio arrayjit.verdict))
+
+(test
  (name reduction_accumulator_residency)
  (package neural_nets_lib)
  (deps

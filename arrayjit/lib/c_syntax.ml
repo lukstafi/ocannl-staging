@@ -4044,7 +4044,10 @@ module C_syntax (B : C_syntax_config) = struct
            inside an invariant-address loop — and there the per-iteration read-modify-write is
            genuinely still present at that level, so the shadow must and does still fire. *)
         let try_localize_serial_reduce () : PPrint.document option =
-          if Utils.debug_log_from_routines () then None
+          (* A dead level ([to_ < from_]) performs no accesses; see [peel_accum_nest]'s refusal,
+             which covers the levels BELOW this one. This is the same refusal for the level being
+             rendered, whose bounds the peel never sees (the caller re-wraps it via [rebuild_hook]). *)
+          if Utils.debug_log_from_routines () || to_ < from_ then None
           else
             let localize (tn, idcs, base, debug, rebuild) =
               match base with

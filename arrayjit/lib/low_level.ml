@@ -5275,9 +5275,18 @@ let peel_accum_nest ?(extra_level = fun _ _ -> false) ~free_of body :
   let cell_invariant ~free_of idcs =
     not (Array.exists idcs ~f:(fun idx -> List.exists free_of ~f:(fun s -> idx_mentions s idx)))
   in
+  (* A DEAD level ([to_ < from_]) is never peeled. Its body performs no accesses at all — the
+     interface walker propagates [live:(live && to_ >= from_)], so a node reached only under a dead
+     loop is absent from the routine's parameters and may not even be allocated — while the
+     localized form this peel licenses reads and writes the accumulator cell OUTSIDE the level,
+     unconditionally. Hoisting there would invent accesses the program does not make, on an
+     identifier the interface never declared. Refusing here covers every consumer at once: codegen's
+     localization and [Schedule]'s [Unroll ~materialize:true] / [Partition] mints. The level then
+     renders as the plain (access-free) dead loop it is. *)
   let rec peel ~free_of ~rebuild body =
     match strip (flat_lines [ body ]) with
-    | [ For_loop ({ index; body = ibody; axis = Serial | Unrolled | Vectorized; _ } as r) ] ->
+    | [ For_loop ({ index; body = ibody; axis = Serial | Unrolled | Vectorized; _ } as r) ]
+      when r.to_ >= r.from_ ->
         (* [Vectorized] levels ride into the scope: the SIMD reduction rendering recognizes the
            [Set_local] update form and folds its chains into the scope local, so the whole nest
            keeps one accumulator residency even when an inner reduction axis is vectorized (autotune
@@ -5286,7 +5295,8 @@ let peel_accum_nest ?(extra_level = fun _ _ -> false) ~free_of body :
         peel ~free_of:(index :: free_of)
           ~rebuild:(fun b -> rebuild (For_loop { r with body = b }))
           ibody
-    | [ For_loop ({ index; body = ibody; axis; _ } as r) ] when extra_level index axis ->
+    | [ For_loop ({ index; body = ibody; axis; _ } as r) ]
+      when r.to_ >= r.from_ && extra_level index axis ->
         (* Levels the CALLER vouches for beyond the annotation-free kinds — codegen passes a
            predicate accepting a hardware-annotated reduction loop its backend will serialize (no
            hardware index for the slot), so e.g. a nested [Workgroup_reduce] on cc keeps the

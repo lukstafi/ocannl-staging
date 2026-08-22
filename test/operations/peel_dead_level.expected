@@ -1,0 +1,4 @@
+a live accumulation level is peeled: true
+a single-iteration level is peeled: true
+a dead accumulation level is refused: true
+an emptier dead level is refused: true

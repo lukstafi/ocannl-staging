@@ -183,6 +183,18 @@ files.
   the `accum_update_parts` grammar (only `Add`/`Mul`/`Max`/`Min` and the `FMA` form, with the
   accumulator read a DIRECT operand of the top operator), and, for a scope-form base, updates under
   mixed operators or a write to another node inside the body.
+- **A DEAD level (`to_ < from_`) is never peeled**, and that refusal is load-bearing rather than
+  tidiness. A dead loop's body performs no accesses at all — the routine-interface walk propagates
+  liveness as `live && to_ >= from_`, so a node reached only under one is absent from the parameters
+  and need not be allocated — while every form the peel licenses reads and writes the accumulated
+  cell OUTSIDE the levels, unconditionally. Peeling one would invent accesses the program does not
+  make, possibly naming an identifier the interface never declared; it is the same convention
+  `drop_dead_loop_accesses` keeps for the affine metrics and virtualization keeps by dropping dead
+  loops outright ("mint phantom parameters for identifiers only dead code renders"). Because
+  `optimize` drops them, ordinary lowering cannot deliver a dead loop to codegen — a post-optimize
+  transform can, which is why the refusal lives in the shared `peel_accum_nest` (covering the
+  schedule mints) plus the rendered level's own bounds in `try_localize_serial_reduce`, which the
+  peel never sees. Pinned by `test/operations/peel_dead_level.ml`, live twin included.
 - The interaction with Metal's `volatile_scalar_rmw` needs no special case, and that is worth
   knowing before adding one: the shadow keys on the emitted `Set` reading its own node at a cell
   invariant across an enclosing SERIAL loop, and localization lifts the `Set` out of exactly those
