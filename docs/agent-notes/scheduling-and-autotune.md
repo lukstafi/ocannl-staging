@@ -96,11 +96,46 @@ files.
   rejection key is what an autotune search groups declines by and the fixes differ.
   Pinned end-to-end by `test/operations/schedule_batch_grid.ml` (structure everywhere, execution
   and emitted-source fold on GPU backends).
-  The HIP backend's `static_properties` dump lists the queried `max_grid_size` and
-  `max_threads_dim` next to `max_threads_per_block`, so a run on hardware can read back what those
-  gates compare against — without them the only evidence the query is not degenerate is that no
-  kernel got rejected. On gfx1151/ROCm/WSL2 they read `(2147483647 65535 65535)` and
-  `(1024 1024 1024)`, i.e. `max_grid_yz = 65535`.
+  The gate covers the WORKGROUP's dimensions the same way (gh-ocannl-679):
+  `hardware_limits.max_workgroup_dims` is an `(int * int * int) option` of per-dimension caps
+  beside — not instead of — `max_threads_per_workgroup`, which caps only the thread PRODUCT.
+  A tuple, not an array: every GPU backend memoizes its `hardware_limits` behind a `lazy` and
+  `Context.hardware_limits` returns that record itself, so ONE mutable cell anywhere in the record
+  would let a caller deriving tighter limits write through into the process-wide singleton. Keep
+  the record free of mutable cells when adding fields — it is what makes handing out the memoized
+  value safe, and `max_workgroup_dims` was the only field that ever broke it. The two are different hardware
+  facts: CUDA's `maxThreadsDim` is `(1024, 1024, 64)`, so a `2 x 2 x 128` workgroup is a legal
+  512-thread product and an invalid launch configuration. `Workgroup` slots cap at 3 and the
+  innermost binds `.x`, so the outermost annotated loop's extent lands on `.z` directly; no fold is
+  involved. Filled by all three GPU backends (CUDA queries `max_block_dim_{x,y,z}`, HIP the
+  `max_threads_dim` triple, Metal all three components of `maxThreadsPerThreadgroup` — it used to
+  read `width` alone), `None` on the C backends. `Schedule.default_gpu` and
+  `Schedule.zero_expansion` clamp their block size against the `.x` entry too, so the gate is a
+  backstop; they emit one `Workgroup` loop per nest, which is why no in-tree annotator can reach
+  the `.z` cliff and why `test/operations/launch_dim_gate.ml` builds that geometry by hand.
+  **The gate is now one table, five rows** (block `.x`/`.y`/`.z`, grid `.y`/`.z`), not a
+  hand-written `Option.iter` per bound — each bound used to be a copy of its neighbour, which is
+  how `gridDim.y` went ungated for a release and how the workgroup dimensions went ungated
+  entirely. `grid.(0)` is the deliberate sixth absence: 2^31-scale wherever hardware axes bind.
+  Adding a cap means adding a row.
+
+  The GPU backends' `static_properties` dumps list the queried launch-dimension limits next to
+  `max_threads_per_block` — HIP `max_grid_size` and `max_threads_dim`, CUDA `max_block_dim` and
+  `max_grid_dim`, Metal the `max_threads_per_threadgroup` triple — so a run on hardware can read
+  back what those gates compare against; without them the only evidence a query is not degenerate
+  is that no kernel got rejected, which is also what a query returning 0 would produce.
+  **`bin/device_props` is the supported way to read them** (gh-ocannl-684): it prints both
+  `static_properties` and the derived `hardware_limits` for the selected backend, one
+  `path = value` line per fact, and compiles no routine. Do NOT reach it through `dune exec` (the
+  `bin/` cwd trap): `dune build bin/device_props.exe`, then run
+  `_build/default/bin/device_props.exe --ocannl_backend=<name>`, pinning the backend explicitly —
+  with none configured `Context.auto` walks metal -> cuda -> hip -> cc and would report a device
+  other than the one being asked about. Local readings: Metal on an M4 Max reports
+  `max_threads_per_threadgroup = 1024 1024 1024`, so Apple parts cannot exercise the per-dimension
+  cliff either. On gfx1151/ROCm/WSL2 the HIP values read `(2147483647 65535 65535)` and
+  `(1024 1024 1024)`, i.e. `max_grid_yz = 65535` and a `max_workgroup_dims` that equals the product
+  cap — that device cannot exercise the per-dimension cliff; CUDA's `.z` of 64 is the one that
+  can.
 - "`Tile_mma` is a barrier" is only half true, and the half that fails is the one barrier elision
   wants. Every rendering form ENDS the intrinsic block with a workgroup barrier, so a staging
   barrier that follows one is always redundant (`Schedule.elide_staged_barriers` drops it, and the

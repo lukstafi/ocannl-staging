@@ -745,16 +745,21 @@ val check_hardware_limits :
 (** Validates the scheduled kernel [name] against the device limits, raising [Utils.User_error] on
     violation: the launch's workgroup size (the product of {!Low_level.launch_dims}' block
     dimensions) against {!field:Backend_intf.max_threads_per_workgroup}, the total bytes of
-    [workgroup_shared] tiles against {!field:Backend_intf.max_workgroup_memory_bytes}, and both
-    16-bit-capped grid dimensions — the [.y] extent ({!Low_level.launch_dims}' [grid.(1)], a
-    blocktiled matmul's row-block count) and the folded [.z] extent ([grid.(2)], the product of the
-    Grid slots [>= 2] — gh-ocannl-643) — against {!field:Backend_intf.max_grid_yz}. Backend
-    [compile] calls this after any [?lowered_transform] (or the default annotator, which already respects the limits),
-    turning driver-level launch failures into early, named errors. A no-op for all-[None] limits. *)
+    [workgroup_shared] tiles against {!field:Backend_intf.max_workgroup_memory_bytes}, and then the
+    launch geometry dimension by dimension from one table — the workgroup's [.x]/[.y]/[.z] extents
+    against {!field:Backend_intf.max_workgroup_dims} (a separate hardware fact from the thread
+    product: CUDA caps [maxThreadsDim.z] at 64 while the product cap is 1024 — gh-ocannl-679), and
+    both 16-bit-capped grid dimensions, the [.y] extent ([grid.(1)], a blocktiled matmul's row-block
+    count) and the folded [.z] extent ([grid.(2)], the product of the Grid slots [>= 2] —
+    gh-ocannl-643), against {!field:Backend_intf.max_grid_yz}. [grid.(0)] is deliberately ungated:
+    it is 2^31-scale wherever hardware axes bind. Backend [compile] calls this after any
+    [?lowered_transform] (or the default annotator, which already respects the limits), turning
+    driver-level launch failures into early, named errors. A no-op for all-[None] limits. *)
 
 val check_hardware_limits_classified :
   name:string -> limits:Backend_intf.hardware_limits -> Low_level.optimized -> unit
 (** Internal candidate-facing variant of {!check_hardware_limits}; transports excess thread,
-    workgroup-memory, [.y]-grid or folded-[.z]-grid requests as typed
-    {!Schedule_outcome.Resource_exceeded} causes (the last two discriminated as
-    {!Schedule_outcome.Grid_y_extent} / {!Schedule_outcome.Grid_z_extent}). *)
+    workgroup-memory, per-workgroup-dimension, [.y]-grid or folded-[.z]-grid requests as typed
+    {!Schedule_outcome.Resource_exceeded} causes, one variant per launch dimension
+    ({!Schedule_outcome.Workgroup_x_extent} .. {!Schedule_outcome.Grid_z_extent}) so an autotune
+    search's declines group by the dimension that asked too much. *)

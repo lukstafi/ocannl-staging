@@ -60,3 +60,16 @@
  (preprocess
   (pps ppx_here ppx_ocannl))
  (modes exe))
+
+; Readback of the backend's queried device properties and derived hardware limits (gh-ocannl-684).
+; No positional geometry, so no bench_args; the backend comes from the library's own --ocannl_*
+; scan, and must be pinned explicitly (the bin/ cwd trap).
+(executable
+ (package neural_nets_lib)
+ (public_name ocannl_device_props)
+ (name device_props)
+ (modules device_props)
+ (libraries ocannl base stdio)
+ (preprocess
+  (pps ppx_sexp_conv))
+ (modes exe))

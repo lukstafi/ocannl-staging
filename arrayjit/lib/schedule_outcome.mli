@@ -24,14 +24,25 @@ type resource =
   | Workgroup_threads
   | Workgroup_memory
   | Thread_scratch
+  | Workgroup_x_extent
+  | Workgroup_y_extent
+  | Workgroup_z_extent
   | Grid_y_extent
   | Grid_z_extent
 [@@deriving sexp_of, compare, equal]
-(** What a {!Resource_exceeded} candidate asked too much of. The two grid dimensions are separate
-    variants although both are capped by the single {!Backend_intf.max_grid_yz}: they are shrunk by
-    different knobs — an over-[.y] launch by coarsening the row blocking, an over-[.z] one by
-    keeping batch loops serial — and this is the rejection key an autotune search groups declines
-    under ({!key_of_cause}). *)
+(** What a {!Resource_exceeded} candidate asked too much of. One variant per launch dimension,
+    although the grid pair shares the single {!Backend_intf.max_grid_yz} cap and the workgroup
+    triple shares one {!Backend_intf.max_workgroup_dims} array: the dimensions are shrunk by
+    different knobs — an over-[.y] grid by coarsening the row blocking, an over-[.z] grid by
+    keeping batch loops serial, an over-[.z] workgroup by re-tiling the outermost annotated
+    thread loop — and this is the rejection key an autotune search groups declines under
+    ({!key_of_cause}). The limit is shared where it is one hardware fact; the resource is distinct
+    because it is a schedule-side dimension.
+
+    {!Workgroup_x_extent} / {!Workgroup_y_extent} / {!Workgroup_z_extent} are per-dimension and
+    therefore not implied by {!Workgroup_threads}, which caps only the thread {e product}: on CUDA
+    a [2 x 2 x 128] workgroup is 512 threads (legal) with a [.z] of 128 against a cap of 64
+    (gh-ocannl-679). *)
 
 type severity = Expected | Compiler_bug [@@deriving sexp_of, compare, equal]
 

@@ -115,6 +115,36 @@ type hardware_limits = {
   max_workgroup_memory_bytes : int option;
       (** Capacity in bytes of the workgroup-shared memory (CUDA [__shared__] / Metal
           [threadgroup]); [None] when the backend imposes no limit. *)
+  max_workgroup_dims : (int * int * int) option;
+      (** Per-dimension upper bounds on the launch's workgroup shape — the caps on [.x], [.y] and
+          [.z] of {!Low_level.launch_dims}' [block], in that order. Beside, not
+          instead of, {!field-max_threads_per_workgroup}: that one caps the {e product}, and the
+          two are not the same fact. CUDA's [maxThreadsDim] is [(1024, 1024, 64)] — the [.z]
+          component is 16x smaller than the product cap — so a workgroup of [2 x 2 x 128] has a
+          perfectly legal 512-thread product and is still an invalid launch configuration
+          (gh-ocannl-679). [Workgroup] slots are capped at 3 and the innermost binds [.x], so the
+          outermost annotated loop's extent lands on [.z] directly; no fold is involved.
+
+          Unlike {!field-max_grid_yz} this carries all three bounds rather than one shared one,
+          because here the dimensions genuinely differ: on CUDA [.z] is the odd one out, while HIP
+          (queried [max_threads_dim]) and Metal ([maxThreadsPerThreadgroup]'s three components)
+          report three equal values. [None] on the C backends, which render annotated loops
+          serially.
+
+          A tuple rather than an [int array], on two independent grounds. It is the shape
+          {!field-mma_tile} already uses for a 3-D quantity here; and it is {e immutable}, which
+          this record needs from every field it has. The GPU backends memoize their
+          [hardware_limits] behind a [lazy] and [Context.hardware_limits] returns that record
+          itself, so one mutable cell anywhere in it would let a caller deriving tighter limits for
+          a custom schedule write through into the process-wide singleton — after which compiles
+          reject legal kernels or admit illegal ones, with nothing to point at. A tuple also makes
+          the arity exactly the three [Workgroup] slots, so no reader has to bounds-check a length
+          the type does not promise.
+
+          Enforced pre-driver by [Schedule.check_hardware_limits_classified] (as
+          [Schedule_outcome.Workgroup_x_extent] / [_y_] / [_z_extent]); [Schedule.default_gpu] and
+          [Schedule.zero_expansion] clamp their block size against the [.x] entry too, so the gate
+          is a backstop rather than the first line of defence. *)
   max_grid_yz : int option;
       (** Upper bound on {e each} of the launch's [.y] and [.z] grid dimensions: the row-block
           count ([grid.(1)]) and the folded batch-extent product ([grid.(2)], the dimension [Grid]
@@ -192,6 +222,7 @@ let no_hardware_limits =
   {
     max_threads_per_workgroup = None;
     max_workgroup_memory_bytes = None;
+    max_workgroup_dims = None;
     max_grid_yz = None;
     mma = None;
     simd_vector_bytes = 0;

@@ -397,4 +397,46 @@ let () =
             Ir.Schedule_outcome.Resource_exceeded
               { resource = Ir.Schedule_outcome.Grid_y_extent; _ } ) ->
         true
+    | exception _ -> false);
+
+  (* The same gate one axis kind over: the WORKGROUP's per-dimension caps (gh-ocannl-679), which
+     [max_threads_per_workgroup] does not imply because it caps only the thread product. The
+     blocktile seed launches two Workgroup dimensions of [bm/tm] x [bn/tn] threads, so its [.y]
+     entry is load-bearing on a schedule the seeding path actually produces — [launch_dim_gate.ml]
+     covers the three-dimensional case (CUDA's [.z] cliff) on a hand-built nest, since no in-tree
+     annotator emits three nested Workgroup loops. The product cap here is set to exactly the
+     seed's own product, so the product row can never be what fires. *)
+  let sblock = sdims.LL.block in
+  let wg_limits dims =
+    {
+      Ir.Backend_intf.no_hardware_limits with
+      max_threads_per_workgroup = Some (Array.fold sblock ~init:1 ~f:( * ));
+      max_workgroup_dims = Some dims;
+    }
+  in
+  p "limit gate: the blocktile seed's workgroup is 2-D — its .y thread extent exceeds 1"
+    (sblock.(1) > 1);
+  p "limit gate: per-dimension caps at the seed's own workgroup shape pass"
+    (match
+       Sched.check_hardware_limits_classified ~name:"qkv_wg"
+         ~limits:(wg_limits (sblock.(0), sblock.(1), sblock.(2)))
+         os
+     with
+    | () -> true
+    | exception _ -> false);
+  p
+    "limit gate: a .y workgroup cap below the seed's extent is a typed Workgroup_y_extent, though \
+     the thread product is legal"
+    (match
+       Sched.check_hardware_limits_classified ~name:"qkv_wg"
+         ~limits:(wg_limits (sblock.(0), sblock.(1) - 1, sblock.(2)))
+         os
+     with
+    | () -> false
+    | exception
+        Ir.Schedule_outcome.Cause_at
+          ( _,
+            Ir.Schedule_outcome.Resource_exceeded
+              { resource = Ir.Schedule_outcome.Workgroup_y_extent; _ } ) ->
+        true
     | exception _ -> false)
