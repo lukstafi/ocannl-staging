@@ -3307,12 +3307,20 @@
   (diff agent_notes_structure.expected agent_notes_structure.actual)))
 
 (test
+ ; The numerics keys are declared because this test READS them, not merely because a kernel does:
+ ; the accumulator-residency claim asks Numerics.cpu_compute_prec which reference the policy
+ ; selects, and Context.hardware_limits which fp16 arithmetic the target has, so all three change
+ ; the required baseline. Undeclared, dune would serve the previous run's result across a change of
+ ; any of them and the policy probe would silently not rerun (gh-ocannl-628).
  (name reduction_forms)
  (package neural_nets_lib)
  (deps
   (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
-  (env_var OCANNL_BACKEND))
+  (env_var OCANNL_BACKEND)
+  (env_var OCANNL_NARROW_COMPUTE_F32)
+  (env_var OCANNL_FP16_ARITHMETIC)
+  (env_var OCANNL_CC_FP16_ARITHMETIC))
  (modules reduction_forms)
  (libraries base ocannl stdio arrayjit.verdict ll_test test_utils)
  (preprocess

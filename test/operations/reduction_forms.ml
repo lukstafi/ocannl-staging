@@ -137,6 +137,18 @@ let per_step_ref ~terms prec =
 
 let precs = [ ("f32", Ops.single); ("bf16", Ops.bfloat16); ("f16", Ops.half) ]
 
+(* One root context for the whole run: [Context.compile] forks the lineage per compile, so members
+   do not observe each other's placement decisions. It is also what answers the target question
+   below, so it is created before the policy is resolved rather than at the first compile. *)
+let base_ctx = lazy (Context.auto ())
+
+(* Whether this target's fp16 arithmetic is genuinely 16-bit. The CC backend's hardware limits carry
+   [Cc_backend.has_native_fp16_arithmetic ()] verbatim (schedulers.ml), which is the same value
+   [Cc_backend.accum_prec] passes to [Numerics.cpu_compute_prec] — so the resolution below is the
+   backend's own, not an approximation of it. *)
+let native_fp16 =
+  lazy (Context.hardware_limits (Lazy.force base_ctx)).Ir.Backend_intf.native_fp16_arithmetic
+
 (* {1 Which reference the backend's policy selects}
 
    A baseline claim of the form "the executed value is ONE OF the two host references" cannot fail
@@ -147,10 +159,11 @@ let precs = [ ("f32", Ops.single); ("bf16", Ops.bfloat16); ("f16", Ops.half) ]
    independent of anything this run compiled or executed.
 
    The CPU arm calls the library's own resolution — [Numerics.cpu_compute_prec] is verbatim what
-   [Cc_backend.accum_prec] is bound to. Its [native_fp16_arithmetic] argument is a property of the
-   compilation target that a test cannot see, so it is asked BOTH ways: where the two answers agree
-   the resolution is decided regardless, and where they differ (fp16 storage with the
-   [fp16_arithmetic] policy on) this says so instead of guessing.
+   [Cc_backend.accum_prec] is bound to — and passes it the target's real answer, taken from
+   {!native_fp16}. An earlier draft asked the question both ways and reported [Undecided] where they
+   differed, which left exactly the native-fp16 configuration unverified while every member went on
+   comparing against the same unchecked baseline (Codex P2, round 4). The capability is exposed, so
+   there is nothing to be undecided about.
 
    The GPU arms restate their backends' [accum_prec], and the restatement is the point rather than
    duplication to be refactored away: a table derived FROM the backend would agree with it by
@@ -174,13 +187,8 @@ let expected_residency prec =
   let of_resolved resolved = if same_prec resolved prec then At_storage else Wider in
   let has name = String.is_substring backend_name ~substring:name in
   if on_cpu then
-    let native = Numerics.cpu_compute_prec ~native_fp16_arithmetic:true prec
-    and emulated = Numerics.cpu_compute_prec ~native_fp16_arithmetic:false prec in
-    if same_prec native emulated then of_resolved native
-    else
-      Undecided
-        "the fp16_arithmetic policy is on, and whether this target's arithmetic is genuinely \
-         16-bit is not visible from a test"
+    of_resolved
+      (Numerics.cpu_compute_prec ~native_fp16_arithmetic:(Lazy.force native_fp16) prec)
   else if has "metal" then match prec with Ops.Fp8_prec _ -> Wider | _ -> At_storage
   else if has "cuda" then
     match prec with
@@ -659,10 +667,6 @@ let form_of reading =
 
 (* {1 Executing a member} *)
 
-(* One root context for the whole run: [Context.compile] forks the lineage per compile, so members
-   do not observe each other's placement decisions. *)
-let base_ctx = lazy (Context.auto ())
-
 let execute ~name ~(prog : prog) ~(sched : Sched.schedule) =
   (* The launch parameters have to reach BOTH halves: [LL.optimize]'s walk asserts that every
      symbol it meets is in scope (a runtime-extent guard mentions one that no loop binds), and
@@ -1076,6 +1080,18 @@ let () =
   p "the coverage samples name distinct constructors"
     (distinct (List.map optop_samples ~f:(fun op -> constructor_name (Sched.sexp_of_optop op)))
     && distinct (List.map axis_samples ~f:(fun ty -> constructor_name (LL.sexp_of_axis_type ty))))
+
+(* The table's VALUE claims follow the numerics policy wherever it goes — that is what
+   {!expected_residency} is for. Its FORM claims do not: whether the SIMD reduction rendering fires
+   for a narrow storage precision is itself policy-dependent (with [narrow_compute_f32] off, a bf16
+   Vectorized reduction declines to the localizing peel instead), and modelling that per member
+   would be a wider claim than this table makes. So the premise is stated rather than assumed: under
+   a non-default policy the forms below are not the ones to expect, and this says so in one line
+   instead of leaving four members to fail obscurely. *)
+let () =
+  let policy = Numerics.get () in
+  p "the numerics policy is the default the member table's forms are stated for"
+    (policy.Numerics.narrow_compute_f32 && not policy.Numerics.fp16_arithmetic)
 
 let () =
   Stdio.printf "reduction: out[%d] = sum of %d terms, hand-built Low_level, %d members\n" rows cols
