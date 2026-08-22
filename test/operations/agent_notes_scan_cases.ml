@@ -45,6 +45,9 @@ let structure_cases =
       "# Title\n\n- A fact with its issue named (gh-ocannl-406.)\n",
       [] );
     ("a bullet ending in bold", "# Title\n\n- A fact that ends **emphatically.**\n", []);
+    ( "a bullet ending in markup behind a space",
+      "# Title\n\n- A fact ends. `\n",
+      [] );
     ("a bullet ending in a code span", "# Title\n\n- A fact naming `Ops.promote_prec`.\n", []);
     ( "a bullet ending in an identifier and no punctuation",
       "# Title\n\n- A fact that trails off into `Ops.promote_prec`\n",
@@ -171,6 +174,9 @@ let structure_cases =
       [ "bullet-integrity @ f.md:3"; "bullet-integrity @ f.md:4"; "bullet-integrity @ f.md:5" ] );
     ( "prose at column zero directly under a bullet",
       "# Title\n\n- A fact follows:\nthe omitted continuation.\n",
+      [ "bullet-integrity @ f.md:4" ] );
+    ( "a lazy continuation whose first column is inert",
+      "# Title\n\n- A fact ends. `\ncode` continues.\n",
       [ "bullet-integrity @ f.md:4" ] );
     ( "a blank line makes the same prose a paragraph",
       "# Title\n\n- A fact follows:\n\nAn ordinary paragraph.\n",
@@ -407,6 +413,25 @@ let index_cases =
           file "- A fact about `Widget`, showing <!--\n  bar\n  --> in passing.\n") ],
       [ "bullet-integrity @ agent-notes/a.md:5"; "bullet-integrity @ agent-notes/b.md:5";
         "no-repetition @ agent-notes/b.md:5" ] );
+    ( "a backlink carrying a link title",
+      index [ row "a.md" "the `Widget` seam" ],
+      [ ("agent-notes/a.md",
+          "# A file\n\nSee the [index](../agent-notes.md \"Agent notes\").\n\n- A fact about `Widget`.\n") ],
+      [] );
+    ( "a backlink whose destination is angle-bracketed",
+      index [ row "a.md" "the `Widget` seam" ],
+      [ ("agent-notes/a.md",
+          "# A file\n\nSee the [index](<../agent-notes.md>).\n\n- A fact about `Widget`.\n") ],
+      [] );
+    ( "an escaped comment opener starts no comment",
+      index [ row "a.md" "the `Widget` seam" ],
+      [ ("agent-notes/a.md",
+          "# A file\n\nProse \\<!--[index](../agent-notes.md)-->\n\n- A fact about `Widget`.\n") ],
+      [] );
+    ( "a hook padded to carry a literal backtick",
+      "# Agent notes\n\nAn index.\n\n| File | Covers |\n| --- | --- |\n| [a.md](agent-notes/a.md) | the `` `Widget` `` seam |\n",
+      [ ("agent-notes/a.md", file "- A fact about `Widget`.\n") ],
+      [] );
     ( "a backlink whose closing parenthesis is escaped",
       index [ row "a.md" "the `Widget` seam" ],
       [ ("agent-notes/a.md",

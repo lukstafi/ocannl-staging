@@ -298,7 +298,7 @@ let inert_by_line contents =
                 start := !i;
                 state := In_code len;
                 i := !i + len)
-              else if at line !i "<!--" then (
+              else if at line !i "<!--" && not (escaped_at line !i) then (
                 comments := lineno :: !comments;
                 start := !i;
                 state := In_comment;
@@ -450,10 +450,16 @@ let terminators = [ '.'; '!'; '?'; ':'; ';' ]
     [agent_notes_structure.ml], where an entry has to name the bullet and say why. *)
 let bullet_text_is_terminated text =
   let text = String.rstrip text in
+  (* Whitespace comes off with the markup, not only before it: ["a fact ends. `"] -- period, space,
+     a literal backtick -- is a finished sentence, and stripping the backtick to leave a trailing
+     space read it as unfinished. *)
   let rec strip s =
+    let s = String.rstrip s in
     match String.length s with
     | 0 -> s
-    | n -> if List.mem closing_markup s.[n - 1] ~equal:Char.equal then strip (String.prefix s (n - 1)) else s
+    | n ->
+        if List.mem closing_markup s.[n - 1] ~equal:Char.equal then strip (String.prefix s (n - 1))
+        else s
   in
   let s = strip text in
   (not (String.is_empty s)) && List.mem terminators s.[String.length s - 1] ~equal:Char.equal
@@ -683,8 +689,18 @@ let parse_file ~file contents =
       else if is_blank line then close_all ()
       else if not marker_is_text then
         (* Text, with no structural marker of its own: it continues an open bullet, or it is prose
-           and closes the list. *)
-        if indent_of line = 0 then close_all ()
+           and closes the list. At column zero under an open bullet it is a LAZY CONTINUATION, the
+           same construct the marker path reports -- and this path was closing the stack silently,
+           so the rule went inert exactly where an inert prefix hid the marker (Codex P2, round 9).
+           The first line of such a bullet reads as terminated once the unmatched delimiter is
+           stripped, so nothing else would have caught it. *)
+        if indent_of line = 0 then (
+          if not (List.is_empty !stack) then
+            bad lineno
+              "prose at column zero directly under a bullet, which Markdown reads as a lazy \
+               continuation of it: separate it with a blank line, or indent it two spaces to make \
+               it the bullet's own";
+          close_all ())
         else (
           match !stack with
           | [] -> ()
@@ -988,10 +1004,25 @@ type index_row = {
   hooks : string list;
 }
 
+(** A code span's RENDERED content: the delimiter runs removed, and then one padding space from each
+    side. The padding is how a span carries a literal backtick — [``` `` `foo` `` ```] renders as
+    [`foo`] — and returning it as part of the hook made [index-agreement] reject a file that
+    contains the hook exactly as rendered (Codex P2, round 9). A span of nothing but spaces keeps
+    them, per the same rule. *)
+let code_span_content s =
+  let s = String.strip s ~drop:(Char.equal '`') in
+  let n = String.length s in
+  if
+    n >= 2
+    && Char.equal s.[0] ' '
+    && Char.equal s.[n - 1] ' '
+    && not (String.for_all s ~f:(Char.equal ' '))
+  then String.sub s ~pos:1 ~len:(n - 2)
+  else s
+
 let backticked cell =
   List.filter_map (code_spans cell) ~f:(fun (start, stop) ->
-      let s = String.sub cell ~pos:start ~len:(stop - start) in
-      let s = String.strip s ~drop:(Char.equal '`') in
+      let s = code_span_content (String.sub cell ~pos:start ~len:(stop - start)) in
       if String.is_empty (String.strip s) then None else Some s)
 
 (** GitHub's heading slug: lowercased, spaces to hyphens, other punctuation dropped — and
@@ -1008,6 +1039,19 @@ let slug heading =
          else None)
   |> String.of_list
 
+
+(** A link's DESTINATION, separated from its optional title. [(../agent-notes.md "Agent notes")] is
+    a perfectly ordinary link, and comparing the whole parenthesised text against the index filename
+    reported a note unreachable over a link that navigates there (Codex P2, round 9). A destination
+    containing spaces has to be written in angle brackets, which is the other form handled here. *)
+let link_destination inside =
+  let inside = String.strip inside in
+  match (String.chop_prefix inside ~prefix:"<", String.index inside '>') with
+  | Some _, Some close -> String.sub inside ~pos:1 ~len:(close - 1)
+  | _ -> (
+      match String.lfindi inside ~f:(fun _ c -> Char.equal c ' ' || Char.equal c '\t') with
+      | Some i -> String.prefix inside i
+      | None -> inside)
 
 (** The NAVIGABLE links of a line: [\[text\](target)] outside inline code, outside HTML comments, and
     not an image ([!\[alt\](src)] renders a picture, not a way back). A substring test for
@@ -1049,7 +1093,7 @@ let markdown_links ?spans line =
           | Some rparen when not (in_any_span spans rparen) ->
               let text = String.sub line ~pos:(i + 1) ~len:(close - i - 1) in
               let target =
-                String.sub line ~pos:(close + 2) ~len:(rparen - close - 2)
+                link_destination (String.sub line ~pos:(close + 2) ~len:(rparen - close - 2))
               in
               let acc = if image then acc else (text, target) :: acc in
               go (rparen + 1) acc

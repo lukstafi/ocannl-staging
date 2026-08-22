@@ -3,6 +3,7 @@ ok: bullets -- a bullet a merge cut in half
 ok: bullets -- a bullet ending in a colon
 ok: bullets -- a bullet ending in a parenthesis after the period
 ok: bullets -- a bullet ending in bold
+ok: bullets -- a bullet ending in markup behind a space
 ok: bullets -- a bullet ending in a code span
 ok: bullets -- a bullet ending in an identifier and no punctuation
 ok: bullets -- a nested bullet with its own continuations
@@ -42,6 +43,7 @@ ok: bullets -- an HTML comment the file never closes
 ok: bullets -- a block quote nested under a bullet
 ok: bullets -- an index whose rows drifted four spaces right
 ok: bullets -- prose at column zero directly under a bullet
+ok: bullets -- a lazy continuation whose first column is inert
 ok: bullets -- a blank line makes the same prose a paragraph
 ok: bullets -- a heading written without a space after the hashes
 ok: bullets -- a comparison at the start of a continuation is not a quote
@@ -125,6 +127,10 @@ ok: index -- an anchor naming a heading that only appears inside a comment
 ok: index -- an index row with a third cell
 ok: index -- two bullets differing only inside a multiline code span
 ok: index -- two bullets differing only inside an HTML comment are one bullet
+ok: index -- a backlink carrying a link title
+ok: index -- a backlink whose destination is angle-bracketed
+ok: index -- an escaped comment opener starts no comment
+ok: index -- a hook padded to carry a literal backtick
 ok: index -- a backlink whose closing parenthesis is escaped
 ok: index -- a backlink whose closing bracket is escaped
 ok: index -- a backlink between escaped backticks is navigable
