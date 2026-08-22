@@ -187,6 +187,18 @@ ok: backend marker placement -- on an executable, which runs nothing
 ok: backend marker placement -- a subdir's stanzas keep their own markers
 ok: backend marker placement -- one in the subdir but in no stanza of it
 ok: backend marker placement -- the declaration and the marker are read independently
+ok: backend rule -- a plain run declaring neither is reported
+ok: backend rule -- a shell action declaring neither is reported, and the floor says so too
+ok: backend rule -- the same rule carrying a marker passes
+ok: backend rule -- and one declaring the variable instead
+ok: backend rule -- both at once stays contradictory through a shell
+ok: backend rule -- a system action is the same action
+ok: backend rule -- a test running its own binary through a shell
+ok: backend rule -- a run under an unresolvable chdir is reported, with a floor under it
+ok: backend rule -- and passes with a marker
+ok: backend rule -- a PATH tool under an unresolvable chdir is counted by neither reader
+ok: backend rule -- nor is a shell line where no stanza runs anything
+ok: backend rule -- a marker on a library that runs nothing is still misplaced
 ok: backend marker sentinel -- in a comment
 ok: backend marker sentinel -- inside a quoted argument, where it declares nothing
 ok: backend marker sentinel -- none at all

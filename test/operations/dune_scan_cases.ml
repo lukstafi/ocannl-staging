@@ -851,6 +851,93 @@ let marker_placement_cases =
       [ "test t* {none}" ] );
   ]
 
+(* gh-ocannl-659's rule itself, put to stanzas this repository does not contain.
+   [Scan.backend_rule_of] is the decision `env_var_deps` acts on, and until gh-ocannl-690 the
+   shapes below were where the two readers disagreed: a rule that runs its test through a shell,
+   and one under a `chdir` no reader can resolve. The rule always applied to them -- the walk places
+   their sites -- but nothing independent vouched for that, so a walk that stopped seeing them would
+   have looked exactly like a file with nothing to check.
+
+   Rendered as "<head> <verdict>", with "+floor" appended when the SECOND reader also sees the
+   stanza running something. The pairing is the point: "reported, +floor" is a hole named by both
+   readers, and "reported, no floor" is one named by the walk alone -- which is the state a blind
+   walk can quietly leave. *)
+let render_rule (m : Scan.marked_stanza) =
+  let verdict =
+    match Scan.backend_rule_of m with
+    | Scan.Runs_nothing -> "runs nothing"
+    | Scan.Marker_without_run _ -> "a marker on a stanza that runs nothing"
+    | Scan.Declares_variable -> "declares the variable"
+    | Scan.Names_backend (_, b) -> "names " ^ b.Scan.backend
+    | Scan.Declares_and_names (_, b) -> "declares AND names " ^ b.Scan.backend
+    | Scan.Names_twice _ -> "names a backend twice"
+    | Scan.Names_neither -> "REPORTED: declares neither"
+  in
+  Printf.sprintf "%s %s%s" m.Scan.marked_head verdict
+    (if m.Scan.marked_raw_subject then " +floor" else "")
+
+let backend_rule_cases =
+  [
+    (* The shape the rule is built for, as a baseline: a rule that runs an executable and says
+       nothing about the backend. *)
+    ( "a plain run declaring neither is reported",
+      {dune|(rule (deps ocannl_config) (action (run %{dep:probe.exe})))|dune},
+      [ "rule REPORTED: declares neither +floor" ] );
+    (* And the same thing said through a shell. Before gh-ocannl-690 this line read
+       "REPORTED: declares neither" with no floor under it. *)
+    ( "a shell action declaring neither is reported, and the floor says so too",
+      {dune|(rule (deps ocannl_config) (action (bash "./probe.exe")))|dune},
+      [ "rule REPORTED: declares neither +floor" ] );
+    ( "the same rule carrying a marker passes",
+      {dune|(rule
+ ; ocannl-backend: cc -- runs the cc probe through a shell
+ (deps ocannl_config)
+ (action (bash "./probe.exe")))|dune},
+      [ "rule names cc +floor" ] );
+    ( "and one declaring the variable instead",
+      {dune|(rule (deps ocannl_config (env_var OCANNL_BACKEND)) (action (bash "./probe.exe")))|dune},
+      [ "rule declares the variable +floor" ] );
+    ( "both at once stays contradictory through a shell",
+      {dune|(rule
+ ; ocannl-backend: cc -- runs the cc probe through a shell
+ (deps ocannl_config (env_var OCANNL_BACKEND))
+ (action (bash "./probe.exe")))|dune},
+      [ "rule declares AND names cc +floor" ] );
+    ( "a system action is the same action",
+      {dune|(rule (deps ocannl_config) (action (system "./probe.exe")))|dune},
+      [ "rule REPORTED: declares neither +floor" ] );
+    ( "a test running its own binary through a shell",
+      {dune|(test (name t) (deps ocannl_config) (action (bash "./t.exe")))|dune},
+      [ "test REPORTED: declares neither +floor" ] );
+    (* A `chdir` the text cannot resolve moves where the process runs and nothing else: the rule
+       still applies, and now the floor still holds. *)
+    ( "a run under an unresolvable chdir is reported, with a floor under it",
+      {dune|(rule (deps ocannl_config) (action (chdir %{workspace_root} (run %{dep:probe.exe}))))|dune},
+      [ "rule REPORTED: declares neither +floor" ] );
+    ( "and passes with a marker",
+      {dune|(rule
+ ; ocannl-backend: none -- copies a file, links no backend
+ (deps ocannl_config)
+ (action (chdir %{workspace_root} (run %{dep:probe.exe}))))|dune},
+      [ "rule names none +floor" ] );
+    (* The negative control on the other side: over-claiming is as bad as under-claiming, because a
+       floor that sees a stanza the walk does not is a floor that fails a correct scan. A PATH tool
+       is external wherever a `chdir` sends it, so neither reader counts it. *)
+    ( "a PATH tool under an unresolvable chdir is counted by neither reader",
+      {dune|(rule (action (chdir %{workspace_root} (run python3 x.py))))|dune},
+      [ "rule runs nothing" ] );
+    ( "nor is a shell line where no stanza runs anything",
+      {dune|(library (name l) (preprocess (action (bash "./pp.exe"))))|dune},
+      [ "library runs nothing" ] );
+    (* A marker on a stanza that runs nothing declares nothing -- including one whose only action is
+       a shell line the walk does place. Kept here so the arm cannot be reached by accident. *)
+    ( "a marker on a library that runs nothing is still misplaced",
+      {dune|(library (name l)
+ ; ocannl-backend: none -- links no backend
+ (preprocess (action (bash "./pp.exe"))))|dune},
+      [ "library a marker on a stanza that runs nothing" ] );
+  ]
+
 (* The dumb reading against the placed one. A marker written where the comment lexer does not look
    -- into a quoted argument, into a field -- is the difference between the two counts, which is the
    shape of "the author declared something the check did not read". *)
@@ -917,6 +1004,14 @@ let () =
           []
       in
       check ("backend marker placement -- " ^ name) expected found);
+  List.iter backend_rule_cases ~f:(fun (name, source, expected) ->
+      let found =
+        try List.map (Scan.marked_stanzas source) ~f:render_rule
+        with exn ->
+          fail "backend rule -- %s: the scan raised: %s" name (Exn.to_string exn);
+          []
+      in
+      check ("backend rule -- " ^ name) expected found);
   List.iter sentinel_counting_cases ~f:(fun (name, source, (in_text, in_comments)) ->
       let found =
         Printf.sprintf "%d in the text, %d in comments" (Scan.sentinel_occurrences source)

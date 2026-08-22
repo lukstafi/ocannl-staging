@@ -1476,6 +1476,64 @@ let marked_stanzas content =
   in
   List.concat (List.map2_exn raw parsed ~f:(go ""))
 
+(** How gh-ocannl-659's rule reads ONE stanza: whether it is subject to the rule, and which of the
+    two declarations it carries.
+
+    Only the DECISION lives here. The diagnostics stay with the check, which owns their wording and
+    their counters — what moves is the part that has to be put to a stanza the repository does not
+    contain, so that "a stanza running its test through [bash] and declaring nothing is reported"
+    can be asserted on synthetic text rather than inferred from the live tree (gh-ocannl-690; the
+    same shape gh-ocannl-603 asks for on [config_dep_completeness]'s resolution half). *)
+type backend_rule =
+  | Runs_nothing  (** not subject to the rule, and carrying no marker: nothing to say of it *)
+  | Marker_without_run of int
+      (** a marker, at that line, on a stanza that runs nothing — it declares nothing there *)
+  | Declares_variable  (** subject, and declares [(env_var OCANNL_BACKEND)] *)
+  | Names_backend of int * marker_body  (** subject, and carrying exactly one well-formed marker *)
+  | Declares_and_names of int * marker_body
+      (** subject, and carrying both — a stanza that names its backend has nothing for the variable
+          to invalidate *)
+  | Names_twice of int  (** subject, and carrying more than one marker: the line of the second *)
+  | Names_neither  (** subject, and carrying neither — the hole gh-ocannl-659 closed *)
+
+(** The markers a stanza encloses that announce themselves and do not parse, each with its line and
+    the comment's text.
+
+    Reported apart from {!backend_rule_of} rather than folded into it, because they are a different
+    failure: a marker the grammar declines is the check going blind to a declaration its author
+    believed they had made, and it can sit on a stanza whose other marker is perfectly well formed.
+    A malformed marker is NOT one of the markers {!backend_rule_of} counts — a stanza carrying only
+    one is reported both as malformed and as declaring neither, which is what is true of it. *)
+let malformed_markers stanza =
+  List.filter_map stanza.marked_comments ~f:(fun (line, text) ->
+      match parse_marker text with
+      | Some (Malformed why) -> Some (line, text, why)
+      | Some (Marker _) | None -> None)
+
+(** The lines of every comment in [stanza] that {!parse_marker} recognises AT ALL, well formed or
+    not — the population a check has to account for, so that a marker attributed to a stanza is not
+    then reported as sitting inside none. *)
+let marker_lines stanza =
+  List.filter_map stanza.marked_comments ~f:(fun (line, text) ->
+      Option.map (parse_marker text) ~f:(fun _ -> line))
+
+let backend_rule_of stanza =
+  let well_formed =
+    List.filter_map stanza.marked_comments ~f:(fun (line, text) ->
+        match parse_marker text with
+        | Some (Marker m) -> Some (line, m)
+        | Some (Malformed _) | None -> None)
+  in
+  let subject = not (List.is_empty stanza.marked_sites) in
+  match (subject, stanza.marked_declares_backend, well_formed) with
+  | false, _, (line, _) :: _ -> Marker_without_run line
+  | false, _, [] -> Runs_nothing
+  | true, _, _ :: (line, _) :: _ -> Names_twice line
+  | true, true, [ (line, m) ] -> Declares_and_names (line, m)
+  | true, true, [] -> Declares_variable
+  | true, false, [ (line, m) ] -> Names_backend (line, m)
+  | true, false, [] -> Names_neither
+
 (** Every comment in [content] that announces itself as a marker, with its line — the population
     {!marked_stanzas} has to account for. A marker the walk attributes to no stanza is one whose
     author believed they had declared something, so it is reported rather than passed over. *)

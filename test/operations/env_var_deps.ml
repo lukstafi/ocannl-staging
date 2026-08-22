@@ -196,6 +196,11 @@ let () =
   let by_file = ref [] in
   let placed_subjects = ref 0 in
   let subject_floor = ref 0 in
+  (* The stanzas the walk places and the second reader names nothing for -- the gap between the two
+     totals, itemised. The floor is a lower bound by design (see `Scan.raw_runs_something`), but a
+     bare "one short" says nothing about WHICH stanza is standing on the walk alone, and the class
+     it belongs to is what decides whether the gap is worth closing (gh-ocannl-690). *)
+  let unfloored = ref [] in
   (* Kept apart on purpose: a stanza declaring neither is the hole gh-ocannl-659 is about, while a
      marker the scan could not place is the scan going blind to it -- and a claim that conflated the
      two would pass while the second was true. *)
@@ -244,33 +249,23 @@ let () =
             Printf.sprintf "%s:%d, the %s %s" dune_file stanza.Scan.marked_line
               stanza.Scan.marked_head what
           in
-          let markers =
-            List.filter_map stanza.Scan.marked_comments ~f:(fun (line, text) ->
-                Option.map (Scan.parse_marker text) ~f:(fun marker -> (line, text, marker)))
-          in
-          List.iter markers ~f:(fun (line, _, _) -> attributed := line :: !attributed);
-          let subject = not (List.is_empty stanza.Scan.marked_sites) in
-          let declares = stanza.Scan.marked_declares_backend in
-          List.iter markers ~f:(function
-            | line, text, Scan.Malformed why ->
-                Int.incr xor_violations;
-                fail
-                  (Printf.sprintf
-                     "%s:%d has a `%s` comment that does not parse as a marker: %s. The line reads \
-                      `;%s`"
-                     dune_file line Scan.marker_sentinel why text)
-            | _ -> ());
-          let well_formed =
-            List.filter_map markers ~f:(function
-              | line, _, Scan.Marker m -> Some (line, m)
-              | _, _, Scan.Malformed _ -> None)
-          in
-          match (subject, declares, well_formed) with
+          (* The rule itself is [Scan.backend_rule_of]: this check owns the wording of the
+             diagnostics and the tallies, and the DECISION lives with the scan so that it can be put
+             to a stanza the repository does not contain (gh-ocannl-690). *)
+          List.iter (Scan.marker_lines stanza) ~f:(fun line -> attributed := line :: !attributed);
+          List.iter (Scan.malformed_markers stanza) ~f:(fun (line, text, why) ->
+              Int.incr xor_violations;
+              fail
+                (Printf.sprintf
+                   "%s:%d has a `%s` comment that does not parse as a marker: %s. The line reads \
+                    `;%s`"
+                   dune_file line Scan.marker_sentinel why text));
+          match Scan.backend_rule_of stanza with
           (* A marker on a stanza that runs nothing declares nothing. An `(executable)` has no
              `deps` field at all, which is why its companion rule is where both the `ocannl_config`
              dep and this marker go -- putting it on the executable reads as a declaration and is
              not one. *)
-          | false, _, (line, _) :: _ ->
+          | Scan.Marker_without_run line ->
               Int.incr xor_violations;
               fail
                 (Printf.sprintf
@@ -278,15 +273,15 @@ let () =
                     belongs on the stanza that RUNS it, which for an `(executable)` is its \
                     companion rule, the same placement as the `%s` dep"
                    where line Scan.config_file)
-          | false, _, [] -> ()
-          | true, _, _ :: (line, _) :: _ ->
+          | Scan.Runs_nothing -> ()
+          | Scan.Names_twice line ->
               Int.incr xor_violations;
               fail
                 (Printf.sprintf
                    "%s carries more than one backend marker (the second at line %d) -- one stanza \
                     runs on one backend, so say so once"
                    where line)
-          | true, true, [ (line, m) ] ->
+          | Scan.Declares_and_names (line, m) ->
               Int.incr xor_violations;
               fail
                 (Printf.sprintf
@@ -295,19 +290,19 @@ let () =
                     variable to invalidate, and a stanza that selects one has no business claiming \
                     otherwise. Keep whichever is true"
                    where Scan.backend_env_var line m.Scan.backend)
-          | true, true, [] ->
+          | Scan.Declares_variable ->
               Int.incr placed_subjects;
               any_declared := true;
               classification :=
                 Printf.sprintf "  %-58s declares %s" where Scan.backend_env_var :: !classification
-          | true, false, [ (_, m) ] ->
+          | Scan.Names_backend (_, m) ->
               Int.incr placed_subjects;
               List.iter (String.split m.Scan.backend ~on:',') ~f:(fun word ->
                   words := Set.add !words word);
               classification :=
                 Printf.sprintf "  %-58s %s -- %s" where m.Scan.backend m.Scan.reason
                 :: !classification
-          | true, false, [] ->
+          | Scan.Names_neither ->
               Int.incr placed_subjects;
               Int.incr xor_violations;
               fail
@@ -379,7 +374,14 @@ let () =
                  dune_file stanza.Scan.marked_line stanza.Scan.marked_head
                  (if String.is_empty stanza.Scan.marked_name then "<unnamed>"
                   else stanza.Scan.marked_name)));
-          if stanza.Scan.marked_raw_subject then Int.incr subject_floor);
+          if stanza.Scan.marked_raw_subject then Int.incr subject_floor
+          else if not (List.is_empty stanza.Scan.marked_sites) then
+            unfloored :=
+              Printf.sprintf "  %s:%d, the %s running %s" dune_file stanza.Scan.marked_line
+                stanza.Scan.marked_head
+                (String.concat ~sep:", "
+                   (List.map stanza.Scan.marked_sites ~f:(fun s -> s.Scan.name)))
+              :: !unfloored);
       by_file :=
         ( dune_file,
           (if !any_declared then [ "declares " ^ Scan.backend_env_var ] else [])
@@ -612,6 +614,15 @@ let () =
     (String.concat ~sep:"\n" (List.rev !classification));
   eprintf "Totals: %d such stanzas, against a raw-text floor of %d.\n" !placed_subjects
     !subject_floor;
+  (match List.rev !unfloored with
+  | [] -> eprintf "Every one of them has a second reader's floor under it.\n"
+  | unfloored ->
+      eprintf
+        "The %d standing on the walk alone -- a site is placed and the raw reader names nothing \
+         there:\n\
+         %s\n"
+        (List.length unfloored)
+        (String.concat ~sep:"\n" unfloored));
   printf "\n";
   Verdict.p
     "every stanza that runs an executable either declares the backend variable or says in place \
