@@ -266,8 +266,13 @@
   /* Local declarations and initialization. */
 
   /* Main logic. */
-  for (int32_t i9 = 0; i9 <= 7; ++i9) {
-    sacc[0] = (sacc[0] + sa[2*i9]);
+  {
+    float v1_sacc;
+    v1_sacc = sacc[0];
+    for (int32_t i9 = 0; i9 <= 7; ++i9) {
+      v1_sacc = (v1_sacc + sa[2*i9]);
+    }
+    sacc[0] = v1_sacc;
   }
 }
  void tile_mma_reg_kernel(
@@ -451,9 +456,13 @@
     if (i14 == 0) {
       for (int32_t i15 = 0; i15 <= 5; ++i15) {
         for (int32_t i16 = 0; i16 <= 28; ++i16) {
-          for (int32_t i17 = 0; i17 <= 4; ++i17) {
-            td2[(i15) * 29 + i16] =
-                (td2[(i15) * 29 + i16] + (ta2[(i15) * 5 + i17] * tb2[(i17) * 29 + i16]));
+          {
+            float v2_td2;
+            v2_td2 = td2[(i15) * 29 + i16];
+            for (int32_t i17 = 0; i17 <= 4; ++i17) {
+              v2_td2 = (v2_td2 + (ta2[(i15) * 5 + i17] * tb2[(i17) * 29 + i16]));
+            }
+            td2[(i15) * 29 + i16] = v2_td2;
           }
         }
       }

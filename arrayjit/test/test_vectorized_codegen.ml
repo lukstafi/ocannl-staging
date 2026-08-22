@@ -327,9 +327,11 @@ let () =
   Stdio.printf "\n";
 
   (* --- An accumulating body the explicit renderings decline (strided, non-contiguous contrib) must
-     fall back to a plain serial loop with NO vectorization pragma: the pragma would assert
-     iteration independence that the loop-carried accumulation does not satisfy. Under Pure_C_config
-     the pragmas are otherwise emitted (see the first kernel above). --- *)
+     fall back to a serial loop with NO vectorization pragma: the pragma would assert iteration
+     independence that the loop-carried accumulation does not satisfy. Under Pure_C_config the
+     pragmas are otherwise emitted (see the first kernel above). The fallback is the LOCALIZED
+     serial form (gh-ocannl-693) -- the accumulator is held in a scope local across the nest at
+     every precision -- which is orthogonal to the pragma question this kernel pins. --- *)
   let sa = make_sized 19 "sa" [| 16 |] in
   let sacc = make_sized 20 "sacc" [| 1 |] in
   let i = Idx.get_symbol () in
