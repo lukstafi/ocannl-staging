@@ -24,3 +24,11 @@ Uint4x32 round trip: PASS
 Uint4x32 mapped: PASS
 padded round trip: PASS
 mapped at unaligned offset: PASS
+  packed layout: a@0 b@8 c@40 d@41 e@73
+  paths: a mapped, b mapped, c mapped, d decoded, e decoded
+every ingestion bumps exactly the counter for the path it reports: true
+an element-aligned unpadded payload of a packed file is mapped: true
+a payload at an offset its element size does not divide is decoded: true
+a padded payload is decoded, whatever its offset: true
+declining the mapping decodes the same bytes into an equal array: true
+both paths reproduce the payloads they ingested: true

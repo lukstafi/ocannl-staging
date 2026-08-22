@@ -1038,6 +1038,65 @@ let read_payload_from_channel ?padding nd ic n_bytes =
   in
   apply_with_prec { f = read_elem } nd
 
+(** {2 *** Payload ingestion: mapped or decoded ***} *)
+
+(** Which path {!ingest_payload} took for one payload. The two produce equal values by
+    construction, so this -- and the running {!ingestion_counts} -- is the only way to observe
+    which one ran. *)
+type ingestion = Mapped | Decoded
+
+let mapped_count = Atomic.make 0
+let decoded_count = Atomic.make 0
+
+(** [(mapped, decoded)] payload counts since the start of the process: how many payloads
+    {!ingest_payload} wrapped as file mappings, and how many it decoded into fresh host buffers.
+    One pair for every reader that ingests through {!ingest_payload} -- checkpoints and
+    safetensors alike -- so a caller interested in a single file's split reads it before and after
+    that file's payloads. For tests, and for diagnosing a load that decodes more than expected. *)
+let ingestion_counts () = (Atomic.get mapped_count, Atomic.get decoded_count)
+
+(** Ingests one payload of a little-endian binary file: the [dims]-shaped, [prec]-typed region of
+    [nbytes] bytes at [byte_offset] of [ic], as a mapping of the file where that is
+    byte-equivalent (gh-ocannl-467, gh-ocannl-587) and otherwise as a fresh host buffer decoded
+    from the channel. Returns the array and which of the two ran; both are counted in
+    {!ingestion_counts}.
+
+    A mapping is byte-equivalent when the file's bytes {e are} the buffer's bytes. Three of the
+    four conditions are the caller's format speaking through the arguments: [?padding] means the
+    payload holds only the logical region, which {!read_payload_from_channel} has to scatter into
+    the padded buffer; an empty [dims] has no mapping to take; and [nbytes] must be exactly the
+    buffer, which also rejects a header claiming a byte length its dimensions and precision do not
+    add up to. The fourth is {!mappable_file_region}, the conditions the mapping itself imposes --
+    host byte order, non-emptiness, and element alignment of [byte_offset], which no format
+    guarantees for free: a packed layout puts a wide payload at an odd offset as soon as a narrow
+    one precedes it. [?mmap:false] declines mapping outright, for a caller that offers the choice.
+
+    The mapping is taken from the descriptor behind [ic] -- the channel the caller read the file's
+    header through -- and NOT from a fresh open of its path: a concurrent atomic save would put a
+    different inode at that name, and the offsets, extents and precisions being mapped describe
+    the file this read started on. The mapping outlives the descriptor, and the directory entry,
+    so nothing here depends on the file staying put; it is the returned array that owns it, and
+    the caller's remaining duty is to keep whatever holds [ic] alive across this call. *)
+let ingest_payload ?padding ?(mmap = true) ~(debug : string) (prec : Ops.prec)
+    ~(dims : int array) ~(byte_offset : int) ~(nbytes : int) (ic : Stdlib.in_channel) =
+  let numel = Array.fold dims ~init:1 ~f:( * ) in
+  if
+    mmap && Option.is_none padding
+    && (not (Array.is_empty dims))
+    && nbytes = numel * Ops.prec_in_bytes prec
+    && mappable_file_region ~prec ~byte_offset ~nbytes
+  then begin
+    Atomic.incr mapped_count;
+    (map_file_array prec ~dims ~byte_offset (Unix.descr_of_in_channel ic), Mapped)
+  end
+  else begin
+    Atomic.incr decoded_count;
+    let nd = create_array ~debug prec ~dims ~padding in
+    Stdlib.seek_in ic byte_offset;
+    read_payload_from_channel ?padding:(Option.map ~f:fst padding) nd ic nbytes;
+    (nd, Decoded)
+  end
+
 (** Byte-for-byte comparison of logical payloads of two ndarrays. Both must have the same precision
     and logical dimensions. *)
 let payloads_equal ?padding nd1 nd2 =

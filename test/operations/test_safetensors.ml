@@ -149,9 +149,9 @@ let () =
     let st = Safetensors.read path in
     let read =
       List.map (("empty", "F32", Ir.Ops.single) :: dtypes) ~f:(fun (name, _, prec) ->
-          let m0, c0 = Safetensors.ingestion_counts () in
+          let m0, c0 = Ir.Ndarray.ingestion_counts () in
           let values = Ir.Ndarray.retrieve_flat_values (Safetensors.to_ndarray st name) in
-          let m1, c1 = Safetensors.ingestion_counts () in
+          let m1, c1 = Ir.Ndarray.ingestion_counts () in
           let { Safetensors.offset; nbytes; _ } = Option.value_exn (Safetensors.info st name) in
           (* The decision has to be exactly "the payload's file position is element-aligned". *)
           let expected = nbytes > 0 && (buffer_start + offset) % Ir.Ops.prec_in_bytes prec = 0 in
