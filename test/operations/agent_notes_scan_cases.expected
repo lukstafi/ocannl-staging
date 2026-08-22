@@ -1,0 +1,154 @@
+ok: bullets -- a flat list of finished bullets
+ok: bullets -- a bullet a merge cut in half
+ok: bullets -- a bullet ending in a colon
+ok: bullets -- a bullet ending in a parenthesis after the period
+ok: bullets -- a bullet ending in bold
+ok: bullets -- a bullet ending in markup behind a space
+ok: bullets -- a bullet ending in a code span
+ok: bullets -- a bullet ending in an identifier and no punctuation
+ok: bullets -- a nested bullet with its own continuations
+ok: bullets -- a nested list where parent and child are both cut short
+ok: bullets -- an indented line at the parent's depth while a nested bullet is open
+ok: bullets -- a second paragraph of a bullet, after a blank line
+ok: bullets -- a second paragraph that is itself cut short
+ok: bullets -- an indented line continuing nothing
+ok: bullets -- a continuation indented past its bullet
+ok: bullets -- a nested bullet under no bullet at all
+ok: bullets -- a bullet written with a star
+ok: bullets -- an empty bullet
+ok: bullets -- a tab in the indentation
+ok: bullets -- an ordered item at column zero
+ok: bullets -- an ordered item written with a parenthesis
+ok: bullets -- a bullet-looking line inside a multiline code span
+ok: bullets -- a bullet-looking line inside an HTML comment
+ok: bullets -- a table-looking line inside a multiline code span
+ok: bullets -- a bullet marker inside the code closing a span
+ok: bullets -- a marker inside a closing span, under an open bullet
+ok: bullets -- a long digit run is prose, not an ordered item
+ok: bullets -- nine digits is still an ordered item
+ok: bullets -- a prose line that is a complete triple-backtick span
+ok: bullets -- a real fence is still a fence
+ok: bullets -- an autolink at column zero is not an HTML block
+ok: bullets -- a comparison at column zero is not an HTML block either
+ok: bullets -- a real HTML block still is one
+ok: bullets -- a thematic break nested under a bullet
+ok: bullets -- an ordered item written with a tab
+ok: bullets -- a star marker written with a tab
+ok: bullets -- a dash marker written with a tab
+ok: bullets -- an ordered item indented under a bullet
+ok: bullets -- a number that merely opens a sentence
+ok: bullets -- a fenced block, whose contents are not bullets
+ok: bullets -- a fence that is never closed
+ok: bullets -- a block quote
+ok: bullets -- an unmatched backtick run is literal text, not an unclosed span
+ok: bullets -- an HTML comment the file never closes
+ok: bullets -- a block quote nested under a bullet
+ok: bullets -- an index whose rows drifted four spaces right
+ok: bullets -- prose at column zero directly under a bullet
+ok: bullets -- a lazy continuation whose first column is inert
+ok: bullets -- a blank line makes the same prose a paragraph
+ok: bullets -- a heading written without a space after the hashes
+ok: bullets -- a comparison at the start of a continuation is not a quote
+ok: bullets -- an HTML block at column zero
+ok: bullets -- an angle bracket inside a continuation is ordinary text
+ok: bullets -- a thematic break
+ok: bullets -- a third nesting level
+ok: bullets -- prose at column zero between lists
+ok: bullets -- a heading closes the list above it
+ok: tables -- a well-formed table
+ok: tables -- a row wrapped across two physical lines
+ok: tables -- the wrapped tail below a table that itself closes
+ok: tables -- a row with a cell too few
+ok: tables -- a row with a cell too many
+ok: tables -- a header with no delimiter row
+ok: tables -- a header and a delimiter and no rows
+ok: tables -- a pipe inside a code span is not a cell separator
+ok: tables -- a pipe inside a code span below a table
+ok: tables -- an escaped pipe is not a cell separator either
+ok: tables -- a table indented three spaces is still a table
+ok: tables -- a table indented four spaces is a code block
+ok: tables -- an escaped backslash leaves the pipe separating
+ok: tables -- a table example inside a code span is not a table
+ok: tables -- a delimiter cell of one hyphen
+ok: tables -- a delimiter cell of two hyphens
+ok: tables -- alignment colons are still a delimiter row
+ok: code spans -- one span
+ok: code spans -- two spans
+ok: code spans -- a double run holds a single
+ok: code spans -- an unpaired run opens nothing
+ok: code spans -- an escaped backtick opens nothing either
+ok: code spans -- no backticks at all
+ok: code spans -- a comment is inert too
+ok: code spans -- a backtick inside a comment opens nothing
+ok: code spans -- a comment opener inside code opens nothing
+ok: inert carry -- a span closed on the next line
+ok: inert carry -- a span closed by the last run on its line
+ok: inert carry -- a paragraph break discards an unterminated span's ranges
+ok: inert carry -- a comment spanning three lines
+ok: inert carry -- a comment survives a blank line
+ok: cell separators -- a plain row
+ok: cell separators -- an escaped pipe is not a separator
+ok: cell separators -- an escaped backslash leaves the pipe live
+ok: cell separators -- three backslashes escape it again
+ok: cell separators -- a pipe inside code is not a separator
+ok: atx headings -- a heading
+ok: atx headings -- a heading with no space
+ok: atx headings -- a bare marker
+ok: atx headings -- closing hashes are decoration
+ok: atx headings -- seven hashes is not a heading
+ok: atx headings -- an identifier heading
+ok: link resolution -- one level up
+ok: link resolution -- two levels up from a nested note
+ok: link resolution -- one too many is above the root
+ok: link resolution -- a redundant ./ is dropped
+ok: link resolution -- a sibling needs no ..
+ok: link resolution -- an anchor is not part of the path
+ok: exemption -- the key names the file and the bullet's opening
+ok: exemption -- a re-wrapped bullet has the same key
+ok: exemption -- two bullets agreeing past the display length keep distinct keys
+ok: exemption -- a finished bullet has no finding to key
+ok: index -- an index whose rows all resolve
+ok: index -- a hook the file it points at does not carry
+ok: index -- a hook whose wording drifted from the file's
+ok: index -- a link to a file that is not there
+ok: index -- link text that does not name its file
+ok: index -- a first cell that is not a link
+ok: index -- an anchor the file has a heading for
+ok: index -- an anchor the file has no heading for
+ok: index -- a wrapped row takes the rest of the index out of the table
+ok: index -- an anchor on an identifier heading, which GitHub keeps underscored
+ok: index -- the same anchor with the underscore hyphenated
+ok: index -- a backlink that is only a code span
+ok: index -- a backlink commented out
+ok: index -- a backlink that is an image
+ok: index -- a backlink hidden in the middle of a multiline code span
+ok: index -- a backlink after a code span that closed on the line above
+ok: index -- a backlink inside a multiline HTML comment
+ok: index -- a backlink whose bracket is escaped
+ok: index -- an anchor naming a heading that only appears inside a comment
+ok: index -- an index row with a third cell
+ok: index -- two bullets differing only inside a multiline code span
+ok: index -- two bullets differing only inside an HTML comment are one bullet
+ok: index -- a backlink carrying a link title
+ok: index -- a backlink whose destination is angle-bracketed
+ok: index -- an escaped comment opener starts no comment
+ok: index -- a hook padded to carry a literal backtick
+ok: index -- a backlink whose closing parenthesis is escaped
+ok: index -- a backlink whose closing bracket is escaped
+ok: index -- a backlink between escaped backticks is navigable
+ok: index -- an anchor naming a heading indented into code
+ok: index -- an index whose single table has a row that does not close
+ok: index -- a backlink one directory too far up
+ok: index -- an anchor on a heading written without a space
+ok: index -- a backlink carrying an anchor is still a backlink
+ok: index -- a note in a subdirectory, linked and backlinked from its own depth
+ok: index -- a nested note carrying the one-level backlink, which resolves to nothing
+ok: index -- a note in a subdirectory, unlinked
+ok: index -- a backlink written with a redundant ./ still resolves
+ok: index -- a file no row links
+ok: index -- two rows for one file
+ok: index -- a file that does not link back to the index
+ok: index -- the same bullet in two files
+ok: index -- the same bullet re-wrapped
+ok: index -- two bullets opening alike and diverging
+ok: index -- two bullets that merely start with the same few words

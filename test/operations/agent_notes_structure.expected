@@ -1,0 +1,11 @@
+Structure of docs/agent-notes.md and docs/agent-notes/, over the live tree. The rules are
+stated in test/support/agent_notes_scan.ml; the counts scanned go to stderr, since a tally in
+a golden moves on every correct addition anywhere (gh-ocannl-665).
+
+every bullet is whole and every list parses as one reading: true
+every index row names a file that carries what it claims: true
+every table is a table, row by row: true
+every notes file is reachable from the index, and links back: true
+no bullet is repeated across the notes: true
+each flagged bullet has an exemption key of its own: true
+every exemption still names a bullet that needs one: true

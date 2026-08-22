@@ -22,6 +22,25 @@ that they earn a lookup rather than always-loaded space.
   is anchored to the directory that generates them. And where the premise is "this value happens to
   equal that constant", read the constant from where it is defined rather than restating the
   coincidence: an unchecked default is the one name no call site spells.
+- The repository's PROSE is checkable where its structure carries meaning, and the agent notes are
+  the case in point: `agent_notes_structure` (gh-ocannl-691) reads `docs/agent-notes.md` and
+  `docs/agent-notes/` as structure rather than as text. It holds five things true — no bullet cut
+  short (each ends in sentence-terminating punctuation, which is what a merge splice destroys), no
+  index hook absent from the file its row links, no table row wrapped across two physical lines
+  (that ends the table and renders every row below it as pipe-delimited prose), no file unreachable
+  from the index, and no bullet promoted into two files. Three of those were review findings on the
+  split that created the files, each caught by a human reading carefully. What it costs when you
+  append here: end the bullet with punctuation, indent continuations exactly two spaces past their
+  bullet, keep one nesting level, keep every index row on one physical line, and give a new file its
+  index row the day it appears.
+- A scan over a tree that is USUALLY CLEAN needs synthetic negative controls more than one over a
+  tree full of findings does, because green-because-intact and green-because-blind are the same
+  output. So the rules live in `test/support/agent_notes_scan.ml` as pure functions over strings and
+  `agent_notes_scan_cases` runs each of them on a violation it must flag AND on the nearest
+  legitimate text it must not — a pipe inside a code span, a bullet ending in `.)` or in bold, two
+  bullets that merely open with the same few words. The second half is not decoration: a rule that
+  fires on ordinary writing gets switched off rather than obeyed, so every rule owes a demonstration
+  that it does not.
 - The `.expected` golden of such a repository-wide check should hold what is TRUE of the repository,
   not how much of it there is. A tally — "170 tests in this directory", "241 test stanzas declare
   the config" — moves on every correct addition anywhere, so every unrelated contributor has to
@@ -263,7 +282,17 @@ that they earn a lookup rather than always-loaded space.
   re-runs actions attached to ALIASES. Either force the alias (`dune build --force
   @<dir>/runtest`), or run the built exe directly with its cwd set to `_build/default/<dir>`, which
   is exactly the environment dune gives it — the same cwd, hence the same `ocannl_config` search
-  root, that makes `dune exec` unusable (CLAUDE.md).
+  root, that makes `dune exec` unusable (CLAUDE.md). The cause is that dune trusts its own digest
+  database and never stats a rule's targets, so a hand-deleted one is recorded as built forever;
+  that also rules out the two other reflexes, since touching a source changes no CONTENT digest and
+  deleting `_build/.digest-db` does not restore the memo either. For a target with no alias of its
+  own — an `(executable)` plus a `(rule)` producing `<name>.actual`, which is how every scanning
+  check is built — the recovery is `dune build --sandbox=copy <that target>`: sandboxing changes
+  how the rule executes, which invalidates the memo and re-runs it. `dune clean` works too and buys
+  a full rebuild, which on macOS means every fresh executable queueing behind XProtect again. Worth
+  knowing before it bites, because the failure is silent in the dangerous direction: the missing
+  target leaves whatever `.actual` was there before, so a probe that only diffs the file reads
+  green while nothing has run.
 - A record with `[@@deriving sexp]` makes every `.expected` file that prints the parent a hidden
   consumer of its FIELD NAMES, and `rg "\.field_name"` over sources is vacuous against that (sexp
   prints `(field_name value)`, not member access). Before claiming a rename has no serialization

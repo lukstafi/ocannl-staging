@@ -25,6 +25,10 @@ module Verdict_scan = Verdict_scan
 (** Scanning test sources for claims a test decides itself and prints outside [Verdict], where a
     failing one is [dune promote]-able into the golden. *)
 
+module Agent_notes_scan = Agent_notes_scan
+(** Reading [docs/agent-notes.md] and [docs/agent-notes/] as structure: bullet integrity, index-hook
+    agreement, table shape, reachability from the index, and repetition across files. *)
+
 module Generated = Generated
 (** Freshness-checked reads of the generated kernels under [build_files/], for tests that assert on
     emitted code. Artifacts outlive the run that wrote them, so a read that does not establish
