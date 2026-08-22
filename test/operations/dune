@@ -3107,33 +3107,13 @@
     (run ./generated_provenance.exe symlink)
     (run ./generated_provenance.exe fresh)
     (run ./generated_provenance.exe armed_overwrite)
-    (with-accepted-exit-codes
-     1
-     (run ./generated_provenance.exe stale))
-    (with-accepted-exit-codes
-     1
-     (run ./generated_provenance.exe missing))
-    (with-accepted-exit-codes
-     1
-     (run ./generated_provenance.exe overwrite))
-    (with-accepted-exit-codes
-     1
-     (run ./generated_provenance.exe armed_no_emission))
-    (with-accepted-exit-codes
-     1
-     (run ./generated_provenance.exe uninitialized))
-    (with-accepted-exit-codes
-     1
-     (run
-      ./generated_provenance.exe
-      explicit_prefix
-      --ocannl_build_files_prefix=.))
-    (with-accepted-exit-codes
-     1
-     (run
-      ./generated_provenance.exe
-      explicit_prefix
-      --ocannl_build_files_prefix=gp_shared_dir))))))
+    ; The modes that must be refused are not run from here (gh-ocannl-692). A refusal announces
+    ; itself with this repository's failure marker -- `FAIL:` and `FAILED:` -- so running one with
+    ; the suite's streams inherited put those words into the log of a green run and cost `grep FAIL`
+    ; its meaning. `refusals` runs each of them as a child whose output it captures, and requires
+    ; both the exit status `with-accepted-exit-codes` used to state and the specific refusal
+    ; message, which no exit status can tell apart from any other way of failing.
+    (run ./generated_provenance.exe refusals)))))
 
 ; The uint4x32 FFI stubs read four lanes out of an [int array], a type that carries no length, so
 ; the C helper has to check the arity rather than assume it (gh-ocannl-688). Links arrayjit.ir
