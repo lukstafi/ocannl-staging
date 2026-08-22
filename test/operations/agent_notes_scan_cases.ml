@@ -188,6 +188,15 @@ let index_cases =
       [ "index-agreement @ agent-notes.md:7" ] );
     (* Reachability, which is the "hook names a file carrying none of it" failure seen from the
        other end: a file nothing links is a file no lookup will reach. *)
+    (* PR #406's third finding, end to end: the wrap ends the table, so most of the index is outside
+       it. Asking the hook and reachability rules about that would produce one "unreachable" line per
+       file and bury the one finding that says what happened -- so they decline, loudly. *)
+    ( "a wrapped row takes the rest of the index out of the table",
+      "# Agent notes\n\nAn index.\n\n| File | What it covers |\n| --- | --- |\n| [a.md](agent-notes/a.md) | the\n`Widget` seam |\n| [b.md](agent-notes/b.md) | the `Gadget` seam |\n",
+      [ ("agent-notes/a.md", file "- A fact about `Widget`.\n");
+        ("agent-notes/b.md", file "- A fact about `Gadget`.\n") ],
+      [ "index-agreement @ agent-notes.md"; "table-shape @ agent-notes.md:7";
+        "table-shape @ agent-notes.md:9"; "reachability @ agent-notes.md" ] );
     ( "a file no row links",
       index [ row "a.md" "the `Widget` seam" ],
       [ ("agent-notes/a.md", file "- A fact about `Widget`.\n");

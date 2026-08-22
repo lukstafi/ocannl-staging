@@ -469,15 +469,22 @@ let parse_link cell =
           else Some (text, target))
   | _ -> None
 
-(** The index's rows, and the findings from reading them. Only the FIRST table of the index is read:
-    the index is one table by construction, and a second one would be a different document. *)
+(** The index's rows, or the one finding that says its table did not parse at all.
+
+    The distinction is the point. A wrapped row ends the table, which leaves the index looking like
+    TWO tables with most of its rows outside both -- and asking the hook and reachability rules about
+    that produces one spurious "unreachable" line per notes file, burying the single finding that
+    says what actually happened. So a refusal comes back as [Error] and stops those rules, which then
+    report that they could not be evaluated rather than reporting twelve falsehoods. It cannot hide a
+    real defect: the refusal is itself a failure, and the table rule has already named the line. *)
 let index_rows ~file contents =
   match tables contents with
-  | [] -> ([], [ file_finding ~file ~rule:rule_index_agreement "no table: the index is a table" ])
+  | [] -> Error (file_finding ~file ~rule:rule_index_agreement "no table: the index is a table")
   | _ :: _ :: _ ->
-      ( [],
-        [ file_finding ~file ~rule:rule_index_agreement "more than one table: the index is one table" ]
-      )
+      Error
+        (file_finding ~file ~rule:rule_index_agreement
+           "more than one table: the index is one table, so a row that ends it puts most of the \
+            index outside both")
   | [ t ] ->
       let data = match t.rows with _ :: _ :: rest -> rest | _ -> [] in
       let rows, findings =
@@ -503,13 +510,21 @@ let index_rows ~file contents =
                   (finding ~file ~line:lineno ~rule:rule_index_agreement
                      "a row with no cells"))
       in
-      (rows, findings)
+      Ok (rows, findings)
 
 (** Rules 2 and 4. [files] is every notes file, keyed by its path relative to the index's directory
     — ["agent-notes/build-and-test.md"] — which is what an index link spells. [index_file] is the
     index's own path relative to the same place, as it appears in the files' backlinks. *)
 let check_index ~index_file ~index_contents ~(files : (string * string) list) =
-  let rows, row_findings = index_rows ~file:index_file index_contents in
+  match index_rows ~file:index_file index_contents with
+  | Error refusal ->
+      [
+        refusal;
+        file_finding ~file:index_file ~rule:rule_reachability
+          "not evaluated: the index's table does not parse, so which files it reaches is unknown \
+           -- fix the table first";
+      ]
+  | Ok (rows, row_findings) ->
   let per_row =
     List.concat_map rows ~f:(fun row ->
         let report msg = finding ~file:index_file ~line:row.row_line ~rule:rule_index_agreement msg in

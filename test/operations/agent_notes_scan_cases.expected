@@ -35,6 +35,7 @@ ok: index -- link text that does not name its file
 ok: index -- a first cell that is not a link
 ok: index -- an anchor the file has a heading for
 ok: index -- an anchor the file has no heading for
+ok: index -- a wrapped row takes the rest of the index out of the table
 ok: index -- a file no row links
 ok: index -- two rows for one file
 ok: index -- a file that does not link back to the index
