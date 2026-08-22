@@ -35,8 +35,8 @@ let is_gpu = Sched.backend_is_gpu backend_name
 let coverage_refutes_unfused tree =
   let refs =
     List.filter (Ir.Schedule_space.refutations tree) ~f:(fun (path, _) ->
-        List.mem path ("fusion", "unfused") ~equal:(fun (l, a) (l', b) ->
-            String.equal l l' && String.equal a b))
+        List.exists path ~f:(fun (_, decision) ->
+            Autotune.Family_decision.equal decision (Autotune.Family_decision.Fusion `Unfused)))
   in
   (not (List.is_empty refs))
   && List.for_all refs ~f:(fun (_, w) ->

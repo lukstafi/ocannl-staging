@@ -96,6 +96,11 @@ let section name ~is_gpu ~is_cpu ~limits opt =
    children carry verdicts — [refuted]/[excluded] branches print their witness and contribute no
    leaves, [unknown] branches never fathom. *)
 module Sspace = Ir.Schedule_space
+module FD = Autotune.Family_decision
+
+(* Every label printed below is [FD.to_label] of the path's decision datum (gh-ocannl-591): the
+   tree's identities are data, the strings are this rendering. *)
+let lbl = FD.to_label
 
 let rec print_tree ~indent tree =
   match tree with
@@ -103,7 +108,8 @@ let rec print_tree ~indent tree =
   | Sspace.Choice { level; children } ->
       if List.is_empty children then Stdio.printf "%s%s: infeasible\n" indent level
       else
-        List.iter children ~f:(fun (label, child) ->
+        List.iter children ~f:(fun (d, child) ->
+            let label = lbl d in
             match child with
             | Sspace.Child sub ->
                 Stdio.printf "%s%s = %s\n" indent level label;
@@ -119,11 +125,7 @@ let rec print_tree ~indent tree =
    policy-suppressed branches a driver could re-propose, and the branches only candidate compilation
    settles. *)
 let verdict_reports tree =
-  let pp (path, w) =
-    Stdio.printf "  %s: %s\n"
-      (String.concat ~sep:" > " (List.map path ~f:(fun (l, v) -> l ^ "=" ^ v)))
-      w
-  in
+  let pp (path, w) = Stdio.printf "  %s: %s\n" (FD.render_path path) w in
   let section name entries =
     if not (List.is_empty entries) then (
       Stdio.printf "-- %s --\n" name;
@@ -143,9 +145,7 @@ let tree_section name ~is_gpu ~is_cpu ~limits opt seeds =
       let paths = Sspace.enumerate tree in
       (match List.last paths with
       | Some (path, _) ->
-          Stdio.printf "last leaf's decision path: %s\n"
-            (String.concat ~sep:" > "
-               (List.map path ~f:(fun (level, label) -> level ^ "=" ^ label)))
+          Stdio.printf "last leaf's decision path: %s\n" (FD.render_path path)
       | None -> Stdio.printf "no leaves\n");
       Verdict.p "tree leaves = flat enumeration"
         (List.equal (fun a b -> String.equal (show a) (show b)) (Sspace.leaves tree) seeds)
@@ -300,9 +300,11 @@ let () =
           (List.length seeds) (List.length unfused) (List.length fused)
           (Sspace.count_choices tree) (Sspace.depth tree);
         (match tree with
-        | Sspace.Choice { level = "fusion"; children } ->
-            List.iter children ~f:(fun (label, child) ->
-                Stdio.printf "fusion = %s%s\n" label
+        | Sspace.Choice { children; _ }
+          when List.for_all children ~f:(fun (d, _) ->
+                   match d with FD.Fusion _ -> true | _ -> false) ->
+            List.iter children ~f:(fun (d, child) ->
+                Stdio.printf "fusion = %s%s\n" (lbl d)
                   (match child with
                   | Sspace.Child _ -> ""
                   | Sspace.Unknown (w, _) -> "  [unknown: " ^ w ^ "]"
@@ -322,15 +324,17 @@ let () =
         (* The fused flavor's own verdicts carry its path — the same refutations and exclusions
            the unfused flavor has, plus nothing, on this fully-dividing site. *)
         let flavor_of (path, _) =
-          List.find_map path ~f:(fun (level, label) ->
-              Option.some_if (String.equal level "fusion") label)
+          List.find_map path ~f:(fun (_, d) ->
+              match d with FD.Fusion f -> Some (FD.Fusion f) | _ -> None)
         in
-        let count lbl entries =
-          List.count entries ~f:(fun e -> Option.equal String.equal (flavor_of e) (Some lbl))
+        let count flavor entries =
+          List.count entries ~f:(fun e -> Option.equal FD.equal (flavor_of e) (Some flavor))
         in
         Stdio.printf "refuted: %d unfused, %d fused; excluded: %d unfused, %d fused\n"
-          (count "unfused" (Sspace.refutations tree)) (count "fused" (Sspace.refutations tree))
-          (count "unfused" (Sspace.exclusions tree)) (count "fused" (Sspace.exclusions tree))
+          (count (FD.Fusion `Unfused) (Sspace.refutations tree))
+          (count (FD.Fusion `Fused) (Sspace.refutations tree))
+          (count (FD.Fusion `Unfused) (Sspace.exclusions tree))
+          (count (FD.Fusion `Fused) (Sspace.exclusions tree))
   in
   fusable_section "fusable tail gpu" ~is_gpu:true ~is_cpu:false ~limits:gpu_full_limits opt_f;
   fusable_section "fusable tail cpu" ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt_f;
@@ -491,21 +495,34 @@ let () =
       (* The certain-traffic increments that make the bound non-uniform: a committed staged geometry
          prices its operand tiles, an unstaged one prices nothing, and a lattice box prices its most
          favorable corner — monotone in refinement. *)
-      let inc = Autotune.sketch_path_traffic_floor ~is_gpu:true ~limits:gpu_full_limits mm2 in
+      let inc = Autotune.sketch_path_traffic_floor ~limits:gpu_full_limits mm2 in
       let show_inc name path = Stdio.printf "  %-46s -> %d bytes\n" name (inc path) in
       Stdio.printf "certain-traffic increments along paths:\n";
+      let at (d : FD.t) = (FD.level d, d) in
+      let mma ~bm ~bn ~bk =
+        at (FD.Geometry (FD.Gpu_mma { g_bm = bm; g_bn = bn; g_bk = bk; g_tm = 0; g_tn = 0 }))
+      in
+      let box lb_axis lb_lo lb_hi = at (FD.Lattice_box { lb_axis; lb_lo; lb_hi }) in
       show_inc "curated staged bm16 bn32 bk32"
-        [ ("pipeline", "tensorized"); ("geometry", "bm16 bn32 bk32") ];
+        [ at (FD.Pipeline `Tensorized); mma ~bm:16 ~bn:32 ~bk:32 ];
       show_inc "curated unstaged bm16 bn32 bk0"
-        [ ("pipeline", "tensorized"); ("geometry", "bm16 bn32 bk0") ];
+        [ at (FD.Pipeline `Tensorized); mma ~bm:16 ~bn:32 ~bk:0 ];
       show_inc "lattice box bm 8..32, bk open"
-        [ ("pipeline", "tensorized"); ("geometry", "lattice"); ("bm", "bm 8..32") ];
+        [ at (FD.Pipeline `Tensorized); at (FD.Geometry FD.Lattice); box `Bm 8 32 ];
       show_inc "lattice box bm=32, bk 16..32"
         [
-          ("pipeline", "tensorized"); ("geometry", "lattice"); ("bm", "bm=32"); ("bk", "bk 16..32");
+          at (FD.Pipeline `Tensorized);
+          at (FD.Geometry FD.Lattice);
+          box `Bm 32 32;
+          box `Bk 16 32;
         ];
       show_inc "lattice singleton bm=32 bk=64"
-        [ ("pipeline", "tensorized"); ("geometry", "lattice"); ("bm", "bm=32"); ("bk", "bk=64") ];
+        [
+          at (FD.Pipeline `Tensorized);
+          at (FD.Geometry FD.Lattice);
+          box `Bm 32 32;
+          box `Bk 64 64;
+        ];
       (* Search over the lifted tree with the increment itself as the bound and an incumbent between
          the small and large boxes' floors: large-tile boxes fathom without expansion, so the walk
          scores a fraction of the lattice — the logarithmic-effective regime. The score never
@@ -530,19 +547,18 @@ let () =
       let lifted = Autotune.lift_geometry_lattice tree in
       let box_refutations =
         List.filter (Sspace.refutations lifted) ~f:(fun (path, _) ->
-            List.exists path ~f:(fun (_, label) -> String.is_substring label ~substring:"..")
-            && List.exists path ~f:(fun (_, label) -> String.equal label "lattice"))
+            List.exists path ~f:(fun (_, d) ->
+                match d with FD.Lattice_box { lb_lo; lb_hi; _ } -> lb_lo <> lb_hi | _ -> false)
+            && List.exists path ~f:(fun (_, d) -> FD.equal d (FD.Geometry FD.Lattice)))
       in
       Stdio.printf "== lattice under a 2048-byte workgroup-memory cap ==\n";
       Stdio.printf "surviving lattice leaves %d; box-level refutations %d, e.g.:\n"
         (List.length
            (List.filter (Sspace.enumerate lifted) ~f:(fun (path, _) ->
-                List.exists path ~f:(fun (_, label) -> String.equal label "lattice"))))
+                List.exists path ~f:(fun (_, d) -> FD.equal d (FD.Geometry FD.Lattice)))))
         (List.length box_refutations);
       List.iter (List.take box_refutations 2) ~f:(fun (path, w) ->
-          Stdio.printf "  %s: %s\n"
-            (String.concat ~sep:" > " (List.map path ~f:(fun (l, v) -> l ^ "=" ^ v)))
-            w);
+          Stdio.printf "  %s: %s\n" (FD.render_path path) w);
       (* Review round (Codex P1 on PR #327): the lattice minima and the open-corner pricing must
          come from the same per-format tile selection the tree builds with — a canonical [mma_tile]
          coarser than the selected format's (CUDA's TF32 shape) must not inflate the open-axis
@@ -570,10 +586,10 @@ let () =
           let lifted = Autotune.lift_geometry_lattice tree in
           let lattice_leaves =
             List.filter (Sspace.enumerate lifted) ~f:(fun (path, _) ->
-                List.exists path ~f:(fun (_, label) -> String.equal label "lattice"))
+                List.exists path ~f:(fun (_, d) -> FD.equal d (FD.Geometry FD.Lattice)))
           in
           let inc =
-            Autotune.sketch_path_traffic_floor ~is_gpu:true ~limits:gpu_coarse_canonical mm2
+            Autotune.sketch_path_traffic_floor ~limits:gpu_coarse_canonical mm2
           in
           Stdio.printf "== coarse canonical mma_tile 16^3, format tile 8^3 ==\n";
           Stdio.printf "lattice leaves %d (8-step multiples of both axes: %b)\n"
@@ -584,4 +600,8 @@ let () =
             && List.exists lattice_leaves ~f:(fun (_, p) -> p.Autotune.sk_bk = 8));
           Stdio.printf
             "  open-corner lattice increment (format 8s, not canonical 16s) -> %d bytes\n"
-            (inc [ ("pipeline", "tensorized"); ("geometry", "lattice") ]))
+            (inc
+               [
+                 (FD.level (FD.Pipeline `Tensorized), FD.Pipeline `Tensorized);
+                 (FD.level (FD.Geometry FD.Lattice), FD.Geometry FD.Lattice);
+               ]))

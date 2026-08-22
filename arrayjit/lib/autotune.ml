@@ -1795,7 +1795,7 @@ let model_default ?name ?report ctx comp bindings =
             if Lazy.force geometry_lattice_enabled then lift_geometry_lattice tree else tree
           in
           let f = CM.completion_floor base_opt.LL.llc in
-          let path_inc = sketch_path_traffic_floor ~is_gpu ~limits base_opt in
+          let path_inc = sketch_path_traffic_floor ~limits base_opt in
           let bound_at inc =
             CM.roofline_seconds ?peak_flops ?peak_memory_bandwidth ~flops:f.CM.fr_flops
               ~bytes:(f.CM.fr_bytes + inc) ()

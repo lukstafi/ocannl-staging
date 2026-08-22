@@ -35,14 +35,14 @@
 type placement = Pl_inline | Pl_stage_at of Indexing.symbol | Pl_materialize
 [@@deriving sexp_of, compare, equal]
 
-type 'a child =
-  | Child of 'a tree Lazy.t  (** Feasible as far as construction can decide. *)
-  | Unknown of string * 'a tree Lazy.t
+type ('l, 'a) child =
+  | Child of ('l, 'a) tree Lazy.t  (** Feasible as far as construction can decide. *)
+  | Unknown of string * ('l, 'a) tree Lazy.t
       (** The [Op_unknown] analogue: construction cannot decide (the witness says why — e.g. a
           permissively detected site whose mis-detections only candidate compilation rejects), so
           the subtree stays enumerable and a fathom must never prune it; its completions settle at
           candidate compile. *)
-  | Excluded of string * 'a child Lazy.t
+  | Excluded of string * ('l, 'a) child Lazy.t
       (** Valid but not proposed: default-policy search economy (a dominated or degenerate shape, a
           twin whose measured cost exceeds its possible win). The witness states the policy; the
           payload is the {e same judgment with only this policy lifted} — forcing it is the driver's
@@ -56,35 +56,40 @@ type 'a child =
           statically-decided emission constraint refutes them all. The witness is the violated
           constraint: a decline explanation produced before any compilation. *)
 
-and 'a tree =
+and ('l, 'a) tree =
   | Leaf of 'a  (** A fully committed schedule shape — today, one sketch-seed parameter set. *)
-  | Choice of { level : string; children : (string * 'a child) list }
-      (** One open decision: [level] names it, each child one way to commit it (labelled, with its
-          verdict). A [Choice] whose children are all [Refuted]/[Excluded] is an infeasible node
+  | Choice of { level : string; children : ('l * ('l, 'a) child) list }
+      (** One open decision: [level] names it, each child one way to commit it — carried as ['l],
+          the {e decision datum} identifying that commitment rather than a rendering of it
+          (gh-ocannl-591: a consumer reading a decision back off a path matches on data, it never
+          re-parses a display string; [Autotune.Family_decision] is the matmul family's such type,
+          and its [to_label] with {!render_path} is the rendering). [level] names the node for
+          display and grouping only — the datum is the identity, so renaming a level is a rendering
+          change and cannot change what a path means. A [Choice] whose children are all [Refuted]/[Excluded] is an infeasible node
           ({!leaves} is empty). Levels appear in {e emission order} (the order candidates reach
           timing), not necessarily dependency order. Verdicts are decided when the parent is
           constructed — fathoming needs them without expansion — while feasible children's subtrees
           stay lazy: expanding one is a decision, not a side effect of construction. *)
 
-val leaves : 'a tree -> 'a list
+val leaves : ('l, 'a) tree -> 'a list
 (** All completions of [Child] and [Unknown] branches, in tree traversal order — the order the flat
     enumerations produced, so a factored family's [leaves] replaces its seed list drop-in. Forces
     the reachable subtrees. *)
 
-val enumerate : 'a tree -> ((string * string) list * 'a) list
-(** {!leaves} with each completion's decision path — the committed [(level, label)] vector that
+val enumerate : ('l, 'a) tree -> ((string * 'l) list * 'a) list
+(** {!leaves} with each completion's decision path — the committed [(level, decision)] vector that
     identifies the leaf; prefixes of these paths are the partial vectors interior nodes stand for.
 *)
 
-val refutations : 'a tree -> ((string * string) list * string) list
+val refutations : ('l, 'a) tree -> ((string * 'l) list * string) list
 (** Every [Refuted] child with its decision path (ending at the refuted commitment) and witness: the
     shape's pre-compilation decline explanations (gh-ocannl-479), in traversal order. *)
 
-val exclusions : 'a tree -> ((string * string) list * string) list
+val exclusions : ('l, 'a) tree -> ((string * 'l) list * string) list
 (** Every [Excluded] child with path and policy witness — the branches a driver could re-propose by
     lifting default-policy economy. *)
 
-val unknowns : 'a tree -> ((string * string) list * string) list
+val unknowns : ('l, 'a) tree -> ((string * 'l) list * string) list
 (** Every [Unknown] child with path and witness — the branches whose verdicts only candidate
     compilation settles; a fathom must treat them as feasible. *)
 
@@ -107,10 +112,10 @@ type search_stats = {
 val no_search_stats : search_stats
 
 val search :
-  ?bound:(path:(string * string) list -> 'a tree -> float option) ->
+  ?bound:(path:(string * 'l) list -> ('l, 'a) tree -> float option) ->
   ?incumbent:float ->
   score:('a -> float option) ->
-  'a tree ->
+  ('l, 'a) tree ->
   ('a * float) option * search_stats
 (** Branch-and-bound minimization over the refinement tree (gh-ocannl-514 phase 4). Depth-first in
     child order — the emission order — so on a bound-free run the returned minimum is the {e first}
@@ -123,7 +128,7 @@ val search :
     is at or above the threshold is fathomed — equality fathoms because displacement needs strict
     improvement. Soundness is the caller's contract ({!Cost_model.completion_floor}'s): a bound that
     can exceed a completion's true cost prunes true winners. [path] is the committed
-    [(level, label)] vector down to and including the judged child — the partial vector the subtree
+    [(level, decision)] vector down to and including the judged child — the partial vector the subtree
     stands for (a prefix of {!enumerate}'s paths; [[]] for the root) — so a bound whose floor
     depends on the commitments (the placement levels, where {!Cost_model.completion_floor}'s
     [open_placement] narrows as [Pl_materialize] commitments accumulate) can price the exact node
@@ -140,14 +145,19 @@ val search :
     = [None]) are counted and never win: in the untuned regime a pick must have a model price, and
     the measured regime handles no-coverage candidates outside the bound-driven walk. *)
 
-val lift_excluded : 'a child -> 'a child
+val lift_excluded : ('l, 'a) child -> ('l, 'a) child
 (** The policy-lift operation: [Excluded (_, payload)] becomes the forced payload — the same
     judgment with only that one policy lifted, still subject to legality; any other child is
     returned unchanged. Lifting is per exclusion: a payload may itself contain further [Excluded]
     children deeper in its subtree. *)
 
-val count_choices : 'a tree -> int
+val count_choices : ('l, 'a) tree -> int
 (** Interior (decision) nodes reachable through [Child]/[Unknown]; forces them. *)
 
-val depth : 'a tree -> int
+val depth : ('l, 'a) tree -> int
 (** Longest reachable decision chain root-to-leaf; forces reachable subtrees. *)
+
+val render_path : label:('l -> string) -> (string * 'l) list -> string
+(** A decision path as ["level=label > level=label > …"], each decision rendered by [label]. The one
+    display form for paths: rendering is a consumer's presentation step, never how a decision is
+    identified. *)
