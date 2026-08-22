@@ -208,11 +208,20 @@ files.
   searches crowned four different families in one arm with a 4.5% spread of best times, while the
   arm gap stayed at 57–95% (gh-ocannl-546, benchmarks/report-gh546-metal.md). Conclusions of the
   form "family X wins/never wins here" need repeats; the arm-level verdict does not.
+  `Autotune.report` says what a call did about searching in ONE field, `outcome` (gh-ocannl-677):
+  `Searched` | `Search_died of terminal_failure` | `Cache_replay` | `Search_disabled` |
+  `Pre_search_failure of terminal_failure`. Match it; do not re-derive it. In particular **"this
+  process searched" is not `not cache_hit`** — under `autotune_search=false` (the `reproducible`
+  profile) and on every pre-search failure a call reports neither having searched nor having
+  replayed, and ships the untuned default. That mis-derivation, made twice in one PR, is what the
+  variant replaced four independent booleans to stop; the benchmark JSON carries the state by name
+  (`arms[].state`) and counts the third bucket (`tune.no_searches`) so the sweep reads it instead
+  of recovering it from two zeroed counters.
   The arms are independent experiments and are contained as such since gh-ocannl-550: an arm whose
   search raises is a LOSING arm (ranked `infinity`), the other arm's winner ships and stays cached,
-  and the failed arm's partial report still arrives in position carrying `terminal_failure` — read
-  that (or `partial`) before `best_ms`, because a partial arm's best is a time whose routine was
-  never compiled. Before that fix, one arm's late failure destroyed the other arm's finished work
+  and the failed arm's report still arrives in position as `Autotune.Search_died` — read the
+  outcome (or the `Autotune.terminal_failure` projection over it) before `best_ms`, because a
+  failed arm's best is a time whose routine was never compiled. Before that fix, one arm's late failure destroyed the other arm's finished work
   in-process (the cache entry survived, since `SC.store` precedes the winner replay — so a warm
   cache could still replay it; five of five tf32 `gpt2_mini` runs lost arm A this way). Note where
   it escaped: NOT at the failing candidate — candidate-grade protection absorbed those OOMs as

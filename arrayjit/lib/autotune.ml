@@ -11,15 +11,27 @@ module SC = Ir.Schedule_cache
 type decline_summary = { key : Outcome.rejection_key; count : int; sample_details : string list }
 type terminal_failure = { phase : Outcome.phase; candidate : string option; detail : string }
 
+(* gh-ocannl-677: the one thing a [tune] call did about searching, as a state rather than as
+   independent flags. The states are mutually exclusive and each carries exactly its own data, so
+   "replayed a cached winner AND ran a search" and "died mid-search but carries no failure" are not
+   expressible, and a consumer that forgets a state stops compiling instead of answering [false].
+   The counters below describe how much work the state got through; they never identify it. *)
+type outcome =
+  | Searched  (** A search ran and completed. *)
+  | Search_died of terminal_failure
+      (** A search ran and terminated on a fatal failure. The counters hold what it had reached. *)
+  | Cache_replay  (** A cached winner replayed; nothing was searched in this process. *)
+  | Search_disabled  (** [autotune_search=false] with nothing to replay: the untuned default ships. *)
+  | Pre_search_failure of terminal_failure
+      (** A failure before (or instead of) the search proper: the base compile, the baseline link or
+          timing, a fatal cache replay, an untuned fallback compile. *)
+
 type report = {
-  cache_hit : bool;
-  searched : bool;
+  outcome : outcome;
   candidates_timed : int;
   candidates_failed : int;
-  partial : bool;
   baseline_declined : bool;
   declines : decline_summary list;
-  terminal_failure : terminal_failure option;
   rounds_run : int;
   sketch_candidates : int;
   epilogue_sketch_candidates : int;
@@ -60,17 +72,16 @@ type report = {
 
 (** The report of a [tune] call that never searched (config [autotune_search=false], gh-ocannl-559):
     every counter zero and every time [infinity], like a search whose candidates all failed. The
-    caller gets the untuned default compile; [best_label] says why. *)
+    caller gets the untuned default compile; [outcome] says why. Also the base that the [census]
+    below and the pre-search failure reports build on — the census keeps [Search_disabled] (it
+    describes exactly that call), a pre-search failure replaces it. *)
 let no_search_report =
   {
-    cache_hit = false;
-    searched = false;
+    outcome = Search_disabled;
     candidates_timed = 0;
     candidates_failed = 0;
-    partial = false;
     baseline_declined = false;
     declines = [];
-    terminal_failure = None;
     rounds_run = 0;
     sketch_candidates = 0;
     epilogue_sketch_candidates = 0;
@@ -87,13 +98,32 @@ let no_search_report =
     baseline_ms = Float.infinity;
     default_ms = None;
     best_ms = Float.infinity;
-    best_label = "search disabled";
+    (* Nothing was timed, so there is no winner to name — and since gh-ocannl-677 the state is in
+       [outcome] rather than smuggled through this string. Keeps [best_label]'s contract exact:
+       empty exactly when [best_ms] is [infinity]. *)
+    best_label = "";
     best_tensorized = false;
     best_mma_statements = 0;
     best_mma_scalar_fallbacks = 0;
     mma_best_ms = Float.infinity;
     best_schedule = [];
   }
+
+(** The stable one-word name of an outcome state, for logs, JSON records and test goldens. *)
+let outcome_name = function
+  | Searched -> "searched"
+  | Search_died _ -> "search-died"
+  | Cache_replay -> "cache-replay"
+  | Search_disabled -> "search-disabled"
+  | Pre_search_failure _ -> "pre-search-failure"
+
+(** The fatal failure that ended the call, from whichever of the two failing states it was. A
+    projection over the outcome, not a re-derivation of it: "did this call fail" is a question that
+    spans two states, and every caller that ranks or attributes arms asks exactly that. *)
+let terminal_failure (r : report) =
+  match r.outcome with
+  | Search_died tf | Pre_search_failure tf -> Some tf
+  | Searched | Cache_replay | Search_disabled -> None
 
 (* Best-effort reporting must stay best-effort for ordinary callback errors and NOT for these: an
    interrupt or a runtime-fatal condition raised inside a [report] callback is about the process,
@@ -2244,14 +2274,7 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir
      fatal path: it must not replace the compiler failure. [base] carries whatever the call did
      learn before failing (e.g. a decline census). *)
   let emit_pre_search_failure ?(base = no_search_report) ~phase ~candidate ~detail () =
-    let r =
-      {
-        base with
-        partial = true;
-        best_label = "";
-        terminal_failure = Some { phase; candidate; detail };
-      }
-    in
+    let r = { base with outcome = Pre_search_failure { phase; candidate; detail } } in
     try emit_report r
     with report_exn when not (process_fatal_exn report_exn) ->
       Stdio.eprintf "autotune: pre-search failure report callback failed: %s\n%!"
@@ -2540,15 +2563,12 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir
                 in
                 emit_report
                   {
-                    cache_hit = true;
-                    searched = false;
+                    outcome = Cache_replay;
                     candidates_timed = 0;
                     (* No search ran, so the only rejection this can carry is the baseline's. *)
                     candidates_failed = failed_count declines;
-                    partial = false;
                     baseline_declined = Option.is_some baseline_decline;
                     declines = decline_summaries declines;
-                    terminal_failure = None;
                     rounds_run = 0;
                     sketch_candidates = 0;
                     epilogue_sketch_candidates = 0;
@@ -2878,20 +2898,18 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir
         let emit_partial_and_raise (fatal : Outcome.fatal) =
           let summaries = decline_summaries declines in
           let best_c, best_ms = !best_so_far in
-          let terminal_failure =
-            Some
-              { phase = fatal.phase; candidate = fatal.candidate; detail = Exn.to_string fatal.exn }
+          (* Shadowing the projection of the same name would be gratuitous here: this is the
+             failure being constructed, not one being read off a report. *)
+          let failure =
+            { phase = fatal.phase; candidate = fatal.candidate; detail = Exn.to_string fatal.exn }
           in
           let partial_report =
             {
-              cache_hit = false;
-              searched = true;
+              outcome = Search_died failure;
               candidates_timed = !n_timed;
               candidates_failed = failed_count declines;
-              partial = true;
               baseline_declined = Option.is_some baseline_decline;
               declines = summaries;
-              terminal_failure;
               rounds_run = !rounds_run;
               sketch_candidates = !n_sketch_candidates;
               epilogue_sketch_candidates = !n_epilogue_sketch_candidates;
@@ -3549,14 +3567,11 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir
                  logf "untuned-default control compile failed: %s" (Exn.to_string exn));
           let completed_report =
             {
-              cache_hit = false;
-              searched = true;
+              outcome = Searched;
               candidates_timed = !n_timed;
               candidates_failed = failed_count declines;
-              partial = false;
               baseline_declined = Option.is_some baseline_decline;
               declines = decline_summaries declines;
-              terminal_failure = None;
               rounds_run = !rounds_run;
               sketch_candidates = List.length sketch_params;
               epilogue_sketch_candidates = List.count sketch_params ~f:(fun p -> p.sk_epilogue);

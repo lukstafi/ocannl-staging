@@ -21,6 +21,16 @@ module SC = Ir.Schedule_cache
 module Asgns = Ir.Assignments
 
 let p = Verdict.p
+
+(* The report's outcome as the questions this test asks of it (gh-ocannl-677): the outcome is a
+   variant naming one of five mutually exclusive states, so a claim names the state it means. In
+   particular [not (replayed r)] is NOT "a search ran" — that mis-derivation is what the variant
+   exists to stop, and the states section below pins the distinction. *)
+let completed (r : Autotune.report) =
+  match r.Autotune.outcome with Autotune.Searched -> true | _ -> false
+
+let replayed (r : Autotune.report) =
+  match r.Autotune.outcome with Autotune.Cache_replay -> true | _ -> false
 let approx a b = Float.(abs (a - b) < 1e-4)
 
 let named name (comp : Asgns.comp) : Asgns.comp =
@@ -239,14 +249,14 @@ let () =
   p "tuned routine values correct"
     (Array.for_all2_exn got1 expected_c ~f:approx
     && Array.for_all2_exn got_mm1 mm_expected ~f:approx);
-  p "first tune call searches (cache miss)" (not r1.Autotune.cache_hit);
+  p "first tune call searches (cache miss)" (completed r1);
   p "first tune call timed at least the baseline" (r1.Autotune.candidates_timed >= 1);
-  p "completed search report is not partial"
-    ((not r1.Autotune.partial) && Option.is_none r1.Autotune.terminal_failure);
+  p "a completed search carries no terminal failure"
+    (Option.is_none (Autotune.terminal_failure r1));
   p "decline census sums to candidates_failed"
     (r1.Autotune.candidates_failed
     = List.sum (module Int) r1.Autotune.declines ~f:(fun d -> d.Autotune.count));
-  p "second tune call hits the schedule cache" r2.Autotune.cache_hit;
+  p "second tune call hits the schedule cache" (replayed r2);
   p "cache-hit report has no declines"
     (List.is_empty r2.Autotune.declines && r2.Autotune.candidates_failed = 0);
   (* The crowned candidate's identity in the report (gh-ocannl-546): backend-independent contract,
@@ -265,7 +275,7 @@ let () =
     Bool.equal (String.is_empty r.Autotune.best_label) (Float.is_inf r.Autotune.best_ms)
     && Bool.equal r.Autotune.best_tensorized (tensorized_schedule r)
     && Float.(r.Autotune.mma_best_ms >= r.Autotune.best_ms)
-    && ((not r.Autotune.best_tensorized) || r.Autotune.cache_hit
+    && ((not r.Autotune.best_tensorized) || replayed r
        || Float.(r.Autotune.mma_best_ms = r.Autotune.best_ms))
     && r.Autotune.best_mma_scalar_fallbacks <= r.Autotune.best_mma_statements
   in
@@ -296,34 +306,40 @@ let () =
   in
   let r3, got3, got_mm3 = tune_no_search ~cache_dir:"" () in
   p "search off without a cache times nothing"
-    ((not r3.Autotune.cache_hit) && r3.Autotune.candidates_timed = 0 && r3.Autotune.rounds_run = 0
+    (r3.Autotune.candidates_timed = 0 && r3.Autotune.rounds_run = 0
     && List.is_empty r3.Autotune.best_schedule
-    && String.equal r3.Autotune.best_label "search disabled");
+    && String.is_empty r3.Autotune.best_label);
   p "search off without a cache returns the correct untuned routine"
     (Array.for_all2_exn got3 expected_c ~f:approx
     && Array.for_all2_exn got_mm3 mm_expected ~f:approx);
   let r4, got4, got_mm4 = tune_no_search ~cache_dir () in
   p "search off still replays a committed cache entry"
-    (r4.Autotune.cache_hit && r4.Autotune.candidates_timed = 0);
+    (replayed r4 && r4.Autotune.candidates_timed = 0);
   p "cache replay under search off gives correct values"
     (Array.for_all2_exn got4 expected_c ~f:approx
     && Array.for_all2_exn got_mm4 mm_expected ~f:approx);
-  (* gh-ocannl-644: [searched] is the report's own statement that a search RAN, and [not cache_hit]
-     is not that statement -- the search-off call without a cache reports [cache_hit = false] having
-     searched nothing, and ships the untuned default. A measurement harness reads this to say which
-     process produced its step times (a searching process is measurably slower per launch), so all
-     four report states are pinned here rather than left to a caller's inference. *)
-  let states = [ r1; r2; r3; r4 ] in
-  p "exactly the call that ran a search reports searched"
-    (r1.Autotune.searched
-    && (not r2.Autotune.searched)
-    && (not r3.Autotune.searched)
-    && not r4.Autotune.searched);
-  p "no report both searches and replays"
-    (List.for_all states ~f:(fun r -> not (r.Autotune.searched && r.Autotune.cache_hit)));
+  (* gh-ocannl-644, gh-ocannl-677: what a call did about searching is ONE state, and the states a
+     measurement harness must tell apart are reached right here -- a completed search, a cached
+     winner replayed, and a call that neither searched nor replayed because the search is off and
+     nothing was cached (the reproducible profile), which ships the untuned default. Pinning the
+     state's own name is the point: the boolean spellings of it were independently derivable, and
+     "[not cache_hit] means this process searched" is false for exactly r3, which is the reading
+     that cost a benchmark sweep every tuned cell under that profile. The two failing states are
+     pinned in autotune_arm_containment.ml, which is where a search can be made to die. *)
+  let named_states = [ ("completed search", r1); ("cache replay", r2);
+                       ("search off, no cache", r3); ("search off, cached", r4) ] in
+  List.iter named_states ~f:(fun (what, r) ->
+      Stdio.printf "state: %-22s -> %s\n" what (Autotune.outcome_name r.Autotune.outcome));
+  p "each of the three reachable outcome states is reported by its own call"
+    (List.equal String.equal
+       (List.map named_states ~f:(fun (_, r) -> Autotune.outcome_name r.Autotune.outcome))
+       [ "searched"; "cache-replay"; "search-disabled"; "cache-replay" ]);
   p "a report that neither searched nor replayed timed nothing"
-    (List.for_all states ~f:(fun r ->
-         r.Autotune.searched || r.Autotune.cache_hit || r.Autotune.candidates_timed = 0));
+    (List.for_all named_states ~f:(fun (_, r) ->
+         match r.Autotune.outcome with
+         | Autotune.Searched | Autotune.Search_died _ | Autotune.Cache_replay -> true
+         | Autotune.Search_disabled | Autotune.Pre_search_failure _ ->
+             r.Autotune.candidates_timed = 0));
   (* Only a CHOSEN cache replays (Codex P2 on PR #291): the SAME directory is replayed or ignored
      depending on whether someone asked for it. A search with no [cache_dir] populates the built-in
      default directory; a search-less call that likewise names no directory must not pick that entry
@@ -335,7 +351,7 @@ let () =
     Autotune.tune ~beam_width:2 ~rounds:1 ~repeats:1 ctx tune_comp Ir.Indexing.Empty
   in
   let r5, _, _ = tune_no_search ~cache_dir:default_cache_dir () in
-  p "search off replays the default cache directory when asked for it" r5.Autotune.cache_hit;
+  p "search off replays the default cache directory when asked for it" (replayed r5);
   let r6 = ref None in
   let ctx = Context.auto () in
   let ctx, routine =
@@ -345,6 +361,6 @@ let () =
   let got6 = Context.get_values ctx tc1.Tensor.value in
   let r6 = Option.value_exn ~here:[%here] !r6 in
   p "search off ignores the unchosen default cache directory"
-    ((not r6.Autotune.cache_hit) && String.equal r6.Autotune.best_label "search disabled");
+    (match r6.Autotune.outcome with Autotune.Search_disabled -> true | _ -> false);
   p "the ignored-cache fallback is still a correct routine"
     (Array.for_all2_exn got6 expected_c ~f:approx)

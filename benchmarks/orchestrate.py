@@ -422,7 +422,11 @@ def search_provenance(result):
 
     The `tune` object's totals are the evidence separating the second case from the third: an
     OCANNL cell that tuned anything reports them, and without them there is nothing to tell those
-    two apart with, so the answer is UNKNOWN rather than a guess.
+    two apart with, so the answer is UNKNOWN rather than a guess. Since gh-ocannl-677 the runner
+    states the third case outright — `no_searches` counts the arms whose `Autotune` outcome was
+    `search-disabled` or `pre-search-failure` — so it is read directly rather than recovered from
+    two counters that are both zero. Older artifacts carry no such key, and the zero-zero reading
+    stays for them.
     """
     searched = result.get("searched")
     if searched is None:
@@ -432,6 +436,8 @@ def search_provenance(result):
     tune = result.get("tune")
     if not tune:
         return "UNKNOWN"
+    if "no_searches" in tune:
+        return "REPLAY" if tune.get("replays") else "NO-SEARCH"
     return "NO-SEARCH" if not tune.get("searches") and not tune.get("replays") else "REPLAY"
 
 
