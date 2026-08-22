@@ -257,6 +257,15 @@ let awkward_section name ~is_gpu ~is_cpu ~limits opt =
         (List.equal (fun a b -> String.equal (show a) (show b)) (Sspace.leaves tree) seeds);
       verdict_reports tree
 
+(* The verdict collectors of a tree this test also prints in full: [tree_section] renders each
+   witness inline at its branch, this renders it with the decision path that reached it. *)
+let tree_verdicts name ~is_gpu ~is_cpu ~limits opt =
+  match Autotune.matmul_sketch_tree ~is_gpu ~is_cpu ~limits opt with
+  | None -> Stdio.printf "== %s verdicts: no site detected ==\n" name
+  | Some tree ->
+      Stdio.printf "== %s verdicts ==\n" name;
+      verdict_reports tree
+
 let () =
   let nn = 64 in
   (* A non-hoistable, B hoistable (host-init-backed constant): the exactly-one-hoistable case, so
@@ -367,6 +376,47 @@ let () =
       Stdio.printf
         "lifted-lattice search over the refuted family: %d expanded, %d scored, %d refuted\n"
         stats.Sspace.st_expanded stats.Sspace.st_scored stats.Sspace.st_refuted);
+  (* A multi-axis contraction (gh-ocannl-683): attention's out projection
+     [d[b,s,j] += w[j,h,e] * x[b,s,h,e]], whose weight carries two input axes, so lowering splits
+     the contraction into an outer head loop ([m_ko]) above the innermost per-head loop, and only
+     the latter's extent ([m_nk]) is what the tile gates judge. Every site above contracts over a
+     single axis, where a tile's k-extent and the site's whole K coincide; here they do not, and a
+     refutation says which one it means ([Sketch_families.k_extent_label]) — head_dim 12 divides
+     neither blocktile menu's k-extents (GPU 8 and 16, CPU 16 and 8), so the k gate refutes at
+     every geometry and its witness names "innermost contraction extent k=12 (of K=48 over 2
+     loops)" rather than a bare "k=12" that reads as the site's contraction. The staged tensorized
+     geometries pad past the same 12 and survive, so the tree still reaches the lattice — and the
+     batch axes give the GPU pipelines the batch-grid level ([sk_batch_grid], gh-ocannl-528) that
+     the rank-2 sites above never show. *)
+  let bb = 2 and ss = 64 and jj = 64 and hh = 4 and ee = 12 in
+  let ov =
+    NTDSL.init ~l:"ov" ~prec:Ir.Ops.single ~o:[ jj ] ~i:[ hh; ee ]
+      ~f:(fun idcs ->
+        (Float.of_int (((((idcs.(0) * hh) + idcs.(1)) * ee) + idcs.(2)) % 11) -. 5.) *. 0.5)
+      ()
+  in
+  let oa =
+    NTDSL.init ~l:"oa" ~prec:Ir.Ops.single ~b:[ bb; ss ] ~o:[ hh; ee ]
+      ~f:(fun idcs ->
+        Float.of_int (((((idcs.(0) * ss) + idcs.(1)) * hh * ee) + (idcs.(2) * ee) + idcs.(3)) % 13)
+        *. 0.25)
+      ()
+  in
+  let%op oproj = ov * oa in
+  let opt_o = with_lowering ~name:"sft_outproj" oproj in
+  let o_cpu_seeds =
+    section "out-projection cpu" ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt_o
+  in
+  let o_gpu_seeds =
+    section "out-projection gpu staged+depth" ~is_gpu:true ~is_cpu:false ~limits:gpu_full_limits
+      opt_o
+  in
+  tree_section "out-projection cpu" ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt_o o_cpu_seeds;
+  tree_section "out-projection gpu staged+depth" ~is_gpu:true ~is_cpu:false
+    ~limits:gpu_full_limits opt_o o_gpu_seeds;
+  tree_verdicts "out-projection cpu" ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt_o;
+  tree_verdicts "out-projection gpu staged+depth" ~is_gpu:true ~is_cpu:false
+    ~limits:gpu_full_limits opt_o;
   (* The epilogue-fusion level (gh-ocannl-613): the family's root decision. Every site above feeds
      its matmul output to nothing fusable, so their fused flavor is refuted AT THE ROOT with the
      fusion recognizer's own reason — the first line of each "-- refuted --" report above, where
