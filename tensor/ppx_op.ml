@@ -84,17 +84,19 @@ let make_vb_nd ~dsl_name ~opt_label ~init_nd ~extra_args ~loc name =
    arrays is a numeric constant, the whole literal is an ndarray constant; otherwise it is a block
    tensor whose components are tensor expressions. *)
 let rec is_ndarray_constant_expr expr =
-  match expr.pexp_desc with
-  | Pexp_constant (Pconst_float _) | Pexp_constant (Pconst_integer _) -> true
-  (* Descend through axis-basis annotations, e.g. [((1., 2., 3.) : features)], so numeric literals
-     carrying a dimension-basis tag stay on the ndarray path rather than being read as a stack. *)
-  | Pexp_constraint (e, _) -> is_ndarray_constant_expr e
-  | Pexp_tuple (e :: _) | Pexp_array (e :: _) -> is_ndarray_constant_expr e
-  | Pexp_construct ({ txt = Lident "::"; _ }, _) -> (
+  match expr with
+  | [%expr [%e? _] :: [%e? _]] -> (
       match collect_list [] expr with e :: _ -> is_ndarray_constant_expr e | [] -> true)
-  | Pexp_construct ({ txt = Lident "[]"; _ }, _) -> true
-  | Pexp_array [] -> true
-  | _ -> false
+  | [%expr []] | [%expr [||]] -> true
+  | _ -> (
+      match expr.pexp_desc with
+      | Pexp_constant (Pconst_float _) | Pexp_constant (Pconst_integer _) -> true
+      (* Descend through axis-basis annotations, e.g. [((1., 2., 3.) : features)], so numeric
+         literals carrying a dimension-basis tag stay on the ndarray path rather than being read
+         as a stack. *)
+      | Pexp_constraint (e, _) -> is_ndarray_constant_expr e
+      | Pexp_tuple (e :: _) | Pexp_array (e :: _) -> is_ndarray_constant_expr e
+      | _ -> false)
 
 (* Desugars a block tensor literal into a call to the named [stack] operation (which composes
    [einsum1] unsqueeze + [concat] along a fresh leading axis). [axis_kind] selects the axis the new
@@ -363,8 +365,7 @@ let rec translate ~dsl_name ~num_configs ~is_toplevel ?(in_block = false) ~opt_l
    pexp_desc =
      Pexp_record
        ( ( first_label,
-           (( { pexp_desc = Pexp_array _; _ }
-            | { pexp_desc = Pexp_construct ({ txt = Lident "::"; _ }, _); _ } ) as init_nd) )
+           (({ pexp_desc = Pexp_array _; _ } | [%expr [%e? _] :: [%e? _]]) as init_nd) )
          :: extra_args,
          None );
    _;
@@ -408,7 +409,7 @@ let rec translate ~dsl_name ~num_configs ~is_toplevel ?(in_block = false) ~opt_l
                  "ppx_ocannl %%op: record field label must be a simple identifier" ))
   (* List [a; b]: numeric first leaf -> ndarray constant; otherwise block tensor stacking along a
      new output axis. *)
-  | { pexp_desc = Pexp_construct ({ txt = Lident "::"; _ }, _); _ } as list_expr ->
+  | [%expr [%e? _] :: [%e? _]] as list_expr ->
       if is_ndarray_constant_expr list_expr then
         (no_vbs, ndarray_op ?label ~ndarray_fn:(dsl_fn "ndarray") list_expr)
       else
@@ -424,10 +425,7 @@ let rec translate ~dsl_name ~num_configs ~is_toplevel ?(in_block = false) ~opt_l
      2.; 3. ] : rgb)] or [([| … |] : batch)]. *)
   | {
    pexp_desc =
-     Pexp_constraint
-       ( ( { pexp_desc = Pexp_array _; _ }
-         | { pexp_desc = Pexp_construct ({ txt = Lident "::"; _ }, _); _ } ),
-         _ );
+     Pexp_constraint (({ pexp_desc = Pexp_array _; _ } | [%expr [%e? _] :: [%e? _]]), _);
    _;
   } ->
       (no_vbs, ndarray_op ?label ~ndarray_fn:(dsl_fn "ndarray") expr)
@@ -483,9 +481,7 @@ let rec translate ~dsl_name ~num_configs ~is_toplevel ?(in_block = false) ~opt_l
          don't transform args before it *)
       let unit_position =
         List.find_mapi args ~f:(fun i (_, arg_expr) ->
-            match arg_expr.pexp_desc with
-            | Pexp_construct ({ txt = Lident "()"; _ }, None) -> Some i
-            | _ -> None)
+            match arg_expr with [%expr ()] -> Some i | _ -> None)
       in
       let vbs_fn, e_fn = loop ?label fn_expr in
       let vbs_args, processed_args =
@@ -516,13 +512,7 @@ let rec translate ~dsl_name ~num_configs ~is_toplevel ?(in_block = false) ~opt_l
       (* Check if there's a unit parameter or a labeled parameter with label "label" *)
       let rec find_unit acc = function
         | [] -> None
-        | ({
-             pparam_desc =
-               Pparam_val
-                 (Nolabel, _, { ppat_desc = Ppat_construct ({ txt = Lident "()"; _ }, None); _ });
-             _;
-           } as unit_param)
-          :: rest ->
+        | ({ pparam_desc = Pparam_val (Nolabel, _, [%pat? ()]); _ } as unit_param) :: rest ->
             Some (List.rev acc, unit_param, rest)
         | hd :: rest -> find_unit (hd :: acc) rest
       in

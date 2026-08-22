@@ -39,8 +39,8 @@ let ndarray_constant expr =
     | { pexp_desc = Pexp_array (exp :: _ as exps); _ } ->
         loop_dims (`Batch_dims (List.length exps, basis) :: accu) exp
     | { pexp_desc = Pexp_tuple []; _ } -> `Input_dims (0, basis) :: accu
-    | { pexp_desc = Pexp_array []; _ } -> `Batch_dims (0, basis) :: accu
-    | { pexp_desc = Pexp_construct ({ txt = Lident "::"; _ }, _); _ } as expr -> (
+    | [%expr [||]] -> `Batch_dims (0, basis) :: accu
+    | [%expr [%e? _] :: [%e? _]] as expr -> (
         let exps = collect_list [] expr in
         match exps with
         | exp :: _ -> loop_dims (`Output_dims (List.length exps, basis) :: accu) exp
@@ -69,7 +69,7 @@ let ndarray_constant expr =
               @@ Location.error_extensionf ~loc
                    "Arrayjit: ndarray literal found batch axis (array), expected number")
               :: accu
-          | { pexp_desc = Pexp_construct ({ txt = Lident "::"; _ }, _); _ } ->
+          | [%expr [%e? _] :: [%e? _]] ->
               (pexp_extension ~loc
               @@ Location.error_extensionf ~loc
                    "Arrayjit: ndarray literal found output axis (list), expected number")
@@ -99,7 +99,7 @@ let ndarray_constant expr =
                        (dim_spec_to_string @@ `Batch_dims (List.length exps, None))
                        (dim_spec_to_string dim_spec))
                   :: accu)
-          | { pexp_desc = Pexp_construct ({ txt = Lident "::"; _ }, _); _ } -> (
+          | [%expr [%e? _] :: [%e? _]] -> (
               let exps = collect_list [] expr in
               match dims_spec.(depth) with
               | `Output_dims (dim, _) when dim = List.length exps ->

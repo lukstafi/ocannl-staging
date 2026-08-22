@@ -1067,14 +1067,11 @@ let translate ?ident_label (expr : expression) : result =
                       simple identifier";
             })
     | { pexp_desc = Pexp_array _; _ }
-    | { pexp_desc = Pexp_construct ({ txt = Lident "::"; _ }, _); _ }
+    | [%expr [%e? _] :: [%e? _]]
     (* Tensor literal whose outermost axis container carries an axis-label annotation. *)
     | {
         pexp_desc =
-          Pexp_constraint
-            ( ( { pexp_desc = Pexp_array _; _ }
-              | { pexp_desc = Pexp_construct ({ txt = Lident "::"; _ }, _); _ } ),
-              _ );
+          Pexp_constraint (({ pexp_desc = Pexp_array _; _ } | [%expr [%e? _] :: [%e? _]]), _);
         _;
       } ->
         { default_result with expr = ndarray_op ~ndarray_fn:[%expr NTDSL.ndarray] expr }
