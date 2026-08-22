@@ -489,7 +489,9 @@
 # plausibly close — and rejects the measured cells that motivated the term by a wide margin (metal
 # ~12x, cuda ~2.3x, against hip's 1.0x where the family won), so no verdict there is knife-edge.
 # Raise it to keep promoting on a machine whose tensorized path is still being brought up;
-# tune_flip_ordering=enablement disables the term outright.
+# tune_flip_ordering=enablement disables the term outright — and disables it in the strong sense:
+# under either unconditional ordering the evidence is never derived, so this key is never read and a
+# malformed value cannot fail a run pinned to a baseline.
 #tune_flip_profit_margin=1.25
 
 # If true, an exception crossing a candidate transform/codegen/compile/link boundary is fatal unless

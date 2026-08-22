@@ -152,6 +152,21 @@ let () =
     (not (prefix_has (ranked `Profitable paying) us));
   (* The floor closure, under the rule's pinned envelope: monotone in the commitments, and strictly
      above the empty commitment once the site nodes' traffic is certain. *)
+  (* An unconditional ordering reads no evidence at all — including the margin, which a run pinned
+     to a baseline must not be able to fail on. *)
+  p "an unconditional ordering records no profitability evidence"
+    (Option.is_none
+       (Autotune.placement_surface ~ordering:`Enablement ctx comp Ir.Indexing.Empty)
+         .Autotune.ps_profit);
+  p "the profitable ordering records the verdict it ranked by"
+    (match
+       (Autotune.placement_surface ~ordering:`Profitable
+          ~evidence:[ arm ~best_ms:7.5 ~mma_timed:3 ~mma_best_ms:92.0 ]
+          ctx comp Ir.Indexing.Empty)
+         .Autotune.ps_profit
+     with
+    | Some (Autotune.Loses _) -> true
+    | _ -> false);
   let surface = Autotune.placement_surface ~ordering:`Enablement ctx comp Ir.Indexing.Empty in
   let f0 = surface.Autotune.ps_floor_ms ~materialized:[] in
   let f1 = surface.Autotune.ps_floor_ms ~materialized:[ mbs.Tensor.value ] in

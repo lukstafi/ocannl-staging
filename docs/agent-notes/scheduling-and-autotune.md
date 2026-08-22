@@ -377,4 +377,7 @@ files.
   per-program digest so an entry answers about a *different* program, and the in-process arm report
   is strictly better evidence anyway); and pricing the *displaced* flip instead of the promoted one
   (its gain is unknown until measured, which is exactly the budget the promotion consumes).
-  `model_default`'s placement walk measures nothing, so it gets `Unmeasured` and is unchanged.
+  `model_default`'s placement walk hands over no evidence, so it gets the prior and is unchanged —
+  and the derivation happens inside `placement_surface`, on the `profitable` path only, so a run
+  pinned to `cost` or `enablement` never reads `tune_flip_profit_margin` (`ps_profit` is `None`
+  there, which is what the log line reports instead of a verdict nothing consulted).

@@ -1726,13 +1726,22 @@ let rank_flip_candidates ~ordering ?(profit = Unmeasured) ~enablement ~disableme
 type placement_surface = {
   ps_candidates : LL.flip_candidate list;
   ps_ordering : [ `Cost | `Enablement ];
+  ps_profit : family_profit option;
   ps_enablement : Set.M(Ir.Tnode).t;
   ps_disablement : Set.M(Ir.Tnode).t;
   ps_floor_ms : materialized:Ir.Tnode.t list -> float option;
 }
 
-let placement_surface ?name ?ordering ?(profit = Unmeasured) ctx comp bindings =
+let placement_surface ?name ?ordering ?(evidence = []) ctx comp bindings =
   let ordering = match ordering with Some o -> o | None -> flip_ordering () in
+  (* The evidence is derived only on the path that consults it, so an unconditional ordering does
+     not depend on [tune_flip_profit_margin] at all — it is not merely ignored: a malformed or
+     out-of-range margin must not abort a run pinned to a baseline the term plays no part in. *)
+  let profit =
+    match ordering with
+    | `Profitable -> Some (family_profit_of_reports evidence)
+    | `Cost | `Enablement -> None
+  in
   let limits = Context.hardware_limits ctx in
   let static_indices = Idx.bound_symbols bindings in
   let base = Context.lowered_for_decisions ?name ctx comp bindings in
@@ -1749,7 +1758,9 @@ let placement_surface ?name ?ordering ?(profit = Unmeasured) ctx comp bindings =
     Context.lowered_for_decisions ?name ~materialized:to_materialize ctx comp bindings
   in
   let enablement, disablement = placement_enablement ~limits ~static_indices ~base ~allmat in
-  let ps_candidates = rank_flip_candidates ~ordering ~profit ~enablement ~disablement candidates in
+  let ps_candidates =
+    rank_flip_candidates ~ordering ?profit ~enablement ~disablement candidates
+  in
   let candidate_set =
     Set.of_list (module Ir.Tnode) (List.map ps_candidates ~f:(fun fc -> fc.LL.fc_tn))
   in
@@ -1764,7 +1775,9 @@ let placement_surface ?name ?ordering ?(profit = Unmeasured) ctx comp bindings =
   in
   {
     ps_candidates;
-    ps_ordering = effective_flip_ordering ~ordering ~profit;
+    ps_ordering =
+      effective_flip_ordering ~ordering ~profit:(Option.value profit ~default:Unmeasured);
+    ps_profit = profit;
     ps_enablement = enablement;
     ps_disablement = disablement;
     ps_floor_ms;

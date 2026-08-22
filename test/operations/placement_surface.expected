@@ -29,6 +29,8 @@ the pure enablement ordering ignores the evidence (the evaluation baseline): tru
 the enablement prior pushes the decoy out of a budget-2 chain: true
 under a measured-losing family the decoy is back in the budget-2 chain: true
 under a measured-paying family the promotion keeps the budget slot: true
+an unconditional ordering records no profitability evidence: true
+the profitable ordering records the verdict it ranked by: true
 the floor is present under the pinned envelope: true
 committing mbs does not lower the floor: true
 committing mc on top does not lower it either: true

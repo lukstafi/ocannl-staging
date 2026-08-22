@@ -1164,15 +1164,16 @@ let tune_placements ?name ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?r
            Under [tune_flip_ordering=profitable] (the default) a family measured to lose here voids
            the prior and the surface ranks by cost — on gh-514's metal/f16 cell the promotion
            displaced the winning cheap inline flip out of a budget-5 chain. Both arms' reports are
-           consulted, including a failing arm's: its timings are measurements of the family even
-           though its [best_ms] is not shippable. *)
-        profit =
-      Autotune.family_profit_of_reports (List.filter_opt [ a_report; b_report ])
+           handed over, including a failing arm's: its timings are measurements of the family even
+           though its [best_ms] is not shippable. The surface derives the verdict, and only when the
+           ordering in force consults one. *)
+        evidence =
+      List.filter_opt [ a_report; b_report ]
     in
     let surface =
       (* Outside the tuner's failure containment; a lowering failure (the A/B searches above can
          still have crowned a winner) must skip the refinement, not fail the tune. *)
-      match Autotune.placement_surface ?name ~profit ctx comp bindings with
+      match Autotune.placement_surface ?name ~evidence ctx comp bindings with
       | s -> Some s
       | exception exn ->
           logf "flip refinement skipped: the decision-surface lowering failed: %s"
@@ -1189,9 +1190,12 @@ let tune_placements ?name ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?r
         logf "flip refinement: %d candidate(s), %d enablement-promoted, ranked by %s, budget %d%s"
           (List.length candidates)
           (Set.length surface.Autotune.ps_enablement)
-          (match surface.Autotune.ps_ordering with
-          | `Cost -> "cost (" ^ Autotune.family_profit_summary profit ^ ")"
-          | `Enablement -> "enablement (" ^ Autotune.family_profit_summary profit ^ ")")
+          (let name =
+             match surface.Autotune.ps_ordering with `Cost -> "cost" | `Enablement -> "enablement"
+           in
+           match surface.Autotune.ps_profit with
+           | Some profit -> name ^ " (" ^ Autotune.family_profit_summary profit ^ ")"
+           | None -> name ^ " (configured unconditionally, so no profitability evidence was read)")
           inline_flips
           (if bound_pruning then ", bound pruning on" else "");
         let chain = ref (a, a_ms, ctx, timing_ctx) in

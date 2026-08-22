@@ -769,6 +769,10 @@ type placement_surface = {
       (** The ordering [ps_candidates] actually came out in — with [tune_flip_ordering=profitable]
           (the default) this is where the measured evidence landed, so a log line or a test can say
           which prior ranked the surface rather than which one was configured. *)
+  ps_profit : family_profit option;
+      (** The evidence that decided [ps_ordering], and [None] when the configured ordering is
+          unconditional ([cost] or [enablement]) and no evidence was consulted — which is also why
+          such a run never reads [tune_flip_profit_margin] and cannot fail on a malformed one. *)
   ps_enablement : Set.M(Ir.Tnode).t;
   ps_disablement : Set.M(Ir.Tnode).t;
   ps_floor_ms : materialized:Ir.Tnode.t list -> float option;
@@ -787,7 +791,7 @@ type placement_surface = {
 val placement_surface :
   ?name:string ->
   ?ordering:[ `Cost | `Enablement | `Profitable ] ->
-  ?profit:family_profit ->
+  ?evidence:report list ->
   Context.t ->
   Ir.Assignments.comp ->
   Ir.Indexing.unit_bindings ->
@@ -797,11 +801,12 @@ val placement_surface :
     effect on [ctx]). [name] names the computation for those lowerings exactly as
     {!Context.compile}'s does, and is what makes this work for a comp carrying no
     {!Ir.Assignments.Block_comment} (gh-ocannl-669). [ordering] defaults from config
-    [tune_flip_ordering] ([profitable]), and [profit] — the measured evidence [`Profitable] weighs
-    the enablement prior against — defaults to [Unmeasured], which is what {!model_default}'s
-    placement search (config [model_default_placements]) gets: it measures nothing, so the prior
-    stands there. [Train.tune_placements]' flip refinement passes the placement A/B arms' evidence.
-*)
+    [tune_flip_ordering] ([profitable]). [evidence] is the completed searches [`Profitable] weighs
+    the enablement prior against ({!family_profit_of_reports}, reported as [ps_profit]):
+    [Train.tune_placements]' flip refinement passes the placement A/B arms' reports, while
+    {!model_default}'s placement search (config [model_default_placements]) passes none — it
+    measures nothing, so the prior stands there. Under an unconditional ordering the evidence is not
+    derived at all, so such a run never reads [tune_flip_profit_margin]. *)
 
 type model_choice = {
   mc_label : string;
