@@ -80,6 +80,39 @@ let structure_cases =
       [ "bullet-integrity @ f.md:4"; "bullet-integrity @ f.md:3" ] );
     (* Prose paragraphs at column zero are the abstract and the backlink, and they close the list
        above them rather than continuing it. *)
+    (* Round 1's family: four constructs that fell through to "prose", which is not checked -- so
+       the text inside them got no termination, no repetition and no table rule at all, and the
+       golden stayed green over it. Recognition is closed now, and the fallthrough is a finding. *)
+    ( "an ordered item at column zero",
+      "# Title\n\n1. A fact written as an ordered item.\n",
+      [ "bullet-integrity @ f.md:3" ] );
+    ( "an ordered item written with a parenthesis",
+      "# Title\n\n1) A fact written as an ordered item.\n",
+      [ "bullet-integrity @ f.md:3" ] );
+    ( "an ordered item indented under a bullet",
+      "# Title\n\n- A fact with parts:\n  1. the first part.\n",
+      [ "bullet-integrity @ f.md:4" ] );
+    ( "a number that merely opens a sentence",
+      "# Title\n\n- 296 stanzas were placed against a floor of 295.\n",
+      [] );
+    ( "a fenced block, whose contents are not bullets",
+      "# Title\n\n- A fact.\n\n```\n- not a bullet, an example\n| not | a table |\n```\n\n-        Another fact.\n",
+      [ "bullet-integrity @ f.md:5" ] );
+    ( "a fence that is never closed",
+      "# Title\n\n- A fact.\n\n~~~\n- not a bullet\n",
+      [ "bullet-integrity @ f.md:5"; "bullet-integrity @ f.md:7" ] );
+    ("a block quote", "# Title\n\n> Quoted prose.\n", [ "bullet-integrity @ f.md:3" ]);
+    ( "an HTML block at column zero",
+      "# Title\n\n<details><summary>x</summary>\n",
+      [ "bullet-integrity @ f.md:3" ] );
+    ( "an angle bracket inside a continuation is ordinary text",
+      "# Title\n\n- A fact about widths\n  <= 8, and about `dune build <that target>`.\n",
+      [] );
+    ("a thematic break", "# Title\n\n- A fact.\n\n---\n\n- Another fact.\n",
+      [ "bullet-integrity @ f.md:5" ] );
+    ( "a third nesting level",
+      "# Title\n\n- A fact with parts:\n  - the first part, itself with parts:\n    - a third        level.\n",
+      [ "bullet-integrity @ f.md:5" ] );
     ( "prose at column zero between lists",
       "# Title\n\n- A fact.\n\nA paragraph of prose.\n\n- Another fact.\n",
       [] );
@@ -129,6 +162,12 @@ let table_cases =
     ( "an escaped pipe is not a cell separator either",
       "# Title\n\n| File | Covers |\n| --- | --- |\n| a \\| b | c |\n",
       [] );
+    ( "a delimiter cell of one hyphen",
+      "# Title\n\n| File | Covers |\n| - | --- |\n| a | b |\n",
+      [ "table-shape @ f.md:4" ] );
+    ( "a delimiter cell of two hyphens",
+      "# Title\n\n| File | Covers |\n| -- | -- |\n| a | b |\n",
+      [ "table-shape @ f.md:4" ] );
     ("alignment colons are still a delimiter row",
       "# Title\n\n| File | Covers |\n| :--- | ---: |\n| a | b |\n", [] );
   ]
@@ -197,6 +236,47 @@ let index_cases =
         ("agent-notes/b.md", file "- A fact about `Gadget`.\n") ],
       [ "index-agreement @ agent-notes.md"; "table-shape @ agent-notes.md:7";
         "table-shape @ agent-notes.md:9"; "reachability @ agent-notes.md" ] );
+    ( "an anchor on an identifier heading, which GitHub keeps underscored",
+      index [ "| [a.md](agent-notes/a.md#ident_blacklist) | the `ident_blacklist` |" ],
+      [ ("agent-notes/a.md", file "## ident_blacklist\n\n- A fact about `ident_blacklist`.\n") ],
+      [] );
+    ( "the same anchor with the underscore hyphenated",
+      index [ "| [a.md](agent-notes/a.md#ident-blacklist) | the `ident_blacklist` |" ],
+      [ ("agent-notes/a.md", file "## ident_blacklist\n\n- A fact about `ident_blacklist`.\n") ],
+      [ "index-agreement @ agent-notes.md:7" ] );
+    (* A backlink has to be one a reader can FOLLOW. All three of these carry the bytes and none of
+       them carries a link. *)
+    ( "a backlink that is only a code span",
+      index [ row "a.md" "the `Widget` seam" ],
+      [ ("agent-notes/a.md",
+          "# A file\n\nThe index lives at `[index](../agent-notes.md)`.\n\n- A fact about            `Widget`.\n") ],
+      [ "reachability @ agent-notes/a.md" ] );
+    ( "a backlink commented out",
+      index [ row "a.md" "the `Widget` seam" ],
+      [ ("agent-notes/a.md",
+          "# A file\n\n<!-- [index](../agent-notes.md) -->\n\n- A fact about `Widget`.\n") ],
+      [ "bullet-integrity @ agent-notes/a.md:3"; "reachability @ agent-notes/a.md" ] );
+    ( "a backlink that is an image",
+      index [ row "a.md" "the `Widget` seam" ],
+      [ ("agent-notes/a.md",
+          "# A file\n\n![index](../agent-notes.md)\n\n- A fact about `Widget`.\n") ],
+      [ "reachability @ agent-notes/a.md" ] );
+    ( "a backlink carrying an anchor is still a backlink",
+      index [ row "a.md" "the `Widget` seam" ],
+      [ ("agent-notes/a.md",
+          "# A file\n\nPart of the [index](../agent-notes.md#index).\n\n- A fact about            `Widget`.\n") ],
+      [] );
+    (* The directory is flat today; a note in a subdirectory of it is judged like any other, which is
+       what makes recursing over the tree safe rather than merely more thorough. *)
+    ( "a note in a subdirectory, linked",
+      index [ "| [a.md](agent-notes/sub/a.md) | the `Widget` seam |" ],
+      [ ("agent-notes/sub/a.md", file "- A fact about `Widget`.\n") ],
+      [] );
+    ( "a note in a subdirectory, unlinked",
+      index [ row "b.md" "the `Gadget` seam" ],
+      [ ("agent-notes/b.md", file "- A fact about `Gadget`.\n");
+        ("agent-notes/sub/a.md", file "- A fact about `Widget`.\n") ],
+      [ "reachability @ agent-notes/sub/a.md" ] );
     ( "a file no row links",
       index [ row "a.md" "the `Widget` seam" ],
       [ ("agent-notes/a.md", file "- A fact about `Widget`.\n");
@@ -238,6 +318,25 @@ let index_cases =
       [] );
   ]
 
+(* The escape hatch is only a hatch if the key a message tells you to paste is the key that matches.
+   Round 1 found it could match nothing at all: the documented format named the bullet's opening
+   while the message carried its tail, and the comparison ran over the message text. Both halves are
+   pinned here -- the key's shape, and that the message hands it to you verbatim. *)
+let exemption_cases =
+  [
+    ( "the key names the file and the bullet's opening",
+      "agent-notes/a.md",
+      "# A file\n\n- A trailing identifier is the ending here: `Ops.promote_prec`\n",
+      Some
+        "agent-notes/a.md: A trailing identifier is the ending here: `Ops.p" );
+    ( "a re-wrapped bullet has the same key",
+      "agent-notes/a.md",
+      "# A file\n\n- A trailing identifier is the ending\n  here: `Ops.promote_prec`\n",
+      Some "agent-notes/a.md: A trailing identifier is the ending here: `Ops.p" );
+    ("a finished bullet has no finding to key", "agent-notes/a.md",
+      "# A file\n\n- A fact that ends properly.\n", None );
+  ]
+
 let () =
   let check name expected found =
     if List.equal String.equal found expected then printf "ok: %s\n" name
@@ -252,6 +351,20 @@ let () =
   List.iter table_cases ~f:(fun (name, body, expected) ->
       check ("tables -- " ^ name) expected
         (List.map (Notes.check_tables ~file:"f.md" body) ~f:render));
+  List.iter exemption_cases ~f:(fun (name, file, body, expected) ->
+      let keys =
+        List.filter_map (Notes.check_structure ~file body) ~f:Notes.exemption_key
+      in
+      let message_offers_key =
+        List.for_all (Notes.check_structure ~file body) ~f:(fun f ->
+            match Notes.exemption_key f with
+            | None -> true
+            | Some k -> String.is_substring f.Notes.message ~substring:k)
+      in
+      check ("exemption -- " ^ name) (Option.to_list expected) keys;
+      if not message_offers_key then
+        fail "exemption -- %s: the finding's message does not print the key that would silence it"
+          name);
   List.iter index_cases ~f:(fun (name, index_contents, files, expected) ->
       let _, found =
         Notes.check_all ~index_file:"agent-notes.md" ~index_contents ~files

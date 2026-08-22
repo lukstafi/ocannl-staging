@@ -29,7 +29,9 @@ open Stdio
 module Notes = Test_utils.Agent_notes_scan
 
 (** Bullets that legitimately end without sentence-terminating punctuation, keyed by
-    ["<file>: <the bullet's opening>"] and each carrying its reason. The cheap fix for a flagged
+    [Agent_notes_scan.subject_key] form — ["<file>: <the bullet's opening, whitespace-normalized>"],
+    which the finding's own message prints ready to paste — and each carrying its reason. The cheap
+    fix for a flagged
     bullet is punctuation; this list is for one whose ending is load-bearing. Every entry has to earn
     its place on every run — an exemption that no longer matches a flagged bullet is reported, so a
     stale one cannot sit here granting cover to whatever text replaced it. *)
@@ -77,11 +79,16 @@ let () =
     "Structure of docs/agent-notes.md and docs/agent-notes/, over the live tree. The rules are\n\
      stated in test/support/agent_notes_scan.ml; the counts scanned go to stderr, since a tally in\n\
      a golden moves on every correct addition anywhere (gh-ocannl-665).\n";
-  (* An exemption suppresses the finding it names, and only that one. *)
+  (* An exemption suppresses the finding it names, and only that one. The comparison is against the
+     finding's own structured identity -- file plus the bullet's OPENING, which is the key its
+     message tells you to paste -- never against the message text, which is prose and gets reworded.
+     Keyed on the message it could not match at all (Codex P2, round 1). *)
   let exempted (f : Notes.finding) =
     String.equal f.Notes.rule Notes.rule_bullet_integrity
-    && List.exists unterminated_bullets ~f:(fun (key, _) ->
-           String.is_substring (f.Notes.where ^ ": " ^ f.Notes.message) ~substring:key)
+    &&
+    match Notes.exemption_key f with
+    | None -> false
+    | Some key -> List.exists unterminated_bullets ~f:(fun (k, _) -> String.equal k key)
   in
   let of_rule r =
     List.filter findings ~f:(fun f -> String.equal f.Notes.rule r && not (exempted f))
@@ -109,7 +116,8 @@ let () =
         not
           (List.exists findings ~f:(fun f ->
                String.equal f.Notes.rule Notes.rule_bullet_integrity
-               && String.is_substring (f.Notes.where ^ ": " ^ f.Notes.message) ~substring:key)))
+               && Option.value_map (Notes.exemption_key f) ~default:false
+                    ~f:(String.equal key))))
   in
   List.iter stale ~f:(fun (key, reason) ->
       eprintf "  stale exemption for %s (%s): no bullet is flagged for it any more\n" key reason);

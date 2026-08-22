@@ -3138,8 +3138,10 @@
 ; them until this; three of the six review findings on the split that created them (#406) were
 ; structural and decidable from the text alone. The rules live in test/support/agent_notes_scan.ml
 ; as pure functions over strings, so the negative controls below run the same code as the live-tree
-; scan. The glob is not recursive because the notes directory is flat by design -- one file per
-; subsystem, one index row each.
+; scan. The glob is RECURSIVE: the directory is flat today, but a note dropped into a subdirectory
+; of it would otherwise never reach the scanner, and a file the scan never sees is a file the
+; reachability rule calls green (Codex P2, round 1). Recursing hands it over instead, and the index
+; rules then judge it like any other -- linked and backlinked, or reported.
 
 ; What the agent-notes scan calls a defect, on input built to break it rather than on whatever the
 ; notes happen to say today -- which on a good day is nothing at all.
@@ -3164,7 +3166,7 @@
  (deps
   ocannl_config
   ../../docs/agent-notes.md
-  (glob_files ../../docs/agent-notes/*.md))
+  (glob_files_rec ../../docs/agent-notes/*.md))
  (action
   (with-stdout-to
    %{target}

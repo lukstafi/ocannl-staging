@@ -70,7 +70,18 @@ open Base
 
 (** A structural defect: which rule it broke, where, and what is wrong. [where] is
     ["<file>:<line>"], or ["<file>"] for a whole-file finding. *)
-type finding = { rule : string; where : string; message : string }
+type finding = {
+  rule : string;
+  file : string;  (** The notes file, apart from the line, so a consumer never re-parses [where]. *)
+  where : string;
+  message : string;
+  subject : string option;
+      (** The thing the finding is ABOUT, kept apart from the prose that describes it: for a bullet,
+          its opening. An exemption names a bullet, and a message is free to be reworded, so matching
+          an exemption against the message would break the moment the wording improved -- and did:
+          the key format documented one thing while the message carried the bullet's TAIL (Codex P2,
+          round 1). Consumers compare against [where]'s file and this. *)
+}
 
 (** One bullet, joined: [text] is the start line's content and every continuation line, separated by
     single spaces, with the ["- "] marker removed. [line] is the start line, 1-based. *)
@@ -92,10 +103,20 @@ let rules =
     rule_no_repetition;
   ]
 
-let finding ~file ~line ~rule message =
-  { rule; where = Printf.sprintf "%s:%d" file line; message }
+let finding ?subject ~file ~line ~rule message =
+  { rule; file; where = Printf.sprintf "%s:%d" file line; message; subject }
 
-let file_finding ~file ~rule message = { rule; where = file; message }
+let file_finding ?subject ~file ~rule message = { rule; file; where = file; message; subject }
+
+(** How an exemption or a report names the bullet a finding is about: the file it is in and the
+    bullet's opening, which is what a person can copy out of the message and paste into a list. *)
+let subject_key ~file ~subject = Printf.sprintf "%s: %s" file subject
+
+(** The exemption key a finding would be silenced by, for the findings that can be exempted at all.
+    Built from the finding's own structured fields, so the key a message tells you to paste is
+    exactly the key that matches — the two cannot drift apart. *)
+let exemption_key f =
+  Option.map f.subject ~f:(fun subject -> subject_key ~file:f.file ~subject)
 
 (* ------------------------------------------------------------------ *)
 (* Lines, indentation, inline code *)
@@ -184,13 +205,19 @@ let row_cells line =
 
 let is_table_line line = String.is_prefix (String.strip line) ~prefix:"|"
 
+(** GitHub wants at least THREE hyphens in a delimiter cell. A cell shortened to ["-"] or ["--"]
+    stops the block rendering as a table while every other property of it still holds, so accepting
+    "nonempty and all dashes" would leave the rule green over a table that is no longer one (Codex
+    P2, round 1). *)
+let delimiter_min_hyphens = 3
+
 let is_delimiter_row cells =
   (not (List.is_empty cells))
   && List.for_all cells ~f:(fun c ->
          let c = String.strip c in
          let c = Option.value (String.chop_prefix c ~prefix:":") ~default:c in
          let c = Option.value (String.chop_suffix c ~suffix:":") ~default:c in
-         (not (String.is_empty c)) && String.for_all c ~f:(Char.equal '-'))
+         String.length c >= delimiter_min_hyphens && String.for_all c ~f:(Char.equal '-'))
 
 (* ------------------------------------------------------------------ *)
 (* Rule 1: bullet integrity *)
@@ -221,10 +248,86 @@ let bullet_text_is_terminated text =
   let s = strip text in
   (not (String.is_empty s)) && List.mem terminators s.[String.length s - 1] ~equal:Char.equal
 
-(** A list marker this scan does not accept, so that a bullet written ["* "] or ["+ "] is reported
-    rather than silently read as a continuation line of whatever came before. *)
-let foreign_marker stripped =
-  List.find [ "* "; "+ " ] ~f:(fun m -> String.is_prefix stripped ~prefix:m)
+(** Whitespace collapsed to single spaces: the one normal form the repetition rule compares in and
+    the one a bullet is named by, so a bullet re-wrapped across different lines is the same bullet to
+    both. *)
+let normalize text =
+  String.split_on_chars text ~on:[ ' '; '\t' ]
+  |> List.filter ~f:(fun s -> not (String.is_empty s))
+  |> String.concat ~sep:" "
+
+(** How many characters of a bullet name it. Long enough to be unambiguous among 179, short enough
+    to paste into an exemption list by hand. *)
+let subject_length = 48
+
+(** How a bullet is NAMED, in a finding and in an exemption: its OPENING. The opening rather than
+    the tail, because that is the half a person recognises and the half that stays put while the
+    bullet is edited -- and because an exemption keyed on the tail of an unterminated bullet would
+    stop matching the moment someone finished the sentence, which is the edit it exists to survive.
+*)
+let bullet_subject (b : bullet) = String.prefix (normalize b.text) subject_length
+
+(** {2 The closed dialect}
+
+    The module's claim is that it reads the notes' dialect and REPORTS anything outside it rather
+    than guessing. Round 1 of review found four separate places where the code did the opposite and
+    silently skipped instead — an ordered-list item, a fenced block's contents, an HTML block, a
+    thematic break — each of which drops real text out of every rule while the golden stays green.
+    They are one defect, not four: an unrecognised line fell through to "prose", and prose is not
+    checked. So recognition is a closed vocabulary now, and the fallthrough is a finding.
+
+    Adding a construct to the notes therefore means teaching this function about it first, which is
+    the intended cost: a note that wants a fenced example has to say what the bullet rules mean
+    inside one. *)
+
+(** A list marker at any indentation that is not this scan's ["- "]. An ordered item is the one that
+    bit: at column zero it read as prose (so its text got no termination or repetition check at all),
+    and indented it folded into its parent's continuation (Codex P2, round 1). *)
+let foreign_list_marker stripped =
+  let ordered =
+    match String.lfindi stripped ~f:(fun _ c -> not (Char.is_digit c)) with
+    | Some i when i > 0 && i + 1 < String.length stripped ->
+        let sep = stripped.[i] and after = stripped.[i + 1] in
+        if (Char.equal sep '.' || Char.equal sep ')') && Char.equal after ' ' then
+          Some (String.prefix stripped (i + 1))
+        else None
+    | _ -> None
+  in
+  match ordered with
+  | Some m -> Some m
+  | None ->
+      List.find_map [ "* "; "+ " ] ~f:(fun m ->
+          if String.is_prefix stripped ~prefix:m then Some (String.rstrip m) else None)
+
+(** A fence opens a region whose contents are not the notes' dialect at all: a ["- "] line inside one
+    is example text, and reading it as a bullet invents integrity and repetition failures out of
+    someone's code sample. Reported, and its contents skipped, so one unsupported construct is one
+    finding. *)
+let fence_marker stripped =
+  List.find [ "```"; "~~~" ] ~f:(fun m -> String.is_prefix stripped ~prefix:m)
+
+(** Block constructs that Markdown recognises only at column zero, and that the notes do not use. At
+    depth they are ordinary continuation text — [`  <= 8 and …`] and [`  <that target>`] both occur —
+    so the column-zero condition is load-bearing, not incidental. *)
+let unsupported_block stripped =
+  let thematic =
+    (String.length stripped >= 3
+    && List.exists [ '-'; '*'; '_' ] ~f:(fun c ->
+           String.for_all stripped ~f:(fun d -> Char.equal c d || Char.equal d ' ')))
+    || (String.length stripped >= 3 && String.for_all stripped ~f:(Char.equal '='))
+  in
+  if String.is_prefix stripped ~prefix:">" then
+    Some "a block quote, which this scan does not read"
+  else if String.is_prefix stripped ~prefix:"<" then
+    Some "an HTML block, whose text no rule here can see"
+  else if thematic then
+    Some "a thematic break or a setext heading underline, neither of which the notes use"
+  else None
+
+(** One nesting level is what the notes are written in, and what {!parse_file} documents. A third
+    level was being accepted anyway — [expected] simply advanced by two more spaces — so the
+    discipline held only by convention (Codex P2, round 1). *)
+let max_nesting_indent = 2
 
 type parse = { bullets : bullet list; structure : finding list }
 
@@ -252,73 +355,117 @@ let parse_file ~file contents =
         bullets := { b with text } :: !bullets);
     stack := []
   in
+  (* Set while inside a fenced region, holding the fence that opened it: its contents are somebody's
+     example, not the notes' dialect, and reading a `- ` line in one as a bullet invents failures. *)
+  let fence_open = ref None in
   List.iter (lines contents) ~f:(fun (lineno, line) ->
       let stripped = String.strip line in
-      if is_blank line then close_all ()
-      else if has_leading_tab line then (
-        bad lineno "a tab in the indentation: indentation here is spaces, two per nesting level";
-        close_all ())
-      else
-        let indent = indent_of line in
-        if String.is_prefix stripped ~prefix:"#" then close_all ()
-        else if is_table_line line then close_all ()
-        else
-          match foreign_marker stripped with
-          | Some m ->
-              bad lineno
-                (Printf.sprintf "the list marker %S: bullets here are written \"- \"" (String.rstrip m));
-              close_all ()
-          | None ->
-              if String.equal stripped "-" then (
-                bad lineno "an empty bullet";
-                close_all ())
-              else if String.is_prefix stripped ~prefix:"- " then (
-                (* A bullet start closes every open bullet at or inside its own depth. *)
-                let rec pop acc =
-                  match !stack with
-                  | (b, texts) :: rest when b.indent >= indent ->
-                      stack := rest;
-                      pop ((b, texts) :: acc)
-                  | _ -> acc
-                in
-                (* [pop] prepends as it unwinds inwards-out, so [popped] is outermost first. *)
-                List.iter (pop []) ~f:(fun (b, texts) ->
-                    let text = String.concat ~sep:" " (List.rev !texts) in
-                    bullets := { b with text } :: !bullets);
-                let expected = match !stack with [] -> 0 | (b, _) :: _ -> b.indent + 2 in
-                if indent <> expected then
-                  bad lineno
-                    (Printf.sprintf
-                       "a bullet indented %d, where the open list puts the next one at %d" indent
-                       expected);
-                let b = { file; line = lineno; indent; text = "" } in
-                stack := (b, ref [ String.drop_prefix stripped 2 ]) :: !stack)
-              else if indent = 0 then close_all ()
-              else
-                match !stack with
-                | [] ->
-                    bad lineno
-                      "an indented line continuing no bullet: nothing above it is an open list item";
-                    ()
-                | (b, texts) :: _ ->
-                    if indent <> b.indent + 2 then
+      match !fence_open with
+      | Some opener ->
+          if String.is_prefix stripped ~prefix:opener then fence_open := None
+          else ()
+      | None ->
+          if is_blank line then close_all ()
+          else if has_leading_tab line then (
+            bad lineno
+              "a tab in the indentation: indentation here is spaces, two per nesting level";
+            close_all ())
+          else
+            let indent = indent_of line in
+            match fence_marker stripped with
+            | Some m ->
+                bad lineno
+                  (Printf.sprintf
+                     "a %s fenced block: the notes have no fenced code, and the lines inside one \
+                      are not bullets, table rows or prose -- teach this scan what they are before \
+                      writing one"
+                     m);
+                fence_open := Some m;
+                close_all ()
+            | None ->
+                if String.is_prefix stripped ~prefix:"#" then close_all ()
+                else if is_table_line line then close_all ()
+                else
+                  match foreign_list_marker stripped with
+                  | Some m ->
                       bad lineno
                         (Printf.sprintf
-                           "an indented line at %d continuing the bullet at line %d, whose \
-                            continuations sit at %d"
-                           indent b.line (b.indent + 2))
-                    else texts := stripped :: !texts);
+                           "the list marker %S: bullets here are written \"- \", and an item this \
+                            scan does not recognise is an item no rule checks"
+                           m);
+                      close_all ()
+                  | None -> (
+                      if String.equal stripped "-" then (
+                        bad lineno "an empty bullet";
+                        close_all ())
+                      else if String.is_prefix stripped ~prefix:"- " then (
+                        (* A bullet start closes every open bullet at or inside its own depth. *)
+                        let rec pop acc =
+                          match !stack with
+                          | (b, texts) :: rest when b.indent >= indent ->
+                              stack := rest;
+                              pop ((b, texts) :: acc)
+                          | _ -> acc
+                        in
+                        (* [pop] prepends as it unwinds inwards-out, so [popped] is outermost first. *)
+                        List.iter (pop []) ~f:(fun (b, texts) ->
+                            let text = String.concat ~sep:" " (List.rev !texts) in
+                            bullets := { b with text } :: !bullets);
+                        let expected = match !stack with [] -> 0 | (b, _) :: _ -> b.indent + 2 in
+                        if indent > max_nesting_indent then
+                          bad lineno
+                            (Printf.sprintf
+                               "a bullet nested %d deep: the notes go one level down and this scan \
+                                reads no further, so anything below %d is unchecked"
+                               ((indent / 2) + 1) max_nesting_indent
+                            )
+                        else if indent <> expected then
+                          bad lineno
+                            (Printf.sprintf
+                               "a bullet indented %d, where the open list puts the next one at %d"
+                               indent expected);
+                        let b = { file; line = lineno; indent; text = "" } in
+                        stack := (b, ref [ String.drop_prefix stripped 2 ]) :: !stack)
+                      else if indent = 0 then (
+                        (match unsupported_block stripped with
+                        | Some what -> bad lineno what
+                        | None -> ());
+                        close_all ())
+                      else
+                        match !stack with
+                        | [] ->
+                            bad lineno
+                              "an indented line continuing no bullet: nothing above it is an open \
+                               list item"
+                        | (b, texts) :: _ ->
+                            if indent <> b.indent + 2 then
+                              bad lineno
+                                (Printf.sprintf
+                                   "an indented line at %d continuing the bullet at line %d, whose \
+                                    continuations sit at %d"
+                                   indent b.line (b.indent + 2))
+                            else texts := stripped :: !texts));
+  (match !fence_open with
+  | Some m ->
+      findings :=
+        finding ~file ~line:(List.length (lines contents)) ~rule:rule_bullet_integrity
+          (Printf.sprintf "a %s fence that is never closed, so the rest of the file is unread" m)
+        :: !findings
+  | None -> ());
   close_all ();
   let bullets = List.rev !bullets in
   let terminator_findings =
     List.filter_map bullets ~f:(fun b ->
         if bullet_text_is_terminated b.text then None
         else
+          let subject = bullet_subject b in
           Some
-            (finding ~file ~line:b.line ~rule:rule_bullet_integrity
-               (Printf.sprintf "a bullet that does not end a sentence, so its tail may be elsewhere: \
-                                \"…%s\""
-                  (String.suffix b.text 60))))
+            (finding ~subject ~file ~line:b.line ~rule:rule_bullet_integrity
+               (Printf.sprintf
+                  "a bullet that does not end a sentence, so its tail may be elsewhere: %S ends \
+                   \"…%s\" -- exempt it as %S if that ending is deliberate"
+                  subject (String.suffix b.text 40)
+                  (subject_key ~file ~subject))))
   in
   { bullets; structure = List.rev !findings @ terminator_findings }
 
@@ -436,14 +583,17 @@ let backticked cell =
       let s = String.strip s ~drop:(Char.equal '`') in
       if String.is_empty (String.strip s) then None else Some s)
 
-(** GitHub's heading slug, enough of it for the anchors a note would write: lowercased, punctuation
-    dropped, spaces to hyphens. *)
+(** GitHub's heading slug: lowercased, spaces to hyphens, other punctuation dropped — and
+    UNDERSCORES KEPT, which is the half that matters here. The headings a note would anchor are
+    identifiers (`ident_blacklist`, `promote_prec`), and GitHub anchors those as `#ident_blacklist`;
+    rewriting the underscore rejected the correct anchor and accepted the wrong one (Codex P2,
+    round 1). Hyphens are likewise kept as themselves rather than re-derived. *)
 let slug heading =
   String.lowercase heading
   |> String.to_list
   |> List.filter_map ~f:(fun c ->
-         if Char.is_alphanum c then Some c
-         else if Char.equal c ' ' || Char.equal c '-' || Char.equal c '_' then Some '-'
+         if Char.is_alphanum c || Char.equal c '_' || Char.equal c '-' then Some c
+         else if Char.equal c ' ' then Some '-'
          else None)
   |> String.of_list
 
@@ -453,6 +603,55 @@ let headings contents =
       if String.is_prefix s ~prefix:"#" then
         Some (String.strip (String.lstrip s ~drop:(Char.equal '#')))
       else None)
+
+(** HTML comments removed, so that a link inside one is not a link. Unterminated, the comment runs
+    to the end of the text — which is what a browser does with it too. *)
+let strip_html_comments text =
+  let rec go acc rest =
+    match String.substr_index rest ~pattern:"<!--" with
+    | None -> acc ^ rest
+    | Some i -> (
+        let after = String.drop_prefix rest (i + 4) in
+        match String.substr_index after ~pattern:"-->" with
+        | None -> acc ^ String.prefix rest i
+        | Some j -> go (acc ^ String.prefix rest i) (String.drop_prefix after (j + 3)))
+  in
+  go "" text
+
+(** The NAVIGABLE links of a line: [\[text\](target)] outside inline code, outside HTML comments, and
+    not an image ([!\[alt\](src)] renders a picture, not a way back). A substring test for
+    ["](../agent-notes.md)"] called a file reachable when those same bytes sat in a code span, in a
+    comment, or behind an image (Codex P2, round 1) — all three of which a reader cannot follow. *)
+let markdown_links line =
+  let line = strip_html_comments line in
+  let spans = code_spans line in
+  let n = String.length line in
+  let rec go i acc =
+    if i >= n then List.rev acc
+    else if Char.equal line.[i] '[' && not (in_any_span spans i) then
+      let image = i > 0 && Char.equal line.[i - 1] '!' in
+      match String.index_from line i ']' with
+      | Some close
+        when close + 1 < n
+             && Char.equal line.[close + 1] '('
+             && (not (in_any_span spans close))
+             && not (in_any_span spans (close + 1)) -> (
+          match String.index_from line (close + 1) ')' with
+          | Some rparen when not (in_any_span spans rparen) ->
+              let text = String.sub line ~pos:(i + 1) ~len:(close - i - 1) in
+              let target =
+                String.sub line ~pos:(close + 2) ~len:(rparen - close - 2)
+              in
+              let acc = if image then acc else (text, target) :: acc in
+              go (rparen + 1) acc
+          | _ -> go (i + 1) acc)
+      | _ -> go (i + 1) acc
+    else go (i + 1) acc
+  in
+  go 0 []
+
+(** Every navigable link of a whole file. *)
+let links_of contents = List.concat_map (lines contents) ~f:(fun (_, l) -> markdown_links l)
 
 (** [\[text\](target)] filling the whole cell, and nothing else. *)
 let parse_link cell =
@@ -587,15 +786,22 @@ let check_index ~index_file ~index_contents ~(files : (string * string) list) =
                "a notes file no index row links to: unreachable from the one place a lookup starts"))
   in
   let backlinks =
+    let index_base = List.last_exn (String.split index_file ~on:'/') in
     List.filter_map files ~f:(fun (name, contents) ->
-        let expected = Printf.sprintf "](../%s)" (List.last_exn (String.split index_file ~on:'/')) in
-        if String.is_substring contents ~substring:expected then None
+        (* A link, not a byte sequence: the target has to be one a reader can follow back. *)
+        let target = "../" ^ index_base in
+        if
+          List.exists (links_of contents) ~f:(fun (_, t) ->
+              String.equal (List.hd_exn (String.split t ~on:'#')) target)
+        then None
         else
           Some
             (file_finding ~file:name ~rule:rule_reachability
-               (Printf.sprintf "no link back to the index (%S): a file reached on its own leaves the \
-                                reader without the scope discipline the index carries"
-                  expected)))
+               (Printf.sprintf
+                  "no navigable link back to the index (a link to %S, outside code spans, HTML \
+                   comments and images): a file reached on its own leaves the reader without the \
+                   scope discipline the index carries"
+                  target)))
   in
   row_findings @ per_row @ duplicates @ orphans @ backlinks
 
@@ -607,11 +813,6 @@ let check_index ~index_file ~index_contents ~(files : (string * string) list) =
     duplicates. Long enough that no two of the corpus's 177 bullets collide, short enough that a
     fact re-promoted with its tail reworded is still caught. *)
 let near_duplicate_prefix = 60
-
-let normalize text =
-  String.split_on_chars text ~on:[ ' '; '\t' ]
-  |> List.filter ~f:(fun s -> not (String.is_empty s))
-  |> String.concat ~sep:" "
 
 (** Rule 5 over every bullet of the notes, the index's own included. Exact repetition is reported
     first and suppresses the near-duplicate report for the same pair, so one fact promoted twice is
