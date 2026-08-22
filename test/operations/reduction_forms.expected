@@ -1,3 +1,26 @@
+Schedule.optop coverage:
+  Split              covered by split-then-unroll, split-then-swap, split-then-vectorize-inner, split-then-vectorize-narrow
+  Swap               covered by split-then-swap
+  Retype             covered by retype-vectorized, split-then-vectorize-inner, split-then-vectorize-narrow, retype-workgroup-reduce, retype-workgroup
+  Unroll             covered by unroll-annot, unroll-mat, unroll-outer-mat
+  Partition          covered by partition, partition-then-unroll, partition-outer
+  Pad                covered by pad-then-unroll-mat
+  Stage              out of scope: stages an OPERAND into shared memory: it changes where the reduction reads from, never where its accumulator lives
+  Privatize          out of scope: gives a scratch node a per-thread copy, which is a parallelism decision about a different node than the one being accumulated
+  Expand_zero        covered by tile-mma-fallback
+  Tensorize          covered by tile-mma-fallback
+  Fuse_epilogue      out of scope: splices a consumer AFTER the reduction's closing store, so the form it follows is whichever one this table already pins
+  Split_reduce       covered by split-reduce
+every Schedule.optop constructor is reached by a member that exists, or exempted with a reason: true
+Low_level.axis_type coverage:
+  Serial             covered by serial, decline-data-guard, decline-sibling-statement
+  Unrolled           covered by unroll-annot, decline-sibling-unrolled
+  Vectorized         covered by retype-vectorized, split-then-vectorize-inner, split-then-vectorize-narrow
+  Workgroup          covered by retype-workgroup
+  Workgroup_reduce   covered by retype-workgroup-reduce
+  Grid               out of scope: its fallback is the plain serial loop and NOT the localizing one — the one arm that serializes without localizing. No schedule op in the tree produces an unbindable, non-parallel-eligible Grid level over a reduction axis, and one that existed would be a cross-thread race rather than a width question
+every Low_level.axis_type constructor is reached by a member that exists, or exempted with a reason: true
+the coverage samples name distinct constructors: true
 reduction: out[3] = sum of 32 terms, hand-built Low_level, 25 members
   01 serial                      [f32 bf16 f16] over plain                 no schedule ops (the reference rendering)                              -> localized scope
   02 unroll-annot                [f32 bf16 f16] over plain                 Unroll (annotated: codegen repeats the body)                           -> localized scope

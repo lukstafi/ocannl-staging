@@ -18,7 +18,8 @@
      read-modify-write member must agree bitwise with the host's per-step-narrowed reference. Both
      references are exact: the operands are storage-exact multiples of 1/8 whose PARTIAL SUMS leave
      the storage format's exactness range (see {!cells}), so the two references differ at bf16 and
-     f16 — proven here rather than assumed, by [claim_refs_differ]. At f32 they coincide, which is
+     f16 — proven here rather than assumed, by the "the whole-nest and per-step references differ"
+     claims. At f32 they coincide, which is
      the identity-precision leg gh-ocannl-693 added: there the value claim pins substitution and
      iteration coverage rather than accumulator width.
    - FORM. The emitted kernel is classified — localized scope, per-step read-modify-write, SIMD
@@ -536,8 +537,11 @@ let read_form src ~label =
           has_warp = String.is_substring src ~substring:"ocannl_shfl_xor";
         }
 
-(* What the reading says the kernel rendered. The order matters: a SIMD grid or a shuffle tree is
-   also localized (that is the point of them), so the more specific form wins. *)
+(* What the reading says the kernel rendered. The order matters, and not merely for tidiness: a
+   SIMD grid's epilogue is TEXTUALLY a read-modify-write ([out[i] = out[i] + vred_total]) — one per
+   nest rather than one per step, which is the entire difference — so testing the RMW fingerprint
+   first would classify the vector rendering as the form it exists to avoid. The more specific form
+   wins, and the per-nest count is checked separately against the member's declared sites. *)
 let form_of reading =
   if reading.has_warp then Warp
   else if reading.has_simd then Simd
@@ -582,14 +586,13 @@ let execute ~name ~(prog : prog) ~(sched : Sched.schedule) =
    Each member is one point of the product the issue asks to sweep: a schedule composition over one
    of the {!shape}s, the form it claims to reach, and the reference its value must match. *)
 
-type parity =
-  | Bitwise
-      (** The composition preserves the summation order and the narrowing points, so the values are
-          equal to the last bit — the strongest reading, and the one that catches an accumulator
-          silently narrowing at a seam. *)
-  | Approx
-      (** The composition REASSOCIATES (a swapped split, a block-partial reduction, a shuffle tree),
-          so its narrowing points differ by construction; only closeness is claimed. *)
+(* Every value claim is BITWISE, the reassociating compositions included. A swapped split, a
+   block-partial reduction and a shuffle tree all change the order of the additions, so they would
+   normally earn a tolerance — but each of them is declared over f32 only (or, for the shuffle,
+   available at f32 only), and there these operands' partial sums are exact, so every association
+   gives the same float. That is not an assumption: the "at f32 the whole-nest and per-step
+   references coincide" claim asserts exactly the exactness the argument rests on. A tolerance would have hidden a real narrowing at a seam behind
+   an allowance for a reassociation that cannot cost anything here. *)
 
 type reference =
   | Baseline  (** The serial rendering of the plain nest, executed at this precision. *)
@@ -606,7 +609,17 @@ type member = {
           [.expected] golden is one file for every backend, so a member whose form is
           backend-dependent names both readings here. *)
   reference : reference;
-  parity : parity;
+  store_sites : int;
+      (** How many CLOSING STORES of the accumulated node the localized form may emit: one per
+          textual copy of the surviving output loop's body, which is one unless the composition
+          duplicated that loop ([Unroll ~materialize] or [Partition] of the OUTPUT axis). Pinned
+          exactly, not as "at least one" (Codex P2, round 1): a regression that gave each
+          [Partition] segment or each unrolled copy its OWN scope and closing store would still
+          read as localized under a positive-count test, and on a backend whose accumulator already
+          resides at storage width the extra store/reload seams need not change the executed value
+          either — a false green in both claims at once. The node's total subscript count is bounded
+          by [2 * store_sites] for the same reason: each site may open the cell and close it, and
+          nothing else may touch it. *)
   extra : string list;
       (** Substrings the emitted kernel must also contain, ANDed into the form claim. For the one
           distinguishing feature the node-access classifier cannot see: WHICH spelling the update
@@ -624,10 +637,22 @@ type member = {
 let no_ops _ = []
 
 let member ?(shape = Plain) ?(sched = no_ops) ?(expect = Localized) ?claimed ?(reference = Baseline)
-    ?(parity = Bitwise) ?(extra = []) ?(precisions = [ "f32"; "bf16"; "f16" ])
+    ?(store_sites = 1) ?(extra = []) ?(precisions = [ "f32"; "bf16"; "f16" ])
     ?(available = fun _ -> true) slug what =
   let claimed = Option.value claimed ~default:(form_name expect) in
-  { slug; what; shape; sched; expect; claimed; reference; parity; extra; precisions; available }
+  {
+    slug;
+    what;
+    shape;
+    sched;
+    expect;
+    claimed;
+    reference;
+    store_sites;
+    extra;
+    precisions;
+    available;
+  }
 
 let members =
   [
@@ -639,8 +664,10 @@ let members =
         [ Sched.Unroll { axis = g.k; materialize = false } ]);
     member "unroll-mat" "Unroll ~materialize (the schedule mints the scope)" ~sched:(fun g ->
         [ Sched.Unroll { axis = g.k; materialize = true } ]);
-    member "unroll-outer-mat" "Unroll ~materialize of the OUTPUT axis" ~sched:(fun g ->
-        [ Sched.Unroll { axis = g.r; materialize = true } ]);
+    (* The output loop is gone, so each of its [rows] copies closes its own cell -- which is not a
+       seam but the whole of that cell's reduction. *)
+    member "unroll-outer-mat" "Unroll ~materialize of the OUTPUT axis" ~store_sites:rows
+      ~sched:(fun g -> [ Sched.Unroll { axis = g.r; materialize = true } ]);
     (* --- [Partition]: an index-set specialization of one reduction, so its segment seams must not
        become narrowing points — one scope spans every segment. --- *)
     member "partition" "Partition of the reduction axis into three segments" ~sched:(fun g ->
@@ -650,7 +677,9 @@ let members =
       ~sched:(fun g ->
         let pt, segs = Sched.partition ~axis:g.k ~breakpoints:[ 4; 12 ] in
         [ pt; Sched.Unroll { axis = List.hd_exn segs; materialize = false } ]);
+    (* Two segment loops over the output axis, each carrying a whole reduction: two sites. *)
     member "partition-outer" "Partition of the OUTPUT axis (the reduction is inside a segment)"
+      ~store_sites:2
       ~sched:(fun g ->
         let pt, _ = Sched.partition ~axis:g.r ~breakpoints:[ 1 ] in
         [ pt ]);
@@ -659,7 +688,7 @@ let members =
       ~sched:(fun g ->
         let sp, _outer, inner = Sched.split ~axis:g.k ~factor:4 ~outer:LL.Serial ~inner:LL.Serial in
         [ sp; Sched.Unroll { axis = inner; materialize = true } ]);
-    member "split-then-swap" "Split the reduction axis, then Swap the halves" ~parity:Approx
+    member "split-then-swap" "Split the reduction axis, then Swap the halves"
       ~precisions:[ "f32" ] ~sched:(fun g ->
         let sp, outer, inner = Sched.split ~axis:g.k ~factor:4 ~outer:LL.Serial ~inner:LL.Serial in
         [ sp; Sched.Swap { outer; inner } ]);
@@ -674,7 +703,7 @@ let members =
        (each partial narrows at its own store), so this member claims f32 only, where the sums are
        exact. --- *)
     member "split-reduce" "Split_reduce into four block partials plus a combine nest"
-      ~expect:Partials_combine ~parity:Approx ~precisions:[ "f32" ] ~sched:(fun g ->
+      ~expect:Partials_combine ~precisions:[ "f32" ] ~sched:(fun g ->
         let op, _b, _i, _c = Sched.split_reduce ~axis:g.k ~target:g.out ~num_blocks:4 in
         [ op ]);
     (* --- the [Vectorized] arm: a SIMD accumulator grid plus its scalar tail, and the same
@@ -742,25 +771,192 @@ let members =
         [ Sched.Unroll { axis = g.k; materialize = false } ]);
   ]
 
+(* {1 Coverage ratchets}
+
+   Printing the member list says what the table SWEEPS; on its own it cannot say what the table
+   MISSES. A schedule op or an axis kind that no member reaches changes neither the list nor the
+   output, which leaves exhaustiveness as an unenforced advertisement and puts the next form back on
+   the review-only discovery path this test exists to replace (Codex P2, round 1).
+
+   So the two variant types that DEFINE the space are matched exhaustively below, and the compiler
+   is the ratchet: adding a constructor to [Schedule.optop] or to [Low_level.axis_type] fails to
+   build this file until someone says which member reaches it, or why it is out of scope. The
+   classification is printed, and every member name it cites is checked to exist — so the coverage
+   claim cannot drift from the table by renaming either side.
+
+   The limit is worth stating rather than glossing: this catches a new schedule OP and a new axis
+   KIND. It does not catch a new rendering ARM inside an axis kind the table already reaches — if
+   such an arm fires for a member the form claim moves and the golden diffs, but an arm reachable
+   only through a shape no member builds is invisible here. Closing that needs a census emitted by
+   codegen itself, in the shape of [C_syntax.mma_census]. *)
+
+type coverage =
+  | Covered of string list  (** The members that reach it, by slug. *)
+  | Out_of_scope of string  (** Why it is not a serial-rendered form of a reduction. *)
+
+let optop_coverage (op : Sched.optop) : coverage =
+  match op with
+  | Sched.Split _ ->
+      Covered
+        [
+          "split-then-unroll"; "split-then-swap"; "split-then-vectorize-inner";
+          "split-then-vectorize-narrow";
+        ]
+  | Sched.Swap _ -> Covered [ "split-then-swap" ]
+  | Sched.Retype _ ->
+      Covered
+        [
+          "retype-vectorized"; "split-then-vectorize-inner"; "split-then-vectorize-narrow";
+          "retype-workgroup-reduce"; "retype-workgroup";
+        ]
+  | Sched.Unroll _ -> Covered [ "unroll-annot"; "unroll-mat"; "unroll-outer-mat" ]
+  | Sched.Partition _ -> Covered [ "partition"; "partition-then-unroll"; "partition-outer" ]
+  | Sched.Pad _ -> Covered [ "pad-then-unroll-mat" ]
+  | Sched.Split_reduce _ -> Covered [ "split-reduce" ]
+  | Sched.Tensorize _ -> Covered [ "tile-mma-fallback" ]
+  | Sched.Expand_zero _ -> Covered [ "tile-mma-fallback" ]
+  | Sched.Stage _ ->
+      Out_of_scope
+        "stages an OPERAND into shared memory: it changes where the reduction reads from, never \
+         where its accumulator lives"
+  | Sched.Privatize _ ->
+      Out_of_scope
+        "gives a scratch node a per-thread copy, which is a parallelism decision about a different \
+         node than the one being accumulated"
+  | Sched.Fuse_epilogue _ ->
+      Out_of_scope
+        "splices a consumer AFTER the reduction's closing store, so the form it follows is \
+         whichever one this table already pins"
+
+let axis_coverage (ty : LL.axis_type) : coverage =
+  match ty with
+  | LL.Serial -> Covered [ "serial"; "decline-data-guard"; "decline-sibling-statement" ]
+  | LL.Unrolled -> Covered [ "unroll-annot"; "decline-sibling-unrolled" ]
+  | LL.Vectorized ->
+      Covered [ "retype-vectorized"; "split-then-vectorize-inner"; "split-then-vectorize-narrow" ]
+  | LL.Workgroup_reduce -> Covered [ "retype-workgroup-reduce" ]
+  | LL.Workgroup -> Covered [ "retype-workgroup" ]
+  | LL.Grid ->
+      Out_of_scope
+        "its fallback is the plain serial loop and NOT the localizing one — the one arm that \
+         serializes without localizing. No schedule op in the tree produces an unbindable, \
+         non-parallel-eligible Grid level over a reduction axis, and one that existed would be a \
+         cross-thread race rather than a width question"
+
+(* Sample values, one per constructor, purely to drive the printed table: the classification itself
+   is the exhaustive [match] above, which is what the compiler checks. A constructor added without a
+   sample here still fails the build at that match — add both. *)
+let coverage_sym = Ll_test.sym ()
+
+let coverage_node =
+  Int.incr next_id;
+  Tn.create (Tn.Specified Ops.single) ~id:!next_id ~label:[ "rfcov" ]
+    ~unpadded_dims:(lazy [| 1 |])
+    ~padding:(lazy None)
+    ()
+
+let optop_samples : Sched.optop list =
+  let s = coverage_sym in
+  [
+    Sched.Split
+      { axis = s; factor = 1; outer = LL.Serial; inner = LL.Serial; outer_index = s; inner_index = s };
+    Sched.Swap { outer = s; inner = s };
+    Sched.Retype { axis = s; ty = LL.Serial };
+    Sched.Unroll { axis = s; materialize = false };
+    Sched.Partition { axis = s; breakpoints = []; segment_indices = [] };
+    Sched.Pad { axis = s; to_multiple_of = 1 };
+    Sched.Stage
+      {
+        source = coverage_node;
+        tile_loops = [];
+        shared = false;
+        cooperative = None;
+        hoisted = false;
+        swizzle = None;
+        pad_stride = None;
+        pipeline_depth = 0;
+        tile_prec = None;
+      };
+    Sched.Privatize { target = coverage_node; over = s };
+    Sched.Expand_zero { tn = coverage_node; indices = [] };
+    Sched.Tensorize { i = s; j = s; k = s; lane = s; simd_width = 1 };
+    Sched.Fuse_epilogue { target = coverage_node; shared = false };
+    Sched.Split_reduce
+      {
+        axis = s;
+        target = coverage_node;
+        num_blocks = 1;
+        block_index = s;
+        inner_index = s;
+        combine_indices = [];
+      };
+  ]
+
+let axis_samples : LL.axis_type list =
+  [ LL.Serial; LL.Unrolled; LL.Vectorized; LL.Workgroup; LL.Workgroup_reduce; LL.Grid ]
+
+(* The constructor's own name, off its sexp — so the printed table cannot disagree with the value
+   it describes. *)
+let constructor_name sexp =
+  match sexp with Sexp.List (Sexp.Atom name :: _) -> name | Sexp.Atom name -> name | _ -> "?"
+
 (* {1 Running the table} *)
 
 let same_form a b = String.equal (form_name a) (form_name b)
 
-(* A reassociating member's tolerance, relative: one rounding of the accumulator is ~2^-8 at bf16
-   and ~2^-11 at f16, and a tree or block reduction performs a handful of them. f32 sums of these
-   operands are exact, so the tolerance there only absorbs a change in association that cannot
-   happen. *)
-let tolerance = function "bf16" -> 3e-2 | "f16" -> 3e-3 | _ -> 1e-6
-
-let agrees ~parity ~prec_name got want =
-  Array.length got = Array.length want
-  && Array.for_all2_exn got want ~f:(fun g w ->
-         match parity with
-         | Bitwise -> Float.equal g w
-         | Approx -> Float.(abs (g - w) <= tolerance prec_name *. (abs w +. 1.0)))
+let agrees got want =
+  Array.length got = Array.length want && Array.for_all2_exn got want ~f:Float.equal
 
 let show vs = String.concat ~sep:" " (Array.to_list (Array.map vs ~f:(Printf.sprintf "%h")))
 let routine_stem slug = String.tr slug ~target:'-' ~replacement:'_'
+
+(* The coverage tables, printed and asserted: every constructor is reached by a member that
+   EXISTS, or exempted with a reason. A slug naming no member fails the claim, so renaming a member
+   without updating its coverage entry is a failure rather than a quiet gap. *)
+let () =
+  let slugs =
+    "tile-mma-fallback" :: List.map members ~f:(fun m -> m.slug) |> Set.of_list (module String)
+  in
+  let report ~what ~name_of ~classify samples =
+    let ok = ref true in
+    List.iter samples ~f:(fun sample ->
+        let name = name_of sample in
+        match classify sample with
+        | Covered [] ->
+            ok := false;
+            Stdio.printf "  %-18s covered by nothing\n" name
+        | Covered members_of ->
+            let missing =
+              List.filter members_of ~f:(fun slug -> not (Set.mem slugs slug))
+            in
+            if not (List.is_empty missing) then begin
+              ok := false;
+              Stdio.eprintf "  %s cites members that do not exist: %s\n" name
+                (String.concat ~sep:", " missing)
+            end;
+            Stdio.printf "  %-18s covered by %s\n" name (String.concat ~sep:", " members_of)
+        | Out_of_scope why -> Stdio.printf "  %-18s out of scope: %s\n" name why);
+    p
+      (Printf.sprintf
+         "every %s constructor is reached by a member that exists, or exempted with a reason" what)
+      !ok
+  in
+  Stdio.printf "Schedule.optop coverage:\n";
+  report ~what:"Schedule.optop"
+    ~name_of:(fun op -> constructor_name (Sched.sexp_of_optop op))
+    ~classify:optop_coverage optop_samples;
+  Stdio.printf "Low_level.axis_type coverage:\n";
+  report ~what:"Low_level.axis_type"
+    ~name_of:(fun ty -> constructor_name (LL.sexp_of_axis_type ty))
+    ~classify:axis_coverage axis_samples;
+  (* A duplicated sample would print one constructor twice and leave another unprinted, while the
+     exhaustive matches above stayed satisfied. *)
+  let distinct l =
+    List.length (List.dedup_and_sort l ~compare:String.compare) = List.length l
+  in
+  p "the coverage samples name distinct constructors"
+    (distinct (List.map optop_samples ~f:(fun op -> constructor_name (Sched.sexp_of_optop op)))
+    && distinct (List.map axis_samples ~f:(fun ty -> constructor_name (LL.sexp_of_axis_type ty))))
 
 let () =
   Stdio.printf "reduction: out[%d] = sum of %d terms, hand-built Low_level, %d members\n" rows cols
@@ -852,19 +1048,46 @@ let () =
                   p form_claim false
               | Some reading ->
                   let rendered = form_of reading in
+                  (* The coarse form is not the whole claim: a localizing composition must close the
+                     cell exactly as often as it opens the output loop's body, and touch the node no
+                     more than that (Codex P2, round 1). The declining and partial forms are
+                     identified by what they do to the node in the first place, so the count adds
+                     nothing there. *)
+                  let sites_ok =
+                    match m.expect with
+                    | Localized ->
+                        reading.stores_from_local = m.store_sites
+                        && reading.node_accesses <= 2 * m.store_sites
+                    | Simd | Warp ->
+                        (* A vector or shuffle epilogue closes the cell ONCE per nest, and may
+                           spell that as [out[i] = out[i] + vred_total] rather than as a store
+                           from a scope local — textually a read-modify-write, but one per nest
+                           instead of one per step, which is the whole distinction. Either
+                           spelling counts, and the access bound is what refuses a regression
+                           that closed once per chain. *)
+                        reading.stores_from_local + reading.rmw_statements = m.store_sites
+                        && reading.node_accesses <= 2 * m.store_sites
+                    | Partials_combine | Rmw | Mma_fallback -> true
+                  in
+                  if not sites_ok then
+                    Stdio.eprintf
+                      "  %s: %d closing store(s) and %d node subscript(s), expected %d and at most \
+                       %d\n"
+                      name reading.stores_from_local reading.node_accesses m.store_sites
+                      (2 * m.store_sites);
                   if not (same_form rendered m.expect) then
                     Stdio.eprintf
                       "  %s: rendered %s, claimed %s (node subscripts %d, rmw statements %d, \
                        stores from a local %d, foreign local stores %d)\n"
                       name (form_name rendered) (form_name m.expect) reading.node_accesses
                       reading.rmw_statements reading.stores_from_local reading.foreign_local_stores;
-                  p form_claim (same_form rendered m.expect && extra_ok));
+                  p form_claim (same_form rendered m.expect && sites_ok && extra_ok));
               let want =
                 match m.reference with
                 | Baseline -> baseline prec_name
                 | Per_step -> per_step_ref prec
               in
-              let ok = agrees ~parity:m.parity ~prec_name got want in
+              let ok = agrees got want in
               if not ok then
                 Stdio.eprintf "  %s: got [%s] want [%s]\n" name (show got) (show want);
               p value_claim ok
@@ -959,7 +1182,7 @@ let () =
           (Cs.equal_tensorization census.Cs.tensorization Cs.Scalar_fallback
           && census.Cs.statements > 0
           && census.Cs.scalar_fallbacks = census.Cs.statements);
-        let ok = agrees ~parity:Bitwise ~prec_name got want in
+        let ok = agrees got want in
         if not ok then
           Stdio.eprintf "  rf_mma_fallback_%s: got [%s] want [%s]\n" prec_name (show got)
             (show want);
