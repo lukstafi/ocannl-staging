@@ -2,7 +2,7 @@ the cache key is stable within one numerics regime: true
 the cache key separates the tf32 regime from the default one: true
 a policy difference in any other field separates the key too: true
 the key still carries the source digest and the backend: true
-the cold search misses the cache: true
+the cold call ran a search rather than replaying: true
 the cold search computes correct values: true
 the search stored exactly one entry (or timed nothing, on GPU): true
 the entry replays under the policy that wrote it: true

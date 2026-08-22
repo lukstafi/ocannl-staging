@@ -31,6 +31,7 @@ let completed (r : Autotune.report) =
 
 let replayed (r : Autotune.report) =
   match r.Autotune.outcome with Autotune.Cache_replay -> true | _ -> false
+
 let approx a b = Float.(abs (a - b) < 1e-4)
 
 let named name (comp : Asgns.comp) : Asgns.comp =
@@ -330,7 +331,7 @@ let () =
                        ("search off, no cache", r3); ("search off, cached", r4) ] in
   List.iter named_states ~f:(fun (what, r) ->
       Stdio.printf "state: %-22s -> %s\n" what (Autotune.outcome_name r.Autotune.outcome));
-  p "each of the three reachable outcome states is reported by its own call"
+  p "the four calls report, by name, exactly the three states they reach"
     (List.equal String.equal
        (List.map named_states ~f:(fun (_, r) -> Autotune.outcome_name r.Autotune.outcome))
        [ "searched"; "cache-replay"; "search-disabled"; "cache-replay" ]);
