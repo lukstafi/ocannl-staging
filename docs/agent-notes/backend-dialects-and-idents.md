@@ -29,6 +29,22 @@ files.
   the FIFO wait, pipelined (no-sync) timing is unreliable, and `get_values`/`set_values` do FULL
   awaits by design.
 
+- Emitted float constants go through `C_syntax.c_float_literal`, the single site that turns a
+  `Low_level.Constant` into kernel text, and it owes three things at once (gh-ocannl-623): a radix
+  point or exponent, so the token is a *floating* literal and not an integer one the cast happens to
+  convert (`%.16g (-0.)` was `"-0"`, hence `+0.0`, a live corruption on every C-family backend);
+  enough digits to round-trip, since 16 do not recover every double (`0.1 +. 0.2` and `max_float`
+  both print as a *different* double at `%.16g`, and hosted constant inits inline arbitrary host
+  values through here); and spellings for `INFINITY` / `(-INFINITY)` / `NAN`, which MSL provides and
+  the CUDA and HIP preludes `#ifndef`-define. What it deliberately does NOT emit is a precision
+  suffix: the literal stays double-typed and `convert_precision`'s cast narrows it, which is one
+  rounding of the exact host double — an `f`-suffixed decimal rounds the decimal straight to float
+  and disagrees on a value sitting on a float tie. Guard: `test/operations/float_literal_forms`,
+  bitwise at f64/f32/f16 plus the emitted tokens. The double-typed-literal reasoning holds only
+  where the dialect HAS a `double`: MSL does not, so Metal parses the literal as a float and the
+  `(float)` cast narrows nothing — which diverges from the host exactly on a constant sitting on an
+  f32 tie, since the host rounds ties-to-even and MSL rounds the 17-digit decimal (gh-ocannl-699,
+  the leg that test reports `SKIPPED` on Metal).
 - Reduced-precision *literals* are dialect-specific and do not transpose between backends. `0.0h`
   is a clang extension and valid MSL, but not CUDA C++ — nvrtc rejects it with "user-defined
   literal operator not found" (gh-ocannl-518, the half `Relu_gate`). On CUDA/HIP write the zero as
