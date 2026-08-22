@@ -106,11 +106,19 @@ let round (prec : Ops.prec) v =
   | Ops.Fp8_prec _ -> Ops.fp8_to_single (Ops.single_to_fp8 v)
   | _ -> v
 
+(* How many of the [cols] terms a guarded shape's guard admits. INTERIOR, not the whole axis
+   (Codex P2, round 2): a guard bound to the full extent is true on every iteration, so a schedule
+   mint that DROPPED or broadened the predicate while rewriting the nest would still produce the
+   localized form and still compute the baseline's value — both claims green over a guard that had
+   ceased to exist. With an interior extent the reference is a partial sum, and a lost predicate or
+   a lost iteration is a different number. *)
+let guard_terms = 20
+
 (* The whole-nest reference: accumulate wide, narrow once at the store. *)
-let whole_nest_ref prec =
+let whole_nest_ref ~terms prec =
   Array.init rows ~f:(fun r ->
       let acc = ref 0.0 in
-      for k = 0 to cols - 1 do
+      for k = 0 to terms - 1 do
         acc := !acc +. cell r k
       done;
       round prec !acc)
@@ -118,10 +126,10 @@ let whole_nest_ref prec =
 (* The per-step reference: narrow to storage at every accumulation step, which is what a
    read-modify-write rendering does. The addition itself happens at compute precision, and the
    operands are storage-exact, so one rounding per step is the whole of it. *)
-let per_step_ref prec =
+let per_step_ref ~terms prec =
   Array.init rows ~f:(fun r ->
       let acc = ref 0.0 in
-      for k = 0 to cols - 1 do
+      for k = 0 to terms - 1 do
         acc := round prec (!acc +. cell r k)
       done;
       !acc)
@@ -130,20 +138,24 @@ let precs = [ ("f32", Ops.single); ("bf16", Ops.bfloat16); ("f16", Ops.half) ]
 
 (* {1 Program shapes}
 
-   Five spellings of the same mathematical reduction. All the guards are VACUOUS — the mask is
-   all-zero, the runtime extent is bound to [cols] at launch — so every shape computes the full sum
-   and one baseline serves them all; what the guards change is which peel decision codegen and the
-   schedule mints reach, which is the point. *)
+   Six spellings of one reduction. The guarded ones admit an INTERIOR prefix of the reduction axis
+   — the runtime extent is bound to {!guard_terms} of [cols] at launch, and the mask admits the same
+   prefix — so they compute a smaller sum than the unguarded ones and are judged against a reference
+   of their own. A guard true on every iteration would have made their claims unfailable, which is
+   the whole of {!guard_terms}'s comment. Beyond the value, what the guards change is which peel
+   decision codegen and the schedule mints reach, which is the point of having them. *)
 
 type shape =
   | Plain  (** [for r: for k: out[r] += x[r,k]] — the recognizer's canonical nest. *)
   | Runtime_guard
       (** The gh-490 symbolic-extent shape: [If (k < s)] with [s] a STATIC symbol, a kernel
           parameter bound at launch. Its bound is outside every loop, so the peel must take it
-          (gh-ocannl-693); the mints' agreement with the serial baseline under it is gh-ocannl-715. *)
+          (gh-ocannl-693); the mints' agreement with the serial baseline under it is gh-ocannl-715.
+          Bound to {!guard_terms} of [cols], so the predicate SELECTS. *)
   | Data_guard
       (** [If (mask[k] < 1)] — a guard that is not [pure_index_guard], so the peel refuses and the
-          nest renders as per-step read-modify-writes. Seeded all-zero, hence always true. *)
+          nest renders as per-step read-modify-writes. The mask admits the first {!guard_terms}
+          iterations, for the same reason the runtime extent is interior. *)
   | Side_write
       (** The reduction level holds a SECOND statement (a write to another node), one of
           [peel_accum_nest]'s structural refusals. The sibling does not feed [out], so the value is
@@ -155,7 +167,13 @@ type shape =
       (** Virtualization's guarded-update spelling: an already-scoped nest whose update is
           [Set_local (id, Where (cond, acc + x, Get_local id))] — an expression-spelled guard whose
           else-arm carries the accumulator through. Post-optimize IR, so it reaches the backend
-          through {!Ll_test.optimize_scoped} rather than through [LL.optimize]. *)
+          through {!Ll_test.optimize_scoped} rather than through [LL.optimize]. Same interior
+          runtime extent, so the else-arm is taken on real iterations rather than on none. *)
+
+(* How many terms a shape's reduction admits — which reference its value is judged against. *)
+let terms_of_shape = function
+  | Runtime_guard | Data_guard | Where_scope -> guard_terms
+  | Plain | Side_write | Virtual_acc -> cols
 
 let shape_name = function
   | Plain -> "plain"
@@ -249,7 +267,7 @@ let make ~(prec : Ops.prec) ~(shape : shape) () : prog =
         base with
         llc = nest ~body:(LL.If { cond = (cond, iprec); body = plain_body }) ();
         bindings;
-        bind = (fun lowered -> Idx.find_exn lowered s := cols);
+        bind = (fun lowered -> Idx.find_exn lowered s := guard_terms);
       }
   | Data_guard ->
       let mask = node ~dims:[| cols |] "rfmask" in
@@ -261,7 +279,10 @@ let make ~(prec : Ops.prec) ~(shape : shape) () : prog =
         base with
         llc = nest ~body:(LL.If { cond = (cond, prec); body = plain_body }) ();
         materialized = [ out; x; mask ];
-        seed = (mask, Array.create ~len:cols 0.0) :: seed;
+        seed =
+          ( mask,
+            Array.init cols ~f:(fun k -> if k < guard_terms then 0.0 else 1.0) )
+          :: seed;
       }
   | Side_write ->
       (* Indexed by BOTH symbols, so the sibling is not loop-invariant: a hoistable one would leave
@@ -403,7 +424,7 @@ let make ~(prec : Ops.prec) ~(shape : shape) () : prog =
         llc = scoped;
         raw = Some raw;
         bindings;
-        bind = (fun lowered -> Idx.find_exn lowered s := cols);
+        bind = (fun lowered -> Idx.find_exn lowered s := guard_terms);
       }
 
 (* {1 Reading the rendered form off the emitted kernel}
@@ -507,6 +528,21 @@ let subscripts st ~ident =
     (String.substr_index_all st ~may_overlap:false ~pattern:(ident ^ "["))
     ~f:(fun at -> at = 0 || not (is_ident_char st.[at - 1]))
 
+(* The statements that assign a scope local: [v<digits>_<ident> = ...]. What {!member}'s [extra]
+   substrings are searched in — a builtin helper's own locals are not named this way, so its
+   ternaries and casts cannot satisfy a claim about the reduction's update. *)
+let scope_update_statements src =
+  List.filter (statements src) ~f:(fun st ->
+      match String.substr_index st ~pattern:" = " with
+      | None -> false
+      | Some at ->
+          let lhs =
+            match List.rev (String.split_on_chars (String.prefix st at) ~on:[ ' '; '('; ')' ]) with
+            | tok :: _ -> tok
+            | [] -> ""
+          in
+          is_scope_local lhs)
+
 let read_form src ~label =
   match ident_for src ~label with
   | None -> None
@@ -595,8 +631,15 @@ let execute ~name ~(prog : prog) ~(sched : Sched.schedule) =
    an allowance for a reassociation that cannot cost anything here. *)
 
 type reference =
-  | Baseline  (** The serial rendering of the plain nest, executed at this precision. *)
-  | Per_step  (** The host's per-step-narrowed reference: what a read-modify-write form computes. *)
+  | Baseline  (** The serial rendering of the plain nest, executed at this precision: 32 terms. *)
+  | Guarded_baseline
+      (** The serial rendering of the runtime-extent-GUARDED nest, executed at this precision:
+          {!guard_terms} terms. A schedule mint that dropped or broadened the predicate while
+          rewriting the nest computes the unguarded sum instead, which is a different number — that
+          is what makes the guarded members' value claims able to fail (Codex P2, round 2). *)
+  | Per_step
+      (** The host's per-step-narrowed reference over the member's own term count: what a
+          read-modify-write form computes. *)
 
 type member = {
   slug : string;  (** Short name; also the routine name's stem, so artifacts are per member. *)
@@ -621,9 +664,14 @@ type member = {
           by [2 * store_sites] for the same reason: each site may open the cell and close it, and
           nothing else may touch it. *)
   extra : string list;
-      (** Substrings the emitted kernel must also contain, ANDed into the form claim. For the one
-          distinguishing feature the node-access classifier cannot see: WHICH spelling the update
-          took inside the scope. *)
+      (** Substrings that must appear in a statement ASSIGNING A SCOPE LOCAL — the scope's own
+          updates — ANDed into the form claim. For the one distinguishing feature the node-access
+          classifier cannot see: which spelling the update took inside the scope.
+
+          Scoped to those statements rather than searched for in the whole artifact (Codex P2,
+          round 2): at f16 the kernel pulls in [half_to_float_emulated], whose body is full of
+          unrelated ternaries, so [" ? "] anywhere in the source is true whatever the update
+          renders as. *)
   precisions : string list;
   available : string -> bool;
       (** Whether this backend can evaluate the member at the given storage precision. Per
@@ -747,18 +795,20 @@ let members =
        constant. The peel must see through it (gh-ocannl-693) and the mints must agree with the
        serial baseline under it (gh-ocannl-715): a refused mint round-trips the accumulator per
        copy, which on narrow storage is a different number. --- *)
-    member "runtime-guard" "a runtime-extent guard, unscheduled" ~shape:Runtime_guard;
+    member "runtime-guard" "a runtime-extent guard, unscheduled" ~shape:Runtime_guard
+      ~reference:Guarded_baseline;
     member "runtime-guard-unroll-mat" "a runtime-extent guard under Unroll ~materialize"
-      ~shape:Runtime_guard ~sched:(fun g -> [ Sched.Unroll { axis = g.k; materialize = true } ]);
+      ~shape:Runtime_guard ~reference:Guarded_baseline
+      ~sched:(fun g -> [ Sched.Unroll { axis = g.k; materialize = true } ]);
     member "runtime-guard-partition" "a runtime-extent guard under Partition of the reduction axis"
-      ~shape:Runtime_guard ~sched:(fun g ->
+      ~shape:Runtime_guard ~reference:Guarded_baseline ~sched:(fun g ->
         let pt, _ = Sched.partition ~axis:g.k ~breakpoints:[ 4; 12 ] in
         [ pt ]);
     (* --- the OTHER producer of the scope form: virtualization's inline at a read site --- *)
     member "virtual-accumulator" "a virtual accumulator inlined at its read site"
       ~shape:Virtual_acc;
     member "where-guarded-update" "virtualization's Where-guarded update spelling"
-      ~shape:Where_scope ~extra:[ " ? " ];
+      ~shape:Where_scope ~reference:Guarded_baseline ~extra:[ " ? " ];
     (* --- the two read-modify-write forms, i.e. the declines. Without these the localized claims
        could not fail: a classifier that answered "localized" for everything would pass every other
        member, and the whole table would be measuring nothing. --- *)
@@ -971,19 +1021,31 @@ let () =
     "Tensorize whose emission preconditions fail (transposed-B operands)"
     (form_name Mma_fallback)
 
-(* The baselines: the plain nest with no schedule ops, one per precision. Every localizing member
-   is compared against these, so a regression that moved the BASELINE would fail its own host-
-   reference claim below rather than silently shifting the whole table. *)
+(* The baselines: the plain nest with no schedule ops, and the runtime-extent-guarded nest with no
+   schedule ops, one of each per precision. Every localizing member is compared against one of them,
+   so a regression that moved a BASELINE fails its own host-reference claim below rather than
+   silently shifting the whole table. *)
 let baselines =
   List.map precs ~f:(fun (prec_name, prec) ->
       let prog = make ~prec ~shape:Plain () in
       (prec_name, execute ~name:("rf_baseline_" ^ prec_name) ~prog ~sched:[]))
 
+let guarded_baselines =
+  List.map precs ~f:(fun (prec_name, prec) ->
+      let prog = make ~prec ~shape:Runtime_guard () in
+      (prec_name, execute ~name:("rf_guarded_baseline_" ^ prec_name) ~prog ~sched:[]))
+
 let baseline prec_name = List.Assoc.find_exn baselines ~equal:String.equal prec_name
+
+let guarded_baseline prec_name =
+  List.Assoc.find_exn guarded_baselines ~equal:String.equal prec_name
 
 let () =
   List.iter precs ~f:(fun (prec_name, prec) ->
-      let wide = whole_nest_ref prec and stepped = per_step_ref prec in
+      (* One pair of host references per term count: the full axis, and what a guard admitting
+         [guard_terms] of it leaves. *)
+      let refs terms = (whole_nest_ref ~terms prec, per_step_ref ~terms prec) in
+      let wide, stepped = refs cols in
       let got = baseline prec_name in
       let differ = not (Array.for_all2_exn wide stepped ~f:Float.equal) in
       (* The discrimination control. Without it every value claim in the table could hold because
@@ -999,14 +1061,38 @@ let () =
               accumulator width)"
              prec_name)
           differ;
-      let matches_wide = Array.for_all2_exn got wide ~f:Float.equal in
-      let matches_stepped = Array.for_all2_exn got stepped ~f:Float.equal in
-      if not (matches_wide || matches_stepped) then
-        Stdio.eprintf "  baseline %s: got [%s] wide [%s] per-step [%s]\n" prec_name (show got)
-          (show wide) (show stepped);
+      let is_a_reference ~terms values =
+        let wide, stepped = refs terms in
+        let m_wide = Array.for_all2_exn values wide ~f:Float.equal in
+        let m_stepped = Array.for_all2_exn values stepped ~f:Float.equal in
+        if not (m_wide || m_stepped) then
+          Stdio.eprintf "  %s over %d terms: got [%s] wide [%s] per-step [%s]\n" prec_name terms
+            (show values) (show wide) (show stepped);
+        (m_wide, m_stepped)
+      in
+      let matches_wide, matches_stepped = is_a_reference ~terms:cols got in
       p
         (Printf.sprintf "the %s serial baseline is one of the two host references" prec_name)
         (matches_wide || matches_stepped);
+      let guarded = guarded_baseline prec_name in
+      let g_wide, g_stepped = is_a_reference ~terms:guard_terms guarded in
+      p
+        (Printf.sprintf "the %s guarded baseline is one of the two host references at %d terms"
+           prec_name guard_terms)
+        (g_wide || g_stepped);
+      (* And the guards SELECT: without this the guarded members could not fail at all, since a
+         mint or a renderer that discarded the predicate would land on the unguarded sum and still
+         match. Both references the guarded members use are covered — the executed guarded baseline
+         (the localizing members) and the host per-step reference at the guarded term count (the
+         data-guarded decline). *)
+      let _, stepped_guarded = refs guard_terms in
+      p
+        (Printf.sprintf
+           "the %s guards are load-bearing: %d of %d terms differs from the full axis in both the \
+            executed baseline and the per-step reference"
+           prec_name guard_terms cols)
+        ((not (Array.for_all2_exn guarded got ~f:Float.equal))
+        && not (Array.for_all2_exn stepped_guarded stepped ~f:Float.equal));
       (* Which regime this backend is in, on stderr so the golden stays backend-uniform: whether
          the accumulator resolves wider than storage decides whether the localized and
          read-modify-write forms are also distinguishable BY VALUE here, or only structurally. *)
@@ -1036,11 +1122,14 @@ let () =
               let prog = make ~prec ~shape:m.shape () in
               let got = execute ~name ~prog ~sched:(m.sched prog) in
               let src = Generated.read name in
+              let updates = scope_update_statements src in
               let extra_ok =
-                List.for_all m.extra ~f:(fun sub -> String.is_substring src ~substring:sub)
+                List.for_all m.extra ~f:(fun sub ->
+                    List.exists updates ~f:(fun st -> String.is_substring st ~substring:sub))
               in
               if not extra_ok then
-                Stdio.eprintf "  %s: the kernel lacks one of [%s]\n" name
+                Stdio.eprintf "  %s: no scope-local assignment among %d contains all of [%s]\n" name
+                  (List.length updates)
                   (String.concat ~sep:"; " m.extra);
               (match read_form src ~label:"rfout" with
               | None ->
@@ -1085,7 +1174,8 @@ let () =
               let want =
                 match m.reference with
                 | Baseline -> baseline prec_name
-                | Per_step -> per_step_ref prec
+                | Guarded_baseline -> guarded_baseline prec_name
+                | Per_step -> per_step_ref ~terms:(terms_of_shape m.shape) prec
               in
               let ok = agrees got want in
               if not ok then
