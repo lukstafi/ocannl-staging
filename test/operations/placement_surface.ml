@@ -83,6 +83,7 @@ let () =
     Autotune.placement_enablement ~limits:gpu_limits ~static_indices:[] ~base ~allmat
   in
   let mem set (t : Tensor.t) = Set.mem set t.Tensor.value in
+  let mem_tn (fc : LL.flip_candidate) (t : Tensor.t) = Tn.equal fc.LL.fc_tn t.Tensor.value in
   p "the enablement set is nonempty" (not (Set.is_empty enablement));
   p "it contains the site operand mbs" (mem enablement mbs);
   p "it contains the site destination mc" (mem enablement mc);
@@ -112,6 +113,43 @@ let () =
     (match List.last by_enablement with
     | Some fc -> ( is_en fc && match fc.LL.fc_flip with `Inline -> true | `Materialize -> false)
     | None -> false);
+  (* gh-ocannl-579, the profitability term: the prior above prices EXPRESSIBILITY only, so on a
+     device where the family it unlocks has been MEASURED to lose, promoting its flips is pure
+     opportunity cost — it displaces cheaper flips out of a small budget. The evidence is the
+     placement A/B arms' own reports, here synthesized from gh-514's metal cell (best 7.5 ms, best
+     tensorized 92 ms) and its hip cell (the arm's winner IS tensorized). *)
+  let arm ~best_ms ~mma_timed ~mma_best_ms =
+    { Autotune.no_search_report with Autotune.best_ms; mma_timed; mma_best_ms }
+  in
+  let losing =
+    Autotune.family_profit_of_reports [ arm ~best_ms:7.5 ~mma_timed:3 ~mma_best_ms:92.0 ]
+  in
+  let paying =
+    Autotune.family_profit_of_reports [ arm ~best_ms:1.28 ~mma_timed:16 ~mma_best_ms:1.28 ]
+  in
+  let ranked ordering profit =
+    Autotune.rank_flip_candidates ~ordering ~profit ~enablement ~disablement candidates
+  in
+  let same a b = List.equal (fun x y -> Tn.equal x.LL.fc_tn y.LL.fc_tn) a b in
+  p "a measured-losing family ranks the surface exactly as cost does"
+    (same (ranked `Profitable losing) by_cost);
+  p "a measured-paying family ranks it exactly as the enablement prior does"
+    (same (ranked `Profitable paying) by_enablement);
+  p "an unmeasured family leaves the enablement prior standing"
+    (same (ranked `Profitable Autotune.Unmeasured) by_enablement);
+  p "the pure enablement ordering ignores the evidence (the evaluation baseline)"
+    (same (ranked `Enablement losing) by_enablement);
+  (* The displacement, in miniature: the decoy is this surface's cheap-but-highest-cost flip, the
+     analogue of metal's winning `inline n32_relu.grad` at cost 1024 / cost-rank 5. At a budget of
+     two the promotion pushes it out of the chain; the profitability term hands the slot back. *)
+  let budget = 2 in
+  let prefix_has l t = List.exists (List.take l budget) ~f:(fun fc -> mem_tn fc t) in
+  p "the enablement prior pushes the decoy out of a budget-2 chain"
+    (not (prefix_has by_enablement us));
+  p "under a measured-losing family the decoy is back in the budget-2 chain"
+    (prefix_has (ranked `Profitable losing) us);
+  p "under a measured-paying family the promotion keeps the budget slot"
+    (not (prefix_has (ranked `Profitable paying) us));
   (* The floor closure, under the rule's pinned envelope: monotone in the commitments, and strictly
      above the empty commitment once the site nodes' traffic is certain. *)
   let surface = Autotune.placement_surface ~ordering:`Enablement ctx comp Ir.Indexing.Empty in

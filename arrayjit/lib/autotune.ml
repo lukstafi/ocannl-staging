@@ -1602,15 +1602,91 @@ let placement_enablement ~limits ~static_indices ~(base : LL.optimized) ~(allmat
   in
   (site_tns enabling_sites, site_tns base_sites)
 
+(* gh-ocannl-579: the profitability term. The enablement prior above prices EXPRESSIBILITY — which
+   sketch families a placement makes reachable — and nothing else, so it promotes a flip whose family
+   this device has already been measured to lose with. The evidence that settles it is in hand at the
+   only place the prior is consumed: [Train.tune_placements] searches arm B (materialize-all) — the
+   very specialization [placement_enablement] derives [enablement] from — before the flip chain
+   walks, and its report says what the tensorized family was worth here ([mma_best_ms] against
+   [best_ms], same device, same computation, same session, already paid for). *)
+
+type family_profit = Unmeasured | Pays of float | Loses of float
+
+(* Most favourable evidence wins: the prior is deleted only by evidence that contradicts it, never by
+   the mere absence of a confirmation, and a single arm that measured a competitive family outranks
+   another that measured a losing one (the arms search different placements; the promotion is a bet
+   on the best placement reachable, not on the average). *)
+let combine_family_profit a b =
+  match (a, b) with
+  | Unmeasured, x | x, Unmeasured -> x
+  | Pays x, Pays y | Loses x, Loses y -> if Float.(x <= y) then a else b
+  | (Pays _ as p), Loses _ | Loses _, (Pays _ as p) -> p
+
+let flip_profit_margin () =
+  let raw =
+    String.strip (Utils.get_global_arg ~arg_name:"tune_flip_profit_margin" ~default:"1.25")
+  in
+  let bad () =
+    raise
+    @@ Utils.User_error
+         ("Autotune: ocannl_tune_flip_profit_margin should be a ratio of at least 1.0 (how much \
+           worse than a search's best the best tensorized candidate may be and still be worth a \
+           flip-budget slot); found: " ^ raw)
+  in
+  match Float.of_string raw with
+  | m when Float.(is_finite m && m >= 1.) -> m
+  | _ -> bad ()
+  | exception _ -> bad ()
+
+(** What one completed search measured about the tensorized family's profitability. A search that
+    timed no tensorized candidate measured nothing about it — including one that seeded many and
+    timed none, the gh-ocannl-521 state, which is a fact about candidate compilation rather than
+    about the family's speed. *)
+let family_profit_of_report ?margin (r : report) =
+  let margin = match margin with Some m -> m | None -> flip_profit_margin () in
+  if
+    r.mma_timed <= 0
+    || (not (Float.is_finite r.mma_best_ms))
+    || (not (Float.is_finite r.best_ms))
+    || Float.(r.best_ms <= 0.)
+  then Unmeasured
+  else
+    let ratio = r.mma_best_ms /. r.best_ms in
+    if Float.(ratio <= margin) then Pays ratio else Loses ratio
+
+let family_profit_of_reports ?margin reports =
+  List.fold reports ~init:Unmeasured ~f:(fun acc r ->
+      combine_family_profit acc (family_profit_of_report ?margin r))
+
+let family_profit_summary = function
+  | Unmeasured -> "the tensorized family was never timed, so the enablement prior stands"
+  | Pays r ->
+      Printf.sprintf "the tensorized family measured %.2fx the best time, within the profit margin"
+        r
+  | Loses r -> Printf.sprintf "the tensorized family measured %.2fx the best time, out of profit" r
+
+(** The ordering a ranking actually uses. [`Profitable] is the prior weighed against the measured
+    evidence: with none, or with evidence that the family is competitive, it IS [`Enablement]; with
+    measured evidence that the family loses here, both of the prior's classes are void at once — the
+    promotion of family-unlocking flips and the demotion of family-breaking ones are the same bet on
+    the same family — and the ranking degenerates to [`Cost]. *)
+let effective_flip_ordering ~ordering ~profit =
+  match (ordering, profit) with
+  | `Cost, _ -> `Cost
+  | `Enablement, _ -> `Enablement
+  | `Profitable, (Unmeasured | Pays _) -> `Enablement
+  | `Profitable, Loses _ -> `Cost
+
 let flip_ordering () =
   match
     String.lowercase
-      (String.strip (Utils.get_global_arg ~arg_name:"tune_flip_ordering" ~default:"enablement"))
+      (String.strip (Utils.get_global_arg ~arg_name:"tune_flip_ordering" ~default:"profitable"))
   with
   | "cost" -> `Cost
-  | _ -> `Enablement
+  | "enablement" -> `Enablement
+  | _ -> `Profitable
 
-let rank_flip_candidates ~ordering ~enablement ~disablement candidates =
+let rank_flip_candidates ~ordering ?(profit = Unmeasured) ~enablement ~disablement candidates =
   let deduped =
     List.fold candidates ~init:[] ~f:(fun acc (fc : LL.flip_candidate) ->
         (* Identity is [Tn.uid] ([Tn.equal]), not the session [id], which can repeat across
@@ -1624,7 +1700,7 @@ let rank_flip_candidates ~ordering ~enablement ~disablement candidates =
     | 0 -> Ir.Tnode.compare a.LL.fc_tn b.LL.fc_tn
     | c -> c
   in
-  match ordering with
+  match effective_flip_ordering ~ordering ~profit with
   | `Cost -> List.sort deduped ~compare:by_cost
   | `Enablement ->
       (* Three classes, cost-descending within each: family-unlocking [`Materialize] flips first
@@ -1643,12 +1719,13 @@ let rank_flip_candidates ~ordering ~enablement ~disablement candidates =
 
 type placement_surface = {
   ps_candidates : LL.flip_candidate list;
+  ps_ordering : [ `Cost | `Enablement ];
   ps_enablement : Set.M(Ir.Tnode).t;
   ps_disablement : Set.M(Ir.Tnode).t;
   ps_floor_ms : materialized:Ir.Tnode.t list -> float option;
 }
 
-let placement_surface ?name ?ordering ctx comp bindings =
+let placement_surface ?name ?ordering ?(profit = Unmeasured) ctx comp bindings =
   let ordering = match ordering with Some o -> o | None -> flip_ordering () in
   let limits = Context.hardware_limits ctx in
   let static_indices = Idx.bound_symbols bindings in
@@ -1666,7 +1743,7 @@ let placement_surface ?name ?ordering ctx comp bindings =
     Context.lowered_for_decisions ?name ~materialized:to_materialize ctx comp bindings
   in
   let enablement, disablement = placement_enablement ~limits ~static_indices ~base ~allmat in
-  let ps_candidates = rank_flip_candidates ~ordering ~enablement ~disablement candidates in
+  let ps_candidates = rank_flip_candidates ~ordering ~profit ~enablement ~disablement candidates in
   let candidate_set =
     Set.of_list (module Ir.Tnode) (List.map ps_candidates ~f:(fun fc -> fc.LL.fc_tn))
   in
@@ -1679,7 +1756,13 @@ let placement_surface ?name ?ordering ctx comp bindings =
       ()
     |> Option.map ~f:(fun s -> s *. 1e3)
   in
-  { ps_candidates; ps_enablement = enablement; ps_disablement = disablement; ps_floor_ms }
+  {
+    ps_candidates;
+    ps_ordering = effective_flip_ordering ~ordering ~profit;
+    ps_enablement = enablement;
+    ps_disablement = disablement;
+    ps_floor_ms;
+  }
 
 (** {2 Model-picked untuned defaults (gh-ocannl-491 task 3)}
 

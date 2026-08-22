@@ -706,8 +706,43 @@ val placement_enablement :
     Empty on backends without an [mma] capability. A classified fission failure degrades to
     whole-routine detection; the classification is a ranking prior, never a legality fact. *)
 
+type family_profit =
+  | Unmeasured
+      (** No completed search timed a tensorized candidate, so nothing is known about the family's
+          speed here — including the gh-ocannl-521 state (many seeded, none surviving candidate
+          compile), which is a fact about candidate compilation, not about the family. *)
+  | Pays of float
+      (** The best timed tensorized candidate was within the profit margin of the search's best, at
+          this ratio of it ([<= 1.] when the family won outright). *)
+  | Loses of float
+      (** It lost by more than the margin, at this ratio of the search's best. On gh-514's metal/f16
+          [mlp_wide] cell the ratio is ~12 (mma_best 79-92 ms against 7.5 ms). *)
+
+val family_profit_of_report : ?margin:float -> report -> family_profit
+val family_profit_of_reports : ?margin:float -> report list -> family_profit
+(** What completed searches measured about the tensorized family's profitability on this device
+    (gh-ocannl-579): [mma_best_ms] against [best_ms], compared to config
+    [tune_flip_profit_margin]. Over several reports the most favourable evidence wins — the
+    expressibility prior is deleted only by evidence that contradicts it, never by the absence of a
+    confirmation. A failing arm's report counts: its timings are measurements of the family even
+    though its [best_ms] is not shippable. Exposed for tests and for [Train.tune_placements], which
+    derives it from the placement A/B's two arm reports. *)
+
+val family_profit_summary : family_profit -> string
+(** A log-line phrase naming the evidence and its ratio. *)
+
+val effective_flip_ordering :
+  ordering:[ `Cost | `Enablement | `Profitable ] ->
+  profit:family_profit ->
+  [ `Cost | `Enablement ]
+(** The ordering [`Profitable] resolves to under the given evidence: [`Enablement] when the family
+    is unmeasured or competitive, [`Cost] when it is measured to lose here. Both of the prior's
+    classes go at once, because the promotion of family-unlocking flips and the demotion of
+    family-breaking ones are the same bet on the same family. Exposed for tests. *)
+
 val rank_flip_candidates :
-  ordering:[ `Cost | `Enablement ] ->
+  ordering:[ `Cost | `Enablement | `Profitable ] ->
+  ?profit:family_profit ->
   enablement:Set.M(Ir.Tnode).t ->
   disablement:Set.M(Ir.Tnode).t ->
   Ir.Low_level.flip_candidate list ->
@@ -715,12 +750,21 @@ val rank_flip_candidates :
 (** Deduplicate (by [Tn.uid], keep-first) and rank the decision surface. [`Cost] is the legacy
     recompute-cost-descending order (the gh-555 chain's, kept as the evaluation baseline);
     [`Enablement] sorts family-unlocking [`Materialize] flips ([enablement] members) first and
-    family-breaking [`Inline] flips (members of either set) last, cost-descending within each class.
-    Config [tune_flip_ordering] selects the default. Exposed for tests. *)
+    family-breaking [`Inline] flips (members of either set) last, cost-descending within each class;
+    [`Profitable] (gh-ocannl-579) is [`Enablement] weighed against [profit] per
+    {!effective_flip_ordering} — the prior models expressibility, and on a device where the family
+    it unlocks is measured hopeless, promotion is pure opportunity cost that displaces the winning
+    flip out of a small budget. [profit] defaults to [Unmeasured] (so a caller with no measurements,
+    such as {!model_default}, gets the prior). Config [tune_flip_ordering] selects the default
+    ordering. Exposed for tests. *)
 
 type placement_surface = {
   ps_candidates : Ir.Low_level.flip_candidate list;
       (** Deduplicated, ranked per {!rank_flip_candidates} under config [tune_flip_ordering]. *)
+  ps_ordering : [ `Cost | `Enablement ];
+      (** The ordering [ps_candidates] actually came out in — with [tune_flip_ordering=profitable]
+          (the default) this is where the measured evidence landed, so a log line or a test can say
+          which prior ranked the surface rather than which one was configured. *)
   ps_enablement : Set.M(Ir.Tnode).t;
   ps_disablement : Set.M(Ir.Tnode).t;
   ps_floor_ms : materialized:Ir.Tnode.t list -> float option;
@@ -738,7 +782,8 @@ type placement_surface = {
 
 val placement_surface :
   ?name:string ->
-  ?ordering:[ `Cost | `Enablement ] ->
+  ?ordering:[ `Cost | `Enablement | `Profitable ] ->
+  ?profit:family_profit ->
   Context.t ->
   Ir.Assignments.comp ->
   Ir.Indexing.unit_bindings ->
@@ -748,8 +793,11 @@ val placement_surface :
     effect on [ctx]). [name] names the computation for those lowerings exactly as
     {!Context.compile}'s does, and is what makes this work for a comp carrying no
     {!Ir.Assignments.Block_comment} (gh-ocannl-669). [ordering] defaults from config
-    [tune_flip_ordering] ([enablement]). Consumed by [Train.tune_placements]' flip refinement and by
-    {!model_default}'s placement search (config [model_default_placements]). *)
+    [tune_flip_ordering] ([profitable]), and [profit] — the measured evidence [`Profitable] weighs
+    the enablement prior against — defaults to [Unmeasured], which is what {!model_default}'s
+    placement search (config [model_default_placements]) gets: it measures nothing, so the prior
+    stands there. [Train.tune_placements]' flip refinement passes the placement A/B arms' evidence.
+*)
 
 type model_choice = {
   mc_label : string;

@@ -1,0 +1,24 @@
+cell         evidence    ratio    ranks the surface by
+metal f16    loses       12.267   cost
+cuda f16     loses       2.318    cost
+hip bf16     pays        1.000    enablement
+metal's cell is measured out of profit: true
+metal's losing family ranks the surface by cost: true
+cuda's cell is measured out of profit too: true
+hip's winning family keeps the enablement prior: true
+hip's paying family ranks the surface by enablement: true
+a family that lost by 1% is still within profit: true
+a family that lost by 1% keeps the enablement prior: true
+an arm that timed no tensorized candidate measures nothing: true
+unmeasured keeps the enablement prior: true
+a report that never searched measures nothing: true
+one arm's paying family outweighs another's losing one: true
+two losing arms report the more favourable ratio: true
+a margin above metal's ratio re-admits its family: true
+a margin below hip's ratio is not reachable (its family won outright): true
+ordering=cost stays cost under unmeasured evidence: true
+ordering=enablement stays enablement under unmeasured evidence: true
+ordering=cost stays cost under paying evidence: true
+ordering=enablement stays enablement under paying evidence: true
+ordering=cost stays cost under losing evidence: true
+ordering=enablement stays enablement under losing evidence: true
