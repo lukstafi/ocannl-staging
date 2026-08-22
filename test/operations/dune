@@ -3314,8 +3314,11 @@
  ;   NARROW_COMPUTE_F32, FP16_ARITHMETIC, CC_FP16_ARITHMETIC -- which reference the accumulator
  ;     policy selects (Numerics.cpu_compute_prec and Context.hardware_limits are consulted here,
  ;     not merely by the kernels).
- ;   CC_VECTOR_BYTES, CC_BACKEND_ARCH_FLAGS -- whether try_vectorize_reduce renders at all
- ;     (cc_vector_bytes=0 trips its vector_bytes < 8 guard), so the Vectorized members' form.
+ ;   CC_VECTOR_BYTES, CC_BACKEND_ARCH_FLAGS, CC_BACKEND_SIMD_FLAGS -- whether try_vectorize_reduce
+ ;     renders at all (cc_vector_bytes=0 trips its vector_bytes < 8 guard), so the Vectorized
+ ;     members' form. The SIMD flags reach BOTH arms of this test: vector_bytes is gated on avx2
+ ;     appearing in simd_flags (cc_backend.ml), and the native-fp16 probe compiles under
+ ;     `arch_flags () ^ simd_flags ()' -- so they also move the accumulator-policy reference.
  ;   DEBUG_LOG_FROM_ROUTINES, LOG_LEVEL -- try_localize_serial_reduce declines wholesale under
  ;     routine logging, which turns every localized member into a read-modify-write one. BOTH keys,
  ;     because Utils.debug_log_from_routines () is their conjunction: the flag alone is inert until
@@ -3341,6 +3344,7 @@
   (env_var OCANNL_CC_FP16_ARITHMETIC)
   (env_var OCANNL_CC_VECTOR_BYTES)
   (env_var OCANNL_CC_BACKEND_ARCH_FLAGS)
+  (env_var OCANNL_CC_BACKEND_SIMD_FLAGS)
   (env_var OCANNL_DEBUG_LOG_FROM_ROUTINES)
   (env_var OCANNL_LOG_LEVEL)
   (env_var OCANNL_VIRTUALIZE_MAX_VISITS)
