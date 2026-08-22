@@ -68,6 +68,8 @@ See [ROADMAP.md](ROADMAP.md) for the detailed schedule. GitHub issue assignments
 > Venue history (August 2026): the OCaml Workshop submission was not accepted — the article reads as a research report rather than an introductory demonstration, which put it outside that audience's scope. IFL 2026 was then considered and decided against as a poor fit. **No conference submission is currently scheduled**; the workshop article stays in the repository unchanged, as a historical artifact of the project at v0.8, and the formal core technical report continues as live work.
 >
 > Update (August 13, 2026): **v1.0 shipped**, with its milestone fully closed (49 issues). Release dates are no longer pinned to paper deadlines: **v1.1's soft target is August 24, 2026** (the OCaml Workshop date, used as an anchor rather than as a submission). v1.1 and v1.2 were rebalanced along a different seam than the original split — **v1.1 is the compiler work plus the training-loop mechanics it needs**, **v1.2 the consumers and explorations**, including the training experience a user sees. The sequence is `0.9 → 1.0 → 1.1 → 1.2`.
+>
+> Update (late August 2026): v1.2 was split along the performance seam — **v1.2 is performance-chasing in the `approximate` profile, demonstrated on benchmarks**, and **v1.3 is the consumers, explorations, training experience, and review-filed hygiene**; the Winograd and zero-nest conv tiers (#505, #503) moved from v1.1 into v1.2. With its numerics-changing carry-overs gone, **v1.1 reads as consolidation after v1.0**: the search follow-ups v1.0's evaluation filed, inlining and reduction soundness, test and benchmark seams that cannot report a false pass, and the training-loop mechanics. The sequence is `1.0 → 1.1 → 1.2 → 1.3`.
 
 * **0.7 (Jul 3, 2026, released): Frontend finalization + compiler optimizations.** The consolidated paper-ready release for workshop submissions (OCaml Workshop, FProPer). Absorbs the former v0.6.4/v0.6.5/v0.7.0 frontend work and the former v0.7.2 optimization work.
   - [x] Migrate from the "hosted tensor" idea to always requiring a context when accessing tensors and dealing with devices directly; remove the `array` field of `Tnode.t` and the hosted memory mode (#333).
@@ -100,18 +102,23 @@ See [ROADMAP.md](ROADMAP.md) for the detailed schedule. GitHub issue assignments
   - [x] The `gpt2_mini` arc: attribute the step (#531), then judge companion coverage at the site's arity (#569) — tuned step 107.4 → 52.4 ms on CUDA, 45.6 → 25.4 ms on HIP; batched/rank-3 sites seeded (#528).
   - [x] CPU reduced precision: 16-bit storage with f32 compute and native fp16 arithmetic (#516, #517); `cc` worker-pool uniformity on hybrid CPUs (#530).
   - [x] Frontend, configuration and diagnostics: use-site row resolution and `stretch` (#544), config profiles (#559), the tuner's honest reference point (#552), routine-name collision policy (#513).
-* **1.1 (Aug 24, 2026, soft target): Performance carry-overs, algebraic rewrites, and training-loop utilities.**
-  - [ ] Training-loop mechanics: LR schedules, global-norm clipping, gradient accumulation, and mmap-backed checkpoint loading (#465, #467).
-  - [ ] Fused attention via online softmax and the remaining convolution tiers (#483, #503, #505).
-  - [ ] Search follow-ups from the v1.0 evaluation: builder preconditions as tree verdicts, a fittable memory leg, profitability in enablement promotion, sketch-family extraction (#577, #578, #579, #580).
-  - [ ] Narrow-operand tensor-core tiling (#575) and the `gpt2_mini` residue (#573, #574).
-  - [ ] Robustness and test seams: digest completeness, fault-injection inventory, executed parity for analysis-level passes (#562, #571, #572, #582).
-* **1.2 (undated): Consumers and explorations.**
-  - [ ] Training experience: resumable checkpoints, experiment tracking, and plot polish (#96, #122, #103).
-  - [ ] Models, reproductions and demos: model surgery, LSTM, Bonsai RNN, digit addition, BERT/ModernBERT, DisTrO, and a Gemma 3 demo target (#33, #60, #182, #427, #297, #278, #570).
-  - [ ] Frontend design, library and deployment: shape schemes, the Simply/NanoDO study for `lib/`, PoPE, and inference binaries (#404, #435, #444, #97).
-  - [ ] Integrations and external-framework study: Polars, krnl/autograph (#219, #277).
-  - [ ] Performance gated on hardware or on evidence not yet in hand: pressure-aware device memory management, async-copy staging refinements, HIP CDNA tensor cores, and CUDA pinned/constant host memory (#565, #576, #477, #170, #195).
+* **1.1 (Aug 24, 2026, soft target): Consolidation after v1.0 — search follow-through, inlining and reduction soundness, honest test and benchmark seams, and training-loop mechanics.**
+  - [x] Search follow-through from the v1.0 evaluation: builder preconditions as tree verdicts, a fittable memory leg, profitability in enablement promotion, sketch-family extraction, and narrow-operand tensor-core tiling (#577, #578, #579, #580, #575).
+  - [x] The `gpt2_mini` residue: `lm_head` fission, the residual stream's re-summation, rank-4 projection sites (#574, #573, #643); the attention out-projection site stays open (#683).
+  - [x] Soundness: inlined computations keep their guards, loops and leaf reads (#651, #674, #610); reduction accumulator width independent of the chosen schedule (#639, #663, #693).
+  - [x] Seams that cannot report a false pass: `Verdict` with its ratchet, generated-kernel provenance, one tracked environment spelling, complete config deps, digest completeness, benchmark pass provenance (#601, #668, #655, #628, #652, #586, #597, #572, #644).
+  - [x] Training-loop mechanics: LR schedules, global-norm clipping, gradient accumulation, mmap-backed checkpoint loading, and `trainable_params` (#465, #467, #673).
+  - [ ] Still open: the fault-injection inventory (#571), post-finalization placements in `ll_test` (#631), the two-pass protocol question (#675), the out-projection site (#683).
+* **1.2 (undated): Performance-chasing in the approximate profile, demonstrated on benchmarks.**
+  - [ ] The `approximate` preset and the benchmark expansion legs, with Gemma 3 as the real-weights long-context target (#719, #720, #570).
+  - [ ] Algebraic rewrites: fused attention via online softmax on a loop-carried-recurrence construct, Winograd, zero-nest workgroup geometry, fp16 accumulator width and warp-shuffle reductions at narrow storage (#483, #696, #505, #503, #680, #682).
+  - [ ] Exact-numerics residue: footprint-scoped materialization, register-tile geometry, the peel cliff, non-dividing GEBP, vector `Max`/`Min` reductions, cost-model fidelity, async-copy staging, memory pressure (#616, #619, #620, #627, #649, #636, #637, #576, #565).
+* **1.3 (undated): Consumers, explorations, and the hygiene the reviews filed.**
+  - [ ] Training experience: resumable checkpoints, experiment tracking, plot polish, and zero-copy from mmap-backed checkpoints (#96, #122, #103, #585).
+  - [ ] Models, reproductions and demos: model surgery, LSTM, Bonsai RNN, digit addition, BERT/ModernBERT, DisTrO (#33, #60, #182, #427, #297, #278).
+  - [ ] Frontend design, library and deployment: shape schemes, the Simply/NanoDO study for `lib/`, PoPE, inference binaries, the ppxlib ceiling migration (#404, #435, #444, #97, #695).
+  - [ ] Integrations — Polars, krnl/autograph (#219, #277) — and hardware-gated performance: HIP CDNA MFMA, CUDA pinned and constant host memory (#477, #170, #195).
+  - [ ] Engineering hygiene and test seams filed by the v1.0–v1.1 review cycles: configuration and caching, IR and codegen, test infrastructure, documentation (see [ROADMAP.md](ROADMAP.md)).
 
 ### Releases
 
