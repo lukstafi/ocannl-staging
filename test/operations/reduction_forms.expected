@@ -46,7 +46,7 @@ reduction: out[3] = sum of 32 terms, hand-built Low_level, 25 members
   22 decline-data-guard          [f32 bf16 f16] over data-dependent guard  a data-dependent guard (not a pure index guard)                        -> per-step read-modify-write
   23 decline-sibling-statement   [f32 bf16 f16] over sibling statement     a second statement in the reduction level                              -> per-step read-modify-write
   24 decline-sibling-unrolled    [f32 bf16 f16] over sibling statement     the same level Unrolled: one read-modify-write per copy                -> per-step read-modify-write
-  25 tile-mma-fallback           [f32 bf16    ] over small contraction     Tensorize whose emission preconditions fail (transposed-B operands)    -> Tile_mma scalar fallback
+  25 tile-mma-fallback           [f32 bf16 f16] over small contraction     Tensorize whose emission preconditions fail (transposed-B operands)    -> Tile_mma scalar fallback
 at f32 the whole-nest and per-step references coincide (the identity-precision leg): true
 the f32 serial baseline matches the reference its backend's accumulator policy selects: true
 the f32 guarded baseline matches the reference its backend's accumulator policy selects: true
@@ -199,3 +199,5 @@ tile-mma-fallback @ f32 renders the form its composition claims: true
 tile-mma-fallback @ f32 agrees with its reference value: true
 tile-mma-fallback @ bf16 renders the form its composition claims: true
 tile-mma-fallback @ bf16 agrees with its reference value: true
+tile-mma-fallback @ f16 renders the form its composition claims: true
+tile-mma-fallback @ f16 agrees with its reference value: true

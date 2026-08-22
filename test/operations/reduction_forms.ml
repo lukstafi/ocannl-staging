@@ -1086,7 +1086,7 @@ let () =
         (shape_name m.shape) m.what m.claimed);
   Stdio.printf "  %02d %-27s [%-12s] over %-21s %-70s -> %s\n"
     (List.length members + 1)
-    "tile-mma-fallback" "f32 bf16" "small contraction"
+    "tile-mma-fallback" "f32 bf16 f16" "small contraction"
     "Tensorize whose emission preconditions fail (transposed-B operands)"
     (form_name Mma_fallback)
 
@@ -1323,7 +1323,7 @@ let mma_run ~name ~out ~tensorize comp =
   (Context.get_values ctx out, routine.Context.mma)
 
 let () =
-  List.iter [ ("f32", Ops.single); ("bf16", Ops.bfloat16) ] ~f:(fun (prec_name, prec) ->
+  List.iter precs ~f:(fun (prec_name, prec) ->
       let form_claim =
         Printf.sprintf "tile-mma-fallback @ %s renders the form its composition claims" prec_name
       in
@@ -1349,10 +1349,53 @@ let () =
             ~out:tiled.Tensor.value ~tensorize:true
             (Train.forward tiled)
         in
+        (* The census says every [Tile_mma] statement declined; it says NOTHING about how the
+           nested fallback reduction then rendered (Codex P2, round 3). If localization inside the
+           fallback regressed to per-step read-modify-writes the census would be unchanged, and
+           these small exactly-representable products give the same value either way — so the
+           fallback's own accumulator is read with the same classifier the row-sum members use.
+
+           Three node touches rather than two: the einsum lowering emits a whole-node zero-init
+           before the contraction, which the hand-built members do not have (they seed their
+           accumulator from the host instead). It writes the cell once and mentions no local, so it
+           cannot be confused with a closing store. *)
+        (* [%op mc = ...] labels the node ["*._mc"] — the operator and the binding name — while
+           codegen names it [mc]. Take the trailing identifier of the label, which is the part the
+           code name is derived from. *)
+        let label =
+          let l = Tn.label tiled.Tensor.value in
+          let b = ref (String.length l) in
+          while !b > 0 && is_ident_char l.[!b - 1] do
+            Int.decr b
+          done;
+          String.lstrip ~drop:(Char.equal '_') (String.drop_prefix l !b)
+        in
+        let localized =
+          match read_form (Generated.read ("rf_mma_fallback_" ^ prec_name)) ~label with
+          | None ->
+              Stdio.eprintf "  rf_mma_fallback_%s: no accumulator identifier in the kernel\n"
+                prec_name;
+              false
+          | Some reading ->
+              let ok =
+                same_form (form_of reading) Localized
+                && reading.stores_from_local = 1
+                && reading.node_accesses <= 3
+              in
+              if not ok then
+                Stdio.eprintf
+                  "  rf_mma_fallback_%s: fallback rendered %s (%d subscripts, %d rmw, %d local \
+                   stores)\n"
+                  prec_name
+                  (form_name (form_of reading))
+                  reading.node_accesses reading.rmw_statements reading.stores_from_local;
+              ok
+        in
         p form_claim
           (Cs.equal_tensorization census.Cs.tensorization Cs.Scalar_fallback
           && census.Cs.statements > 0
-          && census.Cs.scalar_fallbacks = census.Cs.statements);
+          && census.Cs.scalar_fallbacks = census.Cs.statements
+          && localized);
         let ok = agrees got want in
         if not ok then
           Stdio.eprintf "  rf_mma_fallback_%s: got [%s] want [%s]\n" prec_name (show got)
