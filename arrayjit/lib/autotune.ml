@@ -1641,12 +1641,18 @@ let flip_profit_margin () =
 (** What one completed search measured about the tensorized family's profitability. A search that
     timed no tensorized candidate measured nothing about it — including one that seeded many and
     timed none, the gh-ocannl-521 state, which is a fact about candidate compilation rather than
-    about the family's speed. *)
+    about the family's speed.
+
+    "Was one timed" is [mma_best_ms] being finite, NOT [mma_timed > 0]: those are deliberately
+    different populations (see where [mma_best_ms] is set). [mma_timed] counts candidates whose
+    LABEL promised a tensorized pipeline, while a beam round appending a [Tensorize] to a saved or
+    preset incumbent promises nothing in its label and is exactly as tensorized — and can win. A
+    search whose only tensorized measurement came that way has measured the family, and keying this
+    guard on the label would keep the prior standing against a family that lost tenfold. *)
 let family_profit_of_report ?margin (r : report) =
   let margin = match margin with Some m -> m | None -> flip_profit_margin () in
   if
-    r.mma_timed <= 0
-    || (not (Float.is_finite r.mma_best_ms))
+    (not (Float.is_finite r.mma_best_ms))
     || (not (Float.is_finite r.best_ms))
     || Float.(r.best_ms <= 0.)
   then Unmeasured

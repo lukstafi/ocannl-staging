@@ -11,6 +11,8 @@ a family that lost by 1% is still within profit: true
 a family that lost by 1% keeps the enablement prior: true
 an arm that timed no tensorized candidate measures nothing: true
 unmeasured keeps the enablement prior: true
+a beam-appended Tensorize measures the family though no label promised one: true
+and its losing measurement voids the prior: true
 a report that never searched measures nothing: true
 one arm's paying family outweighs another's losing one: true
 two losing arms report the more favourable ratio: true

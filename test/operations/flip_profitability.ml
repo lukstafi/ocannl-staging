@@ -37,6 +37,12 @@ let searched ~best_ms ~mma_timed ~mma_best_ms =
    about candidate compilation, not about the family's speed. *)
 let seeded_none ~best_ms = searched ~best_ms ~mma_timed:0 ~mma_best_ms:Float.infinity
 
+(* A beam round appending a [Tensorize] to a saved or preset incumbent: the candidate promises
+   nothing in its LABEL, so [mma_timed] stays zero, while [mma_best_ms] records its structural
+   measurement. The family was measured; reading the label counter instead would keep the prior
+   standing against a family that lost tenfold. *)
+let beam_appended ~best_ms ~mma_best_ms = searched ~best_ms ~mma_timed:0 ~mma_best_ms
+
 let profit_name = function
   | Autotune.Unmeasured -> "unmeasured"
   | Autotune.Pays _ -> "pays"
@@ -101,6 +107,13 @@ let () =
     (match unmeasured with Autotune.Unmeasured -> true | _ -> false);
   V.p "unmeasured keeps the enablement prior"
     (match resolves unmeasured with `Enablement -> true | `Cost -> false);
+  (* The label counter and the structural best are different populations. *)
+  let beam_only = Autotune.family_profit_of_reports [ beam_appended ~best_ms:7.5 ~mma_best_ms:92.0 ]
+  in
+  V.p "a beam-appended Tensorize measures the family though no label promised one"
+    (match beam_only with Autotune.Loses _ -> true | _ -> false);
+  V.p "and its losing measurement voids the prior"
+    (match resolves beam_only with `Cost -> true | `Enablement -> false);
   V.p "a report that never searched measures nothing"
     (match Autotune.family_profit_of_reports [ Autotune.no_search_report ] with
     | Autotune.Unmeasured -> true

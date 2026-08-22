@@ -364,7 +364,12 @@ files.
   prior's classes go at once (promoting family-unlocking flips and demoting family-breaking ones are
   the same bet on the same family), and **the absence of a confirmation is not evidence against** —
   an arm that seeded tensorized candidates and timed none (the gh-ocannl-521 state) measured nothing
-  about the family, so the prior stands and gh-558's budget-5 reachability closure is untouched. The
+  about the family, so the prior stands and gh-558's budget-5 reachability closure is untouched. Read
+  "was one timed" off `mma_best_ms` being finite, **never** off `mma_timed`: those are deliberately
+  different populations — `mma_timed` counts candidates whose LABEL promised a tensorized pipeline,
+  while a beam round appending a `Tensorize` to a saved or preset incumbent promises nothing in its
+  label and is exactly as tensorized, and can win. Keying the guard on the label lets a family that
+  lost tenfold read as unmeasured. The
   granularity limit is worth knowing: `mma_best_ms` is per *search*, not per site, so the term
   cannot demote one site's promotion while keeping another's; per-site attribution would need the
   search to report per-site tensorized bests. Alternatives that were weighed and rejected: reading
