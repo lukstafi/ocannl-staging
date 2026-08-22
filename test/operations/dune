@@ -1051,6 +1051,19 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
+; gh-ocannl-681: the scope-target contract -- a Local_scope over a materialized node is rejected by
+; LL.optimize, not normalized to a plain Get. Picks its backend from the environment for the two
+; executed legs (the reference row sums and the prelowered-seam accumulation).
+
+(test
+ (name scope_over_materialized)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules scope_over_materialized)
+ (libraries base ocannl ll_test))
+
 (test
  (name virtual_diagonal)
  (package neural_nets_lib)
@@ -1466,6 +1479,20 @@
  (modules dune_scan_cases)
  (libraries base stdio test_utils arrayjit.verdict))
 
+; gh-ocannl-689: the marker grammar's closed backend vocabulary, held equal to the backends OCANNL
+; has. Its own stanza because linking the backend closure is exactly the cost the scanning tests
+; above are keeping off themselves -- one executable pays it, and `Dune_stanza_scan` keeps depending
+; on nothing heavier than `arrayjit.utils`.
+
+(test
+ ; ocannl-backend: none -- links the backend closure only to enumerate `Backends.all_of_backend`, a derived
+ ; constant: it opens no device, compiles nothing, and its output cannot vary with the backend.
+ (name marker_backend_vocabulary)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules marker_backend_vocabulary)
+ (libraries base stdio arrayjit.context test_utils arrayjit.verdict))
+
 (executable
  (name digest_completeness)
  (modules digest_completeness)
@@ -1641,6 +1668,18 @@
 ; How the directory reader behind cache_dir_ignores resolves a name, on snippets built to break it.
 ; The census over the tree exercises only the spellings some source uses today; these pin the rest,
 ; including the module alias bound in expression position that no source spells yet.
+
+; The benchmark runners' JSON result line, on the values a happy-path run never produces: a
+; diverged loss trajectory, times that were never measured, a diagnostic full of control
+; characters. Yojson is the parse oracle -- it rejects OCaml's `nan`/`inf` spellings, which is the
+; regression (gh-ocannl-676), and the test's last verdicts show that it does.
+(test
+ ; ocannl-backend: none -- links no backend: it formats and re-parses JSON strings.
+ (name bench_result_line)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules bench_result_line)
+ (libraries base stdio yojson bench_json arrayjit.verdict))
 
 (test
  ; ocannl-backend: none -- links no backend: it resolves directory names out of embedded OCaml snippets.
@@ -1821,6 +1860,22 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ ; A hand-built [Low_level] program of constant stores, executed and read back at f64/f32/f16, plus
+ ; a read of the emitted f32 kernel.
+ (name float_literal_forms)
+ (package neural_nets_lib)
+ (deps
+  ; Generated.init reads build_files_prefix, so a run under a different one must not be served
+  ; from the cache of a run under the default private directory.
+  (env_var OCANNL_BUILD_FILES_PREFIX)
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules float_literal_forms)
+ (libraries base ocannl stdio arrayjit.verdict ll_test test_utils)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name vec_signed_zero)
  (package neural_nets_lib)
  (deps
@@ -1993,6 +2048,28 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ ; ocannl-backend: none -- exercises the menu's cap-sharing rule over synthetic category lists;
+ ; it lowers, compiles and runs nothing, so no backend is selected.
+ (name autotune_menu_cap)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules autotune_menu_cap)
+ (libraries base stdio ocannl arrayjit.verdict ll_test)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
+ ; ocannl-backend: none -- enumerates the action menu over hand-built IR through the post-optimize
+ ; scope seam; it compiles and runs no kernel, so no backend is selected.
+ (name autotune_scope_provenance)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules autotune_scope_provenance)
+ (libraries base ocannl stdio arrayjit.verdict ll_test)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name autotune_scope_menu)
  (package neural_nets_lib)
  (deps
@@ -2033,6 +2110,22 @@
   (env_var OCANNL_BACKEND))
  (modules autotune_batched_companion)
  (libraries base ocannl stdio arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+; gh-ocannl-686: routine names that collide with a reserved word or a builtin. Executes the
+; colliding routines and reads their emitted sources, so it needs both the backend selection and
+; the build_files prefix Test_utils.Generated inspects.
+
+(test
+ (name reserved_routine_names)
+ (package neural_nets_lib)
+ (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules reserved_routine_names)
+ (libraries base ocannl stdio arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2091,6 +2184,17 @@
   (env_var OCANNL_BACKEND))
  (modules schedule_batched_mma)
  (libraries base ocannl stdio arrayjit.verdict test_utils)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
+ ; ocannl-backend: none -- builds Ir.Low_level by hand and judges the launch gate against MOCKED
+ ; hardware_limits records; nothing is compiled and no device is touched.
+ (name launch_dim_gate)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules launch_dim_gate)
+ (libraries base ocannl stdio ll_test)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2218,6 +2322,17 @@
   (env_var OCANNL_CC_FP16_ARITHMETIC))
  (modules tile_mma_narrow)
  (libraries base ocannl stdio unix arrayjit.verdict test_utils)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
+ (name mma_tensorization_label)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules mma_tensorization_label)
+ (libraries base ocannl arrayjit.autotune stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -3093,33 +3208,13 @@
     (run ./generated_provenance.exe symlink)
     (run ./generated_provenance.exe fresh)
     (run ./generated_provenance.exe armed_overwrite)
-    (with-accepted-exit-codes
-     1
-     (run ./generated_provenance.exe stale))
-    (with-accepted-exit-codes
-     1
-     (run ./generated_provenance.exe missing))
-    (with-accepted-exit-codes
-     1
-     (run ./generated_provenance.exe overwrite))
-    (with-accepted-exit-codes
-     1
-     (run ./generated_provenance.exe armed_no_emission))
-    (with-accepted-exit-codes
-     1
-     (run ./generated_provenance.exe uninitialized))
-    (with-accepted-exit-codes
-     1
-     (run
-      ./generated_provenance.exe
-      explicit_prefix
-      --ocannl_build_files_prefix=.))
-    (with-accepted-exit-codes
-     1
-     (run
-      ./generated_provenance.exe
-      explicit_prefix
-      --ocannl_build_files_prefix=gp_shared_dir))))))
+    ; The modes that must be refused are not run from here (gh-ocannl-692). A refusal announces
+    ; itself with this repository's failure marker -- `FAIL:` and `FAILED:` -- so running one with
+    ; the suite's streams inherited put those words into the log of a green run and cost `grep FAIL`
+    ; its meaning. `refusals` runs each of them as a child whose output it captures, and requires
+    ; both the exit status `with-accepted-exit-codes` used to state and the specific refusal
+    ; message, which no exit status can tell apart from any other way of failing.
+    (run ./generated_provenance.exe refusals)))))
 
 ; The uint4x32 FFI stubs read four lanes out of an [int array], a type that carries no length, so
 ; the C helper has to check the arity rather than assume it (gh-ocannl-688). Links arrayjit.ir

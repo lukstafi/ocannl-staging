@@ -70,6 +70,7 @@ type routine = {
   outputs : Set.M(Tn).t;
   routine_id : int;
   execution_deps : Set.M(Int).t;
+  mma : Ir.C_syntax.mma_summary;
 }
 
 let can_run ctx routine = Set.is_subset routine.execution_deps ~of_:ctx.ledger.executed
@@ -148,25 +149,31 @@ let compile_outcome ?name ?lowered_transform ?lowered_transforms ?prelowered ~pr
                and type event = event)
             bctx
           ->
-            match
-              Ir.Schedule_outcome.protect ~classify_backend:Backend.classify_failure ~provenance
-                ~phase:Ir.Schedule_outcome.Transform ?candidate (fun () ->
-                  let code =
-                    Backend.compile ?name ?lowered_transform ?lowered_transforms ?prelowered
-                      bctx.BI.optimize_ctx bindings comp
-                  in
-                  Ir.Schedule_outcome.tag Ir.Schedule_outcome.Backend_link (fun () ->
-                      Backend.link bctx code))
-            with
+            (* The [Tile_mma] rendering census is collected HERE, once, around this routine's
+               codegen (gh-ocannl-626): whether a routine tensorized is a property of the compiled
+               routine, not of whichever timing harness remembered to bracket the global. Fissioned
+               segments compile inside this bracket, so their kernels land in the same summary. *)
+            let outcome, mma =
+              Ir.C_syntax.with_census (fun () ->
+                  Ir.Schedule_outcome.protect ~classify_backend:Backend.classify_failure ~provenance
+                    ~phase:Ir.Schedule_outcome.Transform ?candidate (fun () ->
+                      let code =
+                        Backend.compile ?name ?lowered_transform ?lowered_transforms ?prelowered
+                          bctx.BI.optimize_ctx bindings comp
+                      in
+                      Ir.Schedule_outcome.tag Ir.Schedule_outcome.Backend_link (fun () ->
+                          Backend.link bctx code)))
+            in
+            match outcome with
             | Ok r ->
                 ( r.BI.context,
-                  Ok (r.BI.schedule, r.BI.bindings, r.BI.name, r.BI.inputs, r.BI.outputs) )
+                  Ok (r.BI.schedule, r.BI.bindings, r.BI.name, r.BI.inputs, r.BI.outputs, mma) )
             | Error failure -> (bctx, Error failure));
       }
   in
   match backend_outcome with
   | Error failure -> Error failure
-  | Ok (task, lowered_bindings, name, backend_inputs, backend_outputs) ->
+  | Ok (task, lowered_bindings, name, backend_inputs, backend_outputs, mma) ->
       (* Allocate unique ID from shared ledger *)
       let id = ctx.ledger.next_id in
       ctx.ledger.next_id <- id + 1;
@@ -242,6 +249,7 @@ let compile_outcome ?name ?lowered_transform ?lowered_transforms ?prelowered ~pr
           outputs;
           routine_id = id;
           execution_deps = deps;
+          mma;
         }
       in
 
@@ -386,6 +394,19 @@ let sync ctx =
              and type event = event)
           c
         -> Backend.await c.BI.device);
+    }
+
+let static_properties ctx =
+  Backends.query ctx.wrapped
+    {
+      q =
+        (fun (type dev runner event)
+          (module Backend : BI.Backend
+            with type dev = dev
+             and type runner = runner
+             and type event = event)
+          _c
+        -> Backend.static_properties ());
     }
 
 let hardware_limits ctx =

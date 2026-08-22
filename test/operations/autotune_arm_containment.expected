@@ -2,7 +2,7 @@ the failing arm did not take the tune down with it: true
 both arms reported, in position: true
 arm A completed: true
 arm A crowned a timed winner: true
-arm B is reported as partial: true
+arm B is reported as a search that died mid-way: true
 arm B's report carries the terminal failure: true
 arm B had timed candidates before failing: true
 the surviving arm's routine ships and computes the right values: true

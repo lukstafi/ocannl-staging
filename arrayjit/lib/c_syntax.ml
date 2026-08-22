@@ -53,9 +53,15 @@ let per_chunk_private_bytes_cap =
     | exception _ -> 256 * 1024)
 
 (* Census of [Tile_mma] statement renderings, collected during codegen while [mma_census_enabled]
-   (gh-ocannl-479): [Autotune] flips it around candidate compiles, because "the tensorized candidate
-   lost" and "the tensorized candidate never ran tensorized" must be distinguishable in tuning logs.
-   Entries are (kernel name, rendering), most recent first; tests assert on it directly. *)
+   (gh-ocannl-479): "the tensorized candidate lost" and "the tensorized candidate never ran
+   tensorized" must be distinguishable in tuning logs. Entries are (kernel name, rendering), most
+   recent first.
+
+   Consumers do not touch these refs: {!with_census} brackets them, {!Context.compile} calls it
+   around every routine's codegen, and the resulting {!mma_summary} is a field of the compiled
+   routine (gh-ocannl-626). Opt-in collection made the DEFAULT for a new timing harness "report a
+   variant name that may be unrelated to what rendered", which is exactly the false perf number the
+   census exists to prevent. *)
 type mma_rendering =
   | Mma_intrinsics
   | Mma_intrinsics_ldmatrix
@@ -68,6 +74,120 @@ type mma_rendering =
 
 let mma_census_enabled = ref false
 let mma_census : (string * mma_rendering) list ref = ref []
+
+let is_tensorized_rendering = function
+  | Mma_intrinsics | Mma_intrinsics_ldmatrix | Mma_register_tiled -> true
+  | Mma_scalar_fallback -> false
+
+(** Whether a compiled routine's tensorization request was honoured (gh-ocannl-626). Three states,
+    not a boolean, because "this routine has no tensor-core work in it" and "this routine asked for
+    tensor-core work and got the scalar fallback" are opposite readings of a timing and the boolean
+    that collapses them is the defect: an [Tile_mma]-free routine is not a failure, a wholly declined
+    one is. Mixed renderings — some statements honoured, some declined — read as {!Tensorized}, and
+    the counts on {!mma_summary} say by how much; the label answers "did any tensor-core / SIMD-tile
+    emission happen", the counts answer "how much of what was asked for". *)
+type tensorization =
+  | Not_requested
+      (** Codegen emitted no [Tile_mma] statement at all: nothing about this routine claims tensor
+          cores, and a timing of it is not a tensorized timing. *)
+  | Tensorized
+      (** At least one [Tile_mma] statement rendered to a real tensor-core or SIMD-register-tile
+          emission ({!Mma_intrinsics}, {!Mma_intrinsics_ldmatrix}, {!Mma_register_tiled}). The C
+          backends' register-tiled rendering counts: it is the SIMD-tile emission those backends
+          have, and the point of the label is fallback-vs-not, not which ISA. *)
+  | Scalar_fallback
+      (** [Tile_mma] statements were emitted and {e every} one of them declined to the lane-0 scalar
+          fallback. A timing labeled tensorized in this state measured scalar code. *)
+[@@deriving sexp, compare, equal]
+
+let tensorization_name = function
+  | Not_requested -> "not-requested"
+  | Tensorized -> "tensorized"
+  | Scalar_fallback -> "scalar-fallback"
+
+type mma_summary = {
+  renderings : (string * mma_rendering) list;
+      (** The census entries of one compile, in emission order (kernel name, rendering). Fissioned
+          segments of one routine contribute their kernels to the same summary. *)
+  tensorization : tensorization;
+  statements : int;  (** [Tile_mma] statements emitted: [List.length renderings]. *)
+  scalar_fallbacks : int;  (** Of those, how many rendered as the lane-0 scalar fallback. *)
+}
+[@@deriving sexp_of]
+(** What a compile's {!mma_census} says about the routine it produced (gh-ocannl-626). Derived once,
+    where the routine is compiled, so that "did this tensorize" is a property of the compiled
+    routine rather than of whichever call site remembered to bracket the global. *)
+
+let summarize_census renderings =
+  let statements = List.length renderings in
+  let scalar_fallbacks =
+    List.count renderings ~f:(fun (_, r) -> equal_mma_rendering r Mma_scalar_fallback)
+  in
+  let tensorization =
+    if statements = 0 then Not_requested
+    else if scalar_fallbacks = statements then Scalar_fallback
+    else Tensorized
+  in
+  { renderings; tensorization; statements; scalar_fallbacks }
+
+let empty_mma_summary = summarize_census []
+
+let merge_mma_summaries summaries =
+  summarize_census (List.concat_map summaries ~f:(fun s -> s.renderings))
+
+(** The one-line census a timing report prints beside a measurement (gh-ocannl-626): the
+    {!tensorization} label first — a reader scanning a table for a mismatch reads that word, not a
+    histogram — then the per-rendering counts. Shared so that every harness that names a variant
+    after a rendering says "did this tensorize" the same way; the two bench copies had disagreed
+    about the predicate (one counted the fallback, the other tested equality with
+    {!Mma_register_tiled}, which false-warns on any GPU backend). *)
+let mma_summary_string summary =
+  match summary.renderings with
+  | [] -> tensorization_name summary.tensorization
+  | rs ->
+      let counted =
+        List.map
+          (List.dedup_and_sort (List.map rs ~f:snd) ~compare:compare_mma_rendering)
+          ~f:(fun r ->
+            Printf.sprintf "%s x%d" (Sexp.to_string (sexp_of_mma_rendering r))
+              (List.count rs ~f:(fun (_, r') -> equal_mma_rendering r r')))
+      in
+      Printf.sprintf "%s: %s"
+        (tensorization_name summary.tensorization)
+        (String.concat ~sep:", " counted)
+
+(** Run [f] with the {!mma_census} collecting, and return its result alongside the summary of what
+    rendered during it (gh-ocannl-626). Both census refs are saved and restored, so calls nest and
+    an inner compile does not disturb an outer collection; the summary covers only [f]'s own
+    entries. This replaces the hand-rolled [Exn.protect] bracket that had been copied to six call
+    sites — and, applied inside {!Context.compile}, makes collecting the census the default rather
+    than something a timing harness must remember to do.
+
+    The census is a process global, as it always was: compiles are sequential on the main domain,
+    and nothing here makes concurrent compiles from several domains attribute their renderings
+    correctly. *)
+let with_census f =
+  let saved_enabled = !mma_census_enabled and saved_census = !mma_census in
+  mma_census_enabled := true;
+  mma_census := [];
+  (* Nesting is additive, not shadowing: an enclosing collection (a bench bracketing several
+     compiles, each of which collects its own summary) must still see the inner entries, or wrapping
+     the compile path in this helper would silently empty every outer bracket. *)
+  let restore () =
+    let inner = !mma_census in
+    mma_census_enabled := saved_enabled;
+    mma_census := (if saved_enabled then inner @ saved_census else saved_census)
+  in
+  let result =
+    match f () with
+    | r -> r
+    | exception e ->
+        restore ();
+        raise e
+  in
+  let renderings = List.rev !mma_census in
+  restore ();
+  (result, summarize_census renderings)
 
 type mma_space = [ `Device | `Shared | `Thread | `Fragment of string ]
 (** The address space of a tile-MMA operand as the emission hooks see it. *)
@@ -422,21 +542,124 @@ module type C_syntax_config = sig
         captured_log_prefix) to the format string and arguments. *)
 end
 
-(** A C source literal for the floating-point constant [c].
+(** A C source literal for the floating-point constant [c], as a {e double}-typed floating literal
+    that parses back to exactly [c] on every C-family backend.
 
-    The three special values [%.16g] cannot spell, plus a fourth it spells {e wrong}: a value with
-    no fractional part comes out without a radix point, hence as a C {e integer} literal, and while
-    that is value-preserving for every other constant, [%.16g (-0.)] is ["-0"] — the integer zero,
-    [+0.0] once cast. So a [-0.0] in host data silently became [+0.0] wherever the constant fill
-    inlines as scalar stores, the same negative-zero normalization as the vector splat
-    (gh-ocannl-615). Only this value needs the radix point forced; spelling every whole number as
-    [N.0] instead would be equivalent C and churn every codegen snapshot. *)
+    Three properties, each of which [%.16g] alone gets wrong (gh-ocannl-623):
+
+    - {b It is a floating literal, not an integer one.} [%.16g] of a value with no fractional part
+      has no radix point, so [2.] came out as the C integer literal [2]. Value-preserving in the
+      cast contexts the constants happen to sit in today — but [-0.] came out as ["-0"], the
+      integer zero, hence [+0.0] once cast: a [-0.0] in host data silently reached kernels as
+      [+0.0] wherever the constant fill inlines as scalar stores (gh-ocannl-615 fixed that one
+      value). The rest of the class is latent rather than inert: an integer literal divides as an
+      integer against another one, promotes as an integer, and would overflow its type once the
+      digits outgrow [long long]. Forcing the radix point closes all of it at once, and subsumes
+      the [-0.] special case.
+    - {b It round-trips.} [%.16g] is not enough digits to recover every double: [0.1 +. 0.2] prints
+      as ["0.3"], which is a {e different} double. That reaches emitted code for real — hosted
+      constant inits (gh-ocannl-633) inline arbitrary host values as scalar stores — so the
+      rendering retries at [%.17g], the width IEEE-754 guarantees, whenever 16 digits do not parse
+      back to [c]. Values that already round-trip at 16 digits keep their exact previous spelling,
+      which is why no codegen golden moves except by the appended [.0].
+    - {b The specials are spelled, not printed.} [%.16g] cannot spell them at all. [INFINITY] and
+      [NAN] are C99 [math.h] macros that MSL also provides; the CUDA and HIP preludes define them
+      under [#ifndef] since nvrtc/hiprtc supply no standard headers. [(-INFINITY)] is parenthesized
+      so it cannot glue into [--INFINITY] beside a subtraction. A NaN's payload and sign do not
+      survive this (no dialect spells a payload portably); nothing in OCANNL depends on them, and
+      a bit-exact constant has {!Low_level.Constant_bits} available.
+
+    Deliberately {e not} carried here: a precision suffix. The literal is always double-typed and
+    the narrowing is [B.convert_precision]'s cast, which is a single rounding of the exact host
+    double — the same conversion the host performs when it stores the value. An [f]-suffixed
+    decimal would instead round the decimal straight to float. The cast is present for every
+    non-double target: [Ops.c_convert_precision] and each backend's override return [("", "")] only
+    when [from] and [to_] are the same precision.
+
+    That last argument has a hole, and {!is_f32_tie} is what fills it: the cast only {e is} a
+    narrowing where the dialect has a [double]. MSL does not, so Metal rounds the decimal itself,
+    at parse time, to f32. A decimal that round-trips as a double is not thereby exact, so the two
+    readings — round [c] to f32, versus round a decimal near [c] to f32 — can differ, and they
+    differ exactly when [c] sits on an f32 tie: the host takes ties-to-even while the dialect
+    follows whichever side the decimal happens to land on. Which digit count is emitted then
+    decides the value, so this is not a hazard the retry above introduced but one it {e moves}.
+    A hexadecimal literal takes it away instead of moving it: it is exact by construction, so there
+    is no parse-time rounding for either reading to disagree about, and both round [c] itself. It
+    is spelled only for ties — a handful of values that were otherwise a coin toss — so the
+    ordinary constant keeps its readable decimal, and C99, CUDA, HIP and MSL all accept the
+    form. *)
+(** Whether [c] lies exactly halfway between two adjacent f32 values, so that narrowing it to f32
+    is a tie that IEEE-754 breaks to even -- and any decimal near but not equal to [c] would instead
+    break by whichever side it fell on.
+
+    Computed against the two neighbours rather than by masking mantissa bits, so that the f32
+    subnormal range (where the retained-bit count shrinks, and a bit mask would need a second case)
+    is covered by the same three lines. Values that overflow f32 have no neighbours to sit between
+    and are not ties. *)
+let is_f32_tie c =
+  Float.is_finite c
+  && (Float.(abs c = 0x1.ffffffp+127)
+     (* The OVERFLOW midpoint, which the neighbour walk below cannot see: halfway between the
+        largest finite f32 and the (unrepresentable) 2^128 that would follow it. IEEE-754 rounds it
+        to even, and the even candidate is the one that overflows, so the host answers an infinity
+        while a decimal spelling of it -- necessarily just under the midpoint, since the midpoint's
+        exact decimal is longer -- answers the largest finite f32. The tie has exactly one
+        magnitude, so naming it is complete rather than a first case of many. *)
+     ||
+     let f = Int32.float_of_bits (Int32.bits_of_float c) in
+     Float.is_finite f && Float.(f <> c)
+     &&
+     let bits = Int32.bits_of_float f in
+     (* One f32 step from [f] towards [c]: away from zero when they share a direction, towards it
+        otherwise, since the bit pattern's order tracks magnitude rather than value. *)
+     let step =
+       if Float.(c > f) then if Float.(f >= 0.) then Int32.(bits + one) else Int32.(bits - one)
+       else if Float.(f > 0.) then Int32.(bits - one)
+       else Int32.(bits + one)
+     in
+     let g = Int32.float_of_bits step in
+     Float.is_finite g && Float.(abs (c - f) = abs (g - c)))
+
+(** [s] with any exponent's leading zeros removed, so that the emitted literal does not depend on
+    which C runtime formatted it.
+
+    OCaml's [%g] goes through the platform's [snprintf], and the Windows runtimes pad the exponent
+    to three digits ([1e+020] where glibc writes [1e+20]) -- which would make generated kernels, and
+    any golden quoting one, differ by platform. Both spellings denote the same number, so this is
+    about the artifact being reproducible rather than about the value. Digits that are not padding
+    are kept: [1e-300] stays itself. *)
+let normalize_exponent s =
+  match String.findi s ~f:(fun _ ch -> Char.(ch = 'e' || ch = 'E')) with
+  | None -> s
+  | Some (i, _) ->
+      let mantissa = String.prefix s i and exp = String.drop_prefix s (i + 1) in
+      let sign, digits =
+        match String.chop_prefix exp ~prefix:"+" with
+        | Some d -> ("+", d)
+        | None -> (
+            match String.chop_prefix exp ~prefix:"-" with Some d -> ("-", d) | None -> ("", exp))
+      in
+      if String.is_empty digits || not (String.for_all digits ~f:Char.is_digit) then s
+      else
+        let stripped = String.lstrip digits ~drop:(Char.equal '0') in
+        let stripped = if String.is_empty stripped then "0" else stripped in
+        mantissa ^ "e" ^ sign ^ stripped
+
 let c_float_literal c =
   if Float.(c = infinity) then "INFINITY"
   else if Float.(c = neg_infinity) then "(-INFINITY)"
   else if Float.is_nan c then "NAN"
-  else if Float.(c = 0.) && Float.ieee_negative c then "-0.0"
-  else Printf.sprintf "%.16g" c
+  else if is_f32_tie c then Printf.sprintf "%h" c
+  else
+    let s =
+      let s16 = Printf.sprintf "%.16g" c in
+      if Float.equal (Float.of_string s16) c then s16 else Printf.sprintf "%.17g" c
+    in
+    (* [%g] emits a radix point or an exponent for everything else, and either one makes the token
+       a floating literal. *)
+    if String.exists s ~f:(function '.' | 'e' | 'E' -> true | _ -> false) then
+      normalize_exponent s
+    else s ^ ".0"
 
 (** The C-family rendering of a binary operation, from {!Ops.binop_c_syntax}: prefix, first operand,
     infix, second operand (breaking after the operator), suffix.
@@ -689,6 +912,447 @@ let operand_conditionality_violations ~ternop_syntax ~binop_syntax =
     never calls it. *)
 let builtin_idents builtins = List.map builtins ~f:(fun (key, _, _) -> key)
 
+(** The words the C language itself reserves, plus the scaffolding names this module's rendering
+    emits unconditionally. Shared by every C-family backend through {!Pure_C_config}, and by
+    {!C_syntax.kernel_ident}: a routine and a tensor node are both plain identifiers in the emitted
+    source, so they are unsafe on exactly the same words.
+
+    [asm] is in the list even though C89/C99 reserve it only as a common extension: every compiler
+    OCANNL emits for (gcc, clang, nvrtc, hiprtc, the Metal front end) treats it as a keyword, which
+    is what made [Block_comment "asm"] emit [void asm(] and fail as an "internal" codegen bug
+    (gh-ocannl-686). *)
+let c_keywords =
+  [
+    (* C89 keywords *)
+    "auto";
+    "break";
+    "case";
+    "char";
+    "const";
+    "continue";
+    "default";
+    "do";
+    "double";
+    "else";
+    "enum";
+    "extern";
+    "float";
+    "for";
+    "goto";
+    "if";
+    "int";
+    "long";
+    "register";
+    "return";
+    "short";
+    "signed";
+    "sizeof";
+    "static";
+    "struct";
+    "switch";
+    "typedef";
+    "union";
+    "unsigned";
+    "void";
+    "volatile";
+    "while";
+    (* C99 additions *)
+    "inline";
+    "restrict";
+    "_Bool";
+    "_Complex";
+    "_Imaginary";
+    (* C11 additions *)
+    "_Alignas";
+    "_Alignof";
+    "_Atomic";
+    "_Generic";
+    "_Noreturn";
+    "_Static_assert";
+    "_Thread_local";
+    (* Keywords every compiler in the toolchain set accepts as an extension, or C23 promotes *)
+    "asm";
+    "typeof";
+    (* Scaffolding names emitted by generated code that must not clash with variable names *)
+    "log_file";
+    "log_file_name";
+    "uint32_t";
+    "uint64_t";
+  ]
+
+(** Macro names the C-family preludes' unconditional includes define ([<stdio.h>], [<math.h>],
+    [<string.h>], [<stdlib.h>], [<stdint.h>]). Macros are the half of the standard library that
+    NOTHING can shadow -- a parameter or a local named [NAN] expands mid-declaration and the kernel
+    fails to parse -- so these constrain every identifier, tensor-node names included, and belong in
+    the shared [ident_blacklist] (gh-ocannl-686). *)
+let c_stdlib_macros =
+  [
+    "NULL";
+    "EOF";
+    "BUFSIZ";
+    "SEEK_SET";
+    "SEEK_CUR";
+    "SEEK_END";
+    "FILENAME_MAX";
+    "FOPEN_MAX";
+    "TMP_MAX";
+    "L_tmpnam";
+    "stdin";
+    "stdout";
+    "stderr";
+    "NAN";
+    "INFINITY";
+    "HUGE_VAL";
+    "HUGE_VALF";
+    "HUGE_VALL";
+    "M_PI";
+    "M_E";
+    "M_SQRT2";
+    "FP_NAN";
+    "FP_INFINITE";
+    "FP_ZERO";
+    "FP_SUBNORMAL";
+    "FP_NORMAL";
+    "FP_ILOGB0";
+    "FP_ILOGBNAN";
+    "MATH_ERRNO";
+    "MATH_ERREXCEPT";
+    "fpclassify";
+    "isfinite";
+    "isinf";
+    "isnan";
+    "isnormal";
+    "signbit";
+    "isgreater";
+    "isgreaterequal";
+    "isless";
+    "islessequal";
+    "islessgreater";
+    "isunordered";
+    "RAND_MAX";
+    "EXIT_SUCCESS";
+    "EXIT_FAILURE";
+    "MB_CUR_MAX";
+    "INT8_MAX";
+    "INT16_MAX";
+    "INT32_MAX";
+    "INT64_MAX";
+    "INT8_MIN";
+    "INT16_MIN";
+    "INT32_MIN";
+    "INT64_MIN";
+    "UINT8_MAX";
+    "UINT16_MAX";
+    "UINT32_MAX";
+    "UINT64_MAX";
+    "INTMAX_MAX";
+    "INTMAX_MIN";
+    "UINTMAX_MAX";
+    "SIZE_MAX";
+    "PTRDIFF_MAX";
+    "PTRDIFF_MIN";
+    "assert";
+    "offsetof";
+    "errno";
+    "va_start";
+    "va_arg";
+    "va_end";
+    "va_copy";
+  ]
+
+(** Function and type names the same unconditional includes declare. Unlike the macros above these
+    are ordinary file-scope declarations, and C scoping makes the two cases genuinely different:
+
+    - a routine DEFINITION takes file scope, so [void printf(...)] after [<stdio.h>] is a
+      conflicting declaration and [void exp(...)] after [<math.h>] likewise -- an error regardless
+      of whether the kernel ever calls either;
+    - a parameter or a local legally SHADOWS them, so a tensor node named [exp] is well-formed C
+      and always has been.
+
+    So this table constrains routine names only ({!C_syntax.kernel_ident}) and is deliberately kept
+    out of [ident_blacklist]: adding it there would rename tensor nodes -- [Tensor.unop]'s
+    [~op_label]s are exactly these words ([exp], [log], [sqrt], [tanh]) -- churning goldens to
+    prevent a collision that cannot happen. The names a rendering actually CALLS are a separate
+    concern already covered by {!op_syntax_idents}, which is what stops a node from shadowing a
+    callee the same kernel invokes. *)
+let c_stdlib_idents =
+  [
+    "FILE";
+    "fpos_t";
+    "fopen";
+    "freopen";
+    "fclose";
+    "fflush";
+    "setbuf";
+    "setvbuf";
+    "fread";
+    "fwrite";
+    "fprintf";
+    "printf";
+    "sprintf";
+    "snprintf";
+    "vprintf";
+    "vfprintf";
+    "vsprintf";
+    "vsnprintf";
+    "fscanf";
+    "scanf";
+    "sscanf";
+    "vscanf";
+    "vfscanf";
+    "vsscanf";
+    "fgetc";
+    "getc";
+    "getchar";
+    "fgets";
+    "fputc";
+    "putc";
+    "putchar";
+    "fputs";
+    "puts";
+    "ungetc";
+    "fseek";
+    "ftell";
+    "rewind";
+    "fgetpos";
+    "fsetpos";
+    "remove";
+    "rename";
+    "tmpfile";
+    "tmpnam";
+    "clearerr";
+    "feof";
+    "ferror";
+    "perror";
+    "acos";
+    "asin";
+    "atan";
+    "atan2";
+    "cos";
+    "sin";
+    "tan";
+    "acosh";
+    "asinh";
+    "atanh";
+    "cosh";
+    "sinh";
+    "tanh";
+    "exp";
+    "exp2";
+    "expm1";
+    "frexp";
+    "ldexp";
+    "log";
+    "log10";
+    "log1p";
+    "log2";
+    "logb";
+    "ilogb";
+    "modf";
+    "scalbn";
+    "scalbln";
+    "cbrt";
+    "fabs";
+    "hypot";
+    "pow";
+    "sqrt";
+    "erf";
+    "erfc";
+    "lgamma";
+    "tgamma";
+    "ceil";
+    "floor";
+    "nearbyint";
+    "rint";
+    "lrint";
+    "llrint";
+    "round";
+    "lround";
+    "llround";
+    "trunc";
+    "fmod";
+    "remainder";
+    "remquo";
+    "copysign";
+    "nan";
+    "nextafter";
+    "nexttoward";
+    "fdim";
+    "fmax";
+    "fmin";
+    "fma";
+    "acosf";
+    "asinf";
+    "atanf";
+    "atan2f";
+    "cosf";
+    "sinf";
+    "tanf";
+    "coshf";
+    "sinhf";
+    "tanhf";
+    "expf";
+    "exp2f";
+    "logf";
+    "log10f";
+    "log2f";
+    "fabsf";
+    "hypotf";
+    "powf";
+    "sqrtf";
+    "cbrtf";
+    "ceilf";
+    "floorf";
+    "roundf";
+    "truncf";
+    "fmodf";
+    "copysignf";
+    "fmaxf";
+    "fminf";
+    "fmaf";
+    "erff";
+    "tgammaf";
+    "lgammaf";
+    "rintf";
+    "memcpy";
+    "memmove";
+    "memset";
+    "memcmp";
+    "memchr";
+    "strcpy";
+    "strncpy";
+    "strcat";
+    "strncat";
+    "strcmp";
+    "strncmp";
+    "strcoll";
+    "strxfrm";
+    "strchr";
+    "strrchr";
+    "strspn";
+    "strcspn";
+    "strpbrk";
+    "strstr";
+    "strtok";
+    "strlen";
+    "strerror";
+    "malloc";
+    "calloc";
+    "realloc";
+    "free";
+    "aligned_alloc";
+    "abort";
+    "exit";
+    "_Exit";
+    "atexit";
+    "system";
+    "getenv";
+    "bsearch";
+    "qsort";
+    "abs";
+    "labs";
+    "llabs";
+    "div";
+    "ldiv";
+    "lldiv";
+    "rand";
+    "srand";
+    "atoi";
+    "atol";
+    "atoll";
+    "atof";
+    "strtol";
+    "strtoul";
+    "strtoll";
+    "strtoull";
+    "strtod";
+    "strtof";
+    "strtold";
+    "div_t";
+    "ldiv_t";
+    "lldiv_t";
+    "size_t";
+    "ptrdiff_t";
+    "wchar_t";
+    "intptr_t";
+    "uintptr_t";
+    "intmax_t";
+    "uintmax_t";
+    "int8_t";
+    "int16_t";
+    "int32_t";
+    "int64_t";
+    "uint8_t";
+    "uint16_t";
+  ]
+
+(** The words C++ reserves on top of {!c_keywords}. CUDA, HIP and MSL are all C++ dialects -- their
+    kernels are parsed by a C++ front end even where the emitted body is plain C -- so their
+    backends extend the blacklist with this table. Several entries are entirely plausible tensor
+    labels or routine names ([class], [new], [operator], [bool], [this], [template]), and a
+    collision there is the same misattributed "bug in OCANNL" failure as gh-ocannl-686's [asm]. *)
+let cpp_keywords =
+  [
+    "alignas";
+    "alignof";
+    "and";
+    "and_eq";
+    "bitand";
+    "bitor";
+    "bool";
+    "catch";
+    "char8_t";
+    "char16_t";
+    "char32_t";
+    "class";
+    "compl";
+    "concept";
+    "consteval";
+    "constexpr";
+    "constinit";
+    "const_cast";
+    "co_await";
+    "co_return";
+    "co_yield";
+    "decltype";
+    "delete";
+    "dynamic_cast";
+    "explicit";
+    "export";
+    "false";
+    "friend";
+    "mutable";
+    "namespace";
+    "new";
+    "noexcept";
+    "not";
+    "not_eq";
+    "nullptr";
+    "operator";
+    "or";
+    "or_eq";
+    "private";
+    "protected";
+    "public";
+    "reinterpret_cast";
+    "requires";
+    "static_assert";
+    "static_cast";
+    "template";
+    "this";
+    "thread_local";
+    "throw";
+    "true";
+    "try";
+    "typeid";
+    "typename";
+    "using";
+    "virtual";
+    "wchar_t";
+    "xor";
+    "xor_eq";
+  ]
+
 module Pure_C_config (Input : sig
   type buffer_ptr
 
@@ -796,58 +1460,10 @@ struct
      where it overrides the op to something else, so that a node's code name does not depend on
      which arms a backend happens to shadow. *)
   let ident_blacklist =
-    let c_keywords =
-      [
-        (* C89 keywords *)
-        "auto";
-        "break";
-        "case";
-        "char";
-        "const";
-        "continue";
-        "default";
-        "do";
-        "double";
-        "else";
-        "enum";
-        "extern";
-        "float";
-        "for";
-        "goto";
-        "if";
-        "int";
-        "long";
-        "register";
-        "return";
-        "short";
-        "signed";
-        "sizeof";
-        "static";
-        "struct";
-        "switch";
-        "typedef";
-        "union";
-        "unsigned";
-        "void";
-        "volatile";
-        "while";
-        (* C99 additions *)
-        "inline";
-        "restrict";
-        "_Bool";
-        "_Complex";
-        "_Imaginary";
-        (* Scaffolding names emitted by generated code that must not clash with variable names *)
-        "log_file";
-        "log_file_name";
-        "uint32_t";
-        "uint64_t";
-      ]
-    in
     let c_names =
       op_syntax_idents ~ternop_syntax ~binop_syntax ~unop_syntax ~vec_unop_syntax ~convert_precision
     in
-    c_keywords @ c_names
+    c_keywords @ c_stdlib_macros @ c_names
 
   let kernel_log_param = Some ("const char*", "log_file_name")
   let log_involves_file_management = true
@@ -910,6 +1526,71 @@ module C_syntax (B : C_syntax_config) = struct
   let get_ident =
     Low_level.get_ident_within_code ~no_dots:true ~blacklist:ident_blacklist
     @@ Array.map B.procs ~f:(fun l -> l.llc)
+
+  (** [kernel_ident name] is [name] made safe to emit as a kernel function's C identifier
+      (gh-ocannl-686).
+
+      Routine names come from user-facing surfaces -- an {!Assignments.Block_comment} label, the
+      [~name] argument of [Context.compile] and of the autotune drop-ins (gh-ocannl-669) -- and
+      reached the emitted [void <name>(] unexamined. A name that happens to be a reserved word or a
+      builtin therefore produced a source the backend's compiler rejects, and every backend reports
+      that rejection as "this is a bug in OCANNL", naming a generated file rather than the name that
+      caused it.
+
+      Tensor nodes and scope locals need no equivalent: a node's code name is minted by
+      {!Low_level.get_ident_within_code} with [ident_blacklist] pre-seeded, so a colliding label is
+      forced into the disambiguated [n<id>_<label>] form, and every local is minted with a
+      [v<scope>_] / [wred_] / [__rmw_] prefix. Routine names were the one identifier class entering
+      the emitted source verbatim.
+
+      The scheme is deterministic and, on a name that is already a safe C identifier, the identity
+      -- so nothing about a non-colliding routine changes: not its emitted symbol, not its
+      schedule-cache identity, not its generated-source goldens. On a colliding one:
+
+      - characters C does not admit in an identifier become [_], and a name starting with a digit
+        (or empty after that pass) gains a [k_] prefix, so the result is always well-formed;
+      - a result still equal to a reserved word or builtin gains a [__] suffix, repeatedly until it
+        is clear of [ident_blacklist] -- which terminates, the list being finite.
+
+      The name a routine is KNOWN by is untouched: [Context.routine]'s [name] field, the [.cd] and
+      [.ll] sources (written by {!Backends} before any backend sees the code), and the calibration
+      rows all keep what the caller asked for. Only the C-family artifacts downstream of this
+      function -- the emitted symbol, the [.c] / [.cu] / [.hip] / [.metal] source and what the
+      backend looks the symbol up by -- carry the mangled spelling, and they carry it consistently.
+
+      The table is {!routine_ident_blacklist}: everything the node names avoid ([ident_blacklist] --
+      the language's keywords, C plus C++ for the GPU dialects, the backend's intrinsic globals, its
+      builtins table's keys, and the names its own operator renderings emit) plus
+      {!c_stdlib_idents}, the standard-library functions and types the preludes' unconditional
+      includes declare, which constrain a file-scope definition and not a parameter.
+
+      Two things it deliberately does not do. Uniqueness {e among} the routines of one batch is not
+      its business and never was -- two routines given the same name collide as duplicate C symbols
+      with or without mangling. And it cannot see what a BACKEND-SPECIFIC header declares beyond the
+      C standard floor ([<cuda_fp16.h>], [metal_stdlib]'s namespace): those names are covered only
+      where a rendering emits them, so a routine named after an unused vendor intrinsic still
+      reaches the vendor compiler. That failure is an ordinary compile error naming the conflict,
+      which is the state this function put the reserved words in -- not the misattributed "bug in
+      OCANNL" the issue was about. *)
+  (* What a ROUTINE name must avoid: everything a node name must ({!ident_blacklist}) plus the
+     standard-library functions and types the preludes' unconditional includes declare. The extra
+     table applies here and not to node names because a routine definition takes FILE scope, where
+     [void exp(...)] after [<math.h>] is a conflicting declaration, while a parameter or local named
+     [exp] merely shadows it and is well-formed C (gh-ocannl-686 review round 1). *)
+  let routine_ident_blacklist = ident_blacklist @ c_stdlib_idents
+
+  let kernel_ident name =
+    let sanitized =
+      String.map name ~f:(fun c -> if Char.is_alphanum c || Char.equal c '_' then c else '_')
+    in
+    let sanitized =
+      if String.is_empty sanitized || Char.is_digit sanitized.[0] then "k_" ^ sanitized
+      else sanitized
+    in
+    let rec avoid s =
+      if List.mem routine_ident_blacklist s ~equal:String.equal then avoid (s ^ "__") else s
+    in
+    avoid sanitized
 
   (* {3 Storage precision vs. compute precision (gh-ocannl-517)}
 
@@ -1180,10 +1861,14 @@ module C_syntax (B : C_syntax_config) = struct
 
   (* [routine_names]: the kernel function names in [proc_doc] — their declarations (and the
      name-echoing comments) are token occurrences the usage scan below must not count as builtin
-     uses. A routine named exactly like a builtin cannot genuinely use it (the definition would be a
-     duplicate C symbol), so excluding the name only converts a pathological collision from silent
-     helper injection — which on CUDA could raise the architecture floor past the device (Codex P2
-     on PR #317, round 4) — into an ordinary compile error naming the conflict. *)
+     uses. Since gh-ocannl-686 the names arriving here are {!kernel_ident}-mangled, so a routine
+     name can no longer BE a builtin key: a colliding one was renamed before it reached codegen,
+     and the kernel's own token no longer matches the key. The exclusion is kept as the backstop
+     for that guarantee — a routine named exactly like a builtin cannot genuinely use it (the
+     definition would be a duplicate C symbol), so dropping the name from the scan degrades a
+     pathological collision from silent helper injection — which on CUDA could raise the
+     architecture floor past the device (Codex P2 on PR #317, round 4) — into an ordinary compile
+     error naming the conflict. *)
   let filter_and_prepend_builtins ~routine_names ~includes ~builtins ~proc_doc =
     let doc_buffer = Buffer.create 4096 in
     PPrint.ToBuffer.pretty 1.0 110 doc_buffer proc_doc;
@@ -3605,7 +4290,14 @@ module C_syntax (B : C_syntax_config) = struct
                             {
                               tn;
                               idcs;
-                              llsc = Local_scope { id; body = scope_body; orig_indices = idcs };
+                              llsc =
+                                Local_scope
+                                  {
+                                    id;
+                                    body = scope_body;
+                                    orig_indices = idcs;
+                                    mint = Schedule_minted;
+                                  };
                               debug;
                             }))
             in
@@ -4649,7 +5341,8 @@ module C_syntax (B : C_syntax_config) = struct
     (* Returns (local definitions, value expression) *)
     let open PPrint in
     match vcomp with
-    | Local_scope { id = { tn = { storage_prec = _; _ }; scope_id } as id; body; orig_indices = _ }
+    | Local_scope
+        { id = { tn = { storage_prec = _; _ }; scope_id } as id; body; orig_indices = _; mint = _ }
       ->
         let scope_prec = scope_prec_of id in
         let num_typ = string (B.typ_of_prec scope_prec) in
@@ -5002,6 +5695,19 @@ module C_syntax (B : C_syntax_config) = struct
               per-thread stack arrays -- wrong sharing semantics. *)
            invalid_arg
              "C_syntax.compile_proc: workgroup-shared placement not supported by this backend");
+    (* gh-ocannl-686: the routine name reaches the emitted [void <name>(] verbatim, so it must
+       already be a legal, non-reserved identifier. Mangling it HERE would leave the caller's
+       symbol lookup and artifact names pointing at the pre-mangling spelling, so the caller owns
+       the normalization ({!kernel_ident}, applied once at each backend's [compile] entry) and this
+       is the check that it happened -- a backend that skips it fails here, naming the routine,
+       instead of handing its compiler a source it rejects as an OCANNL bug. *)
+    if not (String.equal name (kernel_ident name)) then
+      invalid_arg
+        (Printf.sprintf
+           "C_syntax.compile_proc: routine name %S is not a legal C identifier for this backend \
+            (reserved word, builtin, or illegal character) -- the backend must pass it through \
+            C_syntax.kernel_ident first, which would give %S"
+           name (kernel_ident name));
     current_kernel_name := name;
     current_placements := Some optimize_ctx.Low_level.placements;
     (* gh-ocannl-584: scope purity, the pipeline's EXIT gate ([Low_level.optimize_proc] is the entry

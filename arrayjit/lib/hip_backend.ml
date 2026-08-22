@@ -461,6 +461,9 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
 
     let ident_blacklist =
       ident_blacklist
+      (* HIP kernels are parsed by a C++ front end, so the C++ keywords are reserved here on top of
+         the C ones {!Pure_C_config} contributes (gh-ocannl-686). *)
+      @ C_syntax.cpp_keywords
       @ C_syntax.builtin_idents Builtins_hip.builtins
       @ [
           (* HIP built-in variables — would shadow per-thread or per-block context *)
@@ -1531,6 +1534,9 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     end))
     in
     let idx_params = Indexing.bound_symbols bindings in
+    (* gh-ocannl-686: normalize the user-supplied routine name into a legal identifier ONCE, here,
+       so the emitted symbol, the module's function lookup and the source artifacts agree. *)
+    let name = Syntax.kernel_ident name in
     let kparams, proc_doc, launch = Syntax.compile_proc ~name idx_params lowered in
     let source =
       Syntax.filter_and_prepend_builtins ~routine_names:[ name ] ~includes:hip_includes
@@ -1545,6 +1551,9 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     end))
     in
     let idx_params = Indexing.bound_symbols bindings in
+    (* gh-ocannl-686: normalize the user-supplied routine name into a legal identifier ONCE, here,
+       so the emitted symbol, the module's function lookup and the source artifacts agree. *)
+    let names = Array.map names ~f:(Option.map ~f:Syntax.kernel_ident) in
     let kparams_and_docs =
       Array.map2_exn names lowereds
         ~f:
@@ -1919,6 +1928,26 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
              min_over (fun (a : H.Device.attributes) -> a.max_threads_per_block);
            max_workgroup_memory_bytes =
              min_over (fun (a : H.Device.attributes) -> a.shared_mem_per_block);
+           (* Per-dimension workgroup caps (gh-ocannl-679), from the same queried [max_threads_dim]
+              the dump above surfaces. On the AMD parts seen so far it reads (1024, 1024, 1024) --
+              equal to [max_threads_per_block], so on those devices every per-dimension violation
+              is also a product violation and this row never fires alone. It is CUDA, whose [.z] is
+              64, that the row exists for; filling it here keeps the two backends' gates identical
+              rather than making the caller ask which backend it is on. *)
+           max_workgroup_dims =
+             (match
+                ( min_over (fun (a : H.Device.attributes) ->
+                      let x, _, _ = a.max_threads_dim in
+                      x),
+                  min_over (fun (a : H.Device.attributes) ->
+                      let _, y, _ = a.max_threads_dim in
+                      y),
+                  min_over (fun (a : H.Device.attributes) ->
+                      let _, _, z = a.max_threads_dim in
+                      z) )
+              with
+              | Some x, Some y, Some z -> Some (x, y, z)
+              | _ -> None);
            (* One cap for both gated dimensions (see [Backend_intf.max_grid_yz]): the smaller of
               the queried .y and .z components, so the gate is never looser than the device on
               either. On the AMD devices seen so far they coincide. *)

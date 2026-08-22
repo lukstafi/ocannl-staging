@@ -26,6 +26,28 @@ def result(framework, backend, variant, losses, precision="f32"):
     }
 
 
+def cell(framework, backend, variant, losses, precision="f32", p50=1.0):
+    """A result with the fields `report` reads, not just the parity ones."""
+    r = result(framework, backend, variant, losses, precision=precision)
+    r.update(
+        {
+            "step_ms": {"p10": p50, "p50": p50, "p90": p50},
+            "queued_step_ms": p50,
+            "compile_s": 1.5,
+        }
+    )
+    return r
+
+
+def _reject(token):
+    raise ValueError(f"not JSON: {token}")
+
+
+def strict_loads(text):
+    """`json.loads` without its NaN/Infinity extension -- JSON as every other reader has it."""
+    return json.loads(text, parse_constant=_reject)
+
+
 class ParityCheckTest(unittest.TestCase):
     def test_precision_tolerances_match_measured_headroom(self):
         self.assertEqual(orchestrate.PARITY_TOL_PRECISION, {"bf16": 4e-3, "f16": 2e-3})
@@ -52,6 +74,149 @@ class ParityCheckTest(unittest.TestCase):
 
         self.assertTrue(moving["parity_loss_moved"])
         self.assertEqual(moving["parity"], "PASS")
+
+
+class DivergenceTest(unittest.TestCase):
+    """gh-ocannl-676: a cell whose training diverged ran, and its trajectory is the finding.
+
+    The three runners now all emit `null` for a number JSON cannot express, and the OCANNL one
+    used to emit OCaml's `nan`, whose line `json.loads` refuses -- so the cell was reported as a
+    broken runner and the loss vector that shows the divergence was thrown away. Here the verdict
+    is DIVERGED: a parity failure that names its cause.
+    """
+
+    def test_null_loss_is_a_diverged_cell_not_a_missing_one(self):
+        ref = result("pytorch", "cpu", "eager", [2.3026, 2.3010, 2.3000])
+        blown = result("ocannl", "metal", "default", [2.3026, None, None], precision="f16")
+
+        orchestrate.parity_check([ref, blown])
+
+        self.assertEqual(blown["parity"], "DIVERGED")
+        self.assertEqual(blown["diverged_at"], 1)
+        self.assertEqual(ref["parity"], "REF")
+
+    def test_nan_from_a_python_runner_reads_the_same(self):
+        # Python's json.loads accepts its own `NaN` extension, so an older result file can still
+        # deliver one; it is the same fact as a null.
+        ref = result("pytorch", "cpu", "eager", [2.3026, 2.3010, 2.3000])
+        blown = result("tinygrad", "metal", "jit", [2.3026, float("nan"), float("inf")])
+
+        orchestrate.parity_check([ref, blown])
+
+        self.assertEqual(blown["parity"], "DIVERGED")
+        self.assertEqual(blown["diverged_at"], 1)
+
+    def test_a_diverged_cell_is_not_reported_as_stationary(self):
+        # Its finite prefix moved; and with fewer than two finite steps there is nothing to say
+        # about movement, which is reported as divergence rather than as a flat trajectory.
+        self.assertTrue(orchestrate.loss_moved([2.3026, 1.5, None]))
+        self.assertFalse(orchestrate.loss_moved([2.3026, None, None]))
+
+    def test_the_finite_prefix_is_still_compared(self):
+        ref = result("pytorch", "cpu", "eager", [2.0, 2.0, 2.0])
+        blown = result("ocannl", "cc", "default", [2.0, None, None])
+
+        orchestrate.parity_check([ref, blown])
+
+        self.assertEqual(blown["parity_max_rel"], 0.0)
+
+    def test_a_finite_value_after_the_divergence_is_not_evidence(self):
+        # A loss that comes back finite after a NaN is whatever the arithmetic settled on, not
+        # drift: comparing it would put a number on the DIVERGED row that its own contract calls
+        # meaningless, and reading it as movement would say the trajectory moved when what it did
+        # was blow up.
+        ref = result("pytorch", "cpu", "eager", [2.0, 2.0, 2.0])
+        blown = result("ocannl", "cc", "default", [2.0, None, 9.0])
+
+        orchestrate.parity_check([ref, blown])
+
+        self.assertEqual(blown["parity_max_rel"], 0.0)
+        self.assertFalse(blown["parity_loss_moved"])
+        self.assertEqual(orchestrate.finite_prefix([2.0, None, 9.0]), [2.0])
+
+    def test_the_reference_prefix_bounds_the_comparison_too(self):
+        ref = result("pytorch", "cpu", "eager", [2.0, float("nan"), 2.0])
+        other = result("ocannl", "cc", "default", [2.0, 5.0, 5.0])
+
+        orchestrate.parity_check([ref, other])
+
+        self.assertEqual(other["parity_max_rel"], 0.0)
+
+    def test_a_diverged_reference_is_no_reference(self):
+        ref = result("pytorch", "cpu", "eager", [2.3026, None, None])
+        other = result("ocannl", "cc", "default", [2.3026, 2.3010, 2.3000])
+
+        orchestrate.parity_check([ref, other])
+
+        self.assertEqual(ref["parity"], "DIVERGED")
+        self.assertEqual(other["parity"], "NO-REF")
+
+    def test_report_names_the_divergence_and_writes_parseable_json(self):
+        ref = cell("pytorch", "cpu", "eager", [2.3026, 2.3010, 2.3000])
+        blown = cell(
+            "ocannl", "metal", "default", [2.3026, None, None], precision="f16", p50=None
+        )
+        orchestrate.parity_check([ref, blown])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            with contextlib.redirect_stdout(io.StringIO()):
+                orchestrate.report([ref, blown], out)
+            text = (out / "report.md").read_text()
+            rows = [
+                strict_loads(line) for line in (out / "results.jsonl").read_text().splitlines()
+            ]
+
+        self.assertIn("DIVERGED", text)
+        self.assertIn("loss non-finite from step 1", text)
+        # A time the runner never measured prints as n/a rather than crashing the report.
+        self.assertIn("n/a", text)
+        self.assertEqual([r["parity"] for r in rows], ["REF", "DIVERGED"])
+
+    def test_emit_writes_null_for_a_non_finite_number(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            bench_common.emit({"losses": [1.0, float("nan")], "step_ms": {"p50": float("inf")}})
+
+        parsed = strict_loads(buf.getvalue().strip())
+        self.assertEqual(parsed, {"losses": [1.0, None], "step_ms": {"p50": None}})
+
+
+class OcannlResultLineTest(unittest.TestCase):
+    """The OCANNL runner's own result line, as this orchestrator reads it (gh-ocannl-676).
+
+    The golden of test/operations/bench_result_line holds the line built from fabricated values --
+    a diverged trajectory, times that were never measured, a diagnostic full of control characters
+    -- and this is the parser that has to accept it. Pinning it in OCaml alone would leave the
+    claim "this parses" resting on a second implementation of JSON.
+    """
+
+    GOLDEN = HERE.parent / "test/operations/bench_result_line.expected"
+
+    def lines(self):
+        return [
+            line
+            for line in self.GOLDEN.read_text().splitlines()
+            if line.startswith("{")  # what run_cell picks out of a cell's output
+        ]
+
+    def test_every_emitted_line_parses_strictly(self):
+        lines = self.lines()
+        self.assertGreaterEqual(len(lines), 2, self.GOLDEN)
+        for line in lines:
+            with self.subTest(line=line[:60]):
+                self.assertIn("losses", strict_loads(line))
+
+    def test_the_diverged_line_is_read_as_a_diverged_cell(self):
+        parsed = [strict_loads(line) for line in self.lines()]
+        blown = next(r for r in parsed if None in r["losses"])
+        ref = result("pytorch", "cpu", "eager", [2.5, 1.75, 1.25])
+        ref["workload"] = blown["workload"]
+
+        orchestrate.parity_check([ref, blown])
+
+        self.assertEqual(blown["parity"], "DIVERGED")
+        self.assertEqual(blown["diverged_at"], 1)
 
 
 class CellIdentityTest(unittest.TestCase):
@@ -197,12 +362,13 @@ class PrecisionLegTest(unittest.TestCase):
 class ProvenanceTest(unittest.TestCase):
     """gh-ocannl-644: a tuned cell's result says which pass timed it."""
 
-    def tuned(self, searched, searches=0, replays=0):
+    def tuned(self, searched, searches=0, replays=0, no_searches=0):
         r = result("ocannl", "hip", "tuned", [2.3, 2.2, 2.1])
         if searched is not None:
             r["searched"] = searched
             r["tune"] = {
-                "shipped": "A", "searches": searches, "replays": replays, "arms": []
+                "shipped": "A", "searches": searches, "replays": replays,
+                "no_searches": no_searches, "arms": []
             }
         return r
 
@@ -239,6 +405,22 @@ class ProvenanceTest(unittest.TestCase):
         # searched nothing, and guessing either way has already been a bug.
         self.assertEqual(orchestrate.search_provenance({"searched": False}), "UNKNOWN")
 
+    def test_the_runner_states_the_no_search_case_instead_of_it_being_derived(self):
+        # gh-ocannl-677: the OCaml call's outcome is one state, and the runner now names it per
+        # arm and counts it (`no_searches`) rather than leaving the reader to recover "neither
+        # searched nor replayed" from two zeroed counters in a JSON artifact.
+        stated = lambda replays, no_searches: {  # noqa: E731
+            "searched": False,
+            "tune": {"shipped": "A", "searches": 0, "replays": replays,
+                     "no_searches": no_searches, "arms": []},
+        }
+
+        self.assertEqual(orchestrate.search_provenance(stated(0, 2)), "NO-SEARCH")
+        self.assertEqual(orchestrate.search_provenance(stated(2, 0)), "REPLAY")
+        # A mixed cell — one arm replayed, the other had nothing to replay — still carries a tuned
+        # artifact, so it is a replay.
+        self.assertEqual(orchestrate.search_provenance(stated(1, 1)), "REPLAY")
+
     def test_only_a_real_replay_labels_the_carried_over_compile_cost_cached(self):
         # A search pass under autotune_search=false hands over the cost of compiling the untuned
         # default; calling that "(cached)" would claim a schedule cache it never touched.
@@ -252,10 +434,17 @@ class ProvenanceTest(unittest.TestCase):
         # default, having neither searched nor replayed. Gating it would fail BOTH passes of every
         # tuned cell, and calling it a replay would credit the row with a tuned artifact it does
         # not have.
-        cell = self.tuned(False, searches=0, replays=0)
+        cell = self.tuned(False, searches=0, replays=0, no_searches=2)
 
         self.assertEqual(orchestrate.provenance_check([cell]), [])
         self.assertEqual(cell["provenance"], "NO-SEARCH")
+
+        # And the same verdict from an artifact written before `no_searches` existed.
+        legacy = self.tuned(False, searches=0, replays=0)
+        del legacy["tune"]["no_searches"]
+
+        self.assertEqual(orchestrate.provenance_check([legacy]), [])
+        self.assertEqual(legacy["provenance"], "NO-SEARCH")
 
     def test_a_runner_without_the_field_is_unknown_not_a_violation(self):
         old = self.tuned(None)
@@ -308,6 +497,160 @@ class ProvenanceTest(unittest.TestCase):
 
     def test_the_gated_and_stated_cell_sets_do_not_overlap(self):
         self.assertFalse(orchestrate.TWO_PASS_CELLS & orchestrate.SAME_PROCESS_CELLS)
+
+
+class TensorizationTest(unittest.TestCase):
+    """gh-ocannl-626: a "tensorized" timing must not be able to be a scalar-fallback timing."""
+
+    def cell(self, arms, shipped="A", shipped_mma=...):
+        r = result("ocannl", "metal", "tuned", [2.3, 2.2, 2.1])
+        r["searched"] = False
+        r["step_ms"] = {"p10": 1.0, "p50": 1.1, "p90": 1.2}
+        r["queued_step_ms"] = 0.1
+        r["compile_s"] = 3.0
+        r["parity"] = "REF"
+        r["parity_loss_moved"] = True
+        r["diverged_at"] = None
+        r["tune"] = {
+            "shipped": shipped, "searches": 0, "replays": 1, "no_searches": 0, "arms": arms
+        }
+        if shipped_mma is not ...:
+            r["tune"]["shipped_mma"] = shipped_mma
+        return r
+
+    def mma(self, tensorization, statements=0, scalar_fallbacks=0):
+        return {
+            "tensorization": tensorization, "statements": statements,
+            "scalar_fallbacks": scalar_fallbacks,
+        }
+
+
+    def arm(self, name, tensorized, tensorization, statements=0, fallbacks=0):
+        return {
+            "arm": name, "state": "cache-replay", "searched": False, "cache_hit": True,
+            "best_ms": 1.0, "best_label": "L", "tensorized": tensorized,
+            "tensorization": tensorization, "mma_statements": statements,
+            "mma_scalar_fallbacks": fallbacks, "mma_seeded": 0, "mma_timed": 0,
+            "mma_best_ms": 1.0, "terminal_failure": None,
+        }
+
+    def test_a_declined_tensorize_is_not_reported_as_a_tensorized_timing(self):
+        # The defect: the schedule asked for tensor cores, every Tile_mma rendered the lane-0
+        # scalar loop, and the row still carried a tensorized variant name.
+        cell = self.cell([self.arm("A", True, "scalar-fallback", statements=3, fallbacks=3)])
+
+        self.assertEqual(orchestrate.tensorization_verdict(cell), "SCALAR-FALLBACK")
+        self.assertEqual(orchestrate.tensorization_check([cell]), [cell])
+
+    def test_a_tensorize_that_emitted_no_statement_is_its_own_verdict(self):
+        # Distinct from the fallback: nothing declined, because nothing was emitted to decline.
+        cell = self.cell([self.arm("A", True, "not-requested")])
+
+        self.assertEqual(orchestrate.tensorization_verdict(cell), "NOT-EMITTED")
+        self.assertEqual(orchestrate.tensorization_check([cell]), [cell])
+
+    def test_an_honestly_tensorized_cell_is_not_flagged(self):
+        cell = self.cell([self.arm("A", True, "tensorized", statements=4)])
+
+        self.assertEqual(orchestrate.tensorization_verdict(cell), "TENSORIZED")
+        self.assertEqual(orchestrate.tensorization_check([cell]), [])
+
+    def test_an_artifact_that_never_asked_is_not_a_mismatch(self):
+        cell = self.cell([self.arm("A", False, "not-requested")])
+
+        self.assertEqual(orchestrate.tensorization_verdict(cell), "NOT-REQUESTED")
+        self.assertEqual(orchestrate.tensorization_check([cell]), [])
+
+    def test_a_missing_census_never_reads_as_tensorized(self):
+        # The negative control. A runner predating the field, or an arm with no crowned candidate,
+        # carries a null label — which must answer UNKNOWN, never the passing reading.
+        older = self.cell([{"arm": "A", "best_ms": 1.0}])
+        no_winner = self.cell([self.arm("A", False, None)])
+
+        self.assertEqual(orchestrate.tensorization_verdict(older), "UNKNOWN")
+        self.assertEqual(orchestrate.tensorization_verdict(no_winner), "UNKNOWN")
+        self.assertEqual(orchestrate.tensorization_check([older, no_winner]), [])
+        # And a cell that tuned nothing at all has no arm to consult, so it gets no column entry
+        # rather than a fabricated one.
+        self.assertIsNone(orchestrate.tensorization_verdict(result("torch", "cuda", "eager", [1.0])))
+
+    def test_the_shipped_routines_census_outranks_the_arm_reports(self):
+        # A gh-555 flip refinement that beats the A/B winner ships under `shipped: "flip"` and is
+        # not an arm at all; on the timing_ctx path the tuner can also fall back to the untuned
+        # default after the arm was crowned. Either way the arm describes a discarded schedule, so
+        # the routine that was actually timed is what the column must report.
+        flip = self.cell(
+            [self.arm("A", True, "tensorized", statements=4)],
+            shipped="flip",
+            shipped_mma=self.mma("scalar-fallback", statements=3, scalar_fallbacks=3),
+        )
+
+        self.assertIsNone(orchestrate.shipped_arm(flip))
+        self.assertEqual(orchestrate.tensorization_verdict(flip), "SCALAR-FALLBACK")
+        self.assertEqual(orchestrate.tensorization_check([flip]), [flip])
+
+    def test_a_fallback_to_the_untuned_default_is_not_reported_as_the_crowned_arm(self):
+        # The arm was crowned in the scratch context and its replay was rejected in the production
+        # one, so the timed routine has no mma at all while the arm still says tensorized.
+        cell = self.cell(
+            [self.arm("A", True, "tensorized", statements=4)],
+            shipped_mma=self.mma("not-requested"),
+        )
+
+        self.assertEqual(orchestrate.tensorization_verdict(cell), "NOT-EMITTED")
+        self.assertEqual(orchestrate.tensorization_check([cell]), [cell])
+
+    def test_a_harness_that_recorded_no_shipped_census_reads_unknown(self):
+        # Present-but-empty is a runner that reported arms and forgot the routine: not a finding,
+        # and not the passing reading either.
+        cell = self.cell([self.arm("A", True, "tensorized", statements=4)], shipped_mma=None)
+
+        self.assertEqual(orchestrate.tensorization_verdict(cell), "UNKNOWN")
+        self.assertEqual(orchestrate.tensorization_check([cell]), [])
+
+    def test_an_artifact_predating_shipped_mma_still_reads_its_arm(self):
+        # The key absent (not null) is an older result line; the arm is right whenever the crowned
+        # candidate WAS the shipped artifact, which is the common case.
+        cell = self.cell([self.arm("A", True, "scalar-fallback", statements=2, fallbacks=2)])
+
+        self.assertNotIn("shipped_mma", cell["tune"])
+        self.assertEqual(orchestrate.tensorization_verdict(cell), "SCALAR-FALLBACK")
+
+    def test_the_verdict_describes_the_arm_that_shipped_not_the_fastest_one(self):
+        # tune_placements searches several arms and keeps one artifact; reading any other arm
+        # describes a schedule that was discarded (gh-ocannl-638).
+        cell = self.cell(
+            [
+                self.arm("A", True, "tensorized", statements=4),
+                self.arm("B", True, "scalar-fallback", statements=2, fallbacks=2),
+            ],
+            shipped="B",
+        )
+
+        self.assertEqual(orchestrate.tensorization_verdict(cell), "SCALAR-FALLBACK")
+
+    def test_every_verdict_renders_in_the_table(self):
+        # The same completeness check the provenance column carries: a verdict with no mark would
+        # print as an em dash, which is the "never asked" reading.
+        for verdict in ("TENSORIZED", "SCALAR-FALLBACK", "NOT-EMITTED", "NOT-REQUESTED", "UNKNOWN"):
+            self.assertIn(verdict, orchestrate.TENSORIZATION_MARK)
+        for verdict in orchestrate.TENSORIZATION_MISMATCH:
+            self.assertIn(verdict, orchestrate.TENSORIZATION_MARK)
+            self.assertIn("**", orchestrate.TENSORIZATION_MARK[verdict])
+
+    def test_the_mismatch_is_visible_in_the_rendered_table(self):
+        cells = [
+            self.cell([self.arm("A", True, "scalar-fallback", statements=3, fallbacks=3)]),
+            self.cell([self.arm("A", True, "tensorized", statements=4)]),
+        ]
+        orchestrate.tensorization_check(cells)
+        out = Path(tempfile.mkdtemp())
+        orchestrate.report(cells, out)
+        table = (out / "report.md").read_text()
+
+        self.assertIn(" mma |", table)
+        self.assertIn("**SCALAR FALLBACK**", table)
+        self.assertIn("tensorized", table)
 
 
 class RunnerProvenanceProbeTest(unittest.TestCase):

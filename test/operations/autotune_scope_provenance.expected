@@ -1,0 +1,11 @@
+control: the inlined scope's inner loop is registry-nameable: true
+the schedule mint's scope-nested loop draws proposals: true
+the schedule mint's scope-nested loop draws the reshaping categories: true
+the virtualization inline's scope-nested loop draws none of them: true
+the statement-level loop draws the same proposals under either mint: true
+the inlined copy's menu is the schedule mint's minus exactly its scope-nested reshaping part: true
+the inlined copy keeps the Vectorized retype on its scope-nested loop: true
+the schedule mint keeps it there too — the mint decides categories, not this one: true
+neither copy proposes vectorizing the enclosing loop, which no renderer would serve: true
+
+Done.

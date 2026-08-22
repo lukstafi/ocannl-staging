@@ -215,12 +215,91 @@ val sketch_seed_params :
     list {e is} {!Ir.Schedule_space.leaves} of {!matmul_sketch_tree}, epilogue twins included.
     Exposed for tests. *)
 
+module Family_decision : sig
+  (** {1 What a commitment on the matmul family tree is} (gh-ocannl-591)
+
+      The family tree's levels commit to values of {!t}, not to display strings. A consumer that
+      reads a decision back off a path — the certain-traffic floor {!sketch_path_traffic_floor}, the
+      lattice lift {!lift_geometry_lattice}, a ranking or profitability pass over the search's
+      paths, the tests — matches on the datum. {!to_label} is the rendering, used by logs, decline
+      reports and goldens; nothing parses it back, so rewording a label (or renaming a level, which
+      {!level} derives from the datum) changes what is printed and nothing else.
+
+      This replaced a [Printf.sprintf] / [Scanf.sscanf] protocol whose failure mode was silent: a
+      reworded geometry label made every scan arm fall through, so the traffic floor's increment was
+      [0] on every path — a sound bound, so nothing raised, no golden moved, and the family bound
+      quietly stopped differentiating the tree. *)
+
+  type geometry = { g_bm : int; g_bn : int; g_bk : int; g_tm : int; g_tn : int }
+  (** A committed tile geometry. Which fields are meaningful is the {!geometry_choice}
+      constructor's business: [g_bm]/[g_bk] always; [g_bn] is [0] for {!Cpu_packed}'s unsplit full
+      column extent and the mma lane width for {!Gpu_mma}; [g_tm]/[g_tn] are the per-thread tile of
+      {!Gpu_blocktile} and [0] elsewhere. [g_bk = 0] in {!Gpu_mma} is the unstaged full-K block. *)
+
+  type geometry_choice =
+    | Gpu_blocktile of geometry
+        (** The GPU scalar blocktile menu: both operand tiles staged in kernel. *)
+    | Gpu_mma of geometry
+        (** The GPU tensorized menu: [g_bk > 0] stages both operand tiles in kernel, [g_bk = 0] is
+            the unstaged full-K block. *)
+    | Cpu_blocktile of int  (** The CPU blocktile menu's single block size (bm = bn = bk). *)
+    | Cpu_packed of geometry
+        (** The CPU packed composition; what it costs depends on the {!Packing_shape} above it. *)
+    | Lattice
+        (** The staged tile-size lattice beyond the curated menu (gh-ocannl-514 phase 5), excluded
+            by default policy and lifted by {!lift_geometry_lattice}; its axes commit as
+            {!Lattice_box}. *)
+
+  (** One committed decision. Each constructor belongs to exactly one level ({!level}) and carries
+      the whole identity of the commitment: no consumer needs the level name, or the label, to know
+      what was decided. *)
+  type t =
+    | Fusion of [ `Unfused | `Fused ]  (** The root: the epilogue-fusion flavor (gh-ocannl-613). *)
+    | Pipeline of [ `Blocktile | `Tensorized ]  (** Which composed pipeline. *)
+    | Batch of [ `Serial | `Grid ]  (** The batch-geometry twin (gh-ocannl-643), GPU only. *)
+    | Packing of [ `In_kernel | `Hoisted ]
+        (** The CPU blocktile pipeline's link-time packing twin (gh-ocannl-470). *)
+    | Geometry of geometry_choice  (** The tile geometry, per the pipeline's own menu. *)
+    | Lattice_box of { lb_axis : [ `Bm | `Bk ]; lb_lo : int; lb_hi : int }
+        (** One binary interval refinement of a lattice axis: the value range still open below the
+            commitment, [lb_lo = lb_hi] at a singleton. A box prices at [lb_lo], its most favorable
+            corner. *)
+    | Twin of [ `Plain | `Swizzled | `Depth of int ]
+        (** The per-staged-geometry twins: the swizzled staged layout, the pipelined depths. *)
+    | Tensorized_form of [ `Whole_triple | `Packed ]  (** The CPU tensorized composition. *)
+    | Row_block of int
+        (** The CPU whole-triple row block; [0] is the unsplit form, [> 0] a pool-rendered Grid
+            split. *)
+    | Packing_shape of
+        [ `Serial | `Hoisted | `Hoisted_grid | `Hoisted_grid_pack_rest | `Grid_pack_rest | `Grid ]
+        (** Which CPU packed composition: where the panels are packed (in kernel, at link time, per
+            Grid chunk) — what makes a packed geometry's traffic additional or merely relocated. *)
+
+  type path = (string * t) list
+  (** What {!Ir.Schedule_space.enumerate} and the [~path] of {!Ir.Schedule_space.search} carry at
+      this label type: the committed vector, outermost level first. The [string] is the level's
+      display name; the decision is the identity. *)
+
+  val equal : t -> t -> bool
+  val compare : t -> t -> int
+
+  val level : t -> string
+  (** The level a decision belongs to — the name {!Ir.Schedule_space.Choice} carries. Derived from
+      the datum, so a node's level and its children's identities cannot drift apart. *)
+
+  val to_label : t -> string
+  (** The display rendering. Nothing reads it back. *)
+
+  val render_path : path -> string
+  (** A path as ["level=label > level=label > …"], for logs and reports. *)
+end
+
 val matmul_sketch_tree :
   is_gpu:bool ->
   is_cpu:bool ->
   limits:Ir.Backend_intf.hardware_limits ->
   Ir.Low_level.optimized ->
-  sketch_params Ir.Schedule_space.tree option
+  (Family_decision.t, sketch_params) Ir.Schedule_space.tree option
 (** The matmul sketch family as a refinement tree (gh-ocannl-514 phase 1): decision levels —
     epilogue fusion, pipeline, packing shape, geometry, twins — whose lazily-refined choices depend
     on earlier commitments, and whose {!Ir.Schedule_space.leaves} are exactly the family's
@@ -243,21 +322,25 @@ val geometry_lattice_witness : string
     the tuner's seed lists are unchanged by the lattice's existence. *)
 
 val lift_geometry_lattice :
-  sketch_params Ir.Schedule_space.tree -> sketch_params Ir.Schedule_space.tree
-(** Lift every {!geometry_lattice_witness} exclusion, preserving the laziness of everything else;
+  (Family_decision.t, sketch_params) Ir.Schedule_space.tree ->
+  (Family_decision.t, sketch_params) Ir.Schedule_space.tree
+(** Lift every geometry-lattice exclusion — the branches whose decision is
+    [Family_decision.Geometry Lattice], identified by that datum rather than by the exclusion's
+    prose witness — preserving the laziness of everything else;
     lifted branches remain subject to legality (the box refutations), and other exclusions stay
     excluded. {!model_default}'s family search applies this under config
     [model_default_geometry_lattice]. Exposed for tests. *)
 
 val sketch_path_traffic_floor :
-  is_gpu:bool ->
   limits:Ir.Backend_intf.hardware_limits ->
   Ir.Low_level.optimized ->
-  (string * string) list ->
+  Family_decision.path ->
   int
 (** The certain-traffic increment (bytes) of a family-tree decision path (gh-ocannl-514 phase 5):
     traffic every completion below the path moves beyond the schedule-invariant
-    {!Ir.Cost_model.completion_floor}, read off the path's committed staging decisions — a committed
+    {!Ir.Cost_model.completion_floor}, read off the path's committed staging decisions as {e data}
+    ({!Family_decision}, gh-ocannl-591; the decision also says which pipeline minted it, so the
+    caller's backend kind is not needed alongside the path) — a committed
     staged geometry contributes its operand tiles' distinct-cell footprints exactly as
     {!Ir.Cost_model.analyze} charges them on every leaf (in-kernel GPU stages read and write; CPU
     packed panels only under in-kernel [serial] packing — a hoisted panel replaces the original
@@ -329,7 +412,17 @@ val split_reduce_sites :
     it acts on); the chain is recorded in [sr_swaps] and replayed by the candidate's prelude.
     [static_indices] only reaches the interchange probe's [Sched.apply]. Exposed for tests. *)
 
+val share_cap : cap:int -> (string * 'a list) list -> 'a list * (string * int) list
+(** gh-ocannl-685: spend a cap round-robin across named categories instead of as a prefix over their
+    concatenation, returning the survivors (in the original category order, so an under-cap input
+    comes back unchanged) and the per-category drop counts. One proposal per category per round, a
+    category that runs out stops taking turns: every non-empty category is represented before any
+    gets a second, and unused share spills to the others without imposing a ranking. Used for
+    {!menu}'s per-unit action cap, whose list is a category-ordered concatenation and NOT ranked --
+    a plain prefix there starved every category after the first outright. Exposed for tests. *)
+
 val menu :
+  ?admits:(Ir.Schedule_cache.saved_optop -> bool) ->
   is_cpu:bool ->
   is_gpu:bool ->
   limits:Ir.Backend_intf.hardware_limits ->
@@ -343,7 +436,20 @@ val menu :
     permutations, each proposal vetted by {!Ir.Schedule.op_legality} (proven-illegal ones are pruned
     before they cost a candidate compile; [Op_unknown] proceeds to compile-and-time). The loop
     enumeration descends into accumulation-minted [Local_scope] bodies and treats binder-sharing
-    mint copies as one decision (gh-ocannl-666); see the candidate-space overview above. Exposed for
+    mint copies as one decision (gh-ocannl-666). It descends virtualization's inlined computations
+    too, but a loop reached through one draws the [Retype]-[Vectorized] proposal ALONE
+    ([Ir.Low_level.scope_mint], gh-ocannl-687): that is the one category with a renderer built for
+    the shape (an inlined reduction's [Set_local] accumulation is what
+    [C_syntax.try_vectorize_reduce] recognizes, and the enclosing loop -- whose body holds a
+    [Local_scope] -- cannot be explicitly vectorized at all), while [Split]s, [Swap]s and [Unroll]s
+    there are up to eight descriptors per loop that nothing proposed before gh-666 and that displace
+    proposals for the main nest.
+
+    The per-unit action cap is shared across the categories by {!share_cap} rather than spent in
+    category order (gh-ocannl-685). [admits] filters proposals BEFORE that cap, so the budget is
+    shared over moves the caller can use rather than over moves it is about to discard -- the beam
+    passes its GPU dispatchability rule here, since an incumbent binding no hardware dimension can
+    only be expanded through a move that binds one. It may record its refusals. Exposed for
     tests. *)
 
 type decline_summary = {
@@ -360,19 +466,48 @@ type terminal_failure = {
   detail : string;
 }
 
-type report = {
-  cache_hit : bool;
-      (** The schedule came from the disk cache; no search ran. The census is then empty except for
-          a declined baseline: the base compile precedes the lookup, so its rejection is real
+type outcome =
+  | Searched
+      (** A search ran and completed: candidates were proposed and compiled or timed, leaving the
+          process loaded with their modules and buffers. *)
+  | Search_died of terminal_failure
+      (** A search ran and terminated on the carried fatal failure. The counters hold the work it
+          had reached, and [best_ms] is a mid-search measurement of the {e search} context: no
+          routine was compiled from the caller's context for it, so it is never shippable
+          (gh-ocannl-550). *)
+  | Cache_replay
+      (** A cached winner replayed; no search ran in this process. The census is then empty except
+          for a declined baseline: the base compile precedes the lookup, so its rejection is real
           information about this process on this device even though nothing was searched. *)
-  searched : bool;
-      (** This call ran a search: it proposed candidates and compiled or timed them, leaving the
-          process loaded with their modules and buffers. [not cache_hit] is NOT this predicate —
-          with [autotune_search=false] (the reproducible profile, gh-ocannl-559) and on every
-          pre-search failure the call reports [cache_hit = false] having searched nothing, and the
-          caller ships the untuned default. The distinction is what a measurement harness needs to
-          say which process produced its timings (gh-ocannl-644), so it is stated here rather than
-          inferred from a counter that happens to be zero. *)
+  | Search_disabled
+      (** Nothing was searched and there was nothing to replay: config [autotune_search=false] (the
+          reproducible profile, gh-ocannl-559) with no chosen cache, or a chosen cache that missed.
+          The caller gets the untuned default compile — the same code {!Context.compile} would have
+          produced. Every counter is zero and every time [infinity]; a declined baseline can still
+          populate [declines]. *)
+  | Pre_search_failure of terminal_failure
+      (** The call failed before (or instead of) the search proper — a base compile that failed
+          before its lowering was captured, a fatal baseline link, a fatal cache replay, a baseline
+          timing failure, or an untuned fallback compile of a search-less call — and raised. It
+          still reports (gh-ocannl-550), carrying whatever census the call had reached, so a caller
+          attributing arms by arrival order (the positional [?report] of {!Train.tune_placements})
+          gets a slot for it. *)
+(** What the call did about searching (gh-ocannl-677). The states are mutually exclusive and each
+    carries exactly its own data, so a consumer matches instead of re-deriving: "it searched" is
+    [Searched | Search_died _] and nothing else — in particular it is {e not} [not cache_hit], the
+    reading that costs a benchmark harness every tuned cell under the reproducible profile, where a
+    call reports having neither searched nor replayed. Spelled as four independent booleans until
+    gh-ocannl-677, where two consumers mis-derived the state in one PR.
+
+    Note the arithmetic: five constructors for what reads as four outcomes, because "nothing
+    searched" is two — a deliberate no-search that ships the untuned default and returns, and a
+    failure before the search that reports and then raises. The old encoding could not tell them
+    apart either, it just did not say so. *)
+
+type report = {
+  outcome : outcome;
+      (** What this call did about searching. The counters below say how much work that state got
+          through; they never identify it — several are zero in more than one state. *)
   candidates_timed : int;
       (** Including the serial baseline where it was dispatched — on GPU backends it is not
           (gh-ocannl-532), and neither is any other candidate that binds no hardware dimension. So
@@ -386,18 +521,6 @@ type report = {
           candidates refused as unparallelized on a GPU backend (gh-ocannl-532), which the decline
           census records so a previously-proposed site — or a candidate space the backend's
           execution model empties — never stops being proposed silently. *)
-  partial : bool;
-      (** [true] when the call terminated on a fatal failure instead of completing. {!tune} reports
-          exactly once per call, on every path that does any work (gh-ocannl-550) — argument
-          validation is the exception, and deliberately so: an incompatible [timing_ctx] is a
-          precondition violation detected before anything happens, not an outcome of a search, and
-          reporting it would attribute a phase to a call that never reached one. The failures that
-          precede the search proper — a base compile that fails before the base lowering is
-          captured, a fatal baseline link, a fatal cache replay, a baseline timing failure — and the
-          untuned fallback compiles of a search-less call ([search=false]) report with every counter
-          at the value it had reached and the failure in [terminal_failure], so a caller attributing
-          arms by arrival order (the positional [?report] of [Train.tune_placements]) still gets a
-          slot for the search that died. *)
   baseline_declined : bool;
       (** The serial baseline's own compile was rejected with a typed cause and the search ran on
           the scheduled candidates alone (gh-ocannl-533): [baseline_ms] is then [infinity] and the
@@ -407,10 +530,6 @@ type report = {
   declines : decline_summary list;
       (** Candidate rejections aggregated by stable cause key. Their counts sum to
           [candidates_failed]. Cache-entry replay failures are excluded. *)
-  terminal_failure : terminal_failure option;
-      (** The fatal failure that stopped a partial search; [None] on completed reports. [phase] is
-          the one the failure carries — where the search actually died (at link, at launch, at
-          sync), not where the report was assembled. *)
   rounds_run : int;  (** Beam-expansion rounds actually executed (0 = seeds only). *)
   sketch_candidates : int;
       (** Whole-routine matmul-sketch instantiations seeded (0 when no matmul micro-kernel was
@@ -498,13 +617,33 @@ type report = {
   best_label : string;
       (** The crowned candidate's spec label — the same string the [autotune_log] lines carry (e.g.
           ["F_sketch[mma-gpu 16x32x32 ep]"]). ["baseline"] when no candidate beat the serial
-          baseline, [""] when nothing was timed. Which candidate won is otherwise recoverable only
-          by matching [best_ms] against the log's per-candidate times (gh-ocannl-546). *)
+          baseline, and [""] exactly when nothing was timed — including the states that time nothing
+          by construction, which say so in [outcome] rather than through this string. Which
+          candidate won is otherwise recoverable only by matching [best_ms] against the log's
+          per-candidate times (gh-ocannl-546). *)
   best_tensorized : bool;
       (** The crowned schedule contains a [Schedule.Tensorize] — read off [best_schedule], so this
           is what the winner {e is}, not what its label promised. This is the fact a caller needs to
           state that a search's shipping artifact uses tensor cores; per-search [mma_timed] answers
-          only whether one was measured. *)
+          only whether one was measured.
+
+          It says what the schedule {e asked for}. What the emission {e delivered} is
+          [best_tensorization]; the two disagreeing is exactly the false "tensorized" timing. *)
+  best_tensorization : Ir.C_syntax.tensorization option;
+      (** How the crowned candidate's [Tile_mma] statements actually rendered (gh-ocannl-626), read
+          off its compiled routine's {!Context.routine.mma} rather than re-derived by bracketing the
+          census global: [Tensorized] when at least one tensor-core / SIMD-register-tile emission
+          happened, [Scalar_fallback] when every emitted [Tile_mma] declined to the lane-0 scalar
+          path, [Not_requested] when codegen emitted no [Tile_mma] at all.
+
+          [None] exactly when there is no crowned candidate to consult (nothing was timed, or the
+          call never searched) — a report that consulted no census must not read as tensorized, so
+          the absence is a distinct value and not a default of [Not_requested].
+
+          Against [best_tensorized] this closes the reporting contract of gh-ocannl-545: a schedule
+          that asked and got scalar code is [best_tensorized = true] with [Scalar_fallback], one
+          that asked and emitted nothing is [best_tensorized = true] with [Not_requested], and a
+          genuinely tensorized artifact is [best_tensorized = true] with [Tensorized]. *)
   best_mma_statements : int;
       (** [Tile_mma] statements the crowned candidate emitted, and of those, how many rendered as
           the lane-0 scalar fallback ([best_mma_scalar_fallbacks]). The pair keeps the reporting
@@ -537,8 +676,27 @@ type report = {
 
 val no_search_report : report
 (** The report of a {!tune} call that never searched (config [autotune_search=false], gh-ocannl-559,
-    and no cache entry to replay): every counter zero, every time [infinity], and [best_label] =
-    ["search disabled"]. The caller gets the untuned default compile. *)
+    and no cache entry to replay): [outcome = Search_disabled], every counter zero, every time
+    [infinity], [best_label] empty and [best_tensorization = None]. The caller gets the untuned default compile. Also the base
+    the pre-search failure reports are built on, with [outcome] replaced and whatever census the
+    call had reached filled in. *)
+
+val outcome_name : outcome -> string
+(** The stable one-word name of an outcome state — ["searched"], ["search-died"], ["cache-replay"],
+    ["search-disabled"], ["pre-search-failure"] — for logs, JSON records and test goldens. *)
+
+val terminal_failure : report -> terminal_failure option
+(** The fatal failure that ended the call, from whichever of the two failing states carried it;
+    [None] otherwise. A projection over {!outcome}, not a re-derivation of it: "did this call fail"
+    spans two states, and every caller that ranks or attributes arms asks exactly that — an arm
+    carrying one is {e never} the shipped arm, whatever its pre-failure [best_ms] says
+    (gh-ocannl-550). The failure's [phase] is the one it carries — where the call actually died (at
+    link, at launch, at sync), not where the report was assembled.
+
+    {!tune} reports exactly once per call, on every path that does any work. Argument validation is
+    the exception, and deliberately so: an incompatible [timing_ctx] is a precondition violation
+    detected before anything happens, not an outcome of a search, and reporting it would attribute a
+    phase to a call that never reached one. *)
 
 val model_score :
   static_indices:Ir.Indexing.static_symbol list ->
@@ -715,7 +873,7 @@ val on_candidate_attempt : (string -> unit) ref
     that one is called inside the base compile's transform, so a fault injected there is classified
     like any other and surfaces as the pre-search failure of a search that never started. The
     default is a no-op and no configuration selects it; raising from it terminates the search the
-    way an uncontainable failure does — the partial report (carrying [terminal_failure]) is emitted
+    way an uncontainable failure does — the [Search_died] report (carrying its failure) is emitted
     to [?report] and the exception propagates out of {!tune}, which is what [Train.tune_placements]
     must survive without losing the other arm's winner. Not a production seam: candidate failures
     that a backend {e can} attribute are contained without it (see [declines]). *)

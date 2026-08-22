@@ -26,6 +26,25 @@ module SC = Ir.Schedule_cache
 module SO = Ir.Schedule_outcome
 
 let p = Verdict.p
+
+(* The report's outcome as the questions this test asks of it (gh-ocannl-677): the outcome is a
+   variant naming one of five mutually exclusive states, so each claim below names the state it
+   means — and the two ways an arm can die, mid-search and before the search exists, are told apart
+   by the state rather than by a [partial] flag both of them set. *)
+let completed (r : Autotune.report) =
+  match r.Autotune.outcome with Autotune.Searched -> true | _ -> false
+
+let replayed (r : Autotune.report) =
+  match r.Autotune.outcome with Autotune.Cache_replay -> true | _ -> false
+
+let died_mid_search (r : Autotune.report) =
+  match r.Autotune.outcome with Autotune.Search_died _ -> true | _ -> false
+
+let died_before_search (r : Autotune.report) =
+  match r.Autotune.outcome with Autotune.Pre_search_failure _ -> true | _ -> false
+
+(* Either failing state: what a caller ranking or attributing arms asks. *)
+let failed (r : Autotune.report) = Option.is_some (Autotune.terminal_failure r)
 let approx a b = Float.(abs (a - b) < 1e-4)
 let n = 8
 
@@ -125,11 +144,11 @@ let () =
   p "the failing arm did not take the tune down with it" true;
   p "both arms reported, in position" (List.length reports1 = 2);
   let arm_a = List.nth_exn reports1 0 and arm_b = List.nth_exn reports1 1 in
-  p "arm A completed" (not arm_a.Autotune.partial);
+  p "arm A completed" (completed arm_a);
   p "arm A crowned a timed winner" (not (Float.is_inf arm_a.Autotune.best_ms));
-  p "arm B is reported as partial" arm_b.Autotune.partial;
+  p "arm B is reported as a search that died mid-way" (died_mid_search arm_b);
   p "arm B's report carries the terminal failure"
-    (Option.value_map arm_b.Autotune.terminal_failure ~default:false ~f:(fun tf ->
+    (Option.value_map (Autotune.terminal_failure arm_b) ~default:false ~f:(fun tf ->
          String.is_substring tf.Autotune.detail ~substring:message));
   p "arm B had timed candidates before failing"
     (arm_b.Autotune.candidates_timed > 0 && not (Float.is_inf arm_b.Autotune.best_ms));
@@ -146,7 +165,7 @@ let () =
       (Context.auto ()) t2 comp Ir.Indexing.Empty
   in
   let arm_a2 = List.nth_exn (List.rev !reports) 0 in
-  p "arm A's winner was cached by the run its sibling arm failed in" arm_a2.Autotune.cache_hit;
+  p "arm A's winner was cached by the run its sibling arm failed in" (replayed arm_a2);
   p "the replay is the very schedule run 1 crowned"
     (SC.equal_saved_schedule arm_a.Autotune.best_schedule arm_a2.Autotune.best_schedule);
   let ctx_2 = Context.run ctx_2 routine_2 in
@@ -173,9 +192,9 @@ let () =
   p "an arm failing before its search starts still occupies its slot" (List.length reports3 = 2);
   let arm_a3 = List.nth_exn reports3 0 and arm_b3 = List.nth_exn reports3 1 in
   p "the slot report is arm B's, not arm A's misattributed one"
-    (arm_a3.Autotune.cache_hit && arm_b3.Autotune.partial);
+    (replayed arm_a3 && died_before_search arm_b3);
   p "the pre-search report names the injected failure at a structured phase"
-    (Option.value_map arm_b3.Autotune.terminal_failure ~default:false ~f:(fun tf ->
+    (Option.value_map (Autotune.terminal_failure arm_b3) ~default:false ~f:(fun tf ->
          String.is_substring tf.Autotune.detail ~substring:message
          && Ir.Schedule_outcome.equal_phase tf.Autotune.phase Ir.Schedule_outcome.Transform));
   let ctx_3 = Context.run ctx_3 routine_3 in
@@ -230,7 +249,7 @@ let () =
           Train.tune_placements ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:""
             ~report:(fun r ->
               Int.incr arms_reported;
-              if r.Autotune.partial then raise Stdlib.Exit)
+              if failed r then raise Stdlib.Exit)
             (Context.auto ()) t2 comp Ir.Indexing.Empty
         with
         | ctx_c, routine_c ->
@@ -311,7 +330,7 @@ let () =
              if !attempts = 3 then raise (Failure "injected failure under interrupt"));
         match
           Train.tune_placements ~beam_width:2 ~rounds:0 ~repeats:1 ~cache_dir:""
-            ~report:(fun r -> if r.Autotune.partial then raise Stdlib.Sys.Break)
+            ~report:(fun r -> if failed r then raise Stdlib.Sys.Break)
             (Context.auto ()) t2 comp Ir.Indexing.Empty
         with
         | _ -> false
@@ -360,7 +379,7 @@ let () =
   p "control: an uninjected search declines nothing at pre-dispatch validation"
     (List.for_all control_reports ~f:(fun r -> List.is_empty (preflight_declines r)));
   p "control: an uninjected search completes and ships"
-    (control_ships && List.for_all control_reports ~f:(fun r -> not r.Autotune.partial));
+    (control_ships && List.for_all control_reports ~f:completed);
 
   (* An unsatisfied execution dependency, from a routine that genuinely has one: [dep_r2] reads what
      [dep_r1] writes and [dep_r1] has not run. *)
@@ -381,8 +400,7 @@ let () =
   p "an unsatisfied dependency reached a candidate's timing run" (preflights_d >= 2);
   p "it is a decline in the census, at the pre-dispatch phase"
     (declined_with reports_d ~substring:"unexecuted dependencies");
-  p "the search that declined it completed"
-    (List.for_all reports_d ~f:(fun r -> not r.Autotune.partial));
+  p "the search that declined it completed" (List.for_all reports_d ~f:completed);
   p "and did not condemn the lineage" (Option.is_none (Context.poisoned_failure ctx_d));
   let ctx_d' = Context.run ctx_d' routine_d in
   p "a winner still ships and computes the right values"
@@ -406,8 +424,7 @@ let () =
   p "an out-of-range static binding reached a candidate's timing run" (preflights_b >= 2);
   p "it too is a decline in the census, at the pre-dispatch phase"
     (declined_with reports_b ~substring:"exceeds its declared range");
-  p "the search that declined it completed"
-    (List.for_all reports_b ~f:(fun r -> not r.Autotune.partial));
+  p "the search that declined it completed" (List.for_all reports_b ~f:completed);
   p "and did not condemn the lineage" (Option.is_none (Context.poisoned_failure ctx_b));
   let ctx_b' = Context.run ctx_b' routine_b in
   p "a winner still ships and computes the right values"
@@ -451,8 +468,7 @@ let () =
        (List.hd (List.rev !reports_z))
        ~default:false
        ~f:(fun r ->
-         r.Autotune.partial
-         && Option.value_map r.Autotune.terminal_failure ~default:false ~f:(fun tf ->
+         Option.value_map (Autotune.terminal_failure r) ~default:false ~f:(fun tf ->
              String.is_substring tf.Autotune.detail ~substring:"poisoned")));
 
   (* --- The genuine whole-search form, injection-free: a lineage holding an unexecuted compile of

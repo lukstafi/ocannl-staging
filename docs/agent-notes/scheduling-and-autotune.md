@@ -60,7 +60,7 @@ files.
   (`fusion = unfused | fused`, `matmul_family_tree`): the fused child is refuted with the
   recognizer's own reason (`Schedule.fuse_epilogue_witness`) on a site with no fusable tail —
   so a tree's `refutations` always carries one entry more than its pipelines produce, and a
-  test asserting "every refutation is X" must scope to the `("fusion", "unfused")` path — and
+  test asserting "every refutation is X" must scope to the `Family_decision.Fusion `Unfused`` path — and
   the unfused coverage verdict is shared with the fused branch because it implies it (the fused
   demand is a subset, and `aligned_chains` ignores `skip`): `aligned_chains` runs twice only
   where the unfused flavor is refuted. `sketch_seed_params` is the tree's `leaves`, twins
@@ -69,6 +69,27 @@ files.
   never seeded, so it never reaches the decline log. gh-569's Part 3 read 25 coverage declines out of
   `schedule_log_declines`; the same workload on current master logs zero
   (`report-gh612-hip.md`). Ask the emitted source and the launch geometry instead.
+- **The family tree's decisions are DATA, and reading one back means matching on it — never
+  re-parsing a label** (gh-ocannl-591). `Ir.Schedule_space` is parameterized over the decision type
+  (`('l, 'a) tree`, paths `(string * 'l) list`); the matmul family instantiates it at
+  `Autotune.Family_decision.t`, one constructor per level carrying the geometry, the lattice
+  interval, the pipeline depth, the packing shape. `Family_decision.level` derives the level name
+  from the decision and `to_label`/`render_path` are the rendering, so renaming a level or
+  rewording a label is a display change with no consumer behind it. Before this, levels minted
+  labels with `sprintf` and `sketch_path_traffic_floor` read them back with `sscanf` under
+  `try … with _ -> None`: any reword made every arm fall through, so the certain-traffic increment
+  was `0` on every path — a SOUND lower bound, so nothing raised, no golden moved, and the family
+  bound silently degraded to the schedule-invariant floor. If you add a level, add its constructor;
+  if a consumer needs to know what was committed, match the datum. The same shape applies to
+  `model_default`'s placement tree, whose children carry `(flip_candidate, `Keep | `Flip)`.
+- **A test that prices decision paths must walk them out of the tree, not write them down.**
+  `sketch_family_tree.ml` used to call the traffic floor with literal paths, which pinned its own
+  parser and let the tree mint anything. It now enumerates the real tree and asserts that every
+  leaf's increment equals the traffic the LEAF'S OWN `sketch_params` imply (independent of the
+  path) and that the increment is monotone along every prefix — so a commitment a consumer stops
+  reading is a mismatch instead of a uniform zero, and the golden's leaf-path counts and level
+  inventory move when a level is added or removed. Verified both ways: rewording three labels moves
+  190 rendered lines and no number; deleting the `twin` level moves the counts and fails.
 - Batch loops of a GPU matmul sketch are no longer unconditionally `Serial` (gh-ocannl-643, the
   rank-4 q/k/v residue of gh-569: `36.7%` of the gpt2_mini step at 10% of sgemm peak because a
   `(batch, head, seq, head_dim)` site launched 4 blocks with batch and head serial inside). Two
@@ -96,11 +117,46 @@ files.
   rejection key is what an autotune search groups declines by and the fixes differ.
   Pinned end-to-end by `test/operations/schedule_batch_grid.ml` (structure everywhere, execution
   and emitted-source fold on GPU backends).
-  The HIP backend's `static_properties` dump lists the queried `max_grid_size` and
-  `max_threads_dim` next to `max_threads_per_block`, so a run on hardware can read back what those
-  gates compare against — without them the only evidence the query is not degenerate is that no
-  kernel got rejected. On gfx1151/ROCm/WSL2 they read `(2147483647 65535 65535)` and
-  `(1024 1024 1024)`, i.e. `max_grid_yz = 65535`.
+  The gate covers the WORKGROUP's dimensions the same way (gh-ocannl-679):
+  `hardware_limits.max_workgroup_dims` is an `(int * int * int) option` of per-dimension caps
+  beside — not instead of — `max_threads_per_workgroup`, which caps only the thread PRODUCT.
+  A tuple, not an array: every GPU backend memoizes its `hardware_limits` behind a `lazy` and
+  `Context.hardware_limits` returns that record itself, so ONE mutable cell anywhere in the record
+  would let a caller deriving tighter limits write through into the process-wide singleton. Keep
+  the record free of mutable cells when adding fields — it is what makes handing out the memoized
+  value safe, and `max_workgroup_dims` was the only field that ever broke it. The two are different hardware
+  facts: CUDA's `maxThreadsDim` is `(1024, 1024, 64)`, so a `2 x 2 x 128` workgroup is a legal
+  512-thread product and an invalid launch configuration. `Workgroup` slots cap at 3 and the
+  innermost binds `.x`, so the outermost annotated loop's extent lands on `.z` directly; no fold is
+  involved. Filled by all three GPU backends (CUDA queries `max_block_dim_{x,y,z}`, HIP the
+  `max_threads_dim` triple, Metal all three components of `maxThreadsPerThreadgroup` — it used to
+  read `width` alone), `None` on the C backends. `Schedule.default_gpu` and
+  `Schedule.zero_expansion` clamp their block size against the `.x` entry too, so the gate is a
+  backstop; they emit one `Workgroup` loop per nest, which is why no in-tree annotator can reach
+  the `.z` cliff and why `test/operations/launch_dim_gate.ml` builds that geometry by hand.
+  **The gate is now one table, five rows** (block `.x`/`.y`/`.z`, grid `.y`/`.z`), not a
+  hand-written `Option.iter` per bound — each bound used to be a copy of its neighbour, which is
+  how `gridDim.y` went ungated for a release and how the workgroup dimensions went ungated
+  entirely. `grid.(0)` is the deliberate sixth absence: 2^31-scale wherever hardware axes bind.
+  Adding a cap means adding a row.
+
+  The GPU backends' `static_properties` dumps list the queried launch-dimension limits next to
+  `max_threads_per_block` — HIP `max_grid_size` and `max_threads_dim`, CUDA `max_block_dim` and
+  `max_grid_dim`, Metal the `max_threads_per_threadgroup` triple — so a run on hardware can read
+  back what those gates compare against; without them the only evidence a query is not degenerate
+  is that no kernel got rejected, which is also what a query returning 0 would produce.
+  **`bin/device_props` is the supported way to read them** (gh-ocannl-684): it prints both
+  `static_properties` and the derived `hardware_limits` for the selected backend, one
+  `path = value` line per fact, and compiles no routine. Do NOT reach it through `dune exec` (the
+  `bin/` cwd trap): `dune build bin/device_props.exe`, then run
+  `_build/default/bin/device_props.exe --ocannl_backend=<name>`, pinning the backend explicitly —
+  with none configured `Context.auto` walks metal -> cuda -> hip -> cc and would report a device
+  other than the one being asked about. Local readings: Metal on an M4 Max reports
+  `max_threads_per_threadgroup = 1024 1024 1024`, so Apple parts cannot exercise the per-dimension
+  cliff either. On gfx1151/ROCm/WSL2 the HIP values read `(2147483647 65535 65535)` and
+  `(1024 1024 1024)`, i.e. `max_grid_yz = 65535` and a `max_workgroup_dims` that equals the product
+  cap — that device cannot exercise the per-dimension cliff; CUDA's `.z` of 64 is the one that
+  can.
 - "`Tile_mma` is a barrier" is only half true, and the half that fails is the one barrier elision
   wants. Every rendering form ENDS the intrinsic block with a workgroup barrier, so a staging
   barrier that follows one is always redundant (`Schedule.elide_staged_barriers` drops it, and the
@@ -180,12 +236,32 @@ files.
 - "Timed" is not "tensorized" either, and that failure is worse: a declined `Tile_mma` renders its
   scalar fallback, which compiles and runs, so the candidate is timed, ranked and possibly crowned
   under an `mma-*` label (gh-ocannl-545: 20 of 20 timed bf16 candidates on CUDA were scalar). The
-  emission is the source of truth — grep the emitted kernel for the intrinsic
-  (`wmma::`/`mma.sync`/`simdgroup_`), or read `C_syntax.mma_census`; `schedule_log_declines=true`
+  emission is the source of truth, and since gh-ocannl-626 it is carried, not fetched: every
+  compiled routine has `Context.routine.mma`, an `Ir.C_syntax.mma_summary` whose `tensorization`
+  field is `Tensorized` (at least one tensor-core / SIMD-register-tile emission), `Scalar_fallback`
+  (statements emitted, every one declined) or `Not_requested` (no `Tile_mma` emitted at all), with
+  the statement and fallback counts beside it. Read that; do NOT bracket `mma_census_enabled`
+  yourself (`C_syntax.with_census` is the bracket, it nests additively, and it is what
+  `Context.compile` calls). `Autotune.report.best_tensorization` is the crowned candidate's label,
+  `None` when nothing was crowned — and the pair to read is `best_tensorized` (what the SCHEDULE
+  asked) against `best_tensorization` (what the EMISSION delivered): a `true` beside anything but
+  `Tensorized` is a scalar timing under a tensorized label. `schedule_log_declines=true`
   names the rule that fired. When seeding and emission can disagree, fix the seeding side too, or the
   measurement budget keeps going to schedules that never tensorize: `mma_format_tiles` is keyed on
   the whole `(a, b, accumulator)` format triple, with per-entry arch floors, precisely so that a
   combination a backend supports at one accumulator width but not the other cannot be seeded.
+  Where a timing is REPORTED the label is now printed, so a mismatch is legible without re-deriving
+  anything: the `autotune_log` NOTE lines lead with it, `Train.tune_placements`' arm lines read
+  `[tensorized/<label>]`, `bin/schedule_bench` and `bin/narrow_gebp_bench` print
+  `C_syntax.mma_summary_string` on EVERY timing line (not only when something declined), the
+  benchmark harness prints it per segment in the per-kernel table, and the result line's `tune`
+  arms carry `tensorization` + `mma_statements`, which `orchestrate.py` renders in the report's
+  `mma` column (`SCALAR FALLBACK` / `NO MMA EMITTED` shouted) plus a `TENSORIZATION NOTICE`. What
+  that column reads is `tune.shipped_mma`, the census of the routine that was TIMED, not the arm
+  named as shipped — a crowned arm candidate is not always the shipped artifact: a gh-555 flip
+  refinement ships under `shipped: "flip"` and is not an arm, and the `timing_ctx` path can fall
+  back to the untuned default after crowning a winner. Same rule as "crowned is not shipped", one
+  level down.
   `mma_staged_layouts` (gh-ocannl-481) is keyed the same way for the same reason: the swizzled
   staged twin is seeded only where the emission can actually read that layout, which on CUDA is
   the uniform-bf16 combination and not fp8 (whose B side has no 16-bit `ldmatrix` form at the
@@ -193,7 +269,7 @@ files.
   `Mma_intrinsics`, so "tensorized" and "fed at rate" are separable in a sweep.
 - "Crowned" is not "shipped", and neither is reproducible on a small routine. `Train.tune_placements`
   runs two searches and keeps one artifact, so a family can win the arm that is then discarded whole
-  — read `report.best_label` / `best_tensorized` / `mma_best_ms` per arm (the A/B calls `?report`
+  — read `report.best_label` / `best_tensorized` / `best_tensorization` / `mma_best_ms` per arm (the A/B calls `?report`
   for arm A first and ships the smaller `best_ms`), never the fact that some search crowned it.
   Since gh-ocannl-638, do not re-derive WHICH arm shipped from the reports' times either: config
   `tune_ship_arm=a|b` overrides the comparison, and `?on_ship` (`"A"` / `"B"` / `"flip"`) is the
@@ -208,11 +284,20 @@ files.
   searches crowned four different families in one arm with a 4.5% spread of best times, while the
   arm gap stayed at 57–95% (gh-ocannl-546, benchmarks/report-gh546-metal.md). Conclusions of the
   form "family X wins/never wins here" need repeats; the arm-level verdict does not.
+  `Autotune.report` says what a call did about searching in ONE field, `outcome` (gh-ocannl-677):
+  `Searched` | `Search_died of terminal_failure` | `Cache_replay` | `Search_disabled` |
+  `Pre_search_failure of terminal_failure`. Match it; do not re-derive it. In particular **"this
+  process searched" is not `not cache_hit`** — under `autotune_search=false` (the `reproducible`
+  profile) and on every pre-search failure a call reports neither having searched nor having
+  replayed, and ships the untuned default. That mis-derivation, made twice in one PR, is what the
+  variant replaced four independent booleans to stop; the benchmark JSON carries the state by name
+  (`arms[].state`) and counts the third bucket (`tune.no_searches`) so the sweep reads it instead
+  of recovering it from two zeroed counters.
   The arms are independent experiments and are contained as such since gh-ocannl-550: an arm whose
   search raises is a LOSING arm (ranked `infinity`), the other arm's winner ships and stays cached,
-  and the failed arm's partial report still arrives in position carrying `terminal_failure` — read
-  that (or `partial`) before `best_ms`, because a partial arm's best is a time whose routine was
-  never compiled. Before that fix, one arm's late failure destroyed the other arm's finished work
+  and the failed arm's report still arrives in position as `Autotune.Search_died` — read the
+  outcome (or the `Autotune.terminal_failure` projection over it) before `best_ms`, because a
+  failed arm's best is a time whose routine was never compiled. Before that fix, one arm's late failure destroyed the other arm's finished work
   in-process (the cache entry survived, since `SC.store` precedes the winner replay — so a warm
   cache could still replay it; five of five tf32 `gpt2_mini` runs lost arm A this way). Note where
   it escaped: NOT at the failing candidate — candidate-grade protection absorbed those OOMs as
@@ -281,3 +366,45 @@ files.
   is `report.default_ms` instead — the config-thresholds fissioned seed reproduces the untuned
   pipeline exactly and its time is attributed by digest (so a seed that dedups against a timed twin,
   the CPU serial baseline included, still reports).
+- The action menu's loop enumeration is provenance-aimed **by action category**, not by loop
+  (gh-ocannl-687). `Local_scope` has two producers — virtualization's inline at a read site, and the
+  accumulator localization `Schedule`'s materializing `Unroll` / `Partition` and
+  `C_syntax.try_widen_serial_reduce` mint over a MATERIALIZED cell — and `Low_level.scope_mint` on
+  the node tells them apart. `Autotune.collect_loops` descends both and tags each descriptor
+  (`ld_inlined`); a loop reached through an inline draws the `Vectorized` retype and nothing else.
+  Two things this is NOT about. Not reachability: `Schedule.rewrite_loop` descends every
+  `Local_scope`, so a proposal naming an inlined loop applies. And not "which loops exist": the
+  first attempt at this dropped them from the enumeration wholesale, which **destroys** the
+  candidate rather than moving it outward — `C_syntax`'s elementwise vectorizer bails on any
+  `Local_scope` in the body, and an accumulating bailout falls back to a plain serial loop, so the
+  enclosing loop's retype renders exactly like the baseline, while the inlined reduction one level
+  down is precisely what `try_vectorize_reduce` was built for (gh-639). `contains_loop` therefore
+  stays provenance-blind: innermost-ness decides which loop gets the retype, and the renderer
+  answers that structurally. What the exclusion buys is the other three categories — up to eight
+  descriptors per loop, no evidence any pays on a per-use-site inline, each costing a candidate
+  compile and displacing one for the main nest. **When narrowing a search space, check whether the
+  thing you are dropping has a renderer the alternative lacks**; "propose fewer things" and "propose
+  the same things elsewhere" are different changes. A flag on the node is the durable form of this
+  fact; contrast `input_scope_ids` (gh-ocannl-681), which answers the per-call question of whether a
+  scope was in the program a given `optimize` was HANDED, and must stay id-set-based: a mint is
+  claimable, and hand-built IR has no honest way to spell "not mine".
+- The per-unit action cap is shared round-robin across the menu's categories, not spent as a prefix
+  over their concatenation (`Autotune.share_cap`, gh-ocannl-685). The menu list is category-ordered
+  and UNRANKED, so a prefix over it is arbitrary — a unit whose tensorizes alone reached 48 offered
+  the search no split, swap, unroll or vectorize at all, and those are exactly the categories a unit
+  needs when its tensorizes turn out `Op_illegal`. Contrast `List.take surface.ps_candidates
+  placement_budget`, a prefix over a RANKED list where top-N is the intended semantics; that one is
+  fine as it stands. When capping anything else in this search, check which kind of list you have.
+  Survivors keep category order, so an under-cap menu is byte-identical to before; the `menu:` log
+  now also reports what the cap DROPPED (it used to print only the per-category counts taken before
+  the take, so a truncated menu logged the same numbers as an untruncated one) and what the
+  provenance filter withheld.
+  **A cap must also sit at the right altitude, not just be shared fairly.** `menu`'s `?admits` runs
+  ahead of the cap so the budget is spent on moves the caller can use: the beam's GPU rule — an
+  incumbent binding no hardware dimension can only be expanded through a move that binds one — used
+  to filter *after* `menu` had capped, so a tensorize-rich unit got its share of five categories and
+  kept only a fraction of the one category the beam could use. The old plain prefix happened to hand
+  all 48 to the tensorizes, so sharing without moving the filter would have been a regression
+  exactly where #685 meant to help. When adding a consumer-side filter over a capped list, ask
+  whether the cap should see it.
+

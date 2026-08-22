@@ -1445,7 +1445,7 @@ module Cuda_b : Backend = Raise_backend (Cuda_backend_impl.Impl : Lowered_backen
 module Hip_b : Backend = Raise_backend (Hip_backend_impl.Impl : Lowered_backend)
 module Metal_b : Backend = Raise_backend (Metal_backend_impl.Impl : Lowered_backend)
 
-type backend = Cc | Multidev_cc | Cuda | Hip | Metal [@@deriving sexp, equal]
+type backend = Cc | Multidev_cc | Cuda | Hip | Metal [@@deriving sexp, equal, enumerate]
 
 let get_backend ?backend_name () =
   match

@@ -35,6 +35,18 @@ type routine = private {
       (** The routine IDs that must execute before this routine, derived from RAW, WAR, and WAW
           hazards on tensor nodes at compile time. An empty set means the routine is independent of
           all previously compiled routines in its lineage. *)
+  mma : Ir.C_syntax.mma_summary;
+      (** How this routine's [Tile_mma] statements actually rendered (gh-ocannl-626): the
+          {!Ir.C_syntax.mma_census} of this compile, collected by {!compile} itself and summarized
+          into {!Ir.C_syntax.tensorization} — [Not_requested] when codegen emitted no [Tile_mma],
+          [Scalar_fallback] when every one of them declined to the lane-0 scalar path, [Tensorized]
+          when at least one rendered to a tensor-core / SIMD-register-tile emission.
+
+          It is a field of the routine, and not something a caller collects around the compile,
+          because a timing labeled "tensorized" that measured the scalar fallback is a false perf
+          number, and the census being opt-in made that the default for every new timing harness
+          (the defect this closes). Fissioned segments compile inside the same bracket, so their
+          kernels are summarized together. *)
 }
 (** A compiled computational routine ready for execution. The record is [private]: only {!compile}
     constructs routines — the ledger's identity and dependency tracking rely on that — while every
@@ -211,6 +223,14 @@ val poisoned_failure : t -> exn option
     now raises. Lets a caller that would otherwise start fresh work on the lineage see that it
     cannot run: [Train.tune_placements] checks it before searching the second placement arm, since
     the arms share a lineage and a poisoned one refuses every timing run (gh-ocannl-550). *)
+
+val static_properties : t -> Sexp.t
+(** The backend's own dump of the properties of all its devices — names, ordinals, and the queried
+    attributes each backend chooses to surface, including the launch-dimension limits
+    {!hardware_limits} derives from. Not redundant with {!hardware_limits}: what a gate compares
+    against may be a device query on one backend and an architectural constant on another, so the
+    raw props do not tell you what the gate uses and the derived limits do not tell you whether the
+    underlying query answered. Printed together by [bin/device_props.ml] (gh-ocannl-684). *)
 
 val hardware_limits : t -> Ir.Backend_intf.hardware_limits
 (** The backend's conservative per-workgroup device limits (all-[None] on backends that do not bind

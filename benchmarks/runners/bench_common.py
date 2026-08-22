@@ -1,6 +1,7 @@
 """Shared helpers for the Python benchmark runners."""
 
 import json
+import math
 import struct
 
 
@@ -21,8 +22,29 @@ def percentiles(xs):
     return {"p10": p(10), "p50": p(50), "p90": p(90)}
 
 
+def json_safe(obj):
+    """`obj` with every non-finite float replaced by None, recursively.
+
+    A diverged training run is exactly the run whose loss trajectory the report needs, and
+    `json.dumps` writes it as `NaN` / `Infinity` -- tokens JSON does not have. Python's own loader
+    accepts them, so the sweep survives, but `results.jsonl` then holds a line no other JSON reader
+    will take, and the OCANNL runner emitting the same fact as `nan` had its whole cell dropped
+    (gh-ocannl-676). `null` is what all three runners emit for a number they have and JSON cannot
+    express; `orchestrate.py` reads it as "ran, and this number is not a number".
+    """
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [json_safe(v) for v in obj]
+    return obj
+
+
 def emit(result):
-    print(json.dumps(result), flush=True)
+    # allow_nan=False so that a non-finite value json_safe did not reach -- one behind a type it
+    # does not walk -- raises here rather than being written as an unparseable token.
+    print(json.dumps(json_safe(result), allow_nan=False), flush=True)
 
 
 # --- Search provenance (gh-ocannl-644) ---------------------------------------------------

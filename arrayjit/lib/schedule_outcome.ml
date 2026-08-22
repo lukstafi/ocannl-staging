@@ -15,6 +15,9 @@ type resource =
   | Workgroup_threads
   | Workgroup_memory
   | Thread_scratch
+  | Workgroup_x_extent
+  | Workgroup_y_extent
+  | Workgroup_z_extent
   | Grid_y_extent
   | Grid_z_extent
 [@@deriving sexp_of, compare, equal]

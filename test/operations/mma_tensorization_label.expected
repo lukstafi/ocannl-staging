@@ -1,0 +1,15 @@
+a routine with no Tensorize is labeled not-requested: true
+a routine with no Tensorize does not read as tensorized: true
+the routine's summary is what a bracket around the same compile collects: true
+an honoured Tensorize is labeled tensorized: true
+a declined Tensorize is labeled scalar-fallback: true
+a declined Tensorize does not read as tensorized despite the schedule asking: true
+no statements is not-requested: true
+all statements declined is scalar-fallback: true
+every non-fallback rendering counts as tensorized: true
+a partly declined routine is tensorized with a nonzero fallback count: true
+a nested bracket summarizes only its own entries: true
+an enclosing bracket observes the entries of a nested one: true
+a completed bracket leaves the census global as it found it: true
+a report with no crowned candidate carries no tensorization label: true
+a report with no crowned candidate does not render as tensorized: true

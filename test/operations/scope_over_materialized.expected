@@ -1,0 +1,7 @@
+optimizing a Local_scope over a materialized node is refused: true
+the refusal names the node: true
+claiming the schedule mint does not exempt a program handed to optimize: true
+the same accumulation without the scope optimizes and executes: true
+a Local_scope over a virtual node survives optimization: true
+the virtual-node scope executes to the reference row sums: true
+the prelowered seam still delivers the materialized-accumulator scope: true

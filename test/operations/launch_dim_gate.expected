@@ -1,0 +1,19 @@
+geometry: the hand-built nest is a 2 x 2 x 128 workgroup: true
+geometry: its thread product is 512, well under a 1024-thread device: true
+product-only limits accept the 2 x 2 x 128 workgroup (the pre-679 gate): true
+a .z cap of 64 refuses it as a typed Workgroup_z_extent Resource_exceeded: true
+a .z cap at the extent accepts it: true
+a .z cap one below the extent refuses it: true
+an .x cap below the .x extent refuses as Workgroup_x_extent: true
+a .y cap below the .y extent refuses as Workgroup_y_extent: true
+caps at every extent accept the whole geometry: true
+absent per-dimension caps gate nothing: true
+the raising variant names the .z workgroup extent: true
+geometry: the grid nest is .y = 300 over .x = 4: true
+a max_grid_yz of 300 accepts it: true
+a max_grid_yz of 299 refuses it as Grid_y_extent: true
+geometry: the fold nest folds 4 onto .z with a .y of 2: true
+a max_grid_yz of 4 accepts the fold: true
+a max_grid_yz of 3 refuses the fold as Grid_z_extent: true
+annotator: with no per-dimension cap the block keeps the requested 256 threads: true
+annotator: an .x cap of 8 clamps the block to 8, before the gate ever sees it: true

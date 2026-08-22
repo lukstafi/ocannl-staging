@@ -235,9 +235,22 @@ type tune_arms = {
   mutable shipped : string option;
   mutable searches : int;
   mutable replays : int;
+  mutable no_searches : int;
+  mutable shipped_mma : Ir.C_syntax.mma_summary option;
+      (** The census of the routine(s) this cell actually times (gh-ocannl-626), recorded by
+          {!collect_shipped}. Kept apart from the arms' because the crowned candidate of an arm is
+          not always the shipped artifact — see {!collect_shipped}. *)
 }
 
-let tune_arms () = { arm_reports = []; shipped = None; searches = 0; replays = 0 }
+let tune_arms () =
+  {
+    arm_reports = [];
+    shipped = None;
+    searches = 0;
+    replays = 0;
+    no_searches = 0;
+    shipped_mma = None;
+  }
 
 (** Counts one reported search by its provenance (gh-ocannl-644). Kept separate from
     {!collect_arm} because a search this process ran is a search whether or not it was one of the
@@ -247,20 +260,47 @@ let tune_arms () = { arm_reports = []; shipped = None; searches = 0; replays = 0
     search does — which is the whole reason the two-pass protocol exists. A caller that runs any
     search whose outcome it does not otherwise collect should still route it here.
 
-    A report is counted by [Autotune.searched] and [cache_hit], which are not complements: under
-    [autotune_search=false] — the reproducible profile — and on a pre-search failure, a call
-    reports neither, having shipped the untuned default without searching or replaying anything.
+    A report is counted by matching its [Autotune.outcome] (gh-ocannl-677), which is what makes
+    the third bucket visible: under [autotune_search=false] — the reproducible profile — and on a
+    pre-search failure, a call neither searches nor replays, having shipped the untuned default.
     Such an arm must not be counted as a search: it would fail the sweep's provenance gate on both
-    passes of a tuned cell, and there is nothing wrong with either. *)
+    passes of a tuned cell, and there is nothing wrong with either. Nor as a replay: it carries no
+    tuned artifact to credit the row with. Counting it explicitly is what lets the sweep state the
+    third case instead of recovering it from two counters that are both zero. *)
 let collect_search t (r : Autotune.report) =
-  if r.Autotune.searched then t.searches <- t.searches + 1
-  else if r.Autotune.cache_hit then t.replays <- t.replays + 1
+  match r.Autotune.outcome with
+  | Autotune.Searched | Autotune.Search_died _ -> t.searches <- t.searches + 1
+  | Autotune.Cache_replay -> t.replays <- t.replays + 1
+  | Autotune.Search_disabled | Autotune.Pre_search_failure _ ->
+      t.no_searches <- t.no_searches + 1
 
 let collect_arm t (r : Autotune.report) =
   collect_search t r;
   t.arm_reports <- r :: t.arm_reports
 
 let collect_ship t what = t.shipped <- Some what
+
+(** The [Tile_mma] renderings of every routine one timed step runs. *)
+let step_census = function
+  | Plain routine -> routine.Context.mma
+  | Host_gate (_, _, grad_routine, sgd_routine) ->
+      Ir.C_syntax.merge_mma_summaries [ grad_routine.Context.mma; sgd_routine.Context.mma ]
+  | Device_gate (_, _, routine, _) -> routine.Context.mma
+
+(** Records what the artifact this cell TIMES actually emitted (gh-ocannl-626). Every runner calls
+    it with the routines it goes on to step, right after compiling them.
+
+    This is deliberately not derived from the arm reports, and overrides them downstream, because a
+    crowned arm candidate is not always the shipped artifact. Two ways they come apart, both live:
+    a gh-555 flip refinement that beats the A/B winner ships under [on_ship "flip"] and is not an
+    arm at all (flip reports stay out of [arm_reports] — their arrival order would misname the
+    arms), so an arm lookup finds nothing and the cell would report no census; and on the
+    [timing_ctx] path {!Autotune.tune} recompiles the winner in the production context and falls
+    back to the untuned default when that replay is rejected or lands unparallelized, so the arm
+    describes a schedule that was discarded. In both cases the arm's label can claim tensorized over
+    a routine that emitted no mma, which is the exact failure this whole field exists to prevent —
+    so the fact is taken from the compiled routine, which cannot be wrong about itself. *)
+let collect_shipped t routines = t.shipped_mma <- Some (step_census routines)
 
 (** Whether this process ran a schedule search rather than replaying cached winners throughout —
     the [searched] field of the result line. See {!measure_and_emit}. *)
@@ -278,27 +318,15 @@ let searched t = t.searches > 0
     compiled from it — [Train.tune_placements] ranks it at [infinity] and this attribution follows
     the same rule rather than re-deriving a winner from times alone.
 
-    Each arm also records whether it {e searched} and whether it replayed a cached winner
-    ([cache_hit]), and the object totals both over every search this process reported ([searches] /
-    [replays], flip refinements included). That is the per-arm detail behind the result line's
-    [searched] field (gh-ocannl-644): a cell can be mixed — one arm cached, the other searched
-    because its half of the A/B was never cached — and only the per-arm breakdown says which. The
-    two flags are both [false] for an arm that neither searched nor replayed, which is what
-    [autotune_search=false] and a pre-search failure produce. *)
+    Each arm also records its outcome [state] — the {!Autotune.outcome_name} of what it did about
+    searching — and the object totals the three provenance buckets over every search this process
+    reported ([searches] / [replays] / [no_searches], flip refinements included). That is the
+    per-arm detail behind the result line's [searched] field (gh-ocannl-644): a cell can be mixed —
+    one arm cached, the other searched because its half of the A/B was never cached — and only the
+    per-arm breakdown says which. The legacy [searched] and [cache_hit] booleans stay in the wire
+    format for artifacts and readers that predate gh-ocannl-677; [state] is the one that names the
+    outcome, [no_searches] the one that spares a reader deriving the third case from two zeros. *)
 let tune_json t =
-  let ms_json v = if Float.is_inf v then "null" else Printf.sprintf "%.6g" v in
-  (* Quote-and-control-character scrubbing rather than escaping: these strings are diagnostics
-     (labels, an exception's message) and the result line has to stay one parseable JSON line. JSON
-     forbids every unescaped byte below U+0020, not just the whitespace ones, so the test is the
-     code point — a NUL or an ESC from a backend diagnostic would otherwise invalidate the record
-     and cost the whole measurement. *)
-  let json_string s =
-    String.map s ~f:(function
-      | '"' -> '\''
-      | '\\' -> '/'
-      | c when Char.to_int c < 0x20 || Char.to_int c = 0x7f -> ' '
-      | c -> c)
-  in
   match List.rev t.arm_reports with
   | [] -> None
   | reports ->
@@ -310,7 +338,7 @@ let tune_json t =
         | Some what -> what
         | None ->
             List.fold named ~init:None ~f:(fun acc (name, (r : Autotune.report)) ->
-                if Option.is_some r.terminal_failure then acc
+                if Option.is_some (Autotune.terminal_failure r) then acc
                 else
                   match acc with
                   | Some (_, best) when Float.( <= ) best r.best_ms -> acc
@@ -318,19 +346,34 @@ let tune_json t =
             |> Option.value_map ~default:"?" ~f:fst
       in
       let arm (name, (r : Autotune.report)) =
-        Printf.sprintf
-          {|{"arm":"%s","searched":%b,"cache_hit":%b,"best_ms":%s,"best_label":"%s","tensorized":%b,"mma_scalar_fallbacks":%d,"mma_seeded":%d,"mma_timed":%d,"mma_best_ms":%s,"terminal_failure":%s}|}
-          name r.Autotune.searched r.Autotune.cache_hit (ms_json r.Autotune.best_ms)
-          (json_string r.Autotune.best_label)
-          r.Autotune.best_tensorized r.Autotune.best_mma_scalar_fallbacks r.Autotune.mma_candidates
-          r.Autotune.mma_timed (ms_json r.Autotune.mma_best_ms)
-          (Option.value_map r.Autotune.terminal_failure ~default:"null" ~f:(fun tf ->
-               Printf.sprintf {|"%s"|} (json_string tf.Autotune.detail)))
+        let searched, cache_hit =
+          match r.Autotune.outcome with
+          | Autotune.Searched | Autotune.Search_died _ -> (true, false)
+          | Autotune.Cache_replay -> (false, true)
+          | Autotune.Search_disabled | Autotune.Pre_search_failure _ -> (false, false)
+        in
+        Bench_json.tune_arm ~name
+          ~state:(Autotune.outcome_name r.Autotune.outcome)
+          ~searched ~cache_hit ~best_ms:r.Autotune.best_ms ~best_label:r.Autotune.best_label
+          ~tensorized:r.Autotune.best_tensorized
+          ~tensorization:
+            (Option.map r.Autotune.best_tensorization ~f:Ir.C_syntax.tensorization_name)
+          ~mma_statements:r.Autotune.best_mma_statements
+          ~mma_scalar_fallbacks:r.Autotune.best_mma_scalar_fallbacks
+          ~mma_seeded:r.Autotune.mma_candidates ~mma_timed:r.Autotune.mma_timed
+          ~mma_best_ms:r.Autotune.mma_best_ms
+          ~terminal_failure:
+            (Option.map (Autotune.terminal_failure r) ~f:(fun tf -> tf.Autotune.detail))
       in
       Some
-        (Printf.sprintf {|{"shipped":"%s","searches":%d,"replays":%d,"arms":[%s]}|} shipped
-           t.searches t.replays
-           (String.concat ~sep:"," (List.map named ~f:arm)))
+        (Bench_json.tune_object ~shipped ~searches:t.searches ~replays:t.replays
+           ~no_searches:t.no_searches
+           ~shipped_mma:
+             (Option.map t.shipped_mma ~f:(fun (m : Ir.C_syntax.mma_summary) ->
+                  ( Ir.C_syntax.tensorization_name m.Ir.C_syntax.tensorization,
+                    m.Ir.C_syntax.statements,
+                    m.Ir.C_syntax.scalar_fallbacks )))
+           ~arms:(List.map named ~f:arm))
 
 let floats_of_gen g =
   let n = Array.fold (Bigarray.Genarray.dims g) ~init:1 ~f:( * ) in
@@ -573,6 +616,12 @@ let time_segments ?promote_locals ?(repeats = 20) ~backend ~limits ~static_indic
   Stdio.printf "segment times (min of %d runs, ms):\n" repeats;
   let total = ref 0. in
   let declined = ref 0 in
+  (* Per-segment tensorization, straight off each compiled routine (gh-ocannl-626): this table is
+     where a per-kernel number is read, so it is where "this kernel emitted tensor cores" has to be
+     legible. Without it a segment that declined its [Tile_mma] is indistinguishable here from one
+     that ran on tensor cores, and the per-kernel attribution is what a measurement campaign
+     quotes. *)
+  let censuses = ref [] in
   List.iteri segs ~f:(fun i (kind, pre, _sched, post) ->
       let kind_s = match kind with `Normal -> "N" | `Zeros -> "Z" | `Solo -> "S" in
       let ws = String.concat ~sep:" " (List.map (writes_of pre.LL.llc) ~f:Tn.debug_name) in
@@ -606,15 +655,30 @@ let time_segments ?promote_locals ?(repeats = 20) ~backend ~limits ~static_indic
             best := Float.min !best (elapsed_ms c0)
           done;
           total := !total +. !best;
-          Stdio.printf "  seg%-3d %s %8.4f ms  w:%s\n" i kind_s !best ws);
+          censuses := routine.Context.mma :: !censuses;
+          Stdio.printf "  seg%-3d %s %8.4f ms  mma:%s  w:%s\n" i kind_s !best
+            (Ir.C_syntax.mma_summary_string routine.Context.mma)
+            ws);
   Stdio.printf "  total (sum of per-segment minima): %.4f ms%s\n" !total
     (if !declined = 0 then ""
      else Printf.sprintf " (INCOMPLETE: %d of %d segments declined)" !declined (List.length segs));
+  let all = Ir.C_syntax.merge_mma_summaries !censuses in
+  if all.Ir.C_syntax.scalar_fallbacks > 0 then
+    Stdio.printf
+      "  WARNING: %d of %d Tile_mma statements across these segments rendered the lane-0 scalar \
+       fallback — those segment times are NOT tensorized timings \
+       (--ocannl_schedule_log_declines=true names the rule)\n"
+      all.Ir.C_syntax.scalar_fallbacks all.Ir.C_syntax.statements;
   Stdio.Out_channel.flush Stdio.stdout
 
 (** Runs the measurement protocol and prints the JSON result line. [run_step] advances the batch
     binding and enqueues one step; [read_loss] returns the current loss value (awaits the device);
     [sync] awaits all queued work.
+
+    Every number in the line goes through {!Bench_json}, so a non-finite one is [null] rather than
+    OCaml's [nan] / [inf]: a training run that diverges is exactly the run whose loss trajectory
+    the report needs, and a line that does not parse is a cell [orchestrate.py] drops as a broken
+    runner after the whole measurement has been paid for (gh-ocannl-676).
 
     The line's [searched] field states whether {e this process} ran a schedule search
     (gh-ocannl-644). A tuned cell is measured by a two-pass protocol — pass 1 searches and populates
@@ -626,8 +690,9 @@ let time_segments ?promote_locals ?(repeats = 20) ~backend ~limits ~static_indic
     revisions. [searched] is [false] for an untuned cell too: it says no search ran in this process,
     which for a cell that tunes nothing is both true and the condition the protocol wants — as it is
     for a tuned cell under [autotune_search=false], which ships the untuned default having neither
-    searched nor replayed (the [tune] object's zero [searches] and [replays] are what tell that
-    apart from a replay). *)
+    searched nor replayed (the [tune] object's [no_searches] is what tells that apart from a
+    replay — a count of arms whose {!Autotune.outcome} was one of the two states that search
+    nothing, rather than an inference from two counters that are both zero). *)
 let measure_and_emit ~st ~backend ~variant ?(precision = "f32") ~compile_s ?tokens_per_step ?tune
     ~run_step ~read_loss ~sync () =
   let workload = get_meta st "name" in
@@ -664,21 +729,10 @@ let measure_and_emit ~st ~backend ~variant ?(precision = "f32") ~compile_s ?toke
   sync ();
   let queued_ms = elapsed_ms c0 /. Float.of_int timed_steps in
   Array.sort synced ~compare:Float.compare;
-  let json_floats arr =
-    String.concat ~sep:"," (Array.to_list (Array.map arr ~f:(Printf.sprintf "%.9g")))
-  in
-  let tokens_field =
-    match tokens_per_step with Some t -> Printf.sprintf {|"tokens_per_step":%d,|} t | None -> ""
-  in
-  let tune_field =
-    match Option.bind tune ~f:tune_json with
-    | Some j -> Printf.sprintf {|"tune":%s,|} j
-    | None -> ""
-  in
-  Stdio.printf
-    {|{"framework":"ocannl","backend":"%s","variant":"%s","precision":"%s","workload":"%s","compile_s":%.3f,"searched":%b,%s%s"step_ms":{"p10":%.6g,"p50":%.6g,"p90":%.6g},"queued_step_ms":%.6g,"timed_steps":%d,"losses":[%s]}|}
-    backend variant precision workload compile_s
-    (Option.value_map tune ~default:false ~f:searched)
-    tokens_field tune_field (percentile synced 10.) (percentile synced 50.) (percentile synced 90.)
-    queued_ms timed_steps (json_floats losses);
-  Stdio.printf "\n"
+  Stdio.printf "%s\n"
+    (Bench_json.result_line ~backend ~variant ~precision ~workload ~compile_s
+       ~searched:(Option.value_map tune ~default:false ~f:searched)
+       ?tokens_per_step
+       ?tune:(Option.bind tune ~f:tune_json)
+       ~p10:(percentile synced 10.) ~p50:(percentile synced 50.) ~p90:(percentile synced 90.)
+       ~queued_ms ~timed_steps ~losses ())

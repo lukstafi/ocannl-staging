@@ -301,6 +301,20 @@ module Impl = struct
                       Sexp.Atom "max_threadgroup_memory_length";
                       Sexp.Atom (Unsigned.ULong.to_string attributes.max_threadgroup_memory_length);
                     ];
+                  (* The launch-dimension limit the schedule layer gates against: all three
+                     components, not just [width]. [width] alone feeds
+                     [hardware_limits.max_threads_per_workgroup] (the thread product), while the
+                     triple feeds [max_workgroup_dims] (per-dimension, gh-ocannl-679). Surfaced so
+                     a run on hardware can read back what the gates compare against --
+                     [bin/device_props.ml] prints exactly this (gh-ocannl-684). *)
+                  Sexp.List
+                    [
+                      Sexp.Atom "max_threads_per_threadgroup";
+                      [%sexp_of: int * int * int]
+                        ( attributes.max_threads_per_threadgroup.width,
+                          attributes.max_threads_per_threadgroup.height,
+                          attributes.max_threads_per_threadgroup.depth );
+                    ];
                   Sexp.List
                     [
                       Sexp.Atom "recommended_max_working_set_size";
@@ -352,6 +366,22 @@ module Impl = struct
            max_workgroup_memory_bytes =
              min_over (fun (a : Me.Device.attributes) ->
                  Unsigned.ULong.to_int a.max_threadgroup_memory_length);
+           (* Per-dimension threadgroup caps (gh-ocannl-679): [maxThreadsPerThreadgroup] is a 3-D
+              [MTLSize] and only its [width] was being read (as the thread-product cap above).
+              Apple parts report the three components equal, so this row does not fire alone here;
+              it is filled because a schedule is gated by the record, not by the backend's name,
+              and a per-dimension cap left [None] silently exempts the dimension. *)
+           max_workgroup_dims =
+             (match
+                ( min_over (fun (a : Me.Device.attributes) ->
+                      a.max_threads_per_threadgroup.width),
+                  min_over (fun (a : Me.Device.attributes) ->
+                      a.max_threads_per_threadgroup.height),
+                  min_over (fun (a : Me.Device.attributes) ->
+                      a.max_threads_per_threadgroup.depth) )
+              with
+              | Some x, Some y, Some z -> Some (x, y, z)
+              | _ -> None);
            (* Metal's threadgroups-per-grid dimensions are not 16-bit like CUDA/HIP's
               gridDim.y/z; no practical cap to enforce here. *)
            max_grid_yz = None;
@@ -573,6 +603,9 @@ module Impl = struct
 
     let ident_blacklist =
       ident_blacklist
+      (* MSL is a C++14 dialect, so the C++ keywords are reserved here on top of the C ones
+         {!Pure_C_config} contributes (gh-ocannl-686). *)
+      @ C_syntax.cpp_keywords
       @ C_syntax.builtin_idents Builtins_metal.builtins
       @ [
           (* MSL address-space qualifiers and function attributes — highly plausible tensor
@@ -1194,6 +1227,9 @@ module Impl = struct
       let procs = [| lowered |]
     end))
     in
+    (* gh-ocannl-686: normalize the user-supplied routine name into a legal MSL identifier ONCE,
+       here, so the emitted symbol, [new_function_with_name] and the [.metal] artifact agree. *)
+    let name = Syntax.kernel_ident name in
     let idx_params = Indexing.bound_symbols bindings in
     (* Add Metal address space qualifiers *)
     let kparams, proc_doc, launch = Syntax.compile_proc ~name idx_params lowered in
@@ -1220,6 +1256,9 @@ using namespace metal;|} in
       let procs = Array.filter_opt lowereds
     end))
     in
+    (* gh-ocannl-686: normalize the user-supplied routine name into a legal MSL identifier ONCE,
+       here, so the emitted symbol, [new_function_with_name] and the [.metal] artifact agree. *)
+    let names = Array.map names ~f:(Option.map ~f:Syntax.kernel_ident) in
     let idx_params = Indexing.bound_symbols bindings in
     let funcs_and_docs =
       Array.map2_exn names lowereds

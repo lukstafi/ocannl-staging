@@ -55,10 +55,13 @@ that they earn a lookup rather than always-loaded space.
   down too), and the exact numbers on STDERR, which a `(test)` stanza does not diff. Assert the floor through `Verdict`
   rather than as a golden line, so a scan that goes blind cannot be promoted back to green. And
   compare the floor to the walk STANZA BY STANZA, never as two totals over a file: the second reader
-  recognises fewer shapes than the walk (in gh-ocannl-659's case no `bash`/`system`, and nothing
-  under an unresolvable `chdir`), so every stanza the walk places and the floor misses is a unit of
-  SLACK that can absorb a different stanza silently dropping out of enforcement. Not theoretical —
-  the tree stood at 296 placed against a floor of 295, one whole stanza of cover. Asked per stanza
+  recognises fewer shapes than the walk — today an external command handed something the workspace
+  builds (`(run python3 %{dep:x.py})`) — so every stanza the walk places and the floor misses is a
+  unit of SLACK that can absorb a different stanza silently dropping out of enforcement. Not
+  theoretical — the tree stood at 296 placed against a floor of 295, one whole stanza of cover.
+  Print the gap ITEMISED rather than as arithmetic: "one short" does not say which stanza is
+  standing on the walk alone, and the class it belongs to is what decides whether closing it is
+  worth the loss of independence. Asked per stanza
   the two answers are about the same stanza and cannot be traded against a third, and the narrower
   vocabulary degrades to a weaker floor just where it is narrow instead of to a hole elsewhere. Note
   what this licenses: once the comparison is per stanza, the two readers may share the TRAVERSAL
@@ -79,7 +82,7 @@ that they earn a lookup rather than always-loaded space.
   runs — `subdir` and `chdir` compose into the directory whose config the process finds, and the
   comparison key is that composition, for a test's own `%{test}` as much as for a helper; (c')
   what CANNOT be resolved — under a `chdir` holding a pform the walk emits a site with no
-  executables, so drop that subtree rather than report a literal `%{…}`; (d) GROUPING and IDENTITY —
+  executables, so never report a literal `%{…}` as a directory; (d) GROUPING and IDENTITY —
   one site per distinct executable per directory, so raw occurrence counts fail a `progn` running
   one executable twice while a flat set lets five of six rules be answered for by the sixth, and
   identities come from a structured field (`site.executables`), never from splitting a display name.
@@ -91,6 +94,23 @@ that they earn a lookup rather than always-loaded space.
   floor and therefore the easy thing to over-use — declining `./%{pp}` left all three `test/ppx`
   rules with no floor at all, and the fix was to resolve the `(:pp pp.exe)` binding from the same
   stanza, which in turn means resolving commands only once the stanza has been read.
+  The general form of that trap, and the one worth reaching for first: a shape the second reader
+  cannot RESOLVE is usually still one it can COUNT. It does not have to parse a `(bash …)` line, or
+  resolve a `(chdir %{…} …)`, to record that the stanza runs SOMETHING — which is the entire
+  question a subject-or-not floor asks. Tag such a shape rather than dropping it (gh-ocannl-690),
+  and carry the tag WITHOUT the piece that is unknown: a command under an unresolvable `chdir` goes
+  into a directory-less list, because the per-directory floors would otherwise hold the walk's
+  refusal to guess against the floor's guess. Then watch the OTHER direction, which is where tagging
+  puts the risk: a floor that sees a stanza the walk does not fails a correct scan. Mirror the walk's
+  own dropping rule at the tag site — a PATH tool is external wherever a `chdir` sends it, so the
+  walk places no site and the floor must record nothing.
+  And keep the rule's DECISION somewhere synthetic text can reach it. `env_var_deps`' XOR lived in
+  its main loop, so "a rule running its test through `bash` is subject to the rule" could be argued
+  and not asserted; `Scan.backend_rule_of` is that decision alone, with the diagnostics and tallies
+  left in the check that owns their wording, and `dune_scan_cases` states the rule over stanzas the
+  repository does not contain. Render the floor's answer ALONGSIDE the verdict in such cases
+  ("declares neither +floor" versus the same line without it): the pairing is what makes a false
+  green visible as a golden line rather than as an absence.
   The
   sibling checks are worth a glance when touching this genre and were both fine: `env_var_deps` lists
   names only, and `digest_completeness`'s key count moves only alongside its own enumerated key list

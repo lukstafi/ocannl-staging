@@ -29,6 +29,26 @@ files.
   the FIFO wait, pipelined (no-sync) timing is unreliable, and `get_values`/`set_values` do FULL
   awaits by design.
 
+- Emitted float constants go through `C_syntax.c_float_literal`, the single site that turns a
+  `Low_level.Constant` into kernel text, and it owes three things at once (gh-ocannl-623): a radix
+  point or exponent, so the token is a *floating* literal and not an integer one the cast happens to
+  convert (`%.16g (-0.)` was `"-0"`, hence `+0.0`, a live corruption on every C-family backend);
+  enough digits to round-trip, since 16 do not recover every double (`0.1 +. 0.2` and `max_float`
+  both print as a *different* double at `%.16g`, and hosted constant inits inline arbitrary host
+  values through here); and spellings for `INFINITY` / `(-INFINITY)` / `NAN`, which MSL provides and
+  the CUDA and HIP preludes `#ifndef`-define. What it deliberately does NOT emit is a precision
+  suffix: the literal stays double-typed and `convert_precision`'s cast narrows it, which is one
+  rounding of the exact host double — an `f`-suffixed decimal rounds the decimal straight to float
+  and disagrees on a value sitting on a float tie. The one place that reasoning has a hole is worth
+  knowing, because it is invisible from the C backends: the cast only IS a narrowing where the
+  dialect has a `double`, and **MSL does not** — Metal rounds the emitted decimal itself, at parse
+  time. Round-tripping is not exactness, so "round the value to f32" and "round a decimal near it
+  to f32" can differ, and they differ exactly on an f32 tie (host takes ties-to-even; the dialect
+  follows whichever side the decimal fell on), which makes the emitted digit count decide the
+  value. Hence `is_f32_tie` -> a `%h` hexadecimal literal, exact by construction so neither reading
+  has anything to round; C99, CUDA, HIP and MSL all accept the form, and only ties are spelled that
+  way. Guard: `test/operations/float_literal_forms`, bitwise at f64/f32/f16 plus the emitted
+  tokens, and its three tie cases fail on Metal without the hex spelling.
 - Reduced-precision *literals* are dialect-specific and do not transpose between backends. `0.0h`
   is a clang extension and valid MSL, but not CUDA C++ — nvrtc rejects it with "user-defined
   literal operator not found" (gh-ocannl-518, the half `Relu_gate`). On CUDA/HIP write the zero as
@@ -85,6 +105,24 @@ files.
   declaration and the call, so which backend it fires on depends on fissioning — the guard is
   `test/operations/test_ident_blacklist.ml`, and its section 3 only has teeth under
   `OCANNL_BACKEND=metal` (C spells these with an `f` suffix, so no C compile can exhibit it).
+  The GPU dialects reserve the C++ keywords on top of the C ones: CUDA, HIP and MSL are all parsed
+  by a C++ front end, so `C_syntax.cpp_keywords` (one shared table, added to all three) covers
+  plausible labels like `class`, `new`, `operator`, `bool` and `this` that plain C leaves free.
+- Routine names are the *other* identifier class reaching the emitted source, and they do not go
+  through the node-name machinery at all — a node's colliding label is forced into `n<id>_<label>`
+  and every local carries a `v<scope>_` / `wred_` / `__rmw_` prefix, but a routine name was emitted
+  verbatim, so `Block_comment ("asm", ...)` produced `void asm(` and the compiler's rejection
+  surfaced as "this is a bug in OCANNL … file an issue with the generated .c file", naming
+  everything except the name that caused it (gh-ocannl-686). `C_syntax.kernel_ident` is the fix and
+  the rule: apply it once at each backend's `compile`/`compile_batch` entry, *before* anything
+  derives a file name or a symbol, so the emitted header, the `dlsym` / `cuModuleGetFunction` /
+  `hipModuleGetFunction` / `new_function_with_name` lookup and the `.c`/`.cu`/`.hip`/`.metal`
+  artifact all name the same thing; `compile_proc` refuses a name its caller did not mangle rather
+  than emitting one. It is the identity on any legal non-reserved identifier, which is what keeps
+  schedule-cache identities and existing goldens from churning. The name a routine is *known* by —
+  the routine record, the `.cd`/`.ll` sources, calibration rows — deliberately keeps the caller's
+  spelling; only the C-family artifacts carry the mangled one. Guard:
+  `test/operations/reserved_routine_names.ml` (executes each colliding routine, not just parses it).
 - `test/config/ocannl_config` pins `backend=cc`, so `dune runtest` never exercises GPU codegen —
   a Metal/CUDA-only rendering bug passes a fully green suite. The bf16 bug above was already
   covered by `test/training/mixed_prec_parity.ml` (its "loss trajectory parity within 0.1" check

@@ -23,9 +23,9 @@ reads_scope_before_set: all unit assertions passed
 {
   float v50_src_el = (float)(0);
   for (int32_t i3 = 5; i3 <= 0; ++i3) {
-    v50_src_el = (float)(0);
+    v50_src_el = (float)(0.0);
   }
-  v50_src_el = (v50_src_el + (float)(1));
+  v50_src_el = (v50_src_el + (float)(1.0));
   out_el[0] = v50_src_el;
 }
 === Hoisted Declare_local write-before-read (no init): ===

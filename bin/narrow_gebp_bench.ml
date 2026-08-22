@@ -188,15 +188,11 @@ let () =
        "packmma", so an unchecked run can present fallback timings as register-tiled ones — the
        column extent below the compute vector width is one way in, but so are a narrow
        [vector_bytes], a mixed operand precision, and [debug_log_from_routines]. Collecting the
-       census only appends to a list, so it does not perturb what is compiled or timed. *)
-    Ir.C_syntax.mma_census := [];
-    Ir.C_syntax.mma_census_enabled := true;
-    let ctx, routine =
-      Exn.protect
-        ~f:(fun () -> Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty)
-        ~finally:(fun () -> Ir.C_syntax.mma_census_enabled := false)
-    in
-    let renderings = List.rev_map !Ir.C_syntax.mma_census ~f:snd in
+       census only appends to a list, so it does not perturb what is compiled or timed. Since
+       gh-ocannl-626 it travels on the compiled routine, and the "did this tensorize" predicate is
+       shared with [schedule_bench] rather than re-derived here. *)
+    let ctx, routine = Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty in
+    let mma = routine.Context.mma in
     let ctx = Context.run ctx routine in
     let _ = Context.get_values ctx mc.Tensor.value in
     let start = Time_now.nanoseconds_since_unix_epoch () in
@@ -260,20 +256,14 @@ let () =
     in
     let spot = Int.min (n + 1) (Array.length values - 1) in
     let secs = Float.of_int63 Int63.(stop - start) /. 1e9 /. Float.of_int repeats in
-    p "%-12s %8.3f ms  %8.2f GFLOP/s  (spot check [%d] %.2f, chk %.10g)%s\n" variant (secs *. 1e3)
+    (* Printed on EVERY timing line, untensorized variants included: an absent suffix is one a
+       table reader does not notice (gh-ocannl-626). *)
+    p "%-12s %8.3f ms  %8.2f GFLOP/s  (spot check [%d] %.2f, chk %.10g)  [%s]\n" variant
+      (secs *. 1e3)
       (flops /. secs /. 1e9)
       spot values.(spot) checksum
-      (match renderings with
-      | [] -> ""
-      | rs ->
-          let counted =
-            List.map (List.dedup_and_sort rs ~compare:Ir.C_syntax.compare_mma_rendering)
-              ~f:(fun r ->
-                let k = List.count rs ~f:(Ir.C_syntax.equal_mma_rendering r) in
-                Printf.sprintf "%s x%d" (Sexp.to_string (Ir.C_syntax.sexp_of_mma_rendering r)) k)
-          in
-          "  [" ^ String.concat ~sep:", " counted ^ "]");
-    (secs, renderings)
+      (Ir.C_syntax.mma_summary_string mma);
+    (secs, mma)
   in
   let ctx0 = Context.auto () in
   let limits = Context.hardware_limits ctx0 in
@@ -322,15 +312,13 @@ let () =
         (t_naive /. t_par);
       (* Count the fallback rather than "anything that is not [Mma_register_tiled]": on the C
          backends this bench targets the two are the same set, but the latter also indicts
-         [Mma_intrinsics], so it would false-warn the moment an arm runs on a GPU. *)
-      let declined =
-        List.count (r_pack @ r_par)
-          ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_scalar_fallback)
-      in
+         [Mma_intrinsics], so it would false-warn the moment an arm runs on a GPU. That predicate
+         now lives once, in [C_syntax] (gh-ocannl-626), so the two benches cannot disagree. *)
+      let all = Ir.C_syntax.merge_mma_summaries [ r_pack; r_par ] in
+      let declined = all.Ir.C_syntax.scalar_fallbacks in
       if declined > 0 then
         p
           "WARNING: %d of %d Tile_mma statements rendered the scalar fallback (see the census\n\
            above) — these are NOT register-tiled timings. Re-run with\n\
            --ocannl_schedule_log_declines=true for the per-rule reason.\n"
-          declined
-          (List.length (r_pack @ r_par))
+          declined all.Ir.C_syntax.statements

@@ -21,6 +21,7 @@ the run log and in a report section, rather than quietly not being run (gh-ocann
 
 import argparse
 import json
+import math
 import os
 import platform
 import re
@@ -255,17 +256,75 @@ def run_cell(label, cmd, env=None, cwd=None):
         print(f"!!! {label} failed (exit {proc.returncode})", flush=True)
         return None
     result = json.loads(line)
-    p50 = result["step_ms"]["p50"]
-    print(f"    p50 {p50:.3f} ms, compile {result['compile_s']:.2f} s", flush=True)
+    print(
+        f"    p50 {num(result['step_ms']['p50'], '.3f')} ms, "
+        f"compile {num(result['compile_s'], '.2f')} s",
+        flush=True,
+    )
     return result
 
 
+def finite(x):
+    """Whether a JSON number from a result line is a real number this report can compare.
+
+    A runner emits `null` for a value it has but cannot express in JSON -- a diverged loss, a time
+    it never measured (gh-ocannl-676) -- so `None` reaching here means "ran, and this number is not
+    a number", not "runner failed". `NaN` is accepted by Python's `json.loads` (its non-standard
+    extension) and so can still arrive from an older result file, and is the same fact.
+    """
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+
+
+def diverged_at(losses):
+    """The index of the first non-finite loss, or None for a trajectory that stayed finite."""
+    return next((i for i, loss in enumerate(losses) if not finite(loss)), None)
+
+
+def finite_prefix(losses):
+    """The steps before the trajectory left the finite numbers.
+
+    Nothing after the first non-finite loss is evidence about the run: a finite value FOLLOWING a
+    NaN is whatever the arithmetic settled on afterwards, not drift the reference can be compared
+    against, and not movement. Both readers of a trajectory take this prefix, so neither can report
+    a number the DIVERGED verdict says is meaningless (gh-ocannl-676).
+    """
+    cut = diverged_at(losses)
+    return losses if cut is None else losses[:cut]
+
+
+def json_safe(obj):
+    """`obj` with every non-finite float replaced by None, recursively.
+
+    `json.dumps` writes `NaN` / `Infinity` for those, which its own loader accepts and no other
+    JSON reader does -- results.jsonl is read by jq, by pandas and by the next session's scripts,
+    so what this sweep writes has to be JSON.
+    """
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [json_safe(v) for v in obj]
+    return obj
+
+
+def num(x, spec):
+    """A number for the report table, or `n/a` when the runner had none to give."""
+    return format(x, spec) if finite(x) else "n/a"
+
+
 def loss_moved(losses):
-    """Whether a loss trajectory has more than floating-point-noise-level variation."""
-    if len(losses) < 2:
+    """Whether a loss trajectory has more than floating-point-noise-level variation.
+
+    Over the prefix before the first non-finite step: a diverged trajectory is not a stationary
+    one, and reporting it as stationary names the wrong defect. A prefix shorter than two steps has
+    nothing to say about movement, and the cell is reported as diverged instead.
+    """
+    prefix = finite_prefix(losses)
+    if len(prefix) < 2:
         return False
-    scale = max(max(abs(loss) for loss in losses), 1e-6)
-    return max(losses) - min(losses) > LOSS_MOVE_MIN_REL * scale
+    scale = max(max(abs(loss) for loss in prefix), 1e-6)
+    return max(prefix) - min(prefix) > LOSS_MOVE_MIN_REL * scale
 
 
 def parity_check(results):
@@ -278,23 +337,41 @@ def parity_check(results):
             (r for r in rs if (r["framework"], r["backend"], r["variant"]) == REFERENCE),
             None,
         )
+        ref_prefix = finite_prefix(ref["losses"]) if ref is not None else []
+        ref_diverged = ref is not None and len(ref_prefix) < len(ref["losses"])
         for r in rs:
             r["parity_loss_moved"] = loss_moved(r["losses"])
-            if ref is None:
+            r["diverged_at"] = diverged_at(r["losses"])
+            if ref is not None:
+                # Compared over the prefix both trajectories reached while still finite, so a
+                # DIVERGED row's parity_max_rel is drift measured BEFORE it went and nothing else.
+                n = min(len(finite_prefix(r["losses"])), len(ref_prefix))
+                if n:
+                    r["parity_max_rel"] = max(
+                        abs(a - b) / max(abs(b), 1e-6)
+                        for a, b in zip(r["losses"][:n], ref["losses"][:n])
+                    )
+            if r["diverged_at"] is not None:
+                # The cell ran and its training blew up: a gate failure naming its cause, not a
+                # missing cell and not a stationary one (gh-ocannl-676). Parity is meaningless past
+                # the divergence, so what is reported is where it happened -- and, when there is a
+                # finite prefix shared with the reference, how far it had drifted before it did.
+                r["parity"] = "DIVERGED"
+            elif ref is None or ref_diverged:
+                # A diverged reference is no reference: comparing against a trajectory that blew up
+                # would report the reference's defect as every other cell's.
                 r["parity"] = "NO-REF"
-                continue
-            if r is ref:
+            elif r is ref:
                 r["parity"] = "REF"
                 r["parity_max_rel"] = 0.0
-                continue
-            n = min(len(r["losses"]), len(ref["losses"]))
-            max_rel = max(
-                abs(a - b) / max(abs(b), 1e-6)
-                for a, b in zip(r["losses"][:n], ref["losses"][:n])
-            )
-            r["parity_max_rel"] = max_rel
-            tol = parity_tol(r.get("precision", "f32"))
-            r["parity"] = "PASS" if max_rel < tol and r["parity_loss_moved"] else "FAIL"
+            else:
+                max_rel = r.get("parity_max_rel")
+                tol = parity_tol(r.get("precision", "f32"))
+                r["parity"] = (
+                    "PASS"
+                    if max_rel is not None and max_rel < tol and r["parity_loss_moved"]
+                    else "FAIL"
+                )
 
 
 def check_fixture_digests(fixtures, digests_path=None, allow_unpinned=False):
@@ -345,7 +422,11 @@ def search_provenance(result):
 
     The `tune` object's totals are the evidence separating the second case from the third: an
     OCANNL cell that tuned anything reports them, and without them there is nothing to tell those
-    two apart with, so the answer is UNKNOWN rather than a guess.
+    two apart with, so the answer is UNKNOWN rather than a guess. Since gh-ocannl-677 the runner
+    states the third case outright — `no_searches` counts the arms whose `Autotune` outcome was
+    `search-disabled` or `pre-search-failure` — so it is read directly rather than recovered from
+    two counters that are both zero. Older artifacts carry no such key, and the zero-zero reading
+    stays for them.
     """
     searched = result.get("searched")
     if searched is None:
@@ -355,7 +436,108 @@ def search_provenance(result):
     tune = result.get("tune")
     if not tune:
         return "UNKNOWN"
+    if "no_searches" in tune:
+        return "REPLAY" if tune.get("replays") else "NO-SEARCH"
     return "NO-SEARCH" if not tune.get("searches") and not tune.get("replays") else "REPLAY"
+
+
+# gh-ocannl-626: what the timed artifact's emission actually did about tensor cores, for the
+# report's `mma` column. A cell whose shipped arm carries a `Tensorize` but whose kernels rendered
+# the lane-0 scalar fallback measured scalar code under a tensorized label, and every perf number
+# quoted from that row inherits the error — so those two states are shouted, not spelled quietly.
+TENSORIZATION_MARK = {
+    "TENSORIZED": "tensorized",
+    "SCALAR-FALLBACK": "**SCALAR FALLBACK**",
+    "NOT-EMITTED": "**NO MMA EMITTED**",
+    "NOT-REQUESTED": "—",
+    "UNKNOWN": "?",
+}
+# The two verdicts that mean "this row's tensorized label is not what ran".
+TENSORIZATION_MISMATCH = ("SCALAR-FALLBACK", "NOT-EMITTED")
+
+
+def shipped_arm(result):
+    """The `tune` arm whose artifact produced this cell's step times, or None.
+
+    `Train.tune_placements` runs several searches and ships one of them, so reading any arm — or
+    the fastest one — would describe a schedule that was discarded (gh-ocannl-638). The runner
+    states which arm shipped; that is the only one whose emission the timings measured.
+    """
+    tune = result.get("tune")
+    if not tune:
+        return None
+    shipped = tune.get("shipped")
+    for arm in tune.get("arms") or []:
+        if arm.get("arm") == shipped:
+            return arm
+    return None
+
+
+def tensorization_verdict(result):
+    """Did this cell's timed artifact actually tensorize: the schedule's ask against the emission.
+
+    Four answers, not two, because the interesting cases are the disagreements (gh-ocannl-626):
+    TENSORIZED (asked or not, at least one tensor-core / SIMD-tile emission happened),
+    SCALAR-FALLBACK (`Tile_mma` statements were emitted and every one of them declined to the
+    lane-0 scalar path), NOT-EMITTED (the schedule carries a `Tensorize` and codegen emitted no
+    `Tile_mma` at all), NOT-REQUESTED (nothing about this artifact claims tensor cores — not a
+    defect, and the only one of the four that is not worth a mark).
+
+    The emission half comes from `tune.shipped_mma`, the census of the routine whose steps were
+    TIMED, and not from the arm named as shipped. A crowned arm candidate is not always the shipped
+    artifact: a gh-555 flip refinement that wins ships under `shipped: "flip"` and is not an arm at
+    all, and on the `timing_ctx` path the tuner recompiles the winner in the production context and
+    falls back to the untuned default when that replay is rejected — in both cases the arm
+    describes a schedule that was discarded, and reading it could claim `tensorized` over a routine
+    that emitted no mma.
+
+    The `tensorized` half — did the schedule ASK — has no such per-routine record, so it is still
+    read off the shipped arm and only refines a `not-requested` emission into NOT-EMITTED. Where no
+    arm can be identified (the flip case) that refinement is unavailable and the verdict stays
+    NOT-REQUESTED: the artifact demonstrably emitted no `Tile_mma`, which is the fact the column
+    reports; what is lost is at most the shout, never a false `tensorized`.
+
+    None for a cell with no tune object at all — an eager framework, an untuned default — which has
+    no census to consult; UNKNOWN for a runner predating either field, or one that reported arms
+    without recording the shipped census, so a missing census never reads as a tensorized one.
+    """
+    tune = result.get("tune")
+    if not tune:
+        return None
+    arm = shipped_arm(result) or {}
+    if "shipped_mma" in tune:
+        shipped = tune["shipped_mma"]
+        if not shipped:
+            # The key is there and empty: the harness reported arms and recorded no census. Not a
+            # finding either way, and emphatically not a passing reading.
+            return "UNKNOWN"
+        label = shipped.get("tensorization")
+    else:
+        # An artifact predating `shipped_mma`. The arm is all there is; it is right whenever the
+        # crowned candidate WAS the shipped artifact, which is the common case.
+        if not arm:
+            return None
+        label = arm.get("tensorization")
+    if label == "tensorized":
+        return "TENSORIZED"
+    if label == "scalar-fallback":
+        return "SCALAR-FALLBACK"
+    if label == "not-requested":
+        return "NOT-EMITTED" if arm.get("tensorized") else "NOT-REQUESTED"
+    return "UNKNOWN"
+
+
+def tensorization_check(results):
+    """Annotate each tuned cell with its `tensorization` verdict; return the mismatched ones."""
+    mismatched = []
+    for r in results:
+        verdict = tensorization_verdict(r)
+        if verdict is None:
+            continue
+        r["tensorization"] = verdict
+        if verdict in TENSORIZATION_MISMATCH:
+            mismatched.append(r)
+    return mismatched
 
 
 # How a two-pass cell's own verdict maps to the report's `pass` column: only a searching process
@@ -415,7 +597,10 @@ def report(results, out_dir, unavailable=()):
     out_dir.mkdir(parents=True, exist_ok=True)
     with open(out_dir / "results.jsonl", "w") as f:
         for r in results:
-            f.write(json.dumps(r) + "\n")
+            # allow_nan=False so a non-finite value this sweep computed itself cannot slip out as
+            # `NaN`: json_safe has already mapped the ones it expects, and anything left is a bug
+            # worth raising over rather than writing an unreadable file (gh-ocannl-676).
+            f.write(json.dumps(json_safe(r), allow_nan=False) + "\n")
     lines = []
     commit = subprocess.run(
         ["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, capture_output=True, text=True
@@ -443,7 +628,10 @@ def report(results, out_dir, unavailable=()):
         # against the others computing in the same format, and a reduced-precision block reads as
         # its own group rather than being interleaved by a speed it owes to its storage format.
         rows.sort(
-            key=lambda r: (precision_rank(r.get("precision", "f32")), r["step_ms"]["p50"])
+            key=lambda r: (
+                precision_rank(r.get("precision", "f32")),
+                r["step_ms"]["p50"] if finite(r["step_ms"]["p50"]) else math.inf,
+            )
         )
         precisions = {r.get("precision", "f32") for r in rows}
         if len(precisions) > 1:
@@ -469,10 +657,26 @@ def report(results, out_dir, unavailable=()):
                 "came from: `(cached)` for one that replayed the schedule cache, `(no search)` "
                 "for one that searched nothing at all.\n"
             )
+        # gh-ocannl-626: only cells that tuned something have an emission census to report.
+        with_tensorization = any(r.get("tensorization") for r in rows)
+        if with_tensorization:
+            lines.append(
+                "`mma` says what the timed artifact's kernels actually emitted, which is not what "
+                "its schedule asked for: `tensorized` is at least one tensor-core / SIMD-tile "
+                "emission, **`SCALAR FALLBACK`** is a schedule carrying a `Tensorize` whose every "
+                "`Tile_mma` declined at codegen to the lane-0 scalar loop, **`NO MMA EMITTED`** is "
+                "one that carries a `Tensorize` and emitted no `Tile_mma` at all, and `—` is an "
+                "artifact that never asked for tensor cores. The two shouted verdicts mean the row "
+                "is a scalar timing: quoting it as a tensor-core number is the error this column "
+                "exists to stop.\n"
+            )
         header = "| framework | backend | variant | precision | step p50 ms | p10 | p90 | queued ms | compile s |"
         rule = "|---|---|---|---|---|---|---|---|---|"
         if with_provenance:
             header += " pass |"
+            rule += "---|"
+        if with_tensorization:
+            header += " mma |"
             rule += "---|"
         header += " parity |"
         rule += "---|"
@@ -484,24 +688,30 @@ def report(results, out_dir, unavailable=()):
         for r in rows:
             s = r["step_ms"]
             parity = r["parity"]
-            if parity not in ("REF", "NO-REF"):
+            if parity not in ("REF", "NO-REF") and finite(r.get("parity_max_rel")):
                 parity += f" ({r['parity_max_rel']:.1e})"
-            if not r["parity_loss_moved"]:
+            if r.get("diverged_at") is not None:
+                parity += f" (loss non-finite from step {r['diverged_at']})"
+            elif not r["parity_loss_moved"]:
                 parity += " (loss stationary)"
             tokens = ""
             if with_tokens:
                 tps = r.get("tokens_per_step")
-                tokens = f" {tps * 1000 / s['p50']:,.0f} |" if tps else " |"
-            compile_s = f"{r['compile_s']:.2f}"
+                tokens = (
+                    f" {tps * 1000 / s['p50']:,.0f} |" if tps and finite(s["p50"]) else " |"
+                )
+            compile_s = num(r["compile_s"], ".2f")
             compile_s += COMPILE_S_NOTE.get(r.get("search_pass"), "")
             provenance = ""
             if with_provenance:
                 provenance = " %s |" % PROVENANCE_MARK.get(r.get("provenance"), "—")
+            if with_tensorization:
+                provenance += " %s |" % TENSORIZATION_MARK.get(r.get("tensorization"), "—")
             lines.append(
                 f"| {r['framework']} | {r['backend']} | {r['variant']} "
                 f"| {r.get('precision', 'f32')} "
-                f"| {s['p50']:.3f} | {s['p10']:.3f} | {s['p90']:.3f} "
-                f"| {r['queued_step_ms']:.3f} | {compile_s} |{provenance} {parity} |{tokens}"
+                f"| {num(s['p50'], '.3f')} | {num(s['p10'], '.3f')} | {num(s['p90'], '.3f')} "
+                f"| {num(r['queued_step_ms'], '.3f')} | {compile_s} |{provenance} {parity} |{tokens}"
             )
     if unavailable:
         # Stated where the matrix is read: a cell missing because the workload cannot express it
@@ -641,9 +851,11 @@ def main():
             if override:
                 r.update(override)
             results.append(r)
-            # Stream each cell as it lands so an interrupted run keeps its results.
+            # Stream each cell as it lands so an interrupted run keeps its results. Through
+            # json_safe like the final file: an interrupted run's rows are read by the same
+            # readers, and a diverged cell is exactly the one an operator interrupts around.
             with open(partial, "a") as f:
-                f.write(json.dumps(r) + "\n")
+                f.write(json.dumps(json_safe(r), allow_nan=False) + "\n")
         else:
             failures.append(label)
         print(f"    cell took {time.monotonic() - t0:.0f}s", flush=True)
@@ -736,6 +948,7 @@ def main():
 
     parity_check(results)
     provenance_violations = provenance_check(results)
+    tensorization_mismatches = tensorization_check(results)
     report(results, HERE / "results", unavailable)
     ok = True
     if unavailable:
@@ -773,11 +986,44 @@ def main():
             f"from a process that searched: {labels}",
             flush=True,
         )
+    if tensorization_mismatches:
+        # Not a gate: a declined `Tile_mma` still computes the right thing, and at some extents
+        # declining is the correct decision. It is announced because the number is honest only
+        # about a scalar kernel, and the row's variant name says otherwise (gh-ocannl-626) — the
+        # failure mode is a reader quoting it as a tensor-core measurement.
+        labels = ", ".join(
+            f"{r['workload']} {r['backend']}/"
+            f"{cell_name(r['variant'], r.get('precision', 'f32'))} ({r['tensorization']})"
+            for r in tensorization_mismatches
+        )
+        print(
+            f"TENSORIZATION NOTICE: {len(tensorization_mismatches)} tuned cell(s) shipped a "
+            f"schedule asking for tensor cores whose kernels did not emit them: {labels}",
+            flush=True,
+        )
     failed = [r for r in results if r["parity"] == "FAIL"]
     if failed:
         ok = False
         print(f"PARITY GATE: {len(failed)} cell(s) FAILED", flush=True)
-    stationary = [r for r in results if not r["parity_loss_moved"]]
+    diverged = [r for r in results if r["parity"] == "DIVERGED"]
+    if diverged:
+        # A cell that ran and blew up, reported as such (gh-ocannl-676). It is a gate failure like
+        # any other parity failure, named separately because the finding is different: nothing is
+        # wrong with the runner, and the trajectory that shows it is in results.jsonl.
+        ok = False
+        labels = ", ".join(
+            f"{r['workload']} {r['framework']}/{r['backend']}/"
+            f"{cell_name(r['variant'], r.get('precision', 'f32'))}"
+            f" (from step {r['diverged_at']})"
+            for r in diverged
+        )
+        print(
+            f"PARITY GATE: {len(diverged)} cell(s) DIVERGED (non-finite loss): {labels}",
+            flush=True,
+        )
+    stationary = [
+        r for r in results if not r["parity_loss_moved"] and r["diverged_at"] is None
+    ]
     if stationary:
         ok = False
         labels = ", ".join(

@@ -179,21 +179,18 @@ let () =
      deliberately divisible by tf32's k=8 tile but not the f16/bf16 k=16 tile. The transposed-A leg
      covers the col-major fragment form retained by [wmma_combo]. --- *)
   let compile_mma_with_census ?(inspect = fun (_ : LL.optimized) -> ()) ~name tensor =
-    Ir.C_syntax.mma_census := [];
-    Ir.C_syntax.mma_census_enabled := true;
     let ctx, routine =
-      Exn.protect
-        ~f:(fun () ->
-          let transform opt =
-            inspect opt;
-            Sched.apply (mma_schedule ~out:tensor.Tensor.value opt) opt
-          in
-          Context.compile ~lowered_transform:transform (Context.auto ())
-            (named name (Train.forward tensor))
-            Ir.Indexing.Empty)
-        ~finally:(fun () -> Ir.C_syntax.mma_census_enabled := false)
+      let transform opt =
+        inspect opt;
+        Sched.apply (mma_schedule ~out:tensor.Tensor.value opt) opt
+      in
+      Context.compile ~lowered_transform:transform (Context.auto ())
+        (named name (Train.forward tensor))
+        Ir.Indexing.Empty
     in
-    let census = List.rev_map !Ir.C_syntax.mma_census ~f:snd in
+    (* The census is a field of the compiled routine since gh-ocannl-626, not a global this call
+       site brackets. *)
+    let census = List.map routine.Context.mma.Ir.C_syntax.renderings ~f:snd in
     let ctx = Context.run ctx routine in
     (Context.get_values ctx tensor.Tensor.value, census)
   in

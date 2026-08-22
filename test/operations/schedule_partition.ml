@@ -538,7 +538,12 @@ let () =
           idcs;
           llsc =
             LL.Local_scope
-              { id = LL.get_scope tn; body = LL.Seq (guarded 3, guarded 6); orig_indices = idcs };
+              {
+                id = LL.get_scope tn;
+                body = LL.Seq (guarded 3, guarded 6);
+                orig_indices = idcs;
+                mint = LL.Schedule_minted;
+              };
           debug = "";
         }
     in

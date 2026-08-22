@@ -248,9 +248,11 @@ files.
   follows the DEGRADED width, i.e. the 32-byte floor, not the configured one), but a narrow
   `vector_bytes`,
   mixed operand compute precisions, transposed-B storage, and `debug_log_from_routines` all decline
-  too. Check `C_syntax.mma_census` (flip `mma_census_enabled` around the compile) rather than
-  trusting the label; `bin/narrow_gebp_bench` prints the census per line and warns when any
-  statement declined, and `schedule_log_declines=true` gives the per-rule reason. This is the same
+  too. Check the compiled routine's `Context.routine.mma.tensorization` (gh-ocannl-626 — the
+  census travels with the routine; do not bracket `mma_census_enabled` by hand) rather than
+  trusting the label; `bin/narrow_gebp_bench` and `bin/schedule_bench` print it on every timing
+  line and warn when any statement declined, and `schedule_log_declines=true` gives the per-rule
+  reason. This is the same
   "timed is not tensorized" hazard the seeding note above raises, seen from the bench side.
 - `bin/narrow_gebp_bench` takes its blocking factors as arguments (`[bm] [bk]` positionally, or
   `--bm=`/`--bk=`), defaulting to 64/256. The packed variants need `n mod bm = 0` and `n mod bk = 0`

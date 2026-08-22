@@ -333,14 +333,46 @@ than the driver (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION` at module load), run it wi
   graph (placement A/B) and keeps the faster one.
 - A tuned OCANNL cell's result line carries a `tune` object (gh-ocannl-546): `shipped` names the
   arm whose artifact was kept, and each arm reports its crowned candidate's label, whether that
-  schedule tensorizes, how many of its `Tile_mma` statements rendered as the lane-0 scalar
-  fallback, the seeded/timed tensorized counts, and the best *timed* tensorized candidate's time.
+  schedule tensorizes, how many of its `Tile_mma` statements were emitted and how many of those
+  rendered as the lane-0 scalar fallback, the seeded/timed tensorized counts, and the best *timed*
+  tensorized candidate's time.
   A tensorized win in the arm that loses the A/B reaches no artifact and shows up in no step time,
   so without this the sweep can only find it by grepping `OCANNL_AUTOTUNE_LOG` output that a
-  successful cell discards. Each arm also states whether it searched or replayed a cached winner
-  (`cache_hit`), which is what makes a *mixed* cell readable — one arm cached, the other searched
-  because its half of the A/B never was. Read `mma_best_ms` against `best_ms` for the margin: tensorization
+  successful cell discards. Each arm also names its outcome `state` — `searched`,
+  `search-died`, `cache-replay`, `search-disabled` or `pre-search-failure`, the `Autotune.outcome`
+  the call reported (gh-ocannl-677) — which is what makes a *mixed* cell readable: one arm cached,
+  the other searched because its half of the A/B never was. Read `mma_best_ms` against `best_ms` for the margin: tensorization
   losing by 1% and by 40% are different findings.
+- **`tensorized` is what the schedule asked for; `tensorization` is what the emission did**
+  (gh-ocannl-626). Each arm carries both: `tensorization` is `"tensorized"`, `"scalar-fallback"`
+  (every emitted `Tile_mma` declined to the lane-0 scalar loop) or `"not-requested"` (codegen
+  emitted no `Tile_mma` at all), read off the compiled routine's census rather than re-derived by
+  a harness, and `null` when there was no crowned candidate to consult — so an arm that consulted
+  no census can never read as tensorized. The `tune` object additionally carries `shipped_mma` —
+  the census of the routine whose steps were TIMED — and that is what `orchestrate.py` reads, not
+  the arm named as shipped: a gh-555 flip refinement that wins ships under `shipped: "flip"` and is
+  not an arm at all, and on the `timing_ctx` path the tuner recompiles the winner in the production
+  context and falls back to the untuned default when that replay is rejected, so in both cases the
+  arm describes a schedule that was discarded. A `Tile_mma` declines for a column extent below the
+  compute vector width, a narrow `vector_bytes`, mixed operand precisions, transposed-B storage or
+  `debug_log_from_routines`, and the resulting scalar kernel compiles, runs and times perfectly
+  well under an `mma-*` label — so `tensorized: true` with any other `tensorization` means the
+  row's number is a *scalar* timing. `orchestrate.py` reads that pair into the
+  report's `mma` column (**`SCALAR FALLBACK`** / **`NO MMA EMITTED`** are shouted; `tensorized`
+  and `—` are not) and prints a `TENSORIZATION NOTICE` naming the mismatched cells. It is a notice
+  rather than a gate: declining is sometimes the correct codegen decision, and the defect is
+  quoting the row as a tensor-core measurement, not the decline itself. The per-segment table
+  `bench_*_diag` prints carries the same label per kernel.
+- A non-finite number never reaches a result line: a diverged loss, a time that was never
+  measured, an arm that timed nothing are emitted as JSON `null` (gh-ocannl-676). OCaml's `%g`
+  spells those `nan` / `inf` / `-inf` and Python's `json.dumps` writes `NaN`, none of which is
+  JSON — so a diverged cell, the exact thing the parity gate exists to catch, used to be reported
+  as a *broken runner* with its loss trajectory discarded after the whole measurement had been
+  paid for. `test/operations/bench_result_line` pins the OCANNL line by re-parsing it with
+  fabricated values, and `test_orchestrate.py` re-parses that golden with the reader that has to
+  accept it. A `null` in a loss vector is read as **DIVERGED**: a parity-gate failure naming the
+  step the trajectory left the finite numbers, with the trajectory itself kept in
+  `results/results.jsonl` — not a runner failure, and not a stationary loss.
 - tinygrad's loss must be realized before `opt.step()` (in-place assigns; a later realize
   would recompute the loss from updated weights). tinygrad JIT capture happens during the
   first parity steps; loss values are unaffected.
@@ -355,12 +387,14 @@ than the driver (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION` at module load), run it wi
   whose `compile_s` should reflect a from-scratch search.
 
   **The result line says which pass produced it** (gh-ocannl-644): `"searched": true|false` is
-  whether *this process* ran a search, and the `tune` object breaks it down per arm (`searched`
-  and `cache_hit`, which are not complements) and in total (`searches` / `replays`, counting the
-  gh-555 flip refinements too, which are searches this process ran even though they are not
-  arms). A tuned cell under `autotune_search=false` — the `reproducible` profile — reports zero
-  of both: it shipped the untuned default, having neither searched nor replayed, and the report
-  says `no search` rather than crediting the row with a tuned artifact it does not have. `orchestrate.py` gates on
+  whether *this process* ran a search, and the `tune` object breaks it down per arm (each arm's
+  `state`) and in total (`searches` / `replays` / `no_searches`, counting the gh-555 flip
+  refinements too, which are searches this process ran even though they are not arms). A tuned cell
+  under `autotune_search=false` — the `reproducible` profile — lands in `no_searches`: it shipped
+  the untuned default, having neither searched nor replayed, and the report says `no search` rather
+  than crediting the row with a tuned artifact it does not have. That third case is *stated* by the
+  runner rather than derived from two counters that are both zero (gh-ocannl-677); the legacy
+  per-arm `searched` / `cache_hit` booleans stay in the wire format for older readers. `orchestrate.py` gates on
   it — a tuned cell whose step times came from a searching process fails the **PROVENANCE
   GATE** and is marked `SEARCH PASS` in the report's `pass` column — and stamps the search
   pass's own verdict as `search_pass`, so a `compile_s` carried over from a process that

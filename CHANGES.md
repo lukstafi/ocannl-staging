@@ -2,6 +2,33 @@
 
 ### Changed
 
+- **A "tensorized" timing can no longer be a scalar-fallback timing** (gh-ocannl-626). The
+  `Tile_mma` rendering census was a pair of global refs each consumer bracketed by hand (six copies
+  of the same five-line `Exn.protect`), so the default for any new timing harness was to report a
+  variant name unrelated to what rendered: a `Tile_mma` whose emission preconditions fail renders
+  the lane-0 scalar fallback, which compiles, runs and times fine under an `mma-*` label. It is now
+  derived once, inside `Context.compile`, and carried on the routine as
+  `Context.routine.mma : Ir.C_syntax.mma_summary`. The label is a three-way
+  `Ir.C_syntax.tensorization` — `Tensorized` (at least one tensor-core / SIMD-register-tile
+  emission), `Scalar_fallback` (statements emitted, every one declined), `Not_requested` (no
+  `Tile_mma` emitted) — with the statement and fallback counts beside it, and
+  `C_syntax.with_census` is the (additively nesting) bracket that replaces the six copies.
+
+  `Autotune.report` gains `best_tensorization : tensorization option`, `None` exactly when there is
+  no crowned candidate to consult, so a report that consulted no census cannot read as tensorized;
+  read against the existing `best_tensorized` it separates what the schedule ASKED for from what
+  the emission DELIVERED. The label is printed where timings are reported: the `autotune_log` notes,
+  `Train.tune_placements`' arm lines, every timing line of `bin/schedule_bench` and
+  `bin/narrow_gebp_bench` (through the now-shared `C_syntax.mma_summary_string`, which also ends
+  the two benches' disagreement about the "did this tensorize" predicate), the benchmark harness's
+  per-kernel segment table, and the result line's `tune` arms as `tensorization` +
+  `mma_statements`, plus `shipped_mma`: the census of the routine whose steps were timed, which is
+  what `orchestrate.py` reads into the report's `mma` column (`SCALAR FALLBACK` / `NO MMA EMITTED`
+  shouted, plus a `TENSORIZATION NOTICE`). Not the arm named as shipped — a crowned arm candidate
+  is not always the shipped artifact, since a flip refinement ships under `shipped: "flip"` and is
+  not an arm at all, and the `timing_ctx` path can fall back to the untuned default after crowning
+  a winner.
+
 - **One environment spelling, and no silent demotion** (gh-ocannl-652): a configuration key is read
   from `OCANNL_<KEY>` and from nothing else. The lowercase `ocannl_<key>`, which `read_env_var`
   used to consult FIRST, is gone — no caller in the repository spelled a variable that way and no
@@ -35,6 +62,46 @@
   to keep on the way to the abort.
 
 ### Added
+
+- **The pre-driver launch gate covers every hardware dimension, workgroup included**
+  (gh-ocannl-679). `max_threads_per_workgroup` caps the thread *product* of a workgroup and nothing
+  capped its dimensions individually — but CUDA's `maxThreadsDim` is `(1024, 1024, 64)`, so a
+  `2 x 2 x 128` threadgroup has a perfectly legal 512-thread product, passes every check, compiles,
+  and then dies at the driver with an opaque invalid-configuration error. `Workgroup` slots cap at
+  3 and the innermost binds `.x`, so the outermost annotated loop's extent lands on `.z` directly;
+  no fold and no exotic schedule is needed to reach it. `Backend_intf.hardware_limits` therefore
+  gains `max_workgroup_dims : (int * int * int) option`, the per-dimension caps on the block's
+  `.x`/`.y`/`.z` — all three rather than one shared bound (as `max_grid_yz` is) because here the
+  dimensions genuinely differ, and an immutable tuple because the GPU backends memoize this record
+  and `Context.hardware_limits` hands it out directly, so a single mutable cell in it would let a
+  caller write through into the process-wide device limits. CUDA queries `max_block_dim_{x,y,z}`, HIP the `max_threads_dim` triple, Metal
+  all three components of `maxThreadsPerThreadgroup` (it read `width` alone before); the C backends
+  stay `None`. Three typed causes join the two grid ones —
+  `Schedule_outcome.Workgroup_{x,y,z}_extent` — because the rejection key is what an autotune search
+  groups declines under and each dimension shrinks by its own knob. `Schedule.default_gpu` and
+  `Schedule.zero_expansion` clamp their block size against the `.x` entry as well as the product,
+  so the gate is a backstop rather than the first line of defence.
+
+  `Schedule.check_hardware_limits{,_classified}` now enumerates the launch geometry from **one
+  table, one row per hardware dimension**, instead of a hand-written `Option.iter` per bound: each
+  bound used to be a copy of its neighbour, which is how `gridDim.y` came to be ungated for a
+  release (gh-ocannl-643) and how the workgroup's dimensions came to be ungated entirely. Five
+  rows, not six — `grid.(0)` is 2^31-scale wherever hardware axes bind, so its absence is stated
+  rather than implied.
+
+- **`bin/device_props`, a supported readback for what the gates compare against** (gh-ocannl-684).
+  `Backend_intf.static_properties` (the per-device props dump) and `hardware_limits` (the derived
+  caps the schedule layer gates against) had no caller anywhere in the repository, so reading a
+  device's queried limits back meant adding a throwaway executable to the tree and deleting it
+  again — paid twice already, and about to be paid a third time verifying gh-ocannl-679's caps on
+  hardware. The new executable prints both for the selected backend, flattened to one
+  `path = value` line per fact so the output greps and diffs, and it compiles no routine (both
+  functions are deliberately `unit ->` so they can run before any driver work). The two surfaces
+  are printed together because they are not redundant: on HIP `max_grid_yz` is a device query, on
+  CUDA a hardcoded architectural constant, on Metal `None` — a dump of the raw props does not tell
+  you what the gate uses, and a dump of `hardware_limits` does not tell you whether the underlying
+  query answered. `Context.static_properties` exposes the first of them the way
+  `Context.hardware_limits` already exposed the second.
 
 - **A computation you can name is a computation you can tune** (gh-ocannl-669). `Autotune.tune`
   takes `?name`, exactly as `Context.compile` does, and passes it to every compile of one search:

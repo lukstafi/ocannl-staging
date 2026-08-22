@@ -96,6 +96,98 @@ let test_mapped_at_offset () =
   Stdlib.Sys.remove path;
   Verdict.pass_fail "mapped at unaligned offset" (Nd.payloads_equal nd1 nd2)
 
+(* The mappable-or-decode act itself (gh-ocannl-667). Both readers -- checkpoints and safetensors
+   -- ingest through [Nd.ingest_payload], and each can only A/B whole files: a checkpoint load
+   takes [~mmap:false] for all of its payloads or none, and safetensors offers no way to decline a
+   mapping at all. What is checked here is per payload, of one file whose layout takes BOTH paths:
+   the reported path, the counter it bumped, and -- for a payload that is mappable -- that
+   declining the mapping decodes the same bytes into an equal array.
+
+   The layout is packed on purpose, which is where the mixture comes from: a one-byte payload
+   ahead of a double leaves that double at an offset no multiple of 8, and it decodes. *)
+let test_ingestion () =
+  let path = Stdlib.Filename.temp_file "ndarray_ingest" ".bin" in
+  let flat prec ~debug n ~f =
+    let nd = Nd.create_array ~debug prec ~dims:[| n |] ~padding:None in
+    for i = 0 to n - 1 do
+      Nd.set_from_float nd [| i |] (f i)
+    done;
+    nd
+  in
+  let a = flat Ops.byte ~debug:"a" 8 ~f:(fun i -> Float.of_int (i + 1)) in
+  let b = flat Ops.double ~debug:"b" 4 ~f:(fun i -> (Float.of_int i *. 1.5) +. 0.25) in
+  let c = flat Ops.byte ~debug:"c" 1 ~f:(fun _ -> 9.0) in
+  let d = flat Ops.double ~debug:"d" 4 ~f:(fun i -> (Float.of_int i *. -2.5) -. 0.125) in
+  let padding_arr = [| Ops.{ left = 1; right = 1 }; Ops.{ left = 0; right = 2 } |] in
+  let e =
+    Nd.create_array ~debug:"e" Ops.single ~dims:[| 4; 5 |] ~padding:(Some (padding_arr, 0.0))
+  in
+  for i = 0 to 1 do
+    for j = 0 to 2 do
+      Nd.set_from_float ~padding:padding_arr e [| i; j |] (Float.of_int ((i * 3) + j + 1))
+    done
+  done;
+  let oc = Stdlib.open_out_bin path in
+  (* Sequential lets, not `and`: the offsets are the channel positions, so the order matters. *)
+  let put ?padding nd =
+    let at = Stdlib.pos_out oc in
+    let n = Nd.write_payload_to_channel ?padding nd oc in
+    (at, n)
+  in
+  let a_at = put a in
+  let b_at = put b in
+  let c_at = put c in
+  let d_at = put d in
+  let e_at = put ~padding:padding_arr e in
+  Stdlib.close_out oc;
+  let ic = Stdlib.open_in_bin path in
+  let ingest ?padding ?mmap ~debug prec ~dims (byte_offset, nbytes) =
+    let m0, d0 = Nd.ingestion_counts () in
+    let nd, taken =
+      Nd.ingest_payload ?padding ?mmap ~debug prec ~dims ~byte_offset ~nbytes ic
+    in
+    let m1, d1 = Nd.ingestion_counts () in
+    let counted =
+      match taken with
+      | Nd.Mapped -> m1 - m0 = 1 && d1 - d0 = 0
+      | Nd.Decoded -> d1 - d0 = 1 && m1 - m0 = 0
+    in
+    (nd, taken, counted)
+  in
+  let a_nd, a_path, a_counted = ingest ~debug:"a" Ops.byte ~dims:[| 8 |] a_at in
+  let b_nd, b_path, b_counted = ingest ~debug:"b" Ops.double ~dims:[| 4 |] b_at in
+  let c_nd, c_path, c_counted = ingest ~debug:"c" Ops.byte ~dims:[| 1 |] c_at in
+  let d_nd, d_path, d_counted = ingest ~debug:"d" Ops.double ~dims:[| 4 |] d_at in
+  let e_nd, e_path, e_counted =
+    ingest ~padding:(padding_arr, 0.0) ~debug:"e" Ops.single ~dims:[| 4; 5 |] e_at
+  in
+  (* The same payload, same offset, the other act. *)
+  let b_dec, b_dec_path, b_dec_counted =
+    ingest ~mmap:false ~debug:"b_dec" Ops.double ~dims:[| 4 |] b_at
+  in
+  Stdlib.close_in ic;
+  (* The mappings outlive the descriptor they were taken from, and the file itself. *)
+  Stdlib.Sys.remove path;
+  let mapped = function Nd.Mapped -> true | Nd.Decoded -> false in
+  let name_of p = if mapped p then "mapped" else "decoded" in
+  Stdio.printf "  packed layout: a@%d b@%d c@%d d@%d e@%d\n" (fst a_at) (fst b_at) (fst c_at)
+    (fst d_at) (fst e_at);
+  Stdio.printf "  paths: a %s, b %s, c %s, d %s, e %s\n" (name_of a_path) (name_of b_path)
+    (name_of c_path) (name_of d_path) (name_of e_path);
+  Verdict.p "every ingestion bumps exactly the counter for the path it reports"
+    (a_counted && b_counted && c_counted && d_counted && e_counted && b_dec_counted);
+  Verdict.p "an element-aligned unpadded payload of a packed file is mapped"
+    (mapped a_path && mapped b_path && mapped c_path);
+  Verdict.p "a payload at an offset its element size does not divide is decoded"
+    (not (mapped d_path));
+  Verdict.p "a padded payload is decoded, whatever its offset" (not (mapped e_path));
+  Verdict.p "declining the mapping decodes the same bytes into an equal array"
+    ((not (mapped b_dec_path)) && Nd.payloads_equal b_nd b_dec);
+  Verdict.p "both paths reproduce the payloads they ingested"
+    (Nd.payloads_equal a a_nd && Nd.payloads_equal b b_nd && Nd.payloads_equal c c_nd
+   && Nd.payloads_equal d d_nd
+    && Nd.payloads_equal ~padding:padding_arr e e_nd)
+
 let () =
   (* Test each precision type *)
   test_round_trip_prec "Byte" Ops.byte (fun nd idx i ->
@@ -125,4 +217,5 @@ let () =
       Nd.set_from_float nd idx (Float.of_int ((i * 7) + 3)));
   (* Test padded tensor *)
   test_padded ();
-  test_mapped_at_offset ()
+  test_mapped_at_offset ();
+  test_ingestion ()

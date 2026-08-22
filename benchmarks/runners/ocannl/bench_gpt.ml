@@ -265,6 +265,9 @@ let () =
         in
         (ctx, H.Plain routine)
   in
+  (* What the timed artifact emitted, off the routines themselves (gh-ocannl-626): a flip
+     refinement or a timing_ctx replay fallback ships something no arm report describes. *)
+  H.collect_shipped arms routines;
   let compile_s = Unix.gettimeofday () -. t0 in
   let ctx = if tune then H.inject ctx st batch_loss mapping else ctx in
   (* The scaled training legs thread the context (Loss_scaler.update overwrites the scale tensors),

@@ -45,7 +45,8 @@ val load :
     payload stores only the logical region and has to be scattered into the padded buffer, and
     payloads whose file offset is not a multiple of their element size, which a checkpoint written
     with a small [?alignment] can produce. The mapping outlives the call, so the values are the same
-    either way but the pages are read from the file lazily.
+    either way but the pages are read from the file lazily. Which path each payload took is counted
+    in {!Ir.Ndarray.ingestion_counts}, the one place that observes it for every reader.
 
     A later {!save} over the same path is safe while those mappings are live, on every platform
     (gh-ocannl-588): the rename succeeds and the mappings keep reading the file they were taken
@@ -60,12 +61,6 @@ val load :
     session ids (so [Embed_self_id] values are invariant under prefixing). The prefix must match
     [A-Za-z_][A-Za-z0-9_]*; [None] and [Some ""] keep the file namespaces as-is. Pre-namespace
     checkpoints that recorded the namespace as [""] are read as the default namespace [ocannl]. *)
-
-val ingestion_counts : unit -> int * int
-(** [(mapped, copied)] payload counts since the start of the process (gh-ocannl-467): how many
-    payloads {!load} and {!restore} wrapped as file mappings, and how many they decoded into fresh
-    host buffers. The two paths agree on values by construction, so this is the only way to observe
-    which one ran — for tests, and for diagnosing a load that copies more than expected. *)
 
 val restore : ctx:Context.t -> ?mmap:bool -> Ocannl_tensor.Tensor.tn_set -> string -> Context.t
 (** [restore ~ctx t_set path] updates existing tensor device buffers from a checkpoint file,

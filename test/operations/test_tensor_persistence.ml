@@ -278,9 +278,9 @@ let () =
   report path;
   Tensor.unsafe_reinitialize ();
   let ctx = Context.cpu () in
-  let mapped_before, copied_before = Persistence.ingestion_counts () in
+  let mapped_before, decoded_before = Nd.ingestion_counts () in
   let ctx, loaded = Persistence.load ~ctx ~mmap:true path in
-  let mapped_after, copied_after = Persistence.ingestion_counts () in
+  let mapped_after, decoded_after = Nd.ingestion_counts () in
   Set.iter loaded ~f:(fun tn -> Stdio.printf "  id=%d values=[%s]\n" tn.Tn.id (show ctx tn));
   (* Packed, nothing keeps a payload on its element's boundary: the header is not padded out, and
      each offset is just the sum of the preceding payloads. A mapping at such an offset would hand
@@ -294,10 +294,10 @@ let () =
         (data_start + offset) % Ops.prec_in_bytes (prec_of_id id) = 0)
   in
   Stdio.printf "  packed load: %d mapped, %d decoded\n" (mapped_after - mapped_before)
-    (copied_after - copied_before);
+    (decoded_after - decoded_before);
   Verdict.p "a payload at an offset its precision cannot be mapped at is decoded"
     (mapped_after - mapped_before = expected_mapped
-    && copied_after - copied_before = List.length layout - expected_mapped);
+    && decoded_after - decoded_before = List.length layout - expected_mapped);
   Verdict.p "the packed layout really does leave a payload unmappable"
     (expected_mapped < List.length layout);
   (* And a checkpoint written before the field existed -- the same layout with the field deleted
@@ -327,8 +327,8 @@ let () =
   cleanup "legacy";
   cleanup "packed";
 
-  (* === Test 13: Mapped load matches the copying load (gh-ocannl-467) === *)
-  Stdio.printf "=== Test 13: Mapped vs copied payloads ===\n";
+  (* === Test 13: Mapped load matches the decoding load (gh-ocannl-467) === *)
+  Stdio.printf "=== Test 13: Mapped vs decoded payloads ===\n";
   (* The mapping reinterprets the payload bytes as the host buffer, so precisions whose in-memory
      representation is not the payload's would silently decode to garbage: check them all. The
      padded node exercises the fallback -- its payload holds only the logical region. *)
@@ -366,29 +366,29 @@ let () =
   let load_and_show ~mmap =
     Tensor.unsafe_reinitialize ();
     let ctx = Context.cpu () in
-    let mapped_before, copied_before = Persistence.ingestion_counts () in
+    let mapped_before, decoded_before = Nd.ingestion_counts () in
     let ctx, loaded = Persistence.load ~ctx ~mmap path in
-    let mapped_after, copied_after = Persistence.ingestion_counts () in
-    Stdio.printf "  load ~mmap:%b ingested %d payloads by mapping, %d by copying\n" mmap
-      (mapped_after - mapped_before) (copied_after - copied_before);
+    let mapped_after, decoded_after = Nd.ingestion_counts () in
+    Stdio.printf "  load ~mmap:%b: %d mapped, %d decoded\n" mmap (mapped_after - mapped_before)
+      (decoded_after - decoded_before);
     List.map (Set.to_list loaded) ~f:(fun tn -> (tn.Tn.id, show ctx tn))
   in
-  let copied = load_and_show ~mmap:false in
+  let decoded = load_and_show ~mmap:false in
   let mapped = load_and_show ~mmap:true in
-  List.iter2_exn copied mapped ~f:(fun (id, copied) (_, mapped) ->
+  List.iter2_exn decoded mapped ~f:(fun (id, decoded) (_, mapped) ->
       let name =
         if id < List.length precisions then fst (List.nth_exn precisions id) else "padded/single"
       in
-      Stdio.printf "  %s: %s (mapped %s)\n" name copied
-        (if String.equal copied mapped then "identical" else "DIFFERS: " ^ mapped));
+      Stdio.printf "  %s: %s (mapped %s)\n" name decoded
+        (if String.equal decoded mapped then "identical" else "DIFFERS: " ^ mapped));
   (* Restore takes the same path, into already-existing device buffers. *)
   Tensor.unsafe_reinitialize ();
   let ctx = Context.cpu () in
   let ctx, tn = make_tn ctx ~id:0 ~label:[ "p" ] Ops.single [| 4 |] [| 0.0; 0.0; 0.0; 0.0 |] in
   let t_set = Set.of_list (module Tn) [ tn ] in
-  let mapped_before, _ = Persistence.ingestion_counts () in
+  let mapped_before, _ = Nd.ingestion_counts () in
   let ctx = Persistence.restore ~ctx ~mmap:true t_set path in
-  let mapped_after, _ = Persistence.ingestion_counts () in
+  let mapped_after, _ = Nd.ingestion_counts () in
   Stdio.printf "  restored with mapping (%d mapped): [%s]\n" (mapped_after - mapped_before)
     (show ctx tn);
   cleanup "mapped";
@@ -447,9 +447,9 @@ let () =
   Persistence.save ~ctx ~appending:false (Set.of_list (module Tn) [ tn ]) path;
   Tensor.unsafe_reinitialize ();
   let ctx = Context.cpu () in
-  let mapped_before, _ = Persistence.ingestion_counts () in
+  let mapped_before, _ = Nd.ingestion_counts () in
   let ctx, loaded = Persistence.load ~ctx ~mmap:true path in
-  let mapped_after, _ = Persistence.ingestion_counts () in
+  let mapped_after, _ = Nd.ingestion_counts () in
   Verdict.p "the reloaded payload is mapped, whatever the platform default"
     (mapped_after - mapped_before = 1);
   let tn = List.hd_exn (Set.to_list loaded) in

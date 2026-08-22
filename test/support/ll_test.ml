@@ -221,6 +221,22 @@ let optimize ?(materialized = []) ~name llc : LL.optimized =
   LL.decide_materialized ~provenance:589 ctx materialized;
   LL.optimize ctx ~unoptim_ll_source:None ~ll_source:None ~name [] llc
 
+(** [optimize_scoped ~name ~raw scoped] is the supported route for hand-built IR in the
+    POST-optimize [Local_scope] form — a scope over a MATERIALIZED node, which
+    {!Ir.Low_level.optimize} rejects (gh-ocannl-681) and which only [Schedule]'s materializing
+    [Unroll] / [Partition] mints and [C_syntax.try_widen_serial_reduce] produce. [raw] is a twin
+    spelling the same nodes, reads and writes WITHOUT the scope: optimizing it builds the traced
+    store and the placements the record needs, and [scoped] then replaces the schedule wholesale,
+    reaching the backend through the [?prelowered] seam.
+
+    Optimizing [scoped] itself is what used to collapse it into an identity copy of the accumulator
+    — green for the wrong reason, which is how two [accum_width.ml] legs passed while executing
+    [acc[0] = acc[0]]. This seam is what gh-ocannl-693's codegen accumulator peel will replace as
+    the one localization route. *)
+let optimize_scoped ?materialized ~name ~raw scoped : LL.optimized =
+  let o = optimize ?materialized ~name raw in
+  { o with LL.llc = scoped }
+
 (** Post-optimization placement probes. Decisions live on the [optimize_ctx]'s placements
     (context-scoped memory modes), not on the tnode, which holds only declared intent. *)
 let known_virtual (o : LL.optimized) tn =
