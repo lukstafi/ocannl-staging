@@ -478,20 +478,52 @@ end
     and are not ties. *)
 let is_f32_tie c =
   Float.is_finite c
-  &&
-  let f = Int32.float_of_bits (Int32.bits_of_float c) in
-  Float.is_finite f && Float.(f <> c)
-  &&
-  let bits = Int32.bits_of_float f in
-  (* One f32 step from [f] towards [c]: away from zero when they share a direction, towards it
-     otherwise, since the bit pattern's order tracks magnitude rather than value. *)
-  let step =
-    if Float.(c > f) then if Float.(f >= 0.) then Int32.(bits + one) else Int32.(bits - one)
-    else if Float.(f > 0.) then Int32.(bits - one)
-    else Int32.(bits + one)
-  in
-  let g = Int32.float_of_bits step in
-  Float.is_finite g && Float.(abs (c - f) = abs (g - c))
+  && (Float.(abs c = 0x1.ffffffp+127)
+     (* The OVERFLOW midpoint, which the neighbour walk below cannot see: halfway between the
+        largest finite f32 and the (unrepresentable) 2^128 that would follow it. IEEE-754 rounds it
+        to even, and the even candidate is the one that overflows, so the host answers an infinity
+        while a decimal spelling of it -- necessarily just under the midpoint, since the midpoint's
+        exact decimal is longer -- answers the largest finite f32. The tie has exactly one
+        magnitude, so naming it is complete rather than a first case of many. *)
+     ||
+     let f = Int32.float_of_bits (Int32.bits_of_float c) in
+     Float.is_finite f && Float.(f <> c)
+     &&
+     let bits = Int32.bits_of_float f in
+     (* One f32 step from [f] towards [c]: away from zero when they share a direction, towards it
+        otherwise, since the bit pattern's order tracks magnitude rather than value. *)
+     let step =
+       if Float.(c > f) then if Float.(f >= 0.) then Int32.(bits + one) else Int32.(bits - one)
+       else if Float.(f > 0.) then Int32.(bits - one)
+       else Int32.(bits + one)
+     in
+     let g = Int32.float_of_bits step in
+     Float.is_finite g && Float.(abs (c - f) = abs (g - c)))
+
+(** [s] with any exponent's leading zeros removed, so that the emitted literal does not depend on
+    which C runtime formatted it.
+
+    OCaml's [%g] goes through the platform's [snprintf], and the Windows runtimes pad the exponent
+    to three digits ([1e+020] where glibc writes [1e+20]) -- which would make generated kernels, and
+    any golden quoting one, differ by platform. Both spellings denote the same number, so this is
+    about the artifact being reproducible rather than about the value. Digits that are not padding
+    are kept: [1e-300] stays itself. *)
+let normalize_exponent s =
+  match String.findi s ~f:(fun _ ch -> Char.(ch = 'e' || ch = 'E')) with
+  | None -> s
+  | Some (i, _) ->
+      let mantissa = String.prefix s i and exp = String.drop_prefix s (i + 1) in
+      let sign, digits =
+        match String.chop_prefix exp ~prefix:"+" with
+        | Some d -> ("+", d)
+        | None -> (
+            match String.chop_prefix exp ~prefix:"-" with Some d -> ("-", d) | None -> ("", exp))
+      in
+      if String.is_empty digits || not (String.for_all digits ~f:Char.is_digit) then s
+      else
+        let stripped = String.lstrip digits ~drop:(Char.equal '0') in
+        let stripped = if String.is_empty stripped then "0" else stripped in
+        mantissa ^ "e" ^ sign ^ stripped
 
 let c_float_literal c =
   if Float.(c = infinity) then "INFINITY"
@@ -505,7 +537,9 @@ let c_float_literal c =
     in
     (* [%g] emits a radix point or an exponent for everything else, and either one makes the token
        a floating literal. *)
-    if String.exists s ~f:(function '.' | 'e' | 'E' -> true | _ -> false) then s else s ^ ".0"
+    if String.exists s ~f:(function '.' | 'e' | 'E' -> true | _ -> false) then
+      normalize_exponent s
+    else s ^ ".0"
 
 (** The C-family rendering of a binary operation, from {!Ops.binop_c_syntax}: prefix, first operand,
     infix, second operand (breaking after the operator), suffix.

@@ -99,6 +99,12 @@ let cases =
     case Float.(1. + (2. ** -24.)) "0x1.000001p+0";
     case Float.(0.5 + (1.5 * (2. ** -24.))) "0x1.000003p-1";
     case 1.2853009017203525e+35 "0x1.8c105dp+116" ~narrow:false;
+    (* The OVERFLOW midpoint and its negative: halfway between the largest finite f32 and the 2^128
+       that would follow it, so the host's ties-to-even overflows to an infinity while any decimal
+       spelling sits below the midpoint and answers the largest finite f32 instead. The neighbour
+       walk cannot see this tie -- the value above has no f32 to be -- so it is named outright. *)
+    case 0x1.ffffffp+127 "0x1.ffffffp+127" ~narrow:false;
+    case (-0x1.ffffffp+127) "-0x1.ffffffp+127" ~narrow:false;
     (* Ordinary values, pinning that their spelling did not move. *)
     case 0.5 "0.5";
     case (1. /. 3.) "0.3333333333333333";

@@ -1826,6 +1826,9 @@
  (name float_literal_forms)
  (package neural_nets_lib)
  (deps
+  ; Generated.init reads build_files_prefix, so a run under a different one must not be served
+  ; from the cache of a run under the default private directory.
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules float_literal_forms)
