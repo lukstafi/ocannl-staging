@@ -61,6 +61,7 @@ module LL = Ir.Low_level
 module Idx = Ir.Indexing
 module Ops = Ir.Ops
 module Sched = Ir.Schedule
+module Numerics = Ir.Numerics
 module Generated = Test_utils.Generated
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
@@ -135,6 +136,64 @@ let per_step_ref ~terms prec =
       !acc)
 
 let precs = [ ("f32", Ops.single); ("bf16", Ops.bfloat16); ("f16", Ops.half) ]
+
+(* {1 Which reference the backend's policy selects}
+
+   A baseline claim of the form "the executed value is ONE OF the two host references" cannot fail
+   in the direction that matters (Codex P2, round 3): if [C_syntax.scope_prec_of] or a backend's
+   [accum_prec] regressed to storage precision, the baseline and every member referencing it would
+   shift TOGETHER, every structure would still read as localized, and the only thing to change would
+   be a label on stderr. So the reference is SELECTED here, from a statement of the policy that is
+   independent of anything this run compiled or executed.
+
+   The CPU arm calls the library's own resolution — [Numerics.cpu_compute_prec] is verbatim what
+   [Cc_backend.accum_prec] is bound to. Its [native_fp16_arithmetic] argument is a property of the
+   compilation target that a test cannot see, so it is asked BOTH ways: where the two answers agree
+   the resolution is decided regardless, and where they differ (fp16 storage with the
+   [fp16_arithmetic] policy on) this says so instead of guessing.
+
+   The GPU arms restate their backends' [accum_prec], and the restatement is the point rather than
+   duplication to be refactored away: a table derived FROM the backend would agree with it by
+   construction and could not detect a regression in it.
+   - metal_backend.ml: [half] and [bfloat] are native MSL scalars that compute where they store, so
+     16-bit accumulators keep storage residency; fp8 is not a type there and goes through f32.
+   - cuda_backend.ml: bf16 -> f32, the hardware having no bf16 accumulate; fp8 -> f32 under
+     [narrow_compute_f32]; everything else itself.
+   - hip_backend.ml: RDNA WMMA has genuine bf16 and f16 accumulator variants, so 16-bit keeps its
+     storage residency and only fp8 widens. *)
+
+type residency =
+  | Wider  (** The accumulator resides above storage: the whole-nest reference. *)
+  | At_storage  (** It resides at storage width: the per-step-narrowed reference. *)
+  | Undecided of string  (** This configuration's resolution is not visible from here. *)
+
+let same_prec a b = String.equal (Ops.prec_string a) (Ops.prec_string b)
+
+let expected_residency prec =
+  let narrow = (Numerics.get ()).Numerics.narrow_compute_f32 in
+  let of_resolved resolved = if same_prec resolved prec then At_storage else Wider in
+  let has name = String.is_substring backend_name ~substring:name in
+  if on_cpu then
+    let native = Numerics.cpu_compute_prec ~native_fp16_arithmetic:true prec
+    and emulated = Numerics.cpu_compute_prec ~native_fp16_arithmetic:false prec in
+    if same_prec native emulated then of_resolved native
+    else
+      Undecided
+        "the fp16_arithmetic policy is on, and whether this target's arithmetic is genuinely \
+         16-bit is not visible from a test"
+  else if has "metal" then match prec with Ops.Fp8_prec _ -> Wider | _ -> At_storage
+  else if has "cuda" then
+    match prec with
+    | Ops.Bfloat16_prec _ -> Wider
+    | Ops.Fp8_prec _ when narrow -> Wider
+    | _ -> At_storage
+  else if has "hip" then match prec with Ops.Fp8_prec _ when narrow -> Wider | _ -> At_storage
+  else Undecided ("no accumulator policy is recorded here for backend " ^ backend_name)
+
+let residency_name = function
+  | Wider -> "wider than storage (whole-nest)"
+  | At_storage -> "storage width (per-step)"
+  | Undecided why -> "undecided: " ^ why
 
 (* {1 Program shapes}
 
@@ -440,7 +499,7 @@ let make ~(prec : Ops.prec) ~(shape : shape) () : prog =
    across lines, so a line-based reading of "does this statement touch the node twice" answers no
    for precisely the wide read-modify-write it is meant to catch. *)
 
-type form = Localized | Partials_combine | Rmw | Simd | Warp | Mma_fallback
+type form = Localized | Partials_combine | Rmw | Simd | Warp | Mma_fallback | Unrecognized
 
 let form_name = function
   | Localized -> "localized scope"
@@ -449,6 +508,7 @@ let form_name = function
   | Simd -> "SIMD accumulator grid"
   | Warp -> "warp-shuffle tree"
   | Mma_fallback -> "Tile_mma scalar fallback"
+  | Unrecognized -> "unrecognized"
 
 let is_ident_char c = Char.is_alphanum c || Char.equal c '_'
 
@@ -582,10 +642,19 @@ let form_of reading =
   if reading.has_warp then Warp
   else if reading.has_simd then Simd
   else if reading.rmw_statements = 0 && reading.stores_from_local > 0 then Localized
-  else if reading.rmw_statements > 0 && reading.stores_from_local = 0
-          && reading.foreign_local_stores > 0
+  else if
+    reading.rmw_statements > 0 && reading.stores_from_local = 0
+    && reading.foreign_local_stores > 0
   then Partials_combine
-  else Rmw
+  else if reading.rmw_statements > 0 && reading.stores_from_local = 0 then Rmw
+  else
+    (* NOT a catch-all (Codex P2, round 3). A reading with neither fingerprint — a declining
+       renderer that moved to an unrecognized accumulator spelling, or to a once-per-nest direct
+       store — used to land here as [Rmw], and at f32 it can compute the per-step reference's value
+       exactly, so form and value would both have passed over a kernel containing no
+       read-modify-write at all. An unrecognized reading is a failure to classify, and matches no
+       member's claim. *)
+    Unrecognized
 
 
 (* {1 Executing a member} *)
@@ -1051,35 +1120,46 @@ let () =
       (* The discrimination control. Without it every value claim in the table could hold because
          the operands never leave the storage format's exactness range, in which case a form that
          narrowed at every step would be indistinguishable from one that narrows once. *)
+      let g_wide, g_stepped = refs guard_terms in
+      let differ_guarded = not (Array.for_all2_exn g_wide g_stepped ~f:Float.equal) in
       if String.equal prec_name "f32" then
         p "at f32 the whole-nest and per-step references coincide (the identity-precision leg)"
-          (not differ)
+          ((not differ) && not differ_guarded)
       else
+        (* At BOTH term counts: the guarded baseline is asserted against a selected reference too,
+           and that assertion is only worth something where the two references are distinguishable
+           over the guard's shorter run. *)
         p
           (Printf.sprintf
-             "at %s the whole-nest and per-step references differ (the operands discriminate \
-              accumulator width)"
+             "at %s the whole-nest and per-step references differ over the full axis and over the \
+              guarded prefix (the operands discriminate accumulator width)"
              prec_name)
-          differ;
-      let is_a_reference ~terms values =
+          (differ && differ_guarded);
+      (* Which reference the policy selects, and the assertion that the run took THAT one. Not
+         "one of the two": see {!expected_residency}. *)
+      let selected ~terms values ~what =
         let wide, stepped = refs terms in
-        let m_wide = Array.for_all2_exn values wide ~f:Float.equal in
-        let m_stepped = Array.for_all2_exn values stepped ~f:Float.equal in
-        if not (m_wide || m_stepped) then
-          Stdio.eprintf "  %s over %d terms: got [%s] wide [%s] per-step [%s]\n" prec_name terms
-            (show values) (show wide) (show stepped);
-        (m_wide, m_stepped)
+        let claim =
+          Printf.sprintf "the %s %s matches the reference its backend's accumulator policy selects"
+            prec_name what
+        in
+        match expected_residency prec with
+        | Undecided why ->
+            Stdio.eprintf "  %s %s: %s\n%!" prec_name what why;
+            skipped claim;
+            None
+        | (Wider | At_storage) as residency ->
+            let want = match residency with Wider -> wide | _ -> stepped in
+            let ok = Array.for_all2_exn values want ~f:Float.equal in
+            if not ok then
+              Stdio.eprintf "  %s %s over %d terms: got [%s] want [%s] (policy says %s)\n" prec_name
+                what terms (show values) (show want) (residency_name residency);
+            p claim ok;
+            Some residency
       in
-      let matches_wide, matches_stepped = is_a_reference ~terms:cols got in
-      p
-        (Printf.sprintf "the %s serial baseline is one of the two host references" prec_name)
-        (matches_wide || matches_stepped);
+      let residency = selected ~terms:cols got ~what:"serial baseline" in
       let guarded = guarded_baseline prec_name in
-      let g_wide, g_stepped = is_a_reference ~terms:guard_terms guarded in
-      p
-        (Printf.sprintf "the %s guarded baseline is one of the two host references at %d terms"
-           prec_name guard_terms)
-        (g_wide || g_stepped);
+      ignore (selected ~terms:guard_terms guarded ~what:"guarded baseline");
       (* And the guards SELECT: without this the guarded members could not fail at all, since a
          mint or a renderer that discarded the predicate would land on the unguarded sum and still
          match. Both references the guarded members use are covered — the executed guarded baseline
@@ -1097,11 +1177,9 @@ let () =
          the accumulator resolves wider than storage decides whether the localized and
          read-modify-write forms are also distinguishable BY VALUE here, or only structurally. *)
       Stdio.eprintf "accumulator residency at %s: %s\n%!" prec_name
-        (match (matches_wide, matches_stepped) with
-        | true, false -> "wider than storage (whole-nest)"
-        | false, true -> "storage width (per-step)"
-        | true, true -> "indistinguishable by value at this precision"
-        | false, false -> "neither host reference"))
+        (match residency with
+        | Some r -> residency_name r
+        | None -> residency_name (expected_residency prec)))
 
 let () =
   List.iter members ~f:(fun m ->
@@ -1157,6 +1235,9 @@ let () =
                         reading.stores_from_local + reading.rmw_statements = m.store_sites
                         && reading.node_accesses <= 2 * m.store_sites
                     | Partials_combine | Rmw | Mma_fallback -> true
+                    | Unrecognized ->
+                        (* No member claims it; [same_form] already fails. *)
+                        false
                   in
                   if not sites_ok then
                     Stdio.eprintf

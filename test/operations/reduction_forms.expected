@@ -48,16 +48,16 @@ reduction: out[3] = sum of 32 terms, hand-built Low_level, 25 members
   24 decline-sibling-unrolled    [f32 bf16 f16] over sibling statement     the same level Unrolled: one read-modify-write per copy                -> per-step read-modify-write
   25 tile-mma-fallback           [f32 bf16    ] over small contraction     Tensorize whose emission preconditions fail (transposed-B operands)    -> Tile_mma scalar fallback
 at f32 the whole-nest and per-step references coincide (the identity-precision leg): true
-the f32 serial baseline is one of the two host references: true
-the f32 guarded baseline is one of the two host references at 20 terms: true
+the f32 serial baseline matches the reference its backend's accumulator policy selects: true
+the f32 guarded baseline matches the reference its backend's accumulator policy selects: true
 the f32 guards are load-bearing: 20 of 32 terms differs from the full axis in both the executed baseline and the per-step reference: true
-at bf16 the whole-nest and per-step references differ (the operands discriminate accumulator width): true
-the bf16 serial baseline is one of the two host references: true
-the bf16 guarded baseline is one of the two host references at 20 terms: true
+at bf16 the whole-nest and per-step references differ over the full axis and over the guarded prefix (the operands discriminate accumulator width): true
+the bf16 serial baseline matches the reference its backend's accumulator policy selects: true
+the bf16 guarded baseline matches the reference its backend's accumulator policy selects: true
 the bf16 guards are load-bearing: 20 of 32 terms differs from the full axis in both the executed baseline and the per-step reference: true
-at f16 the whole-nest and per-step references differ (the operands discriminate accumulator width): true
-the f16 serial baseline is one of the two host references: true
-the f16 guarded baseline is one of the two host references at 20 terms: true
+at f16 the whole-nest and per-step references differ over the full axis and over the guarded prefix (the operands discriminate accumulator width): true
+the f16 serial baseline matches the reference its backend's accumulator policy selects: true
+the f16 guarded baseline matches the reference its backend's accumulator policy selects: true
 the f16 guards are load-bearing: 20 of 32 terms differs from the full axis in both the executed baseline and the per-step reference: true
 serial @ f32 renders the form its composition claims: true
 serial @ f32 agrees with its reference value: true
