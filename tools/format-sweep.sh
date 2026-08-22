@@ -129,19 +129,6 @@ LOCKDIR="$ROOT/_build/format-sweep.lock"
 mkdir "$LOCKDIR" 2>/dev/null \
   || die "another format-sweep is running (or a stale lock after a hard kill: $LOCKDIR)"
 
-# Where the formatting rounds record dune's own output. The only evidence of
-# WHY a round failed is what dune printed -- an ocamlformat error, a refusal
-# from a concurrent dune instance, a promotion that wrote nothing -- and the
-# abort message cannot carry it; discarding that output leaves the generic
-# "did not converge" abort undiagnosable after the fact, which is exactly the
-# state a scheduled run reports from. Under _build: gitignored, so a log can
-# never ride a sweep commit or trip the clean-tree gate. Cleared per sweep
-# (we hold the lock by now, so this cannot wipe a live sweep's evidence) --
-# rounds left by an earlier run would misattribute the failure.
-FMT_LOGS="$ROOT/_build/format-sweep-logs"
-rm -rf "$FMT_LOGS"
-mkdir -p "$FMT_LOGS"
-
 # Any exit that did not deliberately keep its result (KEEP=1: pushed, or
 # --no-push retained) resets the checkout to BASE (once BASE is recorded) --
 # a sweep killed by the scheduler or failed mid-way must not leave master
@@ -175,6 +162,26 @@ cleanup() {
   rmdir "$LOCKDIR" 2>/dev/null
 }
 trap cleanup EXIT
+
+# Where the formatting rounds record dune's own output. The only evidence of
+# WHY a round failed is what dune printed -- an ocamlformat error, a refusal
+# from a concurrent dune instance, a promotion that wrote nothing -- and the
+# abort message cannot carry it; discarding that output leaves the generic
+# "did not converge" abort undiagnosable after the fact, which is exactly the
+# state a scheduled run reports from. Under _build: gitignored, so a log can
+# never ride a sweep commit or trip the clean-tree gate.
+# Placed between two constraints. AFTER the sweep lock: cleared per sweep
+# (rounds left by an earlier run would misattribute the failure), so a second
+# invocation refused at that lock must not wipe the running sweep's evidence.
+# AFTER the EXIT trap: these two are fallible (an unremovable directory, a
+# full disk, a plain FILE sitting at that path), and under `set -e` a failure
+# before the trap is installed would leave LOCKDIR behind -- which, the lock
+# being a bare mkdir with no staleness detection, wedges every later
+# scheduled sweep at "another format-sweep is running" until a human clears
+# it. Exiting through cleanup rmdir's it instead.
+FMT_LOGS="$ROOT/_build/format-sweep-logs"
+rm -rf "$FMT_LOGS"
+mkdir -p "$FMT_LOGS"
 
 # Run a long-lived child in the background under an interruptible `wait`:
 # bash defers signal traps while a foreground child runs, so a TERM arriving
