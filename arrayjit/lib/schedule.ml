@@ -794,7 +794,7 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
             (* Under routine logging the per-iteration [Set] copies ARE the trace: a [Local_scope]
                body renders with [log_set_locals:false], so minting the scope would silence every
                update. The serial baseline's widening declines under logging for the same reason
-               (C_syntax.try_widen_serial_reduce), so within a logged regime the unrolled and serial
+               (C_syntax.try_localize_serial_reduce), so within a logged regime the unrolled and serial
                candidates still agree — both per-step. *)
             if Utils.debug_log_from_routines () then None
             else Low_level.peel_accum_nest ~free_of:[ axis ] fc.body

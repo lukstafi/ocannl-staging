@@ -156,7 +156,7 @@ and scalar_t =
           node with no setter is decided non-virtual, so a hand-built scope over a freshly created
           node is rejected too unless the node is declared virtual. AFTER [optimize] the shape is
           legal and means the opposite: [Schedule]'s materializing [Unroll] and [Partition] mints
-          and [C_syntax.try_widen_serial_reduce] localize a materialized accumulator this way, and
+          and [C_syntax.try_localize_serial_reduce] localize a materialized accumulator this way, and
           codegen renders it. Localization is codegen's business alone (gh-ocannl-693); IR already
           in that form reaches a backend through [Context.compile ?prelowered], never through
           [optimize]. Only a scope [optimize] MINTED may be retracted to a [Get], and only by

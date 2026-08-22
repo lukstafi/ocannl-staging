@@ -109,7 +109,7 @@ files.
   test in the suite exercises the retraction; the arm was in practice only ever firing on
   out-of-contract input.)
   The SAME shape is legal and means the opposite AFTER `optimize`: `Schedule`'s materializing
-  `Unroll` / `Partition` mints and `C_syntax.try_widen_serial_reduce` localize a materialized
+  `Unroll` / `Partition` mints and `C_syntax.try_localize_serial_reduce` localize a materialized
   accumulator this way and codegen renders it. That asymmetry is the point — **materialized-accumulator
   localization belongs to codegen's accumulator peel (gh-ocannl-693) and to nothing else**; a second
   route through the virtualizer would restore the gh-639 "whichever schedule happened to run"

@@ -2322,7 +2322,7 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
     survives [specialize_proc]", and they did not.
 
     The shape IS legal on the far side of the pipeline — [Schedule]'s materializing [Unroll] and
-    [Partition] mints and [C_syntax.try_widen_serial_reduce] build exactly it over a materialized
+    [Partition] mints and [C_syntax.try_localize_serial_reduce] build exactly it over a materialized
     accumulator, and codegen renders it. One IR, two meanings, with nothing saying which side of
     [optimize] a program was on. This is the statement of which side: localizing a materialized
     accumulator is codegen's accumulator peel (gh-ocannl-693), and rejecting here is what keeps that

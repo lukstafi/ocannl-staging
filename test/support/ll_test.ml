@@ -224,7 +224,7 @@ let optimize ?(materialized = []) ~name llc : LL.optimized =
 (** [optimize_scoped ~name ~raw scoped] is the supported route for hand-built IR in the
     POST-optimize [Local_scope] form — a scope over a MATERIALIZED node, which
     {!Ir.Low_level.optimize} rejects (gh-ocannl-681) and which only [Schedule]'s materializing
-    [Unroll] / [Partition] mints and [C_syntax.try_widen_serial_reduce] produce. [raw] is a twin
+    [Unroll] / [Partition] mints and [C_syntax.try_localize_serial_reduce] produce. [raw] is a twin
     spelling the same nodes, reads and writes WITHOUT the scope: optimizing it builds the traced
     store and the placements the record needs, and [scoped] then replaces the schedule wholesale,
     reaching the backend through the [?prelowered] seam.

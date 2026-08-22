@@ -2,7 +2,7 @@
    [Low_level.optimize], and is REJECTED rather than silently normalized to a plain [Get].
 
    The shape is legal on the OTHER side of the pipeline: [Schedule]'s materializing [Unroll] and
-   [Partition] mints, and [C_syntax.try_widen_serial_reduce], build exactly it over a materialized
+   [Partition] mints, and [C_syntax.try_localize_serial_reduce], build exactly it over a materialized
    accumulator AFTER optimization, and codegen renders it. So one IR meant two different things
    depending on which side of [optimize] it was handed to, and nothing told a test author or a
    future transform writer which side they were on. The optimizer used to answer by discarding the

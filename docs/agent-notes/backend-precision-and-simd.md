@@ -144,7 +144,7 @@ files.
   The plain serial fallback of an accumulation nest holds the accumulator at `comp_prec` and
   narrows once at the store, implemented not by new emission but by locally rewriting the nest at
   codegen into the `Local_scope` form virtualization gives virtual accumulators
-  (`C_syntax.try_widen_serial_reduce`) and rendering that — `scope_prec_of` and the
+  (`C_syntax.try_localize_serial_reduce`) and rendering that — `scope_prec_of` and the
   `Set_local`/`Get_local` arms already carry the widening. It joins virtual scopes,
   `try_vectorize_reduce`'s epilogue and `try_register_tile`'s C-tile. The peel accepts
   Serial/`Unrolled`/`Vectorized` levels (autotune proposes `Unroll` over any Serial loop of extent
