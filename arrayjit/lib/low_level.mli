@@ -46,6 +46,30 @@ val axis_type_label : axis_type -> string
 (** Loop keyword used by the human-readable printers: plain ["for"] for [Serial], ["for@<axis>"]
     otherwise. *)
 
+(** Which pass minted a [Local_scope] (gh-ocannl-687). The construct has two producers, and a
+    consumer that walks the IR looking for schedulable structure means only one of them:
+
+    - [Inlined_computation] -- virtualization's inline of a virtual node's computation at a read
+      site, and the rewrites that carry those scopes along. The loops inside such a body are the
+      inlined node's own iteration space, re-instantiated per use site; no [Schedule] op has ever
+      targeted them.
+    - [Schedule_minted] -- the accumulator localization built by [Schedule]'s materializing
+      [Unroll] and by [Partition] (gh-ocannl-639), and by [C_syntax.try_localize_serial_reduce]: a
+      running value for a MATERIALIZED cell, whose body holds the very per-step / per-segment loops
+      [Schedule.rewrite_loop] retargets.
+
+    This is the fact [Autotune.collect_loops] needs: it enumerates loops inside [Schedule_minted]
+    scopes only, so the action menu does not spend its per-unit budget proposing splits, swaps,
+    unrolls and vectorize retypes for inlined interpolation and reduction loops that no schedule op
+    has ever been able to reach.
+
+    Deliberately NOT the mechanism behind the scope-target contract {!input_scope_ids} serves: that
+    one asks whether a scope was in the program a given {!optimize} call was HANDED, which is a
+    per-call fact -- a virtualizer-minted scope handed back into a second [optimize] still carries
+    [Inlined_computation] and still is not that call's to retract -- and hand-built IR has no
+    honest way to spell "not mine". *)
+type scope_mint = Inlined_computation | Schedule_minted [@@deriving sexp, compare, equal]
+
 (** Cases: [t] -- code, [scalar_t] -- single number at some precision. *)
 type t =
   | Noop
@@ -131,7 +155,12 @@ type t =
 [@@deriving sexp_of, equal]
 
 and scalar_t =
-  | Local_scope of { id : scope_id; body : t; orig_indices : Indexing.axis_index array }
+  | Local_scope of {
+      id : scope_id;
+      body : t;
+      orig_indices : Indexing.axis_index array;
+      mint : scope_mint;  (** Which pass built this scope; see {!scope_mint}. *)
+    }
       (** An inlined sub-computation whose value is [body]'s final [Set_local] of [id].
 
           {b Scope purity} (gh-ocannl-584): [body]'s only effect is on the locals it owns — its own

@@ -214,7 +214,12 @@ let () =
   let la = scope_node "LA" and lb = scope_node "LB" in
   let scope_a : LL.scalar_t =
     LL.Local_scope
-      { id = la; body = LL.Set_local (la, get x [| it i7 |]); orig_indices = [| it i7 |] }
+      {
+        id = la;
+        body = LL.Set_local (la, get x [| it i7 |]);
+        orig_indices = [| it i7 |];
+        mint = LL.Inlined_computation;
+      }
   in
   let scope_b : LL.scalar_t =
     LL.Local_scope
@@ -225,6 +230,7 @@ let () =
             ( LL.Set { tn = x; idcs = [| it i7 |]; llsc = LL.Constant 5.; debug = "" },
               LL.Set_local (lb, LL.Constant 1.) );
         orig_indices = [| it i7 |];
+        mint = LL.Inlined_computation;
       }
   in
   let sibling =

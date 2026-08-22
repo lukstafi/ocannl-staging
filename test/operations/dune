@@ -1860,6 +1860,22 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ ; A hand-built [Low_level] program of constant stores, executed and read back at f64/f32/f16, plus
+ ; a read of the emitted f32 kernel.
+ (name float_literal_forms)
+ (package neural_nets_lib)
+ (deps
+  ; Generated.init reads build_files_prefix, so a run under a different one must not be served
+  ; from the cache of a run under the default private directory.
+  (env_var OCANNL_BUILD_FILES_PREFIX)
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules float_literal_forms)
+ (libraries base ocannl stdio arrayjit.verdict ll_test test_utils)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name vec_signed_zero)
  (package neural_nets_lib)
  (deps
@@ -2032,6 +2048,28 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ ; ocannl-backend: none -- exercises the menu's cap-sharing rule over synthetic category lists;
+ ; it lowers, compiles and runs nothing, so no backend is selected.
+ (name autotune_menu_cap)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules autotune_menu_cap)
+ (libraries base stdio ocannl arrayjit.verdict ll_test)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
+ ; ocannl-backend: none -- enumerates the action menu over hand-built IR through the post-optimize
+ ; scope seam; it compiles and runs no kernel, so no backend is selected.
+ (name autotune_scope_provenance)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules autotune_scope_provenance)
+ (libraries base ocannl stdio arrayjit.verdict ll_test)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name autotune_scope_menu)
  (package neural_nets_lib)
  (deps
@@ -2146,6 +2184,17 @@
   (env_var OCANNL_BACKEND))
  (modules schedule_batched_mma)
  (libraries base ocannl stdio arrayjit.verdict test_utils)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
+ ; ocannl-backend: none -- builds Ir.Low_level by hand and judges the launch gate against MOCKED
+ ; hardware_limits records; nothing is compiled and no device is touched.
+ (name launch_dim_gate)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules launch_dim_gate)
+ (libraries base ocannl stdio ll_test)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 

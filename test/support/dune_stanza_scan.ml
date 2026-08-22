@@ -799,7 +799,34 @@ type raw_stanza = {
           branch running [%{test}], and [[""]] composed with the subdirectory when the stanza has no
           custom action — which is how {!sites} counts its [Test] sites, one per directory. Empty
           for every other head. *)
+  raw_opaque : string list;
+      (** what the stanza demonstrably runs and this reader will not name: the command line of a
+          [(bash …)] or [(system …)] action, which it does not parse, and a command sitting under a
+          [(chdir %{…} …)] whose destination it cannot resolve. Recorded rather than dropped — THAT
+          something runs is the whole of what gh-ocannl-659's per-stanza floor asks, and neither
+          shape can be placed any further without parsing shell or resolving a pform
+          (gh-ocannl-690).
+
+          Carried without a directory, deliberately. {!sites} places each of these as an
+          [Unreadable_directory] site precisely BECAUSE the directory is unknown, so a
+          per-directory floor built on them would be holding the walk's refusal to guess against
+          this reader's guess. Only the per-stanza floor consumes them. *)
 }
+
+(* One thing a stanza's actions run, as this reader sees it before deciding what to record of it.
+   A variant rather than the tuple this used to be, because the two shapes gh-ocannl-690 added carry
+   weaker evidence than a placed command does: a [(run …)] answers "what, and where", while a shell
+   line answers only "something". *)
+type raw_ran =
+  | Raw_command of {
+      cwd : string;  (** where the process ends up, when that is knowable *)
+      token : string;  (** the command position, as written *)
+      under_path : bool;  (** whether a [(setenv PATH …)] encloses it *)
+      unresolved : string option;
+          (** [Some dir] when a [(chdir dir …)] whose destination holds a pform encloses it, which
+              makes [cwd] a fiction — the command is still evidence that something runs *)
+    }
+  | Raw_opaque of string  (** something runs here and this reader will not say what *)
 
 (** [raw_stanzas content] reads [content] as a second opinion on {!sites}: the stanzas it declares,
     with what each of them runs and where.
@@ -836,16 +863,21 @@ type raw_stanza = {
       per resulting directory because each resolves a different config. The two compose through
       {!in_subdir}, and what is recorded here is the composition, ready to compare against
       [in_subdir site.subdir site.cwd].
-    - WHAT CANNOT BE RESOLVED. Under a [chdir] whose destination holds a pform the walk cannot say
-      where the process runs and emits an {!Unreadable_directory} site carrying no executables, so
-      nothing beneath it is reported here either.
+    - WHAT CANNOT BE RESOLVED. Under a [chdir] whose destination holds a pform neither reader can
+      say where the process runs: the walk emits an {!Unreadable_directory} site carrying no
+      executables, and this one records the command in {!raw_stanza.raw_opaque} — tagged rather
+      than dropped, since THAT something runs there is what the per-stanza floor rests on. A
+      command that is external wherever it runs is passed over by both, the walk placing no site
+      for it either.
     - IDENTITY. Commands are recognised as {!classify_command} recognises them, [(:name …)]
       bindings included, and normalised to the same string.
 
-    What it still declines is a [(bash …)] line and a pform naming nothing the stanza binds: the
-    text does not say what those run. Those under-report, which is the safe direction for a floor —
-    blindness makes things DISAPPEAR, so a floor that under-counts still fails on it and never fails
-    on a correct scan. *)
+    What it still declines to NAME is a [(bash …)] or [(system …)] command line and a pform naming
+    nothing the stanza binds: the text does not say what those run. The first is recorded as running
+    something unnamed, which is what the per-stanza floor needs of it; the second, and an external
+    command handed a workspace file, are passed over entirely. Those under-report, which is the safe
+    direction for a floor — blindness makes things DISAPPEAR, so a floor that under-counts still
+    fails on it and never fails on a correct scan. *)
 (* The raw reading of ONE stanza, lifted out of {!raw_stanzas} so that a caller holding a stanza can
    ask this reader about THAT stanza rather than about a whole file. {!raw_stanzas} is this over a
    document; gh-ocannl-659's floor pairs it with the walk stanza by stanza, which needs both
@@ -908,6 +940,15 @@ let raw_stanza_of =
             | Some _ -> None
             | None -> List.Assoc.find bindings inner ~equal:String.equal))
   in
+  (* A command name PATH decides the meaning of: no pform to resolve, no extension and no explicit
+     path to read it off. Under a rewritten PATH the walk refuses to call such a name external, so it
+     places a site for it wherever it runs -- which is what the [raw_unnameable] floor and the opaque
+     one both rest on, so they read one predicate rather than restating it. *)
+  let is_bare_name cmd =
+    (not (String.is_substring cmd ~substring:"%{"))
+    && (not (is_executable cmd))
+    && not (is_explicit_path cmd)
+  in
   (* Every command the stanza runs, with the directory it runs in. Its own traversal, deliberately:
      this is the question [executables_run] answers, and answering it twice is the point. *)
   let rec commands ~cwd ~unresolved ~under_path sexp =
@@ -920,10 +961,22 @@ let raw_stanza_of =
         List.concat_map rest ~f:(commands ~cwd ~unresolved ~under_path:true)
     | Sexp.List (Sexp.Atom "chdir" :: Sexp.Atom dir :: rest) ->
         if String.is_substring dir ~substring:"%{" then
-          List.concat_map rest ~f:(commands ~cwd ~unresolved:true ~under_path)
+          List.concat_map rest ~f:(commands ~cwd ~unresolved:(Some dir) ~under_path)
         else List.concat_map rest ~f:(commands ~cwd:(in_subdir cwd dir) ~unresolved ~under_path)
+    (* A shell action hands a command line to a shell, and this reader parses shell no more than
+       [commands_in] does -- splitting it on whitespace would be reading it, and reading it wrong.
+       What the text does say is that the stanza runs SOMETHING, which is the whole of what the
+       per-stanza floor asks; before gh-ocannl-690 it said nothing, and a stanza running its test
+       through `bash` had no floor under it at all. The arguments are that command line rather than
+       nested actions, so the traversal stops here. *)
+    | Sexp.List (Sexp.Atom (("bash" | "system") as action) :: args) ->
+        List.filter_map args ~f:(function
+          | Sexp.Atom line -> Some (Raw_opaque (Printf.sprintf "(%s %s)" action line))
+          | _ -> None)
+    (* Kept whatever encloses it: what an unresolvable `chdir` costs is the DIRECTORY, and
+       [of_stanza] is where that decides which list the command lands in. *)
     | Sexp.List (Sexp.Atom ("run" | "dynamic-run") :: Sexp.Atom cmd :: _) ->
-        if unresolved then [] else [ (cwd, cmd, under_path) ]
+        [ Raw_command { cwd; token = cmd; under_path; unresolved } ]
     | Sexp.List l -> List.concat_map l ~f:(commands ~cwd ~unresolved ~under_path)
   in
   let of_stanza ~subdir sexp =
@@ -937,16 +990,26 @@ let raw_stanza_of =
         in
         let ran =
           if List.mem counted_heads head ~equal:String.equal then
-            commands ~cwd:subdir ~unresolved:false ~under_path:false sexp
+            commands ~cwd:subdir ~unresolved:None ~under_path:false sexp
           else []
         in
         let bindings = bindings_of fields in
+        (* What this reader can place: everything but the shell lines and what an unresolvable
+           `chdir` moved. Both of those are evidence that something runs and no evidence of WHERE,
+           so letting them through here would put a fabricated directory into the per-directory
+           floors `config_dep_completeness` builds out of [raw_runs] and [raw_unnameable]. *)
+        let placed =
+          List.filter_map ran ~f:(function
+            | Raw_command { cwd; token; under_path; unresolved = None } ->
+                Some (cwd, token, under_path)
+            | Raw_command _ | Raw_opaque _ -> None)
+        in
         let is_test = List.mem test_heads head ~equal:String.equal in
         let test_cwds =
           if not is_test then []
           else
             match
-              List.filter_map ran ~f:(fun (cwd, cmd, _) ->
+              List.filter_map placed ~f:(fun (cwd, cmd, _) ->
                   (* `./%{test}` is the test binary too: the `./` says only "here". *)
                   if String.equal (program_path cmd) test_pform then Some cwd else None)
             with
@@ -959,7 +1022,7 @@ let raw_stanza_of =
             raw_inline_tests = inline;
             raw_subdir = subdir;
             raw_runs =
-              List.filter_map ran ~f:(fun (cwd, cmd, _) ->
+              List.filter_map placed ~f:(fun (cwd, cmd, _) ->
                   if String.equal (program_path cmd) test_pform then None
                   else
                     match program ~bindings cmd with
@@ -972,16 +1035,34 @@ let raw_stanza_of =
                make {!Unreadable_directory}, since a command it CAN name stays a [Runs] even there.
                Deduplicated by (directory, command), which is how the walk's own sites collapse. *)
             raw_unnameable =
-              List.filter_map ran ~f:(fun (cwd, cmd, under_path) ->
-                  if
-                    under_path
-                    && (not (String.is_substring cmd ~substring:"%{"))
-                    && (not (is_executable cmd))
-                    && not (is_explicit_path cmd)
-                  then Some (cwd, cmd)
-                  else None)
+              List.filter_map placed ~f:(fun (cwd, cmd, under_path) ->
+                  if under_path && is_bare_name cmd then Some (cwd, cmd) else None)
               |> List.dedup_and_sort ~compare:Poly.compare
               |> List.map ~f:fst;
+            raw_opaque =
+              List.filter_map ran ~f:(function
+                | Raw_opaque what -> Some what
+                (* Under an unresolvable `chdir` what is lost is the DIRECTORY, not the evidence
+                   that something runs -- and evidence from two enclosing forms must not cancel out.
+                   Two things can still supply it: a command this reader could otherwise name, and a
+                   bare name under a rewritten PATH, which the walk places a site for precisely
+                   because PATH may point it at a workspace executable. Reading only the first left
+                   a command enclosed by BOTH with no floor under it, in either nesting order (Codex
+                   P2, round 1 of PR #422). *)
+                | Raw_command { token; unresolved = Some dir; under_path; _ } -> (
+                    match program ~bindings token with
+                    | Some exe -> Some (Printf.sprintf "%s, under `(chdir %s ...)`" exe dir)
+                    | None ->
+                        if under_path && is_bare_name token then
+                          Some
+                            (Printf.sprintf "%s, under `(setenv PATH ...)` and `(chdir %s ...)`"
+                               token dir)
+                        else None)
+                (* A PATH tool under nothing but a `chdir` is external wherever that sends it: the
+                   walk places no site, so claiming one here would turn the floor from a lower bound
+                   into a false alarm. *)
+                | Raw_command _ -> None)
+              |> List.dedup_and_sort ~compare:String.compare;
           };
         ]
   in
@@ -990,19 +1071,26 @@ let raw_stanza_of =
 (** Whether the raw reader thinks this stanza runs something — the floor's side of "is this stanza
     subject to the backend rule", kept in ONE place so a caller cannot drift from it.
 
-    Deliberately a lower bound, and safe to be one. The raw reader sees fewer shapes than
-    {!sites_of_stanza} does: it reads [run]/[dynamic-run] and not [bash]/[system], and it drops what
-    sits under a [chdir] it cannot resolve, so a stanza the walk places as {!Unreadable_command},
-    {!Unreadable_directory} or {!Unclassified_action} can be invisible here. That gap is harmless
-    exactly as long as the comparison is made STANZA BY STANZA: under-claiming for one stanza
-    weakens the floor for that stanza alone. Compared in aggregate it is not harmless at all — a
-    stanza the walk counts and this reader does not contributes slack that hides a DIFFERENT
-    stanza dropping out of enforcement (Codex P2, round 2). *)
+    Deliberately a lower bound, and safe to be one — but a lower bound over what a stanza RUNS, not
+    over what this reader can name. It reads [run] and [dynamic-run] commands, [bash] and [system]
+    actions, and commands under a [chdir] it cannot resolve; the last two it can only report as
+    {!raw_stanza.raw_opaque}, and that is enough, because the question here is whether the stanza is
+    subject to the rule and not which program answers for it (gh-ocannl-690).
+
+    What still passes it by is a command it cannot recognise at ALL: {!sites_of_stanza} places an
+    {!Unreadable_command} or {!Unclassified_action} site where this reader sees nothing, and so does
+    an external command handed something this workspace builds — [(run python3 %{dep:x.py})] is one
+    such stanza in this repository today. Those gaps are harmless exactly as long as the comparison
+    is made STANZA BY STANZA: under-claiming for one stanza weakens the floor for that stanza alone.
+    Compared in aggregate it is not harmless at all — a stanza the walk counts and this reader does
+    not contributes slack that hides a DIFFERENT stanza dropping out of enforcement (Codex P2,
+    round 2). *)
 let raw_runs_something r =
   (not (List.is_empty r.raw_runs))
   || (not (List.is_empty r.raw_test_cwds))
   || r.raw_inline_tests
-  || not (List.is_empty r.raw_unnameable)
+  || (not (List.is_empty r.raw_unnameable))
+  || not (List.is_empty r.raw_opaque)
 
 let raw_stanzas content =
   (* Parsed rather than scanned. [sites] has already refused any file the two readers disagree
@@ -1402,6 +1490,64 @@ let marked_stanzas content =
         ]
   in
   List.concat (List.map2_exn raw parsed ~f:(go ""))
+
+(** How gh-ocannl-659's rule reads ONE stanza: whether it is subject to the rule, and which of the
+    two declarations it carries.
+
+    Only the DECISION lives here. The diagnostics stay with the check, which owns their wording and
+    their counters — what moves is the part that has to be put to a stanza the repository does not
+    contain, so that "a stanza running its test through [bash] and declaring nothing is reported"
+    can be asserted on synthetic text rather than inferred from the live tree (gh-ocannl-690; the
+    same shape gh-ocannl-603 asks for on [config_dep_completeness]'s resolution half). *)
+type backend_rule =
+  | Runs_nothing  (** not subject to the rule, and carrying no marker: nothing to say of it *)
+  | Marker_without_run of int
+      (** a marker, at that line, on a stanza that runs nothing — it declares nothing there *)
+  | Declares_variable  (** subject, and declares [(env_var OCANNL_BACKEND)] *)
+  | Names_backend of int * marker_body  (** subject, and carrying exactly one well-formed marker *)
+  | Declares_and_names of int * marker_body
+      (** subject, and carrying both — a stanza that names its backend has nothing for the variable
+          to invalidate *)
+  | Names_twice of int  (** subject, and carrying more than one marker: the line of the second *)
+  | Names_neither  (** subject, and carrying neither — the hole gh-ocannl-659 closed *)
+
+(** The markers a stanza encloses that announce themselves and do not parse, each with its line and
+    the comment's text.
+
+    Reported apart from {!backend_rule_of} rather than folded into it, because they are a different
+    failure: a marker the grammar declines is the check going blind to a declaration its author
+    believed they had made, and it can sit on a stanza whose other marker is perfectly well formed.
+    A malformed marker is NOT one of the markers {!backend_rule_of} counts — a stanza carrying only
+    one is reported both as malformed and as declaring neither, which is what is true of it. *)
+let malformed_markers stanza =
+  List.filter_map stanza.marked_comments ~f:(fun (line, text) ->
+      match parse_marker text with
+      | Some (Malformed why) -> Some (line, text, why)
+      | Some (Marker _) | None -> None)
+
+(** The lines of every comment in [stanza] that {!parse_marker} recognises AT ALL, well formed or
+    not — the population a check has to account for, so that a marker attributed to a stanza is not
+    then reported as sitting inside none. *)
+let marker_lines stanza =
+  List.filter_map stanza.marked_comments ~f:(fun (line, text) ->
+      Option.map (parse_marker text) ~f:(fun _ -> line))
+
+let backend_rule_of stanza =
+  let well_formed =
+    List.filter_map stanza.marked_comments ~f:(fun (line, text) ->
+        match parse_marker text with
+        | Some (Marker m) -> Some (line, m)
+        | Some (Malformed _) | None -> None)
+  in
+  let subject = not (List.is_empty stanza.marked_sites) in
+  match (subject, stanza.marked_declares_backend, well_formed) with
+  | false, _, (line, _) :: _ -> Marker_without_run line
+  | false, _, [] -> Runs_nothing
+  | true, _, _ :: (line, _) :: _ -> Names_twice line
+  | true, true, [ (line, m) ] -> Declares_and_names (line, m)
+  | true, true, [] -> Declares_variable
+  | true, false, [ (line, m) ] -> Names_backend (line, m)
+  | true, false, [] -> Names_neither
 
 (** Every comment in [content] that announces itself as a marker, with its line — the population
     {!marked_stanzas} has to account for. A marker the walk attributes to no stanza is one whose

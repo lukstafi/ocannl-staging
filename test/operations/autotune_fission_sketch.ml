@@ -32,6 +32,15 @@ module Asgns = Ir.Assignments
 
 let p = Verdict.p
 
+(* The report's outcome as the questions this test asks of it (gh-ocannl-677): the outcome is a
+   variant naming one of five mutually exclusive states, so a claim names the state it means
+   instead of combining flags — [not (replayed r)] in particular does NOT say a search ran. *)
+let replayed (r : Autotune.report) =
+  match r.Autotune.outcome with Autotune.Cache_replay -> true | _ -> false
+
+let completed (r : Autotune.report) =
+  match r.Autotune.outcome with Autotune.Searched -> true | _ -> false
+
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
    that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
    parity check between two zero arrays passes while covering nothing (gh-ocannl-481 item 3). Every
@@ -172,7 +181,7 @@ let () =
   let got_hit = Context.get_values hctx e.Tensor.value in
   (match !hit_report with
   | Some r ->
-      p "hand-crafted fissioned entry hits the cache" r.Autotune.cache_hit;
+      p "hand-crafted fissioned entry hits the cache" (replayed r);
       p "cache-hit replay is fissioned" r.Autotune.fissioned
   | None ->
       p "hand-crafted fissioned entry hits the cache" false;
@@ -199,7 +208,7 @@ let () =
     match !reports with [ r2; r1 ] -> (r2, r1) | _ -> failwith "expected two reports"
   in
   p "tuned fissionable chain values correct" (Array.for_all2_exn got_t1 expected_e ~f:approx);
-  p "chain tune searches then hits the cache" ((not r1.Autotune.cache_hit) && r2.Autotune.cache_hit);
+  p "chain tune searches then hits the cache" (completed r1 && replayed r2);
   (* gh-ocannl-552: the untuned-default reference is measured by the search — the config-thresholds
      fissioned seed is the first candidate that binds a hardware dimension on GPU, and on CPU it is
      timed or dedups against a timed twin — and persists through the cache entry, so a cache-hit
@@ -228,7 +237,7 @@ let () =
       let (_ : Context.t) = Context.run c3 rt3 in
       p "a stale default fingerprint drops the cached reference but not the hit (gh-ocannl-552)"
         (match !r3 with
-        | Some r -> r.Autotune.cache_hit && Option.is_none r.Autotune.default_ms
+        | Some r -> replayed r && Option.is_none r.Autotune.default_ms
         | None -> false)
   | None ->
       p "a stale default fingerprint drops the cached reference but not the hit (gh-ocannl-552)"
@@ -305,7 +314,7 @@ let () =
     >= if is_cpu then 6 else if String.is_substring backend_name ~substring:"metal" then 9 else 4);
   p "tuned matmul matches the serial twin" (Array.for_all2_exn got_mm1 got_serial ~f:approx);
   p "matmul tune searches then hits the cache"
-    ((not mr1.Autotune.cache_hit) && mr2.Autotune.cache_hit);
+    (completed mr1 && replayed mr2);
   p "matmul cache-hit values match the serial twin"
     (Array.for_all2_exn got_mm2 got_serial ~f:approx);
 

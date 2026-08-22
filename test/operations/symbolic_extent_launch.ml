@@ -79,4 +79,6 @@ let () =
       hctx comp bindings
   in
   Verdict.p "second tune hits the extent-value-independent cache entry"
-    (match !report2 with Some r -> r.Autotune.cache_hit | None -> false)
+    (match !report2 with
+    | Some r -> ( match r.Autotune.outcome with Autotune.Cache_replay -> true | _ -> false)
+    | None -> false)

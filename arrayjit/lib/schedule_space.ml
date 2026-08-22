@@ -5,13 +5,15 @@ open Base
 type placement = Pl_inline | Pl_stage_at of Indexing.symbol | Pl_materialize
 [@@deriving sexp_of, compare, equal]
 
-type 'a child =
-  | Child of 'a tree Lazy.t
-  | Unknown of string * 'a tree Lazy.t
-  | Excluded of string * 'a child Lazy.t
+type ('l, 'a) child =
+  | Child of ('l, 'a) tree Lazy.t
+  | Unknown of string * ('l, 'a) tree Lazy.t
+  | Excluded of string * ('l, 'a) child Lazy.t
   | Refuted of string
 
-and 'a tree = Leaf of 'a | Choice of { level : string; children : (string * 'a child) list }
+and ('l, 'a) tree =
+  | Leaf of 'a
+  | Choice of { level : string; children : ('l * ('l, 'a) child) list }
 
 let subtree = function Child sub | Unknown (_, sub) -> Some sub | Excluded _ | Refuted _ -> None
 let lift_excluded = function Excluded (_, c) -> Lazy.force c | c -> c
@@ -50,6 +52,9 @@ let collect ~f tree =
             | None -> [])
   in
   go [] tree
+
+let render_path ~label path =
+  String.concat ~sep:" > " (List.map path ~f:(fun (level, l) -> level ^ "=" ^ label l))
 
 let refutations tree = collect tree ~f:(function Refuted w -> Some w | _ -> None)
 let exclusions tree = collect tree ~f:(function Excluded (w, _) -> Some w | _ -> None)

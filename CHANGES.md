@@ -36,6 +36,46 @@
 
 ### Added
 
+- **The pre-driver launch gate covers every hardware dimension, workgroup included**
+  (gh-ocannl-679). `max_threads_per_workgroup` caps the thread *product* of a workgroup and nothing
+  capped its dimensions individually — but CUDA's `maxThreadsDim` is `(1024, 1024, 64)`, so a
+  `2 x 2 x 128` threadgroup has a perfectly legal 512-thread product, passes every check, compiles,
+  and then dies at the driver with an opaque invalid-configuration error. `Workgroup` slots cap at
+  3 and the innermost binds `.x`, so the outermost annotated loop's extent lands on `.z` directly;
+  no fold and no exotic schedule is needed to reach it. `Backend_intf.hardware_limits` therefore
+  gains `max_workgroup_dims : (int * int * int) option`, the per-dimension caps on the block's
+  `.x`/`.y`/`.z` — all three rather than one shared bound (as `max_grid_yz` is) because here the
+  dimensions genuinely differ, and an immutable tuple because the GPU backends memoize this record
+  and `Context.hardware_limits` hands it out directly, so a single mutable cell in it would let a
+  caller write through into the process-wide device limits. CUDA queries `max_block_dim_{x,y,z}`, HIP the `max_threads_dim` triple, Metal
+  all three components of `maxThreadsPerThreadgroup` (it read `width` alone before); the C backends
+  stay `None`. Three typed causes join the two grid ones —
+  `Schedule_outcome.Workgroup_{x,y,z}_extent` — because the rejection key is what an autotune search
+  groups declines under and each dimension shrinks by its own knob. `Schedule.default_gpu` and
+  `Schedule.zero_expansion` clamp their block size against the `.x` entry as well as the product,
+  so the gate is a backstop rather than the first line of defence.
+
+  `Schedule.check_hardware_limits{,_classified}` now enumerates the launch geometry from **one
+  table, one row per hardware dimension**, instead of a hand-written `Option.iter` per bound: each
+  bound used to be a copy of its neighbour, which is how `gridDim.y` came to be ungated for a
+  release (gh-ocannl-643) and how the workgroup's dimensions came to be ungated entirely. Five
+  rows, not six — `grid.(0)` is 2^31-scale wherever hardware axes bind, so its absence is stated
+  rather than implied.
+
+- **`bin/device_props`, a supported readback for what the gates compare against** (gh-ocannl-684).
+  `Backend_intf.static_properties` (the per-device props dump) and `hardware_limits` (the derived
+  caps the schedule layer gates against) had no caller anywhere in the repository, so reading a
+  device's queried limits back meant adding a throwaway executable to the tree and deleting it
+  again — paid twice already, and about to be paid a third time verifying gh-ocannl-679's caps on
+  hardware. The new executable prints both for the selected backend, flattened to one
+  `path = value` line per fact so the output greps and diffs, and it compiles no routine (both
+  functions are deliberately `unit ->` so they can run before any driver work). The two surfaces
+  are printed together because they are not redundant: on HIP `max_grid_yz` is a device query, on
+  CUDA a hardcoded architectural constant, on Metal `None` — a dump of the raw props does not tell
+  you what the gate uses, and a dump of `hardware_limits` does not tell you whether the underlying
+  query answered. `Context.static_properties` exposes the first of them the way
+  `Context.hardware_limits` already exposed the second.
+
 - **A computation you can name is a computation you can tune** (gh-ocannl-669). `Autotune.tune`
   takes `?name`, exactly as `Context.compile` does, and passes it to every compile of one search:
   each candidate, the baseline, the cache replay, the winner, both untuned fallbacks and the

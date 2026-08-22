@@ -27,6 +27,15 @@ module Numerics = Ir.Numerics
 module Asgns = Ir.Assignments
 
 let p = Verdict.p
+
+(* The report's outcome as the questions this test asks of it (gh-ocannl-677): the outcome is a
+   variant naming one of five mutually exclusive states, so a claim names the state it means
+   instead of combining flags — [not (replayed r)] in particular does NOT say a search ran. *)
+let replayed (r : Autotune.report) =
+  match r.Autotune.outcome with Autotune.Cache_replay -> true | _ -> false
+
+let completed (r : Autotune.report) =
+  match r.Autotune.outcome with Autotune.Searched -> true | _ -> false
 let approx a b = Float.(abs (a - b) < 1e-4)
 
 let named name (comp : Asgns.comp) : Asgns.comp =
@@ -110,7 +119,7 @@ let () =
   in
   Numerics.set_policy policy_a;
   let r, got = tune () in
-  p "the cold search misses the cache" (not r.Autotune.cache_hit);
+  p "the cold call ran a search rather than replaying" (completed r);
   p "the cold search computes correct values" (Array.for_all2_exn got mm_expected ~f:approx);
   (* On a GPU backend a search that timed nothing stores nothing (gh-ocannl-532), so the replay
      assertions below are conditioned on an entry actually having been written. *)
@@ -118,13 +127,13 @@ let () =
   p "the search stored exactly one entry (or timed nothing, on GPU)"
     (stored_a || (is_gpu && entry_count () = 0));
   let r, got = tune () in
-  p "the entry replays under the policy that wrote it" (Bool.equal r.Autotune.cache_hit stored_a);
+  p "the entry replays under the policy that wrote it" (Bool.equal (replayed r) stored_a);
   p "the replayed routine computes correct values" (Array.for_all2_exn got mm_expected ~f:approx);
 
   (* --- Regime B: the same code, the same directory, the other policy --- *)
   Numerics.set_policy policy_b;
   let r, got = tune () in
-  p "the entry does NOT replay under a different policy (gh-ocannl-568)" (not r.Autotune.cache_hit);
+  p "the entry does NOT replay under a different policy (gh-ocannl-568)" (not (replayed r));
   p "the cross-policy run searches instead of replaying"
     ((not stored_a) || r.Autotune.candidates_timed >= 1);
   p "the cross-policy run computes correct values" (Array.for_all2_exn got mm_expected ~f:approx);
@@ -133,5 +142,5 @@ let () =
   Numerics.set_policy policy_a;
   let r, _got = tune () in
   p "regime B's search did not overwrite regime A's winner"
-    (Bool.equal r.Autotune.cache_hit stored_a);
+    (Bool.equal (replayed r) stored_a);
   Numerics.set_policy base

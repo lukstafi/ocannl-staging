@@ -682,9 +682,9 @@ let placement_arm_name = function
 
     An arm that fails is a {e losing} arm, not a failed run (gh-ocannl-550): a search that
     terminates on a fatal failure ranks at [infinity], the other arm's completed winner ships and
-    stays cached, and the failed arm's own (partial) report — carrying its [terminal_failure] —
+    stays cached, and the failed arm's own report — [Autotune.Search_died], carrying the failure —
     still reaches [report] in position, so the failure is recorded rather than downgraded to "that
-    arm merely lost". A partial arm's [best_ms] is deliberately {e not} shippable and not compared:
+    arm merely lost". A failed arm's [best_ms] is deliberately {e not} shippable and not compared:
     {!Autotune.tune} raised, so no routine was compiled from [ctx] for it. Only when every arm fails
     does [tune_placements] propagate, with the first failure's original backtrace — with two
     exceptions that are not the arm's to absorb and propagate at once: process-level failures
@@ -693,8 +693,9 @@ let placement_arm_name = function
     [report] callback's own exception likewise propagates rather than counting as an arm failure,
     and so does a failure that poisoned the lineage the arms share ({!Context.poisoned_failure}):
     every timing run in the sibling would then refuse to execute, so the second arm can only burn a
-    search proving it. Consumers attributing arms by arrival order should read [terminal_failure]
-    (equivalently [partial]) before [best_ms], as benchmarks/runners/ocannl/bench_harness.ml does.
+    search proving it. Consumers attributing arms by arrival order should read
+    {!Autotune.terminal_failure} — or match the report's [outcome] — before [best_ms], as
+    benchmarks/runners/ocannl/bench_harness.ml does.
 
     The in-position guarantee is {!Autotune.tune}'s reporting contract, and inherits its one
     carve-out: an argument-precondition violation (an incompatible [timing_ctx]) is detected before
@@ -871,8 +872,8 @@ let tune_placements ?name ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?r
     let r = !last in
     let best_ms =
       match result with
-      (* Not [r.best_ms]: the partial report's best is a measurement of the search context, and no
-         routine was compiled from [ctx] for it. There is nothing to ship at that time. *)
+      (* Not [r.best_ms]: a [Search_died] report's best is a measurement of the search context, and
+         no routine was compiled from [ctx] for it. There is nothing to ship at that time. *)
       | Error _ -> Float.infinity
       | Ok _ -> Option.value_map r ~default:Float.infinity ~f:(fun r -> r.Autotune.best_ms)
     in
@@ -1043,8 +1044,8 @@ let tune_placements ?name ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?r
            %s at %.4f ms%s"
           (if a_wins then "B" else "A")
           d.Autotune.best_label d.Autotune.best_ms
-          (* A partial arm's crown is mid-search: it lost the A/B by failing, not by its time. *)
-          (if Option.is_some d.Autotune.terminal_failure then ", before that arm failed" else "")
+          (* A failed arm's crown is mid-search: it lost the A/B by failing, not by its time. *)
+          (if Option.is_some (Autotune.terminal_failure d) then ", before that arm failed" else "")
           (if a_wins then "A" else "B")
           (* Under a forced arm the shipped one need not have won anything (gh-ocannl-638). *)
           (if forced then "ships by tune_ship_arm" else "wins the placement A/B")

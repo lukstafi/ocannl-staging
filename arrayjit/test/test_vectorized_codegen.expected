@@ -10,7 +10,7 @@
   #pragma GCC ivdep
   #endif
   for (int32_t i1 = 0; i1 <= 7; ++i1) {
-    out[i1] = (float)(1);
+    out[i1] = (float)(1.0);
   }
 }
  void vec_fallback_kernel(
@@ -20,7 +20,7 @@
 
   /* Main logic. */
   for (int32_t i2 = 0; i2 <= 7; ++i2) {
-    out2[i2] = (float)(1);
+    out2[i2] = (float)(1.0);
   }
 }
  void aligned_local_kernel(
@@ -31,7 +31,7 @@
 
   /* Main logic. */
   for (int32_t i3 = 0; i3 <= 7; ++i3) {
-    scratch[i3] = (float)(2);
+    scratch[i3] = (float)(2.0);
     out3[i3] = scratch[i3];
   }
 }
@@ -48,15 +48,15 @@
     for (; i4 + 8 <= 8; i4 += 8) {
       ocannl_vec8f vget1__;
       __builtin_memcpy(&vget1__, &inp[i4], sizeof(vget1__));
-      ocannl_vec8f vset2__ = (vget1__ + ((float)(2)));
+      ocannl_vec8f vset2__ = (vget1__ + ((float)(2.0)));
       __builtin_memcpy(&out4[i4], &vset2__, sizeof(vset2__));
-      float vunif3__ = ((float)(1));
+      float vunif3__ = ((float)(1.0));
       ocannl_vec8f vset4__ = (ocannl_vec8f){vunif3__, vunif3__, vunif3__, vunif3__, vunif3__, vunif3__, vunif3__, vunif3__};
       __builtin_memcpy(&inp[i4], &vset4__, sizeof(vset4__));
     }
     for (; i4 <= 7; ++i4) {
-      out4[i4] = (inp[i4] + (float)(2));
-      inp[i4] = (float)(1);
+      out4[i4] = (inp[i4] + (float)(2.0));
+      inp[i4] = (float)(1.0);
     }
   }
 }

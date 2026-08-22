@@ -28,6 +28,12 @@ module SC = Ir.Schedule_cache
 module Asgns = Ir.Assignments
 
 let p = Verdict.p
+
+(* The report's outcome as the questions this test asks of it (gh-ocannl-677): the outcome is a
+   variant naming one of five mutually exclusive states, so a claim names the state it means
+   instead of combining flags — [not (replayed r)] in particular does NOT say a search ran. *)
+let replayed (r : Autotune.report) =
+  match r.Autotune.outcome with Autotune.Cache_replay -> true | _ -> false
 let approx a b = Float.(abs (a - b) < 1e-4)
 
 let named name (comp : Asgns.comp) : Asgns.comp =
@@ -171,7 +177,7 @@ let () =
   let got = Context.get_values ctx mc.Tensor.value in
   let r = Option.value_exn ~here:[%here] !report in
   p "a serial cache entry is rejected on GPU backends and honoured on CPU ones"
-    (Bool.equal r.Autotune.cache_hit (not is_gpu));
+    (Bool.equal (replayed r) (not is_gpu));
   p "rejecting it re-searches rather than returning the serial routine"
     (if is_gpu then r.Autotune.candidates_timed >= 1 else r.Autotune.candidates_timed = 0);
   p "a pre-gh-552 entry reports no default measurement; a re-search measures one"

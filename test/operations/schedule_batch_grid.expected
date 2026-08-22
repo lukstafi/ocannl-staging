@@ -42,3 +42,6 @@ limit gate: a max_grid_yz below the batch product stops the twins at seeding: tr
 limit gate: the .y reference isolates the row blocks — its .z extent is 1 and its .y exceeds 1: true
 limit gate: a .y grid extent at the device limit passes: true
 limit gate: a .y grid extent beyond the device limit is a typed Resource_exceeded: true
+limit gate: the blocktile seed's workgroup is 2-D — its .y thread extent exceeds 1: true
+limit gate: per-dimension caps at the seed's own workgroup shape pass: true
+limit gate: a .y workgroup cap below the seed's extent is a typed Workgroup_y_extent, though the thread product is legal: true

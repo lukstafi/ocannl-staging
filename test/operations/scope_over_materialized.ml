@@ -42,20 +42,29 @@ let () =
         Ll_test.loop_n i 8
           (LL.Set_local (id, Ll_test.add (LL.Get_local id) (Ll_test.get xs [| Ll_test.iter i |]))) )
   in
-  let scoped =
+  let scoped mint =
     Ll_test.set acc
       [| Ll_test.fixed 0 |]
-      (LL.Local_scope { id; body; orig_indices = [| Ll_test.fixed 0 |] })
+      (LL.Local_scope { id; body; orig_indices = [| Ll_test.fixed 0 |]; mint })
   in
-  let rejection =
-    match Ll_test.optimize ~materialized:[ acc; xs ] ~name:"som_reject" scoped with
+  let rejection_of mint =
+    match Ll_test.optimize ~materialized:[ acc; xs ] ~name:"som_reject" (scoped mint) with
     | (_ : LL.optimized) -> None
     | exception Invalid_argument msg -> Some msg
   in
+  let rejection = rejection_of LL.Inlined_computation in
   p "optimizing a Local_scope over a materialized node is refused" (Option.is_some rejection);
   p "the refusal names the node"
     (Option.value_map rejection ~default:false ~f:(fun msg ->
          String.is_substring msg ~substring:(Tn.debug_name acc)));
+  (* gh-ocannl-687 added a mint field to [Local_scope], and it is deliberately NOT what decides
+     this rejection. The mint records which pass BUILT a scope; this contract is about which side
+     of [optimize] a program was handed to, a per-call fact that {!Low_level.input_scope_ids}
+     answers. Claiming the schedule's provenance must not buy a program past the optimizer -- were
+     the two conflated, hand-built IR (which has no honest way to spell "not mine") could label its
+     way back into the silent collapse this rejection closed. *)
+  p "claiming the schedule mint does not exempt a program handed to optimize"
+    (Option.is_some (rejection_of LL.Schedule_minted));
   (* The refusal is about the SCOPE, not about the computation: the same accumulation spelled
      without one optimizes and executes. This is also the raw twin the prelowered leg needs. *)
   let raw =
@@ -102,7 +111,7 @@ let () =
     Ll_test.loop_n r 4
       (Ll_test.set out
          [| Ll_test.iter r |]
-         (LL.Local_scope { id = vid; body = vbody; orig_indices = [| Ll_test.fixed 0 |] }))
+         (LL.Local_scope { id = vid; body = vbody; orig_indices = [| Ll_test.fixed 0 |]; mint = LL.Inlined_computation }))
   in
   let vo = Ll_test.optimize ~materialized:[ out; src ] ~name:"som_virtual" vllc in
   p "a Local_scope over a virtual node survives optimization" (Ll_test.count_scopes vo.LL.llc = 1);
@@ -117,7 +126,11 @@ let () =
   p "the virtual-node scope executes to the reference row sums"
     (Ll_test.same vvals [ [| 6.0; 36.0; 66.0; 96.0 |] ]);
   (* === the supported route for the post-optimize form === *)
-  let so = Ll_test.optimize_scoped ~materialized:[ acc; xs ] ~name:"som_prelowered" ~raw scoped in
+  (* The honest provenance for this shape: it is what a materializing [Unroll] mints. *)
+  let so =
+    Ll_test.optimize_scoped ~materialized:[ acc; xs ] ~name:"som_prelowered" ~raw
+      (scoped LL.Schedule_minted)
+  in
   let svals =
     Ll_test.execute ~name:"som_prelowered" so
       ~seed:[ (acc, [| seeded |]); (xs, xs_values) ]

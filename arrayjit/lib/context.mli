@@ -212,6 +212,14 @@ val poisoned_failure : t -> exn option
     cannot run: [Train.tune_placements] checks it before searching the second placement arm, since
     the arms share a lineage and a poisoned one refuses every timing run (gh-ocannl-550). *)
 
+val static_properties : t -> Sexp.t
+(** The backend's own dump of the properties of all its devices — names, ordinals, and the queried
+    attributes each backend chooses to surface, including the launch-dimension limits
+    {!hardware_limits} derives from. Not redundant with {!hardware_limits}: what a gate compares
+    against may be a device query on one backend and an architectural constant on another, so the
+    raw props do not tell you what the gate uses and the derived limits do not tell you whether the
+    underlying query answered. Printed together by [bin/device_props.ml] (gh-ocannl-684). *)
+
 val hardware_limits : t -> Ir.Backend_intf.hardware_limits
 (** The backend's conservative per-workgroup device limits (all-[None] on backends that do not bind
     hardware axes). Chiefly for schedule transforms and the autotuner. *)

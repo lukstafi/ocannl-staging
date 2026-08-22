@@ -30,6 +30,12 @@ module Asgns = Ir.Assignments
 
 let p = Verdict.p
 
+(* The report's outcome as the questions this test asks of it (gh-ocannl-677): the outcome is a
+   variant naming one of five mutually exclusive states, so a claim names the state it means
+   instead of combining flags — [not (replayed r)] in particular does NOT say a search ran. *)
+let replayed (r : Autotune.report) =
+  match r.Autotune.outcome with Autotune.Cache_replay -> true | _ -> false
+
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
    that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
    parity check between two zero arrays passes while covering nothing (gh-ocannl-481 item 3). Every
@@ -268,7 +274,7 @@ let () =
   let got = Context.get_values hctx y1.Tensor.value in
   (match !hit_report with
   | Some r ->
-      p "split-reduce entry hits the cache" r.Autotune.cache_hit;
+      p "split-reduce entry hits the cache" (replayed r);
       p "split-reduce cache-hit replay is fissioned" r.Autotune.fissioned
   | None ->
       p "split-reduce entry hits the cache" false;

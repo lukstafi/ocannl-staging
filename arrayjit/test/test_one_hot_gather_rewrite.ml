@@ -99,7 +99,9 @@ let make_local_scope_reduction ~table ~ids ~result ~table_idcs ~vocab ~bounds ~r
     {
       tn = result;
       idcs = [| Idx.Iterator b; Idx.Iterator d |];
-      llsc = LL.Local_scope { id; body; orig_indices = [| Idx.Iterator b; Idx.Iterator d |] };
+      llsc =
+        LL.Local_scope
+          { id; body; orig_indices = [| Idx.Iterator b; Idx.Iterator d |]; mint = LL.Inlined_computation };
       debug = "";
     }
 
