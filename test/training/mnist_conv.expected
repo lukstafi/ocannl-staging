@@ -2,16 +2,7 @@ Loading MNIST dataset...
 Training on 2000 samples, testing on 1000 samples, batch_size=50
 
 Starting training for 100 epochs (4000 steps)...
-Epoch 10: avg loss = 0.2
-Epoch 20: avg loss = 0.1
-Epoch 30: avg loss = 0.0
-Epoch 40: avg loss = 0.0
-Epoch 50: avg loss = 0.0
-Epoch 60: avg loss = 0.0
-Epoch 70: avg loss = 0.0
-Epoch 80: avg loss = 0.0
-Epoch 90: avg loss = 0.0
-Epoch 100: avg loss = 0.0
+avg loss fell from epoch 10 to epoch 100: true
 
 Evaluating on 1000 test samples...
 Test loss below 2.0: true

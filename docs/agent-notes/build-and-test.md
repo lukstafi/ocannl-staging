@@ -427,3 +427,12 @@ that they earn a lookup rather than always-loaded space.
   existing `_build` — seconds rather than minutes when little changed. That is what makes a daily
   cadence affordable; it also means a sweep is not a clean-tree build, and a genuine
   from-scratch check still wants `dune clean` or a fresh CI run.
+- A golden line printed at a FIXED decimal precision is not made portable by lowering the
+  precision: it only moves the boundary. `cifar_conv`'s epoch-30 mean loss sat at ~1.05, so its
+  `%.1f` print — introduced to absorb reduction-order drift — read `1.0` on cc and `1.1` on cuda at
+  the same commit, and no promotion could serve both backends. The fix that holds is the one the
+  test metrics already used (`9defc92f`): exact digits to stderr, where dune does not diff them, and
+  on stdout a `Verdict` claim about the property the trajectory was there to show (the loss fell
+  from the first logged epoch to the last). The `@slow` goldens get this treatment the day they
+  flip, because CI never runs `@slow` — only `tools/sweep.sh --slow` (the Sunday sweep) and hand runs do — so a knife-edge
+  there stays hidden until a GPU run lands on the other side of it.

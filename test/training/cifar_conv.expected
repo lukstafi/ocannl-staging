@@ -2,11 +2,7 @@ Loading CIFAR-10 dataset...
 Training on 2000 samples, testing on 1000 samples, batch_size=50
 
 Starting training for 50 epochs (2000 steps)...
-Epoch 10: avg loss = 1.6
-Epoch 20: avg loss = 1.3
-Epoch 30: avg loss = 1.0
-Epoch 40: avg loss = 0.8
-Epoch 50: avg loss = 0.7
+avg loss fell from epoch 10 to epoch 50: true
 
 Evaluating on 1000 test samples...
 Test loss below 2.3: true
