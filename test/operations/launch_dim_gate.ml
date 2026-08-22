@@ -56,7 +56,7 @@ let block_nest () =
 
 let cuda_like ~z =
   { BI.no_hardware_limits with max_threads_per_workgroup = Some 1024;
-    max_workgroup_dims = Some [| 1024; 1024; z |] }
+    max_workgroup_dims = Some (1024, 1024, z) }
 
 let accepts ~limits opt =
   match Sched.check_hardware_limits_classified ~name:"ldg" ~limits opt with
@@ -105,25 +105,23 @@ let () =
   (* Each dimension is gated by its own entry and reported as its own resource: a shared variant
      would erase which knob has to shrink. Caps of 1 on [.x] / [.y] leave [.z] slack, so the row
      that fires is the row under test. *)
-  let dim_only i n =
-    let caps = [| 1024; 1024; 1024 |] in
-    caps.(i) <- n;
+  let dim_only caps =
     { BI.no_hardware_limits with max_threads_per_workgroup = Some 1024;
       max_workgroup_dims = Some caps }
   in
   p "an .x cap below the .x extent refuses as Workgroup_x_extent"
-    (match refusal opt ~limits:(dim_only 0 1) with
+    (match refusal opt ~limits:(dim_only (1, 1024, 1024)) with
     | Some (SO.Workgroup_x_extent, 2, Some 1) -> true
     | _ -> false);
   p "a .y cap below the .y extent refuses as Workgroup_y_extent"
-    (match refusal opt ~limits:(dim_only 1 1) with
+    (match refusal opt ~limits:(dim_only (1024, 1, 1024)) with
     | Some (SO.Workgroup_y_extent, 2, Some 1) -> true
     | _ -> false);
   p "caps at every extent accept the whole geometry"
     (accepts opt
        ~limits:
          { BI.no_hardware_limits with max_threads_per_workgroup = Some 1024;
-           max_workgroup_dims = Some [| 2; 2; 128 |] });
+           max_workgroup_dims = Some (2, 2, 128) });
 
   (* [max_workgroup_dims = None] is what the C backends report, and it must exempt the dimensions
      rather than reject on a missing cap. *)
@@ -202,5 +200,5 @@ let () =
     (annotated
        ~limits:
          { BI.no_hardware_limits with max_threads_per_workgroup = Some 1024;
-           max_workgroup_dims = Some [| 8; 1024; 1024 |] }
+           max_workgroup_dims = Some (8, 1024, 1024) }
      = 8)

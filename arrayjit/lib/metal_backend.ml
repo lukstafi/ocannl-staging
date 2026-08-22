@@ -380,7 +380,7 @@ module Impl = struct
                   min_over (fun (a : Me.Device.attributes) ->
                       a.max_threads_per_threadgroup.depth) )
               with
-              | Some x, Some y, Some z -> Some [| x; y; z |]
+              | Some x, Some y, Some z -> Some (x, y, z)
               | _ -> None);
            (* Metal's threadgroups-per-grid dimensions are not 16-bit like CUDA/HIP's
               gridDim.y/z; no practical cap to enforce here. *)

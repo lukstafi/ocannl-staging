@@ -2338,7 +2338,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                   min_over (fun (a : Cu.Device.attributes) -> a.max_block_dim_y),
                   min_over (fun (a : Cu.Device.attributes) -> a.max_block_dim_z) )
               with
-              | Some x, Some y, Some z -> Some [| x; y; z |]
+              | Some x, Some y, Some z -> Some (x, y, z)
               (* No devices: [min_over] is [None] on all three, and an empty machine advertises no
                  cap rather than a spurious one. *)
               | _ -> None);

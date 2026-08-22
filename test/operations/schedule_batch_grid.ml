@@ -419,7 +419,7 @@ let () =
   p "limit gate: per-dimension caps at the seed's own workgroup shape pass"
     (match
        Sched.check_hardware_limits_classified ~name:"qkv_wg"
-         ~limits:(wg_limits [| sblock.(0); sblock.(1); sblock.(2) |])
+         ~limits:(wg_limits (sblock.(0), sblock.(1), sblock.(2)))
          os
      with
     | () -> true
@@ -429,7 +429,7 @@ let () =
      the thread product is legal"
     (match
        Sched.check_hardware_limits_classified ~name:"qkv_wg"
-         ~limits:(wg_limits [| sblock.(0); sblock.(1) - 1; sblock.(2) |])
+         ~limits:(wg_limits (sblock.(0), sblock.(1) - 1, sblock.(2)))
          os
      with
     | () -> false

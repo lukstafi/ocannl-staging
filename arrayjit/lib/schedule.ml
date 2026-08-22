@@ -4964,9 +4964,7 @@ let aligned_chains ?max_chain ?(expanded_zeros = []) (opt : Low_level.optimized)
 let clamp_block_size ~(limits : Backend_intf.hardware_limits) block_size =
   let clamp cap n = Option.value_map cap ~default:n ~f:(min n) in
   clamp limits.max_threads_per_workgroup block_size
-  |> clamp
-       (Option.bind limits.max_workgroup_dims ~f:(fun caps ->
-            if Array.length caps > 0 then Some caps.(0) else None))
+  |> clamp (Option.map limits.max_workgroup_dims ~f:(fun (x, _, _) -> x))
 
 let default_gpu ?block_size ?min_parallel ?(limits = Backend_intf.no_hardware_limits)
     (opt : Low_level.optimized) : schedule =
@@ -5889,19 +5887,18 @@ let check_hardware_limits_classified ~name ~(limits : Backend_intf.hardware_limi
       "Schedule: kernel %{name} requests a %{what} of %{requested#Int}, exceeding the device limit \
        of %{limit#Int}"]
   in
-  let workgroup_dim i =
-    Option.bind limits.max_workgroup_dims ~f:(fun caps ->
-        if i < Array.length caps then Some caps.(i) else None)
-  in
+  let wg_x = Option.map limits.max_workgroup_dims ~f:(fun (x, _, _) -> x)
+  and wg_y = Option.map limits.max_workgroup_dims ~f:(fun (_, y, _) -> y)
+  and wg_z = Option.map limits.max_workgroup_dims ~f:(fun (_, _, z) -> z) in
   let geometry_rows =
     [
       (* The workgroup's own dimensions, beside — not instead of — the thread-product check above:
          they are separate hardware facts, and CUDA's [.z] cap of 64 sits 16x below its product
          cap, so a legal-product workgroup with a deep [.z] passes every other check and dies at
          the driver. [Workgroup] slots are capped at 3, so these three rows are exhaustive. *)
-      (workgroup_dim 0, dims.block.(0), Schedule_outcome.Workgroup_x_extent, detail_of ~what:".x workgroup extent");
-      (workgroup_dim 1, dims.block.(1), Schedule_outcome.Workgroup_y_extent, detail_of ~what:".y workgroup extent");
-      (workgroup_dim 2, dims.block.(2), Schedule_outcome.Workgroup_z_extent, detail_of ~what:".z workgroup extent");
+      (wg_x, dims.block.(0), Schedule_outcome.Workgroup_x_extent, detail_of ~what:".x workgroup extent");
+      (wg_y, dims.block.(1), Schedule_outcome.Workgroup_y_extent, detail_of ~what:".y workgroup extent");
+      (wg_z, dims.block.(2), Schedule_outcome.Workgroup_z_extent, detail_of ~what:".z workgroup extent");
       (* [.y] is the grid slot-1 extent — the row-block count of a blocktiled matmul, which grows
          with the site's m-extent rather than with any fold: at [bm = 16] an m-extent past ~1M rows
          is already over the cap. *)

@@ -43,9 +43,11 @@
   and then dies at the driver with an opaque invalid-configuration error. `Workgroup` slots cap at
   3 and the innermost binds `.x`, so the outermost annotated loop's extent lands on `.z` directly;
   no fold and no exotic schedule is needed to reach it. `Backend_intf.hardware_limits` therefore
-  gains `max_workgroup_dims : int array option`, the per-dimension caps on the block's `.x`/`.y`/
-  `.z` — an array rather than one shared bound (as `max_grid_yz` is) because here the dimensions
-  genuinely differ. CUDA queries `max_block_dim_{x,y,z}`, HIP the `max_threads_dim` triple, Metal
+  gains `max_workgroup_dims : (int * int * int) option`, the per-dimension caps on the block's
+  `.x`/`.y`/`.z` — all three rather than one shared bound (as `max_grid_yz` is) because here the
+  dimensions genuinely differ, and an immutable tuple because the GPU backends memoize this record
+  and `Context.hardware_limits` hands it out directly, so a single mutable cell in it would let a
+  caller write through into the process-wide device limits. CUDA queries `max_block_dim_{x,y,z}`, HIP the `max_threads_dim` triple, Metal
   all three components of `maxThreadsPerThreadgroup` (it read `width` alone before); the C backends
   stay `None`. Three typed causes join the two grid ones —
   `Schedule_outcome.Workgroup_{x,y,z}_extent` — because the rejection key is what an autotune search

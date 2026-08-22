@@ -1937,7 +1937,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
                       let _, _, z = a.max_threads_dim in
                       z) )
               with
-              | Some x, Some y, Some z -> Some [| x; y; z |]
+              | Some x, Some y, Some z -> Some (x, y, z)
               | _ -> None);
            (* One cap for both gated dimensions (see [Backend_intf.max_grid_yz]): the smaller of
               the queried .y and .z components, so the gate is never looser than the device on

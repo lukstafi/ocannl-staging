@@ -97,8 +97,13 @@ files.
   Pinned end-to-end by `test/operations/schedule_batch_grid.ml` (structure everywhere, execution
   and emitted-source fold on GPU backends).
   The gate covers the WORKGROUP's dimensions the same way (gh-ocannl-679):
-  `hardware_limits.max_workgroup_dims` is a 3-array of per-dimension caps beside — not instead of —
-  `max_threads_per_workgroup`, which caps only the thread PRODUCT. The two are different hardware
+  `hardware_limits.max_workgroup_dims` is an `(int * int * int) option` of per-dimension caps
+  beside — not instead of — `max_threads_per_workgroup`, which caps only the thread PRODUCT.
+  A tuple, not an array: every GPU backend memoizes its `hardware_limits` behind a `lazy` and
+  `Context.hardware_limits` returns that record itself, so ONE mutable cell anywhere in the record
+  would let a caller deriving tighter limits write through into the process-wide singleton. Keep
+  the record free of mutable cells when adding fields — it is what makes handing out the memoized
+  value safe, and `max_workgroup_dims` was the only field that ever broke it. The two are different hardware
   facts: CUDA's `maxThreadsDim` is `(1024, 1024, 64)`, so a `2 x 2 x 128` workgroup is a legal
   512-thread product and an invalid launch configuration. `Workgroup` slots cap at 3 and the
   innermost binds `.x`, so the outermost annotated loop's extent lands on `.z` directly; no fold is
