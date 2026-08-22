@@ -21,7 +21,10 @@ Configuration keys tracked as ambient dependencies, in the one spelling OCANNL r
   backend
   buffer_aliasing
   build_files_prefix
+  cc_backend_arch_flags
   cc_fp16_arithmetic
+  cc_vector_bytes
+  debug_log_from_routines
   fp16_arithmetic
   log_config_sourcing
   log_level
@@ -31,6 +34,7 @@ Configuration keys tracked as ambient dependencies, in the one spelling OCANNL r
   no_config_file
   profile
   suppress_welcome_message
+  virtualize_max_visits
 
 Per-module tracing gates, and the library whose preprocessor_deps declares each:
   OCANNL_LOG_LEVEL_ASSIGNMENTS   arrayjit/lib/dune, library ir (arrayjit/lib/assignments.ml)

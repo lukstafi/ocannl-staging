@@ -3307,11 +3307,18 @@
   (diff agent_notes_structure.expected agent_notes_structure.actual)))
 
 (test
- ; The numerics keys are declared because this test READS them, not merely because a kernel does:
- ; the accumulator-residency claim asks Numerics.cpu_compute_prec which reference the policy
- ; selects, and Context.hardware_limits which fp16 arithmetic the target has, so all three change
- ; the required baseline. Undeclared, dune would serve the previous run's result across a change of
- ; any of them and the policy probe would silently not rerun (gh-ocannl-628).
+ ; This test asserts which FORM a reduction renders as and which accumulator reference its value
+ ; must match, so every configuration key that can move either is an ambient dependency of it --
+ ; undeclared, dune serves the previous run's result and the probe silently does not rerun
+ ; (gh-ocannl-628). The set, and what each one moves:
+ ;   NARROW_COMPUTE_F32, FP16_ARITHMETIC, CC_FP16_ARITHMETIC -- which reference the accumulator
+ ;     policy selects (Numerics.cpu_compute_prec and Context.hardware_limits are consulted here,
+ ;     not merely by the kernels).
+ ;   CC_VECTOR_BYTES, CC_BACKEND_ARCH_FLAGS -- whether try_vectorize_reduce renders at all
+ ;     (cc_vector_bytes=0 trips its vector_bytes < 8 guard), so the Vectorized members' form.
+ ;   DEBUG_LOG_FROM_ROUTINES -- try_localize_serial_reduce declines wholesale under routine
+ ;     logging, which turns every localized member into a read-modify-write one.
+ ;   VIRTUALIZE_MAX_VISITS -- whether the virtual accumulator is inlined at its read site at all.
  (name reduction_forms)
  (package neural_nets_lib)
  (deps
@@ -3320,7 +3327,11 @@
   (env_var OCANNL_BACKEND)
   (env_var OCANNL_NARROW_COMPUTE_F32)
   (env_var OCANNL_FP16_ARITHMETIC)
-  (env_var OCANNL_CC_FP16_ARITHMETIC))
+  (env_var OCANNL_CC_FP16_ARITHMETIC)
+  (env_var OCANNL_CC_VECTOR_BYTES)
+  (env_var OCANNL_CC_BACKEND_ARCH_FLAGS)
+  (env_var OCANNL_DEBUG_LOG_FROM_ROUTINES)
+  (env_var OCANNL_VIRTUALIZE_MAX_VISITS))
  (modules reduction_forms)
  (libraries base ocannl stdio arrayjit.verdict ll_test test_utils)
  (preprocess

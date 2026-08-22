@@ -752,6 +752,15 @@ type member = {
           either — a false green in both claims at once. The node's total subscript count is bounded
           by [2 * store_sites] for the same reason: each site may open the cell and close it, and
           nothing else may touch it. *)
+  rmw_sites : int;
+      (** For a member claiming {!Rmw}: how many read-modify-write statements the composition
+          emits, textually — one per repetition where the level is [Unrolled], one where it is a
+          serial loop. Pinned exactly, because the COUNT is what distinguishes the two declining
+          forms (Codex P2, round 5): if the [Unrolled] renderer regressed to [serial_loop], or the
+          axis annotation were dropped, the source would still hold one read-modify-write, [form_of]
+          would still answer [Rmw], and execution would still equal the per-step reference — serial
+          and unrolled loops visit the same terms — so a member advertised as "one per copy" would
+          be green without the Unrolled fallback ever running. *)
   extra : string list;
       (** Substrings that must appear in a statement ASSIGNING A SCOPE LOCAL — the scope's own
           updates — ANDed into the form claim. For the one distinguishing feature the node-access
@@ -774,7 +783,7 @@ type member = {
 let no_ops _ = []
 
 let member ?(shape = Plain) ?(sched = no_ops) ?(expect = Localized) ?claimed ?(reference = Baseline)
-    ?(store_sites = 1) ?(extra = []) ?(precisions = [ "f32"; "bf16"; "f16" ])
+    ?(store_sites = 1) ?(rmw_sites = 1) ?(extra = []) ?(precisions = [ "f32"; "bf16"; "f16" ])
     ?(available = fun _ -> true) slug what =
   let claimed = Option.value claimed ~default:(form_name expect) in
   {
@@ -786,6 +795,7 @@ let member ?(shape = Plain) ?(sched = no_ops) ?(expect = Localized) ?claimed ?(r
     claimed;
     reference;
     store_sites;
+    rmw_sites;
     extra;
     precisions;
     available;
@@ -906,7 +916,7 @@ let members =
     member "decline-sibling-statement" "a second statement in the reduction level"
       ~shape:Side_write ~expect:Rmw ~reference:Per_step;
     member "decline-sibling-unrolled" "the same level Unrolled: one read-modify-write per copy"
-      ~shape:Side_write ~expect:Rmw ~reference:Per_step ~sched:(fun g ->
+      ~shape:Side_write ~expect:Rmw ~reference:Per_step ~rmw_sites:cols ~sched:(fun g ->
         [ Sched.Unroll { axis = g.k; materialize = false } ]);
   ]
 
@@ -1268,17 +1278,20 @@ let () =
                            that closed once per chain. *)
                         reading.stores_from_local + reading.rmw_statements = m.store_sites
                         && reading.node_accesses <= 2 * m.store_sites
-                    | Partials_combine | Rmw | Mma_fallback -> true
+                    | Rmw ->
+                        reading.rmw_statements = m.rmw_sites
+                        && reading.node_accesses <= 2 * m.rmw_sites
+                    | Partials_combine | Mma_fallback -> true
                     | Unrecognized ->
                         (* No member claims it; [same_form] already fails. *)
                         false
                   in
                   if not sites_ok then
                     Stdio.eprintf
-                      "  %s: %d closing store(s) and %d node subscript(s), expected %d and at most \
-                       %d\n"
-                      name reading.stores_from_local reading.node_accesses m.store_sites
-                      (2 * m.store_sites);
+                      "  %s: %d closing store(s), %d rmw statement(s), %d node subscript(s); \
+                       expected %d store sites / %d rmw sites\n"
+                      name reading.stores_from_local reading.rmw_statements reading.node_accesses
+                      m.store_sites m.rmw_sites;
                   if not (same_form rendered m.expect) then
                     Stdio.eprintf
                       "  %s: rendered %s, claimed %s (node subscripts %d, rmw statements %d, \
