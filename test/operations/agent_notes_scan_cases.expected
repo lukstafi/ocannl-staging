@@ -21,6 +21,9 @@ ok: bullets -- a number that merely opens a sentence
 ok: bullets -- a fenced block, whose contents are not bullets
 ok: bullets -- a fence that is never closed
 ok: bullets -- a block quote
+ok: bullets -- a block quote nested under a bullet
+ok: bullets -- an index whose rows drifted four spaces right
+ok: bullets -- a comparison at the start of a continuation is not a quote
 ok: bullets -- an HTML block at column zero
 ok: bullets -- an angle bracket inside a continuation is ordinary text
 ok: bullets -- a thematic break
@@ -37,6 +40,8 @@ ok: tables -- a header and a delimiter and no rows
 ok: tables -- a pipe inside a code span is not a cell separator
 ok: tables -- a pipe inside a code span below a table
 ok: tables -- an escaped pipe is not a cell separator either
+ok: tables -- a table indented three spaces is still a table
+ok: tables -- a table indented four spaces is a code block
 ok: tables -- a delimiter cell of one hyphen
 ok: tables -- a delimiter cell of two hyphens
 ok: tables -- alignment colons are still a delimiter row
@@ -58,8 +63,10 @@ ok: index -- a backlink that is only a code span
 ok: index -- a backlink commented out
 ok: index -- a backlink that is an image
 ok: index -- a backlink carrying an anchor is still a backlink
-ok: index -- a note in a subdirectory, linked
+ok: index -- a note in a subdirectory, linked and backlinked from its own depth
+ok: index -- a nested note carrying the one-level backlink, which resolves to nothing
 ok: index -- a note in a subdirectory, unlinked
+ok: index -- a backlink written with a redundant ./ still resolves
 ok: index -- a file no row links
 ok: index -- two rows for one file
 ok: index -- a file that does not link back to the index

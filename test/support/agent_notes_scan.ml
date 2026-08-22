@@ -203,7 +203,15 @@ let row_cells line =
         in
         Some (cut pipes)
 
-let is_table_line line = String.is_prefix (String.strip line) ~prefix:"|"
+(** Markdown allows a block's line at most THREE leading spaces; at four it is an indented code
+    block instead. Stripping all of it read a table indented into code as a table, so an index whose
+    rows drifted right rendered as a code sample with no navigable link in it while every rule
+    stayed green (Codex P2, round 2). Beyond three the line falls through to the continuation rules,
+    which is right inside a bullet and reported outside one. *)
+let max_block_indent = 3
+
+let is_table_line line =
+  indent_of line <= max_block_indent && String.is_prefix (String.strip line) ~prefix:"|"
 
 (** GitHub wants at least THREE hyphens in a delimiter cell. A cell shortened to ["-"] or ["--"]
     stops the block rendering as a table while every other property of it still holds, so accepting
@@ -306,23 +314,38 @@ let foreign_list_marker stripped =
 let fence_marker stripped =
   List.find [ "```"; "~~~" ] ~f:(fun m -> String.is_prefix stripped ~prefix:m)
 
-(** Block constructs that Markdown recognises only at column zero, and that the notes do not use. At
-    depth they are ordinary continuation text — [`  <= 8 and …`] and [`  <that target>`] both occur —
-    so the column-zero condition is load-bearing, not incidental. *)
-let unsupported_block stripped =
-  let thematic =
-    (String.length stripped >= 3
-    && List.exists [ '-'; '*'; '_' ] ~f:(fun c ->
-           String.for_all stripped ~f:(fun d -> Char.equal c d || Char.equal d ' ')))
-    || (String.length stripped >= 3 && String.for_all stripped ~f:(Char.equal '='))
-  in
-  if String.is_prefix stripped ~prefix:">" then
-    Some "a block quote, which this scan does not read"
-  else if String.is_prefix stripped ~prefix:"<" then
-    Some "an HTML block, whose text no rule here can see"
-  else if thematic then
-    Some "a thematic break or a setext heading underline, neither of which the notes use"
+(** A block quote marker, which Markdown honours at EVERY depth: nested under a bullet, [`  > …`]
+    is a quote inside the list item, not part of the bullet's prose. Wiring this to column zero only
+    let a nested quote fold into its parent's text unchecked (Codex P2, round 2).
+
+    [>=] is excluded deliberately. These notes compare numbers in prose ([`  <= 8 and Retype-…`] is
+    a real continuation line), and a wrapped line beginning [">= 8"] is arithmetic, not a quote. That
+    is a narrower marker than CommonMark's, and narrower in the safe direction: it under-reports a
+    quote written without a space rather than failing a correct file. *)
+let block_quote_marker stripped =
+  if String.is_prefix stripped ~prefix:">" && not (String.is_prefix stripped ~prefix:">=") then
+    Some "a block quote, whose text belongs to no bullet and which this scan does not read"
   else None
+
+(** Block constructs Markdown recognises only at column zero, and that the notes do not use. The
+    column-zero condition is load-bearing for these two rather than incidental: [`  <= 8 and …`] and
+    [`  <that target>`] are real continuation lines, the second of them continuing a code span
+    opened on the line above, so an HTML test at depth would fail a correct file. *)
+let unsupported_block stripped =
+  let all_of chars =
+    String.length stripped >= 3
+    && String.for_all stripped ~f:(fun d ->
+           Char.equal d ' ' || List.mem chars d ~equal:Char.equal)
+  in
+  let thematic = all_of [ '-' ] || all_of [ '*' ] || all_of [ '_' ] || all_of [ '=' ] in
+  match block_quote_marker stripped with
+  | Some what -> Some what
+  | None ->
+      if String.is_prefix stripped ~prefix:"<" then
+        Some "an HTML block, whose text no rule here can see"
+      else if thematic then
+        Some "a thematic break or a setext heading underline, neither of which the notes use"
+      else None
 
 (** One nesting level is what the notes are written in, and what {!parse_file} documents. A third
     level was being accepted anyway — [expected] simply advanced by two more spaces — so the
@@ -432,19 +455,31 @@ let parse_file ~file contents =
                         | None -> ());
                         close_all ())
                       else
-                        match !stack with
-                        | [] ->
-                            bad lineno
-                              "an indented line continuing no bullet: nothing above it is an open \
-                               list item"
-                        | (b, texts) :: _ ->
-                            if indent <> b.indent + 2 then
-                              bad lineno
-                                (Printf.sprintf
-                                   "an indented line at %d continuing the bullet at line %d, whose \
-                                    continuations sit at %d"
-                                   indent b.line (b.indent + 2))
-                            else texts := stripped :: !texts));
+                        match block_quote_marker stripped with
+                        | Some what ->
+                            (* Honoured at depth too: nested under a bullet this is a quote inside
+                               the list item, and folding it into the parent's prose would leave its
+                               text checked by nothing. *)
+                            bad lineno what;
+                            close_all ()
+                        | None -> (
+                            match !stack with
+                            | [] ->
+                                bad lineno
+                                  (if String.is_prefix stripped ~prefix:"|" then
+                                     "a table row indented four spaces or more, which Markdown \
+                                      renders as an indented code block rather than a table"
+                                   else
+                                     "an indented line continuing no bullet: nothing above it is an \
+                                      open list item")
+                            | (b, texts) :: _ ->
+                                if indent <> b.indent + 2 then
+                                  bad lineno
+                                    (Printf.sprintf
+                                       "an indented line at %d continuing the bullet at line %d, \
+                                        whose continuations sit at %d"
+                                       indent b.line (b.indent + 2))
+                                else texts := stripped :: !texts)));
   (match !fence_open with
   | Some m ->
       findings :=
@@ -653,6 +688,29 @@ let markdown_links line =
 (** Every navigable link of a whole file. *)
 let links_of contents = List.concat_map (lines contents) ~f:(fun (_, l) -> markdown_links l)
 
+(** Where a relative link written IN [from_file] actually points, as a path in the same space as
+    the scan's file keys. [from_file] is a file, so the link resolves against its DIRECTORY;
+    [".."] pops a segment and ["."] is dropped, exactly as a browser or GitHub would.
+
+    This exists because a target's correct spelling depends on how deep the file is, and hard-coding
+    the one-level spelling made the backlink rule demand [`../agent-notes.md`] of a note in a
+    subdirectory — which from there resolves to [docs/agent-notes/agent-notes.md], a file that does
+    not exist. So nested notes could only pass by carrying an unusable link (Codex P2, round 2). *)
+let resolve_link ~from_file target =
+  let dir =
+    match List.rev (String.split from_file ~on:'/') with
+    | _ :: rest -> List.rev rest
+    | [] -> []
+  in
+  let target = List.hd_exn (String.split target ~on:'#') in
+  let step acc segment =
+    if String.equal segment "." || String.is_empty segment then acc
+    else if String.equal segment ".." then match acc with _ :: rest -> rest | [] -> []
+    else segment :: acc
+  in
+  List.fold (String.split target ~on:'/') ~init:(List.rev dir) ~f:step
+  |> List.rev |> String.concat ~sep:"/"
+
 (** [\[text\](target)] filling the whole cell, and nothing else. *)
 let parse_link cell =
   let cell = String.strip cell in
@@ -786,22 +844,26 @@ let check_index ~index_file ~index_contents ~(files : (string * string) list) =
                "a notes file no index row links to: unreachable from the one place a lookup starts"))
   in
   let backlinks =
-    let index_base = List.last_exn (String.split index_file ~on:'/') in
     List.filter_map files ~f:(fun (name, contents) ->
-        (* A link, not a byte sequence: the target has to be one a reader can follow back. *)
-        let target = "../" ^ index_base in
+        (* A link, not a byte sequence -- and one that RESOLVES to the index from where this file
+           sits, so a note one directory deeper is asked for the spelling that works from there
+           rather than for the spelling that works one level up. *)
         if
           List.exists (links_of contents) ~f:(fun (_, t) ->
-              String.equal (List.hd_exn (String.split t ~on:'#')) target)
+              String.equal (resolve_link ~from_file:name t) index_file)
         then None
         else
           Some
             (file_finding ~file:name ~rule:rule_reachability
                (Printf.sprintf
-                  "no navigable link back to the index (a link to %S, outside code spans, HTML \
-                   comments and images): a file reached on its own leaves the reader without the \
-                   scope discipline the index carries"
-                  target)))
+                  "no navigable link back to the index: a link resolving to %S from here (outside \
+                   code spans, HTML comments and images), which from %S is written %S"
+                  index_file name
+                  (String.concat
+                     (List.init
+                        (List.length (String.split name ~on:'/') - 1)
+                        ~f:(fun _ -> "../"))
+                  ^ index_file))))
   in
   row_findings @ per_row @ duplicates @ orphans @ backlinks
 

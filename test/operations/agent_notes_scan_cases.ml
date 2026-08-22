@@ -102,6 +102,17 @@ let structure_cases =
       "# Title\n\n- A fact.\n\n~~~\n- not a bullet\n",
       [ "bullet-integrity @ f.md:5"; "bullet-integrity @ f.md:7" ] );
     ("a block quote", "# Title\n\n> Quoted prose.\n", [ "bullet-integrity @ f.md:3" ]);
+    (* Markdown honours a quote marker at every depth, so nested under a bullet this is a quote
+       inside the list item -- not part of the bullet's prose, and checked by nothing if folded in. *)
+    ( "a block quote nested under a bullet",
+      "# Title\n\n- A fact:\n  > Quoted guidance.\n",
+      [ "bullet-integrity @ f.md:4" ] );
+    ( "an index whose rows drifted four spaces right",
+      "# Title\n\n    | File | Covers |\n    | --- | --- |\n    | a | b |\n",
+      [ "bullet-integrity @ f.md:3"; "bullet-integrity @ f.md:4"; "bullet-integrity @ f.md:5" ] );
+    ( "a comparison at the start of a continuation is not a quote",
+      "# Title\n\n- A fact about widths\n  >= 8, and about `dune build`.\n",
+      [] );
     ( "an HTML block at column zero",
       "# Title\n\n<details><summary>x</summary>\n",
       [ "bullet-integrity @ f.md:3" ] );
@@ -162,6 +173,14 @@ let table_cases =
     ( "an escaped pipe is not a cell separator either",
       "# Title\n\n| File | Covers |\n| --- | --- |\n| a \\| b | c |\n",
       [] );
+    (* Four spaces make an indented code block, so an index whose rows drifted right renders as a
+       code sample with no navigable link in it. Three is Markdown's limit and still a table. *)
+    ( "a table indented three spaces is still a table",
+      "# Title\n\n   | File | Covers |\n   | --- | --- |\n   | a | b |\n",
+      [] );
+    ( "a table indented four spaces is a code block",
+      "# Title\n\n    | File | Covers |\n    | --- | --- |\n    | a | b |\n",
+      [] );
     ( "a delimiter cell of one hyphen",
       "# Title\n\n| File | Covers |\n| - | --- |\n| a | b |\n",
       [ "table-shape @ f.md:4" ] );
@@ -176,9 +195,18 @@ let table_cases =
 (* Rules 2, 4 and 5: the index against the files it indexes *)
 (* ------------------------------------------------------------------ *)
 
-let backlink = "Part of the agent notes; the [index](../agent-notes.md) carries the rest.\n"
+(* The backlink a file at [depth] directories below docs/ has to carry. Written as a function of the
+   depth rather than as the one-level constant it used to be: the constant made the nested-file
+   fixture bless a target that resolves to nothing (Codex P2, round 2), which is the sharpest way a
+   test can go wrong -- it locked the defect in rather than catching it. *)
+let backlink_at depth =
+  let up = String.concat (List.init depth ~f:(fun _ -> "../")) in
+  Printf.sprintf "Part of the agent notes; the [index](%sagent-notes.md) carries the rest.\n" up
 
-let file body = "# A file\n\n" ^ backlink ^ "\n" ^ body
+let file_at depth body = "# A file\n\n" ^ backlink_at depth ^ "\n" ^ body
+
+(* Every unnested fixture sits at agent-notes/<name>, one directory below the index. *)
+let file body = file_at 1 body
 
 let index rows =
   "# Agent notes\n\nAn index.\n\n| File | What it covers |\n| --- | --- |\n"
@@ -268,15 +296,24 @@ let index_cases =
       [] );
     (* The directory is flat today; a note in a subdirectory of it is judged like any other, which is
        what makes recursing over the tree safe rather than merely more thorough. *)
-    ( "a note in a subdirectory, linked",
+    ( "a note in a subdirectory, linked and backlinked from its own depth",
       index [ "| [a.md](agent-notes/sub/a.md) | the `Widget` seam |" ],
-      [ ("agent-notes/sub/a.md", file "- A fact about `Widget`.\n") ],
+      [ ("agent-notes/sub/a.md", file_at 2 "- A fact about `Widget`.\n") ],
       [] );
+    ( "a nested note carrying the one-level backlink, which resolves to nothing",
+      index [ "| [a.md](agent-notes/sub/a.md) | the `Widget` seam |" ],
+      [ ("agent-notes/sub/a.md", file_at 1 "- A fact about `Widget`.\n") ],
+      [ "reachability @ agent-notes/sub/a.md" ] );
     ( "a note in a subdirectory, unlinked",
       index [ row "b.md" "the `Gadget` seam" ],
       [ ("agent-notes/b.md", file "- A fact about `Gadget`.\n");
-        ("agent-notes/sub/a.md", file "- A fact about `Widget`.\n") ],
+        ("agent-notes/sub/a.md", file_at 2 "- A fact about `Widget`.\n") ],
       [ "reachability @ agent-notes/sub/a.md" ] );
+    ( "a backlink written with a redundant ./ still resolves",
+      index [ row "a.md" "the `Widget` seam" ],
+      [ ("agent-notes/a.md",
+          "# A file\n\nSee the [index](./../agent-notes.md).\n\n- A fact about `Widget`.\n") ],
+      [] );
     ( "a file no row links",
       index [ row "a.md" "the `Widget` seam" ],
       [ ("agent-notes/a.md", file "- A fact about `Widget`.\n");
