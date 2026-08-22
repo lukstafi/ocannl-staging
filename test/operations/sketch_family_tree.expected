@@ -46,149 +46,155 @@
 13  gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
 14  gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
 15  gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:2
-== cpu simd32 tree: 12 choice nodes, depth 4 ==
-pipeline = blocktile
-  packing = in-kernel
-    geometry = b16
-      * gpu:false mma:false simd:0  bm:16  bn:16  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
-    geometry = b8
-      * gpu:false mma:false simd:0  bm:8   bn:8   bk:8   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
-  packing = hoisted
-    geometry = b16
-      * gpu:false mma:false simd:0  bm:16  bn:16  bk:16  tm:0 tn:0 hoist:true grid:false packrest:false epi:false swz:- depth:1
-    geometry = b8
-      * gpu:false mma:false simd:0  bm:8   bn:8   bk:8   tm:0 tn:0 hoist:true grid:false packrest:false epi:false swz:- depth:1
-pipeline = tensorized
-  tensorized-form = whole-triple
-    row-block = bm0
-      * gpu:false mma:true simd:0  bm:0   bn:0   bk:0   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
-    row-block = bm64  [refuted: bm=64 gives 1 row block(s); a Grid split needs at least 2]
-    row-block = bm16
-      * gpu:false mma:true simd:0  bm:16  bn:0   bk:0   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
-  tensorized-form = packed
-    packing-shape = serial
-      geometry = bm64 bn0 bk64
-        * gpu:false mma:true simd:0  bm:64  bn:0   bk:64  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
-      geometry = bm64 bn0 bk256
-        * gpu:false mma:true simd:0  bm:64  bn:0   bk:256 tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
-      geometry = bm128 bn128 bk128
-        * gpu:false mma:true simd:0  bm:128 bn:128 bk:128 tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
-      geometry = bm64 bn128 bk256
-        * gpu:false mma:true simd:0  bm:64  bn:128 bk:256 tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
-      geometry = bm16 bn0 bk16
-        * gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
-    packing-shape = hoisted
-      geometry = bm64 bn0 bk64
-        * gpu:false mma:true simd:0  bm:64  bn:0   bk:64  tm:0 tn:0 hoist:true grid:false packrest:false epi:false swz:- depth:1
-      geometry = bm64 bn0 bk256
-        * gpu:false mma:true simd:0  bm:64  bn:0   bk:256 tm:0 tn:0 hoist:true grid:false packrest:false epi:false swz:- depth:1
-      geometry = bm128 bn128 bk128
-        * gpu:false mma:true simd:0  bm:128 bn:128 bk:128 tm:0 tn:0 hoist:true grid:false packrest:false epi:false swz:- depth:1
-      geometry = bm64 bn128 bk256
-        * gpu:false mma:true simd:0  bm:64  bn:128 bk:256 tm:0 tn:0 hoist:true grid:false packrest:false epi:false swz:- depth:1
-      geometry = bm16 bn0 bk16
-        * gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:true grid:false packrest:false epi:false swz:- depth:1
-    packing-shape = hoisted-grid
-      geometry = bm64 bn0 bk64  [refuted: bm=64 gives 1 row block(s); a Grid split needs at least 2]
-      geometry = bm64 bn0 bk256  [refuted: extents do not divide the blocks: the non-hoistable operand is read in place and cannot absorb the zero-fringe pad]
-      geometry = bm128 bn128 bk128  [refuted: extents do not divide the blocks: the non-hoistable operand is read in place and cannot absorb the zero-fringe pad]
-      geometry = bm64 bn128 bk256  [refuted: extents do not divide the blocks: the non-hoistable operand is read in place and cannot absorb the zero-fringe pad]
-      geometry = bm16 bn0 bk16
-        * gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:true grid:true packrest:false epi:false swz:- depth:1
-    packing-shape = hoisted-grid-pack-rest
-      geometry = bm64 bn0 bk64  [refuted: bm=64 gives 1 row block(s); a Grid split needs at least 2]
-      geometry = bm64 bn0 bk256  [refuted: bm=64 gives 1 row block(s); a Grid split needs at least 2]
-      geometry = bm128 bn128 bk128  [refuted: bm=128 gives 1 row block(s); a Grid split needs at least 2]
-      geometry = bm64 bn128 bk256  [refuted: bm=64 gives 1 row block(s); a Grid split needs at least 2]
-      geometry = bm16 bn0 bk16
-        * gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:true grid:true packrest:true epi:false swz:- depth:1
-    packing-shape = grid-pack-rest  [excluded: a hoistable operand exists: the hoisted shapes cover the one-dispatch role without per-chunk re-packing]
-    packing-shape = grid
-      geometry = bm64 bn0 bk64  [refuted: bm=64 gives 1 row block(s); a Grid split needs at least 2]
-      geometry = bm64 bn0 bk256  [refuted: bm=64 gives 1 row block(s); a Grid split needs at least 2]
-      geometry = bm128 bn128 bk128  [refuted: bm=128 gives 1 row block(s); a Grid split needs at least 2]
-      geometry = bm64 bn128 bk256  [refuted: bm=64 gives 1 row block(s); a Grid split needs at least 2]
-      geometry = bm16 bn0 bk16
-        * gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:false grid:true packrest:false epi:false swz:- depth:1
-last leaf's decision path: pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm16 bn0 bk16
+== cpu simd32 tree: 13 choice nodes, depth 5 ==
+fusion = unfused
+  pipeline = blocktile
+    packing = in-kernel
+      geometry = b16
+        * gpu:false mma:false simd:0  bm:16  bn:16  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+      geometry = b8
+        * gpu:false mma:false simd:0  bm:8   bn:8   bk:8   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+    packing = hoisted
+      geometry = b16
+        * gpu:false mma:false simd:0  bm:16  bn:16  bk:16  tm:0 tn:0 hoist:true grid:false packrest:false epi:false swz:- depth:1
+      geometry = b8
+        * gpu:false mma:false simd:0  bm:8   bn:8   bk:8   tm:0 tn:0 hoist:true grid:false packrest:false epi:false swz:- depth:1
+  pipeline = tensorized
+    tensorized-form = whole-triple
+      row-block = bm0
+        * gpu:false mma:true simd:0  bm:0   bn:0   bk:0   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+      row-block = bm64  [refuted: bm=64 gives 1 row block(s); a Grid split needs at least 2]
+      row-block = bm16
+        * gpu:false mma:true simd:0  bm:16  bn:0   bk:0   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+    tensorized-form = packed
+      packing-shape = serial
+        geometry = bm64 bn0 bk64
+          * gpu:false mma:true simd:0  bm:64  bn:0   bk:64  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+        geometry = bm64 bn0 bk256
+          * gpu:false mma:true simd:0  bm:64  bn:0   bk:256 tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+        geometry = bm128 bn128 bk128
+          * gpu:false mma:true simd:0  bm:128 bn:128 bk:128 tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+        geometry = bm64 bn128 bk256
+          * gpu:false mma:true simd:0  bm:64  bn:128 bk:256 tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+        geometry = bm16 bn0 bk16
+          * gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+      packing-shape = hoisted
+        geometry = bm64 bn0 bk64
+          * gpu:false mma:true simd:0  bm:64  bn:0   bk:64  tm:0 tn:0 hoist:true grid:false packrest:false epi:false swz:- depth:1
+        geometry = bm64 bn0 bk256
+          * gpu:false mma:true simd:0  bm:64  bn:0   bk:256 tm:0 tn:0 hoist:true grid:false packrest:false epi:false swz:- depth:1
+        geometry = bm128 bn128 bk128
+          * gpu:false mma:true simd:0  bm:128 bn:128 bk:128 tm:0 tn:0 hoist:true grid:false packrest:false epi:false swz:- depth:1
+        geometry = bm64 bn128 bk256
+          * gpu:false mma:true simd:0  bm:64  bn:128 bk:256 tm:0 tn:0 hoist:true grid:false packrest:false epi:false swz:- depth:1
+        geometry = bm16 bn0 bk16
+          * gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:true grid:false packrest:false epi:false swz:- depth:1
+      packing-shape = hoisted-grid
+        geometry = bm64 bn0 bk64  [refuted: bm=64 gives 1 row block(s); a Grid split needs at least 2]
+        geometry = bm64 bn0 bk256  [refuted: extents do not divide the blocks: the non-hoistable operand is read in place and cannot absorb the zero-fringe pad]
+        geometry = bm128 bn128 bk128  [refuted: extents do not divide the blocks: the non-hoistable operand is read in place and cannot absorb the zero-fringe pad]
+        geometry = bm64 bn128 bk256  [refuted: extents do not divide the blocks: the non-hoistable operand is read in place and cannot absorb the zero-fringe pad]
+        geometry = bm16 bn0 bk16
+          * gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:true grid:true packrest:false epi:false swz:- depth:1
+      packing-shape = hoisted-grid-pack-rest
+        geometry = bm64 bn0 bk64  [refuted: bm=64 gives 1 row block(s); a Grid split needs at least 2]
+        geometry = bm64 bn0 bk256  [refuted: bm=64 gives 1 row block(s); a Grid split needs at least 2]
+        geometry = bm128 bn128 bk128  [refuted: bm=128 gives 1 row block(s); a Grid split needs at least 2]
+        geometry = bm64 bn128 bk256  [refuted: bm=64 gives 1 row block(s); a Grid split needs at least 2]
+        geometry = bm16 bn0 bk16
+          * gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:true grid:true packrest:true epi:false swz:- depth:1
+      packing-shape = grid-pack-rest  [excluded: a hoistable operand exists: the hoisted shapes cover the one-dispatch role without per-chunk re-packing]
+      packing-shape = grid
+        geometry = bm64 bn0 bk64  [refuted: bm=64 gives 1 row block(s); a Grid split needs at least 2]
+        geometry = bm64 bn0 bk256  [refuted: bm=64 gives 1 row block(s); a Grid split needs at least 2]
+        geometry = bm128 bn128 bk128  [refuted: bm=128 gives 1 row block(s); a Grid split needs at least 2]
+        geometry = bm64 bn128 bk256  [refuted: bm=64 gives 1 row block(s); a Grid split needs at least 2]
+        geometry = bm16 bn0 bk16
+          * gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:false grid:true packrest:false epi:false swz:- depth:1
+fusion = fused  [refuted: Schedule.Fuse_epilogue: no statement follows the reduction over mm]
+last leaf's decision path: fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm16 bn0 bk16
 tree leaves = flat enumeration: true
-== gpu staged+depth tree: 8 choice nodes, depth 3 ==
-pipeline = blocktile
-  geometry = bm64 bn64 bk8 tm4 tn4
-    * gpu:true mma:false simd:0  bm:64  bn:64  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
-  geometry = bm32 bn32 bk8 tm4 tn4
-    * gpu:true mma:false simd:0  bm:32  bn:32  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
-  geometry = bm16 bn16 bk8 tm4 tn4
-    * gpu:true mma:false simd:0  bm:16  bn:16  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
-  geometry = bm32 bn32 bk16 tm2 tn2
-    * gpu:true mma:false simd:0  bm:32  bn:32  bk:16  tm:2 tn:2 hoist:false grid:false packrest:false epi:false swz:- depth:1
-  geometry = bm16 bn16 bk8 tm2 tn2
-    * gpu:true mma:false simd:0  bm:16  bn:16  bk:8   tm:2 tn:2 hoist:false grid:false packrest:false epi:false swz:- depth:1
-pipeline = tensorized
-  geometry = bm16 bn32 bk0
-    twin = plain
-      * gpu:true mma:true simd:32 bm:16  bn:32  bk:0   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
-  geometry = bm32 bn32 bk0
-    twin = plain
-      * gpu:true mma:true simd:32 bm:32  bn:32  bk:0   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
-  geometry = bm16 bn32 bk32
-    twin = plain
-      * gpu:true mma:true simd:32 bm:16  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
-    twin = swizzled
-      * gpu:true mma:true simd:32 bm:16  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
-    twin = depth2
-      * gpu:true mma:true simd:32 bm:16  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:2
-  geometry = bm32 bn32 bk32
-    twin = plain
-      * gpu:true mma:true simd:32 bm:32  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
-    twin = swizzled
-      * gpu:true mma:true simd:32 bm:32  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
-    twin = depth2
-      * gpu:true mma:true simd:32 bm:32  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:2
-  geometry = bm32 bn32 bk16
-    twin = plain
-      * gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
-    twin = swizzled
-      * gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
-    twin = depth2
-      * gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:2
-  geometry = lattice  [excluded: beyond the curated menu (search economy): the staged tile-size lattice; config model_default_geometry_lattice lifts it for the model-argmin search]
-last leaf's decision path: pipeline=tensorized > geometry=bm32 bn32 bk16 > twin=depth2
+== gpu staged+depth tree: 9 choice nodes, depth 4 ==
+fusion = unfused
+  pipeline = blocktile
+    geometry = bm64 bn64 bk8 tm4 tn4
+      * gpu:true mma:false simd:0  bm:64  bn:64  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
+    geometry = bm32 bn32 bk8 tm4 tn4
+      * gpu:true mma:false simd:0  bm:32  bn:32  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
+    geometry = bm16 bn16 bk8 tm4 tn4
+      * gpu:true mma:false simd:0  bm:16  bn:16  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
+    geometry = bm32 bn32 bk16 tm2 tn2
+      * gpu:true mma:false simd:0  bm:32  bn:32  bk:16  tm:2 tn:2 hoist:false grid:false packrest:false epi:false swz:- depth:1
+    geometry = bm16 bn16 bk8 tm2 tn2
+      * gpu:true mma:false simd:0  bm:16  bn:16  bk:8   tm:2 tn:2 hoist:false grid:false packrest:false epi:false swz:- depth:1
+  pipeline = tensorized
+    geometry = bm16 bn32 bk0
+      twin = plain
+        * gpu:true mma:true simd:32 bm:16  bn:32  bk:0   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+    geometry = bm32 bn32 bk0
+      twin = plain
+        * gpu:true mma:true simd:32 bm:32  bn:32  bk:0   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+    geometry = bm16 bn32 bk32
+      twin = plain
+        * gpu:true mma:true simd:32 bm:16  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+      twin = swizzled
+        * gpu:true mma:true simd:32 bm:16  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
+      twin = depth2
+        * gpu:true mma:true simd:32 bm:16  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:2
+    geometry = bm32 bn32 bk32
+      twin = plain
+        * gpu:true mma:true simd:32 bm:32  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+      twin = swizzled
+        * gpu:true mma:true simd:32 bm:32  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
+      twin = depth2
+        * gpu:true mma:true simd:32 bm:32  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:2
+    geometry = bm32 bn32 bk16
+      twin = plain
+        * gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+      twin = swizzled
+        * gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
+      twin = depth2
+        * gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:2
+    geometry = lattice  [excluded: beyond the curated menu (search economy): the staged tile-size lattice; config model_default_geometry_lattice lifts it for the model-argmin search]
+fusion = fused  [refuted: Schedule.Fuse_epilogue: no statement follows the reduction over mm]
+last leaf's decision path: fusion=unfused > pipeline=tensorized > geometry=bm32 bn32 bk16 > twin=depth2
 tree leaves = flat enumeration: true
 == awkward 20^3 gpu: 6 seeds ==
 tree leaves = flat enumeration: true
 -- refuted --
-  pipeline=blocktile > geometry=bm64 bn64 bk8 tm4 tn4: bm=64 does not divide m=20
-  pipeline=blocktile > geometry=bm32 bn32 bk8 tm4 tn4: bm=32 does not divide m=20
-  pipeline=blocktile > geometry=bm16 bn16 bk8 tm4 tn4: bm=16 does not divide m=20
-  pipeline=blocktile > geometry=bm32 bn32 bk16 tm2 tn2: bm=32 does not divide m=20
-  pipeline=blocktile > geometry=bm16 bn16 bk8 tm2 tn2: bm=16 does not divide m=20
-  pipeline=tensorized > geometry=bm16 bn32 bk0: bm=16 does not divide m=20
-  pipeline=tensorized > geometry=bm32 bn32 bk0: bm=32 does not divide m=20
+  fusion=unfused > pipeline=blocktile > geometry=bm64 bn64 bk8 tm4 tn4: bm=64 does not divide m=20
+  fusion=unfused > pipeline=blocktile > geometry=bm32 bn32 bk8 tm4 tn4: bm=32 does not divide m=20
+  fusion=unfused > pipeline=blocktile > geometry=bm16 bn16 bk8 tm4 tn4: bm=16 does not divide m=20
+  fusion=unfused > pipeline=blocktile > geometry=bm32 bn32 bk16 tm2 tn2: bm=32 does not divide m=20
+  fusion=unfused > pipeline=blocktile > geometry=bm16 bn16 bk8 tm2 tn2: bm=16 does not divide m=20
+  fusion=unfused > pipeline=tensorized > geometry=bm16 bn32 bk0: bm=16 does not divide m=20
+  fusion=unfused > pipeline=tensorized > geometry=bm32 bn32 bk0: bm=32 does not divide m=20
+  fusion=fused: Schedule.Fuse_epilogue: no statement follows the reduction over awk
 -- excluded --
-  pipeline=tensorized > geometry=bm16 bn32 bk32 > twin=depth2: pad-masked site: Tensorize stays on the barrier-bracketed arm, so the twin could only pay the doubled shared-memory footprint (Codex P2 on PR #303)
-  pipeline=tensorized > geometry=bm32 bn32 bk32 > twin=depth2: pad-masked site: Tensorize stays on the barrier-bracketed arm, so the twin could only pay the doubled shared-memory footprint (Codex P2 on PR #303)
-  pipeline=tensorized > geometry=bm32 bn32 bk16 > twin=depth2: pad-masked site: Tensorize stays on the barrier-bracketed arm, so the twin could only pay the doubled shared-memory footprint (Codex P2 on PR #303)
-  pipeline=tensorized > geometry=lattice: beyond the curated menu (search economy): the staged tile-size lattice; config model_default_geometry_lattice lifts it for the model-argmin search
+  fusion=unfused > pipeline=tensorized > geometry=bm16 bn32 bk32 > twin=depth2: pad-masked site: Tensorize stays on the barrier-bracketed arm, so the twin could only pay the doubled shared-memory footprint (Codex P2 on PR #303)
+  fusion=unfused > pipeline=tensorized > geometry=bm32 bn32 bk32 > twin=depth2: pad-masked site: Tensorize stays on the barrier-bracketed arm, so the twin could only pay the doubled shared-memory footprint (Codex P2 on PR #303)
+  fusion=unfused > pipeline=tensorized > geometry=bm32 bn32 bk16 > twin=depth2: pad-masked site: Tensorize stays on the barrier-bracketed arm, so the twin could only pay the doubled shared-memory footprint (Codex P2 on PR #303)
+  fusion=unfused > pipeline=tensorized > geometry=lattice: beyond the curated menu (search economy): the staged tile-size lattice; config model_default_geometry_lattice lifts it for the model-argmin search
 == awkward 20^3 cpu: 8 seeds ==
 tree leaves = flat enumeration: true
 -- refuted --
-  pipeline=blocktile > packing=in-kernel > geometry=b16: b=16 does not divide m=20
-  pipeline=blocktile > packing=in-kernel > geometry=b8: b=8 does not divide m=20
-  pipeline=blocktile > packing=hoisted: hoisted packing needs a host-init-backed constant operand; neither operand is one
-  pipeline=tensorized > tensorized-form=whole-triple > row-block=bm64: bm=64 does not divide m=20
-  pipeline=tensorized > tensorized-form=whole-triple > row-block=bm16: bm=16 does not divide m=20
-  pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted: no host-init-backed constant operand to pack at link time
-  pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid: no host-init-backed constant operand to pack at link time
-  pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid-pack-rest: no host-init-backed constant operand to pack at link time
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn0 bk64: bm=64 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn0 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm128 bn128 bk128: bm=128 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn128 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk64: bm=64 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm128 bn128 bk128: bm=128 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn128 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=blocktile > packing=in-kernel > geometry=b16: b=16 does not divide m=20
+  fusion=unfused > pipeline=blocktile > packing=in-kernel > geometry=b8: b=8 does not divide m=20
+  fusion=unfused > pipeline=blocktile > packing=hoisted: hoisted packing needs a host-init-backed constant operand; neither operand is one
+  fusion=unfused > pipeline=tensorized > tensorized-form=whole-triple > row-block=bm64: bm=64 does not divide m=20
+  fusion=unfused > pipeline=tensorized > tensorized-form=whole-triple > row-block=bm16: bm=16 does not divide m=20
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted: no host-init-backed constant operand to pack at link time
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid: no host-init-backed constant operand to pack at link time
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid-pack-rest: no host-init-backed constant operand to pack at link time
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn0 bk64: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn0 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm128 bn128 bk128: bm=128 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn128 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk64: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm128 bn128 bk128: bm=128 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn128 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=fused: Schedule.Fuse_epilogue: no statement follows the reduction over awk
 == half-prec cpu seeds: 11 seeds ==
  0  gpu:false mma:false simd:0  bm:16  bn:16  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
  1  gpu:false mma:false simd:0  bm:8   bn:8   bk:8   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
@@ -204,28 +210,31 @@ tree leaves = flat enumeration: true
 == half-prec cpu: 11 seeds ==
 tree leaves = flat enumeration: true
 -- refuted --
-  pipeline=blocktile > packing=hoisted: hoisted packing needs a host-init-backed constant operand; neither operand is one
-  pipeline=tensorized > tensorized-form=whole-triple > row-block=bm64: bm=64 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted: no host-init-backed constant operand to pack at link time
-  pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid: no host-init-backed constant operand to pack at link time
-  pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid-pack-rest: no host-init-backed constant operand to pack at link time
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn0 bk64: bm=64 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn0 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm128 bn128 bk128: bm=128 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn128 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk64: bm=64 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm128 bn128 bk128: bm=128 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn128 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=blocktile > packing=hoisted: hoisted packing needs a host-init-backed constant operand; neither operand is one
+  fusion=unfused > pipeline=tensorized > tensorized-form=whole-triple > row-block=bm64: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted: no host-init-backed constant operand to pack at link time
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid: no host-init-backed constant operand to pack at link time
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid-pack-rest: no host-init-backed constant operand to pack at link time
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn0 bk64: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn0 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm128 bn128 bk128: bm=128 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn128 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk64: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm128 bn128 bk128: bm=128 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn128 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=fused: Schedule.Fuse_epilogue: no statement follows the reduction over hmm
 == half-prec gpu: 5 seeds ==
 tree leaves = flat enumeration: true
 -- refuted --
-  pipeline=tensorized: backend advertises no mma format tile for operands (half, half) with accumulator half
+  fusion=unfused > pipeline=tensorized: backend advertises no mma format tile for operands (half, half) with accumulator half
+  fusion=fused: Schedule.Fuse_epilogue: no statement follows the reduction over hmm
 == half-prec cpu, narrow_compute_f32 off: 2 seeds ==
 tree leaves = flat enumeration: true
 -- refuted --
-  pipeline=blocktile > packing=hoisted: hoisted packing needs a host-init-backed constant operand; neither operand is one
-  pipeline=tensorized: register tiling requires uniform vector-capable compute precisions (f32/f64, or fp16 where arithmetic is native)
+  fusion=unfused > pipeline=blocktile > packing=hoisted: hoisted packing needs a host-init-backed constant operand; neither operand is one
+  fusion=unfused > pipeline=tensorized: register tiling requires uniform vector-capable compute precisions (f32/f64, or fp16 where arithmetic is native)
+  fusion=fused: Schedule.Fuse_epilogue: no statement follows the reduction over hmm
 == half-prec cpu seeds, native fp16: 11 seeds ==
  0  gpu:false mma:false simd:0  bm:16  bn:16  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
  1  gpu:false mma:false simd:0  bm:8   bn:8   bk:8   tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
@@ -253,73 +262,92 @@ tree leaves = flat enumeration: true
 == transposed-B cpu: 9 seeds ==
 tree leaves = flat enumeration: true
 -- refuted --
-  pipeline=blocktile > packing=hoisted: hoisted packing needs a host-init-backed constant operand; neither operand is one
-  pipeline=tensorized > tensorized-form=whole-triple: stored B is transposed: whole-triple reads B in place, which the register tiling statically declines
-  pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted: no host-init-backed constant operand to pack at link time
-  pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid: no host-init-backed constant operand to pack at link time
-  pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid-pack-rest: no host-init-backed constant operand to pack at link time
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn0 bk64: bm=64 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn0 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm128 bn128 bk128: bm=128 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn128 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk64: bm=64 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm128 bn128 bk128: bm=128 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn128 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=blocktile > packing=hoisted: hoisted packing needs a host-init-backed constant operand; neither operand is one
+  fusion=unfused > pipeline=tensorized > tensorized-form=whole-triple: stored B is transposed: whole-triple reads B in place, which the register tiling statically declines
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted: no host-init-backed constant operand to pack at link time
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid: no host-init-backed constant operand to pack at link time
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid-pack-rest: no host-init-backed constant operand to pack at link time
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn0 bk64: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn0 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm128 bn128 bk128: bm=128 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn128 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk64: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm128 bn128 bk128: bm=128 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn128 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=fused: Schedule.Fuse_epilogue: no statement follows the reduction over tmm
 == companion-reduction gpu: 0 seeds ==
 tree leaves = flat enumeration: true
 -- refuted --
-  pipeline=blocktile: GPU matmul companion coverage (gh-521): the cross-nest race analysis bails on this routine, so the 2 companion nest(s) (cred; cred) cannot be given aligned geometry
-  pipeline=tensorized: GPU matmul companion coverage (gh-521): the cross-nest race analysis bails on this routine, so the 2 companion nest(s) (cred; cred) cannot be given aligned geometry
+  fusion=unfused > pipeline=blocktile: GPU matmul companion coverage (gh-521): the cross-nest race analysis bails on this routine, so the 2 companion nest(s) (cred; cred) cannot be given aligned geometry
+  fusion=unfused > pipeline=tensorized: GPU matmul companion coverage (gh-521): the cross-nest race analysis bails on this routine, so the 2 companion nest(s) (cred; cred) cannot be given aligned geometry
+  fusion=fused: Schedule.Fuse_epilogue: the tail is not the sole consumer: a later statement mentions n11
 == companion-reduction cpu: 19 seeds ==
 tree leaves = flat enumeration: true
 -- refuted --
-  pipeline=tensorized > tensorized-form=whole-triple > row-block=bm64: bm=64 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid > geometry=bm64 bn0 bk64: bm=64 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid > geometry=bm64 bn0 bk256: extents do not divide the blocks: the non-hoistable operand is read in place and cannot absorb the zero-fringe pad
-  pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid > geometry=bm128 bn128 bk128: extents do not divide the blocks: the non-hoistable operand is read in place and cannot absorb the zero-fringe pad
-  pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid > geometry=bm64 bn128 bk256: extents do not divide the blocks: the non-hoistable operand is read in place and cannot absorb the zero-fringe pad
-  pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid-pack-rest > geometry=bm64 bn0 bk64: bm=64 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid-pack-rest > geometry=bm64 bn0 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid-pack-rest > geometry=bm128 bn128 bk128: bm=128 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid-pack-rest > geometry=bm64 bn128 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk64: bm=64 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm128 bn128 bk128: bm=128 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn128 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=whole-triple > row-block=bm64: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid > geometry=bm64 bn0 bk64: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid > geometry=bm64 bn0 bk256: extents do not divide the blocks: the non-hoistable operand is read in place and cannot absorb the zero-fringe pad
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid > geometry=bm128 bn128 bk128: extents do not divide the blocks: the non-hoistable operand is read in place and cannot absorb the zero-fringe pad
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid > geometry=bm64 bn128 bk256: extents do not divide the blocks: the non-hoistable operand is read in place and cannot absorb the zero-fringe pad
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid-pack-rest > geometry=bm64 bn0 bk64: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid-pack-rest > geometry=bm64 bn0 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid-pack-rest > geometry=bm128 bn128 bk128: bm=128 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid-pack-rest > geometry=bm64 bn128 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk64: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm128 bn128 bk128: bm=128 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn128 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=fused: Schedule.Fuse_epilogue: the tail is not the sole consumer: a later statement mentions n11
 -- excluded --
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest: a hoistable operand exists: the hoisted shapes cover the one-dispatch role without per-chunk re-packing
-lifted-lattice search over the refuted family: 1 expanded, 0 scored, 2 refuted
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest: a hoistable operand exists: the hoisted shapes cover the one-dispatch role without per-chunk re-packing
+lifted-lattice search over the refuted family: 2 expanded, 0 scored, 3 refuted
+== fusable tail gpu: 32 seeds (16 unfused + 16 fused), 17 choice nodes, depth 4 ==
+fusion = unfused
+fusion = fused
+tree leaves = flat enumeration: true
+every fused leaf follows every unfused leaf: true
+the fused flavor twins the unfused leaves geometry for geometry: true
+refuted: 0 unfused, 0 fused; excluded: 1 unfused, 1 fused
+== fusable tail cpu: 38 seeds (19 unfused + 19 fused), 25 choice nodes, depth 5 ==
+fusion = unfused
+fusion = fused
+tree leaves = flat enumeration: true
+every fused leaf follows every unfused leaf: true
+the fused flavor twins the unfused leaves geometry for geometry: true
+refuted: 13 unfused, 13 fused; excluded: 1 unfused, 1 fused
 == gpu tight smem: 9 seeds ==
 tree leaves = flat enumeration: true
 -- refuted --
-  pipeline=blocktile > geometry=bm64 bn64 bk8 tm4 tn4: block tile launches 256 threads per workgroup (bm/tm * bn/tn), exceeding the 128-thread limit
-  pipeline=blocktile > geometry=bm32 bn32 bk16 tm2 tn2: block tile launches 256 threads per workgroup (bm/tm * bn/tn), exceeding the 128-thread limit
-  pipeline=tensorized > geometry=bm16 bn32 bk32 > twin=depth2: staged operand tiles need 12288 bytes of workgroup memory at pipeline depth 2, exceeding the 6144-byte limit
-  pipeline=tensorized > geometry=bm16 bn32 bk32 > twin=depth3: pipeline depth 3 is outside the implemented range 1..2 (Schedule.apply_stage)
-  pipeline=tensorized > geometry=bm32 bn32 bk32: staged operand tiles need 8192 bytes of workgroup memory, exceeding the 6144-byte limit
-  pipeline=tensorized > geometry=bm32 bn32 bk16 > twin=depth2: staged operand tiles need 8192 bytes of workgroup memory at pipeline depth 2, exceeding the 6144-byte limit
-  pipeline=tensorized > geometry=bm32 bn32 bk16 > twin=depth3: pipeline depth 3 is outside the implemented range 1..2 (Schedule.apply_stage)
+  fusion=unfused > pipeline=blocktile > geometry=bm64 bn64 bk8 tm4 tn4: block tile launches 256 threads per workgroup (bm/tm * bn/tn), exceeding the 128-thread limit
+  fusion=unfused > pipeline=blocktile > geometry=bm32 bn32 bk16 tm2 tn2: block tile launches 256 threads per workgroup (bm/tm * bn/tn), exceeding the 128-thread limit
+  fusion=unfused > pipeline=tensorized > geometry=bm16 bn32 bk32 > twin=depth2: staged operand tiles need 12288 bytes of workgroup memory at pipeline depth 2, exceeding the 6144-byte limit
+  fusion=unfused > pipeline=tensorized > geometry=bm16 bn32 bk32 > twin=depth3: pipeline depth 3 is outside the implemented range 1..2 (Schedule.apply_stage)
+  fusion=unfused > pipeline=tensorized > geometry=bm32 bn32 bk32: staged operand tiles need 8192 bytes of workgroup memory, exceeding the 6144-byte limit
+  fusion=unfused > pipeline=tensorized > geometry=bm32 bn32 bk16 > twin=depth2: staged operand tiles need 8192 bytes of workgroup memory at pipeline depth 2, exceeding the 6144-byte limit
+  fusion=unfused > pipeline=tensorized > geometry=bm32 bn32 bk16 > twin=depth3: pipeline depth 3 is outside the implemented range 1..2 (Schedule.apply_stage)
+  fusion=fused: Schedule.Fuse_epilogue: no statement follows the reduction over mm
 -- excluded --
-  pipeline=tensorized > geometry=lattice: beyond the curated menu (search economy): the staged tile-size lattice; config model_default_geometry_lattice lifts it for the model-argmin search
+  fusion=unfused > pipeline=tensorized > geometry=lattice: beyond the curated menu (search economy): the staged tile-size lattice; config model_default_geometry_lattice lifts it for the model-argmin search
 == wide-N cpu: 10 seeds ==
 tree leaves = flat enumeration: true
 -- refuted --
-  pipeline=blocktile > packing=hoisted: hoisted packing needs a host-init-backed constant operand; neither operand is one
-  pipeline=tensorized > tensorized-form=whole-triple > row-block=bm64: bm=64 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted: no host-init-backed constant operand to pack at link time
-  pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid: no host-init-backed constant operand to pack at link time
-  pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid-pack-rest: no host-init-backed constant operand to pack at link time
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn0 bk64: bm=64 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm128 bn128 bk128: bm=128 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn128 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk64: bm=64 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm128 bn128 bk128: bm=128 gives 1 row block(s); a Grid split needs at least 2
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn128 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=blocktile > packing=hoisted: hoisted packing needs a host-init-backed constant operand; neither operand is one
+  fusion=unfused > pipeline=tensorized > tensorized-form=whole-triple > row-block=bm64: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted: no host-init-backed constant operand to pack at link time
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid: no host-init-backed constant operand to pack at link time
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid-pack-rest: no host-init-backed constant operand to pack at link time
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn0 bk64: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm128 bn128 bk128: bm=128 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn128 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk64: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm128 bn128 bk128: bm=128 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn128 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=fused: Schedule.Fuse_epilogue: no statement follows the reduction over wmm
 -- excluded --
-  pipeline=tensorized > tensorized-form=packed > packing-shape=serial > geometry=bm64 bn0 bk256: packed tiles (589824 bytes) exceed the 262144-byte stack/cache-economy threshold (heuristic, not a compiler limit)
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn0 bk256: packed tiles (589824 bytes) exceed the 262144-byte stack/cache-economy threshold (heuristic, not a compiler limit)
-  pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk256: packed tiles (589824 bytes) exceed the 262144-byte stack/cache-economy threshold (heuristic, not a compiler limit)
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=serial > geometry=bm64 bn0 bk256: packed tiles (589824 bytes) exceed the 262144-byte stack/cache-economy threshold (heuristic, not a compiler limit)
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn0 bk256: packed tiles (589824 bytes) exceed the 262144-byte stack/cache-economy threshold (heuristic, not a compiler limit)
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk256: packed tiles (589824 bytes) exceed the 262144-byte stack/cache-economy threshold (heuristic, not a compiler limit)
 wide-N leaves: 10; with exclusions lifted: 11
 search with bounds: best=u1@1.0 stats=((st_expanded 3) (st_scored 4) (st_unscored 0) (st_fathomed 1) (st_refuted 1)
  (st_excluded 1) (st_unknown 1))
@@ -332,7 +360,7 @@ cost bound fathoms above a nested Unknown: best=good@3.0 stats=((st_expanded 1) 
 path-dependent bound fathoms the doubly-committed subtree: best=mk@6.0 stats=((st_expanded 3) (st_scored 3) (st_unscored 0) (st_fathomed 1) (st_refuted 0)
  (st_excluded 0) (st_unknown 0))
 == lattice (64^3, tile 8x8x8) ==
-curated leaves 16, lifted leaves 80 (+64 lattice singletons), depth 3 -> 8
+curated leaves 16, lifted leaves 80 (+64 lattice singletons), depth 4 -> 9
 the lattice exclusion carries the lift instructions: true
 certain-traffic increments along paths:
   curated staged bm16 bn32 bk32                  -> 12288 bytes
@@ -340,11 +368,11 @@ certain-traffic increments along paths:
   lattice box bm 8..32, bk open                  -> 2560 bytes
   lattice box bm=32, bk 16..32                   -> 8192 bytes
   lattice singleton bm=32 bk=64                  -> 32768 bytes
-lifted search at incumbent 6000: 33 expanded, 13 scored, 26 fathomed, 0 refuted, 0 excluded
+lifted search at incumbent 6000: 34 expanded, 13 scored, 26 fathomed, 1 refuted, 0 excluded
 == lattice under a 2048-byte workgroup-memory cap ==
 surviving lattice leaves 4; box-level refutations 13, e.g.:
-  pipeline=tensorized > geometry=lattice > bm=bm 8..32 > bm=bm 8..16 > bm=bm=8 > bk=bk 8..32 > bk=bk 8..16 > bk=bk=16: staged operand tiles need 2560 bytes of workgroup memory, exceeding the 2048-byte limit
-  pipeline=tensorized > geometry=lattice > bm=bm 8..32 > bm=bm 8..16 > bm=bm=8 > bk=bk 8..32 > bk=bk 24..32: staged operand tiles need 3840 bytes of workgroup memory, exceeding the 2048-byte limit
+  fusion=unfused > pipeline=tensorized > geometry=lattice > bm=bm 8..32 > bm=bm 8..16 > bm=bm=8 > bk=bk 8..32 > bk=bk 8..16 > bk=bk=16: staged operand tiles need 2560 bytes of workgroup memory, exceeding the 2048-byte limit
+  fusion=unfused > pipeline=tensorized > geometry=lattice > bm=bm 8..32 > bm=bm 8..16 > bm=bm=8 > bk=bk 8..32 > bk=bk 24..32: staged operand tiles need 3840 bytes of workgroup memory, exceeding the 2048-byte limit
 == coarse canonical mma_tile 16^3, format tile 8^3 ==
 lattice leaves 64 (8-step multiples of both axes: true)
   open-corner lattice increment (format 8s, not canonical 16s) -> 2560 bytes

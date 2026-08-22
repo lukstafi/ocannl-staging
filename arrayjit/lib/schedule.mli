@@ -449,11 +449,17 @@ val split_reduce_hoist : Low_level.optimized -> optop -> Indexing.symbol list
     interchange cannot remove (the cell mentioning the reduction loop itself, an enclosing loop that
     pins no component, an unrecognized accumulation form). *)
 
+val fuse_epilogue_witness : target:Tn.t -> Low_level.optimized -> string option
+(** Why {!constructor-Fuse_epilogue} on [target] would fail on this code — the recognizer's own
+    rejection message, probed hermetically like {!split_reduce_hoist} — or [None] when an eligible
+    elementwise tail immediately follows the reduction over [target] and the fusion applies. The
+    autotune family tree judges its fused-flavor branch with it (the check runs on the pre-schedule
+    code, where the plain accumulation-nest site applies), so a site without a fusable tail carries
+    the recognizer's reason as a construction-time refutation rather than silently minting no
+    twins. *)
+
 val can_fuse_epilogue : target:Tn.t -> Low_level.optimized -> bool
-(** Whether {!constructor-Fuse_epilogue} on [target] would succeed on this code — i.e. an eligible
-    elementwise tail immediately follows the reduction over [target]. Used by the autotune seeding
-    to propose fused-epilogue sketch variants (the check runs on the pre-schedule code, where the
-    plain accumulation-nest site applies). *)
+(** [Option.is_none (fuse_epilogue_witness ~target opt)]: whether the fusion applies. *)
 
 val hoistable_constant : Tn.t -> bool
 (** Whether the node is eligible as a [hoisted] {!constructor-Stage} source: declared value-constant

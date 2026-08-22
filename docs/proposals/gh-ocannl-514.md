@@ -9,7 +9,8 @@ fission slack for multi-kernel aggregate rows, floored serialization). Phase 1 i
 labelled, commitment-dependent choices) and the matmul family factored into it —
 `Autotune.matmul_seed_params` {e is} `Schedule_space.leaves` of `matmul_sketch_tree`, pinned
 list-for-list against the pre-factoring golden by test/operations/sketch_family_tree.ml; the
-conv family and the epilogue-twin level factor the same way as mechanical follow-ups. Phase 2
+epilogue-twin level factored in as the tree's root (gh-613), the conv family is the remaining
+mechanical follow-up. Phase 2
 implemented: legality over partial shapes for the factored family — tree children carry
 verdicts decided at parent construction, mirroring `op_legality`'s three values quantified
 over completions (`Refuted` with the violated constraint as witness — a decline explanation
@@ -33,11 +34,18 @@ geometry menus and the lattice. Lifted so far: the zero-expansion row-axis rule,
 companion-coverage rule per fusion flavor (`companion_geometry`'s verdict never depends on the
 geometry annotator, so one trivial-annotator query settles a flavor's whole family; the fused
 flavor is judged separately because skipping the epilogue tail can make coverage pass where the
-unfused form fails). The builders' raise sites remain the safety net for parameters replayed
+unfused form fails). The flavor-indexed verdicts first forced a second tree build per flavor;
+gh-613 then factored the fusion choice in as the tree's root level — `Choice "fusion"
+[unfused; fused]`, the fused child refuted with the recognizer's own reason
+(`Schedule.fuse_epilogue_witness`) where no fusable tail exists — so each flavor's
+preconditions are ordinary verdicts of its branch, the twins enumerate after all unfused
+leaves exactly as before, and the unfused coverage verdict is shared (it implies the fused
+one: the fused demand is a subset and the alignment analysis ignores the skip). The builders'
+raise sites remain the safety net for parameters replayed
 against a different lowering (fission recombination), and genuinely build-settled analyses stay
 candidate-build declines. Recorded follow-ups: an A-orientation
-site classifier (the `m_tb` analogue for forms reading A in place), plus the conv-family and
-epilogue-twin factorings. Phase 3 implemented: the dual (floor) extraction —
+site classifier (the `m_tb` analogue for forms reading A in place), plus the conv-family
+factoring. Phase 3 implemented: the dual (floor) extraction —
 `Cost_model.completion_floor` — with every approximation biased down, the exact mirror of
 `analyze`'s contract: guarded work counts guards-never-taken, the short-circuiting forms count
 only their certain part (`Where`'s cheaper arm, `And`/`Or`'s left operand, `Arg1`/`Arg2`'s
@@ -62,8 +70,10 @@ default's score as incumbent and the schedule-invariant `completion_floor` roofl
 uniform bound (sketch completions share the base program's semantics, so the floor bounds them
 all; it fathoms the family exactly when the incumbent already achieves it — the memory-bound
 kernels where the default preset is optimal). Selections are unchanged (goldens byte-identical);
-the not-yet-factored levels (epilogue twins, conv family) compete through the flat path at the
-tightened threshold, after the tree's leaves like the flat seeds-then-twins order. Phase 4b (first half) implemented: bound pruning against the measured incumbent in `tune` —
+the not-yet-factored conv family competes through the flat path at the tightened threshold.
+The epilogue twins competed that way too until gh-613 made fusion the tree's root level, which
+put them inside the walk — under its bound and on its stats ledger — after the unfused leaves,
+preserving the seeds-then-twins order. Phase 4b (first half) implemented: bound pruning against the measured incumbent in `tune` —
 an enumerative sketch candidate (whole-routine/per-segment sketches, split-reduce seeds) whose
 schedule-invariant roofline floor meets the best measured time so far is skipped before
 compile, the admissible-direction pruning of the tuned regime; config-gated

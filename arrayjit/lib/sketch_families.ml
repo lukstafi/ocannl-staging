@@ -8,8 +8,9 @@
     {!Ir.Schedule_space} and a handful of {!Ir.Schedule} helpers, so it is reviewable, and
     extensible, in isolation from the beam search that consumes it.
 
-    {!Autotune.sketch_seed_params} composes the families (matmul, else conv, plus the
-    epilogue-fusion twins) into the seed list the search actually enumerates.
+    {!Autotune.sketch_seed_params} composes the families (the matmul tree's leaves, else the conv
+    seeds crossed with their epilogue-fusion twins) into the seed list the search actually
+    enumerates.
 
     No [.mli] of its own: [autotune.ml] {e includes} this module, so the whole of it is in scope for
     the search harness unqualified (the site helpers as much as the families), and [autotune.mli]
@@ -110,7 +111,9 @@ type sketch_params = {
       (** Epilogue fusion (gh-ocannl-486): append [Sched.Fuse_epilogue] on the site's output, so the
           sole-consumer elementwise tail (bias add / activation / residual) folds into the
           store-back and the whole routine is one kernel — the fused competitor to the fissioned
-          two-kernel form. Seeded only when [Sched.can_fuse_epilogue] holds on the base code; a
+          two-kernel form. The matmul family tree's root level (gh-ocannl-613): the fused flavor is
+          refuted with the recognizer's own reason ([Sched.fuse_epilogue_witness]) when the base
+          code has no fusable tail, and otherwise enumerates after every unfused leaf; a
           candidate whose scheduled form no longer admits the fusion (e.g. materializing unrolls
           duplicating the store-back) fails its compile and is skipped like any other invalid
           candidate. On GPU the accumulator moves to workgroup-shared memory (the [shared] flag) so
@@ -1206,7 +1209,10 @@ let matmul_site_chain (site : matmul_site) =
    [fused] selects the [Fuse_epilogue] twins' flavor, which skips the epilogue tail nest — coverage
    can pass fused where it fails unfused (the tail was the failing companion, or its exclusion
    empties the demand before the alignment analysis is consulted), the pre-gh-521 "only the fused
-   twin survives" regime, so the two flavors are judged separately. The raise sites in the schedule
+   twin survives" regime, so the two flavors are judged separately — though not independently: the
+   fused demand is a subset of the unfused one and the alignment analysis itself does not depend on
+   [skip], so an unfused-Ok verdict implies the fused one ([matmul_family_tree] shares it, paying
+   the analysis twice only where the unfused flavor is refuted). The raise sites in the schedule
    builders stay as the safety net for parameters replayed against a different lowering (fission
    recombination). *)
 let matmul_coverage_witness ~(opt : LL.optimized) ~(fused : bool) (site : matmul_site) :
@@ -2287,8 +2293,11 @@ let interval_axis ~axis ~(values : int array) ~(box_verdict : int -> int -> stri
   | 1 -> Sspace.Choice { level = axis; children = [ (label 0 0, child 0 0) ] }
   | n -> split 0 (n - 1)
 
-let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
-    ~(opt : LL.optimized) ~(fused : bool) site : sketch_params Sspace.tree =
+(* One epilogue-fusion flavor of the matmul family: the pipeline level and everything below it.
+   [fused] selects the leaves' [sk_epilogue] and the flavor's own companion-coverage verdict
+   ([coverage_witness], owned by {!matmul_family_tree} so that the flavors can share it). *)
+let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
+    ~(coverage_witness : string option Lazy.t) ~(fused : bool) site : sketch_params Sspace.tree =
   (* Builder preconditions statically decidable at tree construction (gh-ocannl-577): rules the
      schedule builders settle identically for every tile completion refute here, with their
      witnesses, instead of failing candidate by candidate at build — the same lift phase 2 gave the
@@ -2300,7 +2309,7 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
   let precondition_witness =
     match zero_expansion_witness site with
     | Some _ as w -> w
-    | None -> if is_gpu then matmul_coverage_witness ~opt ~fused site else None
+    | None -> if is_gpu then Lazy.force coverage_witness else None
   in
   let precondition_guard child =
     match precondition_witness with Some w -> Sspace.Refuted w | None -> child
@@ -3075,16 +3084,53 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
       ("tensorized", precondition_guard (with_batch_twins mma_child));
     ]
 
-let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits) ~opt ~fused site
-    : sketch_params list =
-  Sspace.leaves (matmul_family_tree ~is_gpu ~is_cpu ~limits ~opt ~fused site)
+(* The matmul family: the epilogue-fusion level (gh-ocannl-613) above one {!matmul_flavor_tree} per
+   flavor. Unfused first, so the leaves keep the seeds-then-twins order the flat enumeration
+   established (candidate timing order, dedup keep-first), and the search's threshold tightens over
+   the unfused leaves before the twins compete. The fused flavor is a construction-time verdict of
+   the root: refuted with the fusion recognizer's own reason when the base code carries no fusable
+   tail ([Sched.fuse_epilogue_witness] — the check runs on the base code, where the plain
+   accumulation-nest site applies), so a site that mints no twins says why. Each flavor's
+   pipelines are then judged under the flavor's own preconditions — the fused coverage verdict is
+   flavor-indexed (gh-ocannl-577) but implied by the unfused one ([matmul_coverage_witness]), so it
+   is derived from it and the alignment analysis runs twice only where the unfused flavor is
+   refuted. Both flavors' subtrees stay lazy like every other level: nothing below the root is
+   built before a consumer descends into it. *)
+let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
+    ~(opt : LL.optimized) site : sketch_params Sspace.tree =
+  let unfused_coverage = lazy (matmul_coverage_witness ~opt ~fused:false site) in
+  let fused_coverage =
+    lazy
+      (match Lazy.force unfused_coverage with
+      | None -> None
+      | Some _ -> matmul_coverage_witness ~opt ~fused:true site)
+  in
+  let flavor ~fused ~coverage_witness =
+    Sspace.Child
+      (lazy (matmul_flavor_tree ~is_gpu ~is_cpu ~limits ~coverage_witness ~fused site))
+  in
+  Sspace.Choice
+    {
+      level = "fusion";
+      children =
+        [
+          ("unfused", flavor ~fused:false ~coverage_witness:unfused_coverage);
+          ( "fused",
+            match Sched.fuse_epilogue_witness ~target:site.m_d opt with
+            | Some w -> Sspace.Refuted w
+            | None -> flavor ~fused:true ~coverage_witness:fused_coverage );
+        ];
+    }
 
-(* The exported tree view of the matmul family (site detection included); the conv family and the
-   epilogue-twin level factor the same way as mechanical follow-ups. *)
+let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits) ~opt site :
+    sketch_params list =
+  Sspace.leaves (matmul_family_tree ~is_gpu ~is_cpu ~limits ~opt site)
+
+(* The exported tree view of the matmul family (site detection included); the conv family factors
+   the same way as a follow-up. *)
 let matmul_sketch_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
     (opt : LL.optimized) : sketch_params Sspace.tree option =
-  Option.map (detect_matmul opt.LL.llc)
-    ~f:(matmul_family_tree ~is_gpu ~is_cpu ~limits ~opt ~fused:false)
+  Option.map (detect_matmul opt.LL.llc) ~f:(matmul_family_tree ~is_gpu ~is_cpu ~limits ~opt)
 
 (* gh-ocannl-514 phase 5: lift every tile-lattice exclusion in the family tree, preserving the
    laziness of everything else — a lifted branch remains subject to legality (box refutations), and
