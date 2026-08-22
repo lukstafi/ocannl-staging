@@ -98,6 +98,16 @@ let cells = Ll_test.cycle ~dims:[| rows; cols |] ~modulus:13 ~offset:200. ~strid
 let cell r k = cells [| r; k |]
 let x_values = Array.init (rows * cols) ~f:(fun n -> cell (n / cols) (n % cols))
 
+(* The accumulator's INCOMING contents: distinct per row and nonzero (Codex P2, round 1). With
+   every [out] cell and both references starting at zero, a regression that initialized a localized
+   accumulator to zero instead of loading [out[r]] would satisfy every form and every value claim —
+   while the same [out[r] += x[r,k]] IR computes the wrong thing for any caller whose destination
+   already holds data, which is what an accumulation into a pre-zeroed or previously-written node
+   is. In units of 1/8 these are 100, 107, 114: distinct, well inside bf16's exact range, and in the
+   same units as the operands so the sums stay f32-exact. *)
+let seed_value r = (100. +. (7. *. Float.of_int r)) /. 8.
+let out_seed = Array.init rows ~f:seed_value
+
 (* Host references, per storage precision. [round] is the library's own conversion, so these are
    the kernel's roundings and not an approximation of them. *)
 let round (prec : Ops.prec) v =
@@ -115,10 +125,12 @@ let round (prec : Ops.prec) v =
    a lost iteration is a different number. *)
 let guard_terms = 20
 
-(* The whole-nest reference: accumulate wide, narrow once at the store. *)
-let whole_nest_ref ~terms prec =
+(* The whole-nest reference: open the cell, accumulate wide, narrow once at the store. [~from] is
+   what the accumulator loads — the seed for every shape that reads [out], zero for the virtual
+   accumulator, which owns its cell and initializes it from a [Zero_out]. *)
+let whole_nest_ref ~terms ~from prec =
   Array.init rows ~f:(fun r ->
-      let acc = ref 0.0 in
+      let acc = ref (from r) in
       for k = 0 to terms - 1 do
         acc := !acc +. cell r k
       done;
@@ -127,9 +139,9 @@ let whole_nest_ref ~terms prec =
 (* The per-step reference: narrow to storage at every accumulation step, which is what a
    read-modify-write rendering does. The addition itself happens at compute precision, and the
    operands are storage-exact, so one rounding per step is the whole of it. *)
-let per_step_ref ~terms prec =
+let per_step_ref ~terms ~from prec =
   Array.init rows ~f:(fun r ->
-      let acc = ref 0.0 in
+      let acc = ref (from r) in
       for k = 0 to terms - 1 do
         acc := round prec (!acc +. cell r k)
       done;
@@ -296,7 +308,7 @@ let make ~(prec : Ops.prec) ~(shape : shape) () : prog =
   let get_x = LL.Get (x, [| ri; ki |]) in
   let update = LL.Binop (Ops.Add, (get_acc, prec), (get_x, prec)) in
   let plain_body = LL.Set { tn = out; idcs = acc_cell; llsc = update; debug = "" } in
-  let seed = [ (out, Array.create ~len:rows 0.0); (x, x_values) ] in
+  let seed = [ (out, out_seed); (x, x_values) ] in
   let base =
     {
       llc = LL.Noop;
@@ -712,7 +724,11 @@ type reference =
           is what makes the guarded members' value claims able to fail (Codex P2, round 2). *)
   | Per_step
       (** The host's per-step-narrowed reference over the member's own term count: what a
-          read-modify-write form computes. *)
+          read-modify-write form computes, opening from the seeded cell. *)
+  | Owned_cell
+      (** The host reference the POLICY selects, over the full axis, starting from ZERO: the
+          virtual accumulator owns its cell and initializes it from a [Zero_out] rather than
+          loading [out], so the incoming contents are not part of what it computes. *)
 
 type member = {
   slug : string;  (** Short name; also the routine name's stem, so artifacts are per member. *)
@@ -879,7 +895,7 @@ let members =
         [ pt ]);
     (* --- the OTHER producer of the scope form: virtualization's inline at a read site --- *)
     member "virtual-accumulator" "a virtual accumulator inlined at its read site"
-      ~shape:Virtual_acc;
+      ~shape:Virtual_acc ~reference:Owned_cell;
     member "where-guarded-update" "virtualization's Where-guarded update spelling"
       ~shape:Where_scope ~reference:Guarded_baseline ~extra:[ " ? " ];
     (* --- the two read-modify-write forms, i.e. the declines. Without these the localized claims
@@ -1129,7 +1145,9 @@ let () =
   List.iter precs ~f:(fun (prec_name, prec) ->
       (* One pair of host references per term count: the full axis, and what a guard admitting
          [guard_terms] of it leaves. *)
-      let refs terms = (whole_nest_ref ~terms prec, per_step_ref ~terms prec) in
+      let refs ?(from = seed_value) terms =
+        (whole_nest_ref ~terms ~from prec, per_step_ref ~terms ~from prec)
+      in
       let wide, stepped = refs cols in
       let got = baseline prec_name in
       let differ = not (Array.for_all2_exn wide stepped ~f:Float.equal) in
@@ -1272,7 +1290,13 @@ let () =
                 match m.reference with
                 | Baseline -> baseline prec_name
                 | Guarded_baseline -> guarded_baseline prec_name
-                | Per_step -> per_step_ref ~terms:(terms_of_shape m.shape) prec
+                | Per_step ->
+                    per_step_ref ~terms:(terms_of_shape m.shape) ~from:seed_value prec
+                | Owned_cell -> (
+                    let from _ = 0.0 in
+                    match expected_residency prec with
+                    | Wider -> whole_nest_ref ~terms:cols ~from prec
+                    | At_storage | Undecided _ -> per_step_ref ~terms:cols ~from prec)
               in
               let ok = agrees got want in
               if not ok then
