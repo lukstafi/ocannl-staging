@@ -1860,6 +1860,22 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ ; A hand-built [Low_level] program of constant stores, executed and read back at f64/f32/f16, plus
+ ; a read of the emitted f32 kernel.
+ (name float_literal_forms)
+ (package neural_nets_lib)
+ (deps
+  ; Generated.init reads build_files_prefix, so a run under a different one must not be served
+  ; from the cache of a run under the default private directory.
+  (env_var OCANNL_BUILD_FILES_PREFIX)
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules float_literal_forms)
+ (libraries base ocannl stdio arrayjit.verdict ll_test test_utils)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name vec_signed_zero)
  (package neural_nets_lib)
  (deps

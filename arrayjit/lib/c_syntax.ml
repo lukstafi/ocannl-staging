@@ -422,21 +422,124 @@ module type C_syntax_config = sig
         captured_log_prefix) to the format string and arguments. *)
 end
 
-(** A C source literal for the floating-point constant [c].
+(** A C source literal for the floating-point constant [c], as a {e double}-typed floating literal
+    that parses back to exactly [c] on every C-family backend.
 
-    The three special values [%.16g] cannot spell, plus a fourth it spells {e wrong}: a value with
-    no fractional part comes out without a radix point, hence as a C {e integer} literal, and while
-    that is value-preserving for every other constant, [%.16g (-0.)] is ["-0"] — the integer zero,
-    [+0.0] once cast. So a [-0.0] in host data silently became [+0.0] wherever the constant fill
-    inlines as scalar stores, the same negative-zero normalization as the vector splat
-    (gh-ocannl-615). Only this value needs the radix point forced; spelling every whole number as
-    [N.0] instead would be equivalent C and churn every codegen snapshot. *)
+    Three properties, each of which [%.16g] alone gets wrong (gh-ocannl-623):
+
+    - {b It is a floating literal, not an integer one.} [%.16g] of a value with no fractional part
+      has no radix point, so [2.] came out as the C integer literal [2]. Value-preserving in the
+      cast contexts the constants happen to sit in today — but [-0.] came out as ["-0"], the
+      integer zero, hence [+0.0] once cast: a [-0.0] in host data silently reached kernels as
+      [+0.0] wherever the constant fill inlines as scalar stores (gh-ocannl-615 fixed that one
+      value). The rest of the class is latent rather than inert: an integer literal divides as an
+      integer against another one, promotes as an integer, and would overflow its type once the
+      digits outgrow [long long]. Forcing the radix point closes all of it at once, and subsumes
+      the [-0.] special case.
+    - {b It round-trips.} [%.16g] is not enough digits to recover every double: [0.1 +. 0.2] prints
+      as ["0.3"], which is a {e different} double. That reaches emitted code for real — hosted
+      constant inits (gh-ocannl-633) inline arbitrary host values as scalar stores — so the
+      rendering retries at [%.17g], the width IEEE-754 guarantees, whenever 16 digits do not parse
+      back to [c]. Values that already round-trip at 16 digits keep their exact previous spelling,
+      which is why no codegen golden moves except by the appended [.0].
+    - {b The specials are spelled, not printed.} [%.16g] cannot spell them at all. [INFINITY] and
+      [NAN] are C99 [math.h] macros that MSL also provides; the CUDA and HIP preludes define them
+      under [#ifndef] since nvrtc/hiprtc supply no standard headers. [(-INFINITY)] is parenthesized
+      so it cannot glue into [--INFINITY] beside a subtraction. A NaN's payload and sign do not
+      survive this (no dialect spells a payload portably); nothing in OCANNL depends on them, and
+      a bit-exact constant has {!Low_level.Constant_bits} available.
+
+    Deliberately {e not} carried here: a precision suffix. The literal is always double-typed and
+    the narrowing is [B.convert_precision]'s cast, which is a single rounding of the exact host
+    double — the same conversion the host performs when it stores the value. An [f]-suffixed
+    decimal would instead round the decimal straight to float. The cast is present for every
+    non-double target: [Ops.c_convert_precision] and each backend's override return [("", "")] only
+    when [from] and [to_] are the same precision.
+
+    That last argument has a hole, and {!is_f32_tie} is what fills it: the cast only {e is} a
+    narrowing where the dialect has a [double]. MSL does not, so Metal rounds the decimal itself,
+    at parse time, to f32. A decimal that round-trips as a double is not thereby exact, so the two
+    readings — round [c] to f32, versus round a decimal near [c] to f32 — can differ, and they
+    differ exactly when [c] sits on an f32 tie: the host takes ties-to-even while the dialect
+    follows whichever side the decimal happens to land on. Which digit count is emitted then
+    decides the value, so this is not a hazard the retry above introduced but one it {e moves}.
+    A hexadecimal literal takes it away instead of moving it: it is exact by construction, so there
+    is no parse-time rounding for either reading to disagree about, and both round [c] itself. It
+    is spelled only for ties — a handful of values that were otherwise a coin toss — so the
+    ordinary constant keeps its readable decimal, and C99, CUDA, HIP and MSL all accept the
+    form. *)
+(** Whether [c] lies exactly halfway between two adjacent f32 values, so that narrowing it to f32
+    is a tie that IEEE-754 breaks to even -- and any decimal near but not equal to [c] would instead
+    break by whichever side it fell on.
+
+    Computed against the two neighbours rather than by masking mantissa bits, so that the f32
+    subnormal range (where the retained-bit count shrinks, and a bit mask would need a second case)
+    is covered by the same three lines. Values that overflow f32 have no neighbours to sit between
+    and are not ties. *)
+let is_f32_tie c =
+  Float.is_finite c
+  && (Float.(abs c = 0x1.ffffffp+127)
+     (* The OVERFLOW midpoint, which the neighbour walk below cannot see: halfway between the
+        largest finite f32 and the (unrepresentable) 2^128 that would follow it. IEEE-754 rounds it
+        to even, and the even candidate is the one that overflows, so the host answers an infinity
+        while a decimal spelling of it -- necessarily just under the midpoint, since the midpoint's
+        exact decimal is longer -- answers the largest finite f32. The tie has exactly one
+        magnitude, so naming it is complete rather than a first case of many. *)
+     ||
+     let f = Int32.float_of_bits (Int32.bits_of_float c) in
+     Float.is_finite f && Float.(f <> c)
+     &&
+     let bits = Int32.bits_of_float f in
+     (* One f32 step from [f] towards [c]: away from zero when they share a direction, towards it
+        otherwise, since the bit pattern's order tracks magnitude rather than value. *)
+     let step =
+       if Float.(c > f) then if Float.(f >= 0.) then Int32.(bits + one) else Int32.(bits - one)
+       else if Float.(f > 0.) then Int32.(bits - one)
+       else Int32.(bits + one)
+     in
+     let g = Int32.float_of_bits step in
+     Float.is_finite g && Float.(abs (c - f) = abs (g - c)))
+
+(** [s] with any exponent's leading zeros removed, so that the emitted literal does not depend on
+    which C runtime formatted it.
+
+    OCaml's [%g] goes through the platform's [snprintf], and the Windows runtimes pad the exponent
+    to three digits ([1e+020] where glibc writes [1e+20]) -- which would make generated kernels, and
+    any golden quoting one, differ by platform. Both spellings denote the same number, so this is
+    about the artifact being reproducible rather than about the value. Digits that are not padding
+    are kept: [1e-300] stays itself. *)
+let normalize_exponent s =
+  match String.findi s ~f:(fun _ ch -> Char.(ch = 'e' || ch = 'E')) with
+  | None -> s
+  | Some (i, _) ->
+      let mantissa = String.prefix s i and exp = String.drop_prefix s (i + 1) in
+      let sign, digits =
+        match String.chop_prefix exp ~prefix:"+" with
+        | Some d -> ("+", d)
+        | None -> (
+            match String.chop_prefix exp ~prefix:"-" with Some d -> ("-", d) | None -> ("", exp))
+      in
+      if String.is_empty digits || not (String.for_all digits ~f:Char.is_digit) then s
+      else
+        let stripped = String.lstrip digits ~drop:(Char.equal '0') in
+        let stripped = if String.is_empty stripped then "0" else stripped in
+        mantissa ^ "e" ^ sign ^ stripped
+
 let c_float_literal c =
   if Float.(c = infinity) then "INFINITY"
   else if Float.(c = neg_infinity) then "(-INFINITY)"
   else if Float.is_nan c then "NAN"
-  else if Float.(c = 0.) && Float.ieee_negative c then "-0.0"
-  else Printf.sprintf "%.16g" c
+  else if is_f32_tie c then Printf.sprintf "%h" c
+  else
+    let s =
+      let s16 = Printf.sprintf "%.16g" c in
+      if Float.equal (Float.of_string s16) c then s16 else Printf.sprintf "%.17g" c
+    in
+    (* [%g] emits a radix point or an exponent for everything else, and either one makes the token
+       a floating literal. *)
+    if String.exists s ~f:(function '.' | 'e' | 'E' -> true | _ -> false) then
+      normalize_exponent s
+    else s ^ ".0"
 
 (** The C-family rendering of a binary operation, from {!Ops.binop_c_syntax}: prefix, first operand,
     infix, second operand (breaking after the operator), suffix.

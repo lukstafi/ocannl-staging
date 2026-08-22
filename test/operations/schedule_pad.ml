@@ -155,7 +155,10 @@ let () =
      store-back writes only the valid rows. *)
   p "staged tiles zero-fill their fringe and the store-back is masked"
     ((not on_cpu)
-    || (has "!= 0.0 ? " && has "(float)(0)" && has (Printf.sprintf "< (int)(%d))) {" m_ext)))
+       (* The bounds are float constants cast to the index type, so they carry the radix point
+          every emitted float constant now does (gh-ocannl-623): [(int)(33.0)], same value. *)
+    || (has "!= 0.0 ? " && has "(float)(0.0)"
+       && has (Printf.sprintf "< (int)(%d.0))) {" m_ext)))
 
 (* === GPU leg: padded shared cooperative composition (mirrors autotune's [gpu_mma_sketch_schedule],
    plus the pads — including the unsplit column panel, which the intrinsic n-extent needs). The
