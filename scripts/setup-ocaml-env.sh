@@ -110,10 +110,13 @@ fi
 # Best-effort and bounded, and the bound must not depend on the transport or
 # on the platform: `GIT_TERMINAL_PROMPT=0` silences git's prompts but not
 # OpenSSH's (host-key confirmation, a passphrase), `http.lowSpeed*` reaches only
-# HTTP transfers, and GNU `timeout` is absent on a default macOS and on some
-# Git Bash installs. So the fetch runs under `bounded`, a watchdog that kills
-# the command after N seconds whatever it is stuck on — `timeout` where one
-# exists, a background killer otherwise — and the SSH leg additionally gets
+# HTTP transfers, and `timeout` is not something to lean on: absent on a default
+# macOS and on some Git Bash installs, and where present not necessarily GNU's —
+# uutils' (Ubuntu's since 25.10) takes `-k` but does not signal the process
+# group on the KILL escalation, so git's ssh child outlives it. So the fetch
+# runs under `bounded`, a watchdog of this script's own that kills the
+# command's whole process group after N seconds whatever it is stuck on, the
+# same on every platform — and the SSH leg additionally gets
 # `BatchMode=yes` (no prompts) with connect and keepalive timeouts, appended to
 # whatever ssh command the user already configured. Any failure prints `skip`.
 # The count is then taken against whatever `origin/master` the repository
@@ -123,21 +126,22 @@ fi
 # incomplete; it names the recovery instead.
 bounded() {
   # bounded SECS CMD...: run CMD, killing it if still running after SECS.
+  # What GNU timeout does, done here so that it holds whatever `timeout` is on
+  # PATH: the command runs in its own process group and the watchdog signals
+  # the GROUP, so the ssh or credential helper git is blocked on dies with git
+  # instead of being orphaned by a PID-only kill and accumulating across
+  # session starts; TERM then CONT (for a job stopped on a tty read), then KILL
+  # 5s later for anything that ignores TERM, which an ignoring parent's
+  # children inherit. Job control is what gives a background job its own group;
+  # it is switched off again once both jobs are spawned.
   local secs="$1"; shift
-  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@" </dev/null; return $?; fi
-  # Without GNU timeout, reproduce what it does: the command runs in its own
-  # process group and the watchdog signals the GROUP, so the ssh or credential
-  # helper git is blocked on dies with git instead of being orphaned by a
-  # PID-only kill and accumulating across session starts. Job control is what
-  # gives a background job its own group; it is switched off again once both
-  # jobs are spawned. CONT follows TERM for a job stopped on a tty read.
   local pid watchdog rc
   set -m
   "$@" </dev/null & pid=$!
   # The killer gets no inherited fds: a lingering `sleep` holding the hook's
   # stdout would keep the harness waiting for EOF after the script exits.
-  ( sleep "$secs"; kill -TERM -- -"$pid" 2>/dev/null; kill -CONT -- -"$pid" 2>/dev/null ) \
-    >/dev/null 2>&1 </dev/null &
+  ( sleep "$secs"; kill -TERM -- -"$pid" 2>/dev/null; kill -CONT -- -"$pid" 2>/dev/null
+    sleep 5; kill -KILL -- -"$pid" 2>/dev/null ) >/dev/null 2>&1 </dev/null &
   watchdog=$!
   set +m
   wait "$pid" 2>/dev/null; rc=$?
@@ -147,13 +151,15 @@ bounded() {
 if [ -n "$wt_top" ] && git -C "$wt_top" remote get-url origin >/dev/null 2>&1; then
   # Git picks its SSH launcher as GIT_SSH_COMMAND, else core.sshCommand, else
   # GIT_SSH, else `ssh`; the probe keeps that choice and only APPENDS the OpenSSH
-  # options where they are known to apply: to a shell-string launcher (the first
-  # two, or the default) whose variant takes OpenSSH options — judged by an
-  # explicit variant (`GIT_SSH_VARIANT`, which outranks `ssh.variant`) when one
-  # is set, else by the program's basename the way git's auto-detection does;
-  # `simple` is `COMMAND HOST...` with no options at all. A `GIT_SSH` program (a
-  # path, not a shell string — typically plink on Windows) is left entirely
-  # alone. Wherever the options are not appended, `bounded` is still the bound.
+  # options where OpenSSH is CERTAIN: a shell-string launcher (the first two, or
+  # the default) whose program is `ssh` itself, or whose variant is explicitly
+  # `ssh` (`GIT_SSH_VARIANT`, which outranks `ssh.variant`). Everything else —
+  # plink and its kin, `simple`, a custom wrapper git would probe with `-G`, a
+  # `GIT_SSH` program (a path, not a shell string) — is passed through exactly
+  # as git would run it. This is deliberately narrower than git's own variant
+  # detection rather than a copy of it: the options are a courtesy bound, and
+  # `bounded` is the bound wherever they are not appended, so nothing is lost
+  # by declining to guess, while a wrong guess breaks every startup fetch.
   ssh_opts="-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2"
   ssh_variant="${GIT_SSH_VARIANT:-$(git -C "$wt_top" config ssh.variant 2>/dev/null || true)}"
   fetch_env=()
@@ -164,30 +170,37 @@ if [ -n "$wt_top" ] && git -C "$wt_top" remote get-url origin >/dev/null 2>&1; t
   fi
   if [ -n "$ssh_launcher" ]; then
     ssh_prog="$(basename "${ssh_launcher%% *}" | tr 'A-Z' 'a-z')"
-    case "${ssh_variant:-$ssh_prog}" in
-      simple|plink|putty|tortoiseplink|plink.exe|putty.exe|tortoiseplink.exe) ;;
-      *) fetch_env=(GIT_SSH_COMMAND="$ssh_launcher $ssh_opts") ;;
+    case "${ssh_variant:-auto}:$ssh_prog" in
+      ssh:*|auto:ssh|auto:ssh.exe) fetch_env=(GIT_SSH_COMMAND="$ssh_launcher $ssh_opts") ;;
     esac
   fi
   # `--no-write-fetch-head` (git >= 2.29): a startup probe must not clobber a
-  # FETCH_HEAD someone kept for a later `git merge FETCH_HEAD`. The refspec
+  # FETCH_HEAD someone kept for a later `git merge FETCH_HEAD`;
+  # `--no-auto-maintenance`: housekeeping the watchdog would cut short at the
+  # bound, leaving its trigger in place for the next start to hit. The refspec
   # names `refs/heads/master` in full because a remote TAG called `master`
   # would otherwise win the short name, `--no-tags` notwithstanding, and the
   # forced update would then write the tag's commit into the tracking ref.
   if bounded 30 env GIT_TERMINAL_PROMPT=0 "${fetch_env[@]}" \
        git -C "$wt_top" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=15 \
-       fetch --quiet --no-tags --no-write-fetch-head origin \
+       fetch --quiet --no-tags --no-write-fetch-head --no-auto-maintenance origin \
        "+refs/heads/master:refs/remotes/origin/master" >/dev/null 2>&1; then
     fetched="origin/master"
   else
     echo "  skip  fetching origin/master failed (offline?)"
     fetched=""
   fi
-  if git -C "$wt_top" rev-parse --verify -q refs/remotes/origin/master >/dev/null; then
-    behind="$(git -C "$wt_top" rev-list --count HEAD..origin/master 2>/dev/null || echo 0)"
-    ahead="$(git -C "$wt_top" rev-list --count origin/master..HEAD 2>/dev/null || echo 0)"
+  # The tracking ref is spelled in full here too: a branch or tag named
+  # `origin/master` would make the short form ambiguous. A comparison that
+  # fails anyway (an unborn HEAD, say) is reported, not read as 0.
+  upstream=refs/remotes/origin/master
+  if git -C "$wt_top" rev-parse --verify -q "$upstream" >/dev/null; then
+    behind="$(git -C "$wt_top" rev-list --count "HEAD..$upstream" 2>/dev/null || true)"
+    ahead="$(git -C "$wt_top" rev-list --count "$upstream..HEAD" 2>/dev/null || true)"
     asof="${fetched:+}"; [ -n "$fetched" ] || asof=" (as of the last successful fetch)"
-    if [ "$behind" = 0 ]; then
+    if [ -z "$behind" ] || [ -z "$ahead" ]; then
+      echo "  skip  could not compare HEAD with origin/master"
+    elif [ "$behind" = 0 ]; then
       ok "up to date with origin/master$asof"
     else
       if [ "$ahead" = 0 ]; then
