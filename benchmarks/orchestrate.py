@@ -21,6 +21,7 @@ the run log and in a report section, rather than quietly not being run (gh-ocann
 
 import argparse
 import json
+import math
 import os
 import platform
 import re
@@ -255,17 +256,63 @@ def run_cell(label, cmd, env=None, cwd=None):
         print(f"!!! {label} failed (exit {proc.returncode})", flush=True)
         return None
     result = json.loads(line)
-    p50 = result["step_ms"]["p50"]
-    print(f"    p50 {p50:.3f} ms, compile {result['compile_s']:.2f} s", flush=True)
+    print(
+        f"    p50 {num(result['step_ms']['p50'], '.3f')} ms, "
+        f"compile {num(result['compile_s'], '.2f')} s",
+        flush=True,
+    )
     return result
 
 
+def finite(x):
+    """Whether a JSON number from a result line is a real number this report can compare.
+
+    A runner emits `null` for a value it has but cannot express in JSON -- a diverged loss, a time
+    it never measured (gh-ocannl-676) -- so `None` reaching here means "ran, and this number is not
+    a number", not "runner failed". `NaN` is accepted by Python's `json.loads` (its non-standard
+    extension) and so can still arrive from an older result file, and is the same fact.
+    """
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+
+
+def diverged_at(losses):
+    """The index of the first non-finite loss, or None for a trajectory that stayed finite."""
+    return next((i for i, loss in enumerate(losses) if not finite(loss)), None)
+
+
+def json_safe(obj):
+    """`obj` with every non-finite float replaced by None, recursively.
+
+    `json.dumps` writes `NaN` / `Infinity` for those, which its own loader accepts and no other
+    JSON reader does -- results.jsonl is read by jq, by pandas and by the next session's scripts,
+    so what this sweep writes has to be JSON.
+    """
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [json_safe(v) for v in obj]
+    return obj
+
+
+def num(x, spec):
+    """A number for the report table, or `n/a` when the runner had none to give."""
+    return format(x, spec) if finite(x) else "n/a"
+
+
 def loss_moved(losses):
-    """Whether a loss trajectory has more than floating-point-noise-level variation."""
-    if len(losses) < 2:
+    """Whether a loss trajectory has more than floating-point-noise-level variation.
+
+    Over the finite steps only: a diverged trajectory is not a stationary one, and reporting it as
+    stationary names the wrong defect. A trajectory with fewer than two finite steps has nothing to
+    say about movement, and is reported as diverged instead.
+    """
+    finites = [loss for loss in losses if finite(loss)]
+    if len(finites) < 2:
         return False
-    scale = max(max(abs(loss) for loss in losses), 1e-6)
-    return max(losses) - min(losses) > LOSS_MOVE_MIN_REL * scale
+    scale = max(max(abs(loss) for loss in finites), 1e-6)
+    return max(finites) - min(finites) > LOSS_MOVE_MIN_REL * scale
 
 
 def parity_check(results):
@@ -278,23 +325,42 @@ def parity_check(results):
             (r for r in rs if (r["framework"], r["backend"], r["variant"]) == REFERENCE),
             None,
         )
+        ref_diverged = ref is not None and diverged_at(ref["losses"]) is not None
         for r in rs:
             r["parity_loss_moved"] = loss_moved(r["losses"])
-            if ref is None:
+            r["diverged_at"] = diverged_at(r["losses"])
+            if ref is not None:
+                n = min(len(r["losses"]), len(ref["losses"]))
+                comparable = [
+                    (a, b)
+                    for a, b in zip(r["losses"][:n], ref["losses"][:n])
+                    if finite(a) and finite(b)
+                ]
+                if comparable:
+                    r["parity_max_rel"] = max(
+                        abs(a - b) / max(abs(b), 1e-6) for a, b in comparable
+                    )
+            if r["diverged_at"] is not None:
+                # The cell ran and its training blew up: a gate failure naming its cause, not a
+                # missing cell and not a stationary one (gh-ocannl-676). Parity is meaningless past
+                # the divergence, so what is reported is where it happened -- and, when there is a
+                # finite prefix shared with the reference, how far it had drifted before it did.
+                r["parity"] = "DIVERGED"
+            elif ref is None or ref_diverged:
+                # A diverged reference is no reference: comparing against a trajectory that blew up
+                # would report the reference's defect as every other cell's.
                 r["parity"] = "NO-REF"
-                continue
-            if r is ref:
+            elif r is ref:
                 r["parity"] = "REF"
                 r["parity_max_rel"] = 0.0
-                continue
-            n = min(len(r["losses"]), len(ref["losses"]))
-            max_rel = max(
-                abs(a - b) / max(abs(b), 1e-6)
-                for a, b in zip(r["losses"][:n], ref["losses"][:n])
-            )
-            r["parity_max_rel"] = max_rel
-            tol = parity_tol(r.get("precision", "f32"))
-            r["parity"] = "PASS" if max_rel < tol and r["parity_loss_moved"] else "FAIL"
+            else:
+                max_rel = r.get("parity_max_rel")
+                tol = parity_tol(r.get("precision", "f32"))
+                r["parity"] = (
+                    "PASS"
+                    if max_rel is not None and max_rel < tol and r["parity_loss_moved"]
+                    else "FAIL"
+                )
 
 
 def check_fixture_digests(fixtures, digests_path=None, allow_unpinned=False):
@@ -415,7 +481,10 @@ def report(results, out_dir, unavailable=()):
     out_dir.mkdir(parents=True, exist_ok=True)
     with open(out_dir / "results.jsonl", "w") as f:
         for r in results:
-            f.write(json.dumps(r) + "\n")
+            # allow_nan=False so a non-finite value this sweep computed itself cannot slip out as
+            # `NaN`: json_safe has already mapped the ones it expects, and anything left is a bug
+            # worth raising over rather than writing an unreadable file (gh-ocannl-676).
+            f.write(json.dumps(json_safe(r), allow_nan=False) + "\n")
     lines = []
     commit = subprocess.run(
         ["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, capture_output=True, text=True
@@ -443,7 +512,10 @@ def report(results, out_dir, unavailable=()):
         # against the others computing in the same format, and a reduced-precision block reads as
         # its own group rather than being interleaved by a speed it owes to its storage format.
         rows.sort(
-            key=lambda r: (precision_rank(r.get("precision", "f32")), r["step_ms"]["p50"])
+            key=lambda r: (
+                precision_rank(r.get("precision", "f32")),
+                r["step_ms"]["p50"] if finite(r["step_ms"]["p50"]) else math.inf,
+            )
         )
         precisions = {r.get("precision", "f32") for r in rows}
         if len(precisions) > 1:
@@ -484,15 +556,19 @@ def report(results, out_dir, unavailable=()):
         for r in rows:
             s = r["step_ms"]
             parity = r["parity"]
-            if parity not in ("REF", "NO-REF"):
+            if parity not in ("REF", "NO-REF") and finite(r.get("parity_max_rel")):
                 parity += f" ({r['parity_max_rel']:.1e})"
-            if not r["parity_loss_moved"]:
+            if r.get("diverged_at") is not None:
+                parity += f" (loss non-finite from step {r['diverged_at']})"
+            elif not r["parity_loss_moved"]:
                 parity += " (loss stationary)"
             tokens = ""
             if with_tokens:
                 tps = r.get("tokens_per_step")
-                tokens = f" {tps * 1000 / s['p50']:,.0f} |" if tps else " |"
-            compile_s = f"{r['compile_s']:.2f}"
+                tokens = (
+                    f" {tps * 1000 / s['p50']:,.0f} |" if tps and finite(s["p50"]) else " |"
+                )
+            compile_s = num(r["compile_s"], ".2f")
             compile_s += COMPILE_S_NOTE.get(r.get("search_pass"), "")
             provenance = ""
             if with_provenance:
@@ -500,8 +576,8 @@ def report(results, out_dir, unavailable=()):
             lines.append(
                 f"| {r['framework']} | {r['backend']} | {r['variant']} "
                 f"| {r.get('precision', 'f32')} "
-                f"| {s['p50']:.3f} | {s['p10']:.3f} | {s['p90']:.3f} "
-                f"| {r['queued_step_ms']:.3f} | {compile_s} |{provenance} {parity} |{tokens}"
+                f"| {num(s['p50'], '.3f')} | {num(s['p10'], '.3f')} | {num(s['p90'], '.3f')} "
+                f"| {num(r['queued_step_ms'], '.3f')} | {compile_s} |{provenance} {parity} |{tokens}"
             )
     if unavailable:
         # Stated where the matrix is read: a cell missing because the workload cannot express it
@@ -777,7 +853,25 @@ def main():
     if failed:
         ok = False
         print(f"PARITY GATE: {len(failed)} cell(s) FAILED", flush=True)
-    stationary = [r for r in results if not r["parity_loss_moved"]]
+    diverged = [r for r in results if r["parity"] == "DIVERGED"]
+    if diverged:
+        # A cell that ran and blew up, reported as such (gh-ocannl-676). It is a gate failure like
+        # any other parity failure, named separately because the finding is different: nothing is
+        # wrong with the runner, and the trajectory that shows it is in results.jsonl.
+        ok = False
+        labels = ", ".join(
+            f"{r['workload']} {r['framework']}/{r['backend']}/"
+            f"{cell_name(r['variant'], r.get('precision', 'f32'))}"
+            f" (from step {r['diverged_at']})"
+            for r in diverged
+        )
+        print(
+            f"PARITY GATE: {len(diverged)} cell(s) DIVERGED (non-finite loss): {labels}",
+            flush=True,
+        )
+    stationary = [
+        r for r in results if not r["parity_loss_moved"] and r["diverged_at"] is None
+    ]
     if stationary:
         ok = False
         labels = ", ".join(

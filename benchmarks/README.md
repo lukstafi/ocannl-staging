@@ -347,7 +347,10 @@ than the driver (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION` at module load), run it wi
   JSON — so a diverged cell, the exact thing the parity gate exists to catch, used to be reported
   as a *broken runner* with its loss trajectory discarded after the whole measurement had been
   paid for. `test/operations/bench_result_line` pins the OCANNL line by re-parsing it with
-  fabricated values.
+  fabricated values, and `test_orchestrate.py` re-parses that golden with the reader that has to
+  accept it. A `null` in a loss vector is read as **DIVERGED**: a parity-gate failure naming the
+  step the trajectory left the finite numbers, with the trajectory itself kept in
+  `results/results.jsonl` — not a runner failure, and not a stationary loss.
 - tinygrad's loss must be realized before `opt.step()` (in-place assigns; a later realize
   would recompute the loss from updated weights). tinygrad JIT capture happens during the
   first parity steps; loss values are unaffected.
