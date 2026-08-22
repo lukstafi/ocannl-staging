@@ -1,9 +1,9 @@
 (* gh-ocannl-686: a routine whose name collides with a reserved word or a builtin.
 
-   Routine names come from user-facing surfaces — an [Assignments.Block_comment] label, the [~name]
-   argument of [Context.compile] and of the autotune drop-ins (gh-ocannl-669) — and used to reach
-   the emitted [void <name>(] verbatim. [Block_comment ("asm", ...)] — a natural abbreviation, and
-   the one that found this — therefore emitted [void asm(], which every C front end rejects, and the
+   Routine names come from user-facing surfaces -- an [Assignments.Block_comment] label, the [~name]
+   argument of [Context.compile] and of the autotune drop-ins (gh-ocannl-669) -- and used to reach
+   the emitted [void <name>(] verbatim. [Block_comment ("asm", ...)] -- a natural abbreviation, and
+   the one that found this -- therefore emitted [void asm(], which every C front end rejects, and the
    rejection surfaced as [Invalid_argument "... This is a bug in OCANNL. Please file an issue with
    the generated .c file ..."]: the actual cause, the name, appeared nowhere in the message.
 
@@ -13,7 +13,7 @@
    - The colliding routines COMPILE AND EXECUTE, with their values checked. A structural check on
    the emitted header would pass on a kernel that computes nothing; the point of the fix is that the
    routine works, not merely that it parses.
-   - The emitted symbol is the mangled one, and the artifact names it — the deterministic scheme is
+   - The emitted symbol is the mangled one, and the artifact names it -- the deterministic scheme is
    observable, not just its absence of failure.
    - The identity half: a name that is already a legal, non-reserved identifier is emitted
    unchanged. This is what keeps schedule-cache identities and every existing golden from churning,
@@ -24,7 +24,7 @@
    though C89/C99 reserve it only as an extension), and [arrayjit_threefry4x32] is a builtin all four
    backends' tables define. The C++-only keywords ([class], [new], ...) are deliberately NOT probed
    for mangling: they are legal identifiers in plain C, so the cc backend must and does leave them
-   alone — asserting a uniform mangling for them would be asserting something false. *)
+   alone -- asserting a uniform mangling for them would be asserting something false. *)
 
 open Base
 open Ocannl
@@ -82,6 +82,15 @@ let () = colliding ~label:"gh686_kw" ~name:"asm" ~emitted:"asm__"
 let () =
   colliding ~label:"gh686_bi" ~name:"arrayjit_threefry4x32" ~emitted:"arrayjit_threefry4x32__"
 
+(* --- 2b. A name the prelude's unconditional includes declare. A routine DEFINITION takes file
+   scope, so [void printf(...)] after [<stdio.h>] and [void exp(...)] after [<math.h>] are
+   conflicting declarations -- errors whether or not the kernel calls either. These are not in
+   [ident_blacklist] proper, because a tensor node named [exp] is a parameter or a local and
+   legally shadows the declaration; putting them there would rename nodes (Tensor.unop's op_labels
+   ARE these words) to prevent a collision that cannot happen. Hence a routine-only table. --- *)
+let () = colliding ~label:"gh686_io" ~name:"printf" ~emitted:"printf__"
+let () = colliding ~label:"gh686_mt" ~name:"exp" ~emitted:"exp__"
+
 (* --- 3. Characters C does not admit in an identifier, and a leading digit. [Context.compile]'s
    [~name] bypasses [Assignments.get_name_exn]'s punctuation pass entirely, so these reached the
    emitted header as-is too. --- *)
@@ -118,13 +127,13 @@ let () =
 
 (* --- 6. The other half of the same table: a tensor NODE whose label is a reserved word. Node names
    already avoid [ident_blacklist] by construction (a collision forces the disambiguated
-   [n<id>_<label>] form), so this pins the table rather than the mechanism — specifically the C++
+   [n<id>_<label>] form), so this pins the table rather than the mechanism -- specifically the C++
    entries, which the GPU dialects need and plain C does not.
 
    [Tensor.unop ~op_label:"not"] mints exactly that: [not] is an alternative token for [!] in C++,
    so on MSL/CUDA/HIP a bare [not] is a parse error where in C it is an ordinary identifier. The
    claim is deliberately just the values: which spelling the node gets is backend-dependent (bare on
-   cc, disambiguated on the C++ dialects) and so cannot appear in a backend-uniform golden — the
+   cc, disambiguated on the C++ dialects) and so cannot appear in a backend-uniform golden -- the
    teeth here are that the kernel COMPILES AND RUNS under OCANNL_BACKEND=metal. *)
 let () =
   let a = TDSL.ndarray av ~label:[ "gh686_not_a" ] ~output_dims:[ n ] () in

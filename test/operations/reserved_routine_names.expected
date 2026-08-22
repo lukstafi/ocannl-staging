@@ -4,6 +4,12 @@ routine named "asm" emits the mangled symbol "asm__": true
 routine named "arrayjit_threefry4x32" computes correct values: true
 routine named "arrayjit_threefry4x32" keeps its given name in the routine record: true
 routine named "arrayjit_threefry4x32" emits the mangled symbol "arrayjit_threefry4x32__": true
+routine named "printf" computes correct values: true
+routine named "printf" keeps its given name in the routine record: true
+routine named "printf" emits the mangled symbol "printf__": true
+routine named "exp" computes correct values: true
+routine named "exp" keeps its given name in the routine record: true
+routine named "exp" emits the mangled symbol "exp__": true
 routine named "gh686 bad/name!" computes correct values: true
 routine named "gh686 bad/name!" keeps its given name in the routine record: true
 routine named "gh686 bad/name!" emits the mangled symbol "gh686_bad_name_": true

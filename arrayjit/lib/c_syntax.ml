@@ -757,6 +757,312 @@ let c_keywords =
     "uint64_t";
   ]
 
+(** Macro names the C-family preludes' unconditional includes define ([<stdio.h>], [<math.h>],
+    [<string.h>], [<stdlib.h>], [<stdint.h>]). Macros are the half of the standard library that
+    NOTHING can shadow -- a parameter or a local named [NAN] expands mid-declaration and the kernel
+    fails to parse -- so these constrain every identifier, tensor-node names included, and belong in
+    the shared [ident_blacklist] (gh-ocannl-686). *)
+let c_stdlib_macros =
+  [
+    "NULL";
+    "EOF";
+    "BUFSIZ";
+    "SEEK_SET";
+    "SEEK_CUR";
+    "SEEK_END";
+    "FILENAME_MAX";
+    "FOPEN_MAX";
+    "TMP_MAX";
+    "L_tmpnam";
+    "stdin";
+    "stdout";
+    "stderr";
+    "NAN";
+    "INFINITY";
+    "HUGE_VAL";
+    "HUGE_VALF";
+    "HUGE_VALL";
+    "M_PI";
+    "M_E";
+    "M_SQRT2";
+    "FP_NAN";
+    "FP_INFINITE";
+    "FP_ZERO";
+    "FP_SUBNORMAL";
+    "FP_NORMAL";
+    "FP_ILOGB0";
+    "FP_ILOGBNAN";
+    "MATH_ERRNO";
+    "MATH_ERREXCEPT";
+    "fpclassify";
+    "isfinite";
+    "isinf";
+    "isnan";
+    "isnormal";
+    "signbit";
+    "isgreater";
+    "isgreaterequal";
+    "isless";
+    "islessequal";
+    "islessgreater";
+    "isunordered";
+    "RAND_MAX";
+    "EXIT_SUCCESS";
+    "EXIT_FAILURE";
+    "MB_CUR_MAX";
+    "INT8_MAX";
+    "INT16_MAX";
+    "INT32_MAX";
+    "INT64_MAX";
+    "INT8_MIN";
+    "INT16_MIN";
+    "INT32_MIN";
+    "INT64_MIN";
+    "UINT8_MAX";
+    "UINT16_MAX";
+    "UINT32_MAX";
+    "UINT64_MAX";
+    "INTMAX_MAX";
+    "INTMAX_MIN";
+    "UINTMAX_MAX";
+    "SIZE_MAX";
+    "PTRDIFF_MAX";
+    "PTRDIFF_MIN";
+    "assert";
+    "offsetof";
+    "errno";
+    "va_start";
+    "va_arg";
+    "va_end";
+    "va_copy";
+  ]
+
+(** Function and type names the same unconditional includes declare. Unlike the macros above these
+    are ordinary file-scope declarations, and C scoping makes the two cases genuinely different:
+
+    - a routine DEFINITION takes file scope, so [void printf(...)] after [<stdio.h>] is a
+      conflicting declaration and [void exp(...)] after [<math.h>] likewise -- an error regardless
+      of whether the kernel ever calls either;
+    - a parameter or a local legally SHADOWS them, so a tensor node named [exp] is well-formed C
+      and always has been.
+
+    So this table constrains routine names only ({!C_syntax.kernel_ident}) and is deliberately kept
+    out of [ident_blacklist]: adding it there would rename tensor nodes -- [Tensor.unop]'s
+    [~op_label]s are exactly these words ([exp], [log], [sqrt], [tanh]) -- churning goldens to
+    prevent a collision that cannot happen. The names a rendering actually CALLS are a separate
+    concern already covered by {!op_syntax_idents}, which is what stops a node from shadowing a
+    callee the same kernel invokes. *)
+let c_stdlib_idents =
+  [
+    "FILE";
+    "fpos_t";
+    "fopen";
+    "freopen";
+    "fclose";
+    "fflush";
+    "setbuf";
+    "setvbuf";
+    "fread";
+    "fwrite";
+    "fprintf";
+    "printf";
+    "sprintf";
+    "snprintf";
+    "vprintf";
+    "vfprintf";
+    "vsprintf";
+    "vsnprintf";
+    "fscanf";
+    "scanf";
+    "sscanf";
+    "vscanf";
+    "vfscanf";
+    "vsscanf";
+    "fgetc";
+    "getc";
+    "getchar";
+    "fgets";
+    "fputc";
+    "putc";
+    "putchar";
+    "fputs";
+    "puts";
+    "ungetc";
+    "fseek";
+    "ftell";
+    "rewind";
+    "fgetpos";
+    "fsetpos";
+    "remove";
+    "rename";
+    "tmpfile";
+    "tmpnam";
+    "clearerr";
+    "feof";
+    "ferror";
+    "perror";
+    "acos";
+    "asin";
+    "atan";
+    "atan2";
+    "cos";
+    "sin";
+    "tan";
+    "acosh";
+    "asinh";
+    "atanh";
+    "cosh";
+    "sinh";
+    "tanh";
+    "exp";
+    "exp2";
+    "expm1";
+    "frexp";
+    "ldexp";
+    "log";
+    "log10";
+    "log1p";
+    "log2";
+    "logb";
+    "ilogb";
+    "modf";
+    "scalbn";
+    "scalbln";
+    "cbrt";
+    "fabs";
+    "hypot";
+    "pow";
+    "sqrt";
+    "erf";
+    "erfc";
+    "lgamma";
+    "tgamma";
+    "ceil";
+    "floor";
+    "nearbyint";
+    "rint";
+    "lrint";
+    "llrint";
+    "round";
+    "lround";
+    "llround";
+    "trunc";
+    "fmod";
+    "remainder";
+    "remquo";
+    "copysign";
+    "nan";
+    "nextafter";
+    "nexttoward";
+    "fdim";
+    "fmax";
+    "fmin";
+    "fma";
+    "acosf";
+    "asinf";
+    "atanf";
+    "atan2f";
+    "cosf";
+    "sinf";
+    "tanf";
+    "coshf";
+    "sinhf";
+    "tanhf";
+    "expf";
+    "exp2f";
+    "logf";
+    "log10f";
+    "log2f";
+    "fabsf";
+    "hypotf";
+    "powf";
+    "sqrtf";
+    "cbrtf";
+    "ceilf";
+    "floorf";
+    "roundf";
+    "truncf";
+    "fmodf";
+    "copysignf";
+    "fmaxf";
+    "fminf";
+    "fmaf";
+    "erff";
+    "tgammaf";
+    "lgammaf";
+    "rintf";
+    "memcpy";
+    "memmove";
+    "memset";
+    "memcmp";
+    "memchr";
+    "strcpy";
+    "strncpy";
+    "strcat";
+    "strncat";
+    "strcmp";
+    "strncmp";
+    "strcoll";
+    "strxfrm";
+    "strchr";
+    "strrchr";
+    "strspn";
+    "strcspn";
+    "strpbrk";
+    "strstr";
+    "strtok";
+    "strlen";
+    "strerror";
+    "malloc";
+    "calloc";
+    "realloc";
+    "free";
+    "aligned_alloc";
+    "abort";
+    "exit";
+    "_Exit";
+    "atexit";
+    "system";
+    "getenv";
+    "bsearch";
+    "qsort";
+    "abs";
+    "labs";
+    "llabs";
+    "div";
+    "ldiv";
+    "lldiv";
+    "rand";
+    "srand";
+    "atoi";
+    "atol";
+    "atoll";
+    "atof";
+    "strtol";
+    "strtoul";
+    "strtoll";
+    "strtoull";
+    "strtod";
+    "strtof";
+    "strtold";
+    "div_t";
+    "ldiv_t";
+    "lldiv_t";
+    "size_t";
+    "ptrdiff_t";
+    "wchar_t";
+    "intptr_t";
+    "uintptr_t";
+    "intmax_t";
+    "uintmax_t";
+    "int8_t";
+    "int16_t";
+    "int32_t";
+    "int64_t";
+    "uint8_t";
+    "uint16_t";
+  ]
+
 (** The words C++ reserves on top of {!c_keywords}. CUDA, HIP and MSL are all C++ dialects -- their
     kernels are parsed by a C++ front end even where the emitted body is plain C -- so their
     backends extend the blacklist with this table. Several entries are entirely plausible tensor
@@ -934,7 +1240,7 @@ struct
     let c_names =
       op_syntax_idents ~ternop_syntax ~binop_syntax ~unop_syntax ~vec_unop_syntax ~convert_precision
     in
-    c_keywords @ c_names
+    c_keywords @ c_stdlib_macros @ c_names
 
   let kernel_log_param = Some ("const char*", "log_file_name")
   let log_involves_file_management = true
@@ -1029,11 +1335,27 @@ module C_syntax (B : C_syntax_config) = struct
       function -- the emitted symbol, the [.c] / [.cu] / [.hip] / [.metal] source and what the
       backend looks the symbol up by -- carry the mangled spelling, and they carry it consistently.
 
-      [ident_blacklist] is the same table the node names avoid: the language's keywords (C, plus
-      C++ for the GPU dialects), the backend's intrinsic globals, the names its builtins table
-      defines, and the names its own operator renderings emit. Uniqueness {e among} the routines of
-      one batch is not this function's business and never was -- two routines given the same name
-      collide as duplicate C symbols with or without mangling. *)
+      The table is {!routine_ident_blacklist}: everything the node names avoid ([ident_blacklist] --
+      the language's keywords, C plus C++ for the GPU dialects, the backend's intrinsic globals, its
+      builtins table's keys, and the names its own operator renderings emit) plus
+      {!c_stdlib_idents}, the standard-library functions and types the preludes' unconditional
+      includes declare, which constrain a file-scope definition and not a parameter.
+
+      Two things it deliberately does not do. Uniqueness {e among} the routines of one batch is not
+      its business and never was -- two routines given the same name collide as duplicate C symbols
+      with or without mangling. And it cannot see what a BACKEND-SPECIFIC header declares beyond the
+      C standard floor ([<cuda_fp16.h>], [metal_stdlib]'s namespace): those names are covered only
+      where a rendering emits them, so a routine named after an unused vendor intrinsic still
+      reaches the vendor compiler. That failure is an ordinary compile error naming the conflict,
+      which is the state this function put the reserved words in -- not the misattributed "bug in
+      OCANNL" the issue was about. *)
+  (* What a ROUTINE name must avoid: everything a node name must ({!ident_blacklist}) plus the
+     standard-library functions and types the preludes' unconditional includes declare. The extra
+     table applies here and not to node names because a routine definition takes FILE scope, where
+     [void exp(...)] after [<math.h>] is a conflicting declaration, while a parameter or local named
+     [exp] merely shadows it and is well-formed C (gh-ocannl-686 review round 1). *)
+  let routine_ident_blacklist = ident_blacklist @ c_stdlib_idents
+
   let kernel_ident name =
     let sanitized =
       String.map name ~f:(fun c -> if Char.is_alphanum c || Char.equal c '_' then c else '_')
@@ -1043,7 +1365,7 @@ module C_syntax (B : C_syntax_config) = struct
       else sanitized
     in
     let rec avoid s =
-      if List.mem ident_blacklist s ~equal:String.equal then avoid (s ^ "__") else s
+      if List.mem routine_ident_blacklist s ~equal:String.equal then avoid (s ^ "__") else s
     in
     avoid sanitized
 
