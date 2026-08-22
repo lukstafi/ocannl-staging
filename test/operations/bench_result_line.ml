@@ -33,28 +33,46 @@ let () =
 (* A tuned cell whose arm A timed nothing at all and terminated on a failure whose message carries
    the characters that would invalidate the record: a quote, a backslash, a NUL and an ESC.
 
-   The three arms are the three provenance buckets the [tune] object totals (gh-ocannl-677), so the
-   line carries one of each: a search that died mid-way, a replayed cache entry, and an arm that
-   neither searched nor replayed because the search was off. That last one is why [no_searches]
-   exists — before it, a reader had to infer the case from [searches] and [replays] both being
-   zero, which is exactly the derivation the outcome type replaced. *)
+   Arms A, B and C are the three provenance buckets the [tune] object totals (gh-ocannl-677): a
+   search that died mid-way, a replayed cache entry, and an arm that neither searched nor replayed
+   because the search was off. That last one is why [no_searches] exists — before it, a reader had
+   to infer the case from [searches] and [replays] both being zero, which is exactly the derivation
+   the outcome type replaced.
+
+   Arms B, D and E carry the three [tensorization] labels (gh-ocannl-626), and A and C carry the
+   [null] that says no census was consulted. B is the case the field exists for: [tensorized: true]
+   — the crowned schedule carries a [Tensorize] — with every one of its [Tile_mma] statements
+   rendered as the lane-0 scalar fallback, so its 0.75 ms is a scalar timing under a tensorized
+   label. *)
 let tune =
-  Bench_json.tune_object ~shipped:"B" ~searches:1 ~replays:1 ~no_searches:1
+  Bench_json.tune_object ~shipped:"B" ~searches:3 ~replays:1 ~no_searches:1
     ~arms:
       [
         Bench_json.tune_arm ~name:"A" ~state:"search-died" ~searched:true ~cache_hit:false
-          ~best_ms:Float.infinity ~best_label:"tile 32x32" ~tensorized:false
-          ~mma_scalar_fallbacks:0 ~mma_seeded:4 ~mma_timed:0 ~mma_best_ms:Float.infinity
+          ~best_ms:Float.infinity ~best_label:"tile 32x32" ~tensorized:false ~tensorization:None
+          ~mma_statements:0 ~mma_scalar_fallbacks:0 ~mma_seeded:4 ~mma_timed:0
+          ~mma_best_ms:Float.infinity
           ~terminal_failure:
             (Some
                (Printf.sprintf "compile failed: \"kernel\" \\ path%c%c ESC" (Char.of_int_exn 0)
                   (Char.of_int_exn 27)));
         Bench_json.tune_arm ~name:"B" ~state:"cache-replay" ~searched:false ~cache_hit:true
-          ~best_ms:0.75 ~best_label:"grid 128" ~tensorized:true ~mma_scalar_fallbacks:2
+          ~best_ms:0.75 ~best_label:"grid 128" ~tensorized:true
+          ~tensorization:(Some "scalar-fallback") ~mma_statements:2 ~mma_scalar_fallbacks:2
           ~mma_seeded:6 ~mma_timed:3 ~mma_best_ms:0.8 ~terminal_failure:None;
         (* Neither searched nor replayed: every counter zero, no winner to name. *)
         Bench_json.tune_arm ~name:"C" ~state:"search-disabled" ~searched:false ~cache_hit:false
-          ~best_ms:Float.infinity ~best_label:"" ~tensorized:false ~mma_scalar_fallbacks:0
+          ~best_ms:Float.infinity ~best_label:"" ~tensorized:false ~tensorization:None
+          ~mma_statements:0 ~mma_scalar_fallbacks:0 ~mma_seeded:0 ~mma_timed:0
+          ~mma_best_ms:Float.infinity ~terminal_failure:None;
+        (* An honestly tensorized winner, and an ordinary one that never asked. *)
+        Bench_json.tune_arm ~name:"D" ~state:"searched" ~searched:true ~cache_hit:false
+          ~best_ms:0.5 ~best_label:"mma-gpu 16x16x16" ~tensorized:true
+          ~tensorization:(Some "tensorized") ~mma_statements:4 ~mma_scalar_fallbacks:0
+          ~mma_seeded:6 ~mma_timed:5 ~mma_best_ms:0.5 ~terminal_failure:None;
+        Bench_json.tune_arm ~name:"E" ~state:"searched" ~searched:true ~cache_hit:false
+          ~best_ms:1.25 ~best_label:"grid 64" ~tensorized:false
+          ~tensorization:(Some "not-requested") ~mma_statements:0 ~mma_scalar_fallbacks:0
           ~mma_seeded:0 ~mma_timed:0 ~mma_best_ms:Float.infinity ~terminal_failure:None;
       ]
 
@@ -102,7 +120,27 @@ let () =
   V.p "a diagnostic survives as a scrubbed string"
     (match member "terminal_failure" arm_a with
     | `String s -> String.is_prefix s ~prefix:"compile failed: 'kernel' / path"
-    | _ -> false)
+    | _ -> false);
+  (* gh-ocannl-626: the wire format has to distinguish "asked and got scalar code" from "asked and
+     got tensor cores" from "never asked" from "no census to consult", or a reader cannot tell a
+     tensorized timing from a scalar one. *)
+  let arms = Yojson.Safe.Util.to_list (member "arms" (member "tune" j)) in
+  let arm name =
+    List.find_exn arms ~f:(fun a -> Yojson.Safe.equal (member "arm" a) (`String name))
+  in
+  V.p "an arm with no crowned candidate reports a null tensorization, not a label"
+    (List.for_all [ "A"; "C" ] ~f:(fun n ->
+         Yojson.Safe.equal (member "tensorization" (arm n)) `Null));
+  V.p "the three tensorization labels reach the wire"
+    (List.for_all
+       [ ("B", "scalar-fallback"); ("D", "tensorized"); ("E", "not-requested") ]
+       ~f:(fun (n, label) ->
+         Yojson.Safe.equal (member "tensorization" (arm n)) (`String label)));
+  V.p "a tensorized label over a scalar-fallback emission is visible as the pair"
+    (Yojson.Safe.equal (member "tensorized" (arm "B")) (`Bool true)
+    && Yojson.Safe.equal (member "tensorization" (arm "B")) (`String "scalar-fallback")
+    && Yojson.Safe.equal (member "mma_statements" (arm "B")) (`Int 2)
+    && Yojson.Safe.equal (member "mma_scalar_fallbacks" (arm "B")) (`Int 2))
 
 (* The negative control: without the mapping the line carries OCaml's own spellings, and this
    oracle rejects each of them — which is what makes the verdicts above evidence rather than

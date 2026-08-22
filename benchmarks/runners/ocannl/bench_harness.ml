@@ -323,6 +323,9 @@ let tune_json t =
           ~state:(Autotune.outcome_name r.Autotune.outcome)
           ~searched ~cache_hit ~best_ms:r.Autotune.best_ms ~best_label:r.Autotune.best_label
           ~tensorized:r.Autotune.best_tensorized
+          ~tensorization:
+            (Option.map r.Autotune.best_tensorization ~f:Ir.C_syntax.tensorization_name)
+          ~mma_statements:r.Autotune.best_mma_statements
           ~mma_scalar_fallbacks:r.Autotune.best_mma_scalar_fallbacks
           ~mma_seeded:r.Autotune.mma_candidates ~mma_timed:r.Autotune.mma_timed
           ~mma_best_ms:r.Autotune.mma_best_ms
@@ -574,6 +577,12 @@ let time_segments ?promote_locals ?(repeats = 20) ~backend ~limits ~static_indic
   Stdio.printf "segment times (min of %d runs, ms):\n" repeats;
   let total = ref 0. in
   let declined = ref 0 in
+  (* Per-segment tensorization, straight off each compiled routine (gh-ocannl-626): this table is
+     where a per-kernel number is read, so it is where "this kernel emitted tensor cores" has to be
+     legible. Without it a segment that declined its [Tile_mma] is indistinguishable here from one
+     that ran on tensor cores, and the per-kernel attribution is what a measurement campaign
+     quotes. *)
+  let censuses = ref [] in
   List.iteri segs ~f:(fun i (kind, pre, _sched, post) ->
       let kind_s = match kind with `Normal -> "N" | `Zeros -> "Z" | `Solo -> "S" in
       let ws = String.concat ~sep:" " (List.map (writes_of pre.LL.llc) ~f:Tn.debug_name) in
@@ -607,10 +616,20 @@ let time_segments ?promote_locals ?(repeats = 20) ~backend ~limits ~static_indic
             best := Float.min !best (elapsed_ms c0)
           done;
           total := !total +. !best;
-          Stdio.printf "  seg%-3d %s %8.4f ms  w:%s\n" i kind_s !best ws);
+          censuses := routine.Context.mma :: !censuses;
+          Stdio.printf "  seg%-3d %s %8.4f ms  mma:%s  w:%s\n" i kind_s !best
+            (Ir.C_syntax.mma_summary_string routine.Context.mma)
+            ws);
   Stdio.printf "  total (sum of per-segment minima): %.4f ms%s\n" !total
     (if !declined = 0 then ""
      else Printf.sprintf " (INCOMPLETE: %d of %d segments declined)" !declined (List.length segs));
+  let all = Ir.C_syntax.merge_mma_summaries !censuses in
+  if all.Ir.C_syntax.scalar_fallbacks > 0 then
+    Stdio.printf
+      "  WARNING: %d of %d Tile_mma statements across these segments rendered the lane-0 scalar \
+       fallback — those segment times are NOT tensorized timings \
+       (--ocannl_schedule_log_declines=true names the rule)\n"
+      all.Ir.C_syntax.scalar_fallbacks all.Ir.C_syntax.statements;
   Stdio.Out_channel.flush Stdio.stdout
 
 (** Runs the measurement protocol and prints the JSON result line. [run_step] advances the batch
