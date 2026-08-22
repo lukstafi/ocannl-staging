@@ -189,7 +189,10 @@ if [ -n "$wt_top" ] && git -C "$wt_top" remote get-url origin >/dev/null 2>&1; t
   # names `refs/heads/master` in full because a remote TAG called `master`
   # would otherwise win the short name, `--no-tags` notwithstanding, and the
   # forced update would then write the tag's commit into the tracking ref.
-  if bounded 30 env GIT_TERMINAL_PROMPT=0 "${fetch_env[@]}" \
+  # `${a[@]+"${a[@]}"}`, not `"${a[@]}"`: under `set -u`, bash before 4.4 (macOS
+  # ships 3.2) treats an EMPTY array's expansion as an unbound variable and
+  # exits the script — which is every leg where no options are appended.
+  if bounded 30 env GIT_TERMINAL_PROMPT=0 ${fetch_env[@]+"${fetch_env[@]}"} \
        git -C "$wt_top" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=15 \
        fetch --quiet --no-tags --no-write-fetch-head --no-auto-maintenance origin \
        "+refs/heads/master:refs/remotes/origin/master" >/dev/null 2>&1; then
