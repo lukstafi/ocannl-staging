@@ -3305,3 +3305,15 @@
  (package neural_nets_lib)
  (action
   (diff agent_notes_structure.expected agent_notes_structure.actual)))
+
+(test
+ (name schedule_contraction_nest)
+ (package neural_nets_lib)
+ (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules schedule_contraction_nest)
+ (libraries base ocannl stdio arrayjit.verdict test_utils)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))

@@ -1,0 +1,46 @@
+out_proj: the multi-axis contraction is detected as a matmul site: true
+out_proj: the outer contraction loops carry the expected extents: true
+out_proj: m_k is the innermost contraction loop: true
+out_proj: the accumulation is in fused form: true
+out_proj: GPU blocktile seeds are proposed: true
+out_proj: every GPU blocktile seed's schedule constructs: true
+out_proj: every GPU blocktile seed validates: true
+out_proj: every GPU blocktile seed binds a multi-thread workgroup: true
+out_proj: every GPU batch-grid twin launches more than one block: true
+out_proj: GPU tensorized seeds are proposed: true
+out_proj: every GPU tensorized seed's schedule constructs: true
+out_proj: every GPU tensorized seed validates: true
+out_proj: the tensorized seeds include unstaged, staged and pipelined-staged geometries: true
+out_proj: CPU seeds are proposed: true
+out_proj: every CPU seed's schedule constructs: true
+out_proj: every CPU seed binding no hardware dimension validates: true
+out_proj: every CPU seed validates: true
+out_proj: every GPU blocktile seed compiles and runs: true
+out_proj: every GPU blocktile candidate matches the serial reference bitwise: true
+out_proj: the blocktiled kernel stages operands through workgroup-shared tiles: true
+out_proj: the CPU seeds include the register-tiled packed pipelines: true
+out_proj: every CPU seed compiles and runs: true
+out_proj: every CPU candidate matches the serial reference bitwise: true
+three_axis_companion: the multi-axis contraction is detected as a matmul site: true
+three_axis_companion: the outer contraction loops carry the expected extents: true
+three_axis_companion: m_k is the innermost contraction loop: true
+three_axis_companion: the accumulation is in fused form: true
+three_axis_companion: GPU blocktile seeds are proposed: true
+three_axis_companion: every GPU blocktile seed's schedule constructs: true
+three_axis_companion: every GPU blocktile seed validates: true
+three_axis_companion: every GPU blocktile seed binds a multi-thread workgroup: true
+three_axis_companion: every GPU batch-grid twin launches more than one block: true
+three_axis_companion: GPU tensorized seeds are proposed: true
+three_axis_companion: every GPU tensorized seed's schedule constructs: true
+three_axis_companion: every GPU tensorized seed validates: true
+three_axis_companion: the tensorized seeds include unstaged, staged and pipelined-staged geometries: true
+three_axis_companion: CPU seeds are proposed: true
+three_axis_companion: every CPU seed's schedule constructs: true
+three_axis_companion: every CPU seed binding no hardware dimension validates: true
+three_axis_companion: the Grid-bound CPU shapes decline on the uncovered companion: true
+three_axis_companion: every GPU blocktile seed compiles and runs: true
+three_axis_companion: every GPU blocktile candidate matches the serial reference bitwise: true
+three_axis_companion: the blocktiled kernel stages operands through workgroup-shared tiles: true
+three_axis_companion: the CPU seeds include the register-tiled packed pipelines: true
+three_axis_companion: every CPU seed compiles and runs: true
+three_axis_companion: every CPU candidate matches the serial reference bitwise: true
