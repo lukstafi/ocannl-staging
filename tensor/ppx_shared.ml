@@ -1,6 +1,50 @@
 open Base
 open Ppxlib
 
+(* {1 Coupling to ppxlib's selected AST}
+
+   ppxlib parses with the compiler's own parser and then migrates to its SELECTED ast, which is
+   Astlib.Ast_502 for every ppxlib this project permits. Where a shape is fixed, the four ppx
+   modules state it as a quotation -- %expr lhs, %expr [%e? _] :: [%e? _], %expr [], %expr [||],
+   %expr (), %pat? (), %expr [%oc [%e? e]] -- because metaquot is regenerated for whichever ast is
+   selected and so cannot go stale. Write any new fixed shape that way.
+
+   What is left names constructors, and this is the map of it, so that raising the ppxlib bound in
+   [dune-project] is a known quantity rather than a discovery. Measured against Ast_503..Ast_506,
+   which are the candidates a selection move can land on:
+
+   - {b Literal values} ([Pconst_string], [Pconst_float], [Pconst_integer], [Pconst_char]) --
+     about fifty occurrences, mostly in [ppx_cd] and [ppx_op]. {b Moves at Ast_503}, where
+     [constant] stops being a flat variant and becomes [{ pconst_desc; pconst_loc }]; the payloads
+     themselves are unchanged. Not expressible: a quotation pins one literal, and there is no way
+     to write "any string literal, and give me its text", which is what these arms need;
+     [Ast_pattern.estring] says it but raises on an attributed node rather than declining to match
+     (see [string_literal] below). Reads that stand alone are funnelled through [string_literal]
+     and [string_of_constant]; the rest sit inside quotation-shaped arms in [ppx_cd]/[ppx_op].
+     Per-site fix: [Pconst_X (..)] becomes [{ pconst_desc = Pconst_X (..); _ }]. Mechanical.
+
+   - {b Tuple payloads} ([Pexp_tuple], [Ppat_tuple]) -- about fifteen occurrences. {b Moves at
+     Ast_504}, which adds labelled tuples: [Pexp_tuple of (string option * expression) list] and
+     [Ppat_tuple of (string option * pattern) list * closed_flag]. Not expressible: all but one
+     bind a variable-length element list, and no quotation states one. Construction already goes
+     through [Ast_builder.Default.pexp_tuple] where it can ([pat2expr]). Per-site fix: pair each
+     element with [None] -- and decide, per site, whether a labelled tuple should be accepted as
+     an axis container or refused. That is a design question, not a rename.
+
+   - {b [Pexp_open] and [Pexp_letmodule]} -- ten occurrences. {b Moves at Ast_505}, which deletes
+     both: [let open M in e] and [let module M = .. in e] become
+     [Pexp_struct_item (Pstr_open ../Pstr_module .., e)]. Not expressible: the arms match a binder
+     and rebuild it around a translated body, and neither a quotation nor a builder states "the
+     body of whatever binder this is". This is the one residue class whose fix is a restructure
+     rather than a rename; lukstafi/ocannl-staging#408 met the same deletion from the compiler
+     side, in [Cache_dir_scan].
+
+   - {b "Any node of this kind" tests} -- [Pexp_ident _], [Pexp_array _], [Pexp_apply (fn, args)],
+     [Pexp_record (..)], [Pexp_function (..)], [Pstr_value], [Ppat_var] and friends. A quotation
+     pins a shape; it cannot say "any identifier" or "an array of any length". These are coupling
+     to a grep and not to a version: every one of them is byte-identical from Ast_502 through
+     Ast_506, [Pexp_function]'s [params * constraint * body] triple included. *)
+
 type li = longident
 
 let rec collect_list accu = function
