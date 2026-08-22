@@ -56,7 +56,15 @@ files.
   would build (or vice versa) — keep the invariant, or re-derive the witness. The fused
   (`Fuse_epilogue`) flavor is judged separately: skipping the epilogue tail can empty the
   coverage demand before the alignment analysis is consulted, so twins can survive a routine the
-  unfused family is refuted on. **Consequence for diagnostics: since gh-577 a companion-coverage
+  unfused family is refuted on. Since gh-ocannl-613 the flavor is the family tree's ROOT level
+  (`fusion = unfused | fused`, `matmul_family_tree`): the fused child is refuted with the
+  recognizer's own reason (`Schedule.fuse_epilogue_witness`) on a site with no fusable tail —
+  so a tree's `refutations` always carries one entry more than its pipelines produce, and a
+  test asserting "every refutation is X" must scope to the `("fusion", "unfused")` path — and
+  the unfused coverage verdict is shared with the fused branch because it implies it (the fused
+  demand is a subset, and `aligned_chains` ignores `skip`): `aligned_chains` runs twice only
+  where the unfused flavor is refuted. `sketch_seed_params` is the tree's `leaves`, twins
+  included, and `model_default` has no separate twins step. **Consequence for diagnostics: since gh-577 a companion-coverage
   DECLINE CENSUS is empty, and that is not evidence the rule stopped firing** — a refuted family is
   never seeded, so it never reaches the decline log. gh-569's Part 3 read 25 coverage declines out of
   `schedule_log_declines`; the same workload on current master logs zero

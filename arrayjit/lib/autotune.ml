@@ -1777,9 +1777,11 @@ let model_default ?name ?report ctx comp bindings =
        [completion_floor] lower-bounds every one; it fathoms the whole family exactly when the
        incumbent already achieves it (the memory-bound kernels where the default preset is optimal)
        — raised per subtree by the committed staging decisions' certain traffic (phase 5,
-       [sketch_path_traffic_floor]). [None] = no matmul site: the caller keeps the flat path (conv
-       seeds, which factor as a follow-up). Returns the first leaf strictly better than
-       [incumbent]. *)
+       [sketch_path_traffic_floor]). The epilogue twins are the tree's root level (gh-ocannl-613),
+       so they compete inside the walk, after the unfused leaves and at the threshold those
+       tightened to, with the same bound and on the same stats ledger. [None] = no matmul site: the
+       caller keeps the flat path (conv seeds, which factor as a follow-up). Returns the first leaf
+       strictly better than [incumbent]. *)
     let tree_search ~incumbent base_opt =
       match matmul_sketch_tree ~is_gpu ~is_cpu ~limits base_opt with
       | None -> None
@@ -1818,8 +1820,7 @@ let model_default ?name ?report ctx comp bindings =
           Some best
     in
     (* First leaf strictly under [threshold], in list order — the flat counterpart the
-       not-yet-factored levels (epilogue twins) go through, after the tree's leaves like the flat
-       enumeration's seeds-then-twins order. *)
+       not-yet-factored conv family goes through. *)
     let best_flat ~threshold base_opt ps =
       List.fold ps ~init:(None, threshold) ~f:(fun (best, th) p ->
           match score_sketch base_opt p with
@@ -1851,17 +1852,10 @@ let model_default ?name ?report ctx comp bindings =
                never picked over the default without a measured run ({!tune} covers that). *)
             let whole_best =
               match tree_search ~incumbent:ds opt with
-              | Some tree_best -> (
-                  (* Matmul site: the tree's leaves searched with the default as incumbent; the
-                     epilogue twins compete after them at the tightened threshold. *)
-                  let twins =
-                    List.filter (sketch_seed_params ~is_gpu ~is_cpu ~limits opt) ~f:(fun p ->
-                        p.sk_epilogue)
-                  in
-                  let th = match tree_best with Some (_, sc) -> Float.min ds sc | None -> ds in
-                  match best_flat ~threshold:th opt twins with
-                  | Some _ as tb -> tb
-                  | None -> tree_best)
+              | Some tree_best ->
+                  (* Matmul site: the tree's leaves, twins included, searched with the default as
+                     incumbent. *)
+                  tree_best
               | None ->
                   (* No matmul site: the flat path covers the conv family. *)
                   best_flat ~threshold:ds opt (sketch_seed_params ~is_gpu ~is_cpu ~limits opt)
@@ -1899,20 +1893,7 @@ let model_default ?name ?report ctx comp bindings =
                                      path. *)
                                   let best_sketch =
                                     match tree_search ~incumbent:bs pre with
-                                    | Some tree_best -> (
-                                        let twins =
-                                          List.filter
-                                            (sketch_seed_params ~is_gpu ~is_cpu ~limits pre)
-                                            ~f:(fun p -> p.sk_epilogue)
-                                        in
-                                        let th =
-                                          match tree_best with
-                                          | Some (_, sc) -> Float.min bs sc
-                                          | None -> bs
-                                        in
-                                        match best_flat ~threshold:th pre twins with
-                                        | Some _ as tb -> tb
-                                        | None -> tree_best)
+                                    | Some tree_best -> tree_best
                                     | None ->
                                         best_flat ~threshold:bs pre
                                           (sketch_seed_params ~is_gpu ~is_cpu ~limits pre)
