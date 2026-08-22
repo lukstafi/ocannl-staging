@@ -452,13 +452,52 @@ end
     Deliberately {e not} carried here: a precision suffix. The literal is always double-typed and
     the narrowing is [B.convert_precision]'s cast, which is a single rounding of the exact host
     double — the same conversion the host performs when it stores the value. An [f]-suffixed
-    decimal would instead round the decimal straight to float, which disagrees for a [c] sitting on
-    a float tie. The cast is present for every non-double target: [Ops.c_convert_precision] and
-    each backend's override return [("", "")] only when [from] and [to_] are the same precision. *)
+    decimal would instead round the decimal straight to float. The cast is present for every
+    non-double target: [Ops.c_convert_precision] and each backend's override return [("", "")] only
+    when [from] and [to_] are the same precision.
+
+    That last argument has a hole, and {!is_f32_tie} is what fills it: the cast only {e is} a
+    narrowing where the dialect has a [double]. MSL does not, so Metal rounds the decimal itself,
+    at parse time, to f32. A decimal that round-trips as a double is not thereby exact, so the two
+    readings — round [c] to f32, versus round a decimal near [c] to f32 — can differ, and they
+    differ exactly when [c] sits on an f32 tie: the host takes ties-to-even while the dialect
+    follows whichever side the decimal happens to land on. Which digit count is emitted then
+    decides the value, so this is not a hazard the retry above introduced but one it {e moves}.
+    A hexadecimal literal takes it away instead of moving it: it is exact by construction, so there
+    is no parse-time rounding for either reading to disagree about, and both round [c] itself. It
+    is spelled only for ties — a handful of values that were otherwise a coin toss — so the
+    ordinary constant keeps its readable decimal, and C99, CUDA, HIP and MSL all accept the
+    form. *)
+(** Whether [c] lies exactly halfway between two adjacent f32 values, so that narrowing it to f32
+    is a tie that IEEE-754 breaks to even -- and any decimal near but not equal to [c] would instead
+    break by whichever side it fell on.
+
+    Computed against the two neighbours rather than by masking mantissa bits, so that the f32
+    subnormal range (where the retained-bit count shrinks, and a bit mask would need a second case)
+    is covered by the same three lines. Values that overflow f32 have no neighbours to sit between
+    and are not ties. *)
+let is_f32_tie c =
+  Float.is_finite c
+  &&
+  let f = Int32.float_of_bits (Int32.bits_of_float c) in
+  Float.is_finite f && Float.(f <> c)
+  &&
+  let bits = Int32.bits_of_float f in
+  (* One f32 step from [f] towards [c]: away from zero when they share a direction, towards it
+     otherwise, since the bit pattern's order tracks magnitude rather than value. *)
+  let step =
+    if Float.(c > f) then if Float.(f >= 0.) then Int32.(bits + one) else Int32.(bits - one)
+    else if Float.(f > 0.) then Int32.(bits - one)
+    else Int32.(bits + one)
+  in
+  let g = Int32.float_of_bits step in
+  Float.is_finite g && Float.(abs (c - f) = abs (g - c))
+
 let c_float_literal c =
   if Float.(c = infinity) then "INFINITY"
   else if Float.(c = neg_infinity) then "(-INFINITY)"
   else if Float.is_nan c then "NAN"
+  else if is_f32_tie c then Printf.sprintf "%h" c
   else
     let s =
       let s16 = Printf.sprintf "%.16g" c in

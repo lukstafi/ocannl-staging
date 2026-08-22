@@ -18,6 +18,12 @@
    - The specials have to be SPELLED. [INFINITY] / [(-INFINITY)] / [NAN] are C99 macros MSL also
      provides and the CUDA and HIP preludes define under [#ifndef]; a NaN's payload and sign do not
      survive any of them, so NaN is checked as "is a NaN" rather than on the bits.
+   - A value on an f32 TIE has to be exact, not merely round-tripping. The reasoning that the cast
+     does the narrowing holds only where the dialect has a [double]; MSL does not, so Metal rounds
+     the decimal itself, at parse time. The two readings agree everywhere except on a tie, where
+     the host takes ties-to-even and a decimal near but not equal to the value breaks by whichever
+     side it landed on — so the emitted digit count silently decides the value. Ties are therefore
+     spelled as exact hexadecimal literals, which no reading has to round.
 
    Deliberately absent: a precision suffix. The literal is always double-typed and the narrowing is
    [convert_precision]'s cast — one rounding of the exact host double, the same conversion the host
@@ -60,26 +66,10 @@ let to_f16 c = Ops.half_to_single (Ops.single_to_half (to_f32 c))
    and [was] the pre-fix spelling that must NOT survive — checked with the cast's closing paren
    attached, since ["(float)(7)"] is otherwise a prefix of ["(float)(7.0)"]. [narrow] marks the
    values a half-precision node may hold: [Ops.exceeds_fp16_cutoff] refuses the large ones during
-   lowering (the infinities are exempt there by construction, being reduction identities).
+   lowering (the infinities are exempt there by construction, being reduction identities). *)
+type case = { value : float; spelling : string; was : string option; narrow : bool }
 
-   [cast_narrows] is the one that is a statement about the BACKEND rather than about the value. The
-   f32 and f16 legs assume the emitted literal is a double that [convert_precision]'s cast then
-   narrows in one correctly-rounded step. That holds wherever the dialect has a [double] — and MSL
-   does not, so Metal parses the literal itself as a float and the "cast" narrows nothing. The two
-   readings agree on every value except one exactly on an f32 tie, where the host rounds
-   ties-to-even and MSL rounds the 17-digit decimal, which sits just off the tie (gh-ocannl-699).
-   That value is therefore carried only by the f64 leg and the token checks, both of which are about
-   this printer; the divergence itself is MSL's and is its own issue. *)
-type case = {
-  value : float;
-  spelling : string;
-  was : string option;
-  narrow : bool;
-  cast_narrows : bool;
-}
-
-let case ?was ?(narrow = true) ?(cast_narrows = true) value spelling =
-  { value; spelling; was; narrow; cast_narrows }
+let case ?was ?(narrow = true) value spelling = { value; spelling; was; narrow }
 
 let cases =
   [
@@ -96,14 +86,19 @@ let cases =
     case 1e20 "1e+20" ~narrow:false;
     (* Tiny: the smallest subnormal double, which flushes to zero in both narrow legs. *)
     case 5e-324 "4.940656458412465e-324" ~narrow:false;
-    (* Values sixteen digits cannot recover. The last is the midpoint between [1.0f] and its
-       successor: exact as a double, so [(float)(...)] takes it to [1.0f] by round-to-even, while
-       its (necessarily 17-digit) decimal sits just above the midpoint and would round the other way
-       if it were parsed straight to float. That is what an [f] suffix on the literal would do, so
-       this case is also what pins the decision to leave the narrowing to the cast. *)
+    (* Values sixteen digits cannot recover. *)
     case (0.1 +. 0.2) "0.30000000000000004";
     case Float.max_finite_value "1.7976931348623157e+308" ~narrow:false;
-    case Float.(1. + (2. ** -24.)) "1.0000000596046448" ~cast_narrows:false;
+    (* f32 ties, spelled as exact hex so that rounding the LITERAL and rounding the value agree.
+       Three of them, because the decimal spellings fail in three different ways and a single tie
+       would pin only one: the first has no round-tripping 16-digit form and its 17-digit form falls
+       on the odd side; the second round-trips at 16 digits, so a printer keyed on round-tripping
+       alone would leave it a decimal, and it is the value review offered as a counterexample; the
+       third is a tie whose 16-digit form happened to land on the EVEN side, i.e. one that the
+       decimal spelling got right by luck and the retry would have broken. *)
+    case Float.(1. + (2. ** -24.)) "0x1.000001p+0";
+    case Float.(0.5 + (1.5 * (2. ** -24.))) "0x1.000003p-1";
+    case 1.2853009017203525e+35 "0x1.8c105dp+116" ~narrow:false;
     (* Ordinary values, pinning that their spelling did not move. *)
     case 0.5 "0.5";
     case (1. /. 3.) "0.3333333333333333";
@@ -132,20 +127,14 @@ let leg ~prec ~name ~oracle ~stored =
   let want = Array.of_list_map stored ~f:(fun { value; _ } -> oracle value) in
   (stored, got, want)
 
-(* [checked] selects which of the stored cells this claim is about, so that one kernel can carry
-   every constant (the token checks below read one of them) while a cell whose divergence belongs to
-   another issue is reported separately rather than silently folded in. A claim over no cells at all
-   would be vacuous, so it fails. *)
-let report ~claim ?(checked = fun _ -> true) (stored, got, want) =
-  let indexed = List.filter_mapi stored ~f:(fun i c -> if checked c then Some (i, c) else None) in
+let report ~claim (stored, got, want) =
   let ok i = i < Array.length got && bitwise got.(i) want.(i) in
-  List.iter indexed ~f:(fun (i, c) ->
-      if not (ok i) then
-        Stdio.eprintf "  %s: emitted %h, host %h\n" c.spelling got.(i) want.(i));
+  List.iteri stored ~f:(fun i c ->
+      if not (ok i) then Stdio.eprintf "  %s: emitted %h, host %h\n" c.spelling got.(i) want.(i));
   p claim
     (Array.length got = Array.length want
-    && (not (List.is_empty indexed))
-    && List.for_all indexed ~f:(fun (i, _) -> ok i))
+    && (not (List.is_empty stored))
+    && List.for_alli stored ~f:(fun i _ -> ok i))
 
 (* === The values, at each store precision === *)
 
@@ -159,30 +148,19 @@ let () =
     report ~claim:"f64 constants reach the kernel bit-exactly"
       (leg ~prec:Ops.double ~name:"flit_f64" ~oracle:Fn.id ~stored:(fun _ -> true))
 
-(* f32: the literal is double-typed and [(float)(...)] narrows it, so the oracle is the host's own
-   double -> f32 rounding. Every constant is stored — the token checks below read this kernel — but
-   the f32-tie cell is claimed separately, since on MSL the cast narrows nothing (gh-ocannl-699). *)
-let f32_leg = leg ~prec:Ops.single ~name:"flit_f32" ~oracle:to_f32 ~stored:(fun _ -> true)
-
+(* f32: the oracle is the host's own double -> f32 rounding, which for the tie cases means
+   ties-to-even. This is the leg that runs on Metal, where the literal is not narrowed by the cast
+   but rounded at parse time — the two agree only because the ties are spelled exactly. *)
 let () =
   report ~claim:"f32 constants reach the kernel bit-exactly"
-    ~checked:(fun c -> c.cast_narrows) f32_leg
-
-let () =
-  if String.equal backend_name "metal" then
-    skipped "a constant on an f32 tie narrows as the host does"
-  else
-    report ~claim:"a constant on an f32 tie narrows as the host does"
-      ~checked:(fun c -> not c.cast_narrows)
-      f32_leg
+    (leg ~prec:Ops.single ~name:"flit_f32" ~oracle:to_f32 ~stored:(fun _ -> true))
 
 (* f16, the representative of the narrow-float family (bf16 and fp8 differ only in which codec the
    cast names): the literal is still a plain double literal, never a dialect-specific half literal —
    [0.0h] is valid MSL and a hard error under nvrtc, so no backend may spell one here. *)
 let () =
   report ~claim:"f16 constants reach the kernel as the host's own half conversion"
-    (leg ~prec:Ops.half ~name:"flit_f16" ~oracle:to_f16
-       ~stored:(fun c -> c.narrow && c.cast_narrows))
+    (leg ~prec:Ops.half ~name:"flit_f16" ~oracle:to_f16 ~stored:(fun c -> c.narrow))
 
 (* === The emitted tokens === *)
 

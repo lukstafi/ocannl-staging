@@ -39,12 +39,16 @@ files.
   the CUDA and HIP preludes `#ifndef`-define. What it deliberately does NOT emit is a precision
   suffix: the literal stays double-typed and `convert_precision`'s cast narrows it, which is one
   rounding of the exact host double — an `f`-suffixed decimal rounds the decimal straight to float
-  and disagrees on a value sitting on a float tie. Guard: `test/operations/float_literal_forms`,
-  bitwise at f64/f32/f16 plus the emitted tokens. The double-typed-literal reasoning holds only
-  where the dialect HAS a `double`: MSL does not, so Metal parses the literal as a float and the
-  `(float)` cast narrows nothing — which diverges from the host exactly on a constant sitting on an
-  f32 tie, since the host rounds ties-to-even and MSL rounds the 17-digit decimal (gh-ocannl-699,
-  the leg that test reports `SKIPPED` on Metal).
+  and disagrees on a value sitting on a float tie. The one place that reasoning has a hole is worth
+  knowing, because it is invisible from the C backends: the cast only IS a narrowing where the
+  dialect has a `double`, and **MSL does not** — Metal rounds the emitted decimal itself, at parse
+  time. Round-tripping is not exactness, so "round the value to f32" and "round a decimal near it
+  to f32" can differ, and they differ exactly on an f32 tie (host takes ties-to-even; the dialect
+  follows whichever side the decimal fell on), which makes the emitted digit count decide the
+  value. Hence `is_f32_tie` -> a `%h` hexadecimal literal, exact by construction so neither reading
+  has anything to round; C99, CUDA, HIP and MSL all accept the form, and only ties are spelled that
+  way. Guard: `test/operations/float_literal_forms`, bitwise at f64/f32/f16 plus the emitted
+  tokens, and its three tie cases fail on Metal without the hex spelling.
 - Reduced-precision *literals* are dialect-specific and do not transpose between backends. `0.0h`
   is a clang extension and valid MSL, but not CUDA C++ — nvrtc rejects it with "user-defined
   literal operator not found" (gh-ocannl-518, the half `Relu_gate`). On CUDA/HIP write the zero as
