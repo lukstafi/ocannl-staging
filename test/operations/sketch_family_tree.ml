@@ -273,6 +273,67 @@ let () =
       Stdio.printf
         "lifted-lattice search over the refuted family: %d expanded, %d scored, %d refuted\n"
         stats.Sspace.st_expanded stats.Sspace.st_scored stats.Sspace.st_refuted);
+  (* The epilogue-fusion level (gh-ocannl-613): the family's root decision. Every site above feeds
+     its matmul output to nothing fusable, so their fused flavor is refuted AT THE ROOT with the
+     fusion recognizer's own reason — the first line of each "-- refuted --" report above, where
+     before the flavor left no witness anywhere. Here the output feeds a bias-add + relu tail: the
+     fused flavor is feasible and enumerates after every unfused leaf (the seeds-then-twins order
+     candidate timing relies on), geometry for geometry, under its own construction-time verdicts —
+     one tree, where a flag-flip over the unfused leaves or a second build per flavor used to mint
+     the twins outside it. *)
+  let fbias =
+    TDSL.ndarray
+      (Array.init nn ~f:(fun x -> Float.of_int (x % 3) *. 0.5))
+      ~label:[ "fbias" ] ~output_dims:[ nn ] ()
+  in
+  let%op fprod = av +* "ik;kj=>ij" bv in
+  let%op fmm = relu (fprod + fbias) in
+  Train.set_materialized fprod.Tensor.value;
+  let opt_f = with_lowering ~name:"sft_fusable" fmm in
+  let fusable_section name ~is_gpu ~is_cpu ~limits opt =
+    match Autotune.matmul_sketch_tree ~is_gpu ~is_cpu ~limits opt with
+    | None -> Stdio.printf "== %s: no site detected ==\n" name
+    | Some tree ->
+        let seeds = Autotune.sketch_seed_params ~is_gpu ~is_cpu ~limits opt in
+        let unfused, fused = List.partition_tf seeds ~f:(fun p -> not p.Autotune.sk_epilogue) in
+        Stdio.printf "== %s: %d seeds (%d unfused + %d fused), %d choice nodes, depth %d ==\n" name
+          (List.length seeds) (List.length unfused) (List.length fused)
+          (Sspace.count_choices tree) (Sspace.depth tree);
+        (match tree with
+        | Sspace.Choice { level = "fusion"; children } ->
+            List.iter children ~f:(fun (label, child) ->
+                Stdio.printf "fusion = %s%s\n" label
+                  (match child with
+                  | Sspace.Child _ -> ""
+                  | Sspace.Unknown (w, _) -> "  [unknown: " ^ w ^ "]"
+                  | Sspace.Excluded (w, _) -> "  [excluded: " ^ w ^ "]"
+                  | Sspace.Refuted w -> "  [refuted: " ^ w ^ "]"))
+        | _ -> Stdio.printf "root is not the fusion level\n");
+        Verdict.p "tree leaves = flat enumeration"
+          (List.equal (fun a b -> String.equal (show a) (show b)) (Sspace.leaves tree) seeds);
+        Verdict.p "every fused leaf follows every unfused leaf"
+          (List.for_alli seeds ~f:(fun i p ->
+               Bool.equal p.Autotune.sk_epilogue (i >= List.length unfused)));
+        Verdict.p "the fused flavor twins the unfused leaves geometry for geometry"
+          ((not (List.is_empty fused))
+          && List.equal
+               (fun u f -> String.equal (show { u with Autotune.sk_epilogue = true }) (show f))
+               unfused fused);
+        (* The fused flavor's own verdicts carry its path — the same refutations and exclusions
+           the unfused flavor has, plus nothing, on this fully-dividing site. *)
+        let flavor_of (path, _) =
+          List.find_map path ~f:(fun (level, label) ->
+              Option.some_if (String.equal level "fusion") label)
+        in
+        let count lbl entries =
+          List.count entries ~f:(fun e -> Option.equal String.equal (flavor_of e) (Some lbl))
+        in
+        Stdio.printf "refuted: %d unfused, %d fused; excluded: %d unfused, %d fused\n"
+          (count "unfused" (Sspace.refutations tree)) (count "fused" (Sspace.refutations tree))
+          (count "unfused" (Sspace.exclusions tree)) (count "fused" (Sspace.exclusions tree))
+  in
+  fusable_section "fusable tail gpu" ~is_gpu:true ~is_cpu:false ~limits:gpu_full_limits opt_f;
+  fusable_section "fusable tail cpu" ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt_f;
   (* Tight hardware limits: the staged operand tiles are a sound workgroup-memory floor, so
      geometries whose depth-1 tiles exceed the cap refute outright and dividing geometries whose
      doubled tiles exceed it refute their depth twins; a blocktile geometry's launch size (bm/tm *

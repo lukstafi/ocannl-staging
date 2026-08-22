@@ -211,7 +211,9 @@ val sketch_seed_params :
     preconditions the schedule builders settle identically for every tile completion — the
     zero-expansion row-axis rule, and the GPU sketches' companion-coverage rule per fusion flavor —
     also pre-filter here, as the family tree's construction-time refutations (gh-ocannl-577): a seed
-    list never proposes a candidate that statically must fail its build. Exposed for tests. *)
+    list never proposes a candidate that statically must fail its build. For the matmul family this
+    list {e is} {!Ir.Schedule_space.leaves} of {!matmul_sketch_tree}, epilogue twins included.
+    Exposed for tests. *)
 
 val matmul_sketch_tree :
   is_gpu:bool ->
@@ -220,15 +222,17 @@ val matmul_sketch_tree :
   Ir.Low_level.optimized ->
   sketch_params Ir.Schedule_space.tree option
 (** The matmul sketch family as a refinement tree (gh-ocannl-514 phase 1): decision levels —
-    pipeline, packing shape, geometry, twins — whose lazily-refined choices depend on earlier
-    commitments, and whose {!Ir.Schedule_space.leaves} are exactly the family's
-    {!sketch_seed_params} unfused contribution, in enumeration order (the fused twins enumerate from
-    the tree's [Fuse_epilogue] flavor, whose construction-time verdicts differ — gh-ocannl-577).
-    [None] when no matmul site is detected. Statically-decidable builder preconditions refute at the
-    pipeline level here — above the geometry menus and the tile lattice, so a family whose every
-    completion must fail its candidate build never expands (gh-ocannl-577). The conv family and the
-    epilogue-twin level factor the same way as follow-ups. Exposed for tests and as the phase-4
-    search driver's entry into the family space. *)
+    epilogue fusion, pipeline, packing shape, geometry, twins — whose lazily-refined choices depend
+    on earlier commitments, and whose {!Ir.Schedule_space.leaves} are exactly the family's
+    {!sketch_seed_params}, in enumeration order. [None] when no matmul site is detected. The root
+    level is the [Fuse_epilogue] flavor (gh-ocannl-613): [unfused] first, then [fused] — refuted
+    with the fusion recognizer's reason ([Schedule.fuse_epilogue_witness]) when the site's output
+    feeds no fusable tail — so the twins enumerate after every unfused leaf and each flavor's
+    construction-time verdicts are its own (gh-ocannl-577: companion coverage can pass fused where
+    it fails unfused). Statically-decidable builder preconditions refute at the pipeline level —
+    above the geometry menus and the tile lattice, so a family whose every completion must fail its
+    candidate build never expands (gh-ocannl-577). The conv family factors the same way as a
+    follow-up. Exposed for tests and as the phase-4 search driver's entry into the family space. *)
 
 val geometry_lattice_witness : string
 (** The exclusion witness marking the tile-size lattice branches beyond the curated geometry menus

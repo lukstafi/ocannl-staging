@@ -29,6 +29,19 @@ let named name (comp : Asgns.comp) : Asgns.comp =
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let is_gpu = Sched.backend_is_gpu backend_name
 
+(* The family tree's unfused flavor is refuted on companion coverage and on nothing else (the
+   fused flavor, the root's other child, is refuted separately — these sites feed their output to a
+   reduction, not a fusable tail — and carries the fusion recognizer's reason, gh-ocannl-613). *)
+let coverage_refutes_unfused tree =
+  let refs =
+    List.filter (Ir.Schedule_space.refutations tree) ~f:(fun (path, _) ->
+        List.mem path ("fusion", "unfused") ~equal:(fun (l, a) (l', b) ->
+            String.equal l l' && String.equal a b))
+  in
+  (not (List.is_empty refs))
+  && List.for_all refs ~f:(fun (_, w) ->
+         String.is_substring w ~substring:"companion coverage (gh-521)")
+
 let clean_cache dir =
   if Stdlib.Sys.file_exists dir && Stdlib.Sys.is_directory dir then
     Array.iter (Stdlib.Sys.readdir dir) ~f:(fun f ->
@@ -204,11 +217,7 @@ let () =
     (List.is_empty seeds2
     &&
     match Autotune.matmul_sketch_tree ~is_gpu:true ~is_cpu:false ~limits opt2 with
-    | Some tree ->
-        let refs = Ir.Schedule_space.refutations tree in
-        (not (List.is_empty refs))
-        && List.for_all refs ~f:(fun (_, w) ->
-            String.is_substring w ~substring:"companion coverage (gh-521)")
+    | Some tree -> coverage_refutes_unfused tree
     | None -> false);
   (* The builders' raise site remains the safety net for parameters replayed against a lowering they
      were not seeded for (the fission-recombination scenario): a seed minted on the buildable
@@ -307,11 +316,7 @@ let () =
         List.is_empty (gpu_seeds seg)
         &&
         match Autotune.matmul_sketch_tree ~is_gpu:true ~is_cpu:false ~limits seg with
-        | Some tree ->
-            let refs = Ir.Schedule_space.refutations tree in
-            (not (List.is_empty refs))
-            && List.for_all refs ~f:(fun (_, w) ->
-                String.is_substring w ~substring:"companion coverage (gh-521)")
+        | Some tree -> coverage_refutes_unfused tree
         | None -> false)
     | _ -> false);
   (* Finer segmentation: the GEMM segment is freed, its seeds construct, and they spread j — the

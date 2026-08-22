@@ -299,25 +299,18 @@ let optop_family (op : SC.saved_optop) =
 (** {2 The composed seed list} *)
 
 (* The families composed into the seed list the search enumerates: the matmul family when a matmul
-   site is detected, else the convolution family, each crossed with the epilogue-fusion twins. *)
+   site is detected, else the convolution family, each with its epilogue-fusion twins. *)
 let sketch_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
     (opt : LL.optimized) : sketch_params list =
   (* Fused-epilogue variants (gh-ocannl-486): when the site's output feeds an eligible elementwise
      tail, every seed gets a fused twin — the tuner measures fused (one kernel) vs. unfused (the
      fissioned two-kernel form). The check runs on the base code where the plain accumulation-nest
      fusion site applies; seeds whose scheduled form no longer admits the fusion fail their
-     candidate compile and are skipped. *)
+     candidate compile and are skipped. For the matmul family the fusion choice is the tree's root
+     level (gh-ocannl-613), so its leaves already carry the twins, each flavor under its own
+     preconditions; the conv family is not tree-factored yet and flag-flips its seeds. *)
   match detect_matmul opt.LL.llc with
-  | Some site ->
-      (* The twins come from their own flavor of the family tree rather than a flag-flip over the
-         unfused seeds: the tree's construction-time verdicts are flavor-indexed (gh-ocannl-577 —
-         companion coverage can pass fused where it fails unfused), so each flavor enumerates under
-         its own preconditions. When neither flavor is refuted the two trees enumerate identical
-         geometries, preserving the seeds-then-twins order list-for-list. *)
-      let seeds = matmul_seed_params ~is_gpu ~is_cpu ~limits ~opt ~fused:false site in
-      if Sched.can_fuse_epilogue ~target:site.m_d opt then
-        seeds @ matmul_seed_params ~is_gpu ~is_cpu ~limits ~opt ~fused:true site
-      else seeds
+  | Some site -> matmul_seed_params ~is_gpu ~is_cpu ~limits ~opt site
   | None -> (
       match conv_seed_params ~is_gpu ~is_cpu ~limits opt with
       | None -> []
