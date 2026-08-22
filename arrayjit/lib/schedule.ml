@@ -704,7 +704,15 @@ let tensorize_llc ~(zero_fringe : Tn.t -> bool) ~i ~j ~k ~lane ~simd_width (llc 
   in
   (llc, !out_masks)
 
-let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
+(* [invariant]: the routine's launch-bound index parameters, forwarded to
+   [Low_level.peel_accum_nest] so a runtime-extent guard ([i < s], gh-490) does not stop the
+   accumulation mints. Declining is NOT neutral here, unlike in codegen: a refused mint makes
+   [Unroll ~materialize:true] round-trip the accumulator through storage per copy and [Partition]
+   turn its segment seams into narrowing points, which on narrow storage changes the candidate's
+   values against the serial baseline -- the very invariant these mints exist to keep. The default
+   is the conservative empty list, which is what the legality probes get: they ask whether an op is
+   legal, and both shapes are, so the verdict does not turn on it. *)
+let apply_op ?(invariant = []) (llc : Low_level.t) (op : optop) : Low_level.t =
   let open Low_level in
   match op with
   | Stage _ | Privatize _ | Fuse_epilogue _ | Tensorize _ | Split_reduce _ ->
@@ -797,7 +805,7 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
                (C_syntax.try_localize_serial_reduce), so within a logged regime the unrolled and serial
                candidates still agree — both per-step. *)
             if Utils.debug_log_from_routines () then None
-            else Low_level.peel_accum_nest ~free_of:[ axis ] fc.body
+            else Low_level.peel_accum_nest ~invariant ~free_of:[ axis ] fc.body
           in
           match mint with
           | Some (tn, idcs, base, debug, rebuild) ->
@@ -921,7 +929,7 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
              and same declines as [Unroll ~materialize:true] above. *)
           let mint =
             if Utils.debug_log_from_routines () then None
-            else Low_level.peel_accum_nest ~free_of:[ axis ] fc.body
+            else Low_level.peel_accum_nest ~invariant ~free_of:[ axis ] fc.body
           in
           match mint with
           | Some (tn, idcs, base, debug, rebuild) ->
@@ -3600,7 +3608,8 @@ let fuse_epilogue_witness ~target (opt : Low_level.optimized) : string option =
 
 let can_fuse_epilogue ~target opt = Option.is_none (fuse_epilogue_witness ~target opt)
 
-let apply_opt_op (opt : Low_level.optimized) (op : optop) : Low_level.optimized =
+let apply_opt_op ?(invariant = []) (opt : Low_level.optimized) (op : optop) :
+    Low_level.optimized =
   match op with
   | Stage
       {
@@ -3629,7 +3638,7 @@ let apply_opt_op (opt : Low_level.optimized) (op : optop) : Low_level.optimized 
           ^ ", which is not bound by a loop enclosing the reduction loop in this statement — Swap \
              it outside " ^ Indexing.symbol_ident axis ^ " first"))
   | (Split _ | Swap _ | Retype _ | Unroll _ | Partition _ | Pad _ | Expand_zero _) as op ->
-      { opt with llc = apply_op opt.Low_level.llc op }
+      { opt with llc = apply_op ~invariant opt.Low_level.llc op }
 
 (* gh-ocannl-537: the recognizer's answer to "which loops would have to enclose the reduction for
    this site to be splittable". Probed hermetically like [op_legality]'s [Split_reduce] arm — the
@@ -3730,7 +3739,10 @@ let apply ?(static_indices = []) (sched : schedule) (opt : Low_level.optimized) 
     Low_level.optimized =
   if List.is_empty sched then opt
   else
-    let opt = List.fold sched ~init:opt ~f:apply_opt_op in
+    let invariant_syms =
+      List.map static_indices ~f:(fun s -> s.Indexing.static_symbol)
+    in
+    let opt = List.fold sched ~init:opt ~f:(apply_opt_op ~invariant:invariant_syms) in
     let opt = elide_staged_barriers opt in
     let llc = opt.Low_level.llc in
     (* Transforms fold their own guards (schedule-ir-optops §2): the pipeline's simplify already

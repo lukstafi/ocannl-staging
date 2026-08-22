@@ -220,9 +220,17 @@ files.
   STATIC symbol, a kernel parameter bound at launch. (`Schedule`'s Pad guards ARE constant-bounded;
   the two shapes are easy to conflate.) A static symbol cannot select among enclosing loop
   iterations, but the peel cannot tell it from a loop index on its own, so the caller certifies via
-  `~invariant`: codegen passes its `idx_params`, and a caller passing none merely declines more —
-  which for narrow storage would also drop the gh-639 accumulator width, not just the residency.
-  `peel_dead_level.ml` carries all four shapes. Keeping such a guard
+  `~invariant`: codegen passes its `idx_params`, and `Schedule.apply` passes its `static_indices`
+  down through `apply_opt_op`/`apply_op`. **Declining is not neutral for the schedule mints**, which
+  is why they must be certified too: a refused mint makes `Unroll ~materialize:true` round-trip the
+  accumulator per copy and `Partition` turn its segment seams into narrowing points, so on narrow
+  storage the scheduled candidate stops agreeing with the serial baseline — the invariant those
+  mints exist to hold ("candidates compete on speed, never numerics"). Only the legality probes keep
+  the empty default: they ask whether an op is legal, and both shapes are.
+  `peel_dead_level.ml` carries all four guard shapes at the peel. What is NOT yet pinned is the
+  executed narrow-precision consequence — a bf16 reduction under a runtime-extent guard, scheduled
+  and compared against its serial baseline; the propagation restores master's behaviour rather than
+  introducing new emission, but that test is the one that would catch a future regression here. Keeping such a guard
   around the whole scope instead of declining would also be sound and would localize more; it needs
   the peel to report its outer guards separately, which is wider than the correctness fix.
 - The interaction with Metal's `volatile_scalar_rmw` needs no special case, and that is worth
