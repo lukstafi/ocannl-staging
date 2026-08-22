@@ -626,6 +626,12 @@ type reading = {
       (** The same shape into some OTHER node: [Split_reduce]'s block partials, each of which
           localizes while the combine that folds them into the target does not. *)
   node_accesses : int;
+  foreign_accesses : int;
+      (** Subscripts of the nodes a foreign closing store writes — [Split_reduce]'s partials. The
+          COUNT of foreign stores is not enough (Codex P2, round 13): a regression could keep one
+          localized closing store into the partials while routing another segment through direct
+          read-modify-writes of that same node, leaving one foreign store, one target RMW and two
+          target accesses intact, and the f32-only execution exact throughout. *)
   has_simd : bool;
   has_warp : bool;
 }
@@ -669,6 +675,21 @@ let scope_update_statements src =
           in
           is_scope_local lhs)
 
+(* The array a statement assigns to: the identifier ending at the first subscript before [ = ]. *)
+let lhs_array st =
+  match String.substr_index st ~pattern:"] = " with
+  | None -> None
+  | Some at -> (
+      let prefix = String.prefix st at in
+      match String.index prefix '[' with
+      | None -> None
+      | Some br ->
+          let b = ref br in
+          while !b > 0 && is_ident_char prefix.[!b - 1] do
+            Int.decr b
+          done;
+          if !b < br then Some (String.sub prefix ~pos:!b ~len:(br - !b)) else None)
+
 let read_form src ~label =
   match ident_for src ~label with
   | None -> None
@@ -687,6 +708,11 @@ let read_form src ~label =
         | Some at, Some lhs -> lhs < at && (lhs = 0 || not (is_ident_char st.[lhs - 1]))
         | _ -> false
       in
+      let foreign_idents =
+        List.filter_map sts ~f:(fun st ->
+            if accesses st = 0 && stores_a_local st then lhs_array st else None)
+        |> List.dedup_and_sort ~compare:String.compare
+      in
       Some
         {
           rmw_statements = List.count sts ~f:(fun st -> accesses st >= 2);
@@ -695,6 +721,11 @@ let read_form src ~label =
           foreign_local_stores =
             List.count sts ~f:(fun st -> accesses st = 0 && stores_a_local st);
           node_accesses = List.sum (module Int) sts ~f:accesses;
+          foreign_accesses =
+            List.sum
+              (module Int)
+              foreign_idents
+              ~f:(fun ident -> List.sum (module Int) sts ~f:(subscripts ~ident));
           has_simd = String.is_substring src ~substring:"Vectorized reduction rendering";
           has_warp = String.is_substring src ~substring:"ocannl_shfl_xor";
         }
@@ -862,6 +893,10 @@ type member = {
           expanded into several textual sites, would still read as this form — and this leg's f32
           arithmetic is exactly representable, so the extra seams or the reassociation need not
           move the value either. *)
+  foreign_accesses : int;
+      (** For {!Partials_combine}: how many subscripts the foreign node carries in total — the
+          partials' own zero-init, scope-open read and closing store, plus one read per block in
+          the combine. *)
   rmw_sites : int;
       (** For a member claiming {!Rmw}: how many read-modify-write statements the composition
           emits, textually — one per repetition where the level is [Unrolled], one where it is a
@@ -908,7 +943,8 @@ let simd_or_localized = if on_cpu then Simd else Localized
 let simd_claimed = "SIMD accumulator grid, or the localized scope where no vector rendering exists"
 
 let member ?(shape = Plain) ?(sched = no_ops) ?(expect = Localized) ?claimed ?(reference = Baseline)
-    ?(store_sites = 1) ?(rmw_sites = 1) ?(foreign_sites = 0) ?expect_axis ?(extra = [])
+    ?(store_sites = 1) ?(rmw_sites = 1) ?(foreign_sites = 0) ?(foreign_accesses = 0) ?expect_axis
+    ?(extra = [])
     ?(precisions = [ "f32"; "bf16"; "f16" ])
     ?(available = fun _ -> true) slug what =
   let claimed = Option.value claimed ~default:(form_name expect) in
@@ -923,6 +959,7 @@ let member ?(shape = Plain) ?(sched = no_ops) ?(expect = Localized) ?claimed ?(r
     store_sites;
     rmw_sites;
     foreign_sites;
+    foreign_accesses;
     expect_axis;
     extra;
     precisions;
@@ -979,7 +1016,13 @@ let members =
        (each partial narrows at its own store), so this member claims f32 only, where the sums are
        exact. --- *)
     member "split-reduce" "Split_reduce into four block partials plus a combine nest"
-      ~expect:Partials_combine ~foreign_sites:1 ~precisions:[ "f32" ] ~sched:(fun g ->
+      (* Seven subscripts of the partials node, and each one is accounted for: the whole-node
+         zero-init, the scope-opening read and the closing store of the per-block accumulation
+         (the partials are themselves localized), then one read per block in the combine. Counted
+         off the emitted kernel rather than predicted — my arithmetic said five and the init and
+         the open are the two it forgot. *)
+      ~expect:Partials_combine ~foreign_sites:1 ~foreign_accesses:7 ~precisions:[ "f32" ]
+      ~sched:(fun g ->
         let op, _b, _i, _c = Sched.split_reduce ~axis:g.k ~target:g.out ~num_blocks:4 in
         [ op ]);
     (* --- the [Vectorized] arm: a SIMD accumulator grid plus its scalar tail, and the same
@@ -1484,6 +1527,7 @@ let () =
                         && reading.rmw_statements = m.rmw_sites
                         && reading.stores_from_local = 0
                         && reading.node_accesses <= 2 * m.rmw_sites
+                        && reading.foreign_accesses = m.foreign_accesses
                     | Mma_fallback ->
                         (* No table member claims it: the contraction leg is separate and does its
                            own site check, against a bound of its own (the einsum lowering's
@@ -1654,6 +1698,12 @@ let () =
                 same_form (form_of reading) Localized
                 && reading.stores_from_local = 1
                 && reading.node_accesses <= 3
+                (* And nothing closed elsewhere on the way, as every other localized form in the
+                   table now requires (Codex P2, round 13). A fallback that began closing
+                   intermediate partials into another node would keep its single [mc] store, its
+                   Scalar_fallback census and this leg's exact f32 comparison. *)
+                && reading.foreign_local_stores = 0
+                && reading.foreign_accesses = 0
               in
               if not ok then
                 Stdio.eprintf
