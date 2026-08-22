@@ -939,17 +939,15 @@ let translate ?ident_label (expr : expression) : result =
       assignment ~punned ~lhs:setup_l ~rhses:[ setup_r ] ~raw_body ()
     in
     match expr with
-    | { pexp_desc = Pexp_extension ({ txt = "oc"; _ }, payload); _ } -> (
-        (* %oc anti-quotation: preserve the expression without transformation *)
-        match payload with
-        | PStr [ { pstr_desc = Pstr_eval (expr, _); _ } ] -> { default_result with expr }
-        | _ ->
-            {
-              default_result with
-              expr =
-                Ast_builder.Default.pexp_extension ~loc
-                @@ Location.error_extensionf ~loc "%%oc expects a single expression";
-            })
+    (* %oc anti-quotation: preserve the expression without transformation *)
+    | [%expr [%oc [%e? oc_expr]]] -> { default_result with expr = oc_expr }
+    | { pexp_desc = Pexp_extension ({ txt = "oc"; _ }, _); _ } ->
+        {
+          default_result with
+          expr =
+            Ast_builder.Default.pexp_extension ~loc
+            @@ Location.error_extensionf ~loc "%%oc expects a single expression";
+        }
     | { pexp_desc = Pexp_constant (Pconst_float _); _ } ->
         { default_result with expr = [%expr NTDSL.number [%e expr]]; slot = Scalar }
     | { pexp_desc = Pexp_constant (Pconst_integer (_, Some ('L' | 'l'))); _ } ->
@@ -966,7 +964,7 @@ let translate ?ident_label (expr : expression) : result =
            { ptyp_desc = Ptyp_constr ({ txt = Lident basis; _ }, []); ptyp_loc; _ } );
      _;
     } ->
-        let axis = Ast_helper.Exp.constant ~loc:ptyp_loc (Pconst_string (basis, ptyp_loc, None)) in
+        let axis = Ast_builder.Default.estring ~loc:ptyp_loc basis in
         {
           default_result with
           expr = [%expr NTDSL.number ~axis_basis:[%e axis] [%e f]];
@@ -979,7 +977,7 @@ let translate ?ident_label (expr : expression) : result =
            { ptyp_desc = Ptyp_constr ({ txt = Lident basis; _ }, []); ptyp_loc; _ } );
      _;
     } ->
-        let axis = Ast_helper.Exp.constant ~loc:ptyp_loc (Pconst_string (basis, ptyp_loc, None)) in
+        let axis = Ast_builder.Default.estring ~loc:ptyp_loc basis in
         {
           default_result with
           expr = [%expr NTDSL.bits ~axis_basis:[%e axis] [%e i]];
@@ -992,7 +990,7 @@ let translate ?ident_label (expr : expression) : result =
            { ptyp_desc = Ptyp_constr ({ txt = Lident basis; _ }, []); ptyp_loc; _ } );
      _;
     } ->
-        let axis = Ast_helper.Exp.constant ~loc:ptyp_loc (Pconst_string (basis, ptyp_loc, None)) in
+        let axis = Ast_builder.Default.estring ~loc:ptyp_loc basis in
         {
           default_result with
           expr = [%expr NTDSL.number ~axis_basis:[%e axis] (Float.of_int [%e i])];
@@ -1005,8 +1003,7 @@ let translate ?ident_label (expr : expression) : result =
           when String.equal name_expr tensor_name ->
             (* Simple case: just tensor initialization, similar to original string syntax *)
             let name_expr =
-              Ast_helper.Exp.constant ~loc:first_label.loc
-                (Pconst_string (tensor_name, first_label.loc, None))
+              Ast_builder.Default.estring ~loc:first_label.loc tensor_name
             in
             let extra_args =
               List.map extra_args ~f:(function
@@ -1068,56 +1065,53 @@ let translate ?ident_label (expr : expression) : result =
                       simple identifier";
             })
     | { pexp_desc = Pexp_array _; _ }
-    | { pexp_desc = Pexp_construct ({ txt = Lident "::"; _ }, _); _ }
+    | [%expr [%e? _] :: [%e? _]]
     (* Tensor literal whose outermost axis container carries an axis-label annotation. *)
     | {
         pexp_desc =
-          Pexp_constraint
-            ( ( { pexp_desc = Pexp_array _; _ }
-              | { pexp_desc = Pexp_construct ({ txt = Lident "::"; _ }, _); _ } ),
-              _ );
+          Pexp_constraint (({ pexp_desc = Pexp_array _; _ } | [%expr [%e? _] :: [%e? _]]), _);
         _;
       } ->
         { default_result with expr = ndarray_op ~ndarray_fn:[%expr NTDSL.ndarray] expr }
-    | { pexp_desc = Pexp_ident { txt = Lident "lhs"; _ }; _ } ->
+    | [%expr lhs] ->
         { default_result with typ = Array; slot = LHS }
-    | { pexp_desc = Pexp_ident { txt = Lident "v"; _ }; _ } ->
+    | [%expr v] ->
         { default_result with typ = Array; slot = LHS; expr = [%expr t.Tensor.value] }
-    | { pexp_desc = Pexp_ident { txt = Lident "g"; _ }; _ } ->
+    | [%expr g] ->
         { default_result with typ = Array; slot = LHS }
-    | { pexp_desc = Pexp_ident { txt = Lident "rhs1"; _ }; _ } ->
+    | [%expr rhs1] ->
         { default_result with typ = Array; slot = RHS1 }
-    | { pexp_desc = Pexp_ident { txt = Lident "t"; _ }; _ } -> { default_result with slot = LHS }
-    | { pexp_desc = Pexp_ident { txt = Lident "t1"; _ }; _ } -> { default_result with slot = RHS1 }
-    | { pexp_desc = Pexp_ident { txt = Lident "v1"; _ }; _ } ->
+    | [%expr t] -> { default_result with slot = LHS }
+    | [%expr t1] -> { default_result with slot = RHS1 }
+    | [%expr v1] ->
         { default_result with typ = Array; slot = RHS1; expr = [%expr t1.Tensor.value] }
-    | { pexp_desc = Pexp_ident { txt = Lident "g1"; _ }; _ } ->
+    | [%expr g1] ->
         {
           default_result with
           typ = Grad_of_tensor [%expr t1];
           slot = RHS1;
           expr = [%expr Option.map t1.Tensor.diff ~f:(fun d -> d.Tensor.grad)];
         }
-    | { pexp_desc = Pexp_ident { txt = Lident "rhs2"; _ }; _ } ->
+    | [%expr rhs2] ->
         { default_result with typ = Array; slot = RHS2 }
-    | { pexp_desc = Pexp_ident { txt = Lident "t2"; _ }; _ } ->
+    | [%expr t2] ->
         { default_result with typ = Tensor; slot = RHS2 }
-    | { pexp_desc = Pexp_ident { txt = Lident "v2"; _ }; _ } ->
+    | [%expr v2] ->
         { default_result with typ = Array; slot = RHS2; expr = [%expr t2.Tensor.value] }
-    | { pexp_desc = Pexp_ident { txt = Lident "g2"; _ }; _ } ->
+    | [%expr g2] ->
         {
           default_result with
           typ = Grad_of_tensor [%expr t2];
           slot = RHS2;
           expr = [%expr Option.map t2.Tensor.diff ~f:(fun d -> d.Tensor.grad)];
         }
-    | { pexp_desc = Pexp_ident { txt = Lident "rhs3"; _ }; _ } ->
+    | [%expr rhs3] ->
         { default_result with typ = Array; slot = RHS3 }
-    | { pexp_desc = Pexp_ident { txt = Lident "t3"; _ }; _ } ->
+    | [%expr t3] ->
         { default_result with typ = Tensor; slot = RHS3 }
-    | { pexp_desc = Pexp_ident { txt = Lident "v3"; _ }; _ } ->
+    | [%expr v3] ->
         { default_result with typ = Array; slot = RHS3; expr = [%expr t3.Tensor.value] }
-    | { pexp_desc = Pexp_ident { txt = Lident "g3"; _ }; _ } ->
+    | [%expr g3] ->
         {
           default_result with
           typ = Grad_of_tensor [%expr t3];

@@ -62,18 +62,28 @@
   (saturn_lockfree
    (>= 0.5.0))
   ; Bounded ABOVE as well, because what this project depends on is not ppxlib's API but the AST
-  ; that API selects -- `Astlib.Ast_502` throughout the permitted range. `ppx_cd`, `ppx_op`,
-  ; `ppx_shared` and `ppx_extend_dsls` match its shapes at some sixty sites (`Pconst_string` as a
-  ; flat triple, `Pexp_function` as a triple), and the source scanners under `test/support` match
-  ; a handful more. A ppxlib that selects a later AST does not break these subtly: they stop
-  ; compiling, which is the loud failure and not the dangerous one -- but it stops them compiling
-  ; in a solve nothing warned about, which is what an upper bound is for. 0.39 is announced as the
-  ; release that moves the selection.
+  ; that API selects -- `Astlib.Ast_502` throughout the permitted range. Every fixed shape the ppx
+  ; matches is now written as a metaquot quotation, which ppxlib regenerates for whichever AST it
+  ; selects; what still names constructors is mapped class by class, with the fix each class
+  ; needs, at the head of `tensor/ppx_shared.ml`. The source scanners under `test/support` match
+  ; a handful more.
+  ;
+  ; Three classes actually move, checked against Ast_503..Ast_506: literal values at `Ast_503`,
+  ; where `constant` becomes a record `{ pconst_desc; pconst_loc }`; tuple payloads at `Ast_504`,
+  ; which adds labelled tuples; and `Pexp_open`/`Pexp_letmodule` at `Ast_505`, which deletes both
+  ; in favour of `Pexp_struct_item`. Only the last is more than a rename. `Pexp_function`'s
+  ; params/constraint/body triple, named here as a mover before it was checked, is in fact
+  ; byte-identical through Ast_506.
+  ;
+  ; A ppxlib that selects a later AST does not break these subtly: they stop compiling, which is
+  ; the loud failure and not the dangerous one -- but it stops them compiling in a solve nothing
+  ; warned about, which is what an upper bound is for. 0.39 is announced as the release that moves
+  ; the selection.
   ;
   ; Deliberately NOT resolved by pinning `Astlib.Ast_502` directly and migrating into it: ppxlib
   ; generates `Ast_traverse` and metaquot for the SELECTED ast alone, so targeting a versioned one
-  ; costs both the iterators and the quotation syntax, across all sixty sites. Raising this bound
-  ; is a deliberate edit that recompiles the ppx; that is the right shape for the decision.
+  ; costs both the iterators and the quotation syntax, across every site. Raising this bound is a
+  ; deliberate edit that recompiles the ppx; that is the right shape for the decision.
   (ppxlib
    (and
     (>= 0.36.0)
@@ -146,7 +156,7 @@
   num
   time_now
   ; Bounded above for the AST the ppx and the source scanners match; see the note in the arrayjit
-  ; stanza above.
+  ; stanza above, and the residue map at the head of `tensor/ppx_shared.ml`.
   (ppxlib
    (and
     (>= 0.36.0)
