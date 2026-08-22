@@ -150,6 +150,100 @@ let tree_section name ~is_gpu ~is_cpu ~limits opt seeds =
       Verdict.p "tree leaves = flat enumeration"
         (List.equal (fun a b -> String.equal (show a) (show b)) (Sspace.leaves tree) seeds)
 
+(* gh-ocannl-591: what the certain-traffic increment of a leaf's path MUST be, derived from the
+   leaf's own sketch parameters and NOTHING on the path — no decision, no label. Cross-checking it
+   against [sketch_path_traffic_floor] over paths walked out of the real tree is what pins the
+   decision protocol end to end: a commitment the floor stops reading shows up as a mismatch,
+   where the string protocol's silent fall-through showed up as a uniform (sound, useless) zero.
+   The two families count differently, exactly as [Cost_model.analyze] charges them: the GPU
+   pipelines stage both operand tiles in kernel (written and read), while the CPU packed
+   composition adds traffic only where it packs in kernel — every other shape packs at link time or
+   per Grid chunk, replacing the original operand's reads rather than adding to them. *)
+let expected_inc ~elt_bytes ~n_extent (p : Autotune.sketch_params) =
+  let bm = p.Autotune.sk_bm and bk = p.Autotune.sk_bk in
+  let bn = if p.Autotune.sk_bn = 0 then n_extent else p.Autotune.sk_bn in
+  let tile = ((bm * bk) + (bk * bn)) * elt_bytes in
+  if p.Autotune.sk_gpu then if bk > 0 then 2 * tile else 0
+  else if
+    p.Autotune.sk_mma && bk > 0
+    && not (p.Autotune.sk_hoist || p.Autotune.sk_grid || p.Autotune.sk_pack_rest)
+  then tile
+  else 0
+
+let prefixes path =
+  List.folding_map path ~init:[] ~f:(fun acc entry ->
+      let acc = acc @ [ entry ] in
+      (acc, acc))
+
+(* The traffic floor judged against the tree it is supposed to price (gh-ocannl-591): the paths come
+   from [Sspace.enumerate] of the real tree, never from literals. A renamed level or a reworded
+   label moves the rendered lines below and no number; a level ADDED, REMOVED or re-parameterized
+   moves the counts and the per-leaf agreement. *)
+let traffic_pins name ~limits ~elt_bytes ~n_extent tree opt =
+  let inc = Autotune.sketch_path_traffic_floor ~limits opt in
+  let paths = Sspace.enumerate tree in
+  let priced = List.count paths ~f:(fun (path, _) -> inc path > 0) in
+  let levels =
+    List.dedup_and_sort ~compare:String.compare
+      (List.concat_map paths ~f:(fun (path, _) -> List.map path ~f:fst))
+  in
+  Stdio.printf "== %s: certain-traffic increments over %d leaf paths ==\n" name
+    (List.length paths);
+  Stdio.printf "  levels on the leaf paths: %s\n" (String.concat ~sep:", " levels);
+  Stdio.printf "  priced above the schedule-invariant floor: %d; max increment %d bytes\n" priced
+    (List.fold paths ~init:0 ~f:(fun acc (path, _) -> max acc (inc path)));
+  Verdict.p
+    (name ^ ": every leaf's increment is the traffic its own parameters imply")
+    (List.for_all paths ~f:(fun (path, p) ->
+         inc path = expected_inc ~elt_bytes ~n_extent p));
+  Verdict.p
+    (name ^ ": the increment is monotone along every path's prefixes")
+    (List.for_all paths ~f:(fun (path, _) ->
+         let incs = 0 :: List.map (prefixes path) ~f:inc in
+         List.is_sorted incs ~compare:Int.compare));
+  Verdict.p
+    (name ^ ": the staging commitments price above the floor")
+    (priced > 0
+    && priced = List.count paths ~f:(fun (_, p) -> expected_inc ~elt_bytes ~n_extent p > 0));
+  Verdict.p
+    (name ^ ": every leaf path commits its pipeline's shape level")
+    (List.for_all paths ~f:(fun (path, _) ->
+         List.exists path ~f:(fun (_, d) ->
+             match d with FD.Geometry _ | FD.Row_block _ -> true | _ -> false)));
+  (* One representative path per pricing regime, walked out of the tree and rendered here (the
+     rendering is all that a label reword can move). *)
+  let sample what f =
+    match List.find paths ~f:(fun (path, _) -> f path) with
+    | None -> Stdio.printf "  %-26s (none in this tree)\n" what
+    | Some (path, _) ->
+        Stdio.printf "  %-26s %d bytes\n    %s\n" what (inc path) (FD.render_path path)
+  in
+  sample "staged geometry" (fun path ->
+      inc path > 0
+      && List.exists path ~f:(fun (_, d) ->
+             match d with FD.Geometry (FD.Gpu_mma _ | FD.Cpu_packed _) -> true | _ -> false));
+  sample "unpriced geometry" (fun path -> inc path = 0);
+  sample "lattice leaf" (fun path ->
+      List.exists path ~f:(fun (_, d) -> FD.equal d (FD.Geometry FD.Lattice)));
+  (* The refinement chain of one lattice leaf: each interval commitment tightens the corner the box
+     is priced at, so the increments grow monotonically down to the singleton. Pinning the chain
+     off the tree replaces the hand-written box labels this test used to feed the parser. *)
+  match
+    (* The LAST lattice leaf: the largest corner, so the chain's tightening is visible — every box
+       prices at its own minimum, which the refinement raises step by step. *)
+    List.last
+      (List.filter paths ~f:(fun (path, _) ->
+           List.exists path ~f:(fun (_, d) -> FD.equal d (FD.Geometry FD.Lattice))))
+  with
+  | None -> ()
+  | Some (path, _) ->
+      Stdio.printf "  lattice refinement chain:\n";
+      List.iter (prefixes path) ~f:(fun pre ->
+          match List.last pre with
+          | Some (_, d) when match d with FD.Lattice_box _ -> true | _ -> false ->
+              Stdio.printf "    %-14s -> %d bytes\n" (FD.to_label d) (inc pre)
+          | _ -> ())
+
 (* Awkward sites (phase 2): the tree's verdicts explain, before any compilation, why branches
    propose nothing — where the flat enumeration silently dropped them. Only the collector reports
    print here; the leaves are still the seeds the flat API proposes. *)
@@ -492,37 +586,14 @@ let () =
       Verdict.p "the lattice exclusion carries the lift instructions"
         (List.exists (Sspace.exclusions tree) ~f:(fun (_, w) ->
              String.equal w Autotune.geometry_lattice_witness));
-      (* The certain-traffic increments that make the bound non-uniform: a committed staged geometry
-         prices its operand tiles, an unstaged one prices nothing, and a lattice box prices its most
-         favorable corner — monotone in refinement. *)
+      (* The certain-traffic increments that make the bound non-uniform: a committed staged
+         geometry prices its operand tiles, an unstaged one prices nothing, and a lattice box prices
+         its most favorable corner — monotone in refinement. Judged over the LIFTED tree's own
+         paths (gh-ocannl-591), so the pin moves with the tree rather than with a list of literals
+         this test wrote for itself. *)
       let inc = Autotune.sketch_path_traffic_floor ~limits:gpu_full_limits mm2 in
-      let show_inc name path = Stdio.printf "  %-46s -> %d bytes\n" name (inc path) in
-      Stdio.printf "certain-traffic increments along paths:\n";
-      let at (d : FD.t) = (FD.level d, d) in
-      let mma ~bm ~bn ~bk =
-        at (FD.Geometry (FD.Gpu_mma { g_bm = bm; g_bn = bn; g_bk = bk; g_tm = 0; g_tn = 0 }))
-      in
-      let box lb_axis lb_lo lb_hi = at (FD.Lattice_box { lb_axis; lb_lo; lb_hi }) in
-      show_inc "curated staged bm16 bn32 bk32"
-        [ at (FD.Pipeline `Tensorized); mma ~bm:16 ~bn:32 ~bk:32 ];
-      show_inc "curated unstaged bm16 bn32 bk0"
-        [ at (FD.Pipeline `Tensorized); mma ~bm:16 ~bn:32 ~bk:0 ];
-      show_inc "lattice box bm 8..32, bk open"
-        [ at (FD.Pipeline `Tensorized); at (FD.Geometry FD.Lattice); box `Bm 8 32 ];
-      show_inc "lattice box bm=32, bk 16..32"
-        [
-          at (FD.Pipeline `Tensorized);
-          at (FD.Geometry FD.Lattice);
-          box `Bm 32 32;
-          box `Bk 16 32;
-        ];
-      show_inc "lattice singleton bm=32 bk=64"
-        [
-          at (FD.Pipeline `Tensorized);
-          at (FD.Geometry FD.Lattice);
-          box `Bm 32 32;
-          box `Bk 64 64;
-        ];
+      traffic_pins "gpu staged lattice" ~limits:gpu_full_limits ~elt_bytes:4 ~n_extent:64 lifted
+        mm2;
       (* Search over the lifted tree with the increment itself as the bound and an incumbent between
          the small and large boxes' floors: large-tile boxes fathom without expansion, so the walk
          scores a fraction of the lattice — the logarithmic-effective regime. The score never
@@ -535,6 +606,14 @@ let () =
          excluded\n"
         stats.Sspace.st_expanded stats.Sspace.st_scored stats.Sspace.st_fathomed
         stats.Sspace.st_refuted stats.Sspace.st_excluded);
+  (* The CPU side of the same protocol, which no test priced before (gh-ocannl-591): the packed
+     composition's traffic depends on the packing shape ABOVE its geometry — only in-kernel
+     [serial] packing adds panel bytes, the hoisted and Grid shapes replace or split reads — and the
+     blocktile pipeline stages nothing at all. Same tree-walked judgment, so the CPU arms of the
+     floor are pinned by the tree rather than by a literal path. *)
+  (match Autotune.matmul_sketch_tree ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt with
+  | None -> Stdio.printf "cpu traffic: no site detected\n"
+  | Some tree -> traffic_pins "cpu simd32" ~limits:cpu_limits ~elt_bytes:4 ~n_extent:64 tree opt);
   (* Corner-judged box refutations: a workgroup-memory cap that admits only the smallest staged
      tiles refutes the large-tile half-boxes at their most favorable corner, pre-expansion — the
      "tile-size interval whose minimum footprint exceeds shared memory" fathom of the issue. *)
