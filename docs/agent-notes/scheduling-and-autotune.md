@@ -60,7 +60,7 @@ files.
   (`fusion = unfused | fused`, `matmul_family_tree`): the fused child is refuted with the
   recognizer's own reason (`Schedule.fuse_epilogue_witness`) on a site with no fusable tail —
   so a tree's `refutations` always carries one entry more than its pipelines produce, and a
-  test asserting "every refutation is X" must scope to the `("fusion", "unfused")` path — and
+  test asserting "every refutation is X" must scope to the `Family_decision.Fusion `Unfused`` path — and
   the unfused coverage verdict is shared with the fused branch because it implies it (the fused
   demand is a subset, and `aligned_chains` ignores `skip`): `aligned_chains` runs twice only
   where the unfused flavor is refuted. `sketch_seed_params` is the tree's `leaves`, twins
@@ -69,6 +69,27 @@ files.
   never seeded, so it never reaches the decline log. gh-569's Part 3 read 25 coverage declines out of
   `schedule_log_declines`; the same workload on current master logs zero
   (`report-gh612-hip.md`). Ask the emitted source and the launch geometry instead.
+- **The family tree's decisions are DATA, and reading one back means matching on it — never
+  re-parsing a label** (gh-ocannl-591). `Ir.Schedule_space` is parameterized over the decision type
+  (`('l, 'a) tree`, paths `(string * 'l) list`); the matmul family instantiates it at
+  `Autotune.Family_decision.t`, one constructor per level carrying the geometry, the lattice
+  interval, the pipeline depth, the packing shape. `Family_decision.level` derives the level name
+  from the decision and `to_label`/`render_path` are the rendering, so renaming a level or
+  rewording a label is a display change with no consumer behind it. Before this, levels minted
+  labels with `sprintf` and `sketch_path_traffic_floor` read them back with `sscanf` under
+  `try … with _ -> None`: any reword made every arm fall through, so the certain-traffic increment
+  was `0` on every path — a SOUND lower bound, so nothing raised, no golden moved, and the family
+  bound silently degraded to the schedule-invariant floor. If you add a level, add its constructor;
+  if a consumer needs to know what was committed, match the datum. The same shape applies to
+  `model_default`'s placement tree, whose children carry `(flip_candidate, `Keep | `Flip)`.
+- **A test that prices decision paths must walk them out of the tree, not write them down.**
+  `sketch_family_tree.ml` used to call the traffic floor with literal paths, which pinned its own
+  parser and let the tree mint anything. It now enumerates the real tree and asserts that every
+  leaf's increment equals the traffic the LEAF'S OWN `sketch_params` imply (independent of the
+  path) and that the increment is monotone along every prefix — so a commitment a consumer stops
+  reading is a mismatch instead of a uniform zero, and the golden's leaf-path counts and level
+  inventory move when a level is added or removed. Verified both ways: rewording three labels moves
+  190 rendered lines and no number; deleting the `twin` level moves the counts and fails.
 - Batch loops of a GPU matmul sketch are no longer unconditionally `Serial` (gh-ocannl-643, the
   rank-4 q/k/v residue of gh-569: `36.7%` of the gpt2_mini step at 10% of sgemm peak because a
   `(batch, head, seq, head_dim)` site launched 4 blocks with batch and head serial inside). Two
