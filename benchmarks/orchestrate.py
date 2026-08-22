@@ -280,6 +280,18 @@ def diverged_at(losses):
     return next((i for i, loss in enumerate(losses) if not finite(loss)), None)
 
 
+def finite_prefix(losses):
+    """The steps before the trajectory left the finite numbers.
+
+    Nothing after the first non-finite loss is evidence about the run: a finite value FOLLOWING a
+    NaN is whatever the arithmetic settled on afterwards, not drift the reference can be compared
+    against, and not movement. Both readers of a trajectory take this prefix, so neither can report
+    a number the DIVERGED verdict says is meaningless (gh-ocannl-676).
+    """
+    cut = diverged_at(losses)
+    return losses if cut is None else losses[:cut]
+
+
 def json_safe(obj):
     """`obj` with every non-finite float replaced by None, recursively.
 
@@ -304,15 +316,15 @@ def num(x, spec):
 def loss_moved(losses):
     """Whether a loss trajectory has more than floating-point-noise-level variation.
 
-    Over the finite steps only: a diverged trajectory is not a stationary one, and reporting it as
-    stationary names the wrong defect. A trajectory with fewer than two finite steps has nothing to
-    say about movement, and is reported as diverged instead.
+    Over the prefix before the first non-finite step: a diverged trajectory is not a stationary
+    one, and reporting it as stationary names the wrong defect. A prefix shorter than two steps has
+    nothing to say about movement, and the cell is reported as diverged instead.
     """
-    finites = [loss for loss in losses if finite(loss)]
-    if len(finites) < 2:
+    prefix = finite_prefix(losses)
+    if len(prefix) < 2:
         return False
-    scale = max(max(abs(loss) for loss in finites), 1e-6)
-    return max(finites) - min(finites) > LOSS_MOVE_MIN_REL * scale
+    scale = max(max(abs(loss) for loss in prefix), 1e-6)
+    return max(prefix) - min(prefix) > LOSS_MOVE_MIN_REL * scale
 
 
 def parity_check(results):
@@ -325,20 +337,19 @@ def parity_check(results):
             (r for r in rs if (r["framework"], r["backend"], r["variant"]) == REFERENCE),
             None,
         )
-        ref_diverged = ref is not None and diverged_at(ref["losses"]) is not None
+        ref_prefix = finite_prefix(ref["losses"]) if ref is not None else []
+        ref_diverged = ref is not None and len(ref_prefix) < len(ref["losses"])
         for r in rs:
             r["parity_loss_moved"] = loss_moved(r["losses"])
             r["diverged_at"] = diverged_at(r["losses"])
             if ref is not None:
-                n = min(len(r["losses"]), len(ref["losses"]))
-                comparable = [
-                    (a, b)
-                    for a, b in zip(r["losses"][:n], ref["losses"][:n])
-                    if finite(a) and finite(b)
-                ]
-                if comparable:
+                # Compared over the prefix both trajectories reached while still finite, so a
+                # DIVERGED row's parity_max_rel is drift measured BEFORE it went and nothing else.
+                n = min(len(finite_prefix(r["losses"])), len(ref_prefix))
+                if n:
                     r["parity_max_rel"] = max(
-                        abs(a - b) / max(abs(b), 1e-6) for a, b in comparable
+                        abs(a - b) / max(abs(b), 1e-6)
+                        for a, b in zip(r["losses"][:n], ref["losses"][:n])
                     )
             if r["diverged_at"] is not None:
                 # The cell ran and its training blew up: a gate failure naming its cause, not a

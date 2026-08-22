@@ -120,6 +120,28 @@ class DivergenceTest(unittest.TestCase):
 
         self.assertEqual(blown["parity_max_rel"], 0.0)
 
+    def test_a_finite_value_after_the_divergence_is_not_evidence(self):
+        # A loss that comes back finite after a NaN is whatever the arithmetic settled on, not
+        # drift: comparing it would put a number on the DIVERGED row that its own contract calls
+        # meaningless, and reading it as movement would say the trajectory moved when what it did
+        # was blow up.
+        ref = result("pytorch", "cpu", "eager", [2.0, 2.0, 2.0])
+        blown = result("ocannl", "cc", "default", [2.0, None, 9.0])
+
+        orchestrate.parity_check([ref, blown])
+
+        self.assertEqual(blown["parity_max_rel"], 0.0)
+        self.assertFalse(blown["parity_loss_moved"])
+        self.assertEqual(orchestrate.finite_prefix([2.0, None, 9.0]), [2.0])
+
+    def test_the_reference_prefix_bounds_the_comparison_too(self):
+        ref = result("pytorch", "cpu", "eager", [2.0, float("nan"), 2.0])
+        other = result("ocannl", "cc", "default", [2.0, 5.0, 5.0])
+
+        orchestrate.parity_check([ref, other])
+
+        self.assertEqual(other["parity_max_rel"], 0.0)
+
     def test_a_diverged_reference_is_no_reference(self):
         ref = result("pytorch", "cpu", "eager", [2.3026, None, None])
         other = result("ocannl", "cc", "default", [2.3026, 2.3010, 2.3000])
