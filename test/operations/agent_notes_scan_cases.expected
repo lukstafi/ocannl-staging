@@ -1,0 +1,43 @@
+ok: bullets -- a flat list of finished bullets
+ok: bullets -- a bullet a merge cut in half
+ok: bullets -- a bullet ending in a colon
+ok: bullets -- a bullet ending in a parenthesis after the period
+ok: bullets -- a bullet ending in bold
+ok: bullets -- a bullet ending in a code span
+ok: bullets -- a bullet ending in an identifier and no punctuation
+ok: bullets -- a nested bullet with its own continuations
+ok: bullets -- an indented line at the parent's depth while a nested bullet is open
+ok: bullets -- an indented line continuing nothing
+ok: bullets -- a continuation indented past its bullet
+ok: bullets -- a nested bullet under no bullet at all
+ok: bullets -- a bullet written with a star
+ok: bullets -- an empty bullet
+ok: bullets -- a tab in the indentation
+ok: bullets -- prose at column zero between lists
+ok: bullets -- a heading closes the list above it
+ok: tables -- a well-formed table
+ok: tables -- a row wrapped across two physical lines
+ok: tables -- the wrapped tail below a table that itself closes
+ok: tables -- a row with a cell too few
+ok: tables -- a row with a cell too many
+ok: tables -- a header with no delimiter row
+ok: tables -- a header and a delimiter and no rows
+ok: tables -- a pipe inside a code span is not a cell separator
+ok: tables -- a pipe inside a code span below a table
+ok: tables -- an escaped pipe is not a cell separator either
+ok: tables -- alignment colons are still a delimiter row
+ok: index -- an index whose rows all resolve
+ok: index -- a hook the file it points at does not carry
+ok: index -- a hook whose wording drifted from the file's
+ok: index -- a link to a file that is not there
+ok: index -- link text that does not name its file
+ok: index -- a first cell that is not a link
+ok: index -- an anchor the file has a heading for
+ok: index -- an anchor the file has no heading for
+ok: index -- a file no row links
+ok: index -- two rows for one file
+ok: index -- a file that does not link back to the index
+ok: index -- the same bullet in two files
+ok: index -- the same bullet re-wrapped
+ok: index -- two bullets opening alike and diverging
+ok: index -- two bullets that merely start with the same few words

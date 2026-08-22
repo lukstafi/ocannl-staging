@@ -3132,3 +3132,22 @@
  (deps ocannl_config)
  (modules uint4x32_stub_bounds)
  (libraries base stdio arrayjit.ir arrayjit.verdict))
+
+; gh-ocannl-691: the agent notes are structurally intact and wholly reachable from their index.
+; docs/agent-notes.md and docs/agent-notes/ are the project's cross-session memory and nothing read
+; them until this; three of the six review findings on the split that created them (#406) were
+; structural and decidable from the text alone. The rules live in test/support/agent_notes_scan.ml
+; as pure functions over strings, so the negative controls below run the same code as the live-tree
+; scan. The glob is not recursive because the notes directory is flat by design -- one file per
+; subsystem, one index row each.
+
+; What the agent-notes scan calls a defect, on input built to break it rather than on whatever the
+; notes happen to say today -- which on a good day is nothing at all.
+
+(test
+ ; ocannl-backend: none -- reads markdown only: the fixtures are embedded strings and it links no backend.
+ (name agent_notes_scan_cases)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules agent_notes_scan_cases)
+ (libraries base stdio test_utils arrayjit.verdict))
