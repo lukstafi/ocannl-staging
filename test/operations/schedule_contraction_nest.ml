@@ -37,6 +37,7 @@ open Ocannl
 open Ocannl.Operation.DSL_modules
 module LL = Ir.Low_level
 module Sched = Ir.Schedule
+module Sspace = Ir.Schedule_space
 module Asgns = Ir.Assignments
 module Tn = Ir.Tnode
 
@@ -366,6 +367,25 @@ let bf16_leg ~tag ~build =
               (n_ran = 1 && renders_intrinsic (Generated.read routine)))
   end
 
+(* What a tile-geometry refutation calls the extent it judged (gh-ocannl-683). The divisibility
+   gates compare a tile's k-extent against the INNERMOST contraction loop's extent [m_nk] alone --
+   the outer contraction loops are k-block loops every pipeline inherits already split -- so on a
+   multi-axis site a bare "bk=8 does not divide k=12" names a number that is not the site's K (48
+   here), misleading whoever reads a refutation log or [Ir.Schedule_space.refutations]. The
+   witnesses are collected off the real family tree, never from literals; single-axis sites must
+   keep the bare "k=%d" text the sketch-family goldens quote, which the control leg pins. *)
+let bk_witnesses ~name build =
+  let opt = capture (named name (Train.forward (build ()))) in
+  match
+    Autotune.matmul_sketch_tree ~is_gpu:true ~is_cpu:false
+      ~limits:Ir.Backend_intf.no_hardware_limits opt
+  with
+  | None -> []
+  | Some tree ->
+      Sspace.refutations tree
+      |> List.map ~f:snd
+      |> List.filter ~f:(String.is_prefix ~prefix:"bk=")
+
 (* [offset + stride * (flat index mod modulus)] over row-major [dims]: varies along every axis
    whose extent is not a multiple of [modulus]. *)
 let cycle ~dims ~modulus ~offset ~stride idcs =
@@ -395,6 +415,51 @@ let () =
       let%op out = wv * av in
       (out, out))
     ();
+
+  (* The same out projection at a head_dim the blocktile menu's k-extents do not divide, so the
+     [bk] gate actually refutes, plus a single-axis control contracting over the same 12. *)
+  let ee_odd = 12 in
+  let w_odd () =
+    NTDSL.init ~l:"cn_w_odd" ~prec:Ir.Ops.single ~o:[ jj ] ~i:[ hh; ee_odd ]
+      ~f:(cycle ~dims:[| jj; hh; ee_odd |] ~modulus:11 ~offset:(-5.5) ~stride:0.5)
+      ()
+  in
+  let att_odd () =
+    NTDSL.init ~l:"cn_att_odd" ~prec:Ir.Ops.single ~b:[ bb; ss ] ~o:[ hh; ee_odd ]
+      ~f:(cycle ~dims:[| bb; ss; hh; ee_odd |] ~modulus:13 ~offset:0.25 ~stride:0.25)
+      ()
+  in
+  let multi =
+    bk_witnesses ~name:"out_proj_witness" (fun () ->
+        let wv = w_odd () and av = att_odd () in
+        let%op out = wv * av in
+        out)
+  in
+  let single =
+    bk_witnesses ~name:"single_axis_witness" (fun () ->
+        let wv =
+          NTDSL.init ~l:"cn_w1" ~prec:Ir.Ops.single ~o:[ jj ] ~i:[ ee_odd ]
+            ~f:(cycle ~dims:[| jj; ee_odd |] ~modulus:11 ~offset:(-5.5) ~stride:0.5)
+            ()
+        in
+        let av =
+          NTDSL.init ~l:"cn_att1" ~prec:Ir.Ops.single ~b:[ bb; ss ] ~o:[ ee_odd ]
+            ~f:(cycle ~dims:[| bb; ss; ee_odd |] ~modulus:13 ~offset:0.25 ~stride:0.25)
+            ()
+        in
+        let%op out = wv * av in
+        out)
+  in
+  p "out_proj: the bk gate refutes on the site whose innermost extent it does not divide"
+    (not (List.is_empty multi));
+  p "out_proj: a refuted bk names the innermost contraction extent, not the site's whole K"
+    (List.for_all multi ~f:(fun wit ->
+         String.is_substring wit
+           ~substring:"does not divide innermost contraction extent k=12 (of K=48 over 2 loops)"));
+  p "single-axis: the same refuted bk keeps the bare k= witness"
+    ((not (List.is_empty single))
+    && List.for_all single ~f:(fun wit ->
+           String.is_suffix wit ~suffix:"does not divide k=12"));
 
   (* --- A three-axis contraction with a materialized output feeding a bias+relu companion. --- *)
   let bb2 = 2 and ss2 = 32 and jj2 = 64 and gg = 2 and hh2 = 2 and ee2 = 16 in
