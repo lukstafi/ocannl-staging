@@ -502,7 +502,7 @@ class ProvenanceTest(unittest.TestCase):
 class TensorizationTest(unittest.TestCase):
     """gh-ocannl-626: a "tensorized" timing must not be able to be a scalar-fallback timing."""
 
-    def cell(self, arms, shipped="A"):
+    def cell(self, arms, shipped="A", shipped_mma=...):
         r = result("ocannl", "metal", "tuned", [2.3, 2.2, 2.1])
         r["searched"] = False
         r["step_ms"] = {"p10": 1.0, "p50": 1.1, "p90": 1.2}
@@ -514,7 +514,16 @@ class TensorizationTest(unittest.TestCase):
         r["tune"] = {
             "shipped": shipped, "searches": 0, "replays": 1, "no_searches": 0, "arms": arms
         }
+        if shipped_mma is not ...:
+            r["tune"]["shipped_mma"] = shipped_mma
         return r
+
+    def mma(self, tensorization, statements=0, scalar_fallbacks=0):
+        return {
+            "tensorization": tensorization, "statements": statements,
+            "scalar_fallbacks": scalar_fallbacks,
+        }
+
 
     def arm(self, name, tensorized, tensorization, statements=0, fallbacks=0):
         return {
@@ -564,6 +573,48 @@ class TensorizationTest(unittest.TestCase):
         # And a cell that tuned nothing at all has no arm to consult, so it gets no column entry
         # rather than a fabricated one.
         self.assertIsNone(orchestrate.tensorization_verdict(result("torch", "cuda", "eager", [1.0])))
+
+    def test_the_shipped_routines_census_outranks_the_arm_reports(self):
+        # A gh-555 flip refinement that beats the A/B winner ships under `shipped: "flip"` and is
+        # not an arm at all; on the timing_ctx path the tuner can also fall back to the untuned
+        # default after the arm was crowned. Either way the arm describes a discarded schedule, so
+        # the routine that was actually timed is what the column must report.
+        flip = self.cell(
+            [self.arm("A", True, "tensorized", statements=4)],
+            shipped="flip",
+            shipped_mma=self.mma("scalar-fallback", statements=3, scalar_fallbacks=3),
+        )
+
+        self.assertIsNone(orchestrate.shipped_arm(flip))
+        self.assertEqual(orchestrate.tensorization_verdict(flip), "SCALAR-FALLBACK")
+        self.assertEqual(orchestrate.tensorization_check([flip]), [flip])
+
+    def test_a_fallback_to_the_untuned_default_is_not_reported_as_the_crowned_arm(self):
+        # The arm was crowned in the scratch context and its replay was rejected in the production
+        # one, so the timed routine has no mma at all while the arm still says tensorized.
+        cell = self.cell(
+            [self.arm("A", True, "tensorized", statements=4)],
+            shipped_mma=self.mma("not-requested"),
+        )
+
+        self.assertEqual(orchestrate.tensorization_verdict(cell), "NOT-EMITTED")
+        self.assertEqual(orchestrate.tensorization_check([cell]), [cell])
+
+    def test_a_harness_that_recorded_no_shipped_census_reads_unknown(self):
+        # Present-but-empty is a runner that reported arms and forgot the routine: not a finding,
+        # and not the passing reading either.
+        cell = self.cell([self.arm("A", True, "tensorized", statements=4)], shipped_mma=None)
+
+        self.assertEqual(orchestrate.tensorization_verdict(cell), "UNKNOWN")
+        self.assertEqual(orchestrate.tensorization_check([cell]), [])
+
+    def test_an_artifact_predating_shipped_mma_still_reads_its_arm(self):
+        # The key absent (not null) is an older result line; the arm is right whenever the crowned
+        # candidate WAS the shipped artifact, which is the common case.
+        cell = self.cell([self.arm("A", True, "scalar-fallback", statements=2, fallbacks=2)])
+
+        self.assertNotIn("shipped_mma", cell["tune"])
+        self.assertEqual(orchestrate.tensorization_verdict(cell), "SCALAR-FALLBACK")
 
     def test_the_verdict_describes_the_arm_that_shipped_not_the_fastest_one(self):
         # tune_placements searches several arms and keeps one artifact; reading any other arm

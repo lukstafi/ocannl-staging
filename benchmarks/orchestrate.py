@@ -479,18 +479,45 @@ def tensorization_verdict(result):
     Four answers, not two, because the interesting cases are the disagreements (gh-ocannl-626):
     TENSORIZED (asked or not, at least one tensor-core / SIMD-tile emission happened),
     SCALAR-FALLBACK (`Tile_mma` statements were emitted and every one of them declined to the
-    lane-0 scalar path), NOT-EMITTED (the crowned schedule carries a `Tensorize` and codegen
-    emitted no `Tile_mma` at all), NOT-REQUESTED (nothing about this artifact claims tensor
-    cores — not a defect, and the only one of the four that is not worth a mark).
+    lane-0 scalar path), NOT-EMITTED (the schedule carries a `Tensorize` and codegen emitted no
+    `Tile_mma` at all), NOT-REQUESTED (nothing about this artifact claims tensor cores — not a
+    defect, and the only one of the four that is not worth a mark).
+
+    The emission half comes from `tune.shipped_mma`, the census of the routine whose steps were
+    TIMED, and not from the arm named as shipped. A crowned arm candidate is not always the shipped
+    artifact: a gh-555 flip refinement that wins ships under `shipped: "flip"` and is not an arm at
+    all, and on the `timing_ctx` path the tuner recompiles the winner in the production context and
+    falls back to the untuned default when that replay is rejected — in both cases the arm
+    describes a schedule that was discarded, and reading it could claim `tensorized` over a routine
+    that emitted no mma.
+
+    The `tensorized` half — did the schedule ASK — has no such per-routine record, so it is still
+    read off the shipped arm and only refines a `not-requested` emission into NOT-EMITTED. Where no
+    arm can be identified (the flip case) that refinement is unavailable and the verdict stays
+    NOT-REQUESTED: the artifact demonstrably emitted no `Tile_mma`, which is the fact the column
+    reports; what is lost is at most the shout, never a false `tensorized`.
 
     None for a cell with no tune object at all — an eager framework, an untuned default — which has
-    no arm to consult; UNKNOWN for a runner predating the field, so a missing census never reads as
-    a tensorized one.
+    no census to consult; UNKNOWN for a runner predating either field, or one that reported arms
+    without recording the shipped census, so a missing census never reads as a tensorized one.
     """
-    arm = shipped_arm(result)
-    if arm is None:
+    tune = result.get("tune")
+    if not tune:
         return None
-    label = arm.get("tensorization")
+    arm = shipped_arm(result) or {}
+    if "shipped_mma" in tune:
+        shipped = tune["shipped_mma"]
+        if not shipped:
+            # The key is there and empty: the harness reported arms and recorded no census. Not a
+            # finding either way, and emphatically not a passing reading.
+            return "UNKNOWN"
+        label = shipped.get("tensorization")
+    else:
+        # An artifact predating `shipped_mma`. The arm is all there is; it is right whenever the
+        # crowned candidate WAS the shipped artifact, which is the common case.
+        if not arm:
+            return None
+        label = arm.get("tensorization")
     if label == "tensorized":
         return "TENSORIZED"
     if label == "scalar-fallback":

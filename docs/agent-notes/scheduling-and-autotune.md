@@ -235,7 +235,12 @@ files.
   `C_syntax.mma_summary_string` on EVERY timing line (not only when something declined), the
   benchmark harness prints it per segment in the per-kernel table, and the result line's `tune`
   arms carry `tensorization` + `mma_statements`, which `orchestrate.py` renders in the report's
-  `mma` column (`SCALAR FALLBACK` / `NO MMA EMITTED` shouted) plus a `TENSORIZATION NOTICE`.
+  `mma` column (`SCALAR FALLBACK` / `NO MMA EMITTED` shouted) plus a `TENSORIZATION NOTICE`. What
+  that column reads is `tune.shipped_mma`, the census of the routine that was TIMED, not the arm
+  named as shipped — a crowned arm candidate is not always the shipped artifact: a gh-555 flip
+  refinement ships under `shipped: "flip"` and is not an arm, and the `timing_ctx` path can fall
+  back to the untuned default after crowning a winner. Same rule as "crowned is not shipped", one
+  level down.
   `mma_staged_layouts` (gh-ocannl-481) is keyed the same way for the same reason: the swizzled
   staged twin is seeded only where the emission can actually read that layout, which on CUDA is
   the uniform-bf16 combination and not fp8 (whose B side has no 16-bit `ldmatrix` form at the

@@ -236,10 +236,21 @@ type tune_arms = {
   mutable searches : int;
   mutable replays : int;
   mutable no_searches : int;
+  mutable shipped_mma : Ir.C_syntax.mma_summary option;
+      (** The census of the routine(s) this cell actually times (gh-ocannl-626), recorded by
+          {!collect_shipped}. Kept apart from the arms' because the crowned candidate of an arm is
+          not always the shipped artifact — see {!collect_shipped}. *)
 }
 
 let tune_arms () =
-  { arm_reports = []; shipped = None; searches = 0; replays = 0; no_searches = 0 }
+  {
+    arm_reports = [];
+    shipped = None;
+    searches = 0;
+    replays = 0;
+    no_searches = 0;
+    shipped_mma = None;
+  }
 
 (** Counts one reported search by its provenance (gh-ocannl-644). Kept separate from
     {!collect_arm} because a search this process ran is a search whether or not it was one of the
@@ -268,6 +279,28 @@ let collect_arm t (r : Autotune.report) =
   t.arm_reports <- r :: t.arm_reports
 
 let collect_ship t what = t.shipped <- Some what
+
+(** The [Tile_mma] renderings of every routine one timed step runs. *)
+let step_census = function
+  | Plain routine -> routine.Context.mma
+  | Host_gate (_, _, grad_routine, sgd_routine) ->
+      Ir.C_syntax.merge_mma_summaries [ grad_routine.Context.mma; sgd_routine.Context.mma ]
+  | Device_gate (_, _, routine, _) -> routine.Context.mma
+
+(** Records what the artifact this cell TIMES actually emitted (gh-ocannl-626). Every runner calls
+    it with the routines it goes on to step, right after compiling them.
+
+    This is deliberately not derived from the arm reports, and overrides them downstream, because a
+    crowned arm candidate is not always the shipped artifact. Two ways they come apart, both live:
+    a gh-555 flip refinement that beats the A/B winner ships under [on_ship "flip"] and is not an
+    arm at all (flip reports stay out of [arm_reports] — their arrival order would misname the
+    arms), so an arm lookup finds nothing and the cell would report no census; and on the
+    [timing_ctx] path {!Autotune.tune} recompiles the winner in the production context and falls
+    back to the untuned default when that replay is rejected or lands unparallelized, so the arm
+    describes a schedule that was discarded. In both cases the arm's label can claim tensorized over
+    a routine that emitted no mma, which is the exact failure this whole field exists to prevent —
+    so the fact is taken from the compiled routine, which cannot be wrong about itself. *)
+let collect_shipped t routines = t.shipped_mma <- Some (step_census routines)
 
 (** Whether this process ran a schedule search rather than replaying cached winners throughout —
     the [searched] field of the result line. See {!measure_and_emit}. *)
@@ -334,7 +367,13 @@ let tune_json t =
       in
       Some
         (Bench_json.tune_object ~shipped ~searches:t.searches ~replays:t.replays
-           ~no_searches:t.no_searches ~arms:(List.map named ~f:arm))
+           ~no_searches:t.no_searches
+           ~shipped_mma:
+             (Option.map t.shipped_mma ~f:(fun (m : Ir.C_syntax.mma_summary) ->
+                  ( Ir.C_syntax.tensorization_name m.Ir.C_syntax.tensorization,
+                    m.Ir.C_syntax.statements,
+                    m.Ir.C_syntax.scalar_fallbacks )))
+           ~arms:(List.map named ~f:arm))
 
 let floats_of_gen g =
   let n = Array.fold (Bigarray.Genarray.dims g) ~init:1 ~f:( * ) in

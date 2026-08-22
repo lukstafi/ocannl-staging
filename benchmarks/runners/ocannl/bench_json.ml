@@ -73,10 +73,27 @@ let tune_arm ~name ~state ~searched ~cache_hit ~best_ms ~best_label ~tensorized 
     Three provenance totals, not two (gh-ocannl-677): [no_searches] counts the arms that neither
     searched nor replayed — [autotune_search=false] and every pre-search failure — so
     [orchestrate.py] reads that case instead of inferring it from [searches] and [replays] both
-    being zero. *)
-let tune_object ~shipped ~searches ~replays ~no_searches ~arms =
-  Printf.sprintf {|{"shipped":"%s","searches":%d,"replays":%d,"no_searches":%d,"arms":[%s]}|}
-    (string shipped) searches replays no_searches
+    being zero.
+
+    [shipped_mma] is the census of the routine this cell's step times actually ran, as
+    [{"tensorization": …, "statements": N, "scalar_fallbacks": N}] (gh-ocannl-626). It is a
+    separate field from the arms', and authoritative over them, because a crowned ARM CANDIDATE is
+    not always the shipped ARTIFACT: a gh-555 flip refinement that beats the A/B winner ships under
+    [shipped: "flip"] and is deliberately not an arm at all, and on the [timing_ctx] path
+    {!Autotune.tune} recompiles the winner in the production context and falls back to the untuned
+    default when that replay is rejected or lands unparallelized. In both cases the arm describes a
+    schedule that was discarded. [null] when the harness reported arms without recording it — which
+    reads as UNKNOWN downstream, never as a tensorized cell. *)
+let mma_object = function
+  | None -> "null"
+  | Some (tensorization, statements, scalar_fallbacks) ->
+      Printf.sprintf {|{"tensorization":"%s","statements":%d,"scalar_fallbacks":%d}|}
+        (string tensorization) statements scalar_fallbacks
+
+let tune_object ~shipped ~searches ~replays ~no_searches ~shipped_mma ~arms =
+  Printf.sprintf
+    {|{"shipped":"%s","searches":%d,"replays":%d,"no_searches":%d,"shipped_mma":%s,"arms":[%s]}|}
+    (string shipped) searches replays no_searches (mma_object shipped_mma)
     (String.concat ~sep:"," arms)
 
 (** The result line [orchestrate.py] parses, as a string without its trailing newline.

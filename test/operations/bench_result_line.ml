@@ -45,7 +45,11 @@ let () =
    rendered as the lane-0 scalar fallback, so its 0.75 ms is a scalar timing under a tensorized
    label. *)
 let tune =
+  (* [shipped_mma] is the shipped ARTIFACT's census, and it disagrees with arm B's on purpose: this
+     cell shipped a flip refinement or a replay fallback, so the arm describes a schedule that was
+     discarded and only this field describes what ran (gh-ocannl-626). *)
   Bench_json.tune_object ~shipped:"B" ~searches:3 ~replays:1 ~no_searches:1
+    ~shipped_mma:(Some ("tensorized", 4, 0))
     ~arms:
       [
         Bench_json.tune_arm ~name:"A" ~state:"search-died" ~searched:true ~cache_hit:false
@@ -140,7 +144,22 @@ let () =
     (Yojson.Safe.equal (member "tensorized" (arm "B")) (`Bool true)
     && Yojson.Safe.equal (member "tensorization" (arm "B")) (`String "scalar-fallback")
     && Yojson.Safe.equal (member "mma_statements" (arm "B")) (`Int 2)
-    && Yojson.Safe.equal (member "mma_scalar_fallbacks" (arm "B")) (`Int 2))
+    && Yojson.Safe.equal (member "mma_scalar_fallbacks" (arm "B")) (`Int 2));
+  (* The shipped artifact's own census, which the arms cannot always speak for. *)
+  let shipped_mma = member "shipped_mma" (member "tune" j) in
+  V.p "the shipped artifact's census is carried apart from the arms'"
+    (Yojson.Safe.equal (member "tensorization" shipped_mma) (`String "tensorized")
+    && Yojson.Safe.equal (member "statements" shipped_mma) (`Int 4)
+    && Yojson.Safe.equal (member "scalar_fallbacks" shipped_mma) (`Int 0)
+    (* And it is free to disagree with the arm named as shipped: that is the case it exists for. *)
+    && Yojson.Safe.equal (member "tensorization" (arm "B")) (`String "scalar-fallback"));
+  V.p "a tune object that recorded no shipped census says null, not a label"
+    (Yojson.Safe.equal
+       (member "shipped_mma"
+          (Yojson.Safe.from_string
+             (Bench_json.tune_object ~shipped:"A" ~searches:1 ~replays:0 ~no_searches:0
+                ~shipped_mma:None ~arms:[])))
+       `Null)
 
 (* The negative control: without the mapping the line carries OCaml's own spellings, and this
    oracle rejects each of them — which is what makes the verdicts above evidence rather than

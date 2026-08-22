@@ -22,8 +22,12 @@
   `bin/narrow_gebp_bench` (through the now-shared `C_syntax.mma_summary_string`, which also ends
   the two benches' disagreement about the "did this tensorize" predicate), the benchmark harness's
   per-kernel segment table, and the result line's `tune` arms as `tensorization` +
-  `mma_statements`. `orchestrate.py` reads the shipped arm's pair into the report's `mma` column
-  (`SCALAR FALLBACK` / `NO MMA EMITTED` shouted) and prints a `TENSORIZATION NOTICE`.
+  `mma_statements`, plus `shipped_mma`: the census of the routine whose steps were timed, which is
+  what `orchestrate.py` reads into the report's `mma` column (`SCALAR FALLBACK` / `NO MMA EMITTED`
+  shouted, plus a `TENSORIZATION NOTICE`). Not the arm named as shipped — a crowned arm candidate
+  is not always the shipped artifact, since a flip refinement ships under `shipped: "flip"` and is
+  not an arm at all, and the `timing_ctx` path can fall back to the untuned default after crowning
+  a winner.
 
 - **One environment spelling, and no silent demotion** (gh-ocannl-652): a configuration key is read
   from `OCANNL_<KEY>` and from nothing else. The lowercase `ocannl_<key>`, which `read_env_var`

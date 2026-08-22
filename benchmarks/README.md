@@ -348,11 +348,16 @@ than the driver (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION` at module load), run it wi
   (every emitted `Tile_mma` declined to the lane-0 scalar loop) or `"not-requested"` (codegen
   emitted no `Tile_mma` at all), read off the compiled routine's census rather than re-derived by
   a harness, and `null` when there was no crowned candidate to consult — so an arm that consulted
-  no census can never read as tensorized. A `Tile_mma` declines for a column extent below the
+  no census can never read as tensorized. The `tune` object additionally carries `shipped_mma` —
+  the census of the routine whose steps were TIMED — and that is what `orchestrate.py` reads, not
+  the arm named as shipped: a gh-555 flip refinement that wins ships under `shipped: "flip"` and is
+  not an arm at all, and on the `timing_ctx` path the tuner recompiles the winner in the production
+  context and falls back to the untuned default when that replay is rejected, so in both cases the
+  arm describes a schedule that was discarded. A `Tile_mma` declines for a column extent below the
   compute vector width, a narrow `vector_bytes`, mixed operand precisions, transposed-B storage or
   `debug_log_from_routines`, and the resulting scalar kernel compiles, runs and times perfectly
   well under an `mma-*` label — so `tensorized: true` with any other `tensorization` means the
-  row's number is a *scalar* timing. `orchestrate.py` reads the shipped arm's pair into the
+  row's number is a *scalar* timing. `orchestrate.py` reads that pair into the
   report's `mma` column (**`SCALAR FALLBACK`** / **`NO MMA EMITTED`** are shouted; `tensorized`
   and `—` are not) and prints a `TENSORIZATION NOTICE` naming the mismatched cells. It is a notice
   rather than a gate: declining is sometimes the correct codegen decision, and the defect is

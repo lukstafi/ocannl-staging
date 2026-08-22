@@ -282,6 +282,9 @@ let () =
       ~timing_ctx:scratch ctx batch_loss comp bindings
   in
   let ctx, routines = H.compile_train_step ~tune ~tuned ctx bindings parts in
+  (* What the timed artifact emitted, off the routines themselves (gh-ocannl-626): a flip
+     refinement or a timing_ctx replay fallback ships something no arm report describes. *)
+  H.collect_shipped arms routines;
   let compile_s = Unix.gettimeofday () -. t0 in
   (* The scaled step threads the context (Loss_scaler.update overwrites the scale tensors). *)
   let ctx_ref = ref ctx in
