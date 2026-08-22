@@ -75,11 +75,19 @@ let exempt_sites : (string * string) list = []
    here would be a list of claims in a test source, and this check would have to exempt its own file
    to hold everyone else to the rule. A head stops before the boolean, so it is not one.
 
-   Every entry here is a row of a table or a census, where the boolean records what happened rather
-   than deciding whether it was right. Each also carries its assertion separately, through
-   `Verdict.claim`/`claimf` on the same bound boolean, which is the pattern that lets a row keep its
-   shape without losing its gate -- so what is exempted is the PRINT, never the check. An entry
-   whose test has no such claim beside it is an exemption that should not have been granted. *)
+   Every entry here but the first is a row of a table or a census, where the boolean records what
+   happened rather than deciding whether it was right. Each also carries its assertion separately,
+   through `Verdict.claim`/`claimf` on the same bound boolean, which is the pattern that lets a row
+   keep its shape without losing its gate -- so what is exempted is the PRINT, never the check. An
+   entry whose test has no such claim beside it is an exemption that should not have been granted,
+   and that is not a hypothetical: `affine_extraction`'s parallelizability table was exempted here
+   while nothing claimed it, so a conflict analysis that stopped seeing the reduction's cross-thread
+   dependence would have flipped a row to `true`, exited zero, and been promotable (Codex P2, round
+   2). All seven entries were audited against the invariant when that one was found.
+
+   The first entry is the structural exception, and it is the only kind there can be: the body of
+   the claim printer itself, which is not a row and has no claim beside it because it IS the claim.
+   A second entry of that kind would mean a second gate. *)
 let exempt_computed_sites =
   [
     ( "test/support/verdict.ml:%s: ",
