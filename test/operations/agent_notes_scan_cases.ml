@@ -65,8 +65,18 @@ let structure_cases =
     ( "an indented line at the parent's depth while a nested bullet is open",
       "# Title\n\n- A fact with parts:\n  - the first part.\n  more of the first fact.\n",
       [ "bullet-integrity @ f.md:5" ] );
+    (* A blank line inside a list item does NOT end the list: what follows, indented to the item's
+       continuation depth, is a second PARAGRAPH of the same bullet. This is the shape a note on
+       master arrived in while this PR was in review, and closing the list there reported nine
+       findings against somebody else's correctly written work. *)
+    ( "a second paragraph of a bullet, after a blank line",
+      "# Title\n\n- A finished fact.\n\n  A second paragraph of the same bullet.\n",
+      [] );
+    ( "a second paragraph that is itself cut short",
+      "# Title\n\n- A finished fact.\n\n  A second paragraph that stops mid-senten\n",
+      [ "bullet-integrity @ f.md:3" ] );
     ( "an indented line continuing nothing",
-      "# Title\n\n- A finished fact.\n\n  a line indented under a blank one.\n",
+      "# Title\n\nPreamble prose.\n\n  a line indented under no bullet at all.\n",
       [ "bullet-integrity @ f.md:5" ] );
     ( "a continuation indented past its bullet",
       "# Title\n\n- A fact that\n    continues four deep.\n",

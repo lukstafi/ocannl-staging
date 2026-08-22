@@ -9,6 +9,8 @@ ok: bullets -- a bullet ending in an identifier and no punctuation
 ok: bullets -- a nested bullet with its own continuations
 ok: bullets -- a nested list where parent and child are both cut short
 ok: bullets -- an indented line at the parent's depth while a nested bullet is open
+ok: bullets -- a second paragraph of a bullet, after a blank line
+ok: bullets -- a second paragraph that is itself cut short
 ok: bullets -- an indented line continuing nothing
 ok: bullets -- a continuation indented past its bullet
 ok: bullets -- a nested bullet under no bullet at all

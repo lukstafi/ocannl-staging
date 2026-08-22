@@ -188,6 +188,10 @@ type inert_state = In_text | In_code of int | In_comment | In_fence of char * in
 type inert_scan = {
   ranges : (int * (int * int) list) list;
   comment_ranges : (int * (int * int) list) list;
+  fence_ranges : (int * (int * int) list) list;
+      (** The lines of a fenced block, delimiters included. A fence is a LEAF BLOCK: it ends the
+          paragraph above it, so its lines belong to no bullet and contribute no text -- unlike a
+          code span's lines, which are part of the sentence they sit in. *)
       (** The subset of {!ranges} that is HTML comment. The distinction is not cosmetic: text inside
           a code span RENDERS -- it is part of what a reader sees and part of what a bullet says --
           while text inside a comment does not. Treating both as equally absent made two bullets
@@ -246,6 +250,7 @@ let inert_by_line contents =
      at the end of the file, which is exactly what a renderer does with them. *)
   let committed : (int, (int * int) list) Hashtbl.t = Hashtbl.create (module Int) in
   let comment_tbl : (int, (int * int) list) Hashtbl.t = Hashtbl.create (module Int) in
+  let fence_tbl : (int, (int * int) list) Hashtbl.t = Hashtbl.create (module Int) in
   let pending = ref [] in
   let add tbl lineno range =
     Hashtbl.update tbl lineno ~f:(function None -> [ range ] | Some rs -> range :: rs)
@@ -284,7 +289,11 @@ let inert_by_line contents =
             | None -> false)
         | _ -> false
       in
-      if fence_line then (if n > 0 then add committed lineno (0, n))
+      if fence_line then
+        if n > 0 then (
+          add committed lineno (0, n);
+          add fence_tbl lineno (0, n))
+        else add fence_tbl lineno (0, 0)
       else
         while !i < n do
           match !state with
@@ -344,6 +353,9 @@ let inert_by_line contents =
     comment_ranges =
       List.rev_map !ranges_of ~f:(fun lineno ->
           (lineno, List.rev (Option.value (Hashtbl.find comment_tbl lineno) ~default:[])));
+    fence_ranges =
+      List.rev_map !ranges_of ~f:(fun lineno ->
+          (lineno, List.rev (Option.value (Hashtbl.find fence_tbl lineno) ~default:[])));
     unclosed = !state;
     fences = List.rev !fences;
     comments = List.rev !comments;
@@ -649,6 +661,13 @@ let parse_file ~file contents =
      the repetition rule reports against (the SECOND occurrence is the finding) and what orders the
      findings of a file. *)
   let stack : (bullet * string list ref) list ref = ref [] in
+  (* A blank line inside a list item does NOT end the list: what follows, indented to the item's
+     continuation depth, is a second PARAGRAPH of the same bullet. Closing the list there reported
+     nine findings against a correctly written note the moment one arrived on master (gh-ocannl-691
+     review, round 9 CI) -- a false failure on somebody else's intact work, which is the failure
+     mode this whole scan is supposed to avoid causing. So a blank line is remembered, not acted on;
+     the next line decides whether the list ended. *)
+  let blank_seen = ref false in
   let close_all () =
     List.iter (List.rev !stack) ~f:(fun (b, texts) ->
         let text = String.concat ~sep:" " (List.rev !texts) in
@@ -660,6 +679,7 @@ let parse_file ~file contents =
   let scan = inert_by_line contents in
   let inert = scan.ranges in
   let comments_at = scan.comment_ranges in
+  let fences_at = scan.fence_ranges in
   List.iter (lines contents) ~f:(fun (lineno, line) ->
       let stripped = String.strip line in
       (* A line wholly inside a code span or an HTML comment is somebody's example. Parsing it as
@@ -676,17 +696,25 @@ let parse_file ~file contents =
          whose first seventeen characters close a code span and whose remainder is prose, and it is
          a continuation at depth two however much of its left edge is code. *)
       let marker_is_text = not (in_any_span spans (indent_of line)) in
+      (* Read once and cleared here, so every branch below sees the same answer and no branch has to
+         remember to reset it. *)
+      let after_blank = !blank_seen in
+      if not (is_blank line) then blank_seen := false;
       if line_is_inert ~spans line then
         (* Wholly inert, so it carries no structure -- but it may still carry TEXT. A line inside a
            code span renders, and is part of what its bullet says; a line inside an HTML comment does
            not, and is not. Collapsing the two made bullets differing only on a code line identical,
            and the repetition rule called them duplicates (Codex P2, round 8). *)
-        (if line_is_inert ~spans:(spans_at comments_at lineno) line then ()
+        (if not (List.is_empty (spans_at fences_at lineno)) then
+           (* A fenced block is a leaf block: it ends the list above it and its lines are nobody's
+              prose. The fence itself is reported by [hiding_constructs]. *)
+           close_all ()
+         else if line_is_inert ~spans:(spans_at comments_at lineno) line then ()
          else
            match !stack with
            | [] -> ()
            | (_, texts) :: _ -> texts := stripped :: !texts)
-      else if is_blank line then close_all ()
+      else if is_blank line then blank_seen := true
       else if not marker_is_text then
         (* Text, with no structural marker of its own: it continues an open bullet, or it is prose
            and closes the list. At column zero under an open bullet it is a LAZY CONTINUATION, the
@@ -695,7 +723,7 @@ let parse_file ~file contents =
            The first line of such a bullet reads as terminated once the unmatched delimiter is
            stripped, so nothing else would have caught it. *)
         if indent_of line = 0 then (
-          if not (List.is_empty !stack) then
+          if (not after_blank) && not (List.is_empty !stack) then
             bad lineno
               "prose at column zero directly under a bullet, which Markdown reads as a lazy \
                continuation of it: separate it with a blank line, or indent it two spaces to make \
@@ -774,7 +802,7 @@ let parse_file ~file contents =
                                the whole transition (Codex P2, round 3). Nothing legitimate needs
                                it: the notes separate a paragraph from the list above with a blank
                                line, which is what closes the list here. *)
-                            if not (List.is_empty !stack) then
+                            if (not after_blank) && not (List.is_empty !stack) then
                               bad lineno
                                 "prose at column zero directly under a bullet, which Markdown reads \
                                  as a lazy continuation of it: separate it with a blank line, or \
