@@ -261,6 +261,8 @@ let () =
       best_ms = 0.;
       baseline_ms = 0.;
       default_ms = None;
+      (* Also pre-gh-579: no stored tensorized best, so a replay of it reports none. *)
+      mma_best_ms = None;
       default_fingerprint = None;
     };
   let hit_report = ref None in

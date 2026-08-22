@@ -667,8 +667,13 @@ type report = {
           carries no [Tensorize] counts in [mma_timed] and not here. Same choice as
           [best_tensorized], for the same reason: what shipped is a property of the schedule.
 
-          [infinity] on a cache hit even when the replayed winner tensorizes: this process timed
-          nothing, and [best_ms] there is the searching process's measurement. *)
+          On a cache hit it is the STORING search's measurement, exactly as [best_ms] and
+          [baseline_ms] there are (gh-ocannl-579): this process timed nothing, but the counters are
+          what describe this call, while the times describe the program — under a key regime that
+          already makes those two replayable. Without that the flip chain's profitability term would
+          rank the decision surface one way on the cold run that measured the family and the other
+          way on every warm-cache run after it. [infinity] when the storing search timed no
+          tensorized candidate, and for entries written before the field existed. *)
   best_schedule : Ir.Schedule_cache.saved_schedule;
       (** The winner's schedule; for a fissioned winner, the concatenation of the per-segment
           schedules (informational). Empty when nothing was timed. *)
@@ -747,8 +752,54 @@ val placement_enablement :
     Empty on backends without an [mma] capability. A classified fission failure degrades to
     whole-routine detection; the classification is a ranking prior, never a legality fact. *)
 
+type family_profit =
+  | Unmeasured
+      (** No completed search timed a tensorized candidate ([mma_best_ms] infinite), so nothing is
+          known about the family's speed here — including the gh-ocannl-521 state (many seeded, none
+          surviving candidate compile), which is a fact about candidate compilation, not about the
+          family. Read from [mma_best_ms] rather than [mma_timed]: the latter counts LABEL-promised
+          candidates, and a beam-appended [Tensorize] on a saved incumbent measures the family
+          without promising it in a label. *)
+  | Pays of float
+      (** The best timed tensorized candidate ([mma_best_ms], structural rather than label-keyed)
+          was within the profit margin of the search's best, at this ratio of it ([<= 1.] when the
+          family won outright). *)
+  | Loses of float
+      (** It lost by more than the margin, at this ratio of the search's best. On gh-514's metal/f16
+          [mlp_wide] cell the ratio is ~12 (mma_best 79-92 ms against 7.5 ms). *)
+
+val flip_profit_margin_of_string : string -> float
+(** Parse config [tune_flip_profit_margin] (gh-ocannl-579): a ratio of at least 1.0. Anything else —
+    unparseable, non-finite, or below 1.0, which would demote a family that WON — raises
+    {!Utils.User_error} rather than falling back to the default, since a run that asked for a
+    profitability policy it also made impossible should not quietly get a different one. Exposed for
+    tests. *)
+
+val family_profit_of_report : ?margin:float -> report -> family_profit
+val family_profit_of_reports : ?margin:float -> report list -> family_profit
+(** What completed searches measured about the tensorized family's profitability on this device
+    (gh-ocannl-579): [mma_best_ms] against [best_ms], compared to config
+    [tune_flip_profit_margin]. Over several reports the most favourable evidence wins — the
+    expressibility prior is deleted only by evidence that contradicts it, never by the absence of a
+    confirmation. A failing arm's report counts: its timings are measurements of the family even
+    though its [best_ms] is not shippable. Exposed for tests and for [Train.tune_placements], which
+    derives it from the placement A/B's two arm reports. *)
+
+val family_profit_summary : family_profit -> string
+(** A log-line phrase naming the evidence and its ratio. *)
+
+val effective_flip_ordering :
+  ordering:[ `Cost | `Enablement | `Profitable ] ->
+  profit:family_profit ->
+  [ `Cost | `Enablement ]
+(** The ordering [`Profitable] resolves to under the given evidence: [`Enablement] when the family
+    is unmeasured or competitive, [`Cost] when it is measured to lose here. Both of the prior's
+    classes go at once, because the promotion of family-unlocking flips and the demotion of
+    family-breaking ones are the same bet on the same family. Exposed for tests. *)
+
 val rank_flip_candidates :
-  ordering:[ `Cost | `Enablement ] ->
+  ordering:[ `Cost | `Enablement | `Profitable ] ->
+  ?profit:family_profit ->
   enablement:Set.M(Ir.Tnode).t ->
   disablement:Set.M(Ir.Tnode).t ->
   Ir.Low_level.flip_candidate list ->
@@ -756,12 +807,25 @@ val rank_flip_candidates :
 (** Deduplicate (by [Tn.uid], keep-first) and rank the decision surface. [`Cost] is the legacy
     recompute-cost-descending order (the gh-555 chain's, kept as the evaluation baseline);
     [`Enablement] sorts family-unlocking [`Materialize] flips ([enablement] members) first and
-    family-breaking [`Inline] flips (members of either set) last, cost-descending within each class.
-    Config [tune_flip_ordering] selects the default. Exposed for tests. *)
+    family-breaking [`Inline] flips (members of either set) last, cost-descending within each class;
+    [`Profitable] (gh-ocannl-579) is [`Enablement] weighed against [profit] per
+    {!effective_flip_ordering} — the prior models expressibility, and on a device where the family
+    it unlocks is measured hopeless, promotion is pure opportunity cost that displaces the winning
+    flip out of a small budget. [profit] defaults to [Unmeasured] (so a caller with no measurements,
+    such as {!model_default}, gets the prior). Config [tune_flip_ordering] selects the default
+    ordering. Exposed for tests. *)
 
 type placement_surface = {
   ps_candidates : Ir.Low_level.flip_candidate list;
       (** Deduplicated, ranked per {!rank_flip_candidates} under config [tune_flip_ordering]. *)
+  ps_ordering : [ `Cost | `Enablement ];
+      (** The ordering [ps_candidates] actually came out in — with [tune_flip_ordering=profitable]
+          (the default) this is where the measured evidence landed, so a log line or a test can say
+          which prior ranked the surface rather than which one was configured. *)
+  ps_profit : family_profit option;
+      (** The evidence that decided [ps_ordering], and [None] when the configured ordering is
+          unconditional ([cost] or [enablement]) and no evidence was consulted — which is also why
+          such a run never reads [tune_flip_profit_margin] and cannot fail on a malformed one. *)
   ps_enablement : Set.M(Ir.Tnode).t;
   ps_disablement : Set.M(Ir.Tnode).t;
   ps_floor_ms : materialized:Ir.Tnode.t list -> float option;
@@ -779,7 +843,8 @@ type placement_surface = {
 
 val placement_surface :
   ?name:string ->
-  ?ordering:[ `Cost | `Enablement ] ->
+  ?ordering:[ `Cost | `Enablement | `Profitable ] ->
+  ?evidence:report list ->
   Context.t ->
   Ir.Assignments.comp ->
   Ir.Indexing.unit_bindings ->
@@ -789,8 +854,12 @@ val placement_surface :
     effect on [ctx]). [name] names the computation for those lowerings exactly as
     {!Context.compile}'s does, and is what makes this work for a comp carrying no
     {!Ir.Assignments.Block_comment} (gh-ocannl-669). [ordering] defaults from config
-    [tune_flip_ordering] ([enablement]). Consumed by [Train.tune_placements]' flip refinement and by
-    {!model_default}'s placement search (config [model_default_placements]). *)
+    [tune_flip_ordering] ([profitable]). [evidence] is the completed searches [`Profitable] weighs
+    the enablement prior against ({!family_profit_of_reports}, reported as [ps_profit]):
+    [Train.tune_placements]' flip refinement passes the placement A/B arms' reports, while
+    {!model_default}'s placement search (config [model_default_placements]) passes none — it
+    measures nothing, so the prior stands there. Under an unconditional ordering the evidence is not
+    derived at all, so such a run never reads [tune_flip_profit_margin]. *)
 
 type model_choice = {
   mc_label : string;

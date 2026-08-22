@@ -151,6 +151,7 @@ let known_config_keys =
       "autotune_log";
       "tune_inline_flips";
       "tune_flip_ordering";
+      "tune_flip_profit_margin";
       "tune_ship_arm";
       "strict_failure_classification";
       (* Analytic cost model (gh-ocannl-491) *)
@@ -321,7 +322,7 @@ let config_key_classification : (config_key_class * string * string list) list =
     ( Search_shaping,
       "it makes the tuner try alternative inlining decisions; each alternative is a different \
        program and keys on its own digest",
-      [ "tune_inline_flips"; "tune_flip_ordering" ] );
+      [ "tune_inline_flips"; "tune_flip_ordering"; "tune_flip_profit_margin" ] );
     ( Search_shaping,
       "it decides which of the two searched placement arms ships, overriding the measured \
        comparison rather than changing either arm: each arm is a different program keyed on its \

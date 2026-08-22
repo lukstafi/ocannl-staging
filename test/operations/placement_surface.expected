@@ -22,6 +22,15 @@ enablement ranking:
 cost ranking buries the enablement candidates below the decoy: true
 enablement ranking puts the family-unlocking materialize flip first: true
 enablement ranking puts the family-breaking inline flip last: true
+a measured-losing family ranks the surface exactly as cost does: true
+a measured-paying family ranks it exactly as the enablement prior does: true
+an unmeasured family leaves the enablement prior standing: true
+the pure enablement ordering ignores the evidence (the evaluation baseline): true
+the enablement prior pushes the decoy out of a budget-2 chain: true
+under a measured-losing family the decoy is back in the budget-2 chain: true
+under a measured-paying family the promotion keeps the budget slot: true
+an unconditional ordering records no profitability evidence: true
+the profitable ordering records the verdict it ranked by: true
 the floor is present under the pinned envelope: true
 committing mbs does not lower the floor: true
 committing mc on top does not lower it either: true

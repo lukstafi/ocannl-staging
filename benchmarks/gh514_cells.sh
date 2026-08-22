@@ -139,8 +139,9 @@ mlp B-off 1 "$PREC" ${PEAKS[@]+"${PEAKS[@]}"} --ocannl_autotune_search=true \
 mlp B-on 1 "$PREC" ${PEAKS[@]+"${PEAKS[@]}"} --ocannl_autotune_search=true \
   --ocannl_autotune_keep_fraction=1 --ocannl_autotune_repeats=3 \
   --ocannl_tune_inline_flips=0 --ocannl_autotune_bound_pruning=true
-# C: the flip chain at budget 5, legacy cost ordering vs enablement ordering, two replicates;
-# then enablement + bound pruning.
+# C: the flip chain at budget 5, legacy cost ordering vs the pure enablement prior vs the shipped
+# default (the prior weighed against the arms' measured profitability, gh-ocannl-579), two
+# replicates; then enablement + bound pruning.
 for r in 1 2; do
   mlp C-cost-$r 1 "$PREC" ${PEAKS[@]+"${PEAKS[@]}"} --ocannl_autotune_search=true \
     --ocannl_autotune_keep_fraction=1 --ocannl_autotune_repeats=3 \
@@ -150,6 +151,10 @@ for r in 1 2; do
     --ocannl_autotune_keep_fraction=1 --ocannl_autotune_repeats=3 \
     --ocannl_autotune_bound_pruning=false \
     --ocannl_tune_inline_flips=5 --ocannl_tune_flip_ordering=enablement
+  mlp C-prof-$r 1 "$PREC" ${PEAKS[@]+"${PEAKS[@]}"} --ocannl_autotune_search=true \
+    --ocannl_autotune_keep_fraction=1 --ocannl_autotune_repeats=3 \
+    --ocannl_autotune_bound_pruning=false \
+    --ocannl_tune_inline_flips=5 --ocannl_tune_flip_ordering=profitable
 done
 mlp C-enab-bp 1 "$PREC" ${PEAKS[@]+"${PEAKS[@]}"} --ocannl_autotune_search=true \
   --ocannl_autotune_keep_fraction=1 --ocannl_autotune_repeats=3 \

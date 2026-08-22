@@ -301,8 +301,18 @@ per-fission-segment, the granularity the seeders detect at) of the all-materiali
 specialization that have no eligible counterpart under default placements. A `Materialize` flip
 of such a site's operand or destination is family-unlocking and ranks first; an `Inline` flip
 of any eligible site's node can only move away from the family and ranks last; recompute cost
-orders within each class (`Autotune.rank_flip_candidates`). Config `tune_flip_ordering`
-defaults to `enablement`; `cost` keeps the legacy ranking as the evaluation baseline.
+orders within each class (`Autotune.rank_flip_candidates`). Config `tune_flip_ordering` selects
+it; `cost` keeps the legacy ranking as the evaluation baseline, and `enablement` selects this
+pure prior — which is what phase 6's cells C were measured under, and what to pin to reproduce
+them.
+
+The shipped default is neither: phase 6 found that the prior models expressibility and not
+profitability, and on metal/f16 promoting a family that loses tenfold displaced the winning
+cheap flip out of a budget-5 chain (follow-up gh-ocannl-579). `tune_flip_ordering=profitable`,
+the default since, weighs the prior against what the placement A/B's own arms MEASURED about
+that family (`Autotune.family_profit_of_reports`: `mma_best_ms` against `best_ms`, compared to
+`tune_flip_profit_margin`) — it IS `enablement` when the family is competitive or was never
+timed, and degenerates to `cost` when it is measured to lose here.
 
 ## Phases
 

@@ -2,6 +2,32 @@
 
 ### Changed
 
+- **The flip chain's enablement promotion is weighed against measured profitability**
+  (gh-ocannl-579, the last open follow-up of the gh-ocannl-514 branch-and-bound arc). The
+  enablement prior ranks a placement flip by which sketch families it makes EXPRESSIBLE — the
+  gh-ocannl-558 lesson, which the recompute-cost bound has no term for — and prices nothing about
+  whether those families pay. On gh-ocannl-514's metal/f16 `mlp_wide` cell that cost the run: the
+  two promoted cast twins took budget slots 1-2 of a budget-5 chain, the family they unlocked timed
+  79-92 ms against the arm's 7.5 ms, and the cheap `inline` flip that actually won (cost-rank 5)
+  fell out of the budget — enablement-ordered chains shipped 7.03-7.14 ms where cost-ordered ones
+  shipped 6.55/6.64. The evidence that settles it is already paid for at the decision point:
+  `Train.tune_placements` searches arm B, the all-materialized specialization the prior derives its
+  enablement set FROM, before the chain walks, so its report's best tensorized time against its best
+  time prices the promotion for free, on this device and this computation. New
+  `Autotune.family_profit_of_reports` reads both arms' reports and the new default
+  `tune_flip_ordering=profitable` resolves to `enablement` when the family is competitive or was
+  never timed, and to `cost` when it lost by more than the new `tune_flip_profit_margin` (default
+  1.25). Absence of a confirmation is not evidence against — an arm that seeded tensorized
+  candidates and timed none measured nothing about the family, so gh-ocannl-558's budget-5
+  reachability closure is untouched — and when the prior is voided both its classes go at once,
+  since promoting family-unlocking flips and demoting family-breaking ones are the same bet on the
+  same family. The verdict does not depend on cache state: the schedule-cache entry now carries the
+  storing search's `mma_best_ms` (an optional field, so existing entries stay readable and claim
+  nothing), replayed like `best_ms` and `baseline_ms` already were — the counters describe the call,
+  the times describe the program. `tune_flip_ordering=cost` and `=enablement` remain as the two
+  unconditional evaluation baselines the gh-514 report's cells were measured under, and under them
+  the evidence is never derived, so `tune_flip_profit_margin` is never read; `Autotune.model_default`'s
+  placement walk measures nothing, so it gets the prior unchanged.
 - **A "tensorized" timing can no longer be a scalar-fallback timing** (gh-ocannl-626). The
   `Tile_mma` rendering census was a pair of global refs each consumer bracketed by hand (six copies
   of the same five-line `Exn.protect`), so the default for any new timing harness was to report a

@@ -67,7 +67,9 @@ type report = {
   mma_best_ms : float;
       (** The best timed tensorized candidate's time (gh-ocannl-546), [infinity] when none was
           timed. Its margin against [best_ms] is what tells a crowned tensorization apart from one
-          that lost by 1% and one that lost by 40%. *)
+          that lost by 1% and one that lost by 40%. Structural, not label-keyed (see its set site),
+          and on a [Cache_replay] report it is the storing search's measurement, like [best_ms] —
+          the counters describe this call, the times describe the program. *)
   best_schedule : SC.saved_schedule;
 }
 
@@ -1699,15 +1701,99 @@ let placement_enablement ~limits ~static_indices ~(base : LL.optimized) ~(allmat
   in
   (site_tns enabling_sites, site_tns base_sites)
 
+(* gh-ocannl-579: the profitability term. The enablement prior above prices EXPRESSIBILITY — which
+   sketch families a placement makes reachable — and nothing else, so it promotes a flip whose family
+   this device has already been measured to lose with. The evidence that settles it is in hand at the
+   only place the prior is consumed: [Train.tune_placements] searches arm B (materialize-all) — the
+   very specialization [placement_enablement] derives [enablement] from — before the flip chain
+   walks, and its report says what the tensorized family was worth here ([mma_best_ms] against
+   [best_ms], same device, same computation, same session, already paid for). *)
+
+type family_profit = Unmeasured | Pays of float | Loses of float
+
+(* Most favourable evidence wins: the prior is deleted only by evidence that contradicts it, never by
+   the mere absence of a confirmation, and a single arm that measured a competitive family outranks
+   another that measured a losing one (the arms search different placements; the promotion is a bet
+   on the best placement reachable, not on the average). *)
+let combine_family_profit a b =
+  match (a, b) with
+  | Unmeasured, x | x, Unmeasured -> x
+  | Pays x, Pays y | Loses x, Loses y -> if Float.(x <= y) then a else b
+  | (Pays _ as p), Loses _ | Loses _, (Pays _ as p) -> p
+
+let flip_profit_margin_of_string raw =
+  let raw = String.strip raw in
+  let bad () =
+    raise
+    @@ Utils.User_error
+         ("Autotune: ocannl_tune_flip_profit_margin should be a ratio of at least 1.0 (how much \
+           worse than a search's best the best tensorized candidate may be and still be worth a \
+           flip-budget slot); found: " ^ raw)
+  in
+  match Float.of_string raw with
+  | m when Float.(is_finite m && m >= 1.) -> m
+  | _ -> bad ()
+  | exception _ -> bad ()
+
+let flip_profit_margin () =
+  flip_profit_margin_of_string
+    (Utils.get_global_arg ~arg_name:"tune_flip_profit_margin" ~default:"1.25")
+
+(** What one completed search measured about the tensorized family's profitability. A search that
+    timed no tensorized candidate measured nothing about it — including one that seeded many and
+    timed none, the gh-ocannl-521 state, which is a fact about candidate compilation rather than
+    about the family's speed.
+
+    "Was one timed" is [mma_best_ms] being finite, NOT [mma_timed > 0]: those are deliberately
+    different populations (see where [mma_best_ms] is set). [mma_timed] counts candidates whose
+    LABEL promised a tensorized pipeline, while a beam round appending a [Tensorize] to a saved or
+    preset incumbent promises nothing in its label and is exactly as tensorized — and can win. A
+    search whose only tensorized measurement came that way has measured the family, and keying this
+    guard on the label would keep the prior standing against a family that lost tenfold. *)
+let family_profit_of_report ?margin (r : report) =
+  let margin = match margin with Some m -> m | None -> flip_profit_margin () in
+  if
+    (not (Float.is_finite r.mma_best_ms))
+    || (not (Float.is_finite r.best_ms))
+    || Float.(r.best_ms <= 0.)
+  then Unmeasured
+  else
+    let ratio = r.mma_best_ms /. r.best_ms in
+    if Float.(ratio <= margin) then Pays ratio else Loses ratio
+
+let family_profit_of_reports ?margin reports =
+  List.fold reports ~init:Unmeasured ~f:(fun acc r ->
+      combine_family_profit acc (family_profit_of_report ?margin r))
+
+let family_profit_summary = function
+  | Unmeasured -> "the tensorized family was never timed, so the enablement prior stands"
+  | Pays r ->
+      Printf.sprintf "the tensorized family measured %.2fx the best time, within the profit margin"
+        r
+  | Loses r -> Printf.sprintf "the tensorized family measured %.2fx the best time, out of profit" r
+
+(** The ordering a ranking actually uses. [`Profitable] is the prior weighed against the measured
+    evidence: with none, or with evidence that the family is competitive, it IS [`Enablement]; with
+    measured evidence that the family loses here, both of the prior's classes are void at once — the
+    promotion of family-unlocking flips and the demotion of family-breaking ones are the same bet on
+    the same family — and the ranking degenerates to [`Cost]. *)
+let effective_flip_ordering ~ordering ~profit =
+  match (ordering, profit) with
+  | `Cost, _ -> `Cost
+  | `Enablement, _ -> `Enablement
+  | `Profitable, (Unmeasured | Pays _) -> `Enablement
+  | `Profitable, Loses _ -> `Cost
+
 let flip_ordering () =
   match
     String.lowercase
-      (String.strip (Utils.get_global_arg ~arg_name:"tune_flip_ordering" ~default:"enablement"))
+      (String.strip (Utils.get_global_arg ~arg_name:"tune_flip_ordering" ~default:"profitable"))
   with
   | "cost" -> `Cost
-  | _ -> `Enablement
+  | "enablement" -> `Enablement
+  | _ -> `Profitable
 
-let rank_flip_candidates ~ordering ~enablement ~disablement candidates =
+let rank_flip_candidates ~ordering ?(profit = Unmeasured) ~enablement ~disablement candidates =
   let deduped =
     List.fold candidates ~init:[] ~f:(fun acc (fc : LL.flip_candidate) ->
         (* Identity is [Tn.uid] ([Tn.equal]), not the session [id], which can repeat across
@@ -1721,7 +1807,7 @@ let rank_flip_candidates ~ordering ~enablement ~disablement candidates =
     | 0 -> Ir.Tnode.compare a.LL.fc_tn b.LL.fc_tn
     | c -> c
   in
-  match ordering with
+  match effective_flip_ordering ~ordering ~profit with
   | `Cost -> List.sort deduped ~compare:by_cost
   | `Enablement ->
       (* Three classes, cost-descending within each: family-unlocking [`Materialize] flips first
@@ -1740,13 +1826,23 @@ let rank_flip_candidates ~ordering ~enablement ~disablement candidates =
 
 type placement_surface = {
   ps_candidates : LL.flip_candidate list;
+  ps_ordering : [ `Cost | `Enablement ];
+  ps_profit : family_profit option;
   ps_enablement : Set.M(Ir.Tnode).t;
   ps_disablement : Set.M(Ir.Tnode).t;
   ps_floor_ms : materialized:Ir.Tnode.t list -> float option;
 }
 
-let placement_surface ?name ?ordering ctx comp bindings =
+let placement_surface ?name ?ordering ?(evidence = []) ctx comp bindings =
   let ordering = match ordering with Some o -> o | None -> flip_ordering () in
+  (* The evidence is derived only on the path that consults it, so an unconditional ordering does
+     not depend on [tune_flip_profit_margin] at all — it is not merely ignored: a malformed or
+     out-of-range margin must not abort a run pinned to a baseline the term plays no part in. *)
+  let profit =
+    match ordering with
+    | `Profitable -> Some (family_profit_of_reports evidence)
+    | `Cost | `Enablement -> None
+  in
   let limits = Context.hardware_limits ctx in
   let static_indices = Idx.bound_symbols bindings in
   let base = Context.lowered_for_decisions ?name ctx comp bindings in
@@ -1763,7 +1859,9 @@ let placement_surface ?name ?ordering ctx comp bindings =
     Context.lowered_for_decisions ?name ~materialized:to_materialize ctx comp bindings
   in
   let enablement, disablement = placement_enablement ~limits ~static_indices ~base ~allmat in
-  let ps_candidates = rank_flip_candidates ~ordering ~enablement ~disablement candidates in
+  let ps_candidates =
+    rank_flip_candidates ~ordering ?profit ~enablement ~disablement candidates
+  in
   let candidate_set =
     Set.of_list (module Ir.Tnode) (List.map ps_candidates ~f:(fun fc -> fc.LL.fc_tn))
   in
@@ -1776,7 +1874,15 @@ let placement_surface ?name ?ordering ctx comp bindings =
       ()
     |> Option.map ~f:(fun s -> s *. 1e3)
   in
-  { ps_candidates; ps_enablement = enablement; ps_disablement = disablement; ps_floor_ms }
+  {
+    ps_candidates;
+    ps_ordering =
+      effective_flip_ordering ~ordering ~profit:(Option.value profit ~default:Unmeasured);
+    ps_profit = profit;
+    ps_enablement = enablement;
+    ps_disablement = disablement;
+    ps_floor_ms;
+  }
 
 (** {2 Model-picked untuned defaults (gh-ocannl-491 task 3)}
 
@@ -2702,11 +2808,15 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir
                     best_tensorization = Some (mma_summary c).Ir.C_syntax.tensorization;
                     best_mma_statements = mma_statements c;
                     best_mma_scalar_fallbacks = mma_scalar_fallbacks c;
-                    (* Nothing was timed in this process ([mma_timed = 0] like every other counter
-                       here), so there is no measured tensorized candidate to report — including the
-                       replayed winner, whose [best_ms] was measured by the process that searched.
-                       [best_tensorized] still describes the artifact, which is what it is for. *)
-                    mma_best_ms = Float.infinity;
+                    (* Nothing was timed in this process — [mma_timed = 0] like every other
+                       COUNTER here, which describes this call. The TIMES describe the program, and
+                       are replayed from the entry exactly as [best_ms] and [baseline_ms] above are:
+                       without that, the flip chain's profitability term (gh-ocannl-579) would rank
+                       the decision surface one way on the cold run that measured the family and the
+                       other way on every warm-cache run after it. [None] for a search that timed
+                       none, and for entries written before the field existed. *)
+                    mma_best_ms =
+                      Option.value entry.SC.mma_best_ms ~default:Float.infinity;
                     best_schedule = flat_schedule c.form;
                   };
                 Some (c.cctx, c.routine)
@@ -3649,6 +3759,11 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir
                    finer_fission;
                    best_ms;
                    baseline_ms;
+                   (* gh-ocannl-579: a measurement of the program, stored like the two above so the
+                      flip chain's profitability term reads the same evidence on a warm cache as on
+                      the cold run that measured it. Absent when nothing tensorized was timed. *)
+                   mma_best_ms =
+                     (if Float.is_finite !mma_best_ms then Some !mma_best_ms else None);
                    default_ms = default_ms ();
                    default_fingerprint =
                      Option.map (default_ms ()) ~f:(fun _ ->

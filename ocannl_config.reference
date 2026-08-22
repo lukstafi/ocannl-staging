@@ -454,7 +454,7 @@
 # arm.
 #tune_ship_arm=auto
 
-# gh-ocannl-514: the ranking of the flip chain's candidates. `enablement` (the default) sorts the
+# gh-ocannl-514: the ranking of the flip chain's candidates. `enablement` sorts the
 # decision surface family-first: a `materialize` flip whose node is an operand or destination of
 # an mma-eligible matmul site that exists only in the all-materialized specialization — so its
 # materialization is what makes the tensorized family expressible — ranks ahead of every
@@ -467,7 +467,32 @@
 # partial-placement-vector roofline floor (`Cost_model.completion_floor` on the all-materialized
 # lowering, monotone in the chain's accumulated commitments) already meets the best measured
 # time — the same admissible direction as the sketch-level pruning.
-#tune_flip_ordering=enablement
+#
+# gh-ocannl-579: `profitable` (the default) is `enablement` weighed against what the placement A/B
+# arms MEASURED about the family the prior points at. The prior models expressibility and has no
+# profitability term, and on gh-514's metal/f16 mlp_wide cell that costs the run: the two promoted
+# cast twins take budget slots 1-2, the family they unlock times 79-92 ms against the arm's 7.5 ms,
+# and the cheap winning `inline` flip (rank 5 under cost) falls out of a budget-5 chain — cost
+# ordering shipped 6.55/6.64 ms there against enablement's 7.03-7.14 ms. Arm B (materialize-all) is
+# the specialization the prior derives enablement from and it is searched before the chain walks, so
+# its report's `mma_best_ms` against `best_ms` settles the question for free, on this device, on this
+# computation. Competitive or never timed: the prior stands (on hip's cell the family IS the arm's
+# winner, and gh-558's budget-5 failure stays closed). Measured to lose by more than
+# tune_flip_profit_margin: both of the prior's classes go at once — the promotion of family-unlocking
+# flips and the demotion of family-breaking ones are the same bet on the same family — and the
+# ranking degenerates to `cost`. `enablement` keeps the pure prior as the other evaluation baseline.
+#tune_flip_ordering=profitable
+
+# gh-ocannl-579: how much worse than a search's best the best TIMED tensorized candidate may be and
+# still be worth a flip-budget slot under tune_flip_ordering=profitable, as a ratio of at least 1.0.
+# The default admits a family that lost by up to a quarter — a gap one more placement flip could
+# plausibly close — and rejects the measured cells that motivated the term by a wide margin (metal
+# ~12x, cuda ~2.3x, against hip's 1.0x where the family won), so no verdict there is knife-edge.
+# Raise it to keep promoting on a machine whose tensorized path is still being brought up;
+# tune_flip_ordering=enablement disables the term outright — and disables it in the strong sense:
+# under either unconditional ordering the evidence is never derived, so this key is never read and a
+# malformed value cannot fail a run pinned to a baseline.
+#tune_flip_profit_margin=1.25
 
 # If true, an exception crossing a candidate transform/codegen/compile/link boundary is fatal unless
 # a narrow compiler seam or the backend classifies it. If false, unattributed compile-side failures
