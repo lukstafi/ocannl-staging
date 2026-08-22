@@ -173,6 +173,14 @@ let is_blank line = String.is_empty (String.strip line)
     which is right inside a bullet and reported outside one. *)
 let max_block_indent = 3
 
+(** Whether the character at [i] is escaped: by the PARITY of the run of backslashes before it, not
+    by the single character before it. Two backslashes are an escaped backslash, which leaves the
+    pipe after them live — so ["| a \\\\| b | c |"] is three cells to a renderer and was two to this
+    scan, quietly dropping a cell out of the width check (Codex P2, round 3). *)
+let escaped_at line i =
+  let rec count j acc = if j >= 0 && Char.equal line.[j] '\\' then count (j - 1) (acc + 1) else acc in
+  count (i - 1) 0 % 2 = 1
+
 type inert_state = In_text | In_code of int | In_comment | In_fence of char * int
 
 (** What one pass over a file learned: where the inert text is, what was left open at the end, and
@@ -208,7 +216,14 @@ let fence_at line =
     let c = if indent < String.length line then line.[indent] else ' ' in
     if Char.equal c '`' || Char.equal c '~' then
       let len = run_length line indent c in
-      if len >= 3 then Some (c, len) else None
+      (* A backtick fence's info string may not contain a backtick, which is precisely what keeps an
+         inline ```foo``` span from opening a block. Looking only at the leading run reported a
+         perfectly ordinary prose line as an unclosed fenced block (Codex P2, round 6). Tildes carry
+         no such restriction, because a tilde run is never a code span. *)
+      let closed_inline =
+        Char.equal c '`' && String.contains (String.drop_prefix line (indent + len)) '`'
+      in
+      if len >= 3 && not closed_inline then Some (c, len) else None
     else None
 
 (** Per line, the half-open ranges that are inert; ranges include their delimiters. *)
@@ -217,19 +232,37 @@ let inert_by_line contents =
   let fences = ref [] in
   let comments = ref [] in
   let ranges_of = ref [] in
+  (* Committed ranges, by line. A code span's ranges are held back until it CLOSES: an unmatched
+     backtick run renders literally, so the text after it is ordinary prose and any link in it is
+     navigable. Marking it inert as the run opened, then dropping the state at the paragraph break
+     without dropping the ranges, suppressed a real backlink and reported the file unreachable
+     (Codex P2, round 6) -- a false failure. Pending ranges are discarded at a paragraph break and
+     at the end of the file, which is exactly what a renderer does with them. *)
+  let committed : (int, (int * int) list) Hashtbl.t = Hashtbl.create (module Int) in
+  let pending = ref [] in
+  let add tbl lineno range =
+    Hashtbl.update tbl lineno ~f:(function None -> [ range ] | Some rs -> range :: rs)
+  in
+  let commit () =
+    List.iter !pending ~f:(fun (lineno, range) -> add committed lineno range);
+    pending := []
+  in
+  let discard () = pending := [] in
   List.iter (lines contents) ~f:(fun (lineno, line) ->
-      (* A paragraph break closes an unterminated span; a comment and a fence are blocks and
-         survive it. *)
-      (if is_blank line then match !state with In_code _ -> state := In_text | _ -> ());
+      (* A paragraph break ends an unterminated span, and its text was never code. A comment and a
+         fence are blocks and survive one. *)
+      (if is_blank line then
+         match !state with
+         | In_code _ ->
+             discard ();
+             state := In_text
+         | _ -> ());
       let n = String.length line in
-      let ranges = ref [] in
-      (* A state carried in from the line above starts this line's inert region at column 0. *)
       let start = ref 0 in
       let i = ref 0 in
       let fence_line =
         match !state with
         | In_fence (c, len) -> (
-            (* Only a run of the same character, at least as long, closes it. *)
             match fence_at line with
             | Some (c', len') when Char.equal c c' && len' >= len ->
                 state := In_text;
@@ -244,13 +277,16 @@ let inert_by_line contents =
             | None -> false)
         | _ -> false
       in
-      if fence_line then (if n > 0 then ranges := [ (0, n) ])
+      if fence_line then (if n > 0 then add committed lineno (0, n))
       else
         while !i < n do
           match !state with
           | In_fence _ -> i := n
           | In_text ->
-              if Char.equal line.[!i] '`' then (
+              (* An ESCAPED backtick renders literally and opens nothing. Inside a span the rule
+                 does not apply: CommonMark gives backslashes no meaning there, so a backtick always
+                 closes. *)
+              if Char.equal line.[!i] '`' && not (escaped_at line !i) then (
                 let len = run_length line !i '`' in
                 start := !i;
                 state := In_code len;
@@ -265,28 +301,35 @@ let inert_by_line contents =
               if Char.equal line.[!i] '`' then (
                 let run = run_length line !i '`' in
                 if run = len then (
-                  ranges := (!start, !i + run) :: !ranges;
+                  pending := (lineno, (!start, !i + run)) :: !pending;
+                  commit ();
                   state := In_text;
                   start := 0);
                 i := !i + run)
               else Int.incr i
           | In_comment ->
               if at line !i "-->" then (
-                ranges := (!start, !i + 3) :: !ranges;
+                add committed lineno (!start, !i + 3);
                 state := In_text;
                 start := 0;
                 i := !i + 3)
               else Int.incr i
         done;
-      (* Still open at the end of the line: the remainder is inert and the state carries. An empty
-         range says nothing, so a blank line inside a comment does not emit one. *)
+      (* Still open at the end of the line: the remainder carries. A code span's share is pending
+         until it closes; a comment's is committed, since a comment hides text whether or not it is
+         ever closed. An empty range says nothing. *)
       (match !state with
       | In_text -> ()
-      | In_code _ | In_comment -> if n > !start then ranges := (!start, n) :: !ranges
+      | In_code _ -> if n > !start then pending := (lineno, (!start, n)) :: !pending
+      | In_comment -> if n > !start then add committed lineno (!start, n)
       | In_fence _ -> ());
-      ranges_of := (lineno, List.rev !ranges) :: !ranges_of);
+      ranges_of := lineno :: !ranges_of);
+  (* An unmatched run at the end of the file is literal text too. *)
+  (match !state with In_code _ -> discard () | _ -> ());
   {
-    ranges = List.rev !ranges_of;
+    ranges =
+      List.rev_map !ranges_of ~f:(fun lineno ->
+          (lineno, List.rev (Option.value (Hashtbl.find committed lineno) ~default:[])));
     unclosed = !state;
     fences = List.rev !fences;
     comments = List.rev !comments;
@@ -324,14 +367,6 @@ let line_is_inert ~spans line =
     ordered item and ["*\tFact"] a bulleted one. Requiring a literal space let both fall through as
     prose, which is the omission the foreign-marker check exists to prevent (Codex P2, round 5). *)
 let md_space c = Char.equal c ' ' || Char.equal c '\t'
-
-(** Whether the character at [i] is escaped: by the PARITY of the run of backslashes before it, not
-    by the single character before it. Two backslashes are an escaped backslash, which leaves the
-    pipe after them live — so ["| a \\\\| b | c |"] is three cells to a renderer and was two to this
-    scan, quietly dropping a cell out of the width check (Codex P2, round 3). *)
-let escaped_at line i =
-  let rec count j acc = if j >= 0 && Char.equal line.[j] '\\' then count (j - 1) (acc + 1) else acc in
-  count (i - 1) 0 % 2 = 1
 
 (** Positions of the ['|'] characters that separate table cells: outside inline code, and not
     backslash-escaped. [?spans] passes the paragraph-aware reading when the caller has one. *)
@@ -436,6 +471,10 @@ let bullet_subject (b : bullet) = normalize b.text
     heading let the index's [#ident_blacklist] anchor pass while pointing at nothing (Codex P2,
     round 3). The marker also has to be a real ATX run — seven hashes is not a heading either. *)
 let atx_heading line =
+  if indent_of line > max_block_indent then None
+  else
+  (* Four spaces make it an indented code block, not a heading -- so an anchor naming it is dead,
+     the same failure the missing-space case had (Codex P2, round 6). *)
   let s = String.strip line in
   let hashes =
     match String.lfindi s ~f:(fun _ c -> not (Char.equal c '#')) with
@@ -520,25 +559,47 @@ let block_quote_marker stripped =
     Some "a block quote, whose text belongs to no bullet and which this scan does not read"
   else None
 
+(** A thematic break or a setext heading underline: a line of nothing but one repeated marker. It
+    is a block at every depth, which is why it is factored out here rather than living inside the
+    column-zero test. *)
+let thematic_break stripped =
+  let all_of c =
+    String.length stripped >= 3
+    && String.for_all stripped ~f:(fun d -> Char.equal d ' ' || Char.equal d c)
+  in
+  if all_of '-' || all_of '*' || all_of '_' || all_of '=' then
+    Some "a thematic break or a setext heading underline, neither of which the notes use"
+  else None
+
+(** Whether a line opens a raw HTML block, as opposed to merely starting with ['<']. Every
+    column-zero ['<'] used to count, which failed two kinds of perfectly ordinary prose: an autolink
+    ([<https://example.com>]) and a comparison ([<= 8], which these notes write) (Codex P2, round 6).
+    An HTML block needs a tag-ish opener — a letter, ['/'], ['!'] or ['?'] — and an autolink is
+    excluded by what it is: a bracketed run with no whitespace, carrying a scheme or an address. *)
+let html_block_opener stripped =
+  String.length stripped >= 2
+  && Char.equal stripped.[0] '<'
+  && (Char.is_alpha stripped.[1]
+     || List.mem [ '/'; '!'; '?' ] stripped.[1] ~equal:Char.equal)
+  && not
+       (match String.index stripped '>' with
+       | Some close ->
+           let inside = String.sub stripped ~pos:1 ~len:(close - 1) in
+           (not (String.exists inside ~f:(fun c -> Char.equal c ' ' || Char.equal c '\t')))
+           && (String.contains inside ':' || String.contains inside '@')
+       | None -> false)
+
 (** Block constructs Markdown recognises only at column zero, and that the notes do not use. The
     column-zero condition is load-bearing for these two rather than incidental: [`  <= 8 and …`] and
     [`  <that target>`] are real continuation lines, the second of them continuing a code span
     opened on the line above, so an HTML test at depth would fail a correct file. *)
 let unsupported_block stripped =
-  let all_of chars =
-    String.length stripped >= 3
-    && String.for_all stripped ~f:(fun d ->
-           Char.equal d ' ' || List.mem chars d ~equal:Char.equal)
-  in
-  let thematic = all_of [ '-' ] || all_of [ '*' ] || all_of [ '_' ] || all_of [ '=' ] in
   match block_quote_marker stripped with
   | Some what -> Some what
   | None ->
-      if String.is_prefix stripped ~prefix:"<" then
+      if html_block_opener stripped then
         Some "an HTML block, whose text no rule here can see"
-      else if thematic then
-        Some "a thematic break or a setext heading underline, neither of which the notes use"
-      else None
+      else thematic_break stripped
 
 (** One nesting level is what the notes are written in, and what {!parse_file} documents. A third
     level was being accepted anyway — [expected] simply advanced by two more spaces — so the
@@ -588,13 +649,14 @@ let parse_file ~file contents =
             close_all ())
           else
             let indent = indent_of line in
-            if looks_like_heading stripped then (
+            if looks_like_heading line then (
 
-                  if Option.is_none (atx_heading stripped) then
+                  if Option.is_none (atx_heading line) then
                     bad lineno
                       "a line opening with # that is not a heading: an ATX marker is one to six \
-                       hashes followed by a space, and without one this renders as prose -- so an \
-                       anchor naming it points at nothing";
+                       hashes, followed by a space, indented at most three -- without all three of \
+                       those it renders as prose or as code, so an anchor naming it points at \
+                       nothing";
                   close_all ())
                 else if is_table_line line then close_all ()
                 else
@@ -656,7 +718,16 @@ let parse_file ~file contents =
                                  indent it two spaces to make it the bullet's own");
                         close_all ())
                       else
-                        match block_quote_marker stripped with
+                        match
+                          match block_quote_marker stripped with
+                          | Some what -> Some what
+                          | None ->
+                              (* A hyphen line under a bullet is a separate block to Markdown, not
+                                 part of the bullet's prose -- and folding it in left every rule
+                                 green, since the joined text still ended in a period (Codex P2,
+                                 round 6). *)
+                              thematic_break stripped
+                        with
                         | Some what ->
                             (* Honoured at depth too: nested under a bullet this is a quote inside
                                the list item, and folding it into the parent's prose would leave its
@@ -708,14 +779,9 @@ let bullets ~file contents = (parse_file ~file contents).bullets
 let unclosed_inert ~file contents =
   match (inert_by_line contents).unclosed with
   | In_text -> []
-  | In_code n ->
-      [
-        finding ~file ~line:(List.length (lines contents)) ~rule:rule_bullet_integrity
-          (Printf.sprintf
-             "a code span opened with %d backtick(s) and never closed, so everything below it reads \
-              as code and no rule can see it"
-             n);
-      ]
+  (* An unmatched backtick run is literal text to a renderer, and the lexer now treats it that way
+     -- nothing is hidden, so there is nothing to report. *)
+  | In_code _ -> []
   | In_comment ->
       [
         finding ~file ~line:(List.length (lines contents)) ~rule:rule_bullet_integrity
@@ -989,6 +1055,22 @@ let parse_link cell =
     says what actually happened. So a refusal comes back as [Error] and stops those rules, which then
     report that they could not be evaluated rather than reporting twelve falsehoods. It cannot hide a
     real defect: the refusal is itself a failure, and the table rule has already named the line. *)
+(** Whether a table block is one: header, delimiter, at least one data row, every line closing with
+    a separator, and one width throughout. The same questions {!check_tables} answers with findings,
+    asked as a yes or no -- so the two cannot disagree about what parses. *)
+let table_parses ~contents t =
+  let map = (inert_by_line contents).ranges in
+  let cells =
+    List.map t.rows ~f:(fun (lineno, line) -> row_cells ~spans:(spans_at map lineno) line)
+  in
+  match cells with
+  | Some header :: Some delim :: (_ :: _ as rest) ->
+      is_delimiter_row delim
+      && List.for_all (Some header :: Some delim :: rest) ~f:(function
+           | Some c -> List.length c = List.length header
+           | None -> false)
+  | _ -> false
+
 let index_rows ~file contents =
   match tables contents with
   | [] -> Error (file_finding ~file ~rule:rule_index_agreement "no table: the index is a table")
@@ -997,6 +1079,16 @@ let index_rows ~file contents =
         (file_finding ~file ~rule:rule_index_agreement
            "more than one table: the index is one table, so a row that ends it puts most of the \
             index outside both")
+  | [ t ] when not (table_parses ~contents t) ->
+      (* One block, but not a table: a row that does not close, a ragged width, a missing delimiter.
+         Extracting rows anyway dropped the bad one and then reported EVERY notes file as an orphan,
+         burying the one actionable finding under a dozen spurious ones -- the same cascade the
+         two-table refusal above exists to prevent, through the door it left open (Codex P2,
+         round 6). *)
+      Error
+        (file_finding ~file ~rule:rule_index_agreement
+           "a table that does not parse, so its rows cannot be read: fix what table-shape reports \
+            about it first")
   | [ t ] ->
       let map = (inert_by_line contents).ranges in
       let data = match t.rows with _ :: _ :: rest -> rest | _ -> [] in

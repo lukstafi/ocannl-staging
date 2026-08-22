@@ -100,6 +100,25 @@ let structure_cases =
     ( "a table-looking line inside a multiline code span",
       "# Title\n\n- A fact showing the shape `\n  | not | a table |\n  ` in passing.\n",
       [] );
+    (* A backtick fence's info string may not contain a backtick, which is what keeps an inline
+       triple-backtick span from opening a block. *)
+    ( "a prose line that is a complete triple-backtick span",
+      "# Title\n\n```foo``` is how it is written.\n",
+      [] );
+    ("a real fence is still a fence", "# Title\n\n```\ncode\n```\n",
+      [ "bullet-integrity @ f.md:3" ] );
+    ( "an autolink at column zero is not an HTML block",
+      "# Title\n\n<https://example.com> is the reference.\n",
+      [] );
+    ( "a comparison at column zero is not an HTML block either",
+      "# Title\n\n<= 8 lanes is the threshold.\n",
+      [] );
+    ( "a real HTML block still is one",
+      "# Title\n\n<div class=\"x\">\n",
+      [ "bullet-integrity @ f.md:3" ] );
+    ( "a thematic break nested under a bullet",
+      "# Title\n\n- A fact:\n  ---\n  More.\n",
+      [ "bullet-integrity @ f.md:4"; "bullet-integrity @ f.md:5" ] );
     ( "an ordered item written with a tab",
       "# Title\n\n1.\tA fact written as an ordered item.\n",
       [ "bullet-integrity @ f.md:3" ] );
@@ -122,9 +141,9 @@ let structure_cases =
       "# Title\n\n- A fact.\n\n~~~\n- not a bullet\n",
       [ "bullet-integrity @ f.md:5"; "bullet-integrity @ f.md:7" ] );
     ("a block quote", "# Title\n\n> Quoted prose.\n", [ "bullet-integrity @ f.md:3" ]);
-    ( "a code span the file never closes",
+    ( "an unmatched backtick run is literal text, not an unclosed span",
       "# Title\n\n- A fact naming `Ops.promote_prec.",
-      [ "bullet-integrity @ f.md:3" ] );
+      [] );
     ( "an HTML comment the file never closes",
       "# Title\n\nProse <!-- and then nothing.\n\n- A fact.\n",
       [ "bullet-integrity @ f.md:3"; "bullet-integrity @ f.md:6" ] );
@@ -359,6 +378,23 @@ let index_cases =
       "# Agent notes\n\nAn index.\n\n| File | Covers | Owner |\n| --- | --- | --- |\n|        [a.md](agent-notes/a.md) | the `Widget` seam | me |\n",
       [ ("agent-notes/a.md", file "- A fact about `Widget`.\n") ],
       [ "index-agreement @ agent-notes.md:7"; "reachability @ agent-notes/a.md" ] );
+    ( "a backlink between escaped backticks is navigable",
+      index [ row "a.md" "the `Widget` seam" ],
+      [ ("agent-notes/a.md",
+          "# A file\n\nWritten \\`[index](../agent-notes.md)\\` in the source.\n\n- A fact about `Widget`.\n") ],
+      [] );
+    ( "an anchor naming a heading indented into code",
+      index [ "| [a.md](agent-notes/a.md#draft) | the `Widget` seam |" ],
+      [ ("agent-notes/a.md", file "    # Draft\n\n- A fact about `Widget`.\n") ],
+      [ "bullet-integrity @ agent-notes/a.md:5"; "index-agreement @ agent-notes.md:7" ] );
+    (* One block, but not a table: the row extraction must decline rather than report every file as
+       an orphan. *)
+    ( "an index whose single table has a row that does not close",
+      "# Agent notes\n\nAn index.\n\n| File | Covers |\n| --- | --- |\n| [a.md](agent-notes/a.md) | the `Widget` seam\n| [b.md](agent-notes/b.md) | the `Gadget` seam |\n",
+      [ ("agent-notes/a.md", file "- A fact about `Widget`.\n");
+        ("agent-notes/b.md", file "- A fact about `Gadget`.\n") ],
+      [ "index-agreement @ agent-notes.md"; "table-shape @ agent-notes.md:7";
+        "reachability @ agent-notes.md" ] );
     ( "a backlink one directory too far up",
       index [ row "a.md" "the `Widget` seam" ],
       [ ("agent-notes/a.md",
@@ -448,7 +484,10 @@ let primitive_cases =
     ("one span", "a `b` c", [ "2-5" ]);
     ("two spans", "`a` and `b`", [ "0-3"; "8-11" ]);
     ("a double run holds a single", "``a`b`` c", [ "0-7" ]);
-    ("an unpaired run opens a span to the line's end", "a `b c", [ "2-6" ]);
+    (* CommonMark renders an unmatched run literally, so it opens nothing and the text after it is
+       ordinary prose -- which is what makes a link there navigable. *)
+    ("an unpaired run opens nothing", "a `b c", []);
+    ("an escaped backtick opens nothing either", "a \\`b` c", []);
     ("no backticks at all", "plain text", []);
     ("a comment is inert too", "a <!-- b --> c", [ "2-12" ]);
     ("a backtick inside a comment opens nothing", "a <!-- ` --> c", [ "2-12" ]);
@@ -467,9 +506,9 @@ let carry_cases =
     ( "a span closed by the last run on its line",
       "a `b\nexample`\n[index](../agent-notes.md)\n",
       [ "1:2-4"; "2:0-8" ] );
-    ( "a blank line ends an unterminated span",
+    ( "a paragraph break discards an unterminated span's ranges",
       "a `b\n\nc | d\n",
-      [ "1:2-4" ] );
+      [] );
     ( "a comment spanning three lines",
       "Prose <!--\n[index](../agent-notes.md)\n--> after\n",
       [ "1:6-10"; "2:0-26"; "3:0-3" ] );
