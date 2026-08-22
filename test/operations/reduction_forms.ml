@@ -168,6 +168,20 @@ let per_step_ref ~terms ~from prec =
 
 let precs = [ ("f32", Ops.single); ("bf16", Ops.bfloat16); ("f16", Ops.half) ]
 
+(* Whether an op is a pure LOOP REWRITE, hence safe to apply a second time as a probe. The ops
+   [apply_op] handles rewrite the nest and mint nothing; the ones [apply_opt_op] handles need the
+   whole [optimized] record and can MINT NODES — [Split_reduce] creates a partials node, so probing
+   it and then applying it for real produced two nodes with one name and a C function with a
+   duplicated parameter. Exhaustive, so a new constructor has to answer the question. *)
+let is_loop_rewrite (op : Sched.optop) =
+  match op with
+  | Sched.Split _ | Sched.Swap _ | Sched.Retype _ | Sched.Unroll _ | Sched.Partition _
+  | Sched.Pad _ ->
+      true
+  | Sched.Split_reduce _ | Sched.Tensorize _ | Sched.Stage _ | Sched.Privatize _
+  | Sched.Expand_zero _ | Sched.Fuse_epilogue _ ->
+      false
+
 (* One root context for the whole run: [Context.compile] forks the lineage per compile, so members
    do not observe each other's placement decisions. It is also what answers the target question
    below, so it is created before the policy is resolved rather than at the first compile. *)
@@ -728,11 +742,33 @@ let execute ~name ~(prog : prog) ~(sched : Sched.schedule) =
      [Serial], the kernel would keep the same localized classification, the same closing store and
      the same value, and both the member and its coverage entry would stay green. Comparing the two
      is what binds a cited op to an observable effect. *)
-  let before = ref None and after = ref None in
+  let before = ref None and after = ref None and per_op = ref [] in
   let ctx, routine =
     Context.compile ~name ~prelowered:o
       ~lowered_transform:(fun opt ->
         before := Some opt.LL.llc;
+        (* EVERY op, not just the schedule as a whole (Codex P2, round 11). Comparing only the two
+           ends credits a composition to all of its ops: in [split-then-swap] the [Split] alone
+           makes the whole-schedule comparison true, so a [Swap] that became a no-op would leave the
+           member's form, value and site checks passing and the sole [Swap] coverage entry green
+           over an op that never ran. This is a PROBE beside the real transform, not a replacement
+           for it -- [Sched.apply] simplifies and re-runs CSE at the end of the fold, so applying
+           the ops one at a time would not produce the same IR, and only the whole-schedule result
+           is compiled. *)
+        (* Only for a COMPOSITION of loop rewrites: with one op the whole-schedule comparison
+           already is the per-op one, and a node-minting op cannot be applied twice. *)
+        if List.length sched > 1 && List.for_all sched ~f:is_loop_rewrite then
+          per_op :=
+            (let rec step acc state = function
+               | [] -> List.rev acc
+               | op :: rest ->
+                   let next = Sched.apply ~static_indices [ op ] state in
+                   let moved =
+                     not (Sexp.equal (LL.sexp_of_t state.LL.llc) (LL.sexp_of_t next.LL.llc))
+                   in
+                   step (moved :: acc) next rest
+             in
+             step [] opt sched);
         let result = Sched.apply ~static_indices sched opt in
         after := Some result.LL.llc;
         result)
@@ -745,7 +781,7 @@ let execute ~name ~(prog : prog) ~(sched : Sched.schedule) =
   let ctx = Context.run ctx routine in
   let read tn = Context.get_values ctx tn in
   (read prog.out, List.map prog.verify ~f:(fun (c, tn, want) -> (c, read tn, want)),
-   (!before, !after))
+   (!before, !after, !per_op))
 
 (* The axis kinds a statement's loops carry. What binds a member to the constructor its coverage
    entry credits it with: an op that names an axis kind must leave that kind in the IR it produced. *)
@@ -1350,7 +1386,7 @@ let () =
               let name = Printf.sprintf "rf_%s_%s" (routine_stem m.slug) prec_name in
               let prog = make ~prec ~shape:m.shape () in
               let sched = m.sched prog in
-              let got, verified, (before, after) = execute ~name ~prog ~sched in
+              let got, verified, (before, after, per_op) = execute ~name ~prog ~sched in
               (* Every node the shape writes, not only the accumulator. *)
               List.iter verified ~f:(fun (claim, values, want) ->
                   let ok = agrees values want in
@@ -1363,8 +1399,11 @@ let () =
               (match (before, after) with
               | Some b, Some a ->
                   let changed =
-                    List.is_empty sched
-                    || not (Sexp.equal (LL.sexp_of_t b) (LL.sexp_of_t a))
+                    (List.is_empty sched
+                    || not (Sexp.equal (LL.sexp_of_t b) (LL.sexp_of_t a)))
+                    && (List.is_empty per_op
+                       || (List.length per_op = List.length sched
+                          && List.for_all per_op ~f:Fn.id))
                   in
                   let axis_ok =
                     match m.expect_axis with
@@ -1412,6 +1451,14 @@ let () =
                     | Localized ->
                         reading.stores_from_local = m.store_sites
                         && reading.node_accesses <= 2 * m.store_sites
+                        (* And NOTHING closes a partial into another node on the way (Codex P2,
+                           round 11). A split, partition or unroll regression that started closing
+                           intermediate partials elsewhere before the single final store would keep
+                           the Localized reading and every count above — and on a backend whose
+                           accumulator already resides at storage width, the added store/reload
+                           seams need not move the executed value either. Foreign stores belong to
+                           the explicit partials form, which declares how many it has. *)
+                        && reading.foreign_local_stores = m.foreign_sites
                     | Simd | Warp ->
                         (* A vector or shuffle epilogue closes the cell ONCE per nest, and may
                            spell that as [out[i] = out[i] + vred_total] rather than as a store
