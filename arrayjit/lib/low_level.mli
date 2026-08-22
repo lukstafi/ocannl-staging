@@ -323,12 +323,14 @@ val peel_accum_nest :
     the accumulated cell OUTSIDE the levels, unconditionally. Peeling a dead level would invent
     accesses the program does not make, possibly on an identifier the interface never declared.
 
-    A peeled GUARD must likewise vary with the levels being peeled. [rebuild] keeps it around the
+    A peeled GUARD must likewise be confined to the levels being peeled — every symbol it
+    mentions is one of them, and it mentions at least one. [rebuild] keeps it around the
     accumulating update only, so the localized form loads and stores outside it — the original's
     behaviour exactly when the guard's truth is not fixed for the whole nest. One invariant across
     the peeled levels is fixed for the whole nest, and hoisting the accesses out of it makes every
     instance load and store; across an enclosing hardware axis that is a data race, since lanes the
-    guard excludes write their unchanged local back over the accumulating lane's result. *)
+    guard excludes write their unchanged local back over the accumulating lane's result. Merely
+    varying with a peeled symbol does not suffice: a mixed guard selects among enclosing lanes too. *)
 
 (** {2 Hardware axis analyses}
 

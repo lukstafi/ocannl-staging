@@ -201,7 +201,8 @@ files.
   exactly a dead level's access-free meaning. That abort was reachable before gh-ocannl-693 for a
   dead `Unrolled` level whose body is not a recognized accumulation; refusing to peel the
   accumulating ones widened its reach, which is how it surfaced.
-- **A peeled guard must VARY with the levels being peeled.** `rebuild` keeps a guard around the
+- **A peeled guard must be CONFINED to the levels being peeled** — every symbol it mentions is
+  one of them, and it mentions at least one. `rebuild` keeps a guard around the
   accumulating update only, so the localized form performs its opening load and closing store
   OUTSIDE it — right when the guard's truth is not fixed for the whole nest, wrong when it is.
   A guard invariant across the peeled levels is fixed for the whole nest, so hoisting the accesses
@@ -210,8 +211,12 @@ files.
   `Workgroup w -> Serial k -> If (w < 1) (acc[0] += x[k])` every lane would load `acc[0]` and write
   its unchanged local back, so a lane reading before lane 0's store and writing after it silently
   discards the reduction — the same 1/N fingerprint as the Metal RMW miscompile, from a different
-  cause. The gh-490 symbolic-extent shape `If (i < s)` mentions the peeled `i`, so it is unaffected
-  and must stay peelable (`peel_dead_level.ml` carries it as the control). Keeping such a guard
+  cause. "Varies with a peeled symbol" is NOT the right predicate: a MIXED guard like `w + k <= 0`
+  varies with the peeled `k` and still selects among lanes. Nor is an empty symbol set safe — a
+  guard mentioning nothing is a compile-time constant, and a false one makes the whole nest dead.
+  The gh-490 shape is unaffected because `Schedule` builds those guards as
+  `Cmplt (Embed_index idx, Constant bound)`, so their only symbol is the peeled index
+  (`peel_dead_level.ml` carries it as the control). Keeping such a guard
   around the whole scope instead of declining would also be sound and would localize more; it needs
   the peel to report its outer guards separately, which is wider than the correctness fix.
 - The interaction with Metal's `volatile_scalar_rmw` needs no special case, and that is worth

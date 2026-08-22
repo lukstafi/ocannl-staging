@@ -89,7 +89,14 @@ let () =
    the race. *)
 let guarded_nest ~guard_sym =
   let k = Idx.get_symbol () in
-  let g = match guard_sym with `Peeled -> k | `Enclosing s -> s in
+  (* The guard's left-hand index: the peeled [k], an enclosing symbol, or an affine MIX of both —
+     the mixed one varies with [k] and still selects among enclosing lanes. *)
+  let g : Idx.axis_index =
+    match guard_sym with
+    | `Peeled -> Idx.Iterator k
+    | `Enclosing s -> Idx.Iterator s
+    | `Mixed s -> Idx.Affine { symbols = [ (1, s); (1, k) ]; offset = 0 }
+  in
   LL.For_loop
     {
       index = k;
@@ -99,8 +106,10 @@ let guarded_nest ~guard_sym =
       body =
         LL.If
           {
-            cond = (LL.Binop (Ops.Cmplt, (LL.Embed_index (Idx.Iterator g), single),
-                              (LL.Constant 1.0, single)), single);
+            cond =
+              ( LL.Binop
+                  (Ops.Cmplt, (LL.Embed_index g, single), (LL.Constant 1.0, single)),
+                single );
             body =
               LL.Set
                 {
@@ -122,7 +131,12 @@ let () =
     (Option.is_some (LL.peel_accum_nest ~free_of:[] (guarded_nest ~guard_sym:`Peeled)));
   Verdict.p "a guard invariant across the peeled levels is refused"
     (Option.is_none
-       (LL.peel_accum_nest ~free_of:[] (guarded_nest ~guard_sym:(`Enclosing enclosing))))
+       (LL.peel_accum_nest ~free_of:[] (guarded_nest ~guard_sym:(`Enclosing enclosing))));
+  (* Varying with a peeled symbol is NOT enough: a mixed guard still selects among enclosing lanes,
+     so hoisting the accesses out of it lets every lane write the cell only lane 0 touched. *)
+  Verdict.p "a guard mixing a peeled and an enclosing symbol is refused"
+    (Option.is_none
+       (LL.peel_accum_nest ~free_of:[] (guarded_nest ~guard_sym:(`Mixed enclosing))))
 
 (* Having refused to peel it, codegen must still RENDER a dead level — and the [Unrolled] arm is
    where that is not free: it repeats the body [to_ - from_ + 1] times, and [Base.List.init] RAISES

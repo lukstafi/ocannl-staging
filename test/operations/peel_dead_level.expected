@@ -4,5 +4,6 @@ a dead accumulation level is refused: true
 an emptier dead level is refused: true
 a guard varying with the peeled index still peels: true
 a guard invariant across the peeled levels is refused: true
+a guard mixing a peeled and an enclosing symbol is refused: true
 a dead Unrolled level compiles instead of aborting codegen: true
 a dead Unrolled level performs no accumulation: true

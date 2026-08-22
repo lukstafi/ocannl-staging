@@ -5272,7 +5272,7 @@ let peel_accum_nest ?(extra_level = fun _ _ -> false) ~free_of body :
         List.exists symbols ~f:(fun (_, s) -> Indexing.equal_symbol s sym)
     | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
   in
-  (* A peeled guard has to VARY with the levels being peeled. [rebuild] keeps a guard around the
+  (* A peeled guard has to be CONFINED to the levels being peeled. [rebuild] keeps a guard around the
      accumulating update only, so the localized form performs its opening load and its closing store
      OUTSIDE it — which is the original's behaviour exactly when the guard's truth is not fixed for
      the whole nest. A guard invariant across the peeled levels is fixed for the whole nest, and
@@ -5302,9 +5302,19 @@ let peel_accum_nest ?(extra_level = fun _ _ -> false) ~free_of body :
     in
     go [] llsc
   in
-  let guard_varies_with ~free_of gc =
-    List.exists (guard_symbols gc) ~f:(fun s ->
-        List.exists free_of ~f:(Indexing.equal_symbol s))
+  (* Confined, not merely varying: EVERY symbol the guard mentions must be one of the levels being
+     peeled, and it must mention at least one. "Mentions a peeled symbol" is not enough — a MIXED
+     guard like [w + k <= 0] under [Workgroup w -> Serial k] varies with the peeled [k] and still
+     selects among enclosing lanes, so hoisting the accesses out of it lets every lane write the
+     cell that originally only lane 0 at [k = 0] touched. And a guard mentioning NO symbol is a
+     compile-time constant: if false, the whole nest is dead and the hoist invents both accesses.
+     The gh-490 shape is unaffected because those guards compare an index against a CONSTANT bound
+     ([Schedule]'s [Cmplt (Embed_index idx, Constant bound)]), so their only symbol is the peeled
+     index. *)
+  let guard_confined_to ~free_of gc =
+    let syms = guard_symbols gc in
+    (not (List.is_empty syms))
+    && List.for_all syms ~f:(fun s -> List.exists free_of ~f:(Indexing.equal_symbol s))
   in
   let cell_invariant ~free_of idcs =
     not (Array.exists idcs ~f:(fun idx -> List.exists free_of ~f:(fun s -> idx_mentions s idx)))
@@ -5341,7 +5351,7 @@ let peel_accum_nest ?(extra_level = fun _ _ -> false) ~free_of body :
           ~rebuild:(fun b -> rebuild (For_loop { r with body = b }))
           ibody
     | [ If { cond = gc, gp; body = gbody } ]
-      when pure_index_guard gc && guard_varies_with ~free_of gc ->
+      when pure_index_guard gc && guard_confined_to ~free_of gc ->
         peel ~free_of ~rebuild:(fun b -> rebuild (If { cond = (gc, gp); body = b })) gbody
     | [ Set { tn; idcs; llsc = Local_scope { id; body = sbody; orig_indices = _ }; debug } ]
       when cell_invariant ~free_of idcs -> (
