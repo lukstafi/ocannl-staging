@@ -36,6 +36,30 @@
 
 ### Added
 
+- **The pre-driver launch gate covers every hardware dimension, workgroup included**
+  (gh-ocannl-679). `max_threads_per_workgroup` caps the thread *product* of a workgroup and nothing
+  capped its dimensions individually — but CUDA's `maxThreadsDim` is `(1024, 1024, 64)`, so a
+  `2 x 2 x 128` threadgroup has a perfectly legal 512-thread product, passes every check, compiles,
+  and then dies at the driver with an opaque invalid-configuration error. `Workgroup` slots cap at
+  3 and the innermost binds `.x`, so the outermost annotated loop's extent lands on `.z` directly;
+  no fold and no exotic schedule is needed to reach it. `Backend_intf.hardware_limits` therefore
+  gains `max_workgroup_dims : int array option`, the per-dimension caps on the block's `.x`/`.y`/
+  `.z` — an array rather than one shared bound (as `max_grid_yz` is) because here the dimensions
+  genuinely differ. CUDA queries `max_block_dim_{x,y,z}`, HIP the `max_threads_dim` triple, Metal
+  all three components of `maxThreadsPerThreadgroup` (it read `width` alone before); the C backends
+  stay `None`. Three typed causes join the two grid ones —
+  `Schedule_outcome.Workgroup_{x,y,z}_extent` — because the rejection key is what an autotune search
+  groups declines under and each dimension shrinks by its own knob. `Schedule.default_gpu` and
+  `Schedule.zero_expansion` clamp their block size against the `.x` entry as well as the product,
+  so the gate is a backstop rather than the first line of defence.
+
+  `Schedule.check_hardware_limits{,_classified}` now enumerates the launch geometry from **one
+  table, one row per hardware dimension**, instead of a hand-written `Option.iter` per bound: each
+  bound used to be a copy of its neighbour, which is how `gridDim.y` came to be ungated for a
+  release (gh-ocannl-643) and how the workgroup's dimensions came to be ungated entirely. Five
+  rows, not six — `grid.(0)` is 2^31-scale wherever hardware axes bind, so its absence is stated
+  rather than implied.
+
 - **A computation you can name is a computation you can tune** (gh-ocannl-669). `Autotune.tune`
   takes `?name`, exactly as `Context.compile` does, and passes it to every compile of one search:
   each candidate, the baseline, the cache replay, the winner, both untuned fallbacks and the

@@ -1919,6 +1919,26 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
              min_over (fun (a : H.Device.attributes) -> a.max_threads_per_block);
            max_workgroup_memory_bytes =
              min_over (fun (a : H.Device.attributes) -> a.shared_mem_per_block);
+           (* Per-dimension workgroup caps (gh-ocannl-679), from the same queried [max_threads_dim]
+              the dump above surfaces. On the AMD parts seen so far it reads (1024, 1024, 1024) --
+              equal to [max_threads_per_block], so on those devices every per-dimension violation
+              is also a product violation and this row never fires alone. It is CUDA, whose [.z] is
+              64, that the row exists for; filling it here keeps the two backends' gates identical
+              rather than making the caller ask which backend it is on. *)
+           max_workgroup_dims =
+             (match
+                ( min_over (fun (a : H.Device.attributes) ->
+                      let x, _, _ = a.max_threads_dim in
+                      x),
+                  min_over (fun (a : H.Device.attributes) ->
+                      let _, y, _ = a.max_threads_dim in
+                      y),
+                  min_over (fun (a : H.Device.attributes) ->
+                      let _, _, z = a.max_threads_dim in
+                      z) )
+              with
+              | Some x, Some y, Some z -> Some [| x; y; z |]
+              | _ -> None);
            (* One cap for both gated dimensions (see [Backend_intf.max_grid_yz]): the smaller of
               the queried .y and .z components, so the gate is never looser than the device on
               either. On the AMD devices seen so far they coincide. *)

@@ -2288,6 +2288,20 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
               ("compute_capability_major", [%sexp_of: int] attributes.compute_capability_major);
               ("compute_capability_minor", [%sexp_of: int] attributes.compute_capability_minor);
               ("max_threads_per_block", [%sexp_of: int] attributes.max_threads_per_block);
+              (* The launch-dimension limits the schedule layer gates against, mirroring the HIP
+                 dump: [max_block_dim] bounds a workgroup per-dimension beyond the
+                 [max_threads_per_block] product (gh-ocannl-679), and [max_grid_dim] is the
+                 device's reading of what [hardware_limits.max_grid_yz] asserts architecturally.
+                 Surfaced so a run on hardware can read back what the gates compare against --
+                 [bin/device_props.ml] prints exactly this (gh-ocannl-684). *)
+              ( "max_block_dim",
+                [%sexp_of: int * int * int]
+                  (attributes.max_block_dim_x, attributes.max_block_dim_y, attributes.max_block_dim_z)
+              );
+              ( "max_grid_dim",
+                [%sexp_of: int * int * int]
+                  (attributes.max_grid_dim_x, attributes.max_grid_dim_y, attributes.max_grid_dim_z)
+              );
               ("unified_addressing", [%sexp_of: bool] attributes.unified_addressing);
             ]
           in
@@ -2312,6 +2326,22 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
              min_over (fun (a : Cu.Device.attributes) -> a.max_threads_per_block);
            max_workgroup_memory_bytes =
              min_over (fun (a : Cu.Device.attributes) -> a.max_shared_memory_per_block);
+           (* Per-dimension workgroup caps (gh-ocannl-679). Queried rather than asserted from the
+              Compute Capability tables (where they are (1024, 1024, 64) from cc 2.0 up) because
+              the driver answers per device and the fold below shows the query costs nothing extra.
+              The [.z] entry is the point of the field: at 64 it sits 16x below
+              [max_threads_per_block], so a 2 x 2 x 128 workgroup has a legal 512-thread product
+              and is still an invalid launch configuration. *)
+           max_workgroup_dims =
+             (match
+                ( min_over (fun (a : Cu.Device.attributes) -> a.max_block_dim_x),
+                  min_over (fun (a : Cu.Device.attributes) -> a.max_block_dim_y),
+                  min_over (fun (a : Cu.Device.attributes) -> a.max_block_dim_z) )
+              with
+              | Some x, Some y, Some z -> Some [| x; y; z |]
+              (* No devices: [min_over] is [None] on all three, and an empty machine advertises no
+                 cap rather than a spurious one. *)
+              | _ -> None);
            (* CUDA's gridDim.y and gridDim.z cap is 65535 on every architecture (the Compute
               Capability tables), unlike the per-device limits queried above — a constant, not an
               attribute. gridDim.x is 2^31-1 and needs no gate. *)

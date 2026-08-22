@@ -2120,6 +2120,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ ; ocannl-backend: none -- builds Ir.Low_level by hand and judges the launch gate against MOCKED
+ ; hardware_limits records; nothing is compiled and no device is touched.
+ (name launch_dim_gate)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules launch_dim_gate)
+ (libraries base ocannl stdio ll_test)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name schedule_batch_grid)
  (package neural_nets_lib)
  (deps

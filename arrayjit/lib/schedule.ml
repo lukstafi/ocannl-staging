@@ -4954,6 +4954,20 @@ let aligned_chains ?max_chain ?(expanded_zeros = []) (opt : Low_level.optimized)
                  | Low_level.For_loop fc -> Some (fc.index, fc.to_ + 1)
                  | _ -> None) )))
 
+(* The configured block size is a target; the device's capacity is a hard cap. Two hardware facts,
+   not one (gh-ocannl-679): the workgroup's thread PRODUCT
+   ([max_threads_per_workgroup]) and its per-dimension bound ([max_workgroup_dims]) — on CUDA the
+   latter's [.z] entry is 16x below the former. Both annotators below emit exactly one [Workgroup]
+   loop per nest, so the extent they choose lands on [.x] and only that entry can bind; clamping
+   here is what keeps [check_hardware_limits_classified] a backstop rather than the first line of
+   defence. *)
+let clamp_block_size ~(limits : Backend_intf.hardware_limits) block_size =
+  let clamp cap n = Option.value_map cap ~default:n ~f:(min n) in
+  clamp limits.max_threads_per_workgroup block_size
+  |> clamp
+       (Option.bind limits.max_workgroup_dims ~f:(fun caps ->
+            if Array.length caps > 0 then Some caps.(0) else None))
+
 let default_gpu ?block_size ?min_parallel ?(limits = Backend_intf.no_hardware_limits)
     (opt : Low_level.optimized) : schedule =
   let open Low_level in
@@ -4962,11 +4976,7 @@ let default_gpu ?block_size ?min_parallel ?(limits = Backend_intf.no_hardware_li
       ~default:
         (Int.of_string @@ Utils.get_global_arg ~arg_name:"gpu_schedule_block_size" ~default:"256")
   in
-  (* The configured block size is a target, the device's workgroup capacity is a hard cap. *)
-  let block_size =
-    Option.value_map limits.Backend_intf.max_threads_per_workgroup ~default:block_size
-      ~f:(min block_size)
-  in
+  let block_size = clamp_block_size ~limits block_size in
   (* Default 64 (was 1024): a kernel launches either way, so on GPU any real parallelism beats the
      serial 1x1 fallback — a single GPU thread is 1-2 orders of magnitude slower than a CPU core,
      and the "too small to pay for a launch" reasoning of the CPU preset's fan-out threshold does
@@ -5567,10 +5577,7 @@ let zero_expansion ?block_size ?min_parallel ~(limits : Backend_intf.hardware_li
       ~default:
         (Int.of_string @@ Utils.get_global_arg ~arg_name:"gpu_schedule_block_size" ~default:"256")
   in
-  let block_size =
-    Option.value_map limits.Backend_intf.max_threads_per_workgroup ~default:block_size
-      ~f:(min block_size)
-  in
+  let block_size = clamp_block_size ~limits block_size in
   let min_parallel =
     Option.value min_parallel
       ~default:
@@ -5860,52 +5867,64 @@ let check_hardware_limits_classified ~name ~(limits : Backend_intf.hardware_limi
                    limit = Some max_bytes;
                    detail;
                  } )));
-  (* The [.y] and [.z] grid dimensions share one 16-bit cap on CUDA/HIP ([max_grid_yz]; [.x] is
-     2^31-scale), and [validate_parallel] deliberately accepts any grid geometry (it is
-     backend-independent), so this is where an over-cap launch is refused before reaching the
-     driver. Both gates also cover hand-built schedules and future annotators, not only the
-     autotune seeds. *)
-  Option.iter limits.max_grid_yz ~f:(fun max_yz ->
+  (* {3 The launch geometry, one row per hardware dimension}
+
+     Enumerated from a table rather than a hand-written [Option.iter] per bound. Each bound used to
+     be a copy of its neighbour, which is how [gridDim.y] came to be ungated for a release
+     (gh-ocannl-643 gated the fold, lukstafi/ocannl-staging#397 added the row blocks) and how the
+     workgroup's per-dimension caps came to be missing entirely (gh-ocannl-679). With a table an
+     ungated dimension is a missing ROW, visible beside its neighbours, instead of an absence.
+
+     Five rows, not six: [grid.(0)] is 2^31-scale on every backend that binds hardware axes, so no
+     backend has a cap to report for it and it is deliberately absent rather than overlooked.
+
+     [validate_parallel] deliberately accepts any launch geometry (it is backend-independent), so
+     this is where an over-cap launch is refused before it reaches the driver — covering hand-built
+     schedules and future annotators, not only the autotune seeds (which pre-filter at seeding
+     against the same [max_grid_yz], and whose block extents the annotators clamp against the same
+     [max_workgroup_dims]). *)
+  let dims = Low_level.launch_dims opt.llc in
+  let detail_of ~what requested limit =
+    [%string
+      "Schedule: kernel %{name} requests a %{what} of %{requested#Int}, exceeding the device limit \
+       of %{limit#Int}"]
+  in
+  let workgroup_dim i =
+    Option.bind limits.max_workgroup_dims ~f:(fun caps ->
+        if i < Array.length caps then Some caps.(i) else None)
+  in
+  let geometry_rows =
+    [
+      (* The workgroup's own dimensions, beside — not instead of — the thread-product check above:
+         they are separate hardware facts, and CUDA's [.z] cap of 64 sits 16x below its product
+         cap, so a legal-product workgroup with a deep [.z] passes every other check and dies at
+         the driver. [Workgroup] slots are capped at 3, so these three rows are exhaustive. *)
+      (workgroup_dim 0, dims.block.(0), Schedule_outcome.Workgroup_x_extent, detail_of ~what:".x workgroup extent");
+      (workgroup_dim 1, dims.block.(1), Schedule_outcome.Workgroup_y_extent, detail_of ~what:".y workgroup extent");
+      (workgroup_dim 2, dims.block.(2), Schedule_outcome.Workgroup_z_extent, detail_of ~what:".z workgroup extent");
       (* [.y] is the grid slot-1 extent — the row-block count of a blocktiled matmul, which grows
          with the site's m-extent rather than with any fold: at [bm = 16] an m-extent past ~1M rows
          is already over the cap. *)
-      let grid_y = (Low_level.launch_dims opt.llc).grid.(1) in
-      if grid_y > max_yz then
-        let detail =
+      (limits.max_grid_yz, dims.grid.(1), Schedule_outcome.Grid_y_extent, detail_of ~what:".y grid extent");
+      (* The [.z] grid fold (gh-ocannl-643) multiplies every Grid slot [>= 2] into [grid.(2)]. The
+         autotune batch-grid twins pre-filter at seeding against the same limit. *)
+      ( limits.max_grid_yz,
+        dims.grid.(2),
+        Schedule_outcome.Grid_z_extent,
+        fun requested limit ->
           [%string
-            "Schedule: kernel %{name} requests a .y grid extent of %{grid_y#Int}, exceeding the \
-             device limit of %{max_yz#Int}"]
-        in
-        raise
-          (Schedule_outcome.Cause_at
-             ( Schedule_outcome.Hardware_limits,
-               Schedule_outcome.Resource_exceeded
-                 {
-                   resource = Schedule_outcome.Grid_y_extent;
-                   requested = grid_y;
-                   limit = Some max_yz;
-                   detail;
-                 } )));
-  (* The [.z] grid fold (gh-ocannl-643) multiplies every Grid slot [>= 2] into [grid.(2)]. The
-     autotune batch-grid twins pre-filter at seeding against the same limit. *)
-  Option.iter limits.max_grid_yz ~f:(fun max_yz ->
-      let grid_z = (Low_level.launch_dims opt.llc).grid.(2) in
-      if grid_z > max_yz then
-        let detail =
-          [%string
-            "Schedule: kernel %{name} folds grid slots >= 2 to a .z extent of %{grid_z#Int}, \
-             exceeding the device limit of %{max_yz#Int}"]
-        in
-        raise
-          (Schedule_outcome.Cause_at
-             ( Schedule_outcome.Hardware_limits,
-               Schedule_outcome.Resource_exceeded
-                 {
-                   resource = Schedule_outcome.Grid_z_extent;
-                   requested = grid_z;
-                   limit = Some max_yz;
-                   detail;
-                 } )))
+            "Schedule: kernel %{name} folds grid slots >= 2 to a .z extent of %{requested#Int}, \
+             exceeding the device limit of %{limit#Int}"] );
+    ]
+  in
+  List.iter geometry_rows ~f:(fun (cap, requested, resource, detail) ->
+      Option.iter cap ~f:(fun limit ->
+          if requested > limit then
+            raise
+              (Schedule_outcome.Cause_at
+                 ( Schedule_outcome.Hardware_limits,
+                   Schedule_outcome.Resource_exceeded
+                     { resource; requested; limit = Some limit; detail = detail requested limit } ))))
 
 let check_hardware_limits ~name ~limits opt =
   match check_hardware_limits_classified ~name ~limits opt with
