@@ -119,7 +119,15 @@ files.
   `max_grid_dim`, Metal the `max_threads_per_threadgroup` triple — so a run on hardware can read
   back what those gates compare against; without them the only evidence a query is not degenerate
   is that no kernel got rejected, which is also what a query returning 0 would produce.
-  On gfx1151/ROCm/WSL2 the HIP values read `(2147483647 65535 65535)` and
+  **`bin/device_props` is the supported way to read them** (gh-ocannl-684): it prints both
+  `static_properties` and the derived `hardware_limits` for the selected backend, one
+  `path = value` line per fact, and compiles no routine. Do NOT reach it through `dune exec` (the
+  `bin/` cwd trap): `dune build bin/device_props.exe`, then run
+  `_build/default/bin/device_props.exe --ocannl_backend=<name>`, pinning the backend explicitly —
+  with none configured `Context.auto` walks metal -> cuda -> hip -> cc and would report a device
+  other than the one being asked about. Local readings: Metal on an M4 Max reports
+  `max_threads_per_threadgroup = 1024 1024 1024`, so Apple parts cannot exercise the per-dimension
+  cliff either. On gfx1151/ROCm/WSL2 the HIP values read `(2147483647 65535 65535)` and
   `(1024 1024 1024)`, i.e. `max_grid_yz = 65535` and a `max_workgroup_dims` that equals the product
   cap — that device cannot exercise the per-dimension cliff; CUDA's `.z` of 64 is the one that
   can.

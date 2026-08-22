@@ -388,6 +388,19 @@ let sync ctx =
         -> Backend.await c.BI.device);
     }
 
+let static_properties ctx =
+  Backends.query ctx.wrapped
+    {
+      q =
+        (fun (type dev runner event)
+          (module Backend : BI.Backend
+            with type dev = dev
+             and type runner = runner
+             and type event = event)
+          _c
+        -> Backend.static_properties ());
+    }
+
 let hardware_limits ctx =
   Backends.query ctx.wrapped
     {

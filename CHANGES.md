@@ -60,6 +60,20 @@
   rows, not six — `grid.(0)` is 2^31-scale wherever hardware axes bind, so its absence is stated
   rather than implied.
 
+- **`bin/device_props`, a supported readback for what the gates compare against** (gh-ocannl-684).
+  `Backend_intf.static_properties` (the per-device props dump) and `hardware_limits` (the derived
+  caps the schedule layer gates against) had no caller anywhere in the repository, so reading a
+  device's queried limits back meant adding a throwaway executable to the tree and deleting it
+  again — paid twice already, and about to be paid a third time verifying gh-ocannl-679's caps on
+  hardware. The new executable prints both for the selected backend, flattened to one
+  `path = value` line per fact so the output greps and diffs, and it compiles no routine (both
+  functions are deliberately `unit ->` so they can run before any driver work). The two surfaces
+  are printed together because they are not redundant: on HIP `max_grid_yz` is a device query, on
+  CUDA a hardcoded architectural constant, on Metal `None` — a dump of the raw props does not tell
+  you what the gate uses, and a dump of `hardware_limits` does not tell you whether the underlying
+  query answered. `Context.static_properties` exposes the first of them the way
+  `Context.hardware_limits` already exposed the second.
+
 - **A computation you can name is a computation you can tune** (gh-ocannl-669). `Autotune.tune`
   takes `?name`, exactly as `Context.compile` does, and passes it to every compile of one search:
   each candidate, the baseline, the cache replay, the winner, both untuned fallbacks and the
