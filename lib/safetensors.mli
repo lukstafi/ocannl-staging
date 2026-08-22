@@ -60,7 +60,7 @@ val to_ndarray : ?prec:Ir.Ops.prec -> t -> string -> Ir.Ndarray.t
     never reach the file. Two cases fall back to decoding into a fresh host buffer: a big-endian
     host (the format is little-endian), and a payload whose file offset is not a multiple of its
     element size, which the format does not guarantee. Both produce the same values;
-    {!ingestion_counts} is how to tell which ran.
+    {!Ir.Ndarray.ingestion_counts} is how to tell which ran.
 
     [?prec] converts the payload to that precision instead, through {!Ir.Ndarray.convert} -- a copy,
     unless it is already the payload's precision.
@@ -75,8 +75,3 @@ val to_float32 : t -> string -> (float, Bigarray.float32_elt, Bigarray.c_layout)
 
     Raises [Failure] if the tensor is missing or its dtype is not "F32"; use [to_ndarray ~prec] to
     convert another dtype to floats. *)
-
-val ingestion_counts : unit -> int * int
-(** [(mapped, copied)] payload counts since the start of the process: how many payloads the
-    accessors wrapped as file mappings, and how many they decoded into fresh host buffers. The two
-    paths agree on values by construction, so this is the only way to observe which one ran. *)
