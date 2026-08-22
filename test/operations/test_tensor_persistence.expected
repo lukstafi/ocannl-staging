@@ -51,9 +51,9 @@ the packed layout really does leave a payload unmappable: true
   id=0 values=[1.0; 2.0; 3.0]
   id=1 values=[1.0; 2.0; 3.0; 4.0; 5.0]
   id=2 values=[7.0]
-=== Test 13: Mapped vs copied payloads ===
-  load ~mmap:false ingested 0 payloads by mapping, 12 by copying
-  load ~mmap:true ingested 11 payloads by mapping, 1 by copying
+=== Test 13: Mapped vs decoded payloads ===
+  load ~mmap:false: 0 mapped, 12 decoded
+  load ~mmap:true: 11 mapped, 1 decoded
   single: 1.0; 2.0; 32.0; 5.0 (mapped identical)
   double: 1.0; 2.0; 32.0; 5.0 (mapped identical)
   half: 1.0; 2.0; 32.0; 5.0 (mapped identical)

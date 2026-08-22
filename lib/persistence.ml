@@ -221,7 +221,7 @@ let validate_header header =
   if Set.length unique_ids <> List.length ids then
     failwith "checkpoint contains duplicate tensor IDs"
 
-(** {2 Payload ingestion: mapped or copied (gh-ocannl-467)} *)
+(** {2 Payload ingestion: mapped or decoded (gh-ocannl-467)} *)
 
 (* Whether a payload is wrapped as a mapping of the file instead of being decoded into a fresh host
    buffer. On by default everywhere, Windows included (gh-ocannl-588). Windows was the platform this
@@ -235,22 +235,6 @@ let validate_header header =
    that does refuse. *)
 let mmap_by_default = lazy (Utils.get_global_flag ~default:true ~arg_name:"checkpoint_load_mmap")
 let use_mmap = function Some flag -> flag | None -> Lazy.force mmap_by_default
-
-(* A payload can be mapped when the file's bytes ARE the host buffer's bytes. Padding is the only
-   format-level disqualifier: a padded node's payload holds just the logical region, which
-   [Nd.read_payload_from_channel] scatters into the padded buffer through [adjust_idx_for_padding].
-   The rest is byte-compatibility bookkeeping: the payload has to be exactly the buffer, which also
-   rejects a header claiming a byte length its dimensions and precision do not add up to; and
-   [Nd.mappable_file_region] carries the conditions the mapping itself imposes. Alignment is not
-   automatic here either, [?alignment] being the writer's choice: at [~alignment:1] -- the packed
-   layout of pre-alignment-field checkpoints -- a byte payload ahead of a float one leaves the
-   latter at an odd offset, and that one decodes. *)
-let is_mappable ~byte_offset meta =
-  let numel = Array.fold meta.dims ~init:1 ~f:( * ) in
-  Option.is_none meta.padding
-  && (not (Array.is_empty meta.dims))
-  && meta.byte_length = numel * Ops.prec_in_bytes meta.prec
-  && Nd.mappable_file_region ~prec:meta.prec ~byte_offset ~nbytes:meta.byte_length
 
 type payload_reader = {
   path : string;  (** For error messages only: the payloads are addressed through [ic]. *)
@@ -276,32 +260,25 @@ let validate_extents reader header =
           ("checkpoint " ^ reader.path ^ ": the payload of tensor " ^ meta_name meta
          ^ " extends past the end of the file"))
 
-(* Which ingestion path each payload took is otherwise invisible -- the two produce equal values by
-   construction -- so it is counted, for tests and for diagnosing an unexpectedly slow load. *)
-let mapped_count = Atomic.make 0
-let copied_count = Atomic.make 0
-let ingestion_counts () = (Atomic.get mapped_count, Atomic.get copied_count)
+(** Ingests one tensor's payload through {!Nd.ingest_payload}: a mapping of the file where that is
+    byte-equivalent, otherwise a fresh buffer decoded from the channel. The format's half of that
+    question is what gets passed in. Padding is the only format-level disqualifier: a padded node's
+    payload holds just the logical region, which the decoding path scatters into the padded buffer.
+    The recorded [byte_length] going in is byte-compatibility bookkeeping -- the payload has to be
+    exactly the buffer, which also rejects a header claiming a byte length its dimensions and
+    precision do not add up to. Alignment is not automatic either, [?alignment] being the writer's
+    choice: at [~alignment:1] -- the packed layout of pre-alignment-field checkpoints -- a byte
+    payload ahead of a float one leaves the latter at an odd offset, and that one decodes.
 
-(** Ingests one tensor's payload: a mapping of the file where that is byte-equivalent, otherwise a
-    fresh buffer decoded from the channel. *)
+    The channel is the one the header was read through, which is what {!Nd.ingest_payload} maps
+    from: a concurrent atomic save would put a different inode at [reader.path]. *)
 let ingest_payload reader ~debug meta =
   let byte_offset = reader.data_start + meta.offset in
-  if reader.mmap && is_mappable ~byte_offset meta then begin
-    Atomic.incr mapped_count;
-    (* The descriptor behind the channel the header came from, NOT a fresh open of the path: a
-       concurrent atomic save would put a different inode at that name, and the offsets, extents and
-       precisions being mapped describe the file this read started on. The mapping outlives the
-       descriptor -- and the directory entry -- so nothing here depends on the file staying put. *)
-    Nd.map_file_array meta.prec ~dims:meta.dims ~byte_offset (Unix.descr_of_in_channel reader.ic)
-  end
-  else begin
-    Atomic.incr copied_count;
-    let nd = Nd.create_array ~debug meta.prec ~dims:meta.dims ~padding:meta.padding in
-    Stdlib.seek_in reader.ic byte_offset;
-    let padding = Option.map ~f:fst meta.padding in
-    Nd.read_payload_from_channel ?padding nd reader.ic meta.byte_length;
-    nd
-  end
+  let nd, (_ : Nd.ingestion) =
+    Nd.ingest_payload ?padding:meta.padding ~mmap:reader.mmap ~debug meta.prec ~dims:meta.dims
+      ~byte_offset ~nbytes:meta.byte_length reader.ic
+  in
+  nd
 
 (** Compute the byte length for a tensor's logical payload. *)
 let compute_byte_length prec dims padding =
