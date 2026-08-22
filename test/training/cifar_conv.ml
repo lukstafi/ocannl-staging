@@ -138,17 +138,29 @@ let () =
 
   (* --- Training Loop --- *)
   let open Operation.At in
+  let logged_losses = ref [] in
   for epoch = 1 to epochs do
     let epoch_loss = ref 0. in
     Train.sequential_loop sgd_routine.Context.bindings ~f:(fun () ->
         Train.run ctx sgd_routine;
         epoch_loss := !epoch_loss +. (ctx, batch_loss).@[0];
         Int.incr step_ref);
-    if epoch % 10 = 0 then
-      (* 1 decimal only: the exact trajectory digits depend on FP reduction order, which varies with
-         platform, SIMD width and worker count — 2 decimals is not portable. *)
-      printf "Epoch %d: avg loss = %.1f\n%!" epoch (!epoch_loss /. Float.of_int n_batches)
+    if epoch % 10 = 0 then (
+      let avg = !epoch_loss /. Float.of_int n_batches in
+      logged_losses := (epoch, avg) :: !logged_losses;
+      (* Exact trajectory digits go to stderr, like the test metrics below: they depend on FP
+         reduction order (platform, backend, SIMD width, worker count), and NO fixed print precision
+         is portable -- at 1 decimal the cifar epoch-30 value sat on a rounding tie (~1.05) and
+         printed 1.0 on cc but 1.1 on cuda, so the golden could not be backend-uniform. The portable
+         stdout record is the claim below: the loss fell across the logged epochs. *)
+      Stdio.eprintf "Epoch %d: avg loss = %.2f\n%!" epoch avg)
   done;
+  (match List.rev !logged_losses with
+  | [] -> ()
+  | (first_epoch, first_loss) :: _ as logged ->
+      let last_epoch, last_loss = List.last_exn logged in
+      Verdict.pf "avg loss fell from epoch %d to epoch %d" first_epoch last_epoch
+        Float.(last_loss < first_loss));
 
   (* --- Test-Set Evaluation (forward-only) --- Build a separate eval graph that reuses trained
      lenet parameters. Following the pattern from moons_demo.ml and bigram_mlp.ml: apply the model
