@@ -1184,6 +1184,9 @@ let%diagn_sexp compile ~(name : string) bindings (lowered : Low_level.optimized)
     let procs = [| lowered |]
   end))
   in
+  (* gh-ocannl-686: normalize the user-supplied routine name into a legal C identifier ONCE, here,
+     so the emitted symbol, the [dlsym] below and the [.c] artifact all name the same thing. *)
+  let name = Syntax.kernel_ident name in
   let idx_params = Indexing.bound_symbols bindings in
   let build_file = Utils.open_build_file ~base_name:name ~extension:".c" in
   (* Launch dims are ignored: the C backends render annotated loops as serial [for] loops (legal
@@ -1208,6 +1211,8 @@ let%diagn_sexp compile_batch ~names bindings (lowereds : Low_level.optimized opt
     let procs = Array.filter_opt lowereds
   end))
   in
+  (* gh-ocannl-686: as in [compile] — mangle before anything derives a file name or a symbol. *)
+  let names = Array.map names ~f:(Option.map ~f:Syntax.kernel_ident) in
   (* FIXME: do we really want all of them, or only the used ones? *)
   let idx_params = Indexing.bound_symbols bindings in
   let base_name =

@@ -509,6 +509,9 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
 
     let ident_blacklist =
       ident_blacklist
+      (* CUDA kernels are parsed by a C++ front end, so the C++ keywords are reserved here on top of
+         the C ones {!Pure_C_config} contributes (gh-ocannl-686). *)
+      @ C_syntax.cpp_keywords
       @ C_syntax.builtin_idents Builtins_cuda.builtins
       @ [
           (* CUDA built-in variables — would shadow per-thread or per-block context *)
@@ -1989,6 +1992,9 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     end))
     in
     let idx_params = Indexing.bound_symbols bindings in
+    (* gh-ocannl-686: normalize the user-supplied routine name into a legal identifier ONCE, here,
+       so the emitted symbol, the module's function lookup and the source artifacts agree. *)
+    let name = Syntax.kernel_ident name in
     let kparams, proc_doc, launch = Syntax.compile_proc ~name idx_params lowered in
     let cuda_includes =
       {|#include <cuda_fp16.h>
@@ -2020,6 +2026,9 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     end))
     in
     let idx_params = Indexing.bound_symbols bindings in
+    (* gh-ocannl-686: normalize the user-supplied routine name into a legal identifier ONCE, here,
+       so the emitted symbol, the module's function lookup and the source artifacts agree. *)
+    let names = Array.map names ~f:(Option.map ~f:Syntax.kernel_ident) in
     let kparams_and_docs =
       Array.map2_exn names lowereds
         ~f:

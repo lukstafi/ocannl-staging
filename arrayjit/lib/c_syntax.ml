@@ -689,6 +689,141 @@ let operand_conditionality_violations ~ternop_syntax ~binop_syntax =
     never calls it. *)
 let builtin_idents builtins = List.map builtins ~f:(fun (key, _, _) -> key)
 
+(** The words the C language itself reserves, plus the scaffolding names this module's rendering
+    emits unconditionally. Shared by every C-family backend through {!Pure_C_config}, and by
+    {!C_syntax.kernel_ident}: a routine and a tensor node are both plain identifiers in the emitted
+    source, so they are unsafe on exactly the same words.
+
+    [asm] is in the list even though C89/C99 reserve it only as a common extension: every compiler
+    OCANNL emits for (gcc, clang, nvrtc, hiprtc, the Metal front end) treats it as a keyword, which
+    is what made [Block_comment "asm"] emit [void asm(] and fail as an "internal" codegen bug
+    (gh-ocannl-686). *)
+let c_keywords =
+  [
+    (* C89 keywords *)
+    "auto";
+    "break";
+    "case";
+    "char";
+    "const";
+    "continue";
+    "default";
+    "do";
+    "double";
+    "else";
+    "enum";
+    "extern";
+    "float";
+    "for";
+    "goto";
+    "if";
+    "int";
+    "long";
+    "register";
+    "return";
+    "short";
+    "signed";
+    "sizeof";
+    "static";
+    "struct";
+    "switch";
+    "typedef";
+    "union";
+    "unsigned";
+    "void";
+    "volatile";
+    "while";
+    (* C99 additions *)
+    "inline";
+    "restrict";
+    "_Bool";
+    "_Complex";
+    "_Imaginary";
+    (* C11 additions *)
+    "_Alignas";
+    "_Alignof";
+    "_Atomic";
+    "_Generic";
+    "_Noreturn";
+    "_Static_assert";
+    "_Thread_local";
+    (* Keywords every compiler in the toolchain set accepts as an extension, or C23 promotes *)
+    "asm";
+    "typeof";
+    (* Scaffolding names emitted by generated code that must not clash with variable names *)
+    "log_file";
+    "log_file_name";
+    "uint32_t";
+    "uint64_t";
+  ]
+
+(** The words C++ reserves on top of {!c_keywords}. CUDA, HIP and MSL are all C++ dialects -- their
+    kernels are parsed by a C++ front end even where the emitted body is plain C -- so their
+    backends extend the blacklist with this table. Several entries are entirely plausible tensor
+    labels or routine names ([class], [new], [operator], [bool], [this], [template]), and a
+    collision there is the same misattributed "bug in OCANNL" failure as gh-ocannl-686's [asm]. *)
+let cpp_keywords =
+  [
+    "alignas";
+    "alignof";
+    "and";
+    "and_eq";
+    "bitand";
+    "bitor";
+    "bool";
+    "catch";
+    "char8_t";
+    "char16_t";
+    "char32_t";
+    "class";
+    "compl";
+    "concept";
+    "consteval";
+    "constexpr";
+    "constinit";
+    "const_cast";
+    "co_await";
+    "co_return";
+    "co_yield";
+    "decltype";
+    "delete";
+    "dynamic_cast";
+    "explicit";
+    "export";
+    "false";
+    "friend";
+    "mutable";
+    "namespace";
+    "new";
+    "noexcept";
+    "not";
+    "not_eq";
+    "nullptr";
+    "operator";
+    "or";
+    "or_eq";
+    "private";
+    "protected";
+    "public";
+    "reinterpret_cast";
+    "requires";
+    "static_assert";
+    "static_cast";
+    "template";
+    "this";
+    "thread_local";
+    "throw";
+    "true";
+    "try";
+    "typeid";
+    "typename";
+    "using";
+    "virtual";
+    "wchar_t";
+    "xor";
+    "xor_eq";
+  ]
+
 module Pure_C_config (Input : sig
   type buffer_ptr
 
@@ -796,54 +931,6 @@ struct
      where it overrides the op to something else, so that a node's code name does not depend on
      which arms a backend happens to shadow. *)
   let ident_blacklist =
-    let c_keywords =
-      [
-        (* C89 keywords *)
-        "auto";
-        "break";
-        "case";
-        "char";
-        "const";
-        "continue";
-        "default";
-        "do";
-        "double";
-        "else";
-        "enum";
-        "extern";
-        "float";
-        "for";
-        "goto";
-        "if";
-        "int";
-        "long";
-        "register";
-        "return";
-        "short";
-        "signed";
-        "sizeof";
-        "static";
-        "struct";
-        "switch";
-        "typedef";
-        "union";
-        "unsigned";
-        "void";
-        "volatile";
-        "while";
-        (* C99 additions *)
-        "inline";
-        "restrict";
-        "_Bool";
-        "_Complex";
-        "_Imaginary";
-        (* Scaffolding names emitted by generated code that must not clash with variable names *)
-        "log_file";
-        "log_file_name";
-        "uint32_t";
-        "uint64_t";
-      ]
-    in
     let c_names =
       op_syntax_idents ~ternop_syntax ~binop_syntax ~unop_syntax ~vec_unop_syntax ~convert_precision
     in
@@ -910,6 +997,55 @@ module C_syntax (B : C_syntax_config) = struct
   let get_ident =
     Low_level.get_ident_within_code ~no_dots:true ~blacklist:ident_blacklist
     @@ Array.map B.procs ~f:(fun l -> l.llc)
+
+  (** [kernel_ident name] is [name] made safe to emit as a kernel function's C identifier
+      (gh-ocannl-686).
+
+      Routine names come from user-facing surfaces -- an {!Assignments.Block_comment} label, the
+      [~name] argument of [Context.compile] and of the autotune drop-ins (gh-ocannl-669) -- and
+      reached the emitted [void <name>(] unexamined. A name that happens to be a reserved word or a
+      builtin therefore produced a source the backend's compiler rejects, and every backend reports
+      that rejection as "this is a bug in OCANNL", naming a generated file rather than the name that
+      caused it.
+
+      Tensor nodes and scope locals need no equivalent: a node's code name is minted by
+      {!Low_level.get_ident_within_code} with [ident_blacklist] pre-seeded, so a colliding label is
+      forced into the disambiguated [n<id>_<label>] form, and every local is minted with a
+      [v<scope>_] / [wred_] / [__rmw_] prefix. Routine names were the one identifier class entering
+      the emitted source verbatim.
+
+      The scheme is deterministic and, on a name that is already a safe C identifier, the identity
+      -- so nothing about a non-colliding routine changes: not its emitted symbol, not its
+      schedule-cache identity, not its generated-source goldens. On a colliding one:
+
+      - characters C does not admit in an identifier become [_], and a name starting with a digit
+        (or empty after that pass) gains a [k_] prefix, so the result is always well-formed;
+      - a result still equal to a reserved word or builtin gains a [__] suffix, repeatedly until it
+        is clear of [ident_blacklist] -- which terminates, the list being finite.
+
+      The name a routine is KNOWN by is untouched: [Context.routine]'s [name] field, the [.cd] and
+      [.ll] sources (written by {!Backends} before any backend sees the code), and the calibration
+      rows all keep what the caller asked for. Only the C-family artifacts downstream of this
+      function -- the emitted symbol, the [.c] / [.cu] / [.hip] / [.metal] source and what the
+      backend looks the symbol up by -- carry the mangled spelling, and they carry it consistently.
+
+      [ident_blacklist] is the same table the node names avoid: the language's keywords (C, plus
+      C++ for the GPU dialects), the backend's intrinsic globals, the names its builtins table
+      defines, and the names its own operator renderings emit. Uniqueness {e among} the routines of
+      one batch is not this function's business and never was -- two routines given the same name
+      collide as duplicate C symbols with or without mangling. *)
+  let kernel_ident name =
+    let sanitized =
+      String.map name ~f:(fun c -> if Char.is_alphanum c || Char.equal c '_' then c else '_')
+    in
+    let sanitized =
+      if String.is_empty sanitized || Char.is_digit sanitized.[0] then "k_" ^ sanitized
+      else sanitized
+    in
+    let rec avoid s =
+      if List.mem ident_blacklist s ~equal:String.equal then avoid (s ^ "__") else s
+    in
+    avoid sanitized
 
   (* {3 Storage precision vs. compute precision (gh-ocannl-517)}
 
@@ -5002,6 +5138,19 @@ module C_syntax (B : C_syntax_config) = struct
               per-thread stack arrays -- wrong sharing semantics. *)
            invalid_arg
              "C_syntax.compile_proc: workgroup-shared placement not supported by this backend");
+    (* gh-ocannl-686: the routine name reaches the emitted [void <name>(] verbatim, so it must
+       already be a legal, non-reserved identifier. Mangling it HERE would leave the caller's
+       symbol lookup and artifact names pointing at the pre-mangling spelling, so the caller owns
+       the normalization ({!kernel_ident}, applied once at each backend's [compile] entry) and this
+       is the check that it happened -- a backend that skips it fails here, naming the routine,
+       instead of handing its compiler a source it rejects as an OCANNL bug. *)
+    if not (String.equal name (kernel_ident name)) then
+      invalid_arg
+        (Printf.sprintf
+           "C_syntax.compile_proc: routine name %S is not a legal C identifier for this backend \
+            (reserved word, builtin, or illegal character) -- the backend must pass it through \
+            C_syntax.kernel_ident first, which would give %S"
+           name (kernel_ident name));
     current_kernel_name := name;
     current_placements := Some optimize_ctx.Low_level.placements;
     (* gh-ocannl-584: scope purity, the pipeline's EXIT gate ([Low_level.optimize_proc] is the entry
