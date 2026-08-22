@@ -128,7 +128,7 @@ let () =
   let id : LL.scope_id = { tn = tn_src; scope_id = 10 } in
   (* Body: unconditional assignment from tensor -- local is written before any read. *)
   let body = LL.Set_local (id, LL.Get (tn_src, [| Idx.Fixed_idx 0 |])) in
-  let local_scope = LL.Local_scope { id; body; orig_indices = [||] } in
+  let local_scope = LL.Local_scope { id; body; orig_indices = [||]; mint = LL.Inlined_computation } in
   let llc =
     LL.Set { tn = tn_out; idcs = [| Idx.Fixed_idx 0 |]; llsc = local_scope; debug = "write-first" }
   in
@@ -160,7 +160,7 @@ let () =
         axis = Serial;
       }
   in
-  let local_scope = LL.Local_scope { id; body; orig_indices = [||] } in
+  let local_scope = LL.Local_scope { id; body; orig_indices = [||]; mint = LL.Inlined_computation } in
   let llc =
     LL.Set { tn = tn_out; idcs = [| Idx.Fixed_idx 0 |]; llsc = local_scope; debug = "accumulator" }
   in
@@ -176,7 +176,7 @@ let () =
   let tn_src = make_tn ~id:14 ~label:"src_noop" in
   let tn_out = make_tn ~id:15 ~label:"out_noop" in
   let id : LL.scope_id = { tn = tn_src; scope_id = 60 } in
-  let local_scope = LL.Local_scope { id; body = LL.Noop; orig_indices = [||] } in
+  let local_scope = LL.Local_scope { id; body = LL.Noop; orig_indices = [||]; mint = LL.Inlined_computation } in
   let llc =
     LL.Set { tn = tn_out; idcs = [| Idx.Fixed_idx 0 |]; llsc = local_scope; debug = "noop-body" }
   in
@@ -202,7 +202,7 @@ let () =
       (id, LL.Binop (Ops.Add, (LL.Get_local id, Ops.single), (LL.Constant 1., Ops.single)))
   in
   let body = LL.Seq (empty_loop, acc_step) in
-  let local_scope = LL.Local_scope { id; body; orig_indices = [||] } in
+  let local_scope = LL.Local_scope { id; body; orig_indices = [||]; mint = LL.Inlined_computation } in
   let llc =
     LL.Set
       {
@@ -227,7 +227,12 @@ let () =
   (* Simple write-before-read local scope (shared between two statements) *)
   let make_scope sid orig_indices =
     LL.Local_scope
-      { id = sid; body = LL.Set_local (sid, LL.Get (tn_src, [| Idx.Fixed_idx 0 |])); orig_indices }
+      {
+        id = sid;
+        body = LL.Set_local (sid, LL.Get (tn_src, [| Idx.Fixed_idx 0 |]));
+        orig_indices;
+        mint = LL.Inlined_computation;
+      }
   in
   let stmt1 =
     LL.Set { tn = tn_out1; idcs = [| Idx.Fixed_idx 0 |]; llsc = make_scope scope1 [||]; debug = "" }
@@ -271,6 +276,7 @@ let () =
               axis = Serial;
             };
         orig_indices = [||];
+        mint = LL.Inlined_computation;
       }
   in
   let stmt1 =

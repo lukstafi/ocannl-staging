@@ -148,7 +148,7 @@ let phase1b () =
     LL.Set_local (id, Array.fold ws ~init:(c 0.) ~f:(fun acc w -> add acc (get w [| iter i |])))
   in
   let producer =
-    loop_n i dim (set y [| iter i |] (LL.Local_scope { id; body; orig_indices = [| iter i |] }))
+    loop_n i dim (set y [| iter i |] (LL.Local_scope { id; body; orig_indices = [| iter i |]; mint = LL.Inlined_computation }))
   in
   let consumer = loop_n j dim (set out [| iter j |] (get y [| iter j |])) in
   let o = optimize ~name:"vcf_scope" (seq producer consumer) in
@@ -181,7 +181,7 @@ let phase1b () =
       (loop_n i2 dim
          (set y2
             [| iter i2 |]
-            (LL.Local_scope { id = id2; body = body2; orig_indices = [| iter i2 |] })))
+            (LL.Local_scope { id = id2; body = body2; orig_indices = [| iter i2 |]; mint = LL.Inlined_computation })))
   in
   let consumer2 = loop_n j2 dim (set out2 [| iter j2 |] (get y2 [| iter j2 |])) in
   let o2 = optimize ~name:"vcf_scope_rmw" (seq producer2 consumer2) in
@@ -251,6 +251,7 @@ let phase1b () =
               Array.fold (Array.sub ws ~pos ~len:4) ~init:(Ll_test.c 0.) ~f:(fun acc w ->
                   add acc (get w [| iter i5 |])) );
         orig_indices = [| iter i5 |];
+        mint = LL.Inlined_computation;
       }
   in
   let producer5 =
@@ -1124,6 +1125,7 @@ let phase5 () =
                      (LL.Set_local (id16, LL.Get_merge_buffer (msrc7, [| iter sd |]))))
                   (LL.Set_local (id16, add (get ell17 [| iter s |]) (c 100.)));
               orig_indices = [| iter s |];
+              mint = LL.Inlined_computation;
             }))
   in
   let o_a15 =

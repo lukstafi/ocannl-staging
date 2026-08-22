@@ -60,6 +60,7 @@ let make_scope ~tn_src scope_id orig_indices =
       id = scope_id;
       body = LL.Set_local (scope_id, LL.Get (tn_src, [| Idx.Fixed_idx 0 |]));
       orig_indices;
+      mint = LL.Inlined_computation;
     }
 
 let make_set ~tn_out scalar =
@@ -164,6 +165,7 @@ let () =
               axis = Serial;
             };
         orig_indices = [||];
+        mint = LL.Inlined_computation;
       }
   in
   let stmt1 =

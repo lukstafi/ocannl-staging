@@ -1267,11 +1267,15 @@ type loop_desc = {
    virtualization's inlined computations put loops. This is the scalar-position reach of
    [Schedule.rewrite_loop] and [Schedule.find_loops_env]; like them it enters neither [If]
    conditions nor [Tile_mma] fallbacks (transforming those is never profitable and often
-   invalid). *)
-let stmt_scope_bodies (stmt : LL.t) : LL.t list =
+   invalid).
+
+   [mints] selects which scopes to enter by provenance (gh-ocannl-687): all of them by default,
+   which is what "does this loop have an inner loop at all" wants, and the schedule mints alone
+   where the question is which loops a schedule op could target. *)
+let stmt_scope_bodies ?(mints = fun (_ : LL.scope_mint) -> true) (stmt : LL.t) : LL.t list =
   let rec scalar (llsc : LL.scalar_t) =
     match llsc with
-    | LL.Local_scope { body; _ } -> [ body ]
+    | LL.Local_scope { body; mint; _ } -> if mints mint then [ body ] else []
     | LL.Get_dynamic { dyn_value = v, _; _ } -> scalar v
     | LL.Ternop (_, (a, _), (b, _), (c, _)) -> scalar a @ scalar b @ scalar c
     | LL.Binop (_, (a, _), (b, _)) -> scalar a @ scalar b
@@ -1286,9 +1290,13 @@ let stmt_scope_bodies (stmt : LL.t) : LL.t list =
   | LL.Set_from_vec { arg = a, _; _ } -> scalar a
   | _ -> []
 
-(* Whether [llc] contains a loop a schedule op could target — [Local_scope] bodies included
+(* Whether [llc] contains a nested loop — [Local_scope] bodies of BOTH provenances included
    (gh-ocannl-666), so a loop whose only inner loops sit inside an accumulator's scope does not read
-   as innermost. *)
+   as innermost. Deliberately not narrowed to the schedule mints the way [collect_loops] is
+   (gh-ocannl-687): innermost-ness is a fact about the loop nest the backend will emit, and an
+   inlined body's loops are emitted inside this loop whoever minted them. The two consumers ask
+   different questions of the same walk — "is a loop nested here" versus "is that loop mine to
+   propose for". *)
 let rec contains_loop = function
   | LL.Seq (a, b) -> contains_loop a || contains_loop b
   | LL.If { body; _ } -> contains_loop body
@@ -1307,8 +1315,16 @@ let rec contains_loop = function
    menu proposes from them (serial [Split]s, [Swap]s, [Unroll]s, [Vectorized] retypes — none
    introduces a hardware annotation, which [Low_level.validate_parallel] rejects inside a
    [Local_scope]); [Tensorize] is the exception, which is why [collect_serial_triples] below stays
-   out of scopes. *)
-let collect_loops registry llc =
+   out of scopes.
+
+   Only the SCHEDULE mints are entered (gh-ocannl-687). Virtualization mints the same construct at
+   every inlined read, and gh-ocannl-666's widening — which had no provenance to go on — therefore
+   also enumerated the inlined interpolation and reduction loops of a base lowering, loops no
+   schedule op has ever been able to reach: nothing had proposed for them before, they are tiny
+   (re-instantiated per use site), and every descriptor they add costs a candidate compile and, under
+   the per-unit cap, displaces a proposal for the main nest. [Low_level.scope_mint] is the fact that
+   separates them. *)
+let collect_loops ?(mints = LL.equal_scope_mint LL.Schedule_minted) registry llc =
   let acc = ref [] in
   let seen = Hash_set.create (module Idx.Symbol) in
   let rec walk = function
@@ -1340,7 +1356,7 @@ let collect_loops registry llc =
               :: !acc
         | _ -> ());
         walk body
-    | stmt -> List.iter (stmt_scope_bodies stmt) ~f:walk
+    | stmt -> List.iter (stmt_scope_bodies ~mints stmt) ~f:walk
   in
   walk llc;
   List.rev !acc
@@ -1391,9 +1407,17 @@ let collect_serial_triples registry llc =
 let split_factors = [ 2; 4; 8; 16; 32 ]
 let max_actions_per_unit = 48
 
+
 let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) ~registry
     (opt : LL.optimized) : SC.saved_optop list =
   let loops = collect_loops registry opt.LL.llc in
+  (* gh-ocannl-687: what the provenance filter held back, so the narrowing is visible rather than
+     silent. Computed only when the search log is on -- it is a second walk of the program. *)
+  let withheld =
+    if Lazy.force log_enabled then
+      List.length (collect_loops ~mints:(fun _ -> true) registry opt.LL.llc) - List.length loops
+    else 0
+  in
   (* Menu proposals carry their raw-symbol counterpart so the op-legality oracle (gh-494 waypoint 3)
      can veto proven-illegal ones before they cost a candidate compile; [Op_unknown] proposals
      proceed to compile-and-time exactly as before (the oracle's Unknown is never a rejection). *)
@@ -1485,6 +1509,11 @@ let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) ~registry
      vectorize"
     (List.length triples) (List.length tensorizes) (List.length splits) (List.length swaps)
     (List.length unrolls) (List.length vectorizes);
+  if withheld > 0 then
+    logf
+      "menu: %d loop(s) inside virtualization-inlined scopes not enumerated (gh-ocannl-687: no \
+       schedule op reaches them)"
+      withheld;
   List.take (tensorizes @ splits @ swaps @ unrolls @ vectorizes) max_actions_per_unit
 
 (* Extend one unit of a compiled candidate with a menu action. The fissioned entries stay in segment

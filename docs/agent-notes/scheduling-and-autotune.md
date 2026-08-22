@@ -281,3 +281,17 @@ files.
   is `report.default_ms` instead — the config-thresholds fissioned seed reproduces the untuned
   pipeline exactly and its time is attributed by digest (so a seed that dedups against a timed twin,
   the CPU serial baseline included, still reports).
+- The action menu's loop enumeration is provenance-aimed, not shape-aimed (gh-ocannl-687).
+  `Local_scope` has two producers — virtualization's inline at a read site, and the accumulator
+  localization `Schedule`'s materializing `Unroll` / `Partition` and `C_syntax.try_widen_serial_reduce`
+  mint over a MATERIALIZED cell — and `Low_level.scope_mint` on the node is what tells them apart.
+  `Autotune.collect_loops` descends the schedule mints only: those bodies hold the per-step /
+  per-segment loops `Schedule.rewrite_loop` retargets, while an inlined body's loops are the inlined
+  node's own iteration space, re-instantiated per use site and reachable by no schedule op. Note the
+  companion `contains_loop` deliberately keeps descending BOTH: innermost-ness is a fact about the
+  nest the backend emits, so an inlined loop still makes its enclosing loop non-innermost. Two
+  consumers, one walk, different questions — "is a loop nested here" versus "is that loop mine to
+  propose for". A flag on the node is the durable form of this fact; contrast `input_scope_ids`
+  (gh-ocannl-681), which answers the per-call question of whether a scope was in the program a given
+  `optimize` was HANDED, and must stay id-set-based: a mint is claimable, and hand-built IR has no
+  honest way to spell "not mine".

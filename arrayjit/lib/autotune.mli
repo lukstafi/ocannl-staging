@@ -343,8 +343,10 @@ val menu :
     permutations, each proposal vetted by {!Ir.Schedule.op_legality} (proven-illegal ones are pruned
     before they cost a candidate compile; [Op_unknown] proceeds to compile-and-time). The loop
     enumeration descends into accumulation-minted [Local_scope] bodies and treats binder-sharing
-    mint copies as one decision (gh-ocannl-666); see the candidate-space overview above. Exposed for
-    tests. *)
+    mint copies as one decision (gh-ocannl-666) -- into THOSE bodies only, not into virtualization's
+    inlined computations, which mint the same construct at every inlined read and whose loops no
+    schedule op reaches ([Ir.Low_level.scope_mint], gh-ocannl-687). See the candidate-space
+    overview above. Exposed for tests. *)
 
 type decline_summary = {
   key : Ir.Schedule_outcome.rejection_key;

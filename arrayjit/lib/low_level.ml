@@ -59,6 +59,30 @@ let axis_type_label = function
   | Unrolled -> "for@unrolled"
   | Vectorized -> "for@vectorized"
 
+(** Which pass minted a [Local_scope] (gh-ocannl-687). The construct has two producers, and a
+    consumer that walks the IR looking for schedulable structure means only one of them:
+
+    - [Inlined_computation] -- virtualization's inline of a virtual node's computation at a read
+      site ([virtual_llc], and the CSE / simplification rewrites that carry those scopes along).
+      The loops inside such a body are the inlined node's own iteration space, re-instantiated per
+      use site; no [Schedule] op has ever targeted them.
+    - [Schedule_minted] -- the accumulator localization built by [Schedule]'s materializing
+      [Unroll] and by [Partition] (gh-ocannl-639), and by [C_syntax.try_widen_serial_reduce]: a
+      running value for a MATERIALIZED cell, whose body holds the very per-step / per-segment loops
+      [Schedule.rewrite_loop] retargets.
+
+    This is the fact [Autotune.collect_loops] needs: it enumerates loops inside [Schedule_minted]
+    scopes only, so the action menu does not spend its per-unit budget proposing splits, swaps,
+    unrolls and vectorize retypes for inlined interpolation and reduction loops that no schedule op
+    has ever been able to reach.
+
+    Deliberately NOT the mechanism behind {!scope_target_rejection}: that one asks whether a scope
+    was in the program a given [optimize] call was HANDED, which is a per-call fact -- a
+    virtualizer-minted scope handed back into a second [optimize] still carries
+    [Inlined_computation] and still is not that call's to retract -- and hand-built IR has no
+    honest way to spell "not mine". See {!input_scope_ids}. *)
+type scope_mint = Inlined_computation | Schedule_minted [@@deriving sexp, compare, equal]
+
 type t =
   | Noop
   | Comment of string
@@ -147,7 +171,12 @@ type t =
 [@@deriving sexp_of, equal]
 
 and scalar_t =
-  | Local_scope of { id : scope_id; body : t; orig_indices : Indexing.axis_index array }
+  | Local_scope of {
+      id : scope_id;
+      body : t;
+      orig_indices : Indexing.axis_index array;
+      mint : scope_mint;  (** Which pass built this scope; see {!scope_mint}. *)
+    }
   | Get_local of scope_id
   | Get of Tn.t * Indexing.axis_index array
   | Get_dynamic of {
@@ -263,8 +292,11 @@ module Canonical_render = struct
     in
     let rec emit_scalar (sc : scalar_t) =
       match sc with
-      | Local_scope { id; body; orig_indices } ->
-          add "scope(";
+      | Local_scope { id; body; orig_indices; mint } ->
+          (* gh-ocannl-687: the mint is part of the program's identity -- it decides which loops the
+             action menu may target -- but only the newer, schedule-minted form takes a marker, so
+             digests of the code the optimizer produces are unchanged. *)
+          add (match mint with Inlined_computation -> "scope(" | Schedule_minted -> "sscope(");
           emit_scope id;
           add ")";
           emit_idcs orig_indices;
@@ -1889,12 +1921,13 @@ let%track7_sexp inline_computation ~id ~inherited_merge_tainted ~inherited_tns
               dyn_axis;
               dyn_value = (loop_scalar env v, prec);
             }
-      | Local_scope { id; body; orig_indices } ->
+      | Local_scope { id; body; orig_indices; mint } ->
           Local_scope
             {
               id;
               body = Option.value_exn ~here:[%here] @@ loop env body;
               orig_indices = Array.map ~f:(subst env) orig_indices;
+              mint;
             }
       | Get_local _ -> llsc
       | Get_merge_buffer (tn, indices) -> Get_merge_buffer (tn, Array.map ~f:(subst env) indices)
@@ -2256,7 +2289,7 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
                (inline_computation ~id ~inherited_merge_tainted ~inherited_tns optim_ctx traced
                   static_indices indices) ~f:(fun body ->
                  if Hash_set.mem inherited_tns tn then record_spliced_reads body;
-                 Local_scope { id; body; orig_indices = indices })
+                 Local_scope { id; body; orig_indices = indices; mint = Inlined_computation })
     | Get_dynamic { tn; idcs; dyn_axis; dyn_value = v, prec } ->
         (* Review round 12: a dynamically-indexed read cannot be served by recomputation (the gather
            index is only known at runtime), so a LOCAL table materializes — but an INHERITED table
@@ -2497,7 +2530,7 @@ let cleanup_virtual_llc plc ~input_scopes ~static_indices (llc : t) : t =
         (* gh-343: defensive -- the table is a materialized read; recurse into the dynamic index. *)
         Tn.Placements.update plc tn Never_virtual 17;
         Get_dynamic { tn; idcs; dyn_axis; dyn_value = (loop v, prec) }
-    | Local_scope { id; body; orig_indices } ->
+    | Local_scope { id; body; orig_indices; mint } ->
         assert (
           Array.for_all orig_indices ~f:(function
             | Indexing.Iterator s -> Set.mem env_dom s
@@ -2513,7 +2546,7 @@ let cleanup_virtual_llc plc ~input_scopes ~static_indices (llc : t) : t =
         else
           let body = Option.value_exn ~here:[%here] @@ loop_proc ~balanced ~env_dom body in
           Tn.Placements.update plc id.tn Virtual 18;
-          Local_scope { id; orig_indices; body }
+          Local_scope { id; orig_indices; body; mint }
     | Get_local id ->
         assert (not @@ Tn.Placements.known_non_virtual plc id.tn);
         Tn.Placements.update plc id.tn Virtual 16;
@@ -3395,11 +3428,14 @@ let cse_equal_scalar s1 s2 =
     | _ -> false
   and equal_scalar (a : scalar_t) (b : scalar_t) : bool =
     match (a, b) with
-    | ( Local_scope { id = id1; body = b1; orig_indices = oi1 },
-        Local_scope { id = id2; body = b2; orig_indices = oi2 } ) ->
+    | ( Local_scope { id = id1; body = b1; orig_indices = oi1; mint = m1 },
+        Local_scope { id = id2; body = b2; orig_indices = oi2; mint = m2 } ) ->
         (* Record the binder mapping through the checked path (Bug 3) before comparing the body, so
            the binder and its nested [Set_local] / [Get_local] uses all agree via [ids_equal]. *)
-        ids_bind id1 id2 && Array.equal orig_idx_equal oi1 oi2 && equal_t b1 b2
+        equal_scope_mint m1 m2
+        && ids_bind id1 id2
+        && Array.equal orig_idx_equal oi1 oi2
+        && equal_t b1 b2
     | Get_local id1, Get_local id2 -> ids_equal id1 id2
     | Get (tn1, i1), Get (tn2, i2) -> Tn.equal tn1 tn2 && Array.equal idx_equal i1 i2
     | ( Get_dynamic { tn = tn1; idcs = i1; dyn_axis = da1; dyn_value = v1 },
@@ -3431,14 +3467,14 @@ let eliminate_common_subexpressions llc =
     let seen : (scalar_t * scope_id) list ref = ref [] in
     let rec loop_scalar (llsc : scalar_t) : scalar_t =
       match llsc with
-      | Local_scope { id; body; orig_indices } -> (
+      | Local_scope { id; body; orig_indices; mint } -> (
           (* Save seen list: inner definitions must not leak to sibling subtrees *)
           let saved_seen = !seen in
           (* First CSE within the body (bottom-up: inner scopes first) *)
           let body = loop_proc body in
           (* Restore: discard inner definitions, keep only those visible at this level *)
           seen := saved_seen;
-          let result = Local_scope { id; body; orig_indices } in
+          let result = Local_scope { id; body; orig_indices; mint } in
           (* Search for an alpha-equivalent Local_scope already seen at this level *)
           let found =
             List.find_map !seen ~f:(fun (prev_scalar, prev_id) ->
@@ -4756,7 +4792,7 @@ let affine_accesses (llc : t) : Tn.t Affine.access list =
 let iter_buffer_accesses ~(touch : Tn.t -> unit) ~(on_opaque : unit -> unit) (c : t) : unit =
   let rec scal (sc : scalar_t) : unit =
     match sc with
-    | Local_scope { body; id = _; orig_indices = _ } -> stmt body
+    | Local_scope { body; id = _; orig_indices = _; mint = _ } -> stmt body
     | Get_local _ -> ()
     | Get (tn, _) -> touch tn
     | Get_dynamic { tn; dyn_value = dv, _; idcs = _; dyn_axis = _ } ->
@@ -5298,7 +5334,7 @@ let peel_accum_nest ?(extra_level = fun _ _ -> false) ~free_of body :
           ibody
     | [ If { cond = gc, gp; body = gbody } ] when pure_index_guard gc ->
         peel ~free_of ~rebuild:(fun b -> rebuild (If { cond = (gc, gp); body = b })) gbody
-    | [ Set { tn; idcs; llsc = Local_scope { id; body = sbody; orig_indices = _ }; debug } ]
+    | [ Set { tn; idcs; llsc = Local_scope { id; body = sbody; orig_indices = _; mint = _ }; debug } ]
       when cell_invariant ~free_of idcs -> (
         match strip (flat_lines [ sbody ]) with
         | Set_local (id', Get (tn', idcs')) :: (_ :: _ as rest)
@@ -5506,13 +5542,13 @@ let rewrite_one_hot_reductions ?(static_indices = []) (llc : t) : t =
   and loop_scalar ~ienv (llsc : scalar_t) : scalar_t =
     let loop_scalar = loop_scalar ~ienv in
     match llsc with
-    | Local_scope { id; body; orig_indices } -> (
+    | Local_scope { id; body; orig_indices; mint } -> (
         (* Recurse into the body first so inner reductions are handled, then try to collapse this
            scope itself. *)
         let body = loop_proc ~ienv body in
         match try_rewrite_local_scope ~ienv id body with
         | Some gather -> gather
-        | None -> Local_scope { id; body; orig_indices })
+        | None -> Local_scope { id; body; orig_indices; mint })
     | Get_dynamic { tn; idcs; dyn_axis; dyn_value = v, p } ->
         Get_dynamic { tn; idcs; dyn_axis; dyn_value = (loop_scalar v, p) }
     | Ternop (op, (a, pa), (b, pb), (c, pc)) ->
@@ -6610,7 +6646,7 @@ let get_ident_within_code ?no_dots ?(blacklist = []) llcs =
     | Declare_local { id = { tn; _ }; _ } -> visit tn
   and loop_scalar fc =
     match fc with
-    | Local_scope { id = { tn; _ }; body; orig_indices = _ } ->
+    | Local_scope { id = { tn; _ }; body; orig_indices = _; mint = _ } ->
         visit tn;
         loop body
     | Get_merge_buffer (la, _) -> visit la
