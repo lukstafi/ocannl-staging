@@ -1468,6 +1468,14 @@ let () =
                            that closed once per chain. *)
                         reading.stores_from_local + reading.rmw_statements = m.store_sites
                         && reading.node_accesses <= 2 * m.store_sites
+                        (* And no partial closed elsewhere on the way, exactly as for an ordinary
+                           localized member (Codex P2, round 12 — the round-11 fix belonged here
+                           too and I applied it to one arm only). A SIMD or shuffle renderer that
+                           began closing intermediate partials into another node would keep its
+                           marker, its single target epilogue and these target-only counts, and the
+                           f32 legs' exactly-representable arithmetic would absorb the added
+                           store/reload seams. *)
+                        && reading.foreign_local_stores = m.foreign_sites
                     | Rmw ->
                         reading.rmw_statements = m.rmw_sites
                         && reading.node_accesses <= 2 * m.rmw_sites
