@@ -499,6 +499,160 @@ class ProvenanceTest(unittest.TestCase):
         self.assertFalse(orchestrate.TWO_PASS_CELLS & orchestrate.SAME_PROCESS_CELLS)
 
 
+class TensorizationTest(unittest.TestCase):
+    """gh-ocannl-626: a "tensorized" timing must not be able to be a scalar-fallback timing."""
+
+    def cell(self, arms, shipped="A", shipped_mma=...):
+        r = result("ocannl", "metal", "tuned", [2.3, 2.2, 2.1])
+        r["searched"] = False
+        r["step_ms"] = {"p10": 1.0, "p50": 1.1, "p90": 1.2}
+        r["queued_step_ms"] = 0.1
+        r["compile_s"] = 3.0
+        r["parity"] = "REF"
+        r["parity_loss_moved"] = True
+        r["diverged_at"] = None
+        r["tune"] = {
+            "shipped": shipped, "searches": 0, "replays": 1, "no_searches": 0, "arms": arms
+        }
+        if shipped_mma is not ...:
+            r["tune"]["shipped_mma"] = shipped_mma
+        return r
+
+    def mma(self, tensorization, statements=0, scalar_fallbacks=0):
+        return {
+            "tensorization": tensorization, "statements": statements,
+            "scalar_fallbacks": scalar_fallbacks,
+        }
+
+
+    def arm(self, name, tensorized, tensorization, statements=0, fallbacks=0):
+        return {
+            "arm": name, "state": "cache-replay", "searched": False, "cache_hit": True,
+            "best_ms": 1.0, "best_label": "L", "tensorized": tensorized,
+            "tensorization": tensorization, "mma_statements": statements,
+            "mma_scalar_fallbacks": fallbacks, "mma_seeded": 0, "mma_timed": 0,
+            "mma_best_ms": 1.0, "terminal_failure": None,
+        }
+
+    def test_a_declined_tensorize_is_not_reported_as_a_tensorized_timing(self):
+        # The defect: the schedule asked for tensor cores, every Tile_mma rendered the lane-0
+        # scalar loop, and the row still carried a tensorized variant name.
+        cell = self.cell([self.arm("A", True, "scalar-fallback", statements=3, fallbacks=3)])
+
+        self.assertEqual(orchestrate.tensorization_verdict(cell), "SCALAR-FALLBACK")
+        self.assertEqual(orchestrate.tensorization_check([cell]), [cell])
+
+    def test_a_tensorize_that_emitted_no_statement_is_its_own_verdict(self):
+        # Distinct from the fallback: nothing declined, because nothing was emitted to decline.
+        cell = self.cell([self.arm("A", True, "not-requested")])
+
+        self.assertEqual(orchestrate.tensorization_verdict(cell), "NOT-EMITTED")
+        self.assertEqual(orchestrate.tensorization_check([cell]), [cell])
+
+    def test_an_honestly_tensorized_cell_is_not_flagged(self):
+        cell = self.cell([self.arm("A", True, "tensorized", statements=4)])
+
+        self.assertEqual(orchestrate.tensorization_verdict(cell), "TENSORIZED")
+        self.assertEqual(orchestrate.tensorization_check([cell]), [])
+
+    def test_an_artifact_that_never_asked_is_not_a_mismatch(self):
+        cell = self.cell([self.arm("A", False, "not-requested")])
+
+        self.assertEqual(orchestrate.tensorization_verdict(cell), "NOT-REQUESTED")
+        self.assertEqual(orchestrate.tensorization_check([cell]), [])
+
+    def test_a_missing_census_never_reads_as_tensorized(self):
+        # The negative control. A runner predating the field, or an arm with no crowned candidate,
+        # carries a null label — which must answer UNKNOWN, never the passing reading.
+        older = self.cell([{"arm": "A", "best_ms": 1.0}])
+        no_winner = self.cell([self.arm("A", False, None)])
+
+        self.assertEqual(orchestrate.tensorization_verdict(older), "UNKNOWN")
+        self.assertEqual(orchestrate.tensorization_verdict(no_winner), "UNKNOWN")
+        self.assertEqual(orchestrate.tensorization_check([older, no_winner]), [])
+        # And a cell that tuned nothing at all has no arm to consult, so it gets no column entry
+        # rather than a fabricated one.
+        self.assertIsNone(orchestrate.tensorization_verdict(result("torch", "cuda", "eager", [1.0])))
+
+    def test_the_shipped_routines_census_outranks_the_arm_reports(self):
+        # A gh-555 flip refinement that beats the A/B winner ships under `shipped: "flip"` and is
+        # not an arm at all; on the timing_ctx path the tuner can also fall back to the untuned
+        # default after the arm was crowned. Either way the arm describes a discarded schedule, so
+        # the routine that was actually timed is what the column must report.
+        flip = self.cell(
+            [self.arm("A", True, "tensorized", statements=4)],
+            shipped="flip",
+            shipped_mma=self.mma("scalar-fallback", statements=3, scalar_fallbacks=3),
+        )
+
+        self.assertIsNone(orchestrate.shipped_arm(flip))
+        self.assertEqual(orchestrate.tensorization_verdict(flip), "SCALAR-FALLBACK")
+        self.assertEqual(orchestrate.tensorization_check([flip]), [flip])
+
+    def test_a_fallback_to_the_untuned_default_is_not_reported_as_the_crowned_arm(self):
+        # The arm was crowned in the scratch context and its replay was rejected in the production
+        # one, so the timed routine has no mma at all while the arm still says tensorized.
+        cell = self.cell(
+            [self.arm("A", True, "tensorized", statements=4)],
+            shipped_mma=self.mma("not-requested"),
+        )
+
+        self.assertEqual(orchestrate.tensorization_verdict(cell), "NOT-EMITTED")
+        self.assertEqual(orchestrate.tensorization_check([cell]), [cell])
+
+    def test_a_harness_that_recorded_no_shipped_census_reads_unknown(self):
+        # Present-but-empty is a runner that reported arms and forgot the routine: not a finding,
+        # and not the passing reading either.
+        cell = self.cell([self.arm("A", True, "tensorized", statements=4)], shipped_mma=None)
+
+        self.assertEqual(orchestrate.tensorization_verdict(cell), "UNKNOWN")
+        self.assertEqual(orchestrate.tensorization_check([cell]), [])
+
+    def test_an_artifact_predating_shipped_mma_still_reads_its_arm(self):
+        # The key absent (not null) is an older result line; the arm is right whenever the crowned
+        # candidate WAS the shipped artifact, which is the common case.
+        cell = self.cell([self.arm("A", True, "scalar-fallback", statements=2, fallbacks=2)])
+
+        self.assertNotIn("shipped_mma", cell["tune"])
+        self.assertEqual(orchestrate.tensorization_verdict(cell), "SCALAR-FALLBACK")
+
+    def test_the_verdict_describes_the_arm_that_shipped_not_the_fastest_one(self):
+        # tune_placements searches several arms and keeps one artifact; reading any other arm
+        # describes a schedule that was discarded (gh-ocannl-638).
+        cell = self.cell(
+            [
+                self.arm("A", True, "tensorized", statements=4),
+                self.arm("B", True, "scalar-fallback", statements=2, fallbacks=2),
+            ],
+            shipped="B",
+        )
+
+        self.assertEqual(orchestrate.tensorization_verdict(cell), "SCALAR-FALLBACK")
+
+    def test_every_verdict_renders_in_the_table(self):
+        # The same completeness check the provenance column carries: a verdict with no mark would
+        # print as an em dash, which is the "never asked" reading.
+        for verdict in ("TENSORIZED", "SCALAR-FALLBACK", "NOT-EMITTED", "NOT-REQUESTED", "UNKNOWN"):
+            self.assertIn(verdict, orchestrate.TENSORIZATION_MARK)
+        for verdict in orchestrate.TENSORIZATION_MISMATCH:
+            self.assertIn(verdict, orchestrate.TENSORIZATION_MARK)
+            self.assertIn("**", orchestrate.TENSORIZATION_MARK[verdict])
+
+    def test_the_mismatch_is_visible_in_the_rendered_table(self):
+        cells = [
+            self.cell([self.arm("A", True, "scalar-fallback", statements=3, fallbacks=3)]),
+            self.cell([self.arm("A", True, "tensorized", statements=4)]),
+        ]
+        orchestrate.tensorization_check(cells)
+        out = Path(tempfile.mkdtemp())
+        orchestrate.report(cells, out)
+        table = (out / "report.md").read_text()
+
+        self.assertIn(" mma |", table)
+        self.assertIn("**SCALAR FALLBACK**", table)
+        self.assertIn("tensorized", table)
+
+
 class RunnerProvenanceProbeTest(unittest.TestCase):
     """gh-ocannl-644: what the Python runners report, and what they refuse to claim."""
 

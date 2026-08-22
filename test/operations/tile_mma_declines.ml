@@ -6,11 +6,13 @@
    (docs/proposals/tensorize-mma.md: parity passed while tensor cores never ran). This test pins the
    three visibility mechanisms:
 
-   - The [Ir.C_syntax.mma_census]: with [mma_census_enabled], each compiled [Tile_mma] statement
-   records how it actually rendered (intrinsics / register-tiled / scalar fallback). Autotune reads
-   it to annotate candidate timings; here we assert directly that a whole-triple [Tensorize] over a
-   standard layout renders register-tiled on the C backends while a transposed-B layout (the
-   gradient-GEMM shape) falls back to scalar.
+   - The [Ir.C_syntax.mma_census]: each compiled [Tile_mma] statement records how it actually
+   rendered (intrinsics / register-tiled / scalar fallback), and since gh-ocannl-626 the summary --
+   including the three-way [tensorization] label -- is a field of the compiled routine
+   ([Context.routine.mma]) rather than a global a call site brackets. Autotune reads it to annotate
+   candidate timings; here we assert directly that a whole-triple [Tensorize] over a standard
+   layout renders register-tiled on the C backends while a transposed-B layout (the gradient-GEMM
+   shape) falls back to scalar, and that each routine's label reports which happened.
 
    - The per-chunk privatization byte cap (config [cc_grid_private_bytes_cap], default 256KB): a
    grid-outermost packed GEMM that re-packs the B~ panel per chunk (gh-ocannl-475's alternative
@@ -85,17 +87,15 @@ let accum_syms (opt : LL.optimized) =
 
 let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; inner })
 
-(* Compile [comp] under [transform] with the Tile_mma rendering census enabled; returns the
-   renderings in emission order. *)
+(* Compile [comp] under [transform] and return the compiled routine's Tile_mma rendering summary.
+   No bracket around the census global: since gh-ocannl-626 [Context.compile] collects it and the
+   summary is a field of the routine, so a caller cannot forget to ask. *)
 let compile_with_census ~transform comp =
-  Ir.C_syntax.mma_census := [];
-  Ir.C_syntax.mma_census_enabled := true;
   let ctx = Context.auto () in
-  let (_ : Context.t * Context.routine) =
-    Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty
-  in
-  Ir.C_syntax.mma_census_enabled := false;
-  List.rev_map !Ir.C_syntax.mma_census ~f:snd
+  let _ctx, routine = Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty in
+  routine.Context.mma
+
+let renderings summary = List.map summary.Ir.C_syntax.renderings ~f:snd
 
 let n = 64
 
@@ -122,7 +122,11 @@ let () =
   in
   p "census: standard layout renders register-tiled"
     ((not on_cpu)
-    || List.equal Ir.C_syntax.equal_mma_rendering census [ Ir.C_syntax.Mma_register_tiled ]);
+    || List.equal Ir.C_syntax.equal_mma_rendering (renderings census)
+         [ Ir.C_syntax.Mma_register_tiled ]);
+  p "census: the honoured schedule's routine is labeled tensorized"
+    ((not on_cpu)
+    || Ir.C_syntax.equal_tensorization census.Ir.C_syntax.tensorization Ir.C_syntax.Tensorized);
   let mta = TDSL.ndarray mav ~label:[ "tmd_ta" ] ~output_dims:[ n; n ] () in
   let mtb = TDSL.ndarray mbv ~label:[ "tmd_tb" ] ~output_dims:[ n; n ] () in
   let%op td = mta +* "ik;jk=>ij" mtb in
@@ -134,7 +138,12 @@ let () =
   in
   p "census: transposed-B layout falls back to the lane-0 scalar rendering"
     ((not on_cpu)
-    || List.equal Ir.C_syntax.equal_mma_rendering census_tb [ Ir.C_syntax.Mma_scalar_fallback ])
+    || List.equal Ir.C_syntax.equal_mma_rendering (renderings census_tb)
+         [ Ir.C_syntax.Mma_scalar_fallback ]);
+  p "census: the declined schedule's routine is labeled scalar-fallback, not tensorized"
+    ((not on_cpu)
+    || Ir.C_syntax.equal_tensorization census_tb.Ir.C_syntax.tensorization
+         Ir.C_syntax.Scalar_fallback)
 
 (* === The per-chunk privatization cap: grid-outermost packed GEMM re-packing B~ per chunk
    (gh-ocannl-475's shape). Both packing Stages land inside the Grid body, so both tiles must

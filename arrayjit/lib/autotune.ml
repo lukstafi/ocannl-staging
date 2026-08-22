@@ -61,6 +61,7 @@ type report = {
   best_ms : float;
   best_label : string;
   best_tensorized : bool;
+  best_tensorization : Ir.C_syntax.tensorization option;
   best_mma_statements : int;
   best_mma_scalar_fallbacks : int;
   mma_best_ms : float;
@@ -103,6 +104,7 @@ let no_search_report =
        empty exactly when [best_ms] is [infinity]. *)
     best_label = "";
     best_tensorized = false;
+    best_tensorization = None;
     best_mma_statements = 0;
     best_mma_scalar_fallbacks = 0;
     mma_best_ms = Float.infinity;
@@ -778,11 +780,6 @@ type compiled = {
       (** Every compiled segment ([`Zeros] and [`Solo] segments included, unlike [units]) — the code
           the timing runs actually execute, for calibration analysis. *)
   digest_after : string;
-  mma_renders : (string * Ir.C_syntax.mma_rendering) list;
-      (** The [Ir.C_syntax.mma_census] of this candidate's compile: how each [Tile_mma] statement
-          actually rendered (gh-ocannl-479) — a tensorized candidate whose statements all fell back
-          to the scalar path never ran tensorized, and the tuning log must say so next to the
-          timing. *)
 }
 
 (* Per-candidate search diagnostics on stderr, gated by config [autotune_log]. *)
@@ -1253,21 +1250,15 @@ let compile_candidate ?name ~static_indices ~base_opt ~canon ~limits ~is_gpu ~is
         Context.compile_outcome ?name ~lowered_transforms:transforms ~provenance ~candidate ctx comp
           bindings
   in
-  (* Collect the Tile_mma rendering census across this candidate's kernel compiles (fissioned
-     segments included); [mma_census_enabled] keeps the census from growing in non-tuning processes.
-     Compiles are sequential on the main domain, so save-and-restore suffices. *)
-  Ir.C_syntax.mma_census := [];
-  Ir.C_syntax.mma_census_enabled := true;
-  let compile_result =
-    Exn.protect ~f:compile_ctx ~finally:(fun () -> Ir.C_syntax.mma_census_enabled := false)
-  in
-  match compile_result with
+  (* The [Tile_mma] rendering census travels on the routine ([Context.routine.mma], gh-ocannl-626):
+     [Context.compile] collects it around this candidate's kernel compiles, fissioned segments
+     included, so no bracket is needed here and a candidate cannot be timed without it. *)
+  match compile_ctx () with
   | Error failure -> Error failure
   | Ok (cctx, routine) -> (
-      let mma_renders = !Ir.C_syntax.mma_census in
       match !captured with
       | Some (form, units, all_opts, digest_after) ->
-          Ok { form; cctx; routine; units; all_opts; digest_after; mma_renders }
+          Ok { form; cctx; routine; units; all_opts; digest_after }
       | None ->
           Outcome.protect
             ~classify_backend:(fun _ _ -> None)
@@ -2578,10 +2569,12 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir
     let saved_is_tensorized (saved : SC.saved_schedule) =
       List.exists saved ~f:(function SC.Tensorize _ -> true | _ -> false)
     in
-    let mma_scalar_fallbacks c =
-      List.count c.mma_renders ~f:(fun (_, r) ->
-          Ir.C_syntax.equal_mma_rendering r Ir.C_syntax.Mma_scalar_fallback)
-    in
+    (* What the emission actually did, straight off the compiled routine: the schedule-side
+       [saved_is_tensorized] says what was ASKED, [c.routine.mma] says what was DELIVERED, and the
+       gap between the two is exactly the false "tensorized" timing (gh-ocannl-626). *)
+    let mma_summary c = c.routine.Context.mma in
+    let mma_scalar_fallbacks c = (mma_summary c).Ir.C_syntax.scalar_fallbacks in
+    let mma_statements c = (mma_summary c).Ir.C_syntax.statements in
     (* The decline census outlives the cache branch: the baseline compile happens before the lookup
        and can be declined whether or not a cached winner then replays (gh-ocannl-533), so a
        cache-hit report has to carry that rejection too — [baseline_declined] with an empty census
@@ -2706,7 +2699,8 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir
                     best_ms = entry.SC.best_ms;
                     best_label = spec_label spec;
                     best_tensorized = saved_is_tensorized (flat_schedule c.form);
-                    best_mma_statements = List.length c.mma_renders;
+                    best_tensorization = Some (mma_summary c).Ir.C_syntax.tensorization;
+                    best_mma_statements = mma_statements c;
                     best_mma_scalar_fallbacks = mma_scalar_fallbacks c;
                     (* Nothing was timed in this process ([mma_timed = 0] like every other counter
                        here), so there is no measured tensorized candidate to report — including the
@@ -2776,7 +2770,6 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir
                   ];
                 all_opts = [ base_opt ];
                 digest_after = base_digest;
-                mma_renders = [];
               })
         in
         (* Baseline timing failures are the user's bug (e.g. uninitialized inputs) and propagate as
@@ -3036,8 +3029,9 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir
               best_ms;
               best_label = winner_label best_c;
               best_tensorized = winner_tensorized best_c;
-              best_mma_statements =
-                Option.value_map best_c ~default:0 ~f:(fun c -> List.length c.mma_renders);
+              best_tensorization =
+                Option.map best_c ~f:(fun c -> (mma_summary c).Ir.C_syntax.tensorization);
+              best_mma_statements = Option.value_map best_c ~default:0 ~f:mma_statements;
               best_mma_scalar_fallbacks = Option.value_map best_c ~default:0 ~f:mma_scalar_fallbacks;
               mma_best_ms = !mma_best_ms;
               best_schedule = Option.value_map best_c ~default:[] ~f:(fun c -> flat_schedule c.form);
@@ -3196,19 +3190,20 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir
                            labeled tensorized whose [Tile_mma] statements all declined at emission
                            timed the scalar fallback — report it, or every number off this tuning
                            run inherits the ambiguity. *)
-                        let scalar =
-                          List.count c.mma_renders ~f:(fun (_, r) ->
-                              Ir.C_syntax.equal_mma_rendering r Ir.C_syntax.Mma_scalar_fallback)
-                        in
-                        let total = List.length c.mma_renders in
+                        let summary = mma_summary c in
+                        let scalar = summary.Ir.C_syntax.scalar_fallbacks in
+                        let total = summary.Ir.C_syntax.statements in
                         if scalar > 0 then
                           logf
-                            "%s: NOTE %d/%d Tile_mma statement(s) rendered as the lane-0 scalar \
-                             fallback                        (config schedule_log_declines=true \
-                             names the failed rule)"
-                            (spec_label spec) scalar total
+                            "%s: NOTE %s, %d/%d Tile_mma statement(s) rendered as the lane-0 \
+                             scalar fallback (config schedule_log_declines=true names the failed \
+                             rule)"
+                            (spec_label spec)
+                            (Ir.C_syntax.tensorization_name summary.Ir.C_syntax.tensorization)
+                            scalar total
                         else if total = 0 && spec_expects_mma spec then
-                          logf "%s: NOTE tensorized candidate emitted no Tile_mma statement"
+                          logf "%s: NOTE not-requested, tensorized candidate emitted no Tile_mma \
+                                statement"
                             (spec_label spec);
                         if Float.(ms < snd !best_so_far) then best_so_far := (Some c, ms);
                         Some (c, ms)
@@ -3706,8 +3701,9 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir
               best_ms;
               best_label = winner_label best_c;
               best_tensorized = winner_tensorized best_c;
-              best_mma_statements =
-                Option.value_map best_c ~default:0 ~f:(fun c -> List.length c.mma_renders);
+              best_tensorization =
+                Option.map best_c ~f:(fun c -> (mma_summary c).Ir.C_syntax.tensorization);
+              best_mma_statements = Option.value_map best_c ~default:0 ~f:mma_statements;
               best_mma_scalar_fallbacks = Option.value_map best_c ~default:0 ~f:mma_scalar_fallbacks;
               mma_best_ms = !mma_best_ms;
               best_schedule = Option.value_map best_c ~default:[] ~f:(fun c -> flat_schedule c.form);

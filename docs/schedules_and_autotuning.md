@@ -128,7 +128,8 @@ intrinsics (Metal `simdgroup` 8×8×8; CUDA wmma 16×16×16, tf32 16×16×8 unde
 policy, fp8 `mma.sync`; HIP rocWMMA 16×16×16) → the C backends' register-tiled vector
 micro-kernel (tinyBLAS-style C-tile held in vector registers, edges peeled) → the lane-0 scalar
 fallback. Declines are always semantics-preserving and observable (`schedule_log_declines`,
-`C_syntax.mma_census`).
+`C_syntax.mma_census` — summarized on every compiled routine as `Context.routine.mma`, whose
+`tensorization` is `Tensorized` / `Scalar_fallback` / `Not_requested`).
 
 ## Composition recipes
 
@@ -320,7 +321,9 @@ the retained procedural analyses alongside the affine engine and raises on diver
   back it up) where bitwise reproducibility across environments matters.
 - **Diagnostics**: `schedule_log_declines` explains why a rendering declined;
   `C_syntax.mma_census` distinguishes "the tensorized candidate lost" from "it never ran
-  tensorized"; `schedule_log_launches` prints each compiled segment's launch geometry.
+  tensorized", and its per-routine summary (`Context.routine.mma`, surfaced as
+  `Autotune.report.best_tensorization` and in every reported timing) is what keeps a tensorized
+  label from standing over a scalar measurement; `schedule_log_launches` prints each compiled segment's launch geometry.
 
 ## Design position
 

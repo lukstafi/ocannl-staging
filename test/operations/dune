@@ -2326,6 +2326,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name mma_tensorization_label)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules mma_tensorization_label)
+ (libraries base ocannl arrayjit.autotune stdio arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name tile_mma_declines)
  (package neural_nets_lib)
  (deps

@@ -187,8 +187,8 @@ let () =
       Stdlib.Printf.eprintf
         "%s: state=%s timed=%d failed=%d declines=[%s] terminal=%s rounds=%d \
          sketch=%d mma_candidates=%d mma_timed=%d model_pruned=%d bound_pruned=%d fissioned=%b \
-         baseline_ms=%.4f default_ms=%s best_ms=%.4f best=%s tensorized=%b mma_statements=%d \
-         mma_scalar_fallbacks=%d mma_best_ms=%s\n\
+         baseline_ms=%.4f default_ms=%s best_ms=%.4f best=%s tensorized=%b tensorization=%s \
+         mma_statements=%d mma_scalar_fallbacks=%d mma_best_ms=%s\n\
          %!"
         tag (Autotune.outcome_name r.outcome) r.candidates_timed r.candidates_failed declines
         terminal
@@ -197,7 +197,9 @@ let () =
         (Option.value_map r.default_ms ~default:"none" ~f:(Printf.sprintf "%.4f"))
         r.best_ms
         (if String.is_empty r.best_label then "none" else r.best_label)
-        r.best_tensorized r.best_mma_statements r.best_mma_scalar_fallbacks
+        r.best_tensorized
+        (Option.value_map r.best_tensorization ~default:"none" ~f:Ir.C_syntax.tensorization_name)
+        r.best_mma_statements r.best_mma_scalar_fallbacks
         (if Float.is_inf r.mma_best_ms then "none" else Printf.sprintf "%.4f" r.mma_best_ms)
   in
   let report =
@@ -280,6 +282,9 @@ let () =
       ~timing_ctx:scratch ctx batch_loss comp bindings
   in
   let ctx, routines = H.compile_train_step ~tune ~tuned ctx bindings parts in
+  (* What the timed artifact emitted, off the routines themselves (gh-ocannl-626): a flip
+     refinement or a timing_ctx replay fallback ships something no arm report describes. *)
+  H.collect_shipped arms routines;
   let compile_s = Unix.gettimeofday () -. t0 in
   (* The scaled step threads the context (Loss_scaler.update overwrites the scale tensors). *)
   let ctx_ref = ref ctx in
