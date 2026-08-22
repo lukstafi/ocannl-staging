@@ -264,6 +264,22 @@ that they earn a lookup rather than always-loaded space.
   exempt its own file. Every exemption in the tree is a row whose assertion is claimed separately
   beside it through `Verdict.claim`/`claimf` on the same bound boolean; an exemption without that is
   one that should not have been granted.
+- `Ll_test`'s traversal is the one place a new `Ir.Low_level` constructor is handled, and it now
+  carries the queries the hand-built-IR tests used to write for themselves. `walk` takes a record of
+  hooks: the construct-specific ones, a generic `?on_stmt`/`?on_scalar` for a counter that names its
+  own shape, and an `?on_exit` — which is what makes an enclosing-context query derivable from the
+  same walk instead of a second one. `?in_scopes:false` selects the statement-positions-only reading
+  (the walk `Schedule.find_loop` had before gh-ocannl-668); every other query leaves the
+  `Local_scope` descent on, and deciding it here once is the point, since `schedule_partition` alone
+  had grown six walks each deciding it independently while scope nesting was the property under
+  test. Above them sit `loop_sites`, `find_loop`, `find_loop_with_extent`, `find_nest`, `binds_loop`,
+  `count_loops`, `first_binding` and `census`. Reach for `find_nest ~outer_n ~inner_n` rather than
+  locating by extent alone wherever an initialization loop can share the reduction nest's extent:
+  matching on extent takes the earlier one in preorder, which is how a `Partition` leg came to unroll
+  an init loop and report `copies = 1` while exercising nothing. The walk also descends into
+  `Tile_mma`'s `fallback` rather than stopping at the tile, and reports the operands through the
+  fallback alone — reporting the tile's own `d`/`a`/`b` as well would count every operand of a
+  tensorized nest twice.
 - Dune roots at the OUTERMOST ancestor holding a `dune-workspace` (failing that, a `dune-project`)
   and ignores dot-directories, so from a worktree under `.claude/worktrees/` the main checkout wins
   and the worktree is invisible to dune: targeted commands fail with `Don't know about directory

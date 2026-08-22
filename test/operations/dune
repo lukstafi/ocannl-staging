@@ -2238,7 +2238,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules simplify_if_narrowing)
- (libraries base ocannl stdio arrayjit.verdict))
+ (libraries base ocannl stdio arrayjit.verdict ll_test))
 
 (test
  (name schedule_pipelined_matmul)
@@ -2483,7 +2483,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules schedule_partition)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict ll_test)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2506,7 +2506,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules clamped_window_pool)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict ll_test)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2794,7 +2794,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules inline_decision_replay)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict ll_test)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2849,7 +2849,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules analysis_cache)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict ll_test)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2864,7 +2864,7 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules canonical_render)
- (libraries base ocannl stdio arrayjit.verdict)
+ (libraries base ocannl stdio arrayjit.verdict ll_test)
  (preprocess
   (pps ppx_here)))
 
