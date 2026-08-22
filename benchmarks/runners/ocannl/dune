@@ -1,3 +1,14 @@
+; The runners' JSON scalars and result line, a library rather than a module of the executables so
+; that test/operations/bench_result_line can link it without the whole framework (gh-ocannl-676).
+(library
+ (name bench_json)
+ ; Attached to a package (though never installed) because its dependants are: a private library
+ ; assigned to a package may not depend on an unpackaged one, and test/operations/bench_result_line
+ ; is `(package neural_nets_lib)`.
+ (package neural_nets_lib)
+ (modules bench_json)
+ (libraries base))
+
 (executables
  (names
   bench_mlp
@@ -14,7 +25,7 @@
   bench_conv_diag
   bench_min_repro
   bench_harness)
- (libraries base ocannl stdio unix mtime mtime.clock.os)
+ (libraries base bench_json ocannl stdio unix mtime mtime.clock.os)
  (preprocess
   (pps ppx_here ppx_ocannl))
  (modes exe))

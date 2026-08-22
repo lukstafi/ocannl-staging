@@ -341,6 +341,13 @@ than the driver (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION` at module load), run it wi
   (`cache_hit`), which is what makes a *mixed* cell readable — one arm cached, the other searched
   because its half of the A/B never was. Read `mma_best_ms` against `best_ms` for the margin: tensorization
   losing by 1% and by 40% are different findings.
+- A non-finite number never reaches a result line: a diverged loss, a time that was never
+  measured, an arm that timed nothing are emitted as JSON `null` (gh-ocannl-676). OCaml's `%g`
+  spells those `nan` / `inf` / `-inf` and Python's `json.dumps` writes `NaN`, none of which is
+  JSON — so a diverged cell, the exact thing the parity gate exists to catch, used to be reported
+  as a *broken runner* with its loss trajectory discarded after the whole measurement had been
+  paid for. `test/operations/bench_result_line` pins the OCANNL line by re-parsing it with
+  fabricated values.
 - tinygrad's loss must be realized before `opt.step()` (in-place assigns; a later realize
   would recompute the loss from updated weights). tinygrad JIT capture happens during the
   first parity steps; loss values are unaffected.

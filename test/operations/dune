@@ -1642,6 +1642,18 @@
 ; The census over the tree exercises only the spellings some source uses today; these pin the rest,
 ; including the module alias bound in expression position that no source spells yet.
 
+; The benchmark runners' JSON result line, on the values a happy-path run never produces: a
+; diverged loss trajectory, times that were never measured, a diagnostic full of control
+; characters. Yojson is the parse oracle -- it rejects OCaml's `nan`/`inf` spellings, which is the
+; regression (gh-ocannl-676), and the test's last verdicts show that it does.
+(test
+ ; ocannl-backend: none -- links no backend: it formats and re-parses JSON strings.
+ (name bench_result_line)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules bench_result_line)
+ (libraries base stdio yojson bench_json arrayjit.verdict))
+
 (test
  ; ocannl-backend: none -- links no backend: it resolves directory names out of embedded OCaml snippets.
  (name cache_dir_scan_cases)
