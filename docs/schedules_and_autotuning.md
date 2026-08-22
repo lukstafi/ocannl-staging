@@ -242,6 +242,19 @@ the retained procedural analyses alongside the affine engine and raises on diver
   (gh-ocannl-569's clean-room probe peaked near 128 blocks and regressed by 1024): a rank-4
   q/k/v projection at `8×8×128×32` gains 64× the blocks, which the tuner measures against the
   occupancy it costs. Products beyond the CUDA/HIP `gridDim.z` cap (65535) are not seeded.
+- **Multi-axis contractions** (gh-ocannl-683): a site contracting over several axes — attention's
+  out projection `{ w_o } * attn`, whose weight carries two input axes `(head, head_dim)`, lowers
+  to `d[b,s,j] += w[j,h,e] * x[b,s,h,e]`, a reduction nest of two loops — is a matmul site. The
+  matcher takes the contraction nest to be the maximal innermost suffix of loops absent from the
+  accumulator (lowering orders the reduction loops after the output loops), its innermost loop
+  being `m_k` and the rest `m_ko`: k-loops lowering has already split. Every pipeline treats them
+  as k-block loops above the one its own k-split mints (`Sketch_families.k_blocks`) — sunk below
+  the output roles, the staged tiles reloaded at, the accumulator privatized over the outermost —
+  so the tiling machinery is shared unchanged; the tile's k-extent is judged against the
+  innermost contraction extent alone (a k-block cannot straddle two lowered loops, since the
+  per-axis index maps cannot express a coalesced loop). Before this the out projection was never
+  seeded: it shipped as an untiled global-accumulator nest at 8 blocks, 22% of the gpt2_mini step
+  on gfx1151 at 9% of sgemm peak.
 - **Split-reduce seeds** (gh-ocannl-484 task 3): `Autotune.split_reduce_sites` detects
   reduction-dominated accumulations — a target with at most a few thousand cells fed by a serial
   reduction loop of substantial extent (conv bias/weight gradients, softmax denominators, skinny

@@ -224,9 +224,19 @@ type matmul_site = {
   m_i : Idx.symbol;
   m_j : Idx.symbol;
   m_k : Idx.symbol;
+      (** The innermost contraction loop — the one a pipeline's k-split divides, whose extent
+          [m_nk] the tile's k-extent is judged against. *)
   m_ni : int;
   m_nj : int;
   m_nk : int;
+  m_ko : (Idx.symbol * int) list;
+      (** Contraction loops enclosing [m_k], in nest order (gh-ocannl-683): a site contracting over
+          several axes — attention's out projection [d[b,s,j] += w[j,h,e] * x[b,s,h,e]], whose
+          weight carries two input axes — lowers to a reduction nest, of which only the innermost
+          loop is [m_k]. They are k-loops lowering has already split: every pipeline treats them as
+          k-block loops above the one its own k-split mints ([k_blocks]) — sunk below the output
+          roles, staged at, privatized over — so the tiling machinery is shared unchanged with the
+          single-axis case, where this is empty and the schedules are byte-identical to before. *)
   m_bo : (Idx.symbol * int) list;
       (** Batch loops enclosing the [m_i] loop, in nest order (gh-ocannl-528): loops beyond the
           [i x j x k] triple that carry their own output axis. They stay [Serial] in the sketch
@@ -315,16 +325,20 @@ let unit_axis (idcs : Idx.axis_index array) s : int option =
    Inputs: the perfectly nested serial accumulation statement's loops in nest order (with extents),
    the accumulator's index map [di], and the two operand reads. Roles:
 
-   - [k] is the innermost loop and the only one absent from [di]. - Every other loop must own a
-   distinct axis of [di] (unit coefficient, sole occurrence). - [j] owns [di]'s minor axis and must
-   be the innermost of the write loops (how lowering orders them — the sketch pipelines' hoisting
-   normalization only handles batch loops above [j]). - Per operand order, [a] must own [k], must
-   not read [j]; [b] must own [j] and [k]; [i] is the {e deepest} write loop owned by [a] and absent
-   from [b] — the 2-D tile row. The exclusions are what keep variance-style self-products [d[b,s] +=
-   x[b,s,k] * x[b,s,k]] — whose reads mention every loop — from masquerading as matmuls: they seeded
-   (and always failed candidate compile) before. - Everything else is batch: [m_bo] outside [i],
-   [m_bi] between [i] and [j]; batch symbols may appear in the operands freely (their occurrences
-   form the tile block base).
+   - The contraction nest is the maximal innermost suffix of loops absent from [di] (lowering
+   orders the reduction loops after the output loops, so a multi-axis contraction is exactly such a
+   suffix): [k] is its innermost loop, the rest are [m_ko] (gh-ocannl-683). - Every other loop must
+   own a distinct axis of [di] (unit coefficient, sole occurrence). - [j] owns [di]'s minor axis
+   and must be the innermost of the write loops (how lowering orders them — the sketch pipelines'
+   hoisting normalization only handles batch loops above [j]). - Per operand order, [a] must own
+   [k], must not read [j]; [b] must own [j] and [k]; [i] is the {e deepest} write loop owned by [a]
+   and absent from [b] — the 2-D tile row; a role symbol owns its component alone (a convolution
+   window [ox + kx] is not a tile axis). The exclusions are what keep variance-style
+   self-products [d[b,s] += x[b,s,k] * x[b,s,k]] — whose reads mention every loop — from
+   masquerading as matmuls: they seeded (and always failed candidate compile) before. -
+   Everything else is batch: [m_bo] outside [i], [m_bi] between [i] and [j]; batch symbols and
+   outer contraction symbols may appear in the operands freely (their occurrences form the tile
+   block base).
 
    Detection remains permissive about everything else — a mis-detected site fails its candidate
    compile (op preconditions, [validate_parallel], hardware limits) and is skipped. *)
@@ -332,9 +346,10 @@ let classify_matmul ~(loops : (Idx.symbol * int) list) ~(d : Ir.Tnode.t)
     ~(di : Idx.axis_index array) ~(o1 : Ir.Tnode.t * Idx.axis_index array)
     ~(o2 : Ir.Tnode.t * Idx.axis_index array) ~(zeroed : bool) ~(fma : bool) : matmul_site option =
   let rank = Array.length di in
-  match List.rev loops with
-  | (k, nk) :: (_ :: _ :: _ as rev_ws : (Idx.symbol * int) list)
-    when rank >= 2 && not (idcs_mention di k) -> (
+  let rev_ks, rev_ws = List.split_while (List.rev loops) ~f:(fun (s, _) -> not (idcs_mention di s)) in
+  match (rev_ks, rev_ws) with
+  | (k, nk) :: rev_ko, (_ :: _ :: _ as rev_ws : (Idx.symbol * int) list) when rank >= 2 -> (
+      let ko = List.rev rev_ko in
       let ws = List.rev rev_ws in
       let d_axes = List.map ws ~f:(fun (s, _) -> unit_axis di s) in
       if List.exists d_axes ~f:Option.is_none then None
@@ -352,16 +367,40 @@ let classify_matmul ~(loops : (Idx.symbol * int) list) ~(d : Ir.Tnode.t)
             let front = List.drop_last_exn axes in
             let try_order ((a, ai) : Ir.Tnode.t * Idx.axis_index array)
                 ((b, bi) : Ir.Tnode.t * Idx.axis_index array) : matmul_site option =
+              (* A tile axis is a plain iterator: a role symbol must be the SOLE symbol of the
+                 component it owns. A convolution window [x[..., oy + ky, ox + kx, ic]] mixes an
+                 output symbol with a kernel one in a single component; once contraction nests are
+                 admitted (gh-ocannl-683) a conv's [(ky, kx, ic)] suffix would otherwise classify
+                 as a matmul here — [ic] as [k], the window axes as [i] and a batch loop — and since
+                 the matmul family is tried first, the conv family would silently never be seeded
+                 for it (schedule_conv_gemm pins the conv seeds). *)
+              let plain idx =
+                match idx with Idx.Iterator _ | Idx.Affine { symbols = [ _ ]; _ } -> true | _ -> false
+              in
+              let sole_axis idcs s =
+                match unit_axis idcs s with Some p when plain idcs.(p) -> Some p | _ -> None
+              in
+              (* The same for the outer contraction loops, wherever an operand mentions one: a
+                 conv's kernel-window symbols are exactly the suffix loops that appear mixed into
+                 an output axis ([oy + ky]), and with the channel loop innermost the row rule alone
+                 would still pick the batch loop as [i]. Strides and offsets stay admissible — these
+                 loops are only ever iterated, never tiled. *)
+              let ko_plain idcs =
+                List.for_all ko ~f:(fun (s, _) ->
+                    Array.for_all idcs ~f:(fun idx -> (not (idx_mentions idx s)) || plain idx))
+              in
               if
                 idcs_mention ai j
-                || Option.is_none (unit_axis ai k)
-                || Option.is_none (unit_axis bi j)
-                || Option.is_none (unit_axis bi k)
+                || Option.is_none (sole_axis ai k)
+                || Option.is_none (sole_axis bi j)
+                || Option.is_none (sole_axis bi k)
+                || (not (ko_plain ai))
+                || not (ko_plain bi)
               then None
               else
                 let eligible =
                   List.filter front ~f:(fun ((s, _), _) ->
-                      Option.is_some (unit_axis ai s) && not (idcs_mention bi s))
+                      Option.is_some (sole_axis ai s) && not (idcs_mention bi s))
                 in
                 Option.map (List.last eligible) ~f:(fun ((i, ni), p_row) ->
                     let before_i = ref true in
@@ -384,6 +423,7 @@ let classify_matmul ~(loops : (Idx.symbol * int) list) ~(d : Ir.Tnode.t)
                       m_ni = ni;
                       m_nj = nj;
                       m_nk = nk;
+                      m_ko = ko;
                       m_bo = List.rev !m_bo;
                       m_bi = List.rev !m_bi;
                       m_row_axis = p_row;
@@ -520,8 +560,9 @@ let detect_matmul_affine (llc : LL.t) : matmul_site option =
 let matmul_site_equal (x : matmul_site) (y : matmul_site) =
   let batch_equal = List.equal (fun (s1, n1) (s2, n2) -> Idx.equal_symbol s1 s2 && n1 = n2) in
   Idx.equal_symbol x.m_i y.m_i && Idx.equal_symbol x.m_j y.m_j && Idx.equal_symbol x.m_k y.m_k
-  && x.m_ni = y.m_ni && x.m_nj = y.m_nj && x.m_nk = y.m_nk && batch_equal x.m_bo y.m_bo
-  && batch_equal x.m_bi y.m_bi && x.m_row_axis = y.m_row_axis && phys_equal x.m_d y.m_d
+  && x.m_ni = y.m_ni && x.m_nj = y.m_nj && x.m_nk = y.m_nk && batch_equal x.m_ko y.m_ko
+  && batch_equal x.m_bo y.m_bo && batch_equal x.m_bi y.m_bi && x.m_row_axis = y.m_row_axis
+  && phys_equal x.m_d y.m_d
   && phys_equal x.m_a y.m_a && phys_equal x.m_b y.m_b && Bool.equal x.m_zeroed y.m_zeroed
   && Option.equal Bool.equal x.m_tb y.m_tb
   && Bool.equal x.m_fma y.m_fma
@@ -1295,6 +1336,16 @@ let site_batch_ops ~(batch_grid : bool) (site : matmul_site) : Sched.schedule =
 let batch_hoist_swaps (site : matmul_site) : Sched.schedule =
   List.map site.m_bi ~f:(fun (g, _) -> Sched.Swap { outer = site.m_i; inner = g })
 
+(* The k-block loops of a pipeline, in nest order (gh-ocannl-683): the site's outer contraction
+   loops followed by the loop the pipeline's own k-split minted ([k_o], or nothing for the
+   unsplit whole-[m_k] forms). A multi-axis contraction is a k-loop lowering has already split, so
+   wherever a pipeline names "the k-block loop" — the loops the output roles sink below, the
+   anchor the staged tiles reload at, the loop the accumulator is privatized over (the OUTERMOST
+   block loop, so the private tile stays resident across the whole reduction) — it names this list.
+   Empty [m_ko] makes it exactly [k_o], so single-axis sites keep byte-identical schedules. *)
+let k_blocks (site : matmul_site) (k_o : Idx.symbol list) : Idx.symbol list =
+  List.map site.m_ko ~f:fst @ k_o
+
 (* The register-blocktiled GPU matmul (schedule_register_matmul.ml): each output dimension split
    twice (block tile -> Grid, register tile -> Workgroup), register loops sunk innermost, operands
    staged through workgroup-shared tiles at the k-block loop, output privatized, register loops
@@ -1341,7 +1392,8 @@ let gpu_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
   let sp_j, j_o, j_i = Sched.split ~axis:site.m_j ~factor:bn ~outer:LL.Grid ~inner:LL.Serial in
   let sp_j2, j_w, j_t = Sched.split ~axis:j_i ~factor:tn ~outer:LL.Workgroup ~inner:LL.Serial in
   let sp_k, k_o, k_i = Sched.split ~axis:site.m_k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
-  let swaps = sink i_t [ j_o; j_w; j_t; k_o; k_i ] @ sink j_t [ k_o; k_i ] in
+  let kb = k_blocks site [ k_o ] in
+  let swaps = sink i_t ([ j_o; j_w; j_t ] @ kb @ [ k_i ]) @ sink j_t (kb @ [ k_i ]) in
   batch_hoist_swaps site @ zops
   @ [ sp_i; sp_i2; sp_j; sp_j2; sp_k ]
   @ swaps
@@ -1370,7 +1422,7 @@ let gpu_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
           pipeline_depth = 1;
           tile_prec = None;
         };
-      Sched.Privatize { target = site.m_d; over = k_o };
+      Sched.Privatize { target = site.m_d; over = List.hd_exn kb };
       Sched.Unroll { axis = i_t; materialize = true };
       Sched.Unroll { axis = j_t; materialize = true };
     ]
@@ -1390,9 +1442,10 @@ let cpu_sketch_schedule (site : matmul_site) { sk_bm = bm; sk_bn = bn; sk_bk = b
   let sp_i, _, i_i = Sched.split ~axis:site.m_i ~factor:bm ~outer:LL.Serial ~inner:LL.Serial in
   let sp_j, j_o, j_i = Sched.split ~axis:site.m_j ~factor:bn ~outer:LL.Serial ~inner:LL.Serial in
   let sp_k, k_o, k_i = Sched.split ~axis:site.m_k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
+  let kb = k_blocks site [ k_o ] in
   batch_hoist_swaps site @ [ sp_i; sp_j; sp_k ]
-  @ sink i_i [ j_o; j_i; k_o; k_i ]
-  @ sink j_i [ k_o; k_i; i_i ]
+  @ sink i_i ([ j_o; j_i ] @ kb @ [ k_i ])
+  @ sink j_i (kb @ [ k_i; i_i ])
   @ [
       Sched.Stage
         {
@@ -1418,7 +1471,7 @@ let cpu_sketch_schedule (site : matmul_site) { sk_bm = bm; sk_bn = bn; sk_bk = b
           pipeline_depth = 1;
           tile_prec = None;
         };
-      Sched.Privatize { target = site.m_d; over = k_o };
+      Sched.Privatize { target = site.m_d; over = List.hd_exn kb };
     ]
 
 (* Tensorized (tile-MMA) GPU matmul (docs/proposals/tensorize-mma.md; the pinned pipelines of
@@ -1486,10 +1539,14 @@ let gpu_mma_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
   let sp_i, _, i_i = Sched.split ~axis:site.m_i ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
   let sp_j, j_o, j_i = Sched.split ~axis:site.m_j ~factor:bn ~outer:LL.Grid ~inner:LL.Serial in
   if bk = 0 then
+    (* Unsplit: the block statement spans [m_k]; a site's outer contraction loops stay above it. *)
+    let kb = k_blocks site [] in
     let tz, _lane = Sched.tensorize ~i:i_i ~j:j_i ~k:site.m_k ~simd_width:w in
-    batch_hoist_swaps site @ zops @ [ sp_i; sp_j ] @ sink i_i [ j_o ] @ [ tz ]
+    batch_hoist_swaps site @ zops @ [ sp_i; sp_j ] @ sink i_i [ j_o ] @ sink j_i kb @ sink i_i kb
+    @ [ tz ]
   else
     let sp_k, k_o, k_i = Sched.split ~axis:site.m_k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
+    let kb = k_blocks site [ k_o ] in
     let tz, _lane = Sched.tensorize ~i:i_i ~j:j_i ~k:k_i ~simd_width:w in
     (* Pad-composition seeding (gh-ocannl-485): with both operands staged through zero-fringe
        cooperative tiles, non-multiple extents pad to the block sizes — the guards land on the leaf
@@ -1499,7 +1556,7 @@ let gpu_mma_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
     @ pad_to ~axis:site.m_i ~extent:site.m_ni bm
     @ pad_to ~axis:site.m_j ~extent:site.m_nj bn
     @ pad_to ~axis:site.m_k ~extent:site.m_nk bk
-    @ zops @ [ sp_i; sp_j; sp_k ] @ sink i_i [ j_o ] @ sink j_i [ k_o ] @ sink i_i [ k_o ]
+    @ zops @ [ sp_i; sp_j; sp_k ] @ sink i_i [ j_o ] @ sink j_i kb @ sink i_i kb
     @ [
         (* The swizzled twin (gh-ocannl-481 item 3, D3) marks BOTH operand tiles: the tile sizes and
            the whole rest of the pipeline are identical to its plain sibling, so a timing difference
@@ -1546,13 +1603,14 @@ let cpu_mma_sketch_schedule (site : matmul_site) { sk_bm = bm; _ } : Sched.sched
           let sp_zi, _, _ = Sched.split ~axis:zi ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
           [ sp_zi; rz ])
   in
+  let kb = k_blocks site [] in
   if bm = 0 then
     let tz, _lane = Sched.tensorize ~i:site.m_i ~j:site.m_j ~k:site.m_k ~simd_width:site.m_nj in
-    batch_hoist_swaps site @ zops @ [ tz ]
+    batch_hoist_swaps site @ zops @ sink site.m_j kb @ sink site.m_i kb @ [ tz ]
   else
     let sp_i, _, i_i = Sched.split ~axis:site.m_i ~factor:bm ~outer:LL.Grid ~inner:LL.Serial in
     let tz, _lane = Sched.tensorize ~i:i_i ~j:site.m_j ~k:site.m_k ~simd_width:site.m_nj in
-    batch_hoist_swaps site @ zops @ [ sp_i; tz ]
+    batch_hoist_swaps site @ zops @ [ sp_i ] @ sink site.m_j kb @ sink i_i kb @ [ tz ]
 
 (* Cache-blocked, operand-packed tensorized CPU matmul: [Tile_mma] composed with the S4 packing
    pipeline (the remaining piece of gh-ocannl-469). GEBP loop structure, all-Serial: [j_o? { k_o {
@@ -1656,8 +1714,9 @@ let cpu_mma_pack_sketch_schedule (site : matmul_site)
       @ pad_to ~axis:site.m_k ~extent:site.m_nk bk
   in
   let tz, _lane = Sched.tensorize ~i:i_i ~j:j_col ~k:k_i ~simd_width:1 in
-  batch_hoist_swaps site @ pads @ zops @ splits @ j_swaps @ sink j_col [ k_o ] @ sink i_i [ k_o ]
-  @ (if grid_outermost then [] else sink i_o [ k_o ])
+  let kb = k_blocks site [ k_o ] in
+  batch_hoist_swaps site @ pads @ zops @ splits @ j_swaps @ sink j_col kb @ sink i_i kb
+  @ (if grid_outermost then [] else sink i_o kb)
   @ stages @ [ tz ]
 
 (* Adjacent-transposition reorder of a perfect serial nest: [Swap]s that turn [current] (nest order,

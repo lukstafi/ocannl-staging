@@ -154,6 +154,40 @@ type sketch_params = {
     tests (the seeding pre-filter of gh-ocannl-479 and the mixed grid-outermost shape of
     gh-ocannl-473 are asserted on directly). *)
 
+type matmul_site = {
+  m_i : Ir.Indexing.symbol;
+  m_j : Ir.Indexing.symbol;
+  m_k : Ir.Indexing.symbol;
+      (** The innermost contraction loop — the one a pipeline's k-split divides; its extent is
+          [m_nk]. *)
+  m_ni : int;
+  m_nj : int;
+  m_nk : int;
+  m_ko : (Ir.Indexing.symbol * int) list;
+      (** Contraction loops enclosing [m_k], in nest order (gh-ocannl-683): a multi-axis
+          contraction — attention's out projection, whose weight carries two input axes — is a
+          k-loop lowering has already split, and every pipeline treats these as k-block loops above
+          the one its own k-split mints. Empty on single-axis contractions. *)
+  m_bo : (Ir.Indexing.symbol * int) list;
+  m_bi : (Ir.Indexing.symbol * int) list;
+  m_row_axis : int;
+  m_d : Ir.Tnode.t;
+  m_a : Ir.Tnode.t;
+  m_b : Ir.Tnode.t;
+  m_zeroed : bool;
+  m_tb : bool option;
+  m_fma : bool;
+}
+(** A recognized matmul accumulation site; see the implementation's field docs. Exposed for tests
+    (gh-ocannl-683 asserts on the contraction nest directly). *)
+
+val detect_matmul : Ir.Low_level.t -> matmul_site option
+(** Recognize a matmul accumulation nest: a perfectly nested all-serial accumulation whose
+    contraction loops are the innermost suffix absent from the accumulator's index map, every
+    other loop owning a distinct accumulator axis, with the 2-D tile roles assigned per
+    [classify_matmul]'s operand rules and everything else batch. Reads off the extracted access
+    relations like {!detect_conv}, with the same [legality_crosscheck] soak. Exposed for tests. *)
+
 type conv_axis = {
   cx_o : Ir.Indexing.symbol;  (** Output spatial symbol (a plain iterator of the output). *)
   cx_no : int;

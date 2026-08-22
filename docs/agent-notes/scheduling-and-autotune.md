@@ -451,4 +451,25 @@ files.
   all 48 to the tensorizes, so sharing without moving the filter would have been a regression
   exactly where #685 meant to help. When adding a consumer-side filter over a capped list, ask
   whether the cap should see it.
-
+- A site contracting over SEVERAL axes is a matmul site whose k-loop lowering has already split
+  (gh-ocannl-683): the matcher's contraction nest is the maximal innermost suffix of loops absent
+  from the accumulator's index map — `m_k` the innermost, the rest `m_ko` — and every pipeline
+  names "the k-block loop" through `Sketch_families.k_blocks` (the outer contraction loops, then
+  its own k-split's outer loop). Before, `classify_matmul` took the single innermost loop as `k`
+  and demanded every other loop own an accumulator axis, so attention's out projection
+  `{ w_o } * attn` (weight input axes `(head, head_dim)`) was refused and never seeded — a miss
+  invisible to the decline census, exactly like the gh-577 refutations: the emitted source
+  (no `__shared__`, contraction loops serial inside an 8-block launch) was the only evidence.
+  The rule that makes admitting nests safe: a tile-role symbol must be the SOLE symbol of the
+  component it owns (`sole_axis`). Without it a convolution's `(ky, kx, ic)` suffix classifies as
+  a matmul — `ic` as `k`, the `oy + ky` window axis as `i` — and since `sketch_seed_params` tries
+  the matmul family FIRST, the conv family silently stops being seeded; `schedule_conv_gemm` is the
+  test that catches it (11 claims), so run it whenever the matmul classifier is relaxed.
+  Two things the generalization does NOT do: it cannot coalesce the nest into one loop (the
+  per-axis index maps cannot express `f / M, f mod M`), so a tile's k-extent is judged against the
+  innermost contraction extent alone and `bk` values above it are refuted by the ordinary
+  divisibility gates; and the whole-`m_k` forms (the unstaged `bk = 0` tensorize, the CPU
+  whole-triple) keep the outer contraction loops above the block statement, so the accumulator
+  fragment is loaded and stored once per outer-contraction iteration there. Pinned by
+  `test/operations/schedule_contraction_nest.ml` (detection, every family's construction, GPU
+  blocktile execution, CPU-family execution on cc).
