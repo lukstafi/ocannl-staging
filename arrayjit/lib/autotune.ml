@@ -1289,6 +1289,9 @@ type loop_desc = {
   ld_axis : LL.axis_type;
   ld_innermost : bool;
   ld_accumulating : bool;
+  ld_inlined : bool;
+      (** Reached by descending through a virtualization-inlined [Local_scope] (gh-ocannl-687).
+          Decides which action CATEGORIES may propose for it, not whether it is enumerated. *)
   ld_perfect_child : (SC.sym_ref * Idx.symbol * LL.axis_type) option;
 }
 
@@ -1297,11 +1300,14 @@ type loop_desc = {
    virtualization's inlined computations put loops. This is the scalar-position reach of
    [Schedule.rewrite_loop] and [Schedule.find_loops_env]; like them it enters neither [If]
    conditions nor [Tile_mma] fallbacks (transforming those is never profitable and often
-   invalid). *)
-let stmt_scope_bodies (stmt : LL.t) : LL.t list =
+   invalid).
+
+   Each body comes with its scope's provenance (gh-ocannl-687), which every caller here descends
+   into but which decides what the menu then proposes for the loops found there. *)
+let stmt_scope_bodies (stmt : LL.t) : (LL.t * LL.scope_mint) list =
   let rec scalar (llsc : LL.scalar_t) =
     match llsc with
-    | LL.Local_scope { body; _ } -> [ body ]
+    | LL.Local_scope { body; mint; _ } -> [ (body, mint) ]
     | LL.Get_dynamic { dyn_value = v, _; _ } -> scalar v
     | LL.Ternop (_, (a, _), (b, _), (c, _)) -> scalar a @ scalar b @ scalar c
     | LL.Binop (_, (a, _), (b, _)) -> scalar a @ scalar b
@@ -1316,14 +1322,21 @@ let stmt_scope_bodies (stmt : LL.t) : LL.t list =
   | LL.Set_from_vec { arg = a, _; _ } -> scalar a
   | _ -> []
 
-(* Whether [llc] contains a loop a schedule op could target — [Local_scope] bodies included
-   (gh-ocannl-666), so a loop whose only inner loops sit inside an accumulator's scope does not read
-   as innermost. *)
+(* Whether [llc] contains a nested loop, [Local_scope] bodies of BOTH provenances included
+   (gh-ocannl-666), so a loop whose only inner loops sit inside a scope does not read as innermost.
+   Provenance-blind on purpose (PR #424 review round 2): innermost-ness decides which loop a
+   [Vectorized] retype is proposed for, and the renderer answers that question structurally. An
+   outer loop whose body holds a [Local_scope] cannot be explicitly vectorized at all —
+   [C_syntax]'s elementwise vectorizer bails on [Local_scope] / [Get_local], and an accumulating
+   bailout falls back to a plain serial loop — so calling it innermost would propose a retype that
+   renders exactly like the baseline. The inlined reduction one level down is the loop that has a
+   renderer ([try_vectorize_reduce] recognizes its [Set_local] accumulation), which is why
+   [collect_loops] keeps enumerating it. *)
 let rec contains_loop = function
   | LL.Seq (a, b) -> contains_loop a || contains_loop b
   | LL.If { body; _ } -> contains_loop body
   | LL.For_loop _ -> true
-  | stmt -> List.exists (stmt_scope_bodies stmt) ~f:contains_loop
+  | stmt -> List.exists (stmt_scope_bodies stmt) ~f:(fun (b, _) -> contains_loop b)
 
 (* Loops proposable for schedule ops: the statement-level nest structure plus the loops inside
    [Local_scope] bodies (gh-ocannl-666) — since gh-ocannl-639 the accumulation mints of [Unroll
@@ -1337,15 +1350,31 @@ let rec contains_loop = function
    menu proposes from them (serial [Split]s, [Swap]s, [Unroll]s, [Vectorized] retypes — none
    introduces a hardware annotation, which [Low_level.validate_parallel] rejects inside a
    [Local_scope]); [Tensorize] is the exception, which is why [collect_serial_triples] below stays
-   out of scopes. *)
+   out of scopes.
+
+   Both provenances are entered, and each descriptor records which (gh-ocannl-687's [ld_inlined]).
+   The distinction is NOT about reachability — [Schedule.rewrite_loop] descends every [Local_scope],
+   so a proposal naming an inlined loop applies — and it is not about which loops exist. It is about
+   which CATEGORY is worth a candidate compile on a loop virtualization re-instantiates per use
+   site (PR #424 review round 2, correcting a first attempt that dropped such loops wholesale):
+
+   - [Vectorized] retypes stay proposable there, and must. That is one descriptor, and it is the
+     only one with a renderer built for the shape: an inlined reduction's [Set_local] accumulation is
+     exactly what [C_syntax.try_vectorize_reduce] recognizes, while the enclosing loop cannot be
+     explicitly vectorized at all (its body holds a [Local_scope]). Excluding the inner loop does
+     not move the candidate outward, it destroys it.
+   - [Split]s, [Swap]s and [Unroll]s do not. Up to eight descriptors per loop, no evidence any of
+     them pays on a per-use-site inline, and each one costs a candidate compile and — under the
+     per-unit cap — displaces a proposal for the main nest. Nothing proposed them before gh-666,
+     whose widening was aimed at the accumulation mints and swept these in for want of provenance. *)
 let collect_loops registry llc =
   let acc = ref [] in
   let seen = Hash_set.create (module Idx.Symbol) in
-  let rec walk = function
+  let rec walk ~inlined = function
     | LL.Seq (a, b) ->
-        walk a;
-        walk b
-    | LL.If { body; _ } -> walk body
+        walk ~inlined a;
+        walk ~inlined b
+    | LL.If { body; _ } -> walk ~inlined body
     | LL.For_loop { index; from_; to_; body; axis; _ } ->
         (match SC.resolve registry index with
         | Some ld_ref when not (Hash_set.mem seen index) ->
@@ -1365,14 +1394,20 @@ let collect_loops registry llc =
                 ld_axis = axis;
                 ld_innermost = not (contains_loop body);
                 ld_accumulating = LL.has_accumulation body;
+                ld_inlined = inlined;
                 ld_perfect_child;
               }
               :: !acc
         | _ -> ());
-        walk body
-    | stmt -> List.iter (stmt_scope_bodies stmt) ~f:walk
+        walk ~inlined body
+    | stmt ->
+        List.iter (stmt_scope_bodies stmt) ~f:(fun (body, mint) ->
+            walk
+              ~inlined:
+                (inlined || LL.equal_scope_mint mint LL.Inlined_computation)
+              body)
   in
-  walk llc;
+  walk ~inlined:false llc;
   List.rev !acc
 
 (* Perfectly nested serial triples (with extents), for Tensorize proposals. Statement-level only,
@@ -1421,9 +1456,49 @@ let collect_serial_triples registry llc =
 let split_factors = [ 2; 4; 8; 16; 32 ]
 let max_actions_per_unit = 48
 
-let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) ~registry
-    (opt : LL.optimized) : SC.saved_optop list =
+(* gh-ocannl-685: share a cap across the menu's action categories instead of spending it in category
+   order. The menu list is a concatenation ordered by category and NOT ranked (unlike the placement
+   surface's [rank_flip_candidates] prefix, where top-N is the intended semantics), so a plain
+   prefix is arbitrary: a unit whose tensorizes alone reach the cap offered the search no split,
+   swap, unroll or vectorize action at all -- not fewer, none -- and those are exactly the
+   categories a unit needs when its tensorizes turn out [Op_illegal] or unprofitable.
+
+   Round-robin, one proposal per category per round, in category order: every non-empty category is
+   represented before any category gets a second, and a category that runs out simply stops taking
+   turns, so its unused share spills to the others without anyone naming a ranking the tuner is
+   supposed to discover. Survivors are emitted in the original category order, so a menu that fits
+   under the cap comes out exactly as before. Returns the kept proposals and the per-category drop
+   counts, which the caller logs -- the cap must say what it dropped, not what it was offered. *)
+let share_cap ~cap (categories : (string * 'a list) list) : 'a list * (string * int) list =
+  let sizes = Array.of_list_map categories ~f:(fun (_, l) -> List.length l) in
+  let keep = Array.map sizes ~f:(fun _ -> 0) in
+  let budget = ref (max 0 cap) in
+  let progressed = ref true in
+  while !budget > 0 && !progressed do
+    progressed := false;
+    Array.iteri sizes ~f:(fun idx n ->
+        if !budget > 0 && keep.(idx) < n then (
+          keep.(idx) <- keep.(idx) + 1;
+          Int.decr budget;
+          progressed := true))
+  done;
+  let kept =
+    List.concat_mapi categories ~f:(fun idx (_, l) -> List.take l keep.(idx))
+  in
+  let dropped =
+    List.filter_mapi categories ~f:(fun idx (name, l) ->
+        let d = List.length l - keep.(idx) in
+        if d > 0 then Some (name, d) else None)
+  in
+  (kept, dropped)
+
+let menu ?(admits = fun (_ : SC.saved_optop) -> true) ~is_cpu ~is_gpu
+    ~(limits : Ir.Backend_intf.hardware_limits) ~registry (opt : LL.optimized) :
+    SC.saved_optop list =
   let loops = collect_loops registry opt.LL.llc in
+  (* gh-ocannl-687: how many enumerated loops are offered the [Vectorized] retype alone because
+     virtualization inlined them, so the narrowing is visible rather than silent. *)
+  let inlined_loops = List.count loops ~f:(fun ld -> ld.ld_inlined) in
   (* Menu proposals carry their raw-symbol counterpart so the op-legality oracle (gh-494 waypoint 3)
      can veto proven-illegal ones before they cost a candidate compile; [Op_unknown] proposals
      proceed to compile-and-time exactly as before (the oracle's Unknown is never a rejection). *)
@@ -1439,7 +1514,8 @@ let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) ~registry
         (* [Sched.Split]'s index arithmetic requires a zero-origin loop (its apply raises
            otherwise); nonzero-origin loops — [Partition] segments after the first — are still in
            [loops] for the origin-agnostic families below. *)
-        if not (LL.equal_axis_type ld.ld_axis LL.Serial) || ld.ld_from_ <> 0 then []
+        if not (LL.equal_axis_type ld.ld_axis LL.Serial) || ld.ld_from_ <> 0 || ld.ld_inlined then
+          []
         else
           List.filter_map split_factors ~f:(fun factor ->
               if factor < ld.ld_extent && ld.ld_extent % factor = 0 then
@@ -1453,7 +1529,7 @@ let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) ~registry
   let swaps =
     List.filter_map loops ~f:(fun ld ->
         match (ld.ld_axis, ld.ld_perfect_child) with
-        | LL.Serial, Some (child, child_sym, LL.Serial) ->
+        | LL.Serial, Some (child, child_sym, LL.Serial) when not ld.ld_inlined ->
             gate
               ( SC.Swap { outer = ld.ld_ref; inner = child },
                 Sched.Swap { outer = ld.ld_sym; inner = child_sym } )
@@ -1461,7 +1537,7 @@ let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) ~registry
   in
   let unrolls =
     List.concat_map loops ~f:(fun ld ->
-        if LL.equal_axis_type ld.ld_axis LL.Serial && ld.ld_extent <= 8 then
+        if LL.equal_axis_type ld.ld_axis LL.Serial && ld.ld_extent <= 8 && not ld.ld_inlined then
           List.filter_map [ true; false ] ~f:(fun materialize ->
               gate
                 ( SC.Unroll { axis = ld.ld_ref; materialize },
@@ -1515,7 +1591,37 @@ let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) ~registry
      vectorize"
     (List.length triples) (List.length tensorizes) (List.length splits) (List.length swaps)
     (List.length unrolls) (List.length vectorizes);
-  List.take (tensorizes @ splits @ swaps @ unrolls @ vectorizes) max_actions_per_unit
+  if inlined_loops > 0 then
+    logf
+      "menu: %d loop(s) inside virtualization-inlined scopes offered the Vectorized retype only \
+       (gh-ocannl-687: no Split/Swap/Unroll proposals for a per-use-site inline)"
+      inlined_loops;
+  (* gh-ocannl-685 review: [admits] runs BEFORE the cap, so the budget is shared over the moves the
+     caller can actually use rather than over moves it is about to discard. The beam's GPU rule is
+     the case that matters: expanding an incumbent that binds no hardware dimension is worthwhile
+     only through moves that can bind one, and sharing 48 slots across five categories first would
+     leave a tensorize-rich unit ~10 tensorizes plus dozens of proposals the beam drops — where the
+     old prefix, by accident of ordering, handed all 48 to the tensorizes. Filtering first makes
+     that outcome the rule rather than the accident, and leaves the sharing to decide between
+     categories the caller is actually choosing among. It may record its refusals; the drop log
+     below is about the cap alone. *)
+  let kept, dropped =
+    share_cap ~cap:max_actions_per_unit
+      (List.map
+         [
+           ("tensorize", tensorizes);
+           ("split", splits);
+           ("swap", swaps);
+           ("unroll", unrolls);
+           ("vectorize", vectorizes);
+         ]
+         ~f:(fun (name, l) -> (name, List.filter l ~f:admits)))
+  in
+  if not (List.is_empty dropped) then
+    logf "menu: the per-unit cap of %d dropped %s" max_actions_per_unit
+      (String.concat ~sep:", "
+         (List.map dropped ~f:(fun (name, d) -> Printf.sprintf "%d %s" d name)));
+  kept
 
 (* Extend one unit of a compiled candidate with a menu action. The fissioned entries stay in segment
    order (the positional replay fallback relies on it); extending by key updates every structurally
@@ -3458,21 +3564,29 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir
                      gh-ocannl-543 chain). Pruned moves are still counted in the census, so the
                      refusal stays visible where it was before. *)
                   let elem_dispatchable = dispatchable ~is_gpu elem.all_opts in
+                  (* Passed INTO [menu] so the refusal precedes its per-unit cap (gh-ocannl-685
+                     review): applied afterwards, the cap would first share its 48 slots across
+                     categories whose moves this predicate is about to reject, and a tensorize-rich
+                     unit would lose the very proposals that are the beam's only route out of an
+                     undispatchable incumbent. The census recording is unchanged and still happens
+                     per refused move, so the refusal stays as visible as it was. *)
+                  let admits op =
+                    if elem_dispatchable || optop_can_bind_hardware op then true
+                    else (
+                      logf "menu prune (cannot parallelize an undispatched incumbent): %s"
+                        (optop_family op);
+                      record_not_dispatched ~origin:"beam_move"
+                        ~detail:
+                          (Printf.sprintf
+                             "%s on an incumbent binding no hardware dimension cannot bind one \
+                              either"
+                             (optop_family op));
+                      false)
+                  in
                   List.concat_map elem.units ~f:(fun u ->
-                      List.filter_map (menu ~is_cpu ~is_gpu ~limits ~registry:u.u_registry u.u_opt)
-                        ~f:(fun op ->
-                          if elem_dispatchable || optop_can_bind_hardware op then
-                            extend_spec elem u op
-                          else (
-                            logf "menu prune (cannot parallelize an undispatched incumbent): %s"
-                              (optop_family op);
-                            record_not_dispatched ~origin:"beam_move"
-                              ~detail:
-                                (Printf.sprintf
-                                   "%s on an incumbent binding no hardware dimension cannot bind \
-                                    one either"
-                                   (optop_family op));
-                            None))))
+                      List.filter_map
+                        (menu ~admits ~is_cpu ~is_gpu ~limits ~registry:u.u_registry u.u_opt)
+                        ~f:(fun op -> extend_spec elem u op)))
             in
             (* gh-ocannl-550: bounded like the seed pass, but in a SECOND accumulator, because a
                round's decision compares its own best against the incumbent and, if it wins,

@@ -4170,7 +4170,14 @@ module C_syntax (B : C_syntax_config) = struct
                             {
                               tn;
                               idcs;
-                              llsc = Local_scope { id; body = scope_body; orig_indices = idcs };
+                              llsc =
+                                Local_scope
+                                  {
+                                    id;
+                                    body = scope_body;
+                                    orig_indices = idcs;
+                                    mint = Schedule_minted;
+                                  };
                               debug;
                             }))
             in
@@ -5214,7 +5221,8 @@ module C_syntax (B : C_syntax_config) = struct
     (* Returns (local definitions, value expression) *)
     let open PPrint in
     match vcomp with
-    | Local_scope { id = { tn = { storage_prec = _; _ }; scope_id } as id; body; orig_indices = _ }
+    | Local_scope
+        { id = { tn = { storage_prec = _; _ }; scope_id } as id; body; orig_indices = _; mint = _ }
       ->
         let scope_prec = scope_prec_of id in
         let num_typ = string (B.typ_of_prec scope_prec) in

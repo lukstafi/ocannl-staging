@@ -346,3 +346,45 @@ files.
   is `report.default_ms` instead — the config-thresholds fissioned seed reproduces the untuned
   pipeline exactly and its time is attributed by digest (so a seed that dedups against a timed twin,
   the CPU serial baseline included, still reports).
+- The action menu's loop enumeration is provenance-aimed **by action category**, not by loop
+  (gh-ocannl-687). `Local_scope` has two producers — virtualization's inline at a read site, and the
+  accumulator localization `Schedule`'s materializing `Unroll` / `Partition` and
+  `C_syntax.try_widen_serial_reduce` mint over a MATERIALIZED cell — and `Low_level.scope_mint` on
+  the node tells them apart. `Autotune.collect_loops` descends both and tags each descriptor
+  (`ld_inlined`); a loop reached through an inline draws the `Vectorized` retype and nothing else.
+  Two things this is NOT about. Not reachability: `Schedule.rewrite_loop` descends every
+  `Local_scope`, so a proposal naming an inlined loop applies. And not "which loops exist": the
+  first attempt at this dropped them from the enumeration wholesale, which **destroys** the
+  candidate rather than moving it outward — `C_syntax`'s elementwise vectorizer bails on any
+  `Local_scope` in the body, and an accumulating bailout falls back to a plain serial loop, so the
+  enclosing loop's retype renders exactly like the baseline, while the inlined reduction one level
+  down is precisely what `try_vectorize_reduce` was built for (gh-639). `contains_loop` therefore
+  stays provenance-blind: innermost-ness decides which loop gets the retype, and the renderer
+  answers that structurally. What the exclusion buys is the other three categories — up to eight
+  descriptors per loop, no evidence any pays on a per-use-site inline, each costing a candidate
+  compile and displacing one for the main nest. **When narrowing a search space, check whether the
+  thing you are dropping has a renderer the alternative lacks**; "propose fewer things" and "propose
+  the same things elsewhere" are different changes. A flag on the node is the durable form of this
+  fact; contrast `input_scope_ids` (gh-ocannl-681), which answers the per-call question of whether a
+  scope was in the program a given `optimize` was HANDED, and must stay id-set-based: a mint is
+  claimable, and hand-built IR has no honest way to spell "not mine".
+- The per-unit action cap is shared round-robin across the menu's categories, not spent as a prefix
+  over their concatenation (`Autotune.share_cap`, gh-ocannl-685). The menu list is category-ordered
+  and UNRANKED, so a prefix over it is arbitrary — a unit whose tensorizes alone reached 48 offered
+  the search no split, swap, unroll or vectorize at all, and those are exactly the categories a unit
+  needs when its tensorizes turn out `Op_illegal`. Contrast `List.take surface.ps_candidates
+  placement_budget`, a prefix over a RANKED list where top-N is the intended semantics; that one is
+  fine as it stands. When capping anything else in this search, check which kind of list you have.
+  Survivors keep category order, so an under-cap menu is byte-identical to before; the `menu:` log
+  now also reports what the cap DROPPED (it used to print only the per-category counts taken before
+  the take, so a truncated menu logged the same numbers as an untruncated one) and what the
+  provenance filter withheld.
+  **A cap must also sit at the right altitude, not just be shared fairly.** `menu`'s `?admits` runs
+  ahead of the cap so the budget is spent on moves the caller can use: the beam's GPU rule — an
+  incumbent binding no hardware dimension can only be expanded through a move that binds one — used
+  to filter *after* `menu` had capped, so a tensorize-rich unit got its share of five categories and
+  kept only a fraction of the one category the beam could use. The old plain prefix happened to hand
+  all 48 to the tensorizes, so sharing without moving the filter would have been a regression
+  exactly where #685 meant to help. When adding a consumer-side filter over a capped list, ask
+  whether the cap should see it.
+
