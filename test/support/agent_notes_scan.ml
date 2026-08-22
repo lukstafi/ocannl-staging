@@ -146,45 +146,100 @@ let is_blank line = String.is_empty (String.strip line)
 (** Half-open [(start, stop)] character ranges of the inline code spans of a line, CommonMark's
     rule: a run of N backticks opens a span that the next run of exactly N closes, and a run with no
     partner opens nothing. The ranges include the delimiters. *)
-let code_spans line =
+(** The backtick RUNS of a line, as [(position, length)] pairs. Separated out because span pairing
+    happens at two scopes now — within a line, and across the lines of a paragraph — and both need
+    the same notion of a run. *)
+let backtick_runs line =
   let n = String.length line in
-  let rec runs i acc =
+  let rec go i acc =
     if i >= n then List.rev acc
     else if Char.equal line.[i] '`' then (
       let j = ref i in
       while !j < n && Char.equal line.[!j] '`' do
         Int.incr j
       done;
-      runs !j ((i, !j - i) :: acc))
-    else runs (i + 1) acc
+      go !j ((i, !j - i) :: acc))
+    else go (i + 1) acc
   in
-  let runs = runs 0 [] in
+  go 0 []
+
+(** Half-open [(start, stop)] ranges of the inline code spans opened AND closed on this line, per
+    CommonMark: a run of N backticks opens a span that the next run of exactly N closes, and a run
+    with no partner opens nothing. [carry] is a span left open by an earlier line of the same
+    paragraph; when one is passed, the line's leading text up to the closing run is in code too, and
+    the result says whether a span is still open at the end of the line.
+
+    Returning that state is the fix for a span that crosses a line break. A code span may span lines
+    within a paragraph, and pairing runs per line discarded the delimiter state at every newline —
+    so a link on the middle line of a multiline span was read as navigable and counted as a backlink
+    (Codex P2, round 3). *)
+let code_spans_with_carry ?carry line =
+  let n = String.length line in
+  let runs = backtick_runs line in
+  let leading, runs =
+    match carry with
+    | None -> ([], runs)
+    | Some len -> (
+        match List.findi runs ~f:(fun _ (_, l) -> l = len) with
+        | None -> ([ (0, n) ], [])  (* the whole line is inside the carried span *)
+        | Some (idx, (close_at, _)) -> ([ (0, close_at + len) ], List.drop runs (idx + 1)))
+  in
+  let still_open = ref None in
   let rec pair runs acc =
     match runs with
     | [] -> List.rev acc
     | (start, len) :: rest -> (
         match List.findi rest ~f:(fun _ (_, l) -> l = len) with
-        | None -> pair rest acc
+        | None ->
+            (* An unclosed run: in a paragraph it may still be closed by a later line, so the
+               remainder of THIS line is in code and the length is carried forward. *)
+            still_open := Some len;
+            List.rev ((start, n) :: acc)
         | Some (idx, (close_at, _)) ->
             pair (List.drop rest (idx + 1)) ((start, close_at + len) :: acc))
   in
-  pair runs []
+  let spans = pair runs [] in
+  (leading @ spans, if Option.is_some carry && List.is_empty runs then carry else !still_open)
+
+(** The single-line reading, for a caller with no paragraph context. *)
+let code_spans line = fst (code_spans_with_carry line)
 
 let in_any_span spans i =
   List.exists spans ~f:(fun (start, stop) -> start <= i && i < stop)
 
+(** Whether the character at [i] is escaped: by the PARITY of the run of backslashes before it, not
+    by the single character before it. Two backslashes are an escaped backslash, which leaves the
+    pipe after them live — so ["| a \\\\| b | c |"] is three cells to a renderer and was two to this
+    scan, quietly dropping a cell out of the width check (Codex P2, round 3). *)
+let escaped_at line i =
+  let rec count j acc = if j >= 0 && Char.equal line.[j] '\\' then count (j - 1) (acc + 1) else acc in
+  count (i - 1) 0 % 2 = 1
+
 (** Positions of the ['|'] characters that separate table cells: outside inline code, and not
-    backslash-escaped. *)
-let pipes_outside_code line =
-  let spans = code_spans line in
+    backslash-escaped. [?spans] passes the paragraph-aware reading when the caller has one. *)
+let pipes_outside_code ?spans line =
+  let spans = match spans with Some s -> s | None -> code_spans line in
   String.foldi line ~init:[] ~f:(fun i acc c ->
-      if
-        Char.equal c '|'
-        && (not (in_any_span spans i))
-        && not (i > 0 && Char.equal line.[i - 1] '\\')
-      then i :: acc
+      if Char.equal c '|' && (not (in_any_span spans i)) && not (escaped_at line i) then i :: acc
       else acc)
   |> List.rev
+
+(** The inline-code spans of every line of a file, with a span carried across line breaks inside a
+    paragraph. A blank line ends a paragraph, and with it any unclosed span: CommonMark does not let
+    a code span cross one, so state resets there rather than leaking to the end of the file — which
+    is what would turn one stray backtick into "everything below is code". *)
+let code_spans_by_line contents =
+  let carry = ref None in
+  List.map (lines contents) ~f:(fun (lineno, line) ->
+      if is_blank line then (
+        carry := None;
+        (lineno, []))
+      else
+        let spans, still_open = code_spans_with_carry ?carry:!carry line in
+        carry := still_open;
+        (lineno, spans))
+
+let spans_at map lineno = Option.value (List.Assoc.find map lineno ~equal:Int.equal) ~default:[]
 
 (** The cells of a table row: the text between the separating pipes, trimmed. A well-formed row
     starts and ends with one, so the empty pieces outside them are dropped. Returns [None] for a
@@ -264,16 +319,44 @@ let normalize text =
   |> List.filter ~f:(fun s -> not (String.is_empty s))
   |> String.concat ~sep:" "
 
-(** How many characters of a bullet name it. Long enough to be unambiguous among 179, short enough
-    to paste into an exemption list by hand. *)
-let subject_length = 48
+(** How much of a bullet is SHOWN when a finding talks about it. Display only — the identity below
+    is exact, because a prefix is not an identity: two bullets agreeing for 48 characters and
+    diverging afterwards got the same exemption key, so exempting one deliberate ending silenced the
+    other's accidental truncation as well, and the staleness check still saw a match (Codex P2,
+    round 3). *)
+let subject_display_length = 48
 
-(** How a bullet is NAMED, in a finding and in an exemption: its OPENING. The opening rather than
-    the tail, because that is the half a person recognises and the half that stays put while the
-    bullet is edited -- and because an exemption keyed on the tail of an unterminated bullet would
-    stop matching the moment someone finished the sentence, which is the edit it exists to survive.
-*)
-let bullet_subject (b : bullet) = String.prefix (normalize b.text) subject_length
+(** How a bullet is NAMED, in a finding and in an exemption: its WHOLE text, whitespace-normalized.
+    Whole, so that no two bullets can share a key. Normalized, so that re-wrapping a bullet across
+    different lines does not invalidate an exemption written against it — while editing its WORDS
+    does, which is right: an exemption is a claim about a particular sentence's particular ending,
+    and a changed sentence deserves a fresh claim rather than inherited cover. *)
+let bullet_subject (b : bullet) = normalize b.text
+
+(** The ATX heading a line is, if it is one. CommonMark wants one to six ['#'] followed by
+    whitespace or the end of the line: ["##ident_blacklist"] renders as PROSE, and recording it as a
+    heading let the index's [#ident_blacklist] anchor pass while pointing at nothing (Codex P2,
+    round 3). The marker also has to be a real ATX run — seven hashes is not a heading either. *)
+let atx_heading line =
+  let s = String.strip line in
+  let hashes =
+    match String.lfindi s ~f:(fun _ c -> not (Char.equal c '#')) with
+    | Some i -> i
+    | None -> String.length s
+  in
+  if hashes = 0 || hashes > 6 then None
+  else
+    let rest = String.drop_prefix s hashes in
+    if String.is_empty rest || Char.equal rest.[0] ' ' then
+      (* A closing run of hashes is decoration, not content. *)
+      Some (String.strip (String.rstrip (String.strip rest) ~drop:(Char.equal '#')))
+    else None
+
+(** Whether a line opens with something that WANTS to be a heading, so that a malformed one is
+    reported rather than read as prose. *)
+let looks_like_heading line = String.is_prefix (String.strip line) ~prefix:"#"
+
+let headings contents = List.filter_map (lines contents) ~f:(fun (_, line) -> atx_heading line)
 
 (** {2 The closed dialect}
 
@@ -406,7 +489,13 @@ let parse_file ~file contents =
                 fence_open := Some m;
                 close_all ()
             | None ->
-                if String.is_prefix stripped ~prefix:"#" then close_all ()
+                if looks_like_heading stripped then (
+                  if Option.is_none (atx_heading stripped) then
+                    bad lineno
+                      "a line opening with # that is not a heading: an ATX marker is one to six \
+                       hashes followed by a space, and without one this renders as prose -- so an \
+                       anchor naming it points at nothing";
+                  close_all ())
                 else if is_table_line line then close_all ()
                 else
                   match foreign_list_marker stripped with
@@ -452,7 +541,19 @@ let parse_file ~file contents =
                       else if indent = 0 then (
                         (match unsupported_block stripped with
                         | Some what -> bad lineno what
-                        | None -> ());
+                        | None ->
+                            (* Markdown reads column-zero prose directly under an open bullet as a
+                               LAZY CONTINUATION of that item, so this text belongs to the bullet to
+                               a renderer while this scan was closing the list and dropping it from
+                               every rule. A bullet whose first line already ends in punctuation hid
+                               the whole transition (Codex P2, round 3). Nothing legitimate needs
+                               it: the notes separate a paragraph from the list above with a blank
+                               line, which is what closes the list here. *)
+                            if not (List.is_empty !stack) then
+                              bad lineno
+                                "prose at column zero directly under a bullet, which Markdown reads \
+                                 as a lazy continuation of it: separate it with a blank line, or \
+                                 indent it two spaces to make it the bullet's own");
                         close_all ())
                       else
                         match block_quote_marker stripped with
@@ -499,7 +600,8 @@ let parse_file ~file contents =
                (Printf.sprintf
                   "a bullet that does not end a sentence, so its tail may be elsewhere: %S ends \
                    \"…%s\" -- exempt it as %S if that ending is deliberate"
-                  subject (String.suffix b.text 40)
+                  (String.prefix subject subject_display_length)
+                  (String.suffix b.text 40)
                   (subject_key ~file ~subject))))
   in
   { bullets; structure = List.rev !findings @ terminator_findings }
@@ -632,12 +734,6 @@ let slug heading =
          else None)
   |> String.of_list
 
-let headings contents =
-  List.filter_map (lines contents) ~f:(fun (_, line) ->
-      let s = String.strip line in
-      if String.is_prefix s ~prefix:"#" then
-        Some (String.strip (String.lstrip s ~drop:(Char.equal '#')))
-      else None)
 
 (** HTML comments removed, so that a link inside one is not a link. Unterminated, the comment runs
     to the end of the text — which is what a browser does with it too. *)
@@ -657,9 +753,14 @@ let strip_html_comments text =
     not an image ([!\[alt\](src)] renders a picture, not a way back). A substring test for
     ["](../agent-notes.md)"] called a file reachable when those same bytes sat in a code span, in a
     comment, or behind an image (Codex P2, round 1) — all three of which a reader cannot follow. *)
-let markdown_links line =
+let markdown_links ?spans line =
+  let raw = line in
   let line = strip_html_comments line in
-  let spans = code_spans line in
+  let spans =
+    match spans with
+    | Some s when String.equal raw line -> s
+    | _ -> code_spans line
+  in
   let n = String.length line in
   let rec go i acc =
     if i >= n then List.rev acc
@@ -685,8 +786,12 @@ let markdown_links line =
   in
   go 0 []
 
-(** Every navigable link of a whole file. *)
-let links_of contents = List.concat_map (lines contents) ~f:(fun (_, l) -> markdown_links l)
+(** Every navigable link of a whole file, read with the paragraph-aware span map so that a link on
+    the middle line of a multiline code span is not one. *)
+let links_of contents =
+  let map = code_spans_by_line contents in
+  List.concat_map (lines contents) ~f:(fun (lineno, l) ->
+      markdown_links ~spans:(spans_at map lineno) l)
 
 (** Where a relative link written IN [from_file] actually points, as a path in the same space as
     the scan's file keys. [from_file] is a file, so the link resolves against its DIRECTORY;
@@ -696,7 +801,7 @@ let links_of contents = List.concat_map (lines contents) ~f:(fun (_, l) -> markd
     the one-level spelling made the backlink rule demand [`../agent-notes.md`] of a note in a
     subdirectory — which from there resolves to [docs/agent-notes/agent-notes.md], a file that does
     not exist. So nested notes could only pass by carrying an unusable link (Codex P2, round 2). *)
-let resolve_link ~from_file target =
+let resolve_link ~from_file target : string option =
   let dir =
     match List.rev (String.split from_file ~on:'/') with
     | _ :: rest -> List.rev rest
@@ -704,12 +809,19 @@ let resolve_link ~from_file target =
   in
   let target = List.hd_exn (String.split target ~on:'#') in
   let step acc segment =
-    if String.equal segment "." || String.is_empty segment then acc
-    else if String.equal segment ".." then match acc with _ :: rest -> rest | [] -> []
-    else segment :: acc
+    match acc with
+    | None -> None
+    | Some acc ->
+        if String.equal segment "." || String.is_empty segment then Some acc
+        else if String.equal segment ".." then
+          (* Above the root is a DISTINCT answer, not the root. Clamping made
+             agent-notes/a.md's "../../agent-notes.md" resolve to the index, so a link pointing at
+             the repository root passed as a backlink (Codex P2, round 3). *)
+          match acc with _ :: rest -> Some rest | [] -> None
+        else Some (segment :: acc)
   in
-  List.fold (String.split target ~on:'/') ~init:(List.rev dir) ~f:step
-  |> List.rev |> String.concat ~sep:"/"
+  List.fold (String.split target ~on:'/') ~init:(Some (List.rev dir)) ~f:step
+  |> Option.map ~f:(fun acc -> List.rev acc |> String.concat ~sep:"/")
 
 (** [\[text\](target)] filling the whole cell, and nothing else. *)
 let parse_link cell =
@@ -850,7 +962,8 @@ let check_index ~index_file ~index_contents ~(files : (string * string) list) =
            rather than for the spelling that works one level up. *)
         if
           List.exists (links_of contents) ~f:(fun (_, t) ->
-              String.equal (resolve_link ~from_file:name t) index_file)
+              Option.value_map (resolve_link ~from_file:name t) ~default:false
+                ~f:(String.equal index_file))
         then None
         else
           Some

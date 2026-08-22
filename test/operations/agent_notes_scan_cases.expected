@@ -23,6 +23,9 @@ ok: bullets -- a fence that is never closed
 ok: bullets -- a block quote
 ok: bullets -- a block quote nested under a bullet
 ok: bullets -- an index whose rows drifted four spaces right
+ok: bullets -- prose at column zero directly under a bullet
+ok: bullets -- a blank line makes the same prose a paragraph
+ok: bullets -- a heading written without a space after the hashes
 ok: bullets -- a comparison at the start of a continuation is not a quote
 ok: bullets -- an HTML block at column zero
 ok: bullets -- an angle bracket inside a continuation is ordinary text
@@ -42,11 +45,35 @@ ok: tables -- a pipe inside a code span below a table
 ok: tables -- an escaped pipe is not a cell separator either
 ok: tables -- a table indented three spaces is still a table
 ok: tables -- a table indented four spaces is a code block
+ok: tables -- an escaped backslash leaves the pipe separating
 ok: tables -- a delimiter cell of one hyphen
 ok: tables -- a delimiter cell of two hyphens
 ok: tables -- alignment colons are still a delimiter row
+ok: code spans -- one span
+ok: code spans -- two spans
+ok: code spans -- a double run holds a single
+ok: code spans -- an unpaired run opens a span to the line's end
+ok: code spans -- no backticks at all
+ok: cell separators -- a plain row
+ok: cell separators -- an escaped pipe is not a separator
+ok: cell separators -- an escaped backslash leaves the pipe live
+ok: cell separators -- three backslashes escape it again
+ok: cell separators -- a pipe inside code is not a separator
+ok: atx headings -- a heading
+ok: atx headings -- a heading with no space
+ok: atx headings -- a bare marker
+ok: atx headings -- closing hashes are decoration
+ok: atx headings -- seven hashes is not a heading
+ok: atx headings -- an identifier heading
+ok: link resolution -- one level up
+ok: link resolution -- two levels up from a nested note
+ok: link resolution -- one too many is above the root
+ok: link resolution -- a redundant ./ is dropped
+ok: link resolution -- a sibling needs no ..
+ok: link resolution -- an anchor is not part of the path
 ok: exemption -- the key names the file and the bullet's opening
 ok: exemption -- a re-wrapped bullet has the same key
+ok: exemption -- two bullets agreeing past the display length keep distinct keys
 ok: exemption -- a finished bullet has no finding to key
 ok: index -- an index whose rows all resolve
 ok: index -- a hook the file it points at does not carry
@@ -62,6 +89,9 @@ ok: index -- the same anchor with the underscore hyphenated
 ok: index -- a backlink that is only a code span
 ok: index -- a backlink commented out
 ok: index -- a backlink that is an image
+ok: index -- a backlink hidden in the middle of a multiline code span
+ok: index -- a backlink one directory too far up
+ok: index -- an anchor on a heading written without a space
 ok: index -- a backlink carrying an anchor is still a backlink
 ok: index -- a note in a subdirectory, linked and backlinked from its own depth
 ok: index -- a nested note carrying the one-level backlink, which resolves to nothing

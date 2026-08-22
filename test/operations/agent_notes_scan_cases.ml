@@ -110,6 +110,15 @@ let structure_cases =
     ( "an index whose rows drifted four spaces right",
       "# Title\n\n    | File | Covers |\n    | --- | --- |\n    | a | b |\n",
       [ "bullet-integrity @ f.md:3"; "bullet-integrity @ f.md:4"; "bullet-integrity @ f.md:5" ] );
+    ( "prose at column zero directly under a bullet",
+      "# Title\n\n- A fact follows:\nthe omitted continuation.\n",
+      [ "bullet-integrity @ f.md:4" ] );
+    ( "a blank line makes the same prose a paragraph",
+      "# Title\n\n- A fact follows:\n\nAn ordinary paragraph.\n",
+      [] );
+    ( "a heading written without a space after the hashes",
+      "# Title\n\n##ident_blacklist\n\n- A fact.\n",
+      [ "bullet-integrity @ f.md:3" ] );
     ( "a comparison at the start of a continuation is not a quote",
       "# Title\n\n- A fact about widths\n  >= 8, and about `dune build`.\n",
       [] );
@@ -181,6 +190,9 @@ let table_cases =
     ( "a table indented four spaces is a code block",
       "# Title\n\n    | File | Covers |\n    | --- | --- |\n    | a | b |\n",
       [] );
+    ( "an escaped backslash leaves the pipe separating",
+      "# Title\n\n| File | Covers |\n| --- | --- |\n| a \\\\| b | c |\n",
+      [ "table-shape @ f.md:5" ] );
     ( "a delimiter cell of one hyphen",
       "# Title\n\n| File | Covers |\n| - | --- |\n| a | b |\n",
       [ "table-shape @ f.md:4" ] );
@@ -289,6 +301,21 @@ let index_cases =
       [ ("agent-notes/a.md",
           "# A file\n\n![index](../agent-notes.md)\n\n- A fact about `Widget`.\n") ],
       [ "reachability @ agent-notes/a.md" ] );
+    ( "a backlink hidden in the middle of a multiline code span",
+      index [ row "a.md" "the `Widget` seam" ],
+      [ ("agent-notes/a.md",
+          "# A file\n\nPart of an example: `\n[index](../agent-notes.md)\n`.\n\n- A fact about            `Widget`.\n") ],
+      [ "reachability @ agent-notes/a.md" ] );
+    ( "a backlink one directory too far up",
+      index [ row "a.md" "the `Widget` seam" ],
+      [ ("agent-notes/a.md",
+          "# A file\n\nSee the [index](../../agent-notes.md).\n\n- A fact about `Widget`.\n") ],
+      [ "reachability @ agent-notes/a.md" ] );
+    ( "an anchor on a heading written without a space",
+      index [ "| [a.md](agent-notes/a.md#ident_blacklist) | the `ident_blacklist` |" ],
+      [ ("agent-notes/a.md",
+          file "##ident_blacklist\n\n- A fact about `ident_blacklist`.\n") ],
+      [ "bullet-integrity @ agent-notes/a.md:5"; "index-agreement @ agent-notes.md:7" ] );
     ( "a backlink carrying an anchor is still a backlink",
       index [ row "a.md" "the `Widget` seam" ],
       [ ("agent-notes/a.md",
@@ -355,6 +382,57 @@ let index_cases =
       [] );
   ]
 
+(* The LEXICAL layer, tested directly rather than only through the rules above it.
+
+   Round 3 was six findings and three of them were here -- code-span pairing, backslash parity, ATX
+   spacing -- each an approximation of a CommonMark rule, each feeding every rule in the scan, and
+   each invisible from the rule level because a rule reads "no pipe there" and "no heading there" the
+   same whether the primitive was right or lazy. A layer that everything depends on and nothing
+   tests directly is where this class regenerates, so it gets its own fixtures. *)
+let primitive_cases =
+  [
+    (* A run of N backticks is closed by the next run of exactly N. *)
+    ("one span", "a `b` c", [ "2-5" ]);
+    ("two spans", "`a` and `b`", [ "0-3"; "8-11" ]);
+    ("a double run holds a single", "``a`b`` c", [ "0-7" ]);
+    ("an unpaired run opens a span to the line's end", "a `b c", [ "2-6" ]);
+    ("no backticks at all", "plain text", []);
+  ]
+
+(* Escaping is decided by the PARITY of the backslash run, not by the character before the pipe. *)
+let pipe_cases =
+  [
+    ("a plain row", "| a | b |", [ 0; 4; 8 ]);
+    ("an escaped pipe is not a separator", "| a \\| b |", [ 0; 9 ]);
+    ("an escaped backslash leaves the pipe live", "| a \\\\| b |", [ 0; 6; 10 ]);
+    ("three backslashes escape it again", "| a \\\\\\| b |", [ 0; 11 ]);
+    ("a pipe inside code is not a separator", "| `a|b` | c |", [ 0; 8; 12 ]);
+  ]
+
+(* An ATX marker is one to six hashes followed by a space or the end of the line. *)
+let heading_cases =
+  [
+    ("a heading", "## Title", Some "Title");
+    ("a heading with no space", "##Title", None);
+    ("a bare marker", "#", Some "");
+    ("closing hashes are decoration", "## Title ##", Some "Title");
+    ("seven hashes is not a heading", "####### Title", None);
+    ("an identifier heading", "## ident_blacklist", Some "ident_blacklist");
+  ]
+
+(* A relative link resolves against its file's DIRECTORY, and above the root is a distinct answer. *)
+let resolve_cases =
+  [
+    ("one level up", "agent-notes/a.md", "../agent-notes.md", Some "agent-notes.md");
+    ("two levels up from a nested note", "agent-notes/sub/a.md", "../../agent-notes.md",
+      Some "agent-notes.md");
+    ("one too many is above the root", "agent-notes/a.md", "../../agent-notes.md", None);
+    ("a redundant ./ is dropped", "agent-notes/a.md", "./../agent-notes.md", Some "agent-notes.md");
+    ("a sibling needs no ..", "agent-notes/a.md", "b.md", Some "agent-notes/b.md");
+    ("an anchor is not part of the path", "agent-notes/a.md", "../agent-notes.md#x",
+      Some "agent-notes.md");
+  ]
+
 (* The escape hatch is only a hatch if the key a message tells you to paste is the key that matches.
    Round 1 found it could match nothing at all: the documented format named the bullet's opening
    while the message carried its tail, and the comparison ran over the message text. Both halves are
@@ -364,14 +442,22 @@ let exemption_cases =
     ( "the key names the file and the bullet's opening",
       "agent-notes/a.md",
       "# A file\n\n- A trailing identifier is the ending here: `Ops.promote_prec`\n",
-      Some
-        "agent-notes/a.md: A trailing identifier is the ending here: `Ops.p" );
+      [ "agent-notes/a.md: A trailing identifier is the ending here: `Ops.promote_prec`" ] );
     ( "a re-wrapped bullet has the same key",
       "agent-notes/a.md",
       "# A file\n\n- A trailing identifier is the ending\n  here: `Ops.promote_prec`\n",
-      Some "agent-notes/a.md: A trailing identifier is the ending here: `Ops.p" );
+      [ "agent-notes/a.md: A trailing identifier is the ending here: `Ops.promote_prec`" ] );
+    (* The display length is 48; these two agree for well past that and diverge only at the end, so
+       a prefix key would have silenced both from one exemption. *)
+    ( "two bullets agreeing past the display length keep distinct keys",
+      "agent-notes/a.md",
+      "# A file\n\n- The analysis pass establishes what the specializer may assume of `Widget`\n-        The analysis pass establishes what the specializer may assume of `Gadget`\n",
+      [ "agent-notes/a.md: The analysis pass establishes what the specializer may assume of \
+         `Widget`";
+        "agent-notes/a.md: The analysis pass establishes what the specializer may assume of \
+         `Gadget`" ] );
     ("a finished bullet has no finding to key", "agent-notes/a.md",
-      "# A file\n\n- A fact that ends properly.\n", None );
+      "# A file\n\n- A fact that ends properly.\n", [] );
   ]
 
 let () =
@@ -388,6 +474,20 @@ let () =
   List.iter table_cases ~f:(fun (name, body, expected) ->
       check ("tables -- " ^ name) expected
         (List.map (Notes.check_tables ~file:"f.md" body) ~f:render));
+  List.iter primitive_cases ~f:(fun (name, line, expected) ->
+      let found =
+        List.map (Notes.code_spans line) ~f:(fun (a, b) -> Printf.sprintf "%d-%d" a b)
+      in
+      check ("code spans -- " ^ name) expected found);
+  List.iter pipe_cases ~f:(fun (name, line, expected) ->
+      let found = List.map (Notes.pipes_outside_code line) ~f:Int.to_string in
+      check ("cell separators -- " ^ name) (List.map expected ~f:Int.to_string) found);
+  List.iter heading_cases ~f:(fun (name, line, expected) ->
+      check ("atx headings -- " ^ name) (Option.to_list expected)
+        (Option.to_list (Notes.atx_heading line)));
+  List.iter resolve_cases ~f:(fun (name, from_file, target, expected) ->
+      check ("link resolution -- " ^ name) (Option.to_list expected)
+        (Option.to_list (Notes.resolve_link ~from_file target)));
   List.iter exemption_cases ~f:(fun (name, file, body, expected) ->
       let keys =
         List.filter_map (Notes.check_structure ~file body) ~f:Notes.exemption_key
@@ -398,7 +498,7 @@ let () =
             | None -> true
             | Some k -> String.is_substring f.Notes.message ~substring:k)
       in
-      check ("exemption -- " ^ name) (Option.to_list expected) keys;
+      check ("exemption -- " ^ name) expected keys;
       if not message_offers_key then
         fail "exemption -- %s: the finding's message does not print the key that would silence it"
           name);

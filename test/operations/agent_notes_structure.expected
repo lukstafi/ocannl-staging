@@ -7,4 +7,5 @@ every index row names a file that carries what it claims: true
 every table is a table, row by row: true
 every notes file is reachable from the index, and links back: true
 no bullet is repeated across the notes: true
+each flagged bullet has an exemption key of its own: true
 every exemption still names a bullet that needs one: true

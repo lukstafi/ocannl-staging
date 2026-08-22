@@ -111,6 +111,21 @@ let () =
   report Notes.rule_no_repetition "no bullet is repeated across the notes";
   (* An exemption is a claim about a specific bullet; one that matches nothing has stopped being
      one, and left behind a hole the next edit falls into. *)
+  (* An exemption key is the whole normalized bullet, so two bullets cannot share one. That is a
+     property of the key rather than of this list, and a property worth failing loudly if it ever
+     stops holding -- an exemption silencing a second, accidental truncation is exactly the harm the
+     hatch must not do. *)
+  let bullet_findings =
+    List.filter_map findings ~f:(fun f ->
+        if String.equal f.Notes.rule Notes.rule_bullet_integrity then Notes.exemption_key f else None)
+  in
+  let colliding =
+    List.find_a_dup (List.sort bullet_findings ~compare:String.compare) ~compare:String.compare
+  in
+  (match colliding with
+  | Some key -> eprintf "  two flagged bullets share the exemption key %s\n" key
+  | None -> ());
+  Verdict.p "each flagged bullet has an exemption key of its own" (Option.is_none colliding);
   let stale =
     List.filter unterminated_bullets ~f:(fun (key, _) ->
         not
