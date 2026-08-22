@@ -563,7 +563,9 @@ let () =
         {
           tn = wacc;
           idcs = [| Ll_test.fixed 0 |];
-          llsc = LL.Local_scope { id = wid; body = w_body; orig_indices = [| Ll_test.fixed 0 |] };
+          llsc =
+            LL.Local_scope
+              { id = wid; body = w_body; orig_indices = [| Ll_test.fixed 0 |]; mint = LL.Schedule_minted };
           debug = "";
         }
     in
@@ -612,7 +614,12 @@ let () =
              idcs = [| Ll_test.fixed 0 |];
              llsc =
                LL.Local_scope
-                 { id = rid; body = rec_scope_body; orig_indices = [| Ll_test.fixed 0 |] };
+                 {
+                   id = rid;
+                   body = rec_scope_body;
+                   orig_indices = [| Ll_test.fixed 0 |];
+                   mint = LL.Schedule_minted;
+                 };
              debug = "";
            })
     in
@@ -655,7 +662,12 @@ let () =
              idcs = [| Ll_test.fixed 0 |];
              llsc =
                LL.Local_scope
-                 { id = mid; body = mix_scope_body; orig_indices = [| Ll_test.fixed 0 |] };
+                 {
+                   id = mid;
+                   body = mix_scope_body;
+                   orig_indices = [| Ll_test.fixed 0 |];
+                   mint = LL.Schedule_minted;
+                 };
              debug = "";
            })
     in
@@ -714,7 +726,9 @@ let () =
         {
           tn = iacc;
           idcs = [| Ll_test.fixed 0 |];
-          llsc = LL.Local_scope { id = iid; body = i_body; orig_indices = [| Ll_test.fixed 0 |] };
+          llsc =
+            LL.Local_scope
+              { id = iid; body = i_body; orig_indices = [| Ll_test.fixed 0 |]; mint = LL.Schedule_minted };
           debug = "";
         }
     in

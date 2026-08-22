@@ -94,7 +94,12 @@ let build_rich (table, ids, out, acc) =
                 idcs = [| Idx.Affine { symbols = [ (2, i); (1, j) ]; offset = 5 } |];
                 llsc =
                   LL.Local_scope
-                    { id = LL.get_scope acc; body = LL.Noop; orig_indices = [| Idx.Iterator i |] };
+                    {
+                      id = LL.get_scope acc;
+                      body = LL.Noop;
+                      orig_indices = [| Idx.Iterator i |];
+                      mint = LL.Inlined_computation;
+                    };
                 debug = "";
               } ) )
   in
@@ -189,6 +194,23 @@ let part2 () =
   p "initial_tokens pre-bind it instead" (List.is_empty log');
   p "and it then renders positionally"
     (String.is_substring text ~substring:"?" && String.is_substring text' ~substring:"s0");
+  (* gh-ocannl-687: which pass minted a [Local_scope] is part of a program's identity — it decides
+     which loops the action menu may target — so the walk must distinguish the two mints. Only the
+     newer, schedule-minted form takes a distinguishing token, which is why part1's golden (an
+     inlined scope) is unchanged by the field's arrival. *)
+  let scope_stmt mint =
+    LL.Set
+      {
+        tn = d;
+        idcs = [| Idx.Fixed_idx 0 |];
+        llsc = LL.Local_scope { id = LL.get_scope a; body = LL.Noop; orig_indices = [||]; mint };
+        debug = "";
+      }
+  in
+  let inlined_text, _ = render (scope_stmt LL.Inlined_computation) in
+  let minted_text, _ = render (scope_stmt LL.Schedule_minted) in
+  p "a virtualization-inlined and a schedule-minted scope render differently"
+    (not (String.equal inlined_text minted_text));
   let lane = sym () in
   let mma =
     LL.Tile_mma

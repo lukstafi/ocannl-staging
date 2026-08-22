@@ -28,6 +28,32 @@
   unconditional evaluation baselines the gh-514 report's cells were measured under, and under them
   the evidence is never derived, so `tune_flip_profit_margin` is never read; `Autotune.model_default`'s
   placement walk measures nothing, so it gets the prior unchanged.
+- **A "tensorized" timing can no longer be a scalar-fallback timing** (gh-ocannl-626). The
+  `Tile_mma` rendering census was a pair of global refs each consumer bracketed by hand (six copies
+  of the same five-line `Exn.protect`), so the default for any new timing harness was to report a
+  variant name unrelated to what rendered: a `Tile_mma` whose emission preconditions fail renders
+  the lane-0 scalar fallback, which compiles, runs and times fine under an `mma-*` label. It is now
+  derived once, inside `Context.compile`, and carried on the routine as
+  `Context.routine.mma : Ir.C_syntax.mma_summary`. The label is a three-way
+  `Ir.C_syntax.tensorization` — `Tensorized` (at least one tensor-core / SIMD-register-tile
+  emission), `Scalar_fallback` (statements emitted, every one declined), `Not_requested` (no
+  `Tile_mma` emitted) — with the statement and fallback counts beside it, and
+  `C_syntax.with_census` is the (additively nesting) bracket that replaces the six copies.
+
+  `Autotune.report` gains `best_tensorization : tensorization option`, `None` exactly when there is
+  no crowned candidate to consult, so a report that consulted no census cannot read as tensorized;
+  read against the existing `best_tensorized` it separates what the schedule ASKED for from what
+  the emission DELIVERED. The label is printed where timings are reported: the `autotune_log` notes,
+  `Train.tune_placements`' arm lines, every timing line of `bin/schedule_bench` and
+  `bin/narrow_gebp_bench` (through the now-shared `C_syntax.mma_summary_string`, which also ends
+  the two benches' disagreement about the "did this tensorize" predicate), the benchmark harness's
+  per-kernel segment table, and the result line's `tune` arms as `tensorization` +
+  `mma_statements`, plus `shipped_mma`: the census of the routine whose steps were timed, which is
+  what `orchestrate.py` reads into the report's `mma` column (`SCALAR FALLBACK` / `NO MMA EMITTED`
+  shouted, plus a `TENSORIZATION NOTICE`). Not the arm named as shipped — a crowned arm candidate
+  is not always the shipped artifact, since a flip refinement ships under `shipped: "flip"` and is
+  not an arm at all, and the `timing_ctx` path can fall back to the untuned default after crowning
+  a winner.
 
 - **One environment spelling, and no silent demotion** (gh-ocannl-652): a configuration key is read
   from `OCANNL_<KEY>` and from nothing else. The lowercase `ocannl_<key>`, which `read_env_var`

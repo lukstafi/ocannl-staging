@@ -461,15 +461,11 @@ let () =
        decline rules include a column extent below the compute vector width (which arbitrary extents
        now reach), a narrow [vector_bytes], mixed operand precisions, an accumulation not in FMA
        form, and [debug_log_from_routines]. Collecting the census only appends to a list, so it
-       perturbs neither what is compiled nor what is timed. *)
-    Ir.C_syntax.mma_census := [];
-    Ir.C_syntax.mma_census_enabled := true;
-    let ctx, routine =
-      Exn.protect
-        ~f:(fun () -> Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty)
-        ~finally:(fun () -> Ir.C_syntax.mma_census_enabled := false)
-    in
-    let renderings = List.rev_map !Ir.C_syntax.mma_census ~f:snd in
+       perturbs neither what is compiled nor what is timed. Since gh-ocannl-626 it travels on the
+       compiled routine, so this bench cannot forget to ask and cannot disagree with
+       [narrow_gebp_bench] about what "tensorized" means. *)
+    let ctx, routine = Context.compile ~lowered_transform:transform ctx comp Ir.Indexing.Empty in
+    let mma = routine.Context.mma in
     (* Warmup (includes any lazy initialization and host transfers). *)
     let ctx = Context.run ctx routine in
     let _ = Context.get_values ctx mc.Tensor.value in
@@ -496,21 +492,14 @@ let () =
       Array.foldi values ~init:0.0 ~f:(fun i acc v -> acc +. (v *. Float.of_int (1 + (i % 251))))
     in
     let spot = Int.min (n + 1) (Array.length values - 1) in
-    p "%-10s %8.3f ms  %8.2f GFLOP/s  (spot [%d] %.1f, chk %.10g)%s\n" variant (secs *. 1e3)
+    (* The label is printed on EVERY timing line, including the untensorized variants: a suffix
+       that appears only when there is something to say is a suffix a table reader does not miss
+       when it is absent (gh-ocannl-626). *)
+    p "%-10s %8.3f ms  %8.2f GFLOP/s  (spot [%d] %.1f, chk %.10g)  [%s]\n" variant (secs *. 1e3)
       (flops /. secs /. 1e9)
       spot values.(spot) checksum
-      (match renderings with
-      | [] -> ""
-      | rs ->
-          let counted =
-            List.map (List.dedup_and_sort rs ~compare:Ir.C_syntax.compare_mma_rendering)
-              ~f:(fun r ->
-                Printf.sprintf "%s x%d"
-                  (Sexp.to_string (Ir.C_syntax.sexp_of_mma_rendering r))
-                  (List.count rs ~f:(Ir.C_syntax.equal_mma_rendering r)))
-          in
-          "  [" ^ String.concat ~sep:", " counted ^ "]");
-    (secs, renderings)
+      (Ir.C_syntax.mma_summary_string mma);
+    (secs, mma)
   in
   (* A static gate cannot enumerate every way a schedule can be rejected at a given size —
      [validate_parallel]'s coverage rules, per-kernel hardware limits and backend declines all
@@ -525,8 +514,8 @@ let () =
   let census = ref [] in
   let attempt ?repeats ~variant ~schedule () =
     try
-      let secs, renderings = bench ?repeats ~variant ~schedule () in
-      census := renderings @ !census;
+      let secs, mma = bench ?repeats ~variant ~schedule () in
+      census := mma :: !census;
       secs
     with e ->
       Int.incr failures;
@@ -638,15 +627,14 @@ let () =
      lane-0 scalar loop, so the line above timed a scalar kernel under a tensorized label. Reported
      rather than rejected — the census is honest for every decline rule at once, whereas a minimum
      extent would re-introduce exactly the kind of arbitrary size constraint this change removes. *)
-  let declined =
-    List.count !census ~f:(Ir.C_syntax.equal_mma_rendering Ir.C_syntax.Mma_scalar_fallback)
-  in
+  let all = Ir.C_syntax.merge_mma_summaries !census in
+  let declined = all.Ir.C_syntax.scalar_fallbacks in
   if declined > 0 then
     p
       "WARNING: %d of %d Tile_mma statements rendered the scalar fallback — the tensorized lines \
        above are NOT tensorized timings. Re-run with --ocannl_schedule_log_declines=true for the \
        per-rule reason (at these extents, most likely n below the compute vector width).\n"
-      declined (List.length !census);
+      declined all.Ir.C_syntax.statements;
   if !failures > 0 then (
     p "%d variant(s) failed at m=%d n=%d k=%d — see the FAILED lines above.\n" !failures m n k;
     Stdlib.exit 1)

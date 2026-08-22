@@ -441,6 +441,105 @@ def search_provenance(result):
     return "NO-SEARCH" if not tune.get("searches") and not tune.get("replays") else "REPLAY"
 
 
+# gh-ocannl-626: what the timed artifact's emission actually did about tensor cores, for the
+# report's `mma` column. A cell whose shipped arm carries a `Tensorize` but whose kernels rendered
+# the lane-0 scalar fallback measured scalar code under a tensorized label, and every perf number
+# quoted from that row inherits the error — so those two states are shouted, not spelled quietly.
+TENSORIZATION_MARK = {
+    "TENSORIZED": "tensorized",
+    "SCALAR-FALLBACK": "**SCALAR FALLBACK**",
+    "NOT-EMITTED": "**NO MMA EMITTED**",
+    "NOT-REQUESTED": "—",
+    "UNKNOWN": "?",
+}
+# The two verdicts that mean "this row's tensorized label is not what ran".
+TENSORIZATION_MISMATCH = ("SCALAR-FALLBACK", "NOT-EMITTED")
+
+
+def shipped_arm(result):
+    """The `tune` arm whose artifact produced this cell's step times, or None.
+
+    `Train.tune_placements` runs several searches and ships one of them, so reading any arm — or
+    the fastest one — would describe a schedule that was discarded (gh-ocannl-638). The runner
+    states which arm shipped; that is the only one whose emission the timings measured.
+    """
+    tune = result.get("tune")
+    if not tune:
+        return None
+    shipped = tune.get("shipped")
+    for arm in tune.get("arms") or []:
+        if arm.get("arm") == shipped:
+            return arm
+    return None
+
+
+def tensorization_verdict(result):
+    """Did this cell's timed artifact actually tensorize: the schedule's ask against the emission.
+
+    Four answers, not two, because the interesting cases are the disagreements (gh-ocannl-626):
+    TENSORIZED (asked or not, at least one tensor-core / SIMD-tile emission happened),
+    SCALAR-FALLBACK (`Tile_mma` statements were emitted and every one of them declined to the
+    lane-0 scalar path), NOT-EMITTED (the schedule carries a `Tensorize` and codegen emitted no
+    `Tile_mma` at all), NOT-REQUESTED (nothing about this artifact claims tensor cores — not a
+    defect, and the only one of the four that is not worth a mark).
+
+    The emission half comes from `tune.shipped_mma`, the census of the routine whose steps were
+    TIMED, and not from the arm named as shipped. A crowned arm candidate is not always the shipped
+    artifact: a gh-555 flip refinement that wins ships under `shipped: "flip"` and is not an arm at
+    all, and on the `timing_ctx` path the tuner recompiles the winner in the production context and
+    falls back to the untuned default when that replay is rejected — in both cases the arm
+    describes a schedule that was discarded, and reading it could claim `tensorized` over a routine
+    that emitted no mma.
+
+    The `tensorized` half — did the schedule ASK — has no such per-routine record, so it is still
+    read off the shipped arm and only refines a `not-requested` emission into NOT-EMITTED. Where no
+    arm can be identified (the flip case) that refinement is unavailable and the verdict stays
+    NOT-REQUESTED: the artifact demonstrably emitted no `Tile_mma`, which is the fact the column
+    reports; what is lost is at most the shout, never a false `tensorized`.
+
+    None for a cell with no tune object at all — an eager framework, an untuned default — which has
+    no census to consult; UNKNOWN for a runner predating either field, or one that reported arms
+    without recording the shipped census, so a missing census never reads as a tensorized one.
+    """
+    tune = result.get("tune")
+    if not tune:
+        return None
+    arm = shipped_arm(result) or {}
+    if "shipped_mma" in tune:
+        shipped = tune["shipped_mma"]
+        if not shipped:
+            # The key is there and empty: the harness reported arms and recorded no census. Not a
+            # finding either way, and emphatically not a passing reading.
+            return "UNKNOWN"
+        label = shipped.get("tensorization")
+    else:
+        # An artifact predating `shipped_mma`. The arm is all there is; it is right whenever the
+        # crowned candidate WAS the shipped artifact, which is the common case.
+        if not arm:
+            return None
+        label = arm.get("tensorization")
+    if label == "tensorized":
+        return "TENSORIZED"
+    if label == "scalar-fallback":
+        return "SCALAR-FALLBACK"
+    if label == "not-requested":
+        return "NOT-EMITTED" if arm.get("tensorized") else "NOT-REQUESTED"
+    return "UNKNOWN"
+
+
+def tensorization_check(results):
+    """Annotate each tuned cell with its `tensorization` verdict; return the mismatched ones."""
+    mismatched = []
+    for r in results:
+        verdict = tensorization_verdict(r)
+        if verdict is None:
+            continue
+        r["tensorization"] = verdict
+        if verdict in TENSORIZATION_MISMATCH:
+            mismatched.append(r)
+    return mismatched
+
+
 # How a two-pass cell's own verdict maps to the report's `pass` column: only a searching process
 # is a protocol violation, and only a genuine replay may call the carried-over compile cost cached.
 TWO_PASS_VERDICT = {
@@ -558,10 +657,26 @@ def report(results, out_dir, unavailable=()):
                 "came from: `(cached)` for one that replayed the schedule cache, `(no search)` "
                 "for one that searched nothing at all.\n"
             )
+        # gh-ocannl-626: only cells that tuned something have an emission census to report.
+        with_tensorization = any(r.get("tensorization") for r in rows)
+        if with_tensorization:
+            lines.append(
+                "`mma` says what the timed artifact's kernels actually emitted, which is not what "
+                "its schedule asked for: `tensorized` is at least one tensor-core / SIMD-tile "
+                "emission, **`SCALAR FALLBACK`** is a schedule carrying a `Tensorize` whose every "
+                "`Tile_mma` declined at codegen to the lane-0 scalar loop, **`NO MMA EMITTED`** is "
+                "one that carries a `Tensorize` and emitted no `Tile_mma` at all, and `—` is an "
+                "artifact that never asked for tensor cores. The two shouted verdicts mean the row "
+                "is a scalar timing: quoting it as a tensor-core number is the error this column "
+                "exists to stop.\n"
+            )
         header = "| framework | backend | variant | precision | step p50 ms | p10 | p90 | queued ms | compile s |"
         rule = "|---|---|---|---|---|---|---|---|---|"
         if with_provenance:
             header += " pass |"
+            rule += "---|"
+        if with_tensorization:
+            header += " mma |"
             rule += "---|"
         header += " parity |"
         rule += "---|"
@@ -590,6 +705,8 @@ def report(results, out_dir, unavailable=()):
             provenance = ""
             if with_provenance:
                 provenance = " %s |" % PROVENANCE_MARK.get(r.get("provenance"), "—")
+            if with_tensorization:
+                provenance += " %s |" % TENSORIZATION_MARK.get(r.get("tensorization"), "—")
             lines.append(
                 f"| {r['framework']} | {r['backend']} | {r['variant']} "
                 f"| {r.get('precision', 'f32')} "
@@ -831,6 +948,7 @@ def main():
 
     parity_check(results)
     provenance_violations = provenance_check(results)
+    tensorization_mismatches = tensorization_check(results)
     report(results, HERE / "results", unavailable)
     ok = True
     if unavailable:
@@ -866,6 +984,21 @@ def main():
         print(
             f"PROVENANCE GATE: {len(provenance_violations)} tuned cell(s) reported step times "
             f"from a process that searched: {labels}",
+            flush=True,
+        )
+    if tensorization_mismatches:
+        # Not a gate: a declined `Tile_mma` still computes the right thing, and at some extents
+        # declining is the correct decision. It is announced because the number is honest only
+        # about a scalar kernel, and the row's variant name says otherwise (gh-ocannl-626) — the
+        # failure mode is a reader quoting it as a tensor-core measurement.
+        labels = ", ".join(
+            f"{r['workload']} {r['backend']}/"
+            f"{cell_name(r['variant'], r.get('precision', 'f32'))} ({r['tensorization']})"
+            for r in tensorization_mismatches
+        )
+        print(
+            f"TENSORIZATION NOTICE: {len(tensorization_mismatches)} tuned cell(s) shipped a "
+            f"schedule asking for tensor cores whose kernels did not emit them: {labels}",
             flush=True,
         )
     failed = [r for r in results if r["parity"] == "FAIL"]

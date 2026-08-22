@@ -117,6 +117,15 @@ files.
   `Ll_test.optimize_scoped` (optimize a scope-free raw twin for the traced store and placements,
   then swap in the scoped `llc`) and `Context.compile ?prelowered`. Pinned by
   `test/operations/scope_over_materialized.ml`.
+  Since gh-ocannl-687 the node also RECORDS which side it came from — `Local_scope`'s `mint` field,
+  `Inlined_computation` vs `Schedule_minted` — but that flag is deliberately not what decides this
+  rejection, and claiming the schedule's provenance does not buy a program past the optimizer
+  (pinned in the same test). The mint says which pass BUILT a scope, a durable fact consumers such
+  as `Autotune.collect_loops` need; the rejection is about which side of a PARTICULAR `optimize`
+  call a program was handed to, which only `input_scope_ids` can answer. Conflating them would let
+  hand-built IR label its way back into the silent collapse. When building this shape by hand, spell
+  the honest mint anyway — the canonical digest distinguishes the two, so an inlined scope wearing
+  the schedule's label would key a different cache entry.
 - A node-level "what happened at first touch" flag (`zero_initialized_by_code` and friends) cannot
   soundly drive a PER-OCCURRENCE codegen decision, because nothing clears it across the traversal: a
   guard keyed on it alone collapses `Zero_out; Set; Zero_out` to one zero and drops a `Zero_out`

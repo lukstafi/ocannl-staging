@@ -2048,6 +2048,28 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ ; ocannl-backend: none -- exercises the menu's cap-sharing rule over synthetic category lists;
+ ; it lowers, compiles and runs nothing, so no backend is selected.
+ (name autotune_menu_cap)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules autotune_menu_cap)
+ (libraries base stdio ocannl arrayjit.verdict ll_test)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
+ ; ocannl-backend: none -- enumerates the action menu over hand-built IR through the post-optimize
+ ; scope seam; it compiles and runs no kernel, so no backend is selected.
+ (name autotune_scope_provenance)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules autotune_scope_provenance)
+ (libraries base ocannl stdio arrayjit.verdict ll_test)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name autotune_scope_menu)
  (package neural_nets_lib)
  (deps
@@ -2300,6 +2322,17 @@
   (env_var OCANNL_CC_FP16_ARITHMETIC))
  (modules tile_mma_narrow)
  (libraries base ocannl stdio unix arrayjit.verdict test_utils)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
+ (name mma_tensorization_label)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules mma_tensorization_label)
+ (libraries base ocannl arrayjit.autotune stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 

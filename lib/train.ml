@@ -900,7 +900,14 @@ let tune_placements ?name ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?r
                Printf.sprintf "%s%s, best tensorized %s"
                  (if String.is_empty r.Autotune.best_label then "nothing timed"
                   else r.Autotune.best_label)
-                 (if r.Autotune.best_tensorized then " [tensorized]" else "")
+                 (* What the schedule asked for, and next to it what the emission delivered
+                    (gh-ocannl-626): "[tensorized]" alone has read as a tensor-core claim over a
+                    kernel whose every [Tile_mma] fell back to the lane-0 scalar loop. *)
+                 (if r.Autotune.best_tensorized then
+                    Printf.sprintf " [tensorized/%s]"
+                      (Option.value_map r.Autotune.best_tensorization ~default:"no census"
+                         ~f:Ir.C_syntax.tensorization_name)
+                  else "")
                  (if Float.is_inf r.Autotune.mma_best_ms then "none"
                   else Printf.sprintf "%.4f ms" r.Autotune.mma_best_ms))));
     (result, best_ms, r)

@@ -35,6 +35,18 @@ type routine = private {
       (** The routine IDs that must execute before this routine, derived from RAW, WAR, and WAW
           hazards on tensor nodes at compile time. An empty set means the routine is independent of
           all previously compiled routines in its lineage. *)
+  mma : Ir.C_syntax.mma_summary;
+      (** How this routine's [Tile_mma] statements actually rendered (gh-ocannl-626): the
+          {!Ir.C_syntax.mma_census} of this compile, collected by {!compile} itself and summarized
+          into {!Ir.C_syntax.tensorization} — [Not_requested] when codegen emitted no [Tile_mma],
+          [Scalar_fallback] when every one of them declined to the lane-0 scalar path, [Tensorized]
+          when at least one rendered to a tensor-core / SIMD-register-tile emission.
+
+          It is a field of the routine, and not something a caller collects around the compile,
+          because a timing labeled "tensorized" that measured the scalar fallback is a false perf
+          number, and the census being opt-in made that the default for every new timing harness
+          (the defect this closes). Fissioned segments compile inside the same bracket, so their
+          kernels are summarized together. *)
 }
 (** A compiled computational routine ready for execution. The record is [private]: only {!compile}
     constructs routines — the ledger's identity and dependency tracking rely on that — while every

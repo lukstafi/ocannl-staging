@@ -181,8 +181,9 @@ let rec map_code ~fidx (llc : Low_level.t) : Low_level.t =
 and map_scalar ~fidx (llsc : Low_level.scalar_t) : Low_level.scalar_t =
   let open Low_level in
   match llsc with
-  | Local_scope { id; body; orig_indices } ->
-      Local_scope { id; body = map_code ~fidx body; orig_indices = Array.map orig_indices ~f:fidx }
+  | Local_scope { id; body; orig_indices; mint } ->
+      Local_scope
+        { id; body = map_code ~fidx body; orig_indices = Array.map orig_indices ~f:fidx; mint }
   | Get_local _ | Constant _ | Constant_bits _ -> llsc
   | Get (tn, idcs) -> Get (tn, Array.map idcs ~f:fidx)
   | Get_dynamic { tn; idcs; dyn_axis; dyn_value = v, p } ->
@@ -376,8 +377,8 @@ let refresh_scopes (llc : Low_level.t) : Low_level.t =
       | Set_from_vec ({ arg = a, p; _ } as sv) -> Set_from_vec { sv with arg = (scalar a, p) }
     and scalar (llsc : scalar_t) : scalar_t =
       match llsc with
-      | Local_scope { id; body; orig_indices } ->
-          Local_scope { id = subst id; body = code body; orig_indices }
+      | Local_scope { id; body; orig_indices; mint } ->
+          Local_scope { id = subst id; body = code body; orig_indices; mint }
       | Get_local id -> Get_local (subst id)
       | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> llsc
       | Get_dynamic ({ dyn_value = v, p; _ } as gd) ->
@@ -827,6 +828,7 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
                         body =
                           unflat_lines (Low_level.Set_local (id, Low_level.Get (tn, idcs)) :: copies);
                         orig_indices = idcs;
+                        mint = Low_level.Schedule_minted;
                       };
                   debug;
                 }
@@ -948,6 +950,7 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
                           unflat_lines
                             (Low_level.Set_local (id, Low_level.Get (tn, idcs)) :: segments);
                         orig_indices = idcs;
+                        mint = Low_level.Schedule_minted;
                       };
                   debug;
                 }

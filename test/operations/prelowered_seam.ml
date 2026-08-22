@@ -98,6 +98,7 @@ let phase2 () =
             (LL.Set_local (id_a, c 0.))
             (loop ~upto:1 k (LL.Set_local (id_a, add (LL.Get_local id_a) (get x [| iter i |]))));
         orig_indices = [| iter i |];
+        mint = LL.Inlined_computation;
       }
   in
   let scope_b : LL.scalar_t =
@@ -106,6 +107,7 @@ let phase2 () =
         id = id_b;
         body = LL.Set_local (id_b, mul (get x [| iter i |]) (c 3.));
         orig_indices = [| iter i |];
+        mint = LL.Inlined_computation;
       }
   in
   let llc =
@@ -156,6 +158,7 @@ let phase3 () =
             (LL.Set_local (id_a, c 0.))
             (loop ~upto:1 k (LL.Set_local (id_a, add (LL.Get_local id_a) (get x [| iter i |]))));
         orig_indices = [| iter i |];
+        mint = LL.Inlined_computation;
       }
   in
   let scope_b : LL.scalar_t =
@@ -165,6 +168,7 @@ let phase3 () =
         body =
           seq (set x [| iter i |] (c 5.)) (LL.Set_local (id_b, mul (get x [| iter i |]) (c 3.)));
         orig_indices = [| iter i |];
+        mint = LL.Inlined_computation;
       }
   in
   let llc = loop ~upto:3 i (set y [| iter i |] (add scope_a scope_b)) in
@@ -202,7 +206,7 @@ let phase4 () =
   let i = sym () in
   let id_a = LL.get_scope la and id_b = LL.get_scope lb in
   let scope_with body : LL.scalar_t =
-    LL.Local_scope { id = id_a; body; orig_indices = [| iter i |] }
+    LL.Local_scope { id = id_a; body; orig_indices = [| iter i |]; mint = LL.Inlined_computation }
   in
   let stmt body = loop ~upto:3 i (set y [| iter i |] (scope_with body)) in
   (* Writing a SIBLING scope's local from this body. *)
@@ -273,6 +277,7 @@ let phase5 () =
             (LL.Set_local (id, c 0.))
             (loop ~upto:1 k (LL.Set_local (id, add (LL.Get_local id) (LL.Get_local ext))));
         orig_indices = [||];
+        mint = LL.Inlined_computation;
       }
   in
   let set_at idx llsc : LL.t = set y [| fixed idx |] llsc in
@@ -326,6 +331,7 @@ let phase6 () =
         id;
         body = seq (set x [| iter i |] (c 5.)) (LL.Set_local (id, mul (get x [| iter i |]) (c 3.)));
         orig_indices = [| iter i |];
+        mint = LL.Inlined_computation;
       }
   in
   let llc =

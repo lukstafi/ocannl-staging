@@ -236,12 +236,32 @@ files.
 - "Timed" is not "tensorized" either, and that failure is worse: a declined `Tile_mma` renders its
   scalar fallback, which compiles and runs, so the candidate is timed, ranked and possibly crowned
   under an `mma-*` label (gh-ocannl-545: 20 of 20 timed bf16 candidates on CUDA were scalar). The
-  emission is the source of truth — grep the emitted kernel for the intrinsic
-  (`wmma::`/`mma.sync`/`simdgroup_`), or read `C_syntax.mma_census`; `schedule_log_declines=true`
+  emission is the source of truth, and since gh-ocannl-626 it is carried, not fetched: every
+  compiled routine has `Context.routine.mma`, an `Ir.C_syntax.mma_summary` whose `tensorization`
+  field is `Tensorized` (at least one tensor-core / SIMD-register-tile emission), `Scalar_fallback`
+  (statements emitted, every one declined) or `Not_requested` (no `Tile_mma` emitted at all), with
+  the statement and fallback counts beside it. Read that; do NOT bracket `mma_census_enabled`
+  yourself (`C_syntax.with_census` is the bracket, it nests additively, and it is what
+  `Context.compile` calls). `Autotune.report.best_tensorization` is the crowned candidate's label,
+  `None` when nothing was crowned — and the pair to read is `best_tensorized` (what the SCHEDULE
+  asked) against `best_tensorization` (what the EMISSION delivered): a `true` beside anything but
+  `Tensorized` is a scalar timing under a tensorized label. `schedule_log_declines=true`
   names the rule that fired. When seeding and emission can disagree, fix the seeding side too, or the
   measurement budget keeps going to schedules that never tensorize: `mma_format_tiles` is keyed on
   the whole `(a, b, accumulator)` format triple, with per-entry arch floors, precisely so that a
   combination a backend supports at one accumulator width but not the other cannot be seeded.
+  Where a timing is REPORTED the label is now printed, so a mismatch is legible without re-deriving
+  anything: the `autotune_log` NOTE lines lead with it, `Train.tune_placements`' arm lines read
+  `[tensorized/<label>]`, `bin/schedule_bench` and `bin/narrow_gebp_bench` print
+  `C_syntax.mma_summary_string` on EVERY timing line (not only when something declined), the
+  benchmark harness prints it per segment in the per-kernel table, and the result line's `tune`
+  arms carry `tensorization` + `mma_statements`, which `orchestrate.py` renders in the report's
+  `mma` column (`SCALAR FALLBACK` / `NO MMA EMITTED` shouted) plus a `TENSORIZATION NOTICE`. What
+  that column reads is `tune.shipped_mma`, the census of the routine that was TIMED, not the arm
+  named as shipped — a crowned arm candidate is not always the shipped artifact: a gh-555 flip
+  refinement ships under `shipped: "flip"` and is not an arm, and the `timing_ctx` path can fall
+  back to the untuned default after crowning a winner. Same rule as "crowned is not shipped", one
+  level down.
   `mma_staged_layouts` (gh-ocannl-481) is keyed the same way for the same reason: the swizzled
   staged twin is seeded only where the emission can actually read that layout, which on CUDA is
   the uniform-bf16 combination and not fp8 (whose B side has no 16-bit `ldmatrix` form at the
@@ -249,7 +269,7 @@ files.
   `Mma_intrinsics`, so "tensorized" and "fed at rate" are separable in a sweep.
 - "Crowned" is not "shipped", and neither is reproducible on a small routine. `Train.tune_placements`
   runs two searches and keeps one artifact, so a family can win the arm that is then discarded whole
-  — read `report.best_label` / `best_tensorized` / `mma_best_ms` per arm (the A/B calls `?report`
+  — read `report.best_label` / `best_tensorized` / `best_tensorization` / `mma_best_ms` per arm (the A/B calls `?report`
   for arm A first and ships the smaller `best_ms`), never the fact that some search crowned it.
   Since gh-ocannl-638, do not re-derive WHICH arm shipped from the reports' times either: config
   `tune_ship_arm=a|b` overrides the comparison, and `?on_ship` (`"A"` / `"B"` / `"flip"`) is the
@@ -390,3 +410,45 @@ files.
   decision-surface lowering names the classes it does NOT absorb, because swallowing that one skips
   the refinement the configuration asked for and ships the A/B winner as though the setting had been
   honored.
+- The action menu's loop enumeration is provenance-aimed **by action category**, not by loop
+  (gh-ocannl-687). `Local_scope` has two producers — virtualization's inline at a read site, and the
+  accumulator localization `Schedule`'s materializing `Unroll` / `Partition` and
+  `C_syntax.try_widen_serial_reduce` mint over a MATERIALIZED cell — and `Low_level.scope_mint` on
+  the node tells them apart. `Autotune.collect_loops` descends both and tags each descriptor
+  (`ld_inlined`); a loop reached through an inline draws the `Vectorized` retype and nothing else.
+  Two things this is NOT about. Not reachability: `Schedule.rewrite_loop` descends every
+  `Local_scope`, so a proposal naming an inlined loop applies. And not "which loops exist": the
+  first attempt at this dropped them from the enumeration wholesale, which **destroys** the
+  candidate rather than moving it outward — `C_syntax`'s elementwise vectorizer bails on any
+  `Local_scope` in the body, and an accumulating bailout falls back to a plain serial loop, so the
+  enclosing loop's retype renders exactly like the baseline, while the inlined reduction one level
+  down is precisely what `try_vectorize_reduce` was built for (gh-639). `contains_loop` therefore
+  stays provenance-blind: innermost-ness decides which loop gets the retype, and the renderer
+  answers that structurally. What the exclusion buys is the other three categories — up to eight
+  descriptors per loop, no evidence any pays on a per-use-site inline, each costing a candidate
+  compile and displacing one for the main nest. **When narrowing a search space, check whether the
+  thing you are dropping has a renderer the alternative lacks**; "propose fewer things" and "propose
+  the same things elsewhere" are different changes. A flag on the node is the durable form of this
+  fact; contrast `input_scope_ids` (gh-ocannl-681), which answers the per-call question of whether a
+  scope was in the program a given `optimize` was HANDED, and must stay id-set-based: a mint is
+  claimable, and hand-built IR has no honest way to spell "not mine".
+- The per-unit action cap is shared round-robin across the menu's categories, not spent as a prefix
+  over their concatenation (`Autotune.share_cap`, gh-ocannl-685). The menu list is category-ordered
+  and UNRANKED, so a prefix over it is arbitrary — a unit whose tensorizes alone reached 48 offered
+  the search no split, swap, unroll or vectorize at all, and those are exactly the categories a unit
+  needs when its tensorizes turn out `Op_illegal`. Contrast `List.take surface.ps_candidates
+  placement_budget`, a prefix over a RANKED list where top-N is the intended semantics; that one is
+  fine as it stands. When capping anything else in this search, check which kind of list you have.
+  Survivors keep category order, so an under-cap menu is byte-identical to before; the `menu:` log
+  now also reports what the cap DROPPED (it used to print only the per-category counts taken before
+  the take, so a truncated menu logged the same numbers as an untruncated one) and what the
+  provenance filter withheld.
+  **A cap must also sit at the right altitude, not just be shared fairly.** `menu`'s `?admits` runs
+  ahead of the cap so the budget is spent on moves the caller can use: the beam's GPU rule — an
+  incumbent binding no hardware dimension can only be expanded through a move that binds one — used
+  to filter *after* `menu` had capped, so a tensorize-rich unit got its share of five categories and
+  kept only a fraction of the one category the beam could use. The old plain prefix happened to hand
+  all 48 to the tensorizes, so sharing without moving the filter would have been a regression
+  exactly where #685 meant to help. When adding a consumer-side filter over a capped list, ask
+  whether the cap should see it.
+

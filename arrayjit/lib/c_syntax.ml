@@ -53,9 +53,15 @@ let per_chunk_private_bytes_cap =
     | exception _ -> 256 * 1024)
 
 (* Census of [Tile_mma] statement renderings, collected during codegen while [mma_census_enabled]
-   (gh-ocannl-479): [Autotune] flips it around candidate compiles, because "the tensorized candidate
-   lost" and "the tensorized candidate never ran tensorized" must be distinguishable in tuning logs.
-   Entries are (kernel name, rendering), most recent first; tests assert on it directly. *)
+   (gh-ocannl-479): "the tensorized candidate lost" and "the tensorized candidate never ran
+   tensorized" must be distinguishable in tuning logs. Entries are (kernel name, rendering), most
+   recent first.
+
+   Consumers do not touch these refs: {!with_census} brackets them, {!Context.compile} calls it
+   around every routine's codegen, and the resulting {!mma_summary} is a field of the compiled
+   routine (gh-ocannl-626). Opt-in collection made the DEFAULT for a new timing harness "report a
+   variant name that may be unrelated to what rendered", which is exactly the false perf number the
+   census exists to prevent. *)
 type mma_rendering =
   | Mma_intrinsics
   | Mma_intrinsics_ldmatrix
@@ -68,6 +74,120 @@ type mma_rendering =
 
 let mma_census_enabled = ref false
 let mma_census : (string * mma_rendering) list ref = ref []
+
+let is_tensorized_rendering = function
+  | Mma_intrinsics | Mma_intrinsics_ldmatrix | Mma_register_tiled -> true
+  | Mma_scalar_fallback -> false
+
+(** Whether a compiled routine's tensorization request was honoured (gh-ocannl-626). Three states,
+    not a boolean, because "this routine has no tensor-core work in it" and "this routine asked for
+    tensor-core work and got the scalar fallback" are opposite readings of a timing and the boolean
+    that collapses them is the defect: an [Tile_mma]-free routine is not a failure, a wholly declined
+    one is. Mixed renderings — some statements honoured, some declined — read as {!Tensorized}, and
+    the counts on {!mma_summary} say by how much; the label answers "did any tensor-core / SIMD-tile
+    emission happen", the counts answer "how much of what was asked for". *)
+type tensorization =
+  | Not_requested
+      (** Codegen emitted no [Tile_mma] statement at all: nothing about this routine claims tensor
+          cores, and a timing of it is not a tensorized timing. *)
+  | Tensorized
+      (** At least one [Tile_mma] statement rendered to a real tensor-core or SIMD-register-tile
+          emission ({!Mma_intrinsics}, {!Mma_intrinsics_ldmatrix}, {!Mma_register_tiled}). The C
+          backends' register-tiled rendering counts: it is the SIMD-tile emission those backends
+          have, and the point of the label is fallback-vs-not, not which ISA. *)
+  | Scalar_fallback
+      (** [Tile_mma] statements were emitted and {e every} one of them declined to the lane-0 scalar
+          fallback. A timing labeled tensorized in this state measured scalar code. *)
+[@@deriving sexp, compare, equal]
+
+let tensorization_name = function
+  | Not_requested -> "not-requested"
+  | Tensorized -> "tensorized"
+  | Scalar_fallback -> "scalar-fallback"
+
+type mma_summary = {
+  renderings : (string * mma_rendering) list;
+      (** The census entries of one compile, in emission order (kernel name, rendering). Fissioned
+          segments of one routine contribute their kernels to the same summary. *)
+  tensorization : tensorization;
+  statements : int;  (** [Tile_mma] statements emitted: [List.length renderings]. *)
+  scalar_fallbacks : int;  (** Of those, how many rendered as the lane-0 scalar fallback. *)
+}
+[@@deriving sexp_of]
+(** What a compile's {!mma_census} says about the routine it produced (gh-ocannl-626). Derived once,
+    where the routine is compiled, so that "did this tensorize" is a property of the compiled
+    routine rather than of whichever call site remembered to bracket the global. *)
+
+let summarize_census renderings =
+  let statements = List.length renderings in
+  let scalar_fallbacks =
+    List.count renderings ~f:(fun (_, r) -> equal_mma_rendering r Mma_scalar_fallback)
+  in
+  let tensorization =
+    if statements = 0 then Not_requested
+    else if scalar_fallbacks = statements then Scalar_fallback
+    else Tensorized
+  in
+  { renderings; tensorization; statements; scalar_fallbacks }
+
+let empty_mma_summary = summarize_census []
+
+let merge_mma_summaries summaries =
+  summarize_census (List.concat_map summaries ~f:(fun s -> s.renderings))
+
+(** The one-line census a timing report prints beside a measurement (gh-ocannl-626): the
+    {!tensorization} label first — a reader scanning a table for a mismatch reads that word, not a
+    histogram — then the per-rendering counts. Shared so that every harness that names a variant
+    after a rendering says "did this tensorize" the same way; the two bench copies had disagreed
+    about the predicate (one counted the fallback, the other tested equality with
+    {!Mma_register_tiled}, which false-warns on any GPU backend). *)
+let mma_summary_string summary =
+  match summary.renderings with
+  | [] -> tensorization_name summary.tensorization
+  | rs ->
+      let counted =
+        List.map
+          (List.dedup_and_sort (List.map rs ~f:snd) ~compare:compare_mma_rendering)
+          ~f:(fun r ->
+            Printf.sprintf "%s x%d" (Sexp.to_string (sexp_of_mma_rendering r))
+              (List.count rs ~f:(fun (_, r') -> equal_mma_rendering r r')))
+      in
+      Printf.sprintf "%s: %s"
+        (tensorization_name summary.tensorization)
+        (String.concat ~sep:", " counted)
+
+(** Run [f] with the {!mma_census} collecting, and return its result alongside the summary of what
+    rendered during it (gh-ocannl-626). Both census refs are saved and restored, so calls nest and
+    an inner compile does not disturb an outer collection; the summary covers only [f]'s own
+    entries. This replaces the hand-rolled [Exn.protect] bracket that had been copied to six call
+    sites — and, applied inside {!Context.compile}, makes collecting the census the default rather
+    than something a timing harness must remember to do.
+
+    The census is a process global, as it always was: compiles are sequential on the main domain,
+    and nothing here makes concurrent compiles from several domains attribute their renderings
+    correctly. *)
+let with_census f =
+  let saved_enabled = !mma_census_enabled and saved_census = !mma_census in
+  mma_census_enabled := true;
+  mma_census := [];
+  (* Nesting is additive, not shadowing: an enclosing collection (a bench bracketing several
+     compiles, each of which collects its own summary) must still see the inner entries, or wrapping
+     the compile path in this helper would silently empty every outer bracket. *)
+  let restore () =
+    let inner = !mma_census in
+    mma_census_enabled := saved_enabled;
+    mma_census := (if saved_enabled then inner @ saved_census else saved_census)
+  in
+  let result =
+    match f () with
+    | r -> r
+    | exception e ->
+        restore ();
+        raise e
+  in
+  let renderings = List.rev !mma_census in
+  restore ();
+  (result, summarize_census renderings)
 
 type mma_space = [ `Device | `Shared | `Thread | `Fragment of string ]
 (** The address space of a tile-MMA operand as the emission hooks see it. *)
@@ -4170,7 +4290,14 @@ module C_syntax (B : C_syntax_config) = struct
                             {
                               tn;
                               idcs;
-                              llsc = Local_scope { id; body = scope_body; orig_indices = idcs };
+                              llsc =
+                                Local_scope
+                                  {
+                                    id;
+                                    body = scope_body;
+                                    orig_indices = idcs;
+                                    mint = Schedule_minted;
+                                  };
                               debug;
                             }))
             in
@@ -5214,7 +5341,8 @@ module C_syntax (B : C_syntax_config) = struct
     (* Returns (local definitions, value expression) *)
     let open PPrint in
     match vcomp with
-    | Local_scope { id = { tn = { storage_prec = _; _ }; scope_id } as id; body; orig_indices = _ }
+    | Local_scope
+        { id = { tn = { storage_prec = _; _ }; scope_id } as id; body; orig_indices = _; mint = _ }
       ->
         let scope_prec = scope_prec_of id in
         let num_typ = string (B.typ_of_prec scope_prec) in
