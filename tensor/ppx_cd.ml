@@ -966,7 +966,7 @@ let translate ?ident_label (expr : expression) : result =
            { ptyp_desc = Ptyp_constr ({ txt = Lident basis; _ }, []); ptyp_loc; _ } );
      _;
     } ->
-        let axis = Ast_helper.Exp.constant ~loc:ptyp_loc (Pconst_string (basis, ptyp_loc, None)) in
+        let axis = Ast_builder.Default.estring ~loc:ptyp_loc basis in
         {
           default_result with
           expr = [%expr NTDSL.number ~axis_basis:[%e axis] [%e f]];
@@ -979,7 +979,7 @@ let translate ?ident_label (expr : expression) : result =
            { ptyp_desc = Ptyp_constr ({ txt = Lident basis; _ }, []); ptyp_loc; _ } );
      _;
     } ->
-        let axis = Ast_helper.Exp.constant ~loc:ptyp_loc (Pconst_string (basis, ptyp_loc, None)) in
+        let axis = Ast_builder.Default.estring ~loc:ptyp_loc basis in
         {
           default_result with
           expr = [%expr NTDSL.bits ~axis_basis:[%e axis] [%e i]];
@@ -992,7 +992,7 @@ let translate ?ident_label (expr : expression) : result =
            { ptyp_desc = Ptyp_constr ({ txt = Lident basis; _ }, []); ptyp_loc; _ } );
      _;
     } ->
-        let axis = Ast_helper.Exp.constant ~loc:ptyp_loc (Pconst_string (basis, ptyp_loc, None)) in
+        let axis = Ast_builder.Default.estring ~loc:ptyp_loc basis in
         {
           default_result with
           expr = [%expr NTDSL.number ~axis_basis:[%e axis] (Float.of_int [%e i])];
@@ -1005,8 +1005,7 @@ let translate ?ident_label (expr : expression) : result =
           when String.equal name_expr tensor_name ->
             (* Simple case: just tensor initialization, similar to original string syntax *)
             let name_expr =
-              Ast_helper.Exp.constant ~loc:first_label.loc
-                (Pconst_string (tensor_name, first_label.loc, None))
+              Ast_builder.Default.estring ~loc:first_label.loc tensor_name
             in
             let extra_args =
               List.map extra_args ~f:(function

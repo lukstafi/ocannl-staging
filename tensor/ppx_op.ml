@@ -39,7 +39,7 @@ let make_p ~dsl_name ~opt_label ~loc ?value ?values ?param_init ~extra_args name
               @@ Location.error_extensionf ~loc:label.loc
                    "inline-definition fields must be simple identifiers" ))
   in
-  let name = Ast_helper.Exp.constant ~loc (Pconst_string (name.txt, name.loc, None)) in
+  let name = Ast_helper.Exp.constant ~loc (Ast_helper.Const.string ~loc:name.loc name.txt) in
   let param_op = dsl_fn ~loc dsl_name "param" in
   let base_expr =
     [%expr
@@ -152,7 +152,7 @@ let rec translate ~dsl_name ~num_configs ~is_toplevel ?(in_block = false) ~opt_l
          { ptyp_desc = Ptyp_constr ({ txt = Lident basis; _ }, []); ptyp_loc; _ } );
    _;
   } ->
-      let axis = Ast_helper.Exp.constant ~loc:ptyp_loc (Pconst_string (basis, ptyp_loc, None)) in
+      let axis = Ast_builder.Default.estring ~loc:ptyp_loc basis in
       ( no_vbs,
         [%expr [%e dsl_fn "number"] ?label:[%e opt_expr ~loc label] ~axis_basis:[%e axis] [%e f]] )
   | {
@@ -162,7 +162,7 @@ let rec translate ~dsl_name ~num_configs ~is_toplevel ?(in_block = false) ~opt_l
          { ptyp_desc = Ptyp_constr ({ txt = Lident basis; _ }, []); ptyp_loc; _ } );
    _;
   } ->
-      let axis = Ast_helper.Exp.constant ~loc:ptyp_loc (Pconst_string (basis, ptyp_loc, None)) in
+      let axis = Ast_builder.Default.estring ~loc:ptyp_loc basis in
       ( no_vbs,
         [%expr [%e dsl_fn "bits"] ?label:[%e opt_expr ~loc label] ~axis_basis:[%e axis] [%e i]] )
   | {
@@ -172,7 +172,7 @@ let rec translate ~dsl_name ~num_configs ~is_toplevel ?(in_block = false) ~opt_l
          { ptyp_desc = Ptyp_constr ({ txt = Lident basis; _ }, []); ptyp_loc; _ } );
    _;
   } ->
-      let axis = Ast_helper.Exp.constant ~loc:ptyp_loc (Pconst_string (basis, ptyp_loc, None)) in
+      let axis = Ast_builder.Default.estring ~loc:ptyp_loc basis in
       ( no_vbs,
         [%expr
           [%e dsl_fn "number"] ?label:[%e opt_expr ~loc label] ~axis_basis:[%e axis]

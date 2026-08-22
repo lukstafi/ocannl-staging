@@ -294,7 +294,7 @@ let substitute_identifiers_in_einsum_spec ~loc str_input =
       (* Fall back to returning the original string with an error note *)
       pexp_extension ~loc @@ Location.error_extensionf ~loc "Failed to parse einsum spec: %s" msg)
 
-let string_expr ~loc s = Ast_helper.Exp.constant @@ Pconst_string (s, loc, None)
+let string_expr ~loc s = Ast_helper.Exp.constant @@ Ast_helper.Const.string ~loc s
 
 let string_of_pat pat =
   let rec lident = function Lident s | Ldot (_, s) -> s | Lapply (_, i) -> lident i in
