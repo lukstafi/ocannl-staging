@@ -3321,6 +3321,11 @@
  ;     because Utils.debug_log_from_routines () is their conjunction: the flag alone is inert until
  ;     the log level clears 1, so tracking only the flag lets a level change reuse a green result.
  ;   VIRTUALIZE_MAX_VISITS -- whether the virtual accumulator is inlined at its read site at all.
+ ;   PROFILE -- and it is NOT covered by naming the keys above: a profile applies at the sublevel
+ ;     just below the explicit keys of the source that picked it, so it moves them without any of
+ ;     their own variables being set. `reproducible' supplies cc_vector_bytes=0, which is exactly
+ ;     the knob that makes the SIMD members decline to localized forms; `performance' supplies
+ ;     fp16_arithmetic=true, which moves the accumulator reference at f16.
  (name reduction_forms)
  (package neural_nets_lib)
  (deps
@@ -3334,7 +3339,8 @@
   (env_var OCANNL_CC_BACKEND_ARCH_FLAGS)
   (env_var OCANNL_DEBUG_LOG_FROM_ROUTINES)
   (env_var OCANNL_LOG_LEVEL)
-  (env_var OCANNL_VIRTUALIZE_MAX_VISITS))
+  (env_var OCANNL_VIRTUALIZE_MAX_VISITS)
+  (env_var OCANNL_PROFILE))
  (modules reduction_forms)
  (libraries base ocannl stdio arrayjit.verdict ll_test test_utils)
  (preprocess

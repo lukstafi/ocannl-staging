@@ -759,6 +759,15 @@ type member = {
           either — a false green in both claims at once. The node's total subscript count is bounded
           by [2 * store_sites] for the same reason: each site may open the cell and close it, and
           nothing else may touch it. *)
+  foreign_sites : int;
+      (** For a member claiming {!Partials_combine}: how many closing stores into a node OTHER than
+          the target the composition emits — one per textual copy of the block loop's body, which
+          [Split_reduce] leaves at one. Pinned for the same reason the other two counts are (Codex
+          P2, round 7): the form alone says only that SOME partial localized and SOME statement
+          read-modify-writes the target, so partials closing through several scopes, or a combine
+          expanded into several textual sites, would still read as this form — and this leg's f32
+          arithmetic is exactly representable, so the extra seams or the reassociation need not
+          move the value either. *)
   rmw_sites : int;
       (** For a member claiming {!Rmw}: how many read-modify-write statements the composition
           emits, textually — one per repetition where the level is [Unrolled], one where it is a
@@ -790,7 +799,8 @@ type member = {
 let no_ops _ = []
 
 let member ?(shape = Plain) ?(sched = no_ops) ?(expect = Localized) ?claimed ?(reference = Baseline)
-    ?(store_sites = 1) ?(rmw_sites = 1) ?(extra = []) ?(precisions = [ "f32"; "bf16"; "f16" ])
+    ?(store_sites = 1) ?(rmw_sites = 1) ?(foreign_sites = 0) ?(extra = [])
+    ?(precisions = [ "f32"; "bf16"; "f16" ])
     ?(available = fun _ -> true) slug what =
   let claimed = Option.value claimed ~default:(form_name expect) in
   {
@@ -803,6 +813,7 @@ let member ?(shape = Plain) ?(sched = no_ops) ?(expect = Localized) ?claimed ?(r
     reference;
     store_sites;
     rmw_sites;
+    foreign_sites;
     extra;
     precisions;
     available;
@@ -857,7 +868,7 @@ let members =
        (each partial narrows at its own store), so this member claims f32 only, where the sums are
        exact. --- *)
     member "split-reduce" "Split_reduce into four block partials plus a combine nest"
-      ~expect:Partials_combine ~precisions:[ "f32" ] ~sched:(fun g ->
+      ~expect:Partials_combine ~foreign_sites:1 ~precisions:[ "f32" ] ~sched:(fun g ->
         let op, _b, _i, _c = Sched.split_reduce ~axis:g.k ~target:g.out ~num_blocks:4 in
         [ op ]);
     (* --- the [Vectorized] arm: a SIMD accumulator grid plus its scalar tail, and the same
@@ -1291,17 +1302,27 @@ let () =
                     | Rmw ->
                         reading.rmw_statements = m.rmw_sites
                         && reading.node_accesses <= 2 * m.rmw_sites
-                    | Partials_combine | Mma_fallback -> true
+                    | Partials_combine ->
+                        reading.foreign_local_stores = m.foreign_sites
+                        && reading.rmw_statements = m.rmw_sites
+                        && reading.stores_from_local = 0
+                        && reading.node_accesses <= 2 * m.rmw_sites
+                    | Mma_fallback ->
+                        (* No table member claims it: the contraction leg is separate and does its
+                           own site check, against a bound of its own (the einsum lowering's
+                           whole-node zero-init is a third touch the members do not have). *)
+                        true
                     | Unrecognized ->
                         (* No member claims it; [same_form] already fails. *)
                         false
                   in
                   if not sites_ok then
                     Stdio.eprintf
-                      "  %s: %d closing store(s), %d rmw statement(s), %d node subscript(s); \
-                       expected %d store sites / %d rmw sites\n"
-                      name reading.stores_from_local reading.rmw_statements reading.node_accesses
-                      m.store_sites m.rmw_sites;
+                      "  %s: %d closing store(s), %d rmw statement(s), %d foreign store(s), %d \
+                       node subscript(s); expected %d store / %d rmw / %d foreign sites\n"
+                      name reading.stores_from_local reading.rmw_statements
+                      reading.foreign_local_stores reading.node_accesses m.store_sites m.rmw_sites
+                      m.foreign_sites;
                   if not (same_form rendered m.expect) then
                     Stdio.eprintf
                       "  %s: rendered %s, claimed %s (node subscripts %d, rmw statements %d, \
