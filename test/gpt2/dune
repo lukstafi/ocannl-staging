@@ -21,19 +21,33 @@
  (modules env_spelling_gate)
  (libraries base stdio arrayjit.utils arrayjit.verdict))
 
-; The same gate on the `slow` alias, which is a separate entry point: `dune build @slow` builds no
+; The same gate for the `slow` suite, which is a separate entry point: `dune build @slow` builds no
 ; `(test)` stanza, so without this rule a cached `@slow` run would serve every slow result with a
 ; rejected spelling ambient (Codex P1 round 3). Runs the executable the `(test)` stanza above
-; builds, so there is one gate binary per directory however many aliases reach it.
+; builds, so there is one gate binary per directory however many aliases reach it. It sits on an
+; alias of its own so that every slow rule can DEPEND on it: `dune build @<dir>/slow-<name>` then
+; runs the gate first and that one test after it, and the `slow` alias below aggregates them all.
 
 (rule
  ; ocannl-backend: none -- links arrayjit.utils alone and only classifies variable NAMES;
  ; its `(universe)` dependency reruns it whatever any variable is set to.
- (alias slow)
+ (alias slow-env_spelling_gate)
  (package neural_nets_lib)
  (deps ocannl_config (universe))
  (action
   (run %{dep:env_spelling_gate.exe})))
+
+; This directory's `slow` suite. Each slow rule attaches to its own `slow-<name>` alias, so that
+; ONE slow test can be rerun after a change -- `OCANNL_BACKEND=cc dune build
+; @test/gpt2/slow-gpt2_dry_run` -- without rebuilding the whole `@slow` suite; this stanza is what
+; makes `dune build @slow` still run all of them. A `slow-<name>` rule missing from this list is one
+; `@slow` silently skips, which `test/operations/env_var_deps` checks.
+
+(alias
+ (name slow)
+ (deps
+  (alias slow-env_spelling_gate)
+  (alias slow-gpt2_dry_run)))
 
 (library
  (name gpt2_model)
@@ -70,14 +84,15 @@
   (pps ppx_here ppx_ocannl)))
 
 (rule
- (alias slow)
+ (alias slow-gpt2_dry_run)
  (package neural_nets_lib)
  (deps
+  (alias slow-env_spelling_gate)
   gpt2_dry_run.expected
   ocannl_config
   (env_var OCANNL_BACKEND))
  ; no-infer keeps gpt2_dry_run.actual from becoming a build target, so plain
- ; `dune build` (@all) does not run this slow exe -- only `dune build @slow` does.
+ ; `dune build` (@all) does not run this slow exe -- only `@slow` and `@slow-gpt2_dry_run` do.
  (action
   (no-infer
    (progn
