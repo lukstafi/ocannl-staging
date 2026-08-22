@@ -99,6 +99,51 @@ if [ -n "$wt_top" ] && [ -e "$wt_top/dune-project" ]; then
   # No ancestor holds either file: dune already roots at this checkout.
 fi
 
+# --- staleness against origin/master ------------------------------------
+# Claude Code creates a worktree from the MAIN checkout's HEAD, and the main
+# checkout's `master` only advances when someone fast-forwards it after a PR
+# merge — so a fresh worktree can start dozens of commits behind `origin/master`
+# (79 on 2026-08-22, and a full CUDA suite run tested stale code before anyone
+# noticed). A session never sees that by itself: dune builds what is checked
+# out. So fetch `origin master` and count.
+#
+# Best-effort and bounded: a hook must never hang on a credential prompt or a
+# dead network, so the fetch runs with prompts disabled, under `timeout` where
+# one exists, and with git's own low-speed abort as the fallback bound; any
+# failure prints `skip`. The count is then taken against whatever
+# `origin/master` the repository holds — after a failed fetch that is the
+# previous fetch's, which is still newer than the parent checkout's `master`
+# when the latter is the thing that lagged. The warning changes nothing and does
+# not mark the environment incomplete; it names the recovery instead.
+if [ -n "$wt_top" ] && git -C "$wt_top" remote get-url origin >/dev/null 2>&1; then
+  fetch_cmd=(env GIT_TERMINAL_PROMPT=0 git -C "$wt_top" \
+    -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=15 \
+    fetch --quiet --no-tags origin +master:refs/remotes/origin/master)
+  if command -v timeout >/dev/null 2>&1; then fetch_cmd=(timeout 30 "${fetch_cmd[@]}"); fi
+  if "${fetch_cmd[@]}" >/dev/null 2>&1; then
+    fetched="origin/master"
+  else
+    echo "  skip  fetching origin/master failed (offline?)"
+    fetched=""
+  fi
+  if git -C "$wt_top" rev-parse --verify -q refs/remotes/origin/master >/dev/null; then
+    behind="$(git -C "$wt_top" rev-list --count HEAD..origin/master 2>/dev/null || echo 0)"
+    ahead="$(git -C "$wt_top" rev-list --count origin/master..HEAD 2>/dev/null || echo 0)"
+    asof="${fetched:+}"; [ -n "$fetched" ] || asof=" (as of the last successful fetch)"
+    if [ "$behind" = 0 ]; then
+      ok "up to date with origin/master$asof"
+    else
+      if [ "$ahead" = 0 ]; then
+        recovery="git merge --ff-only origin/master"
+      else
+        recovery="git rebase origin/master  ($ahead local commit(s) to replay)"
+      fi
+      printf '  WARNING HEAD is %s commit(s) behind origin/master%s — a suite run here tests stale code.\n' "$behind" "$asof"
+      printf '          recover with: %s\n' "$recovery"
+    fi
+  fi
+fi
+
 # --- opam itself ---------------------------------------------------------
 if command -v opam >/dev/null 2>&1; then
   ok "opam $(opam --version)"
