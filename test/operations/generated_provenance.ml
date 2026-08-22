@@ -7,12 +7,25 @@
    failure, a directory-scoping test that misread a valid configuration, and a sweep that was not
    this process's to perform. This probe exists so that the next one fails a test instead.
 
-   Each mode is one guarantee, and the dune rules assert the EXIT STATUS rather than the output.
-   [Verdict] failures exit 1 from a shared teardown, so "this call must be refused" is exactly a
-   nonzero exit, and [with-accepted-exit-codes] states which way each mode must go. The modes that
-   must be refused therefore make no claim of their own -- the refusal IS the assertion, and a
-   designed-false [Verdict.p] would only add a promotable line saying so. The modes that must
-   succeed claim normally, so that a module which refused everything could not pass them.
+   Each mode is one guarantee. The modes that must SUCCEED are run directly by the dune rule and
+   claim normally, so that a module which refused everything could not pass them. The modes that
+   must be REFUSED are run by the [refusals] mode, as child processes whose streams it captures --
+   and it claims on what it captured.
+
+   Capturing is not incidental (gh-ocannl-692). A refusal reports itself through [Verdict], which
+   prints [FAIL: ...] on stdout and stderr and [FAILED: n checks did not hold.] at teardown. Those
+   words are this repository's failure marker by convention -- the one [verdict_ratchet] enforces at
+   the source level, and the one [grep FAIL] over a suite log rests on -- so a child that inherited
+   the suite's streams put four of them into the log of a GREEN run, and the only way to tell them
+   from a real failure was to read the line after each. A designed refusal and a blessed regression
+   must not be spelled the same way; that is the same argument as gh-ocannl-601, one level up.
+
+   The capture also buys the stronger check, which is why it beat the alternative of a marker
+   reserved for expected-failure children. An exit status alone says only that the child failed:
+   under [with-accepted-exit-codes] a mode whose refusal had stopped firing still passed as long as
+   something else exited 1 -- a mistyped mode name, a missing config, a failure in the mode's own
+   setup. Each refusal is now asserted BY ITS MESSAGE, so it is this guarantee that is being
+   observed and not merely this process's misfortune.
 
    The artifacts are written by hand rather than compiled: what is under test is how this module
    decides whether a file on disk belongs to this run, and a real backend would only make the setup
@@ -40,6 +53,48 @@ let ignore_unix f x = try f x with Unix.Unix_error _ -> ()
 (* Stands in for the backend emitting a kernel. *)
 let emit routine contents = Stdio.Out_channel.write_all (path routine) ~data:contents
 
+let describe_status = function
+  | Unix.WEXITED n -> Printf.sprintf "exited %d" n
+  | Unix.WSIGNALED n -> Printf.sprintf "was killed by signal %d" n
+  | Unix.WSTOPPED n -> Printf.sprintf "was stopped by signal %d" n
+
+(* [run_child ?args mode] runs one mode in a child process and answers its exit status together with
+   everything it wrote, stdout and stderr concatenated.
+
+   Through temporary FILES rather than pipes: the child writes to both streams, and reading two
+   pipes in sequence deadlocks as soon as the stream not being read fills its buffer. Today's
+   messages are far short of that, but "correct while the output stays small" is not a property this
+   file should be resting on -- and the redirection is the same two file descriptors either way. *)
+let run_child ?(args = []) mode =
+  let exe = Stdlib.Sys.executable_name in
+  let capture suffix = Stdlib.Filename.temp_file "gp_child" suffix in
+  let out_path = capture ".out" and err_path = capture ".err" in
+  let open_capture p = Unix.openfile p [ Unix.O_WRONLY; Unix.O_TRUNC ] 0o600 in
+  let out = open_capture out_path and err = open_capture err_path in
+  let pid = Unix.create_process exe (Array.of_list (exe :: mode :: args)) Unix.stdin out err in
+  let _, status = Unix.waitpid [] pid in
+  Unix.close out;
+  Unix.close err;
+  let text = Stdio.In_channel.read_all out_path ^ Stdio.In_channel.read_all err_path in
+  ignore_unix Unix.unlink out_path;
+  ignore_unix Unix.unlink err_path;
+  (status, text)
+
+(* Whether a child refused the way the mode under test is about: exit 1, AND [message] among what it
+   said. A failing check prints the whole capture to stderr -- the child's own account of what went
+   wrong is exactly what a reader needs, and it is only being withheld from PASSING runs. *)
+let child_refused ~message (status, text) =
+  let ok =
+    (match status with Unix.WEXITED 1 -> true | _ -> false)
+    && String.is_substring text ~substring:message
+  in
+  if not ok then
+    Stdio.eprintf "the child %s without reporting %S. Its captured output:\n%s\n"
+      (describe_status status) message text;
+  ok
+
+let refused claim ~message child = Verdict.p claim (child_refused ~message child)
+
 let () =
   let mode =
     match Array.to_list Stdlib.Sys.argv with
@@ -66,7 +121,35 @@ let () =
       emit "gp_twice" "kernel body: candidate 2\n";
       Verdict.p "an armed second reading is attributed to its own compile"
         (String.is_substring (Generated.read "gp_twice") ~substring:"candidate 2")
-  (* === Must be refused (the refusal is the assertion; see the header) === *)
+  (* === The driver for the modes that must be refused ===
+
+     One claim per guarantee, each naming the refusal it requires. The order is the order the dune
+     rule used to run them in: these modes share one artifact directory and several stage a state
+     for the next, so it is a sequence rather than a set. *)
+  | "refusals" ->
+      refused "an artifact left by an earlier run is swept rather than read as this run's"
+        ~message:"no generated source for routine gp_stale" (run_child "stale");
+      refused "a routine this run never emitted is refused rather than answered"
+        ~message:"no generated source for routine gp_never_emitted" (run_child "missing");
+      refused "an unarmed second reading under one routine name is refused as an overwrite"
+        ~message:"generated source for routine gp_twice changed between reads"
+        (run_child "overwrite");
+      refused "an armed compile that emitted nothing is refused rather than credited"
+        ~message:"no generated source for routine gp_twice" (run_child "armed_no_emission");
+      refused "a read before init is refused rather than answered from the directory"
+        ~message:
+          "Generated.read gp_anything: Test_utils.Generated.init ~backend_name must be called \
+           before any compile"
+        (run_child "uninitialized");
+      (* Both spellings: the flat layout and a named prefix are one refusal in the source, and a
+         reader of this list should not have to know that to see that both are covered. *)
+      refused "a flat configured build_files_prefix is refused"
+        ~message:"Generated.init: build_files_prefix is set"
+        (run_child "explicit_prefix" ~args:[ "--ocannl_build_files_prefix=." ]);
+      refused "a named configured build_files_prefix is refused"
+        ~message:"Generated.init: build_files_prefix is set"
+        (run_child "explicit_prefix" ~args:[ "--ocannl_build_files_prefix=gp_shared_dir" ])
+  (* === Must be refused (run by the mode above, which asserts the refusal) === *)
   (* The issue's own failure: an artifact left by an EARLIER run, which the readers this replaced
      accepted because it happened to exist. Written before init, so init's sweep must remove it. *)
   | "stale" ->
@@ -130,23 +213,29 @@ let () =
           Verdict.skipped ~backend:backend_name
             "a symlinked artifact directory is refused rather than followed into"
       | () ->
-          let exe = Stdlib.Sys.executable_name in
-          let pid =
+          let child =
             (* The child inherits this process's environment, in which the dune rule has cleared
                OCANNL_BUILD_FILES_PREFIX. That matters: init refuses every configured prefix, so a
                child that inherited an ambient one would exit 1 without ever looking at the staged
-               link, leaving the parent to see a refused child and a surviving file and to pass this
-               safety probe for the wrong reason. An empty --ocannl_build_files_prefix= argument
-               would NOT do instead -- an empty command-line value reads as "not given" and falls
-               through to the environment. *)
-            Unix.create_process exe [| exe; "symlink_child" |] Unix.stdin Unix.stdout Unix.stderr
+               link. Requiring the SYMLINK refusal by its message would now catch that -- but the
+               environment stays cleared rather than left to be diagnosed, since a probe that has to
+               fail to be right about its own setup is one nobody can read. An empty
+               --ocannl_build_files_prefix= argument would NOT do instead: an empty command-line
+               value reads as "not given" and falls through to the environment. *)
+            run_child "symlink_child"
           in
-          let refused = match Unix.waitpid [] pid with _, Unix.WEXITED 1 -> true | _ -> false in
+          let link_refused =
+            child_refused
+              ~message:
+                "is a symbolic link; refusing to use it, since following it would delete files \
+                 outside the artifact tree"
+              child
+          in
           let survived = Stdlib.Sys.file_exists (precious ()) in
           (* Restore a real directory for whatever runs next. *)
           ignore_unix Unix.unlink scoped;
           Verdict.p "a symlinked artifact directory is refused rather than followed into"
-            (refused && survived))
+            (link_refused && survived))
   (* Run by the mode above, in a child process, because refusing a directory aborts.
 
      The arm attempt after init is the point: an exit status alone cannot tell a refusal that

@@ -1479,6 +1479,20 @@
  (modules dune_scan_cases)
  (libraries base stdio test_utils arrayjit.verdict))
 
+; gh-ocannl-689: the marker grammar's closed backend vocabulary, held equal to the backends OCANNL
+; has. Its own stanza because linking the backend closure is exactly the cost the scanning tests
+; above are keeping off themselves -- one executable pays it, and `Dune_stanza_scan` keeps depending
+; on nothing heavier than `arrayjit.utils`.
+
+(test
+ ; ocannl-backend: none -- links the backend closure only to enumerate `Backends.all_of_backend`, a derived
+ ; constant: it opens no device, compiles nothing, and its output cannot vary with the backend.
+ (name marker_backend_vocabulary)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules marker_backend_vocabulary)
+ (libraries base stdio arrayjit.context test_utils arrayjit.verdict))
+
 (executable
  (name digest_completeness)
  (modules digest_completeness)
@@ -3118,33 +3132,13 @@
     (run ./generated_provenance.exe symlink)
     (run ./generated_provenance.exe fresh)
     (run ./generated_provenance.exe armed_overwrite)
-    (with-accepted-exit-codes
-     1
-     (run ./generated_provenance.exe stale))
-    (with-accepted-exit-codes
-     1
-     (run ./generated_provenance.exe missing))
-    (with-accepted-exit-codes
-     1
-     (run ./generated_provenance.exe overwrite))
-    (with-accepted-exit-codes
-     1
-     (run ./generated_provenance.exe armed_no_emission))
-    (with-accepted-exit-codes
-     1
-     (run ./generated_provenance.exe uninitialized))
-    (with-accepted-exit-codes
-     1
-     (run
-      ./generated_provenance.exe
-      explicit_prefix
-      --ocannl_build_files_prefix=.))
-    (with-accepted-exit-codes
-     1
-     (run
-      ./generated_provenance.exe
-      explicit_prefix
-      --ocannl_build_files_prefix=gp_shared_dir))))))
+    ; The modes that must be refused are not run from here (gh-ocannl-692). A refusal announces
+    ; itself with this repository's failure marker -- `FAIL:` and `FAILED:` -- so running one with
+    ; the suite's streams inherited put those words into the log of a green run and cost `grep FAIL`
+    ; its meaning. `refusals` runs each of them as a child whose output it captures, and requires
+    ; both the exit status `with-accepted-exit-codes` used to state and the specific refusal
+    ; message, which no exit status can tell apart from any other way of failing.
+    (run ./generated_provenance.exe refusals)))))
 
 ; The uint4x32 FFI stubs read four lanes out of an [int array], a type that carries no length, so
 ; the C helper has to check the arity rather than assume it (gh-ocannl-688). Links arrayjit.ir
