@@ -21,6 +21,9 @@ out_proj: the blocktiled kernel stages operands through workgroup-shared tiles: 
 out_proj: the CPU seeds include the register-tiled packed pipelines: true
 out_proj: every CPU seed compiles and runs: true
 out_proj: every CPU candidate matches the serial reference bitwise: true
+out_proj: the bk gate refutes on the site whose innermost extent it does not divide: true
+out_proj: a refuted bk names the innermost contraction extent, not the site's whole K: true
+single-axis: the same refuted bk keeps the bare k= witness: true
 three_axis_companion: the multi-axis contraction is detected as a matmul site: true
 three_axis_companion: the outer contraction loops carry the expected extents: true
 three_axis_companion: m_k is the innermost contraction loop: true

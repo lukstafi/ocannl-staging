@@ -1346,6 +1346,20 @@ let batch_hoist_swaps (site : matmul_site) : Sched.schedule =
 let k_blocks (site : matmul_site) (k_o : Idx.symbol list) : Idx.symbol list =
   List.map site.m_ko ~f:fst @ k_o
 
+(* How a refutation names the extent a tile's k-extent is judged against (gh-ocannl-683). Only the
+   INNERMOST contraction loop's extent [m_nk] takes part in the divisibility gates — the outer
+   contraction loops are k-block loops the pipeline inherits already split ([k_blocks]) — so on a
+   multi-axis site a bare "k=32" reads as the site's whole contraction and misleads anyone reading
+   refutation logs or {!Ir.Schedule_space.refutations}: attention's out projection has [m_nk = 32]
+   over a total K of 256. Single-axis sites render "k=%d" exactly as before, which the sketch
+   goldens quote. *)
+let k_extent_label (site : matmul_site) : string =
+  if List.is_empty site.m_ko then Printf.sprintf "k=%d" site.m_nk
+  else
+    Printf.sprintf "innermost contraction extent k=%d (of K=%d over %d loops)" site.m_nk
+      (List.fold site.m_ko ~init:site.m_nk ~f:(fun acc (_, n) -> acc * n))
+      (1 + List.length site.m_ko)
+
 (* The register-blocktiled GPU matmul (schedule_register_matmul.ml): each output dimension split
    twice (block tile -> Grid, register tile -> Workgroup), register loops sunk innermost, operands
    staged through workgroup-shared tiles at the k-block loop, output privatized, register loops
@@ -2542,6 +2556,11 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
   let ndiv what c ~into n =
     (divides c n, Printf.sprintf "%s=%d does not divide %s=%d" what c into n)
   in
+  (* The k-extent gate names what it actually compares against ([k_extent_label]). *)
+  let ndiv_k what c =
+    ( divides c site.m_nk,
+      Printf.sprintf "%s=%d does not divide %s" what c (k_extent_label site) )
+  in
   let base_params =
     {
       sk_gpu = false;
@@ -2587,7 +2606,7 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                      ([
                         ndiv "bm" bm ~into:"m" site.m_ni;
                         ndiv "bn" bn ~into:"n" site.m_nj;
-                        ndiv "bk" bk ~into:"k" site.m_nk;
+                        ndiv_k "bk" bk;
                         ndiv "tm" tm ~into:"bm" bm;
                         ndiv "tn" tn ~into:"bn" bn;
                       ]
@@ -2647,7 +2666,7 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                    [
                      ndiv "b" b ~into:"m" site.m_ni;
                      ndiv "b" b ~into:"n" site.m_nj;
-                     ndiv "b" b ~into:"k" site.m_nk;
+                     ndiv_k "b" b;
                    ]
                    (fun () ->
                      leaf { base_params with sk_bm = b; sk_bn = b; sk_bk = b; sk_hoist = hoist }) )))
@@ -2754,8 +2773,8 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
               if site.m_ni / tm_t = 0 || site.m_nk / tk_t = 0 then
                 Sspace.Refuted
                   (Printf.sprintf
-                     "no staged lattice: m=%d or k=%d is below one intrinsic tile (%dx%d)" site.m_ni
-                     site.m_nk tm_t tk_t)
+                     "no staged lattice: m=%d or %s is below one intrinsic tile (%dx%d)" site.m_ni
+                     (k_extent_label site) tm_t tk_t)
               else if w % tn_t <> 0 then
                 (* The lattice pins bn at the lane width like the curated staged seeds, so the
                    intrinsic column tile must divide it — the curated menu checks this per entry
@@ -2819,9 +2838,9 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                                ndiv "bn" bn ~into:"n" site.m_nj;
                                ( site.m_nk % tk_t = 0,
                                  Printf.sprintf
-                                   "unstaged full-K block: k=%d is not a multiple of the intrinsic \
+                                   "unstaged full-K block: %s is not a multiple of the intrinsic \
                                     tile k=%d"
-                                   site.m_nk tk_t );
+                                   (k_extent_label site) tk_t );
                              ]
                            else [ nmul "bk" bk ~of_:"k" tk_t ])
                            (fun () ->
