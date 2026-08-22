@@ -60,9 +60,9 @@ let check_grads ~label ctx w b_p =
       max_err := Float.max !max_err (Float.abs (actual -. expected_dw c d))
     done
   done;
-  printf "%s gradients match softmax-CE oracle (max abs err < 1e-6): %b\n" label
+  Verdict.pf "%s gradients match softmax-CE oracle (max abs err < 1e-6)" label
     Float.(!max_err < 1e-6);
-  if Float.(!max_err >= 1e-6) then printf "  max abs err: %.8f\n" !max_err
+  if Float.(!max_err >= 1e-6) then eprintf "  max abs err: %.8f\n" !max_err
 
 let run_case ~label make_loss =
   Tensor.unsafe_reinitialize ();

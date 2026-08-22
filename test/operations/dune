@@ -243,7 +243,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules bf16_builtins)
- (libraries base ocannl stdio test_utils)
+ (libraries base ocannl stdio test_utils arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -254,7 +254,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules bf16_ops)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -302,7 +302,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules mixed_prec_twin_shape)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -317,7 +317,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules stretch_resolution)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -350,7 +350,7 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules test_buffer_loc)
- (libraries base ocannl stdio arrayjit.utils)
+ (libraries base ocannl stdio arrayjit.utils arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -361,7 +361,7 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules shard_transfer)
- (libraries base ocannl stdio arrayjit.utils)
+ (libraries base ocannl stdio arrayjit.utils arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -805,7 +805,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules layer_norm_numeric)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1003,7 +1003,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules reduction_inline_guard)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1025,7 +1025,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules observable_grads)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1712,7 +1712,7 @@
    test_metal_pool_bindings.ml
    from
    (metal -> test_metal_pool_bindings.real.ml)
-   (-> test_metal_pool_bindings.missing.ml)))
+   (-> test_metal_pool_bindings.missing.ml)) arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1732,7 +1732,7 @@
    test_metal_guarded_gather_codegen.ml
    from
    (metal -> test_metal_guarded_gather_codegen.real.ml)
-   (-> test_metal_guarded_gather_codegen.missing.ml)))
+   (-> test_metal_guarded_gather_codegen.missing.ml)) arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1752,7 +1752,7 @@
    test_metal_pool_slot_width.ml
    from
    (metal -> test_metal_pool_slot_width.real.ml)
-   (-> test_metal_pool_slot_width.missing.ml)))
+   (-> test_metal_pool_slot_width.missing.ml)) arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -1771,7 +1771,7 @@
    test_cuda_pool_offset.ml
    from
    (cudajit.cuda -> test_cuda_pool_offset.real.ml)
-   (-> test_cuda_pool_offset.missing.ml)))
+   (-> test_cuda_pool_offset.missing.ml)) arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2400,7 +2400,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules backprop_fragment_order)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2893,7 +2893,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_uniform_virtual_lane)
- (libraries base ocannl stdio test_utils)
+ (libraries base ocannl stdio test_utils arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -2906,7 +2906,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules test_uniform_odd_sizes)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 

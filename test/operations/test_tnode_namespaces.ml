@@ -105,7 +105,7 @@ let () =
   Tensor.unsafe_reinitialize ~namespace:"other_ns" ();
   let v_other = run_self_id () in
   Tensor.unsafe_reinitialize ();
-  Stdio.printf "self_id default=%.1f other_ns=%.1f equal=%b\n" v_default v_other
+  Verdict.pf "self_id default=%.1f other_ns=%.1f equal" v_default v_other
     (Float.equal v_default v_other);
 
   Stdio.printf "=== All namespace tests completed ===\n"

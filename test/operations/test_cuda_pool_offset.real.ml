@@ -54,9 +54,9 @@ let () =
   let lp = Option.value_exn ~here:[%here] (loc "p") in
   let lq = Option.value_exn ~here:[%here] (loc "q") in
   (* Harness condition: p and q must share a pool at DISTINCT offsets for the test to be
-     non-vacuous. If the allocator changes to separate pools, print a diagnostic and skip. *)
-  Stdio.printf "p and q share pool = %b\n" (lp.pool_id = lq.pool_id);
-  Stdio.printf "p.offset=%d q.offset=%d distinct = %b\n" lp.offset lq.offset (lp.offset <> lq.offset);
+     non-vacuous, so it is claimed rather than merely reported. *)
+  Verdict.p "p and q share pool" (lp.pool_id = lq.pool_id);
+  Verdict.pf "p.offset=%d q.offset=%d distinct" lp.offset lq.offset (lp.offset <> lq.offset);
   Task.run routine.BI.schedule;
   Backend.await device;
   let read_back tnode =
@@ -70,9 +70,9 @@ let () =
   let pv = read_back p.Tensor.value in
   let qv = read_back q.Tensor.value in
   (* p = a+b = [4.0; 6.0]; q = a*b = [3.0; 8.0]. With broken Slab.ptr_at (ignore offset), both p and
-     q address offset 0: q's write clobbers p, so reading p gives [3.0; 8.0] — the [correct = false]
-     path that flags the regression. *)
-  Stdio.printf "CUDA pooled p (a+b expect [4.0;6.0]) correct = %b\n"
+     q address offset 0: q's write clobbers p, so reading p gives [3.0; 8.0] — the claim below then
+     fails the run. *)
+  Verdict.p "CUDA pooled p (a+b expect [4.0;6.0]) correct"
     (Array.equal Float.equal pv [| 4.0; 6.0 |]);
-  Stdio.printf "CUDA pooled q (a*b expect [3.0;8.0]) correct = %b\n"
+  Verdict.p "CUDA pooled q (a*b expect [3.0;8.0]) correct"
     (Array.equal Float.equal qv [| 3.0; 8.0 |])

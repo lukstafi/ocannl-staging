@@ -1,3 +1,4 @@
-healthy device: task ran = true, event done = true
-sync surfaces worker failure = true
-await re-raises worker failure = true
+healthy device: task ran: true
+healthy device: event done: true
+sync surfaces worker failure: true
+await re-raises worker failure: true

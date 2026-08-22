@@ -39,6 +39,6 @@ let () =
   let _ctx = Train.forward_once ctx embedded in
   let sources = read_metal_sources () in
   let has substring = List.exists sources ~f:(String.is_substring ~substring) in
-  Stdio.printf "guarded gather source casts signed guard to float = %b\n"
+  Verdict.p "guarded gather source casts signed guard to float"
     (has "? C[" && has ": (float)(0.0))" && has "(float)(ids[");
-  Stdio.printf "guarded gather source contains no double declarations = %b\n" (not (has "double"))
+  Verdict.p "guarded gather source contains no double declarations" (not (has "double"))

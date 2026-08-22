@@ -126,11 +126,19 @@ let () =
   in
   let out_small, virt_small, nonvirt_small = run ~kdim:4 in
   Stdio.printf "small reduction (K=4): virtual=%b non-virtual=%b\n" virt_small nonvirt_small;
+  (* The pair is one tri-state placement report, so the row keeps its shape and the claims sit
+     beside it, each on the same [let]-bound boolean the row prints. *)
+  Verdict.claim "small reduction (K=4) stays virtual" virt_small;
+  Verdict.claim "small reduction (K=4) is not forced non-virtual" (not nonvirt_small);
   Stdio.printf "small reduction (K=4): out=[%s] expected=[%s]\n" (show out_small) (expected ~kdim:4);
   let out_large, virt_large, nonvirt_large = run ~kdim:64 in
   Stdio.printf "large reduction (K=64): virtual=%b non-virtual=%b\n" virt_large nonvirt_large;
+  Verdict.claim "large reduction (K=64) is not virtual" (not virt_large);
+  Verdict.claim "large reduction (K=64) is forced non-virtual" nonvirt_large;
   Stdio.printf "large reduction (K=64): out=[%s] expected=[%s]\n" (show out_large)
     (expected ~kdim:64);
   let virt_dead, nonvirt_dead = run_dead ~kdim:64 in
   Stdio.printf "dead large reduction (K=64): virtual=%b non-virtual=%b\n" virt_dead nonvirt_dead;
+  Verdict.claim "dead large reduction (K=64) stays virtual" virt_dead;
+  Verdict.claim "dead large reduction (K=64) is not forced non-virtual" (not nonvirt_dead);
   Stdio.printf "%!"

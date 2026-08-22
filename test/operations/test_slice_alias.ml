@@ -108,9 +108,9 @@ let () =
   bref := 1;
   Train.run ctx routine;
   let out1 = Context.get_values ctx out.value in
-  Stdio.printf "read-through batch 0: out=%s (expect [2 4 6]): %b\n" (arr_to_string out0)
+  Verdict.pf "read-through batch 0: out=%s (expect [2 4 6])" (arr_to_string out0)
     (Array.equal Float.equal out0 [| 2.; 4.; 6. |]);
-  Stdio.printf "read-through batch 1: out=%s (expect [8 10 12]): %b\n" (arr_to_string out1)
+  Verdict.pf "read-through batch 1: out=%s (expect [8 10 12])" (arr_to_string out1)
     (Array.equal Float.equal out1 [| 8.; 10.; 12. |]);
 
   (* --- R2: direct host read/write of the alias view is rejected (no silent fresh allocation).
@@ -143,8 +143,7 @@ let () =
   wref := 0;
   Train.run ctx wroutine;
   let parent_after = Context.get_values ctx images.value in
-  Stdio.printf "write-through: parent=%s (expect [99 99 99 4 5 6]): %b\n"
-    (arr_to_string parent_after)
+  Verdict.pf "write-through: parent=%s (expect [99 99 99 4 5 6])" (arr_to_string parent_after)
     (Array.equal Float.equal parent_after [| 99.; 99.; 99.; 4.; 5.; 6. |]);
 
   (* --- AC1 (no copy loop): lower an eligible slice's forward and confirm its [Fetch.Slice] became

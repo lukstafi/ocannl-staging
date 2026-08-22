@@ -218,7 +218,7 @@ let () =
   Stdio.eprintf "Test accuracy = %.1f%% (%d/%d)\n%!" accuracy !correct num_test;
   (* Regression-mode threshold checks (conservative, must pass on small subsets). CIFAR-10 is harder
      than MNIST; random chance = 10%, so 15% demonstrates some learning. *)
-  printf "Test loss below 2.3 = %b\n%!" Float.(avg_test_loss < 2.3);
-  printf "Test accuracy above 15%% = %b\n%!" Float.(accuracy > 15.);
+  Verdict.p "Test loss below 2.3" Float.(avg_test_loss < 2.3);
+  Verdict.p "Test accuracy above 15%" Float.(accuracy > 15.);
 
   printf "\nTraining complete!\n%!"

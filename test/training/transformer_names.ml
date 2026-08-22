@@ -215,7 +215,7 @@ let () =
         else if epoch = epochs / 2 then epoch_loss_limit_mid
         else epoch_loss_limit_last
       in
-      printf "Epoch %d, loss below threshold=%b\n%!" epoch Float.(!epoch_loss < limit)
+      Verdict.pf "Epoch %d, loss below threshold" epoch Float.(!epoch_loss < limit)
   done;
 
   (* === Autoregressive generation === Generate names token-by-token, sampling from the model's

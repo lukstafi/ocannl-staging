@@ -1,4 +1,4 @@
-Epoch 0, loss below threshold=true
-Epoch 20, loss below threshold=true
-Epoch 39, loss below threshold=true
-Held-out valid-transition accuracy above 0.90=true
+Epoch 0, loss below threshold: true
+Epoch 20, loss below threshold: true
+Epoch 39, loss below threshold: true
+Held-out valid-transition accuracy above 0.90: true

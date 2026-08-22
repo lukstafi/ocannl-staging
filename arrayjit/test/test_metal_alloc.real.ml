@@ -75,7 +75,7 @@ let () =
     Array.for_all [| 0; 1; 2; 3 |] ~f:(fun i ->
         Float.equal (Nd.get_as_float b_dst [| i |]) (Float.of_int (10 + i)))
   in
-  Stdio.printf "from_host/to_host at offset>0 preserves values -> %b\n" b_roundtrip_ok;
+  Verdict.p "from_host/to_host at offset>0 preserves values" b_roundtrip_ok;
 
   (* memset_zero region B at offset>0, then confirm B reads back zeros AND A is untouched. *)
   B.memset_zero device ~pool_id:pool ~offset:region_bytes ~size_in_bytes:region_bytes;
@@ -94,5 +94,5 @@ let () =
     Array.for_all [| 0; 1; 2; 3 |] ~f:(fun i ->
         Float.equal (Nd.get_as_float a_check [| i |]) (Float.of_int (i + 1)))
   in
-  Stdio.printf "memset_zero at offset>0 reads back zeros -> %b\n" b_zeros_ok;
-  Stdio.printf "offset>0 ops leave region A (offset 0) intact -> %b\n" a_intact
+  Verdict.p "memset_zero at offset>0 reads back zeros" b_zeros_ok;
+  Verdict.p "offset>0 ops leave region A (offset 0) intact" a_intact

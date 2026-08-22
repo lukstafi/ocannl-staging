@@ -16,15 +16,25 @@
    sitting next to converted assertions, so the local example does not teach the rule. This is the
    mechanical trace.
 
-   What it flags is the literal-label shape and only that: a format whose one argument-consuming
-   conversion is a bare `%b` at the end, behind a label ending in a colon. Issue #624's remaining
-   sites compute their label (`"%s aligned: %b\n"`), which takes per-site judgement about what the
-   claim even is, and they stay out of scope here deliberately -- a scan that guessed at them would
-   have to be answered with exemptions, and an exemption list long enough stops being read.
+   What it flags is a format whose LAST argument-consuming conversion is a bare `%b` at the end,
+   behind a label ending in a colon, an equals sign or an arrow -- in either of two kinds. A LITERAL
+   label is written out (`"k-blocks fused: %b\n"`); a COMPUTED one is built from arguments
+   (`"%s aligned: %b\n"`, `"Epoch %d, loss below threshold=%b\n"`).
 
-   So a descriptive `%b` print has two escape hatches, in this order of preference: carry any other
-   conversion -- which nearly every descriptive print does anyway, since it is describing something
-   -- or take a named exemption below, with the reason it is not an assertion. *)
+   Both were once out of reach, for different reasons, and gh-ocannl-624 closed both. The computed
+   form had nowhere to go: `Verdict.p` takes a label, not a format, so converting a computed claim
+   meant splitting the line by hand and every site was a judgement call. `Verdict.pf` and
+   `Verdict.claimf` are that missing entry point, and with the sweep done the shape can be held.
+   The separator was the quieter half: reading only a colon, this check could not see
+   `"round-trip identity = %b\n"` -- the spelling most of the sites it was written for actually
+   used, in `data_parallel`, `shard_transfer`, `test_buffer_loc` and a dozen more. Neither hole
+   showed up as a failure. Both showed up as a clean report.
+
+   A descriptive `%b` print therefore has one escape hatch left, not two. Carrying a second
+   conversion no longer works, because a computed label carries one by construction; what remains is
+   a named exemption below with the reason the line is not an assertion. The list is short, and the
+   reason it stays short is structural: a print whose boolean is not a verdict is a census row or a
+   table, and those rarely END on the boolean. *)
 
 open Base
 open Stdio
@@ -49,16 +59,53 @@ let data_sources =
        against the labels they should yield, and never printed" );
   ]
 
-(* Individual claim-shaped literals that are not assertions. Keyed by "<repository-relative
-   path>:<label>", and each has to earn its place on every run (see the staleness check at the end):
-   an exemption is a claim about a line of code, and a claim that stops being true is not a free
-   pass.
+(* Individual claim-shaped literals that are not assertions. Each has to earn its place on every run
+   (see the staleness check at the end): an exemption is a claim about a line of code, and a claim
+   that stops being true is not a free pass.
 
-   Empty today, and that is the state of the tree rather than an oversight: a print that describes
-   something almost always interpolates the something, and that second conversion takes it out of
-   this shape without anyone having to decide anything. The list exists because the day a genuine
-   exception turns up, the alternative is weakening the shape for everybody. *)
+   LITERAL-label sites, keyed by "<repository-relative path>:<label>". Empty, and that is the state
+   of the tree rather than an oversight: a bare `"<label>: %b"` line with nothing else on it is an
+   assertion in every case the sweeps found. *)
 let exempt_sites : (string * string) list = []
+
+(* COMPUTED-label sites, keyed by "<repository-relative path>:<the format up to the boolean>". The
+   head rather than the label, because a computed label is only what survives rendering a head whose
+   arguments this reader cannot fill in -- a hint for a report, not an identity. And the head rather
+   than the whole format, because the whole format IS the claim shape: a list of them written out
+   here would be a list of claims in a test source, and this check would have to exempt its own file
+   to hold everyone else to the rule. A head stops before the boolean, so it is not one.
+
+   Every entry here is a row of a table or a census, where the boolean records what happened rather
+   than deciding whether it was right. Each also carries its assertion separately, through
+   `Verdict.claim`/`claimf` on the same bound boolean, which is the pattern that lets a row keep its
+   shape without losing its gate -- so what is exempted is the PRINT, never the check. An entry
+   whose test has no such claim beside it is an exemption that should not have been granted. *)
+let exempt_computed_sites =
+  [
+    ( "test/operations/affine_extraction.ml:%s %s parallelizable: ",
+      "the per-symbol parallelizability table: a reduced axis is legitimately not parallelizable, \
+       so `false` is a fact the golden pins rather than a defect" );
+    ( "test/operations/bench_args_parsing.ml:%-22s option: ",
+      "the argument-classification census, whose whole point is that some strings are options and \
+       others are not; the assertion sits beside it as `Verdict.claim (s ^ \" classified as \
+       documented\")`" );
+    ( "test/operations/reduction_inline_guard.ml:small reduction (K=4): virtual=%b non-virtual=",
+      "a tri-state placement row: the pair of booleans is the reading, and each is claimed \
+       separately beside it" );
+    ( "test/operations/reduction_inline_guard.ml:large reduction (K=64): virtual=%b \
+       non-virtual=",
+      "the same row for the large reduction" );
+    ( "test/operations/reduction_inline_guard.ml:dead large reduction (K=64): virtual=%b \
+       non-virtual=",
+      "the same row for the dead large reduction" );
+    ( "test/operations/test_execution_deps.ml:%s refused, names the routine: %b, names the \
+       cause: ",
+      "a two-property row about one refusal; both properties are claimed beside it" );
+    ( "test/operations/observable_grads.ml:%s placement: %s; in context: %b; observable \
+       intent: ",
+      "`in context` is legitimately false for a virtualized leg, so the row describes; the \
+       assertion is `observable intent`, claimed beside it" );
+  ]
 
 (* Literals planted in the fixture file so that this scan has something it MUST find. They are its
    inputs there -- the two spellings whose decoded value is the claim shape -- and they are what
@@ -105,6 +152,8 @@ let () =
      rather than a promotable golden diff carries the verdict (gh-ocannl-601). *)
   let fail message = Verdict.fail message in
   let exemptions = Map.of_alist_exn (module String) exempt_sites in
+  let computed_exemptions = Map.of_alist_exn (module String) exempt_computed_sites in
+  let computed_used = ref (Set.empty (module String)) in
   let canaries = Map.of_alist_exn (module String) canary_sites in
   let data = Map.of_alist_exn (module String) data_sources in
   let exemptions_used = ref (Set.empty (module String)) in
@@ -114,9 +163,10 @@ let () =
   let per_directory = Hashtbl.create (module String) in
   printf
     "Test sources that print a claim they decided themselves, outside `Verdict`: a format whose\n\
-     one argument-consuming conversion is a bare `%%b` at the end, behind a literal label\n\
-     (gh-ocannl-668). Such a line is gated only by the golden diff, and a golden diff is\n\
-     `dune promote`-able -- which is how a failure gets recorded as the expected output.\n\n";
+     last argument-consuming conversion is a bare `%%b` at the end, behind a label ending in `:`,\n\
+     `=` or `->` -- written out (gh-ocannl-668) or computed from arguments (gh-ocannl-624). Such\n\
+     a line is gated only by the golden diff, and a golden diff is `dune promote`-able -- which\n\
+     is how a failure gets recorded as the expected output.\n\n";
   List.iter sources ~f:(fun source ->
       let path = Map.find_exn on_disk source in
       (* A source this reader cannot read is reported by NAME and the scan carries on, rather than
@@ -139,27 +189,45 @@ let () =
           let files, found = Option.value previous ~default:(0, 0) in
           (files + 1, found + List.length scanned.Scan.sites));
       List.iter scanned.Scan.sites ~f:(fun site ->
-          let key = source ^ ":" ^ site.Scan.label in
+          (* A literal-label site is named by its label, which IS what the format says; a computed
+             one by the whole format, because its label is only what survived rendering a head this
+             reader cannot fill in. *)
+          let computed = Scan.(match site.kind with Computed_label -> true | Literal_label -> false) in
+          let key = source ^ ":" ^ if computed then site.Scan.head else site.Scan.label in
           let where = Printf.sprintf "%s:%d" source site.Scan.line in
           let how =
             match site.Scan.printer with
             | Some printer -> Printf.sprintf " through `%s`" printer
             | None -> ""
           in
-          if Map.mem canaries key then (
-            canaries_found := Set.add !canaries_found key;
+          let canary_key = source ^ ":" ^ site.Scan.label in
+          if Map.mem canaries canary_key then (
+            canaries_found := Set.add !canaries_found canary_key;
             data_used := Set.add !data_used source)
           else if Map.mem data source then data_used := Set.add !data_used source
-          else if Map.mem exemptions key then exemptions_used := Set.add !exemptions_used key
+          else if (not computed) && Map.mem exemptions key then
+            exemptions_used := Set.add !exemptions_used key
+          else if computed && Map.mem computed_exemptions key then
+            computed_used := Set.add !computed_used key
           else (
             Int.incr offenders;
+            let remedy =
+              if computed then
+                Printf.sprintf
+                  "write it as `Verdict.pf \"%s\" <args> <bool>` (or `Verdict.claimf`, if the \
+                   surrounding row must keep its shape)"
+                  (String.substr_replace_all
+                     (String.chop_suffix_if_exists site.Scan.format ~suffix:"\n")
+                     ~pattern:": %b" ~with_:"")
+              else Printf.sprintf "write it as `Verdict.p \"%s\" <bool>`" site.Scan.label
+            in
             fail
               (Printf.sprintf
-                 "%s prints `%s: <bool>`%s, deciding its own verdict outside `Verdict` -- write it \
-                  as `Verdict.p \"%s\" <bool>`, so that a false exits the run instead of being \
-                  `dune promote`d into %s. If the line describes rather than asserts, give the \
-                  format another conversion or exempt it by name in verdict_ratchet.ml"
-                 where site.Scan.label how site.Scan.label
+                 "%s prints the claim `%s`%s, deciding its own verdict outside `Verdict` -- %s, so \
+                  that a false exits the run instead of being `dune promote`d into %s. If the line \
+                  describes rather than asserts, exempt it by name in verdict_ratchet.ml with the \
+                  reason it is not an assertion"
+                 where site.Scan.label how remedy
                  (Stdlib.Filename.remove_extension (Stdlib.Filename.basename source) ^ ".expected")))));
   (* Which directories the corpus came from, by name and not by count: a file added anywhere under
      `test/` moved a tally here, so every contributor would promote this file over a change that
@@ -172,14 +240,19 @@ let () =
   List.iter data_sources ~f:(fun (path, why) -> printf "  %s -- %s\n" path why);
   printf "\nPlanted in that fixture so that a scan which went blind cannot report a clean tree:\n";
   List.iter canary_sites ~f:(fun (key, why) -> printf "  %s -- %s\n" key why);
-  printf "\nIndividual claim-shaped literals exempted, with the reason each is not an assertion:\n";
+  printf "\nLiteral-label claims exempted, with the reason each is not an assertion:\n";
   if List.is_empty exempt_sites then
-    printf
-      "  (none: a descriptive print interpolates what it describes, and that second conversion is \
-       hatch enough)\n"
+    printf "  (none: a bare `<label>: %%b` line with nothing else on it has always been a verdict)\n"
   else List.iter exempt_sites ~f:(fun (key, why) -> printf "  %s -- %s\n" key why);
+  printf "\nComputed-label claims exempted -- rows and tables that describe rather than decide,\n\
+          each carrying its assertion separately through `Verdict.claim`/`claimf`:\n";
+  List.iter exempt_computed_sites ~f:(fun (key, why) -> printf "  %s -- %s\n" key why);
   let stale =
-    Set.diff (Set.of_list (module String) (List.map exempt_sites ~f:fst)) !exemptions_used
+    Set.union
+      (Set.diff (Set.of_list (module String) (List.map exempt_sites ~f:fst)) !exemptions_used)
+      (Set.diff
+         (Set.of_list (module String) (List.map exempt_computed_sites ~f:fst))
+         !computed_used)
   in
   if not (Set.is_empty stale) then
     fail

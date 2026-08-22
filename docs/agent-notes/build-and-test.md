@@ -247,6 +247,23 @@ that they earn a lookup rather than always-loaded space.
   routine twice across changed contents is otherwise reported as an unattributed overwrite. Corollary
   for a leg this backend cannot evaluate: gate it and report `Verdict.skipped` rather than letting it
   reach the read, because an absent artifact is a failure here by design.
+- `Verdict` gates a claim by exit status, and a claim whose LABEL is computed needed an entry point of
+  its own: `Verdict.pf fmt … b` is `p` with the label rendered from arguments
+  (`Verdict.pf "%s gradients match the oracle" leg ok`), and `Verdict.claimf` is `claim` the same
+  way. The boolean comes last, after the format's arguments, so the call reads in `p name b` order
+  and forgetting it is a type error rather than a silent no-op. Before they existed every
+  computed-label claim was a bare `printf`, which exits 0 on `false` and lets the failure be
+  `dune promote`d into the golden — the whole of gh-ocannl-624. `verdict_ratchet` now holds both
+  shapes, its reader having widened twice: the separator vocabulary is `:`, `=` and `->`, since
+  reading only a colon left the entire `… = %b` population outside a check written to catch exactly
+  it; and a format may carry other conversions, since a computed label carries one by construction.
+  That second widening costs the old escape hatch — a descriptive `%b` print can no longer excuse
+  itself by interpolating what it describes — so a census row that ends on its boolean takes a named
+  exemption, keyed by the format HEAD (everything up to the `%b`) rather than the whole format,
+  because the whole format is itself the claim shape and a list of them would force the check to
+  exempt its own file. Every exemption in the tree is a row whose assertion is claimed separately
+  beside it through `Verdict.claim`/`claimf` on the same bound boolean; an exemption without that is
+  one that should not have been granted.
 - Dune roots at the OUTERMOST ancestor holding a `dune-workspace` (failing that, a `dune-project`)
   and ignores dot-directories, so from a worktree under `.claude/worktrees/` the main checkout wins
   and the worktree is invisible to dune: targeted commands fail with `Don't know about directory

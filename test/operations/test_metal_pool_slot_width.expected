@@ -1,2 +1,2 @@
-large_models=true: generated slot table is ulong* __pool_slots = true
-large_models=true: generated slot table is uint* __pool_slots = false
+large_models=true: generated slot table is ulong* __pool_slots: true
+large_models=true: generated slot table is not uint* __pool_slots: true

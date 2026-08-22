@@ -1,2 +1,2 @@
-guarded gather source casts signed guard to float = true
-guarded gather source contains no double declarations = true
+guarded gather source casts signed guard to float: true
+guarded gather source contains no double declarations: true

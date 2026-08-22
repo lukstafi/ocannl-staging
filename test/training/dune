@@ -56,7 +56,7 @@
  (modules data_parallel)
  (locks ocannl_training_test)
  (deps ocannl_config)
- (libraries base ocannl stdio arrayjit.utils)
+ (libraries base ocannl stdio arrayjit.utils arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -116,7 +116,7 @@
 (executable
  (name mlp_names)
  (modules mlp_names)
- (libraries ocannl dataprep)
+ (libraries ocannl dataprep arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -143,7 +143,7 @@
 (executable
  (name mlp_bn_names)
  (modules mlp_bn_names)
- (libraries ocannl dataprep)
+ (libraries ocannl dataprep arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -179,7 +179,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules circles_conv)
- (libraries ocannl dataprep)
+ (libraries ocannl dataprep arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -194,7 +194,7 @@
 (executable
  (name mnist_conv)
  (modules mnist_conv)
- (libraries ocannl dataprep conv_data unix)
+ (libraries ocannl dataprep conv_data unix arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -222,7 +222,7 @@
 (executable
  (name cifar_conv)
  (modules cifar_conv)
- (libraries ocannl dataprep conv_data unix)
+ (libraries ocannl dataprep conv_data unix arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -254,7 +254,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules fsm_transformer)
- (libraries ocannl)
+ (libraries ocannl arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -272,7 +272,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules transformer_names)
- (libraries ocannl dataprep)
+ (libraries ocannl dataprep arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -287,7 +287,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules tokenizer_roundtrip)
- (libraries base ocannl stdio dataprep)
+ (libraries base ocannl stdio dataprep arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
@@ -312,7 +312,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules virtual_grads_parity)
- (libraries base ocannl stdio)
+ (libraries base ocannl stdio arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 

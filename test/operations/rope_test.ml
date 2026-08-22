@@ -136,8 +136,10 @@ let () =
      ~1.2e-4, so the 4th decimal depends on reduction order and differs across backends (e.g. hip's
      parallel reduction; cc and hip agree exactly when run at double precision). *)
   Stdio.printf "Loss: %.2f\n" At.((ctx, loss).@{[| 0 |]});
-  Stdio.printf "freqs has grad: %b (expect false)\n" (Option.is_some freqs.Tensor.diff);
-  Stdio.printf "positions has grad: %b (expect false)\n" (Option.is_some positions.Tensor.diff);
+  (* Renamed so that [true] is the passing reading: in a golden a blessed regression and a designed
+     negative are the same line (gh-ocannl-624). *)
+  Verdict.p "freqs has no grad" (not (Option.is_some freqs.Tensor.diff));
+  Verdict.p "positions has no grad" (not (Option.is_some positions.Tensor.diff));
   (* Verify that learnable params exist and have gradients allocated. This proves the backward pass
      through RoPE successfully allocated gradients for the attention weights (w_q, w_k, w_v,
      w_o). *)
@@ -146,7 +148,7 @@ let () =
   Stdio.printf "learnable params: %d, with grad: %d (expect >0)\n" num_params num_with_grad;
   (* Verify loss is finite and non-zero — backward pass completed without NaN/inf *)
   let loss_val = At.((ctx, loss).@{[| 0 |]}) in
-  Stdio.printf "loss finite and nonzero: %b (expect true)\n\n"
-    Float.(is_finite loss_val && abs loss_val > 1e-10)
+  Verdict.p "loss finite and nonzero" Float.(is_finite loss_val && abs loss_val > 1e-10);
+  Stdio.printf "\n"
 
 (* Transformer default regression is covered by transformer_test.ml *)

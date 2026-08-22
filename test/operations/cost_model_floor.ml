@@ -49,11 +49,11 @@ let it s = Idx.Iterator s
 let show name ?open_placement code =
   let s = CM.analyze code in
   let f = CM.completion_floor ?open_placement code in
-  Stdio.printf
-    "== %s ==\n  floor: flops=%d bytes=%d %s\n  upper: flops=%d bytes=%d\n  floor <= upper: %b\n"
-    name f.CM.fr_flops f.CM.fr_bytes
+  Stdio.printf "== %s ==\n  floor: flops=%d bytes=%d %s\n  upper: flops=%d bytes=%d\n" name
+    f.CM.fr_flops f.CM.fr_bytes
     (if f.CM.fr_exact then "exact" else "inexact")
-    s.CM.flops (CM.total_bytes s)
+    s.CM.flops (CM.total_bytes s);
+  Verdict.p "  floor <= upper"
     (f.CM.fr_flops <= s.CM.flops && f.CM.fr_bytes <= CM.total_bytes s);
   f
 

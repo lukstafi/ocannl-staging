@@ -6,10 +6,10 @@
 
    This compiles a pooled Metal kernel with [large_models = true] and inspects the emitted shader.
    The invariant pinned: the generated source declares [ulong* __pool_slots] and NOT [uint*
-   __pool_slots]. If the slot table regressed to [uint] under [large_models], the first line would
-   print [false] (and the second [true]). The harness condition that instantiates the AC is
-   [large_models = true] set before compilation -- the same kernel under the default setting emits
-   [uint], so the setting is what the assertion actually exercises. *)
+   __pool_slots]. If the slot table regressed to [uint] under [large_models], both claims below
+   would fail. The harness condition that instantiates the AC is [large_models = true] set before
+   compilation -- the same kernel under the default setting emits [uint], so the setting is what the
+   claims actually exercise. *)
 
 open! Base
 open Ocannl
@@ -39,7 +39,9 @@ let () =
   let _ctx = Train.forward_once ctx sum in
   let srcs = read_metal_sources () in
   let has sub = List.exists srcs ~f:(String.is_substring ~substring:sub) in
-  Stdio.printf "large_models=true: generated slot table is ulong* __pool_slots = %b\n"
+  Verdict.p "large_models=true: generated slot table is ulong* __pool_slots"
     (has "ulong* __pool_slots");
-  Stdio.printf "large_models=true: generated slot table is uint* __pool_slots = %b\n"
-    (has "uint* __pool_slots")
+  (* Phrased as the fact that holds, so that [true] is the passing reading on both lines: a
+     designed negative and a blessed regression are the same line in a golden (gh-ocannl-624). *)
+  Verdict.p "large_models=true: generated slot table is not uint* __pool_slots"
+    (not (has "uint* __pool_slots"))

@@ -1,4 +1,7 @@
 ok: claim shape -- the plain form
+ok: claim shape -- an equals separator
+ok: claim shape -- an equals with no space
+ok: claim shape -- an arrow separator
 ok: claim shape -- no trailing newline
 ok: claim shape -- a blank line either side
 ok: claim shape -- a flush directive consumes no argument
@@ -9,8 +12,13 @@ ok: claim shape -- no space after the colon
 ok: claim shape -- a tab before the boolean
 ok: claim shape -- the planted canary
 ok: claim shape -- the planted canary over a continuation
-ok: not a claim -- a computed label is #624's, not this check's
-ok: not a claim -- a second boolean
+ok: computed claim shape -- a leading string argument
+ok: computed claim shape -- an interpolated measurement
+ok: computed claim shape -- arguments on both sides of the label
+ok: computed claim shape -- a second boolean before the last
+ok: claim head -- conversions are left unrendered
+ok: claim head -- a width is kept
+ok: claim head -- an earlier boolean is kept
 ok: not a claim -- an interpolated value after the boolean
 ok: not a claim -- an annotation after the boolean
 ok: not a claim -- a width means the print is laying out a column

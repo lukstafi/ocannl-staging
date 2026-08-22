@@ -1,7 +1,8 @@
 Test sources that print a claim they decided themselves, outside `Verdict`: a format whose
-one argument-consuming conversion is a bare `%b` at the end, behind a literal label
-(gh-ocannl-668). Such a line is gated only by the golden diff, and a golden diff is
-`dune promote`-able -- which is how a failure gets recorded as the expected output.
+last argument-consuming conversion is a bare `%b` at the end, behind a label ending in `:`,
+`=` or `->` -- written out (gh-ocannl-668) or computed from arguments (gh-ocannl-624). Such
+a line is gated only by the golden diff, and a golden diff is `dune promote`-able -- which
+is how a failure gets recorded as the expected output.
 
 Directories scanned: arrayjit/test, test/config, test/einsum, test/gpt2, test/operations, test/operations/config, test/operations/profiles, test/operations/startup_streams, test/ppx, test/support, test/training
 
@@ -12,8 +13,18 @@ Planted in that fixture so that a scan which went blind cannot report a clean tr
   test/operations/verdict_scan_cases.ml:planted canary -- the plain spelling, a fixture input for the shape reader
   test/operations/verdict_scan_cases.ml:planted canary over a continuation -- the same literal written over a line continuation, which only a reader of decoded values finds
 
-Individual claim-shaped literals exempted, with the reason each is not an assertion:
-  (none: a descriptive print interpolates what it describes, and that second conversion is hatch enough)
+Literal-label claims exempted, with the reason each is not an assertion:
+  (none: a bare `<label>: %b` line with nothing else on it has always been a verdict)
+
+Computed-label claims exempted -- rows and tables that describe rather than decide,
+each carrying its assertion separately through `Verdict.claim`/`claimf`:
+  test/operations/affine_extraction.ml:%s %s parallelizable:  -- the per-symbol parallelizability table: a reduced axis is legitimately not parallelizable, so `false` is a fact the golden pins rather than a defect
+  test/operations/bench_args_parsing.ml:%-22s option:  -- the argument-classification census, whose whole point is that some strings are options and others are not; the assertion sits beside it as `Verdict.claim (s ^ " classified as documented")`
+  test/operations/reduction_inline_guard.ml:small reduction (K=4): virtual=%b non-virtual= -- a tri-state placement row: the pair of booleans is the reading, and each is claimed separately beside it
+  test/operations/reduction_inline_guard.ml:large reduction (K=64): virtual=%b non-virtual= -- the same row for the large reduction
+  test/operations/reduction_inline_guard.ml:dead large reduction (K=64): virtual=%b non-virtual= -- the same row for the dead large reduction
+  test/operations/test_execution_deps.ml:%s refused, names the routine: %b, names the cause:  -- a two-property row about one refusal; both properties are claimed beside it
+  test/operations/observable_grads.ml:%s placement: %s; in context: %b; observable intent:  -- `in context` is legitimately false for a virtualized leg, so the row describes; the assertion is `observable intent`, claimed beside it
 
 every test source decides its claims through Verdict: true
 the scan found every literal planted for it: true
