@@ -16,7 +16,9 @@ This roadmap outlines the development plan for OCANNL through version 1.0 and be
 >
 > **v1.0 shipped August 13, 2026**, with its milestone fully closed (49 issues). Three consequences for what follows: the release dates are no longer pinned to paper deadlines, **v1.1's soft target moves to August 24, 2026** (the OCaml Workshop date, used as an anchor rather than as a submission), and v1.1/v1.2 were rebalanced along a different seam than the original split — **v1.1 is the compiler work plus the training-loop mechanics it needs**, and **v1.2 is the consumers and explorations**: models, reproductions, demos, integrations, the training experience a user sees, and performance items gated on hardware or on evidence not yet in hand.
 >
-> The version sequence is: `0.7 → 0.8 → 0.9 → 1.0 → 1.1 → 1.2`. Milestone *scope* below tracks the GitHub milestones, which are the source of truth.
+> **Update (late August 2026):** v1.2 was split along the performance seam. **v1.2 is now performance-chasing in the `approximate` profile, demonstrated on benchmarks** — the numerics-changing tier (fused attention, Winograd, tf32/fp16 arithmetic) behind a third preset, the exact-numerics performance residue, and the benchmark legs that expose where OCANNL wins and loses; the Winograd and zero-nest conv tiers (#505, #503) moved into it from v1.1. Everything else that was in v1.2 — the consumers, explorations, training experience, engineering hygiene, and hardware-gated items — is **v1.3**.
+>
+> The version sequence is: `0.7 → 0.8 → 0.9 → 1.0 → 1.1 → 1.2 → 1.3`. Milestone *scope* below tracks the GitHub milestones, which are the source of truth.
 
 ---
 
@@ -173,9 +175,7 @@ GitHub milestone scope: *"Performance carry-overs, algebraic rewrites, training 
 **Training-loop utilities:**
 - LR schedules, global-norm clipping and gradient accumulation (#465), and mmap-backed checkpoint loading with aligned payloads and zero-copy hosted arrays (#467) — the mechanics a training loop runs on, as against the experience built on top of them.
 
-**Algebraic and convolution tiers** (carried over from v1.0):
-- Fused attention via online softmax (#483) — retargeted by the `gpt2_mini` attribution at 5.4% of the step at seq 128 and a plurality at native context, with long-context fixture legs as its trigger.
-- Zero-nest workgroup geometry for whole-routine zeroed GPU sites (#503) and the Winograd conv rewrite (#505).
+**Algebraic and convolution tiers** (carried over from v1.0, then moved on to v1.2 in the late-August split): fused attention via online softmax (#483), zero-nest workgroup geometry for whole-routine zeroed GPU sites (#503), and the Winograd conv rewrite (#505) — they are numerics-changing or benchmark-demonstrated work, which is v1.2's definition.
 
 **Search follow-ups from the v1.0 evaluation** — the deliberate consequence of v1.0 recording its nulls rather than shipping them as wins, each filed with its evidence attached:
 - Lift statically-decidable builder preconditions into tree verdicts, so the tile lattice stops pricing spaces whose members die at candidate build (#577); make the envelope's memory leg fittable (#578); give enablement promotion a profitability term (#579); extract the sketch-family trees from `autotune.ml` before either grows them (#580).
@@ -190,24 +190,51 @@ Quantization (#137, #271), the WebGPU/WASM target (#123), the LLVM backend (#200
 ---
 
 ## v1.2 — undated
-**Theme: Consumers and explorations**
+**Theme: Performance-chasing in the approximate profile, demonstrated on benchmarks**
 
-GitHub milestone scope: *"Consumers and explorations: models, reproductions, demos, integrations, hardware/evidence-gated performance items, training-experience."* Everything that consumes the compiler rather than building it. Paced by interest and by what the hardware allows, not by a date.
+GitHub milestone scope: *"Performance-chasing in the approximate profile, demonstrated on benchmarks."* The `performance` profile is defined as the fastest configuration *at unchanged semantics*; this milestone chases performance past that line, under a third preset whose results differ from the exact profiles by a tolerance the benchmark parity envelope names. An issue here closes with a before/after benchmark cell in a report. Undated: paced by what the measurements say.
+
+**The regime and its evidence:**
+- The `approximate` profile (#719): a third built-in preset bundling tf32 matmuls, fp16 arithmetic, fast-math, and every algebraic-rewrite gate as it lands, with a benchmark regime column whose torch counterpart runs torch's own defaults (tf32, SDPA, cudnn autotuning) rather than the pinned-exact settings the parity oracle needs.
+- The benchmark expansion (#720): sequence-length and batch-size scaling curves, a 3×3 padded conv workload, roofline-attainment and device-memory columns, thread-count parity on the CPU column — each leg the demonstration for named issues below. Gemma 3 (270M/1B) as the real-weights long-context target (#570).
+
+**Algebraic rewrites — the numerics-changing tier:**
+- Fused attention via online softmax (#483), on the minimal loop-carried-recurrence construct the IR needs for it (#696) — the `seq²` materialization is what the scaling curve exposes.
+- Winograd F(2×2, 3×3) (#505), and the zero-nest workgroup geometry that lets whole-routine GPU conv candidates be proposed (#503).
+- fp16 accumulator width aligned with `fp16_arithmetic` (#680); warp-shuffle reductions at the named accumulator residency for narrow storage (#682).
+
+**Exact-numerics performance residue:**
+- Footprint-scoped materialization — a middle ground between inlining and a full buffer (#616); register-tile geometry as a schedule decision the tuner can time (#619), the column-remainder peel cliff (#620), and packed GEBP schedules at non-dividing extents so the cost model can be measured where it is questioned (#627); vector `Max`/`Min` reductions off the per-lane loop (#649).
+- Cost-model fidelity: the advisory envelope's two consumers with opposite biases (#636) and hoisted scope bodies in `sc_flops` (#637).
+- Async-copy staging refinements — Metal `simdgroup_async_copy`, HIP direct-to-LDS, pipeline depths > 2 (#576); device memory management under pressure (#565), whose first consumer the long-context legs are expected to be.
+
+---
+
+## v1.3 — undated
+**Theme: Consumers, explorations, and the hygiene the reviews filed**
+
+GitHub milestone scope: *"Consumers and explorations: models, reproductions, demos, integrations, and the training experience; plus the engineering-hygiene and test-seam follow-ups the v1.0–v1.1 review cycles filed, and performance items gated on hardware not in the fleet."* Everything that consumes the compiler rather than building it, and the follow-ups that make the repository easier to work in. Paced by interest and by what the hardware allows, not by a date.
 
 **Training experience:**
-- Resumable checkpoints (#96), experiment tracking — graphs of observables such as loss and device health (#122), and plot legends and axis ticks (#103). The loop *mechanics* they sit on (#465, #467) are v1.1.
+- Resumable checkpoints (#96), experiment tracking — graphs of observables such as loss and device health (#122), plot legends and axis ticks (#103), and backend zero-copy from mmap-backed checkpoints (#585).
 
 **Models, reproductions and demos:**
-- Model surgery (#33), LSTM (#60), Bonsai RNN (#182), digit addition (#427), BERT/ModernBERT (#297), DisTrO (#278), and a Gemma 3 (270M/1B) demo and benchmarking target with long-context legs against real weights (#570).
+- Model surgery (#33), LSTM (#60), Bonsai RNN (#182), digit addition (#427), BERT/ModernBERT (#297), DisTrO (#278).
 
 **Frontend design, library and deployment:**
-- Shape schemes for tensor functions (#404), the Simply/NanoDO study for `lib/` (#435), PoPE (#444), and inference plugins/binaries (#97).
+- Shape schemes for tensor functions (#404), the Simply/NanoDO study for `lib/` (#435), PoPE (#444), inference plugins/binaries (#97), and the ppxlib ceiling migration (#695).
 
 **Integrations and external-framework study:**
 - Polars integration (#219) and a krnl/autograph study (#277).
 
-**Performance items gated on hardware or on evidence not yet in hand:**
-- Device memory management beyond a static budget — pressure-aware eviction, host-cache spill, pool policy (#565); async-copy staging refinements: Metal `simdgroup_async_copy`, the HIP direct-to-LDS arm, pipeline depths > 2 (#576); HIP CDNA tensor cores via MFMA (#477); CUDA pinned host buffers (#170) and CUDA constant memory (#195).
+**Hardware-gated performance items:**
+- HIP CDNA tensor cores via MFMA (#477) — no CDNA box in the fleet; CUDA pinned host buffers (#170) and CUDA constant memory (#195).
+
+**Engineering hygiene and test seams** (filed by the v1.0–v1.1 review cycles, each grounded in a PR's review history):
+- Configuration and caching: per-device schedule-cache identity (#594), the digest-completeness test's classification-vs-tag blindness (#596), the bootstrap keys' precedence walk written three times (#604), placement provenance without a decoder (#609), one-element constant literals with no host-backed form (#641).
+- IR and codegen: algebraically dead reads at store time (#625), hand-rolled `Low_level` walkers re-deriving conventions (#630), the cc/`builtins.c` duplication (#656), the fp8 codecs' lost exhaustive verification (#657), the HIP fp8 ROCm bug record (#647), cross-target compile checks for emitted kernels (#650), cc rendering for workgroup-shared staging so GPU-sketch parity legs run off-GPU (#678).
+- Test infrastructure: `config_dep_completeness`'s untested resolution half (#603), `test-run.sh`'s launch protocol (#606), `last` pointer (#607) and lock entry point (#671), the remaining hand-built IR traversals (#608), computed-label boolean claims (#624), operands that stop discriminating at dividing sizes (#640), goldens pinning node ids (#642) and `~here` line numbers (#672), the schedule-composition property test the reduction forms need (#664).
+- Documentation: AGENTS.md/CLAUDE.md drift (#653), the dune 3.20 recipe fallback (#654), uncompiled doc examples (#660).
 
 ---
 
@@ -224,7 +251,8 @@ GitHub milestone scope: *"Consumers and explorations: models, reproductions, dem
 | **0.9** | Aug 3, 2026 | **released** | **Schedule quality, deterministic parallelism, mixed precision, convolution performance, and search survivability** |
 | **1.0** | Aug 13, 2026 | **released** | **Branch-and-bound schedule inference, inlining as a searchable decision, graph capture, software pipelining, rematerialization, CPU reduced precision, and the 2x `gpt2_mini` step** |
 | 1.1    | Aug 24, 2026 (soft) | planned | Performance carry-overs, algebraic rewrites, training-loop utilities: fused attention and the remaining conv tiers, the v1.0 search follow-ups, LR schedules and mmap checkpoint loading |
-| 1.2    | undated | planned | Consumers and explorations: models, reproductions, demos, integrations, the training experience, and hardware/evidence-gated performance items |
+| 1.2    | undated | planned | Performance-chasing in the approximate profile, demonstrated on benchmarks: the `approximate` preset, fused attention and Winograd, the exact-numerics residue, and the benchmark legs that expose wins and losses |
+| 1.3    | undated | planned | Consumers and explorations: models, reproductions, demos, integrations, the training experience, review-filed hygiene, and hardware-gated performance items |
 
 ---
 
