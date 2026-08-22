@@ -5,26 +5,28 @@
    move the per-step / per-segment loops inside the accumulator's scope, where
    [Schedule.rewrite_loop] still reaches them. The IR carried no provenance, so the descent could
    not be aimed: virtualization mints the same construct at every inlined read, and the menu began
-   proposing splits, swaps, unrolls and vectorize retypes for inlined interpolation and reduction
-   loops that no schedule op has ever been able to reach — descriptors that cost a candidate
-   compile each and, under the per-unit cap, displace proposals for the main nest.
+   proposing splits, swaps, unrolls AND vectorize retypes for inlined interpolation and reduction
+   loops — up to eight descriptors per loop, each costing a candidate compile and, under the
+   per-unit cap, displacing a proposal for the main nest.
+
+   The aim is by action CATEGORY, not by loop. An inlined loop keeps its [Vectorized] retype: that
+   is one descriptor and the only one with a renderer built for the shape — [try_vectorize_reduce]
+   recognizes an inlined reduction's [Set_local] accumulation, while the ENCLOSING loop cannot be
+   explicitly vectorized at all, its body holding a [Local_scope] the elementwise vectorizer bails
+   on. Dropping the inner loop wholesale destroys that candidate instead of moving it outward, which
+   is what the first attempt here did and what PR #424's review round 2 caught.
 
    [Low_level.scope_mint] is the fact that separates them. The probe is a controlled pair: ONE
    program shape — [out[i] = scope{ acc := out[i]; for k: acc := acc + x[i,k] }] — built twice,
-   the two copies differing in nothing but the scope's [mint] field. The schedule-minted copy is
-   the shape gh-ocannl-666 was for and its [k] must be proposable; the inlined copy is the
-   widening's collateral and its [k] must not be. The control that makes the second claim
-   discriminating: [k] is registry-nameable in the inlined copy too, so what keeps it out of the
-   menu is the provenance filter and not an unresolvable binder — the pre-687 descend-everything
-   walk would have enumerated it, which is exactly the behaviour under test.
+   the two copies differing in nothing but the scope's [mint] field. Both copies' [k] must keep the
+   vectorize retype; only the schedule-minted copy's [k] may draw Splits, Swaps and Unrolls. The
+   control that makes the negative half discriminating: [k] is registry-nameable in the inlined copy
+   too, so what keeps those categories away from it is the provenance decision and not an
+   unresolvable binder.
 
-   The last pair of claims is the one the exclusion has to earn (PR #424 review, P2). Narrowing the
-   enumeration WITHOUT narrowing [contains_loop] in step would leave this shape with no [Vectorized]
-   retype at either level: not at [k] (no longer enumerated) and not at [i] (still reading as
-   non-innermost because of [k]). Before gh-666 the outer loop drew that retype and after it the
-   inner one did; losing it at both levels would be a regression neither state had. So the two walks
-   share one provenance filter, and the two copies here must differ in WHICH loop is vectorizable,
-   never in whether one is. *)
+   The last claims are the ones the exclusion has to earn. The retype must stay on the loop that has
+   a renderer — [k] in BOTH copies — and must not migrate to [i], which cannot be explicitly
+   vectorized whoever minted the scope below it. *)
 
 open Base
 open Ocannl.Operation.DSL_modules
@@ -99,21 +101,31 @@ let () =
      absence from the menu is the provenance decision and nothing else. *)
   p "control: the inlined scope's inner loop is registry-nameable"
     (Option.is_some (SC.resolve reg_inline k));
+  let reshaping menu rf =
+    List.count menu ~f:(function
+      | SC.Split { axis; _ } | SC.Unroll { axis; _ } -> SC.equal_sym_ref axis rf
+      | SC.Swap { outer; inner } -> SC.equal_sym_ref outer rf || SC.equal_sym_ref inner rf
+      | _ -> false)
+  in
+  let reshaping_of reg menu sym =
+    match SC.resolve reg sym with None -> 0 | Some rf -> reshaping menu rf
+  in
   p "the schedule mint's scope-nested loop draws proposals" (count reg_mint menu_mint k > 0);
-  p "the virtualization inline's scope-nested loop draws none"
-    (count reg_inline menu_inline k = 0);
+  p "the schedule mint's scope-nested loop draws the reshaping categories"
+    (reshaping_of reg_mint menu_mint k > 0);
+  p "the virtualization inline's scope-nested loop draws none of them"
+    (reshaping_of reg_inline menu_inline k = 0);
   (* Only the scope-nested descriptors differ: the statement-level nest is untouched by the
      provenance filter. *)
-  p "the statement-level loop keeps its proposals under either mint (and gains one under the inline)"
-    (count reg_inline menu_inline i = count reg_mint menu_mint i + 1
-    && count reg_mint menu_mint i > 0);
-  p "the inlined copy's menu is the schedule mint's, minus its scope-nested part plus the outer \
-     retype that becomes available"
-    (List.length menu_inline + count reg_mint menu_mint k = List.length menu_mint + 1);
-  (* Innermost-ness is judged over the same loops the enumeration covers, so each copy offers the
-     retype at exactly one level: the mint at its scope-nested [k] (gh-ocannl-666's purpose), the
-     inline at the enclosing [i] (the pre-666 reading, restored for scopes no schedule op targets).
-     Neither copy is left without one. *)
+  p "the statement-level loop draws the same proposals under either mint"
+    (count reg_mint menu_mint i = count reg_inline menu_inline i && count reg_mint menu_mint i > 0);
+  p "the inlined copy's menu is the schedule mint's minus exactly its scope-nested reshaping part"
+    (List.length menu_inline + reshaping_of reg_mint menu_mint k = List.length menu_mint);
+  (* The retype stays on the loop a renderer can serve. [C_syntax]'s elementwise vectorizer bails
+     on a body holding a [Local_scope], and an accumulating bailout falls back to a plain serial
+     loop, so a retype of [i] would render like the baseline whoever minted the scope below it;
+     [try_vectorize_reduce] serves [k]'s [Set_local] accumulation in both copies. Hence: same
+     answer under either mint, and it is the inner loop. *)
   let vectorizes reg menu sym =
     match SC.resolve reg sym with
     | None -> 0
@@ -122,11 +134,10 @@ let () =
           | SC.Retype { axis; ty = LL.Vectorized } -> SC.equal_sym_ref axis rf
           | _ -> false)
   in
-  p "the schedule mint offers the Vectorized retype at its scope-nested loop"
-    (vectorizes reg_mint menu_mint k = 1 && vectorizes reg_mint menu_mint i = 0);
-  p "the inlined copy offers it at the enclosing loop instead"
-    (vectorizes reg_inline menu_inline i = 1 && vectorizes reg_inline menu_inline k = 0);
-  p "neither copy is left with no Vectorized candidate at all"
-    (vectorizes reg_mint menu_mint k + vectorizes reg_mint menu_mint i > 0
-    && vectorizes reg_inline menu_inline k + vectorizes reg_inline menu_inline i > 0);
+  p "the inlined copy keeps the Vectorized retype on its scope-nested loop"
+    (vectorizes reg_inline menu_inline k = 1);
+  p "the schedule mint keeps it there too — the mint decides categories, not this one"
+    (vectorizes reg_mint menu_mint k = 1);
+  p "neither copy proposes vectorizing the enclosing loop, which no renderer would serve"
+    (vectorizes reg_mint menu_mint i = 0 && vectorizes reg_inline menu_inline i = 0);
   Stdio.printf "\nDone.\n%!"

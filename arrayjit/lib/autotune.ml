@@ -1289,6 +1289,9 @@ type loop_desc = {
   ld_axis : LL.axis_type;
   ld_innermost : bool;
   ld_accumulating : bool;
+  ld_inlined : bool;
+      (** Reached by descending through a virtualization-inlined [Local_scope] (gh-ocannl-687).
+          Decides which action CATEGORIES may propose for it, not whether it is enumerated. *)
   ld_perfect_child : (SC.sym_ref * Idx.symbol * LL.axis_type) option;
 }
 
@@ -1299,13 +1302,12 @@ type loop_desc = {
    conditions nor [Tile_mma] fallbacks (transforming those is never profitable and often
    invalid).
 
-   [mints] selects which scopes to enter by provenance (gh-ocannl-687): all of them by default,
-   which is what "does this loop have an inner loop at all" wants, and the schedule mints alone
-   where the question is which loops a schedule op could target. *)
-let stmt_scope_bodies ?(mints = fun (_ : LL.scope_mint) -> true) (stmt : LL.t) : LL.t list =
+   Each body comes with its scope's provenance (gh-ocannl-687), which every caller here descends
+   into but which decides what the menu then proposes for the loops found there. *)
+let stmt_scope_bodies (stmt : LL.t) : (LL.t * LL.scope_mint) list =
   let rec scalar (llsc : LL.scalar_t) =
     match llsc with
-    | LL.Local_scope { body; mint; _ } -> if mints mint then [ body ] else []
+    | LL.Local_scope { body; mint; _ } -> [ (body, mint) ]
     | LL.Get_dynamic { dyn_value = v, _; _ } -> scalar v
     | LL.Ternop (_, (a, _), (b, _), (c, _)) -> scalar a @ scalar b @ scalar c
     | LL.Binop (_, (a, _), (b, _)) -> scalar a @ scalar b
@@ -1320,26 +1322,21 @@ let stmt_scope_bodies ?(mints = fun (_ : LL.scope_mint) -> true) (stmt : LL.t) :
   | LL.Set_from_vec { arg = a, _; _ } -> scalar a
   | _ -> []
 
-(* Whether [llc] contains a nested loop, [Local_scope] bodies included (gh-ocannl-666), so a loop
-   whose only inner loops sit inside an accumulator's scope does not read as innermost. [mints]
-   selects which scopes count, and its two callers pass different things ON PURPOSE:
-
-   - [collect_loops]'s [ld_innermost] passes the schedule mints, matching its own enumeration. The
-     predicate there means "innermost among the loops this menu can propose for", and the two halves
-     must agree: with the enumeration narrowed to the schedule mints (gh-ocannl-687) but this walk
-     left wide, a nest whose inner loop is a virtualization inline would draw a [Vectorized] retype
-     at NEITHER level — not at the inner one (not enumerated) and not at the outer one (read as
-     non-innermost) — where before gh-666 the outer loop drew one and after it the inner loop did.
-     Losing a candidate at both levels is the regression that agreement avoids; gh-666's own purpose
-     survives it, since an accumulation mint's loops still count.
-   - [collect_serial_triples] passes the default, descending everything. Its question is the
-     structural one — is this triple perfectly nested with a scalar innermost body — and a
-     [Tile_mma] micro-kernel over a body that emits a loop is not one, whoever minted the scope. *)
-let rec contains_loop ?(mints = fun (_ : LL.scope_mint) -> true) = function
-  | LL.Seq (a, b) -> contains_loop ~mints a || contains_loop ~mints b
-  | LL.If { body; _ } -> contains_loop ~mints body
+(* Whether [llc] contains a nested loop, [Local_scope] bodies of BOTH provenances included
+   (gh-ocannl-666), so a loop whose only inner loops sit inside a scope does not read as innermost.
+   Provenance-blind on purpose (PR #424 review round 2): innermost-ness decides which loop a
+   [Vectorized] retype is proposed for, and the renderer answers that question structurally. An
+   outer loop whose body holds a [Local_scope] cannot be explicitly vectorized at all —
+   [C_syntax]'s elementwise vectorizer bails on [Local_scope] / [Get_local], and an accumulating
+   bailout falls back to a plain serial loop — so calling it innermost would propose a retype that
+   renders exactly like the baseline. The inlined reduction one level down is the loop that has a
+   renderer ([try_vectorize_reduce] recognizes its [Set_local] accumulation), which is why
+   [collect_loops] keeps enumerating it. *)
+let rec contains_loop = function
+  | LL.Seq (a, b) -> contains_loop a || contains_loop b
+  | LL.If { body; _ } -> contains_loop body
   | LL.For_loop _ -> true
-  | stmt -> List.exists (stmt_scope_bodies ~mints stmt) ~f:(contains_loop ~mints)
+  | stmt -> List.exists (stmt_scope_bodies stmt) ~f:(fun (b, _) -> contains_loop b)
 
 (* Loops proposable for schedule ops: the statement-level nest structure plus the loops inside
    [Local_scope] bodies (gh-ocannl-666) — since gh-ocannl-639 the accumulation mints of [Unroll
@@ -1355,24 +1352,29 @@ let rec contains_loop ?(mints = fun (_ : LL.scope_mint) -> true) = function
    [Local_scope]); [Tensorize] is the exception, which is why [collect_serial_triples] below stays
    out of scopes.
 
-   Only the SCHEDULE mints are entered (gh-ocannl-687). Virtualization mints the same construct at
-   every inlined read, and gh-ocannl-666's widening — which had no provenance to go on — therefore
-   also enumerated the inlined interpolation and reduction loops of a base lowering. Note what the
-   argument for excluding them is NOT: [Schedule.rewrite_loop] descends every [Local_scope] body, so
-   such a loop is mechanically rewritable and a proposal naming it would apply. The argument is
-   about where a capped budget goes — nothing had proposed for these before gh-666, they are tiny
-   (re-instantiated per use site, so a win on one is a win on one use), and every descriptor they add
-   costs a candidate compile and displaces a proposal for the main nest. [Low_level.scope_mint] is
-   the fact that separates them; [contains_loop] above is narrowed in step, so the enclosing loop
-   becomes proposable in their stead rather than the shape losing its candidate at both levels. *)
-let collect_loops ?(mints = LL.equal_scope_mint LL.Schedule_minted) registry llc =
+   Both provenances are entered, and each descriptor records which (gh-ocannl-687's [ld_inlined]).
+   The distinction is NOT about reachability — [Schedule.rewrite_loop] descends every [Local_scope],
+   so a proposal naming an inlined loop applies — and it is not about which loops exist. It is about
+   which CATEGORY is worth a candidate compile on a loop virtualization re-instantiates per use
+   site (PR #424 review round 2, correcting a first attempt that dropped such loops wholesale):
+
+   - [Vectorized] retypes stay proposable there, and must. That is one descriptor, and it is the
+     only one with a renderer built for the shape: an inlined reduction's [Set_local] accumulation is
+     exactly what [C_syntax.try_vectorize_reduce] recognizes, while the enclosing loop cannot be
+     explicitly vectorized at all (its body holds a [Local_scope]). Excluding the inner loop does
+     not move the candidate outward, it destroys it.
+   - [Split]s, [Swap]s and [Unroll]s do not. Up to eight descriptors per loop, no evidence any of
+     them pays on a per-use-site inline, and each one costs a candidate compile and — under the
+     per-unit cap — displaces a proposal for the main nest. Nothing proposed them before gh-666,
+     whose widening was aimed at the accumulation mints and swept these in for want of provenance. *)
+let collect_loops registry llc =
   let acc = ref [] in
   let seen = Hash_set.create (module Idx.Symbol) in
-  let rec walk = function
+  let rec walk ~inlined = function
     | LL.Seq (a, b) ->
-        walk a;
-        walk b
-    | LL.If { body; _ } -> walk body
+        walk ~inlined a;
+        walk ~inlined b
+    | LL.If { body; _ } -> walk ~inlined body
     | LL.For_loop { index; from_; to_; body; axis; _ } ->
         (match SC.resolve registry index with
         | Some ld_ref when not (Hash_set.mem seen index) ->
@@ -1390,16 +1392,22 @@ let collect_loops ?(mints = LL.equal_scope_mint LL.Schedule_minted) registry llc
                 ld_from_ = from_;
                 ld_extent = to_ - from_ + 1;
                 ld_axis = axis;
-                ld_innermost = not (contains_loop ~mints body);
+                ld_innermost = not (contains_loop body);
                 ld_accumulating = LL.has_accumulation body;
+                ld_inlined = inlined;
                 ld_perfect_child;
               }
               :: !acc
         | _ -> ());
-        walk body
-    | stmt -> List.iter (stmt_scope_bodies ~mints stmt) ~f:walk
+        walk ~inlined body
+    | stmt ->
+        List.iter (stmt_scope_bodies stmt) ~f:(fun (body, mint) ->
+            walk
+              ~inlined:
+                (inlined || LL.equal_scope_mint mint LL.Inlined_computation)
+              body)
   in
-  walk llc;
+  walk ~inlined:false llc;
   List.rev !acc
 
 (* Perfectly nested serial triples (with extents), for Tensorize proposals. Statement-level only,
@@ -1488,13 +1496,9 @@ let menu ?(admits = fun (_ : SC.saved_optop) -> true) ~is_cpu ~is_gpu
     ~(limits : Ir.Backend_intf.hardware_limits) ~registry (opt : LL.optimized) :
     SC.saved_optop list =
   let loops = collect_loops registry opt.LL.llc in
-  (* gh-ocannl-687: what the provenance filter held back, so the narrowing is visible rather than
-     silent. Computed only when the search log is on -- it is a second walk of the program. *)
-  let withheld =
-    if Lazy.force log_enabled then
-      List.length (collect_loops ~mints:(fun _ -> true) registry opt.LL.llc) - List.length loops
-    else 0
-  in
+  (* gh-ocannl-687: how many enumerated loops are offered the [Vectorized] retype alone because
+     virtualization inlined them, so the narrowing is visible rather than silent. *)
+  let inlined_loops = List.count loops ~f:(fun ld -> ld.ld_inlined) in
   (* Menu proposals carry their raw-symbol counterpart so the op-legality oracle (gh-494 waypoint 3)
      can veto proven-illegal ones before they cost a candidate compile; [Op_unknown] proposals
      proceed to compile-and-time exactly as before (the oracle's Unknown is never a rejection). *)
@@ -1510,7 +1514,8 @@ let menu ?(admits = fun (_ : SC.saved_optop) -> true) ~is_cpu ~is_gpu
         (* [Sched.Split]'s index arithmetic requires a zero-origin loop (its apply raises
            otherwise); nonzero-origin loops — [Partition] segments after the first — are still in
            [loops] for the origin-agnostic families below. *)
-        if not (LL.equal_axis_type ld.ld_axis LL.Serial) || ld.ld_from_ <> 0 then []
+        if not (LL.equal_axis_type ld.ld_axis LL.Serial) || ld.ld_from_ <> 0 || ld.ld_inlined then
+          []
         else
           List.filter_map split_factors ~f:(fun factor ->
               if factor < ld.ld_extent && ld.ld_extent % factor = 0 then
@@ -1524,7 +1529,7 @@ let menu ?(admits = fun (_ : SC.saved_optop) -> true) ~is_cpu ~is_gpu
   let swaps =
     List.filter_map loops ~f:(fun ld ->
         match (ld.ld_axis, ld.ld_perfect_child) with
-        | LL.Serial, Some (child, child_sym, LL.Serial) ->
+        | LL.Serial, Some (child, child_sym, LL.Serial) when not ld.ld_inlined ->
             gate
               ( SC.Swap { outer = ld.ld_ref; inner = child },
                 Sched.Swap { outer = ld.ld_sym; inner = child_sym } )
@@ -1532,7 +1537,7 @@ let menu ?(admits = fun (_ : SC.saved_optop) -> true) ~is_cpu ~is_gpu
   in
   let unrolls =
     List.concat_map loops ~f:(fun ld ->
-        if LL.equal_axis_type ld.ld_axis LL.Serial && ld.ld_extent <= 8 then
+        if LL.equal_axis_type ld.ld_axis LL.Serial && ld.ld_extent <= 8 && not ld.ld_inlined then
           List.filter_map [ true; false ] ~f:(fun materialize ->
               gate
                 ( SC.Unroll { axis = ld.ld_ref; materialize },
@@ -1586,11 +1591,11 @@ let menu ?(admits = fun (_ : SC.saved_optop) -> true) ~is_cpu ~is_gpu
      vectorize"
     (List.length triples) (List.length tensorizes) (List.length splits) (List.length swaps)
     (List.length unrolls) (List.length vectorizes);
-  if withheld > 0 then
+  if inlined_loops > 0 then
     logf
-      "menu: %d loop(s) inside virtualization-inlined scopes not enumerated (gh-ocannl-687: no \
-       schedule op reaches them)"
-      withheld;
+      "menu: %d loop(s) inside virtualization-inlined scopes offered the Vectorized retype only \
+       (gh-ocannl-687: no Split/Swap/Unroll proposals for a per-use-site inline)"
+      inlined_loops;
   (* gh-ocannl-685 review: [admits] runs BEFORE the cap, so the budget is shared over the moves the
      caller can actually use rather than over moves it is about to discard. The beam's GPU rule is
      the case that matters: expanding an incumbent that binds no hardware dimension is worthwhile

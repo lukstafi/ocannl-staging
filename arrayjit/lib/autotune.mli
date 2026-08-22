@@ -353,11 +353,14 @@ val menu :
     permutations, each proposal vetted by {!Ir.Schedule.op_legality} (proven-illegal ones are pruned
     before they cost a candidate compile; [Op_unknown] proceeds to compile-and-time). The loop
     enumeration descends into accumulation-minted [Local_scope] bodies and treats binder-sharing
-    mint copies as one decision (gh-ocannl-666) -- into THOSE bodies only, not into virtualization's
-    inlined computations, which mint the same construct at every inlined read
-    ([Ir.Low_level.scope_mint], gh-ocannl-687); the enclosing loop is then judged innermost and
-    proposable in their stead, so such a nest keeps a candidate rather than losing one at both
-    levels.
+    mint copies as one decision (gh-ocannl-666). It descends virtualization's inlined computations
+    too, but a loop reached through one draws the [Retype]-[Vectorized] proposal ALONE
+    ([Ir.Low_level.scope_mint], gh-ocannl-687): that is the one category with a renderer built for
+    the shape (an inlined reduction's [Set_local] accumulation is what
+    [C_syntax.try_vectorize_reduce] recognizes, and the enclosing loop -- whose body holds a
+    [Local_scope] -- cannot be explicitly vectorized at all), while [Split]s, [Swap]s and [Unroll]s
+    there are up to eight descriptors per loop that nothing proposed before gh-666 and that displace
+    proposals for the main nest.
 
     The per-unit action cap is shared across the categories by {!share_cap} rather than spent in
     category order (gh-ocannl-685). [admits] filters proposals BEFORE that cap, so the budget is
