@@ -753,8 +753,15 @@ def ulp32(x):
     return 2.0**((math.frexp(x)[1]-1)-23)
 # NaN/inf must be rejected BEFORE any span arithmetic: `max(0, nan)` is 0 in Python, so a run whose
 # losses are all NaN would leave `worst` at zero and print PASSED -- a correctness gate certifying
-# the precise outcome it exists to catch.
-nonfinite=sorted({c for L,ks in seqs.items() for c in ks if not all(math.isfinite(v) for v in L)})
+# the precise outcome it exists to catch. A diverged loss now arrives as JSON `null` rather than as
+# a line that failed to parse at all (gh-ocannl-676), so the test is None-aware and the exit is
+# immediate: the span arithmetic below would raise a TypeError on it, which is a traceback where a
+# finding belongs.
+def isfin(v):
+    return isinstance(v,(int,float)) and not isinstance(v,bool) and math.isfinite(v)
+nonfinite=sorted({c for L,ks in seqs.items() for c in ks if not all(isfin(v) for v in L)})
+if nonfinite:
+    sys.exit("FAILED: non-finite losses (null/NaN/inf) in: " + " ".join(nonfinite))
 worst=0.0
 print("per-step agreement across ALL runs:")
 for i in range(len(next(iter(seqs)))):
@@ -765,7 +772,6 @@ maxulp=float(sys.argv[2]); expect=int(sys.argv[3])
 print(f"WORST: {worst:.0f} f32 ulp (threshold {maxulp:.0f}). NOT bit-identity -- state it as"
       "\n       agreement to within that many ulp.")
 bad=[]
-if nonfinite: bad.append(f"non-finite losses (NaN/inf) in: {' '.join(nonfinite)}")
 if worst > maxulp: bad.append(f"loss divergence {worst:.0f} ulp exceeds PARITY_MAX_ULP={maxulp:.0f}")
 # EXPECT_RUNS counts SEARCH cells; pass-2 records are extra coverage, not extra cells.
 searched=sum(1 for ks in seqs.values() for c in ks if not c.endswith("[pass2]"))

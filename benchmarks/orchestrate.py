@@ -717,9 +717,11 @@ def main():
             if override:
                 r.update(override)
             results.append(r)
-            # Stream each cell as it lands so an interrupted run keeps its results.
+            # Stream each cell as it lands so an interrupted run keeps its results. Through
+            # json_safe like the final file: an interrupted run's rows are read by the same
+            # readers, and a diverged cell is exactly the one an operator interrupts around.
             with open(partial, "a") as f:
-                f.write(json.dumps(r) + "\n")
+                f.write(json.dumps(json_safe(r), allow_nan=False) + "\n")
         else:
             failures.append(label)
         print(f"    cell took {time.monotonic() - t0:.0f}s", flush=True)
