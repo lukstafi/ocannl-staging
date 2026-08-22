@@ -27,7 +27,7 @@ Test 5 - einsum variable capture:
 Test 6 - row-dimension equality:
   Row variable s (product): 6
   Dimension variable test_dim: 6
-  s == test_dim constraint satisfied: true (both should be 6)
+  s == test_dim constraint satisfied (both should be 6): true
 === All tests completed ===
 
 === Testing shape validation integration with equality constraints ===

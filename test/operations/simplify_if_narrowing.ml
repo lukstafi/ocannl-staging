@@ -22,73 +22,43 @@ module Asgns = Ir.Assignments
 let p = Verdict.p
 let single = Ops.single
 let iprec = Ops.index_prec ()
-let next_id = ref 7000
 
-let mk ?(dims = [| 16 |]) label =
-  Int.incr next_id;
-  Tn.create (Tn.Specified single) ~id:!next_id ~label:[ label ]
-    ~unpadded_dims:(lazy dims)
-    ~padding:(lazy None)
-    ()
-
-(* --- low-level builders --- *)
-let sym () = Idx.get_symbol ()
-let iter s = Idx.Iterator s
-let embed idx : LL.scalar_t = LL.Embed_index idx
-let ivar s = embed (iter s)
-let ic i : LL.scalar_t = LL.Constant (Float.of_int i)
+(* Builders and structural counters come from [Ll_test] (gh-ocannl-600, gh-ocannl-608): the
+   index-precision comparison and connective builders this file needed are now part of that shared
+   set, so a guard is spelled the same way here and in every other hand-built-IR test. The names
+   below are this file's vocabulary for them, not a second implementation. *)
+let mk = Ll_test.node_factory ~first_id:7000 ~dims:[| 16 |] ()
+let sym = Ll_test.sym
+let iter = Ll_test.iter
+let embed = Ll_test.embed_idx
+let ivar = Ll_test.embed
+let ic = Ll_test.ic
 
 (* [Σ coeff*sym + offset] as an index expression. *)
-let affine_idx symbols offset = Idx.Affine { symbols; offset }
+let affine_idx = Ll_test.aff
 let affine symbols offset = embed (affine_idx symbols offset)
-let cmp op a b : LL.scalar_t = LL.Binop (op, (a, iprec), (b, iprec))
-let lt = cmp Ops.Cmplt
-let le = cmp Ops.Cmple
-let eq = cmp Ops.Cmpeq
-let ne = cmp Ops.Cmpne
-let conj a b : LL.scalar_t = LL.Binop (Ops.And, (a, iprec), (b, iprec))
-let disj a b : LL.scalar_t = LL.Binop (Ops.Or, (a, iprec), (b, iprec))
+let lt = Ll_test.lt
+let le = Ll_test.le
+let eq = Ll_test.eq
+let ne = Ll_test.ne
+let conj = Ll_test.conj
+let disj = Ll_test.disj
 
 (* The zero-fringe shape: [cond ? src[idx] : 0]. *)
 let where_zero cond src idx : LL.scalar_t =
-  LL.Ternop (Ops.Where, (cond, iprec), (LL.Get (src, [| idx |]), single), (LL.Constant 0., single))
+  Ll_test.where_ cond (Ll_test.get src [| idx |]) (Ll_test.c 0.)
 
-let set_at dst idx llsc : LL.t = LL.Set { tn = dst; idcs = [| idx |]; llsc; debug = "" }
+let set_at = Ll_test.set_at
 let set dst s llsc : LL.t = set_at dst (iter s) llsc
-
-let loop ?(from_ = 0) ~to_ s body : LL.t =
-  LL.For_loop { index = s; from_; to_; body; axis = Serial }
-
-let if_ cond body : LL.t = LL.If { cond = (cond, iprec); body }
+let loop ?from_ ~to_ s body : LL.t = Ll_test.loop ?from_ ~upto:to_ s body
+let if_ = Ll_test.if_idx
 
 (* --- structural probes on the simplified form --- *)
-let rec count ~f_stmt ~f_scalar (llc : LL.t) : int =
-  (if f_stmt llc then 1 else 0)
-  +
-  match llc with
-  | LL.Seq (a, b) -> count ~f_stmt ~f_scalar a + count ~f_stmt ~f_scalar b
-  | LL.For_loop { body; _ } | LL.If { body; _ } -> count ~f_stmt ~f_scalar body
-  | LL.Set { llsc; _ } | LL.Set_local (_, llsc) -> count_s ~f_stmt ~f_scalar llsc
-  | _ -> 0
-
-and count_s ~f_stmt ~f_scalar (llsc : LL.scalar_t) : int =
-  (if f_scalar llsc then 1 else 0)
-  +
-  let loop = count_s ~f_stmt ~f_scalar in
-  match llsc with
-  | LL.Ternop (_, (a, _), (b, _), (c, _)) -> loop a + loop b + loop c
-  | LL.Binop (_, (a, _), (b, _)) -> loop a + loop b
-  | LL.Unop (_, (a, _)) -> loop a
-  | LL.Local_scope { body; _ } -> count ~f_stmt ~f_scalar body
-  | _ -> 0
-
-let never _ = false
-
 let wheres llc =
-  count llc ~f_stmt:never ~f_scalar:(function LL.Ternop (Ops.Where, _, _, _) -> true | _ -> false)
+  Ll_test.count_scalar llc ~f:(function LL.Ternop (Ops.Where, _, _, _) -> true | _ -> false)
 
-let ifs llc = count llc ~f_stmt:(function LL.If _ -> true | _ -> false) ~f_scalar:never
-let zeros llc = count llc ~f_stmt:never ~f_scalar:(function LL.Constant 0. -> true | _ -> false)
+let ifs llc = Ll_test.count_stmt llc ~f:(function LL.If _ -> true | _ -> false)
+let zeros llc = Ll_test.count_scalar llc ~f:(function LL.Constant 0. -> true | _ -> false)
 let simplify llc = LL.simplify_llc [] llc
 
 (* The motivating shape, parameterized by the guard wrapping the inner nest: two k-blocks of 16 over

@@ -136,12 +136,12 @@ let () =
      significand bits, so parity is bitwise on either rendering and accumulator width. *)
   let mab =
     NTDSL.init ~l:"mab" ~prec:Ir.Ops.bfloat16 ~i:[ n ] ~o:[ n ]
-      ~f:(fun idcs -> Float.of_int (((idcs.(0) * n) + idcs.(1)) % 3) *. 0.25)
+      ~f:(Ll_test.cycle ~dims:[| n; n |] ~modulus:3 ~offset:0. ~stride:0.25)
       ()
   in
   let mbb =
     NTDSL.init ~l:"mbb" ~prec:Ir.Ops.bfloat16 ~i:[ n ] ~o:[ n ]
-      ~f:(fun idcs -> (Float.of_int (((idcs.(0) * n) + idcs.(1)) % 5) -. 2.) *. 0.5)
+      ~f:(Ll_test.cycle ~dims:[| n; n |] ~modulus:5 ~offset:(-2.) ~stride:0.5)
       ()
   in
   let%op bc0 = mab * mbb in
@@ -185,12 +185,12 @@ let () =
      the accumulator's width, not the blocking.) *)
   let mai =
     NTDSL.init ~l:"mai" ~prec:Ir.Ops.bfloat16 ~i:[ n ] ~o:[ n ]
-      ~f:(fun idcs -> Float.of_int ((((idcs.(0) * n) + idcs.(1)) % 3) + 1) *. 0.375)
+      ~f:(Ll_test.cycle ~dims:[| n; n |] ~modulus:3 ~offset:1. ~stride:0.375)
       ()
   in
   let mbi =
     NTDSL.init ~l:"mbi" ~prec:Ir.Ops.bfloat16 ~i:[ n ] ~o:[ n ]
-      ~f:(fun idcs -> (Float.of_int (((idcs.(0) * n) + idcs.(1)) % 5) -. 1.5) *. 0.625)
+      ~f:(Ll_test.cycle ~dims:[| n; n |] ~modulus:5 ~offset:(-1.5) ~stride:0.625)
       ()
   in
   let%op ic0 = mai * mbi in
@@ -213,12 +213,12 @@ let () =
      the B operand is additionally declared constant so the hoisted pack applies to it. *)
   let mah =
     NTDSL.init ~l:"mah" ~prec:Ir.Ops.half ~i:[ n ] ~o:[ n ]
-      ~f:(fun idcs -> Float.of_int (((idcs.(0) * n) + idcs.(1)) % 5) *. 0.125)
+      ~f:(Ll_test.cycle ~dims:[| n; n |] ~modulus:5 ~offset:0. ~stride:0.125)
       ()
   in
   let mbh =
     NTDSL.init ~l:"mbh" ~prec:Ir.Ops.half ~i:[ n ] ~o:[ n ]
-      ~f:(fun idcs -> (Float.of_int (((idcs.(0) * n) + idcs.(1)) % 7) -. 3.) *. 0.25)
+      ~f:(Ll_test.cycle ~dims:[| n; n |] ~modulus:7 ~offset:(-3.) ~stride:0.25)
       ()
   in
   Tn.set_host_constant mbh.Tensor.value;

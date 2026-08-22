@@ -30,9 +30,14 @@ let param_by_label l name =
       String.equal (Ir.Tnode.debug_name t.Tensor.value) name)
 
 let show_placement label ctx tn =
+  (* [in context] is descriptive -- a virtualized gradient legitimately has no context entry, which
+     is the point of legs 1 and 2. Observation intent is the claim this test exists to pin, on every
+     lineage, so it is asserted here while the line keeps its shape. *)
+  let observable = Tn.is_observable tn in
   printf "%s placement: %s; in context: %b; observable intent: %b\n" label
     (Tn.Placements.debug (Context.placements ctx) tn)
-    (Context.mem ctx tn) (Tn.is_observable tn)
+    (Context.mem ctx tn) observable;
+  Verdict.claimf "%s carries observation intent" label observable
 
 let show_values label ctx tn =
   printf "%s:" label;

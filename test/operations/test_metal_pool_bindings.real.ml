@@ -9,7 +9,7 @@
    [set_buffer] calls and could not be encoded; with pooled binding the 40 constants share a
    constant pool reached via the in-shader pool array, so only a handful of pools are bound. If
    Metal regressed to O(num_tnodes) bindings, encoding this kernel would fail (or silently mis-bind)
-   and the "correct sum" assertion below would not hold. The harness condition that instantiates the
+   and the "correct sum" claim below would fail the run. The harness condition that instantiates the
    AC is [n = 40 > 31]: a small-graph variant would pass even under the old per-tnode binding. *)
 
 open! Base
@@ -38,7 +38,7 @@ let () =
   (* sum_i (i+1) = 820 ; sum_i (i+1.5) = 820 + 40*0.5 = 840 *)
   let expected = [| 820.; 840. |] in
   Stdio.printf "materialized nodes read by one kernel = %d\n" n;
-  Stdio.printf "exceeds Metal ~31 binding limit = %b\n" (n > 31);
-  Stdio.printf "pooled binding computed the correct sum = %b\n"
+  Verdict.p "exceeds Metal ~31 binding limit" (n > 31);
+  Verdict.p "pooled binding computed the correct sum"
     (Array.length got = 2
     && Array.for_all2_exn got expected ~f:(fun a b -> Float.(abs (a - b) < 1e-2)))

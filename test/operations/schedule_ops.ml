@@ -52,7 +52,9 @@ let named name (comp : Asgns.comp) : Asgns.comp =
 
 let () =
   let av = Array.init 32 ~f:(fun i -> Float.of_int i *. 0.5) in
-  let bv = Array.init 32 ~f:(fun i -> Float.of_int (i % 7) -. 3.) in
+  let bv =
+    Array.init 32 ~f:(Ll_test.cycle_flat ~dims:[| 4; 8 |] ~modulus:7 ~offset:(-3.) ~stride:1.)
+  in
   let expected_c = Array.init 32 ~f:(fun i -> av.(i) +. bv.(i)) in
   let a = TDSL.ndarray av ~label:[ "a" ] ~output_dims:[ 4; 8 ] () in
   let b = TDSL.ndarray bv ~label:[ "b" ] ~output_dims:[ 4; 8 ] () in
@@ -133,7 +135,9 @@ let () =
   (* --- The default GPU annotator on a two-nest elementwise kernel (4x8 and 6x8: unequal Grid
      extents => launch-extent guard on GPU backends) --- *)
   let ev = Array.init 48 ~f:(fun i -> Float.of_int i *. 0.25) in
-  let fv = Array.init 48 ~f:(fun i -> Float.of_int ((i % 5) + 1)) in
+  let fv =
+    Array.init 48 ~f:(Ll_test.cycle_flat ~dims:[| 6; 8 |] ~modulus:5 ~offset:1. ~stride:1.)
+  in
   let expected_c2 = Array.init 48 ~f:(fun i -> ev.(i) *. fv.(i)) in
   let e = TDSL.ndarray ev ~label:[ "e" ] ~output_dims:[ 6; 8 ] () in
   let f = TDSL.ndarray fv ~label:[ "f" ] ~output_dims:[ 6; 8 ] () in
@@ -169,8 +173,12 @@ let () =
 
   (* --- The default GPU annotator on a matmul: values must match the unscheduled twin whatever the
      conservative analysis decides (reduction loops stay serial in the preset) --- *)
-  let mav = Array.init 20 ~f:(fun i -> Float.of_int (i % 7) *. 0.5) in
-  let mbv = Array.init 30 ~f:(fun i -> Float.of_int (i % 11) -. 4.) in
+  let mav =
+    Array.init 20 ~f:(Ll_test.cycle_flat ~dims:[| 4; 5 |] ~modulus:7 ~offset:0. ~stride:0.5)
+  in
+  let mbv =
+    Array.init 30 ~f:(Ll_test.cycle_flat ~dims:[| 5; 6 |] ~modulus:11 ~offset:(-4.) ~stride:1.)
+  in
   let ma = TDSL.ndarray mav ~label:[ "ma" ] ~input_dims:[ 5 ] ~output_dims:[ 4 ] () in
   let mb = TDSL.ndarray mbv ~label:[ "mb" ] ~input_dims:[ 6 ] ~output_dims:[ 5 ] () in
   let run_mm ~name ~transform =

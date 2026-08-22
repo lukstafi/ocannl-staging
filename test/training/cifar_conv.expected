@@ -9,7 +9,7 @@ Epoch 40: avg loss = 0.8
 Epoch 50: avg loss = 0.7
 
 Evaluating on 1000 test samples...
-Test loss below 2.3 = true
-Test accuracy above 15% = true
+Test loss below 2.3: true
+Test accuracy above 15%: true
 
 Training complete!

@@ -54,7 +54,7 @@ let () =
   Stdio.printf "gathered = [%s]\n"
     (String.concat ~sep:" " (Array.to_list (Array.map gv ~f:(Printf.sprintf "%g"))));
   let original = Parallel.host_values batch in
-  Stdio.printf "round-trip identity = %b\n" (Array.equal Float.equal original gv);
+  Verdict.p "round-trip identity" (Array.equal Float.equal original gv);
 
   (* Invalid configurations must raise. *)
   let raises f =
@@ -63,11 +63,11 @@ let () =
       false
     with Invalid_argument _ -> true
   in
-  Stdio.printf "n_shards<=0 raises = %b\n"
+  Verdict.p "n_shards<=0 raises"
     (raises (fun () -> ignore (Parallel.shard_along ~axis:0 ~n_shards:0 batch)));
-  Stdio.printf "uneven batch raises = %b\n"
+  Verdict.p "uneven batch raises"
     (raises (fun () -> ignore (Parallel.shard_along ~axis:0 ~n_shards:4 batch)));
-  Stdio.printf "axis<>0 raises = %b\n"
+  Verdict.p "axis<>0 raises"
     (raises (fun () -> ignore (Parallel.shard_along ~axis:1 ~n_shards:2 batch)));
 
   (* --- Part 2: raw-backend merge-buffer all-reduce (grad_sync core) --- *)

@@ -12,7 +12,6 @@
 
 open Base
 open Ocannl
-open Stdio
 open Nn_blocks.DSL_modules
 
 let () =
@@ -40,5 +39,5 @@ let () =
         ([| 1.; 2.; 1.; 2. |].(i) +. [| 3.; 1.; 4.; 1. |].(i)) *. [| 1.; 2.; 3.; 4. |].(i) *. s_val)
   in
   Array.iteri got ~f:(fun i g ->
-      printf "w.grad[%d] = %.2f, expected %.2f, ok: %b\n" i g expected.(i)
+      Verdict.pf "w.grad[%d] = %.2f, expected %.2f, ok" i g expected.(i)
         Float.(abs (g -. expected.(i)) < 1e-4 *. abs expected.(i)))

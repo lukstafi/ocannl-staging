@@ -48,7 +48,7 @@ let () =
   ignore (Train.forward_once (Context.auto ()) loss : Context.t);
   let h = find_by_name loss "relu" in
   let d = dims_of h in
-  Stdio.printf "close-down: relu(w) %s | batch-free=%b\n" (show_dims d) (Array.length d = 2)
+  Verdict.pf "close-down: relu(w) %s | batch-free" (show_dims d) (Array.length d = 2)
 
 let () =
   let x = batched_input "x2" in
@@ -57,7 +57,7 @@ let () =
   ignore (Train.forward_once (Context.auto ()) loss2 : Context.t);
   let s = find_by_name loss2 "stretch" in
   let d = dims_of s in
-  Stdio.printf "stretch: stretch(w2) %s | widened-to-batch=%b\n" (show_dims d)
+  Verdict.pf "stretch: stretch(w2) %s | widened-to-batch" (show_dims d)
     (Array.length d = 3 && d.(0) = batch)
 
 let () =
@@ -79,5 +79,5 @@ let () =
   let%op loss4 = y4 ++ "...|i=>0" in
   ignore (Train.forward_once (Context.auto ()) loss4 : Context.t);
   let d = dims_of one in
-  Stdio.printf "dim close-down: 0.5+0.5 %s | scalar=%b\n" (show_dims d)
+  Verdict.pf "dim close-down: 0.5+0.5 %s | scalar" (show_dims d)
     (Array.fold d ~init:1 ~f:( * ) = 1)

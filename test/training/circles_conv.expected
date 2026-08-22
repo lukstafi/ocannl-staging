@@ -23,6 +23,6 @@ Epoch 720: avg loss = 0.3
 Epoch 730: avg loss = 0.3
 Epoch 740: avg loss = 0.3
 Epoch 750: avg loss = 0.3
-Final avg loss below threshold=true
+Final avg loss below threshold: true
 
 Training complete!

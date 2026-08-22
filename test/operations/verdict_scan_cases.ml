@@ -32,10 +32,15 @@ let planted_plain = "planted canary: %b\n"
 let planted_continued = "planted canary over a \
                          continuation: %b\n"
 
-(* Formats that ARE the claim shape, with the label each yields. *)
+(* Formats that ARE the claim shape, with the label and kind each yields. *)
 let claim_cases =
   [
     ("the plain form", "fused: %b\n", "fused");
+    (* The separator vocabulary. Reading only a colon left the whole `= %b` population outside a
+       check written for it (gh-ocannl-624). *)
+    ("an equals separator", "round-trip identity = %b\n", "round-trip identity");
+    ("an equals with no space", "batch-free=%b\n", "batch-free");
+    ("an arrow separator", "hoisted -> %b\n", "hoisted");
     ("no trailing newline", "fused: %b", "fused");
     ("a blank line either side", "\nfused: %b\n\n", "fused");
     ("a flush directive consumes no argument", "fused: %b\n%!", "fused");
@@ -50,19 +55,39 @@ let claim_cases =
     ("the planted canary over a continuation", planted_continued, "planted canary over a continuation");
   ]
 
-(* Formats that are NOT, each for its own reason. The first is issue #624's population, deliberately
-   out of scope: what its claim even is takes per-site judgement. The rest are descriptive prints,
-   which is the escape hatch that keeps the exemption list short enough to read. *)
+(* Formats whose label is COMPUTED: the claim shape too, since gh-ocannl-624 gave them an entry
+   point ([Verdict.pf] / [Verdict.claimf]). The label is what survives rendering a head this reader
+   cannot fill in, which is why an exemption for one of these is keyed by the whole format. *)
+let computed_cases =
+  [
+    ("a leading string argument", "%s fused: %b\n", "fused");
+    ("an interpolated measurement", "Epoch %d, loss below threshold=%b\n", "Epoch , loss below threshold");
+    ("arguments on both sides of the label", "%s %s parallelizable: %b\n", "parallelizable");
+    (* The wrapper the pre-`Verdict` tests defined for themselves, and the exact shape this ratchet
+       exists to keep from regrowing: the whole label is the argument, so the rendered residual is
+       empty and the verbatim head has to speak for it. Reading that empty residual as "no label"
+       would have let the one form that matters straight back in (Codex P2, round 1). *)
+    ("a label built entirely from arguments", "%s: %b\n", "%s");
+    ("the same with a width", "%-22s: %b\n", "%-22s");
+    ("a numeric label", "%d: %b\n", "%d");
+    (* A census row of several booleans is this shape too, and that is the intent: it is the row
+       shape that needs an exemption, precisely because a reader cannot tell it from a verdict. *)
+    ("a second boolean before the last", "fused: %b %b\n", "fused");
+  ]
+
+(* Formats that are NOT, each for its own reason. What they have in common is that the line does not
+   END on a bare boolean behind a separator, which is what a verdict looks like; a print that
+   describes rather than decides almost always fails one of these. *)
 let non_claim_cases =
   [
-    ("a computed label is #624's, not this check's", "%s fused: %b\n");
-    ("a second boolean", "fused: %b %b\n");
     ("an interpolated value after the boolean", "fused: %b (%d blocks)\n");
     ("an annotation after the boolean", "fused: %b (expect false)\n");
     ("a width means the print is laying out a column", "fused: %6b\n");
     ("so does a left-justifying flag", "fused: %-6b\n");
     ("no colon, so no label", "fused? %b\n");
-    ("no label before the colon", ": %b\n");
+    (* Empty residual AND nothing to build one from: a literal label has to be non-empty, which is
+       what keeps this out while `"%s: %b\n"` is in. *)
+    ("no label before the colon, and no argument to make one", ": %b\n");
     ("a bare boolean", "%b\n");
     ("nothing before it but a blank line", "\n%b\n");
     ("not a boolean at all", "fused: %d\n");
@@ -129,11 +154,31 @@ let () = eprintf "fused: %b\n" true|ocaml},
 let show_printer = Option.value ~default:"<unapplied>"
 
 let () =
-  List.iter claim_cases ~f:(fun (name, format, expected) ->
-      match Scan.claim_label format with
-      | Some found when String.equal found expected -> printf "ok: claim shape -- %s\n" name
-      | Some found -> fail "claim shape -- %s: expected label %S, found %S" name expected found
-      | None -> fail "claim shape -- %s: expected label %S, found no claim" name expected);
+  let check_kind ~what ~expected (name, format, label) =
+    match Scan.claim_of format with
+    | Some (found, kind) when String.equal found label ->
+        if Poly.equal kind expected then printf "ok: %s -- %s\n" what name
+        else fail "%s -- %s: read the right label with the wrong kind" what name
+    | Some (found, _) -> fail "%s -- %s: expected label %S, found %S" what name label found
+    | None -> fail "%s -- %s: expected label %S, found no claim" what name label
+  in
+  List.iter claim_cases ~f:(check_kind ~what:"claim shape" ~expected:Scan.Literal_label);
+  List.iter computed_cases ~f:(check_kind ~what:"computed claim shape" ~expected:Scan.Computed_label);
+  (* The head is what an exemption is keyed by, so it has to be the format VERBATIM up to the
+     boolean -- conversions unrendered, and stopping before the `%b` so that writing one out is not
+     itself a claim. *)
+  List.iter
+    [
+      ("conversions are left unrendered", "%s fused: %b\n", "%s fused: ");
+      ("a width is kept", "%-22s option: %b\n", "%-22s option: ");
+      ("an earlier boolean is kept", "fused: %b tiled: %b\n", "fused: %b tiled: ");
+      ("a wholly computed label keeps its conversion", "%s: %b\n", "%s: ");
+    ]
+    ~f:(fun (name, format, expected) ->
+      match Scan.claim_site format with
+      | Some (_, _, head) when String.equal head expected -> printf "ok: claim head -- %s\n" name
+      | Some (_, _, head) -> fail "claim head -- %s: expected %S, found %S" name expected head
+      | None -> fail "claim head -- %s: expected %S, found no claim" name expected);
   List.iter non_claim_cases ~f:(fun (name, format) ->
       match Scan.claim_label format with
       | None -> printf "ok: not a claim -- %s\n" name

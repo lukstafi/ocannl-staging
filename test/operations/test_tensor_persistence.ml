@@ -379,8 +379,12 @@ let () =
       let name =
         if id < List.length precisions then fst (List.nth_exn precisions id) else "padded/single"
       in
+      let identical = String.equal decoded mapped in
       Stdio.printf "  %s: %s (mapped %s)\n" name decoded
-        (if String.equal decoded mapped then "identical" else "DIFFERS: " ^ mapped));
+        (if identical then "identical" else "DIFFERS: " ^ mapped);
+      (* The row renders the comparison itself, so the claim sits beside it on the same boolean:
+         "DIFFERS: ..." exits 0 and is promotable on its own (gh-ocannl-601). *)
+      Verdict.claimf "%s: mapped payload identical to the decoded one" name identical);
   (* Restore takes the same path, into already-existing device buffers. *)
   Tensor.unsafe_reinitialize ();
   let ctx = Context.cpu () in

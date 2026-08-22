@@ -146,7 +146,7 @@ let () =
     if epoch % 10 = 0 && (epoch <= 100 || epochs - epoch <= 100) then
       printf "Epoch %d: avg loss = %.1f\n%!" epoch (!epoch_loss /. Float.of_int n_batches);
     if epoch = epochs then
-      printf "Final avg loss below threshold=%b\n%!"
+      Verdict.p "Final avg loss below threshold"
         Float.(!epoch_loss /. Float.of_int n_batches < 0.3)
   done;
 

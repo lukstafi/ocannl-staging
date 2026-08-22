@@ -137,7 +137,7 @@ let test_set_dim_and_set_equal () =
   (* Verify they are equal *)
   let s_val = match s.var_ref.solved_dim with Some d -> d | None -> -1 in
   let dim_val = match dim_var.var_ref.solved_dim with Some d -> d | None -> -1 in
-  Stdio.printf "  s == test_dim constraint satisfied: %b (both should be 6)\n"
+  Verdict.p "  s == test_dim constraint satisfied (both should be 6)"
     (s_val = dim_val && s_val = 6);
 
   Stdio.printf "=== All tests completed ===\n"

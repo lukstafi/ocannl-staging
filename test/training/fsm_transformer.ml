@@ -1,6 +1,5 @@
 open Base
 open Ocannl
-open Stdio
 module IDX = Train.IDX
 open Nn_blocks.DSL_modules
 module Asgns = Ir.Assignments
@@ -218,7 +217,7 @@ let () =
         else if epoch = epochs / 2 then epoch_loss_limit_mid
         else epoch_loss_limit_last
       in
-      printf "Epoch %d, loss below threshold=%b\n%!" epoch Float.(!epoch_loss < limit)
+      Verdict.pf "Epoch %d, loss below threshold" epoch Float.(!epoch_loss < limit)
   done;
 
   (* === Held-out Evaluation (inference only, no gradient update) === We evaluate "valid transition
@@ -252,4 +251,4 @@ let () =
     done
   done;
   let accuracy = Float.of_int !correct /. Float.of_int total in
-  printf "Held-out valid-transition accuracy above 0.90=%b\n%!" Float.(accuracy >= 0.90)
+  Verdict.p "Held-out valid-transition accuracy above 0.90" Float.(accuracy >= 0.90)

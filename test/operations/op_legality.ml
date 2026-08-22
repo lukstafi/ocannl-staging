@@ -188,8 +188,12 @@ let () =
      and never a viable candidate — assert the equivalence per permutation. *)
   let open Ocannl.Operation.DSL_modules in
   let m = 8 in
-  let mav = Array.init (m * m) ~f:(fun q -> Float.of_int (q % 5) *. 0.5) in
-  let mbv = Array.init (m * m) ~f:(fun q -> Float.of_int (q % 7) -. 3.) in
+  let mav =
+    Array.init (m * m) ~f:(Ll_test.cycle_flat ~dims:[| m; m |] ~modulus:5 ~offset:0. ~stride:0.5)
+  in
+  let mbv =
+    Array.init (m * m) ~f:(Ll_test.cycle_flat ~dims:[| m; m |] ~modulus:7 ~offset:(-3.) ~stride:1.)
+  in
   let ma = TDSL.ndarray mav ~label:[ "olma" ] ~input_dims:[ m ] ~output_dims:[ m ] () in
   let mb = TDSL.ndarray mbv ~label:[ "olmb" ] ~input_dims:[ m ] ~output_dims:[ m ] () in
   let%op olmc = ma * mb in

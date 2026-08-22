@@ -5,7 +5,6 @@
    per-call generative backend functors, retired in favor of backend singletons). *)
 
 open Base
-open Stdio
 open Ocannl
 open Operation.DSL_modules
 module Tn = Ir.Tnode
@@ -21,9 +20,10 @@ let () =
   let set1 = Set.singleton (module Tn) tn1 in
   Tensor.unsafe_reinitialize ();
   let tn2 = make () in
-  printf "printed ids equal across reinitialize: %b (%s = %s)\n"
-    (String.equal (Tn.id tn1) (Tn.id tn2))
-    (Tn.id tn1) (Tn.id tn2);
+  (* The harness precondition: the ids DO collide across a reinitialization, which is what makes
+     every claim below non-vacuous. *)
+  Verdict.pf "printed ids equal across reinitialize (%s = %s)" (Tn.id tn1) (Tn.id tn2)
+    (String.equal (Tn.id tn1) (Tn.id tn2));
   Verdict.p "stale node still hits its own table entry" (Option.is_some (Hashtbl.find table tn1));
   Verdict.p "fresh same-id node misses the stale table entry"
     (Option.is_none (Hashtbl.find table tn2));

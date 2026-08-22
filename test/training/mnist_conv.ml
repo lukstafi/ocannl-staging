@@ -209,7 +209,7 @@ let () =
   Stdio.eprintf "Test accuracy = %.1f%% (%d/%d)\n%!" accuracy !correct num_test;
   (* Regression-mode threshold checks (conservative, must pass on small subsets). Random chance on
      10 classes = 10%, so 25% demonstrates meaningful learning. *)
-  printf "Test loss below 2.0 = %b\n%!" Float.(avg_test_loss < 2.0);
-  printf "Test accuracy above 25%% = %b\n%!" Float.(accuracy > 25.);
+  Verdict.p "Test loss below 2.0" Float.(avg_test_loss < 2.0);
+  Verdict.p "Test accuracy above 25%" Float.(accuracy > 25.);
 
   printf "\nTraining complete!\n%!"

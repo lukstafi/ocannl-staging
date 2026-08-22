@@ -60,8 +60,9 @@ let () =
   List.iter lines ~f:(fun l ->
       Stdio.printf "  %s\n" (String.substr_replace_all l ~pattern:"\t" ~with_:" | "));
   let parsed = List.filter_map lines ~f:Cal.of_line in
-  Stdio.printf "\nround-trip: %d/%d rows parsed back, re-emission identical: %b\n"
-    (List.length parsed) (List.length lines)
+  Stdio.printf "\n";
+  Verdict.pf "round-trip: %d/%d rows parsed back, re-emission identical" (List.length parsed)
+    (List.length lines)
     (List.equal String.equal lines (List.map parsed ~f:Cal.to_line));
   (* Unparseable numbers are rejected at either column count — these carry the 11 columns of the
      legacy schema below, so they also pin that the legacy arm validates as strictly. *)

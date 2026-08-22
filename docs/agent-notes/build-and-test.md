@@ -247,6 +247,58 @@ that they earn a lookup rather than always-loaded space.
   routine twice across changed contents is otherwise reported as an unattributed overwrite. Corollary
   for a leg this backend cannot evaluate: gate it and report `Verdict.skipped` rather than letting it
   reach the read, because an absent artifact is a failure here by design.
+- `Verdict` gates a claim by exit status, and a claim whose LABEL is computed needed an entry point of
+  its own: `Verdict.pf fmt … b` is `p` with the label rendered from arguments
+  (`Verdict.pf "%s gradients match the oracle" leg ok`), and `Verdict.claimf` is `claim` the same
+  way. The boolean comes last, after the format's arguments, so the call reads in `p name b` order
+  and forgetting it is a type error rather than a silent no-op. Before they existed every
+  computed-label claim was a bare `printf`, which exits 0 on `false` and lets the failure be
+  `dune promote`d into the golden — the whole of gh-ocannl-624. `verdict_ratchet` now holds both
+  shapes, its reader having widened twice: the separator vocabulary is `:`, `=` and `->`, since
+  reading only a colon left the entire `… = %b` population outside a check written to catch exactly
+  it; and a format may carry other conversions, since a computed label carries one by construction.
+  That second widening costs the old escape hatch — a descriptive `%b` print can no longer excuse
+  itself by interpolating what it describes — so a census row that ends on its boolean takes a named
+  exemption, keyed by the format HEAD (everything up to the `%b`) rather than the whole format,
+  because the whole format is itself the claim shape and a list of them would force the check to
+  exempt its own file. Every exemption in the tree is a row whose assertion is claimed separately
+  beside it through `Verdict.claim`/`claimf` on the same bound boolean; an exemption without that is
+  one that should not have been granted.
+- `Ll_test`'s traversal is the one place a new `Ir.Low_level` constructor is handled, and it now
+  carries the queries the hand-built-IR tests used to write for themselves. `walk` takes a record of
+  hooks: the construct-specific ones, a generic `?on_stmt`/`?on_scalar` for a counter that names its
+  own shape, and an `?on_exit` — which is what makes an enclosing-context query derivable from the
+  same walk instead of a second one. `?in_scopes:false` selects the statement-positions-only reading
+  (the walk `Schedule.find_loop` had before gh-ocannl-668); every other query leaves the
+  `Local_scope` descent on, and deciding it here once is the point, since `schedule_partition` alone
+  had grown six walks each deciding it independently while scope nesting was the property under
+  test. Above them sit `loop_sites`, `find_loop`, `find_loop_with_extent`, `find_nest`, `binds_loop`,
+  `count_loops`, `first_binding` and `census`. Reach for `find_nest ~outer_n ~inner_n` rather than
+  locating by extent alone wherever an initialization loop can share the reduction nest's extent:
+  matching on extent takes the earlier one in preorder, which is how a `Partition` leg came to unroll
+  an init loop and report `copies = 1` while exercising nothing. The walk also descends into
+  `Tile_mma`'s `fallback` rather than stopping at the tile, and reports the operands through the
+  fallback alone — reporting the tile's own `d`/`a`/`b` as well would count every operand of a
+  tensorized nest twice.
+- A test operand minted from a FLATTENED offset stops discriminating at sizes that divide its
+  modulus, and does it while still looking right: `(row * stride + col) mod p` collapses to
+  `col mod p` whenever `p` divides the row stride, so every row becomes identical. That makes a
+  whole class of bugs invisible — a transform substituting or repeating the wrong row, panel or
+  K-block computes the correct output, which no whole-output check, checksum included, can see, so
+  it is found by review rather than by a red test. `Ll_test.cycle` (multi-index) and
+  `Ll_test.cycle_flat` (flat offset) compute exactly the values the hand-written idiom did and raise
+  `Invalid_argument` when the modulus is blind to an axis of the `~dims` handed to them, which turns
+  a latent trap into a loud failure the moment a size arms it. Converting a site is therefore free:
+  `Float.of_int (i % 13) *. 0.25` is `~modulus:13 ~offset:0. ~stride:0.25`, and `(x *. s) -. c` is
+  `~offset:(-. c /. s) ~stride:s`, so no golden moves. The care is in `~dims`, which must be the
+  operand's real row-major shape read off its `NTDSL.init`/`TDSL.ndarray` call (`~batch_dims` then
+  `~output_dims` then `~input_dims`), not the `Array.init` argument. What this does not buy is
+  aperiodicity: the values repeat with period `modulus`, so a shift by `modulus` is a symmetry, and
+  where the blocking factors are searchable a packed panel can repeat under `k -> k + p` and hide a
+  panel-substitution bug just as well; the recipe with no shift symmetry at any lag is
+  `bin/narrow_gebp_bench.ml`'s `mix`. A formula that is NOT a flat index —
+  `(i0 + i1 + 2*i2 + 3*i3) mod 7` — is not this class and needs no conversion, as long as no
+  coefficient is a multiple of the modulus.
 - Dune roots at the OUTERMOST ancestor holding a `dune-workspace` (failing that, a `dune-project`)
   and ignores dot-directories, so from a worktree under `.claude/worktrees/` the main checkout wins
   and the worktree is invisible to dune: targeted commands fail with `Don't know about directory

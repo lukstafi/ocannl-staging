@@ -35,7 +35,7 @@ let () =
         let ys = Context.get_values ctx y.value in
         let prefix = Array.sub ys ~pos:0 ~len:extent in
         let prefix_ok = Array.for_all prefix ~f:(fun v -> Float.(abs (v -. 1.0) < 1e-6)) in
-        printf "extent=%d: total=%.1f (expected %.1f), y valid prefix all 1.0: %b\n" extent total_v
+        Verdict.pf "extent=%d: total=%.1f (expected %.1f), y valid prefix all 1.0" extent total_v
           (Float.of_int extent) prefix_ok;
         ctx)
   in

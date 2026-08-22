@@ -95,8 +95,13 @@ let run_serial ~name (out : Tensor.t) =
   let ctx = Context.run ctx routine in
   nonzero name (Context.get_values ctx out.Tensor.value)
 
-let mav = Array.init (m_ext * k_ext) ~f:(fun x -> Float.of_int (x % 13) *. 0.25)
-let mbv = Array.init (k_ext * n_ext) ~f:(fun x -> Float.of_int (x % 17) -. 8.)
+let mav =
+  Array.init (m_ext * k_ext)
+    ~f:(Ll_test.cycle_flat ~dims:[| m_ext; k_ext |] ~modulus:13 ~offset:0. ~stride:0.25)
+
+let mbv =
+  Array.init (k_ext * n_ext)
+    ~f:(Ll_test.cycle_flat ~dims:[| k_ext; n_ext |] ~modulus:17 ~offset:(-8.) ~stride:1.)
 
 (* === CPU leg: padded packed GEBP (mirrors autotune's [cpu_mma_pack_sketch_schedule] with [bn = 0],
    plus the pads). Pad i to [bm], k to [bk]; split; sink to [k_o { i_o { i_i { j { k_i }}}}]; pack

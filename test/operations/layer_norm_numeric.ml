@@ -46,8 +46,7 @@ let grad_oracle b i =
 
 (* [tol_label] instead of printf %g: Windows printf renders 1e-05 as "1e-005". *)
 let report ~what ~tol ~tol_label max_err =
-  Stdio.printf "layer_norm %s matches hand-computed LayerNorm (max abs err < %s): %b\n" what
-    tol_label
+  Verdict.pf "layer_norm %s matches hand-computed LayerNorm (max abs err < %s)" what tol_label
     Float.(max_err < tol);
   if Float.(max_err >= tol) then Stdio.printf "  max abs err: %.8f\n" max_err
 

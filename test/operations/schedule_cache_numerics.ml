@@ -42,8 +42,11 @@ let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
 let n = 16
-let mav = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 7) *. 0.5)
-let mbv = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 11) -. 4.)
+let mav =
+  Array.init (n * n) ~f:(Ll_test.cycle_flat ~dims:[| n; n |] ~modulus:7 ~offset:0. ~stride:0.5)
+
+let mbv =
+  Array.init (n * n) ~f:(Ll_test.cycle_flat ~dims:[| n; n |] ~modulus:11 ~offset:(-4.) ~stride:1.)
 
 let mm_expected =
   Array.init (n * n) ~f:(fun idx ->

@@ -210,7 +210,7 @@ let () =
     done;
     let mean_loss = !epoch_loss /. Float.of_int n_batches in
     let limit = epoch_loss_limit epoch in
-    printf "Epoch %d, mean train loss=%.4f below %g=%b\n%!" epoch mean_loss limit
+    Verdict.pf "Epoch %d, mean train loss=%.4f below %g" epoch mean_loss limit
       Float.(mean_loss < limit)
   done;
 
@@ -275,9 +275,9 @@ let () =
   let train_below = 2.8 in
   let dev_below = 2.8 in
   let test_below = 2.8 in
-  printf "Final train loss=%.4f train_below=%b\n%!" final_train Float.(final_train < train_below);
-  printf "Final dev   loss=%.4f dev_below=%b\n%!" final_dev Float.(final_dev < dev_below);
-  printf "Final test  loss=%.4f test_below=%b\n%!" final_test Float.(final_test < test_below);
+  Verdict.pf "Final train loss=%.4f train_below" final_train Float.(final_train < train_below);
+  Verdict.pf "Final dev   loss=%.4f dev_below" final_dev Float.(final_dev < dev_below);
+  Verdict.pf "Final test  loss=%.4f test_below" final_test Float.(final_test < test_below);
 
   (* === Generation === Autoregressive sampling from a rolling [block_size] context. *)
   let infer_input =
@@ -382,7 +382,7 @@ let () =
   let names = Array.init 3 ~f:(fun _ -> gen_name ()) in
   Array.iter names ~f:(fun name -> eprintf "sampled name (not part of the golden): %s\n%!" name);
   let in_alphabet = Array.for_all names ~f:(String.for_all ~f:Char.is_alpha) in
-  printf "Generated %d names, all chars in alphabet=%b\n%!" (Array.length names) in_alphabet;
+  Verdict.pf "Generated %d names, all chars in alphabet" (Array.length names) in_alphabet;
 
   (* Head of the learned next-character distribution at the start context. Between the two builds
      that disagree on the sampled text, these probabilities drift by ~3e-4, against gaps of ~0.08

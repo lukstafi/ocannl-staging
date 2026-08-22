@@ -57,11 +57,20 @@ let check ~name ~prec ?input_dims output_dims =
     Array.length ref_vals = Array.length vir_vals
     && Array.for_alli vir_vals ~f:(fun i v -> bits_equal v ref_vals.(i))
   in
+  let ref_vec = has "_uniform_vec(" ref_src and ref_lane = has "_uniform_lane(" ref_src in
+  let vir_lane = has "_uniform_lane(" vir_src and vir_vec = has "_uniform_vec(" vir_src in
+  (* A four-property census row whose shape is the point, so the claims sit beside it on the same
+     [let]-bound booleans. The two the row prints as [false] are claimed in the form that holds --
+     in a golden a blessed regression and a designed negative are the same line. *)
   Stdio.printf
     "%s: %d values, bitwise parity %b | materialized: vec store %b, lane %b | virtual: lane %b, \
      vec store %b\n"
-    name (Array.length ref_vals) parity (has "_uniform_vec(" ref_src) (has "_uniform_lane(" ref_src)
-    (has "_uniform_lane(" vir_src) (has "_uniform_vec(" vir_src)
+    name (Array.length ref_vals) parity ref_vec ref_lane vir_lane vir_vec;
+  Verdict.claimf "%s: virtual values bitwise-equal to the materialized ones" name parity;
+  Verdict.claimf "%s: materialized run stores via the vectorized builtin" name ref_vec;
+  Verdict.claimf "%s: materialized run emits no lane extract" name (not ref_lane);
+  Verdict.claimf "%s: virtual run reads via the lane builtin" name vir_lane;
+  Verdict.claimf "%s: virtual run emits no vectorized store" name (not vir_vec)
 
 let () =
   check ~name:"single n=1 (lone partial block)" ~prec:Ir.Ops.single [ 1 ];

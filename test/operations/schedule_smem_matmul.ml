@@ -71,8 +71,12 @@ let n = 32
 let bm, bn, bk = (8, 8, 8)
 
 let () =
-  let mav = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 13) *. 0.25) in
-  let mbv = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 17) -. 8.) in
+  let mav =
+    Array.init (n * n) ~f:(Ll_test.cycle_flat ~dims:[| n; n |] ~modulus:13 ~offset:0. ~stride:0.25)
+  in
+  let mbv =
+    Array.init (n * n) ~f:(Ll_test.cycle_flat ~dims:[| n; n |] ~modulus:17 ~offset:(-8.) ~stride:1.)
+  in
   let ma = TDSL.ndarray mav ~label:[ "ma" ] ~input_dims:[ n ] ~output_dims:[ n ] () in
   let mb = TDSL.ndarray mbv ~label:[ "mb" ] ~input_dims:[ n ] ~output_dims:[ n ] () in
 
@@ -182,7 +186,9 @@ let () =
      index symbol is bound there to restrict the writers): Stage wraps the outermost tile loop
      instead, where the enclosing Workgroup axis guards the cooperative load down to one
      representative thread. --- *)
-  let a2v = Array.init (n * 32) ~f:(fun idx -> Float.of_int (idx % 19) *. 0.5) in
+  let a2v =
+    Array.init (n * 32) ~f:(Ll_test.cycle_flat ~dims:[| n; 32 |] ~modulus:19 ~offset:0. ~stride:0.5)
+  in
   let vv = Array.init 32 ~f:(fun idx -> Float.of_int idx -. 15.5) in
   let a2 = TDSL.ndarray a2v ~label:[ "a2" ] ~output_dims:[ n; 32 ] () in
   let v = TDSL.ndarray vv ~label:[ "v" ] ~output_dims:[ 32 ] () in

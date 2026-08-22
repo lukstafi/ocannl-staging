@@ -169,7 +169,7 @@ let () =
         List.Assoc.find ac.Aff.a_loops sym ~equal:Idx.equal_symbol)
   in
   let dup sym = Option.is_some (range sym) in
-  let check_par name sym =
+  let check_par name ~parallelizable sym =
     (* Every pair over a common node with at least one write must confine its conflicts to one
        thread of [sym]. *)
     let verdicts =
@@ -183,10 +183,19 @@ let () =
               else None))
     in
     let safe = List.for_all verdicts ~f:(function Aff.Cross_thread _ -> false | _ -> true) in
-    Stdio.printf "%s %s parallelizable: %b\n" (Idx.symbol_ident sym) name safe
+    (* The row is the reading; this is the decision. The table shows both answers because both are
+       facts about the nest -- a map axis parallelizes, a reduced axis must not -- so the row cannot
+       be phrased so that `true` always passes, and the claim beside it is what carries the verdict
+       (Codex P2, round 2). Without it a conflict analysis that stopped seeing the reduction's
+       cross-thread dependence would flip `false` to `true` here, exit zero, and be promotable.
+       Stated in the direction that holds, on the same bound boolean the row prints. *)
+    Stdio.printf "%s %s parallelizable: %b\n" (Idx.symbol_ident sym) name safe;
+    if parallelizable then
+      Verdict.claimf "%s %s parallelizes" (Idx.symbol_ident sym) name safe
+    else Verdict.claimf "%s %s does not parallelize" (Idx.symbol_ident sym) name (not safe)
   in
-  check_par "(map axis)" i2;
-  check_par "(reduced axis)" k;
+  check_par "(map axis)" ~parallelizable:true i2;
+  check_par "(reduced axis)" ~parallelizable:false k;
 
   Stdio.printf "\n=== sibling scope operands (gh-561 Arg components) ===\n";
   (* for i7: Y[i7] = scopeA{ la := X[i7] } + scopeB{ X[i7] := 5; lb := 1 } — two [Local_scope]

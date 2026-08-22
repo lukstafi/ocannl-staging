@@ -7,7 +7,7 @@
    increasing, alignment-respecting offsets; (2) an item that would push the running extent past
    [cap] opens a NEW pool at offset 0; (3) a single item larger than [cap] raises (no pool can hold
    it without uint64 offsets). If the allocator dropped the cap split, "splits-at-cap" would print a
-   single segment; if it dropped the over-cap error, the last line would print [false]. *)
+   single segment; if it dropped the over-cap error, the last claim would fail. *)
 
 open Base
 module B = Context.Backends_deprecated
@@ -36,4 +36,4 @@ let () =
       false
     with _ -> true
   in
-  Stdio.printf "over-cap single item raises = %b\n" raised
+  Verdict.p "over-cap single item raises" raised

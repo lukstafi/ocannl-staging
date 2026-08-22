@@ -108,8 +108,12 @@ let tiled_schedule ?(reorder = true) ~ma ~mb ~mc ~hoist_a ~hoist_b (opt : LL.opt
   @ if reorder then [ Sched.Privatize { target = mc; over = k_o } ] else []
 
 let make_pair n =
-  let mav = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 13) *. 0.25) in
-  let mbv = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 17) -. 8.) in
+  let mav =
+    Array.init (n * n) ~f:(Ll_test.cycle_flat ~dims:[| n; n |] ~modulus:13 ~offset:0. ~stride:0.25)
+  in
+  let mbv =
+    Array.init (n * n) ~f:(Ll_test.cycle_flat ~dims:[| n; n |] ~modulus:17 ~offset:(-8.) ~stride:1.)
+  in
   let ma = TDSL.ndarray mav ~label:[ "ma" ] ~input_dims:[ n ] ~output_dims:[ n ] () in
   let mb = TDSL.ndarray mbv ~label:[ "mb" ] ~input_dims:[ n ] ~output_dims:[ n ] () in
   (ma, mb)
@@ -171,7 +175,9 @@ let () =
   let ma, _mb = make_pair n in
   (* A values-backed parameter: host-init data is registered (so packing input exists), but the node
      is trainable, not a compile-time constant — hoisting must refuse it. *)
-  let wv = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 7) *. 0.5) in
+  let wv =
+    Array.init (n * n) ~f:(Ll_test.cycle_flat ~dims:[| n; n |] ~modulus:7 ~offset:0. ~stride:0.5)
+  in
   let w = TDSL.param ~values:wv "w" ~input_dims:[ n ] ~output_dims:[ n ] () in
   let%op mc1 = ma * w in
   let transform opt =
@@ -195,7 +201,9 @@ let () =
   let n = 32 in
   let ma, mb = make_pair n in
   let%op mc0 = ma * mb in
-  let wv = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 7) *. 0.5) in
+  let wv =
+    Array.init (n * n) ~f:(Ll_test.cycle_flat ~dims:[| n; n |] ~modulus:7 ~offset:0. ~stride:0.5)
+  in
   let w = TDSL.param ~values:wv "w" ~input_dims:[ n ] ~output_dims:[ n ] () in
   let%op mc1 = ma * w in
   let digest comp =
