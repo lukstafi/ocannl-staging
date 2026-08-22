@@ -1050,10 +1050,9 @@ let decoded_count = Atomic.make 0
 
 (** [(mapped, decoded)] payload counts since the start of the process: how many payloads
     {!ingest_payload} wrapped as file mappings, and how many it decoded into fresh host buffers.
-    One pair for every reader that ingests through {!ingest_payload} -- checkpoints
-    ({!Ocannl.Persistence}) and safetensors ({!Ocannl.Safetensors}) alike -- so a caller
-    interested in a single file's split reads it before and after that file's payloads. For tests,
-    and for diagnosing a load that decodes more than expected. *)
+    One pair for every reader that ingests through {!ingest_payload} -- checkpoints and
+    safetensors alike -- so a caller interested in a single file's split reads it before and after
+    that file's payloads. For tests, and for diagnosing a load that decodes more than expected. *)
 let ingestion_counts () = (Atomic.get mapped_count, Atomic.get decoded_count)
 
 (** Ingests one payload of a little-endian binary file: the [dims]-shaped, [prec]-typed region of
