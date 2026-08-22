@@ -104,16 +104,24 @@ ok: raw stanzas -- an alias runs things too
 ok: raw stanzas -- a test's custom action
 ok: raw stanzas -- a test's own binary under a chdir
 ok: raw stanzas -- and in two branches, two directories
-ok: raw stanzas -- a run under an unresolvable chdir is declined
+ok: raw stanzas -- a run under an unresolvable chdir is tagged, not dropped
+ok: raw stanzas -- but a PATH tool under one is external wherever it runs
+ok: raw stanzas -- a name the stanza binds resolves under one too
 ok: raw stanzas -- a test's own binary under one falls back to its own directory
-ok: raw stanzas -- the whole subtree beneath it, however deep
+ok: raw stanzas -- and the whole subtree beneath it, however deep
 ok: raw stanzas -- whitespace before the head
 ok: raw stanzas -- a comment before the head
 ok: raw stanzas -- and before a chdir destination
 ok: raw stanzas -- a library's preprocessor is not a test-running rule
 ok: raw stanzas -- nor is an executable's
 ok: raw stanzas -- the test pform runs where the action puts it
-ok: raw stanzas -- a shell line
+ok: raw stanzas -- a shell line runs something unnamed
+ok: raw stanzas -- and so does a system one
+ok: raw stanzas -- one whose shell the text could not read either way
+ok: raw stanzas -- a test stanza running its own binary through a shell
+ok: raw stanzas -- two shell lines are two, and repeats collapse
+ok: raw stanzas -- a shell line under an unresolvable chdir is still one thing that runs
+ok: raw stanzas -- a shell line in a library's preprocessor is not one
 ok: raw stanzas -- a name bound by a dep
 ok: raw stanzas -- and one behind a ./, which says only "here"
 ok: raw stanzas -- a binding may wrap its path in a dependency form

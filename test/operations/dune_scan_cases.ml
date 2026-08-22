@@ -465,10 +465,14 @@ let render_raw (r : Scan.raw_stanza) =
     List.map r.Scan.raw_unnameable ~f:(fun cwd ->
         if String.is_empty cwd then "!" else "!" ^ cwd)
   in
+  (* `?` for what the reader records without naming: it says THAT something runs and nothing more,
+     which is a weaker entry than the `!` of a bare command under `(setenv PATH …)` -- that one
+     still names a directory (gh-ocannl-690). *)
+  let opaque = List.map r.Scan.raw_opaque ~f:(fun what -> "?" ^ what) in
   Printf.sprintf "%s%s%s{%s}" r.Scan.raw_head
     (if String.is_empty r.Scan.raw_subdir then "" else "@" ^ r.Scan.raw_subdir)
     (if r.Scan.raw_inline_tests then "+inline" else "")
-    (String.concat ~sep:" " (tests @ runs @ unnameable))
+    (String.concat ~sep:" " (tests @ runs @ unnameable @ opaque))
 
 let raw_stanza_cases =
   [
@@ -577,20 +581,31 @@ let raw_stanza_cases =
     ( "and in two branches, two directories",
       {dune|(test (name t) (action (progn (chdir d1 (run %{test})) (chdir d2 (run %{test})))))|dune},
       [ "test{d1:%{test} d2:%{test}}" ] );
-    (* Under a chdir the text cannot resolve, the walk cannot say where the process runs and emits
-       a site carrying no executables -- so nothing beneath it is reported here either. *)
-    ( "a run under an unresolvable chdir is declined",
+    (* Under a chdir the text cannot resolve, neither reader can say WHERE the process runs -- the
+       walk emits a site carrying no executables, and this one records the command without its
+       directory. Tagged rather than dropped: that something runs there is the whole of what the
+       per-stanza floor needs, and dropping it left such a stanza with no floor under it at all
+       (gh-ocannl-690). *)
+    ( "a run under an unresolvable chdir is tagged, not dropped",
       {dune|(rule (action (chdir %{workspace_root} (run %{dep:probe.exe}))))|dune},
+      [ "rule{?probe.exe, under `(chdir %{workspace_root} ...)`}" ] );
+    (* Only a command it could otherwise NAME. A PATH tool is external wherever it runs, so the walk
+       places no site for it and claiming one here would turn the floor into a false alarm. *)
+    ( "but a PATH tool under one is external wherever it runs",
+      {dune|(rule (action (chdir %{workspace_root} (run python3 x.py))))|dune},
       [ "rule{}" ] );
+    ( "a name the stanza binds resolves under one too",
+      {dune|(rule (deps (:pp pp.exe)) (action (chdir %{root} (run ./%{pp}))))|dune},
+      [ "rule{?pp.exe, under `(chdir %{root} ...)`}" ] );
     (* The test's own binary is the exception that proves the rule: the walk's `%{test}` filter
        drops the wrapped command too, so its Test site falls back to the stanza's own directory --
        and this reader falls back the same way, which is what keeps them equal. *)
     ( "a test's own binary under one falls back to its own directory",
       {dune|(test (name t) (action (chdir %{workspace_root} (run %{test}))))|dune},
       [ "test{%{test}}" ] );
-    ( "the whole subtree beneath it, however deep",
+    ( "and the whole subtree beneath it, however deep",
       {dune|(rule (action (chdir %{root} (chdir sub (run %{dep:probe.exe})))))|dune},
-      [ "rule{}" ] );
+      [ "rule{?probe.exe, under `(chdir %{root} ...)`}" ] );
     (* Dune allows whitespace and comments after an opening paren; a head read as empty would make
        the stanza invisible to a floor whose whole job is seeing it. *)
     ( "whitespace before the head",
@@ -612,7 +627,29 @@ let raw_stanza_cases =
     (* Declined because the text alone does not say what they resolve to: all under-report, which is
        the safe direction for a floor. *)
     ("the test pform runs where the action puts it", {dune|(test (name t) (action (run %{test} --flag)))|dune}, [ "test{%{test}}" ]);
-    ("a shell line", {dune|(rule (action (bash "./probe.exe")))|dune}, [ "rule{}" ]);
+    (* A shell line is not parsed -- splitting it on whitespace would be reading it, and reading it
+       wrong -- but it is RECORDED, because a rule that runs its test through a shell is subject to
+       the same rules as one that runs it directly. *)
+    ( "a shell line runs something unnamed",
+      {dune|(rule (action (bash "./probe.exe")))|dune},
+      [ "rule{?(bash ./probe.exe)}" ] );
+    ("and so does a system one", {dune|(rule (action (system "probe")))|dune}, [ "rule{?(system probe)}" ]);
+    ( "one whose shell the text could not read either way",
+      {dune|(rule (action (bash "if ready; then ./probe.exe; fi")))|dune},
+      [ "rule{?(bash if ready; then ./probe.exe; fi)}" ] );
+    ( "a test stanza running its own binary through a shell",
+      {dune|(test (name t) (action (bash "./t.exe --flag")))|dune},
+      [ "test{%{test} ?(bash ./t.exe --flag)}" ] );
+    ( "two shell lines are two, and repeats collapse",
+      {dune|(rule (action (progn (bash "a") (bash "b") (bash "a"))))|dune},
+      [ "rule{?(bash a) ?(bash b)}" ] );
+    ( "a shell line under an unresolvable chdir is still one thing that runs",
+      {dune|(rule (action (chdir %{root} (bash "./probe.exe"))))|dune},
+      [ "rule{?(bash ./probe.exe)}" ] );
+    (* Where no stanza runs anything, a shell line is no more a run than a `(run …)` there is. *)
+    ( "a shell line in a library's preprocessor is not one",
+      {dune|(library (name l) (preprocess (action (bash "./pp.exe"))))|dune},
+      [ "library{}" ] );
     (* A `(:name …)` dependency binds an executable, and the binding sits in the same stanza -- so
        the text CAN resolve it, and the three rules of test/ppx/dune are all of this shape. *)
     ("a name bound by a dep", {dune|(rule (deps (:pp pp.exe)) (action (run %{pp})))|dune}, [ "rule{pp.exe}" ]);
@@ -661,7 +698,7 @@ let raw_stanza_cases =
     ( "a shell line alongside one is a different thing",
       {dune|(rule (action (setenv PATH . (run probe))))
 (rule (action (bash "./thing.exe")))|dune},
-      [ "rule{!}"; "rule{}" ] );
+      [ "rule{!}"; "rule{?(bash ./thing.exe)}" ] );
     ( "a chdir under one still names where it runs",
       {dune|(rule (action (setenv PATH . (chdir sub (run %{dep:a.exe})))))|dune},
       [ "rule{sub:a.exe}" ] );
