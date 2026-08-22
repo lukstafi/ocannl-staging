@@ -262,7 +262,17 @@ that they earn a lookup rather than always-loaded space.
   re-runs actions attached to ALIASES. Either force the alias (`dune build --force
   @<dir>/runtest`), or run the built exe directly with its cwd set to `_build/default/<dir>`, which
   is exactly the environment dune gives it — the same cwd, hence the same `ocannl_config` search
-  root, that makes `dune exec` unusable (CLAUDE.md).
+  root, that makes `dune exec` unusable (CLAUDE.md). The cause is that dune trusts its own digest
+  database and never stats a rule's targets, so a hand-deleted one is recorded as built forever;
+  that also rules out the two other reflexes, since touching a source changes no CONTENT digest and
+  deleting `_build/.digest-db` does not restore the memo either. For a target with no alias of its
+  own — an `(executable)` plus a `(rule)` producing `<name>.actual`, which is how every scanning
+  check is built — the recovery is `dune build --sandbox=copy <that target>`: sandboxing changes
+  how the rule executes, which invalidates the memo and re-runs it. `dune clean` works too and buys
+  a full rebuild, which on macOS means every fresh executable queueing behind XProtect again. Worth
+  knowing before it bites, because the failure is silent in the dangerous direction: the missing
+  target leaves whatever `.actual` was there before, so a probe that only diffs the file reads
+  green while nothing has run.
 - A record with `[@@deriving sexp]` makes every `.expected` file that prints the parent a hidden
   consumer of its FIELD NAMES, and `rg "\.field_name"` over sources is vacuous against that (sexp
   prints `(field_name value)`, not member access). Before claiming a rename has no serialization
