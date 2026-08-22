@@ -3151,3 +3151,27 @@
  (deps ocannl_config)
  (modules agent_notes_scan_cases)
  (libraries base stdio test_utils arrayjit.verdict))
+
+(executable
+ (name agent_notes_structure)
+ (modules agent_notes_structure)
+ (libraries base stdio test_utils arrayjit.verdict))
+
+(rule
+ ; ocannl-backend: none -- reads markdown only: it opens the agent notes as text and links no backend.
+ (target agent_notes_structure.actual)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  ../../docs/agent-notes.md
+  (glob_files ../../docs/agent-notes/*.md))
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:agent_notes_structure.exe} %{deps}))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff agent_notes_structure.expected agent_notes_structure.actual)))
