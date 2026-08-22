@@ -173,6 +173,29 @@ files.
   the two RMW ones (plain serial, unrolled repetition) keeps the accumulator in a register for the
   whole nest, so a property test's invariant is: all forms agree on the value, and only the two RMW
   forms touch the node more than twice.
+  The set is now swept MECHANICALLY rather than by review, by `test/operations/reduction_forms.ml`:
+  a table of (schedule composition x storage precision) over one hand-built row sum, each member
+  naming the form it claims, with two claims apiece. The value claim compares a localizing member
+  against the executed serial baseline and a declining one against a host reference that narrows at
+  every step — both exact, because the operands are storage-exact multiples of 1/8 whose partial
+  sums leave the format's exactness range (the test proves that rather than assuming it, and prints
+  on stderr which residency regime the backend is in). The form claim reads the emitted kernel and
+  classifies it, which is what keeps the value claim worth anything: agreement between two
+  renderings says nothing if they are the same rendering, and a composition that stops reaching its
+  form falls back to one that passes. Classification is phrased over the STORED node, not over any
+  local's name — the localizing forms differ in where the accumulator lives but agree on doing at
+  most one read and one write of the node, and the RMW forms are exactly the ones with a statement
+  doing both. Two traps it had to absorb: the closing store is `node[i] =
+  single_to_bfloat16(v5_node)` at narrow storage, so the right-hand side is searched for a
+  scope-local TOKEN rather than compared to one (a bare-local test reports every narrow kernel as
+  unlocalized, which is the reading the whole policy is about); and `partials_<parent>[` contains
+  `<parent>[`, so node subscripts are counted as whole identifiers or `Split_reduce`'s partials read
+  as the target being touched twice. Adding a form to codegen without a table entry is a golden
+  diff, since the member list is printed. Hand-built IR carrying a runtime-extent guard additionally
+  needs `Ll_test.optimize ~static_indices`: the virtualization walk asserts every
+  `Embed_index (Iterator s)` is in scope, and a launch parameter is in scope only because the caller
+  declared it (and its symbol needs `used_as_extent`, or bind-time validation rejects the extent
+  covering the whole axis).
 - **What forces one of the two RMW forms**, i.e. the declines a property test must be able to
   provoke: `debug_log_from_routines` (a `Local_scope` body renders with `log_set_locals:false`, so
   localizing would silence the per-iteration trace — the SIMD and tensorized renderings bail under
@@ -230,9 +253,11 @@ files.
   baseline — the invariant those mints exist to hold ("candidates compete on speed, never
   numerics"). A defaulted certification is exactly the kind a call site forgets; three review rounds
   went into finding that out.
-  `peel_dead_level.ml` carries all five guard shapes at the peel. What is NOT yet pinned is the
-  executed narrow-precision consequence — a bf16 reduction under a runtime-extent guard, scheduled
-  and compared against its serial baseline (gh-ocannl-715). Keeping such a guard
+  `peel_dead_level.ml` carries all five guard shapes at the peel, and `reduction_forms.ml` carries
+  the executed narrow-precision consequence (gh-ocannl-715): a bf16 and f16 reduction under a
+  runtime-extent guard, scheduled with a materializing `Unroll` and with a `Partition`, compared
+  bitwise against its serial baseline — the sixteen guarded copies update ONE widened local and
+  store once, where a refused mint would round-trip per copy. Keeping such a guard
   around the whole scope instead of declining would also be sound and would localize more; it needs
   the peel to report its outer guards separately, which is wider than the correctness fix.
 - The interaction with Metal's `volatile_scalar_rmw` needs no special case, and that is worth
