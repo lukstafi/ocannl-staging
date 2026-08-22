@@ -215,12 +215,91 @@ val sketch_seed_params :
     list {e is} {!Ir.Schedule_space.leaves} of {!matmul_sketch_tree}, epilogue twins included.
     Exposed for tests. *)
 
+module Family_decision : sig
+  (** {1 What a commitment on the matmul family tree is} (gh-ocannl-591)
+
+      The family tree's levels commit to values of {!t}, not to display strings. A consumer that
+      reads a decision back off a path — the certain-traffic floor {!sketch_path_traffic_floor}, the
+      lattice lift {!lift_geometry_lattice}, a ranking or profitability pass over the search's
+      paths, the tests — matches on the datum. {!to_label} is the rendering, used by logs, decline
+      reports and goldens; nothing parses it back, so rewording a label (or renaming a level, which
+      {!level} derives from the datum) changes what is printed and nothing else.
+
+      This replaced a [Printf.sprintf] / [Scanf.sscanf] protocol whose failure mode was silent: a
+      reworded geometry label made every scan arm fall through, so the traffic floor's increment was
+      [0] on every path — a sound bound, so nothing raised, no golden moved, and the family bound
+      quietly stopped differentiating the tree. *)
+
+  type geometry = { g_bm : int; g_bn : int; g_bk : int; g_tm : int; g_tn : int }
+  (** A committed tile geometry. Which fields are meaningful is the {!geometry_choice}
+      constructor's business: [g_bm]/[g_bk] always; [g_bn] is [0] for {!Cpu_packed}'s unsplit full
+      column extent and the mma lane width for {!Gpu_mma}; [g_tm]/[g_tn] are the per-thread tile of
+      {!Gpu_blocktile} and [0] elsewhere. [g_bk = 0] in {!Gpu_mma} is the unstaged full-K block. *)
+
+  type geometry_choice =
+    | Gpu_blocktile of geometry
+        (** The GPU scalar blocktile menu: both operand tiles staged in kernel. *)
+    | Gpu_mma of geometry
+        (** The GPU tensorized menu: [g_bk > 0] stages both operand tiles in kernel, [g_bk = 0] is
+            the unstaged full-K block. *)
+    | Cpu_blocktile of int  (** The CPU blocktile menu's single block size (bm = bn = bk). *)
+    | Cpu_packed of geometry
+        (** The CPU packed composition; what it costs depends on the {!Packing_shape} above it. *)
+    | Lattice
+        (** The staged tile-size lattice beyond the curated menu (gh-ocannl-514 phase 5), excluded
+            by default policy and lifted by {!lift_geometry_lattice}; its axes commit as
+            {!Lattice_box}. *)
+
+  (** One committed decision. Each constructor belongs to exactly one level ({!level}) and carries
+      the whole identity of the commitment: no consumer needs the level name, or the label, to know
+      what was decided. *)
+  type t =
+    | Fusion of [ `Unfused | `Fused ]  (** The root: the epilogue-fusion flavor (gh-ocannl-613). *)
+    | Pipeline of [ `Blocktile | `Tensorized ]  (** Which composed pipeline. *)
+    | Batch of [ `Serial | `Grid ]  (** The batch-geometry twin (gh-ocannl-643), GPU only. *)
+    | Packing of [ `In_kernel | `Hoisted ]
+        (** The CPU blocktile pipeline's link-time packing twin (gh-ocannl-470). *)
+    | Geometry of geometry_choice  (** The tile geometry, per the pipeline's own menu. *)
+    | Lattice_box of { lb_axis : [ `Bm | `Bk ]; lb_lo : int; lb_hi : int }
+        (** One binary interval refinement of a lattice axis: the value range still open below the
+            commitment, [lb_lo = lb_hi] at a singleton. A box prices at [lb_lo], its most favorable
+            corner. *)
+    | Twin of [ `Plain | `Swizzled | `Depth of int ]
+        (** The per-staged-geometry twins: the swizzled staged layout, the pipelined depths. *)
+    | Tensorized_form of [ `Whole_triple | `Packed ]  (** The CPU tensorized composition. *)
+    | Row_block of int
+        (** The CPU whole-triple row block; [0] is the unsplit form, [> 0] a pool-rendered Grid
+            split. *)
+    | Packing_shape of
+        [ `Serial | `Hoisted | `Hoisted_grid | `Hoisted_grid_pack_rest | `Grid_pack_rest | `Grid ]
+        (** Which CPU packed composition: where the panels are packed (in kernel, at link time, per
+            Grid chunk) — what makes a packed geometry's traffic additional or merely relocated. *)
+
+  type path = (string * t) list
+  (** What {!Ir.Schedule_space.enumerate} and the [~path] of {!Ir.Schedule_space.search} carry at
+      this label type: the committed vector, outermost level first. The [string] is the level's
+      display name; the decision is the identity. *)
+
+  val equal : t -> t -> bool
+  val compare : t -> t -> int
+
+  val level : t -> string
+  (** The level a decision belongs to — the name {!Ir.Schedule_space.Choice} carries. Derived from
+      the datum, so a node's level and its children's identities cannot drift apart. *)
+
+  val to_label : t -> string
+  (** The display rendering. Nothing reads it back. *)
+
+  val render_path : path -> string
+  (** A path as ["level=label > level=label > …"], for logs and reports. *)
+end
+
 val matmul_sketch_tree :
   is_gpu:bool ->
   is_cpu:bool ->
   limits:Ir.Backend_intf.hardware_limits ->
   Ir.Low_level.optimized ->
-  sketch_params Ir.Schedule_space.tree option
+  (Family_decision.t, sketch_params) Ir.Schedule_space.tree option
 (** The matmul sketch family as a refinement tree (gh-ocannl-514 phase 1): decision levels —
     epilogue fusion, pipeline, packing shape, geometry, twins — whose lazily-refined choices depend
     on earlier commitments, and whose {!Ir.Schedule_space.leaves} are exactly the family's
@@ -243,21 +322,25 @@ val geometry_lattice_witness : string
     the tuner's seed lists are unchanged by the lattice's existence. *)
 
 val lift_geometry_lattice :
-  sketch_params Ir.Schedule_space.tree -> sketch_params Ir.Schedule_space.tree
-(** Lift every {!geometry_lattice_witness} exclusion, preserving the laziness of everything else;
+  (Family_decision.t, sketch_params) Ir.Schedule_space.tree ->
+  (Family_decision.t, sketch_params) Ir.Schedule_space.tree
+(** Lift every geometry-lattice exclusion — the branches whose decision is
+    [Family_decision.Geometry Lattice], identified by that datum rather than by the exclusion's
+    prose witness — preserving the laziness of everything else;
     lifted branches remain subject to legality (the box refutations), and other exclusions stay
     excluded. {!model_default}'s family search applies this under config
     [model_default_geometry_lattice]. Exposed for tests. *)
 
 val sketch_path_traffic_floor :
-  is_gpu:bool ->
   limits:Ir.Backend_intf.hardware_limits ->
   Ir.Low_level.optimized ->
-  (string * string) list ->
+  Family_decision.path ->
   int
 (** The certain-traffic increment (bytes) of a family-tree decision path (gh-ocannl-514 phase 5):
     traffic every completion below the path moves beyond the schedule-invariant
-    {!Ir.Cost_model.completion_floor}, read off the path's committed staging decisions — a committed
+    {!Ir.Cost_model.completion_floor}, read off the path's committed staging decisions as {e data}
+    ({!Family_decision}, gh-ocannl-591; the decision also says which pipeline minted it, so the
+    caller's backend kind is not needed alongside the path) — a committed
     staged geometry contributes its operand tiles' distinct-cell footprints exactly as
     {!Ir.Cost_model.analyze} charges them on every leaf (in-kernel GPU stages read and write; CPU
     packed panels only under in-kernel [serial] packing — a hoisted panel replaces the original

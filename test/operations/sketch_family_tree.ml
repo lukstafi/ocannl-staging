@@ -96,6 +96,11 @@ let section name ~is_gpu ~is_cpu ~limits opt =
    children carry verdicts — [refuted]/[excluded] branches print their witness and contribute no
    leaves, [unknown] branches never fathom. *)
 module Sspace = Ir.Schedule_space
+module FD = Autotune.Family_decision
+
+(* Every label printed below is [FD.to_label] of the path's decision datum (gh-ocannl-591): the
+   tree's identities are data, the strings are this rendering. *)
+let lbl = FD.to_label
 
 let rec print_tree ~indent tree =
   match tree with
@@ -103,7 +108,8 @@ let rec print_tree ~indent tree =
   | Sspace.Choice { level; children } ->
       if List.is_empty children then Stdio.printf "%s%s: infeasible\n" indent level
       else
-        List.iter children ~f:(fun (label, child) ->
+        List.iter children ~f:(fun (d, child) ->
+            let label = lbl d in
             match child with
             | Sspace.Child sub ->
                 Stdio.printf "%s%s = %s\n" indent level label;
@@ -119,11 +125,7 @@ let rec print_tree ~indent tree =
    policy-suppressed branches a driver could re-propose, and the branches only candidate compilation
    settles. *)
 let verdict_reports tree =
-  let pp (path, w) =
-    Stdio.printf "  %s: %s\n"
-      (String.concat ~sep:" > " (List.map path ~f:(fun (l, v) -> l ^ "=" ^ v)))
-      w
-  in
+  let pp (path, w) = Stdio.printf "  %s: %s\n" (FD.render_path path) w in
   let section name entries =
     if not (List.is_empty entries) then (
       Stdio.printf "-- %s --\n" name;
@@ -143,12 +145,104 @@ let tree_section name ~is_gpu ~is_cpu ~limits opt seeds =
       let paths = Sspace.enumerate tree in
       (match List.last paths with
       | Some (path, _) ->
-          Stdio.printf "last leaf's decision path: %s\n"
-            (String.concat ~sep:" > "
-               (List.map path ~f:(fun (level, label) -> level ^ "=" ^ label)))
+          Stdio.printf "last leaf's decision path: %s\n" (FD.render_path path)
       | None -> Stdio.printf "no leaves\n");
       Verdict.p "tree leaves = flat enumeration"
         (List.equal (fun a b -> String.equal (show a) (show b)) (Sspace.leaves tree) seeds)
+
+(* gh-ocannl-591: what the certain-traffic increment of a leaf's path MUST be, derived from the
+   leaf's own sketch parameters and NOTHING on the path — no decision, no label. Cross-checking it
+   against [sketch_path_traffic_floor] over paths walked out of the real tree is what pins the
+   decision protocol end to end: a commitment the floor stops reading shows up as a mismatch,
+   where the string protocol's silent fall-through showed up as a uniform (sound, useless) zero.
+   The two families count differently, exactly as [Cost_model.analyze] charges them: the GPU
+   pipelines stage both operand tiles in kernel (written and read), while the CPU packed
+   composition adds traffic only where it packs in kernel — every other shape packs at link time or
+   per Grid chunk, replacing the original operand's reads rather than adding to them. *)
+let expected_inc ~elt_bytes ~n_extent (p : Autotune.sketch_params) =
+  let bm = p.Autotune.sk_bm and bk = p.Autotune.sk_bk in
+  let bn = if p.Autotune.sk_bn = 0 then n_extent else p.Autotune.sk_bn in
+  let tile = ((bm * bk) + (bk * bn)) * elt_bytes in
+  if p.Autotune.sk_gpu then if bk > 0 then 2 * tile else 0
+  else if
+    p.Autotune.sk_mma && bk > 0
+    && not (p.Autotune.sk_hoist || p.Autotune.sk_grid || p.Autotune.sk_pack_rest)
+  then tile
+  else 0
+
+let prefixes path =
+  List.folding_map path ~init:[] ~f:(fun acc entry ->
+      let acc = acc @ [ entry ] in
+      (acc, acc))
+
+(* The traffic floor judged against the tree it is supposed to price (gh-ocannl-591): the paths come
+   from [Sspace.enumerate] of the real tree, never from literals. A renamed level or a reworded
+   label moves the rendered lines below and no number; a level ADDED, REMOVED or re-parameterized
+   moves the counts and the per-leaf agreement. *)
+let traffic_pins name ~limits ~elt_bytes ~n_extent tree opt =
+  let inc = Autotune.sketch_path_traffic_floor ~limits opt in
+  let paths = Sspace.enumerate tree in
+  let priced = List.count paths ~f:(fun (path, _) -> inc path > 0) in
+  let levels =
+    List.dedup_and_sort ~compare:String.compare
+      (List.concat_map paths ~f:(fun (path, _) -> List.map path ~f:fst))
+  in
+  Stdio.printf "== %s: certain-traffic increments over %d leaf paths ==\n" name
+    (List.length paths);
+  Stdio.printf "  levels on the leaf paths: %s\n" (String.concat ~sep:", " levels);
+  Stdio.printf "  priced above the schedule-invariant floor: %d; max increment %d bytes\n" priced
+    (List.fold paths ~init:0 ~f:(fun acc (path, _) -> max acc (inc path)));
+  Verdict.p
+    (name ^ ": every leaf's increment is the traffic its own parameters imply")
+    (List.for_all paths ~f:(fun (path, p) ->
+         inc path = expected_inc ~elt_bytes ~n_extent p));
+  Verdict.p
+    (name ^ ": the increment is monotone along every path's prefixes")
+    (List.for_all paths ~f:(fun (path, _) ->
+         let incs = 0 :: List.map (prefixes path) ~f:inc in
+         List.is_sorted incs ~compare:Int.compare));
+  Verdict.p
+    (name ^ ": the staging commitments price above the floor")
+    (priced > 0
+    && priced = List.count paths ~f:(fun (_, p) -> expected_inc ~elt_bytes ~n_extent p > 0));
+  Verdict.p
+    (name ^ ": every leaf path commits its pipeline's shape level")
+    (List.for_all paths ~f:(fun (path, _) ->
+         List.exists path ~f:(fun (_, d) ->
+             match d with FD.Geometry _ | FD.Row_block _ -> true | _ -> false)));
+  (* One representative path per pricing regime, walked out of the tree and rendered here (the
+     rendering is all that a label reword can move). *)
+  let sample what f =
+    match List.find paths ~f:(fun (path, _) -> f path) with
+    | None -> Stdio.printf "  %-26s (none in this tree)\n" what
+    | Some (path, _) ->
+        Stdio.printf "  %-26s %d bytes\n    %s\n" what (inc path) (FD.render_path path)
+  in
+  sample "staged geometry" (fun path ->
+      inc path > 0
+      && List.exists path ~f:(fun (_, d) ->
+             match d with FD.Geometry (FD.Gpu_mma _ | FD.Cpu_packed _) -> true | _ -> false));
+  sample "unpriced geometry" (fun path -> inc path = 0);
+  sample "lattice leaf" (fun path ->
+      List.exists path ~f:(fun (_, d) -> FD.equal d (FD.Geometry FD.Lattice)));
+  (* The refinement chain of one lattice leaf: each interval commitment tightens the corner the box
+     is priced at, so the increments grow monotonically down to the singleton. Pinning the chain
+     off the tree replaces the hand-written box labels this test used to feed the parser. *)
+  match
+    (* The LAST lattice leaf: the largest corner, so the chain's tightening is visible — every box
+       prices at its own minimum, which the refinement raises step by step. *)
+    List.last
+      (List.filter paths ~f:(fun (path, _) ->
+           List.exists path ~f:(fun (_, d) -> FD.equal d (FD.Geometry FD.Lattice))))
+  with
+  | None -> ()
+  | Some (path, _) ->
+      Stdio.printf "  lattice refinement chain:\n";
+      List.iter (prefixes path) ~f:(fun pre ->
+          match List.last pre with
+          | Some (_, d) when match d with FD.Lattice_box _ -> true | _ -> false ->
+              Stdio.printf "    %-14s -> %d bytes\n" (FD.to_label d) (inc pre)
+          | _ -> ())
 
 (* Awkward sites (phase 2): the tree's verdicts explain, before any compilation, why branches
    propose nothing — where the flat enumeration silently dropped them. Only the collector reports
@@ -300,9 +394,11 @@ let () =
           (List.length seeds) (List.length unfused) (List.length fused)
           (Sspace.count_choices tree) (Sspace.depth tree);
         (match tree with
-        | Sspace.Choice { level = "fusion"; children } ->
-            List.iter children ~f:(fun (label, child) ->
-                Stdio.printf "fusion = %s%s\n" label
+        | Sspace.Choice { children; _ }
+          when List.for_all children ~f:(fun (d, _) ->
+                   match d with FD.Fusion _ -> true | _ -> false) ->
+            List.iter children ~f:(fun (d, child) ->
+                Stdio.printf "fusion = %s%s\n" (lbl d)
                   (match child with
                   | Sspace.Child _ -> ""
                   | Sspace.Unknown (w, _) -> "  [unknown: " ^ w ^ "]"
@@ -322,15 +418,17 @@ let () =
         (* The fused flavor's own verdicts carry its path — the same refutations and exclusions
            the unfused flavor has, plus nothing, on this fully-dividing site. *)
         let flavor_of (path, _) =
-          List.find_map path ~f:(fun (level, label) ->
-              Option.some_if (String.equal level "fusion") label)
+          List.find_map path ~f:(fun (_, d) ->
+              match d with FD.Fusion f -> Some (FD.Fusion f) | _ -> None)
         in
-        let count lbl entries =
-          List.count entries ~f:(fun e -> Option.equal String.equal (flavor_of e) (Some lbl))
+        let count flavor entries =
+          List.count entries ~f:(fun e -> Option.equal FD.equal (flavor_of e) (Some flavor))
         in
         Stdio.printf "refuted: %d unfused, %d fused; excluded: %d unfused, %d fused\n"
-          (count "unfused" (Sspace.refutations tree)) (count "fused" (Sspace.refutations tree))
-          (count "unfused" (Sspace.exclusions tree)) (count "fused" (Sspace.exclusions tree))
+          (count (FD.Fusion `Unfused) (Sspace.refutations tree))
+          (count (FD.Fusion `Fused) (Sspace.refutations tree))
+          (count (FD.Fusion `Unfused) (Sspace.exclusions tree))
+          (count (FD.Fusion `Fused) (Sspace.exclusions tree))
   in
   fusable_section "fusable tail gpu" ~is_gpu:true ~is_cpu:false ~limits:gpu_full_limits opt_f;
   fusable_section "fusable tail cpu" ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt_f;
@@ -488,24 +586,14 @@ let () =
       Verdict.p "the lattice exclusion carries the lift instructions"
         (List.exists (Sspace.exclusions tree) ~f:(fun (_, w) ->
              String.equal w Autotune.geometry_lattice_witness));
-      (* The certain-traffic increments that make the bound non-uniform: a committed staged geometry
-         prices its operand tiles, an unstaged one prices nothing, and a lattice box prices its most
-         favorable corner — monotone in refinement. *)
-      let inc = Autotune.sketch_path_traffic_floor ~is_gpu:true ~limits:gpu_full_limits mm2 in
-      let show_inc name path = Stdio.printf "  %-46s -> %d bytes\n" name (inc path) in
-      Stdio.printf "certain-traffic increments along paths:\n";
-      show_inc "curated staged bm16 bn32 bk32"
-        [ ("pipeline", "tensorized"); ("geometry", "bm16 bn32 bk32") ];
-      show_inc "curated unstaged bm16 bn32 bk0"
-        [ ("pipeline", "tensorized"); ("geometry", "bm16 bn32 bk0") ];
-      show_inc "lattice box bm 8..32, bk open"
-        [ ("pipeline", "tensorized"); ("geometry", "lattice"); ("bm", "bm 8..32") ];
-      show_inc "lattice box bm=32, bk 16..32"
-        [
-          ("pipeline", "tensorized"); ("geometry", "lattice"); ("bm", "bm=32"); ("bk", "bk 16..32");
-        ];
-      show_inc "lattice singleton bm=32 bk=64"
-        [ ("pipeline", "tensorized"); ("geometry", "lattice"); ("bm", "bm=32"); ("bk", "bk=64") ];
+      (* The certain-traffic increments that make the bound non-uniform: a committed staged
+         geometry prices its operand tiles, an unstaged one prices nothing, and a lattice box prices
+         its most favorable corner — monotone in refinement. Judged over the LIFTED tree's own
+         paths (gh-ocannl-591), so the pin moves with the tree rather than with a list of literals
+         this test wrote for itself. *)
+      let inc = Autotune.sketch_path_traffic_floor ~limits:gpu_full_limits mm2 in
+      traffic_pins "gpu staged lattice" ~limits:gpu_full_limits ~elt_bytes:4 ~n_extent:64 lifted
+        mm2;
       (* Search over the lifted tree with the increment itself as the bound and an incumbent between
          the small and large boxes' floors: large-tile boxes fathom without expansion, so the walk
          scores a fraction of the lattice — the logarithmic-effective regime. The score never
@@ -518,6 +606,14 @@ let () =
          excluded\n"
         stats.Sspace.st_expanded stats.Sspace.st_scored stats.Sspace.st_fathomed
         stats.Sspace.st_refuted stats.Sspace.st_excluded);
+  (* The CPU side of the same protocol, which no test priced before (gh-ocannl-591): the packed
+     composition's traffic depends on the packing shape ABOVE its geometry — only in-kernel
+     [serial] packing adds panel bytes, the hoisted and Grid shapes replace or split reads — and the
+     blocktile pipeline stages nothing at all. Same tree-walked judgment, so the CPU arms of the
+     floor are pinned by the tree rather than by a literal path. *)
+  (match Autotune.matmul_sketch_tree ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt with
+  | None -> Stdio.printf "cpu traffic: no site detected\n"
+  | Some tree -> traffic_pins "cpu simd32" ~limits:cpu_limits ~elt_bytes:4 ~n_extent:64 tree opt);
   (* Corner-judged box refutations: a workgroup-memory cap that admits only the smallest staged
      tiles refutes the large-tile half-boxes at their most favorable corner, pre-expansion — the
      "tile-size interval whose minimum footprint exceeds shared memory" fathom of the issue. *)
@@ -530,19 +626,18 @@ let () =
       let lifted = Autotune.lift_geometry_lattice tree in
       let box_refutations =
         List.filter (Sspace.refutations lifted) ~f:(fun (path, _) ->
-            List.exists path ~f:(fun (_, label) -> String.is_substring label ~substring:"..")
-            && List.exists path ~f:(fun (_, label) -> String.equal label "lattice"))
+            List.exists path ~f:(fun (_, d) ->
+                match d with FD.Lattice_box { lb_lo; lb_hi; _ } -> lb_lo <> lb_hi | _ -> false)
+            && List.exists path ~f:(fun (_, d) -> FD.equal d (FD.Geometry FD.Lattice)))
       in
       Stdio.printf "== lattice under a 2048-byte workgroup-memory cap ==\n";
       Stdio.printf "surviving lattice leaves %d; box-level refutations %d, e.g.:\n"
         (List.length
            (List.filter (Sspace.enumerate lifted) ~f:(fun (path, _) ->
-                List.exists path ~f:(fun (_, label) -> String.equal label "lattice"))))
+                List.exists path ~f:(fun (_, d) -> FD.equal d (FD.Geometry FD.Lattice)))))
         (List.length box_refutations);
       List.iter (List.take box_refutations 2) ~f:(fun (path, w) ->
-          Stdio.printf "  %s: %s\n"
-            (String.concat ~sep:" > " (List.map path ~f:(fun (l, v) -> l ^ "=" ^ v)))
-            w);
+          Stdio.printf "  %s: %s\n" (FD.render_path path) w);
       (* Review round (Codex P1 on PR #327): the lattice minima and the open-corner pricing must
          come from the same per-format tile selection the tree builds with — a canonical [mma_tile]
          coarser than the selected format's (CUDA's TF32 shape) must not inflate the open-axis
@@ -570,10 +665,10 @@ let () =
           let lifted = Autotune.lift_geometry_lattice tree in
           let lattice_leaves =
             List.filter (Sspace.enumerate lifted) ~f:(fun (path, _) ->
-                List.exists path ~f:(fun (_, label) -> String.equal label "lattice"))
+                List.exists path ~f:(fun (_, d) -> FD.equal d (FD.Geometry FD.Lattice)))
           in
           let inc =
-            Autotune.sketch_path_traffic_floor ~is_gpu:true ~limits:gpu_coarse_canonical mm2
+            Autotune.sketch_path_traffic_floor ~limits:gpu_coarse_canonical mm2
           in
           Stdio.printf "== coarse canonical mma_tile 16^3, format tile 8^3 ==\n";
           Stdio.printf "lattice leaves %d (8-step multiples of both axes: %b)\n"
@@ -584,4 +679,8 @@ let () =
             && List.exists lattice_leaves ~f:(fun (_, p) -> p.Autotune.sk_bk = 8));
           Stdio.printf
             "  open-corner lattice increment (format 8s, not canonical 16s) -> %d bytes\n"
-            (inc [ ("pipeline", "tensorized"); ("geometry", "lattice") ]))
+            (inc
+               [
+                 (FD.level (FD.Pipeline `Tensorized), FD.Pipeline `Tensorized);
+                 (FD.level (FD.Geometry FD.Lattice), FD.Geometry FD.Lattice);
+               ]))

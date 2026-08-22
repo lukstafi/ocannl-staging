@@ -362,13 +362,39 @@ path-dependent bound fathoms the doubly-committed subtree: best=mk@6.0 stats=((s
 == lattice (64^3, tile 8x8x8) ==
 curated leaves 16, lifted leaves 80 (+64 lattice singletons), depth 4 -> 9
 the lattice exclusion carries the lift instructions: true
-certain-traffic increments along paths:
-  curated staged bm16 bn32 bk32                  -> 12288 bytes
-  curated unstaged bm16 bn32 bk0                 -> 0 bytes
-  lattice box bm 8..32, bk open                  -> 2560 bytes
-  lattice box bm=32, bk 16..32                   -> 8192 bytes
-  lattice singleton bm=32 bk=64                  -> 32768 bytes
+== gpu staged lattice: certain-traffic increments over 80 leaf paths ==
+  levels on the leaf paths: bk, bm, fusion, geometry, pipeline, twin
+  priced above the schedule-invariant floor: 78; max increment 49152 bytes
+gpu staged lattice: every leaf's increment is the traffic its own parameters imply: true
+gpu staged lattice: the increment is monotone along every path's prefixes: true
+gpu staged lattice: the staging commitments price above the floor: true
+gpu staged lattice: every leaf path commits its pipeline's shape level: true
+  staged geometry            12288 bytes
+    fusion=unfused > pipeline=tensorized > geometry=bm16 bn32 bk32 > twin=plain
+  unpriced geometry          0 bytes
+    fusion=unfused > pipeline=tensorized > geometry=bm16 bn32 bk0 > twin=plain
+  lattice leaf               2560 bytes
+    fusion=unfused > pipeline=tensorized > geometry=lattice > bm=bm 8..32 > bm=bm 8..16 > bm=bm=8 > bk=bk 8..32 > bk=bk 8..16 > bk=bk=8
+  lattice refinement chain:
+    bm 40..64      -> 4608 bytes
+    bm 56..64      -> 5632 bytes
+    bm=64          -> 6144 bytes
+    bk 40..64      -> 30720 bytes
+    bk 56..64      -> 43008 bytes
+    bk=64          -> 49152 bytes
 lifted search at incumbent 6000: 34 expanded, 13 scored, 26 fathomed, 1 refuted, 0 excluded
+== cpu simd32: certain-traffic increments over 19 leaf paths ==
+  levels on the leaf paths: fusion, geometry, packing, packing-shape, pipeline, row-block, tensorized-form
+  priced above the schedule-invariant floor: 5; max increment 196608 bytes
+cpu simd32: every leaf's increment is the traffic its own parameters imply: true
+cpu simd32: the increment is monotone along every path's prefixes: true
+cpu simd32: the staging commitments price above the floor: true
+cpu simd32: every leaf path commits its pipeline's shape level: true
+  staged geometry            32768 bytes
+    fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=serial > geometry=bm64 bn0 bk64
+  unpriced geometry          0 bytes
+    fusion=unfused > pipeline=blocktile > packing=in-kernel > geometry=b16
+  lattice leaf               (none in this tree)
 == lattice under a 2048-byte workgroup-memory cap ==
 surviving lattice leaves 4; box-level refutations 13, e.g.:
   fusion=unfused > pipeline=tensorized > geometry=lattice > bm=bm 8..32 > bm=bm 8..16 > bm=bm=8 > bk=bk 8..32 > bk=bk 8..16 > bk=bk=16: staged operand tiles need 2560 bytes of workgroup memory, exceeding the 2048-byte limit

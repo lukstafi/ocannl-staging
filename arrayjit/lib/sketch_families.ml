@@ -2215,6 +2215,164 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
            exactly-once check passes by construction — multi-window (2-D) convs included. *)
         Some (seeds, site.c_d)
 
+(** {2 The matmul family tree's decisions}
+
+    What a commitment on the matmul family tree {e is} (gh-ocannl-591). Every level's choices are
+    values of {!Family_decision.t}, so a consumer that reads a decision back off a path — the
+    certain-traffic floor {!sketch_path_traffic_floor}, the lattice lift {!lift_geometry_lattice},
+    the tests, the enablement ranking to come — matches on data. The display strings are
+    {!Family_decision.to_label}, a rendering of the datum and nothing else: rewording one moves what
+    a log or a golden prints and cannot change what any consumer computes, which is the property the
+    strings-plus-[Scanf] protocol did not have (a reworded geometry label silently made every scan
+    arm fall through, zeroing the floor's increment on every path — a sound bound, so nothing
+    raised).
+
+    The level name ({!Family_decision.level}) is likewise derived from the decision, so a node's
+    level and its children's identities cannot drift apart, and renaming a level is a rendering
+    change too. *)
+
+module Family_decision = struct
+  (** A tile geometry as committed by a [geometry] level. Which fields are meaningful is the
+      constructor's business ({!geometry_choice}), so the zero-encodings that the shared shape
+      carries are read only where they mean something:
+
+      - [g_bm], [g_bk]: the row and depth blocks, always meaningful.
+      - [g_bn]: the column block; [0] in {!Cpu_packed} encodes the unsplit full column extent, and
+        in {!Gpu_mma} it is pinned at the mma lane width.
+      - [g_tm], [g_tn]: the per-thread tile of {!Gpu_blocktile}; [0] elsewhere.
+
+      [g_bk = 0] in {!Gpu_mma} is the unstaged full-K block — the one distinction the traffic floor
+      turns on, since an unstaged geometry reads its operands in place and stages nothing. *)
+  type geometry = { g_bm : int; g_bn : int; g_bk : int; g_tm : int; g_tn : int }
+
+  (** How a [geometry] level was committed. The five forms are the five curated menus (plus the
+      lattice branch), and they are distinct constructors rather than one shape because what a
+      completion below them stages differs: the GPU pipelines stage both operand tiles in workgroup
+      memory, the CPU packed shapes pack panels whose traffic depends on the packing shape above,
+      and the CPU blocktile stages nothing. *)
+  type geometry_choice =
+    | Gpu_blocktile of geometry
+        (** The GPU scalar blocktile menu: both operand tiles are staged in kernel. *)
+    | Gpu_mma of geometry
+        (** The GPU tensorized menu: [g_bk > 0] stages both operand tiles in kernel, [g_bk = 0] is
+            the unstaged full-K block. *)
+    | Cpu_blocktile of int  (** The CPU blocktile menu's single block size (bm = bn = bk). *)
+    | Cpu_packed of geometry
+        (** The CPU packed-composition menu; what it costs depends on the {!Packing_shape} above
+            it. *)
+    | Lattice
+        (** The staged tile-size lattice beyond the curated menu (gh-ocannl-514 phase 5), excluded
+            by default and lifted by {!lift_geometry_lattice}. Its own axes commit as
+            {!Lattice_box}. *)
+
+  (** One committed decision of the matmul family tree. Each constructor belongs to exactly one
+      level ({!level}) and carries the whole identity of the commitment — no consumer needs the
+      level name, or the label, to know what was decided. *)
+  type t =
+    | Fusion of [ `Unfused | `Fused ]  (** The root: the epilogue-fusion flavor (gh-ocannl-613). *)
+    | Pipeline of [ `Blocktile | `Tensorized ]  (** Which composed pipeline. *)
+    | Batch of [ `Serial | `Grid ]  (** The batch-geometry twin (gh-ocannl-643), GPU only. *)
+    | Packing of [ `In_kernel | `Hoisted ]
+        (** The CPU blocktile pipeline's link-time packing twin (gh-ocannl-470). *)
+    | Geometry of geometry_choice  (** The tile geometry, per the pipeline's own menu. *)
+    | Lattice_box of { lb_axis : [ `Bm | `Bk ]; lb_lo : int; lb_hi : int }
+        (** One binary interval refinement of a lattice axis: the value range still open below this
+            commitment, [lb_lo = lb_hi] at a singleton. Boxes are priced at [lb_lo], their most
+            favorable corner. *)
+    | Twin of [ `Plain | `Swizzled | `Depth of int ]
+        (** The per-staged-geometry twins: the swizzled staged layout, the pipelined depths. *)
+    | Tensorized_form of [ `Whole_triple | `Packed ]  (** The CPU tensorized composition. *)
+    | Row_block of int
+        (** The CPU whole-triple row block; [0] is the unsplit form, [> 0] a pool-rendered Grid
+            split. *)
+    | Packing_shape of
+        [ `Serial | `Hoisted | `Hoisted_grid | `Hoisted_grid_pack_rest | `Grid_pack_rest | `Grid ]
+        (** Which CPU packed composition: where the panels are packed (in kernel, at link time, per
+            Grid chunk) — what makes a packed geometry's traffic additional or merely relocated. *)
+
+  (** The path a consumer reads: {!Ir.Schedule_space}'s [(level, decision)] vector at this label
+      type. The level string is display; the decision is the identity. *)
+  type path = (string * t) list
+
+  (* The decisions are pure data — variants over ints — and the [autotune] library carries no ppx
+     deriving, so structural [Poly] equality IS the intended equality here (no floats, no
+     functions, no abstract payloads). *)
+
+  (** Two decisions are the same commitment. *)
+  let equal (a : t) (b : t) = Poly.equal a b
+
+  (** Total order on decisions, for keying and sorting. *)
+  let compare (a : t) (b : t) = Poly.compare a b
+
+  (** The level a decision belongs to — the name {!Ir.Schedule_space.Choice} carries. Derived, so
+      the tree cannot mint a node whose level disagrees with its children's decisions. *)
+  let level = function
+    | Fusion _ -> "fusion"
+    | Pipeline _ -> "pipeline"
+    | Batch _ -> "batch"
+    | Packing _ -> "packing"
+    | Geometry _ -> "geometry"
+    | Lattice_box { lb_axis = `Bm; _ } -> "bm"
+    | Lattice_box { lb_axis = `Bk; _ } -> "bk"
+    | Twin _ -> "twin"
+    | Tensorized_form _ -> "tensorized-form"
+    | Row_block _ -> "row-block"
+    | Packing_shape _ -> "packing-shape"
+
+  (** The display rendering — for logs, decline reports and goldens. Nothing reads it back. *)
+  let to_label =
+    let geom { g_bm; g_bn; g_bk; g_tm; g_tn } =
+      Printf.sprintf "bm%d bn%d bk%d tm%d tn%d" g_bm g_bn g_bk g_tm g_tn
+    in
+    let geom3 { g_bm; g_bn; g_bk; _ } = Printf.sprintf "bm%d bn%d bk%d" g_bm g_bn g_bk in
+    function
+    | Fusion `Unfused -> "unfused"
+    | Fusion `Fused -> "fused"
+    | Pipeline `Blocktile -> "blocktile"
+    | Pipeline `Tensorized -> "tensorized"
+    | Batch `Serial -> "batch-serial"
+    | Batch `Grid -> "batch-grid"
+    | Packing `In_kernel -> "in-kernel"
+    | Packing `Hoisted -> "hoisted"
+    | Geometry (Gpu_blocktile g) -> geom g
+    | Geometry (Gpu_mma g) -> geom3 g
+    | Geometry (Cpu_blocktile b) -> Printf.sprintf "b%d" b
+    | Geometry (Cpu_packed g) -> geom3 g
+    | Geometry Lattice -> "lattice"
+    | Lattice_box { lb_axis; lb_lo; lb_hi } ->
+        let axis = match lb_axis with `Bm -> "bm" | `Bk -> "bk" in
+        if lb_lo = lb_hi then Printf.sprintf "%s=%d" axis lb_lo
+        else Printf.sprintf "%s %d..%d" axis lb_lo lb_hi
+    | Twin `Plain -> "plain"
+    | Twin `Swizzled -> "swizzled"
+    | Twin (`Depth d) -> Printf.sprintf "depth%d" d
+    | Tensorized_form `Whole_triple -> "whole-triple"
+    | Tensorized_form `Packed -> "packed"
+    | Row_block bm -> Printf.sprintf "bm%d" bm
+    | Packing_shape `Serial -> "serial"
+    | Packing_shape `Hoisted -> "hoisted"
+    | Packing_shape `Hoisted_grid -> "hoisted-grid"
+    | Packing_shape `Hoisted_grid_pack_rest -> "hoisted-grid-pack-rest"
+    | Packing_shape `Grid_pack_rest -> "grid-pack-rest"
+    | Packing_shape `Grid -> "grid"
+
+  (** A decision path as ["level=label > …"], for logs and reports. *)
+  let render_path (path : path) = Sspace.render_path ~label:to_label path
+end
+
+(** The matmul family's trees and children at the decision label type. *)
+type family_tree = (Family_decision.t, sketch_params) Sspace.tree
+
+type family_child = (Family_decision.t, sketch_params) Sspace.child
+
+(* Every [Choice] node of the family tree. The level name is derived from the children's decisions —
+   all children of one node commit the same level — so a node's level and its children's identities
+   cannot drift apart (gh-ocannl-591). *)
+let decided_choice (children : (Family_decision.t * family_child) list) : family_tree =
+  match children with
+  | [] -> invalid_arg "Sketch_families.decided_choice: a decision level with no children"
+  | (d, _) :: _ -> Sspace.Choice { level = Family_decision.level d; children }
+
 (* The matmul family as a refinement tree (gh-ocannl-514 phase 1): the hand-written seed
    enumeration factored into decision levels — pipeline, then per-pipeline shape/geometry levels,
    twins as their own level — with the seed list recovered as the tree's {!Sspace.leaves}, in the
@@ -2269,11 +2427,10 @@ let geometry_lattice_witness =
    whose minimum footprint exceeds shared memory refutes the whole box"). Subtrees stay lazy, so a
    refuted (or, during search, fathomed) half is never expanded — the property that makes searching
    the full lattice logarithmic-effective rather than enumerative. *)
-let interval_axis ~axis ~(values : int array) ~(box_verdict : int -> int -> string option)
-    ~(singleton : int -> 'a Sspace.child) : 'a Sspace.tree =
+let interval_axis ~(axis : [ `Bm | `Bk ]) ~(values : int array)
+    ~(box_verdict : int -> int -> string option) ~(singleton : int -> family_child) : family_tree =
   let label lo hi =
-    if lo = hi then Printf.sprintf "%s=%d" axis values.(lo)
-    else Printf.sprintf "%s %d..%d" axis values.(lo) values.(hi)
+    Family_decision.Lattice_box { lb_axis = axis; lb_lo = values.(lo); lb_hi = values.(hi) }
   in
   let rec child lo hi =
     match box_verdict values.(lo) values.(hi) with
@@ -2282,22 +2439,18 @@ let interval_axis ~axis ~(values : int array) ~(box_verdict : int -> int -> stri
     | None -> Sspace.Child (lazy (split lo hi))
   and split lo hi =
     let mid = (lo + hi) / 2 in
-    Sspace.Choice
-      {
-        level = axis;
-        children = [ (label lo mid, child lo mid); (label (mid + 1) hi, child (mid + 1) hi) ];
-      }
+    decided_choice [ (label lo mid, child lo mid); (label (mid + 1) hi, child (mid + 1) hi) ]
   in
   match Array.length values with
   | 0 -> invalid_arg "Autotune.interval_axis: empty axis"
-  | 1 -> Sspace.Choice { level = axis; children = [ (label 0 0, child 0 0) ] }
+  | 1 -> decided_choice [ (label 0 0, child 0 0) ]
   | n -> split 0 (n - 1)
 
 (* One epilogue-fusion flavor of the matmul family: the pipeline level and everything below it.
    [fused] selects the leaves' [sk_epilogue] and the flavor's own companion-coverage verdict
    ([coverage_witness], owned by {!matmul_family_tree} so that the flavors can share it). *)
 let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
-    ~(coverage_witness : string option Lazy.t) ~(fused : bool) site : sketch_params Sspace.tree =
+    ~(coverage_witness : string option Lazy.t) ~(fused : bool) site : family_tree =
   (* Builder preconditions statically decidable at tree construction (gh-ocannl-577): rules the
      schedule builders settle identically for every tile completion refute here, with their
      witnesses, instead of failing candidate by candidate at build — the same lift phase 2 gave the
@@ -2316,14 +2469,13 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
   in
   let divides c n = c <= n && n % c = 0 in
   let leaf p = Sspace.Child (lazy (Sspace.Leaf p)) in
-  let choice level children = Sspace.Choice { level; children } in
+  let choice children = decided_choice children in
   (* [subt] defers subtree construction into the child's lazy: verdicts are decided at parent
      construction (fathoming needs them without expansion), subtrees are not. *)
   let subt t = Sspace.Child (lazy (t ())) in
   (* The first failing conjunct is the witness: a refutation names the one constraint whose
      violation already refutes every completion, not the whole gate. *)
-  let refute_unless (conds : (bool * string) list) (ok : unit -> sketch_params Sspace.child) :
-      sketch_params Sspace.child =
+  let refute_unless (conds : (bool * string) list) (ok : unit -> family_child) : family_child =
     match List.find conds ~f:(fun (c, _) -> not c) with
     | Some (_, witness) -> Sspace.Refuted witness
     | None -> ok ()
@@ -2360,7 +2512,7 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
       let a_prec = Lazy.force site.m_a.Ir.Tnode.storage_prec in
       let b_prec = Lazy.force site.m_b.Ir.Tnode.storage_prec in
       subt (fun () ->
-          choice "geometry"
+          choice
             (List.map
                [
                  (64, 64, 8, 4, 4);
@@ -2370,7 +2522,8 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                  (16, 16, 8, 2, 2);
                ]
                ~f:(fun (bm, bn, bk, tm, tn) ->
-                 ( Printf.sprintf "bm%d bn%d bk%d tm%d tn%d" bm bn bk tm tn,
+                 ( Family_decision.Geometry
+                     (Gpu_blocktile { g_bm = bm; g_bn = bn; g_bk = bk; g_tm = tm; g_tn = tn }),
                    refute_unless
                      ([
                         ndiv "bm" bm ~into:"m" site.m_ni;
@@ -2428,9 +2581,9 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
          sits ABOVE its geometries: the flat enumeration emitted all in-kernel tilings before the
          hoisted twins. *)
       let geoms hoist =
-        choice "geometry"
+        choice
           (List.map [ 16; 8 ] ~f:(fun b ->
-               ( Printf.sprintf "b%d" b,
+               ( Family_decision.Geometry (Cpu_blocktile b),
                  refute_unless
                    [
                      ndiv "b" b ~into:"m" site.m_ni;
@@ -2441,10 +2594,10 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                      leaf { base_params with sk_bm = b; sk_bn = b; sk_bk = b; sk_hoist = hoist }) )))
       in
       subt (fun () ->
-          choice "packing"
+          choice
             [
-              ("in-kernel", subt (fun () -> geoms false));
-              ( "hoisted",
+              (Family_decision.Packing `In_kernel, subt (fun () -> geoms false));
+              ( Family_decision.Packing `Hoisted,
                 if hoistable site.m_a || hoistable site.m_b then subt (fun () -> geoms true)
                 else
                   Sspace.Refuted
@@ -2566,13 +2719,13 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                            (let mults t ~upto = List.init (upto / t) ~f:(fun i -> (i + 1) * t) in
                             let bms = Array.of_list (mults tm_t ~upto:site.m_ni) in
                             let bks = Array.of_list (mults tk_t ~upto:site.m_nk) in
-                            interval_axis ~axis:"bm" ~values:bms
+                            interval_axis ~axis:`Bm ~values:bms
                               ~box_verdict:(fun bm_lo _bm_hi ->
                                 staged_tiles_exceed ~bm:bm_lo ~bn:w ~bk:bks.(0) ~depth:1)
                               ~singleton:(fun bm ->
                                 Sspace.Child
                                   (lazy
-                                    (interval_axis ~axis:"bk" ~values:bks
+                                    (interval_axis ~axis:`Bk ~values:bks
                                        ~box_verdict:(fun bk_lo _bk_hi ->
                                          staged_tiles_exceed ~bm ~bn:w ~bk:bk_lo ~depth:1)
                                        ~singleton:(fun bk ->
@@ -2589,11 +2742,12 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                                            }))))))) )
             in
             subt (fun () ->
-                choice "geometry"
+                choice
                   (List.map
                      [ (16, w, 0); (32, w, 0); (16, w, 32); (32, w, 32); (32, w, 16) ]
                      ~f:(fun (bm, bn, bk) ->
-                       ( Printf.sprintf "bm%d bn%d bk%d" bm bn bk,
+                       ( Family_decision.Geometry
+                           (Gpu_mma { g_bm = bm; g_bn = bn; g_bk = bk; g_tm = 0; g_tn = 0 }),
                          refute_unless
                            ([ nmul "bm" bm ~of_:"m" tm_t; nmul "bn" bn ~of_:"n" tn_t ]
                            @ (match staged_tiles_exceed ~bm ~bn ~bk ~depth:1 with
@@ -2638,7 +2792,7 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                                | Some LL.Swizzle_b128 when bk = 0 -> []
                                | Some LL.Swizzle_b128 ->
                                    [
-                                     ( "swizzled",
+                                     ( Family_decision.Twin `Swizzled,
                                        if b128_units_ok a_prec bk && b128_units_ok b_prec bn then
                                          leaf { base with sk_swizzle = Some LL.Swizzle_b128 }
                                        else
@@ -2653,7 +2807,7 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                                then []
                                else
                                  List.map mma.Ir.Backend_intf.mma_pipeline_depths ~f:(fun d ->
-                                     ( Printf.sprintf "depth%d" d,
+                                     ( Family_decision.Twin (`Depth d),
                                        if d < 1 || d > 2 then
                                          (* The capability list is advisory; the implemented range
                                             is [Schedule.apply_stage]'s — the wait-all emission has
@@ -2696,9 +2850,10 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                                              else leaf { base with sk_depth = d } ))
                              in
                              subt (fun () ->
-                                 choice "twin"
-                                   ((("plain", leaf base) :: swizzle_twins) @ depth_twins))) ))
-                  @ [ ("lattice", lattice_child) ])))
+                                 choice
+                                   (((Family_decision.Twin `Plain, leaf base) :: swizzle_twins)
+                                   @ depth_twins))) ))
+                  @ [ (Family_decision.Geometry Lattice, lattice_child) ])))
     | true, None -> Sspace.Refuted "backend advertises no mma capability"
     | _ when is_cpu ->
         (* The register-tiled [Tile_mma] rendering needs no MMA units (cc's [limits.mma] is a token
@@ -2760,9 +2915,9 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
             let whole () =
               (* Whole-triple [Tile_mma] reads both operands in place over the full column extent:
                  the stored B orientation and [n = m_nj] reach the renderer as-is. *)
-              choice "row-block"
+              choice
                 (List.map [ 0; 64; 16 ] ~f:(fun bm ->
-                     ( Printf.sprintf "bm%d" bm,
+                     ( Family_decision.Row_block bm,
                        refute_unless
                          ([
                             ( bm = 0 || divides bm site.m_ni,
@@ -2864,7 +3019,8 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                       && (bn = 0 || divides bn site.m_nj)
                       && divides bk site.m_nk
                     in
-                    ( Printf.sprintf "bm%d bn%d bk%d" bm bn bk,
+                    ( Family_decision.Geometry
+                        (Cpu_packed { g_bm = bm; g_bn = bn; g_bk = bk; g_tm = 0; g_tn = 0 }),
                       {
                         base_params with
                         sk_mma = true;
@@ -2911,7 +3067,7 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                  sits ABOVE the geometries, matching the flat enumeration's variant-major emission
                  order. *)
               let geoms ~f =
-                choice "geometry"
+                choice
                   (List.map menu ~f:(fun (label, p, verdict, full_div, tiles_bytes) ->
                        ( label,
                          match verdict with
@@ -2934,14 +3090,14 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                  hoistable operand leaves a one-dispatch alternative, and its tiles must fit the
                  renderer's per-chunk privatization cap. Grid shapes need at least two row blocks
                  (c_syntax.ml [collect_parallel_grid]). *)
-              choice "packing-shape"
+              choice
                 [
-                  ("serial", subt (fun () -> geoms ~f:(fun p _ _ -> leaf p)));
-                  ( "hoisted",
+                  (Family_decision.Packing_shape `Serial, subt (fun () -> geoms ~f:(fun p _ _ -> leaf p)));
+                  ( Family_decision.Packing_shape `Hoisted,
                     if any_hoistable then
                       subt (fun () -> geoms ~f:(fun p _ _ -> leaf { p with sk_hoist = true }))
                     else Sspace.Refuted no_constant );
-                  ( "hoisted-grid",
+                  ( Family_decision.Packing_shape `Hoisted_grid,
                     if not any_hoistable then Sspace.Refuted no_constant
                     else if Option.is_some (Lazy.force cpu_grid_rendering_disabled) then
                       Sspace.Refuted (Option.value_exn (Lazy.force cpu_grid_rendering_disabled))
@@ -2972,7 +3128,7 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                                    read in place and cannot absorb the zero-fringe pad"
                               else if not (grid_ok p) then Sspace.Refuted (too_few_blocks p)
                               else leaf { p with sk_hoist = true; sk_grid = true })) );
-                  ( "hoisted-grid-pack-rest",
+                  ( Family_decision.Packing_shape `Hoisted_grid_pack_rest,
                     if not any_hoistable then Sspace.Refuted no_constant
                     else if Option.is_some (Lazy.force cpu_grid_rendering_disabled) then
                       Sspace.Refuted (Option.value_exn (Lazy.force cpu_grid_rendering_disabled))
@@ -3014,7 +3170,7 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                                         sk_grid = true;
                                         sk_pack_rest = true;
                                       })) );
-                  ( "grid-pack-rest",
+                  ( Family_decision.Packing_shape `Grid_pack_rest,
                     (* The builder hoists every hoistable source in the grid-outermost form
                        regardless of [sk_hoist], so only the non-hoistable tiles privatize per chunk
                        — the cap judges exactly those (on a no-hoistable site this is both tiles; on
@@ -3042,7 +3198,7 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                            role without per-chunk re-packing",
                           lazy (subt judged) )
                     else subt judged );
-                  ( "grid",
+                  ( Family_decision.Packing_shape `Grid,
                     match Lazy.force cpu_grid_rendering_disabled with
                     | Some w -> Sspace.Refuted w
                     | None ->
@@ -3061,8 +3217,11 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                 ]
             in
             subt (fun () ->
-                choice "tensorized-form"
-                  [ ("whole-triple", whole_child); ("packed", subt (fun () -> packed ())) ]))
+                choice
+                  [
+                    (Family_decision.Tensorized_form `Whole_triple, whole_child);
+                    (Family_decision.Tensorized_form `Packed, subt (fun () -> packed ()));
+                  ]))
     | _ -> Sspace.Refuted "backend kind seeds no tensorized pipeline"
   in
   (* The batch-geometry level (gh-ocannl-643), per GPU pipeline, ABOVE the geometry menus:
@@ -3074,14 +3233,17 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
   let with_batch_twins mk =
     if is_gpu && batch_grid_twin_ok ~limits site then
       subt (fun () ->
-          choice "batch"
-            [ ("batch-serial", mk ~batch_grid:false); ("batch-grid", mk ~batch_grid:true) ])
+          choice
+            [
+              (Family_decision.Batch `Serial, mk ~batch_grid:false);
+              (Family_decision.Batch `Grid, mk ~batch_grid:true);
+            ])
     else mk ~batch_grid:false
   in
-  choice "pipeline"
+  choice
     [
-      ("blocktile", precondition_guard (with_batch_twins blocktile_child));
-      ("tensorized", precondition_guard (with_batch_twins mma_child));
+      (Family_decision.Pipeline `Blocktile, precondition_guard (with_batch_twins blocktile_child));
+      (Family_decision.Pipeline `Tensorized, precondition_guard (with_batch_twins mma_child));
     ]
 
 (* The matmul family: the epilogue-fusion level (gh-ocannl-613) above one {!matmul_flavor_tree} per
@@ -3097,7 +3259,7 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
    refuted. Both flavors' subtrees stay lazy like every other level: nothing below the root is
    built before a consumer descends into it. *)
 let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
-    ~(opt : LL.optimized) site : sketch_params Sspace.tree =
+    ~(opt : LL.optimized) site : family_tree =
   let unfused_coverage = lazy (matmul_coverage_witness ~opt ~fused:false site) in
   let fused_coverage =
     lazy
@@ -3109,18 +3271,14 @@ let matmul_family_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
     Sspace.Child
       (lazy (matmul_flavor_tree ~is_gpu ~is_cpu ~limits ~coverage_witness ~fused site))
   in
-  Sspace.Choice
-    {
-      level = "fusion";
-      children =
-        [
-          ("unfused", flavor ~fused:false ~coverage_witness:unfused_coverage);
-          ( "fused",
-            match Sched.fuse_epilogue_witness ~target:site.m_d opt with
-            | Some w -> Sspace.Refuted w
-            | None -> flavor ~fused:true ~coverage_witness:fused_coverage );
-        ];
-    }
+  decided_choice
+    [
+      (Family_decision.Fusion `Unfused, flavor ~fused:false ~coverage_witness:unfused_coverage);
+      ( Family_decision.Fusion `Fused,
+        match Sched.fuse_epilogue_witness ~target:site.m_d opt with
+        | Some w -> Sspace.Refuted w
+        | None -> flavor ~fused:true ~coverage_witness:fused_coverage );
+    ]
 
 let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits) ~opt site :
     sketch_params list =
@@ -3129,21 +3287,25 @@ let matmul_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
 (* The exported tree view of the matmul family (site detection included); the conv family factors
    the same way as a follow-up. *)
 let matmul_sketch_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
-    (opt : LL.optimized) : sketch_params Sspace.tree option =
+    (opt : LL.optimized) : family_tree option =
   Option.map (detect_matmul opt.LL.llc) ~f:(matmul_family_tree ~is_gpu ~is_cpu ~limits ~opt)
 
 (* gh-ocannl-514 phase 5: lift every tile-lattice exclusion in the family tree, preserving the
    laziness of everything else — a lifted branch remains subject to legality (box refutations), and
    the recursion continues below the lift so nested exclusions of other policies stay excluded. Used
    by [model_default] under config [model_default_geometry_lattice]. *)
-let lift_geometry_lattice (tree : sketch_params Sspace.tree) : sketch_params Sspace.tree =
+let lift_geometry_lattice (tree : family_tree) : family_tree =
   let rec tree_f = function
     | Sspace.Leaf _ as l -> l
     | Sspace.Choice { level; children } ->
-        Sspace.Choice { level; children = List.map children ~f:(fun (lbl, c) -> (lbl, child_f c)) }
-  and child_f = function
-    | Sspace.Excluded (w, _) as c when String.equal w geometry_lattice_witness ->
-        child_f (Sspace.lift_excluded c)
+        Sspace.Choice
+          { level; children = List.map children ~f:(fun (lbl, c) -> (lbl, child_f lbl c)) }
+  and child_f lbl = function
+    (* The lattice branch is identified by its DECISION (gh-ocannl-591), not by its exclusion
+       witness: the witness is prose, and prose a reword can silently desync. *)
+    | Sspace.Excluded _ as c
+      when Family_decision.equal lbl (Family_decision.Geometry Family_decision.Lattice) ->
+        child_f lbl (Sspace.lift_excluded c)
     | Sspace.Child sub -> Sspace.Child (lazy (tree_f (Lazy.force sub)))
     | Sspace.Unknown (w, sub) -> Sspace.Unknown (w, lazy (tree_f (Lazy.force sub)))
     | (Sspace.Excluded _ | Sspace.Refuted _) as c -> c
@@ -3153,38 +3315,26 @@ let lift_geometry_lattice (tree : sketch_params Sspace.tree) : sketch_params Ssp
 (* gh-ocannl-514 phase 5: the certain-traffic increment of a family-tree decision path — bytes that
    {e every} completion below the path moves beyond the schedule-invariant
    [Cost_model.completion_floor], mirroring [Cost_model.analyze]'s counting downward so the composed
-   bound stays below every leaf's model score. The committed staging decisions are read off the
-   path's own labels (minted a few functions above — geometry commitments "bm<B> bn<B> bk<B>[ tm<T>
-   tn<T>]", lattice boxes "<axis> <lo>..<hi>", lattice singletons "<axis>=<v>"); a box contributes
-   its most favorable (smallest-tiles) corner, so the increment is monotone in refinement like the
-   floor it extends. Staged operand tiles are distinct nodes whose distinct-cell footprints
-   [analyze] charges on every staged leaf (reads and writes for the in-kernel GPU stages; reads only
-   for the CPU packed panels, whose hoisted flavors write at link time); everything not certain
-   contributes zero. *)
-let sketch_path_traffic_floor ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits)
-    (opt : LL.optimized) : (string * string) list -> int =
+   bound stays below every leaf's model score. The committed staging decisions are READ OFF THE
+   PATH'S DATA (gh-ocannl-591): each entry is a [Family_decision.t], so a geometry commitment is the
+   geometry, a lattice box is its own interval, and the display labels this used to re-parse are
+   nothing but a rendering — rewording one can no longer make the arms fall through and zero the
+   increment. A box contributes its most favorable (smallest-tiles) corner, so the increment is
+   monotone in refinement like the floor it extends. Staged operand tiles are distinct nodes whose
+   distinct-cell footprints [analyze] charges on every staged leaf (reads and writes for the
+   in-kernel GPU stages; reads only for the CPU packed panels, whose hoisted flavors write at link
+   time); everything not certain contributes zero. The decision also says which pipeline minted it
+   (a [Gpu_mma] geometry is a GPU tensorized commitment by construction), so the floor no longer
+   needs the caller's backend kind alongside the path. *)
+let sketch_path_traffic_floor ~(limits : Ir.Backend_intf.hardware_limits) (opt : LL.optimized) :
+    Family_decision.path -> int =
   match detect_matmul opt.LL.llc with
   | None -> fun _path -> 0
-  | Some site -> (
+  | Some site ->
       let a_prec = Lazy.force site.m_a.Ir.Tnode.storage_prec in
       let b_prec = Lazy.force site.m_b.Ir.Tnode.storage_prec in
       let pa = Ir.Ops.prec_in_bytes a_prec and pb = Ir.Ops.prec_in_bytes b_prec in
       let tile_bytes ~bm ~bn ~bk = (bm * bk * pa) + (bk * bn * pb) in
-      let scan2 fmt label =
-        try Some (Stdlib.Scanf.sscanf label fmt (fun a b -> (a, b))) with _ -> None
-      in
-      let scan_box label =
-        (* "bm 16..64" / "bk 16..32": the box's minimum; "bm=32" / "bk=32": the singleton. *)
-        match scan2 "bm %d..%d" label with
-        | Some (lo, _) -> Some (`Bm lo)
-        | None -> (
-            match scan2 "bk %d..%d" label with
-            | Some (lo, _) -> Some (`Bk lo)
-            | None -> (
-                try Some (`Bm (Stdlib.Scanf.sscanf label "bm=%d" (fun v -> v)))
-                with _ -> (
-                  try Some (`Bk (Stdlib.Scanf.sscanf label "bk=%d" (fun v -> v))) with _ -> None)))
-      in
       let w =
         Option.value_map limits.Ir.Backend_intf.mma ~default:0 ~f:(fun m ->
             m.Ir.Backend_intf.mma_simd_width)
@@ -3203,73 +3353,53 @@ let sketch_path_traffic_floor ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits
             | None -> m.Ir.Backend_intf.mma_tile)
       in
       fun path ->
-        let tensorized =
-          List.exists path ~f:(fun (level, label) ->
-              String.equal level "pipeline" && String.equal label "tensorized")
-        in
-        (* Fully-committed geometry labels: the GPU blocktile's five fields, or the shared
-           three-field form (GPU mma menu; CPU packed shapes, where bn=0 encodes the full column
-           extent). *)
+        let decisions = List.map path ~f:snd in
         let committed =
-          List.find_map path ~f:(fun (level, label) ->
-              if not (String.equal level "geometry") then None
-              else
-                try
-                  Some
-                    (Stdlib.Scanf.sscanf label "bm%d bn%d bk%d tm%d tn%d" (fun bm bn bk _ _ ->
-                         `Blocktile (bm, bn, bk)))
-                with _ -> (
-                  try
-                    Some
-                      (Stdlib.Scanf.sscanf label "bm%d bn%d bk%d" (fun bm bn bk ->
-                           `Three (bm, bn, bk)))
-                  with _ -> None))
+          List.find_map decisions ~f:(function
+            | Family_decision.Geometry g -> Some g
+            | _ -> None)
         in
         match committed with
-        | Some (`Blocktile (bm, bn, bk)) when is_gpu ->
+        | Some (Family_decision.Gpu_blocktile { g_bm = bm; g_bn = bn; g_bk = bk; _ }) ->
             (* The scalar blocktile pipeline stages both operand tiles in kernel: written and
                read. *)
             2 * tile_bytes ~bm ~bn ~bk
-        | Some (`Three (bm, bn, bk)) when is_gpu && tensorized ->
+        | Some (Family_decision.Gpu_mma { g_bm = bm; g_bn = bn; g_bk = bk; _ }) ->
             (* Staged mma geometries (bk > 0) stage both operand tiles in kernel; unstaged read in
                place. *)
             if bk > 0 then 2 * tile_bytes ~bm ~bn ~bk else 0
-        | Some (`Three (bm, bn, bk)) when (not is_gpu) && tensorized ->
-            (* CPU packed shapes: only in-kernel packing of both panels ([serial]) certainly ADDS
-               traffic — the packing nest reads the original operands (already in the base floor)
-               and writes the panels, which the micro-kernel then reads. A hoisted panel is packed
-               at link time and REPLACES the original operand's reads, so its bytes are not
-               additional (with both operands hoisted the addition can be exactly zero — Codex P1 on
-               PR #327); the hoisted-only Grid and mixed grid-outermost shapes likewise replace or
-               split. Zero for all of those, and when the shape is still open. bn = 0 encodes the
-               full column extent. *)
+        | Some (Family_decision.Cpu_packed { g_bm = bm; g_bn = bn; g_bk = bk; _ }) ->
+            (* CPU packed shapes: only in-kernel packing of both panels ([Packing_shape `Serial])
+               certainly ADDS traffic — the packing nest reads the original operands (already in the
+               base floor) and writes the panels, which the micro-kernel then reads. A hoisted panel
+               is packed at link time and REPLACES the original operand's reads, so its bytes are
+               not additional (with both operands hoisted the addition can be exactly zero — Codex
+               P1 on PR #327); the hoisted-only Grid and mixed grid-outermost shapes likewise
+               replace or split. Zero for all of those. bn = 0 encodes the full column extent. *)
             let serial_packing =
-              List.exists path ~f:(fun (level, label) ->
-                  String.equal level "packing-shape" && String.equal label "serial")
+              List.exists decisions ~f:(function
+                | Family_decision.Packing_shape `Serial -> true
+                | _ -> false)
             in
             if serial_packing then
               let bn_eff = if bn = 0 then site.m_nj else bn in
               tile_bytes ~bm ~bn:bn_eff ~bk
             else 0
-        | Some _ | None ->
-            if not (is_gpu && tensorized) then 0
-            else
-              (* Lattice boxes: bn is pinned at the lane width, bm/bk at their box minima (the most
-                 favorable corner), the intrinsic tile when not yet committed. All lattice leaves
-                 are staged, so entering the lattice already floors at the intrinsic corner. *)
-              let on_lattice =
-                List.exists path ~f:(fun (level, label) ->
-                    String.equal level "geometry" && String.equal label "lattice")
-              in
-              if not on_lattice then 0
-              else
-                let tm_t, _, tk_t = tile_min in
-                let bm =
-                  List.fold path ~init:tm_t ~f:(fun acc (_, label) ->
-                      match scan_box label with Some (`Bm v) -> v | _ -> acc)
-                in
-                let bk =
-                  List.fold path ~init:tk_t ~f:(fun acc (_, label) ->
-                      match scan_box label with Some (`Bk v) -> v | _ -> acc)
-                in
-                2 * tile_bytes ~bm ~bn:w ~bk)
+        | Some (Family_decision.Cpu_blocktile _) ->
+            (* The CPU blocktile pipeline stages nothing: its tiles are registers, and its hoisted
+               flavor packs at link time. *)
+            0
+        | Some Family_decision.Lattice ->
+            (* Lattice boxes: bn is pinned at the lane width, bm/bk at their box minima (the most
+               favorable corner), the intrinsic tile when the axis is not yet committed. All lattice
+               leaves are staged, so entering the lattice already floors at the intrinsic corner. *)
+            let tm_t, _, tk_t = tile_min in
+            let corner axis default =
+              List.fold decisions ~init:default ~f:(fun acc -> function
+                | Family_decision.Lattice_box { lb_axis; lb_lo; _ }
+                  when Poly.equal lb_axis axis ->
+                    lb_lo
+                | _ -> acc)
+            in
+            2 * tile_bytes ~bm:(corner `Bm tm_t) ~bn:w ~bk:(corner `Bk tk_t)
+        | None -> 0

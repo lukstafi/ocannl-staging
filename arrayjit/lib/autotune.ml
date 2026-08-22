@@ -1825,7 +1825,7 @@ let model_default ?name ?report ctx comp bindings =
             if Lazy.force geometry_lattice_enabled then lift_geometry_lattice tree else tree
           in
           let f = CM.completion_floor base_opt.LL.llc in
-          let path_inc = sketch_path_traffic_floor ~is_gpu ~limits base_opt in
+          let path_inc = sketch_path_traffic_floor ~limits base_opt in
           let bound_at inc =
             CM.roofline_seconds ?peak_flops ?peak_memory_bandwidth ~flops:f.CM.fr_flops
               ~bytes:(f.CM.fr_bytes + inc) ()
@@ -2057,7 +2057,10 @@ let model_default ?name ?report ctx comp bindings =
               Printf.sprintf "placement#%d %s" fc.LL.fc_tn.Ir.Tnode.uid
                 (Ir.Tnode.debug_name fc.LL.fc_tn)
             in
-            let assoc = List.map cands ~f:(fun fc -> (level_name fc, fc)) in
+            (* The placement levels commit to DATA like the family levels do (gh-ocannl-591):
+               each child carries the candidate it decides and which way, so the bound below reads
+               the path instead of finding the candidate back through the level name and the
+               commitment back through the label. [level_name] is the display name only. *)
             let rec build vector = function
               | [] -> Sspace.Leaf (List.rev vector)
               | fc :: rest ->
@@ -2066,8 +2069,8 @@ let model_default ?name ?report ctx comp bindings =
                       level = level_name fc;
                       children =
                         [
-                          ("keep", Sspace.Child (lazy (build ((fc, false) :: vector) rest)));
-                          ("flip", Sspace.Child (lazy (build ((fc, true) :: vector) rest)));
+                          ((fc, `Keep), Sspace.Child (lazy (build ((fc, false) :: vector) rest)));
+                          ((fc, `Flip), Sspace.Child (lazy (build ((fc, true) :: vector) rest)));
                         ];
                     }
             in
@@ -2092,14 +2095,13 @@ let model_default ?name ?report ctx comp bindings =
             in
             let bound ~path _sub =
               let mat =
-                List.filter_map path ~f:(fun (level, label) ->
-                    Option.bind (List.Assoc.find assoc ~equal:String.equal level) ~f:(fun fc ->
-                        (* Certainly materialized below this node: a committed Materialize flip, or
-                           a kept default-materialized ([`Inline]-flip) candidate. The other two
-                           commitments (and every open level) contribute zero. *)
-                        match (label, fc.LL.fc_flip) with
-                        | "flip", `Materialize | "keep", `Inline -> Some fc.LL.fc_tn
-                        | _ -> None))
+                List.filter_map path ~f:(fun (_level, ((fc : LL.flip_candidate), commitment)) ->
+                    (* Certainly materialized below this node: a committed Materialize flip, or a
+                       kept default-materialized ([`Inline]-flip) candidate. The other two
+                       commitments (and every open level) contribute zero. *)
+                    match (commitment, fc.LL.fc_flip) with
+                    | `Flip, `Materialize | `Keep, `Inline -> Some fc.LL.fc_tn
+                    | _ -> None)
               in
               (* [ps_floor_ms] is milliseconds; [select]'s scores are roofline seconds. *)
               Option.map (surface.ps_floor_ms ~materialized:mat) ~f:(fun ms -> ms /. 1e3)
