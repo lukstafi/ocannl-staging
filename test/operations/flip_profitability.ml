@@ -107,6 +107,59 @@ let () =
     (match unmeasured with Autotune.Unmeasured -> true | _ -> false);
   V.p "unmeasured keeps the enablement prior"
     (match resolves unmeasured with `Enablement -> true | `Cost -> false);
+  (* The verdict must not depend on cache state. A warm run's report comes from the replay path,
+     whose COUNTERS describe this call (all zero, nothing was timed here) while its TIMES are the
+     storing search's — so it must reach the verdict that search reached, or the same workload would
+     rank its decision surface one way cold and the other way warm. *)
+  let replayed ~best_ms ~mma_best_ms =
+    {
+      Autotune.no_search_report with
+      Autotune.outcome = Autotune.Cache_replay;
+      best_ms;
+      mma_best_ms;
+    }
+  in
+  V.p "a cache replay reaches the verdict of the search that stored it"
+    (Float.equal
+       (ratio (Autotune.family_profit_of_reports [ replayed ~best_ms:7.5 ~mma_best_ms:92.0 ]))
+       (ratio (profit_of "metal f16")));
+  V.p "and a replay of a search that timed none still measures nothing"
+    (match
+       Autotune.family_profit_of_reports [ replayed ~best_ms:7.5 ~mma_best_ms:Float.infinity ]
+     with
+    | Autotune.Unmeasured -> true
+    | _ -> false);
+  (* Which the cache entry carries as an OPTIONAL field, so entries written before it stay readable
+     without an [entry_version] bump — and replay as "nothing is known" rather than as a verdict. *)
+  let round_trip e = Ir.Schedule_cache.entry_of_sexp (Ir.Schedule_cache.sexp_of_entry e) in
+  let entry mma_best_ms =
+    {
+      Ir.Schedule_cache.version = Ir.Schedule_cache.entry_version;
+      backend = "metal";
+      numerics = "n";
+      codegen = None;
+      source_digest = "d";
+      saved = [];
+      segments = None;
+      finer_fission = None;
+      best_ms = 7.5;
+      baseline_ms = 9.0;
+      mma_best_ms;
+      default_ms = None;
+      default_fingerprint = None;
+    }
+  in
+  V.p "a stored tensorized best survives the entry round-trip"
+    (match (round_trip (entry (Some 92.0))).Ir.Schedule_cache.mma_best_ms with
+    | Some v -> Float.equal v 92.0
+    | None -> false);
+  V.p "an entry without the field is readable and claims nothing"
+    (Option.is_none (round_trip (entry None)).Ir.Schedule_cache.mma_best_ms);
+  V.p "omitting it keeps the entry's sexp free of the field"
+    (not
+       (String.is_substring
+          (Sexp.to_string (Ir.Schedule_cache.sexp_of_entry (entry None)))
+          ~substring:"mma_best_ms"));
   (* The label counter and the structural best are different populations. *)
   let beam_only = Autotune.family_profit_of_reports [ beam_appended ~best_ms:7.5 ~mma_best_ms:92.0 ]
   in
@@ -138,6 +191,19 @@ let () =
                searched ~best_ms:4.4 ~mma_timed:16 ~mma_best_ms:10.2;
              ]))
        (ratio (profit_of "cuda f16")));
+  (* The margin is configuration, and an unusable one fails the run rather than quietly becoming
+     the default: a run that asked for a profitability policy it also made impossible should not
+     get a different policy without saying so. A ratio below 1.0 would demote a family that WON. *)
+  let rejects raw =
+    match Autotune.flip_profit_margin_of_string raw with
+    | _ -> false
+    | exception Utils.User_error _ -> true
+  in
+  V.p "a well-formed margin parses" (Float.equal (Autotune.flip_profit_margin_of_string " 1.25 ") 1.25);
+  V.p "a margin below 1.0 is rejected" (rejects "0.5");
+  V.p "an unparseable margin is rejected" (rejects "generous");
+  V.p "an empty margin is rejected" (rejects "");
+  V.p "a non-finite margin is rejected" (rejects "inf");
   (* The margin is the knob, and it is the only thing that moves these verdicts. *)
   V.p "a margin above metal's ratio re-admits its family"
     (match Autotune.family_profit_of_reports ~margin:20.0 metal with

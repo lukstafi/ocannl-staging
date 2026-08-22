@@ -1175,6 +1175,15 @@ let tune_placements ?name ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?r
          still have crowned a winner) must skip the refinement, not fail the tune. *)
       match Autotune.placement_surface ?name ~evidence ctx comp bindings with
       | s -> Some s
+      (* This containment is for a lowering that declined, and for nothing else. A malformed
+         [tune_flip_profit_margin] raises {!Utils.User_error} from inside it (gh-ocannl-579): the
+         configuration asked for a refinement it also made impossible, and swallowing that would
+         silently skip the refinement and ship the A/B winner as though the setting had been
+         honored. The two process-level classes are not this containment's either, for the same
+         reasons they are not the arms'. *)
+      | exception exn when (match exn with Utils.User_error _ -> true | _ -> must_propagate exn) ->
+          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+          Stdlib.Printexc.raise_with_backtrace exn backtrace
       | exception exn ->
           logf "flip refinement skipped: the decision-surface lowering failed: %s"
             (Exn.to_string exn);

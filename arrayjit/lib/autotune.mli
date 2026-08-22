@@ -626,8 +626,13 @@ type report = {
           carries no [Tensorize] counts in [mma_timed] and not here. Same choice as
           [best_tensorized], for the same reason: what shipped is a property of the schedule.
 
-          [infinity] on a cache hit even when the replayed winner tensorizes: this process timed
-          nothing, and [best_ms] there is the searching process's measurement. *)
+          On a cache hit it is the STORING search's measurement, exactly as [best_ms] and
+          [baseline_ms] there are (gh-ocannl-579): this process timed nothing, but the counters are
+          what describe this call, while the times describe the program — under a key regime that
+          already makes those two replayable. Without that the flip chain's profitability term would
+          rank the decision surface one way on the cold run that measured the family and the other
+          way on every warm-cache run after it. [infinity] when the storing search timed no
+          tensorized candidate, and for entries written before the field existed. *)
   best_schedule : Ir.Schedule_cache.saved_schedule;
       (** The winner's schedule; for a fissioned winner, the concatenation of the per-segment
           schedules (informational). Empty when nothing was timed. *)
@@ -721,6 +726,13 @@ type family_profit =
   | Loses of float
       (** It lost by more than the margin, at this ratio of the search's best. On gh-514's metal/f16
           [mlp_wide] cell the ratio is ~12 (mma_best 79-92 ms against 7.5 ms). *)
+
+val flip_profit_margin_of_string : string -> float
+(** Parse config [tune_flip_profit_margin] (gh-ocannl-579): a ratio of at least 1.0. Anything else —
+    unparseable, non-finite, or below 1.0, which would demote a family that WON — raises
+    {!Utils.User_error} rather than falling back to the default, since a run that asked for a
+    profitability policy it also made impossible should not quietly get a different one. Exposed for
+    tests. *)
 
 val family_profit_of_report : ?margin:float -> report -> family_profit
 val family_profit_of_reports : ?margin:float -> report list -> family_profit

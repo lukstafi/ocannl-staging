@@ -21,8 +21,12 @@
   candidates and timed none measured nothing about the family, so gh-ocannl-558's budget-5
   reachability closure is untouched — and when the prior is voided both its classes go at once,
   since promoting family-unlocking flips and demoting family-breaking ones are the same bet on the
-  same family. `tune_flip_ordering=cost` and `=enablement` remain as the two unconditional
-  evaluation baselines the gh-514 report's cells were measured under; `Autotune.model_default`'s
+  same family. The verdict does not depend on cache state: the schedule-cache entry now carries the
+  storing search's `mma_best_ms` (an optional field, so existing entries stay readable and claim
+  nothing), replayed like `best_ms` and `baseline_ms` already were — the counters describe the call,
+  the times describe the program. `tune_flip_ordering=cost` and `=enablement` remain as the two
+  unconditional evaluation baselines the gh-514 report's cells were measured under, and under them
+  the evidence is never derived, so `tune_flip_profit_margin` is never read; `Autotune.model_default`'s
   placement walk measures nothing, so it gets the prior unchanged.
 
 - **One environment spelling, and no silent demotion** (gh-ocannl-652): a configuration key is read

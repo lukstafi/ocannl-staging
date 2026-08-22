@@ -66,7 +66,9 @@ type report = {
   mma_best_ms : float;
       (** The best timed tensorized candidate's time (gh-ocannl-546), [infinity] when none was
           timed. Its margin against [best_ms] is what tells a crowned tensorization apart from one
-          that lost by 1% and one that lost by 40%. *)
+          that lost by 1% and one that lost by 40%. Structural, not label-keyed (see its set site),
+          and on a [Cache_replay] report it is the storing search's measurement, like [best_ms] —
+          the counters describe this call, the times describe the program. *)
   best_schedule : SC.saved_schedule;
 }
 
@@ -1622,10 +1624,8 @@ let combine_family_profit a b =
   | Pays x, Pays y | Loses x, Loses y -> if Float.(x <= y) then a else b
   | (Pays _ as p), Loses _ | Loses _, (Pays _ as p) -> p
 
-let flip_profit_margin () =
-  let raw =
-    String.strip (Utils.get_global_arg ~arg_name:"tune_flip_profit_margin" ~default:"1.25")
-  in
+let flip_profit_margin_of_string raw =
+  let raw = String.strip raw in
   let bad () =
     raise
     @@ Utils.User_error
@@ -1637,6 +1637,10 @@ let flip_profit_margin () =
   | m when Float.(is_finite m && m >= 1.) -> m
   | _ -> bad ()
   | exception _ -> bad ()
+
+let flip_profit_margin () =
+  flip_profit_margin_of_string
+    (Utils.get_global_arg ~arg_name:"tune_flip_profit_margin" ~default:"1.25")
 
 (** What one completed search measured about the tensorized family's profitability. A search that
     timed no tensorized candidate measured nothing about it — including one that seeded many and
@@ -2704,11 +2708,15 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir
                     best_tensorized = saved_is_tensorized (flat_schedule c.form);
                     best_mma_statements = List.length c.mma_renders;
                     best_mma_scalar_fallbacks = mma_scalar_fallbacks c;
-                    (* Nothing was timed in this process ([mma_timed = 0] like every other counter
-                       here), so there is no measured tensorized candidate to report — including the
-                       replayed winner, whose [best_ms] was measured by the process that searched.
-                       [best_tensorized] still describes the artifact, which is what it is for. *)
-                    mma_best_ms = Float.infinity;
+                    (* Nothing was timed in this process — [mma_timed = 0] like every other
+                       COUNTER here, which describes this call. The TIMES describe the program, and
+                       are replayed from the entry exactly as [best_ms] and [baseline_ms] above are:
+                       without that, the flip chain's profitability term (gh-ocannl-579) would rank
+                       the decision surface one way on the cold run that measured the family and the
+                       other way on every warm-cache run after it. [None] for a search that timed
+                       none, and for entries written before the field existed. *)
+                    mma_best_ms =
+                      Option.value entry.SC.mma_best_ms ~default:Float.infinity;
                     best_schedule = flat_schedule c.form;
                   };
                 Some (c.cctx, c.routine)
@@ -3642,6 +3650,11 @@ let tune ?name ?search ?beam_width ?rounds ?repeats ?seed_block_sizes ?cache_dir
                    finer_fission;
                    best_ms;
                    baseline_ms;
+                   (* gh-ocannl-579: a measurement of the program, stored like the two above so the
+                      flip chain's profitability term reads the same evidence on a warm cache as on
+                      the cold run that measured it. Absent when nothing tensorized was timed. *)
+                   mma_best_ms =
+                     (if Float.is_finite !mma_best_ms then Some !mma_best_ms else None);
                    default_ms = default_ms ();
                    default_fingerprint =
                      Option.map (default_ms ()) ~f:(fun _ ->

@@ -369,7 +369,12 @@ files.
   different populations — `mma_timed` counts candidates whose LABEL promised a tensorized pipeline,
   while a beam round appending a `Tensorize` to a saved or preset incumbent promises nothing in its
   label and is exactly as tensorized, and can win. Keying the guard on the label lets a family that
-  lost tenfold read as unmeasured. The
+  lost tenfold read as unmeasured. For the same reason the cache entry carries `mma_best_ms` (an
+  optional field, so pre-gh-579 entries stay readable and simply claim nothing): the replay report's
+  COUNTERS describe the call and are all zero, but its TIMES are the storing search's, exactly as
+  `best_ms` and `baseline_ms` already were — without it the same workload ranks its surface by cost
+  on the cold run that measured the family and by enablement on every warm run after it, which is a
+  policy that depends on cache state. The
   granularity limit is worth knowing: `mma_best_ms` is per *search*, not per site, so the term
   cannot demote one site's promotion while keeping another's; per-site attribution would need the
   search to report per-site tensorized bests. Alternatives that were weighed and rejected: reading
@@ -380,4 +385,8 @@ files.
   `model_default`'s placement walk hands over no evidence, so it gets the prior and is unchanged —
   and the derivation happens inside `placement_surface`, on the `profitable` path only, so a run
   pinned to `cost` or `enablement` never reads `tune_flip_profit_margin` (`ps_profit` is `None`
-  there, which is what the log line reports instead of a verdict nothing consulted).
+  there, which is what the log line reports instead of a verdict nothing consulted). A malformed
+  margin is a `Utils.User_error` and must reach the caller: `tune_placements`' containment around the
+  decision-surface lowering names the classes it does NOT absorb, because swallowing that one skips
+  the refinement the configuration asked for and ships the A/B winner as though the setting had been
+  honored.

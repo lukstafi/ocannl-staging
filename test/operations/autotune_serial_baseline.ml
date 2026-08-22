@@ -164,6 +164,8 @@ let () =
       baseline_ms = 1e-6;
       (* A pre-gh-552 entry: written before [default_ms] existed. *)
       default_ms = None;
+      (* Also pre-gh-579: no stored tensorized best, so a replay of it reports none. *)
+      mma_best_ms = None;
       default_fingerprint = None;
     };
   let report = ref None in
