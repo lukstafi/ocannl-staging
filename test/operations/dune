@@ -1051,6 +1051,19 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
+; gh-ocannl-681: the scope-target contract -- a Local_scope over a materialized node is rejected by
+; LL.optimize, not normalized to a plain Get. Picks its backend from the environment for the two
+; executed legs (the reference row sums and the prelowered-seam accumulation).
+
+(test
+ (name scope_over_materialized)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules scope_over_materialized)
+ (libraries base ocannl ll_test))
+
 (test
  (name virtual_diagonal)
  (package neural_nets_lib)

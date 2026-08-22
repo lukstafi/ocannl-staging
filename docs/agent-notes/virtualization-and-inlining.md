@@ -91,6 +91,32 @@ files.
   `Zero_out`s. The raw analysis entry points `analyze_proc`/`specialize_proc` deliberately do NOT
   validate — they are the probes that must stay conservative on IR they may not trust
   (`test/operations/affine_extraction.ml`); everything past them does.
+- The scope-TARGET contract, companion of the body contract above (gh-ocannl-681): a `Local_scope`
+  over X denotes THE INLINED COMPUTATION OF X, so `LL.optimize` accepts one only while X is virtual,
+  and REJECTS it over a materialized X (`scope_target_rejection` in `low_level.ml`, raised from
+  `cleanup_virtual_llc`) instead of the silent normalization to a plain `Get` it used to do. The
+  trap that makes this bite: a node with NO SETTER is decided non-virtual, so a hand-built scope
+  over a freshly created node is a scope over a materialized node — declare it virtual
+  (`Ll_test.virtualize`). Two shapes were green-by-collapse before the rejection: `accum_width.ml`'s
+  gh-639 legs ran kernels literally spelling `acc[0] = acc[0]` (the identity copy reproduced the
+  expected value), and `affine_extraction.ml`'s sibling-operand probe lost scope B's write while its
+  own comment claimed the scopes survived `specialize_proc`.
+  Exactly one exemption, and it is a retraction of the optimizer's OWN decision rather than of the
+  caller's program: `virtual_llc` mints a scope at a `Get` of a still-virtual node, a later refusal
+  can commit that node `Never_virtual`, and rewriting back to a `Get` is then sound because the
+  surviving setter writes the value the body recomputed. `input_scope_ids`, taken before
+  virtualization, is what tells the two apart — a scope in that set may not be rewritten away. (No
+  test in the suite exercises the retraction; the arm was in practice only ever firing on
+  out-of-contract input.)
+  The SAME shape is legal and means the opposite AFTER `optimize`: `Schedule`'s materializing
+  `Unroll` / `Partition` mints and `C_syntax.try_widen_serial_reduce` localize a materialized
+  accumulator this way and codegen renders it. That asymmetry is the point — **materialized-accumulator
+  localization belongs to codegen's accumulator peel (gh-ocannl-693) and to nothing else**; a second
+  route through the virtualizer would restore the gh-639 "whichever schedule happened to run"
+  problem. Until the peel lands, hand-built IR in that form reaches a backend past the optimizer via
+  `Ll_test.optimize_scoped` (optimize a scope-free raw twin for the traced store and placements,
+  then swap in the scoped `llc`) and `Context.compile ?prelowered`. Pinned by
+  `test/operations/scope_over_materialized.ml`.
 - A node-level "what happened at first touch" flag (`zero_initialized_by_code` and friends) cannot
   soundly drive a PER-OCCURRENCE codegen decision, because nothing clears it across the traversal: a
   guard keyed on it alone collapses `Zero_out; Set; Zero_out` to one zero and drops a `Zero_out`

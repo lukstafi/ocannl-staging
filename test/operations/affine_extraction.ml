@@ -200,9 +200,18 @@ let () =
   let x = fresh_tn "X" [| 4 |] in
   let y2 = fresh_tn "Y" [| 4 |] in
   let i7 = Idx.get_symbol () in
-  (* Fresh (virtualizable) scope nodes, so the program below also survives [specialize_proc] for the
-     decision-level check further down. *)
-  let la = LL.get_scope (fresh_tn "LA" [| 4 |]) and lb = LL.get_scope (fresh_tn "LB" [| 4 |]) in
+  (* Scope nodes DECLARED virtual, so the program below survives [specialize_proc] for the
+     decision-level check further down. Freshness alone is not enough and used to be silently
+     insufficient: a node with no setter is decided non-virtual, and [specialize_proc] then rewrote
+     each scope into a bare [Get] of a buffer nothing writes -- dropping, among other things, scope
+     B's write, the very thing this leg is about. That normalization is a rejection since
+     gh-ocannl-681, which is what turned the omission into an error rather than a quiet collapse. *)
+  let scope_node label =
+    let tn = fresh_tn label [| 4 |] in
+    Tn.update_memory_mode tn Tn.Virtual 99;
+    LL.get_scope tn
+  in
+  let la = scope_node "LA" and lb = scope_node "LB" in
   let scope_a : LL.scalar_t =
     LL.Local_scope
       { id = la; body = LL.Set_local (la, get x [| it i7 |]); orig_indices = [| it i7 |] }

@@ -526,11 +526,9 @@ let () =
        traced store), then carry the scope form through the prelowered seam. The gh-639
        recurrence and mixed-operator legs used to optimize the scope form directly and were
        collapsing to identity copies whose value coincided with the expected one — green for the
-       wrong reason; this helper is what makes all four scope-form legs genuinely execute. *)
-    let optimize_scoped ~materialized ~name ~raw scoped =
-      let o = Ll_test.optimize ~materialized ~name raw in
-      { o with LL.llc = scoped }
-    in
+       wrong reason. {!Ll_test.optimize_scoped} is that seam, and since gh-ocannl-681 it is the
+       only route: [LL.optimize] now REJECTS a scope over a materialized node instead of
+       normalizing it away. *)
     (* === virtualization's guarded-read update form === *)
     (* [inline_computation] guards a specialized reduction's update as [Set_local (id,
        Where (index cond, update, Get_local id))] — an expression-spelled guarded update whose
@@ -584,7 +582,7 @@ let () =
                   bf16 ),
                 (Ll_test.get wacc [| Ll_test.fixed 0 |], bf16) )))
     in
-    let wo = optimize_scoped ~materialized:[ wacc; wxs ] ~name:"aw_whereg" ~raw:w_raw w_llc in
+    let wo = Ll_test.optimize_scoped ~materialized:[ wacc; wxs ] ~name:"aw_whereg" ~raw:w_raw w_llc in
     let wvals =
       Ll_test.execute ~name:"aw_whereg" wo
         ~seed:[ (wacc, [| 256.0 |]); (wxs, Array.create ~len:8 1.0) ]
@@ -627,7 +625,7 @@ let () =
                 (Ll_test.get gacc2 [| Ll_test.fixed 0 |], bf16),
                 (LL.Constant 0.5, bf16) )))
     in
-    let ro = optimize_scoped ~materialized:[ gacc2 ] ~name:"aw_recurrence" ~raw:rec_raw rec_llc in
+    let ro = Ll_test.optimize_scoped ~materialized:[ gacc2 ] ~name:"aw_recurrence" ~raw:rec_raw rec_llc in
     let rvals =
       Ll_test.execute ~name:"aw_recurrence" ro ~seed:[ (gacc2, [| 256.0 |]) ] ~read:[ gacc2 ]
     in
@@ -677,7 +675,7 @@ let () =
                     (Ll_test.get macc [| Ll_test.fixed 0 |], bf16),
                     (LL.Constant 1.0, bf16) )) ))
     in
-    let mo = optimize_scoped ~materialized:[ macc ] ~name:"aw_mixed" ~raw:mix_raw mix_llc in
+    let mo = Ll_test.optimize_scoped ~materialized:[ macc ] ~name:"aw_mixed" ~raw:mix_raw mix_llc in
     let mvals = Ll_test.execute ~name:"aw_mixed" mo ~seed:[ (macc, [| 256.0 |]) ] ~read:[ macc ] in
     p claim_mixed_scope (Float.equal (List.hd_exn mvals).(0) 256.0);
     (* === a widened scope's opening init keeps its own assignment's rounding === *)
@@ -737,7 +735,7 @@ let () =
                  (Ll_test.get im [| Ll_test.fixed 0 |], bf16) )) )
     in
     let io =
-      optimize_scoped ~materialized:[ iacc; ia; ib; im ] ~name:"aw_init_round" ~raw:i_raw i_llc
+      Ll_test.optimize_scoped ~materialized:[ iacc; ia; ib; im ] ~name:"aw_init_round" ~raw:i_raw i_llc
     in
     let ivals =
       Ll_test.execute ~name:"aw_init_round" io
