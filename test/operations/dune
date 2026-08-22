@@ -3065,6 +3065,19 @@
 
 ; gh-ocannl-514, the placement decision surface: enablement classification and ranking under
 ; synthetic mma limits (pure in the lowerings, no GPU needed), and the partial-vector floor.
+; gh-ocannl-579: the profitability term the enablement promotion is weighed against, driven with
+; the three gh-514 phase-6 cells' measured numbers as synthetic reports -- pure record functions,
+; no device, so the policy is pinned deterministically where the measurement that motivated it is
+; a shared-box timing.
+(test
+ ; ocannl-backend: none -- links no backend: pure functions over search-report records, no context
+ ; and no compile.
+ (name flip_profitability)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules flip_profitability)
+ (libraries base ocannl stdio arrayjit.verdict))
+
 ; Run by a rule so the backend and the model_peak_* envelope overrides are pinned on the
 ; command line (the C backends carry no advisory envelope constants).
 
@@ -3247,6 +3260,51 @@
  (deps ocannl_config)
  (modules uint4x32_stub_bounds)
  (libraries base stdio arrayjit.ir arrayjit.verdict))
+
+; gh-ocannl-691: the agent notes are structurally intact and wholly reachable from their index.
+; docs/agent-notes.md and docs/agent-notes/ are the project's cross-session memory and nothing read
+; them until this; three of the six review findings on the split that created them (#406) were
+; structural and decidable from the text alone. The rules live in test/support/agent_notes_scan.ml
+; as pure functions over strings, so the negative controls below run the same code as the live-tree
+; scan. The glob is RECURSIVE: the directory is flat today, but a note dropped into a subdirectory
+; of it would otherwise never reach the scanner, and a file the scan never sees is a file the
+; reachability rule calls green (Codex P2, round 1). Recursing hands it over instead, and the index
+; rules then judge it like any other -- linked and backlinked, or reported.
+
+; What the agent-notes scan calls a defect, on input built to break it rather than on whatever the
+; notes happen to say today -- which on a good day is nothing at all.
+
+(test
+ ; ocannl-backend: none -- reads markdown only: the fixtures are embedded strings and it links no backend.
+ (name agent_notes_scan_cases)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules agent_notes_scan_cases)
+ (libraries base stdio test_utils arrayjit.verdict))
+
+(executable
+ (name agent_notes_structure)
+ (modules agent_notes_structure)
+ (libraries base stdio test_utils arrayjit.verdict))
+
+(rule
+ ; ocannl-backend: none -- reads markdown only: it opens the agent notes as text and links no backend.
+ (target agent_notes_structure.actual)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  ../../docs/agent-notes.md
+  (glob_files_rec ../../docs/agent-notes/*.md))
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:agent_notes_structure.exe} %{deps}))))
+
+(rule
+ (alias runtest)
+ (package neural_nets_lib)
+ (action
+  (diff agent_notes_structure.expected agent_notes_structure.actual)))
 
 (test
  (name reduction_forms)

@@ -206,6 +206,13 @@ type entry = {
           diagnostics (gh-ocannl-552). [None] when the default seed was not timed, or for entries
           written before this field existed — optional so such entries stay readable without an
           [entry_version] bump. *)
+  mma_best_ms : float option; [@sexp.option]
+      (** The best TIMED tensorized candidate of the search that wrote the entry (gh-ocannl-579),
+          structural rather than label-keyed, and absent when it timed none — or for entries written
+          before this field existed, which therefore replay as "nothing is known". A measurement of
+          the PROGRAM, like [best_ms] and [baseline_ms] and under the same key regime, which is what
+          makes it replayable: the flip chain's profitability term reads it, so without it a warm
+          cache would rank the decision surface differently from the cold run that measured it. *)
   default_fingerprint : string option; [@sexp.option]
       (** {!Schedule.default_schedule_fingerprint} at store time, present iff [default_ms] is: the
           cache key covers only the source digest and the backend, so a config change can redefine
