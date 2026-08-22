@@ -5239,6 +5239,47 @@ let scope_updates_reduce_op ~id (llc : t) : Ops.binop option =
   in
   match go None llc with Some (Some op) -> Some op | _ -> None
 
+(* Every symbol bound by a [For_loop] anywhere in [llc]. What {!peel_accum_nest} needs is the
+   complement: a guard symbol that is NOT one of these is bound outside every loop -- a static index
+   parameter, a runtime extent -- and therefore cannot select among the iterations of an enclosing
+   level. Derived from the program rather than certified by the caller, so no call site can forget
+   to say (gh-ocannl-693 review round 7). *)
+let loop_indices (llc : t) : Indexing.symbol list =
+  let acc = ref [] in
+  let rec go llc =
+    match llc with
+    | For_loop { index; body; _ } ->
+        acc := index :: !acc;
+        go body
+    | Seq (a, b) ->
+        go a;
+        go b
+    | If { body; _ } -> go body
+    | Set { llsc; _ } | Set_local (_, llsc) -> scalar llsc
+    | Set_dynamic { dyn_value = v, _; llsc; _ } ->
+        scalar v;
+        scalar llsc
+    | Set_from_vec { arg = a, _; _ } -> scalar a
+    | Tile_mma { fallback; _ } -> go fallback
+    | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _ | Workgroup_barrier ->
+        ()
+  and scalar (s : scalar_t) =
+    match s with
+    | Local_scope { body; _ } -> go body
+    | Ternop (_, (a, _), (b, _), (c, _)) ->
+        scalar a;
+        scalar b;
+        scalar c
+    | Binop (_, (a, _), (b, _)) ->
+        scalar a;
+        scalar b
+    | Unop (_, (a, _)) -> scalar a
+    | Get_dynamic { dyn_value = v, _; _ } -> scalar v
+    | Get _ | Get_local _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> ()
+  in
+  go llc;
+  !acc
+
 (* gh-ocannl-639: peel a single-statement reduction nest down to its accumulation base. Levels are
    Serial/[Unrolled] loops and {!pure_index_guard}ed [If]s, each containing nothing else (comments
    aside); the base is either a raw accumulation update ([`Update]: an {!accum_update_parts}-shaped
@@ -5257,7 +5298,7 @@ let scope_updates_reduce_op ~id (llc : t) : Ops.binop option =
    can diverge on it; and a multi-accumulator hoist could not be a [Local_scope] value at all (scope
    purity forbids a sibling [Set] inside a scope body) — it would need the [Declare_local] statement
    form. A transform that starts minting fused reduction bodies must extend this peel alongside. *)
-let peel_accum_nest ?(extra_level = fun _ _ -> false) ?(invariant = []) ~free_of body :
+let peel_accum_nest ?(extra_level = fun _ _ -> false) ~loop_syms ~free_of body :
     (Tn.t
     * Indexing.axis_index array
     * [ `Update of scalar_t | `Scope of scope_id * t list ]
@@ -5320,11 +5361,11 @@ let peel_accum_nest ?(extra_level = fun _ _ -> false) ?(invariant = []) ~free_of
      peel cannot tell it from an enclosing loop's index on its own, which is why the caller says.
      Codegen passes its [idx_params]; a caller that passes nothing gets the conservative answer and
      merely declines to localize (never mis-localizes), which is what the schedule mints do. *)
-  let guard_confined_to ~free_of ~invariant gc =
+  let guard_confined_to ~free_of gc =
     let syms = guard_symbols gc in
     let peeled s = List.exists free_of ~f:(Indexing.equal_symbol s) in
-    let ok s = peeled s || List.exists invariant ~f:(Indexing.equal_symbol s) in
-    List.exists syms ~f:peeled && List.for_all syms ~f:ok
+    let loop_bound s = List.exists loop_syms ~f:(Indexing.equal_symbol s) in
+    List.exists syms ~f:peeled && List.for_all syms ~f:(fun s -> peeled s || not (loop_bound s))
   in
   let cell_invariant ~free_of idcs =
     not (Array.exists idcs ~f:(fun idx -> List.exists free_of ~f:(fun s -> idx_mentions s idx)))
@@ -5361,7 +5402,7 @@ let peel_accum_nest ?(extra_level = fun _ _ -> false) ?(invariant = []) ~free_of
           ~rebuild:(fun b -> rebuild (For_loop { r with body = b }))
           ibody
     | [ If { cond = gc, gp; body = gbody } ]
-      when pure_index_guard gc && guard_confined_to ~free_of ~invariant gc ->
+      when pure_index_guard gc && guard_confined_to ~free_of gc ->
         peel ~free_of ~rebuild:(fun b -> rebuild (If { cond = (gc, gp); body = b })) gbody
     | [ Set { tn; idcs; llsc = Local_scope { id; body = sbody; orig_indices = _ }; debug } ]
       when cell_invariant ~free_of idcs -> (

@@ -63,7 +63,7 @@ let nest ~upto =
     }
 
 let peels ~upto =
-  Option.is_some (LL.peel_accum_nest ~free_of:[] (nest ~upto))
+  Option.is_some (LL.peel_accum_nest ~loop_syms:[] ~free_of:[] (nest ~upto))
 
 let () =
   (* The control: the identical nest over a live range is still recognized. Without this, a peel
@@ -128,15 +128,17 @@ let guarded_nest ~guard_sym =
 let () =
   let enclosing = Idx.get_symbol () in
   Verdict.p "a guard varying with the peeled index still peels"
-    (Option.is_some (LL.peel_accum_nest ~free_of:[] (guarded_nest ~guard_sym:`Peeled)));
+    (Option.is_some (LL.peel_accum_nest ~loop_syms:[ enclosing ] ~free_of:[] (guarded_nest ~guard_sym:`Peeled)));
   Verdict.p "a guard invariant across the peeled levels is refused"
     (Option.is_none
-       (LL.peel_accum_nest ~free_of:[] (guarded_nest ~guard_sym:(`Enclosing enclosing))));
+       (LL.peel_accum_nest ~loop_syms:[ enclosing ] ~free_of:[]
+          (guarded_nest ~guard_sym:(`Enclosing enclosing))));
   (* Varying with a peeled symbol is NOT enough: a mixed guard still selects among enclosing lanes,
      so hoisting the accesses out of it lets every lane write the cell only lane 0 touched. *)
   Verdict.p "a guard mixing a peeled and an enclosing symbol is refused"
     (Option.is_none
-       (LL.peel_accum_nest ~free_of:[] (guarded_nest ~guard_sym:(`Mixed enclosing))));
+       (LL.peel_accum_nest ~loop_syms:[ enclosing ] ~free_of:[]
+          (guarded_nest ~guard_sym:(`Mixed enclosing))));
   (* gh-490's runtime-extent guard is NOT constant-bounded: [Assignments.extent_guard] emits
      [i < s] with [s] a STATIC symbol -- a kernel parameter bound at launch, never a loop index. It
      therefore cannot select among enclosing iterations, and the peel must still take it, or every
@@ -176,17 +178,14 @@ let () =
             };
       }
   in
-  Verdict.p "a runtime-extent guard is refused without the caller's certification"
-    (Option.is_none (LL.peel_accum_nest ~free_of:[] extent_nest));
-  Verdict.p "a runtime-extent guard peels when its bound is certified loop-invariant"
+  Verdict.p "a runtime-extent guard peels: its bound is bound outside every loop"
     (Option.is_some
-       (LL.peel_accum_nest ~invariant:[ extent_sym ] ~free_of:[] extent_nest));
-  (* Certification is not a blanket permit: an ENCLOSING loop symbol wrongly certified would be the
-     caller's error, but a guard with no peeled symbol stays refused however it is certified. *)
-  Verdict.p "certification does not admit a guard with no peeled symbol"
+       (LL.peel_accum_nest ~loop_syms:[ enclosing ] ~free_of:[] extent_nest));
+  (* And it stops peeling the moment that same bound IS a loop index -- the classification is the
+     program's, not a caller's promise, so this is the one thing that distinguishes the two. *)
+  Verdict.p "the same guard is refused when its bound is a loop index"
     (Option.is_none
-       (LL.peel_accum_nest ~invariant:[ enclosing ] ~free_of:[]
-          (guarded_nest ~guard_sym:(`Enclosing enclosing))))
+       (LL.peel_accum_nest ~loop_syms:[ enclosing; extent_sym ] ~free_of:[] extent_nest))
 
 (* Having refused to peel it, codegen must still RENDER a dead level — and the [Unrolled] arm is
    where that is not free: it repeats the body [to_ - from_ + 1] times, and [Base.List.init] RAISES

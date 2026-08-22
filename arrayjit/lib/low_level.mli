@@ -291,9 +291,14 @@ val accum_local_update_parts : id:scope_id -> scalar_t -> (Ops.binop * scalar_t)
     SIMD reduction rendering uses it to fold vector chains into a widened accumulator's scope local
     (gh-ocannl-639), and {!peel_accum_nest}'s scope-form validation is built on it. *)
 
+val loop_indices : t -> Indexing.symbol list
+(** Every symbol bound by a [For_loop] anywhere in the code. The complement is what
+    {!peel_accum_nest} needs: a guard symbol outside this set is bound outside every loop — a static
+    index parameter, a runtime extent — so it cannot select among an enclosing level's iterations. *)
+
 val peel_accum_nest :
   ?extra_level:(Indexing.symbol -> axis_type -> bool) ->
-  ?invariant:Indexing.symbol list ->
+  loop_syms:Indexing.symbol list ->
   free_of:Indexing.symbol list ->
   t ->
   (Tnode.t
@@ -332,10 +337,14 @@ val peel_accum_nest :
     instance load and store; across an enclosing hardware axis that is a data race, since lanes the
     guard excludes write their unchanged local back over the accumulating lane's result. Merely
     varying with a peeled symbol does not suffice: a mixed guard selects among enclosing lanes too.
-    [invariant] names symbols the caller certifies cannot index an enclosing loop — codegen passes
-    its static index parameters, which is what keeps gh-490's runtime-extent guard
-    ([Assignments.extent_guard]'s [i < s], whose bound is a static symbol rather than a constant)
-    peelable. Passing none is safe and merely declines more. *)
+    [loop_syms] is {!loop_indices} of the enclosing program: a guard symbol in it that is not peeled
+    selects among an enclosing level's iterations and stops the peel, while one outside it is a
+    static index parameter or a runtime extent and is harmless — which is what keeps gh-490's
+    runtime-extent guard ([Assignments.extent_guard]'s [i < s], whose bound is a static symbol
+    rather than a constant) peelable. Required rather than defaulted, and derived from the program
+    rather than certified by the caller, so that no call site can forget it: the mints of
+    [Schedule] need it as much as codegen does, since a refused mint there turns segment seams into
+    narrowing points instead of merely declining an optimization. *)
 
 (** {2 Hardware axis analyses}
 

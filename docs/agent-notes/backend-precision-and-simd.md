@@ -220,17 +220,19 @@ files.
   STATIC symbol, a kernel parameter bound at launch. (`Schedule`'s Pad guards ARE constant-bounded;
   the two shapes are easy to conflate.) A static symbol cannot select among enclosing loop
   iterations, but the peel cannot tell it from a loop index on its own, so the caller certifies via
-  `~invariant`: codegen passes its `idx_params`, and `Schedule.apply` passes its `static_indices`
-  down through `apply_opt_op`/`apply_op`. **Declining is not neutral for the schedule mints**, which
-  is why they must be certified too: a refused mint makes `Unroll ~materialize:true` round-trip the
-  accumulator per copy and `Partition` turn its segment seams into narrowing points, so on narrow
-  storage the scheduled candidate stops agreeing with the serial baseline — the invariant those
-  mints exist to hold ("candidates compete on speed, never numerics"). Only the legality probes keep
-  the empty default: they ask whether an op is legal, and both shapes are.
-  `peel_dead_level.ml` carries all four guard shapes at the peel. What is NOT yet pinned is the
+  the REQUIRED `~loop_syms`, which is `Low_level.loop_indices` of the enclosing program: a guard
+  symbol in it that is not peeled selects among an enclosing level's iterations, and one outside it
+  is bound outside every loop — a static index parameter or a runtime extent — hence harmless.
+  Derived from the program, not certified by the caller, and required rather than defaulted, because
+  **declining is not neutral for the schedule mints**: a refused mint makes `Unroll
+  ~materialize:true` round-trip the accumulator per copy and `Partition` turn its segment seams into
+  narrowing points, so on narrow storage the scheduled candidate stops agreeing with the serial
+  baseline — the invariant those mints exist to hold ("candidates compete on speed, never
+  numerics"). A defaulted certification is exactly the kind a call site forgets; three review rounds
+  went into finding that out.
+  `peel_dead_level.ml` carries all five guard shapes at the peel. What is NOT yet pinned is the
   executed narrow-precision consequence — a bf16 reduction under a runtime-extent guard, scheduled
-  and compared against its serial baseline; the propagation restores master's behaviour rather than
-  introducing new emission, but that test is the one that would catch a future regression here. Keeping such a guard
+  and compared against its serial baseline (gh-ocannl-715). Keeping such a guard
   around the whole scope instead of declining would also be sound and would localize more; it needs
   the peel to report its outer guards separately, which is wider than the correctness fix.
 - The interaction with Metal's `volatile_scalar_rmw` needs no special case, and that is worth
