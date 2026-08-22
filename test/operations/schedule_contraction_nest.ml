@@ -1,29 +1,36 @@
 (* gh-ocannl-683: a contraction over several axes is a matmul site.
 
    Attention's out projection [{ w_o } * attn] contracts over the weight's two input axes (head,
-   head_dim), so its lowering is [d[b,s,j] += w[j,h,e] * x[b,s,h,e]] — a reduction NEST of two
+   head_dim), so its lowering is [d[b,s,j] += w[j,h,e] * x[b,s,h,e]] -- a reduction NEST of two
    loops. The matmul matcher took the single innermost loop as [k] and required every other loop
    to own an axis of [d], so the head loop refused the site: no matmul family was ever seeded
    there, and the kernel shipped as an untiled global-accumulator nest at 8 blocks (22% of the
    gpt2_mini step on gfx1151 at 9% of sgemm peak).
 
    Mechanism under test: the contraction nest is the maximal innermost suffix of loops absent from
-   the accumulator ([classify_matmul]); its innermost loop is [m_k], the rest are [m_ko] — k-loops
+   the accumulator ([classify_matmul]); its innermost loop is [m_k], the rest are [m_ko] -- k-loops
    lowering has already split. Every pipeline treats them as k-block loops above the one its own
    k-split mints ([Sketch_families.k_blocks]): sunk below the output roles, the staged tiles
    reloaded at, the accumulator privatized over the outermost. Single-axis sites have an empty
    [m_ko] and keep byte-identical schedules, which the existing sketch suites pin.
 
-   Two lowered shapes: the out projection itself (the [*] operator on a weight with two input
-   axes, the issue's form), and a three-axis contraction whose materialized output feeds a
-   bias+relu companion nest (companion coverage and epilogue twins on a multi-axis site).
+   Three lowered shapes: the out projection itself (the [*] operator on a weight with two input
+   axes, the issue's form); a three-axis contraction whose materialized output feeds a bias+relu
+   companion nest (companion coverage and epilogue twins on a multi-axis site); and the out
+   projection at bf16, the one operand format every wmma backend and Metal advertise, so the
+   tensorized pipelines execute through the real mma hook rather than only constructing.
 
    Executed assertions compare every candidate against a serial reference computed from the same
-   discriminating inputs; the values vary with every index and keep all partial sums exactly
-   representable in f32, so bitwise equality is required regardless of the accumulation order a
-   tiling imposes. GPU backends execute the blocktile family (workgroup-shared staging); cc
-   executes the CPU families (packed and register-tiled pipelines included), so every backend
-   executes a multi-axis-contraction sketch. *)
+   discriminating inputs. For the f32 legs the values vary with every index and keep all partial
+   sums exactly representable, so bitwise equality is required regardless of the accumulation
+   order a tiling imposes; every compared cell of the contraction's output is required nonzero, so
+   a candidate that drops a write and leaves the zero-initialized destination in place cannot pass
+   (the companion leg compares the materialized pre-relu result as well as the relu'd tail, which
+   legitimately zeros cells). GPU backends execute the blocktile family (workgroup-shared staging)
+   and, where the device advertises a uniform-bf16 tile, the tensorized family under the tolerance
+   schedule_mma_matmul documents for gfx1151's not-exactly-rounded WMMA; cc executes the CPU
+   families (packed and register-tiled pipelines included), so every backend executes a
+   multi-axis-contraction sketch. *)
 
 open Base
 open Ocannl
@@ -31,6 +38,7 @@ open Ocannl.Operation.DSL_modules
 module LL = Ir.Low_level
 module Sched = Ir.Schedule
 module Asgns = Ir.Assignments
+module Tn = Ir.Tnode
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
@@ -47,21 +55,23 @@ let () = Generated.init ~backend_name
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
-(* Zeros compare equal to zeros: pin every reference nonzero so the parity claims have content. *)
+(* Every compared cell must differ from the zero sentinel: a candidate that drops a write leaves
+   the zero-initialized destination in place, which a reference holding zeros there cannot see. *)
 let nonzero name (a : float array) =
-  if not (Array.exists a ~f:(fun x -> Float.(x <> 0.))) then
-    failwith (name ^ ": the reference is all zeros — the parity checks against it are vacuous");
+  if Array.exists a ~f:(fun x -> Float.(x = 0.)) then
+    failwith (name ^ ": the reference holds a zero cell -- the parity check there is vacuous");
   a
 
-let compile_serial ~name tensor =
+let values ctx t = Context.get_values ctx t.Tensor.value
+
+(* A serial compile of [fwd]; returns the values of every tensor in [outs]. *)
+let run_serial ~name fwd outs =
   let ctx, routine =
-    Context.compile
-      ~lowered_transform:(fun opt -> opt)
-      (Context.auto ())
-      (named name (Train.forward tensor))
+    Context.compile ~lowered_transform:(fun opt -> opt) (Context.auto ()) (named name fwd)
       Ir.Indexing.Empty
   in
-  nonzero name (Context.get_values (Context.run ctx routine) tensor.Tensor.value)
+  let ctx = Context.run ctx routine in
+  List.map outs ~f:(values ctx)
 
 let capture fwd =
   let captured = ref None in
@@ -101,7 +111,7 @@ let mma_limits =
         };
   }
 
-(* Every seed's schedule applied as the pure IR transform it is — backend-independent. Returns
+(* Every seed's schedule applied as the pure IR transform it is -- backend-independent. Returns
    the seeds whose schedule constructs and validates, and the ones that construct but fail
    [validate_parallel]; a construction failure is reported and counted against the claim. *)
 let constructs_and_validates ~tag ~what seeds opt =
@@ -128,35 +138,43 @@ let binds_hardware q opt =
   let product = Array.fold ~init:1 ~f:( * ) in
   (product dims.LL.grid, product dims.LL.block)
 
-(* Execute every seed against the serial reference, each under its own armed artifact. *)
-let execute_seeds ~tag ~what ~fwd ~cand ~want seeds =
+(* Execute every seed against the serial reference, each under its own armed artifact; [outs] and
+   [wants] pair the compared tensors with their reference values, [close] is the per-cell
+   agreement. Returns how many ran and how many matched on every compared tensor. *)
+let execute_seeds ~tag ~routine ~fwd ~outs ~wants ~close seeds =
   let n_ran = ref 0 and n_match = ref 0 in
   List.iter seeds ~f:(fun q ->
-      Generated.arm (tag ^ "_sched");
+      Generated.arm routine;
       match
-        let ctx, routine =
+        let ctx, r =
           Context.compile
             ~lowered_transform:(fun o -> Sched.apply (Autotune.sketch_schedule ~p:q o) o)
             (Context.auto ()) fwd Ir.Indexing.Empty
         in
-        Context.get_values (Context.run ctx routine) cand.Tensor.value
+        let ctx = Context.run ctx r in
+        List.map outs ~f:(values ctx)
       with
-      | got ->
+      | gots ->
           Int.incr n_ran;
-          if Array.for_all2_exn got want ~f:Float.equal then Int.incr n_match
-      | exception exn -> Stdio.eprintf "%s/%s: seed FAILED: %s\n" tag what (Exn.to_string exn));
-  p
-    (Printf.sprintf "%s: every %s seed compiles and runs" tag what)
-    (!n_ran = List.length seeds && !n_ran > 0);
-  p
-    (Printf.sprintf "%s: every %s candidate matches the serial reference bitwise" tag what)
-    (!n_ran = !n_match)
+          if List.for_all2_exn gots wants ~f:(fun got want -> Array.for_all2_exn got want ~f:close)
+          then Int.incr n_match
+      | exception exn -> Stdio.eprintf "%s: seed FAILED: %s\n" tag (Exn.to_string exn));
+  (!n_ran, !n_match)
 
-(* One leg. [ko_extents] are the expected extents of the outer contraction loops (nest order) and
-   [nk] the innermost contraction extent. *)
+(* One f32 leg. [build ()] returns the tensor to forward and the contraction's own output (the
+   same tensor unless a companion consumes it); both are compared, and the contraction's output is
+   the one required nonzero everywhere. [ko_extents] are the expected extents of the outer
+   contraction loops (nest order), [nk] the innermost contraction extent. *)
 let leg ~tag ~ko_extents ~nk ?(companion = false) ~build () =
-  let want = compile_serial ~name:(tag ^ "_serial") (build ()) in
-  let cand = build () in
+  let outs_of (y, z) = if phys_equal y z then [ y ] else [ y; z ] in
+  let want =
+    let ((y, _) as built) = build () in
+    let vals = run_serial ~name:(tag ^ "_serial") (Train.forward y) (outs_of built) in
+    ignore (nonzero (tag ^ "_serial") (List.last_exn vals));
+    vals
+  in
+  let ((cand, _) as built) = build () in
+  let outs = outs_of built in
   let fwd = named (tag ^ "_sched") (Train.forward cand) in
   let opt = capture fwd in
   (match Autotune.detect_matmul opt.LL.llc with
@@ -208,8 +226,8 @@ let leg ~tag ~ko_extents ~nk ?(companion = false) ~build () =
   let cpu_seeds = unfused_seeds ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt in
   let cpu_valid, cpu_invalid = constructs_and_validates ~tag ~what:"CPU" cpu_seeds opt in
   (* The CPU pipelines carry no companion coverage ([companion_geometry] is consulted by the GPU
-     pipelines only), so on a site with a companion nest the pool-parallel CPU shapes — the ones
-     binding a Grid dimension — decline at validation and are skipped, exactly as on a
+     pipelines only), so on a site with a companion nest the pool-parallel CPU shapes -- the ones
+     binding a Grid dimension -- decline at validation and are skipped, exactly as on a
      single-axis site; the all-serial shapes validate. *)
   p
     (tag ^ ": every CPU seed binding no hardware dimension validates")
@@ -222,8 +240,19 @@ let leg ~tag ~ko_extents ~nk ?(companion = false) ~build () =
     p
       (tag ^ ": the Grid-bound CPU shapes decline on the uncovered companion")
       (not (List.is_empty cpu_invalid));
+  let execute ~what seeds =
+    let n_ran, n_match =
+      execute_seeds ~tag ~routine:(tag ^ "_sched") ~fwd ~outs ~wants:want ~close:Float.equal seeds
+    in
+    p
+      (Printf.sprintf "%s: every %s seed compiles and runs" tag what)
+      (n_ran = List.length seeds && n_ran > 0);
+    p
+      (Printf.sprintf "%s: every %s candidate matches the serial reference bitwise" tag what)
+      (n_ran = n_match)
+  in
   if on_gpu then begin
-    execute_seeds ~tag ~what:"GPU blocktile" ~fwd ~cand ~want gpu_seeds;
+    execute ~what:"GPU blocktile" gpu_seeds;
     (* The seed that shipped untiled before: its kernel now carries a workgroup-shared tile. *)
     let shared =
       if String.is_substring backend_name ~substring:"metal" then "threadgroup " else "__shared__"
@@ -244,7 +273,7 @@ let leg ~tag ~ko_extents ~nk ?(companion = false) ~build () =
     skipped (tag ^ ": every CPU candidate matches the serial reference bitwise")
   end
   else begin
-    Stdio.eprintf "%s: %s cannot execute workgroup-shared staging — GPU execution legs skipped\n"
+    Stdio.eprintf "%s: %s cannot execute workgroup-shared staging -- GPU execution legs skipped\n"
       tag backend_name;
     skipped (tag ^ ": every GPU blocktile seed compiles and runs");
     skipped (tag ^ ": every GPU blocktile candidate matches the serial reference bitwise");
@@ -254,58 +283,129 @@ let leg ~tag ~ko_extents ~nk ?(companion = false) ~build () =
     p
       (tag ^ ": the CPU seeds include the register-tiled packed pipelines")
       (List.exists cpu_seeds ~f:(fun q -> q.Autotune.sk_mma && q.Autotune.sk_bk > 0));
-    execute_seeds ~tag ~what:"CPU" ~fwd ~cand ~want cpu_valid
+    execute ~what:"CPU" cpu_valid
   end
+
+(* The tensorized pipelines through the real mma hook: an out projection at bf16 -- the one
+   operand format the wmma backends and Metal all advertise in the uniform combination -- seeded
+   against [Context.hardware_limits], executing one candidate per tensorized shape this site seeds
+   (unstaged, staged, pipelined-staged, batch-grid) under the 5% tolerance schedule_batched_mma
+   uses for gfx1151's not-exactly-rounded WMMA, and checking that the emitted source reaches the
+   backend's intrinsic rather than the scalar fallback. Where the device advertises no such tile
+   (cc; an f32-only capability) the leg is reported skipped. *)
+let bf16_leg ~tag ~build =
+  let real_limits = Context.hardware_limits (Context.auto ()) in
+  let has_uniform_bf16_tile =
+    match real_limits.Ir.Backend_intf.mma with
+    | None -> false
+    | Some cap ->
+        List.exists cap.Ir.Backend_intf.mma_format_tiles ~f:(fun ((a, b, d), _) ->
+            Ir.Backend_intf.equal_mma_input_format a Ir.Backend_intf.Mma_bf16
+            && Ir.Backend_intf.equal_mma_input_format b Ir.Backend_intf.Mma_bf16
+            && Ir.Backend_intf.equal_mma_input_format d Ir.Backend_intf.Mma_bf16)
+  in
+  let shapes =
+    [
+      ("unstaged", fun q -> q.Autotune.sk_bk = 0);
+      ( "staged",
+        fun q -> q.Autotune.sk_bk > 0 && q.Autotune.sk_depth = 1 && not q.Autotune.sk_batch_grid );
+      ("pipelined-staged", fun q -> q.Autotune.sk_depth = 2);
+      ("batch-grid", fun q -> q.Autotune.sk_batch_grid && q.Autotune.sk_depth = 1);
+    ]
+  in
+  let skip_shape what =
+    skipped (tag ^ " bf16: the " ^ what ^ " candidate compiles and runs");
+    skipped (tag ^ " bf16: the " ^ what ^ " candidate agrees with the serial twin");
+    skipped (tag ^ " bf16: the " ^ what ^ " candidate renders the tensor-core intrinsic")
+  in
+  if not (on_gpu && has_uniform_bf16_tile) then begin
+    Stdio.eprintf
+      "%s: %s advertises no uniform-bf16 mma tile -- the tensorized execution leg is skipped\n" tag
+      backend_name;
+    skipped (tag ^ " bf16: the multi-axis site seeds the backend's advertised tile");
+    List.iter shapes ~f:(fun (what, _) -> skip_shape what)
+  end
+  else begin
+    let renders_intrinsic src =
+      let has s = String.is_substring src ~substring:s in
+      if String.is_substring backend_name ~substring:"metal" then has "simdgroup_bfloat8x8"
+      else if String.is_substring backend_name ~substring:"hip" then has "rocwmma::mma_sync"
+      else if String.is_substring backend_name ~substring:"cuda" then has "mma.sync.aligned.m16n8k16"
+      else false
+    in
+    let close a b = Float.(abs (a - b) <= 0.05 * max 1. (abs b)) in
+    let ref_t = build () in
+    let want =
+      List.hd_exn (run_serial ~name:(tag ^ "_bf16_serial") (Train.forward ref_t) [ ref_t ])
+      |> nonzero (tag ^ "_bf16_serial")
+    in
+    let cand = build () in
+    let routine = tag ^ "_bf16_mma" in
+    let fwd = named routine (Train.forward cand) in
+    let opt = capture fwd in
+    let seeds =
+      Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false ~limits:real_limits opt
+      |> List.filter ~f:(fun q -> q.Autotune.sk_mma && not q.Autotune.sk_epilogue)
+    in
+    p
+      (tag ^ " bf16: the multi-axis site seeds the backend's advertised tile")
+      (not (List.is_empty seeds));
+    List.iter shapes ~f:(fun (what, pick) ->
+        match List.find seeds ~f:pick with
+        | None ->
+            Stdio.eprintf "%s: no %s tensorized seed for this site on %s\n" tag what backend_name;
+            skip_shape what
+        | Some q ->
+            let n_ran, n_match =
+              execute_seeds ~tag ~routine ~fwd ~outs:[ cand ] ~wants:[ want ] ~close [ q ]
+            in
+            p (tag ^ " bf16: the " ^ what ^ " candidate compiles and runs") (n_ran = 1);
+            p (tag ^ " bf16: the " ^ what ^ " candidate agrees with the serial twin") (n_match = 1);
+            p
+              (tag ^ " bf16: the " ^ what ^ " candidate renders the tensor-core intrinsic")
+              (n_ran = 1 && renders_intrinsic (Generated.read routine)))
+  end
+
+(* [offset + stride * (flat index mod modulus)] over row-major [dims]: varies along every axis
+   whose extent is not a multiple of [modulus]. *)
+let cycle ~dims ~modulus ~offset ~stride idcs =
+  let flat = Array.foldi dims ~init:0 ~f:(fun i acc d -> (acc * d) + (idcs.(i) % d)) in
+  offset +. (stride *. Float.of_int (flat % modulus))
 
 let () =
   (* --- The out projection: [{ w_o } * attn] with two input axes on the weight. --- *)
-  (* Discriminating inputs: values vary with every index (the linear-index strides are coprime
-     with the moduli) and every product is a small multiple of 1/8 with partial sums far below
+  (* Discriminating inputs: values vary with every index (the moduli are coprime with every axis
+     extent), the weight is strictly negative and the activation strictly positive so no product
+     and no sum is zero, and every product is a small multiple of 1/8 with partial sums far below
      2^24, so f32 addition is exact in any order. *)
   let bb = 2 and ss = 64 and jj = 64 and hh = 4 and ee = 16 in
   let w () =
     NTDSL.init ~l:"cn_w" ~prec:Ir.Ops.single ~o:[ jj ] ~i:[ hh; ee ]
-      ~f:(fun idcs ->
-        (Float.of_int (((idcs.(0) * hh * ee) + (idcs.(1) * ee) + idcs.(2)) % 11) -. 5.) *. 0.5)
+      ~f:(cycle ~dims:[| jj; hh; ee |] ~modulus:11 ~offset:(-5.5) ~stride:0.5)
       ()
   in
   let att () =
     NTDSL.init ~l:"cn_att" ~prec:Ir.Ops.single ~b:[ bb; ss ] ~o:[ hh; ee ]
-      ~f:(fun idcs ->
-        Float.of_int
-          (((idcs.(0) * ss * hh * ee) + (idcs.(1) * hh * ee) + (idcs.(2) * ee) + idcs.(3)) % 13)
-        *. 0.25)
+      ~f:(cycle ~dims:[| bb; ss; hh; ee |] ~modulus:13 ~offset:0.25 ~stride:0.25)
       ()
   in
-  leg ~tag:"out_proj" ~ko_extents:[ hh ] ~nk:ee ~build:(fun () ->
+  leg ~tag:"out_proj" ~ko_extents:[ hh ] ~nk:ee
+    ~build:(fun () ->
       let wv = w () and av = att () in
       let%op out = wv * av in
-      out)
+      (out, out))
     ();
 
   (* --- A three-axis contraction with a materialized output feeding a bias+relu companion. --- *)
   let bb2 = 2 and ss2 = 32 and jj2 = 64 and gg = 2 and hh2 = 2 and ee2 = 16 in
   let x () =
     NTDSL.init ~l:"cn_x" ~prec:Ir.Ops.single ~o:[ bb2; ss2; gg; hh2; ee2 ]
-      ~f:(fun idcs ->
-        Float.of_int
-          (((idcs.(0) * ss2 * gg * hh2 * ee2)
-           + (idcs.(1) * gg * hh2 * ee2)
-           + (idcs.(2) * hh2 * ee2)
-           + (idcs.(3) * ee2)
-           + idcs.(4))
-          % 13)
-        *. 0.25)
+      ~f:(cycle ~dims:[| bb2; ss2; gg; hh2; ee2 |] ~modulus:13 ~offset:0.25 ~stride:0.25)
       ()
   in
   let w3 () =
     NTDSL.init ~l:"cn_w3" ~prec:Ir.Ops.single ~o:[ jj2; gg; hh2; ee2 ]
-      ~f:(fun idcs ->
-        (Float.of_int
-           (((idcs.(0) * gg * hh2 * ee2) + (idcs.(1) * hh2 * ee2) + (idcs.(2) * ee2) + idcs.(3))
-           % 11)
-        -. 5.)
-        *. 0.5)
+      ~f:(cycle ~dims:[| jj2; gg; hh2; ee2 |] ~modulus:11 ~offset:(-5.5) ~stride:0.5)
       ()
   in
   let bias () =
@@ -313,10 +413,33 @@ let () =
       ~f:(fun idcs -> (Float.of_int (idcs.(0) % 3) -. 1.) *. 0.5)
       ()
   in
-  leg ~tag:"three_axis_companion" ~ko_extents:[ gg; hh2 ] ~nk:ee2 ~companion:true ~build:(fun () ->
+  leg ~tag:"three_axis_companion" ~ko_extents:[ gg; hh2 ] ~nk:ee2 ~companion:true
+    ~build:(fun () ->
       let xv = x () and wv = w3 () and bv = bias () in
       let%op z = xv +* "bsghe;jghe=>bsj" wv in
       Train.set_materialized z.Tensor.value;
       let%op y = relu (z + bv) in
-      y)
-    ()
+      (y, z))
+    ();
+
+  (* --- The out projection at bf16, through the real tensorized pipelines. --- Products are
+     multiples of 1/16 of one sign with sums of typical magnitude ~12 over the 32-term
+     contraction, so bf16 accumulation in the serial twin rounds little and the 5% tolerance is
+     dominated by the tensor core's own rounding; the strictly negative weight against a strictly
+     positive activation keeps every cell nonzero. *)
+  let hb = 2 and eb = 16 in
+  let wb () =
+    NTDSL.init ~l:"cn_wb" ~prec:Ir.Ops.bfloat16 ~o:[ jj ] ~i:[ hb; eb ]
+      ~f:(cycle ~dims:[| jj; hb; eb |] ~modulus:5 ~offset:(-2.5) ~stride:0.5)
+      ()
+  in
+  let attb () =
+    NTDSL.init ~l:"cn_attb" ~prec:Ir.Ops.bfloat16 ~b:[ bb; ss ] ~o:[ hb; eb ]
+      ~f:(cycle ~dims:[| bb; ss; hb; eb |] ~modulus:3 ~offset:0.125 ~stride:0.125)
+      ()
+  in
+  bf16_leg ~tag:"out_proj" ~build:(fun () ->
+      let wv = wb () and av = attb () in
+      let%op out = wv * av in
+      Tn.update_prec out.Tensor.value Ir.Ops.bfloat16;
+      out)

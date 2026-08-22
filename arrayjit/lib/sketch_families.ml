@@ -374,19 +374,28 @@ let classify_matmul ~(loops : (Idx.symbol * int) list) ~(d : Ir.Tnode.t)
                  as a matmul here — [ic] as [k], the window axes as [i] and a batch loop — and since
                  the matmul family is tried first, the conv family would silently never be seeded
                  for it (schedule_conv_gemm pins the conv seeds). *)
+              let plain idx =
+                match idx with Idx.Iterator _ | Idx.Affine { symbols = [ _ ]; _ } -> true | _ -> false
+              in
               let sole_axis idcs s =
-                match unit_axis idcs s with
-                | Some p -> (
-                    match idcs.(p) with
-                    | Idx.Iterator _ | Idx.Affine { symbols = [ _ ]; _ } -> Some p
-                    | _ -> None)
-                | None -> None
+                match unit_axis idcs s with Some p when plain idcs.(p) -> Some p | _ -> None
+              in
+              (* The same for the outer contraction loops, wherever an operand mentions one: a
+                 conv's kernel-window symbols are exactly the suffix loops that appear mixed into
+                 an output axis ([oy + ky]), and with the channel loop innermost the row rule alone
+                 would still pick the batch loop as [i]. Strides and offsets stay admissible — these
+                 loops are only ever iterated, never tiled. *)
+              let ko_plain idcs =
+                List.for_all ko ~f:(fun (s, _) ->
+                    Array.for_all idcs ~f:(fun idx -> (not (idx_mentions idx s)) || plain idx))
               in
               if
                 idcs_mention ai j
                 || Option.is_none (sole_axis ai k)
                 || Option.is_none (sole_axis bi j)
                 || Option.is_none (sole_axis bi k)
+                || (not (ko_plain ai))
+                || not (ko_plain bi)
               then None
               else
                 let eligible =
