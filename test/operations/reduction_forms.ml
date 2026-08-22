@@ -91,17 +91,29 @@ let rows = 3
    32 clears every ladder a real target has. *)
 let cols = 64
 
-(* The operand cells: [(flat mod 13 + 200) / 8], i.e. the multiples of 1/8 between 25 and 26.5.
+(* The operand cells: [(flat mod 67 + 180) / 8], i.e. the multiples of 1/8 between 22.5 and 30.75.
 
-   Both halves of the discrimination are arithmetic (see {!Ll_test.cycle}). Exactness: in units of
-   1/8 every cell is an integer in [200, 212], and a format with [p] significand bits holds every
-   integer up to [2^p] — 212 < 256 = 2^8, so the cells are exact in bf16, in f16 and in f32. Drift:
-   the running sum passes 2^8 units after the second term and 2^11 units after the tenth, so over
-   16 terms a per-step narrowing to bf16 or to f16 visibly diverges from a whole-nest accumulation,
-   while the total (3296 units, 412.0) stays exact in f32 — which is what lets the host reference
-   reproduce the kernel bitwise. 13 is coprime to the row-major strides 16 and 1, so the value
-   varies with BOTH loop symbols; {!Ll_test.cycle} raises rather than let that lapse. *)
-let cells = Ll_test.cycle ~dims:[| rows; cols |] ~modulus:13 ~offset:200. ~stride:0.125
+   Three properties, each arithmetic rather than a rule of thumb (see {!Ll_test.cycle}).
+
+   EXACT in storage: in units of 1/8 every cell is an integer in [180, 246], and a format with [p]
+   significand bits holds every integer up to [2^p] — 246 < 256 = 2^8 — so the cells are exact in
+   bf16, in f16 and in f32. That is what lets a host reference reproduce the kernel bitwise, and it
+   is why the offset is 180 rather than something larger: 67 + offset must stay under 256.
+
+   DRIFTING out of it: the running sum passes 2^8 units within two terms and 2^11 within ten, so a
+   per-step narrowing to bf16 or f16 visibly diverges from a whole-nest accumulation over both the
+   full 64-term axis and the 20-term guarded prefix, while the total (~13732 units, ~1716.5) stays
+   exact in f32.
+
+   APERIODIC over the reduction axis (Codex P2, round 8). [flat = 64 r + k], so a modulus [m] makes
+   [cell r (k + d) = cell r k] exactly when [m | d]: any [m <= 63] therefore has an in-range period,
+   and the previous 13 meant an [Unroll], [Split] or [Partition] regression that dropped one
+   iteration and replayed a copy 13 positions away preserved every executed value AND every emitted
+   count — defeating the value arm this suite leans on to pin substitution and iteration coverage.
+   67 exceeds the extent, so no in-range step is a period; being odd it is coprime to the row stride
+   64, so no in-range row step is one either, and 64 consecutive [k] give 64 distinct residues. It
+   still varies with BOTH symbols, which {!Ll_test.cycle} raises rather than let lapse. *)
+let cells = Ll_test.cycle ~dims:[| rows; cols |] ~modulus:67 ~offset:180. ~stride:0.125
 let cell r k = cells [| r; k |]
 let x_values = Array.init (rows * cols) ~f:(fun n -> cell (n / cols) (n % cols))
 
@@ -1375,10 +1387,12 @@ let mma_a = Ll_test.cycle ~dims:[| mma_n; mma_n |] ~modulus:17 ~offset:1. ~strid
 let mma_b = Ll_test.cycle ~dims:[| mma_n; mma_n |] ~modulus:19 ~offset:1. ~stride:0.5
 
 let mma_matmul ~tag ~prec =
-  let av = Array.init (mma_n * mma_n) ~f:(fun t -> mma_a [| t / mma_n; t % mma_n |]) in
-  let bv = Array.init (mma_n * mma_n) ~f:(fun t -> mma_b [| t / mma_n; t % mma_n |]) in
-  let ma = TDSL.ndarray av ~label:[ tag ^ "_a" ] ~output_dims:[ mma_n; mma_n ] () in
-  let mb = TDSL.ndarray bv ~label:[ tag ^ "_b" ] ~output_dims:[ mma_n; mma_n ] () in
+  (* The operands take the LEG's precision explicitly, through [NTDSL.init] rather than
+     [TDSL.ndarray] — which has no [~prec] and so reads [default_prec] (Codex P2, round 8). That
+     left the bf16 and f16 legs contracting f32 operands into a narrow output, a three-precision
+     sweep in name only, and made what this leg compiles depend on a configuration key. *)
+  let ma = NTDSL.init ~l:(tag ^ "_a") ~prec ~o:[ mma_n; mma_n ] ~f:mma_a () in
+  let mb = NTDSL.init ~l:(tag ^ "_b") ~prec ~o:[ mma_n; mma_n ] ~f:mma_b () in
   let%op mc = ma +* "ik;jk=>ij" mb in
   Tn.update_prec mc.Tensor.value prec;
   mc

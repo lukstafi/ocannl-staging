@@ -25,6 +25,7 @@ Configuration keys tracked as ambient dependencies, in the one spelling OCANNL r
   cc_fp16_arithmetic
   cc_vector_bytes
   debug_log_from_routines
+  default_prec
   fp16_arithmetic
   log_config_sourcing
   log_level

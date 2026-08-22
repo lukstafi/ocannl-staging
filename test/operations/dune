@@ -3326,6 +3326,10 @@
  ;     their own variables being set. `reproducible' supplies cc_vector_bytes=0, which is exactly
  ;     the knob that makes the SIMD members decline to localized forms; `performance' supplies
  ;     fp16_arithmetic=true, which moves the accumulator reference at f16.
+ ;   DEFAULT_PREC -- the precision a node created without an explicit one takes, so it decides what
+ ;     the contraction leg compiles. Its operands now pass ~prec, which is the better fix and was
+ ;     made alongside this; the key stays declared because node creation still consults it wherever
+ ;     the ppx mints an intermediate this test does not name.
  (name reduction_forms)
  (package neural_nets_lib)
  (deps
@@ -3340,7 +3344,8 @@
   (env_var OCANNL_DEBUG_LOG_FROM_ROUTINES)
   (env_var OCANNL_LOG_LEVEL)
   (env_var OCANNL_VIRTUALIZE_MAX_VISITS)
-  (env_var OCANNL_PROFILE))
+  (env_var OCANNL_PROFILE)
+  (env_var OCANNL_DEFAULT_PREC))
  (modules reduction_forms)
  (libraries base ocannl stdio arrayjit.verdict ll_test test_utils)
  (preprocess
