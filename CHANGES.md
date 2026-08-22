@@ -2,6 +2,17 @@
 
 ### Changed
 
+- **Each `@slow` test has its own `slow-<name>` alias**, so one slow test reruns alone after a
+  change -- `OCANNL_BACKEND=cc dune build @test/training/slow-mlp_names` -- instead of the whole
+  suite (~30 min on CUDA, longer on cc) or a hand-run of the exe with a manual diff, which fixing
+  `cifar_conv`/`mnist_conv` (lukstafi/ocannl-staging#429) had to do four times. `@slow` is now a per-directory
+  `(alias (name slow) (deps ...))` stanza aggregating the per-test aliases and the directory's
+  ambient `env_spelling_gate`, which each slow rule also depends on directly, so the gate runs
+  BEFORE the test rather than beside it. `test/operations/env_var_deps` follows gates through alias
+  dependencies now, asks the gating question of every alias a build can start from, and fails on a
+  `slow-<name>` rule the `slow` stanza does not list -- the one way the aggregation could quietly
+  lose a test.
+
 - **The flip chain's enablement promotion is weighed against measured profitability**
   (gh-ocannl-579, the last open follow-up of the gh-ocannl-514 branch-and-bound arc). The
   enablement prior ranks a placement flip by which sketch families it makes EXPRESSIBLE — the

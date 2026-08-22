@@ -85,7 +85,10 @@ Testing notes:
   `dune runtest`; the explicit `rule` + `diff` pattern (as in `test_config_consistency`) is only
   needed for tests not run by a `(test)` stanza, such as the `@slow` rules.
 - Explicit `@slow` training tests are excluded from `dune runtest`; run `dune build @slow` when
-  relevant. Both regular and slow executables are compiled by `dune build @check`.
+  relevant, or one of them alone through its own alias, `dune build @test/training/slow-<name>`
+  (each directory's `(alias (name slow) ...)` stanza aggregates them, and
+  `test/operations/env_var_deps` fails on a `slow-<name>` rule it does not list). Both regular and
+  slow executables are compiled by `dune build @check`.
 - Training actions share the `ocannl_training_test` Dune lock, so they do not run their
   process-local OpenMP pools concurrently with one another; compilation remains parallel.
   Preserve this lock on new regular training tests and `@slow` rules. Other pool-using tests,
