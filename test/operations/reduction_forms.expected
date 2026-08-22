@@ -22,7 +22,7 @@ Low_level.axis_type coverage:
 every Low_level.axis_type constructor is reached by a member that exists, or exempted with a reason: true
 the coverage samples name distinct constructors: true
 the numerics policy is the default the member table's forms are stated for: true
-reduction: out[3] = sum of 32 terms, hand-built Low_level, 25 members
+reduction: out[3] = sum of 64 terms, hand-built Low_level, 25 members
   01 serial                      [f32 bf16 f16] over plain                 no schedule ops (the reference rendering)                              -> localized scope
   02 unroll-annot                [f32 bf16 f16] over plain                 Unroll (annotated: codegen repeats the body)                           -> localized scope
   03 unroll-mat                  [f32 bf16 f16] over plain                 Unroll ~materialize (the schedule mints the scope)                     -> localized scope
@@ -51,15 +51,15 @@ reduction: out[3] = sum of 32 terms, hand-built Low_level, 25 members
 at f32 the whole-nest and per-step references coincide (the identity-precision leg): true
 the f32 serial baseline matches the reference its backend's accumulator policy selects: true
 the f32 guarded baseline matches the reference its backend's accumulator policy selects: true
-the f32 guards are load-bearing: 20 of 32 terms differs from the full axis in both the executed baseline and the per-step reference: true
+the f32 guards are load-bearing: 20 of 64 terms differs from the full axis in both the executed baseline and the per-step reference: true
 at bf16 the whole-nest and per-step references differ over the full axis and over the guarded prefix (the operands discriminate accumulator width): true
 the bf16 serial baseline matches the reference its backend's accumulator policy selects: true
 the bf16 guarded baseline matches the reference its backend's accumulator policy selects: true
-the bf16 guards are load-bearing: 20 of 32 terms differs from the full axis in both the executed baseline and the per-step reference: true
+the bf16 guards are load-bearing: 20 of 64 terms differs from the full axis in both the executed baseline and the per-step reference: true
 at f16 the whole-nest and per-step references differ over the full axis and over the guarded prefix (the operands discriminate accumulator width): true
 the f16 serial baseline matches the reference its backend's accumulator policy selects: true
 the f16 guarded baseline matches the reference its backend's accumulator policy selects: true
-the f16 guards are load-bearing: 20 of 32 terms differs from the full axis in both the executed baseline and the per-step reference: true
+the f16 guards are load-bearing: 20 of 64 terms differs from the full axis in both the executed baseline and the per-step reference: true
 serial @ f32 renders the form its composition claims: true
 serial @ f32 agrees with its reference value: true
 serial @ bf16 renders the form its composition claims: true

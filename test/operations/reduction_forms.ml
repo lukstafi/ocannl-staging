@@ -81,8 +81,15 @@ let rows = 3
 (* A multiple of the GPU backends' warp size, so that the [Workgroup_reduce] member can reach the
    shuffle-tree rendering where the backend has one: that rendering REFUSES (loudly, by design — a
    plain hardware binding would race the accumulator update) an extent it cannot cover a warp at a
-   time. *)
-let cols = 32
+   time.
+
+   TWO warps rather than one, so that splitting the axis can leave a 32-wide inner half under a
+   surviving outer loop. A 4-wide one is not portable: [simd_reduce_lanes_for] filters the lane
+   ladder by [extent >= lanes], and the ladder starts at 8 for f32 on a 32-byte-vector x86 target —
+   so the inner half vectorized on this NEON machine and silently declined to the localizing peel on
+   the Linux CI runner, which is a form claim that holds on the author's hardware and nowhere else.
+   32 clears every ladder a real target has. *)
+let cols = 64
 
 (* The operand cells: [(flat mod 13 + 200) / 8], i.e. the multiples of 1/8 between 25 and 26.5.
 
@@ -862,7 +869,10 @@ let members =
       ~expect:Simd
       ~available:(fun _ -> on_cpu)
       ~sched:(fun g ->
-        let sp, _outer, inner = Sched.split ~axis:g.k ~factor:4 ~outer:LL.Serial ~inner:LL.Serial in
+        (* 32 wide, which every lane ladder a real target has can cover; see {!cols}. *)
+        let sp, _outer, inner =
+          Sched.split ~axis:g.k ~factor:32 ~outer:LL.Serial ~inner:LL.Serial
+        in
         [ sp; Sched.Retype { axis = inner; ty = LL.Vectorized } ]);
     (* The Vectorized arm's OTHER exit: a loop-carried accumulation that no vector rendering
        accepted falls back to the localizing peel, never to the pragma'd loop — the pragmas assert
@@ -1333,9 +1343,19 @@ let () =
 
 let mma_n = 16
 
+(* The contraction's operands. The moduli are coprime to the row stride and LARGER than the extent
+   (Codex P2, round 6): with [t = i * 16 + k], a modulus [m] gives [A[i+d,k] = A[i,k]] exactly when
+   [16 d = 0 mod m], which for [m] coprime to 16 means [m | d] — so any [m <= 15] has an in-range
+   row period, and the previous 7 and 5 made rows 7 apart and columns 5 apart interchangeable. A
+   [Tile_mma] fallback regression that swapped or substituted such rows stayed bitwise equal to the
+   plain run, which neither the census nor the accumulator-form check inspects. 17 and 19 are
+   coprime to 16 and exceed 15, so no in-range step is a period on either axis. *)
+let mma_a = Ll_test.cycle ~dims:[| mma_n; mma_n |] ~modulus:17 ~offset:1. ~stride:0.25
+let mma_b = Ll_test.cycle ~dims:[| mma_n; mma_n |] ~modulus:19 ~offset:1. ~stride:0.5
+
 let mma_matmul ~tag ~prec =
-  let av = Array.init (mma_n * mma_n) ~f:(fun t -> Float.of_int (t % 7) *. 0.25) in
-  let bv = Array.init (mma_n * mma_n) ~f:(fun t -> Float.of_int (t % 5) *. 0.5) in
+  let av = Array.init (mma_n * mma_n) ~f:(fun t -> mma_a [| t / mma_n; t % mma_n |]) in
+  let bv = Array.init (mma_n * mma_n) ~f:(fun t -> mma_b [| t / mma_n; t % mma_n |]) in
   let ma = TDSL.ndarray av ~label:[ tag ^ "_a" ] ~output_dims:[ mma_n; mma_n ] () in
   let mb = TDSL.ndarray bv ~label:[ tag ^ "_b" ] ~output_dims:[ mma_n; mma_n ] () in
   let%op mc = ma +* "ik;jk=>ij" mb in

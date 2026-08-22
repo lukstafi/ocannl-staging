@@ -3316,8 +3316,10 @@
  ;     not merely by the kernels).
  ;   CC_VECTOR_BYTES, CC_BACKEND_ARCH_FLAGS -- whether try_vectorize_reduce renders at all
  ;     (cc_vector_bytes=0 trips its vector_bytes < 8 guard), so the Vectorized members' form.
- ;   DEBUG_LOG_FROM_ROUTINES -- try_localize_serial_reduce declines wholesale under routine
- ;     logging, which turns every localized member into a read-modify-write one.
+ ;   DEBUG_LOG_FROM_ROUTINES, LOG_LEVEL -- try_localize_serial_reduce declines wholesale under
+ ;     routine logging, which turns every localized member into a read-modify-write one. BOTH keys,
+ ;     because Utils.debug_log_from_routines () is their conjunction: the flag alone is inert until
+ ;     the log level clears 1, so tracking only the flag lets a level change reuse a green result.
  ;   VIRTUALIZE_MAX_VISITS -- whether the virtual accumulator is inlined at its read site at all.
  (name reduction_forms)
  (package neural_nets_lib)
@@ -3331,6 +3333,7 @@
   (env_var OCANNL_CC_VECTOR_BYTES)
   (env_var OCANNL_CC_BACKEND_ARCH_FLAGS)
   (env_var OCANNL_DEBUG_LOG_FROM_ROUTINES)
+  (env_var OCANNL_LOG_LEVEL)
   (env_var OCANNL_VIRTUALIZE_MAX_VISITS))
  (modules reduction_forms)
  (libraries base ocannl stdio arrayjit.verdict ll_test test_utils)
