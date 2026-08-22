@@ -727,7 +727,15 @@ let placement_arm_name = function
     gh-514, the tuned placement-space search: the chain walks the surface in
     {!Autotune.placement_surface}'s ranking — family-unlocking (enablement) [Materialize] flips
     before cost, per the gh-558 lesson; config [tune_flip_ordering=cost] restores the legacy
-    recompute-cost order as the evaluation baseline — and, under config [autotune_bound_pruning],
+    recompute-cost order as the evaluation baseline — weighed, under the default
+    [tune_flip_ordering=profitable] (gh-ocannl-579), against what the two arms just MEASURED about
+    the family that prior points at ({!Autotune.family_profit_of_reports} over both arm reports:
+    arm B is the all-materialized specialization the enablement set is derived from, so its best
+    tensorized time against its best time prices the promotion for free). A family measured to lose
+    here by more than [tune_flip_profit_margin] voids the prior and the surface ranks by cost — the
+    prior models expressibility, and on gh-514's metal/f16 cell promoting a hopeless family took
+    budget slots 1-2 and pushed the winning cheap flip out of a budget-5 chain. And, under config
+    [autotune_bound_pruning],
     fathoms a [Materialize] flip pre-search when the roofline floor of the chain's partial placement
     vector extended by it already meets the best measured time (admissible: the floor lower-bounds
     every completion, so the flip cannot win). Fathomed flips do not consume the budget, which
@@ -1148,10 +1156,23 @@ let tune_placements ?name ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?r
       LL =
       Ir.Low_level
     in
+    let (* gh-514 follow-up gh-ocannl-579: the enablement prior prices which sketch families a flip
+           makes EXPRESSIBLE, and nothing about whether they pay. The arms just searched settle
+           that, for free: arm B is the all-materialized specialization the prior derives its
+           enablement set from, so its report's best tensorized time against its best time says what
+           the promoted flips' family is worth on this device, on this computation, in this session.
+           Under [tune_flip_ordering=profitable] (the default) a family measured to lose here voids
+           the prior and the surface ranks by cost — on gh-514's metal/f16 cell the promotion
+           displaced the winning cheap inline flip out of a budget-5 chain. Both arms' reports are
+           consulted, including a failing arm's: its timings are measurements of the family even
+           though its [best_ms] is not shippable. *)
+        profit =
+      Autotune.family_profit_of_reports (List.filter_opt [ a_report; b_report ])
+    in
     let surface =
       (* Outside the tuner's failure containment; a lowering failure (the A/B searches above can
          still have crowned a winner) must skip the refinement, not fail the tune. *)
-      match Autotune.placement_surface ?name ctx comp bindings with
+      match Autotune.placement_surface ?name ~profit ctx comp bindings with
       | s -> Some s
       | exception exn ->
           logf "flip refinement skipped: the decision-surface lowering failed: %s"
@@ -1165,9 +1186,12 @@ let tune_placements ?name ?beam_width ?rounds ?repeats ?cache_dir ?timing_ctx ?r
           Utils.get_global_flag ~default:false ~arg_name:"autotune_bound_pruning"
         in
         let candidates = surface.Autotune.ps_candidates in
-        logf "flip refinement: %d candidate(s), %d enablement-promoted, budget %d%s"
+        logf "flip refinement: %d candidate(s), %d enablement-promoted, ranked by %s, budget %d%s"
           (List.length candidates)
           (Set.length surface.Autotune.ps_enablement)
+          (match surface.Autotune.ps_ordering with
+          | `Cost -> "cost (" ^ Autotune.family_profit_summary profit ^ ")"
+          | `Enablement -> "enablement (" ^ Autotune.family_profit_summary profit ^ ")")
           inline_flips
           (if bound_pruning then ", bound pruning on" else "");
         let chain = ref (a, a_ms, ctx, timing_ctx) in

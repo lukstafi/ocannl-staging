@@ -346,3 +346,30 @@ files.
   is `report.default_ms` instead — the config-thresholds fissioned seed reproduces the untuned
   pipeline exactly and its time is attributed by digest (so a seed that dedups against a timed twin,
   the CPU serial baseline included, still reports).
+- The flip chain's **enablement prior prices expressibility, and the profitability term is what
+  keeps that from costing the run** (gh-ocannl-514 → gh-ocannl-579). The prior promotes a
+  `Materialize` flip because materializing that node makes a tensorized family *reachable*, which
+  the per-node recompute-cost bound has no term for; it says nothing about whether the family, once
+  reachable, is fast. On gh-514's metal/f16 `mlp_wide` cell the two promoted cast twins took budget
+  slots 1–2 of a budget-5 chain, the family they unlocked timed 79–92 ms against the arm's 7.5 ms,
+  and the cheap `inline` flip that actually won (cost-rank 5) fell out of the budget: enablement
+  chains shipped 7.03–7.14 ms where cost-ordered ones shipped 6.55/6.64. **The evidence that settles
+  it is already paid for at the decision point** — `Train.tune_placements` searches arm B, the
+  all-materialized specialization `placement_enablement` derives its enablement set *from*, before
+  the chain walks, so `report.mma_best_ms` against `report.best_ms` prices the promotion for free,
+  on this device, on this computation, this session. `Autotune.family_profit_of_reports` reads both
+  arms' reports; `tune_flip_ordering=profitable` (the default) resolves to `enablement` when the
+  family is competitive or was never timed and to `cost` when it lost by more than
+  `tune_flip_profit_margin`. Two things about the shape of that rule are deliberate: **both** of the
+  prior's classes go at once (promoting family-unlocking flips and demoting family-breaking ones are
+  the same bet on the same family), and **the absence of a confirmation is not evidence against** —
+  an arm that seeded tensorized candidates and timed none (the gh-ocannl-521 state) measured nothing
+  about the family, so the prior stands and gh-558's budget-5 reachability closure is untouched. The
+  granularity limit is worth knowing: `mma_best_ms` is per *search*, not per site, so the term
+  cannot demote one site's promotion while keeping another's; per-site attribution would need the
+  search to report per-site tensorized bests. Alternatives that were weighed and rejected: reading
+  prior searches back out of the schedule cache (it persists no tensorized margin, its key is a
+  per-program digest so an entry answers about a *different* program, and the in-process arm report
+  is strictly better evidence anyway); and pricing the *displaced* flip instead of the promoted one
+  (its gain is unknown until measured, which is exactly the budget the promotion consumes).
+  `model_default`'s placement walk measures nothing, so it gets `Unmeasured` and is unchanged.
