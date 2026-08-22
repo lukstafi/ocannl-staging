@@ -136,7 +136,57 @@ let () =
      so hoisting the accesses out of it lets every lane write the cell only lane 0 touched. *)
   Verdict.p "a guard mixing a peeled and an enclosing symbol is refused"
     (Option.is_none
-       (LL.peel_accum_nest ~free_of:[] (guarded_nest ~guard_sym:(`Mixed enclosing))))
+       (LL.peel_accum_nest ~free_of:[] (guarded_nest ~guard_sym:(`Mixed enclosing))));
+  (* gh-490's runtime-extent guard is NOT constant-bounded: [Assignments.extent_guard] emits
+     [i < s] with [s] a STATIC symbol -- a kernel parameter bound at launch, never a loop index. It
+     therefore cannot select among enclosing iterations, and the peel must still take it, or every
+     runtime-bounded reduction loses accumulator localization (and, on narrow storage, its
+     gh-ocannl-639 accumulator width along with it). The caller certifies such symbols through
+     [~invariant]; codegen passes its [idx_params]. *)
+  let extent_sym = Idx.get_symbol () in
+  let extent_nest =
+    let k = Idx.get_symbol () in
+    LL.For_loop
+      {
+        index = k;
+        from_ = 0;
+        to_ = 3;
+        axis = LL.Serial;
+        body =
+          LL.If
+            {
+              cond =
+                ( LL.Binop
+                    ( Ops.Cmplt,
+                      (LL.Embed_index (Idx.Iterator k), single),
+                      (LL.Embed_index (Idx.Iterator extent_sym), single) ),
+                  single );
+              body =
+                LL.Set
+                  {
+                    tn = acc;
+                    idcs = [| Idx.Fixed_idx 0 |];
+                    llsc =
+                      LL.Binop
+                        ( Ops.Add,
+                          (LL.Get (acc, [| Idx.Fixed_idx 0 |]), single),
+                          (LL.Get (src, [| Idx.Iterator k |]), single) );
+                    debug = "";
+                  };
+            };
+      }
+  in
+  Verdict.p "a runtime-extent guard is refused without the caller's certification"
+    (Option.is_none (LL.peel_accum_nest ~free_of:[] extent_nest));
+  Verdict.p "a runtime-extent guard peels when its bound is certified loop-invariant"
+    (Option.is_some
+       (LL.peel_accum_nest ~invariant:[ extent_sym ] ~free_of:[] extent_nest));
+  (* Certification is not a blanket permit: an ENCLOSING loop symbol wrongly certified would be the
+     caller's error, but a guard with no peeled symbol stays refused however it is certified. *)
+  Verdict.p "certification does not admit a guard with no peeled symbol"
+    (Option.is_none
+       (LL.peel_accum_nest ~invariant:[ enclosing ] ~free_of:[]
+          (guarded_nest ~guard_sym:(`Enclosing enclosing))))
 
 (* Having refused to peel it, codegen must still RENDER a dead level — and the [Unrolled] arm is
    where that is not free: it repeats the body [to_ - from_ + 1] times, and [Base.List.init] RAISES

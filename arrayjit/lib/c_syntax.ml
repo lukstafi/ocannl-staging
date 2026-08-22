@@ -2161,6 +2161,11 @@ module C_syntax (B : C_syntax_config) = struct
      render hardware index bindings. *)
   let current_hardware_axes : Low_level.hardware_axis_info list ref = ref []
 
+  (* The routine's STATIC index parameters, bound once at launch and therefore loop-invariant. The
+     accumulator peel needs them to tell gh-490's runtime-extent guard ([i < s], whose bound is a
+     static symbol) from a guard selecting among enclosing loop iterations, which it must refuse. *)
+  let current_static_symbols : Indexing.symbol list ref = ref []
+
   (* Set by [compile_proc]: nodes placed in workgroup-shared memory. Their declarations carry
      [shared_decl_prefix] and cannot use [= {0}] (not allowed for [__shared__]/[threadgroup]), so
      their [Zero_out] is never elided. *)
@@ -4109,7 +4114,8 @@ module C_syntax (B : C_syntax_config) = struct
               | _ -> false
             in
             Option.bind
-              (Low_level.peel_accum_nest ~extra_level:serialized_hardware ~free_of:[ i ] body)
+              (Low_level.peel_accum_nest ~extra_level:serialized_hardware
+                 ~invariant:!current_static_symbols ~free_of:[ i ] body)
               ~f:localize
         in
         let localize_or_serial () =
@@ -5524,6 +5530,8 @@ module C_syntax (B : C_syntax_config) = struct
     in
     let launch = Low_level.launch_dims llc in
     current_hardware_axes := Low_level.hardware_axes llc;
+    current_static_symbols :=
+      List.map idx_params ~f:(fun s -> s.Indexing.static_symbol);
     (let parallel_grid, grid_private, local_ptr_alias = collect_parallel_grid llc in
      current_parallel_grid := parallel_grid;
      current_grid_private := grid_private;

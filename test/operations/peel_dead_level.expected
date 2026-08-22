@@ -5,5 +5,8 @@ an emptier dead level is refused: true
 a guard varying with the peeled index still peels: true
 a guard invariant across the peeled levels is refused: true
 a guard mixing a peeled and an enclosing symbol is refused: true
+a runtime-extent guard is refused without the caller's certification: true
+a runtime-extent guard peels when its bound is certified loop-invariant: true
+certification does not admit a guard with no peeled symbol: true
 a dead Unrolled level compiles instead of aborting codegen: true
 a dead Unrolled level performs no accumulation: true

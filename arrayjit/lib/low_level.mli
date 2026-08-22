@@ -293,6 +293,7 @@ val accum_local_update_parts : id:scope_id -> scalar_t -> (Ops.binop * scalar_t)
 
 val peel_accum_nest :
   ?extra_level:(Indexing.symbol -> axis_type -> bool) ->
+  ?invariant:Indexing.symbol list ->
   free_of:Indexing.symbol list ->
   t ->
   (Tnode.t
@@ -330,7 +331,11 @@ val peel_accum_nest :
     the peeled levels is fixed for the whole nest, and hoisting the accesses out of it makes every
     instance load and store; across an enclosing hardware axis that is a data race, since lanes the
     guard excludes write their unchanged local back over the accumulating lane's result. Merely
-    varying with a peeled symbol does not suffice: a mixed guard selects among enclosing lanes too. *)
+    varying with a peeled symbol does not suffice: a mixed guard selects among enclosing lanes too.
+    [invariant] names symbols the caller certifies cannot index an enclosing loop — codegen passes
+    its static index parameters, which is what keeps gh-490's runtime-extent guard
+    ([Assignments.extent_guard]'s [i < s], whose bound is a static symbol rather than a constant)
+    peelable. Passing none is safe and merely declines more. *)
 
 (** {2 Hardware axis analyses}
 

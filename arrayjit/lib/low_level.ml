@@ -5257,7 +5257,7 @@ let scope_updates_reduce_op ~id (llc : t) : Ops.binop option =
    can diverge on it; and a multi-accumulator hoist could not be a [Local_scope] value at all (scope
    purity forbids a sibling [Set] inside a scope body) — it would need the [Declare_local] statement
    form. A transform that starts minting fused reduction bodies must extend this peel alongside. *)
-let peel_accum_nest ?(extra_level = fun _ _ -> false) ~free_of body :
+let peel_accum_nest ?(extra_level = fun _ _ -> false) ?(invariant = []) ~free_of body :
     (Tn.t
     * Indexing.axis_index array
     * [ `Update of scalar_t | `Scope of scope_id * t list ]
@@ -5302,19 +5302,29 @@ let peel_accum_nest ?(extra_level = fun _ _ -> false) ~free_of body :
     in
     go [] llsc
   in
-  (* Confined, not merely varying: EVERY symbol the guard mentions must be one of the levels being
-     peeled, and it must mention at least one. "Mentions a peeled symbol" is not enough — a MIXED
-     guard like [w + k <= 0] under [Workgroup w -> Serial k] varies with the peeled [k] and still
-     selects among enclosing lanes, so hoisting the accesses out of it lets every lane write the
-     cell that originally only lane 0 at [k = 0] touched. And a guard mentioning NO symbol is a
-     compile-time constant: if false, the whole nest is dead and the hoist invents both accesses.
-     The gh-490 shape is unaffected because those guards compare an index against a CONSTANT bound
-     ([Schedule]'s [Cmplt (Embed_index idx, Constant bound)]), so their only symbol is the peeled
-     index. *)
-  let guard_confined_to ~free_of gc =
+  (* Confined, not merely varying: every symbol the guard mentions must either be one of the levels
+     being peeled or be certified LOOP-INVARIANT by the caller ([invariant]), and at least one must
+     be peeled.
+
+     "Mentions a peeled symbol" is not enough — a MIXED guard like [w + k <= 0] under
+     [Workgroup w -> Serial k] varies with the peeled [k] and still selects among enclosing lanes,
+     so hoisting the accesses out of it lets every lane write the cell that originally only lane 0
+     at [k = 0] touched. And a guard mentioning no peeled symbol at all is fixed for the whole nest,
+     so hoisting invents both accesses where the original performed none.
+
+     [invariant] is what keeps the gh-490 runtime-extent shape peelable. Its guard is NOT
+     constant-bounded: [Assignments.extent_guard] emits
+     [Cmplt (Embed_index (Iterator index), Embed_index (Iterator sym.static_symbol))], where the
+     bound is a STATIC symbol — a kernel parameter bound at launch, never a loop index. Such a
+     symbol cannot select among iterations of an enclosing loop, so it is harmless here; but the
+     peel cannot tell it from an enclosing loop's index on its own, which is why the caller says.
+     Codegen passes its [idx_params]; a caller that passes nothing gets the conservative answer and
+     merely declines to localize (never mis-localizes), which is what the schedule mints do. *)
+  let guard_confined_to ~free_of ~invariant gc =
     let syms = guard_symbols gc in
-    (not (List.is_empty syms))
-    && List.for_all syms ~f:(fun s -> List.exists free_of ~f:(Indexing.equal_symbol s))
+    let peeled s = List.exists free_of ~f:(Indexing.equal_symbol s) in
+    let ok s = peeled s || List.exists invariant ~f:(Indexing.equal_symbol s) in
+    List.exists syms ~f:peeled && List.for_all syms ~f:ok
   in
   let cell_invariant ~free_of idcs =
     not (Array.exists idcs ~f:(fun idx -> List.exists free_of ~f:(fun s -> idx_mentions s idx)))
@@ -5351,7 +5361,7 @@ let peel_accum_nest ?(extra_level = fun _ _ -> false) ~free_of body :
           ~rebuild:(fun b -> rebuild (For_loop { r with body = b }))
           ibody
     | [ If { cond = gc, gp; body = gbody } ]
-      when pure_index_guard gc && guard_confined_to ~free_of gc ->
+      when pure_index_guard gc && guard_confined_to ~free_of ~invariant gc ->
         peel ~free_of ~rebuild:(fun b -> rebuild (If { cond = (gc, gp); body = b })) gbody
     | [ Set { tn; idcs; llsc = Local_scope { id; body = sbody; orig_indices = _ }; debug } ]
       when cell_invariant ~free_of idcs -> (

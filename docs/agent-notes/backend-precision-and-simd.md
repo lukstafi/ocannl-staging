@@ -213,10 +213,16 @@ files.
   discards the reduction — the same 1/N fingerprint as the Metal RMW miscompile, from a different
   cause. "Varies with a peeled symbol" is NOT the right predicate: a MIXED guard like `w + k <= 0`
   varies with the peeled `k` and still selects among lanes. Nor is an empty symbol set safe — a
-  guard mentioning nothing is a compile-time constant, and a false one makes the whole nest dead.
-  The gh-490 shape is unaffected because `Schedule` builds those guards as
-  `Cmplt (Embed_index idx, Constant bound)`, so their only symbol is the peeled index
-  (`peel_dead_level.ml` carries it as the control). Keeping such a guard
+  guard mentioning no peeled symbol is fixed for the whole nest. **The gh-490 runtime-extent guard
+  is NOT constant-bounded** — worth knowing, because assuming it was cost a review round:
+  `Assignments.extent_guard` (assignments.ml:225) emits
+  `Cmplt (Embed_index (Iterator index), Embed_index (Iterator sym.static_symbol))`, whose bound is a
+  STATIC symbol, a kernel parameter bound at launch. (`Schedule`'s Pad guards ARE constant-bounded;
+  the two shapes are easy to conflate.) A static symbol cannot select among enclosing loop
+  iterations, but the peel cannot tell it from a loop index on its own, so the caller certifies via
+  `~invariant`: codegen passes its `idx_params`, and a caller passing none merely declines more —
+  which for narrow storage would also drop the gh-639 accumulator width, not just the residency.
+  `peel_dead_level.ml` carries all four shapes. Keeping such a guard
   around the whole scope instead of declining would also be sound and would localize more; it needs
   the peel to report its outer guards separately, which is wider than the correctness fix.
 - The interaction with Metal's `volatile_scalar_rmw` needs no special case, and that is worth
