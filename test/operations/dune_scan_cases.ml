@@ -597,6 +597,21 @@ let raw_stanza_cases =
     ( "a name the stanza binds resolves under one too",
       {dune|(rule (deps (:pp pp.exe)) (action (chdir %{root} (run ./%{pp}))))|dune},
       [ "rule{?pp.exe, under `(chdir %{root} ...)`}" ] );
+    (* Evidence from two enclosing forms must not cancel out. A bare name is external under a
+       `chdir` alone, but NOT under a rewritten PATH -- there the walk places a site because PATH
+       may point it at a workspace executable -- so an unresolvable `chdir` around that must not
+       erase what the `setenv` established. Either nesting order, since dune admits both. *)
+    ( "a bare command under both a rewritten PATH and an unresolvable chdir",
+      {dune|(rule (action (setenv PATH . (chdir %{root} (run probe)))))|dune},
+      [ "rule{?probe, under `(setenv PATH ...)` and `(chdir %{root} ...)`}" ] );
+    ( "and in the other nesting order",
+      {dune|(rule (action (chdir %{root} (setenv PATH . (run probe)))))|dune},
+      [ "rule{?probe, under `(setenv PATH ...)` and `(chdir %{root} ...)`}" ] );
+    (* Still the raw_unnameable floor's own entry when the chdir CAN be resolved: that one carries a
+       directory, and the walk's site for it carries `path_rewritten`. *)
+    ( "a resolvable chdir around one keeps it a directoried entry",
+      {dune|(rule (action (setenv PATH . (chdir sub (run probe)))))|dune},
+      [ "rule{!sub}" ] );
     (* The test's own binary is the exception that proves the rule: the walk's `%{test}` filter
        drops the wrapped command too, so its Test site falls back to the stanza's own directory --
        and this reader falls back the same way, which is what keeps them equal. *)
@@ -926,6 +941,11 @@ let backend_rule_cases =
     ( "a PATH tool under an unresolvable chdir is counted by neither reader",
       {dune|(rule (action (chdir %{workspace_root} (run python3 x.py))))|dune},
       [ "rule runs nothing" ] );
+    (* But the same bare name under a rewritten PATH is a site the walk DOES place, and an
+       unresolvable `chdir` around it does not take that back. *)
+    ( "a bare command under a rewritten PATH and an unresolvable chdir keeps its floor",
+      {dune|(rule (deps ocannl_config) (action (setenv PATH . (chdir %{root} (run probe)))))|dune},
+      [ "rule REPORTED: declares neither +floor" ] );
     ( "nor is a shell line where no stanza runs anything",
       {dune|(library (name l) (preprocess (action (bash "./pp.exe"))))|dune},
       [ "library runs nothing" ] );

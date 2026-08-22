@@ -940,6 +940,15 @@ let raw_stanza_of =
             | Some _ -> None
             | None -> List.Assoc.find bindings inner ~equal:String.equal))
   in
+  (* A command name PATH decides the meaning of: no pform to resolve, no extension and no explicit
+     path to read it off. Under a rewritten PATH the walk refuses to call such a name external, so it
+     places a site for it wherever it runs -- which is what the [raw_unnameable] floor and the opaque
+     one both rest on, so they read one predicate rather than restating it. *)
+  let is_bare_name cmd =
+    (not (String.is_substring cmd ~substring:"%{"))
+    && (not (is_executable cmd))
+    && not (is_explicit_path cmd)
+  in
   (* Every command the stanza runs, with the directory it runs in. Its own traversal, deliberately:
      this is the question [executables_run] answers, and answering it twice is the point. *)
   let rec commands ~cwd ~unresolved ~under_path sexp =
@@ -1027,25 +1036,31 @@ let raw_stanza_of =
                Deduplicated by (directory, command), which is how the walk's own sites collapse. *)
             raw_unnameable =
               List.filter_map placed ~f:(fun (cwd, cmd, under_path) ->
-                  if
-                    under_path
-                    && (not (String.is_substring cmd ~substring:"%{"))
-                    && (not (is_executable cmd))
-                    && not (is_explicit_path cmd)
-                  then Some (cwd, cmd)
-                  else None)
+                  if under_path && is_bare_name cmd then Some (cwd, cmd) else None)
               |> List.dedup_and_sort ~compare:Poly.compare
               |> List.map ~f:fst;
             raw_opaque =
               List.filter_map ran ~f:(function
                 | Raw_opaque what -> Some what
-                (* Under an unresolvable `chdir`, only a command this reader could otherwise NAME is
-                   recorded. `(chdir %{root} (run python3 x.py))` runs a PATH tool, which the walk
-                   drops as external wherever it runs -- claiming it here would claim a site the
-                   walk never placed, and turn the floor from a lower bound into a false alarm. *)
-                | Raw_command { token; unresolved = Some dir; _ } ->
-                    Option.map (program ~bindings token) ~f:(fun exe ->
-                        Printf.sprintf "%s, under `(chdir %s ...)`" exe dir)
+                (* Under an unresolvable `chdir` what is lost is the DIRECTORY, not the evidence
+                   that something runs -- and evidence from two enclosing forms must not cancel out.
+                   Two things can still supply it: a command this reader could otherwise name, and a
+                   bare name under a rewritten PATH, which the walk places a site for precisely
+                   because PATH may point it at a workspace executable. Reading only the first left
+                   a command enclosed by BOTH with no floor under it, in either nesting order (Codex
+                   P2, round 1 of PR #422). *)
+                | Raw_command { token; unresolved = Some dir; under_path; _ } -> (
+                    match program ~bindings token with
+                    | Some exe -> Some (Printf.sprintf "%s, under `(chdir %s ...)`" exe dir)
+                    | None ->
+                        if under_path && is_bare_name token then
+                          Some
+                            (Printf.sprintf "%s, under `(setenv PATH ...)` and `(chdir %s ...)`"
+                               token dir)
+                        else None)
+                (* A PATH tool under nothing but a `chdir` is external wherever that sends it: the
+                   walk places no site, so claiming one here would turn the floor from a lower bound
+                   into a false alarm. *)
                 | Raw_command _ -> None)
               |> List.dedup_and_sort ~compare:String.compare;
           };

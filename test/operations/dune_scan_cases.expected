@@ -107,6 +107,9 @@ ok: raw stanzas -- and in two branches, two directories
 ok: raw stanzas -- a run under an unresolvable chdir is tagged, not dropped
 ok: raw stanzas -- but a PATH tool under one is external wherever it runs
 ok: raw stanzas -- a name the stanza binds resolves under one too
+ok: raw stanzas -- a bare command under both a rewritten PATH and an unresolvable chdir
+ok: raw stanzas -- and in the other nesting order
+ok: raw stanzas -- a resolvable chdir around one keeps it a directoried entry
 ok: raw stanzas -- a test's own binary under one falls back to its own directory
 ok: raw stanzas -- and the whole subtree beneath it, however deep
 ok: raw stanzas -- whitespace before the head
@@ -197,6 +200,7 @@ ok: backend rule -- a test running its own binary through a shell
 ok: backend rule -- a run under an unresolvable chdir is reported, with a floor under it
 ok: backend rule -- and passes with a marker
 ok: backend rule -- a PATH tool under an unresolvable chdir is counted by neither reader
+ok: backend rule -- a bare command under a rewritten PATH and an unresolvable chdir keeps its floor
 ok: backend rule -- nor is a shell line where no stanza runs anything
 ok: backend rule -- a marker on a library that runs nothing is still misplaced
 ok: backend marker sentinel -- in a comment
