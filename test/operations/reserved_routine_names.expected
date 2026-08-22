@@ -15,3 +15,4 @@ an ordinary routine name reaches the routine record unchanged: true
 an ordinary routine name is emitted unmangled: true
 the block comment derives the reserved name: true
 a Block_comment-named reserved routine computes correct values: true
+a node labeled by a C++ alternative token computes correct values: true

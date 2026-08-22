@@ -115,3 +115,23 @@ let () =
   let ctx = Context.run ctx routine in
   p "a Block_comment-named reserved routine computes correct values"
     (Array.for_all2_exn (Context.get_values ctx c.Tensor.value) expected ~f:approx)
+
+(* --- 6. The other half of the same table: a tensor NODE whose label is a reserved word. Node names
+   already avoid [ident_blacklist] by construction (a collision forces the disambiguated
+   [n<id>_<label>] form), so this pins the table rather than the mechanism — specifically the C++
+   entries, which the GPU dialects need and plain C does not.
+
+   [Tensor.unop ~op_label:"not"] mints exactly that: [not] is an alternative token for [!] in C++,
+   so on MSL/CUDA/HIP a bare [not] is a parse error where in C it is an ordinary identifier. The
+   claim is deliberately just the values: which spelling the node gets is backend-dependent (bare on
+   cc, disambiguated on the C++ dialects) and so cannot appear in a backend-uniform golden — the
+   teeth here are that the kernel COMPILES AND RUNS under OCANNL_BACKEND=metal. *)
+let () =
+  let a = TDSL.ndarray av ~label:[ "gh686_not_a" ] ~output_dims:[ n ] () in
+  let t = NTDSL.not a () in
+  Train.set_materialized t.Tensor.value;
+  let ctx = Context.auto () in
+  let ctx = Train.forward_once ctx t in
+  let expected_not = Array.map av ~f:(fun x -> if Float.(x = 0.) then 1. else 0.) in
+  p "a node labeled by a C++ alternative token computes correct values"
+    (Array.for_all2_exn (Context.get_values ctx t.Tensor.value) expected_not ~f:approx)
