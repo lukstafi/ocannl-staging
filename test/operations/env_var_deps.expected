@@ -22,6 +22,7 @@ Configuration keys tracked as ambient dependencies, in the one spelling OCANNL r
   buffer_aliasing
   build_files_prefix
   cc_backend_arch_flags
+  cc_backend_compiler_command
   cc_backend_simd_flags
   cc_fp16_arithmetic
   cc_vector_bytes

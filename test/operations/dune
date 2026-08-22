@@ -3319,6 +3319,9 @@
  ;     members' form. The SIMD flags reach BOTH arms of this test: vector_bytes is gated on avx2
  ;     appearing in simd_flags (cc_backend.ml), and the native-fp16 probe compiles under
  ;     `arch_flags () ^ simd_flags ()' -- so they also move the accumulator-policy reference.
+ ;   CC_BACKEND_COMPILER_COMMAND -- the probes above run THROUGH it, so while the arch, SIMD and
+ ;     fp16 settings are `auto' a different compiler can answer them differently, moving the same
+ ;     two things.
  ;   DEBUG_LOG_FROM_ROUTINES, LOG_LEVEL -- try_localize_serial_reduce declines wholesale under
  ;     routine logging, which turns every localized member into a read-modify-write one. BOTH keys,
  ;     because Utils.debug_log_from_routines () is their conjunction: the flag alone is inert until
@@ -3345,6 +3348,7 @@
   (env_var OCANNL_CC_VECTOR_BYTES)
   (env_var OCANNL_CC_BACKEND_ARCH_FLAGS)
   (env_var OCANNL_CC_BACKEND_SIMD_FLAGS)
+  (env_var OCANNL_CC_BACKEND_COMPILER_COMMAND)
   (env_var OCANNL_DEBUG_LOG_FROM_ROUTINES)
   (env_var OCANNL_LOG_LEVEL)
   (env_var OCANNL_VIRTUALIZE_MAX_VISITS)

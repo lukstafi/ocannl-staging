@@ -291,6 +291,12 @@ type prog = {
   seed : (Tn.t * float array) list;
   bindings : Idx.unit_bindings;
   bind : Idx.lowered_bindings -> unit;
+  verify : (string * Tn.t * float array) list;
+      (** Other materialized nodes the shape writes, with what every cell must hold. Reading back
+          only the accumulator is not enough (Codex P2, round 10): a schedule op rewrites the WHOLE
+          level, so a regression that dropped the sibling stores of [Side_write], or substituted the
+          wrong [k] into them, would leave the accumulator's value, its form classification and all
+          its site counts intact while corrupting an observable result. *)
 }
 
 (* Ids are the test's own range, bumped per program so that nodes stay distinguishable in debug
@@ -339,6 +345,7 @@ let make ~(prec : Ops.prec) ~(shape : shape) () : prog =
       seed;
       bindings = Idx.Empty;
       bind = (fun _ -> ());
+      verify = [];
     }
   in
   let nest ?(body = plain_body) () =
@@ -402,6 +409,12 @@ let make ~(prec : Ops.prec) ~(shape : shape) () : prog =
         llc = nest ~body:(LL.Seq (plain_body, sibling)) ();
         materialized = [ out; x; side ];
         seed = (side, Array.create ~len:(rows * cols) Ll_test.sentinel) :: seed;
+        verify =
+          [
+            ( "the sibling stores cover every cell with the value of their own iteration",
+              side,
+              Array.init (rows * cols) ~f:(fun n -> cell (n / cols) (n % cols) +. 1.0) );
+          ];
       }
   | Virtual_acc ->
       let tmp = node ~dims:[| rows |] "rftmp" in
@@ -709,9 +722,20 @@ let execute ~name ~(prog : prog) ~(sched : Sched.schedule) =
     | Some raw ->
         Ll_test.optimize_scoped ~materialized:prog.materialized ~static_indices ~name ~raw prog.llc
   in
+  (* The transform's INPUT and OUTPUT are both kept. A coverage entry that only checks its member
+     exists says nothing about whether that member still exercises the op it is credited with
+     (Codex P2, round 10): were [Unroll]'s annotated rewrite to regress to leaving the loop
+     [Serial], the kernel would keep the same localized classification, the same closing store and
+     the same value, and both the member and its coverage entry would stay green. Comparing the two
+     is what binds a cited op to an observable effect. *)
+  let before = ref None and after = ref None in
   let ctx, routine =
     Context.compile ~name ~prelowered:o
-      ~lowered_transform:(fun opt -> Sched.apply ~static_indices sched opt)
+      ~lowered_transform:(fun opt ->
+        before := Some opt.LL.llc;
+        let result = Sched.apply ~static_indices sched opt in
+        after := Some result.LL.llc;
+        result)
       (Lazy.force base_ctx) Ir.Assignments.empty_comp prog.bindings
   in
   prog.bind routine.Context.bindings;
@@ -719,7 +743,29 @@ let execute ~name ~(prog : prog) ~(sched : Sched.schedule) =
     List.fold prog.seed ~init:ctx ~f:(fun ctx (tn, vs) -> Context.set_values ctx tn vs)
   in
   let ctx = Context.run ctx routine in
-  Context.get_values ctx prog.out
+  let read tn = Context.get_values ctx tn in
+  (read prog.out, List.map prog.verify ~f:(fun (c, tn, want) -> (c, read tn, want)),
+   (!before, !after))
+
+(* The axis kinds a statement's loops carry. What binds a member to the constructor its coverage
+   entry credits it with: an op that names an axis kind must leave that kind in the IR it produced. *)
+let rec axis_kinds (llc : LL.t) : LL.axis_type list =
+  match llc with
+  | LL.For_loop { axis; body; _ } -> axis :: axis_kinds body
+  | LL.Seq (a, b) -> axis_kinds a @ axis_kinds b
+  | LL.If { body; _ } -> axis_kinds body
+  | LL.Set { llsc; _ } -> scalar_axis_kinds llsc
+  | LL.Set_local (_, llsc) -> scalar_axis_kinds llsc
+  | _ -> []
+
+and scalar_axis_kinds (llsc : LL.scalar_t) : LL.axis_type list =
+  match llsc with
+  | LL.Local_scope { body; _ } -> axis_kinds body
+  | LL.Ternop (_, (a, _), (b, _), (c, _)) ->
+      scalar_axis_kinds a @ scalar_axis_kinds b @ scalar_axis_kinds c
+  | LL.Binop (_, (a, _), (b, _)) -> scalar_axis_kinds a @ scalar_axis_kinds b
+  | LL.Unop (_, (a, _)) -> scalar_axis_kinds a
+  | _ -> []
 
 (* {1 The member table}
 
@@ -789,6 +835,12 @@ type member = {
           would still answer [Rmw], and execution would still equal the per-step reference — serial
           and unrolled loops visit the same terms — so a member advertised as "one per copy" would
           be green without the Unrolled fallback ever running. *)
+  expect_axis : LL.axis_type option;
+      (** The axis kind this member's schedule must leave in the IR it produced. Checked against the
+          post-schedule loop nest, so a retype or an unroll that silently became a no-op fails here
+          rather than passing on a form claim its own regression preserves. [None] where the op
+          changes structure without naming a kind — the "the schedule changed the IR" claim covers
+          those. *)
   extra : string list;
       (** Substrings that must appear in a statement ASSIGNING A SCOPE LOCAL — the scope's own
           updates — ANDed into the form claim. For the one distinguishing feature the node-access
@@ -810,8 +862,17 @@ type member = {
 
 let no_ops _ = []
 
+(* The [Vectorized] arm has a DEFINED exit on every backend, and skipping the GPUs hid it (Codex P2,
+   round 10): [try_vectorize_reduce] declines the GPU backends' [`Packed_struct] style, and the
+   renderer then routes an accumulating body through [try_localize_serial_reduce] rather than
+   through the pragma'd loop. That fallback is as much a member of this set as the SIMD grid, so the
+   expectation is backend-dependent instead of the leg being marked unavailable. *)
+let simd_or_localized = if on_cpu then Simd else Localized
+
+let simd_claimed = "SIMD accumulator grid, or the localized scope where no vector rendering exists"
+
 let member ?(shape = Plain) ?(sched = no_ops) ?(expect = Localized) ?claimed ?(reference = Baseline)
-    ?(store_sites = 1) ?(rmw_sites = 1) ?(foreign_sites = 0) ?(extra = [])
+    ?(store_sites = 1) ?(rmw_sites = 1) ?(foreign_sites = 0) ?expect_axis ?(extra = [])
     ?(precisions = [ "f32"; "bf16"; "f16" ])
     ?(available = fun _ -> true) slug what =
   let claimed = Option.value claimed ~default:(form_name expect) in
@@ -826,6 +887,7 @@ let member ?(shape = Plain) ?(sched = no_ops) ?(expect = Localized) ?claimed ?(r
     store_sites;
     rmw_sites;
     foreign_sites;
+    expect_axis;
     extra;
     precisions;
     available;
@@ -837,8 +899,9 @@ let members =
        left every f32 reduction doing one global read-modify-write per step. --- *)
     member "serial" "no schedule ops (the reference rendering)";
     (* --- the two [Unroll] representations autotune proposes over small reduction loops --- *)
-    member "unroll-annot" "Unroll (annotated: codegen repeats the body)" ~sched:(fun g ->
-        [ Sched.Unroll { axis = g.k; materialize = false } ]);
+    member "unroll-annot" "Unroll (annotated: codegen repeats the body)"
+      ~expect_axis:LL.Unrolled
+      ~sched:(fun g -> [ Sched.Unroll { axis = g.k; materialize = false } ]);
     member "unroll-mat" "Unroll ~materialize (the schedule mints the scope)" ~sched:(fun g ->
         [ Sched.Unroll { axis = g.k; materialize = true } ]);
     (* The output loop is gone, so each of its [rows] copies closes its own cell -- which is not a
@@ -885,12 +948,11 @@ let members =
         [ op ]);
     (* --- the [Vectorized] arm: a SIMD accumulator grid plus its scalar tail, and the same
        rendering NESTED inside a surviving serial reduction level. --- *)
-    member "retype-vectorized" "Retype the reduction axis to Vectorized" ~expect:Simd
-      ~available:(fun _ -> on_cpu)
+    member "retype-vectorized" "Retype the reduction axis to Vectorized"
+      ~expect:simd_or_localized ~claimed:simd_claimed ~expect_axis:LL.Vectorized
       ~sched:(fun g -> [ Sched.Retype { axis = g.k; ty = LL.Vectorized } ]);
     member "split-then-vectorize-inner" "Split, then Retype the INNER half to Vectorized"
-      ~expect:Simd
-      ~available:(fun _ -> on_cpu)
+      ~expect:simd_or_localized ~claimed:simd_claimed ~expect_axis:LL.Vectorized
       ~sched:(fun g ->
         (* 32 wide, which every lane ladder a real target has can cover; see {!cols}. *)
         let sp, _outer, inner =
@@ -902,7 +964,7 @@ let members =
        iteration independence, which an accumulation does not satisfy. A two-wide inner half is
        below the profitability gate, so the SIMD grid declines and the peel takes it. *)
     member "split-then-vectorize-narrow" "Split into a two-wide inner half, then Retype it Vectorized"
-      ~available:(fun _ -> on_cpu)
+      ~expect_axis:LL.Vectorized
       ~sched:(fun g ->
         let sp, _outer, inner = Sched.split ~axis:g.k ~factor:2 ~outer:LL.Serial ~inner:LL.Serial in
         [ sp; Sched.Retype { axis = inner; ty = LL.Vectorized } ]);
@@ -915,13 +977,14 @@ let members =
            anything else by raising rather than by falling back — so off the C backends this member
            is evaluable at f32 alone. *)
       ~available:(fun prec_name -> on_cpu || String.equal prec_name "f32")
+      ~expect_axis:LL.Workgroup_reduce
       ~sched:(fun g -> [ Sched.Retype { axis = g.k; ty = LL.Workgroup_reduce } ]);
     (* The plain [Workgroup] arm: a hardware binding where the backend has an index for the slot,
        and otherwise the localizing peel. Only the second half is a member here — binding a
        REDUCTION axis to a workgroup dimension is a cross-lane race wherever the binding exists, so
        the leg runs on the backends that serialize it and is skipped where it would not be. *)
     member "retype-workgroup" "Retype the reduction axis to Workgroup (no index bound: serialized)"
-      ~available:(fun _ -> on_cpu)
+      ~available:(fun _ -> on_cpu) ~expect_axis:LL.Workgroup
       ~sched:(fun g -> [ Sched.Retype { axis = g.k; ty = LL.Workgroup } ]);
     (* --- the gh-490 runtime-extent guard, whose bound is a kernel parameter rather than a
        constant. The peel must see through it (gh-ocannl-693) and the mints must agree with the
@@ -949,8 +1012,9 @@ let members =
     member "decline-sibling-statement" "a second statement in the reduction level"
       ~shape:Side_write ~expect:Rmw ~reference:Per_step;
     member "decline-sibling-unrolled" "the same level Unrolled: one read-modify-write per copy"
-      ~shape:Side_write ~expect:Rmw ~reference:Per_step ~rmw_sites:cols ~sched:(fun g ->
-        [ Sched.Unroll { axis = g.k; materialize = false } ]);
+      ~shape:Side_write ~expect:Rmw ~reference:Per_step ~rmw_sites:cols
+      ~expect_axis:LL.Unrolled
+      ~sched:(fun g -> [ Sched.Unroll { axis = g.k; materialize = false } ]);
   ]
 
 (* {1 Coverage ratchets}
@@ -1172,12 +1236,14 @@ let () =
 let baselines =
   List.map precs ~f:(fun (prec_name, prec) ->
       let prog = make ~prec ~shape:Plain () in
-      (prec_name, execute ~name:("rf_baseline_" ^ prec_name) ~prog ~sched:[]))
+      let values, _, _ = execute ~name:("rf_baseline_" ^ prec_name) ~prog ~sched:[] in
+      (prec_name, values))
 
 let guarded_baselines =
   List.map precs ~f:(fun (prec_name, prec) ->
       let prog = make ~prec ~shape:Runtime_guard () in
-      (prec_name, execute ~name:("rf_guarded_baseline_" ^ prec_name) ~prog ~sched:[]))
+      let values, _, _ = execute ~name:("rf_guarded_baseline_" ^ prec_name) ~prog ~sched:[] in
+      (prec_name, values))
 
 let baseline prec_name = List.Assoc.find_exn baselines ~equal:String.equal prec_name
 
@@ -1268,14 +1334,58 @@ let () =
             let value_claim =
               Printf.sprintf "%s @ %s agrees with its reference value" m.slug prec_name
             in
+            let evidence_claim =
+              Printf.sprintf "%s @ %s: its schedule ops left their mark on the lowered IR" m.slug
+                prec_name
+            in
             if not (m.available prec_name) then begin
+              (* Every claim an evaluable leg prints, in the same order: the golden is one file for
+                 all backends, so a claim emitted only on the available path leaves a hole rather
+                 than a skip. *)
+              skipped evidence_claim;
               skipped form_claim;
               skipped value_claim
             end
             else begin
               let name = Printf.sprintf "rf_%s_%s" (routine_stem m.slug) prec_name in
               let prog = make ~prec ~shape:m.shape () in
-              let got = execute ~name ~prog ~sched:(m.sched prog) in
+              let sched = m.sched prog in
+              let got, verified, (before, after) = execute ~name ~prog ~sched in
+              (* Every node the shape writes, not only the accumulator. *)
+              List.iter verified ~f:(fun (claim, values, want) ->
+                  let ok = agrees values want in
+                  if not ok then
+                    Stdio.eprintf "  %s: %s -- got [%s] want [%s]\n" name claim (show values)
+                      (show want);
+                  p (Printf.sprintf "%s @ %s: %s" m.slug prec_name claim) ok);
+              (* The op is bound to an observable effect: a non-empty schedule must have CHANGED the
+                 lowered IR, and one that names an axis kind must have left that kind in it. *)
+              (match (before, after) with
+              | Some b, Some a ->
+                  let changed =
+                    List.is_empty sched
+                    || not (Sexp.equal (LL.sexp_of_t b) (LL.sexp_of_t a))
+                  in
+                  let axis_ok =
+                    match m.expect_axis with
+                    | None -> true
+                    | Some ty ->
+                        List.exists (axis_kinds a) ~f:(fun k -> LL.equal_axis_type k ty)
+                  in
+                  if not (changed && axis_ok) then
+                    (* Phrased with [%s] rather than a trailing [%b] on purpose: this is a
+                       failure-only diagnostic beside the real claim, and a format ending on a bare
+                       boolean behind a separator is exactly the self-decided-verdict shape
+                       [verdict_ratchet] hunts. Better to say it in words than to earn an
+                       exemption. *)
+                    Stdio.eprintf
+                      "  %s: the schedule left no mark -- IR changed: %s, named axis kind \
+                       present: %s\n"
+                      name (Bool.to_string changed) (Bool.to_string axis_ok);
+                  p evidence_claim (changed && axis_ok)
+              | _ ->
+                  Stdio.eprintf "  %s: the lowered transform was never invoked\n" name;
+                  p evidence_claim false);
               let src = Generated.read name in
               let updates = scope_update_statements src in
               let extra_ok =
