@@ -329,11 +329,26 @@ SNAP_TREE=$(tree_hash)     # clean at BASE; every rewrite re-baselines it
 
 # --- Format / test / promote to a fixed point --------------------------------
 
+# Both fmt commands send their log through a redirection on the
+# run_interruptible CALL, and that redirection is itself fallible (a full
+# disk, a log directory removed mid-sweep). Bash then never enters the
+# function, so RC keeps whatever the PREVIOUS call left -- and a stale RC=0
+# reads as "@fmt found nothing to do", which in round 1 takes the
+# already-formatted branch and exits 0 with "repository already formatted":
+# an unattended sweep skipping its convergence check and reporting success,
+# the very genre of silent failure this logging exists to end. So open each
+# log as its own command first, where the failure can be caught and named.
+open_fmt_log() {
+  : >"$1" || abort "cannot write the formatting log $1 (disk full? _build removed mid-sweep?)"
+}
+
 # $1: file to record dune's output in. Nonzero for either reason dune has --
 # the tree differs from what ocamlformat would write, or dune itself failed
 # (a concurrent instance holding _build/.lock, a broken dune file) -- and the
 # log is what tells the two apart.
 fmt_clean() {
+  RC=127 # never inherit a stale RC, even if some later path skips open_fmt_log
+  open_fmt_log "$1"
   run_interruptible dune build @fmt >"$1" 2>&1
   [ "$RC" -eq 0 ]
 }
@@ -368,6 +383,7 @@ the per-round formatting logs are in $FMT_LOGS"
     # RC is not informative here: dune fmt exits nonzero merely for having
     # promoted. The recheck below is the verdict, and the promote log is
     # where a failure to promote at all shows up.
+    open_fmt_log "$FMT_LOGS/round$iter-promote.log"
     run_interruptible dune fmt >"$FMT_LOGS/round$iter-promote.log" 2>&1
     if ! fmt_clean "$FMT_LOGS/round$iter-recheck.log"; then
       fmt_log_excerpt "$FMT_LOGS/round$iter-promote.log"
