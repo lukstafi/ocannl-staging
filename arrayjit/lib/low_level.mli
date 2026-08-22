@@ -147,7 +147,20 @@ and scalar_t =
           inputs: the hoist additionally needs the body's reads — tensor nodes and scope locals
           alike — untouched across the statements it is lifted over, which is its own hazard check's
           obligation.) Enforced by {!validate_scope_bodies}; the optimization pipeline satisfies it
-          by construction. *)
+          by construction.
+
+          {b Scope target} (gh-ocannl-681): [id.tn] must be VIRTUAL for as long as [optimize] is
+          looking at the scope, since the scope denotes that node's inlined computation. A scope
+          over a materialized node is REJECTED, never rewritten — the optimizer would have to
+          discard the body and read the buffer, which is what used to happen silently. Mind that a
+          node with no setter is decided non-virtual, so a hand-built scope over a freshly created
+          node is rejected too unless the node is declared virtual. AFTER [optimize] the shape is
+          legal and means the opposite: [Schedule]'s materializing [Unroll] and [Partition] mints
+          and [C_syntax.try_widen_serial_reduce] localize a materialized accumulator this way, and
+          codegen renders it. Localization is codegen's business alone (gh-ocannl-693); IR already
+          in that form reaches a backend through [Context.compile ?prelowered], never through
+          [optimize]. Only a scope [optimize] MINTED may be retracted to a [Get], and only by
+          itself, when a later refusal materializes the node it had inlined. *)
   | Get_local of scope_id
   | Get of Tnode.t * Indexing.axis_index array
   | Get_dynamic of {

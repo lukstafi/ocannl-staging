@@ -2308,7 +2308,90 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
   in
   (result, spliced_reads)
 
-let cleanup_virtual_llc plc ~static_indices (llc : t) : t =
+(** gh-ocannl-681: the scope-TARGET contract, companion to the scope-BODY contract
+    {!validate_scope_bodies} enforces. A [Local_scope] over [X] denotes THE INLINED COMPUTATION OF
+    [X], so it means something only while [X] is virtual. Over a materialized [X] the body is not
+    what a read of [X] yields — [X]'s own setter writes the buffer — so the optimizer cannot honour
+    it, and used to answer by discarding it: [Set (X, Local_scope ...)] became [Set (X, Get X)],
+    silently. That is a false green waiting to happen, and it happened twice. Two
+    [test/operations/accum_width.ml] legs ran kernels literally spelling [acc[0] = acc[0]] while
+    claiming to pin an accumulation width — the identity copy reproduced the expected value. And a
+    hand-built scope over a FRESH node collapses the same way, because a node with no setter is
+    decided non-virtual: [test/operations/affine_extraction.ml]'s sibling-operand probe said in its
+    own comment that its scope nodes were "fresh (virtualizable) ... so the program below also
+    survives [specialize_proc]", and they did not.
+
+    The shape IS legal on the far side of the pipeline — [Schedule]'s materializing [Unroll] and
+    [Partition] mints and [C_syntax.try_widen_serial_reduce] build exactly it over a materialized
+    accumulator, and codegen renders it. One IR, two meanings, with nothing saying which side of
+    [optimize] a program was on. This is the statement of which side: localizing a materialized
+    accumulator is codegen's accumulator peel (gh-ocannl-693), and rejecting here is what keeps that
+    the ONE route. IR already in the scope form reaches a backend past the optimizer, through
+    [Context.compile ?prelowered] ([Ll_test.optimize_scoped]).
+
+    The optimizer's OWN scopes are exempt, and only they — the exemption is a retraction of its own
+    decision, not of the caller's program. [virtual_llc] mints a scope at a [Get] of a node still
+    virtual at that point; a later refusal can commit that node [Never_virtual], and then the
+    surviving setter writes the very value the body recomputes, so rewriting back to a [Get] is
+    sound. Hence the ids the pass was HANDED are threaded in: a scope in that set may not be
+    rewritten away. *)
+let scope_target_rejection (id : scope_id) : string =
+  [%string
+    "the program wraps a computation of %{Tn.debug_name id.tn} in a Local_scope \
+     (v%{id.scope_id#Int}), but %{Tn.debug_name id.tn} is materialized in this routine. A \
+     Local_scope over a node denotes the INLINED computation of that node, which is meaningful \
+     only while the node is virtual: materialized, its own setter writes the buffer, the scope \
+     body is not what a read of it yields, and honouring the scope would mean discarding the body. \
+     Note that a node with no setter at all is decided non-virtual, so a scope over a freshly \
+     created node lands here too -- declare such a scope's node virtual. Localizing a MATERIALIZED \
+     accumulator is codegen's accumulator peel (gh-ocannl-693), not the virtualizer's business: \
+     hand that form to a backend past the optimizer, through the Context.compile ?prelowered seam \
+     (Ll_test.optimize_scoped)."]
+
+(** The [Local_scope] ids occurring anywhere in [llc], at any depth: the scopes the optimization was
+    handed, as opposed to the ones it mints. See {!scope_target_rejection}. Ids are collected whole
+    rather than by their integer, because hand-built IR can mint two locals sharing an integer while
+    naming different tensor nodes. *)
+let input_scope_ids (llc : t) : Set.M(Scope_id).t =
+  let acc = ref (Set.empty (module Scope_id)) in
+  let rec proc (llc : t) : unit =
+    match llc with
+    | Noop | Comment _ | Staged_compilation _ | Workgroup_barrier | Declare_local _ | Zero_out _ ->
+        ()
+    | Seq (a, b) ->
+        proc a;
+        proc b
+    | For_loop { body; _ } -> proc body
+    | If { cond = c, _; body } ->
+        scalar c;
+        proc body
+    | Set { llsc; _ } -> scalar llsc
+    | Set_local (_, llsc) -> scalar llsc
+    | Set_dynamic { dyn_value = v, _; llsc; _ } ->
+        scalar v;
+        scalar llsc
+    | Set_from_vec { arg = a, _; _ } -> scalar a
+    | Tile_mma { fallback; _ } -> proc fallback
+  and scalar (llsc : scalar_t) : unit =
+    match llsc with
+    | Local_scope { id; body; _ } ->
+        acc := Set.add !acc id;
+        proc body
+    | Get_dynamic { dyn_value = v, _; _ } -> scalar v
+    | Ternop (_, (a, _), (b, _), (d, _)) ->
+        scalar a;
+        scalar b;
+        scalar d
+    | Binop (_, (a, _), (b, _)) ->
+        scalar a;
+        scalar b
+    | Unop (_, (a, _)) -> scalar a
+    | Get_local _ | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> ()
+  in
+  proc llc;
+  !acc
+
+let cleanup_virtual_llc plc ~input_scopes ~static_indices (llc : t) : t =
   (* The current position is within scope of the definitions of the process_for virtual arrays. *)
   let rec loop_proc ~balanced ~env_dom (llc : t) : t option =
     let loop = loop_proc ~balanced ~env_dom in
@@ -2419,7 +2502,14 @@ let cleanup_virtual_llc plc ~static_indices (llc : t) : t =
           Array.for_all orig_indices ~f:(function
             | Indexing.Iterator s -> Set.mem env_dom s
             | _ -> true));
-        if Tn.Placements.known_non_virtual plc id.tn then Get (id.tn, orig_indices)
+        if Tn.Placements.known_non_virtual plc id.tn then (
+          (* gh-ocannl-681: the pass may retract a scope IT minted -- the node was a virtualization
+             candidate at that read site and a later refusal committed it [Never_virtual], so the
+             setter that now survives writes the very value the body recomputes -- but never one it
+             was handed. See {!scope_target_rejection}. *)
+          if Set.mem input_scopes id then
+            invalid_arg ("Low_level.cleanup_virtual_llc: " ^ scope_target_rejection id);
+          Get (id.tn, orig_indices))
         else
           let body = Option.value_exn ~here:[%here] @@ loop_proc ~balanced ~env_dom body in
           Tn.Placements.update plc id.tn Virtual 18;
@@ -6285,6 +6375,9 @@ let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : opt
   decide_placements input_ctx traced_store ~max_visits:virtualize_settings.max_visits
     ~reads_covered:an.an_reads_covered ~read_multiplicity:an.an_read_multiplicity;
   [%log "optimizing"];
+  (* gh-ocannl-681: taken BEFORE virtualization, so cleanup can tell the scopes this pass was handed
+     from the ones it mints and only retracts its own. *)
+  let input_scopes = input_scope_ids llc in
   let virtual_llc_result, spliced_reads =
     virtual_llc input_ctx traced_store an.an_reverse_node_map static_indices llc
   in
@@ -6293,7 +6386,7 @@ let%diagn2_sexp specialize_proc (input_ctx : optimize_ctx) (an : analysis) : opt
     @@ rewrite_one_hot_reductions ~static_indices
     @@ hosted_constant_inits_to_link_time input_ctx.placements traced_store
     @@ simplify_llc static_indices
-    @@ cleanup_virtual_llc input_ctx.placements ~static_indices
+    @@ cleanup_virtual_llc input_ctx.placements ~input_scopes ~static_indices
     @@ virtual_llc_result
   in
   let cap_inline_flips = Hash_set.create (module Tnode) in
