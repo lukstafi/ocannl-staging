@@ -329,6 +329,15 @@ val split_reduce_sites :
     it acts on); the chain is recorded in [sr_swaps] and replayed by the candidate's prelude.
     [static_indices] only reaches the interchange probe's [Sched.apply]. Exposed for tests. *)
 
+val share_cap : cap:int -> (string * 'a list) list -> 'a list * (string * int) list
+(** gh-ocannl-685: spend a cap round-robin across named categories instead of as a prefix over their
+    concatenation, returning the survivors (in the original category order, so an under-cap input
+    comes back unchanged) and the per-category drop counts. One proposal per category per round, a
+    category that runs out stops taking turns: every non-empty category is represented before any
+    gets a second, and unused share spills to the others without imposing a ranking. Used for
+    {!menu}'s per-unit action cap, whose list is a category-ordered concatenation and NOT ranked --
+    a plain prefix there starved every category after the first outright. Exposed for tests. *)
+
 val menu :
   is_cpu:bool ->
   is_gpu:bool ->
@@ -345,8 +354,9 @@ val menu :
     enumeration descends into accumulation-minted [Local_scope] bodies and treats binder-sharing
     mint copies as one decision (gh-ocannl-666) -- into THOSE bodies only, not into virtualization's
     inlined computations, which mint the same construct at every inlined read and whose loops no
-    schedule op reaches ([Ir.Low_level.scope_mint], gh-ocannl-687). See the candidate-space
-    overview above. Exposed for tests. *)
+    schedule op reaches ([Ir.Low_level.scope_mint], gh-ocannl-687). The per-unit action cap is
+    shared across the categories by {!share_cap} rather than spent in category order
+    (gh-ocannl-685). See the candidate-space overview above. Exposed for tests. *)
 
 type decline_summary = {
   key : Ir.Schedule_outcome.rejection_key;

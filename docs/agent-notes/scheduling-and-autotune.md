@@ -295,3 +295,15 @@ files.
   (gh-ocannl-681), which answers the per-call question of whether a scope was in the program a given
   `optimize` was HANDED, and must stay id-set-based: a mint is claimable, and hand-built IR has no
   honest way to spell "not mine".
+- The per-unit action cap is shared round-robin across the menu's categories, not spent as a prefix
+  over their concatenation (`Autotune.share_cap`, gh-ocannl-685). The menu list is category-ordered
+  and UNRANKED, so a prefix over it is arbitrary — a unit whose tensorizes alone reached 48 offered
+  the search no split, swap, unroll or vectorize at all, and those are exactly the categories a unit
+  needs when its tensorizes turn out `Op_illegal`. Contrast `List.take surface.ps_candidates
+  placement_budget`, a prefix over a RANKED list where top-N is the intended semantics; that one is
+  fine as it stands. When capping anything else in this search, check which kind of list you have.
+  Survivors keep category order, so an under-cap menu is byte-identical to before; the `menu:` log
+  now also reports what the cap DROPPED (it used to print only the per-category counts taken before
+  the take, so a truncated menu logged the same numbers as an untruncated one) and what the
+  provenance filter withheld.
+

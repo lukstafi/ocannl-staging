@@ -1,0 +1,15 @@
+the overflowing menu is capped to exactly the budget: true
+every non-empty category is represented under the cap: true
+an empty category is not conjured into the menu: true
+a category smaller than its share is kept whole (split: 6 of 6): true
+a category smaller than its share is kept whole (vectorize: 5 of 5): true
+the spilled remainder goes to the categories that still have proposals: true
+no category is starved to zero while it has proposals and budget remains: true
+survivors stay in category order and in each category's own order: true
+the drop report accounts for every withheld proposal: true
+the drop report names only categories that actually lost proposals: true
+a menu that fits under the cap is unchanged: true
+a menu that fits under the cap reports no drops: true
+the plain prefix this replaces would have starved every category after the first: true
+
+Done.

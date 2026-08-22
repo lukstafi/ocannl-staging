@@ -1407,6 +1407,41 @@ let collect_serial_triples registry llc =
 let split_factors = [ 2; 4; 8; 16; 32 ]
 let max_actions_per_unit = 48
 
+(* gh-ocannl-685: share a cap across the menu's action categories instead of spending it in category
+   order. The menu list is a concatenation ordered by category and NOT ranked (unlike the placement
+   surface's [rank_flip_candidates] prefix, where top-N is the intended semantics), so a plain
+   prefix is arbitrary: a unit whose tensorizes alone reach the cap offered the search no split,
+   swap, unroll or vectorize action at all -- not fewer, none -- and those are exactly the
+   categories a unit needs when its tensorizes turn out [Op_illegal] or unprofitable.
+
+   Round-robin, one proposal per category per round, in category order: every non-empty category is
+   represented before any category gets a second, and a category that runs out simply stops taking
+   turns, so its unused share spills to the others without anyone naming a ranking the tuner is
+   supposed to discover. Survivors are emitted in the original category order, so a menu that fits
+   under the cap comes out exactly as before. Returns the kept proposals and the per-category drop
+   counts, which the caller logs -- the cap must say what it dropped, not what it was offered. *)
+let share_cap ~cap (categories : (string * 'a list) list) : 'a list * (string * int) list =
+  let sizes = Array.of_list_map categories ~f:(fun (_, l) -> List.length l) in
+  let keep = Array.map sizes ~f:(fun _ -> 0) in
+  let budget = ref (max 0 cap) in
+  let progressed = ref true in
+  while !budget > 0 && !progressed do
+    progressed := false;
+    Array.iteri sizes ~f:(fun idx n ->
+        if !budget > 0 && keep.(idx) < n then (
+          keep.(idx) <- keep.(idx) + 1;
+          Int.decr budget;
+          progressed := true))
+  done;
+  let kept =
+    List.concat_mapi categories ~f:(fun idx (_, l) -> List.take l keep.(idx))
+  in
+  let dropped =
+    List.filter_mapi categories ~f:(fun idx (name, l) ->
+        let d = List.length l - keep.(idx) in
+        if d > 0 then Some (name, d) else None)
+  in
+  (kept, dropped)
 
 let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) ~registry
     (opt : LL.optimized) : SC.saved_optop list =
@@ -1514,7 +1549,21 @@ let menu ~is_cpu ~is_gpu ~(limits : Ir.Backend_intf.hardware_limits) ~registry
       "menu: %d loop(s) inside virtualization-inlined scopes not enumerated (gh-ocannl-687: no \
        schedule op reaches them)"
       withheld;
-  List.take (tensorizes @ splits @ swaps @ unrolls @ vectorizes) max_actions_per_unit
+  let kept, dropped =
+    share_cap ~cap:max_actions_per_unit
+      [
+        ("tensorize", tensorizes);
+        ("split", splits);
+        ("swap", swaps);
+        ("unroll", unrolls);
+        ("vectorize", vectorizes);
+      ]
+  in
+  if not (List.is_empty dropped) then
+    logf "menu: the per-unit cap of %d dropped %s" max_actions_per_unit
+      (String.concat ~sep:", "
+         (List.map dropped ~f:(fun (name, d) -> Printf.sprintf "%d %s" d name)));
+  kept
 
 (* Extend one unit of a compiled candidate with a menu action. The fissioned entries stay in segment
    order (the positional replay fallback relies on it); extending by key updates every structurally
