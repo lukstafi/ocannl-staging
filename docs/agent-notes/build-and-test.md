@@ -280,6 +280,25 @@ that they earn a lookup rather than always-loaded space.
   `Tile_mma`'s `fallback` rather than stopping at the tile, and reports the operands through the
   fallback alone — reporting the tile's own `d`/`a`/`b` as well would count every operand of a
   tensorized nest twice.
+- A test operand minted from a FLATTENED offset stops discriminating at sizes that divide its
+  modulus, and does it while still looking right: `(row * stride + col) mod p` collapses to
+  `col mod p` whenever `p` divides the row stride, so every row becomes identical. That makes a
+  whole class of bugs invisible — a transform substituting or repeating the wrong row, panel or
+  K-block computes the correct output, which no whole-output check, checksum included, can see, so
+  it is found by review rather than by a red test. `Ll_test.cycle` (multi-index) and
+  `Ll_test.cycle_flat` (flat offset) compute exactly the values the hand-written idiom did and raise
+  `Invalid_argument` when the modulus is blind to an axis of the `~dims` handed to them, which turns
+  a latent trap into a loud failure the moment a size arms it. Converting a site is therefore free:
+  `Float.of_int (i % 13) *. 0.25` is `~modulus:13 ~offset:0. ~stride:0.25`, and `(x *. s) -. c` is
+  `~offset:(-. c /. s) ~stride:s`, so no golden moves. The care is in `~dims`, which must be the
+  operand's real row-major shape read off its `NTDSL.init`/`TDSL.ndarray` call (`~batch_dims` then
+  `~output_dims` then `~input_dims`), not the `Array.init` argument. What this does not buy is
+  aperiodicity: the values repeat with period `modulus`, so a shift by `modulus` is a symmetry, and
+  where the blocking factors are searchable a packed panel can repeat under `k -> k + p` and hide a
+  panel-substitution bug just as well; the recipe with no shift symmetry at any lag is
+  `bin/narrow_gebp_bench.ml`'s `mix`. A formula that is NOT a flat index —
+  `(i0 + i1 + 2*i2 + 3*i3) mod 7` — is not this class and needs no conversion, as long as no
+  coefficient is a multiple of the modulus.
 - Dune roots at the OUTERMOST ancestor holding a `dune-workspace` (failing that, a `dune-project`)
   and ignores dot-directories, so from a worktree under `.claude/worktrees/` the main checkout wins
   and the worktree is invisible to dune: targeted commands fail with `Don't know about directory

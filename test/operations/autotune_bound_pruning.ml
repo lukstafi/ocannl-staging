@@ -24,8 +24,14 @@ let named name (comp : Asgns.comp) : Asgns.comp =
 
 let () =
   let nn = 64 in
-  let av = Array.init (nn * nn) ~f:(fun x -> Float.of_int (x % 13) *. 0.25) in
-  let bv = Array.init (nn * nn) ~f:(fun x -> (Float.of_int (x % 7) -. 3.) *. 0.5) in
+  let av =
+    Array.init (nn * nn)
+      ~f:(Ll_test.cycle_flat ~dims:[| nn; nn |] ~modulus:13 ~offset:0. ~stride:0.25)
+  in
+  let bv =
+    Array.init (nn * nn)
+      ~f:(Ll_test.cycle_flat ~dims:[| nn; nn |] ~modulus:7 ~offset:(-3.) ~stride:0.5)
+  in
   let a = TDSL.ndarray av ~label:[ "a" ] ~input_dims:[ nn ] ~output_dims:[ nn ] () in
   let b = TDSL.ndarray bv ~label:[ "b" ] ~input_dims:[ nn ] ~output_dims:[ nn ] () in
   (* Unscheduled twin for the values check. *)

@@ -137,8 +137,12 @@ let bm = 16
 let simd_width = 32
 
 let () =
-  let mav = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 13) *. 0.25) in
-  let mbv = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 17) -. 8.) in
+  let mav =
+    Array.init (n * n) ~f:(Ll_test.cycle_flat ~dims:[| n; n |] ~modulus:13 ~offset:0. ~stride:0.25)
+  in
+  let mbv =
+    Array.init (n * n) ~f:(Ll_test.cycle_flat ~dims:[| n; n |] ~modulus:17 ~offset:(-8.) ~stride:1.)
+  in
   let ma = TDSL.ndarray mav ~label:[ "ma" ] ~input_dims:[ n ] ~output_dims:[ n ] () in
   let mb = TDSL.ndarray mbv ~label:[ "mb" ] ~input_dims:[ n ] ~output_dims:[ n ] () in
 
@@ -370,12 +374,12 @@ let () =
      and either rendering path. --- *)
   let mah =
     NTDSL.init ~l:"mah" ~prec:Ir.Ops.half ~i:[ n ] ~o:[ n ]
-      ~f:(fun idcs -> Float.of_int (((idcs.(0) * n) + idcs.(1)) % 5) *. 0.125)
+      ~f:(Ll_test.cycle ~dims:[| n; n |] ~modulus:5 ~offset:0. ~stride:0.125)
       ()
   in
   let mbh =
     NTDSL.init ~l:"mbh" ~prec:Ir.Ops.half ~i:[ n ] ~o:[ n ]
-      ~f:(fun idcs -> (Float.of_int (((idcs.(0) * n) + idcs.(1)) % 7) -. 3.) *. 0.25)
+      ~f:(Ll_test.cycle ~dims:[| n; n |] ~modulus:7 ~offset:(-3.) ~stride:0.25)
       ()
   in
   let%op mch0 = mah * mbh in
@@ -436,22 +440,22 @@ let () =
      every backend and either rendering path. --- *)
   let mab =
     NTDSL.init ~l:"mab" ~prec:Ir.Ops.bfloat16 ~i:[ n ] ~o:[ n ]
-      ~f:(fun idcs -> Float.of_int (((idcs.(0) * n) + idcs.(1)) % 3) *. 0.25)
+      ~f:(Ll_test.cycle ~dims:[| n; n |] ~modulus:3 ~offset:0. ~stride:0.25)
       ()
   in
   let mbb =
     NTDSL.init ~l:"mbb" ~prec:Ir.Ops.bfloat16 ~i:[ n ] ~o:[ n ]
-      ~f:(fun idcs -> (Float.of_int (((idcs.(0) * n) + idcs.(1)) % 5) -. 2.) *. 0.5)
+      ~f:(Ll_test.cycle ~dims:[| n; n |] ~modulus:5 ~offset:(-2.) ~stride:0.5)
       ()
   in
   let mtab =
     NTDSL.init ~l:"mtab" ~prec:Ir.Ops.bfloat16 ~o:[ n; n ]
-      ~f:(fun idcs -> Float.of_int (((idcs.(0) * n) + idcs.(1)) % 3) *. 0.25)
+      ~f:(Ll_test.cycle ~dims:[| n; n |] ~modulus:3 ~offset:0. ~stride:0.25)
       ()
   in
   let mtbb =
     NTDSL.init ~l:"mtbb" ~prec:Ir.Ops.bfloat16 ~o:[ n; n ]
-      ~f:(fun idcs -> (Float.of_int (((idcs.(0) * n) + idcs.(1)) % 5) -. 2.) *. 0.5)
+      ~f:(Ll_test.cycle ~dims:[| n; n |] ~modulus:5 ~offset:(-2.) ~stride:0.5)
       ()
   in
   let bf16_leg ?bm ~tag ~acc_prec ~build ~check () =
@@ -586,12 +590,12 @@ let () =
      what pins the per-lane layout. --- *)
   (let fp8_a ~l ~o ~i =
      NTDSL.init ~l ~prec:Ir.Ops.fp8 ?i ~o
-       ~f:(fun idcs -> (Float.of_int (((idcs.(0) * n) + idcs.(1)) % 5) *. 0.5) -. 1.)
+       ~f:(Ll_test.cycle ~dims:[| n; n |] ~modulus:5 ~offset:(-2.) ~stride:0.5)
        ()
    in
    let fp8_b ~l ~o ~i =
      NTDSL.init ~l ~prec:Ir.Ops.fp8 ?i ~o
-       ~f:(fun idcs -> (Float.of_int (((idcs.(0) * n) + idcs.(1)) % 7) -. 3.) *. 0.5)
+       ~f:(Ll_test.cycle ~dims:[| n; n |] ~modulus:7 ~offset:(-3.) ~stride:0.5)
        ()
    in
    let maf = fp8_a ~l:"maf" ~i:(Some [ n ]) ~o:[ n ] in
@@ -660,8 +664,14 @@ let () =
      fallback pin). --- *)
   if not on_gpu then (
     let mi = 7 and mk = 13 and mj = 19 in
-    let eav = Array.init (mi * mk) ~f:(fun x -> Float.of_int (x % 11) *. 0.375) in
-    let ebv = Array.init (mk * mj) ~f:(fun x -> Float.of_int (x % 9) -. 4.) in
+    let eav =
+      Array.init (mi * mk)
+        ~f:(Ll_test.cycle_flat ~dims:[| mi; mk |] ~modulus:11 ~offset:0. ~stride:0.375)
+    in
+    let ebv =
+      Array.init (mk * mj)
+        ~f:(Ll_test.cycle_flat ~dims:[| mk; mj |] ~modulus:9 ~offset:(-4.) ~stride:1.)
+    in
     let ea = TDSL.ndarray eav ~label:[ "ea" ] ~input_dims:[ mk ] ~output_dims:[ mi ] () in
     let eb = TDSL.ndarray ebv ~label:[ "eb" ] ~input_dims:[ mj ] ~output_dims:[ mk ] () in
     let%op ec0 = ea * eb in
@@ -727,8 +737,14 @@ let () =
        and 40), so all 8 rows and all 8 columns of each operand differ — and so do all 8 rows of the
        product, whose columns take 13 distinct values, more than any tile width in play. The values
        stay exactly representable (multiples of 1/32 throughout). *)
-    let wav = Array.init (wi * wk) ~f:(fun x -> Float.of_int (x % 11) *. 0.125) in
-    let wbv = Array.init (wk * wj) ~f:(fun x -> (Float.of_int (x % 13) -. 6.) *. 0.25) in
+    let wav =
+      Array.init (wi * wk)
+        ~f:(Ll_test.cycle_flat ~dims:[| wi; wk |] ~modulus:11 ~offset:0. ~stride:0.125)
+    in
+    let wbv =
+      Array.init (wk * wj)
+        ~f:(Ll_test.cycle_flat ~dims:[| wk; wj |] ~modulus:13 ~offset:(-6.) ~stride:0.25)
+    in
     let wa = TDSL.ndarray wav ~label:[ "wa" ] ~input_dims:[ wk ] ~output_dims:[ wi ] () in
     let wb = TDSL.ndarray wbv ~label:[ "wb" ] ~input_dims:[ wj ] ~output_dims:[ wk ] () in
     let%op wc0 = wa * wb in
@@ -1094,8 +1110,12 @@ let () =
      fallback keeps parity bitwise (a packing [Stage] with [tile_loops] in micro-kernel order
      normalizes the layout instead — see schedule_pack_mma_matmul.ml). CUDA's wmma draft declines
      uniform f32 regardless. --- *)
-  let mtav = Array.init (n * n) ~f:(fun x -> Float.of_int (x % 7) *. 0.5) in
-  let mtbv = Array.init (n * n) ~f:(fun x -> Float.of_int (x % 11) -. 5.) in
+  let mtav =
+    Array.init (n * n) ~f:(Ll_test.cycle_flat ~dims:[| n; n |] ~modulus:7 ~offset:0. ~stride:0.5)
+  in
+  let mtbv =
+    Array.init (n * n) ~f:(Ll_test.cycle_flat ~dims:[| n; n |] ~modulus:11 ~offset:(-5.) ~stride:1.)
+  in
   let mta = TDSL.ndarray mtav ~label:[ "mta" ] ~output_dims:[ n; n ] () in
   let mtb = TDSL.ndarray mtbv ~label:[ "mtb" ] ~output_dims:[ n; n ] () in
   let check_transposed ~tag ~c_tiled ~serial ~tensorized =

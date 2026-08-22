@@ -61,8 +61,13 @@ let () =
   (* --- Large elementwise kernel through the automatic schedule (no lowered_transform): 512 x 512 =
      262144 parallel iterations, above every threshold. --- *)
   let n = 512 in
-  let av = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 19) *. 0.5) in
-  let bv = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 23) -. 11.) in
+  let av =
+    Array.init (n * n) ~f:(Ll_test.cycle_flat ~dims:[| n; n |] ~modulus:19 ~offset:0. ~stride:0.5)
+  in
+  let bv =
+    Array.init (n * n)
+      ~f:(Ll_test.cycle_flat ~dims:[| n; n |] ~modulus:23 ~offset:(-11.) ~stride:1.)
+  in
   let expected = Array.init (n * n) ~f:(fun i -> av.(i) +. bv.(i)) in
   let a = TDSL.ndarray av ~label:[ "a" ] ~output_dims:[ n; n ] () in
   let b = TDSL.ndarray bv ~label:[ "b" ] ~output_dims:[ n; n ] () in
@@ -110,8 +115,12 @@ let () =
      parallelize (values must still match the twin). --- *)
   phase "matmul twin";
   let k = 64 in
-  let mav = Array.init (k * k) ~f:(fun i -> Float.of_int (i % 13) *. 0.25) in
-  let mbv = Array.init (k * k) ~f:(fun i -> Float.of_int (i % 17) -. 8.) in
+  let mav =
+    Array.init (k * k) ~f:(Ll_test.cycle_flat ~dims:[| k; k |] ~modulus:13 ~offset:0. ~stride:0.25)
+  in
+  let mbv =
+    Array.init (k * k) ~f:(Ll_test.cycle_flat ~dims:[| k; k |] ~modulus:17 ~offset:(-8.) ~stride:1.)
+  in
   let ma = TDSL.ndarray mav ~label:[ "ma" ] ~input_dims:[ k ] ~output_dims:[ k ] () in
   let mb = TDSL.ndarray mbv ~label:[ "mb" ] ~input_dims:[ k ] ~output_dims:[ k ] () in
   let run_mm ~name ~transform mc =

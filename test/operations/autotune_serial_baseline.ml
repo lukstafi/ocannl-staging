@@ -44,8 +44,11 @@ let named name (comp : Asgns.comp) : Asgns.comp =
    Compiled, never run: this half of the test is structural. *)
 let side = 256
 let n = 16
-let mav = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 7) *. 0.5)
-let mbv = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 11) -. 4.)
+let mav =
+  Array.init (n * n) ~f:(Ll_test.cycle_flat ~dims:[| n; n |] ~modulus:7 ~offset:0. ~stride:0.5)
+
+let mbv =
+  Array.init (n * n) ~f:(Ll_test.cycle_flat ~dims:[| n; n |] ~modulus:11 ~offset:(-4.) ~stride:1.)
 
 let mm_expected =
   Array.init (n * n) ~f:(fun idx ->
@@ -59,8 +62,14 @@ let mm_expected =
 let () =
   (* --- The structural premise: identity transform = the serial form; no transform = parallel
      --- *)
-  let av = Array.init (side * side) ~f:(fun i -> Float.of_int (i % 13) *. 0.25) in
-  let bv = Array.init (side * side) ~f:(fun i -> Float.of_int (i % 7) -. 3.) in
+  let av =
+    Array.init (side * side)
+      ~f:(Ll_test.cycle_flat ~dims:[| side; side |] ~modulus:13 ~offset:0. ~stride:0.25)
+  in
+  let bv =
+    Array.init (side * side)
+      ~f:(Ll_test.cycle_flat ~dims:[| side; side |] ~modulus:7 ~offset:(-3.) ~stride:1.)
+  in
   let a = TDSL.ndarray av ~label:[ "sb_a" ] ~output_dims:[ side; side ] () in
   let b = TDSL.ndarray bv ~label:[ "sb_b" ] ~output_dims:[ side; side ] () in
   let%op sb_sum = a + b in

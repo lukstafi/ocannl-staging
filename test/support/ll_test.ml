@@ -218,7 +218,28 @@ let blind_axis ~dims ~modulus =
       nonzero. A test relying on inexact partials has to EXHIBIT that crossing rather than infer it;
       [test/operations/discriminating_values] does so for {!drift}, and a nonzero mean over too few
       terms is the zero-mean trap wearing a different hat. *)
-let cycle ~dims ~modulus ~offset ~stride idcs =
+
+(** [cycle_flat ~dims ~modulus ~offset ~stride i] is {!cycle} over an already-FLATTENED offset — the
+    form an [Array.init (rows * cols) ~f:…] operand is written in, which is most of them.
+
+    The flat spelling is where this goes wrong in the field (gh-ocannl-640), and it goes wrong
+    invisibly: [Array.init (m * k) ~f:(fun i -> Float.of_int (i % 13) *. 0.25)] LOOKS like it varies
+    with both indices, and stops doing so at exactly the sizes where the modulus divides the row
+    stride — the value collapses to [col mod p] and every row becomes identical. An operand constant
+    along a row makes a whole class of bugs invisible: a transform that substitutes or repeats the
+    wrong row, panel or K-block computes the correct output, so no whole-output check, checksum
+    included, can see it. It was found four times across three review rounds of one PR.
+
+    Passing the real [~dims] is what buys the guard, and the guard is the reason to convert a site:
+    the arithmetic is identical to the idiom it replaces, so no golden moves, and the day someone
+    widens a size onto a multiple of the modulus the run raises instead of quietly passing.
+
+    What this does NOT give is aperiodicity. The values repeat with period [modulus] in the flat
+    offset, so a shift by [modulus] is a symmetry, and where the BLOCKING factors are searchable a
+    packed panel can repeat under [k -> k + p] and hide a panel-substitution bug just as thoroughly.
+    That needs a mixer with no shift symmetry at any lag; [bin/narrow_gebp_bench.ml]'s [mix] is the
+    worked recipe, measured over lags 1..256 and over every block width from 1 to 64. *)
+let cycle_flat ~dims ~modulus ~offset ~stride i =
   (match blind_axis ~dims ~modulus with
   | Some (ax, s) ->
       raise
@@ -230,7 +251,10 @@ let cycle ~dims ~modulus ~offset ~stride idcs =
               (Sexp.to_string (Array.sexp_of_t Int.sexp_of_t dims))
               s))
   | None -> ());
-  (Float.of_int (flat ~dims idcs % modulus) +. offset) *. stride
+  (Float.of_int (i % modulus) +. offset) *. stride
+
+let cycle ~dims ~modulus ~offset ~stride idcs =
+  cycle_flat ~dims ~modulus ~offset ~stride (flat ~dims idcs)
 
 (** [drift ~dims idcs] is {!cycle} at [13/20/(1/64)], the accumulator-width tests' operand: cells
     are the multiples of 1/64 between 0.3125 and 0.5, i.e. [k * (1/64)] for [k] in [20 .. 32], with

@@ -42,8 +42,14 @@ let () =
   let batch_n, bindings = IDX.get_static_symbol ~static_range:n_batches IDX.empty in
   let%op batch_x = xs @| batch_n in
   let%op batch_y = ys @| batch_n in
-  let w1v = Array.init (d_hid * d_in) ~f:(fun i -> Float.of_int (i % 7) *. 0.05) in
-  let w2v = Array.init (classes * d_hid) ~f:(fun i -> Float.of_int (i % 5) *. 0.04) in
+  let w1v =
+    Array.init (d_hid * d_in)
+      ~f:(Ll_test.cycle_flat ~dims:[| d_hid; d_in |] ~modulus:7 ~offset:0. ~stride:0.05)
+  in
+  let w2v =
+    Array.init (classes * d_hid)
+      ~f:(Ll_test.cycle_flat ~dims:[| classes; d_hid |] ~modulus:5 ~offset:0. ~stride:0.04)
+  in
   let w1 =
     Operation.init ~l:"w1" ~prec:Ir.Ops.single ~b:[] ~i:[ d_in ] ~o:[ d_hid ]
       ~f:(fun idcs -> w1v.((idcs.(0) * d_in) + idcs.(1)))

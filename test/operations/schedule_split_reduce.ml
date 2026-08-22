@@ -318,7 +318,10 @@ let grad_of t = (Option.value_exn t.Tensor.diff).Tensor.grad
 
 (* Integer-valued coefficients: every accumulation order is exact, so the split/parallel gradients
    must equal the analytic dense gradient BITWISE — the strongest determinism pin. *)
-let coeff_values = Array.init (positions * embed) ~f:(fun i -> Float.of_int ((i % 7) + 1))
+let coeff_values =
+  Array.init (positions * embed)
+    ~f:(Ll_test.cycle_flat ~dims:[| positions; embed |] ~modulus:7 ~offset:1. ~stride:1.)
+
 let id_values = [| 1.; 3.; 0.; 1.; 4.; 2.; 0.; 3.; 1.; 2. |]
 
 let expected_grads () =
