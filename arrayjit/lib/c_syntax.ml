@@ -53,9 +53,15 @@ let per_chunk_private_bytes_cap =
     | exception _ -> 256 * 1024)
 
 (* Census of [Tile_mma] statement renderings, collected during codegen while [mma_census_enabled]
-   (gh-ocannl-479): [Autotune] flips it around candidate compiles, because "the tensorized candidate
-   lost" and "the tensorized candidate never ran tensorized" must be distinguishable in tuning logs.
-   Entries are (kernel name, rendering), most recent first; tests assert on it directly. *)
+   (gh-ocannl-479): "the tensorized candidate lost" and "the tensorized candidate never ran
+   tensorized" must be distinguishable in tuning logs. Entries are (kernel name, rendering), most
+   recent first.
+
+   Consumers do not touch these refs: {!with_census} brackets them, {!Context.compile} calls it
+   around every routine's codegen, and the resulting {!mma_summary} is a field of the compiled
+   routine (gh-ocannl-626). Opt-in collection made the DEFAULT for a new timing harness "report a
+   variant name that may be unrelated to what rendered", which is exactly the false perf number the
+   census exists to prevent. *)
 type mma_rendering =
   | Mma_intrinsics
   | Mma_intrinsics_ldmatrix
@@ -125,6 +131,30 @@ let summarize_census renderings =
   { renderings; tensorization; statements; scalar_fallbacks }
 
 let empty_mma_summary = summarize_census []
+
+let merge_mma_summaries summaries =
+  summarize_census (List.concat_map summaries ~f:(fun s -> s.renderings))
+
+(** The one-line census a timing report prints beside a measurement (gh-ocannl-626): the
+    {!tensorization} label first — a reader scanning a table for a mismatch reads that word, not a
+    histogram — then the per-rendering counts. Shared so that every harness that names a variant
+    after a rendering says "did this tensorize" the same way; the two bench copies had disagreed
+    about the predicate (one counted the fallback, the other tested equality with
+    {!Mma_register_tiled}, which false-warns on any GPU backend). *)
+let mma_summary_string summary =
+  match summary.renderings with
+  | [] -> tensorization_name summary.tensorization
+  | rs ->
+      let counted =
+        List.map
+          (List.dedup_and_sort (List.map rs ~f:snd) ~compare:compare_mma_rendering)
+          ~f:(fun r ->
+            Printf.sprintf "%s x%d" (Sexp.to_string (sexp_of_mma_rendering r))
+              (List.count rs ~f:(fun (_, r') -> equal_mma_rendering r r')))
+      in
+      Printf.sprintf "%s: %s"
+        (tensorization_name summary.tensorization)
+        (String.concat ~sep:", " counted)
 
 (** Run [f] with the {!mma_census} collecting, and return its result alongside the summary of what
     rendered during it (gh-ocannl-626). Both census refs are saved and restored, so calls nest and

@@ -189,17 +189,13 @@ let leg ?schedule_of ~tag ~build ~src_a ~src_b ~swz_a ~swz_b ~check ~acc_prec ?(
       Context.get_values ctx_s serial.Tensor.value
     in
     with_target @@ fun t0 transform ->
-    Ir.C_syntax.mma_census := [];
-    Ir.C_syntax.mma_census_enabled := true;
     let ctx, routine =
-      Exn.protect
-        ~f:(fun () ->
-          Context.compile ~lowered_transform:transform (Context.auto ())
-            (named (name ^ "_mma") (Train.forward t0))
-            Ir.Indexing.Empty)
-        ~finally:(fun () -> Ir.C_syntax.mma_census_enabled := false)
+      Context.compile ~lowered_transform:transform (Context.auto ())
+        (named (name ^ "_mma") (Train.forward t0))
+        Ir.Indexing.Empty
     in
-    let census = List.rev_map !Ir.C_syntax.mma_census ~f:snd in
+    (* The census is a field of the compiled routine since gh-ocannl-626. *)
+    let census = List.map routine.Context.mma.Ir.C_syntax.renderings ~f:snd in
     let ctx = Context.run ctx routine in
     let got = Context.get_values ctx t0.Tensor.value in
     (* The nonzero guard is not ceremony: a fragment mapping that reads outside the staged block
