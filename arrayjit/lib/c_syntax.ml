@@ -1316,10 +1316,14 @@ module C_syntax (B : C_syntax_config) = struct
 
   (* [routine_names]: the kernel function names in [proc_doc] — their declarations (and the
      name-echoing comments) are token occurrences the usage scan below must not count as builtin
-     uses. A routine named exactly like a builtin cannot genuinely use it (the definition would be a
-     duplicate C symbol), so excluding the name only converts a pathological collision from silent
-     helper injection — which on CUDA could raise the architecture floor past the device (Codex P2
-     on PR #317, round 4) — into an ordinary compile error naming the conflict. *)
+     uses. Since gh-ocannl-686 the names arriving here are {!kernel_ident}-mangled, so a routine
+     name can no longer BE a builtin key: a colliding one was renamed before it reached codegen,
+     and the kernel's own token no longer matches the key. The exclusion is kept as the backstop
+     for that guarantee — a routine named exactly like a builtin cannot genuinely use it (the
+     definition would be a duplicate C symbol), so dropping the name from the scan degrades a
+     pathological collision from silent helper injection — which on CUDA could raise the
+     architecture floor past the device (Codex P2 on PR #317, round 4) — into an ordinary compile
+     error naming the conflict. *)
   let filter_and_prepend_builtins ~routine_names ~includes ~builtins ~proc_doc =
     let doc_buffer = Buffer.create 4096 in
     PPrint.ToBuffer.pretty 1.0 110 doc_buffer proc_doc;

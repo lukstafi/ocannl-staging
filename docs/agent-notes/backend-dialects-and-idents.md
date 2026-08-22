@@ -85,6 +85,24 @@ files.
   declaration and the call, so which backend it fires on depends on fissioning — the guard is
   `test/operations/test_ident_blacklist.ml`, and its section 3 only has teeth under
   `OCANNL_BACKEND=metal` (C spells these with an `f` suffix, so no C compile can exhibit it).
+  The GPU dialects reserve the C++ keywords on top of the C ones: CUDA, HIP and MSL are all parsed
+  by a C++ front end, so `C_syntax.cpp_keywords` (one shared table, added to all three) covers
+  plausible labels like `class`, `new`, `operator`, `bool` and `this` that plain C leaves free.
+- Routine names are the *other* identifier class reaching the emitted source, and they do not go
+  through the node-name machinery at all — a node's colliding label is forced into `n<id>_<label>`
+  and every local carries a `v<scope>_` / `wred_` / `__rmw_` prefix, but a routine name was emitted
+  verbatim, so `Block_comment ("asm", ...)` produced `void asm(` and the compiler's rejection
+  surfaced as "this is a bug in OCANNL … file an issue with the generated .c file", naming
+  everything except the name that caused it (gh-ocannl-686). `C_syntax.kernel_ident` is the fix and
+  the rule: apply it once at each backend's `compile`/`compile_batch` entry, *before* anything
+  derives a file name or a symbol, so the emitted header, the `dlsym` / `cuModuleGetFunction` /
+  `hipModuleGetFunction` / `new_function_with_name` lookup and the `.c`/`.cu`/`.hip`/`.metal`
+  artifact all name the same thing; `compile_proc` refuses a name its caller did not mangle rather
+  than emitting one. It is the identity on any legal non-reserved identifier, which is what keeps
+  schedule-cache identities and existing goldens from churning. The name a routine is *known* by —
+  the routine record, the `.cd`/`.ll` sources, calibration rows — deliberately keeps the caller's
+  spelling; only the C-family artifacts carry the mangled one. Guard:
+  `test/operations/reserved_routine_names.ml` (executes each colliding routine, not just parses it).
 - `test/config/ocannl_config` pins `backend=cc`, so `dune runtest` never exercises GPU codegen —
   a Metal/CUDA-only rendering bug passes a fully green suite. The bf16 bug above was already
   covered by `test/training/mixed_prec_parity.ml` (its "loss trajectory parity within 0.1" check
