@@ -2345,6 +2345,17 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name reduction_accumulator_residency)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules reduction_accumulator_residency)
+ (libraries base ocannl stdio arrayjit.utils test_utils arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name scalar_rmw_accumulation)
  (package neural_nets_lib)
  (deps
