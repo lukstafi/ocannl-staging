@@ -1466,6 +1466,20 @@
  (modules dune_scan_cases)
  (libraries base stdio test_utils arrayjit.verdict))
 
+; gh-ocannl-689: the marker grammar's closed backend vocabulary, held equal to the backends OCANNL
+; has. Its own stanza because linking the backend closure is exactly the cost the scanning tests
+; above are keeping off themselves -- one executable pays it, and `Dune_stanza_scan` keeps depending
+; on nothing heavier than `arrayjit.utils`.
+
+(test
+ ; ocannl-backend: none -- links the backend closure only to enumerate `Backends.all_of_backend`, a derived
+ ; constant: it opens no device, compiles nothing, and its output cannot vary with the backend.
+ (name marker_backend_vocabulary)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules marker_backend_vocabulary)
+ (libraries base stdio arrayjit.context test_utils arrayjit.verdict))
+
 (executable
  (name digest_completeness)
  (modules digest_completeness)

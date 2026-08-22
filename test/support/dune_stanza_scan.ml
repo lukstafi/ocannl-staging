@@ -1204,11 +1204,18 @@ let marker_sentinel = "ocannl-backend:"
     Adding a backend adds a word here — and a marker naming a word that is not one of these fails,
     which is the point: [; ocannl-backend: metl -- …] would otherwise read as a truthful exemption.
 
-    Kept as text rather than taken from [Backends.backend_of_name] on purpose: the scanning tests
-    link [arrayjit.utils] and the source scanners, and pulling the whole backend closure — Metal and
-    CUDA bindings included — into a check that reads dune files would trade a six-word list for a
-    link line that has to resolve on every platform. The check prints the list, so widening it is a
-    reviewable diff. *)
+    Kept as text rather than taken from [Backends.get_backend] on purpose: the scanning tests link
+    [arrayjit.utils] and the source scanners, and pulling the whole backend closure — Metal and CUDA
+    bindings included — into a check that reads dune files would trade a six-word list for a link
+    line that has to resolve on every platform.
+
+    That leaves a restatement, and a restatement nothing relates to its original goes stale in the
+    worse direction: a backend added here would make the TRUTHFUL marker for it fail as malformed,
+    whose remedy is to reach for [none] — a lie this grammar accepts. So the relationship is
+    asserted where the link cost is already paid rather than here:
+    [test/operations/marker_backend_vocabulary] holds this list equal to the names of
+    [Backends.all_of_backend] plus
+    ["none"], and fails whichever side moves alone (gh-ocannl-689). *)
 let marker_backends = [ "none"; "cc"; "multidev_cc"; "cuda"; "hip"; "metal" ]
 
 (** The separators the marker admits between the backend and the reason. The em dash is what this
