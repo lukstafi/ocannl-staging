@@ -98,6 +98,20 @@ files.
   doubles as a gradient oracle. tinygrad: realize the loss BEFORE `opt.step()` or it recomputes
   from updated weights. The autotune schedule cache persists across processes; compiler changes
   invalidate it by digest.
+- **Every Metal number recorded before gh-ocannl-693 carries a ~4x accumulator tax and must not be
+  compared against one taken after.** Until then a serial reduction at f32 accumulated in the output
+  node's global memory, and `volatile_scalar_rmw` shadowed each step's read-modify-write with a
+  `device volatile` alias — which defeats every cache and every reassociation, on every unmatched
+  contraction, not merely on loss reductions. Localizing the accumulator took gpt2_mini forward on
+  Metal (M4 Max, default schedule) from a step p50 of 367.1 ms to 93.9 ms, -74.4%, with the emitted
+  fused kernel's volatile shadow count going 124 -> 0 and the batch losses bitwise identical in 7 of
+  8 batches (the eighth differs by 5e-7 relative: the qualifier had also been blocking FMA
+  contraction). Per segment the win is in the CONTRACTIONS -- lm_head 33.0 -> 6.5 ms, each FFN
+  matmul 24.6 -> 5.5 ms, each attention projection 6.2 -> 1.5 ms -- while the cross-entropy loss
+  reduction, only 0.21 ms to begin with, moved -5.4%. Two consequences: the published Metal cells in
+  `benchmarks/example-report.md` are stale by that factor, and any tuned-vs-default gap measured on
+  Metal before this was partly the search buying its way out of the tax (`Privatize` "sidesteps the
+  volatile-RMW workaround tax", `autotune.ml`), so those gaps should be expected to shrink.
 - That digest covers the compiled result, NOT the diagnostics. When re-measuring a search's
   decline census after changing only an error message or a log line, `rm benchmarks/autotune_cache/*.sexp`
   first — otherwise the second run reports `state=cache-replay`, `timed=0`, `declines=[]` and every

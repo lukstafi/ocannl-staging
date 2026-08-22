@@ -67,7 +67,7 @@ let axis_type_label = function
       The loops inside such a body are the inlined node's own iteration space, re-instantiated per
       use site; no [Schedule] op has ever targeted them.
     - [Schedule_minted] -- the accumulator localization built by [Schedule]'s materializing
-      [Unroll] and by [Partition] (gh-ocannl-639), and by [C_syntax.try_widen_serial_reduce]: a
+      [Unroll] and by [Partition] (gh-ocannl-639), and by [C_syntax.try_localize_serial_reduce]: a
       running value for a MATERIALIZED cell, whose body holds the very per-step / per-segment loops
       [Schedule.rewrite_loop] retargets.
 
@@ -2355,7 +2355,7 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
     survives [specialize_proc]", and they did not.
 
     The shape IS legal on the far side of the pipeline — [Schedule]'s materializing [Unroll] and
-    [Partition] mints and [C_syntax.try_widen_serial_reduce] build exactly it over a materialized
+    [Partition] mints and [C_syntax.try_localize_serial_reduce] build exactly it over a materialized
     accumulator, and codegen renders it. One IR, two meanings, with nothing saying which side of
     [optimize] a program was on. This is the statement of which side: localizing a materialized
     accumulator is codegen's accumulator peel (gh-ocannl-693), and rejecting here is what keeps that
@@ -5275,6 +5275,47 @@ let scope_updates_reduce_op ~id (llc : t) : Ops.binop option =
   in
   match go None llc with Some (Some op) -> Some op | _ -> None
 
+(* Every symbol bound by a [For_loop] anywhere in [llc]. What {!peel_accum_nest} needs is the
+   complement: a guard symbol that is NOT one of these is bound outside every loop -- a static index
+   parameter, a runtime extent -- and therefore cannot select among the iterations of an enclosing
+   level. Derived from the program rather than certified by the caller, so no call site can forget
+   to say (gh-ocannl-693 review round 7). *)
+let loop_indices (llc : t) : Indexing.symbol list =
+  let acc = ref [] in
+  let rec go llc =
+    match llc with
+    | For_loop { index; body; _ } ->
+        acc := index :: !acc;
+        go body
+    | Seq (a, b) ->
+        go a;
+        go b
+    | If { body; _ } -> go body
+    | Set { llsc; _ } | Set_local (_, llsc) -> scalar llsc
+    | Set_dynamic { dyn_value = v, _; llsc; _ } ->
+        scalar v;
+        scalar llsc
+    | Set_from_vec { arg = a, _; _ } -> scalar a
+    | Tile_mma { fallback; _ } -> go fallback
+    | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _ | Workgroup_barrier ->
+        ()
+  and scalar (s : scalar_t) =
+    match s with
+    | Local_scope { body; _ } -> go body
+    | Ternop (_, (a, _), (b, _), (c, _)) ->
+        scalar a;
+        scalar b;
+        scalar c
+    | Binop (_, (a, _), (b, _)) ->
+        scalar a;
+        scalar b
+    | Unop (_, (a, _)) -> scalar a
+    | Get_dynamic { dyn_value = v, _; _ } -> scalar v
+    | Get _ | Get_local _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ -> ()
+  in
+  go llc;
+  !acc
+
 (* gh-ocannl-639: peel a single-statement reduction nest down to its accumulation base. Levels are
    Serial/[Unrolled] loops and {!pure_index_guard}ed [If]s, each containing nothing else (comments
    aside); the base is either a raw accumulation update ([`Update]: an {!accum_update_parts}-shaped
@@ -5293,7 +5334,7 @@ let scope_updates_reduce_op ~id (llc : t) : Ops.binop option =
    can diverge on it; and a multi-accumulator hoist could not be a [Local_scope] value at all (scope
    purity forbids a sibling [Set] inside a scope body) — it would need the [Declare_local] statement
    form. A transform that starts minting fused reduction bodies must extend this peel alongside. *)
-let peel_accum_nest ?(extra_level = fun _ _ -> false) ~free_of body :
+let peel_accum_nest ?(extra_level = fun _ _ -> false) ~loop_syms ~free_of body :
     (Tn.t
     * Indexing.axis_index array
     * [ `Update of scalar_t | `Scope of scope_id * t list ]
@@ -5308,12 +5349,75 @@ let peel_accum_nest ?(extra_level = fun _ _ -> false) ~free_of body :
         List.exists symbols ~f:(fun (_, s) -> Indexing.equal_symbol s sym)
     | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
   in
+  (* A peeled guard has to be CONFINED to the levels being peeled. [rebuild] keeps a guard around the
+     accumulating update only, so the localized form performs its opening load and its closing store
+     OUTSIDE it — which is the original's behaviour exactly when the guard's truth is not fixed for
+     the whole nest. A guard invariant across the peeled levels is fixed for the whole nest, and
+     hoisting the accesses out of it turns "this instance performs no access" into a load and a
+     store. Across an enclosing HARDWARE axis that is a data race, not merely wasted work: for
+     [Workgroup w -> Serial k -> If (w < 1) (acc[0] += x[k])] every lane would load [acc[0]] and
+     write its unchanged local back, so a lane reading before lane 0's store and writing after it
+     silently discards the reduction. The gh-490 symbolic-extent shape [If (i < s)] is unaffected —
+     it mentions the peeled [i], so its truth varies across the very levels being peeled, and the
+     nest as a whole runs. Keeping such a guard around the whole scope instead of declining would
+     also be sound and would localize more; it needs the peel to report its outer guards separately,
+     which is a wider change than the correctness fix. *)
+  let guard_symbols (llsc : scalar_t) =
+    let of_index (idx : Indexing.axis_index) =
+      match idx with
+      | Indexing.Iterator s -> [ s ]
+      | Indexing.Affine { symbols; _ } -> List.map symbols ~f:snd
+      | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> []
+    in
+    let rec go acc (s : scalar_t) =
+      match s with
+      | Embed_index idx -> of_index idx @ acc
+      | Binop (_, (a, _), (b, _)) -> go (go acc a) b
+      | Unop (_, (a, _)) -> go acc a
+      | Ternop (_, (a, _), (b, _), (c, _)) -> go (go (go acc a) b) c
+      | _ -> acc
+    in
+    go [] llsc
+  in
+  (* Confined, not merely varying: every symbol the guard mentions must either be one of the levels
+     being peeled or be certified LOOP-INVARIANT by the caller ([invariant]), and at least one must
+     be peeled.
+
+     "Mentions a peeled symbol" is not enough — a MIXED guard like [w + k <= 0] under
+     [Workgroup w -> Serial k] varies with the peeled [k] and still selects among enclosing lanes,
+     so hoisting the accesses out of it lets every lane write the cell that originally only lane 0
+     at [k = 0] touched. And a guard mentioning no peeled symbol at all is fixed for the whole nest,
+     so hoisting invents both accesses where the original performed none.
+
+     [invariant] is what keeps the gh-490 runtime-extent shape peelable. Its guard is NOT
+     constant-bounded: [Assignments.extent_guard] emits
+     [Cmplt (Embed_index (Iterator index), Embed_index (Iterator sym.static_symbol))], where the
+     bound is a STATIC symbol — a kernel parameter bound at launch, never a loop index. Such a
+     symbol cannot select among iterations of an enclosing loop, so it is harmless here; but the
+     peel cannot tell it from an enclosing loop's index on its own, which is why the caller says.
+     Codegen passes its [idx_params]; a caller that passes nothing gets the conservative answer and
+     merely declines to localize (never mis-localizes), which is what the schedule mints do. *)
+  let guard_confined_to ~free_of gc =
+    let syms = guard_symbols gc in
+    let peeled s = List.exists free_of ~f:(Indexing.equal_symbol s) in
+    let loop_bound s = List.exists loop_syms ~f:(Indexing.equal_symbol s) in
+    List.exists syms ~f:peeled && List.for_all syms ~f:(fun s -> peeled s || not (loop_bound s))
+  in
   let cell_invariant ~free_of idcs =
     not (Array.exists idcs ~f:(fun idx -> List.exists free_of ~f:(fun s -> idx_mentions s idx)))
   in
+  (* A DEAD level ([to_ < from_]) is never peeled. Its body performs no accesses at all — the
+     interface walker propagates [live:(live && to_ >= from_)], so a node reached only under a dead
+     loop is absent from the routine's parameters and may not even be allocated — while the
+     localized form this peel licenses reads and writes the accumulator cell OUTSIDE the level,
+     unconditionally. Hoisting there would invent accesses the program does not make, on an
+     identifier the interface never declared. Refusing here covers every consumer at once: codegen's
+     localization and [Schedule]'s [Unroll ~materialize:true] / [Partition] mints. The level then
+     renders as the plain (access-free) dead loop it is. *)
   let rec peel ~free_of ~rebuild body =
     match strip (flat_lines [ body ]) with
-    | [ For_loop ({ index; body = ibody; axis = Serial | Unrolled | Vectorized; _ } as r) ] ->
+    | [ For_loop ({ index; body = ibody; axis = Serial | Unrolled | Vectorized; _ } as r) ]
+      when r.to_ >= r.from_ ->
         (* [Vectorized] levels ride into the scope: the SIMD reduction rendering recognizes the
            [Set_local] update form and folds its chains into the scope local, so the whole nest
            keeps one accumulator residency even when an inner reduction axis is vectorized (autotune
@@ -5322,7 +5426,8 @@ let peel_accum_nest ?(extra_level = fun _ _ -> false) ~free_of body :
         peel ~free_of:(index :: free_of)
           ~rebuild:(fun b -> rebuild (For_loop { r with body = b }))
           ibody
-    | [ For_loop ({ index; body = ibody; axis; _ } as r) ] when extra_level index axis ->
+    | [ For_loop ({ index; body = ibody; axis; _ } as r) ]
+      when r.to_ >= r.from_ && extra_level index axis ->
         (* Levels the CALLER vouches for beyond the annotation-free kinds — codegen passes a
            predicate accepting a hardware-annotated reduction loop its backend will serialize (no
            hardware index for the slot), so e.g. a nested [Workgroup_reduce] on cc keeps the
@@ -5332,7 +5437,8 @@ let peel_accum_nest ?(extra_level = fun _ _ -> false) ~free_of body :
         peel ~free_of:(index :: free_of)
           ~rebuild:(fun b -> rebuild (For_loop { r with body = b }))
           ibody
-    | [ If { cond = gc, gp; body = gbody } ] when pure_index_guard gc ->
+    | [ If { cond = gc, gp; body = gbody } ]
+      when pure_index_guard gc && guard_confined_to ~free_of gc ->
         peel ~free_of ~rebuild:(fun b -> rebuild (If { cond = (gc, gp); body = b })) gbody
     | [ Set { tn; idcs; llsc = Local_scope { id; body = sbody; orig_indices = _; mint = _ }; debug } ]
       when cell_invariant ~free_of idcs -> (

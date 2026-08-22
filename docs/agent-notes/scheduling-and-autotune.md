@@ -369,7 +369,7 @@ files.
 - The action menu's loop enumeration is provenance-aimed **by action category**, not by loop
   (gh-ocannl-687). `Local_scope` has two producers — virtualization's inline at a read site, and the
   accumulator localization `Schedule`'s materializing `Unroll` / `Partition` and
-  `C_syntax.try_widen_serial_reduce` mint over a MATERIALIZED cell — and `Low_level.scope_mint` on
+  `C_syntax.try_localize_serial_reduce` mint over a MATERIALIZED cell — and `Low_level.scope_mint` on
   the node tells them apart. `Autotune.collect_loops` descends both and tags each descriptor
   (`ld_inlined`); a loop reached through an inline draws the `Vectorized` retype and nothing else.
   Two things this is NOT about. Not reachability: `Schedule.rewrite_loop` descends every

@@ -1,0 +1,11 @@
+a live accumulation level is peeled: true
+a single-iteration level is peeled: true
+a dead accumulation level is refused: true
+an emptier dead level is refused: true
+a guard varying with the peeled index still peels: true
+a guard invariant across the peeled levels is refused: true
+a guard mixing a peeled and an enclosing symbol is refused: true
+a runtime-extent guard peels: its bound is bound outside every loop: true
+the same guard is refused when its bound is a loop index: true
+a dead Unrolled level compiles instead of aborting codegen: true
+a dead Unrolled level performs no accumulation: true

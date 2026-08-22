@@ -1,0 +1,13 @@
+scalar reduction matches host reference: true
+row reduction matches host reference: true
+reference discriminates a last-iteration-only result: true
+scalar reduction: accumulator opens into a scope local: true
+scalar reduction: the reduction updates the local, not the node: true
+scalar reduction: no statement both reads and writes the node: true
+scalar reduction: the node is stored exactly once, from the local: true
+scalar reduction: no volatile shadow on the localized store: true
+row reduction: accumulator opens into a scope local: true
+row reduction: the reduction updates the local, not the node: true
+row reduction: no statement both reads and writes the node: true
+row reduction: the node is stored exactly once, from the local: true
+row reduction: no volatile shadow on the localized store: true

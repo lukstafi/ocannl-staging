@@ -705,7 +705,16 @@ let tensorize_llc ~(zero_fringe : Tn.t -> bool) ~i ~j ~k ~lane ~simd_width (llc 
   in
   (llc, !out_masks)
 
+(* The accumulation mints below forward [Low_level.loop_indices llc] to
+   [Low_level.peel_accum_nest], so a runtime-extent guard ([i < s], gh-490) does not stop them:
+   [s] is bound outside every loop and cannot select among enclosing iterations. Derived here rather
+   than certified by [apply]'s caller, because declining is NOT neutral for these mints the way it
+   is in codegen -- a refused mint makes [Unroll ~materialize:true] round-trip the accumulator
+   through storage per copy and [Partition] turn its segment seams into narrowing points, so on
+   narrow storage the candidate stops agreeing with the serial baseline, which is the very
+   invariant they exist to keep (gh-ocannl-693 review rounds 6-7). *)
 let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
+  let loop_syms = lazy (Low_level.loop_indices llc) in
   let open Low_level in
   match op with
   | Stage _ | Privatize _ | Fuse_epilogue _ | Tensorize _ | Split_reduce _ ->
@@ -795,10 +804,12 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
             (* Under routine logging the per-iteration [Set] copies ARE the trace: a [Local_scope]
                body renders with [log_set_locals:false], so minting the scope would silence every
                update. The serial baseline's widening declines under logging for the same reason
-               (C_syntax.try_widen_serial_reduce), so within a logged regime the unrolled and serial
+               (C_syntax.try_localize_serial_reduce), so within a logged regime the unrolled and serial
                candidates still agree — both per-step. *)
             if Utils.debug_log_from_routines () then None
-            else Low_level.peel_accum_nest ~free_of:[ axis ] fc.body
+            else
+              Low_level.peel_accum_nest ~loop_syms:(Lazy.force loop_syms)
+                ~free_of:[ axis ] fc.body
           in
           match mint with
           | Some (tn, idcs, base, debug, rebuild) ->
@@ -923,7 +934,9 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
              and same declines as [Unroll ~materialize:true] above. *)
           let mint =
             if Utils.debug_log_from_routines () then None
-            else Low_level.peel_accum_nest ~free_of:[ axis ] fc.body
+            else
+              Low_level.peel_accum_nest ~loop_syms:(Lazy.force loop_syms)
+                ~free_of:[ axis ] fc.body
           in
           match mint with
           | Some (tn, idcs, base, debug, rebuild) ->

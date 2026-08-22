@@ -140,12 +140,109 @@ files.
   take `tile_prec` (exact widenings only) to fold the widening into the pack; seeding resolves the
   same `Numerics.cpu_compute_prec` the emission uses — change either side only through that
   helper, or "timed is not tensorized" returns for narrow sites.
-- **A reduction accumulator's WIDTH is policy; its narrowing POINTS are schedule** (gh-ocannl-639).
-  The plain serial fallback of an accumulation nest holds the accumulator at `comp_prec` and
-  narrows once at the store, implemented not by new emission but by locally rewriting the nest at
-  codegen into the `Local_scope` form virtualization gives virtual accumulators
-  (`C_syntax.try_widen_serial_reduce`) and rendering that — `scope_prec_of` and the
-  `Set_local`/`Get_local` arms already carry the widening. It joins virtual scopes,
+- **A reduction accumulator's WIDTH is policy and its RESIDENCY is unconditional; its narrowing
+  POINTS are schedule** (gh-ocannl-639, gh-ocannl-693). The plain serial fallback of an
+  accumulation nest holds the accumulator in a scope LOCAL at `acc_prec` and stores once after the
+  nest, implemented not by new emission but by locally rewriting the nest at codegen into the
+  `Local_scope` form virtualization gives virtual accumulators
+  (`C_syntax.try_localize_serial_reduce`) and rendering that — `scope_prec_of` and the
+  `Set_local`/`Get_local` arms already carry the widening. The rewrite is NOT precision-gated: it
+  used to bail when `acc_prec` was the identity on the storage precision, which left every f32
+  reduction no schedule op reached accumulating in the output node's global memory, one
+  read-modify-write per step — and on Metal `volatile_scalar_rmw` pinned it there by construction,
+  since its trigger predicate is verbatim the localization opportunity. At identity precision the
+  widening half is vacuous and the rewrite is exactly value-neutral, so there is nothing for a gate
+  to protect. Codegen is the ONLY localizer of a materialized accumulator (`optimize` rejects such
+  a scope, gh-ocannl-681).
+- **The rendered forms ONE reduction loop can take**, which is the space a property test over a
+  single reduction has to cover (gh-ocannl-664). `pp_ll`'s `For_loop` arm dispatches on the loop's
+  axis kind, and every arm that can serialize falls back through `try_localize_serial_reduce`:
+  `Serial` -> localized scope, else plain serial loop; `Unrolled` -> localized scope (the repeated
+  bodies update the scope local), else repeated bodies each doing a global RMW; `Vectorized` ->
+  `try_vectorize_reduce`'s SIMD accumulator grid + epilogue, else (accumulating body) the localized
+  scope or plain serial loop — never the pragma'd loop, whose independence assertion a loop-carried
+  accumulation does not satisfy; `Workgroup_reduce` -> `try_warp_reduce`'s shuffle tree, else the
+  hardware binding, else localized scope / serial; `Workgroup` -> hardware binding, else localized
+  scope / serial; `Grid` -> the pool-rendered parallel loop or the hardware binding, whose fallback
+  is the plain `serial_loop` and NOT the localizing one — the one arm that can serialize without
+  localizing. Deliberately left so: an unbindable, non-parallel-eligible `Grid` level over a
+  reduction axis would be a cross-thread race wherever it is reachable at all, and no schedule op in
+  the tree produces one, so making the dispatch uniform there would be an untestable change.
+  Orthogonally,
+  the `Set` arm's `try_register_tile` C-tile and `Tile_mma` hold accumulators too. Every form except
+  the two RMW ones (plain serial, unrolled repetition) keeps the accumulator in a register for the
+  whole nest, so a property test's invariant is: all forms agree on the value, and only the two RMW
+  forms touch the node more than twice.
+- **What forces one of the two RMW forms**, i.e. the declines a property test must be able to
+  provoke: `debug_log_from_routines` (a `Local_scope` body renders with `log_set_locals:false`, so
+  localizing would silence the per-iteration trace — the SIMD and tensorized renderings bail under
+  logging for the same reason); an update mentioning an RNG conversion (gh-ocannl-517: the
+  conversion picks which random bits it consumes from the precision it renders at); and
+  `peel_accum_nest`'s structural refusals — a level holding more than one statement, a guard that is
+  not `pure_index_guard`, a cell that is not invariant across the peeled levels, an update outside
+  the `accum_update_parts` grammar (only `Add`/`Mul`/`Max`/`Min` and the `FMA` form, with the
+  accumulator read a DIRECT operand of the top operator), and, for a scope-form base, updates under
+  mixed operators or a write to another node inside the body.
+- **A DEAD level (`to_ < from_`) is never peeled**, and that refusal is load-bearing rather than
+  tidiness. A dead loop's body performs no accesses at all — the routine-interface walk propagates
+  liveness as `live && to_ >= from_`, so a node reached only under one is absent from the parameters
+  and need not be allocated — while every form the peel licenses reads and writes the accumulated
+  cell OUTSIDE the levels, unconditionally. Peeling one would invent accesses the program does not
+  make, possibly naming an identifier the interface never declared; it is the same convention
+  `drop_dead_loop_accesses` keeps for the affine metrics and virtualization keeps by dropping dead
+  loops outright ("mint phantom parameters for identifiers only dead code renders"). Because
+  `optimize` drops them, ordinary lowering cannot deliver a dead loop to codegen — a post-optimize
+  transform can, which is why the refusal lives in the shared `peel_accum_nest` (covering the
+  schedule mints) plus the rendered level's own bounds in `try_localize_serial_reduce`, which the
+  peel never sees. Pinned by `test/operations/peel_dead_level.ml`, live twin included.
+  Refusing to peel is only half of it: the level then has to RENDER, and the `Unrolled` arm repeats
+  its body `to_ - from_ + 1` times through `Base.List.init`, which RAISES on a negative length
+  rather than answering the empty list — so the count is clamped at zero, zero repetitions being
+  exactly a dead level's access-free meaning. That abort was reachable before gh-ocannl-693 for a
+  dead `Unrolled` level whose body is not a recognized accumulation; refusing to peel the
+  accumulating ones widened its reach, which is how it surfaced.
+- **A peeled guard must be CONFINED to the levels being peeled** — every symbol it mentions is
+  one of them, and it mentions at least one. `rebuild` keeps a guard around the
+  accumulating update only, so the localized form performs its opening load and closing store
+  OUTSIDE it — right when the guard's truth is not fixed for the whole nest, wrong when it is.
+  A guard invariant across the peeled levels is fixed for the whole nest, so hoisting the accesses
+  out of it turns "this instance performs no access" into a load and a store; across an enclosing
+  HARDWARE axis that is a data race, not merely wasted work. For
+  `Workgroup w -> Serial k -> If (w < 1) (acc[0] += x[k])` every lane would load `acc[0]` and write
+  its unchanged local back, so a lane reading before lane 0's store and writing after it silently
+  discards the reduction — the same 1/N fingerprint as the Metal RMW miscompile, from a different
+  cause. "Varies with a peeled symbol" is NOT the right predicate: a MIXED guard like `w + k <= 0`
+  varies with the peeled `k` and still selects among lanes. Nor is an empty symbol set safe — a
+  guard mentioning no peeled symbol is fixed for the whole nest. **The gh-490 runtime-extent guard
+  is NOT constant-bounded** — worth knowing, because assuming it was cost a review round:
+  `Assignments.extent_guard` (assignments.ml:225) emits
+  `Cmplt (Embed_index (Iterator index), Embed_index (Iterator sym.static_symbol))`, whose bound is a
+  STATIC symbol, a kernel parameter bound at launch. (`Schedule`'s Pad guards ARE constant-bounded;
+  the two shapes are easy to conflate.) A static symbol cannot select among enclosing loop
+  iterations, but the peel cannot tell it from a loop index on its own, so the caller certifies via
+  the REQUIRED `~loop_syms`, which is `Low_level.loop_indices` of the enclosing program: a guard
+  symbol in it that is not peeled selects among an enclosing level's iterations, and one outside it
+  is bound outside every loop — a static index parameter or a runtime extent — hence harmless.
+  Derived from the program, not certified by the caller, and required rather than defaulted, because
+  **declining is not neutral for the schedule mints**: a refused mint makes `Unroll
+  ~materialize:true` round-trip the accumulator per copy and `Partition` turn its segment seams into
+  narrowing points, so on narrow storage the scheduled candidate stops agreeing with the serial
+  baseline — the invariant those mints exist to hold ("candidates compete on speed, never
+  numerics"). A defaulted certification is exactly the kind a call site forgets; three review rounds
+  went into finding that out.
+  `peel_dead_level.ml` carries all five guard shapes at the peel. What is NOT yet pinned is the
+  executed narrow-precision consequence — a bf16 reduction under a runtime-extent guard, scheduled
+  and compared against its serial baseline (gh-ocannl-715). Keeping such a guard
+  around the whole scope instead of declining would also be sound and would localize more; it needs
+  the peel to report its outer guards separately, which is wider than the correctness fix.
+- The interaction with Metal's `volatile_scalar_rmw` needs no special case, and that is worth
+  knowing before adding one: the shadow keys on the emitted `Set` reading its own node at a cell
+  invariant across an enclosing SERIAL loop, and localization lifts the `Set` out of exactly those
+  loops (`peel_accum_nest` runs outermost-first, since `pp_ll` recurses top-down), so at a fully
+  localized site the predicate is already false. Where the peel was blocked at an outer level — a
+  sibling statement, a data-dependent guard — the store stays inside an invariant-address loop and
+  the shadow still fires, correctly: the per-iteration read-modify-write is genuinely still there at
+  that level. It joins virtual scopes,
   `try_vectorize_reduce`'s epilogue and `try_register_tile`'s C-tile. The peel accepts
   Serial/`Unrolled`/`Vectorized` levels (autotune proposes `Unroll` over any Serial loop of extent
   <= 8 and Retype-`Vectorized` over reductions; a `Vectorized` level rides into the scope and

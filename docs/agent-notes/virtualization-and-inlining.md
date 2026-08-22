@@ -109,11 +109,14 @@ files.
   test in the suite exercises the retraction; the arm was in practice only ever firing on
   out-of-contract input.)
   The SAME shape is legal and means the opposite AFTER `optimize`: `Schedule`'s materializing
-  `Unroll` / `Partition` mints and `C_syntax.try_widen_serial_reduce` localize a materialized
+  `Unroll` / `Partition` mints and `C_syntax.try_localize_serial_reduce` localize a materialized
   accumulator this way and codegen renders it. That asymmetry is the point — **materialized-accumulator
   localization belongs to codegen's accumulator peel (gh-ocannl-693) and to nothing else**; a second
   route through the virtualizer would restore the gh-639 "whichever schedule happened to run"
-  problem. Until the peel lands, hand-built IR in that form reaches a backend past the optimizer via
+  problem. The peel is unconditional as of gh-ocannl-693 — every recognized serial reduction nest is
+  localized, not only those whose storage precision the numerics policy wants widened — so ordinary
+  lowering now produces this shape at f32 routinely; `test/operations/reduction_accumulator_residency.ml`
+  pins it. Hand-built IR in that form still reaches a backend past the optimizer via
   `Ll_test.optimize_scoped` (optimize a scope-free raw twin for the traced store and placements,
   then swap in the scoped `llc`) and `Context.compile ?prelowered`. Pinned by
   `test/operations/scope_over_materialized.ml`.

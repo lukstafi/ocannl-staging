@@ -54,7 +54,7 @@ val axis_type_label : axis_type -> string
       inlined node's own iteration space, re-instantiated per use site; no [Schedule] op has ever
       targeted them.
     - [Schedule_minted] -- the accumulator localization built by [Schedule]'s materializing
-      [Unroll] and by [Partition] (gh-ocannl-639), and by [C_syntax.try_widen_serial_reduce]: a
+      [Unroll] and by [Partition] (gh-ocannl-639), and by [C_syntax.try_localize_serial_reduce]: a
       running value for a MATERIALIZED cell, whose body holds the very per-step / per-segment loops
       [Schedule.rewrite_loop] retargets.
 
@@ -185,7 +185,7 @@ and scalar_t =
           node with no setter is decided non-virtual, so a hand-built scope over a freshly created
           node is rejected too unless the node is declared virtual. AFTER [optimize] the shape is
           legal and means the opposite: [Schedule]'s materializing [Unroll] and [Partition] mints
-          and [C_syntax.try_widen_serial_reduce] localize a materialized accumulator this way, and
+          and [C_syntax.try_localize_serial_reduce] localize a materialized accumulator this way, and
           codegen renders it. Localization is codegen's business alone (gh-ocannl-693); IR already
           in that form reaches a backend through [Context.compile ?prelowered], never through
           [optimize]. Only a scope [optimize] MINTED may be retracted to a [Get], and only by
@@ -320,8 +320,14 @@ val accum_local_update_parts : id:scope_id -> scalar_t -> (Ops.binop * scalar_t)
     SIMD reduction rendering uses it to fold vector chains into a widened accumulator's scope local
     (gh-ocannl-639), and {!peel_accum_nest}'s scope-form validation is built on it. *)
 
+val loop_indices : t -> Indexing.symbol list
+(** Every symbol bound by a [For_loop] anywhere in the code. The complement is what
+    {!peel_accum_nest} needs: a guard symbol outside this set is bound outside every loop — a static
+    index parameter, a runtime extent — so it cannot select among an enclosing level's iterations. *)
+
 val peel_accum_nest :
   ?extra_level:(Indexing.symbol -> axis_type -> bool) ->
+  loop_syms:Indexing.symbol list ->
   free_of:Indexing.symbol list ->
   t ->
   (Tnode.t
@@ -342,8 +348,32 @@ val peel_accum_nest :
     sequences are not reductions and keep their per-iteration narrowing), with the accumulated cell
     invariant across the peeled levels ([free_of] seeds the invariance check with the caller's own
     loop). [rebuild] re-wraps a replacement base statement in the peeled levels. The ONE definition
-    shared by [C_syntax]'s widened serial fallback and the schedule mints, so transform and emission
-    cannot drift. *)
+    shared by [C_syntax]'s localizing serial fallback and the schedule mints, so transform and
+    emission cannot drift.
+
+    A DEAD level ([to_ < from_]) is never peeled, and that refusal is load-bearing rather than
+    tidiness: the body of a dead loop performs no accesses at all — the routine-interface walk
+    propagates liveness as [live && to_ >= from_], so a node reached only under one is absent from
+    the parameters and need not be allocated — while every form this peel licenses reads and writes
+    the accumulated cell OUTSIDE the levels, unconditionally. Peeling a dead level would invent
+    accesses the program does not make, possibly on an identifier the interface never declared.
+
+    A peeled GUARD must likewise be confined to the levels being peeled — every symbol it
+    mentions is one of them, and it mentions at least one. [rebuild] keeps it around the
+    accumulating update only, so the localized form loads and stores outside it — the original's
+    behaviour exactly when the guard's truth is not fixed for the whole nest. One invariant across
+    the peeled levels is fixed for the whole nest, and hoisting the accesses out of it makes every
+    instance load and store; across an enclosing hardware axis that is a data race, since lanes the
+    guard excludes write their unchanged local back over the accumulating lane's result. Merely
+    varying with a peeled symbol does not suffice: a mixed guard selects among enclosing lanes too.
+    [loop_syms] is {!loop_indices} of the enclosing program: a guard symbol in it that is not peeled
+    selects among an enclosing level's iterations and stops the peel, while one outside it is a
+    static index parameter or a runtime extent and is harmless — which is what keeps gh-490's
+    runtime-extent guard ([Assignments.extent_guard]'s [i < s], whose bound is a static symbol
+    rather than a constant) peelable. Required rather than defaulted, and derived from the program
+    rather than certified by the caller, so that no call site can forget it: the mints of
+    [Schedule] need it as much as codegen does, since a refused mint there turns segment seams into
+    narrowing points instead of merely declining an optimization. *)
 
 (** {2 Hardware axis analyses}
 

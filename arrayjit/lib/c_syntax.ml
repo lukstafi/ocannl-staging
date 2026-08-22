@@ -1604,7 +1604,7 @@ module C_syntax (B : C_syntax_config) = struct
      A corollary (gh-ocannl-639): a reduction accumulator RESIDES at [acc_prec] across its whole
      reduction nest and narrows once at the store, in every rendering — virtual scopes
      ([scope_prec_of]), [try_vectorize_reduce]'s epilogue, [try_register_tile]'s C-tile, and the
-     plain serial fallback ([try_widen_serial_reduce]) — so the effective accumulation width is the
+     plain serial fallback ([try_localize_serial_reduce]) — so the effective accumulation width is the
      numerics policy's, never an artifact of which rendering or schedule ran. On the CPU backends
      [acc_prec] IS [comp_prec]; the GPU backends resolve accumulators wider than their (native,
      identity) compute precision where their tensor-unit triples do (gh-ocannl-663). *)
@@ -1742,7 +1742,7 @@ module C_syntax (B : C_syntax_config) = struct
      per-iteration narrowing by the source's own semantics and disqualifies the scope. Such locals
      take [acc_prec] instead of [comp_prec] in [scope_prec_of], so a virtualized or schedule-minted
      accumulator (Unroll ~materialize / Partition) resides at the same width as the widened serial
-     fallback below ([try_widen_serial_reduce], which registers its codegen-minted scopes here) —
+     fallback below ([try_localize_serial_reduce], which registers its codegen-minted scopes here) —
      on the backends where the two precisions coincide this census is inert. Classified per
      [scope_id] over the scope's own updates wherever they sit, which covers [Local_scope] values,
      the [Declare_local]-lifted form of [hoist_cross_statement_cse], and scopes inside a
@@ -2383,6 +2383,12 @@ module C_syntax (B : C_syntax_config) = struct
      (docs/proposals/axis-types-for-loops.md §1/§5), consulted by [pp_ll]'s [For_loop] case to
      render hardware index bindings. *)
   let current_hardware_axes : Low_level.hardware_axis_info list ref = ref []
+
+  (* Every symbol bound by a loop in the routine. The accumulator peel needs the COMPLEMENT: a
+     guard symbol outside this set is bound outside every loop -- a static index parameter, a
+     runtime extent -- so it cannot select among an enclosing level's iterations, which is what
+     keeps gh-490's runtime-extent guard ([i < s]) peelable. *)
+  let current_loop_syms : Indexing.symbol list ref = ref []
 
   (* Set by [compile_proc]: nodes placed in workgroup-shared memory. Their declarations carry
      [shared_decl_prefix] and cannot use [= {0}] (not allowed for [__shared__]/[threadgroup]), so
@@ -4216,90 +4222,113 @@ module C_syntax (B : C_syntax_config) = struct
                        ^^ hardline ^^ tail)
                   ^^ hardline ^^ rbrace)
         in
-        (* gh-ocannl-639: the plain-serial fallback of a reduction nest holds its accumulator at
-           the backend's accumulator precision ([acc_prec], gh-ocannl-663 — on CPU that is the
-           compute precision) across the whole nest and narrows once at the store — the same
-           once-per-cell narrowing as [try_vectorize_reduce]'s epilogue, [try_register_tile]'s
-           C-tile and virtual scopes ([scope_prec_of]) — so a reduction's effective accumulation
-           width is set by the numerics policy, never by which schedule happened to place the
-           accumulator in a register. Implemented as a local rewrite into exactly the [Local_scope]
-           form virtualization gives virtual accumulators, rendered recursively: [scope_prec_of]
-           (the minted scope is registered in [accum_scope_ids]) and the
-           [Set_local]/[Get_local]/[Local_scope] arms already carry the widening and the single
-           narrowing, so nothing new is emitted. Inert ([None]) where [acc_prec] is the identity on
-           the target's storage precision — f32/f64/integers, [narrow_compute_f32 = false], native
-           fp16, and the GPU backends' 16-bit precisions whose tensor units accumulate at storage
-           width (f16 everywhere; bf16 on HIP/Metal, but NOT on CUDA, whose mma legs hold f32
-           per-lane registers) — those render the plain serial loop unchanged. The nest is peeled through Serial/Unrolled single-statement loop levels
-           ([Unrolled] so a [Sched.Unroll ~materialize:false] over a reduction axis keeps the wide
-           local, its repeated bodies updating the scope local); a guard ([If]), a sibling
-           statement, or any other inner loop stops the widening at that level (the recognizer then
-           fails or the round-trip shrinks to that sub-nest). Two more declines: under
+        (* gh-ocannl-639 / gh-ocannl-693: the plain-serial fallback of a reduction nest holds its
+           accumulator in a scope LOCAL across the whole nest and stores once, after the nest — the
+           same residency as [try_vectorize_reduce]'s epilogue, [try_register_tile]'s C-tile and
+           virtual scopes ([scope_prec_of]). Two properties fall out of the one rewrite, and they
+           are independent:
+
+           - {b Width} (gh-ocannl-639): the local resides at the backend's accumulator precision
+             ([acc_prec], gh-ocannl-663 — on CPU that is the compute precision) and narrows once at
+             the store, so a reduction's effective accumulation width is set by the numerics policy,
+             never by which schedule happened to place the accumulator in a register.
+           - {b Residency} (gh-ocannl-693): the accumulator leaves the node's storage, so the nest
+             performs one load and one store instead of a global read-modify-write per step. This
+             holds at EVERY precision, the identity ones included — f32/f64/integers,
+             [narrow_compute_f32 = false], native fp16, and the GPU backends' 16-bit precisions
+             whose tensor units accumulate at storage width. At those the widening half is vacuous
+             (the local's precision IS the storage precision) and the rewrite is exactly
+             value-neutral, which is why it is unconditional: leaving it precision-gated made
+             residency "whichever schedule happened to place it" at f32, and on Metal
+             [volatile_scalar_rmw] pinned the resulting RMW to device memory by construction.
+
+           Implemented as a local rewrite into exactly the [Local_scope] form virtualization gives
+           virtual accumulators, rendered recursively: [scope_prec_of] (the minted scope is
+           registered in [accum_scope_ids]) and the [Set_local]/[Get_local]/[Local_scope] arms
+           already carry the residency, the widening and the single narrowing, so nothing new is
+           emitted. Codegen is the ONLY place a materialized accumulator is localized ([optimize]
+           rejects a [Local_scope] over a materialized node, gh-ocannl-681).
+
+           The nest is peeled through Serial/[Unrolled]/[Vectorized] single-statement loop levels by
+           [Low_level.peel_accum_nest], outermost-first ([pp_ll] recurses top-down), so the store
+           lands above every enclosing level whose symbols the accumulator's cell is free of. A
+           guard ([If]) that is not pure-index, a sibling statement, or any other inner loop stops
+           the peel at that level (the recognizer then fails or the localization shrinks to that
+           sub-nest). Two more declines, both unchanged by gh-ocannl-693: under
            [debug_log_from_routines] the per-step [Set] form is kept — a [Local_scope] body renders
            with [log_set_locals:false], so the rewrite would silence the per-iteration trace; the
            SIMD renderings bail there for the same reason, and logged narrow runs already differ
            numerically from plain runs (every tensorized rendering declines under logging). And an
-           update mentioning an RNG conversion is never widened: the conversion picks its result
+           update mentioning an RNG conversion is never localized: the conversion picks its result
            type AND which random bits it consumes from the precision it renders at (gh-ocannl-517's
-           carve-out, [renders_at_store_prec]), so rendering it inside an f32-precision scope would
-           change the draw, not just widen it. *)
-        let try_widen_serial_reduce () : PPrint.document option =
-          if Utils.debug_log_from_routines () then None
+           carve-out, [renders_at_store_prec]), so rendering it inside a scope's precision would
+           change the draw, not just move it.
+
+           Interaction with [volatile_scalar_rmw] (Metal): none is needed, and that is a property of
+           WHERE the rewrite puts the store rather than of the shadow's predicate. The shadow keys on
+           the emitted [Set] reading its own node at a cell invariant across an enclosing serial
+           loop; localization lifts the [Set] out of exactly those loops, so at a fully localized
+           site the predicate is already false and no [volatile] alias is emitted. Where the peel was
+           blocked at an outer level (a sibling statement, a data-dependent guard) the store stays
+           inside an invariant-address loop — and there the per-iteration read-modify-write is
+           genuinely still present at that level, so the shadow must and does still fire. *)
+        let try_localize_serial_reduce () : PPrint.document option =
+          (* A dead level ([to_ < from_]) performs no accesses; see [peel_accum_nest]'s refusal,
+             which covers the levels BELOW this one. This is the same refusal for the level being
+             rendered, whose bounds the peel never sees (the caller re-wraps it via [rebuild_hook]). *)
+          if Utils.debug_log_from_routines () || to_ < from_ then None
           else
-            let widen (tn, idcs, base, debug, rebuild) =
-              let store_prec = Lazy.force tn.Tn.storage_prec in
-              if Ops.equal_prec (acc_prec store_prec) store_prec then None
-              else
-                match base with
-                | `Update llsc when mentions_rng_conversion llsc -> None
-                | _ ->
-                    let id, update_code =
-                      match base with
-                      | `Update llsc ->
-                          let id = Low_level.get_scope tn in
-                          (* Codegen-minted, so the census over [B.procs] never saw it: register
-                             the scope as an accumulator or [scope_prec_of] would resolve it at
-                             [comp_prec] and defeat the widening on the backends where the two
-                             differ (gh-ocannl-663). Fresh ids per mint, so no collision with a
-                             censused verdict. *)
-                          Hash_set.add accum_scope_ids id.Low_level.scope_id;
-                          ( id,
-                            Low_level.Set_local (id, Low_level.subst_accum_read ~tn ~idcs ~id llsc)
-                          )
-                      | `Scope (id, rest) ->
-                          (* The scope-form base [Sched.Unroll ~materialize:true] minted (or a
-                             previous level of this very rewrite): hoist it through the enclosing
-                             reduction levels by moving its init above them and keeping its updates
-                             inside — otherwise a partially materialized nest would store and narrow
-                             the accumulator once per remaining outer iteration. The scope id is
-                             reused, so the rng census's storage-precision marking still applies; at
-                             storage precision the hoist is value-neutral. *)
-                          (id, Low_level.unflat_lines rest)
-                    in
-                    let rebuild_hook b =
-                      Low_level.For_loop { index = i; from_; to_; body = b; axis }
-                    in
-                    let scope_body =
-                      Low_level.Seq
-                        ( Low_level.Set_local (id, Low_level.Get (tn, idcs)),
-                          rebuild_hook (rebuild update_code) )
-                    in
-                    Some
-                      (pp_ll ~log_set_locals ~in_loop
-                         (Low_level.Set
-                            {
-                              tn;
-                              idcs;
-                              llsc =
-                                Local_scope
-                                  {
-                                    id;
-                                    body = scope_body;
-                                    orig_indices = idcs;
-                                    mint = Schedule_minted;
-                                  };
-                              debug;
-                            }))
+            let localize (tn, idcs, base, debug, rebuild) =
+              match base with
+              | `Update llsc when mentions_rng_conversion llsc -> None
+              | _ ->
+                  let id, update_code =
+                    match base with
+                    | `Update llsc ->
+                        let id = Low_level.get_scope tn in
+                        (* Codegen-minted, so the census over [B.procs] never saw it: register
+                           the scope as an accumulator or [scope_prec_of] would resolve it at
+                           [comp_prec] and defeat the widening on the backends where the two
+                           differ (gh-ocannl-663). Fresh ids per mint, so no collision with a
+                           censused verdict. *)
+                        Hash_set.add accum_scope_ids id.Low_level.scope_id;
+                        ( id,
+                          Low_level.Set_local (id, Low_level.subst_accum_read ~tn ~idcs ~id llsc)
+                        )
+                    | `Scope (id, rest) ->
+                        (* The scope-form base [Sched.Unroll ~materialize:true] minted (or a
+                           previous level of this very rewrite): hoist it through the enclosing
+                           reduction levels by moving its init above them and keeping its updates
+                           inside — otherwise a partially materialized nest would store and narrow
+                           the accumulator once per remaining outer iteration. The scope id is
+                           reused, so the rng census's storage-precision marking still applies; at
+                           storage precision the hoist is value-neutral. *)
+                        (id, Low_level.unflat_lines rest)
+                  in
+                  let rebuild_hook b =
+                    Low_level.For_loop { index = i; from_; to_; body = b; axis }
+                  in
+                  let scope_body =
+                    Low_level.Seq
+                      ( Low_level.Set_local (id, Low_level.Get (tn, idcs)),
+                        rebuild_hook (rebuild update_code) )
+                  in
+                  Some
+                    (pp_ll ~log_set_locals ~in_loop
+                       (Low_level.Set
+                          {
+                            tn;
+                            idcs;
+                            llsc =
+                              Local_scope
+                                {
+                                  id;
+                                  body = scope_body;
+                                  orig_indices = idcs;
+                                  mint = Schedule_minted;
+                                };
+                            debug;
+                          }))
             in
             (* A hardware-annotated reduction loop this backend serializes (no hardware index for
                its slot) is a serial level like any other — without this, retyping an INNER
@@ -4316,21 +4345,22 @@ module C_syntax (B : C_syntax_config) = struct
               | _ -> false
             in
             Option.bind
-              (Low_level.peel_accum_nest ~extra_level:serialized_hardware ~free_of:[ i ] body)
-              ~f:widen
+              (Low_level.peel_accum_nest ~extra_level:serialized_hardware
+                 ~loop_syms:!current_loop_syms ~free_of:[ i ] body)
+              ~f:localize
         in
-        let widen_or_serial () =
-          match try_widen_serial_reduce () with Some doc -> doc | None -> serial_loop ()
+        let localize_or_serial () =
+          match try_localize_serial_reduce () with Some doc -> doc | None -> serial_loop ()
         in
         match axis with
-        | Low_level.Serial -> widen_or_serial ()
+        | Low_level.Serial -> localize_or_serial ()
         | Grid when Set.mem !current_parallel_grid i -> parallel_grid_loop ()
         | Grid -> hardware_binding `Grid
-        | Workgroup -> hardware_binding ~fallback:widen_or_serial `Workgroup
+        | Workgroup -> hardware_binding ~fallback:localize_or_serial `Workgroup
         | Workgroup_reduce -> (
             match try_warp_reduce () with
             | Some doc -> doc
-            | None -> hardware_binding ~fallback:widen_or_serial `Workgroup)
+            | None -> hardware_binding ~fallback:localize_or_serial `Workgroup)
         | Vectorized -> (
             match try_vectorize_reduce () with
             | Some doc -> doc
@@ -4348,7 +4378,7 @@ module C_syntax (B : C_syntax_config) = struct
                          autotune menu propose Retype-[Vectorized] over reductions). *)
                       Low_level.has_accumulation body
                     then
-                      match try_widen_serial_reduce () with
+                      match try_localize_serial_reduce () with
                       | Some doc -> doc
                       | None -> serial_loop ()
                     else
@@ -4361,12 +4391,18 @@ module C_syntax (B : C_syntax_config) = struct
                loops included, and without this hook the unrolled candidate would round-trip the
                accumulator through storage on every repetition while the serial baseline widens —
                numerics-divergent candidates in one search. *)
-            match try_widen_serial_reduce () with
+            match try_localize_serial_reduce () with
             | Some doc -> doc
             | None ->
                 separate hardline
+                (* [max 0]: a DEAD level ([to_ < from_]) unrolls to zero repetitions, and rendering
+                   nothing is exactly its access-free meaning. The clamp is load-bearing rather than
+                   defensive — [Base.List.init] RAISES on a negative length, so without it a dead
+                   [Unrolled] level aborts codegen. gh-ocannl-693 widened the reach of that: the
+                   localizer used to peel such a level and never fall through here, and now declines
+                   it (a dead level must not be peeled), so this arm receives what the peel refused. *)
                 @@ List.init
-                     (to_ - from_ + 1)
+                     (max 0 (to_ - from_ + 1))
                      ~f:(fun k ->
                        let binding =
                          string ("const " ^ B.loop_index_type)
@@ -5726,6 +5762,7 @@ module C_syntax (B : C_syntax_config) = struct
     in
     let launch = Low_level.launch_dims llc in
     current_hardware_axes := Low_level.hardware_axes llc;
+    current_loop_syms := Low_level.loop_indices llc;
     (let parallel_grid, grid_private, local_ptr_alias = collect_parallel_grid llc in
      current_parallel_grid := parallel_grid;
      current_grid_private := grid_private;
