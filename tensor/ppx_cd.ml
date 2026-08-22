@@ -1078,45 +1078,45 @@ let translate ?ident_label (expr : expression) : result =
         _;
       } ->
         { default_result with expr = ndarray_op ~ndarray_fn:[%expr NTDSL.ndarray] expr }
-    | { pexp_desc = Pexp_ident { txt = Lident "lhs"; _ }; _ } ->
+    | [%expr lhs] ->
         { default_result with typ = Array; slot = LHS }
-    | { pexp_desc = Pexp_ident { txt = Lident "v"; _ }; _ } ->
+    | [%expr v] ->
         { default_result with typ = Array; slot = LHS; expr = [%expr t.Tensor.value] }
-    | { pexp_desc = Pexp_ident { txt = Lident "g"; _ }; _ } ->
+    | [%expr g] ->
         { default_result with typ = Array; slot = LHS }
-    | { pexp_desc = Pexp_ident { txt = Lident "rhs1"; _ }; _ } ->
+    | [%expr rhs1] ->
         { default_result with typ = Array; slot = RHS1 }
-    | { pexp_desc = Pexp_ident { txt = Lident "t"; _ }; _ } -> { default_result with slot = LHS }
-    | { pexp_desc = Pexp_ident { txt = Lident "t1"; _ }; _ } -> { default_result with slot = RHS1 }
-    | { pexp_desc = Pexp_ident { txt = Lident "v1"; _ }; _ } ->
+    | [%expr t] -> { default_result with slot = LHS }
+    | [%expr t1] -> { default_result with slot = RHS1 }
+    | [%expr v1] ->
         { default_result with typ = Array; slot = RHS1; expr = [%expr t1.Tensor.value] }
-    | { pexp_desc = Pexp_ident { txt = Lident "g1"; _ }; _ } ->
+    | [%expr g1] ->
         {
           default_result with
           typ = Grad_of_tensor [%expr t1];
           slot = RHS1;
           expr = [%expr Option.map t1.Tensor.diff ~f:(fun d -> d.Tensor.grad)];
         }
-    | { pexp_desc = Pexp_ident { txt = Lident "rhs2"; _ }; _ } ->
+    | [%expr rhs2] ->
         { default_result with typ = Array; slot = RHS2 }
-    | { pexp_desc = Pexp_ident { txt = Lident "t2"; _ }; _ } ->
+    | [%expr t2] ->
         { default_result with typ = Tensor; slot = RHS2 }
-    | { pexp_desc = Pexp_ident { txt = Lident "v2"; _ }; _ } ->
+    | [%expr v2] ->
         { default_result with typ = Array; slot = RHS2; expr = [%expr t2.Tensor.value] }
-    | { pexp_desc = Pexp_ident { txt = Lident "g2"; _ }; _ } ->
+    | [%expr g2] ->
         {
           default_result with
           typ = Grad_of_tensor [%expr t2];
           slot = RHS2;
           expr = [%expr Option.map t2.Tensor.diff ~f:(fun d -> d.Tensor.grad)];
         }
-    | { pexp_desc = Pexp_ident { txt = Lident "rhs3"; _ }; _ } ->
+    | [%expr rhs3] ->
         { default_result with typ = Array; slot = RHS3 }
-    | { pexp_desc = Pexp_ident { txt = Lident "t3"; _ }; _ } ->
+    | [%expr t3] ->
         { default_result with typ = Tensor; slot = RHS3 }
-    | { pexp_desc = Pexp_ident { txt = Lident "v3"; _ }; _ } ->
+    | [%expr v3] ->
         { default_result with typ = Array; slot = RHS3; expr = [%expr t3.Tensor.value] }
-    | { pexp_desc = Pexp_ident { txt = Lident "g3"; _ }; _ } ->
+    | [%expr g3] ->
         {
           default_result with
           typ = Grad_of_tensor [%expr t3];
