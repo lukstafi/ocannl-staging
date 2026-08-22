@@ -100,7 +100,7 @@ files.
   invalidate it by digest.
 - That digest covers the compiled result, NOT the diagnostics. When re-measuring a search's
   decline census after changing only an error message or a log line, `rm benchmarks/autotune_cache/*.sexp`
-  first — otherwise the second run reports `cache_hit=true`, `timed=0`, `declines=[]` and every
+  first — otherwise the second run reports `state=cache-replay`, `timed=0`, `declines=[]` and every
   counter reads zero, which looks exactly like "the problem went away". Fixtures are also not in a
   fresh checkout (`benchmarks/fixtures/*.safetensors` is generated); `gen_fixtures.py` recreates
   them, and they are only valid while `gen_fixtures.py` and `benchmarks/workloads/` are unchanged.

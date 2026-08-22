@@ -40,6 +40,15 @@ module SO = Ir.Schedule_outcome
 
 let p = Verdict.p
 
+(* The report's outcome as the questions this test asks of it (gh-ocannl-677): the outcome is a
+   variant naming one of five mutually exclusive states, so a claim names the state it means
+   instead of combining flags — [not (replayed r)] in particular does NOT say a search ran. *)
+let replayed (r : Autotune.report) =
+  match r.Autotune.outcome with Autotune.Cache_replay -> true | _ -> false
+
+let completed (r : Autotune.report) =
+  match r.Autotune.outcome with Autotune.Searched -> true | _ -> false
+
 (* 62500 floats = 250,000 B per work-item: over every scratch budget a device with more than 16384
    resident work-items reports, and ~12 KB under the frame hipcc refuses to emit. *)
 let side = 250
@@ -115,7 +124,7 @@ let () =
   (* 2. The search continued to the next candidate: it completed, and timed something. This is the
      half that was broken while the diagnosis was already right. *)
   p "scratch/tune: the search completed"
-    ((not r.Autotune.partial) && Option.is_none r.Autotune.terminal_failure);
+    (completed r);
   p "scratch/tune: the search timed at least one candidate" (r.Autotune.candidates_timed >= 1);
 
   (* 3. And the winner is a real result: the tuned routine computes the value. *)
@@ -154,7 +163,7 @@ let () =
            | _ -> false))
       ~f:(fun d -> d.Autotune.count)
   in
-  p "scratch/tune: the second run replays from the cache" hit.Autotune.cache_hit;
+  p "scratch/tune: the second run replays from the cache" (replayed hit);
   p "scratch/tune: a cache hit still reports the declined baseline"
     (Bool.equal hit.Autotune.baseline_declined r.Autotune.baseline_declined);
   p "scratch/tune: the cache-hit census accounts for that decline, and only it"

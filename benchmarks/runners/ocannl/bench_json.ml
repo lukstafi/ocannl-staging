@@ -39,20 +39,31 @@ let string s =
 
 (** One arm of the [tune] object: the crowned candidate of one placement arm, its search
     provenance, and how its best timed tensorized candidate compared (gh-ocannl-546). [best_ms] and
-    [mma_best_ms] are [infinity] when the arm timed nothing at all, which {!num} renders [null]. *)
-let tune_arm ~name ~searched ~cache_hit ~best_ms ~best_label ~tensorized ~mma_scalar_fallbacks
-    ~mma_seeded ~mma_timed ~mma_best_ms ~terminal_failure =
+    [mma_best_ms] are [infinity] when the arm timed nothing at all, which {!num} renders [null].
+
+    [state] names what the arm did about searching — the {!Autotune.outcome_name} of its outcome
+    (gh-ocannl-677), one of ["searched"], ["search-died"], ["cache-replay"], ["search-disabled"],
+    ["pre-search-failure"]. [searched] and [cache_hit] are that same fact projected onto the two
+    booleans the wire format carried before, kept for readers that predate the field; they are NOT
+    complements, and deriving the state from them is the mistake the outcome type exists to stop. *)
+let tune_arm ~name ~state ~searched ~cache_hit ~best_ms ~best_label ~tensorized
+    ~mma_scalar_fallbacks ~mma_seeded ~mma_timed ~mma_best_ms ~terminal_failure =
   Printf.sprintf
-    {|{"arm":"%s","searched":%b,"cache_hit":%b,"best_ms":%s,"best_label":"%s","tensorized":%b,"mma_scalar_fallbacks":%d,"mma_seeded":%d,"mma_timed":%d,"mma_best_ms":%s,"terminal_failure":%s}|}
-    (string name) searched cache_hit (num best_ms) (string best_label) tensorized
+    {|{"arm":"%s","state":"%s","searched":%b,"cache_hit":%b,"best_ms":%s,"best_label":"%s","tensorized":%b,"mma_scalar_fallbacks":%d,"mma_seeded":%d,"mma_timed":%d,"mma_best_ms":%s,"terminal_failure":%s}|}
+    (string name) (string state) searched cache_hit (num best_ms) (string best_label) tensorized
     mma_scalar_fallbacks mma_seeded mma_timed (num mma_best_ms)
     (Option.value_map terminal_failure ~default:"null" ~f:(fun detail ->
          Printf.sprintf {|"%s"|} (string detail)))
 
-(** The [tune] object of the result line, over arms already rendered by {!tune_arm}. *)
-let tune_object ~shipped ~searches ~replays ~arms =
-  Printf.sprintf {|{"shipped":"%s","searches":%d,"replays":%d,"arms":[%s]}|} (string shipped)
-    searches replays
+(** The [tune] object of the result line, over arms already rendered by {!tune_arm}.
+
+    Three provenance totals, not two (gh-ocannl-677): [no_searches] counts the arms that neither
+    searched nor replayed — [autotune_search=false] and every pre-search failure — so
+    [orchestrate.py] reads that case instead of inferring it from [searches] and [replays] both
+    being zero. *)
+let tune_object ~shipped ~searches ~replays ~no_searches ~arms =
+  Printf.sprintf {|{"shipped":"%s","searches":%d,"replays":%d,"no_searches":%d,"arms":[%s]}|}
+    (string shipped) searches replays no_searches
     (String.concat ~sep:"," arms)
 
 (** The result line [orchestrate.py] parses, as a string without its trailing newline.

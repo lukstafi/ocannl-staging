@@ -10,7 +10,7 @@ saved schedule roundtrips through sexp: true
 tuned routine values correct: true
 first tune call searches (cache miss): true
 first tune call timed at least the baseline: true
-completed search report is not partial: true
+a completed search carries no terminal failure: true
 decline census sums to candidates_failed: true
 second tune call hits the schedule cache: true
 cache-hit report has no declines: true
@@ -22,8 +22,11 @@ search off without a cache times nothing: true
 search off without a cache returns the correct untuned routine: true
 search off still replays a committed cache entry: true
 cache replay under search off gives correct values: true
-exactly the call that ran a search reports searched: true
-no report both searches and replays: true
+state: completed search       -> searched
+state: cache replay           -> cache-replay
+state: search off, no cache   -> search-disabled
+state: search off, cached     -> cache-replay
+the four calls report, by name, exactly the three states they reach: true
 a report that neither searched nor replayed timed nothing: true
 search off replays the default cache directory when asked for it: true
 search off ignores the unchosen default cache directory: true

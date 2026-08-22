@@ -31,21 +31,31 @@ let () =
     (Bench_json.nums ~prec:9 [| 1.5; Float.nan; Float.infinity; Float.neg_infinity |])
 
 (* A tuned cell whose arm A timed nothing at all and terminated on a failure whose message carries
-   the characters that would invalidate the record: a quote, a backslash, a NUL and an ESC. *)
+   the characters that would invalidate the record: a quote, a backslash, a NUL and an ESC.
+
+   The three arms are the three provenance buckets the [tune] object totals (gh-ocannl-677), so the
+   line carries one of each: a search that died mid-way, a replayed cache entry, and an arm that
+   neither searched nor replayed because the search was off. That last one is why [no_searches]
+   exists — before it, a reader had to infer the case from [searches] and [replays] both being
+   zero, which is exactly the derivation the outcome type replaced. *)
 let tune =
-  Bench_json.tune_object ~shipped:"B" ~searches:1 ~replays:1
+  Bench_json.tune_object ~shipped:"B" ~searches:1 ~replays:1 ~no_searches:1
     ~arms:
       [
-        Bench_json.tune_arm ~name:"A" ~searched:true ~cache_hit:false ~best_ms:Float.infinity
-          ~best_label:"tile 32x32" ~tensorized:false ~mma_scalar_fallbacks:0 ~mma_seeded:4
-          ~mma_timed:0 ~mma_best_ms:Float.infinity
+        Bench_json.tune_arm ~name:"A" ~state:"search-died" ~searched:true ~cache_hit:false
+          ~best_ms:Float.infinity ~best_label:"tile 32x32" ~tensorized:false
+          ~mma_scalar_fallbacks:0 ~mma_seeded:4 ~mma_timed:0 ~mma_best_ms:Float.infinity
           ~terminal_failure:
             (Some
                (Printf.sprintf "compile failed: \"kernel\" \\ path%c%c ESC" (Char.of_int_exn 0)
                   (Char.of_int_exn 27)));
-        Bench_json.tune_arm ~name:"B" ~searched:false ~cache_hit:true ~best_ms:0.75
-          ~best_label:"grid 128" ~tensorized:true ~mma_scalar_fallbacks:2 ~mma_seeded:6
-          ~mma_timed:3 ~mma_best_ms:0.8 ~terminal_failure:None;
+        Bench_json.tune_arm ~name:"B" ~state:"cache-replay" ~searched:false ~cache_hit:true
+          ~best_ms:0.75 ~best_label:"grid 128" ~tensorized:true ~mma_scalar_fallbacks:2
+          ~mma_seeded:6 ~mma_timed:3 ~mma_best_ms:0.8 ~terminal_failure:None;
+        (* Neither searched nor replayed: every counter zero, no winner to name. *)
+        Bench_json.tune_arm ~name:"C" ~state:"search-disabled" ~searched:false ~cache_hit:false
+          ~best_ms:Float.infinity ~best_label:"" ~tensorized:false ~mma_scalar_fallbacks:0
+          ~mma_seeded:0 ~mma_timed:0 ~mma_best_ms:Float.infinity ~terminal_failure:None;
       ]
 
 let ordinary =
