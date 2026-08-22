@@ -123,6 +123,9 @@ ok: index -- a backlink inside a multiline HTML comment
 ok: index -- a backlink whose bracket is escaped
 ok: index -- an anchor naming a heading that only appears inside a comment
 ok: index -- an index row with a third cell
+ok: index -- two bullets differing only inside a multiline code span
+ok: index -- two bullets differing only inside an HTML comment are one bullet
+ok: index -- a backlink whose closing parenthesis is escaped
 ok: index -- a backlink whose closing bracket is escaped
 ok: index -- a backlink between escaped backticks is navigable
 ok: index -- an anchor naming a heading indented into code

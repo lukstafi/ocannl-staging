@@ -392,6 +392,26 @@ let index_cases =
       "# Agent notes\n\nAn index.\n\n| File | Covers | Owner |\n| --- | --- | --- |\n|        [a.md](agent-notes/a.md) | the `Widget` seam | me |\n",
       [ ("agent-notes/a.md", file "- A fact about `Widget`.\n") ],
       [ "index-agreement @ agent-notes.md:7"; "reachability @ agent-notes/a.md" ] );
+    (* Text inside a code span RENDERS, so it is part of what a bullet says; text inside a comment
+       does not. Two bullets differing only on a code line are two bullets. *)
+    ( "two bullets differing only inside a multiline code span",
+      index [ row "a.md" "the `Widget` seam"; row "b.md" "the `Widget` seam" ],
+      [ ("agent-notes/a.md", file "- A fact about `Widget`, showing `\n  foo\n  ` in passing.\n");
+        ("agent-notes/b.md", file "- A fact about `Widget`, showing `\n  bar\n  ` in passing.\n") ],
+      [] );
+    ( "two bullets differing only inside an HTML comment are one bullet",
+      index [ row "a.md" "the `Widget` seam"; row "b.md" "the `Widget` seam" ],
+      [ ("agent-notes/a.md",
+          file "- A fact about `Widget`, showing <!--\n  foo\n  --> in passing.\n");
+        ("agent-notes/b.md",
+          file "- A fact about `Widget`, showing <!--\n  bar\n  --> in passing.\n") ],
+      [ "bullet-integrity @ agent-notes/a.md:5"; "bullet-integrity @ agent-notes/b.md:5";
+        "no-repetition @ agent-notes/b.md:5" ] );
+    ( "a backlink whose closing parenthesis is escaped",
+      index [ row "a.md" "the `Widget` seam" ],
+      [ ("agent-notes/a.md",
+          "# A file\n\nWrite it [index](../agent-notes.md#draft\\) to show the syntax.\n\n- A fact about `Widget`.\n") ],
+      [ "reachability @ agent-notes/a.md" ] );
     ( "a backlink whose closing bracket is escaped",
       index [ row "a.md" "the `Widget` seam" ],
       [ ("agent-notes/a.md",

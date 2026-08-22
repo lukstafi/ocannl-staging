@@ -187,6 +187,12 @@ type inert_state = In_text | In_code of int | In_comment | In_fence of char * in
     where each construct that HIDES text from the reader began. *)
 type inert_scan = {
   ranges : (int * (int * int) list) list;
+  comment_ranges : (int * (int * int) list) list;
+      (** The subset of {!ranges} that is HTML comment. The distinction is not cosmetic: text inside
+          a code span RENDERS -- it is part of what a reader sees and part of what a bullet says --
+          while text inside a comment does not. Treating both as equally absent made two bullets
+          differing only on a code line read as the same bullet, and the repetition rule reported a
+          duplicate that a reader can plainly tell apart (Codex P2, round 8). *)
   unclosed : inert_state;
   fences : (int * string) list;  (** line, and the marker that opened it *)
   comments : int list;  (** line on which each HTML comment opened *)
@@ -239,6 +245,7 @@ let inert_by_line contents =
      (Codex P2, round 6) -- a false failure. Pending ranges are discarded at a paragraph break and
      at the end of the file, which is exactly what a renderer does with them. *)
   let committed : (int, (int * int) list) Hashtbl.t = Hashtbl.create (module Int) in
+  let comment_tbl : (int, (int * int) list) Hashtbl.t = Hashtbl.create (module Int) in
   let pending = ref [] in
   let add tbl lineno range =
     Hashtbl.update tbl lineno ~f:(function None -> [ range ] | Some rs -> range :: rs)
@@ -310,6 +317,7 @@ let inert_by_line contents =
           | In_comment ->
               if at line !i "-->" then (
                 add committed lineno (!start, !i + 3);
+                add comment_tbl lineno (!start, !i + 3);
                 state := In_text;
                 start := 0;
                 i := !i + 3)
@@ -321,7 +329,10 @@ let inert_by_line contents =
       (match !state with
       | In_text -> ()
       | In_code _ -> if n > !start then pending := (lineno, (!start, n)) :: !pending
-      | In_comment -> if n > !start then add committed lineno (!start, n)
+      | In_comment ->
+          if n > !start then (
+            add committed lineno (!start, n);
+            add comment_tbl lineno (!start, n))
       | In_fence _ -> ());
       ranges_of := lineno :: !ranges_of);
   (* An unmatched run at the end of the file is literal text too. *)
@@ -330,6 +341,9 @@ let inert_by_line contents =
     ranges =
       List.rev_map !ranges_of ~f:(fun lineno ->
           (lineno, List.rev (Option.value (Hashtbl.find committed lineno) ~default:[])));
+    comment_ranges =
+      List.rev_map !ranges_of ~f:(fun lineno ->
+          (lineno, List.rev (Option.value (Hashtbl.find comment_tbl lineno) ~default:[])));
     unclosed = !state;
     fences = List.rev !fences;
     comments = List.rev !comments;
@@ -637,7 +651,9 @@ let parse_file ~file contents =
   in
   (* Set while inside a fenced region, holding the fence that opened it: its contents are somebody's
      example, not the notes' dialect, and reading a `- ` line in one as a bullet invents failures. *)
-  let inert = (inert_by_line contents).ranges in
+  let scan = inert_by_line contents in
+  let inert = scan.ranges in
+  let comments_at = scan.comment_ranges in
   List.iter (lines contents) ~f:(fun (lineno, line) ->
       let stripped = String.strip line in
       (* A line wholly inside a code span or an HTML comment is somebody's example. Parsing it as
@@ -654,7 +670,16 @@ let parse_file ~file contents =
          whose first seventeen characters close a code span and whose remainder is prose, and it is
          a continuation at depth two however much of its left edge is code. *)
       let marker_is_text = not (in_any_span spans (indent_of line)) in
-      if line_is_inert ~spans line then ()
+      if line_is_inert ~spans line then
+        (* Wholly inert, so it carries no structure -- but it may still carry TEXT. A line inside a
+           code span renders, and is part of what its bullet says; a line inside an HTML comment does
+           not, and is not. Collapsing the two made bullets differing only on a code line identical,
+           and the repetition rule called them duplicates (Codex P2, round 8). *)
+        (if line_is_inert ~spans:(spans_at comments_at lineno) line then ()
+         else
+           match !stack with
+           | [] -> ()
+           | (_, texts) :: _ -> texts := stripped :: !texts)
       else if is_blank line then close_all ()
       else if not marker_is_text then
         (* Text, with no structural marker of its own: it continues an open bullet, or it is prose
@@ -1011,7 +1036,16 @@ let markdown_links ?spans line =
              && Char.equal line.[close + 1] '('
              && (not (in_any_span spans close))
              && not (in_any_span spans (close + 1)) -> (
-          match String.index_from line (close + 1) ')' with
+          (* The first UNESCAPED parenthesis, for the same reason as the bracket above:
+             "[index](../agent-notes.md#draft\)" finishes no link, and accepting the escaped one
+             resolved to the index anyway once the fragment was dropped (Codex P2, round 8). Fourth
+             site of the parity rule. *)
+          let rec unescaped_rparen from =
+            match String.index_from line from ')' with
+            | Some j when escaped_at line j -> unescaped_rparen (j + 1)
+            | other -> other
+          in
+          match unescaped_rparen (close + 1) with
           | Some rparen when not (in_any_span spans rparen) ->
               let text = String.sub line ~pos:(i + 1) ~len:(close - i - 1) in
               let target =
