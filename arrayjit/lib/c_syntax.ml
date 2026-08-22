@@ -4158,8 +4158,14 @@ module C_syntax (B : C_syntax_config) = struct
             | Some doc -> doc
             | None ->
                 separate hardline
+                (* [max 0]: a DEAD level ([to_ < from_]) unrolls to zero repetitions, and rendering
+                   nothing is exactly its access-free meaning. The clamp is load-bearing rather than
+                   defensive — [Base.List.init] RAISES on a negative length, so without it a dead
+                   [Unrolled] level aborts codegen. gh-ocannl-693 widened the reach of that: the
+                   localizer used to peel such a level and never fall through here, and now declines
+                   it (a dead level must not be peeled), so this arm receives what the peel refused. *)
                 @@ List.init
-                     (to_ - from_ + 1)
+                     (max 0 (to_ - from_ + 1))
                      ~f:(fun k ->
                        let binding =
                          string ("const " ^ B.loop_index_type)

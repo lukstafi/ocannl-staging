@@ -195,6 +195,12 @@ files.
   transform can, which is why the refusal lives in the shared `peel_accum_nest` (covering the
   schedule mints) plus the rendered level's own bounds in `try_localize_serial_reduce`, which the
   peel never sees. Pinned by `test/operations/peel_dead_level.ml`, live twin included.
+  Refusing to peel is only half of it: the level then has to RENDER, and the `Unrolled` arm repeats
+  its body `to_ - from_ + 1` times through `Base.List.init`, which RAISES on a negative length
+  rather than answering the empty list — so the count is clamped at zero, zero repetitions being
+  exactly a dead level's access-free meaning. That abort was reachable before gh-ocannl-693 for a
+  dead `Unrolled` level whose body is not a recognized accumulation; refusing to peel the
+  accumulating ones widened its reach, which is how it surfaced.
 - The interaction with Metal's `volatile_scalar_rmw` needs no special case, and that is worth
   knowing before adding one: the shadow keys on the emitted `Set` reading its own node at a cell
   invariant across an enclosing SERIAL loop, and localization lifts the `Set` out of exactly those
