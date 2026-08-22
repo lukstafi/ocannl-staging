@@ -250,6 +250,9 @@ module Family_decision : sig
             by default policy and lifted by {!lift_geometry_lattice}; its axes commit as
             {!Lattice_box}. *)
 
+  (** One committed decision. Each constructor belongs to exactly one level ({!level}) and carries
+      the whole identity of the commitment: no consumer needs the level name, or the label, to know
+      what was decided. *)
   type t =
     | Fusion of [ `Unfused | `Fused ]  (** The root: the epilogue-fusion flavor (gh-ocannl-613). *)
     | Pipeline of [ `Blocktile | `Tensorized ]  (** Which composed pipeline. *)
@@ -271,9 +274,6 @@ module Family_decision : sig
         [ `Serial | `Hoisted | `Hoisted_grid | `Hoisted_grid_pack_rest | `Grid_pack_rest | `Grid ]
         (** Which CPU packed composition: where the panels are packed (in kernel, at link time, per
             Grid chunk) — what makes a packed geometry's traffic additional or merely relocated. *)
-        (** One committed decision. Each constructor belongs to exactly one level ({!level}) and
-            carries the whole identity of the commitment: no consumer needs the level name, or the
-            label, to know what was decided. *)
 
   type path = (string * t) list
   (** What {!Ir.Schedule_space.enumerate} and the [~path] of {!Ir.Schedule_space.search} carry at
