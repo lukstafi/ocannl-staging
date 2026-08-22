@@ -281,11 +281,18 @@ let drift ~dims = cycle ~dims ~modulus:13 ~offset:20. ~stride:0.015625
     optimized record's own [optimize_ctx], so a decision recorded on a context never reaches the
     optimization. Re-specializing the SAME [LL.t] with a virtualization candidate materialized gives
     a case its differential arm: the inlined and materialized readings of one program must agree
-    cell for cell, which is what pins a guard. *)
-let optimize ?(materialized = []) ~name llc : LL.optimized =
+    cell for cell, which is what pins a guard.
+
+    [~static_indices] are the launch parameters the code may mention outside every loop: the bound
+    symbols of the [Indexing.bindings] the routine will be compiled with. Hand-built IR carrying a
+    gh-490 runtime-extent guard ([If (i < s)], as [Assignments.extent_guard] emits) needs them —
+    the virtualization walk asserts that every [Embed_index (Iterator s)] it meets is in scope, and
+    a launch parameter is in scope only because the caller declared it. Empty by default, which is
+    right for every nest whose indices are all loop indices. *)
+let optimize ?(materialized = []) ?(static_indices = []) ~name llc : LL.optimized =
   let ctx : LL.optimize_ctx = LL.empty_optimize_ctx () in
   LL.decide_materialized ~provenance:589 ctx materialized;
-  LL.optimize ctx ~unoptim_ll_source:None ~ll_source:None ~name [] llc
+  LL.optimize ctx ~unoptim_ll_source:None ~ll_source:None ~name static_indices llc
 
 (** [optimize_scoped ~name ~raw scoped] is the supported route for hand-built IR in the
     POST-optimize [Local_scope] form — a scope over a MATERIALIZED node, which
@@ -299,8 +306,8 @@ let optimize ?(materialized = []) ~name llc : LL.optimized =
     — green for the wrong reason, which is how two [accum_width.ml] legs passed while executing
     [acc[0] = acc[0]]. This seam is what gh-ocannl-693's codegen accumulator peel will replace as
     the one localization route. *)
-let optimize_scoped ?materialized ~name ~raw scoped : LL.optimized =
-  let o = optimize ?materialized ~name raw in
+let optimize_scoped ?materialized ?static_indices ~name ~raw scoped : LL.optimized =
+  let o = optimize ?materialized ?static_indices ~name raw in
   { o with LL.llc = scoped }
 
 (** Post-optimization placement probes. Decisions live on the [optimize_ctx]'s placements
