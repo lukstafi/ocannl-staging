@@ -1,8 +1,8 @@
 control: the inlined scope's inner loop is registry-nameable: true
 the schedule mint's scope-nested loop draws proposals: true
-the virtualization inline's scope-nested loop draws none: false
+the virtualization inline's scope-nested loop draws none: true
 the statement-level loop draws the same proposals under either mint: true
-the inlined copy's menu is exactly the schedule mint's menu minus its scope-nested part: false
+the inlined copy's menu is exactly the schedule mint's menu minus its scope-nested part: true
 an inlined scope's loop still makes the enclosing loop non-innermost: true
 
 Done.
