@@ -140,12 +140,57 @@ files.
   take `tile_prec` (exact widenings only) to fold the widening into the pack; seeding resolves the
   same `Numerics.cpu_compute_prec` the emission uses — change either side only through that
   helper, or "timed is not tensorized" returns for narrow sites.
-- **A reduction accumulator's WIDTH is policy; its narrowing POINTS are schedule** (gh-ocannl-639).
-  The plain serial fallback of an accumulation nest holds the accumulator at `comp_prec` and
-  narrows once at the store, implemented not by new emission but by locally rewriting the nest at
-  codegen into the `Local_scope` form virtualization gives virtual accumulators
+- **A reduction accumulator's WIDTH is policy and its RESIDENCY is unconditional; its narrowing
+  POINTS are schedule** (gh-ocannl-639, gh-ocannl-693). The plain serial fallback of an
+  accumulation nest holds the accumulator in a scope LOCAL at `acc_prec` and stores once after the
+  nest, implemented not by new emission but by locally rewriting the nest at codegen into the
+  `Local_scope` form virtualization gives virtual accumulators
   (`C_syntax.try_localize_serial_reduce`) and rendering that — `scope_prec_of` and the
-  `Set_local`/`Get_local` arms already carry the widening. It joins virtual scopes,
+  `Set_local`/`Get_local` arms already carry the widening. The rewrite is NOT precision-gated: it
+  used to bail when `acc_prec` was the identity on the storage precision, which left every f32
+  reduction no schedule op reached accumulating in the output node's global memory, one
+  read-modify-write per step — and on Metal `volatile_scalar_rmw` pinned it there by construction,
+  since its trigger predicate is verbatim the localization opportunity. At identity precision the
+  widening half is vacuous and the rewrite is exactly value-neutral, so there is nothing for a gate
+  to protect. Codegen is the ONLY localizer of a materialized accumulator (`optimize` rejects such
+  a scope, gh-ocannl-681).
+- **The rendered forms ONE reduction loop can take**, which is the space a property test over a
+  single reduction has to cover (gh-ocannl-664). `pp_ll`'s `For_loop` arm dispatches on the loop's
+  axis kind, and every arm that can serialize falls back through `try_localize_serial_reduce`:
+  `Serial` -> localized scope, else plain serial loop; `Unrolled` -> localized scope (the repeated
+  bodies update the scope local), else repeated bodies each doing a global RMW; `Vectorized` ->
+  `try_vectorize_reduce`'s SIMD accumulator grid + epilogue, else (accumulating body) the localized
+  scope or plain serial loop — never the pragma'd loop, whose independence assertion a loop-carried
+  accumulation does not satisfy; `Workgroup_reduce` -> `try_warp_reduce`'s shuffle tree, else the
+  hardware binding, else localized scope / serial; `Workgroup` -> hardware binding, else localized
+  scope / serial; `Grid` -> the pool-rendered parallel loop or the hardware binding, whose fallback
+  is the plain `serial_loop` and NOT the localizing one — the one arm that can serialize without
+  localizing. Deliberately left so: an unbindable, non-parallel-eligible `Grid` level over a
+  reduction axis would be a cross-thread race wherever it is reachable at all, and no schedule op in
+  the tree produces one, so making the dispatch uniform there would be an untestable change.
+  Orthogonally,
+  the `Set` arm's `try_register_tile` C-tile and `Tile_mma` hold accumulators too. Every form except
+  the two RMW ones (plain serial, unrolled repetition) keeps the accumulator in a register for the
+  whole nest, so a property test's invariant is: all forms agree on the value, and only the two RMW
+  forms touch the node more than twice.
+- **What forces one of the two RMW forms**, i.e. the declines a property test must be able to
+  provoke: `debug_log_from_routines` (a `Local_scope` body renders with `log_set_locals:false`, so
+  localizing would silence the per-iteration trace — the SIMD and tensorized renderings bail under
+  logging for the same reason); an update mentioning an RNG conversion (gh-ocannl-517: the
+  conversion picks which random bits it consumes from the precision it renders at); and
+  `peel_accum_nest`'s structural refusals — a level holding more than one statement, a guard that is
+  not `pure_index_guard`, a cell that is not invariant across the peeled levels, an update outside
+  the `accum_update_parts` grammar (only `Add`/`Mul`/`Max`/`Min` and the `FMA` form, with the
+  accumulator read a DIRECT operand of the top operator), and, for a scope-form base, updates under
+  mixed operators or a write to another node inside the body.
+- The interaction with Metal's `volatile_scalar_rmw` needs no special case, and that is worth
+  knowing before adding one: the shadow keys on the emitted `Set` reading its own node at a cell
+  invariant across an enclosing SERIAL loop, and localization lifts the `Set` out of exactly those
+  loops (`peel_accum_nest` runs outermost-first, since `pp_ll` recurses top-down), so at a fully
+  localized site the predicate is already false. Where the peel was blocked at an outer level — a
+  sibling statement, a data-dependent guard — the store stays inside an invariant-address loop and
+  the shadow still fires, correctly: the per-iteration read-modify-write is genuinely still there at
+  that level. It joins virtual scopes,
   `try_vectorize_reduce`'s epilogue and `try_register_tile`'s C-tile. The peel accepts
   Serial/`Unrolled`/`Vectorized` levels (autotune proposes `Unroll` over any Serial loop of extent
   <= 8 and Retype-`Vectorized` over reductions; a `Vectorized` level rides into the scope and
