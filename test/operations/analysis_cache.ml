@@ -16,28 +16,23 @@
 open Base
 module LL = Ir.Low_level
 module Tn = Ir.Tnode
-module Ops = Ir.Ops
+
 module Idx = Ir.Indexing
 
-let single = Ir.Ops.single
-let next_id = ref 3000
+(* Nodes and builders come from [Ll_test] (gh-ocannl-600, gh-ocannl-608), which carries the same
+   set this file used to spell for itself — in one of the three mutually incompatible argument
+   conventions the hand-built-IR tests had drifted into. *)
+let mk = Ll_test.node_factory ~first_id:3000 ~dims:[| 3 |] ()
+let materialize = Ll_test.materialize
+let sym = Ll_test.sym
+let iter = Ll_test.iter
+let set s tn llsc = Ll_test.set_at tn (iter s) llsc
+let get s tn = Ll_test.get tn [| iter s |]
+let mul = Ll_test.mul
+let c = Ll_test.c
+let loop s body = Ll_test.loop ~upto:2 s body
+let seq = Ll_test.seq
 
-let mk ?(dims = [| 3 |]) label =
-  Int.incr next_id;
-  Tn.create (Tn.Specified single) ~id:!next_id ~label:[ label ]
-    ~unpadded_dims:(lazy dims)
-    ~padding:(lazy None)
-    ()
-
-let materialize tn = Tn.update_memory_mode tn Tn.On_device 99
-let sym () = Idx.get_symbol ()
-let iter s = Idx.Iterator s
-let set s tn llsc : LL.t = LL.Set { tn; idcs = [| iter s |]; llsc; debug = "" }
-let get s tn : LL.scalar_t = LL.Get (tn, [| iter s |])
-let mul a b : LL.scalar_t = LL.Binop (Ops.Mul, (a, single), (b, single))
-let c x : LL.scalar_t = LL.Constant x
-let loop s body : LL.t = LL.For_loop { index = s; from_ = 0; to_ = 2; body; axis = Serial }
-let seq a b : LL.t = LL.Seq (a, b)
 let p = Verdict.p
 
 (* One "lowering" of the two-consumer routine: fresh loop symbols each call, tensor nodes fixed by

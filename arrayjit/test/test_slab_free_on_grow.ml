@@ -7,8 +7,8 @@
    the identical free-on-overwrite pattern. CUDA is not buildable in this harness (no cudajit), so
    we pin the invariant through [Make_slab] with a mock raw backend whose [free_pool_raw] is [Some]
    (i.e. a backend that owns explicitly-freed pointers, like CUDA). The assertion "grow freed the
-   old pool = true" would print [false] if [alloc_pool] overwrote the table entry without freeing --
-   the exact bug this fixes. A unique tnode pool id (never pre-existing) must free nothing. *)
+   old pool" would fail if [alloc_pool] overwrote the table entry without freeing -- the exact bug
+   this fixes. A unique tnode pool id (never pre-existing) must free nothing. *)
 
 open Base
 module Backend_impl = Ir.Backend_impl
@@ -85,8 +85,8 @@ let () =
   let p1 = Mock_slab.resolve_pool device (loc 0) in
   Mock_slab.alloc_pool device ~pool_id:0 ~size_in_bytes:32 ~alignment:1;
   let p2 = Mock_slab.resolve_pool device (loc 0) in
-  Stdio.printf "grow freed the old pool = %b\n" (List.mem !Mock_raw.freed p1 ~equal:Int.equal);
-  Stdio.printf "grow installed a new pool = %b\n" (not (p1 = p2));
+  Verdict.p "grow freed the old pool" (List.mem !Mock_raw.freed p1 ~equal:Int.equal);
+  Verdict.p "grow installed a new pool" (not (p1 = p2));
   Stdio.printf "freed count after grow = %d\n" (List.length !Mock_raw.freed);
   (* A unique tnode pool id never pre-exists, so allocating it frees nothing. *)
   Mock_slab.alloc_pool device ~pool_id:1 ~size_in_bytes:16 ~alignment:1;
@@ -98,17 +98,16 @@ let () =
      would raise instead of returning base + 8. *)
   let base1 = Mock_slab.resolve_pool device (loc 1) in
   let base1_at8 = Mock_slab.resolve_pool device { Backend_intf.pool_id = 1; offset = 8 } in
-  Stdio.printf "resolve_pool offset 0 = base = %b\n"
+  Verdict.p "resolve_pool offset 0 = base"
     (base1_at8 - base1 = 8 && Mock_slab.resolve_pool device (loc 1) = base1);
-  Stdio.printf "resolve_pool offset 8 = base + 8 = %b\n" (base1_at8 = base1 + 8);
+  Verdict.p "resolve_pool offset 8 = base + 8" (base1_at8 = base1 + 8);
 
   (* free_pool must drop the private table entry even for a GC-reliant backend (free_pool_raw =
      None), so the strong reference is released and the buffer can be reclaimed. If free_pool were
      [None] (the bug), [finalize] would never remove these entries. *)
   let gc_device = Mock_gc_dev.make_device () () ~ordinal:0 in
   Mock_gc_slab.alloc_pool gc_device ~pool_id:7 ~size_in_bytes:16 ~alignment:1;
-  Stdio.printf "gc backend exposes free_pool (not None) = %b\n"
-    (Option.is_some Mock_gc_slab.free_pool);
+  Verdict.p "gc backend exposes free_pool (not None)" (Option.is_some Mock_gc_slab.free_pool);
   let present_before =
     try
       ignore (Mock_gc_slab.resolve_pool gc_device (loc 7) : int);
@@ -122,5 +121,5 @@ let () =
       true
     with _ -> false
   in
-  Stdio.printf "gc backend entry present before free = %b, after free = %b\n" present_before
-    present_after
+  Verdict.p "gc backend entry present before free" present_before;
+  Verdict.p "gc backend entry absent after free" (not present_after)

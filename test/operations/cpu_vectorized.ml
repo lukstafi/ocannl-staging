@@ -59,8 +59,13 @@ let rec innermost_loop (llc : LL.t) : Ir.Indexing.symbol option =
 let () =
   let rows = 6 and cols = 517 in
   let n = rows * cols in
-  let av = Array.init n ~f:(fun i -> Float.of_int (i % 19) *. 0.5) in
-  let bv = Array.init n ~f:(fun i -> Float.of_int (i % 23) -. 11.) in
+  let av =
+    Array.init n ~f:(Ll_test.cycle_flat ~dims:[| rows; cols |] ~modulus:19 ~offset:0. ~stride:0.5)
+  in
+  let bv =
+    Array.init n
+      ~f:(Ll_test.cycle_flat ~dims:[| rows; cols |] ~modulus:23 ~offset:(-11.) ~stride:1.)
+  in
   let a = TDSL.ndarray av ~label:[ "a" ] ~output_dims:[ rows; cols ] () in
   let b = TDSL.ndarray bv ~label:[ "b" ] ~output_dims:[ rows; cols ] () in
   let run ~name ~transform t =
@@ -97,8 +102,13 @@ let () =
   (* --- Split by 8 then retype the inner loop: Affine last components (8*j_o + j_i). --- *)
   let cols2 = 512 in
   let n2 = rows * cols2 in
-  let ev = Array.init n2 ~f:(fun i -> Float.of_int (i % 13) *. 0.25) in
-  let fv = Array.init n2 ~f:(fun i -> Float.of_int (i % 11) +. 1.) in
+  let ev =
+    Array.init n2
+      ~f:(Ll_test.cycle_flat ~dims:[| rows; cols2 |] ~modulus:13 ~offset:0. ~stride:0.25)
+  in
+  let fv =
+    Array.init n2 ~f:(Ll_test.cycle_flat ~dims:[| rows; cols2 |] ~modulus:11 ~offset:1. ~stride:1.)
+  in
   let e = TDSL.ndarray ev ~label:[ "e" ] ~output_dims:[ rows; cols2 ] () in
   let f = TDSL.ndarray fv ~label:[ "f" ] ~output_dims:[ rows; cols2 ] () in
   let%op d0 = e /. f in

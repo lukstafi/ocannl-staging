@@ -148,7 +148,10 @@ let () =
     let av =
       Array.init (mi * mk) ~f:(fun x -> if x < mk then -0.0 else Float.of_int ((x % 7) + 1) *. 0.5)
     in
-    let bv = Array.init (mk * mj) ~f:(fun x -> Float.of_int ((x % 13) + 1) *. 0.25) in
+    let bv =
+      Array.init (mk * mj)
+        ~f:(Ll_test.cycle_flat ~dims:[| mk; mj |] ~modulus:13 ~offset:1. ~stride:0.25)
+    in
     (* The accumulator's preloaded value: the C-tile is loaded from [d] at block entry, and a [-0.0]
        accumulator is what makes a [-0.0] product visible ([(+0.0) + (-0.0) = +0.0] would otherwise
        absorb the sign). *)

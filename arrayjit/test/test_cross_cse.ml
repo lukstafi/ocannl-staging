@@ -49,7 +49,7 @@ let report name ~hoisted_expected llc =
   Stdio.printf "[%s] declares=%d local_scopes=%d get_locals=%d hoisted=%b expected=%b -> %s\n" name
     declares scopes gets hoisted hoisted_expected
     (if as_expected then "OK" else "FAIL");
-  Verdict.claim name as_expected
+  Verdict.claimf "[%s] hoisting matches the designed outcome" name as_expected
 
 (* A Local_scope over [tn_src] whose body reads src at a fixed index, parameterized by its scope id
    and orig_indices. Bodies are structurally identical across instances modulo the scope id, so the

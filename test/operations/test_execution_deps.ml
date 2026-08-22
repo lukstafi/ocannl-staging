@@ -166,11 +166,16 @@ let test_poisoned_lineage () =
   Context.poison_lineage ctx ~routine_name:routine.Context.name (Failure "synthetic device failure");
   let refuses what f =
     match f () with
-    | _ -> printf "%s: not refused (BUG)\n" what
+    | _ -> Printf.ksprintf Verdict.fail "%s: not refused on a poisoned lineage" what
     | exception Failure msg ->
-        printf "%s refused, names the routine: %b, names the cause: %b\n" what
-          (String.is_substring msg ~substring:routine.Context.name)
-          (String.is_substring msg ~substring:"synthetic device failure")
+        (* The row reports two properties of one refusal, so it keeps its shape and the claims sit
+           beside it, on the same [let]-bound booleans the row prints. *)
+        let names_routine = String.is_substring msg ~substring:routine.Context.name in
+        let names_cause = String.is_substring msg ~substring:"synthetic device failure" in
+        printf "%s refused, names the routine: %b, names the cause: %b\n" what names_routine
+          names_cause;
+        Verdict.claimf "%s refusal names the routine" what names_routine;
+        Verdict.claimf "%s refusal names the cause" what names_cause
   in
   refuses "run" (fun () -> ignore (Context.run ctx routine));
   refuses "sync" (fun () -> Context.sync ctx);

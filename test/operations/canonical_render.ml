@@ -21,16 +21,12 @@ module Idx = Ir.Indexing
 module CR = Ir.Low_level.Canonical_render
 
 let single = Ops.single
-let next_id = ref 7000
 
-let mk label =
-  Int.incr next_id;
-  Tn.create (Tn.Specified single) ~id:!next_id ~label:[ label ]
-    ~unpadded_dims:(lazy [| 4 |])
-    ~padding:(lazy None)
-    ()
-
-let sym () = Idx.get_symbol ()
+(* Nodes and symbols from [Ll_test] (gh-ocannl-608); the rendering fixtures below stay written
+   against the [Low_level] constructors, because what each one pins is the exact construct that
+   reaches the walk. *)
+let mk = Ll_test.node_factory ~first_id:7000 ~dims:[| 4 |] ()
+let sym = Ll_test.sym
 let arg sc : LL.scalar_arg = (sc, single)
 
 (* A recording policy: everything the walk delegates lands in [log], so a test can assert on the

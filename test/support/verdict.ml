@@ -51,6 +51,29 @@ let p name b =
   Stdio.printf "%s: %b\n%!" name b;
   claim name b
 
+(** [pf fmt … b] is {!p} with a COMPUTED label: the format and its arguments render the label, and
+    the boolean follows, so the call reads in the same order as [p name b] —
+    [Verdict.pf "%s gradients match the oracle" label ok] prints ["… gradients match the oracle:
+    true"] and fails the run on [false].
+
+    This is the entry point for the claims gh-ocannl-601 could not convert (gh-ocannl-624): a claim
+    whose label names which leg, which epoch or which measured quantity it is about has to build
+    that label from an argument, and before this it had no choice but a bare [printf] — which exits
+    0 on [false] and lets the failure be [dune promote]d into the golden, the exact hazard the
+    literal-label sites were swept for. A computed label is not a weaker claim than a literal one,
+    so it must not have a weaker gate.
+
+    The rendered label is what {!p} prints and what a failure names on stderr, so it should read as
+    the fact that holds — the same rule as {!p}: phrase it so [true] is the passing reading. *)
+let pf fmt = Printf.ksprintf (fun label b -> p label b) fmt
+
+(** [claimf fmt … b] is {!claim} with a computed label: it fails the run without printing anything
+    on stdout, for a test that renders the boolean itself in a column layout of its own. Prefer
+    {!pf}, which does both; reach for this only where the surrounding line is a table whose shape is
+    the point, and bind the boolean to a name used by both the print and the claim, so the two
+    cannot drift apart. *)
+let claimf fmt = Printf.ksprintf (fun label b -> claim label b) fmt
+
 (** [skipped ~backend name] reports a leg the run's backend cannot evaluate: a GPU intrinsic on a
     CPU backend, a tf32 policy outside CUDA. It prints the same stdout line {!p} would — the
     [.expected] goldens are backend-uniform, and a [(test)] stanza diffs stdout ONLY, so stderr is

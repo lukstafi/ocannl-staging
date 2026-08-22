@@ -1,3 +1,3 @@
 materialized nodes read by one kernel = 40
-exceeds Metal ~31 binding limit = true
-pooled binding computed the correct sum = true
+exceeds Metal ~31 binding limit: true
+pooled binding computed the correct sum: true

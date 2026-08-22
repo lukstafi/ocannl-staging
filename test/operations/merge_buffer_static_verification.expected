@@ -1,4 +1,4 @@
-no eager side effect (updating_for_merge_buffer still None) = true
+no eager side effect (updating_for_merge_buffer still None): true
 mismatch: link raised at link time
 matched: out (init [9 9]) after transfer + consumer = [3 4]
 done

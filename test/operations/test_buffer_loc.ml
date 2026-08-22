@@ -79,16 +79,16 @@ let run_packed () =
   match (loc "p", loc "q", loc "a", loc "b") with
   | Some lp, Some lq, Some la, Some lb ->
       (* Both outputs are non-constant working nodes: same pool, distinct increasing offsets. *)
-      Stdio.printf "two outputs share a pool = %b\n" (lp.pool_id = lq.pool_id);
-      Stdio.printf "two outputs have distinct offsets = %b\n" (lp.offset <> lq.offset);
-      Stdio.printf "offsets are 8-byte aligned (2x float32) = %b\n"
+      Verdict.p "two outputs share a pool" (lp.pool_id = lq.pool_id);
+      Verdict.p "two outputs have distinct offsets" (lp.offset <> lq.offset);
+      Verdict.p "offsets are 8-byte aligned (2x float32)"
         (lp.offset % 4 = 0 && lq.offset % 4 = 0);
       (* The two read-only constants pack into one (per-device) constant pool at distinct offsets,
          separate from the working pool. *)
-      Stdio.printf "two constants share a pool = %b\n" (la.pool_id = lb.pool_id);
-      Stdio.printf "two constants have distinct offsets = %b\n" (la.offset <> lb.offset);
-      Stdio.printf "constant pool is separate from working pool = %b\n" (la.pool_id <> lp.pool_id)
-  | _ -> Stdio.printf "outputs/constants = MISSING\n"
+      Verdict.p "two constants share a pool" (la.pool_id = lb.pool_id);
+      Verdict.p "two constants have distinct offsets" (la.offset <> lb.offset);
+      Verdict.p "constant pool is separate from working pool" (la.pool_id <> lp.pool_id)
+  | _ -> Verdict.fail "outputs/constants missing from ctx_buffers"
 
 (* Value-correctness check for pooled sub-region addressing. Two non-constant working outputs (p, q)
    sharing a pool at distinct byte offsets must hold independent values after the computation runs.
@@ -119,7 +119,7 @@ let run_pooled_values_correct () =
   in
   let lp = Option.value_exn ~here:[%here] (loc "p") in
   let lq = Option.value_exn ~here:[%here] (loc "q") in
-  Stdio.printf "pooled p.offset=%d q.offset=%d share_pool=%b\n" lp.offset lq.offset
+  Verdict.pf "pooled p.offset=%d q.offset=%d share_pool" lp.offset lq.offset
     (lp.pool_id = lq.pool_id);
   Task.run routine.BI.schedule;
   Backend.await device;
@@ -134,12 +134,9 @@ let run_pooled_values_correct () =
   let pv = read_back p.Tensor.value in
   let qv = read_back q.Tensor.value in
   (* p = a+b = [4.0; 6.0]; q = a*b = [3.0; 8.0]. With broken offset both point to offset 0: q
-     overwrites p's slot, reading p gives [3.0; 8.0]. The assertion below would then print false and
-     the expected diff would catch the regression. *)
-  Stdio.printf "pooled p (a+b expect [4.0;6.0]) correct = %b\n"
-    (Array.equal Float.equal pv [| 4.0; 6.0 |]);
-  Stdio.printf "pooled q (a*b expect [3.0;8.0]) correct = %b\n"
-    (Array.equal Float.equal qv [| 3.0; 8.0 |])
+     overwrites p's slot, reading p gives [3.0; 8.0]. The claims below would then fail the run. *)
+  Verdict.p "pooled p (a+b expect [4.0;6.0]) correct" (Array.equal Float.equal pv [| 4.0; 6.0 |]);
+  Verdict.p "pooled q (a*b expect [3.0;8.0]) correct" (Array.equal Float.equal qv [| 3.0; 8.0 |])
 
 let () =
   run_once "run1";

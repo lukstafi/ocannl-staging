@@ -671,7 +671,7 @@ let () =
             Autotune.sketch_path_traffic_floor ~limits:gpu_coarse_canonical mm2
           in
           Stdio.printf "== coarse canonical mma_tile 16^3, format tile 8^3 ==\n";
-          Stdio.printf "lattice leaves %d (8-step multiples of both axes: %b)\n"
+          Verdict.pf "lattice leaves %d, all 8-step multiples of both axes"
             (List.length lattice_leaves)
             (List.for_all lattice_leaves ~f:(fun (_, p) ->
                  p.Autotune.sk_bm % 8 = 0 && p.Autotune.sk_bk % 8 = 0)

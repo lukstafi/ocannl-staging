@@ -37,7 +37,7 @@ let show ctx label t =
 
 let finite ctx label t ~lo ~hi =
   let values = Context.get_values ctx t.Tensor.value in
-  Stdio.printf "%s: %d values, all in [%g, %g]: %b\n" label (Array.length values) lo hi
+  Verdict.pf "%s: %d values, all in [%g, %g]" label (Array.length values) lo hi
     (Array.for_all values ~f:(fun v -> Float.(v >= lo && v <= hi)))
 
 let () =

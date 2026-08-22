@@ -14,14 +14,29 @@
 
     {1 What shape is recognised}
 
-    The literal-label form, and only it: a format string whose single argument-consuming conversion
-    is a bare [%b] at the end, preceded by a label ending in a colon. ["k-blocks fused: %b\n"] is
-    one; ["%s fused: %b\n"] is not, because the label is computed — those are issue #624's remaining
-    sites, which need per-site judgement and are deliberately out of reach here.
+    A format whose LAST argument-consuming conversion is a bare [%b] at the end, behind a label that
+    ends in one of the separators a claim is written with — a colon, an equals sign, or an arrow.
+    Two kinds, told apart by whether anything else in the format consumes an argument:
 
-    Carrying any other conversion is therefore the escape hatch a descriptive print already has. The
-    other is a named exemption in the test that consumes this, which is where a literal-label [%b]
-    that genuinely is not an assertion goes.
+    - {!Literal_label}: the [%b] is the only conversion, so the label is written out.
+      ["k-blocks fused: %b\n"], ["round-trip identity = %b\n"], ["hoisted -> %b\n"].
+    - {!Computed_label}: the label is built from arguments. ["%s fused: %b\n"],
+      ["Epoch %d, loss below threshold=%b\n"].
+
+    Both are recognised now. The literal form was gh-ocannl-668's; the computed one is gh-ocannl-624,
+    which the sweep of that issue converted onto {!Verdict.pf} and {!Verdict.claimf} — entry points
+    that did not exist when this reader was written, which is why the shape was out of scope then
+    and is not now. The separator vocabulary is the other thing that widened: a reader that accepted
+    only a colon was blind to the whole ["… = %b"] population, and that is how the claims in
+    [data_parallel], [shard_transfer] and [test_buffer_loc] sat outside a check written to catch
+    exactly them.
+
+    The escape hatch is narrower as a result, and deliberately so. A descriptive print used to
+    escape by carrying a second conversion; a computed label carries one by construction, so that no
+    longer distinguishes it. What is left is a named exemption in the test that consumes this — one
+    per site, with the reason it is not an assertion. The population that needs one is small (a
+    handful of census rows and tables), because a print whose boolean is not a verdict usually does
+    not end on the boolean.
 
     {1 Why it reads the parse tree}
 
@@ -90,51 +105,111 @@ let directives format =
   in
   scan 0 []
 
-(** What a reader sees printed by a stretch of format text that consumes no arguments: [%%] becomes
-    a per cent sign, [%!] and [%,] print nothing, everything else is itself. Applied to the text
-    before and after the [%b], where by construction every directive left is one of those. *)
-let printed_text text =
-  let length = String.length text in
-  let buffer = Buffer.create length in
-  let rec scan index =
-    if index >= length then Buffer.contents buffer
-    else if Char.equal text.[index] '%' && index + 1 < length then (
-      if Char.equal text.[index + 1] '%' then Buffer.add_char buffer '%';
-      scan (index + 2))
-    else (
-      Buffer.add_char buffer text.[index];
-      scan (index + 1))
-  in
-  scan 0
+(** What a reader sees printed by a stretch of format text, with the arguments left out: [%%] is a
+    per cent sign, every other directive contributes nothing this reader can know, and the rest is
+    itself. Applied to the text before and after the [%b].
 
-(** [claim_label format] is the label of the claim [format] prints, when it prints one.
+    It removes each directive by the SPAN {!directives} found, flags and width included, rather than
+    by a fixed two characters — otherwise [%-22s] leaves ["22s"] behind and a claim's rendered label
+    reads as that debris. The span is also what keeps the tail check honest, since a directive there
+    prints nothing whatever its width. *)
+let printed_text text =
+  let buffer = Buffer.create (String.length text) in
+  let cursor = ref 0 in
+  List.iter (directives text) ~f:(fun directive ->
+      Buffer.add_string buffer (String.sub text ~pos:!cursor ~len:(directive.start - !cursor));
+      if Char.equal directive.conversion '%' then Buffer.add_char buffer '%';
+      cursor := directive.stop + 1);
+  Buffer.add_string buffer (String.subo text ~pos:!cursor);
+  Buffer.contents buffer
+
+type kind =
+  | Literal_label  (** The [%b] is the format's only conversion: the label is written out. *)
+  | Computed_label  (** Something else in the format consumes an argument: the label is built. *)
+
+(** The separators a claim is written with, longest first so that a head ending in ["->"] is not
+    read as ending in ["-"] by a shorter match. A colon is what the gh-ocannl-601 sweep normalised
+    to; the other two are what the sites it could not convert used, and a reader blind to them is
+    blind to most of the population. *)
+let separators = [ "->"; ":"; "=" ]
+
+(** [claim_of format] is the label of the claim [format] prints and which kind it is, when it prints
+    one.
 
     Three things must hold at once:
 
-    - exactly one argument-consuming conversion in the whole format, and it is a bare [%b] — a width
-      or a flag means the print is laying out a column, which is formatting rather than asserting;
+    - the LAST argument-consuming conversion is a bare [%b] — a width or a flag means the print is
+      laying out a column, which is formatting rather than asserting;
     - what follows it prints as whitespace, or as nothing: a newline, a blank line, a [%!] flush;
-    - what precedes it ends in a colon, with a non-empty label before that colon.
+    - what precedes it ends in one of {!separators}, with a non-empty label before it.
 
-    So ["k-blocks fused: %b\n"] yields [Some "k-blocks fused"], while ["%s fused: %b\n"],
-    ["fused: %b (expect false)\n"] and ["fused? %b\n"] all yield [None] — the first because the
-    label is computed, the other two because the line is not the bare claim form the gh-ocannl-601
-    sweep normalised to, and a reader cannot take their boolean at face value. *)
-let claim_label format =
-  match List.filter (directives format) ~f:(fun d -> not (consumes_nothing d.conversion)) with
-  | [ { start; stop; conversion = 'b' } ] when stop = start + 1 ->
+    So ["k-blocks fused: %b\n"] yields [Some ("k-blocks fused", Literal_label)] and
+    ["%s fused: %b\n"] yields [Some ("fused", Computed_label)] — the second's label is what survives
+    rendering the head, which drops the conversions it cannot fill in, so it is a report's hint
+    rather than the site's identity; an exemption for a computed site is keyed by the head.
+
+    A computed label may render to NOTHING and still be a claim: ["%s: %b\n"] is the wrapper the
+    pre-[Verdict] tests defined for themselves, and the whole of its label is the argument. Only a
+    LITERAL label has to be non-empty, because there the residual is all there was.
+    ["fused: %b (expect false)\n"] and ["fused? %b\n"] yield [None]: neither is the bare claim form,
+    and a reader cannot take their boolean at face value. *)
+(** {!claim_of} together with the verbatim head, which is what names a computed site. *)
+let claim_site format =
+  let consuming =
+    List.filter (directives format) ~f:(fun d -> not (consumes_nothing d.conversion))
+  in
+  match List.last consuming with
+  | Some { start; stop; conversion = 'b' } when stop = start + 1 ->
       let tail = printed_text (String.subo format ~pos:(stop + 1)) in
       if not (String.for_all tail ~f:Char.is_whitespace) then None
       else
-        let head = String.rstrip (printed_text (String.sub format ~pos:0 ~len:start)) in
-        Option.bind (String.chop_suffix head ~suffix:":") ~f:(fun label ->
-            let label = String.strip label in
-            if String.is_empty label then None else Some label)
+        let verbatim = String.sub format ~pos:0 ~len:start in
+        let head = String.rstrip (printed_text verbatim) in
+        let kind = if List.length consuming = 1 then Literal_label else Computed_label in
+        Option.bind
+          (List.find_map separators ~f:(fun sep ->
+               Option.map (String.chop_suffix head ~suffix:sep) ~f:(fun label ->
+                   (sep, String.strip label))))
+          ~f:(fun (separator, label) ->
+            if not (String.is_empty label) then Some (label, kind, verbatim)
+            else
+              match kind with
+              (* Nothing before the separator and nothing to build it from: [": %b"] names no fact.
+              *)
+              | Literal_label -> None
+              (* The label is built ENTIRELY from arguments — [Stdio.printf "%s: %b\n" name b], which
+                 is not an edge case but THE shape: it is the wrapper several tests defined before
+                 [Verdict] existed, the one gh-ocannl-668 was written to keep from regrowing, and the
+                 one this reader would have let straight back in by treating its empty residual as
+                 "no label". A residual is empty here because every character of the label was a
+                 conversion, which makes the claim more computed, not less. Reported under the
+                 verbatim head, which is also what names it in an exemption. *)
+              | Computed_label ->
+                  let shown = String.rstrip verbatim in
+                  let shown =
+                    Option.value (String.chop_suffix shown ~suffix:separator) ~default:shown
+                  in
+                  let shown = String.strip shown in
+                  Some ((if String.is_empty shown then "<computed>" else shown), kind, verbatim))
   | _ -> None
 
+(** The label and kind of the claim [format] prints, when it prints one. *)
+let claim_of format = Option.map (claim_site format) ~f:(fun (label, kind, _) -> (label, kind))
+
+(** {!claim_of} without the kind, for a caller that only wants to know what the line asserts. *)
+let claim_label format = Option.map (claim_of format) ~f:fst
+
 type site = {
-  label : string;  (** The claim as the format spells it, without the colon. *)
+  label : string;  (** The claim as the format spells it, without the separator. *)
+  kind : kind;  (** Whether the label is written out or built from arguments. *)
   format : string;  (** The whole format, so a report can show what is written. *)
+  head : string;
+      (** The format up to (not including) the [%b], VERBATIM — conversions unrendered. What names a
+          computed site: its {!label} has had the conversions it cannot fill in dropped, so two
+          different formats can render the same label, and a head cannot. Deliberately not
+          claim-shaped itself: it stops before the boolean, so a list of heads written out in a test
+          source is not a list of claims, which is what lets the check that consumes them hold
+          itself to its own rule instead of exempting its own file. *)
   line : int;  (** 1-based, as the parser located the literal. *)
   printer : string option;
       (** The function the literal is an argument of, where it is one: ["Stdio.printf"],
@@ -181,11 +256,13 @@ let scan content =
         (match Read.string_literal expr with
         | Some value -> (
             Int.incr literals;
-            match claim_label value with
-            | Some label ->
+            match claim_site value with
+            | Some (label, kind, head) ->
                 sites :=
                   {
                     label;
+                    kind;
+                    head;
                     format = value;
                     line = expr.pexp_loc.loc_start.pos_lnum;
                     printer = Hashtbl.find printers expr.pexp_loc.loc_start.pos_cnum;

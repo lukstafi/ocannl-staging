@@ -75,8 +75,12 @@ let () =
      keeps the cross-nest edge misaligned, so the aligned cross-nest rule cannot merge the pair and
      the chain still fissions (a plain pointwise consumer would now stay one kernel). === *)
   let n = 16 in
-  let av = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 7) *. 0.5) in
-  let bv = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 5) -. 2.) in
+  let av =
+    Array.init (n * n) ~f:(Ll_test.cycle_flat ~dims:[| n; n |] ~modulus:7 ~offset:0. ~stride:0.5)
+  in
+  let bv =
+    Array.init (n * n) ~f:(Ll_test.cycle_flat ~dims:[| n; n |] ~modulus:5 ~offset:(-2.) ~stride:1.)
+  in
   let expected_e =
     Array.init (n * n) ~f:(fun idx ->
         let i = idx / n and j = idx % n in
@@ -269,8 +273,12 @@ let () =
 
   (* === The matmul sketch: 32x32 times 32x32 === *)
   let m = 32 in
-  let mav = Array.init (m * m) ~f:(fun i -> Float.of_int (i % 13) *. 0.25) in
-  let mbv = Array.init (m * m) ~f:(fun i -> Float.of_int (i % 17) -. 8.) in
+  let mav =
+    Array.init (m * m) ~f:(Ll_test.cycle_flat ~dims:[| m; m |] ~modulus:13 ~offset:0. ~stride:0.25)
+  in
+  let mbv =
+    Array.init (m * m) ~f:(Ll_test.cycle_flat ~dims:[| m; m |] ~modulus:17 ~offset:(-8.) ~stride:1.)
+  in
   let ma = TDSL.ndarray mav ~label:[ "ma" ] ~input_dims:[ m ] ~output_dims:[ m ] () in
   let mb = TDSL.ndarray mbv ~label:[ "mb" ] ~input_dims:[ m ] ~output_dims:[ m ] () in
   let%op mc0 = ma * mb in
@@ -325,9 +333,16 @@ let () =
      segment, so the matmul segment's site is unzeroed — [detect_matmul] must fire per segment and
      the sketch pipelines apply without the zero-expansion geometry. === *)
   let q = 32 in
-  let qav = Array.init (q * q) ~f:(fun i -> Float.of_int (i % 11) *. 0.125) in
-  let qbv = Array.init (q * q) ~f:(fun i -> Float.of_int (i % 7) -. 3.) in
-  let qcv = Array.init (q * q) ~f:(fun i -> (Float.of_int (i % 5) *. 0.5) -. 1.) in
+  let qav =
+    Array.init (q * q)
+      ~f:(Ll_test.cycle_flat ~dims:[| q; q |] ~modulus:11 ~offset:0. ~stride:0.125)
+  in
+  let qbv =
+    Array.init (q * q) ~f:(Ll_test.cycle_flat ~dims:[| q; q |] ~modulus:7 ~offset:(-3.) ~stride:1.)
+  in
+  let qcv =
+    Array.init (q * q) ~f:(Ll_test.cycle_flat ~dims:[| q; q |] ~modulus:5 ~offset:(-2.) ~stride:0.5)
+  in
   let qa = TDSL.ndarray qav ~label:[ "qa" ] ~input_dims:[ q ] ~output_dims:[ q ] () in
   let qb = TDSL.ndarray qbv ~label:[ "qb" ] ~input_dims:[ q ] ~output_dims:[ q ] () in
   let qc = TDSL.ndarray qcv ~label:[ "qc" ] ~input_dims:[ q ] ~output_dims:[ q ] () in
@@ -383,7 +398,10 @@ let () =
      site's best-timed single simultaneously — counted in [fiss_sketch_timed] but not in the seeded
      [fiss_sketch_candidates]. === *)
   let q2 = 16 in
-  let qc16v = Array.init (q2 * q) ~f:(fun i -> (Float.of_int (i % 9) *. 0.25) -. 1.) in
+  let qc16v =
+    Array.init (q2 * q)
+      ~f:(Ll_test.cycle_flat ~dims:[| q2; q |] ~modulus:9 ~offset:(-4.) ~stride:0.25)
+  in
   let qc16 = TDSL.ndarray qc16v ~label:[ "qc16" ] ~input_dims:[ q ] ~output_dims:[ q2 ] () in
   let tune_candidates tag comp y =
     let report = ref None in

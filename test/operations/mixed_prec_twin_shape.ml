@@ -70,7 +70,7 @@ let leg ~label ~prec =
   in
   let twin = find_consumer loss master in
   let m_dims = dims_of master and t_dims = dims_of twin in
-  Stdio.printf "%s: master %s | twin %s | equal=%b\n" label (show_dims m_dims) (show_dims t_dims)
+  Verdict.pf "%s: master %s | twin %s | equal" label (show_dims m_dims) (show_dims t_dims)
     (Array.equal Int.equal m_dims t_dims)
 
 let () =

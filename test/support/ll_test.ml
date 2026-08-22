@@ -89,10 +89,15 @@ let if_ cond body : LL.t = LL.If { cond = (cond, single); body }
 (** [loop ~upto s body] iterates [s] over [0 .. upto] INCLUSIVE, mirroring
     {!Ir.Low_level.For_loop}'s own bounds; [upto < 0] is a dead loop, which is a case worth
     building. *)
-let loop ~upto s body : LL.t = LL.For_loop { index = s; from_ = 0; to_ = upto; body; axis = Serial }
+let loop ?(from_ = 0) ~upto s body : LL.t =
+  LL.For_loop { index = s; from_; to_ = upto; body; axis = Serial }
 
 (** [loop_n s n body] iterates [s] over a range of WIDTH [n], i.e. [0 .. n-1]. *)
 let loop_n s n body : LL.t = loop ~upto:(n - 1) s body
+
+(** [set_at tn idx llsc] writes the single-axis cell [idx] — [set] over a one-element index array,
+    which is the shape of every hand-built one-dimensional case. *)
+let set_at tn idx llsc : LL.t = set tn [| idx |] llsc
 
 (** {1 Scalar builders} *)
 
@@ -101,6 +106,43 @@ let embed s : LL.scalar_t = LL.Embed_index (iter s)
 let binop op a b : LL.scalar_t = LL.Binop (op, (a, single), (b, single))
 let add a b = binop Ops.Add a b
 let mul a b = binop Ops.Mul a b
+
+(** {2 Index-precision scalars}
+
+    The builders above are single-precision, which is what a value computation is. A GUARD is not: a
+    comparison and its conjunctions are read at index precision, the same as an
+    {!Ir.Low_level.If}'s condition and a [Where]'s selector, and building one at [single] misstates
+    what the pass under test sees. Index precision is read at build time rather than captured once,
+    because it is a configured setting. *)
+
+let iprec () = Ops.index_prec ()
+
+(** [embed_idx idx] embeds an arbitrary index expression, where {!embed} takes a symbol. *)
+let embed_idx idx : LL.scalar_t = LL.Embed_index idx
+
+(** [ic n] is the integer constant [n] as a scalar. *)
+let ic n : LL.scalar_t = LL.Constant (Float.of_int n)
+
+(** [cmp op a b] applies an index-precision binary operator — a comparison ([Cmplt], [Cmple],
+    [Cmpeq], [Cmpne]) or a connective ([And], [Or]). *)
+let cmp op a b : LL.scalar_t = LL.Binop (op, (a, iprec ()), (b, iprec ()))
+
+let lt a b = cmp Ops.Cmplt a b
+let le a b = cmp Ops.Cmple a b
+let eq a b = cmp Ops.Cmpeq a b
+let ne a b = cmp Ops.Cmpne a b
+let conj a b = cmp Ops.And a b
+let disj a b = cmp Ops.Or a b
+
+(** [where_ cond then_ else_] is the [Where] ternop, its condition read at index precision and its
+    arms at [single] — the shape a zero-fringe guard renders as. *)
+let where_ cond then_ else_ : LL.scalar_t =
+  LL.Ternop (Ops.Where, (cond, iprec ()), (then_, single), (else_, single))
+
+(** [if_idx cond body] is {!if_} with the condition read at INDEX precision: the standing of a
+    launch-extent or fringe guard, whose condition is an index expression rather than a value read.
+*)
+let if_idx cond body : LL.t = LL.If { cond = (cond, iprec ()); body }
 
 (** {1 Discriminating producer values}
 
@@ -176,7 +218,28 @@ let blind_axis ~dims ~modulus =
       nonzero. A test relying on inexact partials has to EXHIBIT that crossing rather than infer it;
       [test/operations/discriminating_values] does so for {!drift}, and a nonzero mean over too few
       terms is the zero-mean trap wearing a different hat. *)
-let cycle ~dims ~modulus ~offset ~stride idcs =
+
+(** [cycle_flat ~dims ~modulus ~offset ~stride i] is {!cycle} over an already-FLATTENED offset — the
+    form an [Array.init (rows * cols) ~f:…] operand is written in, which is most of them.
+
+    The flat spelling is where this goes wrong in the field (gh-ocannl-640), and it goes wrong
+    invisibly: [Array.init (m * k) ~f:(fun i -> Float.of_int (i % 13) *. 0.25)] LOOKS like it varies
+    with both indices, and stops doing so at exactly the sizes where the modulus divides the row
+    stride — the value collapses to [col mod p] and every row becomes identical. An operand constant
+    along a row makes a whole class of bugs invisible: a transform that substitutes or repeats the
+    wrong row, panel or K-block computes the correct output, so no whole-output check, checksum
+    included, can see it. It was found four times across three review rounds of one PR.
+
+    Passing the real [~dims] is what buys the guard, and the guard is the reason to convert a site:
+    the arithmetic is identical to the idiom it replaces, so no golden moves, and the day someone
+    widens a size onto a multiple of the modulus the run raises instead of quietly passing.
+
+    What this does NOT give is aperiodicity. The values repeat with period [modulus] in the flat
+    offset, so a shift by [modulus] is a symmetry, and where the BLOCKING factors are searchable a
+    packed panel can repeat under [k -> k + p] and hide a panel-substitution bug just as thoroughly.
+    That needs a mixer with no shift symmetry at any lag; [bin/narrow_gebp_bench.ml]'s [mix] is the
+    worked recipe, measured over lags 1..256 and over every block width from 1 to 64. *)
+let cycle_flat ~dims ~modulus ~offset ~stride i =
   (match blind_axis ~dims ~modulus with
   | Some (ax, s) ->
       raise
@@ -188,7 +251,10 @@ let cycle ~dims ~modulus ~offset ~stride idcs =
               (Sexp.to_string (Array.sexp_of_t Int.sexp_of_t dims))
               s))
   | None -> ());
-  (Float.of_int (flat ~dims idcs % modulus) +. offset) *. stride
+  (Float.of_int (i % modulus) +. offset) *. stride
+
+let cycle ~dims ~modulus ~offset ~stride idcs =
+  cycle_flat ~dims ~modulus ~offset ~stride (flat ~dims idcs)
 
 (** [drift ~dims idcs] is {!cycle} at [13/20/(1/64)], the accumulator-width tests' operand: cells
     are the multiples of 1/64 between 0.3125 and 0.5, i.e. [k * (1/64)] for [k] in [20 .. 32], with
@@ -341,70 +407,133 @@ let p = Verdict.p
     below is derived. Every new IR constructor is handled HERE, once — three hand-maintained copies
     of this pair is what gh-ocannl-600 retired. *)
 
-let rec walk_t ~on_set ~on_get ~on_binop ~on_ternop ~on_scope ~on_if (llc : LL.t) =
-  let recur_t = walk_t ~on_set ~on_get ~on_binop ~on_ternop ~on_scope ~on_if in
-  let recur_s = walk_s ~on_set ~on_get ~on_binop ~on_ternop ~on_scope ~on_if in
-  match llc with
-  | LL.Noop | LL.Declare_local _ | LL.Comment _ | LL.Staged_compilation _ | LL.Workgroup_barrier
-  | LL.Tile_mma _ ->
-      ()
-  | LL.Seq (a, b) ->
-      recur_t a;
-      recur_t b
-  | LL.For_loop { body; _ } -> recur_t body
-  | LL.Zero_out tn -> on_set tn
-  | LL.Set { tn; llsc; _ } ->
-      on_set tn;
-      recur_s llsc
-  | LL.Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
-      on_set tn;
-      recur_s v;
-      recur_s llsc
-  | LL.Set_from_vec { tn; arg = s, _; _ } ->
-      on_set tn;
-      recur_s s
-  | LL.Set_local (_, s) -> recur_s s
-  | LL.If { cond = c, _; body } ->
-      on_if c;
-      recur_s c;
-      recur_t body
+(* One record of callbacks rather than eight labelled arguments: the traversal below threads them
+   through every recursive call, and a record keeps adding a hook from being an edit to forty call
+   sites. Defaults are the do-nothing hooks, so a caller names only what it cares about. *)
+type hooks = {
+  h_set : Tn.t -> unit;
+  h_get : Tn.t -> unit;
+  h_binop : Ops.binop -> unit;
+  h_ternop : Ops.ternop -> unit;
+  h_scope : LL.scope_id -> unit;
+  h_if : LL.scalar_t -> unit;
+  h_stmt : LL.t -> unit;  (** Every statement, in preorder — the generic hook. *)
+  h_scalar : LL.scalar_t -> unit;  (** Every scalar expression, in preorder. *)
+  h_exit : LL.t -> unit;
+      (** Every statement again, on the way out. What makes an enclosing-context query (which loops
+          a statement sits inside) derivable from this traversal instead of a second one. *)
+  h_in_scopes : bool;
+      (** Whether to descend from a scalar into the statement body of a [Local_scope]. The one
+          scalar-to-statement edge in the IR, and the one a hand-written walk gets wrong: a query
+          that wants "reachable through statement positions alone" (what [Schedule.find_loop] saw
+          before gh-ocannl-668) sets this false, and every other query leaves it true. Deciding it
+          here once is the point — six copies in one test file each decided it independently. *)
+}
 
-and walk_s ~on_set ~on_get ~on_binop ~on_ternop ~on_scope ~on_if (s : LL.scalar_t) =
-  let recur_t = walk_t ~on_set ~on_get ~on_binop ~on_ternop ~on_scope ~on_if in
-  let recur_s = walk_s ~on_set ~on_get ~on_binop ~on_ternop ~on_scope ~on_if in
+let ignore1 _ = ()
+
+let no_hooks =
+  {
+    h_set = ignore1;
+    h_get = ignore1;
+    h_binop = ignore1;
+    h_ternop = ignore1;
+    h_scope = ignore1;
+    h_if = ignore1;
+    h_stmt = ignore1;
+    h_scalar = ignore1;
+    h_exit = ignore1;
+    h_in_scopes = true;
+  }
+
+let rec walk_t h (llc : LL.t) =
+  h.h_stmt llc;
+  (match llc with
+  | LL.Noop | LL.Declare_local _ | LL.Comment _ | LL.Staged_compilation _ | LL.Workgroup_barrier ->
+      ()
+  | LL.Tile_mma { fallback; _ } ->
+      (* Through the fallback, which is a semantically equivalent scalar micro-kernel over the same
+         tensor nodes: reporting the tile's own [d]/[a]/[b] as well would count every operand of a
+         tensorized nest twice. Descending at all is what a walk that stopped at [Tile_mma] missed —
+         the loops, guards and accesses of the fallback are statements like any others. *)
+      walk_t h fallback
+  | LL.Seq (a, b) ->
+      walk_t h a;
+      walk_t h b
+  | LL.For_loop { body; _ } -> walk_t h body
+  | LL.Zero_out tn -> h.h_set tn
+  | LL.Set { tn; llsc; _ } ->
+      h.h_set tn;
+      walk_s h llsc
+  | LL.Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
+      h.h_set tn;
+      walk_s h v;
+      walk_s h llsc
+  | LL.Set_from_vec { tn; arg = s, _; _ } ->
+      h.h_set tn;
+      walk_s h s
+  | LL.Set_local (_, s) -> walk_s h s
+  | LL.If { cond = c, _; body } ->
+      h.h_if c;
+      walk_s h c;
+      walk_t h body);
+  h.h_exit llc
+
+and walk_s h (s : LL.scalar_t) =
+  h.h_scalar s;
   match s with
   | LL.Constant _ | LL.Constant_bits _ | LL.Get_local _ | LL.Embed_index _ | LL.Get_merge_buffer _
     ->
       ()
-  | LL.Get (tn, _) -> on_get tn
+  | LL.Get (tn, _) -> h.h_get tn
   | LL.Get_dynamic { tn; dyn_value = v, _; _ } ->
-      on_get tn;
-      recur_s v
+      h.h_get tn;
+      walk_s h v
   | LL.Local_scope { id; body; _ } ->
-      on_scope id;
-      recur_t body
+      h.h_scope id;
+      if h.h_in_scopes then walk_t h body
   | LL.Ternop (op, (a, _), (b, _), (d, _)) ->
-      on_ternop op;
-      recur_s a;
-      recur_s b;
-      recur_s d
+      h.h_ternop op;
+      walk_s h a;
+      walk_s h b;
+      walk_s h d
   | LL.Binop (op, (a, _), (b, _)) ->
-      on_binop op;
-      recur_s a;
-      recur_s b
-  | LL.Unop (_, (a, _)) -> recur_s a
+      h.h_binop op;
+      walk_s h a;
+      walk_s h b
+  | LL.Unop (_, (a, _)) -> walk_s h a
 
-let ignore1 _ = ()
+let hooks_of ?(on_set = ignore1) ?(on_get = ignore1) ?(on_binop = ignore1) ?(on_ternop = ignore1)
+    ?(on_scope = ignore1) ?(on_if = ignore1) ?(on_stmt = ignore1) ?(on_scalar = ignore1)
+    ?(on_exit = ignore1) ?(in_scopes = true) () =
+  {
+    h_set = on_set;
+    h_get = on_get;
+    h_binop = on_binop;
+    h_ternop = on_ternop;
+    h_scope = on_scope;
+    h_if = on_if;
+    h_stmt = on_stmt;
+    h_scalar = on_scalar;
+    h_exit = on_exit;
+    h_in_scopes = in_scopes;
+  }
 
 (** [walk] over a statement, with only the callbacks the caller cares about. *)
-let walk ?(on_set = ignore1) ?(on_get = ignore1) ?(on_binop = ignore1) ?(on_ternop = ignore1)
-    ?(on_scope = ignore1) ?(on_if = ignore1) llc =
-  walk_t ~on_set ~on_get ~on_binop ~on_ternop ~on_scope ~on_if llc
+let walk ?on_set ?on_get ?on_binop ?on_ternop ?on_scope ?on_if ?on_stmt ?on_scalar ?on_exit
+    ?in_scopes llc =
+  walk_t
+    (hooks_of ?on_set ?on_get ?on_binop ?on_ternop ?on_scope ?on_if ?on_stmt ?on_scalar ?on_exit
+       ?in_scopes ())
+    llc
 
 (** [walk_scalar] over a scalar expression, likewise. *)
-let walk_scalar ?(on_set = ignore1) ?(on_get = ignore1) ?(on_binop = ignore1) ?(on_ternop = ignore1)
-    ?(on_scope = ignore1) ?(on_if = ignore1) s =
-  walk_s ~on_set ~on_get ~on_binop ~on_ternop ~on_scope ~on_if s
+let walk_scalar ?on_set ?on_get ?on_binop ?on_ternop ?on_scope ?on_if ?on_stmt ?on_scalar ?on_exit
+    ?in_scopes s =
+  walk_s
+    (hooks_of ?on_set ?on_get ?on_binop ?on_ternop ?on_scope ?on_if ?on_stmt ?on_scalar ?on_exit
+       ?in_scopes ())
+    s
 
 let count f =
   let n = ref 0 in
@@ -443,6 +572,104 @@ let count_guard_ops (o : LL.optimized) =
     [hoist_cross_statement_cse] lifted a shared body out of its users. Takes a statement rather than
     an [optimized] record, because the passes it observes are run directly. *)
 let count_scopes (llc : LL.t) = count (fun bump -> walk llc ~on_scope:(fun _ -> bump ()))
+
+(** {2 Counting a raw statement}
+
+    The counters above take an [optimized] record, which is what a virtualization test holds. A test
+    of a pass called directly ([simplify_llc], [Schedule.apply]) holds a bare {!Ir.Low_level.t}, and
+    counts whatever shape its case is about — so these take a predicate rather than naming one
+    construct, and both walk the same traversal above. *)
+
+(** How many statements satisfy [f]. *)
+let count_stmt ?in_scopes ~f (llc : LL.t) =
+  count (fun bump -> walk ?in_scopes llc ~on_stmt:(fun s -> if f s then bump ()))
+
+(** How many scalar expressions satisfy [f], including those inside statement positions. *)
+let count_scalar ?in_scopes ~f (llc : LL.t) =
+  count (fun bump -> walk ?in_scopes llc ~on_scalar:(fun s -> if f s then bump ()))
+
+(** [census llc] is [(ifs, wheres, loops)] of a raw statement: guarded statements, [Where] ternops,
+    and [For_loop]s. The three a schedule transform's structural pin is usually about. *)
+let census (llc : LL.t) =
+  let ifs = ref 0 and wheres = ref 0 and loops = ref 0 in
+  walk llc
+    ~on_stmt:(function
+      | LL.If _ -> Int.incr ifs | LL.For_loop _ -> Int.incr loops | _ -> ())
+    ~on_ternop:(function Ops.Where -> Int.incr wheres | _ -> ());
+  (!ifs, !wheres, !loops)
+
+(** {1 Loop queries}
+
+    Locating a loop in an optimized or scheduled nest is the other thing every such test writes for
+    itself, and the two ways it goes wrong are not visible in the result: a walk that stops at
+    statement positions misses the loops an accumulation mints inside a [Local_scope], and a
+    first-match on extent alone silently picks an initialization loop that happens to share the
+    extent of the reduction nest one axis out (gh-ocannl-608). Both are decided once here: the scope
+    descent by {!hooks.h_in_scopes}, the disambiguation by making the enclosing loops part of what a
+    query sees. *)
+
+type loop_site = {
+  ls_index : Idx.symbol;  (** The symbol the loop binds. *)
+  ls_extent : int;  (** [to_ - from_ + 1], the iteration count. *)
+  ls_stmt : LL.t;  (** The [For_loop] statement itself, as a standalone routine. *)
+  ls_ancestors : loop_site list;
+      (** The loops enclosing it, innermost first — what tells a reduction nest from an
+          initialization loop of the same extent. *)
+}
+
+(** Every [For_loop], in preorder, with its enclosing loops. Derived from the one traversal above
+    via its exit hook, so a new IR constructor is still handled in exactly one place. *)
+let loop_sites ?in_scopes (llc : LL.t) : loop_site list =
+  let stack = ref [] and found = ref [] in
+  walk ?in_scopes llc
+    ~on_stmt:(fun s ->
+      match s with
+      | LL.For_loop { index; from_; to_; _ } ->
+          let site =
+            { ls_index = index; ls_extent = to_ - from_ + 1; ls_stmt = s; ls_ancestors = !stack }
+          in
+          found := site :: !found;
+          stack := site :: !stack
+      | _ -> ())
+    ~on_exit:(fun s ->
+      match s with LL.For_loop _ -> stack := List.tl_exn !stack | _ -> ());
+  List.rev !found
+
+(** The first loop (in preorder) satisfying [f]. *)
+let find_loop ?in_scopes ~f llc = List.find (loop_sites ?in_scopes llc) ~f
+
+(** The first loop with the given iteration count, as the symbol it binds. Prefer {!find_nest} where
+    an initialization loop can share the extent: this answers "some loop of that extent", which is
+    the weaker question. *)
+let find_loop_with_extent ?in_scopes ~n llc =
+  Option.map (find_loop ?in_scopes ~f:(fun s -> s.ls_extent = n) llc) ~f:(fun s -> s.ls_index)
+
+(** The first loop of extent [inner_n] enclosed by one of extent [outer_n], as the pair of symbols
+    (outer, inner) — the reduction nest of a pooling forward, past the initialization loop over the
+    same extent. The outer is the {e innermost} enclosing loop of that extent. *)
+let find_nest ?in_scopes ~outer_n ~inner_n llc =
+  List.find_map (loop_sites ?in_scopes llc) ~f:(fun site ->
+      if site.ls_extent <> inner_n then None
+      else
+        Option.map
+          (List.find site.ls_ancestors ~f:(fun a -> a.ls_extent = outer_n))
+          ~f:(fun outer -> (outer.ls_index, site.ls_index)))
+
+(** Whether any loop binds [sym]. With [~in_scopes:false], whether one does through statement
+    positions alone. *)
+let binds_loop ?in_scopes sym llc =
+  List.exists (loop_sites ?in_scopes llc) ~f:(fun s -> Idx.equal_symbol s.ls_index sym)
+
+(** How many loops bind [sym] — the copies a materializing [Unroll] leaves behind. *)
+let count_loops ?in_scopes sym llc =
+  List.count (loop_sites ?in_scopes llc) ~f:(fun s -> Idx.equal_symbol s.ls_index sym)
+
+(** The first loop binding [sym], as a standalone routine: the slice of the code a first-match probe
+    speaks for. *)
+let first_binding ?in_scopes sym llc =
+  Option.map
+    (find_loop ?in_scopes ~f:(fun s -> Idx.equal_symbol s.ls_index sym) llc)
+    ~f:(fun s -> s.ls_stmt)
 
 (** The [is_complex] fact recorded for [tn] by the structural facts pass. *)
 let is_complex (o : LL.optimized) tn = (Hashtbl.find_exn o.LL.traced_store tn).LL.is_complex

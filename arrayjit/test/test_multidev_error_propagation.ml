@@ -9,7 +9,6 @@
    re-raise the original exception, so the check is timing-robust. *)
 
 open Base
-open Stdio
 
 module Mock_raw = struct
   let name = "mockdev"
@@ -48,10 +47,11 @@ let () =
     (Ir.Task.Task { context_lifetime = (); description = "ok"; work = (fun () -> ran := true) });
   let e_ok = Sched.all_work dev in
   Sched.sync e_ok;
-  printf "healthy device: task ran = %b, event done = %b\n" !ran (Sched.is_done e_ok);
+  Verdict.p "healthy device: task ran" !ran;
+  Verdict.p "healthy device: event done" (Sched.is_done e_ok);
   Sched.schedule_task dev
     (Ir.Task.Task
        { context_lifetime = (); description = "boom"; work = (fun () -> failwith "boom") });
-  printf "sync surfaces worker failure = %b\n"
+  Verdict.p "sync surfaces worker failure"
     (raised_boom (fun () -> Sched.sync (Sched.all_work dev)));
-  printf "await re-raises worker failure = %b\n" (raised_boom (fun () -> Sched.await dev))
+  Verdict.p "await re-raises worker failure" (raised_boom (fun () -> Sched.await dev))

@@ -50,12 +50,12 @@ let () =
 
   (* --- Mismatch path: producer transfers a.value, consumer expects b.value. --- *)
   (match Backend.device_to_device a.value ~into_merge_buffer:Copy ~dst:src ~src with
-  | None -> Stdio.printf "UNEXPECTED: device_to_device a.value returned None\n"
+  | None -> Verdict.fail "device_to_device a.value returned None"
   | Some transfer_a -> (
       (* device_to_device must NOT have eagerly scheduled the copy: the old implementation set the
          stream's [updating_for_merge_buffer] immediately via [update_writer_event]. With the
          routine-returning form it stays unset until [transfer_a.schedule] is run. *)
-      Stdio.printf "no eager side effect (updating_for_merge_buffer still None) = %b\n"
+      Verdict.p "no eager side effect (updating_for_merge_buffer still None)"
         (Option.is_none src.device.updating_for_merge_buffer);
       try
         let _ = Backend.link transfer_a.context consumer_code in
@@ -64,7 +64,7 @@ let () =
 
   (* --- Matched path: producer transfers b.value, consumer expects b.value. --- *)
   (match Backend.device_to_device b.value ~into_merge_buffer:Copy ~dst:src ~src with
-  | None -> Stdio.printf "UNEXPECTED: device_to_device b.value returned None\n"
+  | None -> Verdict.fail "device_to_device b.value returned None"
   | Some transfer_b ->
       let consumer_routine = Backend.link transfer_b.context consumer_code in
       (* End to end: transfer copies b.value ([3 4]) into the merge buffer, the consumer copies it

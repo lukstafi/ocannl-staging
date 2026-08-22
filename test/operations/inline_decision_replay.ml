@@ -16,88 +16,29 @@
 open Base
 module LL = Ir.Low_level
 module Tn = Ir.Tnode
-module Ops = Ir.Ops
 
-let single = Ir.Ops.single
-let next_id = ref 2000
-
-let mk ?(dims = [| 3 |]) label =
-  Int.incr next_id;
-  Tn.create (Tn.Specified single) ~id:!next_id ~label:[ label ]
-    ~unpadded_dims:(lazy dims)
-    ~padding:(lazy None)
-    ()
-
-let materialize tn = Tn.update_memory_mode tn Tn.On_device 99
-let sym () = Ir.Indexing.get_symbol ()
-let iter s = Ir.Indexing.Iterator s
-let set s tn llsc : LL.t = LL.Set { tn; idcs = [| iter s |]; llsc; debug = "" }
-let get s tn : LL.scalar_t = LL.Get (tn, [| iter s |])
-let mul a b : LL.scalar_t = LL.Binop (Ops.Mul, (a, single), (b, single))
-let c x : LL.scalar_t = LL.Constant x
-let loop s body : LL.t = LL.For_loop { index = s; from_ = 0; to_ = 2; body; axis = Serial }
-let seq a b : LL.t = LL.Seq (a, b)
-
-let rec walk_t ~on_set ~on_get (llc : LL.t) =
-  match llc with
-  | LL.Noop | LL.Declare_local _ | LL.Comment _ | LL.Staged_compilation _ | LL.Workgroup_barrier
-  | LL.Tile_mma _ ->
-      ()
-  | LL.Seq (a, b) ->
-      walk_t ~on_set ~on_get a;
-      walk_t ~on_set ~on_get b
-  | LL.For_loop { body; _ } -> walk_t ~on_set ~on_get body
-  | LL.Zero_out tn -> on_set tn
-  | LL.Set { tn; llsc; _ } ->
-      on_set tn;
-      walk_s ~on_set ~on_get llsc
-  | LL.Set_dynamic { tn; dyn_value = v, _; llsc; _ } ->
-      on_set tn;
-      walk_s ~on_set ~on_get v;
-      walk_s ~on_set ~on_get llsc
-  | LL.Set_from_vec { tn; arg = s, _; _ } ->
-      on_set tn;
-      walk_s ~on_set ~on_get s
-  | LL.Set_local (_, s) -> walk_s ~on_set ~on_get s
-  | LL.If { cond = c, _; body } ->
-      walk_s ~on_set ~on_get c;
-      walk_t ~on_set ~on_get body
-
-and walk_s ~on_set ~on_get (s : LL.scalar_t) =
-  match s with
-  | LL.Constant _ | LL.Constant_bits _ | LL.Get_local _ | LL.Embed_index _ | LL.Get_merge_buffer _
-    ->
-      ()
-  | LL.Get (tn, _) -> on_get tn
-  | LL.Get_dynamic { tn; dyn_value = v, _; _ } ->
-      on_get tn;
-      walk_s ~on_set ~on_get v
-  | LL.Local_scope { body; _ } -> walk_t ~on_set ~on_get body
-  | LL.Ternop (_, (a, _), (b, _), (d, _)) ->
-      walk_s ~on_set ~on_get a;
-      walk_s ~on_set ~on_get b;
-      walk_s ~on_set ~on_get d
-  | LL.Binop (_, (a, _), (b, _)) ->
-      walk_s ~on_set ~on_get a;
-      walk_s ~on_set ~on_get b
-  | LL.Unop (_, (a, _)) -> walk_s ~on_set ~on_get a
-
-let count_set (o : LL.optimized) tn =
-  let n = ref 0 in
-  walk_t ~on_set:(fun t -> if t.Tn.id = tn.Tn.id then Int.incr n) ~on_get:(fun _ -> ()) o.llc;
-  !n
-
-let count_get (o : LL.optimized) tn =
-  let n = ref 0 in
-  walk_t ~on_set:(fun _ -> ()) ~on_get:(fun t -> if t.Tn.id = tn.Tn.id then Int.incr n) o.llc;
-  !n
+(* Nodes, builders, traversal and counters come from [Ll_test] (gh-ocannl-600, gh-ocannl-608): this
+   file carried a verbatim copy of the exhaustive [Low_level.t] / [scalar_t] traversal pair and the
+   [count_set] / [count_get] derived from it, which is the artifact that has to be edited for every
+   new IR constructor and miscounts silently when it is not. *)
+let mk = Ll_test.node_factory ~first_id:2000 ~dims:[| 3 |] ()
+let materialize = Ll_test.materialize
+let sym = Ll_test.sym
+let iter = Ll_test.iter
+let set s tn llsc = Ll_test.set_at tn (iter s) llsc
+let get s tn = Ll_test.get tn [| iter s |]
+let mul = Ll_test.mul
+let c = Ll_test.c
+let loop s body = Ll_test.loop ~upto:2 s body
+let seq = Ll_test.seq
+let count_set = Ll_test.count_set
+let count_get = Ll_test.count_get
 
 let p = Verdict.p
 
 (* A reversed read [prod[2-j]]: position differs from the enclosing statement's write position, so
    unlike a plain copy it is not read-modify-write-exempt and counts toward the multiplicity. *)
-let get_rev s tn : LL.scalar_t =
-  LL.Get (tn, [| Ir.Indexing.Affine { symbols = [ (-1, s) ]; offset = 2 } |])
+let get_rev s tn : LL.scalar_t = Ll_test.get tn [| Ll_test.aff [ (-1, s) ] 2 |]
 
 let phase1 () =
   let x = mk "x" and prod = mk "prod" and oa = mk "oa" and ob = mk "ob" in

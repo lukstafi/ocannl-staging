@@ -14,7 +14,7 @@ Epoch 90: avg loss = 0.0
 Epoch 100: avg loss = 0.0
 
 Evaluating on 1000 test samples...
-Test loss below 2.0 = true
-Test accuracy above 25% = true
+Test loss below 2.0: true
+Test accuracy above 25%: true
 
 Training complete!

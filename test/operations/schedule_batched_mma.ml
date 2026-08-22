@@ -146,13 +146,12 @@ let () =
   (* --- Leading batch: out[b,s,j] += x[b,s,k] * w[k,j] --- *)
   let xv =
     NTDSL.init ~l:"xv" ~prec:Ir.Ops.single ~o:[ bt; ss; kk ]
-      ~f:(fun idcs ->
-        Float.of_int (((idcs.(0) * ss * kk) + (idcs.(1) * kk) + idcs.(2)) % 13) *. 0.25)
+      ~f:(Ll_test.cycle ~dims:[| bt; ss; kk |] ~modulus:13 ~offset:0. ~stride:0.25)
       ()
   in
   let wv =
     NTDSL.init ~l:"wv" ~prec:Ir.Ops.single ~o:[ kk; jj ]
-      ~f:(fun idcs -> (Float.of_int (((idcs.(0) * jj) + idcs.(1)) % 17) -. 8.) *. 0.5)
+      ~f:(Ll_test.cycle ~dims:[| kk; jj |] ~modulus:17 ~offset:(-8.) ~stride:0.5)
       ()
   in
   let%op lb0 = xv +* "bsk;kj=>bsj" wv in
@@ -164,19 +163,12 @@ let () =
   let hh = 2 in
   let att =
     NTDSL.init ~l:"att" ~prec:Ir.Ops.single ~o:[ bt; ss; hh; kk ]
-      ~f:(fun idcs ->
-        Float.of_int
-          (((idcs.(0) * ss * hh * kk) + (idcs.(1) * hh * kk) + (idcs.(2) * kk) + idcs.(3)) % 11)
-        *. 0.125)
+      ~f:(Ll_test.cycle ~dims:[| bt; ss; hh; kk |] ~modulus:11 ~offset:0. ~stride:0.125)
       ()
   in
   let vv =
     NTDSL.init ~l:"vv" ~prec:Ir.Ops.single ~o:[ bt; kk; hh; jj ]
-      ~f:(fun idcs ->
-        (Float.of_int
-           (((idcs.(0) * kk * hh * jj) + (idcs.(1) * hh * jj) + (idcs.(2) * jj) + idcs.(3)) % 7)
-        -. 3.)
-        *. 0.5)
+      ~f:(Ll_test.cycle ~dims:[| bt; kk; hh; jj |] ~modulus:7 ~offset:(-3.) ~stride:0.5)
       ()
   in
   let%op ib0 = att +* "bihk;bkhj=>bihj" vv in
@@ -196,7 +188,7 @@ let () =
   (* --- Variance-style self-product: must not be detected as a matmul site --- *)
   let x2 =
     NTDSL.init ~l:"x2" ~prec:Ir.Ops.single ~o:[ bt; ss; kk ]
-      ~f:(fun idcs -> Float.of_int (((idcs.(0) * ss * kk) + (idcs.(1) * kk) + idcs.(2)) % 5) *. 0.5)
+      ~f:(Ll_test.cycle ~dims:[| bt; ss; kk |] ~modulus:5 ~offset:0. ~stride:0.5)
       ()
   in
   let%op var = x2 +* "bsk;bsk=>bs" x2 in
@@ -361,12 +353,12 @@ let () =
      exact and any deviation the tolerance admits is the tensor core's own. *)
   let ss2 = 32 and kk2 = 32 and jj2 = 32 in
   let xb =
-    bf16_init ~l:"xb" ~o:[ bt; ss2; kk2 ] ~f:(fun idcs ->
-        Float.of_int (((idcs.(0) * ss2 * kk2) + (idcs.(1) * kk2) + idcs.(2)) % 3) *. 0.25)
+    bf16_init ~l:"xb" ~o:[ bt; ss2; kk2 ]
+      ~f:(Ll_test.cycle ~dims:[| bt; ss2; kk2 |] ~modulus:3 ~offset:0. ~stride:0.25)
   in
   let wb =
-    bf16_init ~l:"wb" ~o:[ kk2; jj2 ] ~f:(fun idcs ->
-        (Float.of_int (((idcs.(0) * jj2) + idcs.(1)) % 5) -. 2.) *. 0.5)
+    bf16_init ~l:"wb" ~o:[ kk2; jj2 ]
+      ~f:(Ll_test.cycle ~dims:[| kk2; jj2 |] ~modulus:5 ~offset:(-2.) ~stride:0.5)
   in
   bf16_leg ~tag:"batched_lb" ~build:(fun () ->
       let%op t = xb +* "bsk;kj=>bsj" wb in
@@ -375,17 +367,12 @@ let () =
   (* The interior-batch shape: [h] sits between the tile roles, so [lda]/[ldb]/[ldd] are all
      [hh]-times the minor dim (64 here, against minor dims of 32). *)
   let attb =
-    bf16_init ~l:"attb" ~o:[ bt; ss2; hh; kk2 ] ~f:(fun idcs ->
-        Float.of_int
-          (((idcs.(0) * ss2 * hh * kk2) + (idcs.(1) * hh * kk2) + (idcs.(2) * kk2) + idcs.(3)) % 3)
-        *. 0.25)
+    bf16_init ~l:"attb" ~o:[ bt; ss2; hh; kk2 ]
+      ~f:(Ll_test.cycle ~dims:[| bt; ss2; hh; kk2 |] ~modulus:3 ~offset:0. ~stride:0.25)
   in
   let vb =
-    bf16_init ~l:"vb" ~o:[ bt; kk2; hh; jj2 ] ~f:(fun idcs ->
-        (Float.of_int
-           (((idcs.(0) * kk2 * hh * jj2) + (idcs.(1) * hh * jj2) + (idcs.(2) * jj2) + idcs.(3)) % 5)
-        -. 2.)
-        *. 0.5)
+    bf16_init ~l:"vb" ~o:[ bt; kk2; hh; jj2 ]
+      ~f:(Ll_test.cycle ~dims:[| bt; kk2; hh; jj2 |] ~modulus:5 ~offset:(-2.) ~stride:0.5)
   in
   bf16_leg ~tag:"batched_ib" ~build:(fun () ->
       let%op t = attb +* "bihk;bkhj=>bihj" vb in

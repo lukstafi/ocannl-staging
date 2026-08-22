@@ -105,7 +105,7 @@
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND))
- (libraries base stdio ctypes arrayjit.ir))
+ (libraries base stdio ctypes arrayjit.ir arrayjit.verdict))
 
 (test
  (name test_vectorized_codegen)
@@ -132,7 +132,7 @@
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND))
- (libraries base stdio arrayjit.ir))
+ (libraries base stdio arrayjit.ir arrayjit.verdict))
 
 ; Metal backend tests. The Metal backend (the `metal` opam package + the
 ; `(optional)` `arrayjit.metal_backend` library) is Apple-only — `arrayjit.opam`
@@ -178,6 +178,7 @@
  (libraries
   base
   stdio
+  arrayjit.verdict
   (select
    test_metal_alloc.ml
    from
@@ -236,7 +237,7 @@
  (package arrayjit)
  (modules test_pool_segments)
  (deps ocannl_config test_pool_segments.expected)
- (libraries base stdio arrayjit.context))
+ (libraries base stdio arrayjit.context arrayjit.verdict))
 
 (test
  (name test_stage_b_where_debug)
@@ -263,4 +264,4 @@
  (deps
   ocannl_config
   (env_var OCANNL_BACKEND))
- (libraries base stdio arrayjit.ir arrayjit.context))
+ (libraries base stdio arrayjit.ir arrayjit.context arrayjit.verdict))

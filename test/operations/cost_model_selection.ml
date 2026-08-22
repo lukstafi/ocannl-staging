@@ -47,8 +47,11 @@ let capture comp =
 
 (* 16x16 x 16x16 matmul values, for correctness checks below. *)
 let n = 16
-let mav = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 7) *. 0.5)
-let mbv = Array.init (n * n) ~f:(fun i -> Float.of_int (i % 11) -. 4.)
+let mav =
+  Array.init (n * n) ~f:(Ll_test.cycle_flat ~dims:[| n; n |] ~modulus:7 ~offset:0. ~stride:0.5)
+
+let mbv =
+  Array.init (n * n) ~f:(Ll_test.cycle_flat ~dims:[| n; n |] ~modulus:11 ~offset:(-4.) ~stride:1.)
 
 let mm_expected =
   Array.init (n * n) ~f:(fun idx ->
@@ -167,8 +170,12 @@ let () =
      A 128x128 matmul is the smallest square size at which the C backend's packed mma sketches both
      get seeded and beat the default under this rule's bandwidth-dominant envelope. *)
   let m = 128 in
-  let av = Array.init (m * m) ~f:(fun i -> Float.of_int (i % 7) *. 0.5) in
-  let bv = Array.init (m * m) ~f:(fun i -> Float.of_int (i % 11) -. 4.) in
+  let av =
+    Array.init (m * m) ~f:(Ll_test.cycle_flat ~dims:[| m; m |] ~modulus:7 ~offset:0. ~stride:0.5)
+  in
+  let bv =
+    Array.init (m * m) ~f:(Ll_test.cycle_flat ~dims:[| m; m |] ~modulus:11 ~offset:(-4.) ~stride:1.)
+  in
   let expected =
     Array.init (m * m) ~f:(fun idx ->
         let i = idx / m and j = idx % m in

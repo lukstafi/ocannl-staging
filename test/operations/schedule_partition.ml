@@ -42,195 +42,41 @@ let nonzero name (a : float array) =
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
-(* The first [For_loop] (in preorder) with the given iteration count. *)
+(* The IR queries come from [Ll_test] (gh-ocannl-608), which decides the [Local_scope] descent once
+   for all of them: this file had grown six bespoke traversals of the same 14 statement and 9 scalar
+   constructors, each answering a one-line question and each getting that descent right (or not) on
+   its own — while the thing under test in section 6 is precisely where a loop lives. Where a query
+   below pins the statement-position-only reading, it says so with [~in_scopes:false]; that is the
+   walk [Schedule.find_loop] had before gh-ocannl-668, not a default. *)
+
+(* The first [For_loop] (in preorder) with the given iteration count, through statement positions.
+   Prefer [find_nest] wherever an initialization loop can share the extent of the reduction nest:
+   this answers the weaker question, and answered it with the wrong loop until gh-ocannl-608. *)
 let find_loop_with_extent ~n (llc : LL.t) : Idx.symbol option =
-  let found = ref None in
-  let rec go (llc : LL.t) =
-    if Option.is_none !found then
-      match llc with
-      | LL.For_loop { index; from_; to_; body; _ } ->
-          if to_ - from_ + 1 = n then found := Some index else go body
-      | LL.Seq (a, b) ->
-          go a;
-          go b
-      | LL.If { body; _ } -> go body
-      | _ -> ()
-  in
-  go llc;
-  !found
+  Ll_test.find_loop_with_extent ~in_scopes:false ~n llc
 
 (* Is a [For_loop] binding [sym] reachable through statement positions alone (the walk
    [Schedule.find_loop] had before gh-ocannl-668), and is it reachable at all (descending into
    [Local_scope] bodies, the way [rewrite_loop] reaches loops the accumulation mints wrapped in a
    scope)? Section 6 uses both to pin that its construction really is the scope-nested one. *)
-let binds_loop ~in_scopes sym (llc : LL.t) : bool =
-  let rec go (llc : LL.t) =
-    match llc with
-    | LL.For_loop { index; _ } when Idx.equal_symbol index sym -> true
-    | LL.For_loop { body; _ } | LL.If { body; _ } -> go body
-    | LL.Seq (a, b) -> go a || go b
-    | LL.Tile_mma { fallback; _ } -> go fallback
-    | LL.Set { llsc; _ } | LL.Set_local (_, llsc) -> scan llsc
-    | LL.Set_dynamic { dyn_value = v, _; llsc; _ } -> scan v || scan llsc
-    | LL.Set_from_vec { arg = a, _; _ } -> scan a
-    | LL.Noop | LL.Comment _ | LL.Staged_compilation _ | LL.Zero_out _ | LL.Declare_local _
-    | LL.Workgroup_barrier ->
-        false
-  and scan (sc : LL.scalar_t) =
-    in_scopes
-    &&
-    match sc with
-    | LL.Local_scope { body; _ } -> go body
-    | LL.Ternop (_, (a, _), (b, _), (c, _)) -> scan a || scan b || scan c
-    | LL.Binop (_, (a, _), (b, _)) -> scan a || scan b
-    | LL.Unop (_, (a, _)) -> scan a
-    | LL.Get_dynamic { dyn_value = v, _; _ } -> scan v
-    | LL.Get_local _ | LL.Get _ | LL.Get_merge_buffer _ | LL.Constant _ | LL.Constant_bits _
-    | LL.Embed_index _ ->
-        false
-  in
-  go llc
+let binds_loop ~in_scopes sym (llc : LL.t) : bool = Ll_test.binds_loop ~in_scopes sym llc
 
 (* The first [For_loop] of extent [outer_n] enclosing one of extent [inner_n], as a symbol pair —
    the reduction nest of a pooling forward, past the initialization loop over the same extent. *)
 let find_nest ~outer_n ~inner_n (llc : LL.t) : (Idx.symbol * Idx.symbol) option =
-  let found = ref None in
-  let rec go ~enclosing (llc : LL.t) =
-    if Option.is_none !found then
-      match llc with
-      | LL.For_loop { index; from_; to_; body; _ } ->
-          let extent = to_ - from_ + 1 in
-          (match enclosing with
-          | Some outer when extent = inner_n -> found := Some (outer, index)
-          | _ -> ());
-          go ~enclosing:(if extent = outer_n then Some index else enclosing) body
-      | LL.Seq (a, b) ->
-          go ~enclosing a;
-          go ~enclosing b
-      | LL.If { body; _ } -> go ~enclosing body
-      | _ -> ()
-  in
-  go ~enclosing:None llc;
-  !found
+  Ll_test.find_nest ~in_scopes:false ~outer_n ~inner_n llc
 
 (* How many [For_loop]s bind [sym] — the copies a materializing [Unroll] leaves behind, all of which
    [Sched.apply] rewrites. *)
-let count_loops sym (llc : LL.t) : int =
-  let n = ref 0 in
-  let rec go (llc : LL.t) =
-    match llc with
-    | LL.For_loop { index; body; _ } -> if Idx.equal_symbol index sym then Int.incr n else go body
-    | LL.If { body; _ } -> go body
-    | LL.Seq (a, b) ->
-        go a;
-        go b
-    | LL.Tile_mma { fallback; _ } -> go fallback
-    | LL.Set { llsc; _ } | LL.Set_local (_, llsc) -> scan llsc
-    | LL.Set_dynamic { dyn_value = v, _; llsc; _ } ->
-        scan v;
-        scan llsc
-    | LL.Set_from_vec { arg = a, _; _ } -> scan a
-    | LL.Noop | LL.Comment _ | LL.Staged_compilation _ | LL.Zero_out _ | LL.Declare_local _
-    | LL.Workgroup_barrier ->
-        ()
-  and scan (sc : LL.scalar_t) =
-    match sc with
-    | LL.Local_scope { body; _ } -> go body
-    | LL.Ternop (_, (a, _), (b, _), (c, _)) ->
-        scan a;
-        scan b;
-        scan c
-    | LL.Binop (_, (a, _), (b, _)) ->
-        scan a;
-        scan b
-    | LL.Unop (_, (a, _)) -> scan a
-    | LL.Get_dynamic { dyn_value = v, _; _ } -> scan v
-    | LL.Get_local _ | LL.Get _ | LL.Get_merge_buffer _ | LL.Constant _ | LL.Constant_bits _
-    | LL.Embed_index _ ->
-        ()
-  in
-  go llc;
-  !n
+let count_loops sym (llc : LL.t) : int = Ll_test.count_loops sym llc
 
 (* The first [For_loop] binding [sym] in preorder, as a standalone routine — the slice of the code a
    first-match probe used to speak for. *)
 let first_binding sym (llc : LL.t) : LL.t =
-  let found = ref None in
-  let rec go (llc : LL.t) =
-    if Option.is_none !found then
-      match llc with
-      | LL.For_loop { index; body; _ } ->
-          if Idx.equal_symbol index sym then found := Some llc else go body
-      | LL.If { body; _ } -> go body
-      | LL.Seq (a, b) ->
-          go a;
-          go b
-      | LL.Set { llsc; _ } | LL.Set_local (_, llsc) -> scan llsc
-      | LL.Set_dynamic { dyn_value = v, _; llsc; _ } ->
-          scan v;
-          scan llsc
-      | LL.Set_from_vec { arg = a, _; _ } -> scan a
-      | _ -> ()
-  and scan (sc : LL.scalar_t) =
-    match sc with
-    | LL.Local_scope { body; _ } -> go body
-    | LL.Ternop (_, (a, _), (b, _), (c, _)) ->
-        scan a;
-        scan b;
-        scan c
-    | LL.Binop (_, (a, _), (b, _)) ->
-        scan a;
-        scan b
-    | LL.Unop (_, (a, _)) -> scan a
-    | LL.Get_dynamic { dyn_value = v, _; _ } -> scan v
-    | _ -> ()
-  in
-  go llc;
-  Option.value_exn ~here:[%here] !found
+  Option.value_exn ~here:[%here] (Ll_test.first_binding sym llc)
 
 (* Structural census: statement [If] guards, scalar [Where] guards, and [For_loop]s. *)
-let census (llc : LL.t) : int * int * int =
-  let ifs = ref 0 and wheres = ref 0 and loops = ref 0 in
-  let rec go (llc : LL.t) =
-    match llc with
-    | LL.Noop | LL.Comment _ | LL.Staged_compilation _ | LL.Zero_out _ | LL.Declare_local _
-    | LL.Workgroup_barrier ->
-        ()
-    | LL.Seq (a, b) ->
-        go a;
-        go b
-    | LL.For_loop { body; _ } ->
-        Int.incr loops;
-        go body
-    | LL.If { cond = c, _; body } ->
-        Int.incr ifs;
-        scan c;
-        go body
-    | LL.Tile_mma { fallback; _ } -> go fallback
-    | LL.Set { llsc; _ } | LL.Set_local (_, llsc) -> scan llsc
-    | LL.Set_dynamic { dyn_value = v, _; llsc; _ } ->
-        scan v;
-        scan llsc
-    | LL.Set_from_vec { arg = a, _; _ } -> scan a
-  and scan (sc : LL.scalar_t) =
-    match sc with
-    | LL.Ternop (op, (a, _), (b, _), (c, _)) ->
-        if Ir.Ops.equal_ternop op Ir.Ops.Where then Int.incr wheres;
-        scan a;
-        scan b;
-        scan c
-    | LL.Binop (_, (a, _), (b, _)) ->
-        scan a;
-        scan b
-    | LL.Unop (_, (a, _)) -> scan a
-    | LL.Local_scope { body; _ } -> go body
-    | LL.Get_dynamic { dyn_value = v, _; _ } -> scan v
-    | LL.Get_local _ | LL.Get _ | LL.Get_merge_buffer _ | LL.Constant _ | LL.Constant_bits _
-    | LL.Embed_index _ ->
-        ()
-  in
-  go llc;
-  (!ifs, !wheres, !loops)
+let census (llc : LL.t) : int * int * int = Ll_test.census llc
 
 let run_with name transform (t : Tensor.t) =
   let ctx = Context.auto () in

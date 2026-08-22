@@ -151,9 +151,9 @@ let () =
   Stdio.printf "w after 2-shard step  = [%s]\n"
     (String.concat ~sep:" " (Array.to_list (Array.map p2 ~f:(Printf.sprintf "%.6f"))));
   let close = Array.for_all2_exn p1 p2 ~f:(fun a b -> Float.(abs (a - b) < 1e-4)) in
-  Stdio.printf "data-parallel parity with single-shard baseline = %b\n" close;
-  Stdio.printf "driver routes per-shard seed into RNG = %b\n" (driver_routes_seed_into_shards ());
-  Stdio.printf "shards seeded distinctly (base_seed + i) = %b\n" (shards_seeded_distinctly ());
-  Stdio.printf "global random-seed singleton preserved across data_parallel = %b\n"
+  Verdict.p "data-parallel parity with single-shard baseline" close;
+  Verdict.p "driver routes per-shard seed into RNG" (driver_routes_seed_into_shards ());
+  Verdict.p "shards seeded distinctly (base_seed + i)" (shards_seeded_distinctly ());
+  Verdict.p "global random-seed singleton preserved across data_parallel"
     (seed_singleton_preserved ());
-  Stdio.printf "multi-step via set_batch ok = %b\n" (multistep_ok ())
+  Verdict.p "multi-step via set_batch ok" (multistep_ok ())

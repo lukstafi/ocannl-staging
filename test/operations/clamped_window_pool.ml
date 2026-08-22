@@ -54,83 +54,24 @@ let padding_to_string (tn : Ir.Tnode.t) =
              |> List.map ~f:(fun Ir.Ops.{ left; right } -> Printf.sprintf "%d/%d" left right)))
           (Float.to_string elem)
 
+(* Structural census and loop location come from [Ll_test] (gh-ocannl-608), which decides the
+   [Local_scope] descent once instead of once per hand-written walk. *)
+
 (* Structural census: statement [If] guards, scalar [Where] guards, and [For_loop]s. *)
-let census (llc : LL.t) : int * int * int =
-  let ifs = ref 0 and wheres = ref 0 and loops = ref 0 in
-  let rec go (llc : LL.t) =
-    match llc with
-    | LL.Noop | LL.Comment _ | LL.Staged_compilation _ | LL.Zero_out _ | LL.Declare_local _
-    | LL.Workgroup_barrier ->
-        ()
-    | LL.Seq (a, b) ->
-        go a;
-        go b
-    | LL.For_loop { body; _ } ->
-        Int.incr loops;
-        go body
-    | LL.If { cond = c, _; body } ->
-        Int.incr ifs;
-        scan c;
-        go body
-    | LL.Tile_mma { fallback; _ } -> go fallback
-    | LL.Set { llsc; _ } | LL.Set_local (_, llsc) -> scan llsc
-    | LL.Set_dynamic { dyn_value = v, _; llsc; _ } ->
-        scan v;
-        scan llsc
-    | LL.Set_from_vec { arg = a, _; _ } -> scan a
-  and scan (sc : LL.scalar_t) =
-    match sc with
-    | LL.Ternop (op, (a, _), (b, _), (c, _)) ->
-        if Ir.Ops.equal_ternop op Ir.Ops.Where then Int.incr wheres;
-        scan a;
-        scan b;
-        scan c
-    | LL.Binop (_, (a, _), (b, _)) ->
-        scan a;
-        scan b
-    | LL.Unop (_, (a, _)) -> scan a
-    | LL.Local_scope { body; _ } -> go body
-    | LL.Get_dynamic { dyn_value = v, _; _ } -> scan v
-    | LL.Get_local _ | LL.Get _ | LL.Get_merge_buffer _ | LL.Constant _ | LL.Constant_bits _
-    | LL.Embed_index _ ->
-        ()
-  in
-  go llc;
-  (!ifs, !wheres, !loops)
+let census (llc : LL.t) : int * int * int = Ll_test.census llc
 
 (* The pool's output loop: the first (preorder) statement-level [For_loop] of extent [n] whose
    subtree carries a clamp guard — distinguishing it from the result's initialization loop of the
-   same extent. *)
+   same extent, which is the disambiguation a match on extent alone gets wrong. *)
 let find_pool_loop ~n (llc : LL.t) : Idx.symbol option =
-  let rec has_guard (llc : LL.t) =
-    match llc with
-    | LL.For_loop { body; _ } -> has_guard body
-    | LL.Seq (a, b) -> has_guard a || has_guard b
-    | LL.If _ -> true
-    | LL.Set { llsc; _ } -> scan llsc
-    | _ -> false
-  and scan (sc : LL.scalar_t) =
-    match sc with
-    | LL.Ternop (op, (a, _), (b, _), (c, _)) ->
-        Ir.Ops.equal_ternop op Ir.Ops.Where || scan a || scan b || scan c
-    | LL.Binop (_, (a, _), (b, _)) -> scan a || scan b
-    | LL.Unop (_, (a, _)) -> scan a
-    | _ -> false
+  let guarded stmt =
+    let ifs, wheres, _ = census stmt in
+    ifs > 0 || wheres > 0
   in
-  let found = ref None in
-  let rec go (llc : LL.t) =
-    if Option.is_none !found then
-      match llc with
-      | LL.For_loop { index; from_; to_; body; _ } ->
-          if to_ - from_ + 1 = n && has_guard body then found := Some index else go body
-      | LL.Seq (a, b) ->
-          go a;
-          go b
-      | LL.If { body; _ } -> go body
-      | _ -> ()
-  in
-  go llc;
-  !found
+  Option.map
+    (Ll_test.find_loop ~in_scopes:false llc ~f:(fun site ->
+         site.Ll_test.ls_extent = n && guarded site.Ll_test.ls_stmt))
+    ~f:(fun site -> site.Ll_test.ls_index)
 
 let close a b = Array.for_all2_exn a b ~f:(fun x y -> Float.(abs (x - y) < 1e-5))
 let fa a = String.concat ~sep:" " (Array.to_list a |> List.map ~f:(fun v -> Printf.sprintf "%g" v))
