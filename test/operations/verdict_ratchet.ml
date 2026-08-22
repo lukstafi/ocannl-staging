@@ -82,6 +82,10 @@ let exempt_sites : (string * string) list = []
    whose test has no such claim beside it is an exemption that should not have been granted. *)
 let exempt_computed_sites =
   [
+    ( "test/support/verdict.ml:%s: ",
+      "the body of `Verdict.p` itself -- the claim printer every converted site routes THROUGH, \
+       which is the one place in the tree where printing `<label>: <bool>` is the gate rather than \
+       a way around it" );
     ( "test/operations/affine_extraction.ml:%s %s parallelizable: ",
       "the per-symbol parallelizability table: a reduced axis is legitimately not parallelizable, \
        so `false` is a fact the golden pins rather than a defect" );

@@ -15,16 +15,20 @@ ok: claim shape -- the planted canary over a continuation
 ok: computed claim shape -- a leading string argument
 ok: computed claim shape -- an interpolated measurement
 ok: computed claim shape -- arguments on both sides of the label
+ok: computed claim shape -- a label built entirely from arguments
+ok: computed claim shape -- the same with a width
+ok: computed claim shape -- a numeric label
 ok: computed claim shape -- a second boolean before the last
 ok: claim head -- conversions are left unrendered
 ok: claim head -- a width is kept
 ok: claim head -- an earlier boolean is kept
+ok: claim head -- a wholly computed label keeps its conversion
 ok: not a claim -- an interpolated value after the boolean
 ok: not a claim -- an annotation after the boolean
 ok: not a claim -- a width means the print is laying out a column
 ok: not a claim -- so does a left-justifying flag
 ok: not a claim -- no colon, so no label
-ok: not a claim -- no label before the colon
+ok: not a claim -- no label before the colon, and no argument to make one
 ok: not a claim -- a bare boolean
 ok: not a claim -- nothing before it but a blank line
 ok: not a claim -- not a boolean at all

@@ -63,6 +63,13 @@ let computed_cases =
     ("a leading string argument", "%s fused: %b\n", "fused");
     ("an interpolated measurement", "Epoch %d, loss below threshold=%b\n", "Epoch , loss below threshold");
     ("arguments on both sides of the label", "%s %s parallelizable: %b\n", "parallelizable");
+    (* The wrapper the pre-`Verdict` tests defined for themselves, and the exact shape this ratchet
+       exists to keep from regrowing: the whole label is the argument, so the rendered residual is
+       empty and the verbatim head has to speak for it. Reading that empty residual as "no label"
+       would have let the one form that matters straight back in (Codex P2, round 1). *)
+    ("a label built entirely from arguments", "%s: %b\n", "%s");
+    ("the same with a width", "%-22s: %b\n", "%-22s");
+    ("a numeric label", "%d: %b\n", "%d");
     (* A census row of several booleans is this shape too, and that is the intent: it is the row
        shape that needs an exemption, precisely because a reader cannot tell it from a verdict. *)
     ("a second boolean before the last", "fused: %b %b\n", "fused");
@@ -78,7 +85,9 @@ let non_claim_cases =
     ("a width means the print is laying out a column", "fused: %6b\n");
     ("so does a left-justifying flag", "fused: %-6b\n");
     ("no colon, so no label", "fused? %b\n");
-    ("no label before the colon", ": %b\n");
+    (* Empty residual AND nothing to build one from: a literal label has to be non-empty, which is
+       what keeps this out while `"%s: %b\n"` is in. *)
+    ("no label before the colon, and no argument to make one", ": %b\n");
     ("a bare boolean", "%b\n");
     ("nothing before it but a blank line", "\n%b\n");
     ("not a boolean at all", "fused: %d\n");
@@ -163,6 +172,7 @@ let () =
       ("conversions are left unrendered", "%s fused: %b\n", "%s fused: ");
       ("a width is kept", "%-22s option: %b\n", "%-22s option: ");
       ("an earlier boolean is kept", "fused: %b tiled: %b\n", "fused: %b tiled: ");
+      ("a wholly computed label keeps its conversion", "%s: %b\n", "%s: ");
     ]
     ~f:(fun (name, format, expected) ->
       match Scan.claim_site format with

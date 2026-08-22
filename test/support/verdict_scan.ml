@@ -105,22 +105,23 @@ let directives format =
   in
   scan 0 []
 
-(** What a reader sees printed by a stretch of format text that consumes no arguments: [%%] becomes
-    a per cent sign, [%!] and [%,] print nothing, everything else is itself. Applied to the text
-    before and after the [%b], where by construction every directive left is one of those. *)
+(** What a reader sees printed by a stretch of format text, with the arguments left out: [%%] is a
+    per cent sign, every other directive contributes nothing this reader can know, and the rest is
+    itself. Applied to the text before and after the [%b].
+
+    It removes each directive by the SPAN {!directives} found, flags and width included, rather than
+    by a fixed two characters — otherwise [%-22s] leaves ["22s"] behind and a claim's rendered label
+    reads as that debris. The span is also what keeps the tail check honest, since a directive there
+    prints nothing whatever its width. *)
 let printed_text text =
-  let length = String.length text in
-  let buffer = Buffer.create length in
-  let rec scan index =
-    if index >= length then Buffer.contents buffer
-    else if Char.equal text.[index] '%' && index + 1 < length then (
-      if Char.equal text.[index + 1] '%' then Buffer.add_char buffer '%';
-      scan (index + 2))
-    else (
-      Buffer.add_char buffer text.[index];
-      scan (index + 1))
-  in
-  scan 0
+  let buffer = Buffer.create (String.length text) in
+  let cursor = ref 0 in
+  List.iter (directives text) ~f:(fun directive ->
+      Buffer.add_string buffer (String.sub text ~pos:!cursor ~len:(directive.start - !cursor));
+      if Char.equal directive.conversion '%' then Buffer.add_char buffer '%';
+      cursor := directive.stop + 1);
+  Buffer.add_string buffer (String.subo text ~pos:!cursor);
+  Buffer.contents buffer
 
 type kind =
   | Literal_label  (** The [%b] is the format's only conversion: the label is written out. *)
@@ -145,7 +146,11 @@ let separators = [ "->"; ":"; "=" ]
     So ["k-blocks fused: %b\n"] yields [Some ("k-blocks fused", Literal_label)] and
     ["%s fused: %b\n"] yields [Some ("fused", Computed_label)] — the second's label is what survives
     rendering the head, which drops the conversions it cannot fill in, so it is a report's hint
-    rather than the site's identity; an exemption for a computed site is keyed by the whole format.
+    rather than the site's identity; an exemption for a computed site is keyed by the head.
+
+    A computed label may render to NOTHING and still be a claim: ["%s: %b\n"] is the wrapper the
+    pre-[Verdict] tests defined for themselves, and the whole of its label is the argument. Only a
+    LITERAL label has to be non-empty, because there the residual is all there was.
     ["fused: %b (expect false)\n"] and ["fused? %b\n"] yield [None]: neither is the bare claim form,
     and a reader cannot take their boolean at face value. *)
 (** {!claim_of} together with the verbatim head, which is what names a computed site. *)
@@ -158,17 +163,34 @@ let claim_site format =
       let tail = printed_text (String.subo format ~pos:(stop + 1)) in
       if not (String.for_all tail ~f:Char.is_whitespace) then None
       else
-        let head = String.rstrip (printed_text (String.sub format ~pos:0 ~len:start)) in
+        let verbatim = String.sub format ~pos:0 ~len:start in
+        let head = String.rstrip (printed_text verbatim) in
+        let kind = if List.length consuming = 1 then Literal_label else Computed_label in
         Option.bind
-          (List.find_map separators ~f:(fun sep -> String.chop_suffix head ~suffix:sep))
-          ~f:(fun label ->
-            let label = String.strip label in
-            if String.is_empty label then None
+          (List.find_map separators ~f:(fun sep ->
+               Option.map (String.chop_suffix head ~suffix:sep) ~f:(fun label ->
+                   (sep, String.strip label))))
+          ~f:(fun (separator, label) ->
+            if not (String.is_empty label) then Some (label, kind, verbatim)
             else
-              Some
-                ( label,
-                  (if List.length consuming = 1 then Literal_label else Computed_label),
-                  String.sub format ~pos:0 ~len:start ))
+              match kind with
+              (* Nothing before the separator and nothing to build it from: [": %b"] names no fact.
+              *)
+              | Literal_label -> None
+              (* The label is built ENTIRELY from arguments — [Stdio.printf "%s: %b\n" name b], which
+                 is not an edge case but THE shape: it is the wrapper several tests defined before
+                 [Verdict] existed, the one gh-ocannl-668 was written to keep from regrowing, and the
+                 one this reader would have let straight back in by treating its empty residual as
+                 "no label". A residual is empty here because every character of the label was a
+                 conversion, which makes the claim more computed, not less. Reported under the
+                 verbatim head, which is also what names it in an exemption. *)
+              | Computed_label ->
+                  let shown = String.rstrip verbatim in
+                  let shown =
+                    Option.value (String.chop_suffix shown ~suffix:separator) ~default:shown
+                  in
+                  let shown = String.strip shown in
+                  Some ((if String.is_empty shown then "<computed>" else shown), kind, verbatim))
   | _ -> None
 
 (** The label and kind of the claim [format] prints, when it prints one. *)
