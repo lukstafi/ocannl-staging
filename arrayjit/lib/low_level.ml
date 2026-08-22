@@ -5272,6 +5272,40 @@ let peel_accum_nest ?(extra_level = fun _ _ -> false) ~free_of body :
         List.exists symbols ~f:(fun (_, s) -> Indexing.equal_symbol s sym)
     | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> false
   in
+  (* A peeled guard has to VARY with the levels being peeled. [rebuild] keeps a guard around the
+     accumulating update only, so the localized form performs its opening load and its closing store
+     OUTSIDE it — which is the original's behaviour exactly when the guard's truth is not fixed for
+     the whole nest. A guard invariant across the peeled levels is fixed for the whole nest, and
+     hoisting the accesses out of it turns "this instance performs no access" into a load and a
+     store. Across an enclosing HARDWARE axis that is a data race, not merely wasted work: for
+     [Workgroup w -> Serial k -> If (w < 1) (acc[0] += x[k])] every lane would load [acc[0]] and
+     write its unchanged local back, so a lane reading before lane 0's store and writing after it
+     silently discards the reduction. The gh-490 symbolic-extent shape [If (i < s)] is unaffected —
+     it mentions the peeled [i], so its truth varies across the very levels being peeled, and the
+     nest as a whole runs. Keeping such a guard around the whole scope instead of declining would
+     also be sound and would localize more; it needs the peel to report its outer guards separately,
+     which is a wider change than the correctness fix. *)
+  let guard_symbols (llsc : scalar_t) =
+    let of_index (idx : Indexing.axis_index) =
+      match idx with
+      | Indexing.Iterator s -> [ s ]
+      | Indexing.Affine { symbols; _ } -> List.map symbols ~f:snd
+      | Indexing.Fixed_idx _ | Indexing.Sub_axis | Indexing.Concat _ -> []
+    in
+    let rec go acc (s : scalar_t) =
+      match s with
+      | Embed_index idx -> of_index idx @ acc
+      | Binop (_, (a, _), (b, _)) -> go (go acc a) b
+      | Unop (_, (a, _)) -> go acc a
+      | Ternop (_, (a, _), (b, _), (c, _)) -> go (go (go acc a) b) c
+      | _ -> acc
+    in
+    go [] llsc
+  in
+  let guard_varies_with ~free_of gc =
+    List.exists (guard_symbols gc) ~f:(fun s ->
+        List.exists free_of ~f:(Indexing.equal_symbol s))
+  in
   let cell_invariant ~free_of idcs =
     not (Array.exists idcs ~f:(fun idx -> List.exists free_of ~f:(fun s -> idx_mentions s idx)))
   in
@@ -5306,7 +5340,8 @@ let peel_accum_nest ?(extra_level = fun _ _ -> false) ~free_of body :
         peel ~free_of:(index :: free_of)
           ~rebuild:(fun b -> rebuild (For_loop { r with body = b }))
           ibody
-    | [ If { cond = gc, gp; body = gbody } ] when pure_index_guard gc ->
+    | [ If { cond = gc, gp; body = gbody } ]
+      when pure_index_guard gc && guard_varies_with ~free_of gc ->
         peel ~free_of ~rebuild:(fun b -> rebuild (If { cond = (gc, gp); body = b })) gbody
     | [ Set { tn; idcs; llsc = Local_scope { id; body = sbody; orig_indices = _ }; debug } ]
       when cell_invariant ~free_of idcs -> (

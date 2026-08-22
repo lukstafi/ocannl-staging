@@ -201,6 +201,19 @@ files.
   exactly a dead level's access-free meaning. That abort was reachable before gh-ocannl-693 for a
   dead `Unrolled` level whose body is not a recognized accumulation; refusing to peel the
   accumulating ones widened its reach, which is how it surfaced.
+- **A peeled guard must VARY with the levels being peeled.** `rebuild` keeps a guard around the
+  accumulating update only, so the localized form performs its opening load and closing store
+  OUTSIDE it — right when the guard's truth is not fixed for the whole nest, wrong when it is.
+  A guard invariant across the peeled levels is fixed for the whole nest, so hoisting the accesses
+  out of it turns "this instance performs no access" into a load and a store; across an enclosing
+  HARDWARE axis that is a data race, not merely wasted work. For
+  `Workgroup w -> Serial k -> If (w < 1) (acc[0] += x[k])` every lane would load `acc[0]` and write
+  its unchanged local back, so a lane reading before lane 0's store and writing after it silently
+  discards the reduction — the same 1/N fingerprint as the Metal RMW miscompile, from a different
+  cause. The gh-490 symbolic-extent shape `If (i < s)` mentions the peeled `i`, so it is unaffected
+  and must stay peelable (`peel_dead_level.ml` carries it as the control). Keeping such a guard
+  around the whole scope instead of declining would also be sound and would localize more; it needs
+  the peel to report its outer guards separately, which is wider than the correctness fix.
 - The interaction with Metal's `volatile_scalar_rmw` needs no special case, and that is worth
   knowing before adding one: the shadow keys on the emitted `Set` reading its own node at a cell
   invariant across an enclosing SERIAL loop, and localization lifts the `Set` out of exactly those

@@ -73,6 +73,57 @@ let () =
   Verdict.p "a dead accumulation level is refused" (not (peels ~upto:(-1)));
   Verdict.p "an emptier dead level is refused" (not (peels ~upto:(-5)))
 
+(* A peeled guard must VARY with the levels being peeled (gh-ocannl-693, Codex P1 on PR #421).
+
+   [rebuild] keeps a guard around the accumulating update only, so the localized form performs its
+   opening load and its closing store OUTSIDE it. That matches the original exactly when the guard's
+   truth is not fixed for the whole nest. A guard invariant across the peeled levels is fixed for the
+   whole nest, and hoisting the accesses out of it turns "this instance performs no access" into a
+   load and a store. Across an enclosing HARDWARE axis that is a data race rather than wasted work:
+   for [Workgroup w -> Serial k -> If (w < 1) (acc[0] += x[k])] every lane loads [acc[0]] and writes
+   its unchanged local back, so a lane reading before lane 0's store and writing after it silently
+   discards the reduction.
+
+   The control is the gh-490 symbolic-extent shape, whose guard mentions the peeled index: it must
+   still peel, or the refusal has disabled the feature for every padded window rather than closing
+   the race. *)
+let guarded_nest ~guard_sym =
+  let k = Idx.get_symbol () in
+  let g = match guard_sym with `Peeled -> k | `Enclosing s -> s in
+  LL.For_loop
+    {
+      index = k;
+      from_ = 0;
+      to_ = 3;
+      axis = LL.Serial;
+      body =
+        LL.If
+          {
+            cond = (LL.Binop (Ops.Cmplt, (LL.Embed_index (Idx.Iterator g), single),
+                              (LL.Constant 1.0, single)), single);
+            body =
+              LL.Set
+                {
+                  tn = acc;
+                  idcs = [| Idx.Fixed_idx 0 |];
+                  llsc =
+                    LL.Binop
+                      ( Ops.Add,
+                        (LL.Get (acc, [| Idx.Fixed_idx 0 |]), single),
+                        (LL.Get (src, [| Idx.Iterator k |]), single) );
+                  debug = "";
+                };
+          };
+    }
+
+let () =
+  let enclosing = Idx.get_symbol () in
+  Verdict.p "a guard varying with the peeled index still peels"
+    (Option.is_some (LL.peel_accum_nest ~free_of:[] (guarded_nest ~guard_sym:`Peeled)));
+  Verdict.p "a guard invariant across the peeled levels is refused"
+    (Option.is_none
+       (LL.peel_accum_nest ~free_of:[] (guarded_nest ~guard_sym:(`Enclosing enclosing))))
+
 (* Having refused to peel it, codegen must still RENDER a dead level — and the [Unrolled] arm is
    where that is not free: it repeats the body [to_ - from_ + 1] times, and [Base.List.init] RAISES
    on a negative length rather than answering the empty list. Zero repetitions is exactly a dead
