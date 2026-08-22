@@ -146,66 +146,102 @@ let is_blank line = String.is_empty (String.strip line)
 (** Half-open [(start, stop)] character ranges of the inline code spans of a line, CommonMark's
     rule: a run of N backticks opens a span that the next run of exactly N closes, and a run with no
     partner opens nothing. The ranges include the delimiters. *)
-(** The backtick RUNS of a line, as [(position, length)] pairs. Separated out because span pairing
-    happens at two scopes now — within a line, and across the lines of a paragraph — and both need
-    the same notion of a run. *)
-let backtick_runs line =
+(** {2 Inert regions: one lexer, both states}
+
+    Two things in these notes hold text that is NOT content — inline code spans and HTML comments —
+    and every rule above depends on knowing where they are: a pipe inside one is not a cell
+    separator, a link inside one is not navigable.
+
+    Both cross line boundaries, and both were first written as per-line functions. That cost two
+    review rounds in the same place, each finding the same shape from a different side: state
+    recomputed per line is state discarded at every newline, so a construct spanning two lines hides
+    whatever is on the second one. Splitting the job between two independent per-line strippers also
+    let them disagree — a backtick inside a comment, a [<!--] inside a code span.
+
+    So there is one left-to-right pass over the file, holding one state, and every caller reads its
+    answer. A blank line ends an unterminated code span, because CommonMark does not let one cross a
+    paragraph break; an HTML comment survives blank lines, because it is a block that ends only at
+    [-->]. Either construct left open at the end of the file is reported rather than assumed
+    closed. *)
+
+type inert_state = In_text | In_code of int | In_comment
+
+let at line i pattern =
+  let n = String.length line and m = String.length pattern in
+  i + m <= n && String.equal (String.sub line ~pos:i ~len:m) pattern
+
+let backtick_run line i =
   let n = String.length line in
-  let rec go i acc =
-    if i >= n then List.rev acc
-    else if Char.equal line.[i] '`' then (
-      let j = ref i in
-      while !j < n && Char.equal line.[!j] '`' do
-        Int.incr j
-      done;
-      go !j ((i, !j - i) :: acc))
-    else go (i + 1) acc
+  let j = ref i in
+  while !j < n && Char.equal line.[!j] '`' do
+    Int.incr j
+  done;
+  !j - i
+
+(** Per line, the half-open ranges that are inert, plus whatever was left open at the end of the
+    file. Ranges include their delimiters. *)
+let inert_by_line contents =
+  let state = ref In_text in
+  let per_line =
+    List.map (lines contents) ~f:(fun (lineno, line) ->
+        (* A paragraph break closes an unterminated span; a comment is a block and survives it. *)
+        (if is_blank line then match !state with In_code _ -> state := In_text | _ -> ());
+        let n = String.length line in
+        let ranges = ref [] in
+        (* A state carried in from the line above starts this line's inert region at column 0. *)
+        let start = ref 0 in
+        let i = ref 0 in
+        while !i < n do
+          match !state with
+          | In_text ->
+              if Char.equal line.[!i] '`' then (
+                let len = backtick_run line !i in
+                start := !i;
+                state := In_code len;
+                i := !i + len)
+              else if at line !i "<!--" then (
+                start := !i;
+                state := In_comment;
+                i := !i + 4)
+              else Int.incr i
+          | In_code len ->
+              if Char.equal line.[!i] '`' then (
+                let run = backtick_run line !i in
+                (* Only a run of exactly the opening length closes it. *)
+                if run = len then (
+                  ranges := (!start, !i + run) :: !ranges;
+                  state := In_text;
+                  start := 0);
+                i := !i + run)
+              else Int.incr i
+          | In_comment ->
+              if at line !i "-->" then (
+                ranges := (!start, !i + 3) :: !ranges;
+                state := In_text;
+                start := 0;
+                i := !i + 3)
+              else Int.incr i
+        done;
+        (* Still open at the end of the line: the remainder is inert and the state carries. *)
+        (* An empty range says nothing; a blank line inside a comment would otherwise emit one. *)
+        (match !state with
+        | In_text -> ()
+        | In_code _ | In_comment -> if n > !start then ranges := (!start, n) :: !ranges);
+        (lineno, List.rev !ranges))
   in
-  go 0 []
+  (per_line, !state)
 
-(** Half-open [(start, stop)] ranges of the inline code spans opened AND closed on this line, per
-    CommonMark: a run of N backticks opens a span that the next run of exactly N closes, and a run
-    with no partner opens nothing. [carry] is a span left open by an earlier line of the same
-    paragraph; when one is passed, the line's leading text up to the closing run is in code too, and
-    the result says whether a span is still open at the end of the line.
+(** The inert ranges of a single line, for a caller with no file context — a table cell, a fixture.
+*)
+let inert_of_line line =
+  match fst (inert_by_line line) with (_, ranges) :: _ -> ranges | [] -> []
 
-    Returning that state is the fix for a span that crosses a line break. A code span may span lines
-    within a paragraph, and pairing runs per line discarded the delimiter state at every newline —
-    so a link on the middle line of a multiline span was read as navigable and counted as a backlink
-    (Codex P2, round 3). *)
-let code_spans_with_carry ?carry line =
-  let n = String.length line in
-  let runs = backtick_runs line in
-  let leading, runs =
-    match carry with
-    | None -> ([], runs)
-    | Some len -> (
-        match List.findi runs ~f:(fun _ (_, l) -> l = len) with
-        | None -> ([ (0, n) ], [])  (* the whole line is inside the carried span *)
-        | Some (idx, (close_at, _)) -> ([ (0, close_at + len) ], List.drop runs (idx + 1)))
-  in
-  let still_open = ref None in
-  let rec pair runs acc =
-    match runs with
-    | [] -> List.rev acc
-    | (start, len) :: rest -> (
-        match List.findi rest ~f:(fun _ (_, l) -> l = len) with
-        | None ->
-            (* An unclosed run: in a paragraph it may still be closed by a later line, so the
-               remainder of THIS line is in code and the length is carried forward. *)
-            still_open := Some len;
-            List.rev ((start, n) :: acc)
-        | Some (idx, (close_at, _)) ->
-            pair (List.drop rest (idx + 1)) ((start, close_at + len) :: acc))
-  in
-  let spans = pair runs [] in
-  (leading @ spans, if Option.is_some carry && List.is_empty runs then carry else !still_open)
+(** Kept under its old name: what this answers for one line is still "where is the inline code",
+    and every caller that has a whole file passes the file's answer instead. *)
+let code_spans = inert_of_line
 
-(** The single-line reading, for a caller with no paragraph context. *)
-let code_spans line = fst (code_spans_with_carry line)
-
-let in_any_span spans i =
-  List.exists spans ~f:(fun (start, stop) -> start <= i && i < stop)
+let in_any_span spans i = List.exists spans ~f:(fun (start, stop) -> start <= i && i < stop)
+let spans_at map lineno = Option.value (List.Assoc.find map lineno ~equal:Int.equal) ~default:[]
 
 (** Whether the character at [i] is escaped: by the PARITY of the run of backslashes before it, not
     by the single character before it. Two backslashes are an escaped backslash, which leaves the
@@ -224,29 +260,16 @@ let pipes_outside_code ?spans line =
       else acc)
   |> List.rev
 
-(** The inline-code spans of every line of a file, with a span carried across line breaks inside a
-    paragraph. A blank line ends a paragraph, and with it any unclosed span: CommonMark does not let
-    a code span cross one, so state resets there rather than leaking to the end of the file — which
-    is what would turn one stray backtick into "everything below is code". *)
-let code_spans_by_line contents =
-  let carry = ref None in
-  List.map (lines contents) ~f:(fun (lineno, line) ->
-      if is_blank line then (
-        carry := None;
-        (lineno, []))
-      else
-        let spans, still_open = code_spans_with_carry ?carry:!carry line in
-        carry := still_open;
-        (lineno, spans))
-
-let spans_at map lineno = Option.value (List.Assoc.find map lineno ~equal:Int.equal) ~default:[]
-
 (** The cells of a table row: the text between the separating pipes, trimmed. A well-formed row
     starts and ends with one, so the empty pieces outside them are dropped. Returns [None] for a
     line that does not both start and end with a separating pipe — the shape a wrapped row takes. *)
-let row_cells line =
+let row_cells ?spans line =
+  let dropped = String.length line - String.length (String.lstrip line) in
+  let spans =
+    Option.map spans ~f:(List.map ~f:(fun (a, b) -> (a - dropped, b - dropped)))
+  in
   let line = String.strip line in
-  match pipes_outside_code line with
+  match pipes_outside_code ?spans line with
   | [] -> None
   | first :: _ as pipes ->
       let last = List.last_exn pipes in
@@ -609,8 +632,30 @@ let parse_file ~file contents =
 (** The bullets of a file, for callers that want only those. *)
 let bullets ~file contents = (parse_file ~file contents).bullets
 
+(** A code span or an HTML comment the file never closes. Left open, it makes every line below it
+    inert -- which silences the rules over the rest of the file rather than failing them, so it is
+    reported instead of assumed closed. *)
+let unclosed_inert ~file contents =
+  match snd (inert_by_line contents) with
+  | In_text -> []
+  | In_code n ->
+      [
+        finding ~file ~line:(List.length (lines contents)) ~rule:rule_bullet_integrity
+          (Printf.sprintf
+             "a code span opened with %d backtick(s) and never closed, so everything below it reads \
+              as code and no rule can see it"
+             n);
+      ]
+  | In_comment ->
+      [
+        finding ~file ~line:(List.length (lines contents)) ~rule:rule_bullet_integrity
+          "an HTML comment opened and never closed, so everything below it is commented out and no \
+           rule can see it";
+      ]
+
 (** Rule 1 over one file. *)
-let check_structure ~file contents = (parse_file ~file contents).structure
+let check_structure ~file contents =
+  (parse_file ~file contents).structure @ unclosed_inert ~file contents
 
 (* ------------------------------------------------------------------ *)
 (* Rule 3: table shape *)
@@ -638,13 +683,15 @@ let tables contents =
 
 (** Rule 3 over one file. *)
 let check_tables ~file contents =
+  let map = fst (inert_by_line contents) in
+  let cells_of line lineno = row_cells ~spans:(spans_at map lineno) line in
   let all = lines contents in
   let line_at n = List.Assoc.find all n ~equal:Int.equal in
   List.concat_map (tables contents) ~f:(fun t ->
       let report line msg = finding ~file ~line ~rule:rule_table_shape msg in
       let closed =
         List.filter_map t.rows ~f:(fun (lineno, line) ->
-            match row_cells line with
+            match cells_of line lineno with
             | None ->
                 Some
                   (report lineno
@@ -654,7 +701,9 @@ let check_tables ~file contents =
       in
       if not (List.is_empty closed) then closed
       else
-        let cells = List.map t.rows ~f:(fun (lineno, line) -> (lineno, Option.value_exn (row_cells line))) in
+        let cells =
+          List.map t.rows ~f:(fun (lineno, line) -> (lineno, Option.value_exn (cells_of line lineno)))
+        in
         let shape =
           match cells with
           | [] | [ _ ] | [ _; _ ] ->
@@ -690,7 +739,9 @@ let check_tables ~file contents =
         let after =
           let next = t.start_line + List.length t.rows in
           match line_at next with
-          | Some l when (not (is_blank l)) && not (List.is_empty (pipes_outside_code l)) ->
+          | Some l
+            when (not (is_blank l))
+                 && not (List.is_empty (pipes_outside_code ~spans:(spans_at map next) l)) ->
               [
                 report next
                   "a cell separator on the line below a table: this reads as the tail of a row that \
@@ -735,32 +786,12 @@ let slug heading =
   |> String.of_list
 
 
-(** HTML comments removed, so that a link inside one is not a link. Unterminated, the comment runs
-    to the end of the text — which is what a browser does with it too. *)
-let strip_html_comments text =
-  let rec go acc rest =
-    match String.substr_index rest ~pattern:"<!--" with
-    | None -> acc ^ rest
-    | Some i -> (
-        let after = String.drop_prefix rest (i + 4) in
-        match String.substr_index after ~pattern:"-->" with
-        | None -> acc ^ String.prefix rest i
-        | Some j -> go (acc ^ String.prefix rest i) (String.drop_prefix after (j + 3)))
-  in
-  go "" text
-
 (** The NAVIGABLE links of a line: [\[text\](target)] outside inline code, outside HTML comments, and
     not an image ([!\[alt\](src)] renders a picture, not a way back). A substring test for
     ["](../agent-notes.md)"] called a file reachable when those same bytes sat in a code span, in a
     comment, or behind an image (Codex P2, round 1) — all three of which a reader cannot follow. *)
 let markdown_links ?spans line =
-  let raw = line in
-  let line = strip_html_comments line in
-  let spans =
-    match spans with
-    | Some s when String.equal raw line -> s
-    | _ -> code_spans line
-  in
+  let spans = match spans with Some s -> s | None -> inert_of_line line in
   let n = String.length line in
   let rec go i acc =
     if i >= n then List.rev acc
@@ -789,7 +820,7 @@ let markdown_links ?spans line =
 (** Every navigable link of a whole file, read with the paragraph-aware span map so that a link on
     the middle line of a multiline code span is not one. *)
 let links_of contents =
-  let map = code_spans_by_line contents in
+  let map = fst (inert_by_line contents) in
   List.concat_map (lines contents) ~f:(fun (lineno, l) ->
       markdown_links ~spans:(spans_at map lineno) l)
 
@@ -855,10 +886,11 @@ let index_rows ~file contents =
            "more than one table: the index is one table, so a row that ends it puts most of the \
             index outside both")
   | [ t ] ->
+      let map = fst (inert_by_line contents) in
       let data = match t.rows with _ :: _ :: rest -> rest | _ -> [] in
       let rows, findings =
         List.partition_map data ~f:(fun (lineno, line) ->
-            match row_cells line with
+            match row_cells ~spans:(spans_at map lineno) line with
             | Some (link :: rest) -> (
                 let hooks = String.concat ~sep:" " rest in
                 match parse_link link with

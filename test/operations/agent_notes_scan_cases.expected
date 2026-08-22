@@ -21,6 +21,8 @@ ok: bullets -- a number that merely opens a sentence
 ok: bullets -- a fenced block, whose contents are not bullets
 ok: bullets -- a fence that is never closed
 ok: bullets -- a block quote
+ok: bullets -- a code span the file never closes
+ok: bullets -- an HTML comment the file never closes
 ok: bullets -- a block quote nested under a bullet
 ok: bullets -- an index whose rows drifted four spaces right
 ok: bullets -- prose at column zero directly under a bullet
@@ -54,6 +56,14 @@ ok: code spans -- two spans
 ok: code spans -- a double run holds a single
 ok: code spans -- an unpaired run opens a span to the line's end
 ok: code spans -- no backticks at all
+ok: code spans -- a comment is inert too
+ok: code spans -- a backtick inside a comment opens nothing
+ok: code spans -- a comment opener inside code opens nothing
+ok: inert carry -- a span closed on the next line
+ok: inert carry -- a span closed by the last run on its line
+ok: inert carry -- a blank line ends an unterminated span
+ok: inert carry -- a comment spanning three lines
+ok: inert carry -- a comment survives a blank line
 ok: cell separators -- a plain row
 ok: cell separators -- an escaped pipe is not a separator
 ok: cell separators -- an escaped backslash leaves the pipe live
@@ -90,6 +100,8 @@ ok: index -- a backlink that is only a code span
 ok: index -- a backlink commented out
 ok: index -- a backlink that is an image
 ok: index -- a backlink hidden in the middle of a multiline code span
+ok: index -- a backlink after a code span that closed on the line above
+ok: index -- a backlink inside a multiline HTML comment
 ok: index -- a backlink one directory too far up
 ok: index -- an anchor on a heading written without a space
 ok: index -- a backlink carrying an anchor is still a backlink

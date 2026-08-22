@@ -102,6 +102,12 @@ let structure_cases =
       "# Title\n\n- A fact.\n\n~~~\n- not a bullet\n",
       [ "bullet-integrity @ f.md:5"; "bullet-integrity @ f.md:7" ] );
     ("a block quote", "# Title\n\n> Quoted prose.\n", [ "bullet-integrity @ f.md:3" ]);
+    ( "a code span the file never closes",
+      "# Title\n\n- A fact naming `Ops.promote_prec.",
+      [ "bullet-integrity @ f.md:3" ] );
+    ( "an HTML comment the file never closes",
+      "# Title\n\nProse <!-- and then nothing.\n\n- A fact.\n",
+      [ "bullet-integrity @ f.md:6" ] );
     (* Markdown honours a quote marker at every depth, so nested under a bullet this is a quote
        inside the list item -- not part of the bullet's prose, and checked by nothing if folded in. *)
     ( "a block quote nested under a bullet",
@@ -306,6 +312,16 @@ let index_cases =
       [ ("agent-notes/a.md",
           "# A file\n\nPart of an example: `\n[index](../agent-notes.md)\n`.\n\n- A fact about            `Widget`.\n") ],
       [ "reachability @ agent-notes/a.md" ] );
+    ( "a backlink after a code span that closed on the line above",
+      index [ row "a.md" "the `Widget` seam" ],
+      [ ("agent-notes/a.md",
+          "# A file\n\nPart of an example: `\nexample`\n[index](../agent-notes.md)\n\n- A fact            about `Widget`.\n") ],
+      [] );
+    ( "a backlink inside a multiline HTML comment",
+      index [ row "a.md" "the `Widget` seam" ],
+      [ ("agent-notes/a.md",
+          "# A file\n\nProse <!--\n[index](../agent-notes.md)\n-->\n\n- A fact about            `Widget`.\n") ],
+      [ "reachability @ agent-notes/a.md" ] );
     ( "a backlink one directory too far up",
       index [ row "a.md" "the `Widget` seam" ],
       [ ("agent-notes/a.md",
@@ -397,6 +413,32 @@ let primitive_cases =
     ("a double run holds a single", "``a`b`` c", [ "0-7" ]);
     ("an unpaired run opens a span to the line's end", "a `b c", [ "2-6" ]);
     ("no backticks at all", "plain text", []);
+    ("a comment is inert too", "a <!-- b --> c", [ "2-12" ]);
+    ("a backtick inside a comment opens nothing", "a <!-- ` --> c", [ "2-12" ]);
+    ("a comment opener inside code opens nothing", "a `<!--` b", [ "2-8" ]);
+  ]
+
+(* The lexer's state across line boundaries, which is where rounds 3 and 4 both landed. Each case is
+   a whole file and the lines whose text is inert, as "<line>:<start>-<stop>". *)
+let carry_cases =
+  [
+    ( "a span closed on the next line",
+      "a `b\nc` d\n",
+      [ "1:2-4"; "2:0-2" ] );
+    (* Round 4's finding: the closing run being LAST on its line must clear the carry, and did not --
+       the whole rest of the file went on reading as code. *)
+    ( "a span closed by the last run on its line",
+      "a `b\nexample`\n[index](../agent-notes.md)\n",
+      [ "1:2-4"; "2:0-8" ] );
+    ( "a blank line ends an unterminated span",
+      "a `b\n\nc | d\n",
+      [ "1:2-4" ] );
+    ( "a comment spanning three lines",
+      "Prose <!--\n[index](../agent-notes.md)\n--> after\n",
+      [ "1:6-10"; "2:0-26"; "3:0-3" ] );
+    ( "a comment survives a blank line",
+      "Prose <!--\n\n--> after\n",
+      [ "1:6-10"; "3:0-3" ] );
   ]
 
 (* Escaping is decided by the PARITY of the backslash run, not by the character before the pipe. *)
@@ -479,6 +521,12 @@ let () =
         List.map (Notes.code_spans line) ~f:(fun (a, b) -> Printf.sprintf "%d-%d" a b)
       in
       check ("code spans -- " ^ name) expected found);
+  List.iter carry_cases ~f:(fun (name, contents, expected) ->
+      let found =
+        List.concat_map (fst (Notes.inert_by_line contents)) ~f:(fun (lineno, ranges) ->
+            List.map ranges ~f:(fun (a, b) -> Printf.sprintf "%d:%d-%d" lineno a b))
+      in
+      check ("inert carry -- " ^ name) expected found);
   List.iter pipe_cases ~f:(fun (name, line, expected) ->
       let found = List.map (Notes.pipes_outside_code line) ~f:Int.to_string in
       check ("cell separators -- " ^ name) (List.map expected ~f:Int.to_string) found);
