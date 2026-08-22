@@ -16,6 +16,12 @@ ok: bullets -- an empty bullet
 ok: bullets -- a tab in the indentation
 ok: bullets -- an ordered item at column zero
 ok: bullets -- an ordered item written with a parenthesis
+ok: bullets -- a bullet-looking line inside a multiline code span
+ok: bullets -- a bullet-looking line inside an HTML comment
+ok: bullets -- a table-looking line inside a multiline code span
+ok: bullets -- an ordered item written with a tab
+ok: bullets -- a star marker written with a tab
+ok: bullets -- a dash marker written with a tab
 ok: bullets -- an ordered item indented under a bullet
 ok: bullets -- a number that merely opens a sentence
 ok: bullets -- a fenced block, whose contents are not bullets
@@ -48,6 +54,7 @@ ok: tables -- an escaped pipe is not a cell separator either
 ok: tables -- a table indented three spaces is still a table
 ok: tables -- a table indented four spaces is a code block
 ok: tables -- an escaped backslash leaves the pipe separating
+ok: tables -- a table example inside a code span is not a table
 ok: tables -- a delimiter cell of one hyphen
 ok: tables -- a delimiter cell of two hyphens
 ok: tables -- alignment colons are still a delimiter row
@@ -102,6 +109,9 @@ ok: index -- a backlink that is an image
 ok: index -- a backlink hidden in the middle of a multiline code span
 ok: index -- a backlink after a code span that closed on the line above
 ok: index -- a backlink inside a multiline HTML comment
+ok: index -- a backlink whose bracket is escaped
+ok: index -- an anchor naming a heading that only appears inside a comment
+ok: index -- an index row with a third cell
 ok: index -- a backlink one directory too far up
 ok: index -- an anchor on a heading written without a space
 ok: index -- a backlink carrying an anchor is still a backlink

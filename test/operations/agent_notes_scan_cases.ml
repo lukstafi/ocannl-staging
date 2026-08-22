@@ -67,7 +67,7 @@ let structure_cases =
       [ "bullet-integrity @ f.md:5" ] );
     ( "a continuation indented past its bullet",
       "# Title\n\n- A fact that\n    continues four deep.\n",
-      [ "bullet-integrity @ f.md:4"; "bullet-integrity @ f.md:3" ] );
+      [ "bullet-integrity @ f.md:3"; "bullet-integrity @ f.md:4" ] );
     ( "a nested bullet under no bullet at all",
       "# Title\n\nPreamble prose.\n\n  - a bullet indented under nothing.\n",
       [ "bullet-integrity @ f.md:5" ] );
@@ -77,7 +77,7 @@ let structure_cases =
     ("an empty bullet", "# Title\n\n-\n- A real fact.\n", [ "bullet-integrity @ f.md:3" ]);
     ( "a tab in the indentation",
       "# Title\n\n- A fact that\n\tcontinues after a tab.\n",
-      [ "bullet-integrity @ f.md:4"; "bullet-integrity @ f.md:3" ] );
+      [ "bullet-integrity @ f.md:3"; "bullet-integrity @ f.md:4" ] );
     (* Prose paragraphs at column zero are the abstract and the backlink, and they close the list
        above them rather than continuing it. *)
     (* Round 1's family: four constructs that fell through to "prose", which is not checked -- so
@@ -88,6 +88,26 @@ let structure_cases =
       [ "bullet-integrity @ f.md:3" ] );
     ( "an ordered item written with a parenthesis",
       "# Title\n\n1) A fact written as an ordered item.\n",
+      [ "bullet-integrity @ f.md:3" ] );
+    (* A line wholly inside a code span or a comment is an example. Parsing it invents findings about
+       text nobody sees -- and can report the closing delimiter as an illegal lazy continuation. *)
+    ( "a bullet-looking line inside a multiline code span",
+      "# Title\n\n- A fact showing the shape `\n  - not a bullet\n  ` in passing.\n",
+      [] );
+    ( "a bullet-looking line inside an HTML comment",
+      "# Title\n\n<!-- draft:\n- not a bullet yet\n-->\n\n- A fact.\n",
+      [ "bullet-integrity @ f.md:3" ] );
+    ( "a table-looking line inside a multiline code span",
+      "# Title\n\n- A fact showing the shape `\n  | not | a table |\n  ` in passing.\n",
+      [] );
+    ( "an ordered item written with a tab",
+      "# Title\n\n1.\tA fact written as an ordered item.\n",
+      [ "bullet-integrity @ f.md:3" ] );
+    ( "a star marker written with a tab",
+      "# Title\n\n*\tA fact written with the other marker.\n",
+      [ "bullet-integrity @ f.md:3" ] );
+    ( "a dash marker written with a tab",
+      "# Title\n\n-\tA fact written with a tab.\n",
       [ "bullet-integrity @ f.md:3" ] );
     ( "an ordered item indented under a bullet",
       "# Title\n\n- A fact with parts:\n  1. the first part.\n",
@@ -107,7 +127,7 @@ let structure_cases =
       [ "bullet-integrity @ f.md:3" ] );
     ( "an HTML comment the file never closes",
       "# Title\n\nProse <!-- and then nothing.\n\n- A fact.\n",
-      [ "bullet-integrity @ f.md:6" ] );
+      [ "bullet-integrity @ f.md:3"; "bullet-integrity @ f.md:6" ] );
     (* Markdown honours a quote marker at every depth, so nested under a bullet this is a quote
        inside the list item -- not part of the bullet's prose, and checked by nothing if folded in. *)
     ( "a block quote nested under a bullet",
@@ -199,6 +219,9 @@ let table_cases =
     ( "an escaped backslash leaves the pipe separating",
       "# Title\n\n| File | Covers |\n| --- | --- |\n| a \\\\| b | c |\n",
       [ "table-shape @ f.md:5" ] );
+    ( "a table example inside a code span is not a table",
+      "# Title\n\n- A fact showing `\n  | File | Covers |\n  | --- | --- |\n  ` in passing.\n",
+      [] );
     ( "a delimiter cell of one hyphen",
       "# Title\n\n| File | Covers |\n| - | --- |\n| a | b |\n",
       [ "table-shape @ f.md:4" ] );
@@ -321,7 +344,21 @@ let index_cases =
       index [ row "a.md" "the `Widget` seam" ],
       [ ("agent-notes/a.md",
           "# A file\n\nProse <!--\n[index](../agent-notes.md)\n-->\n\n- A fact about            `Widget`.\n") ],
+      [ "bullet-integrity @ agent-notes/a.md:3"; "reachability @ agent-notes/a.md" ] );
+    ( "a backlink whose bracket is escaped",
+      index [ row "a.md" "the `Widget` seam" ],
+      [ ("agent-notes/a.md",
+          "# A file\n\nWrite it \\[index](../agent-notes.md) to show the syntax.\n\n- A fact            about `Widget`.\n") ],
       [ "reachability @ agent-notes/a.md" ] );
+    ( "an anchor naming a heading that only appears inside a comment",
+      index [ "| [a.md](agent-notes/a.md#draft-heading) | the `Widget` seam |" ],
+      [ ("agent-notes/a.md",
+          file "<!--\n## Draft heading\n-->\n\n- A fact about `Widget`.\n") ],
+      [ "bullet-integrity @ agent-notes/a.md:5"; "index-agreement @ agent-notes.md:7" ] );
+    ( "an index row with a third cell",
+      "# Agent notes\n\nAn index.\n\n| File | Covers | Owner |\n| --- | --- | --- |\n|        [a.md](agent-notes/a.md) | the `Widget` seam | me |\n",
+      [ ("agent-notes/a.md", file "- A fact about `Widget`.\n") ],
+      [ "index-agreement @ agent-notes.md:7"; "reachability @ agent-notes/a.md" ] );
     ( "a backlink one directory too far up",
       index [ row "a.md" "the `Widget` seam" ],
       [ ("agent-notes/a.md",
@@ -523,7 +560,7 @@ let () =
       check ("code spans -- " ^ name) expected found);
   List.iter carry_cases ~f:(fun (name, contents, expected) ->
       let found =
-        List.concat_map (fst (Notes.inert_by_line contents)) ~f:(fun (lineno, ranges) ->
+        List.concat_map ((Notes.inert_by_line contents).Notes.ranges) ~f:(fun (lineno, ranges) ->
             List.map ranges ~f:(fun (a, b) -> Printf.sprintf "%d:%d-%d" lineno a b))
       in
       check ("inert carry -- " ^ name) expected found);

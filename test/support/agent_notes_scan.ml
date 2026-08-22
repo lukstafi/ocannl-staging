@@ -73,6 +73,7 @@ open Base
 type finding = {
   rule : string;
   file : string;  (** The notes file, apart from the line, so a consumer never re-parses [where]. *)
+  line : int option;  (** The line, numerically, so findings order by document position. *)
   where : string;
   message : string;
   subject : string option;
@@ -104,9 +105,10 @@ let rules =
   ]
 
 let finding ?subject ~file ~line ~rule message =
-  { rule; file; where = Printf.sprintf "%s:%d" file line; message; subject }
+  { rule; file; line = Some line; where = Printf.sprintf "%s:%d" file line; message; subject }
 
-let file_finding ?subject ~file ~rule message = { rule; file; where = file; message; subject }
+let file_finding ?subject ~file ~rule message =
+  { rule; file; line = None; where = file; message; subject }
 
 (** How an exemption or a report names the bullet a finding is about: the file it is in and the
     bullet's opening, which is what a person can copy out of the message and paste into a list. *)
@@ -164,50 +166,104 @@ let is_blank line = String.is_empty (String.strip line)
     [-->]. Either construct left open at the end of the file is reported rather than assumed
     closed. *)
 
-type inert_state = In_text | In_code of int | In_comment
+(** Markdown allows a block's line at most THREE leading spaces; at four it is an indented code
+    block instead. Stripping all of it read a table indented into code as a table, so an index whose
+    rows drifted right rendered as a code sample with no navigable link in it while every rule
+    stayed green (Codex P2, round 2). Beyond three the line falls through to the continuation rules,
+    which is right inside a bullet and reported outside one. *)
+let max_block_indent = 3
+
+type inert_state = In_text | In_code of int | In_comment | In_fence of char * int
+
+(** What one pass over a file learned: where the inert text is, what was left open at the end, and
+    where each construct that HIDES text from the reader began. *)
+type inert_scan = {
+  ranges : (int * (int * int) list) list;
+  unclosed : inert_state;
+  fences : (int * string) list;  (** line, and the marker that opened it *)
+  comments : int list;  (** line on which each HTML comment opened *)
+}
 
 let at line i pattern =
   let n = String.length line and m = String.length pattern in
   i + m <= n && String.equal (String.sub line ~pos:i ~len:m) pattern
 
-let backtick_run line i =
+let run_length line i c =
   let n = String.length line in
   let j = ref i in
-  while !j < n && Char.equal line.[!j] '`' do
+  while !j < n && Char.equal line.[!j] c do
     Int.incr j
   done;
   !j - i
 
-(** Per line, the half-open ranges that are inert, plus whatever was left open at the end of the
-    file. Ranges include their delimiters. *)
+(** A fence is a BLOCK: three or more backticks or tildes at the start of a line, after at most
+    three spaces. It is not a code span, however much a run of three backticks looks like one — and
+    reading it as one made a whole fenced block inert and swallowed the report of the fence itself
+    (Codex P2, round 5, by way of a fixture that stopped failing). Deciding it here, in the one pass
+    that owns inert text, is what stops this scan from having two disagreeing notions of a fence. *)
+let fence_at line =
+  let indent = indent_of line in
+  if indent > max_block_indent then None
+  else
+    let c = if indent < String.length line then line.[indent] else ' ' in
+    if Char.equal c '`' || Char.equal c '~' then
+      let len = run_length line indent c in
+      if len >= 3 then Some (c, len) else None
+    else None
+
+(** Per line, the half-open ranges that are inert; ranges include their delimiters. *)
 let inert_by_line contents =
   let state = ref In_text in
-  let per_line =
-    List.map (lines contents) ~f:(fun (lineno, line) ->
-        (* A paragraph break closes an unterminated span; a comment is a block and survives it. *)
-        (if is_blank line then match !state with In_code _ -> state := In_text | _ -> ());
-        let n = String.length line in
-        let ranges = ref [] in
-        (* A state carried in from the line above starts this line's inert region at column 0. *)
-        let start = ref 0 in
-        let i = ref 0 in
+  let fences = ref [] in
+  let comments = ref [] in
+  let ranges_of = ref [] in
+  List.iter (lines contents) ~f:(fun (lineno, line) ->
+      (* A paragraph break closes an unterminated span; a comment and a fence are blocks and
+         survive it. *)
+      (if is_blank line then match !state with In_code _ -> state := In_text | _ -> ());
+      let n = String.length line in
+      let ranges = ref [] in
+      (* A state carried in from the line above starts this line's inert region at column 0. *)
+      let start = ref 0 in
+      let i = ref 0 in
+      let fence_line =
+        match !state with
+        | In_fence (c, len) -> (
+            (* Only a run of the same character, at least as long, closes it. *)
+            match fence_at line with
+            | Some (c', len') when Char.equal c c' && len' >= len ->
+                state := In_text;
+                true
+            | _ -> true)
+        | In_text -> (
+            match fence_at line with
+            | Some (c, len) ->
+                fences := (lineno, String.make len c) :: !fences;
+                state := In_fence (c, len);
+                true
+            | None -> false)
+        | _ -> false
+      in
+      if fence_line then (if n > 0 then ranges := [ (0, n) ])
+      else
         while !i < n do
           match !state with
+          | In_fence _ -> i := n
           | In_text ->
               if Char.equal line.[!i] '`' then (
-                let len = backtick_run line !i in
+                let len = run_length line !i '`' in
                 start := !i;
                 state := In_code len;
                 i := !i + len)
               else if at line !i "<!--" then (
+                comments := lineno :: !comments;
                 start := !i;
                 state := In_comment;
                 i := !i + 4)
               else Int.incr i
           | In_code len ->
               if Char.equal line.[!i] '`' then (
-                let run = backtick_run line !i in
-                (* Only a run of exactly the opening length closes it. *)
+                let run = run_length line !i '`' in
                 if run = len then (
                   ranges := (!start, !i + run) :: !ranges;
                   state := In_text;
@@ -222,19 +278,24 @@ let inert_by_line contents =
                 i := !i + 3)
               else Int.incr i
         done;
-        (* Still open at the end of the line: the remainder is inert and the state carries. *)
-        (* An empty range says nothing; a blank line inside a comment would otherwise emit one. *)
-        (match !state with
-        | In_text -> ()
-        | In_code _ | In_comment -> if n > !start then ranges := (!start, n) :: !ranges);
-        (lineno, List.rev !ranges))
-  in
-  (per_line, !state)
+      (* Still open at the end of the line: the remainder is inert and the state carries. An empty
+         range says nothing, so a blank line inside a comment does not emit one. *)
+      (match !state with
+      | In_text -> ()
+      | In_code _ | In_comment -> if n > !start then ranges := (!start, n) :: !ranges
+      | In_fence _ -> ());
+      ranges_of := (lineno, List.rev !ranges) :: !ranges_of);
+  {
+    ranges = List.rev !ranges_of;
+    unclosed = !state;
+    fences = List.rev !fences;
+    comments = List.rev !comments;
+  }
 
 (** The inert ranges of a single line, for a caller with no file context — a table cell, a fixture.
 *)
 let inert_of_line line =
-  match fst (inert_by_line line) with (_, ranges) :: _ -> ranges | [] -> []
+  match (inert_by_line line).ranges with (_, ranges) :: _ -> ranges | [] -> []
 
 (** Kept under its old name: what this answers for one line is still "where is the inline code",
     and every caller that has a whole file passes the file's answer instead. *)
@@ -242,6 +303,27 @@ let code_spans = inert_of_line
 
 let in_any_span spans i = List.exists spans ~f:(fun (start, stop) -> start <= i && i < stop)
 let spans_at map lineno = Option.value (List.Assoc.find map lineno ~equal:Int.equal) ~default:[]
+
+(** Whether a line is WHOLLY inside an inert region — every character of it that is not a space sits
+    in a code span or an HTML comment. Such a line is somebody's example: a ["- "] in it is not a
+    bullet, a pipe is not a table, a ['#'] is not a heading, and classifying it produces findings
+    about text that no reader ever sees. Every structural consumer skips these, and skips only
+    these.
+
+    Wholly, not partly, and that boundary is load-bearing. The line that OPENS a multiline span
+    still carries prose before the backtick, and the line that CLOSES one still carries prose after
+    it — [`  <that target>\` afterwards exits 0 having produced nothing`] is a real continuation
+    line in these notes, inert for its first seventeen characters and ordinary text for the rest.
+    Skipping those would lose real content; classifying the middle lines invents failures. *)
+let line_is_inert ~spans line =
+  (not (List.is_empty spans))
+  && String.foldi line ~init:true ~f:(fun i acc c ->
+         acc && (Char.equal c ' ' || Char.equal c '\t' || in_any_span spans i))
+
+(** Markdown's whitespace after a list marker: a tab is as good as a space, so ["1.\tFact"] is an
+    ordered item and ["*\tFact"] a bulleted one. Requiring a literal space let both fall through as
+    prose, which is the omission the foreign-marker check exists to prevent (Codex P2, round 5). *)
+let md_space c = Char.equal c ' ' || Char.equal c '\t'
 
 (** Whether the character at [i] is escaped: by the PARITY of the run of backslashes before it, not
     by the single character before it. Two backslashes are an escaped backslash, which leaves the
@@ -280,13 +362,6 @@ let row_cells ?spans line =
           | _ -> []
         in
         Some (cut pipes)
-
-(** Markdown allows a block's line at most THREE leading spaces; at four it is an indented code
-    block instead. Stripping all of it read a table indented into code as a table, so an index whose
-    rows drifted right rendered as a code sample with no navigable link in it while every rule
-    stayed green (Codex P2, round 2). Beyond three the line falls through to the continuation rules,
-    which is right inside a bullet and reported outside one. *)
-let max_block_indent = 3
 
 let is_table_line line =
   indent_of line <= max_block_indent && String.is_prefix (String.strip line) ~prefix:"|"
@@ -379,7 +454,13 @@ let atx_heading line =
     reported rather than read as prose. *)
 let looks_like_heading line = String.is_prefix (String.strip line) ~prefix:"#"
 
-let headings contents = List.filter_map (lines contents) ~f:(fun (_, line) -> atx_heading line)
+(** The headings a reader actually sees: a heading-looking line inside a multiline code span or an
+    HTML comment is an example, and an index anchor naming its slug points at nothing (Codex P2,
+    round 5). *)
+let headings contents =
+  let map = (inert_by_line contents).ranges in
+  List.filter_map (lines contents) ~f:(fun (lineno, line) ->
+      if line_is_inert ~spans:(spans_at map lineno) line then None else atx_heading line)
 
 (** {2 The closed dialect}
 
@@ -398,11 +479,12 @@ let headings contents = List.filter_map (lines contents) ~f:(fun (_, line) -> at
     bit: at column zero it read as prose (so its text got no termination or repetition check at all),
     and indented it folded into its parent's continuation (Codex P2, round 1). *)
 let foreign_list_marker stripped =
+  let n = String.length stripped in
   let ordered =
     match String.lfindi stripped ~f:(fun _ c -> not (Char.is_digit c)) with
-    | Some i when i > 0 && i + 1 < String.length stripped ->
+    | Some i when i > 0 && i + 1 < n ->
         let sep = stripped.[i] and after = stripped.[i + 1] in
-        if (Char.equal sep '.' || Char.equal sep ')') && Char.equal after ' ' then
+        if (Char.equal sep '.' || Char.equal sep ')') && md_space after then
           Some (String.prefix stripped (i + 1))
         else None
     | _ -> None
@@ -410,8 +492,13 @@ let foreign_list_marker stripped =
   match ordered with
   | Some m -> Some m
   | None ->
-      List.find_map [ "* "; "+ " ] ~f:(fun m ->
-          if String.is_prefix stripped ~prefix:m then Some (String.rstrip m) else None)
+      (* A marker of any other flavour, or this repository's own dash written with a tab: the
+         accepted form is "- " exactly, and everything else is reported rather than read as prose. *)
+      List.find_map [ '*'; '+'; '-' ] ~f:(fun c ->
+          if n >= 2 && Char.equal stripped.[0] c && md_space stripped.[1] then
+            if Char.equal c '-' && Char.equal stripped.[1] ' ' then None
+            else Some (String.of_char c ^ if Char.equal stripped.[1] '\t' then "\\t" else " ")
+          else None)
 
 (** A fence opens a region whose contents are not the notes' dialect at all: a ["- "] line inside one
     is example text, and reading it as a bullet invents integrity and repetition failures out of
@@ -486,33 +573,23 @@ let parse_file ~file contents =
   in
   (* Set while inside a fenced region, holding the fence that opened it: its contents are somebody's
      example, not the notes' dialect, and reading a `- ` line in one as a bullet invents failures. *)
-  let fence_open = ref None in
+  let inert = (inert_by_line contents).ranges in
   List.iter (lines contents) ~f:(fun (lineno, line) ->
       let stripped = String.strip line in
-      match !fence_open with
-      | Some opener ->
-          if String.is_prefix stripped ~prefix:opener then fence_open := None
-          else ()
-      | None ->
-          if is_blank line then close_all ()
-          else if has_leading_tab line then (
+      (* A line wholly inside a code span or an HTML comment is somebody's example. Parsing it as
+         structure both invents findings about text no reader sees and lets the closing delimiter be
+         reported as an illegal lazy continuation (Codex P2, round 5). Such a line is transparent
+         here: it neither opens, continues nor closes anything. *)
+      if line_is_inert ~spans:(spans_at inert lineno) line then ()
+      else if is_blank line then close_all ()
+      else if has_leading_tab line then (
             bad lineno
               "a tab in the indentation: indentation here is spaces, two per nesting level";
             close_all ())
           else
             let indent = indent_of line in
-            match fence_marker stripped with
-            | Some m ->
-                bad lineno
-                  (Printf.sprintf
-                     "a %s fenced block: the notes have no fenced code, and the lines inside one \
-                      are not bullets, table rows or prose -- teach this scan what they are before \
-                      writing one"
-                     m);
-                fence_open := Some m;
-                close_all ()
-            | None ->
-                if looks_like_heading stripped then (
+            if looks_like_heading stripped then (
+
                   if Option.is_none (atx_heading stripped) then
                     bad lineno
                       "a line opening with # that is not a heading: an ATX marker is one to six \
@@ -604,13 +681,6 @@ let parse_file ~file contents =
                                         whose continuations sit at %d"
                                        indent b.line (b.indent + 2))
                                 else texts := stripped :: !texts)));
-  (match !fence_open with
-  | Some m ->
-      findings :=
-        finding ~file ~line:(List.length (lines contents)) ~rule:rule_bullet_integrity
-          (Printf.sprintf "a %s fence that is never closed, so the rest of the file is unread" m)
-        :: !findings
-  | None -> ());
   close_all ();
   let bullets = List.rev !bullets in
   let terminator_findings =
@@ -636,7 +706,7 @@ let bullets ~file contents = (parse_file ~file contents).bullets
     inert -- which silences the rules over the rest of the file rather than failing them, so it is
     reported instead of assumed closed. *)
 let unclosed_inert ~file contents =
-  match snd (inert_by_line contents) with
+  match (inert_by_line contents).unclosed with
   | In_text -> []
   | In_code n ->
       [
@@ -652,10 +722,42 @@ let unclosed_inert ~file contents =
           "an HTML comment opened and never closed, so everything below it is commented out and no \
            rule can see it";
       ]
+  | In_fence (c, n) ->
+      [
+        finding ~file ~line:(List.length (lines contents)) ~rule:rule_bullet_integrity
+          (Printf.sprintf
+             "a %s fence that is never closed, so the rest of the file is inside it and unread"
+             (String.make n c));
+      ]
+
+(** The constructs that HIDE text from a reader: a fenced block, and an HTML comment. Neither
+    appears anywhere in the notes, and both are reported rather than silently skipped — the whole
+    argument for a closed dialect is that a note wanting one has to teach this module what its lines
+    mean first. They are read off the lexer's own record, so the report and the inert ranges can
+    never disagree about where a construct began. *)
+let hiding_constructs ~file contents =
+  let scan = inert_by_line contents in
+  List.map scan.fences ~f:(fun (line, marker) ->
+      finding ~file ~line ~rule:rule_bullet_integrity
+        (Printf.sprintf
+           "a %s fenced block: the notes have no fenced code, and the lines inside one are not \
+            bullets, table rows or prose -- teach this scan what they are before writing one"
+           marker))
+  @ List.map scan.comments ~f:(fun line ->
+        finding ~file ~line ~rule:rule_bullet_integrity
+          "an HTML comment: its text is invisible to a reader, so anything promoted inside one is \
+           promoted nowhere")
 
 (** Rule 1 over one file. *)
 let check_structure ~file contents =
-  (parse_file ~file contents).structure @ unclosed_inert ~file contents
+  let structural = (parse_file ~file contents).structure in
+  let extra = hiding_constructs ~file contents @ unclosed_inert ~file contents in
+  (* Ordered by document position, which is numeric: a string sort over ["f.md:10"] and ["f.md:3"]
+     puts line 10 first. *)
+  List.sort (structural @ extra) ~compare:(fun a b ->
+      match String.compare a.file b.file with
+      | 0 -> Option.compare Int.compare a.line b.line
+      | c -> c)
 
 (* ------------------------------------------------------------------ *)
 (* Rule 3: table shape *)
@@ -665,10 +767,18 @@ type table = { start_line : int; rows : (int * string) list }
 
 (** The table blocks of a file: maximal runs of lines whose trimmed form starts with a pipe. *)
 let tables contents =
+  let map = (inert_by_line contents).ranges in
   let rec go acc current = function
     | [] -> List.rev (match current with None -> acc | Some t -> t :: acc)
     | (lineno, line) :: rest ->
-        if is_table_line line then
+        (* A pipe-led line inside a code span or a comment is an example of a table, not one. Reading
+           it as a block started one whose cells then parsed as inert, so a correct note carrying a
+           table example FAILED table-shape (Codex P2, round 5) -- a false failure, the direction
+           that gets a check switched off. *)
+        if line_is_inert ~spans:(spans_at map lineno) line then
+          let acc = match current with None -> acc | Some t -> t :: acc in
+          go acc None rest
+        else if is_table_line line then
           let current =
             match current with
             | None -> Some { start_line = lineno; rows = [ (lineno, line) ] }
@@ -683,7 +793,7 @@ let tables contents =
 
 (** Rule 3 over one file. *)
 let check_tables ~file contents =
-  let map = fst (inert_by_line contents) in
+  let map = (inert_by_line contents).ranges in
   let cells_of line lineno = row_cells ~spans:(spans_at map lineno) line in
   let all = lines contents in
   let line_at n = List.Assoc.find all n ~equal:Int.equal in
@@ -795,8 +905,10 @@ let markdown_links ?spans line =
   let n = String.length line in
   let rec go i acc =
     if i >= n then List.rev acc
-    else if Char.equal line.[i] '[' && not (in_any_span spans i) then
-      let image = i > 0 && Char.equal line.[i - 1] '!' in
+    else if Char.equal line.[i] '[' && (not (in_any_span spans i)) && not (escaped_at line i) then
+      (* An escaped bracket renders literally, so it opens no link. Same parity rule as pipes -- it
+         was applied to one and not the other (Codex P2, round 5). *)
+      let image = i > 0 && Char.equal line.[i - 1] '!' && not (escaped_at line (i - 1)) in
       match String.index_from line i ']' with
       | Some close
         when close + 1 < n
@@ -820,7 +932,7 @@ let markdown_links ?spans line =
 (** Every navigable link of a whole file, read with the paragraph-aware span map so that a link on
     the middle line of a multiline code span is not one. *)
 let links_of contents =
-  let map = fst (inert_by_line contents) in
+  let map = (inert_by_line contents).ranges in
   List.concat_map (lines contents) ~f:(fun (lineno, l) ->
       markdown_links ~spans:(spans_at map lineno) l)
 
@@ -886,13 +998,15 @@ let index_rows ~file contents =
            "more than one table: the index is one table, so a row that ends it puts most of the \
             index outside both")
   | [ t ] ->
-      let map = fst (inert_by_line contents) in
+      let map = (inert_by_line contents).ranges in
       let data = match t.rows with _ :: _ :: rest -> rest | _ -> [] in
       let rows, findings =
         List.partition_map data ~f:(fun (lineno, line) ->
             match row_cells ~spans:(spans_at map lineno) line with
-            | Some (link :: rest) -> (
-                let hooks = String.concat ~sep:" " rest in
+            (* Exactly two: the index's schema is "| file link | coverage prose |", and folding any
+               further cells into the hooks accepted a wider table silently (Codex P2, round 5). *)
+            | Some [ link; hooks ] -> (
+                let hooks = hooks in
                 match parse_link link with
                 | None ->
                     Either.Second
@@ -906,10 +1020,15 @@ let index_rows ~file contents =
                       | None -> (target, None)
                     in
                     Either.First { row_line = lineno; link_text; target; anchor; hooks = backticked hooks })
-            | _ ->
+            | Some cells ->
                 Either.Second
                   (finding ~file ~line:lineno ~rule:rule_index_agreement
-                     "a row with no cells"))
+                     (Printf.sprintf
+                        "a row of %d cells: the index's schema is \"| file link | coverage prose |\""
+                        (List.length cells)))
+            | None ->
+                Either.Second
+                  (finding ~file ~line:lineno ~rule:rule_index_agreement "a row with no cells"))
       in
       Ok (rows, findings)
 
