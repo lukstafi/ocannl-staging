@@ -25,6 +25,22 @@ let dim_spec_to_string = function
 let axis_basis_of_type (typ : core_type) : string option =
   match typ.ptyp_desc with Ptyp_constr ({ txt = Lident b; _ }, []) -> Some b | _ -> None
 
+(* Reads of a literal outside the quotation-shaped arms of [ppx_cd] and [ppx_op] go through the two
+   helpers below, so that ppxlib moving its selected AST off [Astlib.Ast_502] -- where [constant]
+   stops being a flat variant and becomes a record [{ pconst_desc; pconst_loc }], from [Ast_503] on
+   -- costs these two definitions rather than every call site.
+
+   [Ast_pattern.estring] would say "a string literal" without naming a constructor at all, but its
+   generated combinators assert the node carries no attributes and RAISE when it does, where a
+   plain match simply does not select the arm. That would turn several friendly "expected a string
+   literal" error extensions into hard failures, so it is declined here. *)
+let string_literal expr =
+  match expr.pexp_desc with Pexp_constant (Pconst_string (s, _, _)) -> Some s | _ -> None
+
+let string_of_constant = function
+  | Pconst_string (s, _, _) | Pconst_integer (s, _) | Pconst_float (s, _) -> s
+  | Pconst_char c -> Char.to_string c
+
 let ndarray_constant expr =
   let loc = expr.pexp_loc in
   (* Traverse the backbone of the ndarray to collect the dimensions and any per-axis basis labels. A
@@ -245,6 +261,13 @@ let substitute_identifiers_in_einsum_spec ~loc str_input =
     @ (if parsed.implicit_input then [] else input_segments @ [ estring ~loc "->" ])
     @ output_segments
   in
+  (* Fold the segments into one literal when every one of them is a literal, so the common case
+     costs nothing at run time. *)
+  let concat_segments segments =
+    match Option.all (List.map segments ~f:string_literal) with
+    | Some literals -> estring ~loc (String.concat literals)
+    | None -> [%expr String.concat ~sep:"" [%e elist ~loc segments]]
+  in
   (* Try to parse as einsum spec *)
   try
     let rhs_labels, labels_r = einsum_of_spec str_input in
@@ -256,40 +279,12 @@ let substitute_identifiers_in_einsum_spec ~loc str_input =
     in
     let segments_r = [ estring ~loc " => " ] @ parsed_to_segments labels_r in
     let all_segments = rhs_segments @ segments_r in
-    (* Optimize: if all segments are string literals, concatenate at compile time *)
-    let all_literals =
-      List.for_all all_segments ~f:(fun e ->
-          match e.pexp_desc with Pexp_constant (Pconst_string _) -> true | _ -> false)
-    in
-    if all_literals then
-      let combined =
-        String.concat
-          (List.filter_map all_segments ~f:(fun e ->
-               match e.pexp_desc with
-               | Pexp_constant (Pconst_string (s, _, _)) -> Some s
-               | _ -> None))
-      in
-      estring ~loc combined
-    else [%expr String.concat ~sep:"" [%e elist ~loc all_segments]]
+    concat_segments all_segments
   with Parse_error _ -> (
     (* If parsing fails, try as axis_labels_spec *)
     try
       let parsed = axis_labels_of_spec str_input in
-      let segments = parsed_to_segments parsed in
-      let all_literals =
-        List.for_all segments ~f:(fun e ->
-            match e.pexp_desc with Pexp_constant (Pconst_string _) -> true | _ -> false)
-      in
-      if all_literals then
-        let combined =
-          String.concat
-            (List.filter_map segments ~f:(fun e ->
-                 match e.pexp_desc with
-                 | Pexp_constant (Pconst_string (s, _, _)) -> Some s
-                 | _ -> None))
-        in
-        estring ~loc combined
-      else [%expr String.concat ~sep:"" [%e elist ~loc segments]]
+      concat_segments (parsed_to_segments parsed)
     with Parse_error msg ->
       (* Fall back to returning the original string with an error note *)
       pexp_extension ~loc @@ Location.error_extensionf ~loc "Failed to parse einsum spec: %s" msg)
@@ -304,12 +299,8 @@ let string_of_pat pat =
     | Ppat_alias (_, ident) -> ident.txt
     | Ppat_var ident -> ident.txt
     | Ppat_any -> "_"
-    | Ppat_variant (s, _)
-    | Ppat_constant (Pconst_string (s, _, _))
-    | Ppat_constant (Pconst_integer (s, _))
-    | Ppat_constant (Pconst_float (s, _)) ->
-        s
-    | Ppat_constant (Pconst_char c) -> Char.to_string c
+    | Ppat_variant (s, _) -> s
+    | Ppat_constant c -> string_of_constant c
     | Ppat_tuple pats -> "(" ^ String.concat ~sep:", " (List.map ~f:loop pats) ^ ")"
     | Ppat_array pats -> "[|" ^ String.concat ~sep:", " (List.map ~f:loop pats) ^ "|]"
     | Ppat_construct (c, _) -> lident c.txt
@@ -358,12 +349,8 @@ let expr2string_or_empty expr =
     match expr.pexp_desc with
     | Pexp_open (_, expr) | Pexp_lazy expr | Pexp_constraint (expr, _) -> loop expr
     | Pexp_ident ident -> lident ident.txt
-    | Pexp_variant (s, _)
-    | Pexp_constant (Pconst_string (s, _, _))
-    | Pexp_constant (Pconst_integer (s, _))
-    | Pexp_constant (Pconst_float (s, _)) ->
-        s
-    | Pexp_constant (Pconst_char c) -> Char.to_string c
+    | Pexp_variant (s, _) -> s
+    | Pexp_constant c -> string_of_constant c
     | Pexp_tuple exprs -> "(" ^ String.concat ~sep:", " (List.map ~f:loop exprs) ^ ")"
     | Pexp_array exprs -> "[|" ^ String.concat ~sep:", " (List.map ~f:loop exprs) ^ "|]"
     | Pexp_construct (c, _) -> lident c.txt
@@ -667,14 +654,14 @@ let ndarray_op ?axis_labels ?label ~ndarray_fn expr =
 let collect_capture_labels ~loc head rest =
   let capture_labels = head :: collect_list [] rest in
   let capture_labels, errors =
-    List.partition_map capture_labels ~f:(function
-      | { pexp_desc = Pexp_constant (Pconst_string (label, _, _)); pexp_loc; _ } ->
-          Either.First (pexp_loc, label)
-      | expr ->
-          Either.Second
-            (Ast_builder.Default.pexp_extension ~loc:expr.pexp_loc
-            @@ Location.error_extensionf ~loc:expr.pexp_loc
-                 "ppx_ocannl %%op: expected a string literal"))
+    List.partition_map capture_labels ~f:(fun expr ->
+        match string_literal expr with
+        | Some label -> Either.First (expr.pexp_loc, label)
+        | None ->
+            Either.Second
+              (Ast_builder.Default.pexp_extension ~loc:expr.pexp_loc
+              @@ Location.error_extensionf ~loc:expr.pexp_loc
+                   "ppx_ocannl %%op: expected a string literal"))
   in
   let capture_labels, more_errors =
     List.fold_left capture_labels ~init:([], []) ~f:(fun (labels, errors) ((loc, label) as arg) ->
