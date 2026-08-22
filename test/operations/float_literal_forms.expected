@@ -1,0 +1,5 @@
+f64 constants reach the kernel bit-exactly: true
+f32 constants reach the kernel bit-exactly: true
+f16 constants reach the kernel as the host's own half conversion: true
+every constant is emitted as the intended floating literal: true
+no constant is emitted as an integer literal: true
