@@ -362,12 +362,13 @@ class PrecisionLegTest(unittest.TestCase):
 class ProvenanceTest(unittest.TestCase):
     """gh-ocannl-644: a tuned cell's result says which pass timed it."""
 
-    def tuned(self, searched, searches=0, replays=0):
+    def tuned(self, searched, searches=0, replays=0, no_searches=0):
         r = result("ocannl", "hip", "tuned", [2.3, 2.2, 2.1])
         if searched is not None:
             r["searched"] = searched
             r["tune"] = {
-                "shipped": "A", "searches": searches, "replays": replays, "arms": []
+                "shipped": "A", "searches": searches, "replays": replays,
+                "no_searches": no_searches, "arms": []
             }
         return r
 
@@ -404,6 +405,22 @@ class ProvenanceTest(unittest.TestCase):
         # searched nothing, and guessing either way has already been a bug.
         self.assertEqual(orchestrate.search_provenance({"searched": False}), "UNKNOWN")
 
+    def test_the_runner_states_the_no_search_case_instead_of_it_being_derived(self):
+        # gh-ocannl-677: the OCaml call's outcome is one state, and the runner now names it per
+        # arm and counts it (`no_searches`) rather than leaving the reader to recover "neither
+        # searched nor replayed" from two zeroed counters in a JSON artifact.
+        stated = lambda replays, no_searches: {  # noqa: E731
+            "searched": False,
+            "tune": {"shipped": "A", "searches": 0, "replays": replays,
+                     "no_searches": no_searches, "arms": []},
+        }
+
+        self.assertEqual(orchestrate.search_provenance(stated(0, 2)), "NO-SEARCH")
+        self.assertEqual(orchestrate.search_provenance(stated(2, 0)), "REPLAY")
+        # A mixed cell — one arm replayed, the other had nothing to replay — still carries a tuned
+        # artifact, so it is a replay.
+        self.assertEqual(orchestrate.search_provenance(stated(1, 1)), "REPLAY")
+
     def test_only_a_real_replay_labels_the_carried_over_compile_cost_cached(self):
         # A search pass under autotune_search=false hands over the cost of compiling the untuned
         # default; calling that "(cached)" would claim a schedule cache it never touched.
@@ -417,10 +434,17 @@ class ProvenanceTest(unittest.TestCase):
         # default, having neither searched nor replayed. Gating it would fail BOTH passes of every
         # tuned cell, and calling it a replay would credit the row with a tuned artifact it does
         # not have.
-        cell = self.tuned(False, searches=0, replays=0)
+        cell = self.tuned(False, searches=0, replays=0, no_searches=2)
 
         self.assertEqual(orchestrate.provenance_check([cell]), [])
         self.assertEqual(cell["provenance"], "NO-SEARCH")
+
+        # And the same verdict from an artifact written before `no_searches` existed.
+        legacy = self.tuned(False, searches=0, replays=0)
+        del legacy["tune"]["no_searches"]
+
+        self.assertEqual(orchestrate.provenance_check([legacy]), [])
+        self.assertEqual(legacy["provenance"], "NO-SEARCH")
 
     def test_a_runner_without_the_field_is_unknown_not_a_violation(self):
         old = self.tuned(None)

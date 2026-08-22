@@ -105,9 +105,9 @@ let () =
   in
   (match !report with
   | Some r ->
-      printf "tune: cache_hit=%b fissioned=%b candidates=%d baseline_ms=%.3f best_ms=%.3f\n"
-        r.Autotune.cache_hit r.Autotune.fissioned r.Autotune.candidates_timed r.Autotune.baseline_ms
-        r.Autotune.best_ms
+      printf "tune: state=%s fissioned=%b candidates=%d baseline_ms=%.3f best_ms=%.3f\n"
+        (Autotune.outcome_name r.Autotune.outcome)
+        r.Autotune.fissioned r.Autotune.candidates_timed r.Autotune.baseline_ms r.Autotune.best_ms
   | None -> printf "tune: no report\n");
 
   (* --- Steady-state stepping, as the training loop does it. --- *)

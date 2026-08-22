@@ -13,6 +13,12 @@ module Asgns = Ir.Assignments
 
 let p = Verdict.p
 
+(* The report's outcome as the questions this test asks of it (gh-ocannl-677): the outcome is a
+   variant naming one of five mutually exclusive states, so a claim names the state it means
+   instead of combining flags — [not (replayed r)] in particular does NOT say a search ran. *)
+let completed (r : Autotune.report) =
+  match r.Autotune.outcome with Autotune.Searched -> true | _ -> false
+
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
@@ -51,7 +57,7 @@ let () =
     (Array.for_all2_exn got want ~f:(fun x y -> Float.(abs (x - y) < 1e-4)));
   match !reports with
   | [ r ] ->
-      p "search completed (not partial)" (not r.Autotune.partial);
+      p "the search completed" (completed r);
       p "bound pruning fathomed sketch candidates" (r.Autotune.bound_pruned > 0);
       p "never-pruned candidates were still timed" (r.Autotune.candidates_timed >= 1);
       p "keep-fraction pruning is counted apart" (r.Autotune.model_pruned = 0)

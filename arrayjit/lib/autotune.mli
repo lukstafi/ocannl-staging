@@ -360,19 +360,48 @@ type terminal_failure = {
   detail : string;
 }
 
-type report = {
-  cache_hit : bool;
-      (** The schedule came from the disk cache; no search ran. The census is then empty except for
-          a declined baseline: the base compile precedes the lookup, so its rejection is real
+type outcome =
+  | Searched
+      (** A search ran and completed: candidates were proposed and compiled or timed, leaving the
+          process loaded with their modules and buffers. *)
+  | Search_died of terminal_failure
+      (** A search ran and terminated on the carried fatal failure. The counters hold the work it
+          had reached, and [best_ms] is a mid-search measurement of the {e search} context: no
+          routine was compiled from the caller's context for it, so it is never shippable
+          (gh-ocannl-550). *)
+  | Cache_replay
+      (** A cached winner replayed; no search ran in this process. The census is then empty except
+          for a declined baseline: the base compile precedes the lookup, so its rejection is real
           information about this process on this device even though nothing was searched. *)
-  searched : bool;
-      (** This call ran a search: it proposed candidates and compiled or timed them, leaving the
-          process loaded with their modules and buffers. [not cache_hit] is NOT this predicate —
-          with [autotune_search=false] (the reproducible profile, gh-ocannl-559) and on every
-          pre-search failure the call reports [cache_hit = false] having searched nothing, and the
-          caller ships the untuned default. The distinction is what a measurement harness needs to
-          say which process produced its timings (gh-ocannl-644), so it is stated here rather than
-          inferred from a counter that happens to be zero. *)
+  | Search_disabled
+      (** Nothing was searched and there was nothing to replay: config [autotune_search=false] (the
+          reproducible profile, gh-ocannl-559) with no chosen cache, or a chosen cache that missed.
+          The caller gets the untuned default compile — the same code {!Context.compile} would have
+          produced. Every counter is zero and every time [infinity]; a declined baseline can still
+          populate [declines]. *)
+  | Pre_search_failure of terminal_failure
+      (** The call failed before (or instead of) the search proper — a base compile that failed
+          before its lowering was captured, a fatal baseline link, a fatal cache replay, a baseline
+          timing failure, or an untuned fallback compile of a search-less call — and raised. It
+          still reports (gh-ocannl-550), carrying whatever census the call had reached, so a caller
+          attributing arms by arrival order (the positional [?report] of {!Train.tune_placements})
+          gets a slot for it. *)
+(** What the call did about searching (gh-ocannl-677). The states are mutually exclusive and each
+    carries exactly its own data, so a consumer matches instead of re-deriving: "it searched" is
+    [Searched | Search_died _] and nothing else — in particular it is {e not} [not cache_hit], the
+    reading that costs a benchmark harness every tuned cell under the reproducible profile, where a
+    call reports having neither searched nor replayed. Spelled as four independent booleans until
+    gh-ocannl-677, where two consumers mis-derived the state in one PR.
+
+    Note the arithmetic: five constructors for what reads as four outcomes, because "nothing
+    searched" is two — a deliberate no-search that ships the untuned default and returns, and a
+    failure before the search that reports and then raises. The old encoding could not tell them
+    apart either, it just did not say so. *)
+
+type report = {
+  outcome : outcome;
+      (** What this call did about searching. The counters below say how much work that state got
+          through; they never identify it — several are zero in more than one state. *)
   candidates_timed : int;
       (** Including the serial baseline where it was dispatched — on GPU backends it is not
           (gh-ocannl-532), and neither is any other candidate that binds no hardware dimension. So
@@ -386,18 +415,6 @@ type report = {
           candidates refused as unparallelized on a GPU backend (gh-ocannl-532), which the decline
           census records so a previously-proposed site — or a candidate space the backend's
           execution model empties — never stops being proposed silently. *)
-  partial : bool;
-      (** [true] when the call terminated on a fatal failure instead of completing. {!tune} reports
-          exactly once per call, on every path that does any work (gh-ocannl-550) — argument
-          validation is the exception, and deliberately so: an incompatible [timing_ctx] is a
-          precondition violation detected before anything happens, not an outcome of a search, and
-          reporting it would attribute a phase to a call that never reached one. The failures that
-          precede the search proper — a base compile that fails before the base lowering is
-          captured, a fatal baseline link, a fatal cache replay, a baseline timing failure — and the
-          untuned fallback compiles of a search-less call ([search=false]) report with every counter
-          at the value it had reached and the failure in [terminal_failure], so a caller attributing
-          arms by arrival order (the positional [?report] of [Train.tune_placements]) still gets a
-          slot for the search that died. *)
   baseline_declined : bool;
       (** The serial baseline's own compile was rejected with a typed cause and the search ran on
           the scheduled candidates alone (gh-ocannl-533): [baseline_ms] is then [infinity] and the
@@ -407,10 +424,6 @@ type report = {
   declines : decline_summary list;
       (** Candidate rejections aggregated by stable cause key. Their counts sum to
           [candidates_failed]. Cache-entry replay failures are excluded. *)
-  terminal_failure : terminal_failure option;
-      (** The fatal failure that stopped a partial search; [None] on completed reports. [phase] is
-          the one the failure carries — where the search actually died (at link, at launch, at
-          sync), not where the report was assembled. *)
   rounds_run : int;  (** Beam-expansion rounds actually executed (0 = seeds only). *)
   sketch_candidates : int;
       (** Whole-routine matmul-sketch instantiations seeded (0 when no matmul micro-kernel was
@@ -498,8 +511,10 @@ type report = {
   best_label : string;
       (** The crowned candidate's spec label — the same string the [autotune_log] lines carry (e.g.
           ["F_sketch[mma-gpu 16x32x32 ep]"]). ["baseline"] when no candidate beat the serial
-          baseline, [""] when nothing was timed. Which candidate won is otherwise recoverable only
-          by matching [best_ms] against the log's per-candidate times (gh-ocannl-546). *)
+          baseline, and [""] exactly when nothing was timed — including the states that time nothing
+          by construction, which say so in [outcome] rather than through this string. Which
+          candidate won is otherwise recoverable only by matching [best_ms] against the log's
+          per-candidate times (gh-ocannl-546). *)
   best_tensorized : bool;
       (** The crowned schedule contains a [Schedule.Tensorize] — read off [best_schedule], so this
           is what the winner {e is}, not what its label promised. This is the fact a caller needs to
@@ -537,8 +552,27 @@ type report = {
 
 val no_search_report : report
 (** The report of a {!tune} call that never searched (config [autotune_search=false], gh-ocannl-559,
-    and no cache entry to replay): every counter zero, every time [infinity], and [best_label] =
-    ["search disabled"]. The caller gets the untuned default compile. *)
+    and no cache entry to replay): [outcome = Search_disabled], every counter zero, every time
+    [infinity] and [best_label] empty. The caller gets the untuned default compile. Also the base
+    the pre-search failure reports are built on, with [outcome] replaced and whatever census the
+    call had reached filled in. *)
+
+val outcome_name : outcome -> string
+(** The stable one-word name of an outcome state — ["searched"], ["search-died"], ["cache-replay"],
+    ["search-disabled"], ["pre-search-failure"] — for logs, JSON records and test goldens. *)
+
+val terminal_failure : report -> terminal_failure option
+(** The fatal failure that ended the call, from whichever of the two failing states carried it;
+    [None] otherwise. A projection over {!outcome}, not a re-derivation of it: "did this call fail"
+    spans two states, and every caller that ranks or attributes arms asks exactly that — an arm
+    carrying one is {e never} the shipped arm, whatever its pre-failure [best_ms] says
+    (gh-ocannl-550). The failure's [phase] is the one it carries — where the call actually died (at
+    link, at launch, at sync), not where the report was assembled.
+
+    {!tune} reports exactly once per call, on every path that does any work. Argument validation is
+    the exception, and deliberately so: an incompatible [timing_ctx] is a precondition violation
+    detected before anything happens, not an outcome of a search, and reporting it would attribute a
+    phase to a call that never reached one. *)
 
 val model_score :
   static_indices:Ir.Indexing.static_symbol list ->
@@ -715,7 +749,7 @@ val on_candidate_attempt : (string -> unit) ref
     that one is called inside the base compile's transform, so a fault injected there is classified
     like any other and surfaces as the pre-search failure of a search that never started. The
     default is a no-op and no configuration selects it; raising from it terminates the search the
-    way an uncontainable failure does — the partial report (carrying [terminal_failure]) is emitted
+    way an uncontainable failure does — the [Search_died] report (carrying its failure) is emitted
     to [?report] and the exception propagates out of {!tune}, which is what [Train.tune_placements]
     must survive without losing the other arm's winner. Not a production seam: candidate failures
     that a backend {e can} attribute are contained without it (see [declines]). *)
