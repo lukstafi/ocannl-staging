@@ -129,14 +129,12 @@ let rec translate ~dsl_name ~num_configs ~is_toplevel ?(in_block = false) ~opt_l
   let block_loop = translate ~dsl_name ~num_configs ~is_toplevel:false ~in_block:true ~opt_label in
   let dsl_fn = dsl_fn ~loc dsl_name in
   match expr with
-  | { pexp_desc = Pexp_extension ({ txt = "oc"; _ }, payload); _ } -> (
-      (* %oc anti-quotation: preserve the expression without transformation *)
-      match payload with
-      | PStr [ { pstr_desc = Pstr_eval (expr, _); _ } ] -> (no_vbs, expr)
-      | _ ->
-          ( no_vbs,
-            Ast_builder.Default.pexp_extension ~loc
-            @@ Location.error_extensionf ~loc "%%oc expects a single expression" ))
+  (* %oc anti-quotation: preserve the expression without transformation *)
+  | [%expr [%oc [%e? oc_expr]]] -> (no_vbs, oc_expr)
+  | { pexp_desc = Pexp_extension ({ txt = "oc"; _ }, _); _ } ->
+      ( no_vbs,
+        Ast_builder.Default.pexp_extension ~loc
+        @@ Location.error_extensionf ~loc "%%oc expects a single expression" )
   | { pexp_desc = Pexp_constant (Pconst_float _); _ } ->
       (no_vbs, [%expr [%e dsl_fn "number"] ?label:[%e opt_expr ~loc label] [%e expr]])
   | { pexp_desc = Pexp_constant (Pconst_integer (_, Some ('L' | 'l'))); _ } ->
