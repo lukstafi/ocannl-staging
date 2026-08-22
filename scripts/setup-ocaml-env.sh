@@ -124,27 +124,38 @@ fi
 bounded() {
   # bounded SECS CMD...: run CMD, killing it if still running after SECS.
   local secs="$1"; shift
-  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"; return $?; fi
-  "$@" & local pid=$!
+  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@" </dev/null; return $?; fi
+  # Without GNU timeout, reproduce what it does: the command runs in its own
+  # process group and the watchdog signals the GROUP, so the ssh or credential
+  # helper git is blocked on dies with git instead of being orphaned by a
+  # PID-only kill and accumulating across session starts. Job control is what
+  # gives a background job its own group; it is switched off again once both
+  # jobs are spawned. CONT follows TERM for a job stopped on a tty read.
+  local pid watchdog rc
+  set -m
+  "$@" </dev/null & pid=$!
   # The killer gets no inherited fds: a lingering `sleep` holding the hook's
   # stdout would keep the harness waiting for EOF after the script exits.
-  ( sleep "$secs"; kill "$pid" 2>/dev/null ) >/dev/null 2>&1 </dev/null &
-  local watchdog=$!
-  wait "$pid"; local rc=$?
-  kill "$watchdog" 2>/dev/null; wait "$watchdog" 2>/dev/null
+  ( sleep "$secs"; kill -TERM -- -"$pid" 2>/dev/null; kill -CONT -- -"$pid" 2>/dev/null ) \
+    >/dev/null 2>&1 </dev/null &
+  watchdog=$!
+  set +m
+  wait "$pid" 2>/dev/null; rc=$?
+  kill -TERM -- -"$watchdog" 2>/dev/null; wait "$watchdog" 2>/dev/null
   return $rc
 }
 if [ -n "$wt_top" ] && git -C "$wt_top" remote get-url origin >/dev/null 2>&1; then
   # Git picks its SSH launcher as GIT_SSH_COMMAND, else core.sshCommand, else
   # GIT_SSH, else `ssh`; the probe keeps that choice and only APPENDS the OpenSSH
   # options where they are known to apply: to a shell-string launcher (the first
-  # two, or the default) whose program is not a plink variant — judged the way
-  # git's own `ssh.variant` auto-detection does, by the program's basename, or
-  # by an explicit `ssh.variant`. A `GIT_SSH` program (a path, not a shell
-  # string — typically plink on Windows) is left entirely alone. Wherever the
-  # options are not appended, `bounded` is still the bound.
+  # two, or the default) whose variant takes OpenSSH options — judged by an
+  # explicit variant (`GIT_SSH_VARIANT`, which outranks `ssh.variant`) when one
+  # is set, else by the program's basename the way git's auto-detection does;
+  # `simple` is `COMMAND HOST...` with no options at all. A `GIT_SSH` program (a
+  # path, not a shell string — typically plink on Windows) is left entirely
+  # alone. Wherever the options are not appended, `bounded` is still the bound.
   ssh_opts="-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=2"
-  ssh_variant="$(git -C "$wt_top" config ssh.variant 2>/dev/null || true)"
+  ssh_variant="${GIT_SSH_VARIANT:-$(git -C "$wt_top" config ssh.variant 2>/dev/null || true)}"
   fetch_env=()
   if [ -n "${GIT_SSH_COMMAND:-}" ]; then ssh_launcher="$GIT_SSH_COMMAND"
   elif ssh_launcher="$(git -C "$wt_top" config core.sshCommand 2>/dev/null)" && [ -n "$ssh_launcher" ]; then :
@@ -154,7 +165,7 @@ if [ -n "$wt_top" ] && git -C "$wt_top" remote get-url origin >/dev/null 2>&1; t
   if [ -n "$ssh_launcher" ]; then
     ssh_prog="$(basename "${ssh_launcher%% *}" | tr 'A-Z' 'a-z')"
     case "${ssh_variant:-$ssh_prog}" in
-      plink|putty|tortoiseplink|plink.exe|putty.exe|tortoiseplink.exe) ;;
+      simple|plink|putty|tortoiseplink|plink.exe|putty.exe|tortoiseplink.exe) ;;
       *) fetch_env=(GIT_SSH_COMMAND="$ssh_launcher $ssh_opts") ;;
     esac
   fi
