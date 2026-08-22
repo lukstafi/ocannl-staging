@@ -241,7 +241,10 @@ let parse_file ~file contents =
   let report line rule msg = findings := finding ~file ~line ~rule msg :: !findings in
   let bad line msg = report line rule_bullet_integrity msg in
   let bullets = ref [] in
-  (* Innermost last: each entry is a bullet being accumulated, with its text lines reversed. *)
+  (* Innermost FIRST: each entry is a bullet being accumulated, with its text lines reversed.
+     Flushing always goes outermost first, so [bullets] comes out in document order -- which is what
+     the repetition rule reports against (the SECOND occurrence is the finding) and what orders the
+     findings of a file. *)
   let stack : (bullet * string list ref) list ref = ref [] in
   let close_all () =
     List.iter (List.rev !stack) ~f:(fun (b, texts) ->
@@ -251,10 +254,10 @@ let parse_file ~file contents =
   in
   List.iter (lines contents) ~f:(fun (lineno, line) ->
       let stripped = String.strip line in
-      if has_leading_tab line then (
+      if is_blank line then close_all ()
+      else if has_leading_tab line then (
         bad lineno "a tab in the indentation: indentation here is spaces, two per nesting level";
         close_all ())
-      else if is_blank line then close_all ()
       else
         let indent = indent_of line in
         if String.is_prefix stripped ~prefix:"#" then close_all ()
@@ -271,16 +274,17 @@ let parse_file ~file contents =
                 close_all ())
               else if String.is_prefix stripped ~prefix:"- " then (
                 (* A bullet start closes every open bullet at or inside its own depth. *)
-                let rec pop () =
+                let rec pop acc =
                   match !stack with
                   | (b, texts) :: rest when b.indent >= indent ->
-                      let text = String.concat ~sep:" " (List.rev !texts) in
-                      bullets := { b with text } :: !bullets;
                       stack := rest;
-                      pop ()
-                  | _ -> ()
+                      pop ((b, texts) :: acc)
+                  | _ -> acc
                 in
-                pop ();
+                (* [pop] prepends as it unwinds inwards-out, so [popped] is outermost first. *)
+                List.iter (pop []) ~f:(fun (b, texts) ->
+                    let text = String.concat ~sep:" " (List.rev !texts) in
+                    bullets := { b with text } :: !bullets);
                 let expected = match !stack with [] -> 0 | (b, _) :: _ -> b.indent + 2 in
                 if indent <> expected then
                   bad lineno

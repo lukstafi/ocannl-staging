@@ -6,6 +6,7 @@ ok: bullets -- a bullet ending in bold
 ok: bullets -- a bullet ending in a code span
 ok: bullets -- a bullet ending in an identifier and no punctuation
 ok: bullets -- a nested bullet with its own continuations
+ok: bullets -- a nested list where parent and child are both cut short
 ok: bullets -- an indented line at the parent's depth while a nested bullet is open
 ok: bullets -- an indented line continuing nothing
 ok: bullets -- a continuation indented past its bullet

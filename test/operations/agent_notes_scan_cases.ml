@@ -54,6 +54,11 @@ let structure_cases =
       "# Title\n\n- A fact with parts, as follows:\n  - the first part, which\n    wraps across a \
        line.\n  - the second part.\n- The next fact.\n",
       [] );
+    (* Findings come out in document order, parent before child, however the list nests. *)
+    ( "a nested list where parent and child are both cut short",
+      "# Title\n\n- A parent that stops mid-senten\n  - a child that stops too\n- A finished \
+       fact.\n",
+      [ "bullet-integrity @ f.md:3"; "bullet-integrity @ f.md:4" ] );
     ( "an indented line at the parent's depth while a nested bullet is open",
       "# Title\n\n- A fact with parts:\n  - the first part.\n  more of the first fact.\n",
       [ "bullet-integrity @ f.md:5" ] );
