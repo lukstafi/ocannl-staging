@@ -171,6 +171,15 @@ let () =
     @ [ stage mb.Tensor.value [ k_i; j ]; stage ma.Tensor.value [ i_i; k_i ] ]
     @ [ tz ]
   in
+  (* The FIRST variant to complete is the reference every later one is compared against, cell by
+     cell (gh-ocannl-711 review): the checksum is a linear functional of the output, so a row
+     permutation survives it whenever the value difference is orthogonal to the weight difference,
+     and an elementwise comparison has nothing to cancel. Exact equality is the right comparison
+     wherever the note below says the legs are comparable; where it says they are not — a
+     narrow-storage run past the extent at which the block partials stay exact — a DIFFERS line is
+     legitimate, and the note is what says so. *)
+  let reference = ref None in
+  let disagreements = ref 0 in
   let bench ~variant ~schedule () =
     let%op mc = ma * mb in
     Ir.Tnode.update_prec mc.Tensor.value prec;
@@ -248,15 +257,25 @@ let () =
        block-boundary partial could split naive from packed again, far more rarely than the per-step
        narrowing did. Both checks are outside the timed region. *)
     let checksum = Bench_checksum.whole_output ~row_stride:n values in
+    let agreement =
+      match !reference with
+      | None ->
+          reference := Some values;
+          "reference"
+      | Some r ->
+          let d = Bench_checksum.first_difference ~reference:r values in
+          if Option.is_some d then Int.incr disagreements;
+          Bench_checksum.render_agreement d
+    in
     let spot = Int.min (n + 1) (Array.length values - 1) in
     let secs = Float.of_int63 Int63.(stop - start) /. 1e9 /. Float.of_int repeats in
     (* Printed on EVERY timing line, untensorized variants included: an absent suffix is one a
        table reader does not notice (gh-ocannl-626). *)
-    p "%-12s %8.3f ms  %8.2f GFLOP/s  (spot check [%d] %.2f, chk %s)  [%s]\n" variant
+    p "%-12s %8.3f ms  %8.2f GFLOP/s  (spot check [%d] %.2f, chk %s, %s)  [%s]\n" variant
       (secs *. 1e3)
       (flops /. secs /. 1e9)
       spot values.(spot)
-      (Bench_checksum.render checksum)
+      (Bench_checksum.render checksum) agreement
       (Ir.C_syntax.mma_summary_string mma);
     (secs, mma)
   in
@@ -316,4 +335,14 @@ let () =
           "WARNING: %d of %d Tile_mma statements rendered the scalar fallback (see the census\n\
            above) — these are NOT register-tiled timings. Re-run with\n\
            --ocannl_schedule_log_declines=true for the per-rule reason.\n"
-          declined all.Ir.C_syntax.statements
+          declined all.Ir.C_syntax.statements;
+      (* A variant that computed something ELSE, which the checksum can miss and this cannot. In an
+         f32 run, and in a narrow-storage run at an extent the note above calls comparable, every
+         leg's reduction is exact whatever order it sums in, so a difference is a wrong result
+         rather than rounding; past that extent the note is what says a DIFFERS line is expected. *)
+      if !disagreements > 0 then
+        p
+          "WARNING: %d variant(s) did not reproduce the reference variant's output cell for\n\
+           cell — the DIFFERS lines above name the first cell and both values. Read them\n\
+           against the comparability note printed at the top of this run.\n"
+          !disagreements

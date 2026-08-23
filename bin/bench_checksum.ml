@@ -23,13 +23,17 @@
       and a staging bug that repeats the wrong panel is invisible; the packing factors are user
       arguments, so no fixed period can be assumed coprime to them.
 
-    - {b Too few weights to tell the rows apart.} A weight capped at [weight_cap] puts each row's
-      weight vector in a space of size [weight_cap ^ row_stride], so at a narrow row stride two rows
-      collide by birthday long before the pigeonhole bound, and swapping THOSE two is invisible to
-      any weighting: at row_stride = 2, one stream gives rows 9 and 363 the same weights. No bounded
-      weight escapes this, so the answer is to make the space large enough that no geometry a bench
-      is run at reaches it — {!whole_output} accumulates one sum per salt in {!weight_salts},
-      squaring the space per extra stream while each sum stays exactly as exact as it was.
+    - {b A weighted sum that cancels.} A checksum is a linear functional of the output, so a row
+      permutation is missed whenever the value difference is orthogonal to the weight difference —
+      by the weights colliding (a weight capped at [weight_cap] puts a row's weight vector in
+      [weight_cap ^ row_stride] values, and at row_stride 2 one stream gives rows 9 and 363 the same
+      weights), or by plain cancellation (at m = 719, row_stride 2, rows 240 and 718 differ by
+      [-14; 14] against weight differences that are constant across both columns, so BOTH streams
+      cancel). No bounded-weight scalar escapes that class — which is why the guard the benches
+      assert on is {!first_difference}, an elementwise comparison against the reference variant, and
+      the checksum is what they PRINT: a compact fingerprint for reading a table and comparing runs,
+      not the thing that decides. The two streams of {!weight_salts} are what make the printed
+      fingerprint worth reading.
 
     - {b A producer value that IS the accumulator's init.} An operand row of all zeros makes the
       corresponding output row all zeros, which is indistinguishable from a schedule that dropped
@@ -49,9 +53,20 @@ open Base
     intermediate is masked below 2^24, so nothing overflows a 63-bit int, the result is non-negative
     (so [%] on it is a true residue), and the sequence is reproducible by an external oracle. The
     salt lets one bench mint several independent streams — its operands and its checksum weights —
-    from the same function. *)
+    from the same function.
+
+    The mask sits on the FIRST line, and that placement is the whole of a defect this inherited from
+    the copy it was lifted from. With it further down, the fold [x lxor (x lsr 13)] compressed a
+    40-bit product into 24 bits, and it is GF(2)-linear: two rows' outputs then differed by
+    [L (a*P lxor a'*P)], a value depending on neither the column nor the salt — so a row pair in
+    [L]'s kernel was identical at EVERY column of EVERY stream, and no number of streams could tell
+    those two rows apart. Eight such pairs sit below row 20000, the first being 5977 and 10232.
+    Masking to 24 bits first removes the class rather than shrinking it: [a * 73856093] is injective
+    mod 2^24 (the multiplier is odd), and everything after it is a bijection on 24 bits — an
+    xor-shift, a multiply by an odd constant, an xor-shift — so distinct rows below 2^24 differ at
+    every column, and distinct columns likewise. Provable, not swept. *)
 let mix ~salt a b =
-  let x = (a * 73856093) lxor (b * 19349663) lxor salt in
+  let x = ((a * 73856093) lxor (b * 19349663) lxor salt) land 0xFFFFFF in
   let x = x lxor (x lsr 13) land 0xFFFFFF in
   let x = x * 1274126177 land 0xFFFFFF in
   x lxor (x lsr 7)
@@ -106,7 +121,8 @@ let weighted ~salt ~row_stride values =
     wrong offsets — a permutation, which is what a misplaced edge peel produces — leaves it
     unchanged. Every correct variant of a computation produces the identical list.
 
-    This is a correctness guard, not a measurement: call it OUTSIDE the timed region. *)
+    This is the printed fingerprint, not the assertion — {!first_difference} is what a bench decides
+    on. Both are correctness checks rather than measurements: call them OUTSIDE the timed region. *)
 let whole_output ~row_stride values =
   List.map weight_salts ~f:(fun salt -> weighted ~salt ~row_stride values)
 
@@ -121,6 +137,40 @@ let row_weights ~row_stride ~row =
 (** A checksum rendered for a bench's timing line. *)
 let render checksums =
   String.concat ~sep:"/" (List.map checksums ~f:(fun c -> Printf.sprintf "%.10g" c))
+
+(** How one variant's output differs from the reference variant's. *)
+type disagreement =
+  | Length of { reference : int; got : int }
+  | Cell of { at : int; reference : float; got : float }
+
+(** [first_difference ~reference values] is the first cell at which [values] departs from
+    [reference], if any. THIS is the guard a bench asserts on, and it is where the checksum's whole
+    collision class goes away: it compares what the variants computed rather than a digest of it, so
+    a permutation, a dropped edge peel and a repeated tail are all simply differences, with nothing
+    to cancel and no weights to collide. The digest stays worth printing — one number per line
+    fingerprints a run and travels into a report — but it is not what decides.
+
+    Exact equality is the right comparison for these benches: their operands are exact in binary and
+    their products are small multiples of a negative power of two, so every variant's reduction is
+    exact whatever order it sums in. A bench whose legs may legitimately round differently (a
+    narrow-storage run past the extent where its block partials stay exact) should say so where it
+    reports, as it already must for the checksum.
+
+    Outside the timed region, like the checksum. *)
+let first_difference ~reference values =
+  if Array.length reference <> Array.length values then
+    Some (Length { reference = Array.length reference; got = Array.length values })
+  else
+    Array.findi values ~f:(fun t v -> not (Float.equal reference.(t) v))
+    |> Option.map ~f:(fun (at, got) -> Cell { at; reference = reference.(at); got })
+
+(** How a bench renders {!first_difference} on its timing line: short enough to sit beside the
+    timings, specific enough to start a diagnosis from. *)
+let render_agreement = function
+  | None -> "= ref"
+  | Some (Length { reference; got }) -> Printf.sprintf "SIZE %d vs ref %d" got reference
+  | Some (Cell { at; reference; got }) ->
+      Printf.sprintf "DIFFERS at [%d]: %.10g vs ref %.10g" at got reference
 
 (** The degenerate flat-offset weight this module exists to replace, kept so the discrimination test
     can carry it as a NEGATIVE CONTROL: a check that the new form passes is evidence only once the

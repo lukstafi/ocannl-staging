@@ -14,14 +14,21 @@
    row-major array: at [p | row_stride] every row is identical, so a schedule substituting the wrong
    row computes the right answer and no whole-output check can tell.
 
-   [Bench_checksum] keys both on the (row, column) pair through an aperiodic mix instead. Two more
+   [Bench_checksum] keys both on the (row, column) pair through an aperiodic mix instead. Three more
    ways for the same guard to go blind are pinned here beside that one, because keying on the pair
-   does not answer either of them: a weight capped at 251 puts a row's weight vector in
-   [251 ^ row_stride] values, so at a narrow stride two rows collide and NO weighting of that one
-   stream can see them swapped (hence the second stream in [Bench_checksum.weight_salts]); and an
-   operand row of all zeros makes its output row all zeros, which against a zero-initialized
-   destination is indistinguishable from a schedule that dropped the row (hence
-   [Bench_checksum.positive_level]).
+   answers none of them:
+
+   - a checksum is a LINEAR functional of the output, so a row swap survives it whenever the value
+     difference is orthogonal to the weight difference — by the weights colliding, or by plain
+     cancellation. No bounded-weight scalar escapes that, so what a bench asserts on is
+     [Bench_checksum.first_difference], an elementwise comparison against the reference variant;
+     the checksum is what it PRINTS;
+   - the mix's own fold used to compress a 40-bit product into 24 bits and was GF(2)-linear, so two
+     rows' outputs differed by a value depending on neither column nor salt: row pairs existed that
+     were identical in EVERY stream at EVERY salt, which no number of streams can repair;
+   - an operand row of all zeros makes its output row all zeros, indistinguishable from a schedule
+     that dropped the row against a zero-initialized destination (hence
+     [Bench_checksum.positive_level]).
 
    Every claim below is paired with the pre-fix form as a NEGATIVE CONTROL: a check the new form
    passes is evidence only once the old form is shown to fail the same check. The controls are the
@@ -226,6 +233,182 @@ let () =
   Verdict.p
     "a residue admitting zero does produce an all-zero ma row at row stride 2 (negative control)"
     (zeroing_rows ~row_stride:2 ~rows:600 > 0);
+
+  (* The elementwise guard. Everything above is about how far a WEIGHTED SUM can be pushed; this is
+     the claim that the benches do not rest on that. The reviewer's case is [schedule_bench 2 <r>
+     719 2]: output rows 240 and 718 differ by [-14; 14], and both streams' weight differences are
+     constant across the two columns, so both sums cancel and the swap is invisible to the printed
+     fingerprint. It is not invisible to a comparison of the outputs. *)
+  let sb_ma ~m ~k =
+    Array.init (m * k) ~f:(Bc.positive_level ~salt:0x5A17 ~row_stride:k ~levels:12 ~scale:0.25)
+  in
+  let sb_mb ~k ~n =
+    Array.init (k * n) ~f:(fun t ->
+        Float.of_int (Bc.residue ~salt:0x3C6E ~row_stride:n ~modulus:17 t) -. 8.)
+  in
+  let sb_output ~m ~n ~k =
+    let ma = sb_ma ~m ~k and mb = sb_mb ~k ~n in
+    Array.init (m * n) ~f:(fun t ->
+        let i = t / n and j = t % n in
+        List.fold (List.range 0 k) ~init:0.0 ~f:(fun acc kk ->
+            acc +. (ma.((i * k) + kk) *. mb.((kk * n) + j))))
+  in
+  (* Search for a swap of GENERATED rows that both streams miss, rather than asserting the one pair
+     the review happened to find: the claim is about the class, so a pair found by sweep is one the
+     sweep still finds if the constants move. Done on the difference form — a swap of rows a and b
+     shifts stream s by [sum_j (v_aj - v_bj) (w_aj - w_bj)] — which is O(n) per pair instead of a
+     checksum of the whole output per pair. *)
+  let cancelling ~m ~n ~k =
+    let v = sb_output ~m ~n ~k in
+    let w ~salt t = 1 + Bc.residue ~salt ~row_stride:n ~modulus:Bc.weight_cap t in
+    let shift ~salt a b =
+      List.fold (List.range 0 n) ~init:0.0 ~f:(fun acc j ->
+          let ta = (a * n) + j and tb = (b * n) + j in
+          acc +. ((v.(ta) -. v.(tb)) *. Float.of_int (w ~salt ta - w ~salt tb)))
+    in
+    let rows_differ a b =
+      List.exists (List.range 0 n) ~f:(fun j ->
+          not (Float.equal v.((a * n) + j) v.((b * n) + j)))
+    in
+    List.find_map (List.range 0 m) ~f:(fun a ->
+        List.find_map (List.range (a + 1) m) ~f:(fun b ->
+            if
+              rows_differ a b
+              && List.for_all Bc.weight_salts ~f:(fun salt ->
+                     Float.equal (shift ~salt a b) 0.0)
+            then Some (a, b, v)
+            else None))
+  in
+  (* Two geometries, so the class is not read as a property of the narrowest one. *)
+  let cancel_cases =
+    List.filter_map
+      [ (2000, 2, 2); (2000, 3, 2) ]
+      ~f:(fun (m, n, k) ->
+        Option.map (cancelling ~m ~n ~k) ~f:(fun (a, b, v) -> (m, n, k, a, b, v)))
+  in
+  List.iter cancel_cases ~f:(fun (m, n, k, a, b, _) ->
+      p "both weight streams miss the swap of generated rows %d and %d at m=%d n=%d k=%d\n" a b m n
+        k);
+  Verdict.p
+    "the printed checksum can miss a swap of generated output rows, so it is not the guard \
+     (negative control)"
+    (List.length cancel_cases = 2);
+  (* Confirm through the guard itself, not only through the difference form it was found with. *)
+  Verdict.p "those swaps really do leave every printed checksum stream unchanged"
+    (List.for_all cancel_cases ~f:(fun (_, n, _, a, b, v) ->
+         let w = swap_rows ~n v ~r1:a ~r2:b in
+         (not (Array.equal Float.equal v w))
+         && List.equal Float.equal
+              (Bc.whole_output ~row_stride:n v)
+              (Bc.whole_output ~row_stride:n w)));
+  Verdict.p "the elementwise guard sees those swaps"
+    (List.for_all cancel_cases ~f:(fun (_, n, _, a, b, v) ->
+         let w = swap_rows ~n v ~r1:a ~r2:b in
+         Option.is_some (Bc.first_difference ~reference:v w)));
+  (* And it sees the whole class the weighted sums were swept for, at every extent, without a
+     collision argument: it compares what was computed. *)
+  let elementwise_missed =
+    List.concat_map extents ~f:(fun n ->
+        let v = output ~m:rows ~n in
+        List.filter_map row_pairs ~f:(fun (r1, r2) ->
+            let w = swap_rows ~n v ~r1 ~r2 in
+            if Option.is_none (Bc.first_difference ~reference:v w) then Some n else None))
+  in
+  Verdict.p "the elementwise guard sees every row swap at every extent swept"
+    (List.is_empty elementwise_missed);
+  Verdict.p "the elementwise guard reports a length mismatch too"
+    (Option.is_some (Bc.first_difference ~reference:[| 1.0; 2.0 |] [| 1.0 |]));
+
+  (* The mix's own row identity. Under the pre-fix fold two rows could be identical at EVERY column
+     of EVERY stream, so no number of weight streams and no operand value set could tell them apart
+     — the first such pair is 5977 and 10232. The fix is structural rather than statistical: masking
+     the pre-state to 24 bits before the fold makes the whole finalizer a bijection of it, and
+     [a * 73856093] is injective mod 2^24, so distinct rows below 2^24 differ at every column. *)
+  let pre_fix_mix ~salt a b =
+    let x = (a * 73856093) lxor (b * 19349663) lxor salt in
+    let x = x lxor (x lsr 13) land 0xFFFFFF in
+    let x = x * 1274126177 land 0xFFFFFF in
+    x lxor (x lsr 7)
+  in
+  let mix_salts = [ 0x5A17; 0x3C6E ] @ Bc.weight_salts in
+  let rows_identical mix ~salt a b ~columns =
+    List.for_all (List.range 0 columns) ~f:(fun c -> mix ~salt a c = mix ~salt b c)
+  in
+  Verdict.p
+    "the pre-fix fold made rows 5977 and 10232 identical at every column of every salt (negative \
+     control)"
+    (List.for_all mix_salts ~f:(fun salt ->
+         rows_identical pre_fix_mix ~salt 5977 10232 ~columns:64));
+  Verdict.p "the mix keeps those two rows apart"
+    (List.for_all mix_salts ~f:(fun salt ->
+         not (rows_identical Bc.mix ~salt 5977 10232 ~columns:64)));
+  let first_value_collision mix ~salt ~column ~rows =
+    let seen = Hashtbl.create (module Int) in
+    List.find_map (List.range 0 rows) ~f:(fun r ->
+        let v = mix ~salt r column in
+        match Hashtbl.find seen v with
+        | Some _ -> Some r
+        | None ->
+            Hashtbl.set seen ~key:v ~data:r;
+            None)
+  in
+  Verdict.p "no two rows below 100000 share a mix value in a column, at any salt or column swept"
+    (List.for_all mix_salts ~f:(fun salt ->
+         List.for_all [ 0; 1; 7; 63 ] ~f:(fun column ->
+             Option.is_none (first_value_collision Bc.mix ~salt ~column ~rows:100_000))));
+  Verdict.p "the pre-fix fold did collide there, so that sweep can fail (negative control)"
+    (List.exists mix_salts ~f:(fun salt ->
+         List.exists [ 0; 1; 7; 63 ] ~f:(fun column ->
+             Option.is_some (first_value_collision pre_fix_mix ~salt ~column ~rows:100_000))));
+
+  (* Narrow reductions, which the four-row and 12-multiple sweeps above cannot reach. How many rows
+     an operand keeps distinct is bounded by [levels ^ row_stride] whatever the generator — 144 at
+     the narrowest reduction this bench accepts — so the honest claim is a COMPARISON against the
+     form this replaced, not distinctness. The flat residue's bound is not a birthday at all: rows
+     repeat with the modulus's period, 13, at EVERY stride. *)
+  let first_row_collision rowf =
+    let seen = Hashtbl.create (module String) in
+    List.find_map (List.range 0 20_000) ~f:(fun r ->
+        let key =
+          String.concat ~sep:"," (List.map (rowf r) ~f:Int.to_string)
+        in
+        match Hashtbl.find seen key with
+        | Some _ -> Some r
+        | None ->
+            Hashtbl.set seen ~key ~data:r;
+            None)
+  in
+  let narrow_strides = [ 1; 2; 3; 4; 6; 8; 12; 16 ] in
+  let mixed_at stride =
+    first_row_collision (fun r ->
+        List.init stride ~f:(fun c ->
+            Bc.residue ~salt:0x5A17 ~row_stride:stride ~modulus:12 ((r * stride) + c)))
+  in
+  let flat_at stride =
+    first_row_collision (fun r -> List.init stride ~f:(fun c -> ((r * stride) + c) % 13))
+  in
+  let render_row = function None -> "none below 20000" | Some r -> Int.to_string r in
+  p "row at which operand rows first repeat, by reduction extent (mixed vs flat):\n";
+  List.iter narrow_strides ~f:(fun stride ->
+      p "  k = %-3d mixed %-18s flat %s\n" stride (render_row (mixed_at stride))
+        (render_row (flat_at stride)));
+  Verdict.p
+    "the mixed operand keeps rows distinct at least as far as the flat form, at every reduction \
+     extent above 2"
+    (List.for_all
+       (List.filter narrow_strides ~f:(fun stride -> stride > 2))
+       ~f:(fun stride ->
+         match (mixed_at stride, flat_at stride) with
+         | None, _ -> true
+         | Some _, None -> false
+         | Some m, Some f -> m >= f));
+  Verdict.p
+    "at the two narrowest reductions both forms are exhausted within sixteen rows, which the \
+     levels^k bound of 144 leaves no room to improve (and k = 1 is degenerate for the bench anyway)"
+    (List.for_all [ 1; 2 ] ~f:(fun stride ->
+         match (mixed_at stride, flat_at stride) with
+         | Some m, Some f -> m <= 16 && f <= 16
+         | _ -> false));
 
   (* The arithmetic the weights' exactness argument rests on: a residue is a residue (non-negative,
      below its modulus), so a weight is in [1, 251] and products of the benches' exact-in-binary

@@ -472,6 +472,15 @@ let () =
     [ ez; sp_zi; sp_i; sp_k ] @ sink j [ k_o ] @ sink i_i [ k_o ] @ stage_b @ stage_a @ [ tz ]
   in
 
+  (* The FIRST variant to complete is the reference every later one is compared against, cell by
+     cell (gh-ocannl-711 review). That comparison, not the checksum, is what decides whether a
+     variant computed the right thing: a checksum is a linear functional of the output, so a row
+     permutation survives it whenever the value difference is orthogonal to the weight difference —
+     by the weights colliding, or by plain cancellation, both of which are reachable at the narrow
+     extents this bench accepts. An elementwise comparison has nothing to cancel. The checksum is
+     still printed: one number per line fingerprints a run and travels into a report. *)
+  let reference = ref None in
+  let disagreements = ref 0 in
   let bench ?(repeats = repeats) ~variant ~schedule () =
     let%op mc = ma * mb in
     let comp = named ("mm_" ^ variant) (Train.forward mc) in
@@ -506,8 +515,8 @@ let () =
     let secs = Float.of_int63 Int63.(stop - start) /. 1e9 /. Float.of_int repeats in
     (* Element [1][1] of the m x n result — an interior cell, away from the corners — except where
        the output is too small to have one; print which cell was checked. One interior cell cannot
-       see the remainder region an arbitrary extent creates, and a [Sched.split] whose factor does not
-       divide its extent puts the last partial block exactly there, so the whole output is
+       see the remainder region an arbitrary extent creates, and a [Sched.split] whose factor does
+       not divide its extent puts the last partial block exactly there, so the whole output is
        checksummed too: every correct variant prints the identical value, and one that drops or
        repeats tail work does not.
 
@@ -525,14 +534,24 @@ let () =
        n a single capped stream runs out of distinct row weight vectors and two rows collide, whose
        swap no weighting of that stream can see. Both checks are outside the timed region. *)
     let checksum = Bench_checksum.whole_output ~row_stride:n values in
+    let agreement =
+      match !reference with
+      | None ->
+          reference := Some values;
+          "reference"
+      | Some r ->
+          let d = Bench_checksum.first_difference ~reference:r values in
+          if Option.is_some d then Int.incr disagreements;
+          Bench_checksum.render_agreement d
+    in
     let spot = Int.min (n + 1) (Array.length values - 1) in
     (* The label is printed on EVERY timing line, including the untensorized variants: a suffix
        that appears only when there is something to say is a suffix a table reader does not miss
        when it is absent (gh-ocannl-626). *)
-    p "%-10s %8.3f ms  %8.2f GFLOP/s  (spot [%d] %.1f, chk %s)  [%s]\n" variant (secs *. 1e3)
+    p "%-10s %8.3f ms  %8.2f GFLOP/s  (spot [%d] %.1f, chk %s, %s)  [%s]\n" variant (secs *. 1e3)
       (flops /. secs /. 1e9)
       spot values.(spot)
-      (Bench_checksum.render checksum)
+      (Bench_checksum.render checksum) agreement
       (Ir.C_syntax.mma_summary_string mma);
     (secs, mma)
   in
@@ -670,6 +689,19 @@ let () =
        above are NOT tensorized timings. Re-run with --ocannl_schedule_log_declines=true for the \
        per-rule reason (at these extents, most likely n below the compute vector width).\n"
       declined all.Ir.C_syntax.statements;
+  (* A variant that computed something ELSE is the failure this bench's guard exists for, and it is
+     worse than one that failed to compile: a wrong result under a fast timing is what a report
+     would carry forward. Announced rather than made fatal, in the same shape as the census verdict
+     above — every variant's operands here are exact in binary and their products are small
+     multiples of 1/4, so every leg's reduction is exact whatever order it sums in and a difference
+     is never rounding. *)
+  if !disagreements > 0 then
+    p
+      "WARNING: %d variant(s) did not reproduce the reference variant's output cell for cell — the \
+       DIFFERS lines above name the first cell and both values. At these operands every variant's \
+       reduction is exact whatever order it sums in, so a difference is a WRONG RESULT, not \
+       rounding.\n"
+      !disagreements;
   if !failures > 0 then (
     p "%d variant(s) failed at m=%d n=%d k=%d — see the FAILED lines above.\n" !failures m n k;
     Stdlib.exit 1)

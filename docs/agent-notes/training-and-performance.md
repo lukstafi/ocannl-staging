@@ -148,16 +148,32 @@ files.
   by `schedule_bench` and `narrow_gebp_bench` precisely because the fixed copy and the degenerate one
   had sat one file apart. Keep the weights capped below 256 so the products of exact-in-binary
   operands stay exact in the accumulator and variants summing in different orders compare BITWISE;
-  and keep the checksum outside the timed region. Two further blindnesses survive keying on the
-  pair, and neither is a hypothetical (both were review findings on that fix). A capped weight puts
-  a row's weight vector in `cap ^ row_stride` values, so at a NARROW stride two rows collide by
-  birthday — at stride 2 rows 9 and 363 do — and no weighting of that one stream can see them
-  swapped; the answer is more streams (`Bench_checksum.weight_salts` accumulates one exact sum per
-  salt, squaring the space per stream), never a bigger cap. And a producer value that can BE the
-  accumulator's init hides a dropped producer: a mixed operand row is all-zero with probability
-  `levels ^ -row_stride`, likely at narrow extents, which the flat form's marching values could not
-  do — so the multiplicand whose row spans the reduction is minted strictly positive
-  (`Bench_checksum.positive_level`).
+  and keep the checksum outside the timed region. But do not let the checksum be the ASSERTION: it is
+  a linear functional of the output, so a row swap survives it whenever the value difference is
+  orthogonal to the weight difference — by the weights colliding (a capped weight puts a row's
+  weight vector in `cap ^ row_stride` values, so at stride 2 rows 9 and 363 share one) or by plain
+  cancellation (at m = 2000, n = 2 the generated rows 459 and 1310 cancel in BOTH streams). No
+  bounded-weight scalar escapes that class, and more streams only shrink it. What decides is
+  `Bench_checksum.first_difference`, an elementwise comparison against the first variant to
+  complete; the checksum is what the line PRINTS, a fingerprint for reading a table and comparing
+  runs.
+- Two data-side blindnesses sit behind that guard, where no output check can help. A producer value
+  that can BE the accumulator's init hides a dropped producer: a mixed operand row is all-zero with
+  probability `levels ^ -row_stride`, likely at narrow extents, which a flat form's marching values
+  could not do — so the multiplicand whose row spans the reduction is minted strictly positive
+  (`Bench_checksum.positive_level`). And two identical operand rows make a wrong-row schedule
+  compute the right answer: how many rows a generator keeps distinct is bounded by
+  `levels ^ row_stride` whatever it does, which at the narrowest reduction is a dozen — a limit to
+  state, not to engineer around.
+- A mixing function that folds its state DOWN to its output width must not do it linearly. The
+  aperiodic mix here folded a 40-bit product into 24 bits with one xor-shift, which is GF(2)-linear,
+  so two rows' outputs differed by a value depending on neither the column nor the salt: row pairs
+  existed (5977 and 10232 the first of eight below 20000) that were identical in EVERY derived
+  stream at EVERY salt, which no number of streams could repair. Masking the state to the output
+  width FIRST fixes it structurally rather than statistically — the multiplier is odd so the state
+  is injective in each index, and every later step (xor-shift, multiply by an odd constant) is a
+  bijection on that width, so distinct indices below the width differ at every column. Check a hash
+  meant to separate indices for this before trusting a sweep of it.
 
 - A benchmark leg belongs to a WORKLOAD, not to a runner (gh-ocannl-551). `BENCH_STATIC_SCALE` /
   `BENCH_GATE_INTERVAL` lived in `bench_mlp` alone, so the gate-cost contract silently had no
