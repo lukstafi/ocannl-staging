@@ -86,3 +86,15 @@
  (preprocess
   (pps ppx_sexp_conv))
  (modes exe))
+
+; gh-ocannl-728: the batched-vs-merged row-axis measurement. Positional geometry, so bench_args;
+; the backend comes from the library's own --ocannl_* scan and must be pinned explicitly.
+(executable
+ (package neural_nets_lib)
+ (public_name projection_shape_bench)
+ (name projection_shape_bench)
+ (modules projection_shape_bench)
+ (libraries ocannl base stdio time_now bench_args)
+ (preprocess
+  (pps ppx_here ppx_ocannl))
+ (modes exe))
