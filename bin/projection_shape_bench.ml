@@ -35,15 +35,16 @@
 
    Timing is ROUND-INTERLEAVED, not site-by-site: one round per base tile geometry ([bgrid] twins
    included, since a merged site's plain arm and a batched site's [bgrid] arm are the pair being
-   compared), inside which every arm is timed batch by batch. The visiting order is rotated by the
-   batch index AND reversed on odd batches: a rotation alone preserves the circular order, so a
-   pair keeps its relative order and its separation in every batch and an intra-round drift still
-   lands on it asymmetrically, while the reversal flips the order of every pair at once -- the
-   run-by-run alternation the A/B protocol asks for, for all pairs simultaneously and with no RNG.
-   An even batch count balances each pair exactly, which is why the default is even. Timing one
-   site to completion before the next puts the drift straight into the difference under test, and
-   reversing the site order only moves that bias. Two statistics per arm: [repeats] dispatches queued back-to-back with one
-   sync (what a kernel sustains inside a step, and the summary's statistic, taken at the MEDIAN
+   compared; the crowned routines of [tune] mode are one further round), inside which every arm is
+   timed batch by batch. The visiting order uses ONE rotation per adjacent PAIR of batches,
+   mirrored on the odd member, so each such pair exchanges the positions of every pair of arms
+   exactly -- the run-by-run A/B alternation, for all pairs at once and with no RNG. (A rotation
+   that advances every batch does not do this: rotate-then-reverse leaves each arm at the same
+   position in both halves.) An even batch count balances the pairs exactly, which is why the
+   default is even. Timing one site to completion before the next puts the drift straight into the
+   difference under test, and reversing the site order only moves that bias. Two statistics per arm: [repeats] dispatches queued back-to-back with one
+   sync -- the sync only, never a device-to-host readback, which would put a transfer and a host
+   allocation inside the timed region (what a kernel sustains inside a step, and the summary's statistic, taken at the MEDIAN
    batch), and the tuner's own one-dispatch-one-sync minimum, which reads up to 2.6x higher.
 
    Which of the three numbers on a line to believe depends on what the noise is. The median is the
@@ -82,6 +83,19 @@ let p fmt =
       Stdio.print_string s;
       Stdio.Out_channel.flush Stdio.stdout)
     fmt
+
+(* Process-level conditions are not candidate failures: containing them turns an OOM or an
+   interrupt into one "failed cell" and keeps the run going, which prolongs thrashing and can make
+   a minutes-long benchmark unstoppable. Same set the autotuner's own containment re-raises. *)
+let is_fatal = function
+  | Out_of_memory | Stack_overflow | Stdlib.Sys.Break | Assert_failure _ -> true
+  | _ -> false
+
+(* Cleanup on a path that is already failing must not itself abort the run -- a backend still
+   reporting the original asynchronous error can raise from the release's device await -- but a
+   fatal condition still propagates. *)
+let release_quietly ctx =
+  try Context.release ctx with e when not (is_fatal e) -> ()
 
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
@@ -179,7 +193,6 @@ type live = {
   lv_label : string;
   lv_ctx : Context.t ref;
   lv_routine : Context.routine;
-  lv_out : Ir.Tnode.t;
   lv_launch : string;
   lv_parity : bool;
   lv_times : float list ref;
@@ -303,7 +316,14 @@ let () =
           |> List.filter ~f:(fun (q : Autotune.sketch_params) ->
                  (not q.sk_epilogue) && not q.sk_mma)
         in
-        (s, fl, seeds, lazy (oracle s)))
+        (* One [build] per SITE, not per candidate: [NTDSL.init] mints host-initialized operand
+           nodes, and those enter the backend's per-device constant buffer cache, which is keyed by
+           tnode identity and is exactly what [Context.release] cannot free
+           (docs/agent-notes/backend-memory.md). Rebuilding per candidate would accumulate a full
+           operand pair per compile for the whole run. The comp is compiled repeatedly, which is
+           what the sketch suites do too. *)
+        let d = build s in
+        (s, fl, seeds, lazy (oracle s), d, named (s.tag ^ "_t") (Train.forward d)))
   in
   (* Compile one candidate and check its parity. The routine name carries a run-wide counter so
      that under [output_debug_files_in_build_directory] each candidate's .cd/.ll/backend source
@@ -315,14 +335,12 @@ let () =
      must not be timed, ranked, or able to win a summary column that carries no parity marker. The
      context is held in a ref the cleanup can reach, so the release covers the exception path too. *)
   let counter = ref 0 in
-  let arm (s, fl, _, orc) ~label ~compile =
+  let arm (s, fl, _, orc, d, fwd) ~label ~compile =
     Int.incr counter;
     let name = Printf.sprintf "%s_c%d" s.tag !counter in
     let held = ref None in
-    let drop () = Option.iter !held ~f:(fun c -> Context.release !c) in
+    let drop () = Option.iter !held ~f:(fun c -> release_quietly !c) in
     match
-      let d = build s in
-      let fwd = named name (Train.forward d) in
       let dims = ref None in
       let record o =
         dims := Some (LL.launch_dims o.LL.llc);
@@ -352,7 +370,6 @@ let () =
         lv_label = label;
         lv_ctx = ctx;
         lv_routine = routine;
-        lv_out = d.Tensor.value;
         lv_launch = launch;
         lv_parity = parity;
         lv_times = ref [];
@@ -364,25 +381,30 @@ let () =
         fail "%s / %s: PARITY FAILED against the host oracle -- not timed" s.tag label;
         drop ();
         None
-    | exception exn ->
+    | exception exn when not (is_fatal exn) ->
         fail "%s / %s: FAILED: %s" s.tag label
           (List.hd_exn (String.split_lines (Exn.to_string exn)));
         drop ();
         None
+    | exception exn ->
+        drop ();
+        raise exn
   in
   (* One interleaved round: every arm of [lives] is timed batch by batch in rotation, so a monotone
      session drift lands on all of them alike instead of on whichever site came later in the run.
      A whole-site loop cannot do that -- reversing the site order only moves the bias, it does not
      cancel it (docs/agent-notes/training-and-performance.md's A/B protocol: alternate the arms RUN
      BY RUN). Each arm's own batch is [repeats] dispatches queued back-to-back with one sync. *)
-  (* The order arms are visited in for batch [b]: rotated by [b], and REVERSED on odd [b]. The
-     rotation alone preserves the circular order, so a pair keeps its relative order (and its
-     separation) in every batch and an intra-round drift still lands on the pair asymmetrically;
-     the reversal flips the order of EVERY pair at once, which is the run-by-run alternation the
-     A/B protocol asks for, for all pairs simultaneously and with no RNG. An even [nbatches]
-     balances each pair exactly. *)
+  (* The order arms are visited in for batch [b]: ONE rotation per ADJACENT PAIR of batches
+     ([b / 2]), mirrored on the odd member. Advancing the rotation between the forward and the
+     reversed batch would leave every arm at the same position in both -- rotate-by-b then reverse
+     maps arm 0 to position 0 at every even b and back to position 0 at every odd b -- so the
+     mirror has to be of the SAME order the forward batch used. Then each pair of batches
+     exchanges the positions of every pair of arms exactly, which is the run-by-run A/B
+     alternation, for all pairs simultaneously and with no RNG; an even [nbatches] balances them
+     exactly, which is why the default is even. *)
   let visit_order n b =
-    let idx = Array.init n ~f:(fun i -> (i + b) % n) in
+    let idx = Array.init n ~f:(fun i -> (i + (b / 2)) % n) in
     if b % 2 = 1 then Array.rev_inplace idx;
     idx
   in
@@ -398,7 +420,7 @@ let () =
           for _ = 1 to repeats do
             lv.lv_ctx := Context.run !(lv.lv_ctx) lv.lv_routine
           done;
-          let _ = Context.get_values !(lv.lv_ctx) lv.lv_out in
+          Context.sync !(lv.lv_ctx);
           let t1 = now () in
           lv.lv_times := ((t1 -. t0) /. Float.of_int repeats) :: !(lv.lv_times)
         done
@@ -426,7 +448,10 @@ let () =
     let sorted = Array.of_list !(lv.lv_times) in
     Array.sort sorted ~compare:Float.compare;
     let n = Array.length sorted in
-    let best = sorted.(0) and median = sorted.(n / 2) and worst = sorted.(n - 1) in
+    let best = sorted.(0) and worst = sorted.(n - 1) in
+    let median =
+      if n % 2 = 1 then sorted.(n / 2) else (sorted.((n / 2) - 1) +. sorted.(n / 2)) /. 2.
+    in
     let g t = lv.lv_flops /. t /. 1e9 in
     p "   %-22s %-26s %8.1f GFLOP/s med (min %7.1f, min1 %7.1f)  spread %4.1f%%  %s\n" lv.lv_tag
       lv.lv_label (g median) (g best) (g !(lv.lv_single))
@@ -434,7 +459,7 @@ let () =
       lv.lv_launch;
     g median
   in
-  let release lv = Context.release !(lv.lv_ctx) in
+  let release lv = release_quietly !(lv.lv_ctx) in
   let results : (string, (string * float) list) Hashtbl.t = Hashtbl.create (module String) in
   let record_result lv g =
     Hashtbl.update results lv.lv_tag ~f:(function
@@ -463,13 +488,13 @@ let () =
        un-interleaved. A batched site therefore contributes both of its arms to the round. *)
     let base_geom g = String.chop_suffix_if_exists g ~suffix:" bgrid" in
     let geometries =
-      List.concat_map prepared ~f:(fun (_, _, seeds, _) ->
+      List.concat_map prepared ~f:(fun (_, _, seeds, _, _, _) ->
           List.map seeds ~f:(fun q -> base_geom (geom_label q)))
       |> List.dedup_and_sort ~compare:String.compare
     in
     List.iter geometries ~f:(fun g ->
         let lives =
-          List.concat_map prepared ~f:(fun ((_, _, seeds, _) as pr) ->
+          List.concat_map prepared ~f:(fun ((_, _, seeds, _, _, _) as pr) ->
               List.filter seeds ~f:(fun q -> String.equal (base_geom (geom_label q)) g)
               |> List.filter_map ~f:(fun q ->
                      arm pr ~label:(geom_label q) ~compile:(fun ~record ~name:_ fwd ->
@@ -480,35 +505,69 @@ let () =
         in
         run_round ~label:g lives)
   end;
-  (* The full search is per site by construction -- it is minutes of its own dispatches, so there
-     is nothing to interleave with. [~search:true] because this mode was asked for explicitly: a
-     resolved [autotune_search=false] (the reproducible profile) would otherwise return the untuned
-     default under a "TUNED" label, and any outcome other than [Searched] is a failed cell here. *)
+  (* The searches run one site at a time -- a search is minutes of its own dispatches, so there is
+     nothing to interleave THEM with -- but the winners they crown are then timed together, in one
+     interleaved round, exactly like a seed geometry. Timing each winner as its own singleton round
+     would leave the tuned comparison confounded by the drift accumulated during the other sites'
+     searches, which is the same defect the seed rounds were restructured to remove.
+
+     Every parameter that shapes the search is passed explicitly and printed, rather than inherited
+     from the ambient configuration: [~search:true] alone still leaves beam width, rounds, timing
+     repeats and the model pre-filter to whatever OCANNL_* or the nearest ocannl_config says, so a
+     run under autotune_rounds=0 or a pruning fraction below 1 would print "full search" over a
+     search that was neither. And a completed search is not automatically a measurement: when every
+     candidate declines, the outcome is still [Searched] while [best_ms] is infinite and the
+     returned routine is the untuned default, so a finite time and a non-empty winner are required
+     before the arm is admitted. *)
+  let tn_beam = 2 and tn_rounds = 2 and tn_repeats = 3 and tn_keep = 1.0 in
   let tuned = Hashtbl.create (module String) in
-  if do_tune then
-    List.iter prepared ~f:(fun ((s, _, _, _) as pr) ->
-        let lbl = ref "" and ms = ref Float.nan and outcome = ref None in
-        let lives =
-          List.filter_opt
-            [
-              arm pr ~label:"TUNED (full search)" ~compile:(fun ~record:_ ~name fwd ->
-                  Autotune.tune ~name ~search:true ~cache_dir:""
-                    ~report:(fun (r : Autotune.report) ->
-                      lbl := r.Autotune.best_label;
-                      ms := r.Autotune.best_ms;
-                      outcome := Some r.Autotune.outcome)
-                    (Context.auto ()) fwd Ir.Indexing.Empty);
-            ]
-        in
-        (match !outcome with
-        | Some Autotune.Searched -> ()
-        | Some o ->
-            fail "%s: the tune cell did not search (%s) -- its number is not a tuned measurement"
-              s.tag (Autotune.outcome_name o)
-        | None -> if not (List.is_empty lives) then fail "%s: the tune cell reported nothing" s.tag);
-        run_round ~label:("TUNED " ^ s.tag) lives;
-        p "      crowned: %s  (search best_ms %.4f)\n" !lbl !ms;
-        Hashtbl.set tuned ~key:s.tag ~data:!lbl);
+  if do_tune then begin
+    p "\n-- searches: beam_width %d, rounds %d, repeats %d, keep_fraction %.2f, cache disabled\n"
+      tn_beam tn_rounds tn_repeats tn_keep;
+    let winners =
+      List.filter_map prepared ~f:(fun ((s, _, _, _, _, _) as pr) ->
+          let lbl = ref "" and ms = ref Float.nan and outcome = ref None in
+          let lv =
+            arm pr ~label:"TUNED (full search)" ~compile:(fun ~record:_ ~name fwd ->
+                Autotune.tune ~name ~search:true ~cache_dir:"" ~beam_width:tn_beam
+                  ~rounds:tn_rounds ~repeats:tn_repeats ~keep_fraction:tn_keep
+                  ~report:(fun (r : Autotune.report) ->
+                    lbl := r.Autotune.best_label;
+                    ms := r.Autotune.best_ms;
+                    outcome := Some r.Autotune.outcome)
+                  (Context.auto ()) fwd Ir.Indexing.Empty)
+          in
+          let admissible =
+            match !outcome with
+            | None ->
+                if Option.is_some lv then fail "%s: the tune cell reported nothing" s.tag;
+                false
+            | Some Autotune.Searched
+              when Float.is_finite !ms && not (String.is_empty !lbl) ->
+                p "   %-22s crowned: %s  (search best_ms %.4f)\n" s.tag !lbl !ms;
+                Hashtbl.set tuned ~key:s.tag ~data:!lbl;
+                true
+            | Some Autotune.Searched ->
+                fail
+                  "%s: the search timed no candidate (best_ms %g, winner %S) -- the routine it \
+                   returned is the untuned default, not a tuned measurement"
+                  s.tag !ms !lbl;
+                false
+            | Some o ->
+                fail "%s: the tune cell did not search (%s) -- its number is not a tuned \
+                      measurement"
+                  s.tag (Autotune.outcome_name o);
+                false
+          in
+          match lv with
+          | Some lv when admissible -> Some lv
+          | Some lv ->
+              release lv;
+              None
+          | None -> None)
+    in
+    run_round ~label:"TUNED winners" winners
+  end;
   let f_opt = function None -> "     n/a" | Some g -> Printf.sprintf "%8.1f" g in
   let of_site tag lbl =
     Option.bind (Hashtbl.find results tag) ~f:(fun l ->
