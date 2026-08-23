@@ -3,20 +3,17 @@ shebang "#!/usr/bin/env bash" reads as `bash`: true
 shebang "#!/bin/sh" reads as `/bin/sh`: true
 shebang "#!/bin/dash" reads as `/bin/dash`: true
 shebang "" reads as `sourced`: true
-shebang " #!/bin/bash" reads as `sourced`: true
-shebang "#!/usr/bin/env -u FOO bash" reads as `refused (the kernel passes `-u FOO bash` to `env` as ONE argument -- no command or option there; use `env -S`)`: true
-shebang "#!/bin/bash -O extglob" reads as `refused (the kernel passes `-O extglob` to `bash` as ONE argument -- no command or option there; use `env -S`)`: true
-shebang "#!/bin/bash -eu" reads as `/bin/bash -eu`: true
-shebang "#!/bin/bash --posix" reads as `/bin/bash --posix`: true
 shebang "#!/usr/bin/env -S bash" reads as `bash`: true
 shebang "#!/usr/bin/env -Sbash" reads as `bash`: true
-shebang "#!/usr/bin/env --split-string=bash --posix" reads as `bash --posix`: true
-shebang "#!/usr/bin/env -S bash helper.sh" reads as `refused (shebang option this check cannot vouch for: helper.sh -- a bare word is either an option's operand or the script the shell would run instead of this one, and this check cannot tell which)`: true
-shebang "#!/usr/bin/env -S bash -O extglob" reads as `refused (shebang option this check cannot vouch for: extglob -- a bare word is either an option's operand or the script the shell would run instead of this one, and this check cannot tell which)`: true
-shebang "#!/bin/bash -t" reads as `refused (shebang option this check cannot vouch for: -t -- this option stops `-n` from being a parse of the whole file)`: true
-shebang "#!/bin/bash -c" reads as `refused (shebang option this check cannot vouch for: -c -- this option stops `-n` from being a parse of the whole file)`: true
-shebang "#!/bin/bash --" reads as `refused (shebang option this check cannot vouch for: -- -- the `--` terminator makes everything after it positional)`: true
-shebang "#!/bin/bash --version" reads as `refused (shebang option this check cannot vouch for: --version -- this option exits before reading the file)`: true
+shebang "#!/usr/bin/env --split-string=bash" reads as `bash`: true
+shebang " #!/bin/bash" reads as `sourced`: true
+shebang "#!/bin/bash\r" reads as `refused (the shebang line ends CRLF, and the kernel keeps the CR in the interpreter path (`bad interpreter`); this file needs LF endings)`: true
+shebang "#!/usr/bin/env -S bash helper.sh" reads as `refused (`bash` is given helper.sh, and this check runs `<shell> -n <file>` and nothing else -- no placement of `-n` is safe among shell options)`: true
+shebang "#!/usr/bin/env -S zsh --exec" reads as `refused (`zsh` is given --exec, and this check runs `<shell> -n <file>` and nothing else -- no placement of `-n` is safe among shell options)`: true
+shebang "#!/bin/bash --posix" reads as `refused (`bash` is given --posix, and this check runs `<shell> -n <file>` and nothing else -- no placement of `-n` is safe among shell options)`: true
+shebang "#!/bin/bash -eu" reads as `refused (`bash` is given -eu, and this check runs `<shell> -n <file>` and nothing else -- no placement of `-n` is safe among shell options)`: true
+shebang "#!/bin/bash -O extglob" reads as `refused (`bash` is given -O extglob, and this check runs `<shell> -n <file>` and nothing else -- no placement of `-n` is safe among shell options)`: true
+shebang "#!/usr/bin/env -u FOO bash" reads as `refused (the kernel passes `-u FOO bash` to `env` as ONE argument -- there is no command by that name; use `env -S`)`: true
 shebang "#!/usr/bin/env -S PATH=/missing bash" reads as `refused (`env` assignment `PATH=/missing`: the command is looked up, and parses, in an environment this check cannot reproduce)`: true
 shebang "#!/usr/bin/env -S -i bash" reads as `refused (`env` option this check cannot vouch for: -i -- it builds an environment the command's parsing depends on)`: true
 shebang "#!/usr/bin/env python3" reads as `refused (interpreter whose `-n` this check cannot vouch for: python3)`: true
