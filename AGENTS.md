@@ -70,12 +70,17 @@ Testing notes:
   `_build/default/<test dir>` when it runs, which makes the result order-dependent (gh-ocannl-586).
   `test/operations/config_dep_completeness` checks this over every `dune` file (gh-ocannl-597).
 - Avoid `dune exec test/.../<name>.exe` for standalone tests: its working directory bypasses the
-  copied `test/config/ocannl_config`, so a test may fail or silently select another backend. On
-  dune >= 3.20 run the one test by its own alias, `dune build @test/<dir>/runtest-<name>`, which
-  applies the `.expected` diff as well as running the test (`dune promote` accepts it). On an
-  older dune, or for a test written as an `(executable)` plus a diffing `(rule)`, build
-  `test/<dir>/<name>.exe.output` (or `<name>.actual`), inspect it under `_build/default/`, then
-  run `dune runtest test/<dir>/` and promote. Pin `OCANNL_BACKEND` for bin executables.
+  copied `test/config/ocannl_config`, so a test may fail or silently select another backend. Run
+  the one test by its own alias instead, `dune build @test/<dir>/runtest-<name>`, which applies the
+  `.expected` diff as well as running the test (`dune promote` accepts it). For a `(test)` stanza
+  that alias is dune's, and needs dune >= 3.20; for a test written as an `(executable)` plus a
+  diffing `(rule)` it is written into the rule and works on any dune, and `<name>` there is the
+  GOLDEN the rule checks (`runtest-verdict_ratchet`, `runtest-zero_out_local_decl-unoptimized`) --
+  see CLAUDE.md for the three rules such a rule follows. The seven repo-wide scans also share
+  `dune build @test/operations/scans`. Only where no alias exists at all (an older dune, a bare
+  target) build `test/<dir>/<name>.exe.output` (or `<name>.actual`), inspect it under
+  `_build/default/`, then run `dune runtest test/<dir>/` and promote. Pin `OCANNL_BACKEND` for bin
+  executables.
   Check that build's exit status (or let its stderr through): if it fails, the previous
   `.exe.output` stays in place and the stale content reads as a green probe.
   A backend-uniform golden cannot tell you WHICH backend ran: a test that announces
@@ -119,8 +124,10 @@ Testing notes:
   alias — `runtest` and `slow` are asked separately, a `(test)` stanza being a runtest action and
   nothing else — and fails if a file that serializes on `ocannl_training_test` has a gate that does
   not take the lock (the gate starts no pool; an unlocked action in a locked file is what the next
-  training test gets copied from). A single test run by its own alias (`@…/runtest-<name>`) does not build the gate,
-  and can still be served stale.
+  training test gets copied from). A hand-written per-test alias
+  depends on the gate explicitly — `(deps (alias runtest-env_spelling_gate) …)` on every
+  golden-diff rule — so `@…/runtest-<name>` runs it first; dune's GENERATED per-test alias for a
+  `(test)` stanza does not, and such a run can still be served stale.
 - Tests read `test/config/ocannl_config` and can emit .ll/.c/.cu/.metal into build_files/.
 - Config startup chatter (the welcome message, the `log_config_sourcing` trace, the profile
   banner) goes to stderr, so an OCANNL-linked executable's stdout stays a clean data channel and

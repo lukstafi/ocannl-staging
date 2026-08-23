@@ -17,7 +17,7 @@ test/operations/config/dune: nothing that runs a test executable
 test/operations/dune: tests, inline-test libraries, exe-running rules
 test/operations/profiles/dune: tests, exe-running rules
 test/operations/startup_streams/dune: tests, exe-running rules
-test/ppx/dune: tests, exempt rules (pp.exe)
+test/ppx/dune: tests, exe-running rules, exempt rules (pp.exe)
 test/support/dune: nothing that runs a test executable
 test/training/dune: tests, exe-running rules
 tools/dune: nothing that runs a test executable

@@ -18,6 +18,46 @@
  (modules env_spelling_gate)
  (libraries base stdio arrayjit.utils arrayjit.verdict))
 
+; The same gate for the per-test `runtest-<name>` aliases (gh-ocannl-703, gh-ocannl-726). Every rule
+; that diffs a golden sits on an alias of its own, so that ONE of them can be rerun targeted --
+; `dune build @test/operations/profiles/runtest-from_config_file` -- and a per-test alias is a build
+; entry point like any other, so the ambient gate has to reach it. It sits on an alias of its own
+; that every such rule DEPENDS on, which runs the gate BEFORE the diff -- the same shape the slow
+; rules use. The name is the one dune >= 3.20 generates for the `env_spelling_gate` `(test)` stanza
+; above: a rule may add an action to a generated per-test alias, and this one runs the same gate
+; binary, so the alias means the same thing whichever dune is building.
+
+(rule
+ ; ocannl-backend: none -- links arrayjit.utils alone and only classifies variable NAMES;
+ ; its `(universe)` dependency reruns it whatever any variable is set to.
+ (alias runtest-env_spelling_gate)
+ (package neural_nets_lib)
+ (deps ocannl_config (universe))
+ (action
+  (run %{dep:env_spelling_gate.exe})))
+
+; This directory's golden-diff rules, aggregated back onto `runtest` (gh-ocannl-726). Each of them
+; attaches to its own `runtest-<name>` alias and to NOTHING else, so that `dune build
+; @test/operations/profiles/runtest-from_config_file` runs that one test and applies its diff; this
+; stanza is what keeps `dune runtest` running all of them. Attaching such a rule to `runtest` as
+; well would defeat the point: a rule on two aliases makes building either alias build both, so a
+; per-test alias that also named `runtest` would pull the whole directory in behind it -- and where
+; the name is one dune generates for a `(test)` stanza, dune rejects the pair outright as a
+; dependency cycle. Hence the naming: `<name>` is the golden the rule checks, and never a `(test)`
+; stanza's name in this directory. A `runtest-<name>` rule missing from this list is one plain `dune
+; runtest` skips silently, which `test/operations/env_var_deps` checks -- the same check it makes of
+; the `slow` suite.
+
+(alias
+ (name runtest)
+ (deps
+  (alias runtest-from_config_file)
+  (alias runtest-from_cmdline)
+  (alias runtest-from_env)
+  (alias runtest-host_profile_flag)
+  (alias runtest-explicit_beats_profile)
+  (alias runtest-empty_cmdline_falls_through)))
+
 ; gh-ocannl-559: the same executable, resolved against four different pickers. The local
 ; ocannl_config (not the shared test/config one -- the config search stops at the first file
 ; walking up from the working directory) is deliberately "exhaustive": it picks a profile and
@@ -53,8 +93,9 @@
     (run %{dep:profile_precedence.exe})))))
 
 (rule
- (alias runtest)
+ (alias runtest-from_config_file)
  (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
  (action
   (diff from_config_file.expected from_config_file.actual)))
 
@@ -72,8 +113,9 @@
     (run %{dep:profile_precedence.exe} --ocannl_profile=performance)))))
 
 (rule
- (alias runtest)
+ (alias runtest-from_cmdline)
  (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
  (action
   (diff from_cmdline.expected from_cmdline.actual)))
 
@@ -91,8 +133,9 @@
     (run %{dep:profile_precedence.exe})))))
 
 (rule
- (alias runtest)
+ (alias runtest-from_env)
  (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
  (action
   (diff from_env.expected from_env.actual)))
 
@@ -115,8 +158,9 @@
     (run %{dep:profile_precedence.exe} --profile=prod)))))
 
 (rule
- (alias runtest)
+ (alias runtest-host_profile_flag)
  (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
  (action
   (diff host_profile_flag.expected host_profile_flag.actual)))
 
@@ -140,8 +184,9 @@
      --ocannl_autotune_rounds=3)))))
 
 (rule
- (alias runtest)
+ (alias runtest-explicit_beats_profile)
  (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
  (action
   (diff explicit_beats_profile.expected explicit_beats_profile.actual)))
 
@@ -164,8 +209,9 @@
     (run %{dep:profile_precedence.exe} --ocannl_profile=)))))
 
 (rule
- (alias runtest)
+ (alias runtest-empty_cmdline_falls_through)
  (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
  (action
   (diff
    empty_cmdline_falls_through.expected

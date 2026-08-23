@@ -413,14 +413,40 @@ that they earn a lookup rather than always-loaded space.
   root, that makes `dune exec` unusable (CLAUDE.md). The cause is that dune trusts its own digest
   database and never stats a rule's targets, so a hand-deleted one is recorded as built forever;
   that also rules out the two other reflexes, since touching a source changes no CONTENT digest and
-  deleting `_build/.digest-db` does not restore the memo either. For a target with no alias of its
-  own — an `(executable)` plus a `(rule)` producing `<name>.actual`, which is how every scanning
-  check is built — the recovery is `dune build --sandbox=copy <that target>`: sandboxing changes
+  deleting `_build/.digest-db` does not restore the memo either. Every golden-diff rule now has an
+  alias to force (`dune build --force @<dir>/runtest-<name>`, see below); for a target with no alias
+  at all the recovery is `dune build --sandbox=copy <that target>`: sandboxing changes
   how the rule executes, which invalidates the memo and re-runs it. `dune clean` works too and buys
   a full rebuild, which on macOS means every fresh executable queueing behind XProtect again. Worth
   knowing before it bites, because the failure is silent in the dangerous direction: the missing
   target leaves whatever `.actual` was there before, so a probe that only diffs the file reads
   green while nothing has run.
+- Every rule that diffs a golden — the repo-wide scans, the codegen snapshots, the config-precedence
+  rules, the ppx-output diffs — carries its own `runtest-<name>` alias (gh-ocannl-726), so
+  `dune build @test/operations/runtest-verdict_ratchet` runs that one test, applies its diff and is
+  promotable, and a misspelling exits 1 (`Alias … is empty`) rather than doing nothing. The seven
+  repo-wide scans additionally share `dune build @test/operations/scans` (gh-ocannl-703): the family
+  runs in seconds, and is what to run after touching a config key, a dune stanza, a printed claim or
+  an agent note. Two properties of dune shape how those aliases are written, and both are silent
+  when got wrong:
+  - **A rule attached to two aliases makes building EITHER build BOTH.** So a golden-diff rule sits
+    on `runtest-<name>` *alone*, never on `(aliases runtest runtest-<name>)` — that spelling type-checks,
+    passes its own test, and quietly puts the whole directory behind every per-test alias (measured:
+    `@test/operations/runtest-verdict_ratchet` ran the entire `test/operations` suite). What keeps
+    those rules in plain `dune runtest` is an `(alias (name runtest) (deps (alias runtest-<name>) …))`
+    stanza per directory — the same shape PR #431 gave `slow`. `env_var_deps` fails on a member the
+    stanza omits, and on a golden diff attached to `runtest` itself.
+  - **`runtest-<name>` is dune's own namespace for `(test)`/`(tests)` stanzas and inline-test
+    libraries** (dune >= 3.20). Reusing such a name for a rule is a dependency cycle as soon as the
+    rule also names `runtest`, and is confusing in any case, so a hand-written per-test alias names
+    the GOLDEN rather than the stanza: `runtest-zero_out_local_decl-unoptimized` beside the
+    `zero_out_local_decl` test, `runtest-test_ppx_op-ppx` beside `test_ppx_op`. Adding an action to a
+    generated alias is legal, and the per-directory `runtest-env_spelling_gate` rule does exactly
+    that so every per-test rule can depend on the ambient gate -- and is the one rule `env_var_deps`
+    lets share such a name, recognized by its `(universe)` dependency rather than by name. `env_var_deps` compares the two
+    literally: the alias must begin with the golden's name, since what a reader has in hand when
+    they reach for the alias is the golden that just failed, and an alias that renames it is one
+    they construct empty.
 - A record with `[@@deriving sexp]` makes every `.expected` file that prints the parent a hidden
   consumer of its FIELD NAMES, and `rg "\.field_name"` over sources is vacuous against that (sexp
   prints `(field_name value)`, not member access). Before claiming a rename has no serialization

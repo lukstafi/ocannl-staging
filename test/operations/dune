@@ -45,6 +45,25 @@
  (action
   (run %{dep:env_spelling_gate.exe})))
 
+; The same gate for the per-test `runtest-<name>` aliases (gh-ocannl-703, gh-ocannl-726). Every rule
+; that diffs a golden sits on an alias of its own, so that ONE of them can be rerun targeted --
+; `dune build @test/operations/runtest-verdict_ratchet` -- and a per-test alias is a build entry
+; point like any other, so the ambient gate has to reach it. It sits on an alias of its own that
+; every such rule DEPENDS on, which runs the gate BEFORE the diff -- the same shape the slow rules
+; use. The name is the one dune >= 3.20 generates for the `env_spelling_gate` `(test)` stanza above:
+; a rule may add an action to a generated per-test alias, and this one runs the same gate binary, so
+; the alias means the same thing whichever dune is building.
+
+(rule
+ ; ocannl-backend: none -- links arrayjit.utils alone and only classifies variable NAMES;
+ ; its `(universe)` dependency reruns it whatever any variable is set to.
+ (alias runtest-env_spelling_gate)
+ (package neural_nets_lib)
+ (locks ocannl_training_test)
+ (deps ocannl_config (universe))
+ (action
+  (run %{dep:env_spelling_gate.exe})))
+
 ; This directory's `slow` suite. Each slow rule attaches to its own `slow-<name>` alias, so that
 ; ONE slow test can be rerun after a change -- `OCANNL_BACKEND=cc dune build
 ; @test/operations/slow-hip_scratch_budget` -- without rebuilding the whole `@slow` suite; this stanza is what
@@ -57,6 +76,74 @@
   (alias slow-env_spelling_gate)
   (alias slow-hip_scratch_budget)
   (alias slow-hip_scratch_tune_survives)))
+
+; The repo-wide scans, as one family (gh-ocannl-703). These seven parse the repository's own
+; sources, dune files and documentation rather than compiling anything, so they are cheap -- and
+; they are the ones a small targeted change trips: add a config key, add a dune stanza, print a
+; claim. Before this alias the only way to run them was the whole directory, which is the expensive
+; path and, on a box where every freshly linked executable queues behind the OS signature scanner,
+; the unusable one. `dune build @test/operations/scans` runs the family and applies every golden
+; diff.
+;
+; A scan whose per-test alias this list omits is one `@scans` skips silently. `env_var_deps` checks
+; that: it derives the family from the rules that glob the repository recursively -- which is what
+; makes a scan repo-wide -- rather than from a second copy of this list.
+
+(alias
+ (name scans)
+ (deps
+  (alias runtest-env_spelling_gate)
+  (alias runtest-test_config_consistency)
+  (alias runtest-digest_completeness)
+  (alias runtest-config_dep_completeness)
+  (alias runtest-env_var_deps)
+  (alias runtest-cache_dir_ignores)
+  (alias runtest-verdict_ratchet)
+  (alias runtest-agent_notes_structure)))
+
+; This directory's golden-diff rules, aggregated back onto `runtest` (gh-ocannl-726). Each of them
+; attaches to its own `runtest-<name>` alias and to NOTHING else, so that `dune build
+; @test/operations/runtest-verdict_ratchet` runs that one test and applies its diff; this stanza is
+; what keeps `dune runtest` running all of them. Attaching such a rule to `runtest` as well would
+; defeat the point: a rule on two aliases makes building either alias build both, so a per-test
+; alias that also named `runtest` would pull the whole directory in behind it -- and where the name
+; is one dune generates for a `(test)` stanza, dune rejects the pair outright as a dependency cycle.
+; Hence the naming: `<name>` is the golden the rule checks, and never a `(test)` stanza's name in
+; this directory. A `runtest-<name>` rule missing from this list is one plain `dune runtest` skips
+; silently, which `test/operations/env_var_deps` checks -- the same check it makes of the `slow`
+; suite.
+
+(alias
+ (name runtest)
+ (deps
+  (alias runtest-micrograd_demo_logging)
+  (alias runtest-n3_fwd_with_prec-unoptimized)
+  (alias runtest-top_down_prec-unoptimized)
+  (alias runtest-top_down_prec-extension)
+  (alias runtest-zero_out_local_decl-unoptimized)
+  (alias runtest-zero_out_local_decl-extension)
+  (alias runtest-test_where_precision-unoptimized)
+  (alias runtest-test_where_precision-extension)
+  (alias runtest-test_log_stmt_format)
+  (alias runtest-config_var_spellings)
+  (alias runtest-config_var_warnings)
+  (alias runtest-config_var_fatal_spelling)
+  (alias runtest-test_config_consistency)
+  (alias runtest-digest_completeness)
+  (alias runtest-env_var_deps)
+  (alias runtest-cache_dir_ignores)
+  (alias runtest-config_dep_completeness)
+  (alias runtest-verdict_ratchet)
+  (alias runtest-autotune_bound_pruning)
+  (alias runtest-bandwidth_calibration)
+  (alias runtest-autotune_routine_name)
+  (alias runtest-cost_model_selection)
+  (alias runtest-model_default_fallback)
+  (alias runtest-placement_surface)
+  (alias runtest-flip_bound_pruning)
+  (alias runtest-model_default_placements)
+  (alias runtest-agent_notes_structure)
+  (alias runtest-generated_provenance)))
 
 (test
  ; ocannl-backend: none -- links no backend: it reads synthetic Benchmark records through PrintBox_utils.table as text.
@@ -134,8 +221,9 @@
     "%{target}"))))
 
 (rule
- (alias runtest)
+ (alias runtest-micrograd_demo_logging)
  (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
  (action
   (diff
    "micrograd_demo_logging-%{read:config/ocannl_backend.txt}-0-0.log.expected"
@@ -526,25 +614,28 @@
      test_where_precision.extension.actual)))))
 
 (rule
- (alias runtest)
+ (alias runtest-n3_fwd_with_prec-unoptimized)
  (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
  (action
   (diff
    "n3_fwd_with_prec-unoptimized.ll.expected"
    "n3_fwd_with_prec-unoptimized.ll.actual")))
 
 (rule
- (alias runtest)
+ (alias runtest-top_down_prec-unoptimized)
  (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
  (action
   (diff
    "top_down_prec-unoptimized.ll.expected"
    "top_down_prec-unoptimized.ll.actual")))
 
 (rule
- (alias runtest)
+ (alias runtest-top_down_prec-extension)
  (package neural_nets_lib)
  (deps
+  (alias runtest-env_spelling_gate)
   config/ocannl_backend_extension.txt
   (env_var OCANNL_BACKEND))
  (action
@@ -553,17 +644,19 @@
    "top_down_prec.extension.actual")))
 
 (rule
- (alias runtest)
+ (alias runtest-zero_out_local_decl-unoptimized)
  (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
  (action
   (diff
    "zero_out_local_decl-unoptimized.ll.expected"
    "zero_out_local_decl-unoptimized.ll.actual")))
 
 (rule
- (alias runtest)
+ (alias runtest-zero_out_local_decl-extension)
  (package neural_nets_lib)
  (deps
+  (alias runtest-env_spelling_gate)
   config/ocannl_backend_extension.txt
   (env_var OCANNL_BACKEND))
  (action
@@ -572,17 +665,19 @@
    "zero_out_local_decl.extension.actual")))
 
 (rule
- (alias runtest)
+ (alias runtest-test_where_precision-unoptimized)
  (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
  (action
   (diff
    "test_where_precision-unoptimized.ll.expected"
    "test_where_precision-unoptimized.ll.actual")))
 
 (rule
- (alias runtest)
+ (alias runtest-test_where_precision-extension)
  (package neural_nets_lib)
  (deps
+  (alias runtest-env_spelling_gate)
   config/ocannl_backend_extension.txt
   (env_var OCANNL_BACKEND))
  (action
@@ -1184,8 +1279,9 @@
      test_log_stmt_format.c.actual)))))
 
 (rule
- (alias runtest)
+ (alias runtest-test_log_stmt_format)
  (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
  (action
   (diff "test_log_stmt_format.c.expected" "test_log_stmt_format.c.actual")))
 
@@ -1326,8 +1422,9 @@
               --ocannl_log_level_0))))))))))))))
 
 (rule
- (alias runtest)
+ (alias runtest-config_var_spellings)
  (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
  (action
   (diff config_var_spellings.expected config_var_spellings.actual)))
 
@@ -1410,8 +1507,9 @@
         --ocannl-not-a-real-key=7))))))))
 
 (rule
- (alias runtest)
+ (alias runtest-config_var_warnings)
  (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
  (action
   (diff config_var_warnings.expected config_var_warnings.actual)))
 
@@ -1452,8 +1550,9 @@
        --ocannl_log_level=0)))))))
 
 (rule
- (alias runtest)
+ (alias runtest-config_var_fatal_spelling)
  (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
  (action
   (diff config_var_fatal_spelling.expected config_var_fatal_spelling.actual)))
 
@@ -1488,8 +1587,9 @@
     %{deps}))))
 
 (rule
- (alias runtest)
+ (alias runtest-test_config_consistency)
  (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
  (action
   (diff test_config_consistency.expected test_config_consistency.actual)))
 
@@ -1561,8 +1661,9 @@
    (run %{dep:digest_completeness.exe} %{deps}))))
 
 (rule
- (alias runtest)
+ (alias runtest-digest_completeness)
  (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
  (action
   (diff digest_completeness.expected digest_completeness.actual)))
 
@@ -1605,8 +1706,9 @@
    (run %{dep:env_var_deps.exe} %{workspace_root} %{deps}))))
 
 (rule
- (alias runtest)
+ (alias runtest-env_var_deps)
  (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
  (action
   (diff env_var_deps.expected env_var_deps.actual)))
 
@@ -1637,8 +1739,9 @@
    (run %{dep:cache_dir_ignores.exe} %{workspace_root} %{deps}))))
 
 (rule
- (alias runtest)
+ (alias runtest-cache_dir_ignores)
  (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
  (action
   (diff cache_dir_ignores.expected cache_dir_ignores.actual)))
 
@@ -1661,8 +1764,9 @@
    (run %{dep:config_dep_completeness.exe} %{workspace_root} %{deps}))))
 
 (rule
- (alias runtest)
+ (alias runtest-config_dep_completeness)
  (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
  (action
   (diff config_dep_completeness.expected config_dep_completeness.actual)))
 
@@ -1692,8 +1796,9 @@
    (run %{dep:verdict_ratchet.exe} %{workspace_root} %{deps}))))
 
 (rule
- (alias runtest)
+ (alias runtest-verdict_ratchet)
  (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
  (action
   (diff verdict_ratchet.expected verdict_ratchet.actual)))
 
@@ -2650,8 +2755,9 @@
     "--ocannl_model_peak_memory_bandwidth=1e3"))))
 
 (rule
- (alias runtest)
+ (alias runtest-autotune_bound_pruning)
  (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
  (action
   (diff autotune_bound_pruning.expected autotune_bound_pruning.actual)))
 
@@ -2680,8 +2786,9 @@
     "--ocannl_autotune_calibration_file=bandwidth_calibration.tsv"))))
 
 (rule
- (alias runtest)
+ (alias runtest-bandwidth_calibration)
  (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
  (action
   (diff bandwidth_calibration.expected bandwidth_calibration.actual)))
 
@@ -2710,8 +2817,9 @@
     "--ocannl_autotune_calibration_file=autotune_routine_name.tsv"))))
 
 (rule
- (alias runtest)
+ (alias runtest-autotune_routine_name)
  (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
  (action
   (diff autotune_routine_name.expected autotune_routine_name.actual)))
 
@@ -2784,8 +2892,9 @@
     "--ocannl_model_peak_memory_bandwidth=1e6"))))
 
 (rule
- (alias runtest)
+ (alias runtest-cost_model_selection)
  (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
  (action
   (diff cost_model_selection.expected cost_model_selection.actual)))
 
@@ -2816,8 +2925,9 @@
     "--ocannl_model_peak_memory_bandwidth=1e6"))))
 
 (rule
- (alias runtest)
+ (alias runtest-model_default_fallback)
  (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
  (action
   (diff model_default_fallback.expected model_default_fallback.actual)))
 
@@ -3151,8 +3261,9 @@
     "--ocannl_model_peak_memory_bandwidth=1e9"))))
 
 (rule
- (alias runtest)
+ (alias runtest-placement_surface)
  (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
  (action
   (diff placement_surface.expected placement_surface.actual)))
 
@@ -3184,8 +3295,9 @@
     "--ocannl_model_peak_memory_bandwidth=1e3"))))
 
 (rule
- (alias runtest)
+ (alias runtest-flip_bound_pruning)
  (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
  (action
   (diff flip_bound_pruning.expected flip_bound_pruning.actual)))
 
@@ -3217,8 +3329,9 @@
     "--ocannl_model_peak_memory_bandwidth=1e12"))))
 
 (rule
- (alias runtest)
+ (alias runtest-model_default_placements)
  (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
  (action
   (diff model_default_placements.expected model_default_placements.actual)))
 
@@ -3289,9 +3402,14 @@
  ; hand rather than compiling any. Its `backend_name = "cc"` is the label a generated file's name
  ; carries, not a backend it selects: what is under test is how Generated decides a file on disk
  ; belongs to this run.
- (aliases runtest generated_provenance)
+ ; One alias, not two (gh-ocannl-726): this rule used to name `runtest` and
+ ; `generated_provenance` both, which made `dune build @test/operations/generated_provenance` build
+ ; the whole directory -- a rule on two aliases makes building either build both. The per-test
+ ; alias below is aggregated back onto `runtest` by the stanza near the top of this file.
+ (alias runtest-generated_provenance)
  (package neural_nets_lib)
  (deps
+  (alias runtest-env_spelling_gate)
   ocannl_config
   (env_var OCANNL_BUILD_FILES_PREFIX)
   %{dep:generated_provenance.exe})
@@ -3363,8 +3481,9 @@
    (run %{dep:agent_notes_structure.exe} %{deps}))))
 
 (rule
- (alias runtest)
+ (alias runtest-agent_notes_structure)
  (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
  (action
   (diff agent_notes_structure.expected agent_notes_structure.actual)))
 

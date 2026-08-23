@@ -147,9 +147,15 @@ let aliases_of stanza =
   match stanza with
   | Sexp.List (Sexp.Atom ("test" | "tests") :: _) -> [ "runtest" ]
   | Sexp.List (Sexp.Atom "rule" :: fields) ->
-      List.filter_map fields ~f:(function
-        | Sexp.List [ Sexp.Atom "alias"; Sexp.Atom n ] -> Some n
-        | _ -> None)
+      (* Both spellings: `(alias A)` and dune's plural `(aliases A B)`, which is how a rule sits on
+         `runtest` and on its own per-test alias at once (gh-ocannl-726). Reading only the singular
+         would take those rules for attaching to nothing, and a rule attached to nothing is a rule
+         no gate has to reach. *)
+      List.concat_map fields ~f:(function
+        | Sexp.List [ Sexp.Atom "alias"; Sexp.Atom n ] -> [ n ]
+        | Sexp.List (Sexp.Atom "aliases" :: args) ->
+            List.filter_map args ~f:(function Sexp.Atom n -> Some n | _ -> None)
+        | _ -> [])
   | _ -> []
 
 (* The aliases a stanza's `deps` field names, which dune builds before it: before a rule's action
@@ -210,11 +216,188 @@ let aliases_reached_from stanzas alias =
   in
   close (Set.singleton (module String) alias)
 
-(* The suite a per-test alias belongs to, by the naming convention: `slow-<name>` is one slow test
-   and `slow` the suite, an `(alias (name slow) (deps …))` stanza listing its members -- so a
-   member the list omits is one `dune build @slow` skips, silently. *)
-let slow_suite = "slow"
-let slow_member alias = String.is_prefix alias ~prefix:(slow_suite ^ "-")
+(* The suite a per-test alias belongs to, by the naming convention: `<suite>-<name>` is one test and
+   `<suite>` the suite, an `(alias (name <suite>) (deps …))` stanza listing its members -- so a
+   member the list omits is one `dune build @<suite>` skips, silently. Two suites are built this
+   way. `slow` is the one gh-ocannl-667 introduced. `runtest` is the same arrangement for the
+   golden-diff rules (gh-ocannl-726): dune generates `runtest-<name>` for `(test)`/`(tests)` stanzas
+   and inline-test libraries only, so an `(executable)` plus a `(rule)` that diffs has to be given
+   one -- and it has to be given it ALONE, since a rule attached to two aliases makes building
+   either build both, which would put the whole directory behind every per-test alias. Aggregating
+   the members here is then the only thing that keeps them in `dune runtest`. *)
+let suites = [ "slow"; "runtest" ]
+let member_of suite alias = String.is_prefix alias ~prefix:(suite ^ "-")
+
+(* The repo-wide scans and the family alias that runs them (gh-ocannl-703). Which rules are in the
+   family is DERIVED rather than listed here: a rule that globs the repository recursively is
+   reading the repository, which is what makes a scan repo-wide -- so a scan lands in the family the
+   day it lands in the file, and this check cannot go stale against the stanza it is checking the
+   way a second copy of the list would. *)
+let scans_suite = "scans"
+
+let rec globs_repository = function
+  | Sexp.List (Sexp.Atom "glob_files_rec" :: _) -> true
+  | Sexp.List l -> List.exists l ~f:globs_repository
+  | Sexp.Atom _ -> false
+
+let is_repo_wide_scan stanza =
+  match stanza with
+  | Sexp.List (Sexp.Atom "rule" :: _) ->
+      Option.value_map (Scan.field stanza "deps") ~default:false ~f:(fun args ->
+          List.exists args ~f:globs_repository)
+  | _ -> false
+
+(* ... and the glob has to LEAVE the directory to be reading the repository (Codex P2, round 6). A
+   test that recursively reads a fixture tree of its own uses the same form and is nobody's
+   repo-wide scan; classifying it as one would demand a `scans` family beside it and fail the
+   check until an unrelated suite appeared. *)
+let rec escapes_directory = function
+  | Sexp.List (Sexp.Atom "glob_files_rec" :: args) ->
+      List.exists args ~f:(function
+        | Sexp.Atom pattern -> String.is_prefix pattern ~prefix:"../"
+        | _ -> false)
+  | Sexp.List l -> List.exists l ~f:escapes_directory
+  | Sexp.Atom _ -> false
+
+let is_repo_wide_scan stanza =
+  is_repo_wide_scan stanza
+  && Option.value_map (Scan.field stanza "deps") ~default:false ~f:(fun args ->
+         List.exists args ~f:escapes_directory)
+
+(* Dune's named dependencies: `(deps (:golden foo.expected))` binds `%{golden}` to that path. A
+   pform naming one carries no colon, so without the binding `golden_stem` would take the BINDING's
+   name for the golden's -- rejecting the alias a reader would write and accepting one that names
+   nothing (Codex P2, round 6). *)
+let named_deps stanza =
+  match Scan.field stanza "deps" with
+  | None -> []
+  | Some args ->
+      List.filter_map args ~f:(function
+        | Sexp.List (Sexp.Atom name :: Sexp.Atom path :: _) when String.is_prefix name ~prefix:":"
+          ->
+            Some (String.drop_prefix name 1, path)
+        | _ -> None)
+
+(* A file NAMED by a pform -- `%{dep:verdict_ratchet.expected}`, dune's ordinary way of writing a
+   dependency inline, or `%{golden}` for a named one -- still names a file. Unwrap the leading
+   pform: what follows the last `:` inside the braces is the path, and a pform with no colon is a
+   named dependency, resolvable only from the stanza that bound it (Codex P2, rounds 4 and 6).
+   Shared by the alias check and by the scans family's target matching (round 7), so the two agree
+   about what a name is. *)
+let unwrap_pform ?(named = []) file =
+  match String.chop_prefix file ~prefix:"%{" with
+  | None -> file
+  | Some rest -> (
+      match String.substr_index rest ~pattern:"}" with
+      | None -> rest
+      | Some close ->
+          let inside = String.prefix rest close in
+          let after = String.drop_prefix rest (close + 1) in
+          let path =
+            match String.rindex inside ':' with
+            | Some colon -> String.drop_prefix inside (colon + 1)
+            (* An unbound named dependency resolves to nothing, which the callers refuse by name
+               rather than guessing. *)
+            | None -> Option.value (List.Assoc.find named inside ~equal:String.equal) ~default:""
+          in
+          path ^ after)
+
+(* What a rule writes, so that the rule DIFFING it can be found: a scan produces `<name>.actual` and
+   a second rule holds it against the golden. It is that second rule the family alias has to
+   aggregate, since it is the one that fails when the scan reports something. *)
+let targets_of stanza =
+  List.concat_map [ "target"; "targets" ] ~f:(fun field ->
+      match Scan.field stanza field with
+      | None -> []
+      | Some args -> List.filter_map args ~f:(function Sexp.Atom a -> Some a | _ -> None))
+
+let rec diffs_file ?(named = []) target = function
+  | Sexp.List (Sexp.Atom ("diff" | "diff?") :: args) ->
+      (* Modulo the pform spelling: `(diff foo.expected %{dep:foo.actual})` is dune's ordinary way
+         of naming the dependency, and comparing it literally against the producer's `foo.actual`
+         would report a correctly aggregated scan as missing (Codex P2, round 7). *)
+      List.exists args ~f:(function
+        | Sexp.Atom a -> String.equal (unwrap_pform ~named a) target
+        | _ -> false)
+  | Sexp.List l -> List.exists l ~f:(diffs_file ~named target)
+  | Sexp.Atom _ -> false
+
+(* A rule whose action holds a golden against a run's output: the shape that has no alias of its own
+   unless someone writes one, since dune generates `runtest-<name>` for `(test)`/`(tests)` stanzas
+   and for inline-test libraries, and for nothing else (gh-ocannl-726). *)
+let rec is_diff_action = function
+  | Sexp.List (Sexp.Atom ("diff" | "diff?") :: _) -> true
+  | Sexp.List l -> List.exists l ~f:is_diff_action
+  | Sexp.Atom _ -> false
+
+(* The golden a diff rule holds a run's output against: the first operand of its `diff`. What the
+   alias is checked against below -- an alias whose name has nothing to do with its golden is an
+   entry point nobody constructs, since what a reader has in hand is the golden that just failed
+   (Codex P2, round 3, after `runtest-n3_fwd_with_prec` had shortened away the `-unoptimized` its
+   golden carries). *)
+let rec goldens_in = function
+  | Sexp.List (Sexp.Atom ("diff" | "diff?") :: Sexp.Atom golden :: _) -> [ golden ]
+  | Sexp.List l -> List.concat_map l ~f:goldens_in
+  | Sexp.Atom _ -> []
+
+(* The part of a golden's name a reader would type: everything before the first dune pform or
+   extension, less a trailing `_expected` and any separator left dangling. So
+   `verdict_ratchet.expected` is `verdict_ratchet`, `n3_fwd_with_prec-unoptimized.ll.expected` is
+   `n3_fwd_with_prec-unoptimized`, `top_down_prec.%{read:…}.expected` is `top_down_prec`,
+   `micrograd_demo_logging-%{read:…}-0-0.log.expected` is `micrograd_demo_logging`, and the ppx
+   convention's `test_ppx_op_expected.ml` is `test_ppx_op`. The alias may go on to say WHICH golden
+   of a subject it checks -- `-extension`, `-unoptimized`, `-ppx` -- which is why the relation
+   asked for is a prefix rather than equality: one run can write several goldens, and each needs an
+   alias of its own. *)
+let golden_stem ?(named = []) golden =
+  let cut_at s ~on =
+    match String.substr_index s ~pattern:on with None -> s | Some i -> String.prefix s i
+  in
+  let golden = unwrap_pform ~named golden in
+  (* A pform INSIDE the name goes the other way, and is cut before the basename is taken: a
+     `%{read:config/…}` carries a path, so taking the basename first would leave the CONFIG file's
+     name as the stem. *)
+  let stem = cut_at (Stdlib.Filename.basename (cut_at golden ~on:"%{")) ~on:"." in
+  let stem = Option.value (String.chop_suffix stem ~suffix:"_expected") ~default:stem in
+  String.rstrip stem ~drop:(fun c -> Char.equal c '-' || Char.equal c '_')
+
+let is_golden_diff stanza =
+  match stanza with
+  | Sexp.List (Sexp.Atom "rule" :: _) ->
+      Option.value_map (Scan.field stanza "action") ~default:false ~f:(fun args ->
+          List.exists args ~f:is_diff_action)
+  | _ -> false
+
+(* The names dune generates a `runtest-<name>` alias for by itself (>= 3.20): every `(test)`/
+   `(tests)` stanza name, and every inline-test library's name. A hand-written alias must not reuse
+   one (Codex P2, round 5): the two aliases MERGE, so the targeted entry point runs that test as
+   well as the rule, which is the isolation this whole arrangement is for -- and once the rule also
+   names `runtest`, dune calls the pair a dependency cycle. The `runtest-env_spelling_gate` rule is
+   the deliberate exception, and is recognized structurally rather than by name: it is the ambient
+   gate, whose whole purpose is to run the same binary the `(test)` stanza does. *)
+let is_test_stanza = function
+  | Sexp.List (Sexp.Atom ("test" | "tests") :: _) -> true
+  | _ -> false
+
+(* The generated names that belong to an ambient gate: a `(test)` stanza depending on `(universe)`
+   is the gate, so a rule sharing ITS alias runs the same gate binary, which is the one deliberate
+   collision. Recognized this way rather than by the literal name `env_spelling_gate` (which a
+   rename would silently unexempt) and rather than by the rule alone (which let any
+   universe-dependent rule claim the exemption -- Codex P2, rounds 6 and 7). *)
+let gate_generated_names stanzas =
+  List.concat_map stanzas ~f:(fun stanza ->
+      if is_test_stanza stanza && depends_on_universe stanza then Scan.names_of stanza else [])
+  |> Set.of_list (module String)
+
+let generated_runtest_names stanzas =
+  List.concat_map stanzas ~f:(fun stanza ->
+      match stanza with
+      | Sexp.List (Sexp.Atom ("test" | "tests") :: _) -> Scan.names_of stanza
+      | Sexp.List (Sexp.Atom "library" :: _) when Option.is_some (Scan.field stanza "inline_tests")
+        ->
+          Scan.names_of stanza
+      | _ -> [])
+  |> Set.of_list (module String)
 
 (* The prefix `Utils.classify_env_var` reports for a per-module tracing gate. *)
 let gate_prefix = "ocannl_log_level_"
@@ -489,16 +672,212 @@ let () =
                  (if String.equal alias "runtest" then
                     Stdlib.Filename.dirname dune_file ^ "/" ^ alias
                   else alias)));
-      (* The slow suite's members, against what it aggregates. *)
-      let slow_reaches = aliases_reached_from stanzas slow_suite in
-      List.iter entry_points ~f:(fun alias ->
-          if slow_member alias && not (Set.mem slow_reaches alias) then
-            fail
-              (Printf.sprintf
-                 "%s attaches a rule to `%s` that the `%s` alias does not aggregate -- `dune build \
-                  @%s` would skip it silently; list `(alias %s)` in the `(alias (name %s) (deps \
-                  …))` stanza"
-                 dune_file alias slow_suite slow_suite alias slow_suite));
+      (* Each suite's members, against what it aggregates. *)
+      List.iter suites ~f:(fun suite ->
+          let reaches = aliases_reached_from stanzas suite in
+          List.iter entry_points ~f:(fun alias ->
+              if member_of suite alias && not (Set.mem reaches alias) then
+                fail
+                  (Printf.sprintf
+                     "%s attaches a rule to `%s` that the `%s` alias does not aggregate -- `dune \
+                      build @%s` would skip it silently; list `(alias %s)` in the `(alias (name %s) \
+                      (deps …))` stanza"
+                     dune_file alias suite suite alias suite)));
+      (* The scans family, the same question asked of the repo-wide scans (gh-ocannl-703): the rule
+         that diffs a scan's output against its golden is the one that fails, so it is the one
+         `@scans` has to reach. The producers are recognized by what they read rather than by name,
+         so a scan added tomorrow is asked about too. *)
+      let scans_reaches = aliases_reached_from stanzas scans_suite in
+      List.iter stanzas ~f:(fun producer ->
+          if is_repo_wide_scan producer then
+            (* A producer the family already aggregates directly needs no separate checker at all:
+               declaring a target says where its diagnostics go, not that a second rule judges them
+               -- a scan can assert by exit status and still write one (Codex P2, round 8). Asked
+               before the target hunt, so both shapes are accepted the same way. *)
+            if List.exists (aliases_of producer) ~f:(Set.mem scans_reaches) then ()
+            else if List.is_empty (targets_of producer) then
+              (* A scan that declares no target writes and checks in one action -- the `no-infer`
+                 shape this repository uses elsewhere, or an assertion by exit status. There is no
+                 second rule to look for, so the family has to aggregate THIS rule's own alias;
+                 iterating over its (empty) target list would have passed it silently, which is the
+                 fail-open Codex found in round 4. *)
+              if not (List.exists (aliases_of producer) ~f:(Set.mem scans_reaches)) then
+                fail
+                  (Printf.sprintf
+                     "%s has a rule that globs the repository -- a repo-wide scan -- and declares \
+                      no target, so it checks its own output in its action, and the `%s` alias \
+                      does not aggregate the alias it sits on (%s): `dune build @%s/%s` would skip \
+                      it silently. List its alias in the `(alias (name %s) (deps …))` stanza"
+                     dune_file scans_suite
+                     (match aliases_of producer with
+                     | [] -> "none"
+                     | aliases -> String.concat ~sep:", " aliases)
+                     (Stdlib.Filename.dirname dune_file)
+                     scans_suite scans_suite)
+              else ()
+            else
+              List.iter (targets_of producer) ~f:(fun target ->
+                let checkers =
+                  List.filter stanzas ~f:(fun s ->
+                      is_golden_diff s
+                      && Option.value_map (Scan.field s "action") ~default:false ~f:(fun args ->
+                             List.exists args ~f:(diffs_file ~named:(named_deps s) target)))
+                in
+                let aliases = List.concat_map checkers ~f:aliases_of in
+                if not (List.exists aliases ~f:(Set.mem scans_reaches)) then
+                  fail
+                    (Printf.sprintf
+                       "%s globs the repository to produce `%s` -- a repo-wide scan -- and no rule \
+                        the `%s` alias aggregates diffs it against its golden: `dune build \
+                        @%s/%s` would skip it silently. Give the diff rule `(alias \
+                        runtest-<name>)` -- that alias and no other -- and list `(alias \
+                        runtest-<name>)` in BOTH the `(alias (name runtest) (deps …))` and the \
+                        `(alias (name %s) (deps …))` stanzas"
+                       dune_file target scans_suite
+                       (Stdlib.Filename.dirname dune_file)
+                       scans_suite scans_suite)));
+      (* A hand-written per-test alias must not reuse a name dune generates one for: the aliases
+         merge, and the targeted run stops being one test (Codex P2, round 5). Asked of every rule
+         in the file rather than of the golden diffs alone, since any rule can be given such an
+         alias; the ambient gate is the one rule that means to share it. *)
+      let generated = generated_runtest_names stanzas in
+      let gate_names = gate_generated_names stanzas in
+      List.iter stanzas ~f:(fun stanza ->
+          List.iter (aliases_of stanza) ~f:(fun alias ->
+              match String.chop_prefix alias ~prefix:"runtest-" with
+              (* The one deliberate collision: a rule sharing the alias dune generates for a
+                 `(test)` stanza BECAUSE IT RUNS THE SAME BINARY -- the ambient gate, whose rule
+                 exists so that every per-test alias can depend on it. Three things have to hold,
+                 and the third is what the earlier rounds were missing: the rule is a gate, the
+                 name belongs to a gate `(test)` stanza, and the rule's action runs that stanza's
+                 executable, so the merged alias runs one program either way (Codex P2, rounds 6 to
+                 8). *)
+              | Some name
+                when is_gate stanza && Set.mem gate_names name
+                     && List.exists (Scan.executables_run stanza) ~f:(fun (_cwd, command) ->
+                            match command with
+                            | Scan.Runs path ->
+                                String.equal
+                                  (Stdlib.Filename.basename path)
+                                  (name ^ ".exe")
+                            | _ -> false) ->
+                  ()
+              | Some name when Set.mem generated name ->
+                    fail
+                      (Printf.sprintf
+                         "%s attaches a rule to `%s`, the alias dune generates for the `%s` \
+                          stanza in this directory -- the two merge, so `dune build @%s/%s` would \
+                          run that test as well as this rule, and naming `runtest` beside it is a \
+                          dependency cycle. Name the alias after the GOLDEN this rule checks, \
+                          qualified where a run writes several"
+                         dune_file alias name
+                         (Stdlib.Filename.dirname dune_file)
+                         alias)
+              | _ -> ()));
+      (* And one alias checks one golden: two golden diffs sharing an alias make the targeted run
+         two tests, which is the isolation this arrangement is for -- and the prefix relation above
+         admits the pair, since `foo.expected` and `foo-extension.expected` both accept
+         `runtest-foo-extension` (Codex P2, round 7). A producer rule sharing its checker's alias
+         is a different thing and stays allowed: it is what MAKES the output the checker reads. *)
+      List.iter
+        (List.concat_map stanzas ~f:(fun s ->
+             (* One entry per GOLDEN, not per rule: a single rule whose `progn` diffs two goldens
+                puts two checks behind one alias just as two rules would (Codex P2, round 8). *)
+             if is_golden_diff s then
+               List.concat_map (aliases_of s) ~f:(fun alias ->
+                   List.map (goldens_in s) ~f:(fun _ -> alias))
+             else [])
+        |> List.sort ~compare:String.compare
+        |> List.group ~break:(fun a b -> not (String.equal a b))
+        |> List.filter ~f:(fun group -> List.length group > 1))
+        ~f:(fun group ->
+          fail
+            (Printf.sprintf
+               "%s checks %d goldens on the alias `%s` -- `dune build @%s/%s` would run them \
+                all, so the alias no longer names one test. Give each its own, named after the \
+                golden it checks"
+               dune_file (List.length group)
+               (List.hd_exn group)
+               (Stdlib.Filename.dirname dune_file)
+               (List.hd_exn group)));
+      (* Every golden diff sits on a per-test alias, and on that alias ALONE (gh-ocannl-726). Dune
+         generates `runtest-<name>` for `(test)`/`(tests)` stanzas and inline-test libraries and for
+         nothing else, so a rule that diffs a golden and names `runtest` itself can only be run by
+         running the whole directory -- and validating it targeted then means building its `.actual`
+         and diffing by hand, outside dune, which fails open. Naming BOTH aliases does not fix it
+         either, and is the trap worth checking for: a rule attached to two aliases makes building
+         either one build both, so the per-test alias would drag the directory in behind it, and
+         where the name is one dune generates the pair is a dependency cycle outright. *)
+      List.iter stanzas ~f:(fun stanza ->
+          if is_golden_diff stanza then
+            match aliases_of stanza with
+            (* One alias, and it names a member of a suite: that is the whole convention. Asked of
+               the alias SET rather than of the name `runtest` alone (Codex P2, round 1), since a
+               rule with no alias at all, or with an alias of its own invention, has neither the
+               targeted entry point nor a place in a suite -- and its golden stops being checked
+               without anything saying so. *)
+            | [ alias ]
+              when List.exists suites ~f:(fun suite -> member_of suite alias)
+                   && List.for_all (goldens_in stanza) ~f:(fun golden ->
+                          let suffix =
+                            List.find_map suites ~f:(fun suite ->
+                                String.chop_prefix alias ~prefix:(suite ^ "-"))
+                            |> Option.value ~default:alias
+                          in
+                          let stem = golden_stem ~named:(named_deps stanza) golden in
+                          (* The stem itself, or the stem and then a qualifier saying WHICH golden
+                             of the run this is. A bare prefix would accept `runtest-foobar` for
+                             `foo.expected`, leaving the alias a reader constructs empty (Codex P2,
+                             round 8). *)
+                          (not (String.is_empty stem))
+                          && (String.equal suffix stem
+                             || String.is_prefix suffix ~prefix:(stem ^ "-"))) ->
+                ()
+            | aliases ->
+                let what =
+                  match aliases with
+                  | [] -> "attaches a golden diff to no alias at all"
+                  | [ alias ] when not (List.exists suites ~f:(fun s -> member_of s alias)) ->
+                      Printf.sprintf "attaches a golden diff to `%s`, which is no suite's member"
+                        alias
+                  | [ alias ]
+                    when List.exists (goldens_in stanza) ~f:(fun g ->
+                             String.is_empty (golden_stem ~named:(named_deps stanza) g)) ->
+                      Printf.sprintf
+                        "attaches `%s` to a golden this check cannot name -- %s reduces to an \
+                         empty stem, so nothing constrains the alias. Spell the golden as a plain \
+                         path, or teach `golden_stem` the form"
+                        alias
+                        (String.concat ~sep:", "
+                           (List.filter (goldens_in stanza) ~f:(fun g ->
+                                String.is_empty (golden_stem ~named:(named_deps stanza) g))))
+                  | [ alias ] ->
+                      Printf.sprintf
+                        "attaches `%s` to a golden its name does not name: the goldens are %s, so \
+                         the alias should begin `<suite>-%s`. A reader reaches for the alias with \
+                         the failing GOLDEN in hand, and an alias that renames it is one they \
+                         construct empty"
+                        alias
+                        (String.concat ~sep:", " (goldens_in stanza))
+                        (String.concat ~sep:"` or `<suite>-"
+                           (List.map (goldens_in stanza)
+                              ~f:(golden_stem ~named:(named_deps stanza))))
+                  | aliases ->
+                      Printf.sprintf
+                        "attaches a golden diff to %d aliases (%s) -- and a rule on two aliases \
+                         makes building either one build both"
+                        (List.length aliases)
+                        (String.concat ~sep:", " aliases)
+                in
+                fail
+                  (Printf.sprintf
+                     "%s %s. Give it `(alias <suite>-<name>)` -- that alias and no other, with \
+                      <suite> one of %s -- and list it in this file's `(alias (name <suite>) (deps \
+                      …))` stanza, which is what runs it as part of the suite. <name> is the \
+                      golden the rule checks, and for `runtest` must not be the name of a `(test)` \
+                      stanza in this directory, since dune generates `runtest-<name>` for those"
+                     dune_file what
+                     (String.concat ~sep:", " suites)));
       let fields = List.concat_map stanzas ~f:dep_fields in
       let declared =
         List.concat_map fields ~f:(fun (_, args) -> List.concat_map args ~f:env_vars_in)
