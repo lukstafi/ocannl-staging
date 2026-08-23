@@ -1065,6 +1065,18 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ ; gh-ocannl-710: walks each backend's static_properties dump generically. Runs the SELECTED
+ ; backend (so pinning the variable covers cc, metal, cuda and hip in turn) beside multidev_cc,
+ ; which it names itself.
+ (name static_properties_contract)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (env_var OCANNL_BACKEND))
+ (modules static_properties_contract)
+ (libraries base ocannl stdio arrayjit.verdict))
+
+(test
  (name tnode_uid_identity)
  (package neural_nets_lib)
  (deps
