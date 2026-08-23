@@ -122,8 +122,34 @@ let () =
             (Printf.sprintf "%s = %d does not divide %s = %d (remainder %d)" fname f ename e (e % f)))
     |> List.dedup_and_sort ~compare:String.compare
   in
-  let mav = Array.init (m * k) ~f:(fun i -> Float.of_int (i % 13) *. 0.25) in
-  let mbv = Array.init (k * n) ~f:(fun i -> Float.of_int (i % 17) -. 8.) in
+  (* Operand values that vary with EVERY index at every extent, drawn through [Bench_checksum]'s
+     (row, column) mix rather than a residue of the FLATTENED offset (gh-ocannl-711). The flat form
+     is degenerate exactly where this bench runs: [(t mod 17) - 8] over the k x n mb gives every row
+     of mb the identical values whenever 17 divides n (and [(t mod 13)] the same for ma whenever 13
+     divides k), and a schedule that substitutes the wrong row of a collapsed operand then computes
+     the correct output, which no whole-output check can see. Keying on the (row, column) pair
+     removes the class: the row index enters the value in its own right, so no divisibility relation
+     between a modulus and a stride can erase it. The value RANGES are unchanged — ma in multiples
+     of 0.25 up to 3, mb the integers -8..8 — so the products stay exact in binary and the
+     checksum's exactness argument is the one it was.
+
+     ma drops the zero from its set ([Bench_checksum.positive_level], 12 levels rather than 13),
+     which the flat form did not need and the mixed one does: ma's row spans the reduction, so an
+     all-zero ma row zeroes the whole output row, which against a zero-initialized destination is
+     indistinguishable from a schedule that dropped that row. Under the flat form no ma row could be
+     all-zero for k >= 2 (its values marched with the column); under the mix each entry is
+     independent, so a row of k of them is all-zero with probability 13^-k — at k = 2 that is one
+     row in 169, and m = 465 has one. mb keeps its zero: with ma strictly positive no output row is
+     systematically zero, and mb's near-mean-zero set is what keeps the partial sums random-walking
+     rather than growing with k. *)
+  let mav =
+    Array.init (m * k)
+      ~f:(Bench_checksum.positive_level ~salt:0x5A17 ~row_stride:k ~levels:12 ~scale:0.25)
+  in
+  let mbv =
+    Array.init (k * n) ~f:(fun t ->
+        Float.of_int (Bench_checksum.residue ~salt:0x3C6E ~row_stride:n ~modulus:17 t) -. 8.)
+  in
   let ma = TDSL.ndarray mav ~label:[ "ma" ] ~input_dims:[ k ] ~output_dims:[ m ] () in
   let mb = TDSL.ndarray mbv ~label:[ "mb" ] ~input_dims:[ n ] ~output_dims:[ k ] () in
   let flops = 2.0 *. Float.of_int m *. Float.of_int n *. Float.of_int k in
@@ -446,6 +472,40 @@ let () =
     [ ez; sp_zi; sp_i; sp_k ] @ sink j [ k_o ] @ sink i_i [ k_o ] @ stage_b @ stage_a @ [ tz ]
   in
 
+  (* What every variant is compared against, cell by cell (gh-ocannl-711 review). That comparison,
+     not the checksum, is what decides whether a variant computed the right thing: a checksum is a
+     linear functional of the output, so a row permutation survives it whenever the value difference
+     is orthogonal to the weight difference — by the weights colliding, or by plain cancellation,
+     both of which are reachable at the narrow extents this bench accepts. An elementwise comparison
+     has nothing to cancel. The checksum is still printed: one number per line fingerprints a run
+     and travels into a report.
+
+     The reference is the UNSCHEDULED computation, not "whichever variant completed first". Those
+     coincide while the naive leg runs, and diverge exactly where it matters: under
+     [naive_repeats = 0] the naive leg is skipped, and taking the first scheduled variant instead
+     would label an unvalidated output "reference" — with a single schedulable variant, comparing it
+     against nothing at all, and with several, hiding any defect they share. So skipping the
+     expensive naive TIMING costs the timing only: the oracle is materialized by one untimed run of
+     the same unscheduled kernel, on demand and once. When the naive leg does run, its own output is
+     that oracle and no extra run happens. *)
+  let reference = ref None in
+  let disagreements = ref 0 in
+  let unscheduled_output () =
+    let%op mc = ma * mb in
+    let comp = named "mm_reference" (Train.forward mc) in
+    let ctx = Context.auto () in
+    let ctx, routine = Context.compile ctx comp Ir.Indexing.Empty in
+    let ctx = Context.run ctx routine in
+    Context.get_values ctx mc.Tensor.value
+  in
+  let reference_output () =
+    match !reference with
+    | Some r -> r
+    | None ->
+        let r = unscheduled_output () in
+        reference := Some r;
+        r
+  in
   let bench ?(repeats = repeats) ~variant ~schedule () =
     let%op mc = ma * mb in
     let comp = named ("mm_" ^ variant) (Train.forward mc) in
@@ -483,21 +543,42 @@ let () =
        see the remainder region an arbitrary extent creates, and a [Sched.split] whose factor does
        not divide its extent puts the last partial block exactly there, so the whole output is
        checksummed too: every correct variant prints the identical value, and one that drops or
-       repeats tail work does not. Position-weighted, because a plain sum of THIS data is 0 whenever
-       17 divides n (each mb row spans a full cycle of its 17 values, and the total factors as sum_k
-       (sum_i a) (sum_j b)) — exactly the arbitrary-extent regime the checksum is for. The weight is
-       capped so that products of these exact-in-binary operands stay exact in the double
-       accumulator. Both checks are outside the timed region. *)
-    let checksum =
-      Array.foldi values ~init:0.0 ~f:(fun i acc v -> acc +. (v *. Float.of_int (1 + (i % 251))))
+       repeats tail work does not.
+
+       Position-weighted through [Bench_checksum.whole_output], for two reasons. A plain sum of THIS
+       data is 0 whenever 17 divides n (each mb row spans a full cycle of its 17 values, and the
+       total factors as sum_k (sum_i a) (sum_j b)) — exactly the arbitrary-extent regime the
+       checksum is for. And a plain sum reads only the multiset, so it cannot see a PERMUTATION,
+       which is what a misplaced row-edge peel produces. The weight is keyed on the (row, column)
+       pair rather than on the flat offset t = i*n + j, because [1 + (t mod 251)] collapses to
+       [1 + j] whenever 251 divides n — every row then carries the identical weight vector, a row
+       permutation is invisible, and the spot cell at [1][1] is blind to other rows at the same
+       time, so both halves of the check fail together at n = 251, 502, 753, … (gh-ocannl-711).
+       Weights stay capped at 251 so that products of these exact-in-binary operands stay exact in
+       the double accumulator, and the printed [chk a/b] is one sum per weight stream: at a narrow
+       n a single capped stream runs out of distinct row weight vectors and two rows collide, whose
+       swap no weighting of that stream can see. Both checks are outside the timed region. *)
+    let checksum = Bench_checksum.whole_output ~row_stride:n values in
+    (* The unscheduled leg, when it runs, IS the oracle — same kernel, so re-running it would only
+       burn time. Any other variant is compared against it. *)
+    if Option.is_none schedule && Option.is_none !reference then reference := Some values;
+    let agreement =
+      let r = reference_output () in
+      if phys_equal r values then "reference"
+      else begin
+        let d = Bench_checksum.first_difference ~reference:r values in
+        if Option.is_some d then Int.incr disagreements;
+        Bench_checksum.render_agreement ~name:"reference" d
+      end
     in
     let spot = Int.min (n + 1) (Array.length values - 1) in
     (* The label is printed on EVERY timing line, including the untensorized variants: a suffix
        that appears only when there is something to say is a suffix a table reader does not miss
        when it is absent (gh-ocannl-626). *)
-    p "%-10s %8.3f ms  %8.2f GFLOP/s  (spot [%d] %.1f, chk %.10g)  [%s]\n" variant (secs *. 1e3)
+    p "%-10s %8.3f ms  %8.2f GFLOP/s  (spot [%d] %.1f, chk %s, %s)  [%s]\n" variant (secs *. 1e3)
       (flops /. secs /. 1e9)
-      spot values.(spot) checksum
+      spot values.(spot)
+      (Bench_checksum.render checksum) agreement
       (Ir.C_syntax.mma_summary_string mma);
     (secs, mma)
   in
@@ -635,6 +716,20 @@ let () =
        above are NOT tensorized timings. Re-run with --ocannl_schedule_log_declines=true for the \
        per-rule reason (at these extents, most likely n below the compute vector width).\n"
       declined all.Ir.C_syntax.statements;
-  if !failures > 0 then (
+  (* A variant that computed something ELSE is the failure this bench's guard exists for, and it is
+     worse than one that failed to compile: a compile failure is loud, whereas a wrong result under
+     a fast timing is exactly what a report carries forward. So it EXITS NONZERO, after every
+     variant has been reported — a guard that only prints leaves an automated run free to keep the
+     speedup of a kernel already known to be wrong, which is the same hazard `Verdict` exists for on
+     the test side. There is no rounding to excuse it: ma and mb are exact in binary with at most
+     four mantissa bits each, so every product is exact (in tf32 and f16 as well as f32) and every
+     leg's reduction is exact whatever order it sums in, at any extent this bench runs. *)
+  if !disagreements > 0 then
+    p
+      "WRONG RESULT: %d variant(s) did not reproduce the reference output cell for cell — the \
+       DIFFERS lines above name the first cell and both values. At these operands every variant's \
+       reduction is exact whatever order it sums in, so this is not rounding.\n"
+      !disagreements;
+  if !failures > 0 then
     p "%d variant(s) failed at m=%d n=%d k=%d — see the FAILED lines above.\n" !failures m n k;
-    Stdlib.exit 1)
+  if !failures > 0 || !disagreements > 0 then Stdlib.exit 1

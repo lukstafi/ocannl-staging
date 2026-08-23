@@ -11,6 +11,19 @@
  ; post-`--` positional is one the library's own argv scan has already applied as configuration.
  (libraries base stdio arrayjit.utils))
 
+; The checksum machinery the matmul-shaped benches share (gh-ocannl-711): the aperiodic (row,
+; column) mix, the operand residues drawn from it, and the position-weighted whole-output checksum.
+; A library rather than a module listed twice, because dune allows a module in only one stanza; its
+; own library rather than a second module of `bench_args`, because a wrapped library named after its
+; single module is what makes `Bench_args.` and `Bench_checksum.` both spell directly. Depends on
+; base alone -- the discrimination test that pins it links no backend.
+
+(library
+ (name bench_checksum)
+ (package neural_nets_lib)
+ (modules bench_checksum)
+ (libraries base))
+
 (executable
  (package neural_nets_lib)
  (public_name compilation_speed_benchmark)
@@ -26,7 +39,7 @@
  (public_name schedule_bench)
  (name schedule_bench)
  (modules schedule_bench)
- (libraries ocannl base stdio time_now bench_args)
+ (libraries ocannl base stdio time_now bench_args bench_checksum)
  (preprocess
   (pps ppx_here ppx_ocannl))
  (modes exe))
@@ -56,7 +69,7 @@
  (public_name narrow_gebp_bench)
  (name narrow_gebp_bench)
  (modules narrow_gebp_bench)
- (libraries ocannl base stdio time_now bench_args)
+ (libraries ocannl base stdio time_now bench_args bench_checksum)
  (preprocess
   (pps ppx_here ppx_ocannl))
  (modes exe))

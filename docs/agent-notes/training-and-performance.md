@@ -137,6 +137,56 @@ files.
   rather than a numerics one — when a sweep loses only one framework's rows, suspect the emitter's
   spelling before the framework.
 
+- A `bin/` bench's correctness guard is a position-weighted checksum of the WHOLE output, and its
+  position dependence is the whole of it: a residue of the FLATTENED offset `t = i*n + j` loses its
+  row dependence exactly when the modulus divides the row stride, so `1 + (t mod 251)` gives every
+  row the identical weight at n = 251, 502, 753 — a row permutation, which is what a misplaced edge
+  peel produces, then leaves the checksum unchanged while the interior spot cell is blind to other
+  rows at the same time. The same collapse hits operand data drawn as `(t mod p)`: at `p | stride`
+  every row is identical and a schedule substituting the wrong row computes the right answer. Key on
+  the (row, column) PAIR through `Bench_checksum` (`bin/bench_checksum.ml`, gh-ocannl-711) — shared
+  by `schedule_bench` and `narrow_gebp_bench` precisely because the fixed copy and the degenerate one
+  had sat one file apart. Keep the weights capped below 256 so the products of exact-in-binary
+  operands stay exact in the accumulator and variants summing in different orders compare BITWISE;
+  and keep the checksum outside the timed region. But do not let the checksum be the ASSERTION: it is
+  a linear functional of the output, so a row swap survives it whenever the value difference is
+  orthogonal to the weight difference — by the weights colliding (a capped weight puts a row's
+  weight vector in `cap ^ row_stride` values, so at stride 2 rows 9 and 363 share one) or by plain
+  cancellation (at m = 2000, n = 2 the generated rows 459 and 1310 cancel in BOTH streams). No
+  bounded-weight scalar escapes that class, and more streams only shrink it. What decides is
+  `Bench_checksum.first_difference`, an elementwise comparison against the first variant to
+  complete; the checksum is what the line PRINTS, a fingerprint for reading a table and comparing
+  runs. Make that reference the UNSCHEDULED computation rather than "whichever variant ran first":
+  the two coincide while the naive leg runs and diverge exactly where it matters — under
+  `schedule_bench`'s `naive_repeats = 0` the naive leg is skipped, and the first scheduled variant
+  would then be labelled the oracle without anything having validated it. Skipping an expensive
+  reference TIMING should cost the timing only; materialize the oracle with one untimed run. And
+  make a failed comparison EXIT NONZERO once every variant has been reported: a guard that only
+  prints leaves an automated run free to keep the speedup of a kernel already known to be wrong —
+  the same hazard `Verdict` exists for on the test side. Where a bench has legs that may
+  legitimately round differently, put the predicate saying so in ONE binding used by both the
+  runtime note and the exit status, and point the comparisons that stay required at each other
+  rather than at the leg the note excuses (in `narrow_gebp_bench`, `packmma_par` is compared against
+  `packmma` — they narrow at the same k-block boundaries, so nothing the note excuses can separate
+  them, and comparing both against naive would bury a par-only defect in expected rounding).
+- Two data-side blindnesses sit behind that guard, where no output check can help. A producer value
+  that can BE the accumulator's init hides a dropped producer: a mixed operand row is all-zero with
+  probability `levels ^ -row_stride`, likely at narrow extents, which a flat form's marching values
+  could not do — so the multiplicand whose row spans the reduction is minted strictly positive
+  (`Bench_checksum.positive_level`). And two identical operand rows make a wrong-row schedule
+  compute the right answer: how many rows a generator keeps distinct is bounded by
+  `levels ^ row_stride` whatever it does, which at the narrowest reduction is a dozen — a limit to
+  state, not to engineer around.
+- A mixing function that folds its state DOWN to its output width must not do it linearly. The
+  aperiodic mix here folded a 40-bit product into 24 bits with one xor-shift, which is GF(2)-linear,
+  so two rows' outputs differed by a value depending on neither the column nor the salt: row pairs
+  existed (5977 and 10232 the first of eight below 20000) that were identical in EVERY derived
+  stream at EVERY salt, which no number of streams could repair. Masking the state to the output
+  width FIRST fixes it structurally rather than statistically — the multiplier is odd so the state
+  is injective in each index, and every later step (xor-shift, multiply by an odd constant) is a
+  bijection on that width, so distinct indices below the width differ at every column. Check a hash
+  meant to separate indices for this before trusting a sweep of it.
+
 - A benchmark leg belongs to a WORKLOAD, not to a runner (gh-ocannl-551). `BENCH_STATIC_SCALE` /
   `BENCH_GATE_INTERVAL` lived in `bench_mlp` alone, so the gate-cost contract silently had no
   answer for `gpt2_mini` — and a forward-only workload has no loss scale to gate in the first

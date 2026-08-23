@@ -3247,6 +3247,21 @@
  (modules bench_args_parsing)
  (libraries base stdio bench_args arrayjit.verdict))
 
+; gh-ocannl-711: what the whole-output checksum the bin/ matmul benches share has to discriminate --
+; a row permutation at the extents where the pre-fix flat-offset weight was blind, and operand rows
+; that stay distinct where the pre-fix flat-offset residue collapsed. Every claim is paired with the
+; flat-offset form as a negative control, so the test is shown to be able to fail. It links
+; `bench_checksum` alone -- pure arithmetic over int and float arrays, no backend and no
+; configuration reader.
+
+(test
+ ; ocannl-backend: none -- links bench_checksum alone and calls only pure arithmetic.
+ (name bench_checksum_discrimination)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules bench_checksum_discrimination)
+ (libraries base stdio bench_checksum arrayjit.verdict))
+
 ; gh-ocannl-655: the provenance guarantees of Test_utils.Generated, which ~30 tests' structural
 ; assertions now rest on. Every one of those guarantees fires only when something has already gone
 ; wrong, so none of them is exercised by the tests that depend on them -- the code that decides a

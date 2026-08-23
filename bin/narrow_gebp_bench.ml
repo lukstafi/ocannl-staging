@@ -53,18 +53,12 @@ let named name (comp : Asgns.comp) : Asgns.comp =
 
 let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; inner })
 
-(* An aperiodic mix of the two indices, used to mint the operand values below. Aperiodic is the
-   point: any value drawn from [index mod p] repeats under [k -> k + p], so if both operands share
-   that period every packed K panel is identical and a staging bug that substitutes or repeats the
-   wrong panel is invisible — and [bk] is a user argument, so no fixed period can be assumed to be
-   coprime to it. Mixing has no shift symmetry at all, which removes the class rather than dodging
-   it. Every intermediate is masked below 2^54, so nothing overflows a 63-bit int and the sequence
-   is reproducible by an external oracle. *)
-let mix ~salt a b =
-  let x = a * 73856093 lxor (b * 19349663) lxor salt in
-  let x = x lxor (x lsr 13) land 0xFFFFFF in
-  let x = x * 1274126177 land 0xFFFFFF in
-  x lxor (x lsr 7)
+(* The aperiodic mix used to mint the operand values below, and the whole-output checksum further
+   down, both come from [Bench_checksum] (gh-ocannl-711) — shared with [schedule_bench], which had
+   the pre-fix flat-offset forms of both. Why aperiodic and why keyed on the (row, column) pair is
+   documented there; the short version is that a residue of a flattened offset loses its row
+   dependence exactly when the modulus divides the row stride, and that a per-axis residue leaves a
+   shift period that a user-chosen [bk] can hit. *)
 
 let () =
   (* Positional geometry beside the [--ocannl_*] config flags, split by [Bench_args]
@@ -98,18 +92,18 @@ let () =
             Some (Printf.sprintf "%s = %d does not divide n = %d (remainder %d)" name f n (n % f)))
   in
   let flops = 2.0 *. Float.of_int n *. Float.of_int n *. Float.of_int n in
-  (* Operand values that vary with EVERY index at every n, drawn through [mix] so that no shift of
-     any index is a symmetry, and exactly representable at every storage precision (the parity-test
-     recipes). Two traps sit behind this, both of which cost a wrong version to find. The value must
-     not be a modulus of the FLATTENED offset [(i * n + j) % p] — that loses its row dependence
-     exactly when p divides n, which made an earlier ma constant along i at 3 | n and an earlier mb
-     constant along k at 5 | n, with n = 960 collapsing both; a transform substituting the wrong row
-     of a collapsed operand then computes the correct output, which no whole-output check can see.
-     And reducing each index separately fixes that but leaves the period: with both operands drawn
-     mod 5 in k, every packed K panel repeats under [k -> k + 5], so a run with [bk = 5] hides a
-     panel-substitution bug just as thoroughly. [mix] has no shift symmetry at any lag, so neither
-     survives — measured over n = 2..2000 for the collapse, over lags 1..256 for the shift, and as
-     zero duplicate full B~ panels at every bk from 1 to 64.
+  (* Operand values that vary with EVERY index at every n, drawn through [Bench_checksum.mix] so
+     that no shift of any index is a symmetry, and exactly representable at every storage precision
+     (the parity-test recipes). Two traps sit behind this, both of which cost a wrong version to
+     find. The value must not be a modulus of the FLATTENED offset [(i * n + j) % p] — that loses
+     its row dependence exactly when p divides n, which made an earlier ma constant along i at 3 | n
+     and an earlier mb constant along k at 5 | n, with n = 960 collapsing both; a transform
+     substituting the wrong row of a collapsed operand then computes the correct output, which no
+     whole-output check can see. And reducing each index separately fixes that but leaves the
+     period: with both operands drawn mod 5 in k, every packed K panel repeats under [k -> k + 5],
+     so a run with [bk = 5] hides a panel-substitution bug just as thoroughly. The mix has no shift
+     symmetry at any lag, so neither survives — measured over n = 2..2000 for the collapse, over
+     lags 1..256 for the shift, and as zero duplicate full B~ panels at every bk from 1 to 64.
 
      The value SETS are the original ones — ma in {0.25, 0.5, 0.75}, mb in {-1, -0.5, 0, 0.5, 1} —
      because the resulting 1/8 product granularity is load-bearing in a narrow-storage run (see the
@@ -120,12 +114,14 @@ let () =
      pairing produced. *)
   let ma =
     NTDSL.init ~l:"ma" ~prec ~i:[ n ] ~o:[ n ]
-      ~f:(fun idcs -> Float.of_int (1 + (mix ~salt:0x5A17 idcs.(0) idcs.(1) % 3)) *. 0.25)
+      ~f:(fun idcs ->
+        Float.of_int (1 + (Bench_checksum.mix ~salt:0x5A17 idcs.(0) idcs.(1) % 3)) *. 0.25)
       ()
   in
   let mb =
     NTDSL.init ~l:"mb" ~prec ~i:[ n ] ~o:[ n ]
-      ~f:(fun idcs -> Float.of_int ((mix ~salt:0x3C6E idcs.(0) idcs.(1) % 5) - 2) *. 0.5)
+      ~f:(fun idcs ->
+        Float.of_int ((Bench_checksum.mix ~salt:0x3C6E idcs.(0) idcs.(1) % 5) - 2) *. 0.5)
       ()
   in
   let packed_schedule ~grid ~tile_prec ~mc (opt : LL.optimized) : Sched.schedule =
@@ -175,7 +171,23 @@ let () =
     @ [ stage mb.Tensor.value [ k_i; j ]; stage ma.Tensor.value [ i_i; k_i ] ]
     @ [ tz ]
   in
-  let bench ~variant ~schedule () =
+  (* Every variant is compared against another one CELL BY CELL, and each call site says which and
+     whether the equality is required (gh-ocannl-711 review). The checksum cannot carry this: it is
+     a linear functional of the output, so a row permutation survives it whenever the value
+     difference is orthogonal to the weight difference, and an elementwise comparison has nothing to
+     cancel.
+
+     Which comparison is REQUIRED is what the comparability note below is about, and it is not
+     uniform across the legs. naive narrows once per cell while the packed variants narrow once per
+     k block, so past the extent at which the block partials stay storage-exact a naive-vs-packed
+     difference is legitimate. The two packed variants share their reduction structure exactly, so
+     their equality is required at EVERY extent — which is why packmma_par is compared against
+     packmma rather than against naive. Folding it into the naive comparison would mix a
+     packmma_par-only defect in with expected block-boundary rounding and leave the one equality
+     that still holds unchecked. *)
+  let disagreements = ref 0 in
+  let expected_differences = ref 0 in
+  let bench ~variant ~schedule ~against () =
     let%op mc = ma * mb in
     Ir.Tnode.update_prec mc.Tensor.value prec;
     let comp = named ("ngb_" ^ variant) (Train.forward mc) in
@@ -227,13 +239,15 @@ let () =
        right values at the wrong offsets leaves the multiset intact, and the multiset is all a plain
        sum reads — and a misplaced edge is exactly what the peel risks.
 
-       The weight runs through [mix] on the (row, column) pair for the same reason the operands do,
-       and the flat-offset form is the trap it avoids: a weight of [1 + (t mod 251)] over the flat
-       offset t = i*n + j collapses to [1 + j] whenever 251 divides n, giving every row identical
-       weights, so at n = 251 (or 502, 753, ...) a row permutation was invisible to the checksum AND
-       to the spot cell at once. Same degeneracy as the operands', one line away, and it came in
-       with the port. Weights stay capped at 251 so that products of these exact-in-binary operands
-       stay exact in the double accumulator.
+       [Bench_checksum.whole_output] runs the weight through the same mix on the (row, column) pair
+       for the same reason the operands do, and the flat-offset form is the trap it avoids: a weight
+       of [1 + (t mod 251)] over the flat offset t = i*n + j collapses to [1 + j] when 251 divides
+       n, giving every row identical weights, so at n = 251 (or 502, 753, ...) a row permutation was
+       invisible to the checksum AND to the spot cell at once. Same degeneracy as the operands', one
+       line away, and it came in with the port. Weights stay capped at 251 so that products of these
+       exact-in-binary operands stay exact in the double accumulator, and the printed [chk a/b] is
+       one sum per weight stream: at a narrow n a single capped stream runs out of distinct row
+       weight vectors and two rows collide, whose swap no weighting of that stream can see.
 
        Cross-variant equality is EXACT in an f32 run, at every extent: the products are multiples of
        1/8 bounded by 0.75n, so the whole reduction is exact in the f32 accumulator and independent
@@ -249,21 +263,27 @@ let () =
        variant performs is exact and the checksums agree bitwise; well beyond that extent an inexact
        block-boundary partial could split naive from packed again, far more rarely than the per-step
        narrowing did. Both checks are outside the timed region. *)
-    let checksum =
-      Array.foldi values ~init:0.0 ~f:(fun t acc v ->
-          let w = 1 + (mix ~salt:0x7E51 (t / n) (t % n) % 251) in
-          acc +. (v *. Float.of_int w))
+    let checksum = Bench_checksum.whole_output ~row_stride:n values in
+    let agreement =
+      match against with
+      | None -> "reference"
+      | Some (name, r, required) ->
+          let d = Bench_checksum.first_difference ~reference:r values in
+          if Option.is_some d then
+            Int.incr (if required then disagreements else expected_differences);
+          Bench_checksum.render_agreement ~name d
     in
     let spot = Int.min (n + 1) (Array.length values - 1) in
     let secs = Float.of_int63 Int63.(stop - start) /. 1e9 /. Float.of_int repeats in
     (* Printed on EVERY timing line, untensorized variants included: an absent suffix is one a
        table reader does not notice (gh-ocannl-626). *)
-    p "%-12s %8.3f ms  %8.2f GFLOP/s  (spot check [%d] %.2f, chk %.10g)  [%s]\n" variant
+    p "%-12s %8.3f ms  %8.2f GFLOP/s  (spot check [%d] %.2f, chk %s, %s)  [%s]\n" variant
       (secs *. 1e3)
       (flops /. secs /. 1e9)
-      spot values.(spot) checksum
+      spot values.(spot)
+      (Bench_checksum.render checksum) agreement
       (Ir.C_syntax.mma_summary_string mma);
-    (secs, mma)
+    (secs, mma, values)
   in
   let ctx0 = Context.auto () in
   let limits = Context.hardware_limits ctx0 in
@@ -281,8 +301,13 @@ let () =
      long as the per-k-block partial sums stay storage-exact, which for these operands is measured
      through n = 512 at bf16 (max |partial| 31, multiples of 1/8); beyond that an inexact block
      partial can legitimately split naive from packed. *)
+  (* One predicate, used by the note AND by the exit status below, so what the run SAYS about
+     comparability and what it ENFORCES cannot drift apart. It governs the naive-vs-packed
+     comparison only: the two packed variants share a reduction structure, so their equality is
+     required at every extent. *)
+  let naive_comparable = Option.is_none tile_prec || n <= 512 in
   if Option.is_some tile_prec then
-    if n <= 512 then
+    if naive_comparable then
       p
         "note: all variants accumulate in %s (gh-ocannl-639): naive narrows to %s once per cell,\n\
         \      packed variants once per k block — at this extent every such rounding is exact for\n\
@@ -295,18 +320,28 @@ let () =
         \      partial can legitimately split naive from packed; the packed variants remain\n\
         \      comparable with each other, and an f32 run is the cross-variant oracle.\n"
         (Ir.Ops.prec_string cprec) (Ir.Ops.prec_string prec) n;
-  let t_naive, _ = bench ~variant:"naive" ~schedule:None () in
+  let t_naive, _, v_naive = bench ~variant:"naive" ~schedule:None ~against:None () in
   match unschedulable with
   | _ :: _ ->
       p "skipping the packed variants — this n is not schedulable with this blocking:\n";
       List.iter unschedulable ~f:(fun reason -> p "  %s\n" reason);
       if n >= 2 then p "pass a compatible blocking, e.g. --bm=<f> --bk=<f> with f dividing %d.\n" n
   | [] ->
-      let t_pack, r_pack =
-        bench ~variant:"packmma" ~schedule:(Some (packed_schedule ~grid:false ~tile_prec)) ()
+      let t_pack, r_pack, v_pack =
+        bench ~variant:"packmma"
+          ~schedule:(Some (packed_schedule ~grid:false ~tile_prec))
+          ~against:(Some ("naive", v_naive, naive_comparable))
+          ()
       in
-      let t_par, r_par =
-        bench ~variant:"packmma_par" ~schedule:(Some (packed_schedule ~grid:true ~tile_prec)) ()
+      (* Against packmma, not naive, and REQUIRED at every extent: the two packed variants narrow at
+         the same k-block boundaries, so nothing the comparability note excuses can separate them —
+         and comparing par against naive instead would bury a par-only defect in the same expected
+         DIFFERS output as block-boundary rounding. *)
+      let t_par, r_par, _ =
+        bench ~variant:"packmma_par"
+          ~schedule:(Some (packed_schedule ~grid:true ~tile_prec))
+          ~against:(Some ("packmma", v_pack, true))
+          ()
       in
       p "speedups vs naive: packmma %.1fx, packmma_par %.1fx\n" (t_naive /. t_pack)
         (t_naive /. t_par);
@@ -321,4 +356,25 @@ let () =
           "WARNING: %d of %d Tile_mma statements rendered the scalar fallback (see the census\n\
            above) — these are NOT register-tiled timings. Re-run with\n\
            --ocannl_schedule_log_declines=true for the per-rule reason.\n"
-          declined all.Ir.C_syntax.statements
+          declined all.Ir.C_syntax.statements;
+      (* A variant that computed something ELSE, which the checksum can miss and this cannot. Where
+         the comparison was REQUIRED — every extent for the two packed variants against each other,
+         and the naive comparison wherever the note above calls the legs comparable — every leg's
+         reduction is exact whatever order it sums in, so a difference is a wrong result and not
+         rounding. It therefore EXITS NONZERO, after every variant has been reported: a guard that
+         only prints leaves an automated run free to keep the speedup of a kernel already known to
+         be wrong. A difference the note calls legitimate is counted separately and stays
+         non-fatal. *)
+      if !expected_differences > 0 then
+        p
+          "note: %d naive-vs-packed difference(s), which this run's comparability note says are\n\
+           legitimate at this extent and storage precision. The packed variants are still\n\
+           required to agree with each other, and were checked.\n"
+          !expected_differences;
+      if !disagreements > 0 then (
+        p
+          "WRONG RESULT: %d required comparison(s) failed — the DIFFERS lines above name the\n\
+           first cell and both values. At these operands the compared legs round identically, so\n\
+           this is not rounding.\n"
+          !disagreements;
+        Stdlib.exit 1)
