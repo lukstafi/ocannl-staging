@@ -217,6 +217,10 @@ that they earn a lookup rather than always-loaded space.
   replacement: these rules glob with `glob_files_rec`, so a source in a subdirectory would otherwise
   open a bucket of its own — a new golden line, which is the promote round being removed, and under
   no floor at all.
+- That floor machinery is `Test_utils.Scan_floors`, shared by the configuration scanners and by
+  `codegen_text_inventory`: pass it the root table, and get the census-by-root, the itemised
+  diagnostic and the stderr report. Each scan keeps its own table, since which roots it globs and
+  how far each may fall are facts about that scan.
 - Where a check needs an EXEMPTION per site, prefer an in-place marker comment to a central list,
   and give it a grammar rigid enough to be wrong out loud (gh-ocannl-659, the XOR between
   `(env_var OCANNL_BACKEND)` and `; ocannl-backend: <word> -- <reason>`). Two reasons, and the
@@ -509,6 +513,47 @@ that they earn a lookup rather than always-loaded space.
   knowing before it bites, because the failure is silent in the dangerous direction: the missing
   target leaves whatever `.actual` was there before, so a probe that only diffs the file reads
   green while nothing has run.
+- **Before changing code generation, read the inventory**: `dune build
+  @test/operations/runtest-codegen_text_inventory` prints, as its golden, every file in the tree
+  that pins the TEXT of emitted code (gh-ocannl-712). Two populations, and no single search finds
+  both. Goldens holding emitted kernel or IR source live in `test/` and in `arrayjit/test/` — a
+  scan of one tree is how gh-ocannl-623's first CI run went red, since three `arrayjit/test`
+  goldens quote emitted constants. And some tests pin emitted text from a string literal in the
+  `.ml` rather than from a golden, which no `.expected` scan can see; those are the expensive miss,
+  because they are `Verdict` claims and so exit nonzero, failing a plain `dune build` rather than
+  only `dune runtest`. Each source entry itemises the fragments it pins, `sprintf` formats and
+  concatenations included with the hole shown (`"(float)(" ^ ... ^ ")"`, `"< (int)(%d.0))) {"`) —
+  a range guard's bound is a float `Constant` at index precision, so gh-ocannl-623 turned
+  `(int)(33)` into `(int)(33.0)`, a context nobody would think to grep for. Grep the inventory for
+  the spelling you are moving, re-run what it names, and promote its own golden last.
+- **A test reaches generated text three ways, and the inventory tags which.** Through
+  `Test_utils.Generated` (the freshness-checked artifact reader); by opening `build_files/` itself,
+  which two tests predating that module still do; or **in memory**, calling the emitter or a dump
+  printer and rendering the document — `C_syntax.compile_proc`/`compile_main`,
+  `Low_level.to_doc`/`to_doc_cstyle`. That third route touches no artifact at all, and modelling
+  only the first two made an entire scan root look empty: the `arrayjit` tests cannot link
+  `test_utils` (it is a `neural_nets_lib` library), so every one of them takes it. If you add a way
+  to get emitted text into a test, add it to `Codegen_text_scan.emitter_names` — a route the scan
+  does not know about does not shrink the inventory visibly, it just leaves files off it. That list
+  is the one hand-maintained thing left in the scan, and it is the frontier three of the four review
+  rounds on gh-ocannl-712 found a member of: `compile_proc`/`compile_main` return a document,
+  `to_doc`/`to_doc_cstyle` too, and `Canonical_render.emit` writes into a buffer instead. Deriving
+  the set from what the libraries export, rather than listing it, is the standing follow-up
+  (gh-ocannl-748).
+- Each golden in that inventory carries the family that must re-record it, and the DECLARING
+  extension wins over the markers: a `.hip.expected` spells CUDA's `__global__` launch vocabulary
+  and is still HIP. A fragment the scan cannot name at its call site — text a helper computes —
+  marks that file's itemisation partial rather than dropping it, so the file is still listed and
+  the re-run is still called for. Markers are read only outside `Verdict` claim lines, since a
+  claim label is prose ABOUT a kernel and freely quotes its vocabulary ("padded GPU intrinsics fire
+  against the threadgroup fragment").
+- A golden tagged `[derived] beside <source>` got in by neither route. The markers describe whole
+  dumps, and a golden can hold emitted text in fragments instead — a table whose columns are the
+  `%cd` and C-style spellings of one constant, a census of the schedule decisions a kernel was
+  built from. Such a file is a member when the test beside it demonstrably reaches generated text
+  AND its golden holds something other than that test's own verdicts. That last condition is what
+  keeps the rule useful rather than noisy: a boolean column does not move when codegen does, so a
+  schedule test's all-`true` golden stays out while its source stays in.
 - Every rule that diffs a golden — the repo-wide scans, the codegen snapshots, the config-precedence
   rules, the ppx-output diffs — carries its own `runtest-<name>` alias (gh-ocannl-726), so
   `dune build @test/operations/runtest-verdict_ratchet` runs that one test, applies its diff and is

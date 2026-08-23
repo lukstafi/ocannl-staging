@@ -32,8 +32,10 @@
  (modules
   test_utils
   agent_notes_scan
+  codegen_text_scan
   config_key_scan
   cache_dir_scan
+  scan_floors
   dune_stanza_scan
   verdict_scan
   generated)
