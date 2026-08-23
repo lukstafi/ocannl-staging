@@ -35,10 +35,14 @@
 
    Timing is ROUND-INTERLEAVED, not site-by-site: one round per base tile geometry ([bgrid] twins
    included, since a merged site's plain arm and a batched site's [bgrid] arm are the pair being
-   compared), inside which every arm is timed batch by batch in a rotation. A monotone session
-   drift then lands on all the arms of a comparison alike; timing one site to completion before
-   the next puts the drift straight into the difference under test, and reversing the site order
-   only moves that bias. Two statistics per arm: [repeats] dispatches queued back-to-back with one
+   compared), inside which every arm is timed batch by batch. The visiting order is rotated by the
+   batch index AND reversed on odd batches: a rotation alone preserves the circular order, so a
+   pair keeps its relative order and its separation in every batch and an intra-round drift still
+   lands on it asymmetrically, while the reversal flips the order of every pair at once -- the
+   run-by-run alternation the A/B protocol asks for, for all pairs simultaneously and with no RNG.
+   An even batch count balances each pair exactly, which is why the default is even. Timing one
+   site to completion before the next puts the drift straight into the difference under test, and
+   reversing the site order only moves that bias. Two statistics per arm: [repeats] dispatches queued back-to-back with one
    sync (what a kernel sustains inside a step, and the summary's statistic, taken at the MEDIAN
    batch), and the tuner's own one-dispatch-one-sync minimum, which reads up to 2.6x higher.
 
@@ -61,7 +65,7 @@
    Usage (bin/ cwd trap: pin the backend, and run from a directory holding an ocannl_config):
      OCANNL_BACKEND=hip _build/default/bin/projection_shape_bench.exe \
        [repeats] [batches] [group] [order] [mode]
-   Defaults 50 repeats, 5 timing batches, group "all" (a/b/c/d/e/p/abd/abde/all), order fwd (or
+   Defaults 50 repeats, 6 timing batches, group "all" (a/b/c/d/e/p/abd/abde/all), order fwd (or
    rev), mode seeds (or tune, or both). *)
 
 open Base
@@ -185,7 +189,9 @@ type live = {
 let () =
   let args = Bench_args.create "projection_shape_bench" in
   let repeats = Bench_args.int args 0 ~name:"repeats" ~default:50 in
-  let nbatches = Bench_args.int args 1 ~name:"batches" ~default:5 in
+  (* Even by default: the per-batch reversal below alternates every pair's order, so an even
+     number of batches balances every pair exactly. *)
+  let nbatches = Bench_args.int args 1 ~name:"batches" ~default:6 in
   let group = String.lowercase (Bench_args.string args 2 ~default:"all") in
   (* [fwd]/[rev] reverses the rotation the interleaved rounds start from, so a residual
      first-arm-is-cold bias can be shown not to carry the conclusion. *)
@@ -194,13 +200,20 @@ let () =
      search per site (which cannot be interleaved -- a search is minutes of its own dispatches)
      with the disk cache disabled, so neither shape can replay the other's winner. *)
   let mode = String.lowercase (Bench_args.string args 4 ~default:"seeds") in
+  if not (List.mem [ "seeds"; "tune"; "both" ] mode ~equal:String.equal) then
+    invalid_arg ("unknown mode " ^ mode ^ " (seeds | tune | both)");
   let do_seeds = not (String.equal mode "tune") in
   let do_tune = List.mem [ "tune"; "both" ] mode ~equal:String.equal in
-  let backend = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc") in
+  (* The backend comes from the CONTEXT, not from the [backend] setting: unpinned, that setting
+     reads "cc" while [Context.auto] picks the first available GPU, and the harness would then seed
+     the CPU families against a GPU context's limits and print the wrong name over the numbers. *)
+  let probe_ctx = Context.auto () in
+  let backend = String.lowercase (Context.backend_name probe_ctx) in
   let on_gpu =
     List.exists [ "metal"; "cuda"; "hip" ] ~f:(fun s -> String.is_substring backend ~substring:s)
   in
-  let limits = Context.hardware_limits (Context.auto ()) in
+  let limits = Context.hardware_limits probe_ctx in
+  Context.release probe_ctx;
   p "backend %s, repeats %d, batches %d, group %s, order %s, mode %s\n" backend repeats nbatches
     group order mode;
   p "%s\n" (if on_gpu then "GPU blocktile family" else "CPU families");
@@ -292,13 +305,21 @@ let () =
         in
         (s, fl, seeds, lazy (oracle s)))
   in
-  (* Compile one candidate and check its parity; [idx] makes the routine name unique so that under
-     [output_debug_files_in_build_directory] each candidate's .cd/.ll/backend source survives its
-     neighbours instead of being overwritten by them. *)
+  (* Compile one candidate and check its parity. The routine name carries a run-wide counter so
+     that under [output_debug_files_in_build_directory] each candidate's .cd/.ll/backend source
+     survives its neighbours instead of being overwritten by them.
+
+     A candidate that fails parity, or that raises anywhere between the compile and the readback,
+     is RELEASED here and never returned: its context must not outlive the attempt (the pool tables
+     strongly retain device slabs, docs/agent-notes/backend-memory.md), and an incorrect schedule
+     must not be timed, ranked, or able to win a summary column that carries no parity marker. The
+     context is held in a ref the cleanup can reach, so the release covers the exception path too. *)
   let counter = ref 0 in
   let arm (s, fl, _, orc) ~label ~compile =
     Int.incr counter;
     let name = Printf.sprintf "%s_c%d" s.tag !counter in
+    let held = ref None in
+    let drop () = Option.iter !held ~f:(fun c -> Context.release !c) in
     match
       let d = build s in
       let fwd = named name (Train.forward d) in
@@ -309,6 +330,7 @@ let () =
       in
       let ctx, routine = compile ~record ~name fwd in
       let ctx = ref ctx in
+      held := Some ctx;
       for _ = 1 to 3 do
         ctx := Context.run !ctx routine
       done;
@@ -337,13 +359,15 @@ let () =
         lv_single = ref Float.infinity;
       }
     with
-    | lv ->
-        if not lv.lv_parity then
-          fail "%s / %s: PARITY FAILED against the host oracle" s.tag label;
-        Some lv
+    | lv when lv.lv_parity -> Some lv
+    | _ ->
+        fail "%s / %s: PARITY FAILED against the host oracle -- not timed" s.tag label;
+        drop ();
+        None
     | exception exn ->
         fail "%s / %s: FAILED: %s" s.tag label
           (List.hd_exn (String.split_lines (Exn.to_string exn)));
+        drop ();
         None
   in
   (* One interleaved round: every arm of [lives] is timed batch by batch in rotation, so a monotone
@@ -351,13 +375,25 @@ let () =
      A whole-site loop cannot do that -- reversing the site order only moves the bias, it does not
      cancel it (docs/agent-notes/training-and-performance.md's A/B protocol: alternate the arms RUN
      BY RUN). Each arm's own batch is [repeats] dispatches queued back-to-back with one sync. *)
+  (* The order arms are visited in for batch [b]: rotated by [b], and REVERSED on odd [b]. The
+     rotation alone preserves the circular order, so a pair keeps its relative order (and its
+     separation) in every batch and an intra-round drift still lands on the pair asymmetrically;
+     the reversal flips the order of EVERY pair at once, which is the run-by-run alternation the
+     A/B protocol asks for, for all pairs simultaneously and with no RNG. An even [nbatches]
+     balances each pair exactly. *)
+  let visit_order n b =
+    let idx = Array.init n ~f:(fun i -> (i + b) % n) in
+    if b % 2 = 1 then Array.rev_inplace idx;
+    idx
+  in
   let time_round lives =
     let arr = Array.of_list lives in
     let n = Array.length arr in
     if n > 0 then begin
       for b = 0 to nbatches - 1 do
+        let ord = visit_order n b in
         for i = 0 to n - 1 do
-          let lv = arr.((i + b) % n) in
+          let lv = arr.(ord.(i)) in
           let t0 = now () in
           for _ = 1 to repeats do
             lv.lv_ctx := Context.run !(lv.lv_ctx) lv.lv_routine
@@ -371,8 +407,9 @@ let () =
          the iterations -- what a min-of-N per-kernel profile reports, and up to 2.6x above the
          steady-state figure on the same routine. Interleaved for the same reason. *)
       for b = 0 to repeats - 1 do
+        let ord = visit_order n b in
         for i = 0 to n - 1 do
-          let lv = arr.((i + b) % n) in
+          let lv = arr.(ord.(i)) in
           let t0 = now () in
           lv.lv_ctx := Context.run !(lv.lv_ctx) lv.lv_routine;
           Context.sync !(lv.lv_ctx);
@@ -391,11 +428,10 @@ let () =
     let n = Array.length sorted in
     let best = sorted.(0) and median = sorted.(n / 2) and worst = sorted.(n - 1) in
     let g t = lv.lv_flops /. t /. 1e9 in
-    p "   %-22s %-26s %8.1f GFLOP/s med (min %7.1f, min1 %7.1f)  spread %4.1f%%  %s%s\n" lv.lv_tag
+    p "   %-22s %-26s %8.1f GFLOP/s med (min %7.1f, min1 %7.1f)  spread %4.1f%%  %s\n" lv.lv_tag
       lv.lv_label (g median) (g best) (g !(lv.lv_single))
       ((worst -. best) /. best *. 100.)
-      lv.lv_launch
-      (if lv.lv_parity then "" else "  *** PARITY FAILED ***");
+      lv.lv_launch;
     g median
   in
   let release lv = Context.release !(lv.lv_ctx) in
@@ -478,14 +514,27 @@ let () =
     Option.bind (Hashtbl.find results tag) ~f:(fun l ->
         List.find l ~f:(fun (l', _) -> String.equal l' lbl) |> Option.map ~f:snd)
   in
-  (* The two geometries gh-ocannl-728 quotes as crowned on gfx1151. A merged site has no batch
-     axis, so its bgrid twin does not exist and the plain sibling is the same kernel. *)
+  (* The two named columns are the two geometries gh-ocannl-728 quotes as crowned on gfx1151 --
+     but only on a GPU backend: [geom_label] prefixes the CPU family's seeds with "cpu" and its
+     blocktile menu is 16 and 8, so asking for the GPU spellings there would print n/a over
+     measurements that were taken. A site's best arm at a geometry may be a twin (the [bgrid] one
+     on a batched GPU site, the [hoist] one on CPU), so the twins are tried first. *)
+  let col_a, col_b =
+    if on_gpu then ("gpu 32x32x8/4x4", "gpu 16x16x8/2x2")
+    else ("cpu 16x16x16/0x0", "cpu 8x8x8/0x0")
+  in
   let crowned tag want =
-    match of_site tag (want ^ " bgrid") with Some g -> Some g | None -> of_site tag want
+    List.find_map [ want ^ " bgrid"; want ^ " hoist"; want ] ~f:(of_site tag)
+  in
+  (* The blocking, without the backend prefix or the register tile, so the header column stays 8
+     wide whichever family named it. *)
+  let short_col c =
+    String.chop_prefix_if_exists ~prefix:"cpu " (String.chop_prefix_if_exists ~prefix:"gpu " c)
+    |> String.split ~on:'/' |> List.hd_exn
   in
   p "\n\n== summary (GFLOP/s, median timing batch) ==\n";
-  p "%-22s %9s  %8s  %8s  %8s  %8s  %8s  %s\n" "site" "MFLOP" "untuned" "32x32x8" "16x16x8"
-    "bestseed" "tuned" "winner";
+  p "%-22s %9s  %8s  %8s  %8s  %8s  %8s  %s\n" "site" "MFLOP" "untuned"
+    (short_col col_a) (short_col col_b) "bestseed" "tuned" "winner";
   List.iter sites ~f:(fun s ->
       let all = Option.value (Hashtbl.find results s.tag) ~default:[] in
       let seeds_only =
@@ -500,8 +549,8 @@ let () =
       let tn = of_site s.tag "TUNED (full search)" in
       p "%-22s %9.1f  %s  %s  %s  %s  %s  %s\n" s.tag (flops s /. 1e6)
         (f_opt (of_site s.tag "default (untuned)"))
-        (f_opt (crowned s.tag "gpu 32x32x8/4x4"))
-        (f_opt (crowned s.tag "gpu 16x16x8/2x2"))
+        (f_opt (crowned s.tag col_a))
+        (f_opt (crowned s.tag col_b))
         (f_opt (Option.map best_of ~f:snd))
         (f_opt tn)
         (match Hashtbl.find tuned s.tag with
