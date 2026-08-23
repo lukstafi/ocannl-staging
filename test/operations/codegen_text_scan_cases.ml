@@ -13,6 +13,12 @@
     {!Verdict} line quoting the kernel's vocabulary, a memory-mode table naming [On_device], prose
     about how a constant is spelled. Those are the negative controls of the RULE. *)
 
+(* This file's own fixtures spell emitted-kernel syntax, and this file is deliberately NOT a member
+   of either population: the fixtures are inputs to the classifier, not assertions about a kernel
+   this repository emits, so a codegen change owes them nothing. What decides that is the rule
+   itself rather than an exemption -- the source rule asks whether a file READS generated source,
+   and nothing here does. *)
+
 open Base
 open Stdio
 module Scan = Test_utils.Codegen_text_scan

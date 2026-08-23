@@ -579,7 +579,7 @@ let rec pin_of_expr expr =
               match List.filter_map (positional args) ~f:string_literal with
               | fmt :: _ -> Format fmt
               | [] -> Computed)
-          | Some [ "^" ] -> (
+          | Some path when path_ends path ~name:"^" -> (
               let parts =
                 List.map (positional args) ~f:(fun a ->
                     match pin_of_expr a with
