@@ -94,14 +94,18 @@ let claimf fmt = Printf.ksprintf (fun label b -> claim label b) fmt
 
     [?min] raises the floor for a site that knows one — ["every one of the four curated tiles …"] is
     a different claim from ["every tile …"], and a menu that silently shrank to one member should
-    fail it. Below the floor the line names the shortfall: [<claim> (only 1 of 4): false]. *)
+    fail it. It bounds the COLLECTION, not the number of elements satisfying the predicate, in every
+    combinator here. Below the floor the line names the shortfall: [<claim> (only 1 of 4): false]. *)
 
 (* The one place the floor is checked, so that every combinator reports a short collection the same
    way. [holds] is not evaluated when the floor fails: on an empty collection a quantifier answers
-   without looking, and answering is what we are refusing to accept. *)
-let quantified ?(min = 1) name length holds =
-  if length >= min then p name (holds ())
+   without looking, and answering is what we are refusing to accept. The default floor asks
+   [is_empty] rather than [length], so the common path stays O(1) over a collection that can be a
+   whole tensor readback; the length is computed only to report a failure. *)
+let quantified ?(min = 1) name xs holds =
+  if (if min <= 1 then not (List.is_empty xs) else List.length xs >= min) then p name (holds ())
   else
+    let length = List.length xs in
     let detail = if length = 0 then "empty" else Printf.sprintf "only %d of %d" length min in
     Int.incr failures;
     Stdio.printf "%s (%s): false\n%!" name detail;
@@ -110,28 +114,28 @@ let quantified ?(min = 1) name length holds =
 (** [p_all name xs ~f] claims that every element of [xs] satisfies [f], and that there is an element
     — the guarded form of [p name (List.for_all xs ~f)]. Reach for it wherever the claim reads
     ["every …"]. *)
-let p_all ?min name xs ~f = quantified ?min name (List.length xs) (fun () -> List.for_all xs ~f)
+let p_all ?min name xs ~f = quantified ?min name xs (fun () -> List.for_all xs ~f)
 
 (** [p_none name xs ~f] claims that no element of [xs] satisfies [f], and that there is an element —
     the guarded form of [p name (not (List.exists xs ~f))] and of
     [p name (List.is_empty (List.filter xs ~f))]. The mirror of {!p_all}, and the one the ["no X
     is …"] claims want: filtering an empty collection also yields nothing, so the unguarded spelling
     passes on an empty input just as [List.for_all] does. *)
-let p_none ?min name xs ~f = quantified ?min name (List.length xs) (fun () -> not (List.exists xs ~f))
+let p_none ?min name xs ~f = quantified ?min name xs (fun () -> not (List.exists xs ~f))
 
 (** [p_empty name ~over xs] claims that the derived collection [xs] is empty, and that the
     collection it was derived from, [over], is not — the guarded form of [p name (List.is_empty xs)]
     where [xs] is a precomputed subset (the invalid seeds, the declined candidates, the offending
     rows) of a population that must itself exist. Prefer {!p_none} where the predicate can simply be
     passed; this is for the sites that keep the derived list around to report it. *)
-let p_empty ?min name ~over xs =
-  quantified ?min name (List.length over) (fun () -> List.is_empty xs)
+let p_empty ?min name ~over xs = quantified ?min name over (fun () -> List.is_empty xs)
 
 (** [p_exists name xs ~f] claims that some element of [xs] satisfies [f]. Unlike its siblings this
-    one cannot be vacuous — nothing satisfies [f] in an empty collection — so it is here for the
-    [?min] floor and for the family to be spelled one way: ["at least two of the seeds pipeline"] is
-    [p_exists ~min:2], and a collection that shrank below the floor says so. *)
-let p_exists ?min name xs ~f = quantified ?min name (List.length xs) (fun () -> List.exists xs ~f)
+    one cannot be vacuous — nothing satisfies [f] in an empty collection, so the unguarded spelling
+    already fails there — and it is here so that the family is spelled one way, and so that a site
+    can put a floor under the population it searched: [?min] is a claim about how many candidates
+    were CONSIDERED, never about how many satisfied [f], for this combinator as for the others. *)
+let p_exists ?min name xs ~f = quantified ?min name xs (fun () -> List.exists xs ~f)
 
 (** [skipped ~backend name] reports a leg the run's backend cannot evaluate: a GPU intrinsic on a
     CPU backend, a tf32 policy outside CUDA. It prints the same stdout line {!p} would — the
