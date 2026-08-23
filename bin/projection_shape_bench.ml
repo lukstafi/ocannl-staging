@@ -117,10 +117,14 @@ let release_quietly ctx =
    an illegal address, a device assertion or a launch timeout reports [Writes_may_have_occurred],
    leaves partial writes and a sticky context behind, and every later arm on that device is then
    suspect. The autotuner escalates that class for the same reason. *)
-let escalate_if_wrote ~candidate (c : Outcome.classified_cause) =
+let escalate_if_wrote ?fatal ~candidate (c : Outcome.classified_cause) =
   match c.Outcome.execution_effect with
   | Outcome.No_device_writes -> ()
   | Outcome.Writes_may_have_occurred ->
+      (* [fatal] is raised BEFORE the escalation, not after: the exception this renders is an
+         ordinary one, so a containment guarded on that flag would otherwise catch it and go on
+         using a sticky, possibly partially written device. *)
+      Option.iter fatal ~f:(fun f -> f := true);
       Outcome.raise_failure (Outcome.Fatal (Outcome.fatal_of_classified ~candidate c))
 
 let named name (comp : Asgns.comp) : Asgns.comp =
@@ -387,7 +391,7 @@ let () =
     with
     | Ok v -> v
     | Error (Outcome.Classified c) ->
-        escalate_if_wrote ~candidate:name c;
+        escalate_if_wrote ~fatal:fatal_seen ~candidate:name c;
         Outcome.raise_failure (Outcome.Classified c)
     | Error (Outcome.Fatal _ as f) ->
         fatal_seen := true;
@@ -423,7 +427,7 @@ let () =
         with
         | Ok v -> v
         | Error (Outcome.Classified c) ->
-            escalate_if_wrote ~candidate:label c;
+            escalate_if_wrote ~fatal:fatal_seen ~candidate:label c;
             Outcome.raise_failure (Outcome.Classified c)
         | Error (Outcome.Fatal _ as f) ->
             fatal_seen := true;
@@ -673,14 +677,20 @@ let () =
       List.filter_map prepared ~f:(fun ((s, _, _, _, _, _) as pr) ->
           let lbl = ref "" and ms = ref Float.nan and outcome = ref None in
           let lv =
-            arm pr ~label:"TUNED (full search)" ~compile:(fun ~record:_ ~name ~fatal_seen:_ fwd ->
+            arm pr ~label:"TUNED (full search)" ~compile:(fun ~record:_ ~name ~fatal_seen fwd ->
                 Autotune.tune ~name ~search:true ~cache_dir:"" ~beam_width:tn_beam
                   ~rounds:tn_rounds ~repeats:tn_repeats ~keep_fraction:tn_keep
                   ~max_split_reduce_sites:tn_split
                   ~report:(fun (r : Autotune.report) ->
                     lbl := r.Autotune.best_label;
                     ms := r.Autotune.best_ms;
-                    outcome := Some r.Autotune.outcome)
+                    outcome := Some r.Autotune.outcome;
+                    (* [tune] reports and then re-raises the original exception when a search dies
+                       on a fatal failure; the report is the only place this callback learns that,
+                       so the guard is set here rather than left to arm's exception taxonomy. *)
+                    match r.Autotune.outcome with
+                    | Autotune.Search_died _ | Autotune.Pre_search_failure _ -> fatal_seen := true
+                    | _ -> ())
                   (Context.auto ()) fwd Ir.Indexing.Empty)
           in
           let admissible =
