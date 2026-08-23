@@ -1573,3 +1573,136 @@ let sentinel_occurrences content =
     | Some at -> count (at + 1) (found + 1)
   in
   count 0 0
+
+(** {1 The artifact-directory declaration (gh-ocannl-723)}
+
+    [Test_utils.Generated.init] reads the [build_files_prefix] configuration key: it decides whether
+    the artifact directory is this process's to empty, and refuses the run outright where it is not.
+    So a stanza whose executable calls it and does not declare [(env_var OCANNL_BUILD_FILES_PREFIX)]
+    is one dune will not rerun when that variable changes — the gh-ocannl-628 hole, one key over,
+    and with the same consequence: the previous run's result served as a pass.
+
+    The declaration was a convention held by copying a neighbour, and on 2026-08-22 two PRs shipped
+    without it and were caught by a reviewer's eye rather than by the build. What this section adds
+    is the relationship itself, asked where the link cost is already paid: a stanza names its
+    modules, a module's source either calls the initializer or does not, and the two answers have to
+    agree.
+
+    Where the declaration has to sit is what dune's own semantics decide, and it is not the same
+    place for every stanza. A [(test)]/[(tests)] stanza dune runs itself, under its own [(deps …)];
+    an inline-test library runs under [(inline_tests (deps …))]; an [(executable)] has no [deps]
+    field at all, so the rule that RUNS it is what a change of the variable has to invalidate — the
+    same placement as the [ocannl_config] dep and the backend marker. *)
+
+let artifact_env_var = "OCANNL_BUILD_FILES_PREFIX"
+
+(** The stanza heads that name their own modules, and so can be asked what those modules call. *)
+let module_bearing_heads = [ "test"; "tests"; "executable"; "executables"; "library" ]
+
+(** The module names a [(modules …)] field lists. Dune's set language admits [:standard] and set
+    difference here; those arrive as atoms that name no module and are simply not callers, which is
+    safe only because the caller also checks the other direction — that every source calling the
+    initializer was claimed by some stanza (see [env_var_deps]). *)
+let modules_of stanza =
+  match field stanza "modules" with
+  | None -> []
+  | Some args -> List.filter_map args ~f:(function Sexp.Atom m -> Some m | _ -> None)
+
+type artifact_verdict =
+  | Artifact_declared  (** the deps this stanza's run happens under name the variable *)
+  | Artifact_undeclared  (** they do not, which is the hole *)
+  | Artifact_stale_declaration
+      (** they do, and no module of this stanza calls the initializer: a declaration with nothing
+          behind it, which is the restatement this check exists to replace *)
+  | Artifact_unrun
+      (** an [(executable)] whose modules call the initializer and which no stanza in this dune file
+          runs — so there is no [deps] field anywhere that answers for it *)
+  | Artifact_in_library
+      (** a plain [(library)] whose modules call it. The initializer empties the artifact directory
+          of the process that owns it, so it belongs to an executable's own modules; reached through
+          a library it would put the requirement on every stanza that links the library, which is
+          not a relationship this scan — or any other — follows. *)
+
+type artifact_subject = {
+  artifact_head : string;
+  artifact_name : string;
+  artifact_callers : string list;
+      (** the stanza's modules that call the initializer, in the order [(modules …)] lists them *)
+  artifact_deps_site : string;
+      (** where the declaration was looked for, in words a diagnostic can use: the stanza's own
+          dependency field, or the rules that run its executable *)
+  artifact_verdict : artifact_verdict;
+}
+
+(** Every stanza in [stanzas] the rule has an opinion about, given [calls], which answers whether one
+    module name's source calls the initializer. A stanza with no caller among its modules and no
+    declaration of its own is not a subject and is not reported. *)
+let artifact_subjects stanzas ~calls =
+  let runners_of names =
+    List.filter stanzas ~f:(fun s ->
+        List.exists (executables_run s) ~f:(fun (_cwd, command) ->
+            match command with
+            | Runs path ->
+                List.exists names ~f:(fun name ->
+                    String.equal (Stdlib.Filename.basename path) (name ^ ".exe"))
+            | _ -> false))
+  in
+  List.filter_map stanzas ~f:(fun stanza ->
+      match head stanza with
+      | Some h when List.mem module_bearing_heads h ~equal:String.equal ->
+          let callers = List.filter (modules_of stanza) ~f:calls in
+          let name = match names_of stanza with n :: _ -> n | [] -> "<unnamed>" in
+          let subject artifact_verdict artifact_deps_site =
+            Some
+              {
+                artifact_head = h;
+                artifact_name = name;
+                artifact_callers = callers;
+                artifact_deps_site;
+                artifact_verdict;
+              }
+          in
+          (* [all] is what makes the stanza declared -- every run of it has to be invalidated, so a
+             second rule running the same executable without the declaration leaves that run stale.
+             [any] is what makes a declaration present at all, and so what a stale one is judged
+             by. The two coincide for everything dune runs itself. *)
+          let decide ~all ~any site =
+            match (callers, all, any) with
+            | [], _, false -> None
+            | [], _, true -> subject Artifact_stale_declaration site
+            | _ :: _, true, _ -> subject Artifact_declared site
+            | _ :: _, false, _ -> subject Artifact_undeclared site
+          in
+          let declares args = declares_env_var args artifact_env_var in
+          (match h with
+          | "library" -> (
+              match field stanza "inline_tests" with
+              | None -> if List.is_empty callers then None else subject Artifact_in_library "-"
+              | Some inline ->
+                  let declared = declares (field_in inline "deps") in
+                  decide ~all:declared ~any:declared "its `(inline_tests (deps …))`")
+          | "executable" | "executables" -> (
+              let names = names_of stanza in
+              match runners_of names with
+              | [] -> if List.is_empty callers then None else subject Artifact_unrun "-"
+              | runners ->
+                  let declared = List.map runners ~f:(fun r -> declares (field r "deps")) in
+                  decide
+                    ~all:(List.for_all declared ~f:Fn.id)
+                    ~any:(List.exists declared ~f:Fn.id)
+                    (Printf.sprintf "the `(deps …)` of the %d rule%s running %s"
+                       (List.length runners)
+                       (if List.length runners = 1 then "" else "s")
+                       (String.concat ~sep:", " (List.map names ~f:(fun n -> n ^ ".exe")))))
+          | _ ->
+              let declared = declares (field stanza "deps") in
+              decide ~all:declared ~any:declared "its `(deps …)`")
+      | _ -> None)
+
+(** The verdict in one word, for a check's tables and a cases test's expectations. *)
+let artifact_verdict_name = function
+  | Artifact_declared -> "declared"
+  | Artifact_undeclared -> "undeclared"
+  | Artifact_stale_declaration -> "stale declaration"
+  | Artifact_unrun -> "unrun"
+  | Artifact_in_library -> "in a library"

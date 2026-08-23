@@ -139,6 +139,98 @@ let tracing_gates_in_source content =
           | _ -> None)
       | _ -> None)
 
+(** {1 The artifact-freshness initializer (gh-ocannl-723)} *)
+
+(** The module that owns the freshness-checked reads of [build_files/], and the function of it that
+    a test must call before its first compile. *)
+let generated_module = "Generated"
+
+let generated_init = "init"
+
+(* A path is flattened defensively here, unlike {!longident_of}: this one runs over MODULE paths,
+   where a functor application is a shape the language admits, and a scan that raised on one would
+   refuse a file for containing an unrelated [module M = F (X)]. *)
+let flatten_module_path txt = try Some (flatten_longident txt) with _ -> None
+
+let receiver_is_generated txt =
+  match flatten_module_path txt with
+  | Some path -> ( match List.last path with Some m -> String.equal m generated_module | None -> false)
+  | None -> false
+
+(** Every spelling of a [Test_utils.Generated.init] call in [content], deduplicated and in the order
+    they first appear; empty when the source does not call it.
+
+    Three spellings reach the same function and all three are read, because the difference between
+    them is a matter of taste and the rule built on this is not:
+    [Test_utils.Generated.init] written out, [Generated.init] through a [module Generated =
+    Test_utils.Generated] alias (which is what most tests here do), and a bare [init] under an
+    [open] of the module. The alias may be spelled anything, so the aliases and opens are collected
+    in a first pass and the call sites matched against them in a second — OCaml lets neither be used
+    before it is bound, so two passes cost nothing and save the walk from depending on that.
+
+    Parsed rather than grepped, for the reason the rest of this module is: [test/support/generated.ml]
+    names its own [Generated.init] in half a dozen doc comments and error messages, and
+    [generated_provenance.ml] quotes one of them in a string literal it asserts on. A text scan would
+    read every one of those as a call.
+
+    The receiver is matched by NAME, so a module bound to [Generated] that is not this one is read as
+    if it were. That is the safe direction of the two, and deliberately so: a declaration too many
+    makes dune rerun a stanza that need not have been rerun, while one too few is the stale run the
+    rule built on this exists to prevent. *)
+let generated_init_calls_in_source content =
+  let structure = structure_of content in
+  let aliases = ref [] and opened = ref false in
+  let binders =
+    object
+      inherit Ast_traverse.iter as super
+
+      method! structure_item item =
+        (match item.pstr_desc with
+        | Pstr_module { pmb_name = { txt = Some alias; _ }; pmb_expr = { pmod_desc = Pmod_ident { txt; _ }; _ }; _ }
+          when receiver_is_generated txt ->
+            aliases := alias :: !aliases
+        | Pstr_open { popen_expr = { pmod_desc = Pmod_ident { txt; _ }; _ }; _ } when receiver_is_generated txt ->
+            opened := true
+        | _ -> ());
+        super#structure_item item
+    end
+  in
+  binders#structure structure;
+  let names_the_module receiver =
+    String.equal receiver generated_module || List.mem !aliases receiver ~equal:String.equal
+  in
+  let is_the_call path =
+    match List.rev path with
+    | last :: receivers when String.equal last generated_init -> (
+        match receivers with
+        | [] -> !opened
+        | receiver :: _ -> names_the_module receiver)
+    | _ -> false
+  in
+  let found = ref [] in
+  let calls =
+    object
+      inherit Ast_traverse.iter as super
+
+      method! expression expr =
+        (match longident_of expr with
+        | Some path when is_the_call path ->
+            let spelling = String.concat ~sep:"." path in
+            if not (List.mem !found spelling ~equal:String.equal) then found := spelling :: !found
+        | _ -> ());
+        super#expression expr
+    end
+  in
+  calls#structure structure;
+  List.rev !found
+
+(** Whether [content] could possibly call the initializer: the module has to be NAMED for any of the
+    three spellings to reach it, alias and [open] included, so the substring is a necessary
+    condition and skipping a file without it skips no call. Only a narrowing filter — what decides is
+    {!generated_init_calls_in_source} — but it keeps a repository-wide census from parsing every
+    source in the tree. *)
+let could_call_generated_init content = String.is_substring content ~substring:generated_module
+
 type label_use = { key : string option; offset : int }
 (** Every place the [arg_name] label names a configuration key, and what it names it with. [key] is
     [Some k] when the argument is a string literal — the convention both consistency tests rely on

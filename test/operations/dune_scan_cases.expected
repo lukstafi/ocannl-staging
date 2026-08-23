@@ -69,6 +69,21 @@ ok: a subdir's stanzas are the same kinds of site
 ok: a nested subdir names the path it applies to
 ok: stanzas outside the subdir keep the dune file's own directory
 ok: stanzas are reported in file order
+ok: artifact declaration -- a test whose module calls the initializer and does not declare the variable
+ok: artifact declaration -- the same test with the declaration added
+ok: artifact declaration -- the lowercase spelling declares nothing
+ok: artifact declaration -- a declaration no module of the stanza calls for
+ok: artifact declaration -- a test that neither calls nor declares is not a subject
+ok: artifact declaration -- a sibling module's call is not this stanza's
+ok: artifact declaration -- an executable whose runner declares it
+ok: artifact declaration -- an executable whose runner does not
+ok: artifact declaration -- a declaration elsewhere in the file does not answer for the runner
+ok: artifact declaration -- one of two runners declaring it is not enough
+ok: artifact declaration -- an executable nothing in the file runs has no deps field to answer for it
+ok: artifact declaration -- an inline-test library declaring it in its own field
+ok: artifact declaration -- a library's own deps are not the inline tests' deps
+ok: artifact declaration -- a plain library module calling the initializer is reported as such
+ok: artifact declaration -- and a library that does not call it is not a subject
 ok: raw stanzas -- a test stanza
 ok: raw stanzas -- two of them
 ok: raw stanzas -- a plural stanza is one stanza

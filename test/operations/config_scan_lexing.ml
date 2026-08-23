@@ -259,6 +259,76 @@ let x = Utils.settings.large_models|ocaml},
       [] );
   ]
 
+(* gh-ocannl-723: which sources call [Test_utils.Generated.init], the source side of the rule that
+   requires OCANNL_BUILD_FILES_PREFIX of the stanza that runs them.
+
+   The hostile input here is the repository's own: [test/support/generated.ml] names its own
+   [Generated.init] in half a dozen doc comments and error messages, and [generated_provenance.ml]
+   asserts on a string literal quoting one of them -- so a text scan would read the module that
+   DEFINES the initializer as its heaviest caller. The spellings on the other side are the three the
+   tests actually use, and the alias is the one most of them take. *)
+let generated_init_cases =
+  [
+    ("written out", {ocaml|let () = Test_utils.Generated.init ~backend_name|ocaml},
+     [ "Test_utils.Generated.init" ]);
+    ( "through the module alias the tests use",
+      {ocaml|module Generated = Test_utils.Generated
+let () = Generated.init ~backend_name|ocaml},
+      [ "Generated.init" ] );
+    ( "through an alias of any other name",
+      {ocaml|module G = Test_utils.Generated
+let () = G.init ~backend_name|ocaml},
+      [ "G.init" ] );
+    ( "under an open of the module",
+      {ocaml|open Test_utils.Generated
+let () = init ~backend_name|ocaml},
+      [ "init" ] );
+    (* A bare `init` is one only under that open: nothing else makes it this function, and reading
+       it as one would make a caller of every module with an initializer. *)
+    ( "a bare init without the open is somebody else's function",
+      {ocaml|let init () = () 
+let () = init ()|ocaml},
+      [] );
+    (* The match is by NAME, and a module called `Generated` is read as the one wherever it was
+       bound. Over-reading is the safe direction of the two: a declaration too many makes dune rerun
+       a stanza it need not have, while one too few is the stale run this rule exists to prevent. *)
+    ( "a module called Generated is read by its name, whatever it was bound to",
+      {ocaml|module Generated = Somewhere.Else
+let () = Generated.init ~backend_name|ocaml},
+      [ "Generated.init" ] );
+    (* The one this check exists for: the module that defines the initializer names it in prose and
+       in the message it raises, and calls it nowhere. *)
+    ( "a doc comment naming it is not a call",
+      {ocaml|(** [Test_utils.Generated.init] must be called before any compile. *)
+let uninitialized () = ()|ocaml},
+      [] );
+    ( "a string literal quoting it is not a call",
+      {ocaml|let message = "Test_utils.Generated.init ~backend_name must be called before any compile"|ocaml},
+      [] );
+    ( "a different function of the module is not the initializer",
+      {ocaml|module Generated = Test_utils.Generated
+let src = Generated.read "nz_mma"|ocaml},
+      [] );
+    (* Two spellings in one file are two answers, and the census only needs one -- but a scan that
+       reported the first and stopped would go quiet the day a file changed which one it opens
+       with. *)
+    ( "both spellings in one file",
+      {ocaml|module Generated = Test_utils.Generated
+let () = Test_utils.Generated.init ~backend_name
+let () = Generated.init ~backend_name|ocaml},
+      [ "Test_utils.Generated.init"; "Generated.init" ] );
+  ]
+
+(* And the textual filter the census narrows with, which is only safe while naming the module is a
+   NECESSARY condition for calling it: a file the filter drops is never parsed, so a call it hid
+   would be invisible rather than reported. *)
+let could_call_cases =
+  [
+    ("names the module", {ocaml|let () = Test_utils.Generated.init ~backend_name|ocaml}, true);
+    ("names it only to alias it", {ocaml|module G = Test_utils.Generated|ocaml}, true);
+    ("does not name it at all", {ocaml|let () = print_string "hello"|ocaml}, false);
+  ]
+
 let () =
   List.iter cases ~f:(fun (name, source, expected) ->
       let found =
@@ -301,4 +371,20 @@ let () =
       else
         fail "settings read -- %s: expected [%s], found [%s]" name
           (String.concat ~sep:"; " expected)
-          (String.concat ~sep:"; " found))
+          (String.concat ~sep:"; " found));
+  List.iter generated_init_cases ~f:(fun (name, source, expected) ->
+      let found =
+        try Scan.generated_init_calls_in_source source
+        with _ ->
+          fail "Generated.init -- %s: the snippet does not parse" name;
+          []
+      in
+      if List.equal String.equal found expected then printf "ok: Generated.init -- %s\n" name
+      else
+        fail "Generated.init -- %s: expected [%s], found [%s]" name
+          (String.concat ~sep:"; " expected)
+          (String.concat ~sep:"; " found));
+  List.iter could_call_cases ~f:(fun (name, source, expected) ->
+      let found = Scan.could_call_generated_init source in
+      if Bool.equal found expected then printf "ok: could call -- %s\n" name
+      else fail "could call -- %s: expected %b, found %b" name expected found)

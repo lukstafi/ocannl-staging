@@ -1,0 +1,6 @@
+The rule is put to a stanza this repository does not contain: an `(executable)` whose one
+module calls `Test_utils.Generated.init`, run by a rule that does or does not declare
+`(env_var OCANNL_BUILD_FILES_PREFIX)`. Nothing else differs between the two runs.
+
+the checker reports the stanza and exits 1 when the rule running it omits the declaration: true
+the same tree with the declaration added passes and says nothing about it: true

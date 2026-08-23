@@ -972,6 +972,114 @@ let sentinel_counting_cases =
     ("none at all", {dune|(test (name t) (deps ocannl_config))|dune}, (0, 0));
   ]
 
+(* gh-ocannl-723: which stanzas must declare `(env_var OCANNL_BUILD_FILES_PREFIX)`, put to
+   stanza/source pairs this repository does not contain.
+
+   Every stanza here that calls `Test_utils.Generated.init` declares it, so a control drawn from the
+   corpus would only record the ABSENCE of the violating shape -- which a rule that decided nothing
+   would satisfy just as well. The cases below carry the violating shape and the legitimate one that
+   is nearest to it, so each verdict is pinned against its neighbour rather than against silence.
+   The third argument is which modules call the initializer, which is what the source side of the
+   relationship answers. *)
+let render_artifact (s : Scan.artifact_subject) =
+  Printf.sprintf "%s %s: %s%s" s.Scan.artifact_head s.Scan.artifact_name
+    (Scan.artifact_verdict_name s.Scan.artifact_verdict)
+    (match s.Scan.artifact_callers with
+    | [] -> ""
+    | callers -> " (" ^ String.concat ~sep:", " callers ^ ")")
+
+let artifact_cases =
+  [
+    (* The violating shape, and the one thing that fixes it. *)
+    ( "a test whose module calls the initializer and does not declare the variable",
+      {dune|(test (name t) (modules t) (deps ocannl_config (env_var OCANNL_BACKEND)))|dune},
+      [ "t" ],
+      [ "test t: undeclared (t)" ] );
+    ( "the same test with the declaration added",
+      {dune|(test (name t) (modules t)
+ (deps ocannl_config (env_var OCANNL_BACKEND) (env_var OCANNL_BUILD_FILES_PREFIX)))|dune},
+      [ "t" ],
+      [ "test t: declared (t)" ] );
+    (* A spelling no run consults invalidates nothing, which is gh-ocannl-652's lesson applied one
+       key over: it has to read as a missing declaration, not as a present one. *)
+    ( "the lowercase spelling declares nothing",
+      {dune|(test (name t) (modules t) (deps (env_var ocannl_build_files_prefix)))|dune},
+      [ "t" ],
+      [ "test t: undeclared (t)" ] );
+    (* The other direction. A declaration with no caller behind it is the restatement this check
+       replaces -- and it is what a copied stanza leaves behind when the test it was copied from
+       stops asserting on generated code. *)
+    ( "a declaration no module of the stanza calls for",
+      {dune|(test (name t) (modules t) (deps (env_var OCANNL_BUILD_FILES_PREFIX)))|dune},
+      [],
+      [ "test t: stale declaration" ] );
+    ( "a test that neither calls nor declares is not a subject",
+      {dune|(test (name t) (modules t) (deps ocannl_config))|dune},
+      [],
+      [] );
+    (* Attribution is per stanza: a caller in the same directory that this stanza does not name is
+       not this stanza's caller. *)
+    ( "a sibling module's call is not this stanza's",
+      {dune|(test (name t) (modules t) (deps ocannl_config))|dune},
+      [ "other" ],
+      [] );
+    (* An `(executable)` has no `deps` field, so the declaration goes on the rule that runs it --
+       the same placement as the ocannl_config dep and the backend marker. *)
+    ( "an executable whose runner declares it",
+      {dune|(executable (name probe) (modules probe))
+(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (run %{dep:probe.exe})))|dune},
+      [ "probe" ],
+      [ "executable probe: declared (probe)" ] );
+    ( "an executable whose runner does not",
+      {dune|(executable (name probe) (modules probe))
+(rule (deps ocannl_config) (action (run %{dep:probe.exe})))|dune},
+      [ "probe" ],
+      [ "executable probe: undeclared (probe)" ] );
+    (* And the declaration has to be on THAT rule. A neighbour declaring it reruns the neighbour. *)
+    ( "a declaration elsewhere in the file does not answer for the runner",
+      {dune|(executable (name probe) (modules probe))
+(rule (deps ocannl_config) (action (run %{dep:probe.exe})))
+(test (name t) (modules t) (deps (env_var OCANNL_BUILD_FILES_PREFIX)))|dune},
+      [ "probe"; "t" ],
+      [ "executable probe: undeclared (probe)"; "test t: declared (t)" ] );
+    (* Two rules run it, and dune invalidates each on its own deps: the undeclared one would serve
+       its previous result whatever the other says. *)
+    ( "one of two runners declaring it is not enough",
+      {dune|(executable (name probe) (modules probe))
+(rule (alias a) (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (run %{dep:probe.exe})))
+(rule (alias b) (deps ocannl_config) (action (run %{dep:probe.exe})))|dune},
+      [ "probe" ],
+      [ "executable probe: undeclared (probe)" ] );
+    ( "an executable nothing in the file runs has no deps field to answer for it",
+      {dune|(executable (name probe) (modules probe))|dune},
+      [ "probe" ],
+      [ "executable probe: unrun (probe)" ] );
+    (* An inline-test library runs under its own field, not under the library's deps -- the
+       distinction gh-ocannl-628 found for the backend variable, which is the same distinction
+       here. *)
+    ( "an inline-test library declaring it in its own field",
+      {dune|(library (name l) (modules l)
+ (inline_tests (deps (env_var OCANNL_BUILD_FILES_PREFIX))))|dune},
+      [ "l" ],
+      [ "library l: declared (l)" ] );
+    ( "a library's own deps are not the inline tests' deps",
+      {dune|(library (name l) (modules l) (deps (env_var OCANNL_BUILD_FILES_PREFIX))
+ (inline_tests (deps ocannl_config)))|dune},
+      [ "l" ],
+      [ "library l: undeclared (l)" ] );
+    (* A plain library is not run at all: the initializer empties the artifact directory of the
+       process that owns it, so a library module calling it puts the requirement on every stanza
+       that links the library -- a relationship nothing follows. *)
+    ( "a plain library module calling the initializer is reported as such",
+      {dune|(library (name l) (modules l) (libraries base))|dune},
+      [ "l" ],
+      [ "library l: in a library (l)" ] );
+    ( "and a library that does not call it is not a subject",
+      {dune|(library (name l) (modules l) (libraries base))|dune},
+      [],
+      [] );
+  ]
+
 let () =
   let check name expected found =
     if List.equal String.equal found expected then printf "ok: %s\n" name
@@ -988,6 +1096,15 @@ let () =
           []
       in
       check name expected found);
+  List.iter artifact_cases ~f:(fun (name, source, callers, expected) ->
+      let calls module_name = List.mem callers module_name ~equal:String.equal in
+      let found =
+        try List.map (Scan.artifact_subjects (Scan.stanzas source) ~calls) ~f:render_artifact
+        with exn ->
+          fail "artifact declaration -- %s: the scan raised: %s" name (Exn.to_string exn);
+          []
+      in
+      check ("artifact declaration -- " ^ name) expected found);
   List.iter raw_stanza_cases ~f:(fun (name, source, expected) ->
       check ("raw stanzas -- " ^ name) expected (List.map (Scan.raw_stanzas source) ~f:render_raw));
   List.iter path_rewriting_cases ~f:(fun (name, source, expected) ->

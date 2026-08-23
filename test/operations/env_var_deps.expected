@@ -87,6 +87,7 @@ Ambient environment gates, by dune file and every alias whose build runs one:
   test/operations/dune                     @runtest-digest_completeness
   test/operations/dune                     @runtest-env_spelling_gate
   test/operations/dune                     @runtest-env_var_deps
+  test/operations/dune                     @runtest-env_var_deps_control
   test/operations/dune                     @runtest-flip_bound_pruning
   test/operations/dune                     @runtest-generated_provenance
   test/operations/dune                     @runtest-micrograd_demo_logging
@@ -139,6 +140,15 @@ Declarations of a name OCANNL does not read as a configuration key, exempt by de
   test/operations/dune:OCANNL_BACKEDN -- the same fixture, in the casing OCANNL reads -- a lowercase one is reported rather than read, so both write to the stream the golden holds
   test/operations/dune:ocannl-log_level -- the `config_var_fatal_spelling` fixture: a known key in the dashed spelling that gh-ocannl-605 dropped, which since gh-ocannl-652 aborts the run rather than warning
 
+Artifact-directory declarations, by dune file. A stanza whose modules call
+`Test_utils.Generated.init` declares `(env_var OCANNL_BUILD_FILES_PREFIX)`
+where dune runs it -- in its own `(deps ...)`, or, for an `(executable)` which has none, in
+the rule that runs it (gh-ocannl-723). What is held here is which VERDICTS a file's stanzas
+draw, not how many draw each: a tally would move whenever a test is added, and the per-stanza
+table goes to stderr.
+  the census covers every scan root, so the floor of 20 callers applies to it
+  test/operations/dune: declared
+
 Backend declarations, by dune file. Every stanza that runs an executable either declares
 `(env_var OCANNL_BACKEND)`, or carries the marker comment
     ; ocannl-backend: <none|cc|multidev_cc|cuda|hip|metal> -- <reason>
@@ -165,5 +175,7 @@ will copy them from, and the tallies go to stderr (gh-ocannl-659, gh-ocannl-665)
 
 every stanza that runs an executable either declares the backend variable or says in place why it does not: true
 every marker the text spells was read as one, and the walk places at least as many stanzas as a second reader finds: true
+every source that calls Test_utils.Generated.init is claimed by some stanza's modules, and a repository-wide census finds enough of them for the rule to be about something: true
+every stanza whose modules call Test_utils.Generated.init declares OCANNL_BUILD_FILES_PREFIX where dune runs it, and every declaration of it has a caller behind it: true
 
 OK: every `(env_var ...)` addressed to OCANNL names a spelling a run reads, every test directory carries the ambient gate, and every per-module tracing gate is declared by the library whose modules read it.
