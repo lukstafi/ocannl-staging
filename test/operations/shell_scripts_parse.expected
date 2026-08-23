@@ -1,11 +1,11 @@
 shebang "#!/bin/bash" reads as `/bin/bash`: true
-shebang "#!/usr/bin/env bash" reads as `bash`: true
+shebang "#!/usr/bin/env bash" reads as `bash via /usr/bin/env`: true
 shebang "#!/bin/sh" reads as `/bin/sh`: true
 shebang "#!/bin/dash" reads as `/bin/dash`: true
 shebang "" reads as `sourced`: true
-shebang "#!/usr/bin/env -S bash" reads as `bash`: true
-shebang "#!/usr/bin/env -Sbash" reads as `bash`: true
-shebang "#!/usr/bin/env --split-string=bash" reads as `bash`: true
+shebang "#!/usr/bin/env -S bash" reads as `bash via /usr/bin/env`: true
+shebang "#!/usr/bin/env -Sbash" reads as `bash via /usr/bin/env`: true
+shebang "#!/usr/bin/env --split-string=bash" reads as `bash via /usr/bin/env`: true
 shebang " #!/bin/bash" reads as `sourced`: true
 shebang "#!/bin/bash\r" reads as `refused (the shebang line ends CRLF, and the kernel keeps the CR in the interpreter path (`bad interpreter`); this file needs LF endings)`: true
 shebang "#!/usr/bin/env -S bash helper.sh" reads as `refused (`bash` is given helper.sh, and this check runs `<shell> -n <file>` and nothing else -- no placement of `-n` is safe among shell options)`: true
@@ -17,7 +17,7 @@ shebang "#!/usr/bin/env -u FOO bash" reads as `refused (the kernel passes `-u FO
 shebang "#!/usr/bin/env -S PATH=/missing bash" reads as `refused (`env` assignment `PATH=/missing`: the command is looked up, and parses, in an environment this check cannot reproduce)`: true
 shebang "#!/usr/bin/env -S -i bash" reads as `refused (`env` option this check cannot vouch for: -i -- it builds an environment the command's parsing depends on)`: true
 shebang "#!/opt/custom/env bash" reads as `refused (interpreter whose `-n` this check cannot vouch for: env)`: true
-shebang "#!/bin/env bash" reads as `bash`: true
+shebang "#!/bin/env bash" reads as `bash via /bin/env`: true
 shebang "#!/usr/bin/env python3" reads as `refused (interpreter whose `-n` this check cannot vouch for: python3)`: true
 shebang "#!/bin/bash" is a shell script this check reports on: true
 shebang "#!/usr/bin/env bash" is a shell script this check reports on: true
