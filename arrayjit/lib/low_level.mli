@@ -189,7 +189,9 @@ and scalar_t =
           codegen renders it. Localization is codegen's business alone (gh-ocannl-693); IR already
           in that form reaches a backend through [Context.compile ?prelowered], never through
           [optimize]. Only a scope [optimize] MINTED may be retracted to a [Get], and only by
-          itself, when a later refusal materializes the node it had inlined. *)
+          itself, when a later refusal materializes the node it had inlined — which happens
+          (gh-ocannl-704): the virtualization walk is in source order, so a statement reached after
+          a read that already minted can materialize the node under the scope. *)
   | Get_local of scope_id
   | Get of Tnode.t * Indexing.axis_index array
   | Get_dynamic of {

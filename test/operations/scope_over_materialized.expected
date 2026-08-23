@@ -5,3 +5,14 @@ the same accumulation without the scope optimizes and executes: true
 a Local_scope over a virtual node survives optimization: true
 the virtual-node scope executes to the reference row sums: true
 the prelowered seam still delivers the materialized-accumulator scope: true
+without the later refusal the read site inlines the producer: true
+appending the guarded setter commits the already-inlined node Never_virtual: true
+the pass retracts the scope it minted rather than refusing its own program: true
+with the guard off, the retracted read agrees with the materialized reading: true
+with the guard on, the retracted read agrees with the materialized reading: true
+the guarded setter does run when the flag is on: true
+an equivalent scope HANDED to the same optimize call is still rejected: true
+the matching read alone inlines the fixed-cell producer: true
+a later unservable read commits the already-inlined node Never_virtual: true
+consumption-time refusal retracts the minted scope too, rather than refusing the program: true
+the retracted read and the materialized reading deliver the same value to both consumers: true

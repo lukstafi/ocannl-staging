@@ -2367,7 +2367,17 @@ let virtual_llc (optim_ctx : optimize_ctx) traced_store reverse_node_map static_
     virtual at that point; a later refusal can commit that node [Never_virtual], and then the
     surviving setter writes the very value the body recomputes, so rewriting back to a [Get] is
     sound. Hence the ids the pass was HANDED are threaded in: a scope in that set may not be
-    rewritten away. *)
+    rewritten away.
+
+    gh-ocannl-704 settled that the retraction is not hypothetical. [virtual_llc] walks statements in
+    SOURCE ORDER while a node's placement is a single mutable cell shared by the whole walk, so a
+    refusal decided at a statement reached AFTER a read that already minted flips the node under an
+    existing scope, and nothing revisits that scope in between. Both rejection families reach it:
+    store time ([check_and_store_virtual]'s [Non_virtual 142] on a guarded LATER setter of a node an
+    earlier statement already read) and consumption time ([inline_computation]'s [Non_virtual 13] at
+    a second read the producer's index map cannot serve). Dropping the exemption would make
+    [optimize] refuse IR it built itself; [test/operations/scope_over_materialized.ml] pins one
+    witness of each family, with executed parity against the materialized reading. *)
 let scope_target_rejection (id : scope_id) : string =
   [%string
     "the program wraps a computation of %{Tn.debug_name id.tn} in a Local_scope \

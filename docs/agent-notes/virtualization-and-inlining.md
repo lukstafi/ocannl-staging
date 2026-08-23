@@ -105,9 +105,20 @@ files.
   caller's program: `virtual_llc` mints a scope at a `Get` of a still-virtual node, a later refusal
   can commit that node `Never_virtual`, and rewriting back to a `Get` is then sound because the
   surviving setter writes the value the body recomputed. `input_scope_ids`, taken before
-  virtualization, is what tells the two apart — a scope in that set may not be rewritten away. (No
-  test in the suite exercises the retraction; the arm was in practice only ever firing on
-  out-of-contract input.)
+  virtualization, is what tells the two apart — a scope in that set may not be rewritten away.
+  The retraction is REACHABLE, and structurally so rather than by accident (gh-ocannl-704):
+  `virtual_llc` walks statements in SOURCE ORDER while a node's placement is one mutable cell shared
+  by the whole walk, so a refusal decided at a statement reached AFTER a read that already minted
+  flips the node under an existing scope, and nothing revisits that scope in between. Both rejection
+  families do it — store time (`check_and_store_virtual`, e.g. `Non_virtual 142` on a guarded LATER
+  setter of an already-read node) and consumption time (`inline_computation`, `Non_virtual 13` at a
+  second read the producer's index map cannot serve). Deleting the exemption therefore makes
+  `LL.optimize` refuse IR it built itself; `test/operations/scope_over_materialized.ml` pins one
+  witness of each family, each with executed parity against the same program's materialized reading.
+  Both witnesses are hand-built, which is the exemption's honest standing: it is load-bearing for IR
+  `optimize` accepts, not a mechanism user programs are known to hit — instrumented builds (the
+  gh-ocannl-681 PR's, and a repeat over the targeted virtualization tests) recorded hits only on
+  out-of-contract INPUT scopes.
   The SAME shape is legal and means the opposite AFTER `optimize`: `Schedule`'s materializing
   `Unroll` / `Partition` mints and `C_syntax.try_localize_serial_reduce` localize a materialized
   accumulator this way and codegen renders it. That asymmetry is the point — **materialized-accumulator
