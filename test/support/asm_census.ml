@@ -164,9 +164,17 @@ let libm_names = function
 type line = Label of string | Directive of string list | Insn of { mnemonic : string; rest : string }
 
 let strip_comment s =
-  (* x86 GAS comments start with '#', aarch64 GAS with "//". Neither appears inside the operand
-     syntaxes we look at. *)
+  (* x86 GAS comments start with '#', aarch64 GAS with "//", and Apple's arm64 assembler with ';'.
+     None appears inside the operand syntaxes we look at, and compiler-generated assembly writes one
+     instruction per line, so ';' is never the statement separator GAS also allows it to be.
+
+     The ';' case is not cosmetic: Apple clang annotates loop headers as
+     [LBB0_7: ; =>This Inner Loop Header: Depth=1], and a line that does not END in ':' is not
+     classified as a label, so every backward branch to it is discarded and macOS reports no
+     recognizable loops -- the third distinct Mach-O detail to silence this census wholesale, after
+     the dot-less labels and the checksummed [.file]. *)
   let s = match String.substr_index s ~pattern:"//" with Some i -> String.prefix s i | None -> s in
+  let s = match String.index s ';' with Some i -> String.prefix s i | None -> s in
   match String.index s '#' with Some i -> String.prefix s i | None -> s
 
 let classify_line raw =
@@ -286,7 +294,13 @@ let call_target ~mnemonic ~rest =
       | Some i -> String.prefix target i
       | None -> target
     in
-    Some (String.strip target)
+    let target = String.strip target in
+    (* Mach-O prefixes every C symbol with an underscore, so a libm call Apple clang leaves in an
+       accumulator loop is [callq _fmaxf] and would not match [libm_names]' [fmaxf]. Left
+       unstripped, the macOS column reports ZERO libm calls and passes the central gh-ocannl-649
+       claim while containing exactly the regression it exists to catch -- a green that checked
+       nothing, which is the failure mode this whole test is shaped against. *)
+    Some (String.chop_prefix_if_exists target ~prefix:"_")
   else None
 
 (* The aarch64 condition codes, as an explicit list rather than a prefix test, because the

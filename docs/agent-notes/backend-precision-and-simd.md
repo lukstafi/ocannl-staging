@@ -517,10 +517,13 @@ files.
     builtin emits, so the fp16 rows are robustness rather than a measured win — but their guards
     have to be the *same* target question as the macro's, or the vector body would round once
     against a scalar peel rounding twice.
-  - `vec_acc_combine`'s `Max`/`Min` loop still keeps the per-lane form (no builtin matches
-    `fmaxf`'s NaN semantics) — if a `Vectorized` reduction or a wide-vector kernel benches ~10x
-    off, this is the first thing to check, and `cc_backend_optimization_level=2` still confirms it
-    in one run.
+  - `vec_acc_combine`'s `Max`/`Min` loop USED to keep the per-lane form, on the reasoning that no
+    builtin matches `fmaxf`'s NaN semantics. Both halves of that were wrong and gh-ocannl-649 fixed
+    it — the per-lane spelling was not a slow vector loop but a libm CALL per lane, and a faithful
+    whole-vector form exists (a mask blend everywhere, gcc's NEON `fmax`/`fmin` = `FMAXNM` on
+    aarch64); see the gh-ocannl-649 bullet below for what to expect now. The diagnostic advice here
+    is also superseded: `cc_backend_optimization_level=2` does not confirm this class, because the
+    calls are there at `-O2` too.
 - **`-U__FMA__` does NOT disable the builtin arm of a generated kernel** — `<immintrin.h>`, which
   the prelude includes under `__AVX2__`, re-defines `__FMA__` through `#pragma GCC target("fma")`
   in `fmaintrin.h`, and the definition survives the matching `pop_options`. An A/B run that way

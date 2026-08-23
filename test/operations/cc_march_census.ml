@@ -376,19 +376,37 @@ let dialect_probes () =
         "\t.file 1 \"/build/census_kernel.c\"";
         "f:"; ".L2:"; "\t.loc 1 3 12"; "\taddps\t%xmm1, %xmm0"; "\tjne\t.L2"; "\tret" ]
   in
-  (* Apple's local labels carry no leading dot, and clang's [.file] carries a trailing checksum. *)
+  (* Every Mach-O detail that has silenced this census, in ONE fixture, because they were found one
+     round at a time: dot-less [LBB] labels, a checksummed [.file], the [;] loop-header annotation
+     Apple clang writes after a label, and the underscore Mach-O puts on every C symbol. The first
+     version of this probe used a BARE [LBB0_1:] and so did not exercise the annotation -- which is
+     how the [;] gap survived the round that added the probe. A fixture for a dialect should carry
+     the dialect's noise, not just its identifiers. *)
   let darwin_clang =
     String.concat ~sep:"\n"
       [ "\t.file\t0 \"/build\" \"census_kernel.c\" md5 0x0123456789abcdef0123456789abcdef";
         "\t.file\t1 \"/build\" \"census_kernel.c\" md5 0x0123456789abcdef0123456789abcdef";
-        "_f:"; "LBB0_1:"; "\t.loc\t1 3 12"; "\taddps\t%xmm1, %xmm0"; "\tjne\tLBB0_1"; "\tretq" ]
+        "_f:                                     ; @f";
+        "LBB0_1:                                 ; =>This Inner Loop Header: Depth=1";
+        "\t.loc\t1 3 12"; "\tfmax.4s\tv0, v0, v1"; "\tb.ne\tLBB0_1"; "\tret" ]
   in
-  let found asm =
-    Option.is_some (Census.census Census.Max_min ~asm ~source_basename:(routine ^ ".c") ~anchor)
+  (* The same loop with a libm call in it, which the census must SEE. Mach-O spells it [_fmaxf];
+     matching [libm_names] without stripping that underscore reports zero calls and passes the
+     central gh-ocannl-649 claim over a loop that is exactly the regression. *)
+  let darwin_with_libm =
+    String.concat ~sep:"\n"
+      [ "\t.file\t1 \"/build\" \"census_kernel.c\" md5 0x0123456789abcdef0123456789abcdef";
+        "_f:"; "LBB0_1:                                 ; =>This Inner Loop Header: Depth=1";
+        "\t.loc\t1 3 12"; "\tcallq\t_fmaxf"; "\tjne\tLBB0_1"; "\tretq" ]
   in
+  let censused asm = Census.census Census.Max_min ~asm ~source_basename:(routine ^ ".c") ~anchor in
   Verdict.p_all "the census reads both assembler dialects, not only this host's"
-    [ ("gnu/elf", elf); ("apple-clang", darwin_clang) ]
-    ~f:(fun (_, asm) -> Census.loop_edges ~asm > 0 && found asm)
+    [ ("gnu/elf", elf); ("apple-clang", darwin_clang); ("apple-clang+libm", darwin_with_libm) ]
+    ~f:(fun (_, asm) -> Census.loop_edges ~asm > 0 && Option.is_some (censused asm));
+  Verdict.p "a libm call spelled the Mach-O way is still counted as one"
+    (match censused darwin_with_libm with
+    | Some c -> c.Census.counts.Census.libm_calls > 0
+    | None -> false)
 
 let () =
   match Stdlib.Sys.getenv_opt "CC_MARCH_CENSUS_EMIT" with
@@ -410,6 +428,11 @@ let () =
       let edges = ref [] in
       let rows =
         List.concat_map available ~f:(fun t ->
+            (* Once per toolchain, not once per row: [caps_of] launches a compiler process, and this
+               sits above the map over 9 loops x 3 widths x 2 optimization levels, so computing it
+               inside cost 324 redundant `cc -dM -E` invocations per run on an x86 host (432 with
+               both cross targets). *)
+            let caps = caps_of t in
             List.concat_map emitted ~f:(fun e ->
                 List.concat_map [ 2; 3 ] ~f:(fun opt ->
                     let asm_path =
@@ -455,7 +478,7 @@ let () =
                                   t.Census.label e.width opt what);
                             {
                               toolchain = t.Census.label;
-                              caps = caps_of t;
+                              caps;
                               width = e.width;
                               opt;
                               what;

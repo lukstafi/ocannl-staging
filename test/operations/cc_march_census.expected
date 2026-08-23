@@ -1,4 +1,5 @@
 the census reads both assembler dialects, not only this host's: true
+a libm call spelled the Mach-O way is still counted as one: true
 every requested vector width emitted a kernel: true
 native: the -march column compiles clean and its loops are censused: true
 x86-64: the -march column compiles clean and its loops are censused: true
