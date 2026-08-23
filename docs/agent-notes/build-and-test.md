@@ -235,6 +235,38 @@ that they earn a lookup rather than always-loaded space.
   `codegen_text_inventory`: pass it the root table, and get the census-by-root, the itemised
   diagnostic and the stderr report. Each scan keeps its own table, since which roots it globs and
   how far each may fall are facts about that scan.
+- PIN THE RELATIONSHIP, NOT THE RESTATEMENT: where a check needs a set that some other part of the
+  system owns, relate the two rather than writing the set down again and asserting that the copy
+  still says what it says (gh-ocannl-706, after gh-ocannl-591 and gh-ocannl-689 turned out to be the
+  same defect twice). Three shapes carry it: a list or a `match` with one entry per member of
+  something else's vocabulary; a golden that IS the restatement, printing a list the test itself
+  owns; and a count over a derived set. What makes it worse than an unchecked list is the direction
+  the drift pushes — gh-ocannl-689's marker vocabulary was closed deliberately, so a stale copy
+  rejected the CORRECT marker for a newly added backend and the author's cheapest remedy was `none`,
+  a lie the grammar accepts. Prefer DERIVING over pinning where the derivation is free: 29 test
+  files copied `Ir.Schedule.backend_is_gpu`'s substring test instead of calling it, and the fix was
+  to call it. Where the list must stay put, four properties make the pin real. Assert it from
+  wherever the link cost is ALREADY paid, so no new dependency follows the check around —
+  `marker_backend_vocabulary` is a whole executable existing to be the one place that links the
+  backend closure. Compare as SORTED LISTS of identities, never as counts or as sets, so a duplicate
+  on either side is a mismatch too. Claim one bare boolean through `Verdict`, with both lists on
+  stderr, so the golden stays fixed as the underlying set changes and only the literal ever needs
+  editing. And give it a control on a SYNTHESIZED violation rather than on the corpus, since a
+  corpus where every member satisfies the rule cannot tell a rule from a tautology. The two landed
+  exemplars to copy are `test/operations/marker_backend_vocabulary.ml` (gh-ocannl-689, the marker
+  vocabulary against `Backends.all_of_backend`; gh-ocannl-706 added the CPU/GPU classification
+  beside it) and gh-ocannl-723's `artifact_subjects`, which asks the question from the dune scanner
+  that already pairs a stanza with the sources its `(modules …)` name.
+- Not every hand-written list is a member of that habit, and telling them apart is the test of
+  whether it is being applied thoughtfully. A JUDGMENT CALL is not a set the system owns anywhere
+  else: `digest_completeness`'s `codegen_stage_modules` says which modules read configuration
+  downstream of the canonical digest, and `Config_key_scan.scan_root_floors` is hand-written
+  precisely so that no scan of ours can move it. Nor is a restatement whose INDEPENDENCE is the
+  point — `reduction_forms`'s GPU arms restate their backends' `accum_prec` because a table derived
+  from the backend would agree with it by construction and check nothing. A closed vocabulary whose
+  unknown word already FAILS is pinned by its own closedness, which is why `config_dep_completeness`
+  can print dune's stanza kinds and action heads into its golden. Leave each of those written down
+  with its reason next to it, which is what the habit asks of a list that stays.
 - Where a check needs an EXEMPTION per site, prefer an in-place marker comment to a central list,
   and give it a grammar rigid enough to be wrong out loud (gh-ocannl-659, the XOR between
   `(env_var OCANNL_BACKEND)` and `; ocannl-backend: <word> -- <reason>`). Two reasons, and the
