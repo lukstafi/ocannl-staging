@@ -79,6 +79,7 @@ let () =
       Verdict.p_all ~min:3 "every one of the three seeds is even" seeds ~f:even;
       Verdict.p_none "no seed is odd" seeds ~f:odd;
       Verdict.p_exists "some seed exceeds four" seeds ~f:(fun n -> n > 4);
+      Verdict.p_exists ~min:2 "at least two seeds exceed two" seeds ~f:(fun n -> n > 2);
       Verdict.p_empty "every seed validates" ~over:seeds (List.filter seeds ~f:odd);
       (* An array reaches the combinators through [Array.to_list]; the eight array sites in the
          sweep spell it that way rather than growing a second family of entry points. *)
@@ -94,6 +95,9 @@ let () =
   | "all_short" -> Verdict.p_all ~min:3 "every one of the three seeds is even" [ 2 ] ~f:even
   | "none_empty" -> Verdict.p_none "no seed is odd" [] ~f:odd
   | "exists_empty" -> Verdict.p_exists "some seed exceeds four" [] ~f:(fun n -> n > 4)
+  | "exists_short" -> Verdict.p_exists ~min:2 "at least two seeds exceed four" seeds ~f:(fun n -> n > 4)
+  | "exists_none" -> Verdict.p "the claim" (List.exists seeds ~f:odd)
+  | "exists_none_combinator" -> Verdict.p_exists "the claim" seeds ~f:odd
   | "empty_over_empty" -> Verdict.p_empty "every seed validates" ~over:[] []
   | "refusals" ->
       refused "an `every` claim over an empty collection fails rather than passing vacuously"
@@ -104,6 +108,11 @@ let () =
         ~line:"no seed is odd (empty): false" (run_child "none_empty");
       refused "a `some X` claim over an empty collection names emptiness rather than the property"
         ~line:"some seed exceeds four (empty): false" (run_child "exists_empty");
+      (* Codex P2, round 1: `~min` on an existential counts WITNESSES. Read as a population floor
+         it would pass "at least two seeds exceed four" on a three-seed list with one such seed,
+         which is the false green this module exists to prevent. *)
+      refused "a `~min:n` existential counts witnesses, not the population it searched"
+        ~line:"at least two seeds exceed four (only 1 of 2 match): false" (run_child "exists_short");
       refused "an emptiness claim about a derived subset fails when the population is empty too"
         ~line:"every seed validates (empty): false" (run_child "empty_over_empty");
       (* The conversion is golden-neutral exactly to the extent that this holds. *)
@@ -114,5 +123,11 @@ let () =
       let _, plain_false, _ = run_child "shape_p_false" in
       let _, all_false, _ = run_child "shape_p_all_false" in
       Verdict.p "a non-empty collection that refutes the claim prints what `Verdict.p` prints"
-        (String.equal plain_false all_false && String.equal plain_false "the claim: false\n")
+        (String.equal plain_false all_false && String.equal plain_false "the claim: false\n");
+      (* At the default floor there is no shortfall to name, so an unwitnessed existential prints
+         the bare line too -- the `(…)` detail is reserved for what the claim could not express. *)
+      let _, plain_none, _ = run_child "exists_none" in
+      let _, exists_none, _ = run_child "exists_none_combinator" in
+      Verdict.p "an unwitnessed existential at the default floor prints what `Verdict.p` prints"
+        (String.equal plain_none exists_none && String.equal plain_none "the claim: false\n")
   | other -> failwith ("verdict_quantified: unknown mode " ^ other)

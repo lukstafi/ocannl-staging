@@ -94,22 +94,29 @@ let claimf fmt = Printf.ksprintf (fun label b -> claim label b) fmt
 
     [?min] raises the floor for a site that knows one — ["every one of the four curated tiles …"] is
     a different claim from ["every tile …"], and a menu that silently shrank to one member should
-    fail it. It bounds the COLLECTION, not the number of elements satisfying the predicate, in every
-    combinator here. Below the floor the line names the shortfall: [<claim> (only 1 of 4): false]. *)
+    fail it. In {!p_all}, {!p_none} and {!p_empty} it bounds the COLLECTION, which is where those
+    claims can go vacuous; in {!p_exists} it counts WITNESSES, for the reason given there. Below the
+    floor the line names the shortfall: [<claim> (only 1 of 4): false]. *)
 
-(* The one place the floor is checked, so that every combinator reports a short collection the same
-   way. [holds] is not evaluated when the floor fails: on an empty collection a quantifier answers
-   without looking, and answering is what we are refusing to accept. The default floor asks
-   [is_empty] rather than [length], so the common path stays O(1) over a collection that can be a
-   whole tensor readback; the length is computed only to report a failure. *)
+(* A failure the claim itself could not express: the collection was too small for the quantifier to
+   mean anything, so the line says so where a reader will find it rather than printing the bare
+   [false] a satisfied-looking claim shares. *)
+let short_fail name detail =
+  Int.incr failures;
+  Stdio.printf "%s (%s): false\n%!" name detail;
+  Stdio.eprintf "FAIL: %s (%s): false\n" name detail
+
+(* The one place the POPULATION floor is checked, so that every combinator resting on it reports a
+   short collection the same way. [holds] is not evaluated when the floor fails: on an empty
+   collection a quantifier answers without looking, and answering is what we are refusing to accept.
+   The default floor asks [is_empty] rather than [length], so the common path stays O(1) over a
+   collection that can be a whole tensor readback; the length is computed only to report a
+   failure. *)
 let quantified ?(min = 1) name xs holds =
   if (if min <= 1 then not (List.is_empty xs) else List.length xs >= min) then p name (holds ())
   else
     let length = List.length xs in
-    let detail = if length = 0 then "empty" else Printf.sprintf "only %d of %d" length min in
-    Int.incr failures;
-    Stdio.printf "%s (%s): false\n%!" name detail;
-    Stdio.eprintf "FAIL: %s (%s): false\n" name detail
+    short_fail name (if length = 0 then "empty" else Printf.sprintf "only %d of %d" length min)
 
 (** [p_all name xs ~f] claims that every element of [xs] satisfies [f], and that there is an element
     — the guarded form of [p name (List.for_all xs ~f)]. Reach for it wherever the claim reads
@@ -130,12 +137,26 @@ let p_none ?min name xs ~f = quantified ?min name xs (fun () -> not (List.exists
     passed; this is for the sites that keep the derived list around to report it. *)
 let p_empty ?min name ~over xs = quantified ?min name over (fun () -> List.is_empty xs)
 
-(** [p_exists name xs ~f] claims that some element of [xs] satisfies [f]. Unlike its siblings this
-    one cannot be vacuous — nothing satisfies [f] in an empty collection, so the unguarded spelling
-    already fails there — and it is here so that the family is spelled one way, and so that a site
-    can put a floor under the population it searched: [?min] is a claim about how many candidates
-    were CONSIDERED, never about how many satisfied [f], for this combinator as for the others. *)
-let p_exists ?min name xs ~f = quantified ?min name xs (fun () -> List.exists xs ~f)
+(** [p_exists name xs ~f] claims that some element of [xs] satisfies [f], and [p_exists ~min:n] that
+    at least [n] do. Its [?min] counts WITNESSES where its siblings' counts the population, and the
+    asymmetry is the point rather than an inconsistency: for an existential a population floor buys
+    nothing, since [List.exists] already answers [false] on an empty collection, so the only reading
+    of [~min:2] that adds a constraint is "two of them". Reading it as a population floor is what
+    would produce the false green this module exists to prevent — a two-element list with one
+    witness passing ["at least two of the seeds pipeline"] (Codex P2, round 1).
+
+    An empty collection still says so: [<claim> (empty): false], because "nothing satisfied [f]" and
+    "there was nothing to satisfy it" are different findings. Too few witnesses under an explicit
+    floor names the shortfall as [<claim> (only 1 of 2 match): false] — "match", so that the line
+    cannot be read as the population shortfall its siblings print. At the default floor of one the
+    line is the bare [<claim>: false] {!p} would print: there is no shortfall to name. *)
+let p_exists ?(min = 1) name xs ~f =
+  if List.is_empty xs then short_fail name "empty"
+  else
+    let witnesses = List.count xs ~f in
+    if witnesses >= min then p name true
+    else if min <= 1 then p name false
+    else short_fail name (Printf.sprintf "only %d of %d match" witnesses min)
 
 (** [skipped ~backend name] reports a leg the run's backend cannot evaluate: a GPU intrinsic on a
     CPU backend, a tf32 policy outside CUDA. It prints the same stdout line {!p} would — the
