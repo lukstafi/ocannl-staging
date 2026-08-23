@@ -14,6 +14,9 @@ fp8_to_single decodes all 256 codes to their exact e5m2 values, signed zero incl
 fp8_to_single is strictly increasing over the 124 non-negative finite codes: true
 every non-NaN code survives a widen-and-narrow round trip through both codecs: true
 every NaN code widens to a NaN and narrows back to the canonical NaN code: true
+the reference decode refuses a code that is not a finite e5m2 magnitude: true
+a sweep refuses a counters buffer too short to hold its results: true
+a sweep refuses a negative base or count: true
   smallest subnormal (0x01): 0x1p-16
   largest subnormal (0x03): 0x1.8p-15
   smallest normal (0x04): 0x1p-14

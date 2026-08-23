@@ -18,6 +18,7 @@
 #include <string.h>
 
 #include <caml/bigarray.h>
+#include <caml/fail.h>
 #include <caml/memory.h>
 #include <caml/mlvalues.h>
 #include <caml/threads.h>
@@ -127,13 +128,38 @@ static void soak_f64(uint64_t base, uint64_t count, const uint32_t *lows, const 
   }
 }
 
+/* An [external] is a hole in the type system: nothing in the OCaml types says how long the vendor
+   buffer is, how many words the counters need, or that the low-halves array has four elements. This
+   file is the only place those facts can be enforced, so it enforces all of them, before the
+   blocking section and while the runtime lock is still held. */
+static void require(int condition, const char *message)
+{
+  if (!condition)
+  {
+    caml_invalid_argument(message);
+  }
+}
+
+static intnat ba_length(value v)
+{
+  return Caml_ba_array_val(v)->dim[0];
+}
+
 CAMLprim value ocannl_fp8_soak_f32(value v_base, value v_count, value v_theirs, value v_out)
 {
   CAMLparam4(v_base, v_count, v_theirs, v_out);
-  uint64_t base = (uint64_t)Int64_val(v_base);
-  uint64_t count = (uint64_t)Int64_val(v_count);
-  const uint8_t *theirs = (const uint8_t *)Caml_ba_data_val(v_theirs);
-  int64_t *out = (int64_t *)Caml_ba_data_val(v_out);
+  uint64_t base, count;
+  const uint8_t *theirs;
+  int64_t *out;
+  require(Int64_val(v_base) >= 0 && Int64_val(v_count) >= 0,
+          "ocannl_fp8_soak_f32: base and count must be non-negative");
+  require(ba_length(v_theirs) >= Int64_val(v_count),
+          "ocannl_fp8_soak_f32: the vendor buffer is shorter than the sweep");
+  require(ba_length(v_out) >= S_LEN, "ocannl_fp8_soak_f32: the counters buffer is too short");
+  base = (uint64_t)Int64_val(v_base);
+  count = (uint64_t)Int64_val(v_count);
+  theirs = (const uint8_t *)Caml_ba_data_val(v_theirs);
+  out = (int64_t *)Caml_ba_data_val(v_out);
   caml_enter_blocking_section();
   soak_f32(base, count, theirs, out);
   caml_leave_blocking_section();
@@ -144,12 +170,24 @@ CAMLprim value ocannl_fp8_soak_f64(value v_base, value v_count, value v_lows, va
                                    value v_out)
 {
   CAMLparam5(v_base, v_count, v_lows, v_theirs, v_out);
-  uint64_t base = (uint64_t)Int64_val(v_base);
-  uint64_t count = (uint64_t)Int64_val(v_count);
-  const uint8_t *theirs = (const uint8_t *)Caml_ba_data_val(v_theirs);
-  int64_t *out = (int64_t *)Caml_ba_data_val(v_out);
+  uint64_t base, count;
+  const uint8_t *theirs;
+  int64_t *out;
   uint32_t lows[4];
   int k;
+  require(Int64_val(v_base) >= 0 && Int64_val(v_count) >= 0,
+          "ocannl_fp8_soak_f64: base and count must be non-negative");
+  /* Four low halves, and exactly four: the kernel takes them as four scalar parameters, so a
+     shorter array would be read past its heap block and a longer one would silently sweep less
+     than the caller asked for. */
+  require(Wosize_val(v_lows) == 4, "ocannl_fp8_soak_f64: expected exactly four low halves");
+  require(ba_length(v_theirs) >= 4 * Int64_val(v_count),
+          "ocannl_fp8_soak_f64: the vendor buffer is shorter than four bytes per top half");
+  require(ba_length(v_out) >= S_LEN, "ocannl_fp8_soak_f64: the counters buffer is too short");
+  base = (uint64_t)Int64_val(v_base);
+  count = (uint64_t)Int64_val(v_count);
+  theirs = (const uint8_t *)Caml_ba_data_val(v_theirs);
+  out = (int64_t *)Caml_ba_data_val(v_out);
   for (k = 0; k < 4; k++)
   {
     lows[k] = (uint32_t)Long_val(Field(v_lows, k));

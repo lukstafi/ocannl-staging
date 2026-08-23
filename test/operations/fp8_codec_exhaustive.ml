@@ -188,6 +188,27 @@ let () =
          && Ir.Ops.single_to_fp8 widened.(c) land 0x7F = 0x7F
          && Ir.Ops.double_to_fp8 widened.(c) land 0x7F = 0x7F);
 
+  (* The C entry points' argument guards, exercised. They exist because an [external] is a hole in
+     the type system -- nothing in [int64 -> int64 -> sweep_buf -> unit] says how long the buffer
+     must be, and the decode table holds only the 0x7C finite magnitudes -- and a guard that has
+     never fired is a claim about nothing. Cheap enough to check every run. *)
+  let refuses f = try
+      f ();
+      false
+    with Invalid_argument _ -> true
+  in
+  let one_word : sweep_buf =
+    Stdlib.Bigarray.Array1.create Stdlib.Bigarray.int64 Stdlib.Bigarray.c_layout 1
+  in
+  Verdict.p "the reference decode refuses a code that is not a finite e5m2 magnitude"
+    (refuses (fun () -> ignore (reference_decode 0x7C : float))
+    && refuses (fun () -> ignore (reference_decode 0x7F : float)));
+  Verdict.p "a sweep refuses a counters buffer too short to hold its results"
+    (refuses (fun () -> sweep_f32 0L 1L one_word) && refuses (fun () -> sweep_f64 0L 1L one_word));
+  Verdict.p "a sweep refuses a negative base or count"
+    (refuses (fun () -> sweep_f32 (-1L) 1L (fresh_buf ()))
+    && refuses (fun () -> sweep_f64 0L (-1L) (fresh_buf ())));
+
   (* The format's landmarks, as hex floats so the golden is platform-independent: what the codes at
      the boundaries the tails live on actually mean. *)
   Stdio.printf "  smallest subnormal (0x01): %s\n" (Test_utils.hex_float widened.(0x01));

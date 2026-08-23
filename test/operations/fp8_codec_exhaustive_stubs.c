@@ -27,8 +27,9 @@
 #include <stdint.h>
 #include <string.h>
 
-#include <caml/bigarray.h>
 #include <caml/alloc.h>
+#include <caml/bigarray.h>
+#include <caml/fail.h>
 #include <caml/memory.h>
 #include <caml/mlvalues.h>
 #include <caml/threads.h>
@@ -218,9 +219,33 @@ static void sweep_f64(uint64_t base, uint64_t count, int64_t *out)
   }
 }
 
-static int64_t *out_data(value v_out)
+/* The OCaml side of this file is the only caller and passes the right shapes -- but an [external]
+   is a hole in the type system, and a C function that trusts a length it was not given is one
+   refactor away from reading past a heap block. So every entry point below checks what it is about
+   to rely on, in the C, where the reliance is. Raised before the blocking section is entered, while
+   the runtime lock is still held. */
+static void require(int condition, const char *message)
 {
+  if (!condition)
+  {
+    caml_invalid_argument(message);
+  }
+}
+
+static intnat ba_length(value v)
+{
+  return Caml_ba_array_val(v)->dim[0];
+}
+
+static int64_t *checked_out(value v_out, const char *where)
+{
+  require(ba_length(v_out) >= OUT_LEN, where);
   return (int64_t *)Caml_ba_data_val(v_out);
+}
+
+static void check_range(value v_base, value v_count, const char *where)
+{
+  require(Int64_val(v_base) >= 0 && Int64_val(v_count) >= 0, where);
 }
 
 /* Must be called once, from the main domain, before any sweep. */
@@ -234,9 +259,12 @@ CAMLprim value ocannl_fp8_sweep_init(value v_unit)
 CAMLprim value ocannl_fp8_sweep_f32(value v_base, value v_count, value v_out)
 {
   CAMLparam3(v_base, v_count, v_out);
-  uint64_t base = (uint64_t)Int64_val(v_base);
-  uint64_t count = (uint64_t)Int64_val(v_count);
-  int64_t *out = out_data(v_out);
+  uint64_t base, count;
+  int64_t *out;
+  check_range(v_base, v_count, "ocannl_fp8_sweep_f32: base and count must be non-negative");
+  out = checked_out(v_out, "ocannl_fp8_sweep_f32: the counters buffer is too short");
+  base = (uint64_t)Int64_val(v_base);
+  count = (uint64_t)Int64_val(v_count);
   caml_enter_blocking_section();
   sweep_f32(base, count, out);
   caml_leave_blocking_section();
@@ -246,9 +274,12 @@ CAMLprim value ocannl_fp8_sweep_f32(value v_base, value v_count, value v_out)
 CAMLprim value ocannl_fp8_sweep_f64(value v_base, value v_count, value v_out)
 {
   CAMLparam3(v_base, v_count, v_out);
-  uint64_t base = (uint64_t)Int64_val(v_base);
-  uint64_t count = (uint64_t)Int64_val(v_count);
-  int64_t *out = out_data(v_out);
+  uint64_t base, count;
+  int64_t *out;
+  check_range(v_base, v_count, "ocannl_fp8_sweep_f64: base and count must be non-negative");
+  out = checked_out(v_out, "ocannl_fp8_sweep_f64: the counters buffer is too short");
+  base = (uint64_t)Int64_val(v_base);
+  count = (uint64_t)Int64_val(v_count);
   caml_enter_blocking_section();
   sweep_f64(base, count, out);
   caml_leave_blocking_section();
@@ -261,5 +292,10 @@ CAMLprim value ocannl_fp8_sweep_f64(value v_base, value v_count, value v_out)
 CAMLprim value ocannl_fp8_reference_decode(value v_code)
 {
   CAMLparam1(v_code);
-  CAMLreturn(caml_copy_double(e5m2_decode[Int_val(v_code) & 0x7F]));
+  /* The table holds the FINITE magnitudes, 0x00 to 0x7B. Masking with 0x7F -- which is what this
+     line did -- lets 0x7C through 0x7F index one to four doubles past its end: infinity and the
+     NaN payloads have no finite value to look up, and the caller asks about them separately. */
+  require(Int_val(v_code) >= 0 && Int_val(v_code) < 0x7C,
+          "ocannl_fp8_reference_decode: not a finite e5m2 magnitude code");
+  CAMLreturn(caml_copy_double(e5m2_decode[Int_val(v_code)]));
 }
