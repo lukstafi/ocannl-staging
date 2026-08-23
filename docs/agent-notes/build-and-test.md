@@ -491,3 +491,19 @@ that they earn a lookup rather than always-loaded space.
   from the first logged epoch to the last). The `@slow` goldens get this treatment the day they
   flip, because CI never runs `@slow` — only `tools/sweep.sh --slow` (the Sunday sweep) and hand runs do — so a knife-edge
   there stays hidden until a GPU run lands on the other side of it.
+- gh-ocannl-725 swept that genre out of `test/training` and `test/gpt2` rather than waiting for the
+  next flip, and the audit produced a rule worth reusing whenever a training golden gains a number.
+  A float may sit in a stdout golden only when its value is EXACT by construction: a threshold
+  constant (`moons_demo`'s convergence epsilon), a power-of-two loss scale (`mixed_prec_parity`), a
+  host-side schedule evaluated in closed form (`loop_utils`' LR table and z-scores), or a small sum
+  of exactly representable dyadic terms (`data_parallel`'s 67.5 / 11.25 batch losses). Anything a
+  device reduction produced — a trained loss, an epoch mean, a probability, a stepped parameter —
+  goes to stderr tagged `(not part of the golden)`, and stdout gets a `Verdict` claim about the
+  property the number was showing. The claim must still DISCRIMINATE: a threshold the trained value
+  clears and an untrained one does not, a fall between the first and last logged epoch, an argmax or
+  a ranking (`mlp_bn_names`' top-3 next characters — their 0.07–0.11 probability gaps are hundreds
+  of times the cross-build drift that the two printed decimals were one tie away from), or an
+  absolute closed-form value within a tolerance. "Is finite" is not by itself such a claim; pair it
+  with one that a wrong number fails. Nothing lints this — a `%.Nf` scan's false-positive rate on
+  constants and dataset sizes did not justify another exemption list — so it is an audit rule for
+  whoever adds the next training golden.
