@@ -48,10 +48,29 @@ ok: bullets -- prose at column zero directly under a bullet
 ok: bullets -- a lazy continuation whose first column is inert
 ok: bullets -- a blank line makes the same prose a paragraph
 ok: bullets -- a heading written without a space after the hashes
-ok: bullets -- a comparison at the start of a continuation is not a quote
+ok: bullets -- a comparison wrapped onto a continuation's first column is a quote
+ok: bullets -- a comparison written without its own space is a quote too
+ok: bullets -- a quote written without the space after its marker
+ok: bullets -- a quote written without its space, nested under a bullet
+ok: bullets -- a comparison inside the line is not a quote
+ok: bullets -- a comparison rewrapped to keep its operator off the first column
+ok: bullets -- a comparison inside a code span at the first column is not a quote
 ok: bullets -- an HTML block at column zero
 ok: bullets -- an angle bracket inside a continuation is ordinary text
 ok: bullets -- a thematic break
+ok: bullets -- a setext underline at column zero
+ok: bullets -- a setext underline written with equals signs
+ok: bullets -- a setext underline of a single marker
+ok: bullets -- a setext underline nested under a bullet
+ok: bullets -- a dash opening a continuation line is not an underline
+ok: bullets -- a flag opening a continuation line inside a code span is not an underline
+ok: bullets -- two hyphens under a blank line are a paragraph, not an underline
+ok: bullets -- two hyphens under a heading are not an underline
+ok: bullets -- two hyphens under a table row are not an underline
+ok: bullets -- two hyphens under a closing fence are not an underline
+ok: bullets -- an underline below a line whose inert first column looks like a quote
+ok: bullets -- an underline below a line whose inert first column looks like a table
+ok: bullets -- an underline below a line whose inert first column looks like a heading
 ok: bullets -- a third nesting level
 ok: bullets -- prose at column zero between lists
 ok: bullets -- a heading closes the list above it
@@ -63,6 +82,7 @@ ok: tables -- a row with a cell too many
 ok: tables -- a header with no delimiter row
 ok: tables -- a header and a delimiter and no rows
 ok: tables -- a pipe inside a code span is not a cell separator
+ok: tables -- a pipe-led line whose leading pipe is inert opens no table
 ok: tables -- a pipe inside a code span below a table
 ok: tables -- an escaped pipe is not a cell separator either
 ok: tables -- a table indented three spaces is still a table

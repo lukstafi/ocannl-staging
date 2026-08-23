@@ -389,6 +389,23 @@ let line_is_inert ~spans line =
   && String.foldi line ~init:true ~f:(fun i acc c ->
          acc && (Char.equal c ' ' || Char.equal c '\t' || in_any_span spans i))
 
+(** Whether a line's FIRST VISIBLE COLUMN is real text — the one question every marker test has to
+    ask before it classifies a line. A ['>'], ['#'], ['|'], ['<'] or ['-'] sitting inside a code
+    span is not a marker, and the line carrying it is ordinary text: it renders, and it belongs to
+    whatever paragraph or bullet encloses it.
+
+    Distinct from {!line_is_inert}, and the difference is where every miss has come from: a line
+    that OPENS or CLOSES a multiline span is not wholly inert, so the inert test passes it through
+    and whatever raw column it happens to start with then gets classified. Three readers asked the
+    question separately, two of them by the wrong test, so it is asked once here (Codex P2,
+    gh-ocannl-714 round 2).
+
+    Gating the marker rather than masking the inert text, because masking moves the indentation and
+    the indentation is load-bearing: the notes contain a continuation line whose first seventeen
+    characters close a code span and whose remainder is prose, and it is a continuation at depth two
+    however much of its left edge is code. *)
+let marker_is_text ~spans line = not (in_any_span spans (indent_of line))
+
 (** Markdown's whitespace after a list marker: a tab is as good as a space, so ["1.\tFact"] is an
     ordered item and ["*\tFact"] a bulleted one. Requiring a literal space let both fall through as
     prose, which is the omission the foreign-marker check exists to prevent (Codex P2, round 5). *)
@@ -531,7 +548,7 @@ let looks_like_heading line = String.is_prefix (String.strip line) ~prefix:"#"
 let headings contents =
   let map = (inert_by_line contents).ranges in
   List.filter_map (lines contents) ~f:(fun (lineno, line) ->
-      if line_is_inert ~spans:(spans_at map lineno) line then None else atx_heading line)
+      if marker_is_text ~spans:(spans_at map lineno) line then atx_heading line else None)
 
 (** {2 The closed dialect}
 
@@ -585,14 +602,25 @@ let fence_marker stripped =
     is a quote inside the list item, not part of the bullet's prose. Wiring this to column zero only
     let a nested quote fold into its parent's text unchecked (Codex P2, round 2).
 
-    [>=] is excluded deliberately. These notes compare numbers in prose ([`  <= 8 and Retype-…`] is
-    a real continuation line), and a wrapped line beginning [">= 8"] is arithmetic, not a quote. That
-    is a narrower marker than CommonMark's, and narrower in the safe direction: it under-reports a
-    quote written without a space rather than failing a correct file. *)
+    The space after [>] is OPTIONAL, and nothing further along the line changes that: block
+    structure is settled before any of it is read as arithmetic, so a line whose first visible
+    column is [">= 8"] is a quote whatever the operand's type. Excluding [">="] under-read the
+    marker, which is the one thing this dialect promises not to do; and so did the first attempt at
+    fixing it, which excused a [">="] followed by a NUMBER and would have folded a quote whose text
+    happens to open with a digit into the bullet above it (Codex P2, gh-ocannl-714).
+
+    These notes do compare numbers in prose ([`  <= 8 and Retype-…`] is a real continuation line),
+    so the requirement lands on the prose rather than on the marker: a comparison keeps its operator
+    off the line's first visible column, or inside a code span, where this test never sees it. The
+    finding says both. *)
 let block_quote_marker stripped =
-  if String.is_prefix stripped ~prefix:">" && not (String.is_prefix stripped ~prefix:">=") then
-    Some "a block quote, whose text belongs to no bullet and which this scan does not read"
-  else None
+  if not (String.is_prefix stripped ~prefix:">") then None
+  else if String.is_prefix stripped ~prefix:">=" then
+    Some
+      "a block quote: Markdown's quote marker does not need a space after it, so a line whose first \
+       visible column is \">=\" renders as a quote and not as the comparison it reads like -- rewrap \
+       so the operator is not first on the line, or write the comparison inside a code span"
+  else Some "a block quote, whose text belongs to no bullet and which this scan does not read"
 
 (** A thematic break or a setext heading underline: a line of nothing but one repeated marker. It
     is a block at every depth, which is why it is factored out here rather than living inside the
@@ -624,17 +652,67 @@ let html_block_opener stripped =
            && (String.contains inside ':' || String.contains inside '@')
        | None -> false)
 
+(** A setext heading underline: a line of nothing but one repeated ['-'] or ['='], directly under a
+    paragraph, which makes the line ABOVE it a heading. One marker is enough. The three-marker floor
+    belongs to the THEMATIC BREAK and applying it here missed [--] and [==] entirely (gh-ocannl-714),
+    so a heading written that way carried an anchor {!headings} does not know: an index row naming it
+    would be reported dead while the link navigates.
+
+    [under_paragraph] is the whole of what separates a heading from ordinary text here, and it is not
+    a formality: the same [--] under a blank line, a heading, a table or a fence is a paragraph of
+    two hyphens, and only a paragraph above it turns it into an underline. A run of three or more is
+    reported either way, by {!thematic_break} when nothing above it is a paragraph. *)
+let setext_underline ~under_paragraph stripped =
+  let all_of c = (not (String.is_empty stripped)) && String.for_all stripped ~f:(Char.equal c) in
+  if under_paragraph && (all_of '-' || all_of '=') then
+    Some
+      "a setext heading underline, which makes the line above it a heading: headings here are ATX \
+       (\"## Title\"), and one written this way carries an anchor that this scan cannot read, so an \
+       index row naming it reads as dead while the link navigates"
+  else None
+
+(** The lines that can be the last line of a paragraph — the one thing {!setext_underline} needs
+    above it. Computed over the whole file rather than threaded through {!parse_file}'s dispatch, so
+    that every branch of it reads the same answer off the same test.
+
+    A blank line, a fence and its contents, a comment and any line that OPENS a block of its own are
+    NOT paragraph content: an underline under any of them underlines nothing. A line inside a code
+    span is, because it renders as part of the paragraph carrying it.
+
+    What decides "opens a block" is the same gate {!parse_file} puts on every other marker test:
+    a marker whose first visible column is inert is not a marker. Classifying the raw column instead
+    dropped a bullet's closing code-span line — one beginning [`> example.`], [`| a | b |`] or
+    [`## Section`] inside the span — out of the paragraph set, and the underline below it went
+    unreported while a renderer made the line a heading (Codex P2, round 2). *)
+let paragraph_lines ~inert ~fences_at ~comments_at contents =
+  List.filter_map (lines contents) ~f:(fun (lineno, line) ->
+      let stripped = String.strip line in
+      let opens_a_block =
+        marker_is_text ~spans:(spans_at inert lineno) line
+        && (looks_like_heading line || is_table_line line || html_block_opener stripped
+           || Option.is_some (block_quote_marker stripped)
+           || Option.is_some (thematic_break stripped))
+      in
+      let in_fence = not (List.is_empty (spans_at fences_at lineno)) in
+      let in_comment = line_is_inert ~spans:(spans_at comments_at lineno) line in
+      if (not (is_blank line)) && (not in_fence) && (not in_comment) && not opens_a_block then
+        Some lineno
+      else None)
+  |> Set.of_list (module Int)
+
 (** Block constructs Markdown recognises only at column zero, and that the notes do not use. The
     column-zero condition is load-bearing for these two rather than incidental: [`  <= 8 and …`] and
     [`  <that target>`] are real continuation lines, the second of them continuing a code span
     opened on the line above, so an HTML test at depth would fail a correct file. *)
-let unsupported_block stripped =
+let unsupported_block ~under_paragraph stripped =
   match block_quote_marker stripped with
   | Some what -> Some what
   | None ->
-      if html_block_opener stripped then
-        Some "an HTML block, whose text no rule here can see"
-      else thematic_break stripped
+      if html_block_opener stripped then Some "an HTML block, whose text no rule here can see"
+      else
+        match thematic_break stripped with
+        | Some what -> Some what
+        | None -> setext_underline ~under_paragraph stripped
 
 (** One nesting level is what the notes are written in, and what {!parse_file} documents. A third
     level was being accepted anyway — [expected] simply advanced by two more spaces — so the
@@ -680,6 +758,7 @@ let parse_file ~file contents =
   let inert = scan.ranges in
   let comments_at = scan.comment_ranges in
   let fences_at = scan.fence_ranges in
+  let paragraphs = paragraph_lines ~inert ~fences_at ~comments_at contents in
   List.iter (lines contents) ~f:(fun (lineno, line) ->
       let stripped = String.strip line in
       (* A line wholly inside a code span or an HTML comment is somebody's example. Parsing it as
@@ -689,16 +768,16 @@ let parse_file ~file contents =
       let spans = spans_at inert lineno in
       (* Whether this line's FIRST VISIBLE COLUMN is real text. A marker sitting inside a code span
          is not a marker: "- sample`" on the line that closes a span is code, and reading it as a
-         bullet invented one out of somebody's example (Codex P2, round 7).
-
-         Gating the marker tests rather than masking the inert text, because masking moves the
-         indentation and the indentation is load-bearing: the notes contain a continuation line
-         whose first seventeen characters close a code span and whose remainder is prose, and it is
-         a continuation at depth two however much of its left edge is code. *)
-      let marker_is_text = not (in_any_span spans (indent_of line)) in
+         bullet invented one out of somebody's example (Codex P2, round 7). Why it is a gate rather
+         than a mask is at [marker_is_text]. *)
+      let marker_is_text = marker_is_text ~spans line in
       (* Read once and cleared here, so every branch below sees the same answer and no branch has to
          remember to reset it. *)
       let after_blank = !blank_seen in
+      (* What a setext underline needs above it, and nothing else does: whether the PREVIOUS line is
+         paragraph content. Decided by [paragraph_lines] over the whole file, so this reads the same
+         in every branch below. *)
+      let under_paragraph = Set.mem paragraphs (lineno - 1) in
       if not (is_blank line) then blank_seen := false;
       if line_is_inert ~spans line then
         (* Wholly inert, so it carries no structure -- but it may still carry TEXT. A line inside a
@@ -761,7 +840,14 @@ let parse_file ~file contents =
                       close_all ()
                   | None -> (
                       if String.equal stripped "-" then (
-                        bad lineno "an empty bullet";
+                        (* A lone "-" under a paragraph is that paragraph's setext underline rather
+                           than an empty list item -- CommonMark resolves the ambiguity in the
+                           heading's favour, and the message follows it. Either way it is a finding;
+                           which one it is decides what the author is told to fix. *)
+                        bad lineno
+                          (match setext_underline ~under_paragraph stripped with
+                          | Some what -> what
+                          | None -> "an empty bullet");
                         close_all ())
                       else if String.is_prefix stripped ~prefix:"- " then (
                         (* A bullet start closes every open bullet at or inside its own depth. *)
@@ -792,7 +878,7 @@ let parse_file ~file contents =
                         let b = { file; line = lineno; indent; text = "" } in
                         stack := (b, ref [ String.drop_prefix stripped 2 ]) :: !stack)
                       else if indent = 0 then (
-                        (match unsupported_block stripped with
+                        (match unsupported_block ~under_paragraph stripped with
                         | Some what -> bad lineno what
                         | None ->
                             (* Markdown reads column-zero prose directly under an open bullet as a
@@ -816,8 +902,11 @@ let parse_file ~file contents =
                               (* A hyphen line under a bullet is a separate block to Markdown, not
                                  part of the bullet's prose -- and folding it in left every rule
                                  green, since the joined text still ended in a period (Codex P2,
-                                 round 6). *)
-                              thematic_break stripped
+                                 round 6). A SHORT run of them is a block too, when a paragraph sits
+                                 above it: it underlines that paragraph. *)
+                              (match thematic_break stripped with
+                              | Some what -> Some what
+                              | None -> setext_underline ~under_paragraph stripped)
                         with
                         | Some what ->
                             (* Honoured at depth too: nested under a bullet this is a quote inside
@@ -932,7 +1021,7 @@ let tables contents =
            it as a block started one whose cells then parsed as inert, so a correct note carrying a
            table example FAILED table-shape (Codex P2, round 5) -- a false failure, the direction
            that gets a check switched off. *)
-        if line_is_inert ~spans:(spans_at map lineno) line then
+        if not (marker_is_text ~spans:(spans_at map lineno) line) then
           let acc = match current with None -> acc | Some t -> t :: acc in
           go acc None rest
         else if is_table_line line then
