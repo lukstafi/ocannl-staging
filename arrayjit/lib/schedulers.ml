@@ -240,13 +240,27 @@ module Multidev (Backend : For_add_scheduler) :
         devices.(ordinal) <- Some device;
         device
 
+  (* One entry per worker-domain device (gh-ocannl-710). This dump used to be the group atom
+     followed by [(device_name CPU) (num_devices 16)] -- backend-level pairs, no device entries at
+     all -- so a generic reader indexing the children reported two devices, neither of which
+     existed, on the one backend whose entire purpose is multi-device debugging. The count is now
+     the number of entries, which is the reading a count cannot give: an indexable device.
+
+     Enumeration is static: it reports the ordinals this backend will serve, without forcing the
+     lazy worker domains ([get_device] spins one up on first use, from the main domain only). *)
   let static_properties () =
     Sexp.List
-      [
-        Sexp.Atom (name ^ "_devices");
-        Sexp.List [ Sexp.Atom "device_name"; Sexp.Atom "CPU" ];
-        Sexp.List [ Sexp.Atom "num_devices"; [%sexp_of: int] (num_devices ()) ];
-      ]
+      (Sexp.Atom (name ^ "_devices")
+      :: List.init (num_devices ()) ~f:(fun ordinal ->
+             Sexp.message "device"
+               [
+                 ("device_name", Sexp.Atom "CPU");
+                 ("device_ordinal", [%sexp_of: int] ordinal);
+                 (* The device's own scheduling threads: one worker domain per ordinal. Not the
+                    kernel-level width -- Grid loops render onto the process-global worker pool,
+                    which is a backend fact and not a per-device one. *)
+                 ("threads", [%sexp_of: int] 1);
+               ]))
 
   let hardware_limits () = cpu_mma_limits ()
   let get_global_debug_info () = Sexp.message "global_debug" []
