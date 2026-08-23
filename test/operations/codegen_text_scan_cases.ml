@@ -294,6 +294,38 @@ let () = PPrint.ToChannel.pretty 0.9 100 Stdio.stdout (LL.to_doc () llc)|ocaml},
       {ocaml|let to_doc row = PPrint.string (render_row row)
 let () = PPrint.ToChannel.pretty 0.9 100 Stdio.stdout (to_doc header)|ocaml},
       "none" );
+    (* Round 3's genre: the membership rules learned the third route and the PIN rules had not, so
+       a fragment could be dropped while the file stayed listed -- nothing looked wrong, and a grep
+       of the inventory missed the assertion. *)
+    ( "an inline emitter render in the haystack still pins its fragment",
+      {ocaml|module LL = Ir.Low_level
+let () = p "radix" (String.is_substring (render (LL.to_doc () llc)) ~substring:"-0.0")|ocaml},
+      {|"-0.0" +rendered|} );
+    ( "an inline build_files read in the haystack still pins its fragment",
+      {ocaml|let () =
+  p "slots"
+    (String.is_substring (Stdio.In_channel.read_all (Utils.build_file "k.metal"))
+       ~substring:"uint* __pool_slots")|ocaml},
+      {|"uint* __pool_slots" +direct|} );
+    ( "a helper that hard-codes the fragment pins it, taking the source as its parameter",
+      {ocaml|let has_barrier src = String.is_substring src ~substring:"__syncthreads()"
+let () = p "barrier" (has_barrier (Generated.read "r"))|ocaml},
+      {|"__syncthreads()"|} );
+    ( "a helper that slices on a banner and tests its own parameter pins both",
+      {ocaml|let has sub s =
+  let body = match String.substr_index s ~pattern:"Main logic" with
+    | Some i -> String.subo s ~pos:i
+    | None -> s
+  in
+  String.is_substring body ~substring:sub
+let () = p "lane" (has "_uniform_lane(" (Generated.read "r"))|ocaml},
+      {|"Main logic" "_uniform_lane("|} );
+    ( "a fragment named through a binding is still that fragment",
+      {ocaml|let () =
+  let arrow = " := " in
+  let statement = render (Ir.Low_level.to_doc () stmt) in
+  p "arrow" (Option.is_some (String.substr_index statement ~pattern:arrow))|ocaml},
+      {|" := " +rendered|} );
     ( "a test that reads no generated source is not a member",
       {ocaml|let () = p "shapes agree" (String.is_substring rendered ~substring:"3x5")|ocaml},
       "none" );

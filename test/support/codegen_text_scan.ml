@@ -599,7 +599,13 @@ let tainted_names ~generated ~utils bindings =
 
 type predicate = {
   pred_name : string;
-  text_at : int;  (** Position of the pinned-text parameter among the positional arguments. *)
+  text_at : int option;
+      (** Position of the pinned-text parameter among the positional arguments, when the fragment is
+          one the CALLER supplies. [None] where the helper hard-codes the fragment itself
+          ([let has_barrier src = String.is_substring src ~substring:"__syncthreads()"]) -- the
+          helper is still a predicate, because its parameter is still generated source, and the
+          literal in its body is picked up by the pin walk once that parameter joins the tainted
+          set. *)
   source_param : string option;
       (** The parameter that carries the generated source, by name, when the predicate takes it
           rather than closing over it. Such a parameter IS generated source inside the predicate's
@@ -670,30 +676,46 @@ let predicates ~generated ~tainted bindings =
               let text_param =
                 List.find params ~f:(fun p -> List.exists (idents_in text) ~f:(String.equal p))
               in
-              match text_param with
-              | None -> ()
-              | Some text_param ->
+              (* The fragment argument inside a predicate's own definition tests a PARAMETER, not a
+                 fragment; reading it as a pin would mark every file using the idiom partial. Only
+                 that shape is consumed -- a literal the body hard-codes is left for the pin walk. *)
+              Option.iter text_param ~f:(fun _ ->
                   consumed :=
-                    (text.pexp_loc.loc_start.pos_cnum, text.pexp_loc.loc_end.pos_cnum) :: !consumed;
-                  if Option.is_none !result then
-                    let source_param =
-                      Option.bind tested ~f:(fun tested ->
-                          match Set.to_list (derived_params tested) with
-                          | [ p ] when not (String.equal p text_param) -> Some p
-                          | _ -> None)
-                    in
-                    let record source =
-                      result :=
-                        Some
-                          {
-                            pred_name = name;
-                            text_at = Option.value_exn (index_of text_param);
-                            source_param = source;
-                            source_at = Option.bind source ~f:index_of;
-                          }
-                    in
-                    if Option.is_some source_param then record source_param
-                    else if closes_over_source || inherent then record None
+                    (text.pexp_loc.loc_start.pos_cnum, text.pexp_loc.loc_end.pos_cnum) :: !consumed);
+              (* A body can hold several text tests -- a helper that slices on a banner and THEN
+                 tests its own parameter. The one that takes the fragment from the caller is the
+                 more informative reading, so it wins over one already recorded without a fragment
+                 parameter, whichever the traversal reached first. *)
+              let better candidate =
+                match !result with
+                | None -> true
+                | Some existing ->
+                    Option.is_none existing.text_at && Option.is_some candidate
+              in
+              if better (Option.bind text_param ~f:index_of) then
+                let source_param =
+                  Option.bind tested ~f:(fun tested ->
+                      match Set.to_list (derived_params tested) with
+                      | [ p ] when not (Option.exists text_param ~f:(String.equal p)) -> Some p
+                      | _ -> None)
+                in
+                let record source =
+                  result :=
+                    Some
+                      {
+                        pred_name = name;
+                        text_at = Option.bind text_param ~f:index_of;
+                        source_param = source;
+                        source_at = Option.bind source ~f:index_of;
+                      }
+                in
+                (* A parameter that IS the haystack makes this a predicate whether or not the caller
+                   supplies the fragment. Requiring both left [let has_barrier src = ... ~substring:
+                   "__syncthreads()"] unrecognised, so neither the literal nor a partial mark
+                   reached the inventory (Codex P2, round 3). *)
+                if Option.is_some source_param then record source_param
+                else if Option.is_some text_param && (closes_over_source || inherent) then
+                  record None
             in
             let iterator =
               object
@@ -719,10 +741,18 @@ type pin = Literal of string | Format of string | Interpolated of string | Compu
     both are itemised with the hole shown, because that is the context gh-ocannl-623 was found in
     only by reading a failing kernel. Anything with no literal part at all is [Computed], which
     marks the file's itemisation partial rather than being dropped silently. *)
-let rec pin_of_expr expr =
+let rec pin_of_expr ~literals expr =
   match string_literal expr with
   | Some text -> Literal text
   | None -> (
+      (* A fragment named through a binding is still that fragment: [let arrow = " := " in
+         String.substr_index statement ~pattern:arrow] pins the IR dump's assignment arrow as surely
+         as spelling it at the call site would. Same resolution [Cache_dir_scan] makes for a
+         directory name reached through a binding; without it the site reported only that it pins
+         something the scan cannot name. *)
+      match longident_of expr with
+      | Some [ name ] when Map.mem literals name -> Literal (Map.find_exn literals name)
+      | _ -> (
       match expr.pexp_desc with
       | Pexp_apply (callee, args) -> (
           match longident_of callee with
@@ -733,7 +763,7 @@ let rec pin_of_expr expr =
           | Some path when path_ends path ~name:"^" -> (
               let parts =
                 List.map (positional args) ~f:(fun a ->
-                    match pin_of_expr a with
+                    match pin_of_expr ~literals a with
                     | Literal text -> Printf.sprintf "%S" text
                     | Interpolated text -> text
                     | Format _ | Computed -> "...")
@@ -742,7 +772,18 @@ let rec pin_of_expr expr =
               if String.is_substring rendered ~substring:"\"" then Interpolated rendered
               else Computed)
           | _ -> Computed)
-      | _ -> Computed)
+      | _ -> Computed))
+
+(** Names bound directly to a string literal, for {!pin_of_expr} to resolve a fragment through.
+    Simple bindings only: a name bound twice is dropped rather than guessed at. *)
+let literal_bindings bindings =
+  List.filter_map bindings ~f:(fun { names; params; body } ->
+      match (names, params, string_literal body) with
+      | [ name ], [], Some text -> Some (name, text)
+      | _ -> None)
+  |> List.sort_and_group ~compare:(fun (a, _) (b, _) -> String.compare a b)
+  |> List.filter_map ~f:(function [ one ] -> Some one | _ -> None)
+  |> Map.of_alist_exn (module String)
 
 type site = {
   site_path : string;
@@ -812,10 +853,22 @@ let classify_source ~path ~contents =
         (e.pexp_loc.loc_start.pos_cnum, e.pexp_loc.loc_end.pos_cnum)
         ~equal:(fun (a, b) (c, d) -> a = c && b = d)
     in
-    let record text = if not (is_consumed text) then pins := pin_of_expr text :: !pins in
+    let literals = literal_bindings bindings in
+    let record text =
+      if not (is_consumed text) then pins := pin_of_expr ~literals text :: !pins
+    in
+    (* Generated source in the haystack, by any of the three routes -- a tainted name, an inline
+       [Generated.read], an inline emitter render, an inline [build_files/] read. Naming only the
+       first two here left an assertion that renders inline
+       ([String.is_substring (render (LL.to_doc () llc)) ~substring:"-0.0"]) with its fragment
+       silently dropped: the FILE stayed in the census through the membership branches, so nothing
+       looked wrong, while grepping the inventory for the moved spelling missed the assertion
+       (Codex P2, round 3). The membership rules and the pin rules have to know the same routes. *)
     let mentions_tainted e =
       List.exists (idents_in e) ~f:(fun i -> Set.mem tainted i)
       || mentions_generated_read ~generated e
+      || renders_generated_text e
+      || reads_artifacts_directly ~utils e
     in
     let iterator =
       object
@@ -843,7 +896,9 @@ let classify_source ~path ~contents =
                                 | Some a -> mentions_tainted a
                                 | None -> false)
                           in
-                          match (source_ok, List.nth args predicate.text_at) with
+                          match
+                            (source_ok, Option.bind predicate.text_at ~f:(List.nth args))
+                          with
                           | true, Some text -> record text
                           | _ -> ()))
                   | _ -> ())

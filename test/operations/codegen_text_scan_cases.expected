@@ -49,5 +49,10 @@ ok: source -- rendering the emitter's document is reaching generated text
 ok: source -- a dump printer is an emitter too, under whatever alias
 ok: source -- a test emitting to a golden pins nothing and is still a member
 ok: source -- an unqualified to_doc is the test's own, not an emitter
+ok: source -- an inline emitter render in the haystack still pins its fragment
+ok: source -- an inline build_files read in the haystack still pins its fragment
+ok: source -- a helper that hard-codes the fragment pins it, taking the source as its parameter
+ok: source -- a helper that slices on a banner and tests its own parameter pins both
+ok: source -- a fragment named through a binding is still that fragment
 ok: source -- a test that reads no generated source is not a member
 ok: source -- naming the reader in a comment is not reading it

@@ -96,6 +96,7 @@ test/operations/hardware_workgroup_reduce.ml
     "threadgroup float partial_sums[64]"
     "threadgroup_barrier"
 test/operations/ll_printer_constants.ml [renders generated text in memory]
+    " := "
 test/operations/narrow_storage_compute.ml
     "HALF_T ocannl_vec"
     "HALF_TO_FLOAT"
@@ -116,9 +117,13 @@ test/operations/reduction_accumulator_residency.ml [also pins text this scan can
     ... ^ " = "
     ... ^ "["
 test/operations/reduction_forms.ml [also pins text this scan cannot name]
+    " = "
     "Vectorized reduction rendering"
+    "] = "
     "ocannl_shfl_xor"
+    ... ^ "["
 test/operations/reserved_routine_names.ml
+    "void " ^ "gh686_ordinary_name" ^ "("
     "void " ^ ... ^ "("
 test/operations/schedule_batch_grid.ml [also pins text this scan cannot name]
 test/operations/schedule_batched_mma.ml
@@ -160,6 +165,8 @@ test/operations/schedule_mma_matmul.ml [also pins text this scan cannot name]
     "#elif "
     "(wmma-bf16)"
     "(wmma-tf32)"
+    "/* simdgroup fragment reduction body begins */"
+    "/* simdgroup fragment reduction body ends */"
     "/* tile_mma fragment update"
     "== 0)"
     "Tile_mma register tiling"
@@ -187,10 +194,13 @@ test/operations/schedule_mma_matmul.ml [also pins text this scan cannot name]
     "simdgroup_bfloat8x8"
     "simdgroup_half8x8"
     "simdgroup_load"
+    "simdgroup_load(__mma_fragment_"
     "simdgroup_multiply_accumulate"
     "simdgroup_store"
+    "simdgroup_store(__mma_fragment_"
     "threadgroup float tile_"
     "threadgroup_barrier"
+    "threadgroup_barrier(mem_flags::mem_threadgroup);"
     "tile_mma 16x32x24 (wmma-tf32)"
     "tile_mma fragment update"
     "ulong2(0), true)"
