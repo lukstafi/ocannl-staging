@@ -1613,6 +1613,69 @@ let split_with_seps sep s =
   let tokens = Re.split_full sep s in
   List.map tokens ~f:(function `Text tok -> tok | `Delim sep -> Re.Group.get sep 0)
 
+(** {2 Rendering a double as text (gh-ocannl-623, gh-ocannl-713)} *)
+
+(** [s] with any exponent's leading zeros removed, so that the rendering does not depend on which C
+    runtime formatted it.
+
+    OCaml's [%g] goes through the platform's [snprintf], and the Windows runtimes pad the exponent
+    to three digits ([1e+020] where glibc writes [1e+20]) -- which would make generated kernels, IR
+    dumps, and any golden quoting one, differ by platform. Both spellings denote the same number, so
+    this is about the artifact being reproducible rather than about the value. Digits that are not
+    padding are kept: [1e-300] stays itself. *)
+let normalize_exponent s =
+  match String.findi s ~f:(fun _ ch -> Char.(ch = 'e' || ch = 'E')) with
+  | None -> s
+  | Some (i, _) ->
+      let mantissa = String.prefix s i and exp = String.drop_prefix s (i + 1) in
+      let sign, digits =
+        match String.chop_prefix exp ~prefix:"+" with
+        | Some d -> ("+", d)
+        | None -> (
+            match String.chop_prefix exp ~prefix:"-" with Some d -> ("-", d) | None -> ("", exp))
+      in
+      if String.is_empty digits || not (String.for_all digits ~f:Char.is_digit) then s
+      else
+        let stripped = String.lstrip digits ~drop:(Char.equal '0') in
+        let stripped = if String.is_empty stripped then "0" else stripped in
+        mantissa ^ "e" ^ sign ^ stripped
+
+(** The decimal spelling of the double [c]: a floating literal -- a radix point or an exponent is
+    always present -- that parses back to exactly [c].
+
+    Two properties [%.16g] alone gets wrong, and both of them matter wherever a constant is written
+    down: in emitted kernel text ({!C_syntax.c_float_literal}, gh-ocannl-623) and in the IR dumps
+    ({!Low_level.to_doc} and {!Low_level.to_doc_cstyle}, gh-ocannl-713).
+
+    - {b It is a floating literal, not an integer one.} [%.16g] of a value with no fractional part
+      has no radix point, so [2.] comes out as ["2"] and [-0.] as ["-0"] -- the integer zero, hence
+      [+0.0] once read as C, and indistinguishable from [+0.] to a reader of a dump. That is the
+      one distinction the gh-ocannl-615 chase was about: asking whether a [-0.0] in host data
+      survives to the kernel, and being answered [:= 0] either way. Forcing the radix point closes
+      the whole class at once.
+    - {b It round-trips.} 16 significant digits do not recover every double: [0.1 +. 0.2] prints as
+      ["0.3"], which is a {e different} double, and so a constant whose 17th digit matters displays
+      identically to one whose does not. The rendering therefore retries at [%.17g] -- the width
+      IEEE-754 guarantees -- whenever the 16-digit spelling does not parse back to [c]. Values that
+      already round-trip keep their exact previous spelling, which is why goldens move only by the
+      appended [.0].
+
+    Non-finite values get [%.16g]'s words ([inf], [-inf], [nan]): they have no decimal spelling at
+    all, and appending a radix point to one would produce a token that is neither. A caller whose
+    dialect needs its own spelling handles them before calling -- {!C_syntax.c_float_literal}
+    spells C's [INFINITY] and [NAN], while an IR dump, which is not C, keeps the words. *)
+let decimal_float_literal c =
+  if not (Float.is_finite c) then Printf.sprintf "%.16g" c
+  else
+    let s =
+      let s16 = Printf.sprintf "%.16g" c in
+      if Float.equal (Float.of_string s16) c then s16 else Printf.sprintf "%.17g" c
+    in
+    (* [%g] emits a radix point or an exponent for everything else, and either one makes the token a
+       floating literal. *)
+    if String.exists s ~f:(function '.' | 'e' | 'E' -> true | _ -> false) then normalize_exponent s
+    else s ^ ".0"
+
 module Lazy = struct
   include Lazy
 
