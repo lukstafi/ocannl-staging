@@ -1,0 +1,21 @@
+fp8 (e5m2) exhaustive codec sweep
+  f32 bit patterns swept: 4294967296
+  doubles swept: 17179869184
+single_to_fp8 and double_to_fp8 agree on every one of the 2^32 f32-exact doubles: true
+single_to_fp8 rounds every f32 input to the nearest e5m2 code, ties to even: true
+single_to_fp8 carries the sign of every f32 input over, zeros and NaNs included: true
+no finite f32 input narrows to an infinity or a NaN code: true
+every infinite f32 input narrows to 0x7C and every NaN to 0x7F, keeping its sign: true
+double_to_fp8 rounds all 17.2e9 swept doubles to the nearest e5m2 code, ties to even: true
+double_to_fp8 carries the sign of every swept double over: true
+  distinct e5m2 codes produced by narrowing: 252
+narrowing f32 reaches every e5m2 code but the non-canonical NaN payloads 0x7D/0x7E: true
+fp8_to_single decodes all 256 codes to their exact e5m2 values, signed zero included: true
+fp8_to_single is strictly increasing over the 124 non-negative finite codes: true
+every non-NaN code survives a widen-and-narrow round trip through both codecs: true
+every NaN code widens to a NaN and narrows back to the canonical NaN code: true
+  smallest subnormal (0x01): 0x1p-16
+  largest subnormal (0x03): 0x1.8p-15
+  smallest normal (0x04): 0x1p-14
+  largest finite (0x7B): 0x1.cp+15
+  negative zero (0x80): -0x0p+0

@@ -74,6 +74,7 @@
  (name slow)
  (deps
   (alias slow-env_spelling_gate)
+  (alias slow-fp8_codec_exhaustive)
   (alias slow-hip_scratch_budget)
   (alias slow-hip_scratch_tune_survives)))
 
@@ -3671,3 +3672,37 @@
  (deps ocannl_config (env_var OCANNL_BACKEND))
  (modules bench_self_test)
  (libraries base stdio yojson bench_harness arrayjit.verdict))
+
+; gh-ocannl-657: the exhaustive half of the e5m2 codec verification, the half that needs no GPU.
+; 2^32 f32 bit patterns and 17.2e9 doubles, so it belongs on `slow` rather than in `runtest` --
+; seconds, not milliseconds -- but `@check` compiles it and `dune build
+; @test/operations/slow-fp8_codec_exhaustive` reruns just this one after a codec change. The sweeps
+; are C (fp8_codec_exhaustive_stubs.c) calling the very functions builtins.c exports, split across
+; domains; the rest is the 256-code arithmetic, which is cheap. `no-infer` keeps the .actual out of
+; the build targets so a plain `dune build` does not run it.
+
+(executable
+ (name fp8_codec_exhaustive)
+ (modules fp8_codec_exhaustive)
+ (libraries base stdio unix arrayjit.ir arrayjit.verdict test_utils)
+ (foreign_stubs
+  (language c)
+  (names fp8_codec_exhaustive_stubs)))
+
+(rule
+ ; ocannl-backend: none -- links arrayjit.ir alone and calls the host fp8 codecs directly; no
+ ; kernel is compiled and no device is opened.
+ (alias slow-fp8_codec_exhaustive)
+ (package neural_nets_lib)
+ (locks ocannl_training_test)
+ (deps
+  (alias slow-env_spelling_gate)
+  fp8_codec_exhaustive.expected
+  ocannl_config)
+ (action
+  (no-infer
+   (progn
+    (with-stdout-to
+     fp8_codec_exhaustive.actual
+     (run %{dep:fp8_codec_exhaustive.exe}))
+    (diff fp8_codec_exhaustive.expected fp8_codec_exhaustive.actual)))))
