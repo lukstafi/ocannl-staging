@@ -40,9 +40,18 @@
 
     {1 How a source site is recognised}
 
-    A file is a member when it reads generated source at all: through {!Test_utils.Generated}, or by
-    opening [build_files/] itself (which two tests predating that module still do, and which the
-    inventory tags, since such a read is unchecked for freshness).
+    A file is a member when it reaches generated text at all, by any of three routes -- and it is
+    three because a rule naming two of them missed a whole population once already (Codex P2, round
+    2):
+
+    - through {!Test_utils.Generated}, the freshness-checked artifact reader;
+    - by opening [build_files/] itself, which two tests predating that module still do, and which
+      the inventory tags, since such a read is unchecked for freshness;
+    - {b in memory}, by calling the emitter or a dump printer and rendering the document it returns
+      -- [C_syntax]'s [compile_proc] / [compile_main], [Low_level]'s [to_doc] / [to_doc_cstyle].
+      Such a test never touches [build_files/] at all, and every one of them was invisible: the
+      three [arrayjit/test] codegen tests whose GOLDENS the inventory already listed, plus
+      [ll_printer_constants], which pins the spelling of every dumped float constant.
 
     Under each member the inventory itemises the text it pins, found by the same literal-spelling
     discipline the configuration scan uses: the argument of a substring test, {e at the call site}.
@@ -190,7 +199,14 @@ type golden = {
       (** The declaring extension, when the file has one: a member whatever it contains. *)
   families : string list;  (** Sorted family names, for the inventory line. *)
   tags : string list;  (** Sorted content-marker tags; empty for an extension-only member. *)
+  beside : string option;
+      (** The source member this golden belongs to, when nothing about the file itself made it a
+          member. See {!classify_associated}. *)
 }
+
+(** The family of a golden that holds text DERIVED from generated code in a shape no marker names:
+    a table of dumped constants, a census of the schedule decisions a kernel was built from. *)
+let derived_family = "derived"
 
 (** [classify_golden ~path ~contents] is [Some] when the file pins emitted text. [path] is used for
     its extension only, so it may carry any prefix dune's globs put on it. *)
@@ -225,7 +241,47 @@ let classify_golden ~path ~contents =
           by_extension = Option.map by_extension ~f:fst;
           families;
           tags = List.map matched ~f:(fun m -> m.tag) |> List.dedup_and_sort ~compare:String.compare;
+          beside = None;
         }
+
+(** Whether every line of [contents] is {!Verdict} output: a golden made of claims and nothing else.
+
+    This is what tells a test's OWN golden apart from a golden that holds what the test rendered. A
+    boolean column does not move when codegen does -- the claim goes on reading [true] -- so pulling
+    such a file into the inventory would add a line per schedule test and train the reader to skim.
+    A line that is not a claim is the test printing something, and where the test renders generated
+    text that something is derived from it. *)
+let holds_only_claims contents =
+  String.split_lines contents
+  |> List.for_all ~f:(fun line -> String.is_empty (String.strip line) || is_claim_line line)
+
+(** The stem a test source is known by: its path without [.ml], and without the [.real] / [.missing]
+    infix a [(select)] pair carries. *)
+let source_stem path =
+  let stem = Option.value (String.chop_suffix path ~suffix:".ml") ~default:path in
+  match String.chop_suffix stem ~suffix:".real" with
+  | Some stem -> stem
+  | None -> Option.value (String.chop_suffix stem ~suffix:".missing") ~default:stem
+
+(** [classify_associated ~path ~contents ~source] is [Some] when a golden that no extension declares
+    and no marker recognises is still a member, because it is the golden of a test that renders
+    generated text and it holds more than that test's verdicts.
+
+    The route exists because the markers describe whole dumps -- a loop nest, a launch signature, an
+    assignment -- and a golden can pin emitted text in fragments instead: a table whose columns are
+    the [%cd] and C-style spellings of one constant, a census of the schedule decisions a kernel was
+    built from. Those move when codegen moves, and no marker written for kernel syntax will ever see
+    them (Codex P2, round 2). What makes the association sound rather than a guess is the pairing:
+    the test beside it demonstrably reaches generated text, so what it prints comes from there.
+
+    Only the exact stem pairs. A test writing a differently-named golden
+    ([micrograd_demo_logging-cc-0-0.log.expected]) is found by content, which is the primary route
+    and stays so. *)
+let classify_associated ~path ~contents ~source =
+  if holds_only_claims contents then None
+  else
+    Some
+      { path; by_extension = None; families = [ derived_family ]; tags = []; beside = Some source }
 
 (* ------------------------------------------------------------- source sites *)
 
@@ -356,6 +412,37 @@ let mentions_generated_read ~generated expr =
 let direct_artifact_names = [ "build_files_dir"; "build_file" ]
 
 let direct_artifact_module = "Utils"
+
+(** The emitters and dump printers that hand a test generated text without an artifact in between:
+    [C_syntax.compile_proc] / [compile_main] and [Low_level.to_doc] / [to_doc_cstyle].
+
+    Matched by NAME behind any qualifier, rather than against a resolved module. That is deliberate,
+    and it is the one place this scan errs toward including: the qualifier here is routinely a local
+    module bound by a FUNCTOR APPLICATION -- [let module Syntax = Ir.C_syntax.C_syntax (...) in] --
+    which no alias table can resolve to a target, so demanding one would reinstate exactly the blind
+    spot this family exists to close. A qualifier is still required, so a test's own [to_doc] is not
+    swept in; and if some unrelated [X.to_doc] appears one day it costs an inventory line, whereas a
+    miss here costs a silent omission. *)
+let emitter_names = [ "compile_proc"; "compile_main"; "to_doc"; "to_doc_cstyle" ]
+
+let renders_generated_text expr =
+  let found = ref false in
+  let iterator =
+    object
+      inherit Ast_traverse.iter as super
+
+      method! expression e =
+        (match longident_of e with
+        | Some path
+          when List.exists emitter_names ~f:(fun n -> path_ends path ~name:n)
+               && Option.is_some (qualifier_of path) ->
+            found := true
+        | _ -> ());
+        super#expression e
+    end
+  in
+  iterator#expression expr;
+  !found
 
 let reads_artifacts_directly ~utils expr =
   let found = ref false in
@@ -495,7 +582,9 @@ let bindings_in_expression expr = bindings_of (fun it -> it#expression expr)
 let tainted_names ~generated ~utils bindings =
   let tainted = ref (Set.empty (module String)) in
   let seeded body =
-    mentions_generated_read ~generated body || reads_artifacts_directly ~utils body
+    mentions_generated_read ~generated body
+    || reads_artifacts_directly ~utils body
+    || renders_generated_text body
   in
   let changed = ref true in
   while !changed do
@@ -660,6 +749,9 @@ type site = {
   pins : string list;  (** Sorted, deduplicated, each rendered ready for the inventory. *)
   partial : bool;  (** Some pinned fragment could not be named at its call site. *)
   direct : bool;  (** Reads [build_files/] without going through {!Test_utils.Generated}. *)
+  rendered : bool;
+      (** Renders generated text in memory, through an emitter or a dump printer, rather than
+          reading an artifact. Such a test has no [build_files/] output to inspect. *)
 }
 
 let render_pin = function
@@ -677,6 +769,7 @@ let classify_source ~path ~contents =
   let utils = module_aliases ~target:direct_artifact_module structure in
   let reads_generated = ref false in
   let reads_direct = ref false in
+  let renders = ref false in
   let scan_reads =
     object
       inherit Ast_traverse.iter as super
@@ -691,12 +784,16 @@ let classify_source ~path ~contents =
           when List.exists direct_artifact_names ~f:(fun name ->
                    calls ~aliases:utils p ~name) ->
             reads_direct := true
+        | Some p
+          when List.exists emitter_names ~f:(fun name -> path_ends p ~name)
+               && Option.is_some (qualifier_of p) ->
+            renders := true
         | _ -> ());
         super#expression e
     end
   in
   scan_reads#structure structure;
-  if not (!reads_generated || !reads_direct) then None
+  if not (!reads_generated || !reads_direct || !renders) then None
   else
     let bindings = bindings_in_structure structure in
     let tainted = tainted_names ~generated ~utils bindings in
@@ -762,4 +859,5 @@ let classify_source ~path ~contents =
         pins = List.filter_map all ~f:render_pin |> List.dedup_and_sort ~compare:String.compare;
         partial = List.exists all ~f:(function Computed -> true | _ -> false);
         direct = !reads_direct;
+        rendered = !renders;
       }

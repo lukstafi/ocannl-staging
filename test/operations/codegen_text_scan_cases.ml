@@ -128,10 +128,11 @@ let golden_cases =
 let render_site = function
   | None -> "none"
   | Some (s : Scan.site) ->
-      Printf.sprintf "%s%s%s"
+      Printf.sprintf "%s%s%s%s"
         (String.concat ~sep:" " s.Scan.pins)
         (if s.Scan.partial then " +partial" else "")
         (if s.Scan.direct then " +direct" else "")
+        (if s.Scan.rendered then " +rendered" else "")
 
 let source_cases =
   [
@@ -265,6 +266,34 @@ let () = p "wrote" (Stdlib.Sys.file_exists (U.build_file "k.c"))|ocaml},
       {ocaml|let read routine = Stdio.In_channel.read_all routine
 let () = p "loaded" (String.is_substring (read "fixture.txt") ~substring:"(float)(0.0)")|ocaml},
       "none" );
+    (* The third route to generated text: rendering it in memory, with no artifact in between. A
+       rule naming only the other two left five sources and a whole scan root invisible (Codex P2,
+       round 2). *)
+    ( "rendering the emitter's document is reaching generated text",
+      {ocaml|let compile optimized =
+  let module Syntax = Ir.C_syntax.C_syntax (Ir.C_syntax.Pure_C_config (struct
+    let procs = [| optimized |]
+  end)) in
+  let _kparams, doc, _launch = Syntax.compile_proc ~name [] optimized in
+  doc_to_string doc
+let () =
+  let c = compile opt in
+  p "guard" (String.is_substring c ~substring:"? producer[")|ocaml},
+      {|"? producer[" +rendered|} );
+    ( "a dump printer is an emitter too, under whatever alias",
+      {ocaml|module LL = Ir.Low_level
+let () =
+  let src = render (LL.to_doc_cstyle () stmt) in
+  p "radix" (String.is_substring src ~substring:"-0.0")|ocaml},
+      {|"-0.0" +rendered|} );
+    ( "a test emitting to a golden pins nothing and is still a member",
+      {ocaml|module LL = Ir.Low_level
+let () = PPrint.ToChannel.pretty 0.9 100 Stdio.stdout (LL.to_doc () llc)|ocaml},
+      "+rendered" );
+    ( "an unqualified to_doc is the test's own, not an emitter",
+      {ocaml|let to_doc row = PPrint.string (render_row row)
+let () = PPrint.ToChannel.pretty 0.9 100 Stdio.stdout (to_doc header)|ocaml},
+      "none" );
     ( "a test that reads no generated source is not a member",
       {ocaml|let () = p "shapes agree" (String.is_substring rendered ~substring:"3x5")|ocaml},
       "none" );
@@ -274,7 +303,52 @@ let () = p "values" (Array.for_all2_exn got want ~f:Float.equal)|ocaml},
       "none" );
   ]
 
+(** The goldens a test's own output makes members, or does not: {!Scan.classify_associated}. Each
+    case is the golden's contents, and what the rule answers for a golden sitting beside a source
+    member. *)
+let association_cases =
+  [
+    ( "a table of dumped constants is text derived from generated code",
+      "exact value                %cd dump                   C-style dump\n       0x1.999999999999ap-4       0.1                        0.1\n       every dumped constant parses back to the double it names: true\n",
+      "[derived] beside t.ml" );
+    ( "a census of the decisions a kernel was built from moves with them",
+      "seeds: standard, both hoistable: total=18 whole=2 packed=12\n       seeded packed pad-composition matches the serial twin bitwise: true\n",
+      "[derived] beside t.ml" );
+    (* The negative control that decides the rule: a schedule test's golden is a column of
+       booleans, and a boolean does not move when codegen does -- the claim goes on reading true.
+       Pulling those in would add a line per schedule test and train the reader to skim. *)
+    ( "a golden of nothing but claims is the test's verdict, not its output",
+      "padded packed matmul matches the serial twin bitwise: true\n       pad guard over an unstaged operand is rejected: true\n",
+      "none" );
+    ( "blank lines do not make a verdict golden into output",
+      "first claim holds: true\n\n   \nsecond claim holds: PASS\n",
+      "none" );
+    ( "an empty golden is not output either",
+      "",
+      "none" );
+  ]
+
+let render_association = function
+  | None -> "none"
+  | Some (g : Scan.golden) ->
+      Printf.sprintf "[%s]%s"
+        (String.concat ~sep:" " g.Scan.families)
+        (match g.Scan.beside with Some source -> " beside " ^ source | None -> "")
+
 let () =
+  List.iter association_cases ~f:(fun (name, contents, expected) ->
+      let found =
+        render_association (Scan.classify_associated ~path:"t.expected" ~contents ~source:"t.ml")
+      in
+      if String.equal found expected then printf "ok: association -- %s\n" name
+      else fail "association -- %s: expected [%s], found [%s]" name expected found);
+  List.iter
+    [ ("a plain source", "d/x.ml", "d/x"); ("a select real", "d/x.real.ml", "d/x");
+      ("a select stub", "d/x.missing.ml", "d/x") ]
+    ~f:(fun (name, path, expected) ->
+      let found = Scan.source_stem path in
+      if String.equal found expected then printf "ok: stem -- %s\n" name
+      else fail "stem -- %s: expected [%s], found [%s]" name expected found);
   List.iter golden_cases ~f:(fun (name, path, contents, expected) ->
       let found = render_golden (Scan.classify_golden ~path ~contents) in
       if String.equal found expected then printf "ok: golden -- %s\n" name

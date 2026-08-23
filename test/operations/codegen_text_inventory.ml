@@ -32,11 +32,13 @@ module Floors = Test_utils.Scan_floors
     {!Test_utils.Scan_floors}: a glob that breaks goes to zero, a member added moves nothing. *)
 let golden_floors = [ ("test", 12); ("arrayjit/test", 2) ]
 
-(** [arrayjit/test] carries no source site and gets no floor: [test_utils] is a
-    [neural_nets_lib] library, so the arrayjit tests cannot link {!Test_utils.Generated} at all. The
-    root is still globbed, so a site appearing there the day that changes is inventoried -- it would
-    show up as a root nobody has a floor for, which is a diff. *)
-let source_floors = [ ("test", 20) ]
+(** [arrayjit/test] has its own floor, and the reason it once looked as though it could not have
+    sites is worth keeping: [test_utils] is a [neural_nets_lib] library, so the arrayjit tests
+    cannot link {!Test_utils.Generated} at all. They reach generated text the third way instead --
+    calling [C_syntax.compile_proc] and rendering the document -- which is precisely the route the
+    first version of this scan did not model, and which made a whole root look empty (Codex P2,
+    round 2). *)
+let source_floors = [ ("test", 20); ("arrayjit/test", 2) ]
 
 (** Files the globs hand over that are not members of either population, each for a reason that is
     about this scan rather than about them.
@@ -51,6 +53,10 @@ let excluded =
     ( "test/operations/codegen_text_inventory.expected",
       "this scan's own output, which quotes the fragments the sources pin: including it would make \
        the scan's result depend on its own golden, so a promote would take two rounds to converge" );
+    ( "test/operations/generated_provenance.ml",
+      "the test OF the freshness-checked reader: it writes its artifact contents by hand and checks \
+       that a stale or overwritten one is refused, so the strings under it are fixtures no backend \
+       emits and a codegen change does not re-run it" );
   ]
 
 let read path = Stdlib.In_channel.with_open_bin path Stdlib.In_channel.input_all
@@ -105,7 +111,7 @@ let () =
            "the exclusion for %s (%s) names a file the globs no longer hand over -- drop it, or fix \
             the path it was meant to name"
            path reason));
-  let goldens =
+  let by_itself =
     List.filter_map golden_files ~f:(fun (name, on_disk) ->
         if is_excluded name then None
         else Scan.classify_golden ~path:name ~contents:(read on_disk))
@@ -120,6 +126,25 @@ let () =
             unparsed := name :: !unparsed;
             None)
   in
+  (* Goldens that nothing about the file itself made members, paired with the test beside them. See
+     Codegen_text_scan.classify_associated: the markers describe whole dumps, and a golden can hold
+     emitted text in fragments instead. *)
+  let stems =
+    List.map sites ~f:(fun s -> (Scan.source_stem s.Scan.site_path, s.Scan.site_path))
+    |> Map.of_alist_reduce (module String) ~f:(fun first _ -> first)
+  in
+  let already = Set.of_list (module String) (List.map by_itself ~f:(fun g -> g.Scan.path)) in
+  let associated =
+    List.filter_map golden_files ~f:(fun (name, on_disk) ->
+        if is_excluded name || Set.mem already name then None
+        else
+          match String.chop_suffix name ~suffix:".expected" with
+          | None -> None
+          | Some stem ->
+              Option.bind (Map.find stems stem) ~f:(fun source ->
+                  Scan.classify_associated ~path:name ~contents:(read on_disk) ~source))
+  in
+  let goldens = by_itself @ associated in
   List.iter !unparsed ~f:(fun path ->
       Verdict.fail
         (Printf.sprintf
@@ -143,10 +168,10 @@ let () =
     ~f:(fun g ->
       let origin =
         (match g.Scan.by_extension with Some ext -> [ "extension " ^ ext ] | None -> [])
-        @
-        match g.Scan.tags with
-        | [] -> []
-        | tags -> [ "markers " ^ String.concat ~sep:" " tags ]
+        @ (match g.Scan.tags with
+          | [] -> []
+          | tags -> [ "markers " ^ String.concat ~sep:" " tags ])
+        @ match g.Scan.beside with Some source -> [ "beside " ^ source ] | None -> []
       in
       printf "%s [%s] %s\n" g.Scan.path
         (String.concat ~sep:" " g.Scan.families)
@@ -159,6 +184,7 @@ let () =
     ~f:(fun s ->
       let flags =
         (if s.Scan.direct then [ "reads build_files/ directly" ] else [])
+        @ (if s.Scan.rendered then [ "renders generated text in memory" ] else [])
         @ if s.Scan.partial then [ "also pins text this scan cannot name" ] else []
       in
       printf "%s%s\n" s.Scan.site_path

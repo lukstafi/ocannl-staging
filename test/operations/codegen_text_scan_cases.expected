@@ -1,3 +1,11 @@
+ok: association -- a table of dumped constants is text derived from generated code
+ok: association -- a census of the decisions a kernel was built from moves with them
+ok: association -- a golden of nothing but claims is the test's verdict, not its output
+ok: association -- blank lines do not make a verdict golden into output
+ok: association -- an empty golden is not output either
+ok: stem -- a plain source
+ok: stem -- a select real
+ok: stem -- a select stub
 ok: golden -- a C kernel is a member by its markers, under any name
 ok: golden -- a CUDA kernel names the launch vocabulary
 ok: golden -- a Metal kernel names its address spaces
@@ -37,5 +45,9 @@ ok: source -- an alias of an alias is an alias
 ok: source -- an alias bound in expression position counts too
 ok: source -- an alias of Utils is a direct artifact read
 ok: source -- an unqualified read is not the reader, which is what the qualifier is for
+ok: source -- rendering the emitter's document is reaching generated text
+ok: source -- a dump printer is an emitter too, under whatever alias
+ok: source -- a test emitting to a golden pins nothing and is still a member
+ok: source -- an unqualified to_doc is the test's own, not an emitter
 ok: source -- a test that reads no generated source is not a member
 ok: source -- naming the reader in a comment is not reading it
