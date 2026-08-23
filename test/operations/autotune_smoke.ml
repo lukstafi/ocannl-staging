@@ -341,7 +341,9 @@ let () =
        hold the minimum, which is the same band as above and equally not a fault. Keyed on labels
        instead, [mma_best_ms] would stay [infinity] for a beam-appended [Tensorize] winner and this
        would fail, which is the regression it is here to catch. Excluded on a cache hit, which times
-       nothing in this process. *)
+       nothing in this process — and which is also where the implication genuinely does not hold:
+       an entry written before [mma_best_ms] existed replays [infinity] for it while
+       [best_tensorized] still comes off the saved schedule. *)
     Verdict.pass_fail
       (which ^ "'s tensorizing winner was itself timed in the tensorized family")
       ((not r.Autotune.best_tensorized)
