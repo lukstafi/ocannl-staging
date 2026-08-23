@@ -176,7 +176,7 @@ pass-1 wedged the same way as the `sys.path` bug did (minutes at ~1% CPU, GPU id
 bug was fixed, against 55 s and 63 s for the same searches in their other repeats. Both were
 killed by the driver's cap and their pairs dropped (hence n=2 and n=4 in those rows). The ROCm
 leg reports one wedge of the same shape. Something in tinygrad's parallel beam pool deadlocks
-intermittently; it is worth its own issue.
+intermittently; it is worth its own issue (gh-ocannl-760).
 
 Raw per-run records (every arm, every repeat, losses, `queued_step_ms`, `retime_step_ms`,
 `searched`, the OCANNL `tune` objects) are kept on the box at `$GH675_OUT/records.jsonl`
