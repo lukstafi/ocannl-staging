@@ -421,6 +421,19 @@ that they earn a lookup rather than always-loaded space.
   testing different trees. It records a row per unit in `~/.ocannl-sweep/history.tsv` and never
   exits non-zero for test failures — its exit code is not a verdict, the history file is. A daily
   scheduled task drives it.
+- `timeout(1)` is not a portable group-killing bound, and the failure is silent in both directions.
+  macOS ships none at all, which is why the repo reaches for `perl -e 'alarm N; exec @ARGV'`; and
+  where one exists it is not necessarily GNU's — uutils coreutils (Rust, Ubuntu's default since
+  25.10, and what `rog-nv-wsl` runs as 0.8.0) accepts `-k` and delivers the TERM phase to the
+  process group, but escalates the KILL to the DIRECT CHILD only. A descendant that ignores or
+  outlives TERM is reparented and keeps running while `timeout` cheerfully reports 137. Measured
+  there: `timeout -k 2 1 sh -c 'trap "" TERM; sleep 987654'` returns 137 and leaves the `sleep`
+  alive. For a remote unit that means the cap says "coverage lost" while the run still holds the
+  GPU and the worktree lock the next sweep must take. Both sides of `tools/sweep.sh` therefore run
+  the unit under the same perl supervisor (`capped` locally, `remote_capped` emitting it as far-side
+  shell text): it forks, `setpgrp`s the child, and signals the GROUP on expiry, TERM then KILL, so
+  the bound holds whatever `timeout` is on the far side's PATH. Exit 142 (128+SIGALRM) is that
+  supervisor's expiry, on either side of the ssh (gh-ocannl-727).
 - The GPU boxes are usually powered off, so `skip (unreachable)` is the normal outcome and a sweep
   of skips is not a failure. What IS a failure is silent non-coverage: track the age of the last
   `pass` per backend, because nothing else in the project tests CUDA or HIP at all.

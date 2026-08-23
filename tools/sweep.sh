@@ -37,7 +37,9 @@ REF=origin/master
 TARGET=
 SLOW=0
 ONLY=()
-# Per-unit wall-clock cap. macOS has no timeout(1), hence the perl alarm.
+# Per-unit wall-clock cap, enforced by the perl supervisor below on both the
+# local and the remote side: macOS has no timeout(1) at all, and where timeout(1)
+# does exist it is not necessarily one whose -k reaches the process group.
 CAP=${OCANNL_TOOL_SWEEP_CAP:-5400}
 
 while [ $# -gt 0 ]; do
@@ -320,6 +322,28 @@ capped() { perl -e "$capped_perl" -- "$@"; }
 # synchronously it would replace this script.
 capped_bg() { exec perl -e "$capped_perl" -- "$@"; }
 
+# The FAR-SIDE cap, emitted as shell text for the remote shell to run. It is the
+# same perl supervisor, and for the same reason: `timeout -k` is not a
+# group-killing bound everywhere it exists. uutils coreutils -- Ubuntu's default
+# since 25.10, and what rog-nv's WSL side runs -- delivers the TERM phase to the
+# group but escalates the -k KILL to the DIRECT CHILD only, so a descendant that
+# ignores or outlives TERM (a wedged pool worker, a CUDA call that never returns)
+# is reparented and keeps running while `timeout` reports 137 (gh-ocannl-727).
+# The unit would then be filed as `timeout` -- coverage lost -- while still
+# holding the GPU and the remote worktree lock that the NEXT sweep's preparation
+# must take. perl(1) is a firmer assumption than GNU-vs-uutils semantics: the
+# sweep hosts are WSL Linux, where it is part of the base system, and
+# tools/test-run.sh already requires it there.
+#
+# The supervisor exits 142 on expiry -- capped()'s code, which the outcome
+# mapping below already reads as `timeout` -- so both sides now report a hang
+# identically. It also reaps on HUP, which is what the remote end gets when the
+# local ssh is killed by the outer run_capped, so a lost connection tears the
+# remote unit down instead of orphaning it.
+remote_capped() {
+  printf 'perl -e %s -- %s sh -c %s' "$(sq "$capped_perl")" "$1" "$(sq "$2")"
+}
+
 # Put a reused worktree exactly on $full_sha, and PROVE it rather than assume it.
 # `checkout --detach` is not sufficient on its own: a tracked edit that does not
 # conflict with the target survives the checkout, which still exits 0 -- so the
@@ -409,36 +433,37 @@ for unit in "${UNITS[@]}"; do
     # Bounded on BOTH sides, for the reason the test leg documents below: an
     # outer bound only kills the local ssh, and a wedged `git fetch` left running
     # on the far side can finish later and reset the shared remote worktree --
-    # possibly while a subsequent sweep is building in it. The far-side timeout is
+    # possibly while a subsequent sweep is building in it. The far-side cap is
     # what actually stops that; the outer budget is the backstop for a connection
     # that dies without the remote noticing, and is larger so it cannot pre-empt
     # the inner one. Generous overall, since a cold fetch on a slow link is
     # legitimate work.
     if ! run_capped 900 ssh -o BatchMode=yes \
          -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
-         "$host" "timeout -k 10s 600s sh -c $(sq "$path_prefix $(remote_lock_cmd "$wt") $remote_prep")" \
+         "$host" "$(remote_capped 600 "$path_prefix $(remote_lock_cmd "$wt") $remote_prep")" \
          >"$log" 2>&1; then
       echo "  $machine/$backend: error (cannot pin $host to $run_sha)"
       record "$machine" "$backend" error "$(( $(date +%s) - started ))" "$log"
       fingerprint "$log" >"${log%.log}.fingerprint"
       continue
     fi
-    # The cap is applied on the FAR side, where coreutils timeout exists: killing
-    # the local ssh would leave the remote dune running. ONE timeout around the
-    # whole unit, matching capped() locally -- a per-dune-call cap would let a
-    # --slow unit run for twice the budget the script advertises.
-    remote="$path_prefix timeout -k 10s ${CAP}s sh -c $(sq "$(remote_lock_cmd "$wt") $(test_cmd "$backend" "$wt")")"
+    # The cap is applied on the FAR side: killing the local ssh would leave the
+    # remote dune running. ONE cap around the whole unit -- the same perl
+    # supervisor capped() uses locally, see remote_capped -- because a
+    # per-dune-call cap would let a --slow unit run for twice the budget the
+    # script advertises.
+    remote="$(remote_capped "$CAP" "$path_prefix $(remote_lock_cmd "$wt") $(test_cmd "$backend" "$wt")")"
     # The far-side cap does not bound the LOCAL ssh: if the connection blackholes
     # after the command starts -- the box suspends, the WiFi drops -- the remote
-    # timeout may kill dune while this ssh sits waiting for a status that will
+    # cap may kill dune while this ssh sits waiting for a status that will
     # never arrive. OpenSSH's defaults do not rescue it (`ssh -G` reports
     # serveraliveinterval 0 and connecttimeout none), and because the unit is in
     # the foreground, the whole sweep stalls behind it: no later units, no rows.
     #
     # Keepalives detect a dead peer in ~5min, and capped() is the backstop for
     # the case where the connection is alive but the far side never returns. Its
-    # budget deliberately exceeds $CAP, so it can only fire after the remote
-    # timeout has had its chance plus room for cleanup and teardown; otherwise it
+    # budget deliberately exceeds $CAP, so it can only fire after the remote cap
+    # has had its chance plus room for cleanup and teardown; otherwise it
     # would cut legitimate long runs short and call them timeouts.
     run_capped "$(( CAP + 300 ))" \
       ssh -o BatchMode=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
@@ -471,10 +496,12 @@ for unit in "${UNITS[@]}"; do
 
   elapsed=$(( $(date +%s) - started ))
   # A hang, a lost connection and a red test call for different responses, so
-  # keep them apart. 142 is capped()'s local expiry (128+SIGALRM); coreutils
-  # `timeout` reports 124, or 137 when its -k had to escalate to SIGKILL. 137 is
-  # also what an OOM kill looks like -- both mean the run was destroyed rather
-  # than judged, which is the distinction the outcome is carrying.
+  # keep them apart. 142 is the supervisor's expiry (128+SIGALRM), on either
+  # side of the ssh now that the remote unit runs under it too. 124 and 137 are
+  # kept as timeouts anyway: they are what a timeout(1) still on the far side of
+  # an older worktree would report, and 137 is also what an OOM kill looks like
+  # -- all three mean the run was destroyed rather than judged, which is the
+  # distinction the outcome is carrying.
   #
   # ssh reserves 255 for its own transport errors, so on the remote path that is
   # a connection lost mid-run: nothing was judged there either, which is `error`
