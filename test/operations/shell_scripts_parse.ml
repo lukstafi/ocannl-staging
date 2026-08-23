@@ -59,9 +59,14 @@
    Beyond that, what the parser will not do is guess. An interpreter outside {!parse_only_shells} is
    refused rather than run, because `-n` means "parse only" for shells and something else entirely
    for a `python3` that a `.sh` file might name -- `perl -n` wraps the program in a read loop and
-   RUNS it. An option outside {!carried_options}/{!dropped_options} is refused too, because `-c` and
-   `-s` make the shell read its program from somewhere other than the file, which would turn this
-   check into an execution. Refused means a failing verdict naming the token, not a silent pass.
+   RUNS it. An option in {!Shebang.refused_short}/{!Shebang.refused_long} is refused too, because
+   `-c` and `-s` make the shell read its program from somewhere other than the file and
+   `--version` exits before reading it at all. Every other option is carried through to the shell,
+   which is the authority on its own: a universal "harmless flags" list is a guess, and it was wrong
+   for `#!/bin/dash -B`. An `env` shebang that assigns a variable or asks for `-0` output is refused
+   for the same reason -- the first changes the environment the lookup happens in, and the second is
+   an `env` invocation that exits 125 rather than running anything. Refused means a failing verdict
+   naming the token, not a silent pass.
 
    {!shebang_cases} pins that parser on synthetic lines -- the three above among them -- since the
    repository's own scripts exercise two shapes of the grammar and would not notice the rest
@@ -129,18 +134,21 @@ module Shebang = struct
       grammar. bash is deliberately absent -- see [stand_ins]. *)
   let posix_family = [ "sh"; "dash"; "ash" ]
 
-  (** Interpreter options carried into the parse check, because they change what parses. `-O`/`+O`
-      is bash's shopt (`extglob` being the one that matters here), `-o`/`+o` is `set`'s (`posix`),
-      and `--posix` is the same switch spelled long. Each entry says whether the option takes a
-      separate operand. *)
-  let carried_options = [ ("-O", true); ("+O", true); ("-o", true); ("+o", true); ("--posix", false) ]
+  (** Interpreter options that would make `-n` a parse of something other than this file, so a
+      shebang carrying one is refused rather than checked. `-c` takes the program from the command
+      line and `-s` from stdin; `--version`/`--help` exit before reading anything, which would make
+      an unparsable script pass with status 0.
 
-  (** Interpreter options dropped, with a note on stderr: `#!/bin/bash -eu` is a common idiom and
-      none of these reaches the grammar. Single letters, so that a cluster (`-eu`) can be taken
-      apart. Anything outside this set and [carried_options] is refused rather than assumed
-      harmless -- `-c` and `-s` in particular make the shell read its program from the command line
-      or stdin, which would make `-n` a parse of something other than the file. *)
-  let dropped_options = [ 'e'; 'u'; 'x'; 'v'; 'f'; 'h'; 'k'; 'm'; 'b'; 'B'; 'C'; 'E'; 'H'; 'T'; 'p' ]
+      Everything else is carried through verbatim, which is round 5's correction. The previous
+      version dropped a fixed list of "runtime-only" flags as harmless, and that list was universal
+      while the shells are not: `#!/bin/dash -B` had its `-B` dropped and was checked as plain
+      `dash -n`, where the real invocation exits 2 with "Illegal option -B". Encoding each shell's
+      option table here would be the same guess one level down, so the shell is left to be the
+      authority on its own options -- with `-n` in play the carried flags cannot execute anything,
+      so there is nothing to be gained by filtering them. *)
+  let refused_short = [ 'c'; 's' ]
+
+  let refused_long = [ "--version"; "--help" ]
 
   let basename p = List.last_exn (String.split_on_chars p ~on:[ '/'; '\\' ])
 
@@ -162,8 +170,11 @@ module Shebang = struct
     | "--" :: rest -> (
         match rest with [] -> Error "`env --` with no command" | cmd :: args -> Ok (Name cmd, args))
     | ("-S" | "--split-string") :: rest -> skip_env_arguments rest
-    | ("-i" | "--ignore-environment" | "-0" | "--null" | "-v" | "--debug") :: rest ->
-        skip_env_arguments rest
+    | (("-0" | "--null") as token) :: _ ->
+        (* `env` refuses this with a command -- "cannot specify --null (-0) with command", exit
+           125 -- so a shebang carrying it launches nothing. *)
+        Error (Printf.sprintf "`env %s` cannot be combined with a command (env exits 125)" token)
+    | ("-i" | "--ignore-environment" | "-v" | "--debug") :: rest -> skip_env_arguments rest
     | ("-u" | "--unset" | "-C" | "--chdir") :: rest -> (
         (* Operand in the next word. *)
         match rest with [] -> Error "`env` option with no operand" | _ :: rest -> skip_env_arguments rest)
@@ -179,33 +190,35 @@ module Shebang = struct
               && List.mem [ 'u'; 'C' ] token.[1] ~equal:Char.equal) ->
         (* `--unset=NAME`, `--chdir=DIR`, `-uNAME`, `-CDIR`: operand attached. *)
         skip_env_arguments rest
-    | token :: rest when String.contains token '=' && not (String.is_prefix token ~prefix:"-") ->
-        (* A `NAME=VALUE` assignment, which may precede the command. *)
-        skip_env_arguments rest
+    | token :: _ when String.contains token '=' && not (String.is_prefix token ~prefix:"-") ->
+        (* A `NAME=VALUE` assignment. `env` applies it BEFORE looking the command up, so
+           `#!/usr/bin/env -S PATH=/definitely/missing bash` exits 127 having found no bash at all --
+           measured. Skipping the assignment and then resolving the command on the scan's own PATH
+           passes a shebang that cannot launch. Reproducing env's environment here is not something
+           this check can do honestly (PATH decides the lookup, and ENV/BASH_ENV/SHELLOPTS reach the
+           shell's own startup), so an assignment is refused instead. *)
+        Error
+          (Printf.sprintf
+             "`env` assignment `%s`: the command is looked up in an environment this check cannot \
+              reproduce"
+             token)
     | token :: _ when String.is_prefix token ~prefix:"-" ->
         Error (Printf.sprintf "`env` option this check does not know: %s" token)
     | cmd :: args -> Ok (Name cmd, args)
 
-  (** Classify one interpreter option: carried through, dropped, or refused. *)
-  let rec classify_options acc = function
-    | [] -> Ok (List.rev acc)
-    | token :: rest -> (
-        match List.Assoc.find carried_options token ~equal:String.equal with
-        | Some true -> (
-            match rest with
-            | [] -> Error (Printf.sprintf "%s with no operand" token)
-            | operand :: rest -> classify_options (operand :: token :: acc) rest)
-        | Some false -> classify_options (token :: acc) rest
-        | None ->
-            if
-              String.is_prefix token ~prefix:"-"
-              && (not (String.is_prefix token ~prefix:"--"))
-              && String.length token > 1
-              && String.for_all (String.drop_prefix token 1) ~f:(fun c ->
-                     List.mem dropped_options c ~equal:Char.equal)
-            then (* A cluster of runtime-only flags, `-eu`: none of them reaches the grammar. *)
-              classify_options acc rest
-            else Error (Printf.sprintf "interpreter option this check does not know: %s" token))
+  (** Refuse the options above; carry the rest, operands included, in the order written. *)
+  let check_options args =
+    let refused token =
+      if String.is_prefix token ~prefix:"--" then List.mem refused_long token ~equal:String.equal
+      else if String.is_prefix token ~prefix:"-" && String.length token > 1 then
+        String.exists (String.drop_prefix token 1) ~f:(fun c ->
+            List.mem refused_short c ~equal:Char.equal)
+      else false
+    in
+    match List.find args ~f:refused with
+    | Some token ->
+        Error (Printf.sprintf "interpreter option that would not parse this file: %s" token)
+    | None -> Ok args
 
   (* The message both kernel-semantics refusals share: the shape is wrong on the shebang line
      itself, so naming the offending text and the remedy is more use than naming a token. *)
@@ -215,7 +228,17 @@ module Shebang = struct
       arg who
 
   let parse first_line =
-    match String.chop_prefix (String.strip first_line) ~prefix:"#!" with
+    (* `#!` must be the file's first two BYTES: the kernel does not look past anything, so
+       ` #!/bin/bash` is not a shebang -- exec fails with ENOEXEC and the caller's shell runs the
+       file with `sh` instead (measured: such a file executes, under sh, not bash). Stripping the
+       line before testing the prefix classified it as a bash script and skipped the no-shebang
+       checks, so a bash-only construct in it would pass here and fail for a real launcher. Only the
+       tail is stripped, which is where a CRLF checkout's `\r` would sit. *)
+    match
+      if String.is_prefix first_line ~prefix:"#!" then
+        Some (String.strip (String.drop_prefix first_line 2))
+      else None
+    with
     | None -> Ok Sourced
     | Some rest -> (
         (* The kernel splits a shebang in exactly one place: the interpreter path, then the whole
@@ -248,7 +271,7 @@ module Shebang = struct
                 if not (List.mem parse_only_shells shell ~equal:String.equal) then
                   Error
                     (Printf.sprintf "interpreter whose `-n` this check cannot vouch for: %s" shell)
-                else Result.map (classify_options [] args) ~f:(fun opts -> Interp (launch, opts))))
+                else Result.map (check_options args) ~f:(fun opts -> Interp (launch, opts))))
 
   (** How a parse reads in a verdict label, so that the golden is a table of what the parser does
       rather than a column of booleans. *)
@@ -290,13 +313,21 @@ module Shebang = struct
         there; use `env -S`)");
       (* A single argument is fine when it really is one token, which is why `-eu` works in a
          shebang and `-O extglob` cannot. *)
-      ("#!/bin/bash -eu", "/bin/bash");
+      ("#!/bin/bash -eu", "/bin/bash -eu");
+      (* Carried, not dropped: the shell is the authority on its own options, and a universal
+         "harmless" list was wrong here -- `dash -B -n` exits 2 with "Illegal option -B", so the
+         real invocation fails and the check must too. *)
+      ("#!/bin/dash -B", "/bin/dash -B");
       ("#!/bin/bash --posix", "/bin/bash --posix");
       (* `env -S` is the mechanism that DOES produce a word list, so env's own grammar is reachable
          only inside it. The first entry is the review finding of round 2 verbatim. *)
       ("#!/usr/bin/env -S -u FOO bash", "bash");
       ("#!/usr/bin/env -S bash -O extglob", "bash -O extglob");
-      ("#!/usr/bin/env -S FOO=bar bash", "bash");
+      ("#!/usr/bin/env -S FOO=bar bash",
+       "refused (`env` assignment `FOO=bar`: the command is looked up in an environment this \
+        check cannot reproduce)");
+      ("#!/usr/bin/env -S -0 bash",
+       "refused (`env -0` cannot be combined with a command (env exits 125))");
       ("#!/usr/bin/env -S -uFOO bash", "bash");
       ("#!/usr/bin/env -S --unset=FOO bash", "bash");
       ("#!/usr/bin/env -S -C /tmp bash", "bash");
@@ -308,7 +339,12 @@ module Shebang = struct
          third is an `env` option whose operand rule this check does not know. *)
       ("#!/usr/bin/env python3",
        "refused (interpreter whose `-n` this check cannot vouch for: python3)");
-      ("#!/bin/bash -c", "refused (interpreter option this check does not know: -c)");
+      ("#!/bin/bash -c", "refused (interpreter option that would not parse this file: -c)");
+      ("#!/bin/bash --version",
+       "refused (interpreter option that would not parse this file: --version)");
+      (* Not a shebang: `#!` must be the first two bytes, so this file is run by the caller's
+         shell and gets the no-shebang treatment. *)
+      (" #!/bin/bash", "sourced");
       ("#!/usr/bin/env -S -Z bash", "refused (`env` option this check does not know: -Z)");
     ]
 end
@@ -451,7 +487,13 @@ let () =
                   | None ->
                       Some (Printf.sprintf "`%s` disappeared between the probe and the check" prog)
                   | Some (Unix.WEXITED 0, _) -> None
-                  | Some (_, said) -> Some (Printf.sprintf "`%s -n` said: %s" prog said))
+                  | Some (_, said) ->
+                      (* Naming the invocation as it was actually made, carried options included:
+                         with `#!/bin/dash -B` the option is the whole reason it failed. *)
+                      Some
+                        (Printf.sprintf "`%s -n` said: %s"
+                           (String.concat ~sep:" " (prog :: opts))
+                           said))
             in
             eprintf "%s: parsed with %s\n" rel
               (String.concat ~sep:", "
