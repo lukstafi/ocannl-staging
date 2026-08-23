@@ -72,7 +72,15 @@ else
     "$0 is not executable — 'scripts/test-setup-ocaml-env.sh' would fail with Permission denied"
 fi
 
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/setup-ocaml-env-test.XXXXXX")"
+# Checked, not assumed: nothing here uses `set -e`, so a `mktemp` that fails —
+# TMPDIR missing, unwritable, full — would leave TMP empty and every path below
+# would resolve against the ROOT: `$TMP/bin` becomes /bin, and the symlink
+# farm would be installed there. Refuse rather than continue.
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/setup-ocaml-env-test.XXXXXX" 2>/dev/null)" || TMP=""
+if [ -z "$TMP" ] || [ ! -d "$TMP" ]; then
+  echo "could not create a temporary directory under ${TMPDIR:-/tmp}" >&2
+  exit 2
+fi
 cleanup() {
   # A hook broken in the way leg 1 probes for can leave orphans behind. They
   # carry this run's pid in their duration (see D_* below), so they are
@@ -85,7 +93,13 @@ cleanup() {
     }')"
   # shellcheck disable=SC2086
   [ -n "$orphans" ] && kill -KILL $orphans 2>/dev/null
-  if [ "$KEEP" = 1 ]; then echo "kept $TMP"; else rm -rf "$TMP"; fi
+  # Belt and braces on the same hazard: never hand `rm -rf` anything but the
+  # directory this run actually made.
+  if [ "$KEEP" = 1 ]; then
+    echo "kept $TMP"
+  elif [ -n "$TMP" ] && [ -d "$TMP" ] && [ "$TMP" != "/" ]; then
+    rm -rf "$TMP"
+  fi
   return 0
 }
 trap cleanup EXIT
@@ -249,38 +263,82 @@ else
     #     answers yes for a zombie exactly as for a live process. Under a PID 1
     #     that reaps, such a zombie is transient and the old check merely lost a
     #     race with it; under one that does not — the common container case — it
-    #     is PERMANENT, so no amount of waiting would have cleared it. The group
-    #     here is built to hold a zombie and nothing else: a child placed in a
-    #     process group of its own, whose parent `exec`s into a `sleep` that
-    #     will never reap it. `kill -0` must still answer yes for this leg to be
-    #     testing anything at all; `group_alive` must answer no. Leg (d) is the
-    #     other side of the question — a group that really is occupied still
-    #     waits — and ssh (15) is the end-to-end symptom.
+    #     is PERMANENT, so no amount of waiting would have cleared it. Leg (d)
+    #     is the other side of the question — a group that really is occupied
+    #     still waits — and ssh (15) is the end-to-end symptom.
+    #
+    #     Making a zombie that is reliably still a zombie when looked at, and
+    #     that leaves nothing behind afterwards, takes some care. The parent
+    #     puts the child in a process group of ITS OWN (so the group holds the
+    #     zombie and nothing else), then STOPs itself before the child exits: a
+    #     stopped shell runs no SIGCHLD handler, so it cannot reap, and the
+    #     child stays a zombie for as long as we need. Killing that parent would
+    #     orphan the zombie onto a PID 1 that — in the very environment this leg
+    #     is for — never reaps it, leaking a process-table entry per run. So it
+    #     is CONTinued instead, and reaps its own child on the way out.
     zpidfile="$TMP/zombie.pid"; rm -f "$zpidfile"
-    bash -c 'set -m; sleep 0.3 >/dev/null 2>&1 </dev/null & echo $! >"$1"; set +m
-             exec sleep 5' _ "$zpidfile" >/dev/null 2>&1 </dev/null &
+    bash -c 'set -m
+             sleep 0.5 >/dev/null 2>&1 </dev/null &
+             echo $! >"$1"
+             set +m
+             kill -STOP $$
+             wait' _ "$zpidfile" >/dev/null 2>&1 </dev/null &
     zparent=$!
     zpid=""
     for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
       [ -s "$zpidfile" ] && zpid="$(cat "$zpidfile")" && break
       sleep 0.1
     done
-    # Let the child exit; nothing will reap it while its parent sleeps.
-    sleep 0.5
+    # Wait for real zombiehood rather than guessing at it, and read the state
+    # with `ps -p`, independently of the `group_alive` under test.
+    zstate=""
+    if [ -n "$zpid" ]; then
+      for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+        zstate="$(ps -o stat= -p "$zpid" 2>/dev/null | tr -d ' ')"
+        case "$zstate" in Z*) break ;; esac
+        sleep 0.1
+      done
+    fi
     if [ -z "$zpid" ]; then
       report 1 "bounded (f): a group holding nothing but a zombie reads as empty" \
         "could not start the zombie maker"
-    elif ! kill -0 -- -"$zpid" 2>/dev/null; then
-      report 1 "bounded (f): a group holding nothing but a zombie reads as empty" \
-        "the group is already gone, so the leg would pass without testing anything"
-    elif group_alive "$zpid"; then
-      report 1 "bounded (f): a group holding nothing but a zombie reads as empty" \
-        "group_alive counted a zombie as work — bounded would wait out the whole bound"
     else
-      report 0 "bounded (f): a group holding nothing but a zombie reads as empty"
+      case "$zstate" in
+        Z*)
+          if ! kill -0 -- -"$zpid" 2>/dev/null; then
+            report 1 "bounded (f): a group holding nothing but a zombie reads as empty" \
+              "kill -0 says the group is gone, so this leg would pass without testing anything"
+          elif group_alive "$zpid"; then
+            report 1 "bounded (f): a group holding nothing but a zombie reads as empty" \
+              "group_alive counted a zombie as work — bounded would wait out the whole bound"
+          else
+            report 0 "bounded (f): a group holding nothing but a zombie reads as empty"
+          fi
+          ;;
+        *)
+          report 1 "bounded (f): a group holding nothing but a zombie reads as empty" \
+            "the child never reached state Z (saw '${zstate:-gone}'), so the leg tested nothing"
+          ;;
+      esac
     fi
-    kill -KILL "$zparent" 2>/dev/null
+    # Let the parent reap its own child, rather than orphaning the zombie onto
+    # a PID 1 that may never reap it; then check we really left nothing behind.
+    kill -CONT "$zparent" 2>/dev/null
     wait "$zparent" 2>/dev/null
+    zleft=""
+    if [ -n "$zpid" ]; then
+      for _ in 1 2 3 4 5 6 7 8 9 10; do
+        zleft="$(ps -o stat= -p "$zpid" 2>/dev/null | tr -d ' ')"
+        [ -z "$zleft" ] && break
+        sleep 0.1
+      done
+    fi
+    if [ -z "$zleft" ]; then
+      report 0 "bounded (f): the leg reaps its own zombie, leaving no process-table entry"
+    else
+      report 1 "bounded (f): the leg reaps its own zombie, leaving no process-table entry" \
+        "pid $zpid is still present as '$zleft'"
+    fi
   fi
 fi
 
@@ -331,7 +389,17 @@ has() { grep -qF -- "$2" "$1"; }
 # clone below, and a global `core.hooksPath` could reject or rewrite the
 # synthetic commits — either way the harness would fail somewhere upstream of
 # the thing it is testing, and say so misleadingly.
-git_q() { GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+# Config files are only half of it. GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE and
+# their kin point git at a repository REGARDLESS of `-C` — verified: with GIT_DIR
+# exported, `git -C other config user.name X` writes into the GIT_DIR repo, not
+# into `other`. A harness launched from a git hook, or from a shell that exports
+# them, would therefore configure and commit into the developer's real
+# repository while claiming to work in a throwaway clone. The list is taken from
+# git itself rather than hand-written, so it cannot drift as git adds variables.
+GIT_LOCAL_UNSET=()
+for v in $(git rev-parse --local-env-vars 2>/dev/null); do GIT_LOCAL_UNSET+=(-u "$v"); done
+git_q() { env ${GIT_LOCAL_UNSET[@]+"${GIT_LOCAL_UNSET[@]}"} \
+              GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
           git -c advice.detachedHead=false -c init.defaultBranch=master \
               -c user.name=test -c user.email=test@example.invalid \
               -c commit.gpgsign=false "$@"; }
