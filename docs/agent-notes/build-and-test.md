@@ -331,7 +331,13 @@ that they earn a lookup rather than always-loaded space.
   harness bugs it exists to prevent were live during PR #430's review rounds: a throwaway clone
   that silently tested the COMMITTED script, and a `run` helper that executed its label as a
   command. When adding a leg, add the negative control too — mutate the hook and check that leg,
-  and only that leg, goes red.
+  and only that leg, goes red. The harness found one bug on its first outing: `bounded` decided
+  whether to wait for its watchdog with a `kill -0` on the process group taken in the instant after
+  `wait`, and `kill -0` counts a ZOMBIE as present — git's ssh child is briefly one, having been
+  reparented and not yet reaped — so a fetch that had already failed in milliseconds was read as
+  still running and sat out the whole 30s bound, on every session start with an unreachable ssh
+  remote. The group is now polled for a short grace first; only the empty verdict is hurried, and a
+  group still genuinely occupied falls through to the watchdog as before.
 - Dune tracks an environment variable only where a stanza declares it, and the tracking reaches
   further than the stanza: `dune rules test/operations/<name>.exe.output` shows the `(Env
   OCANNL_BACKEND)` dependency travelling from the `(test)` stanza's `(deps ...)` into the

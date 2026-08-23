@@ -24,7 +24,8 @@
 #
 # Legs:
 #   1. `bounded` — the watchdog: TERM at the bound, KILL 5s later, process-group
-#      kill, rc preservation, no orphans.
+#      kill, rc preservation, no orphans, and no waiting out the bound for a
+#      group that is merely draining.
 #   2. counting — behind/ahead wording and recovery command, offline fallback,
 #      ref-ambiguity, FETCH_HEAD untouched, no-origin silence.
 #   3. SSH launcher gating — which program git ends up invoking and whether the
@@ -36,7 +37,7 @@ KEEP=0
 for arg in "$@"; do
   case "$arg" in
     --keep) KEEP=1 ;;
-    -h|--help) sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "test-setup-ocaml-env.sh: unknown argument '$arg'" >&2; exit 2 ;;
   esac
 done
@@ -105,6 +106,7 @@ D_IGN_PARENT="93.$$" # (b) the parent that does not
 D_IGN_ALL="94.$$"   # (c) everything ignores TERM
 D_DAEMON="95.$$"    # (d) the daemon left behind by an exit-0 command
 D_WATCHDOG="97.$$"  # (e) the bound, i.e. the watchdog's own sleep
+D_DRAIN=0.1         # (f) a child that outlives its parent only briefly
 survivors() { # survivors DURATION -> count of live `sleep DURATION`
   pgrep -x sleep -a 2>/dev/null | awk -v d="$1" '$3 == d { n++ } END { print n + 0 }'
 }
@@ -202,6 +204,22 @@ else
         "rc=$rc elapsed=${el}s (want ~0s) watchdog-sleeps=$left"
     fi
 
+    # (f) The group drains a moment AFTER the command exits — the shape git
+    #     leaves behind, whose ssh child is briefly an unreaped zombie. `kill -0`
+    #     counts a zombie as present, so testing the group in the instant after
+    #     `wait` read every failed ssh fetch as still running and sat out the
+    #     whole bound. The return must not wait on a group that is about to be
+    #     empty; leg (d) is the other side of this, a group that stays occupied.
+    t0=$SECONDS
+    bounded "$BOUND" bash -c 'sleep "$1" >/dev/null 2>&1 </dev/null & exit 0' _ \
+      "$D_DRAIN" >/dev/null 2>&1; rc=$?
+    el=$((SECONDS - t0))
+    if [ "$rc" = 0 ] && [ "$el" -le 2 ]; then
+      report 0 "bounded (f): a group that drains just after the command exits does not cost the bound"
+    else
+      report 1 "bounded (f): a group that drains just after the command exits does not cost the bound" \
+        "rc=$rc elapsed=${el}s (want <1s, i.e. well inside the ${BOUND}s bound)"
+    fi
   fi
 fi
 
@@ -391,13 +409,12 @@ fi
 # WHICH program git ended up invoking, and whether the OpenSSH options were
 # appended to it. The options are only correct where OpenSSH is certain.
 #
-# Every case here costs the FULL `bounded` bound (30s), which is why they are
-# launched concurrently and joined once rather than run one after another. The
-# reason is a property of the hook, not of this harness: git's ssh child is
-# still a zombie in the command's process group at the instant `bounded` tests
-# the group for emptiness, so the fast `exit 255` is nevertheless waited out to
-# the bound. Each case has its own clone, log, launcher directory and output
-# file, so concurrency is safe.
+# The cases are launched concurrently and joined once: each has its own clone,
+# log, launcher directory and output file, so nothing is shared but the machine.
+# They used to have no choice — every one of them cost the full 30s bound,
+# because git's ssh child was still a zombie in the process group when `bounded`
+# tested it for emptiness. `bounded` now waits for the group to drain, which
+# leg 1 (f) pins, and these are quick; running them together is just cheap.
 SSH_BASE="$TMP/ssh-base"
 mkdir -p "$SSH_BASE/scripts"
 git_q -C "$SSH_BASE" init -q

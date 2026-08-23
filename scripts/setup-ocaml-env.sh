@@ -137,6 +137,15 @@ bounded() {
   # that nothing of the group survives the return: the command exiting does not
   # by itself cancel the watchdog — git dying on TERM while its ssh child
   # ignores it would otherwise return before the KILL — only an empty group does.
+  # "Empty" has to be given a moment to become true, though: `kill -0` counts a
+  # zombie as present, and when git exits its ssh child is briefly one, having
+  # been reparented and not yet reaped. Testing the group in the instant after
+  # `wait` therefore read a fetch that had already failed in milliseconds as
+  # still running, and sat out the entire bound — 30s added to every session
+  # start whose ssh remote is unreachable. So the group is polled for a short
+  # grace instead. Only the empty verdict is hurried: a group that is genuinely
+  # still occupied falls through to the watchdog exactly as before, and the
+  # grace costs it nothing, the watchdog's own sleep running alongside it.
   local secs="$1"; shift
   local pid watchdog rc
   set -m
@@ -149,6 +158,12 @@ bounded() {
   watchdog=$!
   set +m
   wait "$pid" 2>/dev/null; rc=$?
+  # Where `sleep` takes no fractional argument this drains in zero time and the
+  # behaviour is simply the undelayed check again — slow, never wrong.
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    kill -0 -- -"$pid" 2>/dev/null || break
+    sleep 0.05 2>/dev/null
+  done
   if kill -0 -- -"$pid" 2>/dev/null; then
     wait "$watchdog" 2>/dev/null
   else
