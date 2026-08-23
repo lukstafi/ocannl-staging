@@ -283,6 +283,14 @@ remote_lock_cmd() {
 # would survive while the caller's trap released the lock -- letting the next
 # sweep reset the worktree under a still-running build, which is the corruption
 # the lock exists to prevent.
+#
+# The TERM->KILL grace is measured on the GROUP, not on the leader. The leader is
+# a `sh -c` that dies on the first TERM, so waiting for IT to exit would end the
+# grace in ~0.1s -- and the descendants are the entire reason to escalate: a dune
+# worker or a compiler with a TERM handler wants a moment to unlink its
+# temporaries and drop its _build lock cleanly. `kill 0, -$pid` counts what is
+# still in the group, and the leader is reaped on each pass so its zombie does
+# not read as a survivor and hold the grace open for the full interval.
 capped_perl='
   use POSIX ();
   my $cap = shift;
@@ -292,8 +300,9 @@ capped_perl='
   my $reap = sub {
     my $code = shift;
     kill "TERM", -$pid;
-    for (1 .. 50) {
-      last if waitpid($pid, POSIX::WNOHANG()) > 0;
+    for (1 .. 100) {
+      waitpid($pid, POSIX::WNOHANG());
+      last unless kill 0, -$pid;
       select undef, undef, undef, 0.1;
     }
     kill "KILL", -$pid;
