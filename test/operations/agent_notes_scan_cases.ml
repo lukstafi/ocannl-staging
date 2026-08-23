@@ -784,4 +784,39 @@ let () =
       let _, found =
         Notes.check_all ~index_file:"agent-notes.md" ~index_contents ~files
       in
-      check ("index -- " ^ name) expected (List.map found ~f:render))
+      check ("index -- " ^ name) expected (List.map found ~f:render));
+  (* gh-ocannl-706. A finding whose rule [Notes.rules] does not name -- a sixth rule written and not
+     added to the list -- used to be dropped where the report is grouped by that list: the rule
+     fired and nothing showed it. Put to the rule synthetically, since no fixture here can produce
+     one: the scan's own findings are tagged from the five constants. *)
+  let named = Notes.finding ~file:"agent-notes/a.md" ~line:1 ~rule:Notes.rule_table_shape "named" in
+  let unnamed = Notes.finding ~file:"agent-notes/a.md" ~line:2 ~rule:"invented-rule" "unnamed" in
+  check "unnamed rule -- a finding the list does not name survives the report, last"
+    [ "table-shape @ agent-notes/a.md:1"; "invented-rule @ agent-notes/a.md:2" ]
+    (List.map (Notes.in_rule_order [ unnamed; named ]) ~f:render);
+  check "unnamed rule -- the census reports it, and not the named one beside it"
+    [ "invented-rule @ agent-notes/a.md:2" ]
+    (List.map (Notes.unnamed_rule_findings [ unnamed; named ]) ~f:render);
+  check "unnamed rule -- a named finding leaves the census empty" []
+    (List.map (Notes.unnamed_rule_findings [ named ]) ~f:render);
+  (* This file's own relationship to the scan: the point of it is that each rule has a violation it
+     must flag beside the legitimate text it must not, and a sixth rule shipping without one would
+     leave the live-tree scan as its only reader -- green on days the notes are intact, which is
+     most days, which is the shape this file exists to refuse. The rules exercised are read off the
+     expectations rather than restated, and compared as sorted lists so a duplicate in [Notes.rules]
+     is a mismatch too. The claim is a bare boolean: the golden must not become the list again. *)
+  let rule_of_expectation e = List.hd_exn (String.split e ~on:' ') in
+  let exercised =
+    List.concat_map structure_cases ~f:(fun (_, _, e) -> e)
+    @ List.concat_map table_cases ~f:(fun (_, _, e) -> e)
+    @ List.concat_map index_cases ~f:(fun (_, _, _, e) -> e)
+    |> List.map ~f:rule_of_expectation
+    |> List.dedup_and_sort ~compare:String.compare
+  in
+  let named_rules = List.sort Notes.rules ~compare:String.compare in
+  let covered = List.equal String.equal exercised named_rules in
+  if not covered then
+    eprintf "the cases here flag [%s]; the scan names [%s]\n"
+      (String.concat ~sep:"; " exercised)
+      (String.concat ~sep:"; " named_rules);
+  Verdict.p "every rule the scan names is exercised by a case here" covered

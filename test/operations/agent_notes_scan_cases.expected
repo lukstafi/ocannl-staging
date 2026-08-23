@@ -172,3 +172,7 @@ ok: index -- the same bullet in two files
 ok: index -- the same bullet re-wrapped
 ok: index -- two bullets opening alike and diverging
 ok: index -- two bullets that merely start with the same few words
+ok: unnamed rule -- a finding the list does not name survives the report, last
+ok: unnamed rule -- the census reports it, and not the named one beside it
+ok: unnamed rule -- a named finding leaves the census empty
+every rule the scan names is exercised by a case here: true

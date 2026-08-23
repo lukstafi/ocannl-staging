@@ -94,7 +94,13 @@ let rule_table_shape = "table-shape"
 let rule_reachability = "reachability"
 let rule_no_repetition = "no-repetition"
 
-(** All five, in the order the live-tree scan reports them. *)
+(** All five, in the order the live-tree scan reports them.
+
+    This list stands in for a protocol -- "the rules this scan has" -- that nothing else states, so
+    the two ways it can part from the rules are both checked rather than assumed (gh-ocannl-706).
+    Below, {!unnamed_rule_findings} answers whether a finding carries a rule the list does not name;
+    the live-tree scan holds the rules it reports equal to this list, and the case file holds the
+    rules it exercises equal to it too. *)
 let rules =
   [
     rule_bullet_integrity;
@@ -103,6 +109,8 @@ let rules =
     rule_reachability;
     rule_no_repetition;
   ]
+
+let names_a_rule r = List.mem rules r ~equal:String.equal
 
 let finding ?subject ~file ~line ~rule message =
   { rule; file; line = Some line; where = Printf.sprintf "%s:%d" file line; message; subject }
@@ -1496,9 +1504,23 @@ let check_repetition (bullets : bullet list) =
 (* The whole scan *)
 (* ------------------------------------------------------------------ *)
 
-(** Every rule, over an index and the files it indexes. Findings come back grouped by rule in
-    {!rules} order, and within a rule in file and line order. [files] is keyed as {!check_index}
-    describes. *)
+(** The findings whose [rule] is not one of {!rules}: a rule added to the scan and not named there.
+
+    Grouping the report by {!rules} used to be a filter, which DROPPED such a finding -- the new
+    rule fired, and its findings went nowhere. The order is still {!rules}, but nothing is lost:
+    {!in_rule_order} puts an unnamed rule's findings last, and both consumers claim this census is
+    empty, so the omission fails a run instead of silently costing coverage. *)
+let unnamed_rule_findings found = List.filter found ~f:(fun f -> not (names_a_rule f.rule))
+
+(** Findings grouped by rule in {!rules} order, and within a rule in the order they were found;
+    findings carrying a rule {!rules} does not name keep their order, at the end. *)
+let in_rule_order found =
+  let named, unnamed = List.partition_tf found ~f:(fun f -> names_a_rule f.rule) in
+  List.concat_map rules ~f:(fun r -> List.filter named ~f:(fun f -> String.equal f.rule r)) @ unnamed
+
+(** Every rule, over an index and the files it indexes. Findings come back in {!in_rule_order} --
+    grouped by rule in {!rules} order, and within a rule in file and line order, with any finding
+    carrying an unnamed rule last. [files] is keyed as {!check_index} describes. *)
 let check_all ~index_file ~index_contents ~(files : (string * string) list) =
   let all = (index_file, index_contents) :: files in
   let structure = List.concat_map all ~f:(fun (file, c) -> check_structure ~file c) in
@@ -1507,4 +1529,4 @@ let check_all ~index_file ~index_contents ~(files : (string * string) list) =
   let bullets = List.concat_map all ~f:(fun (file, c) -> bullets ~file c) in
   let repetition = check_repetition bullets in
   let found = structure @ table @ index @ repetition in
-  (bullets, List.concat_map rules ~f:(fun r -> List.filter found ~f:(fun f -> String.equal f.rule r)))
+  (bullets, in_rule_order found)
