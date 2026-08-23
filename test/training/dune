@@ -112,7 +112,7 @@
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules bigram)
- (libraries ocannl dataprep)
+ (libraries ocannl dataprep arrayjit.verdict)
  (preprocess
   (pps ppx_here ppx_ocannl)))
 

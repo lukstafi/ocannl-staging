@@ -82,17 +82,36 @@ let () =
 
   let open Operation.At in
   let batch_ref = IDX.find_exn sgd_step.Context.bindings batch_n in
-  for epoch = 0 to 10 do
+  let epochs = 10 in
+  (* Exact trajectory digits to stderr, claims on stdout (gh-ocannl-725): every one of these numbers
+     is a trained loss reached through a long floating-point reduction, so its low digits depend on
+     reduction order -- backend, SIMD width, worker count -- and NO fixed print precision is
+     portable; four significant digits of an epoch sum near 570 is a tie waiting for the next
+     backend. What the trajectory was there to show is on stdout below: the losses stay finite, the
+     epoch sum falls across training, and it lands under a threshold well inside the trained regime
+     (a bigram model that learned nothing sits at 229000/1000 * ln 27 ~ 754). *)
+  let epoch_losses = ref [] in
+  let all_finite = ref true in
+  for epoch = 0 to epochs do
     let epoch_loss = ref 0. in
     for batch = 0 to n_batches - 1 do
       batch_ref := batch;
       Train.run ctx sgd_step;
       let loss = (ctx, batch_loss).@[0] in
       epoch_loss := !epoch_loss +. loss;
-      if batch % 100 = 0 then Stdio.printf "Epoch %d, batch %d, loss=%.4g\n%!" epoch batch loss
+      if not (Float.is_finite loss) then all_finite := false;
+      if batch % 100 = 0 then Stdio.eprintf "Epoch %d, batch %d, loss=%.4g\n%!" epoch batch loss
     done;
-    Stdio.printf "Epoch %d, epoch loss=%.4g\n%!" epoch !epoch_loss
+    if not (Float.is_finite !epoch_loss) then all_finite := false;
+    epoch_losses := !epoch_loss :: !epoch_losses;
+    Stdio.eprintf "Epoch %d, epoch loss=%.4g\n%!" epoch !epoch_loss
   done;
+  let epoch_losses = Array.of_list_rev !epoch_losses in
+  Verdict.p "every batch and epoch loss is finite" !all_finite;
+  let first_loss = epoch_losses.(0) and last_loss = epoch_losses.(epochs) in
+  Verdict.pf "epoch loss fell from epoch 0 to epoch %d" epochs Float.(last_loss < first_loss);
+  let epoch_below = 600. in
+  Verdict.pf "final epoch loss below %g" epoch_below Float.(last_loss < epoch_below);
 
   (* Train.printf_tree batch_loss; *)
   let counter_n, bindings = IDX.get_static_symbol IDX.empty in
