@@ -1,3 +1,4 @@
+the census reads both assembler dialects, not only this host's: true
 every requested vector width emitted a kernel: true
 x86-64: the -march column compiles clean and its loops are censused: true
 x86-64-v2: the -march column compiles clean and its loops are censused: true

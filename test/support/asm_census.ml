@@ -323,12 +323,28 @@ let anchor_lines ~source ~patterns =
 let source_file_numbers lines ~basename =
   List.filter_map lines ~f:(function
     | Some (Directive (".file" :: num :: rest)) -> (
-        match (Int.of_string_opt num, rest) with
-        | Some n, _ :: _ ->
-            let path = List.last_exn rest in
-            let path = String.strip path ~drop:(fun c -> Char.equal c '"') in
-            if String.is_suffix path ~suffix:basename then Some n else None
-        | _ -> None)
+        match Int.of_string_opt num with
+        | None -> None
+        | Some n ->
+            (* Every QUOTED field is a candidate path, and any one of them ending in the basename
+               settles it. Not [List.last_exn rest]: a [.file] directive has three shapes here --
+               [.file N "path"], gcc's two-field [.file 0 "dir" "path"], and clang's
+               [.file 0 "dir" "path" md5 0x<digest>] -- and taking the last token reads the DIGEST
+               as the path on the third, leaving no file number recognized, hence no anchor line
+               matched, hence [census] answering [None] for every row on any clang-based host.
+               Filtering on the quote is what tells a path field from the trailing metadata; the
+               checksum and the [md5] keyword are unquoted. (A directory containing a space splits
+               into tokens that no longer parse as quoted, which costs nothing: the FILENAME field
+               is the one the basename test needs, and it is a separate field in every shape.) *)
+            let quoted =
+              List.filter_map rest ~f:(fun tok ->
+                  if String.is_prefix tok ~prefix:"\"" then
+                    Some (String.strip tok ~drop:(fun c -> Char.equal c '"'))
+                  else None)
+            in
+            if List.exists quoted ~f:(fun path -> String.is_suffix path ~suffix:basename) then
+              Some n
+            else None)
     | _ -> None)
   |> Set.of_list (module Int)
 

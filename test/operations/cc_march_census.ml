@@ -332,6 +332,43 @@ let isa_has ~target ~what ~width =
   else if is_fma_row what then has "v3" || has "v4" || has "sapphirerapids" || has "armv8"
   else true
 
+(* {2 Assembler dialects this host cannot produce}
+
+   Two review findings in a row were about assembly shapes a Linux/gcc box never emits, each of
+   which silenced the census WHOLESALE rather than skewing a number -- Apple's dot-less [LBB0_9]
+   labels, which made every branch target unrecognizable, and clang's
+   [.file 0 "dir" "name" md5 0x...], whose checksum reads as the path and leaves no file number
+   matched. Both fail the same way: every row reports "no loop", on a platform CI actually builds.
+
+   Neither is reachable from a fixture compiled here, so they are pinned against SYNTHETIC assembly
+   instead. That is not a weaker check for this particular property -- what is being tested is the
+   parser's handling of a documented directive shape, and the shape is what is written down. *)
+
+let dialect_probes () =
+  (* Line 3 carries the anchor; the [.loc] directives below point at it. *)
+  let source = "int f(void) {\n  /* prologue */\n  ACC = MAXOF(ACC, SRC);\n  return 0;\n}\n" in
+  let anchor = Census.anchor_lines ~source ~patterns:[ "MAXOF" ] in
+  let elf =
+    String.concat ~sep:"\n"
+      [ "\t.file\t\"census_kernel.c\"";
+        "\t.file 1 \"/build/census_kernel.c\"";
+        "f:"; ".L2:"; "\t.loc 1 3 12"; "\taddps\t%xmm1, %xmm0"; "\tjne\t.L2"; "\tret" ]
+  in
+  (* Apple's local labels carry no leading dot, and clang's [.file] carries a trailing checksum. *)
+  let darwin_clang =
+    String.concat ~sep:"\n"
+      [ "\t.file\t0 \"/build\" \"census_kernel.c\" md5 0x0123456789abcdef0123456789abcdef";
+        "\t.file\t1 \"/build\" \"census_kernel.c\" md5 0x0123456789abcdef0123456789abcdef";
+        "_f:"; "LBB0_1:"; "\t.loc\t1 3 12"; "\taddps\t%xmm1, %xmm0"; "\tjne\tLBB0_1"; "\tretq" ]
+  in
+  let found asm =
+    Option.is_some
+      (Census.census Census.Max_min ~asm ~source_basename:(routine ^ ".c") ~anchor)
+  in
+  Verdict.p_all "the census reads both assembler dialects, not only this host's"
+    [ ("gnu/elf", elf); ("apple-clang", darwin_clang) ]
+    ~f:(fun (_, asm) -> Census.loop_edges ~asm > 0 && found asm)
+
 let () =
   match Stdlib.Sys.getenv_opt "CC_MARCH_CENSUS_EMIT" with
   | Some dir -> build dir
@@ -340,6 +377,7 @@ let () =
       let root = Stdlib.Filename.concat (Stdlib.Sys.getcwd ()) "cc_march_census_kernels" in
       rm_rf root;
       mkdir_p root;
+      dialect_probes ();
       let emitted = emit_all ~exe ~root in
       Verdict.p_all "every requested vector width emitted a kernel" widths ~f:(fun w ->
           List.exists emitted ~f:(fun e -> e.width = w));
