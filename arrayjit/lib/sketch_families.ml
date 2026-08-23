@@ -128,11 +128,12 @@ type sketch_params = {
           thread identity is preserved. Seeded as a {e twin} of each geometry — the serial-batch
           flavor stays measured, because block-count curves are non-monotone (gh-ocannl-569's probe
           peaked near 128 blocks and regressed by 1024): the tuner, not a heuristic, decides
-          whether the extra parallelism beats the occupancy it costs. Never seeded when the batch
-          extents' product exceeds the backend's [.z] launch-dimension limit
-          ([hardware_limits.max_grid_yz], falling back to [max_grid_fold_extent] where the backend
-          advertises none — the same limit [Schedule.check_hardware_limits_classified] enforces
-          pre-driver for schedules that do not come from these seeds). *)
+          whether the extra parallelism beats the occupancy it costs. Refuted at the leaf,
+          like every other launch dimension, when the batch extents' product exceeds the backend's
+          [.z] limit ([Schedule.launch_geometry_excess] over [hardware_limits.max_grid_yz], with
+          [max_grid_fold_extent] standing in where the backend advertises none) — the same reading
+          [Schedule.check_hardware_limits_classified] enforces pre-driver for schedules that do not
+          come from these seeds. *)
   sk_swizzle : LL.swizzle_kind option;
       (** Staged GPU mma sketches only ([sk_mma] with [sk_bk > 0]): store both cooperative operand
           tiles in this XOR layout (gh-ocannl-481 item 3, D3). Seeded as a {e twin} of each staged
@@ -1308,21 +1309,87 @@ let companion_role_ops ~(roles : [ `Batch | `Row | `Col ] array)
    ones the pipelines hoist above the row loop — the final nest order). *)
 let matmul_batch_loops (site : matmul_site) : (Idx.symbol * int) list = site.m_bo @ site.m_bi
 
-(* The batch fold lands whole batch-extent products on [.z], and CUDA/HIP cap [gridDim.z] (like
-   [gridDim.y]) at 65535 ([gridDim.x] alone is 2^31-scale; Metal is larger still). The
-   authoritative per-backend cap is [hardware_limits.max_grid_yz], enforced pre-driver by
-   [Schedule.check_hardware_limits_classified];
-   this constant is the conservative fallback when a backend advertises no limit, so seeding stays
-   deterministic across machines. A product beyond the cap must not be seeded: the candidate could
-   only fail at launch, on the GPU backends only, after compiling. *)
+(* {3 The launch geometry a seed will have (gh-ocannl-709)}
+
+   A GPU candidate's grid and workgroup extents are decided by the parameters, so the seeder can
+   predict them and consult the SAME cap reading the pre-driver gate uses
+   ([Schedule.launch_geometry_excess], whose rows are the device's per-dimension limits). What the
+   seeder adds is only the prediction; before gh-ocannl-709 it also carried its own copy of one cap
+   (the [.z] fold's), which is how the other four dimensions could only be learned one wasted
+   compile at a time. *)
+
+(* CUDA/HIP cap [gridDim.y] and [gridDim.z] at 65535 ([gridDim.x] alone is 2^31-scale; Metal is
+   larger still, and advertises no cap). The authoritative per-backend cap is
+   [hardware_limits.max_grid_yz]; this constant is the conservative fallback where a backend
+   advertises none, so seeding stays deterministic across machines instead of proposing candidates
+   that only the 16-bit backends would refuse. It saturates the record ([seeding_limits]) rather
+   than a single dimension: the two grid dimensions share the one field, so a fallback applied to
+   one and not the other would be the very asymmetry this section removes. *)
 let max_grid_fold_extent = 65535
 
-(* Whether the [sk_batch_grid] twins are seedable for this site: there are batch loops to spread,
-   and their product fits the backend's [.z] launch dimension. *)
-let batch_grid_twin_ok ~(limits : Ir.Backend_intf.hardware_limits) (site : matmul_site) : bool =
-  let cap = Option.value limits.Ir.Backend_intf.max_grid_yz ~default:max_grid_fold_extent in
+(* The limits a SEED is judged against: the backend's own, with an unadvertised grid cap saturated
+   to the conservative fallback. The gate deliberately does not do this — there, an unadvertised cap
+   is genuinely no cap, and a hand-built schedule on Metal may fold as wide as it likes. *)
+let seeding_limits (limits : Ir.Backend_intf.hardware_limits) : Ir.Backend_intf.hardware_limits =
+  {
+    limits with
+    Ir.Backend_intf.max_grid_yz =
+      Some (Option.value limits.Ir.Backend_intf.max_grid_yz ~default:max_grid_fold_extent);
+  }
+
+(* The launch geometry of a nest whose hardware-annotated loops have these extents in NEST order
+   (outermost first) — the seeding-side mirror of [Ir.Low_level.launch_dims], which reads the same
+   positional rule off the lowered code: among a kernel's loops of one kind the innermost binds
+   [.x], the next [.y], the next [.z], and [Grid] loops beyond the second fold their PRODUCT onto
+   [.z]. One encoding of the slot rule for every family that predicts a geometry. *)
+let predicted_launch_geometry ~(grid : int list) ~(block : int list) : Sched.launch_geometry =
+  let slot loops i = match List.nth (List.rev loops) i with Some n -> Some n | None -> Some 1 in
+  let fold = match List.rev grid with _ :: _ :: rest -> List.fold rest ~init:1 ~f:( * ) | _ -> 1 in
+  {
+    Sched.lg_grid_y = slot grid 1;
+    lg_grid_z = Some fold;
+    lg_block_x = slot block 0;
+    lg_block_y = slot block 1;
+    lg_block_z = slot block 2;
+  }
+
+(* Why a device refuses this predicted geometry, phrased as the seed's refutation witness: the same
+   sentence [Schedule.check_hardware_limits_classified] would put in its decline, so a refutation
+   log and a decline log read alike. *)
+let launch_geometry_refutation ~(limits : Ir.Backend_intf.hardware_limits)
+    (geom : Sched.launch_geometry) : string option =
+  Option.map (Sched.launch_geometry_excess ~limits:(seeding_limits limits) geom)
+    ~f:(fun x -> "the candidate " ^ x.Sched.lx_phrase)
+
+(* Whether the [sk_batch_grid] twins are worth a decision level for this site: there are batch loops
+   to spread, and their product is more than one block. A STRUCTURAL question only — whether the
+   product fits the device's [.z] dimension is the launch predicate's business, and asking it here
+   too is what gh-ocannl-709 found: the one dimension of five that seeding pre-filtered, in its own
+   hand-written encoding of a cap the gate already held. The level now appears on every batched
+   site, and an over-cap fold is refuted leaf by leaf with the gate's own sentence — the same
+   treatment as the other four dimensions, and a reason where there used to be an absence. *)
+let batch_grid_twin_ok (site : matmul_site) : bool =
   let product = List.fold (matmul_batch_loops site) ~init:1 ~f:(fun acc (_, n) -> acc * n) in
-  (not (List.is_empty (matmul_batch_loops site))) && product >= 2 && product <= cap
+  (not (List.is_empty (matmul_batch_loops site))) && product >= 2
+
+(* The launch geometry a GPU matmul sketch will have, from the parameters alone. Grid loops in nest
+   order: the batch loops the [sk_batch_grid] twins retype (outermost), then the row-block loop,
+   then the column-block loop — so the row blocks bind [.y] and the batch product folds onto [.z].
+   Workgroup loops: the register splits [i_w] then [j_w] for the blocktile pipeline (so [bn/tn]
+   binds [.x] and [bm/tm] binds [.y]), the tensorization lane alone for the mma pipeline, whose
+   column block IS the lane width. Parameters that name no block geometry — every CPU pipeline —
+   predict nothing: the C backends render annotated loops serially and have no launch to bound. *)
+let matmul_launch_geometry (site : matmul_site) (p : sketch_params) : Sched.launch_geometry =
+  if not (p.sk_gpu && p.sk_bm > 0 && p.sk_bn > 0) then Sched.unknown_launch_geometry
+  else
+    let batch = if p.sk_batch_grid then List.map (matmul_batch_loops site) ~f:snd else [] in
+    let grid = batch @ [ blocks_of site.m_ni p.sk_bm; blocks_of site.m_nj p.sk_bn ] in
+    let block =
+      if p.sk_mma then [ p.sk_simd ]
+      else if p.sk_tm > 0 && p.sk_tn > 0 then [ p.sk_bm / p.sk_tm; p.sk_bn / p.sk_tn ]
+      else []
+    in
+    predicted_launch_geometry ~grid ~block
 
 (* The site nest's own batch geometry under [sk_batch_grid]: whole-loop [Grid] retypes of the batch
    loops ([batch_hoist_swaps] has already made them the outermost loops of the nest). *)
@@ -2279,6 +2346,13 @@ let conv_seed_params ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limits)
                   whole @ blocked @ depth_twins)
         | _ -> []
       in
+      (* The conv family does not predict its launch geometry yet, so its GPU seeds are not
+         pre-filtered against the caps [Schedule.launch_geometry_excess] holds (gh-ocannl-709): a
+         conv's outer [Grid] loops fold batch x spatial onto [.z], which large inputs can push over
+         a 16-bit cap, and today that costs one compile the gate then declines. What is missing is
+         a [conv_launch_geometry] beside [matmul_launch_geometry] and its cross-check against an
+         applied schedule's [Ir.Low_level.launch_dims] — the caps themselves need no second
+         encoding. *)
       let seeds = cpu_seeds @ gpu_seeds in
       if List.is_empty seeds then None
       else
@@ -2541,7 +2615,17 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
     match precondition_witness with Some w -> Sspace.Refuted w | None -> child
   in
   let divides c n = c <= n && n % c = 0 in
-  let leaf p = Sspace.Child (lazy (Sspace.Leaf p)) in
+  (* Every leaf is judged against the device's launch caps before it becomes a candidate
+     (gh-ocannl-709), through the same {!Schedule.launch_geometry_excess} the pre-driver gate
+     consults — so the refutation carries the gate's own sentence, and a search records WHY a
+     geometry is unreachable on this device instead of paying a compile to be told. One hook rather
+     than a predicate per pipeline: a pipeline added to this family is filtered by construction, as
+     long as [matmul_launch_geometry] can predict its geometry. *)
+  let leaf p =
+    match launch_geometry_refutation ~limits (matmul_launch_geometry site p) with
+    | Some witness -> Sspace.Refuted witness
+    | None -> Sspace.Child (lazy (Sspace.Leaf p))
+  in
   let choice children = decided_choice children in
   (* [subt] defers subtree construction into the child's lazy: verdicts are decided at parent
      construction (fathoming needs them without expansion), subtrees are not. *)
@@ -3304,12 +3388,15 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
   in
   (* The batch-geometry level (gh-ocannl-643), per GPU pipeline, ABOVE the geometry menus:
      "batch-serial" first, so an unbatched (or CPU) site's leaf list is byte-identical to the
-     pre-level enumeration — the level only appears where the twins are seedable, and the grid twins
-     follow all serial-batch geometries of their pipeline, like the other propose-both-measure
-     levels. The coverage witness is flavor-independent here ([companion_geometry]'s verdict never
-     depends on the emitted geometry), so both flavors share the one precondition guard. *)
+     pre-level enumeration — the level only appears where there are batch loops to spread, and the
+     grid twins follow all serial-batch geometries of their pipeline, like the other
+     propose-both-measure levels. Whether the device can LAUNCH a twin's fold is not asked here: it
+     is one dimension of the launch predicate every leaf passes through (gh-ocannl-709), so an
+     over-cap fold refutes with a reason instead of vanishing with the level. The coverage witness
+     is flavor-independent here ([companion_geometry]'s verdict never depends on the emitted
+     geometry), so both flavors share the one precondition guard. *)
   let with_batch_twins mk =
-    if is_gpu && batch_grid_twin_ok ~limits site then
+    if is_gpu && batch_grid_twin_ok site then
       subt (fun () ->
           choice
             [

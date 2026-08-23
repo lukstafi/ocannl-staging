@@ -740,13 +740,61 @@ val maybe_default_schedules :
     not apply (non-GPU/CPU backend, automatic scheduling disabled, config [schedule_fission=false],
     kernel logging active, or nothing to split). *)
 
+type launch_geometry = {
+  lg_grid_y : int option;
+  lg_grid_z : int option;
+  lg_block_x : int option;
+  lg_block_y : int option;
+  lg_block_z : int option;
+}
+(** As much of a candidate's launch geometry as its caller knows (gh-ocannl-709): the two grid
+    dimensions backends cap and the workgroup's three, [None] meaning "not predicted here" — which
+    exempts that dimension rather than refusing on it. Five fields, not six: [grid.(0)] is
+    2^31-scale on every backend that binds hardware axes, so no backend has a cap to report for it.
+    {!check_hardware_limits_classified} fills all five from the lowered code
+    ({!launch_geometry_of_dims}); autotune's seeding pre-filter predicts what it can from the
+    parameters it is about to commit to. A prediction is a {e lower bound} — it describes the site's
+    own nest, while {!Low_level.launch_dims} maxes over the kernel's zeroing and companion nests too
+    — so an under-prediction costs a compile the gate then declines, and only an over-prediction
+    could withhold a legal candidate. *)
+
+val unknown_launch_geometry : launch_geometry
+(** All-[None]: predicts nothing, refuses nothing. The base a family builds its prediction on. *)
+
+val launch_geometry_of_dims : Low_level.launch_dims -> launch_geometry
+(** The geometry a lowered kernel will actually launch with — every field [Some]. *)
+
+type launch_excess = {
+  lx_resource : Schedule_outcome.resource;
+  lx_requested : int;
+  lx_limit : int;
+  lx_phrase : string;
+}
+(** The first dimension of a geometry the device refuses. [lx_phrase] is the verb phrase both
+    callers render — e.g. ["requests a .z workgroup extent of 128, exceeding the device limit of
+    64"] — so a gate [detail] and a seeding refutation witness say the same thing about the same
+    candidate. *)
+
+val launch_geometry_excess :
+  limits:Backend_intf.hardware_limits -> launch_geometry -> launch_excess option
+(** The one static reading of a device's per-dimension launch caps (gh-ocannl-709), consulted both
+    by {!check_hardware_limits_classified} (on the lowered code's geometry) and by autotune's
+    seeding pre-filter (on a candidate's predicted geometry), so the two cannot disagree about what
+    a device permits and a cap is never encoded twice. [None] = every predicted dimension fits.
+    Rows are tested in the order [.x]/[.y]/[.z] workgroup, [.y] grid, [.z] grid fold; a [None] cap
+    ({!field:Backend_intf.max_workgroup_dims} on the C backends,
+    {!field:Backend_intf.max_grid_yz} on Metal) exempts its dimensions. The workgroup thread
+    PRODUCT is deliberately not a row: it is not a per-dimension geometry question, and only the
+    gate checks it. *)
+
 val check_hardware_limits :
   name:string -> limits:Backend_intf.hardware_limits -> Low_level.optimized -> unit
 (** Validates the scheduled kernel [name] against the device limits, raising [Utils.User_error] on
     violation: the launch's workgroup size (the product of {!Low_level.launch_dims}' block
     dimensions) against {!field:Backend_intf.max_threads_per_workgroup}, the total bytes of
     [workgroup_shared] tiles against {!field:Backend_intf.max_workgroup_memory_bytes}, and then the
-    launch geometry dimension by dimension from one table — the workgroup's [.x]/[.y]/[.z] extents
+    launch geometry dimension by dimension through the shared {!launch_geometry_excess} — the
+    workgroup's [.x]/[.y]/[.z] extents
     against {!field:Backend_intf.max_workgroup_dims} (a separate hardware fact from the thread
     product: CUDA caps [maxThreadsDim.z] at 64 while the product cap is 1024 — gh-ocannl-679), and
     both 16-bit-capped grid dimensions, the [.y] extent ([grid.(1)], a blocktiled matmul's row-block

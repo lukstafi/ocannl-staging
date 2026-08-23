@@ -108,9 +108,9 @@ files.
   cells another thread accumulates; `companion_geometry`'s `annotate` callback therefore takes the
   companion's whole chain (the hoist `Swap`s name the companion's own symbols) — its Ok/Error
   verdict still never depends on what `annotate` emits, so the gh-577 static witness stays sound;
-  and batch products beyond 65535 are never seeded (`max_grid_fold_extent` — the CUDA/HIP
-  `gridDim.z` cap; such a candidate could only fail at launch, GPU-only, after compiling).
-  The pre-driver gate that backs that seeding filter (`Schedule.check_hardware_limits_classified`)
+  and batch products beyond the device's `.z` cap are never seeded — one dimension of the launch
+  predicate below, not a filter of its own.
+  The pre-driver gate (`Schedule.check_hardware_limits_classified`)
   covers BOTH 16-bit grid dimensions against the single `hardware_limits.max_grid_yz`: `grid.(2)`
   (the fold) and `grid.(1)` (the row-block count, which overflows on m-extent alone — no batch axis
   involved). One limit field, two typed resources (`Grid_y_extent` / `Grid_z_extent`), since the
@@ -139,6 +139,44 @@ files.
   how `gridDim.y` went ungated for a release and how the workgroup dimensions went ungated
   entirely. `grid.(0)` is the deliberate sixth absence: 2^31-scale wherever hardware axes bind.
   Adding a cap means adding a row.
+
+- **One predicate for the launch caps, consulted by the gate AND by seeding** (gh-ocannl-709).
+  Those five rows live in `Schedule.launch_geometry_excess : limits:hardware_limits ->
+  launch_geometry -> launch_excess option`, not in the gate. A `launch_geometry` is the five capped
+  dimensions as `int option`s (`None` = "this caller does not predict it", which EXEMPTS the
+  dimension rather than refusing on it); `launch_excess` carries the typed
+  `Schedule_outcome.resource`, the requested extent, the limit, and `lx_phrase` — the verb phrase
+  both callers render, so a gate `detail` and a seeding refutation witness are the same sentence
+  about the same candidate. The gate fills all five from the lowered code
+  (`launch_geometry_of_dims (Low_level.launch_dims llc)`); autotune's matmul family predicts them
+  from the parameters (`Autotune.matmul_launch_geometry`) and refutes at the leaf. The workgroup
+  thread PRODUCT is deliberately NOT a row: it is not a per-dimension geometry question, and only
+  the gate asks it.
+  Why it matters: before this, seeding pre-filtered exactly ONE of the five (the `.z` fold, in
+  `batch_grid_twin_ok`'s own copy of `max_grid_yz`) and a search learned the other four one wasted
+  GPU compile at a time — while the one it did filter was a second encoding of a cap the gate
+  already held. `batch_grid_twin_ok` is now structural only ("are there batch loops worth a decision
+  level"), so an over-cap fold refutes at the leaf **with a reason** instead of the twin level
+  silently vanishing.
+  Two traps when adding a family or a dimension. (1) A prediction must be a LOWER bound: it
+  describes the site's own nest, while `launch_dims` maxes over the zeroing and companion nests too
+  — an under-prediction costs one compile the gate then declines, an OVER-prediction silently
+  withholds a legal candidate, which is the worse failure. `test/operations/launch_predicate_parity.ml`
+  therefore cross-checks the prediction against every GPU seed's applied `launch_dims`, per
+  dimension, alongside the seed/gate parity claims (each with its at-the-cap negative control).
+  (2) Slot assignment is positional from the INSIDE out and is encoded once, in
+  `Sketch_families.predicted_launch_geometry ~grid ~block` (extents in nest order, outermost first):
+  the innermost same-kind loop binds `.x`, the next `.y`, and `Grid` loops beyond the second fold
+  their PRODUCT onto `.z`. For the GPU matmul pipelines that makes the column blocks `.x`, the row
+  blocks `.y` and the batch fold `.z`; the blocktile's two `Workgroup` splits put `bn/tn` on `.x`
+  and `bm/tm` on `.y`, while the mma pipeline's lone tensorization lane is `.x` alone.
+  Seeding saturates an unadvertised `max_grid_yz` to the conservative `max_grid_fold_extent`
+  (65535) so the seed set does not swing with the machine; the GATE does not — there, an
+  unadvertised cap is genuinely no cap.
+  Not yet wired: the CONV family predicts no geometry, so its GPU seeds are still filtered by the
+  gate alone (a 2-D conv folds batch x spatial onto `.z`, which large inputs can push over a 16-bit
+  cap). What is missing is a `conv_launch_geometry` beside `matmul_launch_geometry` and its
+  cross-check against an applied schedule — the caps themselves need no second encoding.
 
   The GPU backends' `static_properties` dumps list the queried launch-dimension limits next to
   `max_threads_per_block` — HIP `max_grid_size` and `max_threads_dim`, CUDA `max_block_dim` and
