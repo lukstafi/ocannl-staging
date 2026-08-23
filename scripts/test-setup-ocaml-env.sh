@@ -78,7 +78,12 @@ cleanup() {
   # carry this run's pid in their duration (see D_* below), so they are
   # unambiguously ours to reap and no concurrent run is disturbed.
   local orphans
-  orphans="$(pgrep -x sleep -a 2>/dev/null | awk -v p="$$" '$3 ~ ("^[0-9]+[.]" p "$") { print $1 }')"
+  orphans="$(ps -A -o pid=,args= 2>/dev/null | awk -v p="$$" '
+    NF == 3 {
+      cmd = $2; sub(/^.*\//, "", cmd)
+      if (cmd == "sleep" && $3 ~ ("^[0-9]+[.]" p "$")) print $1
+    }')"
+  # shellcheck disable=SC2086
   [ -n "$orphans" ] && kill -KILL $orphans 2>/dev/null
   if [ "$KEEP" = 1 ]; then echo "kept $TMP"; else rm -rf "$TMP"; fi
   return 0
@@ -106,19 +111,34 @@ fi
 # shellcheck disable=SC1090
 . "$TMP/bounded.sh"
 
-# Survivors are counted by EXACT duration: `pgrep -x sleep` alone also matches
-# the watchdog's own `sleep 3` / `sleep 1`, and a substring `pgrep sleep` would
-# additionally match this harness's command line. The durations also carry this
+# Survivors are counted by EXACT duration: matching `sleep` alone would also
+# catch the watchdog's own `sleep 3` / `sleep 1`, and a substring match would
+# additionally catch this harness's command line. The durations also carry this
 # run's pid, so a second copy of this script (or a leftover from a crashed one)
 # cannot be miscounted as this run's orphan.
+#
+# Listed with `ps -A -o pid=,args=` rather than `pgrep -a`: `-a` is not the same
+# option on both platforms — procps prints the command line, while on macOS it
+# means "include process ancestors in the match list" and prints no arguments at
+# all. A counter that finds no duration to match reports zero forever, and every
+# no-orphan assertion below then passes without testing anything, which is why
+# the prerequisite check makes the counter count something known before use.
 D_TERM="91.$$"      # (a) honours TERM
 D_IGN_CHILD="92.$$" # (b) the child that ignores TERM
 D_IGN_PARENT="93.$$" # (b) the parent that does not
 D_IGN_ALL="94.$$"   # (c) everything ignores TERM
 D_DAEMON="95.$$"    # (d) the daemon left behind by an exit-0 command
 D_WATCHDOG="97.$$"  # (e) the bound, i.e. the watchdog's own sleep
+D_SELFTEST="96.$$"  # the prerequisite check's own known-live sleep
+sleep_pids() { # sleep_pids DURATION -> pids of live `sleep DURATION`
+  ps -A -o pid=,args= 2>/dev/null | awk -v d="$1" '
+    NF == 3 {
+      cmd = $2; sub(/^.*\//, "", cmd)     # argv[0] may carry a directory
+      if (cmd == "sleep" && $3 == d) print $1
+    }'
+}
 survivors() { # survivors DURATION -> count of live `sleep DURATION`
-  pgrep -x sleep -a 2>/dev/null | awk -v d="$1" '$3 == d { n++ } END { print n + 0 }'
+  sleep_pids "$1" | awk 'END { print NR + 0 }'
 }
 settled_survivors() { # settled_survivors DURATION -- allow for asynchronous reaping
   local i n
@@ -133,9 +153,19 @@ settled_survivors() { # settled_survivors DURATION -- allow for asynchronous rea
 
 BOUND=3
 
-if ! command -v pgrep >/dev/null 2>&1 || ! command -v awk >/dev/null 2>&1; then
-  report 1 "bounded: prerequisites" "pgrep and awk are required to count survivors"
+# Not "is there a `ps`" but "does this `ps`, parsed this way, actually find a
+# process we know is running" — the macOS `pgrep -a` trap was invisible exactly
+# because the tool was present and the parse silently matched nothing.
+sleep "$D_SELFTEST" >/dev/null 2>&1 </dev/null &
+selftest_pid=$!
+selftest_found="$(survivors "$D_SELFTEST")"
+kill -KILL "$selftest_pid" 2>/dev/null
+wait "$selftest_pid" 2>/dev/null
+if [ "$selftest_found" != 1 ]; then
+  report 1 "bounded: prerequisites — the survivor counter can count" \
+    "counted $selftest_found live 'sleep $D_SELFTEST', expected 1; every no-orphan leg below would pass vacuously"
 else
+  report 0 "bounded: prerequisites — the survivor counter can count"
   # Guard: `bounded` signals the process GROUP. If `set -m` did not give the
   # child a group of its own, that group is OURS and the first leg would kill
   # this harness. Check before running any of them.
