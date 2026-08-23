@@ -137,6 +137,19 @@ files.
   rather than a numerics one — when a sweep loses only one framework's rows, suspect the emitter's
   spelling before the framework.
 
+- A `bin/` bench's correctness guard is a position-weighted checksum of the WHOLE output, and its
+  position dependence is the whole of it: a residue of the FLATTENED offset `t = i*n + j` loses its
+  row dependence exactly when the modulus divides the row stride, so `1 + (t mod 251)` gives every
+  row the identical weight at n = 251, 502, 753 — a row permutation, which is what a misplaced edge
+  peel produces, then leaves the checksum unchanged while the interior spot cell is blind to other
+  rows at the same time. The same collapse hits operand data drawn as `(t mod p)`: at `p | stride`
+  every row is identical and a schedule substituting the wrong row computes the right answer. Key on
+  the (row, column) PAIR through `Bench_checksum` (`bin/bench_checksum.ml`, gh-ocannl-711) — shared
+  by `schedule_bench` and `narrow_gebp_bench` precisely because the fixed copy and the degenerate one
+  had sat one file apart. Keep the weights capped below 256 so the products of exact-in-binary
+  operands stay exact in the accumulator and variants summing in different orders compare BITWISE;
+  and keep the checksum outside the timed region.
+
 - A benchmark leg belongs to a WORKLOAD, not to a runner (gh-ocannl-551). `BENCH_STATIC_SCALE` /
   `BENCH_GATE_INTERVAL` lived in `bench_mlp` alone, so the gate-cost contract silently had no
   answer for `gpt2_mini` — and a forward-only workload has no loss scale to gate in the first
