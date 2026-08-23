@@ -24,8 +24,8 @@
 #
 # Legs:
 #   1. `bounded` — the watchdog: TERM at the bound, KILL 5s later, process-group
-#      kill, rc preservation, no orphans, and no waiting out the bound for a
-#      group that is merely draining.
+#      kill, rc preservation, no orphans, and a group holding only a zombie
+#      read as empty rather than as work.
 #   2. counting — behind/ahead wording and recovery command, offline fallback,
 #      ref-ambiguity, FETCH_HEAD untouched, no-origin silence.
 #   3. SSH launcher gating — which program git ends up invoking and whether the
@@ -62,6 +62,16 @@ report() { # report RC LABEL [DETAIL]
 echo "testing $HOOK_SRC"
 printf '  digest %s\n' "$( (cksum <"$HOOK_SRC") 2>/dev/null || echo '?')"
 
+# The header and the agent-note both tell people to run this as
+# `scripts/test-setup-ocaml-env.sh`, which needs the bit to survive in git and
+# through a fresh clone; it has been lost once already.
+if [ -x "$0" ]; then
+  report 0 "harness: this script is executable, as its documented invocation needs"
+else
+  report 1 "harness: this script is executable, as its documented invocation needs" \
+    "$0 is not executable — 'scripts/test-setup-ocaml-env.sh' would fail with Permission denied"
+fi
+
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/setup-ocaml-env-test.XXXXXX")"
 cleanup() {
   # A hook broken in the way leg 1 probes for can leave orphans behind. They
@@ -80,14 +90,15 @@ trap cleanup EXIT
 # ---------------------------------------------------------------------------
 # Extract the function from the working-tree hook and source it, so the legs
 # below exercise the very text that ships rather than a paraphrase of it.
-sed -n '/^bounded() {/,/^}/p' "$HOOK_SRC" >"$TMP/bounded.sh"
+sed -n '/^group_alive() {/,/^}/p;/^bounded() {/,/^}/p' "$HOOK_SRC" >"$TMP/bounded.sh"
 # Checked structurally — opens with the header, closes with the brace, has a
 # body — rather than by grepping for one line of it: this guard exists to catch
 # a sed that matched nothing, and must still hold while a leg under test is
 # being mutated to see the assertion fail.
 b_lines="$(wc -l <"$TMP/bounded.sh" | tr -d ' ')"
-if [ "$(head -n1 "$TMP/bounded.sh")" != "bounded() {" ] \
-   || [ "$(tail -n1 "$TMP/bounded.sh")" != "}" ] || [ "$b_lines" -lt 5 ]; then
+if [ "$(head -n1 "$TMP/bounded.sh")" != "group_alive() {" ] \
+   || ! grep -qx 'bounded() {' "$TMP/bounded.sh" \
+   || [ "$(tail -n1 "$TMP/bounded.sh")" != "}" ] || [ "$b_lines" -lt 10 ]; then
   report 1 "bounded: extracted" "sed did not capture the function body from $HOOK_SRC"
 else
   report 0 "bounded: extracted ($b_lines lines)"
@@ -106,7 +117,6 @@ D_IGN_PARENT="93.$$" # (b) the parent that does not
 D_IGN_ALL="94.$$"   # (c) everything ignores TERM
 D_DAEMON="95.$$"    # (d) the daemon left behind by an exit-0 command
 D_WATCHDOG="97.$$"  # (e) the bound, i.e. the watchdog's own sleep
-D_DRAIN=0.1         # (f) a child that outlives its parent only briefly
 survivors() { # survivors DURATION -> count of live `sleep DURATION`
   pgrep -x sleep -a 2>/dev/null | awk -v d="$1" '$3 == d { n++ } END { print n + 0 }'
 }
@@ -204,22 +214,43 @@ else
         "rc=$rc elapsed=${el}s (want ~0s) watchdog-sleeps=$left"
     fi
 
-    # (f) The group drains a moment AFTER the command exits — the shape git
-    #     leaves behind, whose ssh child is briefly an unreaped zombie. `kill -0`
-    #     counts a zombie as present, so testing the group in the instant after
-    #     `wait` read every failed ssh fetch as still running and sat out the
-    #     whole bound. The return must not wait on a group that is about to be
-    #     empty; leg (d) is the other side of this, a group that stays occupied.
-    t0=$SECONDS
-    bounded "$BOUND" bash -c 'sleep "$1" >/dev/null 2>&1 </dev/null & exit 0' _ \
-      "$D_DRAIN" >/dev/null 2>&1; rc=$?
-    el=$((SECONDS - t0))
-    if [ "$rc" = 0 ] && [ "$el" -le 2 ]; then
-      report 0 "bounded (f): a group that drains just after the command exits does not cost the bound"
+    # (f) A group holding nothing but a zombie must read as EMPTY. This is the
+    #     misreading that cost the hook 30s on every failed ssh fetch: `kill -0`
+    #     answers yes for a zombie exactly as for a live process. Under a PID 1
+    #     that reaps, such a zombie is transient and the old check merely lost a
+    #     race with it; under one that does not — the common container case — it
+    #     is PERMANENT, so no amount of waiting would have cleared it. The group
+    #     here is built to hold a zombie and nothing else: a child placed in a
+    #     process group of its own, whose parent `exec`s into a `sleep` that
+    #     will never reap it. `kill -0` must still answer yes for this leg to be
+    #     testing anything at all; `group_alive` must answer no. Leg (d) is the
+    #     other side of the question — a group that really is occupied still
+    #     waits — and ssh (15) is the end-to-end symptom.
+    zpidfile="$TMP/zombie.pid"; rm -f "$zpidfile"
+    bash -c 'set -m; sleep 0.3 >/dev/null 2>&1 </dev/null & echo $! >"$1"; set +m
+             exec sleep 5' _ "$zpidfile" >/dev/null 2>&1 </dev/null &
+    zparent=$!
+    zpid=""
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+      [ -s "$zpidfile" ] && zpid="$(cat "$zpidfile")" && break
+      sleep 0.1
+    done
+    # Let the child exit; nothing will reap it while its parent sleeps.
+    sleep 0.5
+    if [ -z "$zpid" ]; then
+      report 1 "bounded (f): a group holding nothing but a zombie reads as empty" \
+        "could not start the zombie maker"
+    elif ! kill -0 -- -"$zpid" 2>/dev/null; then
+      report 1 "bounded (f): a group holding nothing but a zombie reads as empty" \
+        "the group is already gone, so the leg would pass without testing anything"
+    elif group_alive "$zpid"; then
+      report 1 "bounded (f): a group holding nothing but a zombie reads as empty" \
+        "group_alive counted a zombie as work — bounded would wait out the whole bound"
     else
-      report 1 "bounded (f): a group that drains just after the command exits does not cost the bound" \
-        "rc=$rc elapsed=${el}s (want <1s, i.e. well inside the ${BOUND}s bound)"
+      report 0 "bounded (f): a group holding nothing but a zombie reads as empty"
     fi
+    kill -KILL "$zparent" 2>/dev/null
+    wait "$zparent" 2>/dev/null
   fi
 fi
 
@@ -265,7 +296,13 @@ run_hook() { # run_hook CLONE OUTFILE   (extra env comes from the RUN_ENV array)
 
 has() { grep -qF -- "$2" "$1"; }
 
-git_q() { git -c advice.detachedHead=false -c init.defaultBranch=master \
+# The setup commands need the same isolation as the hook runs, not just the
+# same identity: a global `protocol.file.allow=never` would fail every local
+# clone below, and a global `core.hooksPath` could reject or rewrite the
+# synthetic commits — either way the harness would fail somewhere upstream of
+# the thing it is testing, and say so misleadingly.
+git_q() { GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+          git -c advice.detachedHead=false -c init.defaultBranch=master \
               -c user.name=test -c user.email=test@example.invalid \
               -c commit.gpgsign=false "$@"; }
 
@@ -415,6 +452,20 @@ fi
 # because git's ssh child was still a zombie in the process group when `bounded`
 # tested it for emptiness. `bounded` now waits for the group to drain, which
 # leg 1 (f) pins, and these are quick; running them together is just cheap.
+# Spelled out here rather than read from the hook: a harness that took the list
+# from the thing under test would follow a regression instead of catching it.
+# The hook's own spelling is pinned by the leg below, so adding or removing an
+# option there fails loudly instead of silently narrowing what these legs check.
+SSH_OPT_BUNDLE="BatchMode=yes ConnectTimeout=10 ServerAliveInterval=5 ServerAliveCountMax=2"
+ssh_opts_line=""
+for opt in $SSH_OPT_BUNDLE; do ssh_opts_line="$ssh_opts_line -o $opt"; done
+if grep -qF -- "ssh_opts=\"${ssh_opts_line# }\"" "$HOOK_SRC"; then
+  report 0 "ssh (0): the hook appends exactly the bundle these legs assert on"
+else
+  report 1 "ssh (0): the hook appends exactly the bundle these legs assert on" \
+    "hook has: $(grep -n 'ssh_opts=' "$HOOK_SRC" | tr -d '\n')"
+fi
+
 SSH_BASE="$TMP/ssh-base"
 mkdir -p "$SSH_BASE/scripts"
 git_q -C "$SSH_BASE" init -q
@@ -552,16 +603,50 @@ while [ "$i" -lt "${#SSH_SLUGS[@]}" ]; do
     continue
   fi
   prog="$(basename "${line%% *}")"
-  case "$line" in
-    *"-o BatchMode=yes"*) opts=yes ;;
-    *) opts=no ;;
-  esac
-  if [ "$prog" = "$want_prog" ] && [ "$opts" = "$want_opts" ]; then
+  # Classified on the WHOLE bundle, not on BatchMode alone: an option silently
+  # dropped from the hook, or one leaking onto a launcher that must not get it,
+  # is exactly the regression that puts the long startup stalls back.
+  seen=""; absent=""
+  for opt in $SSH_OPT_BUNDLE; do
+    case "$line" in
+      *"-o $opt"*) seen="$seen $opt" ;;
+      *) absent="$absent $opt" ;;
+    esac
+  done
+  if [ "$want_opts" = yes ]; then opts_ok="$absent"; else opts_ok="$seen"; fi
+  if [ "$prog" = "$want_prog" ] && [ -z "$opts_ok" ]; then
     report 0 "$label"
+  elif [ "$prog" != "$want_prog" ]; then
+    report 1 "$label" "invoked '$prog', wanted '$want_prog'; line: $line"
+  elif [ "$want_opts" = yes ]; then
+    report 1 "$label" "options missing:$absent; line: $line"
   else
-    report 1 "$label" "invoked '$prog' with options=$opts (wanted '$want_prog' / options=$want_opts); line: $line"
+    report 1 "$label" "options wrongly appended:$seen; line: $line"
   fi
 done
+
+# The symptom all of that is for, measured end to end: a failing ssh fetch must
+# come back promptly. Run serially and timed — the cases above run concurrently,
+# which is exactly what makes their wall clock unusable as evidence.
+#
+# Weaker than leg 1 (f) on purpose, and it does not replace it. Where the ssh
+# child's zombie is reaped promptly this is a RACE: degrading `group_alive` back
+# to a bare `kill -0` was measured passing here, the few microseconds of the
+# function call being enough to win it, while leg (f) reddened. So a pass here
+# is not evidence the group check is sound; a failure is evidence it is not, and
+# on a PID 1 that does not reap — where the misreading is permanent rather than
+# raced — this is the leg that reports the 30s stall as a stall.
+ssh_prepare timing ssh
+RUN_ENV=(GIT_SSH_COMMAND="$LAUNCHER")
+t0=$SECONDS
+run_hook "$CASEDIR" "$TMP/out-ssh-timing"
+el=$((SECONDS - t0))
+if [ "$el" -le 10 ]; then
+  report 0 "ssh (15): a failing ssh fetch returns well inside the 30s bound (${el}s)"
+else
+  report 1 "ssh (15): a failing ssh fetch returns well inside the 30s bound" \
+    "took ${el}s — the group check is counting the ssh child's zombie as work again"
+fi
 
 # ---------------------------------------------------------------------------
 echo

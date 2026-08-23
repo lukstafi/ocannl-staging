@@ -124,6 +124,38 @@ fi
 # newer than the parent checkout's `master` when the latter is the thing that
 # lagged. The warning changes nothing and does not mark the environment
 # incomplete; it names the recovery instead.
+group_alive() {
+  # group_alive PGID: is any member of that process group still RUNNING?
+  #
+  # Not the same question as `kill -0 -- -PGID`, which a zombie answers as
+  # readily as a live process — see `bounded` below for why that distinction is
+  # the whole point. Process states are not signal-visible, so they are read
+  # where the system publishes them: /proc on Linux (with the shell's own `read`
+  # rather than a fork per process), `ps` on the BSDs and macOS. Where neither
+  # answers — a cygwin `ps` takes no `-o` — it degrades to the signal, which
+  # over-reports; cygwin reaps its own children, so the zombie case that
+  # motivates this does not arise on that path.
+  local pgid="$1" f line states
+  if [ -r /proc/self/stat ]; then
+    for f in /proc/[0-9]*/stat; do
+      read -r line <"$f" 2>/dev/null || continue
+      # `pid (comm) state ppid pgrp ...`, and comm may itself hold ") ".
+      line="${line##*) }"
+      # shellcheck disable=SC2086
+      set -- $line
+      [ "${3:-}" = "$pgid" ] || continue
+      [ "$1" = Z ] || return 0
+    done
+    return 1
+  fi
+  if states="$(ps -A -o pgid=,stat= 2>/dev/null)" && [ -n "$states" ]; then
+    printf '%s\n' "$states" \
+      | awk -v g="$pgid" '$1 == g && $2 !~ /^[Zz]/ { alive = 1 } END { exit !alive }'
+    return $?
+  fi
+  kill -0 -- -"$pgid" 2>/dev/null
+}
+
 bounded() {
   # bounded SECS CMD...: run CMD, killing it if still running after SECS.
   # What GNU timeout does, done here so that it holds whatever `timeout` is on
@@ -137,15 +169,16 @@ bounded() {
   # that nothing of the group survives the return: the command exiting does not
   # by itself cancel the watchdog — git dying on TERM while its ssh child
   # ignores it would otherwise return before the KILL — only an empty group does.
-  # "Empty" has to be given a moment to become true, though: `kill -0` counts a
-  # zombie as present, and when git exits its ssh child is briefly one, having
-  # been reparented and not yet reaped. Testing the group in the instant after
-  # `wait` therefore read a fetch that had already failed in milliseconds as
-  # still running, and sat out the entire bound — 30s added to every session
-  # start whose ssh remote is unreachable. So the group is polled for a short
-  # grace instead. Only the empty verdict is hurried: a group that is genuinely
-  # still occupied falls through to the watchdog exactly as before, and the
-  # grace costs it nothing, the watchdog's own sleep running alongside it.
+  # "Empty" cannot be asked of signals, though: `kill -0` succeeds on a ZOMBIE
+  # exactly as on a live process, and when git exits its ssh child is one,
+  # having been reparented and not yet reaped. Reading that as work in progress
+  # sat out the entire bound after a fetch that had already failed in
+  # milliseconds — 30s added to every session start whose ssh remote is
+  # unreachable — and where the reaper is a PID 1 that does not reap (the
+  # common container case) the zombie is permanent, so no amount of waiting for
+  # it to clear would help. `group_alive` therefore reads process STATES, from
+  # /proc where there is one and from `ps` otherwise, and only a member that is
+  # not a zombie counts as work.
   local secs="$1"; shift
   local pid watchdog rc
   set -m
@@ -153,18 +186,12 @@ bounded() {
   # The killer gets no inherited fds: a lingering `sleep` holding the hook's
   # stdout would keep the harness waiting for EOF after the script exits.
   ( sleep "$secs"; kill -TERM -- -"$pid" 2>/dev/null; kill -CONT -- -"$pid" 2>/dev/null
-    for _ in 1 2 3 4 5; do sleep 1; kill -0 -- -"$pid" 2>/dev/null || exit 0; done
+    for _ in 1 2 3 4 5; do sleep 1; group_alive "$pid" || exit 0; done
     kill -KILL -- -"$pid" 2>/dev/null ) >/dev/null 2>&1 </dev/null &
   watchdog=$!
   set +m
   wait "$pid" 2>/dev/null; rc=$?
-  # Where `sleep` takes no fractional argument this drains in zero time and the
-  # behaviour is simply the undelayed check again — slow, never wrong.
-  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-    kill -0 -- -"$pid" 2>/dev/null || break
-    sleep 0.05 2>/dev/null
-  done
-  if kill -0 -- -"$pid" 2>/dev/null; then
+  if group_alive "$pid"; then
     wait "$watchdog" 2>/dev/null
   else
     kill -TERM -- -"$watchdog" 2>/dev/null; wait "$watchdog" 2>/dev/null

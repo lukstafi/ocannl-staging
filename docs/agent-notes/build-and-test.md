@@ -332,12 +332,15 @@ that they earn a lookup rather than always-loaded space.
   that silently tested the COMMITTED script, and a `run` helper that executed its label as a
   command. When adding a leg, add the negative control too — mutate the hook and check that leg,
   and only that leg, goes red. The harness found one bug on its first outing: `bounded` decided
-  whether to wait for its watchdog with a `kill -0` on the process group taken in the instant after
-  `wait`, and `kill -0` counts a ZOMBIE as present — git's ssh child is briefly one, having been
-  reparented and not yet reaped — so a fetch that had already failed in milliseconds was read as
-  still running and sat out the whole 30s bound, on every session start with an unreachable ssh
-  remote. The group is now polled for a short grace first; only the empty verdict is hurried, and a
-  group still genuinely occupied falls through to the watchdog as before.
+  whether to wait for its watchdog with a `kill -0` on the command's process group, and `kill -0`
+  counts a ZOMBIE as present — git's ssh child is one, reparented when git exits and not yet
+  reaped — so a fetch that had already failed in milliseconds read as still running and sat out the
+  whole 30s bound, on every session start with an unreachable ssh remote. Emptiness is therefore
+  not a signal question: `group_alive` reads process STATES, from `/proc` where there is one and
+  from `ps -A -o pgid=,stat=` otherwise, and only a non-zombie member counts as work. Where the
+  reaper is a PID 1 that does not reap — the ordinary container case — the zombie is PERMANENT, so
+  the first attempt at this, a short retry loop around the same `kill -0`, would not have helped;
+  that is the shape to keep in mind before reaching for a timing fix here again.
 - Dune tracks an environment variable only where a stanza declares it, and the tracking reaches
   further than the stanza: `dune rules test/operations/<name>.exe.output` shows the `(Env
   OCANNL_BACKEND)` dependency travelling from the `(test)` stanza's `(deps ...)` into the
