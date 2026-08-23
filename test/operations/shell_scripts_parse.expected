@@ -1,0 +1,14 @@
+benchmarks/gh514_cells.sh parses: true
+benchmarks/gh612_cells.sh parses: true
+benchmarks/gh612v_session.sh parses: true
+docs/latex/gen-workshop-tex.sh parses: true
+scripts/setup-ocaml-env.sh parses: true
+scripts/test-setup-ocaml-env.sh parses: true
+tools/dune-quiet.sh parses: true
+tools/format-sweep.sh parses: true
+tools/opam-env.sh parses: true
+tools/promote.sh parses: true
+tools/sweep.sh parses: true
+tools/test-run.sh parses: true
+the scan reached at least the 12 shell scripts this repository is known to have: true
+the scan reached the session hook and the suite runner: true

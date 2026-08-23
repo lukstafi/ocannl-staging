@@ -102,7 +102,8 @@
   (alias runtest-cache_dir_ignores)
   (alias runtest-verdict_ratchet)
   (alias runtest-codegen_text_inventory)
-  (alias runtest-agent_notes_structure)))
+  (alias runtest-agent_notes_structure)
+  (alias runtest-shell_scripts_parse)))
 
 ; This directory's golden-diff rules, aggregated back onto `runtest` (gh-ocannl-726). Each of them
 ; attaches to its own `runtest-<name>` alias and to NOTHING else, so that `dune build
@@ -148,6 +149,7 @@
   (alias runtest-model_default_placements)
   (alias runtest-agent_notes_structure)
   (alias runtest-codegen_text_inventory)
+  (alias runtest-shell_scripts_parse)
   (alias runtest-generated_provenance)
   (alias runtest-verdict_quantified)))
 
@@ -3722,3 +3724,38 @@
      fp8_codec_exhaustive.actual
      (run %{dep:fp8_codec_exhaustive.exe}))
     (diff fp8_codec_exhaustive.expected fp8_codec_exhaustive.actual)))))
+
+; gh-ocannl-438 follow-up: the repository's shell scripts parse. Neither `dune build @check` nor
+; `dune runtest` looks at shell otherwise, while `scripts/setup-ocaml-env.sh` is the SessionStart
+; hook and `tools/test-run.sh` fronts every suite run -- so a syntax error in either is discovered
+; by a broken session or a broken suite run rather than by a test. `bash -n` / `sh -n` parse and
+; execute nothing.
+;
+; `(glob_files_rec ../../*.sh)` is both the discovery mechanism and the reason dune reruns this when
+; a script changes; `%{deps}` hands the whole set to the exe, which keeps the .sh files among them.
+; A `(rule)` rather than a `(test)` because the glob has to be a dependency of the action that runs
+; the executable, and the marker comment and `ocannl_config` go with it.
+
+(executable
+ (name shell_scripts_parse)
+ (modules shell_scripts_parse)
+ (libraries base stdio unix test_utils arrayjit.verdict))
+
+(rule
+ ; ocannl-backend: none -- links no backend: it hands shell scripts to `bash -n`/`sh -n` and runs no kernels.
+ (target shell_scripts_parse.actual)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (glob_files_rec ../../*.sh))
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:shell_scripts_parse.exe} %{workspace_root} %{deps}))))
+
+(rule
+ (alias runtest-shell_scripts_parse)
+ (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
+ (action
+  (diff shell_scripts_parse.expected shell_scripts_parse.actual)))
