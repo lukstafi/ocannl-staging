@@ -293,8 +293,29 @@ let golden_stem golden =
   let cut_at s ~on =
     match String.substr_index s ~pattern:on with None -> s | Some i -> String.prefix s i
   in
-  (* The pform goes first: a `%{read:config/…}` carries a path, and taking the basename before
-     cutting it would leave the CONFIG file's name as the stem. *)
+  (* A golden NAMED by a pform -- `%{dep:verdict_ratchet.expected}`, dune's ordinary way of writing
+     a dependency inline -- still names a file, and cutting the pform away would leave nothing to
+     compare the alias against (Codex P2, round 4). Unwrap the leading one: what follows the last
+     `:` inside the braces is the path. *)
+  let golden =
+    match String.chop_prefix golden ~prefix:"%{" with
+    | None -> golden
+    | Some rest -> (
+        match String.substr_index rest ~pattern:"}" with
+        | None -> rest
+        | Some close ->
+            let inside = String.prefix rest close in
+            let after = String.drop_prefix rest (close + 1) in
+            let path =
+              match String.rindex inside ':' with
+              | None -> inside
+              | Some colon -> String.drop_prefix inside (colon + 1)
+            in
+            path ^ after)
+  in
+  (* A pform INSIDE the name goes the other way, and is cut before the basename is taken: a
+     `%{read:config/…}` carries a path, so taking the basename first would leave the CONFIG file's
+     name as the stem. *)
   let stem = cut_at (Stdlib.Filename.basename (cut_at golden ~on:"%{")) ~on:"." in
   let stem = Option.value (String.chop_suffix stem ~suffix:"_expected") ~default:stem in
   String.rstrip stem ~drop:(fun c -> Char.equal c '-' || Char.equal c '_')
@@ -597,7 +618,28 @@ let () =
       let scans_reaches = aliases_reached_from stanzas scans_suite in
       List.iter stanzas ~f:(fun producer ->
           if is_repo_wide_scan producer then
-            List.iter (targets_of producer) ~f:(fun target ->
+            if List.is_empty (targets_of producer) then
+              (* A scan that declares no target writes and checks in one action -- the `no-infer`
+                 shape this repository uses elsewhere, or an assertion by exit status. There is no
+                 second rule to look for, so the family has to aggregate THIS rule's own alias;
+                 iterating over its (empty) target list would have passed it silently, which is the
+                 fail-open Codex found in round 4. *)
+              if not (List.exists (aliases_of producer) ~f:(Set.mem scans_reaches)) then
+                fail
+                  (Printf.sprintf
+                     "%s has a rule that globs the repository -- a repo-wide scan -- and declares \
+                      no target, so it checks its own output in its action, and the `%s` alias \
+                      does not aggregate the alias it sits on (%s): `dune build @%s/%s` would skip \
+                      it silently. List its alias in the `(alias (name %s) (deps …))` stanza"
+                     dune_file scans_suite
+                     (match aliases_of producer with
+                     | [] -> "none"
+                     | aliases -> String.concat ~sep:", " aliases)
+                     (Stdlib.Filename.dirname dune_file)
+                     scans_suite scans_suite)
+              else ()
+            else
+              List.iter (targets_of producer) ~f:(fun target ->
                 let checkers =
                   List.filter stanzas ~f:(fun s ->
                       is_golden_diff s
@@ -641,7 +683,8 @@ let () =
                                 String.chop_prefix alias ~prefix:(suite ^ "-"))
                             |> Option.value ~default:alias
                           in
-                          String.is_prefix suffix ~prefix:(golden_stem golden)) ->
+                          let stem = golden_stem golden in
+                          (not (String.is_empty stem)) && String.is_prefix suffix ~prefix:stem) ->
                 ()
             | aliases ->
                 let what =
@@ -650,6 +693,17 @@ let () =
                   | [ alias ] when not (List.exists suites ~f:(fun s -> member_of s alias)) ->
                       Printf.sprintf "attaches a golden diff to `%s`, which is no suite's member"
                         alias
+                  | [ alias ]
+                    when List.exists (goldens_in stanza) ~f:(fun g ->
+                             String.is_empty (golden_stem g)) ->
+                      Printf.sprintf
+                        "attaches `%s` to a golden this check cannot name -- %s reduces to an \
+                         empty stem, so nothing constrains the alias. Spell the golden as a plain \
+                         path, or teach `golden_stem` the form"
+                        alias
+                        (String.concat ~sep:", "
+                           (List.filter (goldens_in stanza) ~f:(fun g ->
+                                String.is_empty (golden_stem g))))
                   | [ alias ] ->
                       Printf.sprintf
                         "attaches `%s` to a golden its name does not name: the goldens are %s, so \
