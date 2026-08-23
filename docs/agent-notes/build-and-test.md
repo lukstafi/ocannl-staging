@@ -534,7 +534,12 @@ that they earn a lookup rather than always-loaded space.
   only the first two made an entire scan root look empty: the `arrayjit` tests cannot link
   `test_utils` (it is a `neural_nets_lib` library), so every one of them takes it. If you add a way
   to get emitted text into a test, add it to `Codegen_text_scan.emitter_names` — a route the scan
-  does not know about does not shrink the inventory visibly, it just leaves files off it.
+  does not know about does not shrink the inventory visibly, it just leaves files off it. That list
+  is the one hand-maintained thing left in the scan, and it is the frontier three of the four review
+  rounds on gh-ocannl-712 found a member of: `compile_proc`/`compile_main` return a document,
+  `to_doc`/`to_doc_cstyle` too, and `Canonical_render.emit` writes into a buffer instead. Deriving
+  the set from what the libraries export, rather than listing it, is the standing follow-up
+  (gh-ocannl-748).
 - Each golden in that inventory carries the family that must re-record it, and the DECLARING
   extension wins over the markers: a `.hip.expected` spells CUDA's `__global__` launch vocabulary
   and is still HIP. A fragment the scan cannot name at its call site — text a helper computes —

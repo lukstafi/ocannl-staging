@@ -9,6 +9,7 @@ ok: stem -- a select stub
 ok: golden -- a C kernel is a member by its markers, under any name
 ok: golden -- a CUDA kernel names the launch vocabulary
 ok: golden -- a Metal kernel names its address spaces
+ok: golden -- the compact IR serialization is an assignment without the spaces
 ok: golden -- a low-level IR dump is a member by its loop headers and assignments
 ok: golden -- a routine log carries both the IR line and the C rendering
 ok: golden -- a snapshot is a member by its extension whatever it holds
@@ -54,5 +55,6 @@ ok: source -- an inline build_files read in the haystack still pins its fragment
 ok: source -- a helper that hard-codes the fragment pins it, taking the source as its parameter
 ok: source -- a helper that slices on a banner and tests its own parameter pins both
 ok: source -- a fragment named through a binding is still that fragment
+ok: source -- a buffer-writing serializer is an emitter too
 ok: source -- a test that reads no generated source is not a member
 ok: source -- naming the reader in a comment is not reading it

@@ -65,6 +65,10 @@ let golden_cases =
       "msl_test.expected",
       "kernel void k(device float *o [[buffer(0)]]) { threadgroup float frag[8]; }",
       "[metal] markers metal-kernel" );
+    ( "the compact IR serialization is an assignment without the spaces",
+      "canonical_render.expected",
+      "rendering:\n       c;zero <cr_out>;for b0=0..2@Grid{set <cr_out>[(2*b0+1*b1+5),]:=scope(<cr_acc>.1)[b0,]{nop;};}\n       an alpha-variant lowering renders identically: true\n",
+      "[ll] markers ll-assign" );
     ( "a low-level IR dump is a member by its loop headers and assignments",
       "dump_test.expected",
       "c_fwd (): /* c fwd */\n  for i10 = 0 to 2 {\n    a[i10] := 5*i10;\n  }\n  /* end */",
@@ -326,6 +330,14 @@ let () = p "lane" (has "_uniform_lane(" (Generated.read "r"))|ocaml},
   let statement = render (Ir.Low_level.to_doc () stmt) in
   p "arrow" (Option.is_some (String.substr_index statement ~pattern:arrow))|ocaml},
       {|" := " +rendered|} );
+    ( "a buffer-writing serializer is an emitter too",
+      {ocaml|module CR = Ir.Low_level.Canonical_render
+let render llc =
+  let buf = Buffer.create 256 in
+  CR.emit ~buf policy llc;
+  Buffer.contents buf
+let () = p "free" (String.is_substring (render llc) ~substring:"s0")|ocaml},
+      {|"s0" +rendered|} );
     ( "a test that reads no generated source is not a member",
       {ocaml|let () = p "shapes agree" (String.is_substring rendered ~substring:"3x5")|ocaml},
       "none" );

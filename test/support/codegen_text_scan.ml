@@ -179,7 +179,10 @@ let markers =
           ];
     };
     { tag = "ll-loop"; family = Ll; test = Shape is_ll_loop_line };
-    { tag = "ll-assign"; family = Ll; test = Needles [ "] := " ] };
+    (* Both spellings the IR has: the pretty dump separates the arrow with spaces, and
+       [Canonical_render]'s compact serialization does not. A marker keyed on one of them is keyed
+       on whitespace, which is not what makes a line an assignment (Codex P2, round 4). *)
+    { tag = "ll-assign"; family = Ll; test = Needles [ "] := "; "]:=" ] };
     { tag = "ll-end"; family = Ll; test = Needles [ "/* end */" ] };
     {
       tag = "routine-log";
@@ -416,14 +419,24 @@ let direct_artifact_module = "Utils"
 (** The emitters and dump printers that hand a test generated text without an artifact in between:
     [C_syntax.compile_proc] / [compile_main] and [Low_level.to_doc] / [to_doc_cstyle].
 
+    [emit] is [Low_level.Canonical_render]'s serializer, which writes into a buffer rather than
+    returning a document -- a shape neither of the other two has, and one that kept
+    [canonical_render] off the census entirely (Codex P2, round 4).
+
     Matched by NAME behind any qualifier, rather than against a resolved module. That is deliberate,
     and it is the one place this scan errs toward including: the qualifier here is routinely a local
     module bound by a FUNCTOR APPLICATION -- [let module Syntax = Ir.C_syntax.C_syntax (...) in] --
     which no alias table can resolve to a target, so demanding one would reinstate exactly the blind
     spot this family exists to close. A qualifier is still required, so a test's own [to_doc] is not
     swept in; and if some unrelated [X.to_doc] appears one day it costs an inventory line, whereas a
-    miss here costs a silent omission. *)
-let emitter_names = [ "compile_proc"; "compile_main"; "to_doc"; "to_doc_cstyle" ]
+    miss here costs a silent omission.
+
+    This list is a FRONTIER, and the one hand-maintained thing left in this scan: a way of getting
+    emitted text into a test that it does not name does not shrink the inventory visibly, it just
+    leaves files off. Three of the four review rounds on gh-ocannl-712 found a member of exactly
+    that shape. Deriving the set from the emitters the libraries actually export, rather than
+    listing it, is the standing follow-up (gh-ocannl-748). *)
+let emitter_names = [ "compile_proc"; "compile_main"; "to_doc"; "to_doc_cstyle"; "emit" ]
 
 let renders_generated_text expr =
   let found = ref false in
