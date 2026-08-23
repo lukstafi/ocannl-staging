@@ -453,9 +453,10 @@ module type C_syntax_config = sig
       workgroup slot 0 in [hardware_index], and provide [barrier_syntax] plus [shared_decl_prefix]
       (needed by the two-phase multi-warp form). Those two overloads are all the rendering asks
       for at any storage width: the shuffled value resides at [accum_prec] of the storage precision
-      (gh-ocannl-682), and a storage precision whose residency is neither f32 nor f64 is refused. [0] disables the rendering: [Workgroup_reduce]
-      loops render like [Workgroup] — hardware binding, or the serial fallback (which is the correct
-      meaning of a recognized accumulation body on CPU backends). *)
+      (gh-ocannl-682), and a storage precision whose residency is neither f32 nor f64 is refused.
+      [0] disables the rendering: [Workgroup_reduce] loops render like [Workgroup] — hardware
+      binding, or the serial fallback (which is the correct meaning of a recognized accumulation
+      body on CPU backends). *)
 
   val mma_syntax :
     (d_prec:Ops.prec ->
