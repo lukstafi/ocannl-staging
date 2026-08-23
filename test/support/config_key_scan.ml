@@ -494,79 +494,23 @@ let scan_root_floors =
     ("tools", 2);
   ]
 
-let directory_of path =
-  let rec go p = match String.chop_prefix p ~prefix:"../" with Some p -> go p | None -> p in
-  go (Stdlib.Filename.dirname path)
-
-(** The configured scan root [path] sits under, or its own directory if no root claims it.
-
-    A path outside every root is left as itself deliberately: that is a source arriving from
-    somewhere the globs are not written for, and it should show up in the golden as a directory
-    nobody recognises rather than be filed under one that happens to be a prefix of it. The longest
-    matching root wins, so nesting one root inside another (none today) would still file a file
-    under the more specific one. *)
-let scan_root_of path =
-  let directory = directory_of path in
-  let under (root, _) =
-    String.equal directory root || String.is_prefix directory ~prefix:(root ^ "/")
-  in
-  List.filter scan_root_floors ~f:under
-  |> List.max_elt ~compare:(fun (a, _) (b, _) ->
-         Int.compare (String.length a) (String.length b))
-  |> Option.value_map ~default:directory ~f:fst
+(** The scan root [path] sits under. See {!Scan_floors.root_of}. *)
+let scan_root_of path = Scan_floors.root_of ~floors:scan_root_floors path
 
 (** [files] counted per scan root, sorted by root. *)
-let counts_by_scan_root files =
-  List.map files ~f:scan_root_of
-  |> List.sort_and_group ~compare:String.compare
-  |> List.map ~f:(fun group -> (List.hd_exn group, List.length group))
+let counts_by_scan_root files = Scan_floors.counts_by_root ~floors:scan_root_floors files
 
-(** Which scan roots the census actually came from, by name and not by count: the scope of the
-    globs, for a golden.
+(** Which scan roots the census actually came from, by name and not by count. *)
+let scan_roots files = Scan_floors.roots ~floors:scan_root_floors files
 
-    The alternative to printing it would be a list of permitted roots inside the test — a second
-    copy of the globs in [test/operations/dune], which is the hand-maintained list gh-ocannl-592
-    removed. Printing makes the scope reviewable instead: a file arriving from somewhere the globs
-    do not name shows up as a new directory in the diff, and a root that stops being scanned shows
-    up by leaving the line. The generated sources dune produces in these directories
-    ([tensor/parser.ml] from menhir, the [select]ed backend implementations) are scanned, as they
-    are part of the library (Codex P2, round 9 of PR #343); how MANY files each root contributed is
-    a tally, so it goes to stderr instead ({!report_counts}). *)
-let scan_roots files = List.map (counts_by_scan_root files) ~f:fst
-
-(** The floors [files] fails, itemised: a root below its bound, or absent from the census
-    altogether — which is what a glob matching nothing looks like from here.
-
-    Itemised rather than summed, for the reason gh-ocannl-665 recorded about a floor's diagnostic:
-    "one short" does not say which root is standing on nothing. *)
+(** The floors [files] fails, itemised. *)
 let floor_violations files =
-  let counts = Map.of_alist_exn (module String) (counts_by_scan_root files) in
-  List.filter_map scan_root_floors ~f:(fun (root, floor) ->
-      let count = Option.value (Map.find counts root) ~default:0 in
-      if count >= floor then None
-      else
-        Some
-          (Printf.sprintf
-             "%s contributed %d source%s, below its floor of %d -- either the rule's glob over that \
-              directory has stopped matching, or the sources really went away and the floor in \
-              Config_key_scan.scan_root_floors should come down with them"
-             root count
-             (if count = 1 then "" else "s")
-             floor))
+  Scan_floors.violations ~floors:scan_root_floors ~noun:"source"
+    ~floors_name:"Config_key_scan.scan_root_floors" files
 
-(** The per-root counts and the total, on stderr — where a [(test)] stanza's golden does not see
-    them, so the numbers stay readable in a run's output without a tally in a diffed file
-    (gh-ocannl-665, gh-ocannl-701). *)
+(** The per-root counts and the total, on stderr. *)
 let report_counts files =
-  Stdio.eprintf "Sources scanned per scan root (not diffed -- see gh-ocannl-701):\n";
-  List.iter (counts_by_scan_root files) ~f:(fun (root, count) ->
-      let floor =
-        match List.Assoc.find scan_root_floors root ~equal:String.equal with
-        | Some floor -> Printf.sprintf "floor %d" floor
-        | None -> "no floor -- not a root the globs are written for"
-      in
-      Stdio.eprintf "  %s: %d (%s)\n" root count floor);
-  Stdio.eprintf "Total: %d sources.\n" (List.length files)
+  Scan_floors.report ~floors:scan_root_floors ~noun:"source" ~what:"Sources scanned" files
 
 (** Basenames that more than one of [files] carries.
 
