@@ -90,6 +90,7 @@ open Ocannl.Operation.DSL_modules
 module LL = Ir.Low_level
 module Sched = Ir.Schedule
 module Asgns = Ir.Assignments
+module Outcome = Ir.Schedule_outcome
 
 (* Flushed per line: a long remote run should be readable while it is still going. *)
 let p fmt =
@@ -441,16 +442,28 @@ let () =
   let time_round lives =
     let arr = Array.of_list lives in
     let n = Array.length arr in
-    (* Each timed batch is contained the way validation is: a recoverable dispatch or sync failure
-       marks that one arm and stops visiting it, leaving the round's other matched arms measured,
-       reported and released. Only the fatal set escapes. *)
+    (* Each timed batch is contained the way the autotuner's timing loop is, not by an exception
+       taxonomy of this bench's own: [Schedule_outcome.protect] with the BACKEND's classifier
+       decides whether a launch or sync failure is a candidate's own decline (contain it, mark that
+       one arm, keep the round's other matched arms measurable) or fatal (re-raise with its
+       backtrace). Deciding by "not one of four OCaml exceptions" would contain an unclassified
+       driver failure -- device loss, say -- and then report the remaining arms as measurements,
+       which is precisely what the classifier contract exists to stop. The narrow [tag]s tell a
+       report whether the arm died at launch or at sync. *)
     let attempt lv f =
       if not !(lv.lv_failed) then
-        try f ()
-        with e when not (is_fatal e) ->
-          lv.lv_failed := true;
-          fail "%s / %s: a timed dispatch failed: %s" lv.lv_tag lv.lv_label
-            (List.hd_exn (String.split_lines (Exn.to_string e)))
+        match
+          Outcome.protect
+            ~classify_backend:(Context.failure_classifier !(lv.lv_ctx))
+            ~provenance:Outcome.Candidate ~phase:Outcome.Launch ~candidate:lv.lv_label f
+        with
+        | Ok () -> ()
+        | Error (Outcome.Classified c) ->
+            lv.lv_failed := true;
+            fail "%s / %s: a timed dispatch declined at %s: %s" lv.lv_tag lv.lv_label
+              (Sexp.to_string (Outcome.sexp_of_phase c.Outcome.phase))
+              (List.hd_exn (String.split_lines (Outcome.detail_of_cause c.Outcome.cause)))
+        | Error (Outcome.Fatal fl) -> Outcome.raise_failure (Outcome.Fatal fl)
     in
     if n > 0 then begin
       for b = 0 to nbatches - 1 do
@@ -460,9 +473,10 @@ let () =
           attempt lv (fun () ->
               let c = Mtime_clock.counter () in
               for _ = 1 to repeats do
-                lv.lv_ctx := Context.run !(lv.lv_ctx) lv.lv_routine
+                Outcome.tag Outcome.Launch (fun () ->
+                    lv.lv_ctx := Context.run !(lv.lv_ctx) lv.lv_routine)
               done;
-              Context.sync !(lv.lv_ctx);
+              Outcome.tag Outcome.Sync (fun () -> Context.sync !(lv.lv_ctx));
               lv.lv_times := (elapsed c /. Float.of_int repeats) :: !(lv.lv_times))
         done
       done;
@@ -475,8 +489,9 @@ let () =
           let lv = arr.(ord.(i)) in
           attempt lv (fun () ->
               let c = Mtime_clock.counter () in
-              lv.lv_ctx := Context.run !(lv.lv_ctx) lv.lv_routine;
-              Context.sync !(lv.lv_ctx);
+              Outcome.tag Outcome.Launch (fun () ->
+                  lv.lv_ctx := Context.run !(lv.lv_ctx) lv.lv_routine);
+              Outcome.tag Outcome.Sync (fun () -> Context.sync !(lv.lv_ctx));
               let dt = elapsed c in
               if Float.(dt < !(lv.lv_single)) then lv.lv_single := dt)
         done
