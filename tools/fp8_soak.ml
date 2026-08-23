@@ -13,9 +13,20 @@
    [Ops.double_to_fp8]. So the host side here IS the shipped codec (builtins.c, reached through
    fp8_soak_stubs.c) and the device side IS what the backend emits.
 
+   WHICH SPELLING is a question only ROCm makes interesting (gh-ocannl-757). CUDA has one: the bare
+   [(__nv_fp8_e5m2)x] the backend emits. HIP has two, because its bare cast is BROKEN for tiny
+   magnitudes (gh-ocannl-647) and every OCANNL narrowing there goes through a guarded helper
+   instead. So the default sweeps what the backend actually emits -- guarded on HIP, the cast
+   everywhere else -- and that run is a pass/fail gate on every box: 0 disagreements. The raw cast
+   is then an opt-in probe ([--spelling=raw]), and it does NOT claim agreement, because on an
+   affected ROCm it cannot have it; it claims LOCALIZATION -- that every disagreement lies inside
+   the window the guard covers -- which is true today, stays true (vacuously) once the platform is
+   fixed, and whose disagreement count reaching 0 is the trigger to delete the guard.
+
    Usage:
      dune exec tools/fp8_soak.exe                  -- every arm the box has, both sweeps
      dune exec tools/fp8_soak.exe -- --arm=cuda --sweep=f32
+     dune exec tools/fp8_soak.exe -- --arm=hip --spelling=both
    Runs in a couple of minutes on an RTX 5070 Ti; see docs/agent-notes/backend-precision-and-simd.md.
 
    Exit status is a verdict: nonzero if any claim failed, so it can gate a release check. *)
@@ -59,6 +70,15 @@ module type ARM = sig
       regardless, so a box whose hardware is missing or misconfigured still gets the vendor's own
       diagnosis instead of a silent skip. *)
 
+  val spellings : unit -> [ `Raw | `Guarded ] list
+  (** Which narrowing spellings this vendor has, the DEFAULT first. [`Raw] is the platform's own
+      cast, which is what every backend emits except HIP's, where it is broken for tiny magnitudes
+      (gh-ocannl-647) and [`Guarded] -- the [ocannl_*_to_fp8_uniform] helpers -- is what is emitted
+      instead. An arm is never asked for a spelling outside this list. *)
+
+  val spelling_label : [ `Raw | `Guarded ] -> string
+  (** How the swept narrowing is written in an emitted kernel, for the claim labels. *)
+
   val describe : unit -> string
 
   val conversion_path : unit -> string
@@ -69,12 +89,14 @@ module type ARM = sig
       architecture. It goes into every claim's label, so no run can be mistaken for the other kind
       afterwards (Codex P2 round 4 on PR #463). *)
 
-  val narrow_f32 : base:int -> count:int -> bytes_buf -> unit
-  (** Fills [out.{i}] with the vendor's e5m2 code for the f32 whose bit pattern is [base + i]. *)
+  val narrow_f32 : spelling:[ `Raw | `Guarded ] -> base:int -> count:int -> bytes_buf -> unit
+  (** Fills [out.{i}] with the code the given spelling narrows the f32 with bit pattern [base + i]
+      to. *)
 
-  val narrow_f64 : base:int -> count:int -> lows:int array -> bytes_buf -> unit
-  (** Fills [out.{4*i + k}] with the vendor's e5m2 code for the double whose bit pattern is
-      [(base + i) << 32 | lows.(k)]. *)
+  val narrow_f64 :
+    spelling:[ `Raw | `Guarded ] -> base:int -> count:int -> lows:int array -> bytes_buf -> unit
+  (** Fills [out.{4*i + k}] with the code the given spelling narrows the double with bit pattern
+      [(base + i) << 32 | lows.(k)] to. *)
 end
 
 let arms : (module ARM) list = [ (module Fp8_soak_cuda); (module Fp8_soak_hip) ]
@@ -88,11 +110,39 @@ let s_nan_seen = 4
 let s_inf_codes = 5
 let s_nan_codes = 9
 let s_all_codes = 13
-let s_reported = 17
-let s_records = 18
+let s_unguarded = 17
+let s_dis_exps = 18
+let s_reported = 50
+let s_records = 51
 let s_max_records = 8
 let s_len = s_records + (3 * s_max_records)
 let two_pow_32 = 0x1_0000_0000
+
+(* Half the smallest e5m2 subnormal: below this magnitude every correctly rounded narrowing answers
+   a signed zero, which is why the HIP guard's clamp is exact and not an approximation. The stub
+   classifies each finite disagreement against it. *)
+let guard_threshold_exp = -17
+
+(* The gh-ocannl-647 window, and it is not a range: ROCm's defect RECURS WITH PERIOD 64 in the
+   input's binary exponent, which is the signature of the defect itself. [cast_to_f8] computes an
+   [exponent_diff] that reaches 85 for an f32 source and far more for an f64 one, then shifts a
+   64-bit value by it -- and a shift by >= 64 is taken mod 64, so every 64th binary exponent
+   reproduces the same wrong shift amount and the same wrong answer. The window is therefore a
+   residue class: magnitudes 2^m with m <= -78 and (-78 - m) mod 64 < 4.
+
+   Measured exhaustively on gfx1151 / ROCm 7.14.60850 (gh-ocannl-757). The F32 sweep can only reach
+   the topmost member -- f32 exponent fields 46..49, i.e. 2^-81..2^-77 -- and a sweep restricted to
+   f32-exact doubles reaches only one more, the f32-subnormal magnitudes ~4.5e-44..1.8e-43, which is
+   why gh-ocannl-647 recorded "two windows". The full 17.2e9-double sweep here reaches all FIFTEEN,
+   down to 2^-977, and the period is what ties them together.
+
+   A run that finds a disagreement outside this residue class has found something new, and says so:
+   the claim below is one-sided containment, so it stays true (vacuously) on a repaired platform. *)
+let window_top = -78
+let window_period = 64
+let window_width = 4
+
+let in_documented_window m = m <= window_top && (window_top - m) % window_period < window_width
 
 (* The four low halves the f64 sweep crosses every top half with: zero, one ulp up, the mantissa's
    own midpoint bit, and all ones. The midpoint is the point -- gh-ocannl-648 was a double sitting
@@ -106,11 +156,13 @@ let fresh_counts () : counts_buf =
 
 let get c i = Int64.to_int_exn c.{i}
 
-let code_set (c : counts_buf) slot =
-  List.filter (List.range 0 256) ~f:(fun code ->
-      not
-        (Int64.equal 0L
-           (Int64.bit_and c.{slot + (code / 64)} (Int64.shift_left 1L (code % 64)))))
+(* A bitmap the stub filled, as the list of set indices. [~size] because two of them are swept: the
+   256 e5m2 codes, and the 2048 possible biased exponent fields of an f64 input. *)
+let bit_set (c : counts_buf) slot ~size =
+  List.filter (List.range 0 size) ~f:(fun i ->
+      not (Int64.equal 0L (Int64.bit_and c.{slot + (i / 64)} (Int64.shift_left 1L (i % 64)))))
+
+let code_set (c : counts_buf) slot = bit_set c slot ~size:256
 
 let show_codes codes =
   if List.is_empty codes then "none"
@@ -155,7 +207,7 @@ let codec_landmarks () =
     (Ir.Ops.single_to_fp8 1.125)
     (Ir.Ops.double_to_fp8 (Float.( ** ) 2. (-17.)))
 
-let run_f32 (module A : ARM) =
+let run_f32 (module A : ARM) ~spelling =
   let counts = fresh_counts () in
   let buf : bytes_buf =
     Stdlib.Bigarray.Array1.create Stdlib.Bigarray.int8_unsigned Stdlib.Bigarray.c_layout f32_chunk
@@ -164,7 +216,7 @@ let run_f32 (module A : ARM) =
   let base = ref 0 in
   while !base < two_pow_32 do
     let count = Int.min f32_chunk (two_pow_32 - !base) in
-    A.narrow_f32 ~base:!base ~count buf;
+    A.narrow_f32 ~spelling ~base:!base ~count buf;
     soak_f32 (Int64.of_int !base) (Int64.of_int count) buf counts;
     base := !base + count;
     show_progress (A.name ^ " f32") !base two_pow_32
@@ -172,7 +224,7 @@ let run_f32 (module A : ARM) =
   end_progress ();
   (counts, elapsed started)
 
-let run_f64 (module A : ARM) =
+let run_f64 (module A : ARM) ~spelling =
   let counts = fresh_counts () in
   let buf : bytes_buf =
     Stdlib.Bigarray.Array1.create Stdlib.Bigarray.int8_unsigned Stdlib.Bigarray.c_layout
@@ -182,7 +234,7 @@ let run_f64 (module A : ARM) =
   let base = ref 0 in
   while !base < two_pow_32 do
     let count = Int.min f64_chunk (two_pow_32 - !base) in
-    A.narrow_f64 ~base:!base ~count ~lows:low_halves buf;
+    A.narrow_f64 ~spelling ~base:!base ~count ~lows:low_halves buf;
     soak_f64 (Int64.of_int !base) (Int64.of_int count) low_halves buf counts;
     base := !base + count;
     show_progress (A.name ^ " f64") !base two_pow_32
@@ -195,10 +247,43 @@ let run_f64 (module A : ARM) =
 let all_finite_codes =
   List.filter (List.range 0 256) ~f:(fun c -> c land 0x7F <= 0x7B)
 
-let report (module A : ARM) ~sweep ~inputs (counts, seconds) =
+(* An input's base-2 magnitude exponent from its biased exponent FIELD. A zero field is subnormal
+   and its magnitude is only bounded above, by 2^(1-bias) -- which is what is returned, so a
+   subnormal disagreement is judged against the window by the largest magnitude it could have and
+   therefore never sneaks INTO one. *)
+let magnitude_exp ~bias e = if e = 0 then 1 - bias else e - bias
+
+let show_window () =
+  Printf.sprintf "2^%d..2^%d and every 2^-%d below that, %d binary exponents wide" (window_top - window_width + 1)
+    (window_top + 1) window_period window_width
+
+(* The disagreeing exponent fields as CONSECUTIVE RUNS with their magnitudes, because the runs are
+   the finding: ROCm's defect comes in groups of four adjacent exponents repeating every 64, and a
+   flat list of sixty numbers hides exactly the structure that identifies the mod-64 shift. *)
+let show_exps exps ~bias =
+  let runs =
+    List.fold_right exps ~init:[] ~f:(fun e acc ->
+        match acc with
+        | (lo, hi) :: rest when lo = e + 1 -> (e, hi) :: rest
+        | _ -> (e, e) :: acc)
+  in
+  String.concat ~sep:", "
+    (List.map runs ~f:(fun (lo, hi) ->
+         if lo = hi then Printf.sprintf "%d (2^%d)" lo (magnitude_exp ~bias lo)
+         else
+           Printf.sprintf "%d-%d (2^%d..2^%d)" lo hi (magnitude_exp ~bias lo)
+             (magnitude_exp ~bias hi)))
+
+let report (module A : ARM) ~sweep ~inputs ~spelling ~bias ~exp_size (counts, seconds) =
   let vendor = A.vendor_type in
-  let path = A.conversion_path () in
-  Stdio.printf "\n%s %s sweep: %d inputs, %.1fs\n" A.name sweep inputs seconds;
+  (* Both halves of "what was measured" ride in every claim: which side of the vendor header's
+     compile-time split the kernel compiled on, and which of the vendor's narrowing spellings it
+     called. Neither is inferable from the options this program passed. *)
+  let via = Printf.sprintf "%s, narrowing with %s" (A.conversion_path ()) (A.spelling_label spelling) in
+  let finite = get counts s_finite in
+  let exps = bit_set counts s_dis_exps ~size:exp_size in
+  Stdio.printf "\n%s %s sweep, %s: %d inputs, %.1fs\n" A.name sweep (A.spelling_label spelling)
+    inputs seconds;
   Stdio.printf "  non-finite inputs: %d infinite, %d NaN\n" (get counts s_inf_seen)
     (get counts s_nan_seen);
   Stdio.printf "  %s codes on infinite inputs: %s (%d disagree with the codec)\n" vendor
@@ -209,36 +294,76 @@ let report (module A : ARM) ~sweep ~inputs (counts, seconds) =
     (get counts s_nan);
   Stdio.printf "  distinct %s codes produced overall: %d\n" vendor
     (List.length (code_set counts s_all_codes));
+  (* Descriptive, not a claim: on the raw HIP spelling this number is the FINDING (gh-ocannl-647),
+     and it is the guard's removal check -- when a ROCm release brings it to 0, the guarded
+     narrowing in [Builtins_hip] can go. Where the number must be zero, the claim below says so. *)
+  Stdio.printf "  finite-input disagreements: %d, on %d exponent field(s)%s\n" finite
+    (List.length exps)
+    (if List.is_empty exps then "" else ": " ^ show_exps exps ~bias);
   report_records counts ~arm:A.name ~vendor;
-  Verdict.pf "the software codec and %s agree on every finite %s input the sweep covers, via the %s"
-    vendor sweep path
-    (get counts s_finite = 0);
+  (* The raw cast is known-defective on ROCm, so on an arm that HAS a guarded spelling the raw probe
+     asserts LOCALIZATION rather than agreement: asserting agreement there would be a claim that
+     fails by design on affected hardware, which makes the tool unusable as a gate exactly where it
+     is most needed. Everywhere else -- CUDA, and HIP's guarded spelling, which is what OCANNL
+     emits -- the claim is the full one. *)
+  let defective_by_design =
+    (match spelling with `Raw -> true | `Guarded -> false)
+    && List.exists (A.spellings ()) ~f:(function `Guarded -> true | `Raw -> false)
+  in
+  if defective_by_design then (
+    (* Both of these are VACUOUSLY true at zero disagreements, and that is the intended end state,
+       not an unguarded quantifier: a fixed ROCm has nothing to localize, and the descriptive count
+       above is what distinguishes "the window still holds" from "the window is empty". So they use
+       [Verdict.pf] rather than the non-emptiness-guarded [p_all]/[p_none], which would fail a run
+       on a platform that had been repaired. *)
+    Verdict.pf
+      "every %s %s disagreement with the codec is one the %s guarded narrowing closes, i.e. lies \
+       inside the |x| < 2^%d it clamps to a signed zero, via the %s"
+      vendor sweep A.name guard_threshold_exp via
+      (get counts s_unguarded = 0);
+    Verdict.pf
+      "the %s %s disagreements are confined to the documented gh-ocannl-647 magnitude window (%s), \
+       via the %s"
+      vendor sweep (show_window ()) via
+      (List.for_all exps ~f:(fun e -> in_documented_window (magnitude_exp ~bias e))))
+  else
+    Verdict.pf "the software codec and %s agree on every finite %s input the sweep covers, via the %s"
+      vendor sweep via (finite = 0);
   let produced = code_set counts s_all_codes in
   Verdict.p_all
     (Printf.sprintf "the %s %s sweep produced every signed finite e5m2 code, via the %s" vendor sweep
-       path)
+       via)
     all_finite_codes ~min:248
     ~f:(fun c -> List.mem produced c ~equal:Int.equal)
 
 let usage () =
   Stdio.printf
     "fp8_soak: sweep OCANNL's e5m2 codec against a GPU vendor's fp8 type.\n\
-       --arm=cuda|hip   which vendor (default: every arm this build has)\n\
-       --sweep=f32|f64|both   which input set (default: both)\n\
+    \  --arm=cuda|hip         which vendor (default: every arm this build has)\n\
+    \  --sweep=f32|f64|both   which input set (default: both)\n\
+    \  --spelling=default|raw|guarded|both\n\
+    \                         which narrowing to sweep. default: what the backend emits --\n\
+    \                         the guarded ocannl_*_to_fp8_uniform helpers on HIP, the bare\n\
+    \                         vendor cast elsewhere; raw: the bare cast, which on ROCm is\n\
+    \                         gh-ocannl-647's defect and claims localization, not agreement\n\
     \  --arch=device|backend  device: this GPU's own capability, so the vendor cast is the\n\
     \                         hardware instruction (default, and what verifies the codec against\n\
     \                         the hardware); backend: the repo's marker-driven arch policy, which\n\
-    \                         for a marker-free source lands on the header's software path\n"
+    \                         for a marker-free source lands on the header's software path.\n\
+    \                         CUDA only: ROCm's split is keyed off the target architecture\n\
+    \                         macro, which hiprtc takes from the device either way\n"
 
 let () =
   let arm_filter = ref None in
   let sweep = ref "both" in
+  let spelling = ref "default" in
   let arch = ref `Device in
   Array.iteri (Stdlib.Sys.argv) ~f:(fun i s ->
       if i > 0 then
         match String.lsplit2 s ~on:'=' with
         | Some ("--arm", v) -> arm_filter := Some (String.lowercase v)
         | Some ("--sweep", v) -> sweep := String.lowercase v
+        | Some ("--spelling", (("default" | "raw" | "guarded" | "both") as v)) -> spelling := v
         | Some ("--arch", "device") -> arch := `Device
         | Some ("--arch", "backend") -> arch := `Backend
         | _ ->
@@ -288,7 +413,38 @@ let () =
          pre-sm_89 GPU asks honestly for the device's own architecture and still gets the header's
          software conversion, so "device mode" is not by itself a statement about hardware. *)
       Stdio.printf "  conversion swept: %s\n%!" (A.conversion_path ());
-      if String.(!sweep = "f32" || !sweep = "both") then
-        report arm ~sweep:"f32" ~inputs:two_pow_32 (run_f32 arm);
-      if String.(!sweep = "f64" || !sweep = "both") then
-        report arm ~sweep:"f64" ~inputs:(4 * two_pow_32) (run_f64 arm))
+      (* [`Guarded] is asked for only where the arm has it -- [spellings ()] is the arm's own menu,
+         with its default at the head -- so [--spelling=guarded] on CUDA sweeps nothing and says so
+         rather than reaching a [narrow_f32] that would reject it. *)
+      let available = A.spellings () in
+      let wanted =
+        match !spelling with
+        | "default" -> [ List.hd_exn available ]
+        | "raw" -> [ `Raw ]
+        | "guarded" -> [ `Guarded ]
+        | _ -> available
+      in
+      let explicit = String.(!spelling = "raw" || !spelling = "guarded") in
+      let wanted =
+        List.filter wanted ~f:(fun sp ->
+            List.mem available sp ~equal:Poly.equal
+            ||
+            (* Asked for by name and not there: a verdict, on the same reasoning as an explicit
+               [--arm] whose hardware is missing. Under [--spelling=both] it is only a note, since
+               "both" means "both of the ones this arm has". *)
+            (if explicit then
+               Verdict.fail
+                 (Printf.sprintf "the %s arm has the %s narrowing that was asked for" A.name
+                    !spelling)
+             else
+               Stdio.eprintf "fp8_soak: the %s arm has no %s narrowing; skipping that spelling\n%!"
+                 A.name !spelling;
+             false))
+      in
+      List.iter wanted ~f:(fun spelling ->
+          if String.(!sweep = "f32" || !sweep = "both") then
+            report arm ~sweep:"f32" ~inputs:two_pow_32 ~spelling ~bias:127 ~exp_size:256
+              (run_f32 arm ~spelling);
+          if String.(!sweep = "f64" || !sweep = "both") then
+            report arm ~sweep:"f64" ~inputs:(4 * two_pow_32) ~spelling ~bias:1023 ~exp_size:2048
+              (run_f64 arm ~spelling)))

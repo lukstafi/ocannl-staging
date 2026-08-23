@@ -36,10 +36,26 @@ extern uint8_t double_to_fp8(double f);
 #define S_INF_CODES 5  /* 4 words: vendor codes seen on infinite inputs */
 #define S_NAN_CODES 9  /* 4 words: vendor codes seen on NaN inputs */
 #define S_ALL_CODES 13 /* 4 words: every vendor code seen, over all inputs */
-#define S_REPORTED 17
-#define S_RECORDS 18 /* triples: input bits, our code, the vendor's */
+/* Finite disagreements the HIP guard would NOT close: those at |x| >= 2^-17, i.e. outside the range
+   [ocannl_single_to_fp8_uniform] / [ocannl_double_to_fp8_uniform] pre-round to a signed zero. The
+   whole claim that guard rests on is that this stays 0 -- everything below half the smallest e5m2
+   subnormal rounds to zero anyway, so clamping there is exact, and a disagreement ABOVE it would be
+   one the guard silently fails to fix. */
+#define S_UNGUARDED 17
+/* 32 words: the set of biased exponent FIELDS of the inputs that disagreed on a finite value --
+   8-bit for the f32 sweep, 11-bit for the f64 one, hence 2048 bits. This is what localizes a
+   vendor defect to a window instead of to a count (gh-ocannl-647), and what lets a run assert the
+   window without the tool having to keep every offending input. */
+#define S_DIS_EXPS 18
+#define S_REPORTED 50
+#define S_RECORDS 51 /* triples: input bits, our code, the vendor's */
 #define S_MAX_RECORDS 8
 #define S_LEN (S_RECORDS + (3 * S_MAX_RECORDS))
+
+/* Half the smallest e5m2 subnormal (2^-17). Below this magnitude every correctly rounded narrowing
+   answers a signed zero, which is why the HIP guard's clamp is exact rather than an approximation;
+   it is also the boundary this file classifies disagreements against. */
+#define OCANNL_FP8_GUARD_THRESHOLD 7.62939453125e-6
 
 static void mark(int64_t *out, int slot, unsigned int code)
 {
@@ -85,6 +101,11 @@ static void soak_f32(uint64_t base, uint64_t count, const uint8_t *theirs, int64
     if (ours != them)
     {
       out[S_FINITE]++;
+      mark(out, S_DIS_EXPS, e32);
+      if (!(fabsf(x) < (float)OCANNL_FP8_GUARD_THRESHOLD))
+      {
+        out[S_UNGUARDED]++;
+      }
       record(out, (int64_t)u, ours, them);
     }
   }
@@ -122,6 +143,11 @@ static void soak_f64(uint64_t base, uint64_t count, const uint32_t *lows, const 
       if (ours != them)
       {
         out[S_FINITE]++;
+        mark(out, S_DIS_EXPS, e64);
+        if (!(fabs(d) < OCANNL_FP8_GUARD_THRESHOLD))
+        {
+          out[S_UNGUARDED]++;
+        }
         record(out, (int64_t)u, ours, them);
       }
     }
