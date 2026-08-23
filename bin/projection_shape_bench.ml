@@ -113,6 +113,16 @@ let is_fatal = function
 let release_quietly ctx =
   try Context.release ctx with e when not (is_fatal e) -> ()
 
+(* A classified rejection is containable only when the backend says the device was not written:
+   an illegal address, a device assertion or a launch timeout reports [Writes_may_have_occurred],
+   leaves partial writes and a sticky context behind, and every later arm on that device is then
+   suspect. The autotuner escalates that class for the same reason. *)
+let escalate_if_wrote ~candidate (c : Outcome.classified_cause) =
+  match c.Outcome.execution_effect with
+  | Outcome.No_device_writes -> ()
+  | Outcome.Writes_may_have_occurred ->
+      Outcome.raise_failure (Outcome.Fatal (Outcome.fatal_of_classified ~candidate c))
+
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
@@ -366,6 +376,23 @@ let () =
      must not be timed, ranked, or able to win a summary column that carries no parity marker. The
      context is held in a ref the cleanup can reach, so the release covers the exception path too. *)
   let counter = ref 0 in
+  (* The two direct compiles go through [Context.compile_outcome] so that a FATAL compile,
+     link or driver failure is not contained as one cell by the generic handler below: only a
+     classified candidate rejection is recoverable. [Autotune.tune] is a raising API and does its
+     own classification internally, so the tuned arm keeps the raising form. *)
+  let compiled ~fatal_seen ?lowered_transform ~name ctx fwd =
+    match
+      Context.compile_outcome ?lowered_transform ~name ~provenance:Outcome.Candidate
+        ~candidate:name ctx fwd Ir.Indexing.Empty
+    with
+    | Ok v -> v
+    | Error (Outcome.Classified c) ->
+        escalate_if_wrote ~candidate:name c;
+        Outcome.raise_failure (Outcome.Classified c)
+    | Error (Outcome.Fatal _ as f) ->
+        fatal_seen := true;
+        Outcome.raise_failure f
+  in
   let arm (s, fl, _, orc, d, fwd) ~label ~compile =
     Int.incr counter;
     let name = Printf.sprintf "%s_c%d" s.tag !counter in
@@ -381,7 +408,7 @@ let () =
         dims := Some (LL.launch_dims o.LL.llc);
         o
       in
-      let ctx, routine = compile ~record ~name fwd in
+      let ctx, routine = compile ~record ~name ~fatal_seen fwd in
       let ctx = ref ctx in
       held := Some ctx;
       (* The warm-up launches and the synchronizing readback go through the same classifier the
@@ -395,7 +422,9 @@ let () =
             ~provenance:Outcome.Candidate ~phase ~candidate:label f
         with
         | Ok v -> v
-        | Error (Outcome.Classified _ as f) -> Outcome.raise_failure f
+        | Error (Outcome.Classified c) ->
+            escalate_if_wrote ~candidate:label c;
+            Outcome.raise_failure (Outcome.Classified c)
         | Error (Outcome.Fatal _ as f) ->
             fatal_seen := true;
             Outcome.raise_failure f
@@ -481,6 +510,7 @@ let () =
         with
         | Ok () -> ()
         | Error (Outcome.Classified c) ->
+            escalate_if_wrote ~candidate:lv.lv_label c;
             lv.lv_failed := true;
             fail "%s / %s: a timed dispatch declined at %s: %s" lv.lv_tag lv.lv_label
               (Sexp.to_string (Outcome.sexp_of_phase c.Outcome.phase))
@@ -502,9 +532,13 @@ let () =
               lv.lv_times := (elapsed c /. Float.of_int repeats) :: !(lv.lv_times))
         done
       done;
-      (* The tuner's own statistic ([Autotune.time_routine]): one dispatch, one sync, minimum over
-         the iterations -- what a min-of-N per-kernel profile reports, and up to 2.6x above the
-         steady-state figure on the same routine. Interleaved for the same reason. *)
+      (* An independently sampled diagnostic, not a reproduction of [Autotune.time_routine]: one
+         dispatch, one sync, minimum over exactly [repeats] samples, where the tuner keeps sampling
+         past its repeat count until ~25 ms have accumulated (up to 64 runs) and its minimum
+         therefore improves with a sample count this loop does not match. What it is FOR is the
+         shape of the statistic -- a min over single sync'd launches, which is what a min-of-N
+         per-kernel profile reports, and which reads up to 2.6x from the steady-state figure on the
+         same routine. Interleaved for the same reason as the batches. *)
       for b = 0 to repeats - 1 do
         let ord = visit_order n b in
         for i = 0 to n - 1 do
@@ -566,8 +600,8 @@ let () =
   (* Round 0: the untuned shipped default, one arm per site. *)
   run_round ~label:"default (untuned)"
     (List.filter_map prepared ~f:(fun pr ->
-         arm pr ~label:"default (untuned)" ~compile:(fun ~record:_ ~name fwd ->
-             Context.compile ~name (Context.auto ()) fwd Ir.Indexing.Empty)));
+         arm pr ~label:"default (untuned)" ~compile:(fun ~record:_ ~name ~fatal_seen fwd ->
+             compiled ~fatal_seen ~name (Context.auto ()) fwd)));
   (* One round per geometry, over the sites whose seed list offers it: that is the comparison the
      experiment makes, so that is the set that has to be interleaved. Menu order is preserved. *)
   if do_seeds then begin
@@ -595,11 +629,11 @@ let () =
           List.concat_map prepared ~f:(fun ((_, _, seeds, _, _, _) as pr) ->
               List.filter seeds ~f:(fun q -> String.equal (base_geom (geom_label q)) g)
               |> List.filter_map ~f:(fun q ->
-                     arm pr ~label:(geom_label q) ~compile:(fun ~record ~name fwd ->
-                         Context.compile ~name
+                     arm pr ~label:(geom_label q) ~compile:(fun ~record ~name ~fatal_seen fwd ->
+                         compiled ~fatal_seen
                            ~lowered_transform:(fun o ->
                              record (Sched.apply (Autotune.sketch_schedule ~p:q o) o))
-                           (Context.auto ()) fwd Ir.Indexing.Empty)))
+                           ~name (Context.auto ()) fwd)))
         in
         run_round ~label:g lives)
   end;
@@ -639,7 +673,7 @@ let () =
       List.filter_map prepared ~f:(fun ((s, _, _, _, _, _) as pr) ->
           let lbl = ref "" and ms = ref Float.nan and outcome = ref None in
           let lv =
-            arm pr ~label:"TUNED (full search)" ~compile:(fun ~record:_ ~name fwd ->
+            arm pr ~label:"TUNED (full search)" ~compile:(fun ~record:_ ~name ~fatal_seen:_ fwd ->
                 Autotune.tune ~name ~search:true ~cache_dir:"" ~beam_width:tn_beam
                   ~rounds:tn_rounds ~repeats:tn_repeats ~keep_fraction:tn_keep
                   ~max_split_reduce_sites:tn_split
