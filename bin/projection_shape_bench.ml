@@ -132,7 +132,10 @@ let geom_label (q : Autotune.sketch_params) =
     (if q.sk_pack_rest then " packrest" else "")
     (if q.sk_batch_grid then " bgrid" else "")
 
-let now () = Float.of_int63 (Time_now.nanoseconds_since_unix_epoch ()) /. 1e9
+(* A MONOTONIC counter, not a wall-clock timestamp: an NTP step or a VM clock correction during a
+   long run would otherwise jump (or invert) an interval, and the corrupted batch feeds the median
+   and the winner directly. Same clock [Autotune.time_routine] measures with. *)
+let elapsed c = Mtime.Span.to_float_ns (Mtime_clock.count c) /. 1e9
 
 (* One site: a batched matmul [d[bs.., m, j] += a[bs.., m, kk..] * w[j, kk..]]. [ks] is the
    weight's input-axis list -- a singleton for the q/k/v shape, a pair for the out projection's
@@ -197,6 +200,10 @@ type live = {
   lv_parity : bool;
   lv_times : float list ref;
   lv_single : float ref;
+  lv_failed : bool ref;
+      (** Set when a timed dispatch raises: the arm stops being visited, is not reported, and its
+          cell is counted -- a recoverable per-candidate failure must not abort a run that still
+          has matched arms to measure and release. *)
 }
 
 let () =
@@ -381,6 +388,7 @@ let () =
         lv_parity = parity;
         lv_times = ref [];
         lv_single = ref Float.infinity;
+        lv_failed = ref false;
       }
     with
     | lv when lv.lv_parity -> Some lv
@@ -418,18 +426,29 @@ let () =
   let time_round lives =
     let arr = Array.of_list lives in
     let n = Array.length arr in
+    (* Each timed batch is contained the way validation is: a recoverable dispatch or sync failure
+       marks that one arm and stops visiting it, leaving the round's other matched arms measured,
+       reported and released. Only the fatal set escapes. *)
+    let attempt lv f =
+      if not !(lv.lv_failed) then
+        try f ()
+        with e when not (is_fatal e) ->
+          lv.lv_failed := true;
+          fail "%s / %s: a timed dispatch failed: %s" lv.lv_tag lv.lv_label
+            (List.hd_exn (String.split_lines (Exn.to_string e)))
+    in
     if n > 0 then begin
       for b = 0 to nbatches - 1 do
         let ord = visit_order n b in
         for i = 0 to n - 1 do
           let lv = arr.(ord.(i)) in
-          let t0 = now () in
-          for _ = 1 to repeats do
-            lv.lv_ctx := Context.run !(lv.lv_ctx) lv.lv_routine
-          done;
-          Context.sync !(lv.lv_ctx);
-          let t1 = now () in
-          lv.lv_times := ((t1 -. t0) /. Float.of_int repeats) :: !(lv.lv_times)
+          attempt lv (fun () ->
+              let c = Mtime_clock.counter () in
+              for _ = 1 to repeats do
+                lv.lv_ctx := Context.run !(lv.lv_ctx) lv.lv_routine
+              done;
+              Context.sync !(lv.lv_ctx);
+              lv.lv_times := (elapsed c /. Float.of_int repeats) :: !(lv.lv_times))
         done
       done;
       (* The tuner's own statistic ([Autotune.time_routine]): one dispatch, one sync, minimum over
@@ -439,11 +458,12 @@ let () =
         let ord = visit_order n b in
         for i = 0 to n - 1 do
           let lv = arr.(ord.(i)) in
-          let t0 = now () in
-          lv.lv_ctx := Context.run !(lv.lv_ctx) lv.lv_routine;
-          Context.sync !(lv.lv_ctx);
-          let dt = now () -. t0 in
-          if Float.(dt < !(lv.lv_single)) then lv.lv_single := dt
+          attempt lv (fun () ->
+              let c = Mtime_clock.counter () in
+              lv.lv_ctx := Context.run !(lv.lv_ctx) lv.lv_routine;
+              Context.sync !(lv.lv_ctx);
+              let dt = elapsed c in
+              if Float.(dt < !(lv.lv_single)) then lv.lv_single := dt)
         done
       done
     end
@@ -485,7 +505,9 @@ let () =
     if not (List.is_empty lives) then begin
       p "\n-- round: %s (%d arms interleaved)\n" label (List.length lives);
       time_round lives;
-      List.iter lives ~f:(fun lv -> record_result lv (report lv));
+      List.iter lives ~f:(fun lv ->
+          if (not !(lv.lv_failed)) && not (List.is_empty !(lv.lv_times)) then
+            record_result lv (report lv));
       List.iter lives ~f:release
     end
   in

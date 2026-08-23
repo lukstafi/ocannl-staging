@@ -94,7 +94,7 @@
  (public_name projection_shape_bench)
  (name projection_shape_bench)
  (modules projection_shape_bench)
- (libraries ocannl base stdio time_now bench_args)
+ (libraries ocannl base stdio mtime.clock.os bench_args)
  (preprocess
   (pps ppx_here ppx_ocannl))
  (modes exe))
