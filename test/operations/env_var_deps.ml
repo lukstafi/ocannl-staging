@@ -247,6 +247,23 @@ let is_repo_wide_scan stanza =
           List.exists args ~f:globs_repository)
   | _ -> false
 
+(* ... and the glob has to LEAVE the directory to be reading the repository (Codex P2, round 6). A
+   test that recursively reads a fixture tree of its own uses the same form and is nobody's
+   repo-wide scan; classifying it as one would demand a `scans` family beside it and fail the
+   check until an unrelated suite appeared. *)
+let rec escapes_directory = function
+  | Sexp.List (Sexp.Atom "glob_files_rec" :: args) ->
+      List.exists args ~f:(function
+        | Sexp.Atom pattern -> String.is_prefix pattern ~prefix:"../"
+        | _ -> false)
+  | Sexp.List l -> List.exists l ~f:escapes_directory
+  | Sexp.Atom _ -> false
+
+let is_repo_wide_scan stanza =
+  is_repo_wide_scan stanza
+  && Option.value_map (Scan.field stanza "deps") ~default:false ~f:(fun args ->
+         List.exists args ~f:escapes_directory)
+
 (* What a rule writes, so that the rule DIFFING it can be found: a scan produces `<name>.actual` and
    a second rule holds it against the golden. It is that second rule the family alias has to
    aggregate, since it is the one that fails when the scan reports something. *)
@@ -289,7 +306,21 @@ let rec goldens_in = function
    of a subject it checks -- `-extension`, `-unoptimized`, `-ppx` -- which is why the relation
    asked for is a prefix rather than equality: one run can write several goldens, and each needs an
    alias of its own. *)
-let golden_stem golden =
+(* Dune's named dependencies: `(deps (:golden foo.expected))` binds `%{golden}` to that path. A
+   pform naming one carries no colon, so without the binding `golden_stem` would take the BINDING's
+   name for the golden's -- rejecting the alias a reader would write and accepting one that names
+   nothing (Codex P2, round 6). *)
+let named_deps stanza =
+  match Scan.field stanza "deps" with
+  | None -> []
+  | Some args ->
+      List.filter_map args ~f:(function
+        | Sexp.List (Sexp.Atom name :: Sexp.Atom path :: _) when String.is_prefix name ~prefix:":"
+          ->
+            Some (String.drop_prefix name 1, path)
+        | _ -> None)
+
+let golden_stem ?(named = []) golden =
   let cut_at s ~on =
     match String.substr_index s ~pattern:on with None -> s | Some i -> String.prefix s i
   in
@@ -308,8 +339,11 @@ let golden_stem golden =
             let after = String.drop_prefix rest (close + 1) in
             let path =
               match String.rindex inside ':' with
-              | None -> inside
               | Some colon -> String.drop_prefix inside (colon + 1)
+              (* No colon: a named dependency, resolvable only from the stanza that bound it. An
+                 unbound one leaves the stem empty, which the caller refuses by name rather than
+                 guessing. *)
+              | None -> Option.value (List.Assoc.find named inside ~equal:String.equal) ~default:""
             in
             path ^ after)
   in
@@ -682,7 +716,10 @@ let () =
          alias; the ambient gate is the one rule that means to share it. *)
       let generated = generated_runtest_names stanzas in
       List.iter stanzas ~f:(fun stanza ->
-          if not (is_gate stanza) then
+          (* The exemption is the ambient gate, and a gate does not diff a golden: without that
+             second half, any rule could buy its way out of this check with a `(universe)`
+             dependency (Codex P2, round 6). *)
+          if not (is_gate stanza && not (is_golden_diff stanza)) then
             List.iter (aliases_of stanza) ~f:(fun alias ->
                 match String.chop_prefix alias ~prefix:"runtest-" with
                 | Some name when Set.mem generated name ->
@@ -721,7 +758,7 @@ let () =
                                 String.chop_prefix alias ~prefix:(suite ^ "-"))
                             |> Option.value ~default:alias
                           in
-                          let stem = golden_stem golden in
+                          let stem = golden_stem ~named:(named_deps stanza) golden in
                           (not (String.is_empty stem)) && String.is_prefix suffix ~prefix:stem) ->
                 ()
             | aliases ->
@@ -733,7 +770,7 @@ let () =
                         alias
                   | [ alias ]
                     when List.exists (goldens_in stanza) ~f:(fun g ->
-                             String.is_empty (golden_stem g)) ->
+                             String.is_empty (golden_stem ~named:(named_deps stanza) g)) ->
                       Printf.sprintf
                         "attaches `%s` to a golden this check cannot name -- %s reduces to an \
                          empty stem, so nothing constrains the alias. Spell the golden as a plain \
@@ -741,7 +778,7 @@ let () =
                         alias
                         (String.concat ~sep:", "
                            (List.filter (goldens_in stanza) ~f:(fun g ->
-                                String.is_empty (golden_stem g))))
+                                String.is_empty (golden_stem ~named:(named_deps stanza) g))))
                   | [ alias ] ->
                       Printf.sprintf
                         "attaches `%s` to a golden its name does not name: the goldens are %s, so \
@@ -751,7 +788,8 @@ let () =
                         alias
                         (String.concat ~sep:", " (goldens_in stanza))
                         (String.concat ~sep:"` or `<suite>-"
-                           (List.map (goldens_in stanza) ~f:golden_stem))
+                           (List.map (goldens_in stanza)
+                              ~f:(golden_stem ~named:(named_deps stanza))))
                   | aliases ->
                       Printf.sprintf
                         "attaches a golden diff to %d aliases (%s) -- and a rule on two aliases \
