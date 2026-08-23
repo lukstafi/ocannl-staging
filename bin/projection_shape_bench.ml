@@ -123,19 +123,11 @@ let cycle ~dims ~modulus ~offset ~stride idcs =
   let flat = Array.foldi dims ~init:0 ~f:(fun i acc d -> (acc * d) + (idcs.(i) % d)) in
   offset +. (stride *. Float.of_int (flat % modulus))
 
-(* The lowering alone; the context this mints is released rather than left to the pool tables,
-   which strongly retain device slabs (docs/agent-notes/backend-memory.md). *)
-let capture fwd =
-  let captured = ref None in
-  let ctx, _r =
-    Context.compile
-      ~lowered_transform:(fun opt ->
-        captured := Some opt;
-        opt)
-      (Context.auto ()) fwd Ir.Indexing.Empty
-  in
-  Context.release ctx;
-  Option.value_exn ~here:[%here] !captured
+(* The lowering alone, through the ANALYZE-ONLY entry point: [Context.compile] would need the
+   backend to accept the untuned form, so one site whose default compile a backend rejects would
+   abort the whole run before any explicitly scheduled seed -- which might compile perfectly -- got
+   measured. It also mints no context to leak. *)
+let capture fwd = Context.lowered_for_decisions (Context.auto ()) fwd Ir.Indexing.Empty
 
 let geom_label (q : Autotune.sketch_params) =
   Printf.sprintf "%s%s %dx%dx%d/%dx%d%s%s%s%s%s"
@@ -235,6 +227,15 @@ let () =
     invalid_arg
       (Printf.sprintf "batches must be even (got %d): each batch is mirrored by its partner"
          nbatches);
+  (* [repeats] is the dispatch count inside a steady-state batch AND the sample count of the
+     one-dispatch statistic, whose sweep is mirrored the same way; an odd value leaves that
+     statistic's final sample unpaired. *)
+  if repeats % 2 = 1 then
+    invalid_arg
+      (Printf.sprintf
+         "repeats must be even (got %d): it is also the mirrored sample count of the \
+          one-dispatch statistic"
+         repeats);
   let group = String.lowercase (Bench_args.string args 2 ~default:"all") in
   (* [fwd]/[rev] reverses the rotation the interleaved rounds start from, so a residual
      first-arm-is-cold bias can be shown not to carry the conclusion. *)
@@ -370,6 +371,10 @@ let () =
     let name = Printf.sprintf "%s_c%d" s.tag !counter in
     let held = ref None in
     let drop () = Option.iter !held ~f:(fun c -> release_quietly !c) in
+    (* Set when the classifier called a validation failure fatal: [raise_failure] re-raises the
+       original exception with its backtrace, which the containment below would otherwise catch
+       like any other. A classified decline is left to that containment on purpose. *)
+    let fatal_seen = ref false in
     match
       let dims = ref None in
       let record o =
@@ -379,10 +384,27 @@ let () =
       let ctx, routine = compile ~record ~name fwd in
       let ctx = ref ctx in
       held := Some ctx;
-      for _ = 1 to 3 do
-        ctx := Context.run !ctx routine
-      done;
-      let got = Context.get_values !ctx d.Tensor.value in
+      (* The warm-up launches and the synchronizing readback go through the same classifier the
+         timed batches use: an unclassified driver failure here is fatal, not a candidate's own
+         decline, and continuing to compile and time arms on an affected device is what the
+         contract exists to stop. *)
+      let protect phase f =
+        match
+          Outcome.protect
+            ~classify_backend:(Context.failure_classifier !ctx)
+            ~provenance:Outcome.Candidate ~phase ~candidate:label f
+        with
+        | Ok v -> v
+        | Error (Outcome.Classified _ as f) -> Outcome.raise_failure f
+        | Error (Outcome.Fatal _ as f) ->
+            fatal_seen := true;
+            Outcome.raise_failure f
+      in
+      protect Outcome.Launch (fun () ->
+          for _ = 1 to 3 do
+            ctx := Context.run !ctx routine
+          done);
+      let got = protect Outcome.Sync (fun () -> Context.get_values !ctx d.Tensor.value) in
       let want = Lazy.force orc in
       let parity =
         Array.length got = Array.length want && Array.for_all2_exn got want ~f:Float.equal
@@ -412,7 +434,7 @@ let () =
         fail "%s / %s: PARITY FAILED against the host oracle -- not timed" s.tag label;
         drop ();
         None
-    | exception exn when not (is_fatal exn) ->
+    | exception exn when (not !fatal_seen) && not (is_fatal exn) ->
         fail "%s / %s: FAILED: %s" s.tag label
           (List.hd_exn (String.split_lines (Exn.to_string exn)));
         drop ();
