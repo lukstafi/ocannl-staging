@@ -142,6 +142,15 @@
    "backend-0-0.log.actual")))
 
 (test
+ ; ocannl-backend: none -- renders IR documents through the pretty-printer and never creates a
+ ; context, so no configured backend can change what it prints.
+ (name ll_printer_constants)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules ll_printer_constants)
+ (libraries base stdio ll_test arrayjit.verdict))
+
+(test
  (name one_element_reshape)
  (package neural_nets_lib)
  (deps

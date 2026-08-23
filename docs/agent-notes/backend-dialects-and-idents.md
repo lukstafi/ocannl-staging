@@ -49,6 +49,16 @@ files.
   has anything to round; C99, CUDA, HIP and MSL all accept the form, and only ties are spelled that
   way. Guard: `test/operations/float_literal_forms`, bitwise at f64/f32/f16 plus the emitted
   tokens, and its three tie cases fail on Metal without the hex spelling.
+- Two of those three obligations are not C's: an IR dump wants a floating literal that round-trips
+  for the same reasons a kernel does, and the `.ll`/`.cd` printers (`Low_level.to_doc_cstyle`,
+  `Low_level.to_doc`) used to render a `Constant` with a bare `%.16g` of their own — so `2.` showed
+  as `2`, `-0.` as the integer `-0`, and a constant whose 17th digit mattered was displayed as its
+  16-digit neighbour. That is the debug surface you reach for when chasing this exact class of bug,
+  which is what made it worth more than tidiness (gh-ocannl-713). The radix-forcing and the
+  `%.17g` retry now live in `Utils.decimal_float_literal`, shared by `c_float_literal` and both
+  printers; the C-dialect spellings (`INFINITY`, the tie's `%h`) stay in `c_float_literal`, since a
+  dump is not C and its specials keep `%.16g`'s `inf`/`nan` words. Guard:
+  `test/operations/ll_printer_constants`, the dump-side twin of `float_literal_forms`.
 - Reduced-precision *literals* are dialect-specific and do not transpose between backends. `0.0h`
   is a clang extension and valid MSL, but not CUDA C++ — nvrtc rejects it with "user-defined
   literal operator not found" (gh-ocannl-518, the half `Relu_gate`). On CUDA/HIP write the zero as
