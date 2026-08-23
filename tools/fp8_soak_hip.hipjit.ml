@@ -18,7 +18,6 @@ module H = Hip
 
 let name = "hip"
 let vendor_type = "__hip_fp8_e5m2"
-let available = true
 
 type bytes_buf =
   (int, Stdlib.Bigarray.int8_unsigned_elt, Stdlib.Bigarray.c_layout) Stdlib.Bigarray.Array1.t
@@ -60,7 +59,11 @@ extern "C" __global__ void ocannl_vendor_narrow_f64(unsigned long long base,
 }
 |}
 
+(* [context] and [kernel_module] are held for the same reason the CUDA arm holds them: a primary
+   context released by its finalizer resets the device under the sweep. See that arm's comment. *)
 type state = {
+  context : H.Context.t;
+  kernel_module : H.Module.t;
   attrs : H.Device.attributes;
   stream : H.Stream.t;
   narrow_f32 : H.Module.func;
@@ -69,6 +72,16 @@ type state = {
 }
 
 let state = ref None
+
+(* Whether this box has an AMD device, not merely whether hipjit is linked. See the CUDA arm. *)
+let probe () =
+  match
+    H.init ();
+    H.Device.get_count ()
+  with
+  | 0 -> Error "hipjit is linked, but the HIP runtime reports no device"
+  | _ -> Ok ()
+  | exception e -> Error ("hipjit is linked, but HIP initialization failed: " ^ Exn.to_string e)
 
 let init () =
   match !state with
@@ -82,13 +95,15 @@ let init () =
         Hiprtc.compile_to_code ~hip_src:source ~name:"ocannl_fp8_soak.hip" ~options:[]
           ~with_debug:false
       in
-      let m = H.Module.load_data_ex code [] in
+      let kernel_module = H.Module.load_data_ex code [] in
       let st =
         {
+          context = ctx;
+          kernel_module;
           attrs = H.Device.get_attributes device;
           stream = H.Stream.create ();
-          narrow_f32 = H.Module.get_function m ~name:"ocannl_vendor_narrow_f32";
-          narrow_f64 = H.Module.get_function m ~name:"ocannl_vendor_narrow_f64";
+          narrow_f32 = H.Module.get_function kernel_module ~name:"ocannl_vendor_narrow_f32";
+          narrow_f64 = H.Module.get_function kernel_module ~name:"ocannl_vendor_narrow_f64";
           buffer = None;
         }
       in

@@ -14,7 +14,6 @@ module Cu = Cuda
 
 let name = "cuda"
 let vendor_type = "__nv_fp8_e5m2"
-let available = true
 
 type bytes_buf = (int, Stdlib.Bigarray.int8_unsigned_elt, Stdlib.Bigarray.c_layout) Stdlib.Bigarray.Array1.t
 
@@ -55,8 +54,17 @@ extern "C" __global__ void ocannl_vendor_narrow_f64(unsigned long long base,
 }
 |}
 
+(* Everything the sweep needs, held for the whole of it. The two lifetime fields are not
+   decoration: [Cu.Context.get_primary] finalizes with [cuDevicePrimaryCtxRelease], and the
+   underlying context is RESET once the last reference goes -- so a context dropped after [init]
+   returns can be collected mid-sweep and take the device allocation and the loaded code with it.
+   [Cuda_backend] keeps its [primary_context] in the device record for exactly this reason.
+   [kernel_module] is belt and braces: cudajit's [get_function] already documents that the returned
+   [func] retains its module, so this one is about saying the lifetime rather than inferring it from
+   a binding's internals -- and about the HIP arm, where the same reasoning has to hold. *)
 type state = {
-  device : Cu.Device.t;
+  context : Cu.Context.t;
+  kernel_module : Cu.Module.t;
   attrs : Cu.Device.attributes;
   stream : Cu.Stream.t;
   narrow_f32 : Cu.Module.func;
@@ -65,6 +73,19 @@ type state = {
 }
 
 let state = ref None
+
+(* Whether this BOX can run the arm, not whether the build has it: an opam switch with both
+   `cudajit` and `hipjit` in it has both arms compiled, and on a machine with one kind of GPU the
+   default selection must not pick the other -- least of all after finishing the first vendor's
+   several-minute sweep. The reason travels with the answer so a skip is never silent. *)
+let probe () =
+  match
+    Cu.init ();
+    Cu.Device.get_count ()
+  with
+  | 0 -> Error "cudajit is linked, but the CUDA driver reports no device"
+  | _ -> Ok ()
+  | exception e -> Error ("cudajit is linked, but CUDA initialization failed: " ^ Exn.to_string e)
 
 let init () =
   match !state with
@@ -88,14 +109,15 @@ let init () =
           ~options:(includes @ [ arch ])
           ~with_debug:false
       in
-      let m = Cu.Module.load_data_ex ptx [] in
+      let kernel_module = Cu.Module.load_data_ex ptx [] in
       let st =
         {
-          device;
+          context = ctx;
+          kernel_module;
           attrs;
           stream = Cu.Stream.create ();
-          narrow_f32 = Cu.Module.get_function m ~name:"ocannl_vendor_narrow_f32";
-          narrow_f64 = Cu.Module.get_function m ~name:"ocannl_vendor_narrow_f64";
+          narrow_f32 = Cu.Module.get_function kernel_module ~name:"ocannl_vendor_narrow_f32";
+          narrow_f64 = Cu.Module.get_function kernel_module ~name:"ocannl_vendor_narrow_f64";
           buffer = None;
         }
       in

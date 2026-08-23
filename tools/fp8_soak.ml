@@ -39,7 +39,16 @@ external soak_f64 : int64 -> int64 -> int array -> bytes_buf -> counts_buf -> un
 module type ARM = sig
   val name : string
   val vendor_type : string
-  val available : bool
+
+  val probe : unit -> (unit, string) Result.t
+  (** Whether THIS BOX can run the arm — the vendor's jit library linked AND its driver reporting a
+      device — with the reason when it cannot. "Compiled in" is not the same question: a switch
+      carrying both `cudajit` and `hipjit` compiles both arms, and on a machine with one kind of GPU
+      the default selection must skip the other rather than raise partway through a run, possibly
+      after the first vendor's several-minute sweep has already completed. An explicit [--arm] runs
+      regardless, so a box whose hardware is missing or misconfigured still gets the vendor's own
+      diagnosis instead of a silent skip. *)
+
   val describe : unit -> string
 
   val narrow_f32 : base:int -> count:int -> bytes_buf -> unit
@@ -208,20 +217,43 @@ let () =
         | _ ->
             usage ();
             Stdlib.exit (if String.equal s "--help" then 0 else 2));
+  (* The default takes the arms that probe clean and says out loud why it passed over each of the
+     others. An arm named EXPLICITLY is never skipped silently: a box whose driver is missing or
+     whose GPU is not visible gets the probe's own diagnosis as a failed verdict — which carries the
+     nonzero exit an uncaught exception would, and the reason without the backtrace. *)
   let selected =
-    List.filter arms ~f:(fun (module A : ARM) ->
-        match !arm_filter with Some n -> String.equal n A.name | None -> A.available)
+    match !arm_filter with
+    | Some n ->
+        List.filter arms ~f:(fun (module A : ARM) ->
+            String.equal n A.name
+            &&
+            match A.probe () with
+            | Ok () -> true
+            | Error why ->
+                Verdict.fail (Printf.sprintf "the %s arm can run on this box (%s)" A.name why);
+                false)
+    | None ->
+        List.filter arms ~f:(fun (module A : ARM) ->
+            match A.probe () with
+            | Ok () -> true
+            | Error why ->
+                Stdio.eprintf "fp8_soak: skipping the %s arm: %s\n%!" A.name why;
+                false)
   in
-  (match selected with
-  | [] ->
-      Stdio.eprintf "fp8_soak: no arm selected; this build has: %s\n"
-        (String.concat ~sep:" "
+  (match (selected, !arm_filter) with
+  | [], Some _ when Verdict.any_failed () -> () (* the probe already said why, as a verdict *)
+  | [], _ ->
+      Stdio.eprintf "fp8_soak: no arm selected; this build has: %s\n%!"
+        (String.concat ~sep:", "
            (List.map arms ~f:(fun (module A : ARM) ->
-                Printf.sprintf "%s(%s)" A.name (if A.available then "available" else "missing"))));
-      Verdict.fail "at least one GPU arm is available"
+                match A.probe () with
+                | Ok () -> Printf.sprintf "%s (ready)" A.name
+                | Error why -> Printf.sprintf "%s (%s)" A.name why)));
+      Verdict.fail "at least one GPU arm can run on this box"
   | _ -> ());
   List.iter selected ~f:(fun ((module A : ARM) as arm) ->
-      Stdio.printf "%s arm: %s\n" A.name (A.describe ());
+      (* Flushed, so the arm header cannot land after a skip notice on the other stream. *)
+      Stdio.printf "%s arm: %s\n%!" A.name (A.describe ());
       Stdio.printf "  codec: builtins.c single_to_fp8 / double_to_fp8 (%s); vendor: %s\n"
         (codec_landmarks ()) A.vendor_type;
       if String.(!sweep = "f32" || !sweep = "both") then

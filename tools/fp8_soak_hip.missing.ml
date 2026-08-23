@@ -5,7 +5,7 @@ type bytes_buf =
 
 let name = "hip"
 let vendor_type = "__hip_fp8_e5m2"
-let available = false
+let probe () = Error "not built: the hip arm needs the hipjit library"
 let unavailable () = failwith "fp8_soak: the hip arm needs the hipjit library"
 let describe () : string = unavailable ()
 let narrow_f32 ~base:_ ~count:_ (_ : bytes_buf) : unit = unavailable ()
