@@ -125,23 +125,68 @@ let () =
   List.iter declines ~f:(fun e -> Stdio.eprintf "bc decline: %s\n" e);
   (* The point of the fix is reach: the minor output axis (j) must actually carry [Grid] blocks in
      the constructed schedule, not merely survive construction. A schedule constructed under the old
-     rule could not exist at all, but guard against a future regression that constructs a j-serial
-     form: the split must be a real spread (factor < extent) of an axis of j's extent — m = 64 is
-     unique to the minor output axis here (b = 4, i = 32, k = 16), in the site's nest and its
-     companions alike. *)
+     rule could not exist at all; the guard is against a future regression that constructs a
+     j-serial form. m = 64 is unique to the minor output axis here (b = 4, i = 32, k = 16), in the
+     site's nest and its companions alike.
+
+     TWO claims, because since gh-ocannl-730 the menu reaches j's whole extent in a single block:
+     padding lets bm = 64 apply to this site's 32 rows, and that geometry's bn = 64 then covers j in
+     one Grid block. Measured against the pre-gh-730 seeding, that geometry is an ADDITION — every
+     geometry that spread j before still does, and two more now exist — so the [for_all] that used
+     to carry the whole property is split rather than weakened. The first claim is the
+     anti-regression invariant proper and runs over ALL seeds: j is Grid-typed in every constructed
+     schedule, never left serial. The second keeps [for_all] strength over exactly the geometries
+     the property can speak about — those whose column block is narrower than j — and requires that
+     set to be non-empty, so it cannot pass by going vacuous. Both are stated over the resulting
+     BLOCK COUNT rather than over the split factor (gh-ocannl-744), so neither pins the provenance
+     of the geometry that produced it. *)
   let bounds = LL.loop_bounds opt.LL.llc in
-  let spreads_j sched =
-    List.exists sched ~f:(function
+  let j_grid_factors bounds sched =
+    List.filter_map sched ~f:(function
       | Sched.Split { axis; factor; outer = LL.Grid; _ } -> (
-          factor < m
-          &&
           match List.Assoc.find bounds axis ~equal:Ir.Indexing.equal_symbol with
-          | Some (0, hi) -> hi + 1 = m
-          | _ -> false)
-      | _ -> false)
+          | Some (0, hi) when hi + 1 = m -> Some factor
+          | _ -> None)
+      | _ -> None)
   in
-  p "bc: constructed schedules spread the minor output axis across Grid blocks"
-    (List.for_all constructed ~f:(function Either.First s -> spreads_j s | _ -> false));
+  (* Stated as a BLOCK COUNT, not as a comparison of the split factor against the extent
+     (gh-ocannl-744): what the leg is about is that the minor output axis carries block-level
+     parallelism, and any factor yielding more than one block delivers that, whatever geometry
+     produced it. *)
+  let j_block_counts bounds sched =
+    List.map (j_grid_factors bounds sched) ~f:(fun f -> (m + f - 1) / f)
+  in
+  let blocks_j bounds sched = not (List.is_empty (j_block_counts bounds sched)) in
+  let spreads_j sched = List.exists (j_block_counts bounds sched) ~f:(fun c -> c > 1) in
+  let built =
+    List.filter_map (List.zip_exn seeds constructed) ~f:(function
+      | sp, Either.First sched -> Some (sp, sched)
+      | _, Either.Second _ -> None)
+  in
+  p "bc: every constructed schedule Grid-blocks the minor output axis, never leaving it serial"
+    (List.length built = List.length seeds
+    && (not (List.is_empty built))
+    && List.for_all built ~f:(fun (_, sched) -> blocks_j bounds sched));
+  let narrower = List.filter built ~f:(fun (sp, _) -> sp.Autotune.sk_bn < m) in
+  p "bc: the minor output axis carries block-level parallelism wherever the geometry allows"
+    ((not (List.is_empty narrower)) && List.for_all narrower ~f:(fun (_, s) -> spreads_j s));
+  (* Negative control: the detector has teeth. The CPU pipelines block the ROW axis (under
+     [sk_grid]) and never j, so [blocks_j] must reject every CPU-seeded schedule — if it answered
+     true there it would be matching any Grid split at all, and both claims above would hold for a
+     j-serial form. *)
+  let cpu_scheds =
+    List.filter_map
+      (List.filter
+         (Autotune.sketch_seed_params ~is_gpu:false ~is_cpu:true ~limits opt)
+         ~f:(fun sp -> not sp.Autotune.sk_epilogue))
+      ~f:(fun sp ->
+        match Autotune.sketch_schedule ~p:sp opt with
+        | sched -> Some sched
+        | exception _ -> None)
+  in
+  p "bc: the j-blocking detector rejects the CPU pipelines, which block the row axis instead"
+    ((not (List.is_empty cpu_scheds))
+    && List.for_all cpu_scheds ~f:(fun s -> not (blocks_j bounds s)));
 
   (* Executable parity, seed by seed, on backends that can run shared staging. Vacuous on cc —
      announced on stderr so it is not mistaken for coverage; the golden stays
@@ -331,31 +376,51 @@ let () =
   (* Finer segmentation: the GEMM segment is freed, its seeds construct, and they spread j — the
      axis whose extent m = 64 is unique in this workload (b = 4, i = 32, k = 16). *)
   let bounds seg = LL.loop_bounds seg.LL.llc in
-  let spreads_j seg sched =
-    List.exists sched ~f:(function
+  let j_grid_factors seg sched =
+    List.filter_map sched ~f:(function
       | Sched.Split { axis; factor; outer = LL.Grid; _ } -> (
-          factor < m
-          &&
           match List.Assoc.find (bounds seg) axis ~equal:Ir.Indexing.equal_symbol with
-          | Some (0, hi) -> hi + 1 = m
-          | _ -> false)
-      | _ -> false)
+          | Some (0, hi) when hi + 1 = m -> Some factor
+          | _ -> None)
+      | _ -> None)
   in
+  let j_block_counts seg sched =
+    List.map (j_grid_factors seg sched) ~f:(fun f -> (m + f - 1) / f)
+  in
+  let blocks_j seg sched = not (List.is_empty (j_block_counts seg sched)) in
+  let spreads_j seg sched = List.exists (j_block_counts seg sched) ~f:(fun c -> c > 1) in
   let fine_gemm_seg tuples =
     List.find (normals tuples) ~f:(fun seg -> not (List.is_empty (gpu_seeds seg)))
   in
-  p "lm: arity_cuts fission frees the GEMM and its seeds spread j across Grid blocks"
-    (match fine_gemm_seg (segments ~arity_cuts:true opt) with
-    | None -> false
+  (* Split the same way as the [bc] leg above, and for the same reason (gh-ocannl-730): every
+     freed seed must Grid-block j, and every seed whose column block is narrower than j must spread
+     it across more than one block. *)
+  let fine_built =
+    match fine_gemm_seg (segments ~arity_cuts:true opt) with
+    | None -> None
     | Some seg ->
         let seeds = gpu_seeds seg in
-        (not (List.is_empty seeds))
-        && List.for_all seeds ~f:(fun sp ->
-            match Autotune.sketch_schedule ~p:sp seg with
-            | sched -> spreads_j seg sched
-            | exception exn ->
-                Stdio.eprintf "lm: fine seed FAILED to construct: %s\n" (Exn.to_string exn);
-                false));
+        let built =
+          List.filter_map seeds ~f:(fun sp ->
+              match Autotune.sketch_schedule ~p:sp seg with
+              | sched -> Some (sp, sched)
+              | exception exn ->
+                  Stdio.eprintf "lm: fine seed FAILED to construct: %s\n" (Exn.to_string exn);
+                  None)
+        in
+        if List.length built <> List.length seeds then None else Some (seg, built)
+  in
+  p "lm: arity_cuts fission frees the GEMM and its seeds Grid-block j"
+    (match fine_built with
+    | None -> false
+    | Some (seg, built) ->
+        (not (List.is_empty built)) && List.for_all built ~f:(fun (_, s) -> blocks_j seg s));
+  p "lm: the freed GEMM's seeds carry block-level parallelism on j wherever the geometry allows"
+    (match fine_built with
+    | None -> false
+    | Some (seg, built) ->
+        let narrower = List.filter built ~f:(fun (sp, _) -> sp.Autotune.sk_bn < m) in
+        (not (List.is_empty narrower)) && List.for_all narrower ~f:(fun (_, s) -> spreads_j seg s));
   (* Executed: the finer fissioned form (default per-segment presets) computes the same values — the
      cut's stream-order synchronization replaces the fused segment's serial order. Runs on every
      backend. *)
