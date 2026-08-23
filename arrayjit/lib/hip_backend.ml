@@ -101,6 +101,48 @@ module Slab = struct
       H.Stream.memset_d8 ~offset base Unsigned.UChar.zero ~length:size_in_bytes device.runner
 end
 
+(* The HIP SDK include dir (no-spaces junction on Windows / HIP_PATH / /opt/rocm), forward-slashed
+   for the clang command line. [None] when no SDK is found (the Linux built-in-headers path).
+   Lifted out of [Impl] for the same reason [Cuda_backend.cuda_include_options] was: it is a policy
+   every hiprtc caller has to agree with, and tools/fp8_soak.ml is one -- a soak that guessed its
+   own include path would report the HIP arm ready and then fail to compile its kernel wherever the
+   SDK does not sit where the guess looked (Codex P2 on PR #463, for the CUDA side of the same
+   program). *)
+let hip_sdk_include_dir =
+  lazy
+    (let candidates =
+       (match Sys.getenv "LOCALAPPDATA" with Some l -> [ l ^ "/hip_path_link" ] | None -> [])
+       @ (match Sys.getenv "HIP_PATH" with Some p -> [ p ] | None -> [])
+       @ [ "/opt/rocm" ]
+     in
+     List.find_map candidates ~f:(fun p ->
+         if Stdlib.Sys.file_exists (p ^ "/include/hip/hip_fp16.h") then
+           Some (String.map ~f:(fun c -> if Char.(c = '\\') then '/' else c) (p ^ "/include"))
+         else None))
+
+let hip_include_options () =
+  match Lazy.force hip_sdk_include_dir with Some d -> [ "-I" ^ d ] | None -> []
+
+(* The two guarded narrowing helpers HIP emits in place of a bare cast (gh-ocannl-647), as SOURCE
+   TEXT, so a caller sweeping them sweeps the shipped definitions rather than a transcription of
+   them -- tools/fp8_soak.ml's HIP arm, whose whole subject is what the guard does and does not
+   change. Raises rather than silently returning less if either helper is renamed: a soak that
+   quietly stopped sweeping the guard would keep printing the same passing line. *)
+let fp8_guard_helper_names = [ "ocannl_single_to_fp8_uniform"; "ocannl_double_to_fp8_uniform" ]
+
+let fp8_guard_source () =
+  List.map fp8_guard_helper_names ~f:(fun wanted ->
+      match
+        List.find Builtins_hip.builtins ~f:(fun (name, _, _) -> String.equal name wanted)
+      with
+      | Some (_, code, _) -> code
+      | None ->
+          raise
+          @@ Utils.User_error
+               ("Hip_backend.fp8_guard_source: no builtin named " ^ wanted
+              ^ " -- Builtins_hip and this list have drifted apart"))
+  |> String.concat ~sep:"\n"
+
 (* [initialized_devices] never forgets its entries. *)
 let initialized_devices = Hash_set.create (module Int)
 let initialized = ref false
@@ -218,20 +260,6 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
               || String.is_prefix a.gcn_arch_name ~prefix:"gfx12")
               && a.warp_size = 32))
 
-  (* The HIP SDK include dir (no-spaces junction on Windows / HIP_PATH / /opt/rocm), forward-slashed
-     for the clang command line. [None] when no SDK is found (the Linux built-in-headers path). *)
-  let hip_sdk_include_dir =
-    lazy
-      (let candidates =
-         (match Sys.getenv "LOCALAPPDATA" with Some l -> [ l ^ "/hip_path_link" ] | None -> [])
-         @ (match Sys.getenv "HIP_PATH" with Some p -> [ p ] | None -> [])
-         @ [ "/opt/rocm" ]
-       in
-       List.find_map candidates ~f:(fun p ->
-           if Stdlib.Sys.file_exists (p ^ "/include/hip/hip_fp16.h") then
-             Some (String.map ~f:(fun c -> if Char.(c = '\\') then '/' else c) (p ^ "/include"))
-           else None))
-
   (* A directory directly containing [rocwmma/rocwmma.hpp], if any: [ROCWMMA_PATH] variants, a clone
      under [%LOCALAPPDATA%/rocwmma], or the HIP include tree (rocWMMA installs there on Linux).
      rocWMMA is header-only and is NOT in the ROCm Windows SDK, hence the extra search paths. *)
@@ -279,9 +307,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
        include directory ([hip_sdk_include_dir]: the no-spaces junction created by ocaml-hipjit,
        falling back to HIP_PATH or /opt/rocm). The -I is only added when the directory exists, so
        the Linux built-in-headers path is unaffected. *)
-    let hip_include_opt =
-      match Lazy.force hip_sdk_include_dir with Some d -> [ "-I" ^ d ] | None -> []
-    in
+    let hip_include_opt = hip_include_options () in
     (* rocWMMA include dir, only for tensor-core kernels ([rocwmma_include_dir] finds the dir
        holding [rocwmma/rocwmma.hpp]). *)
     let rocwmma_include_opt =
