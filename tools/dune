@@ -40,7 +40,7 @@
   (select
    fp8_soak_hip.ml
    from
-   (hipjit.hip hipjit.hiprtc -> fp8_soak_hip.hipjit.ml)
+   (hipjit.hip hipjit.hiprtc arrayjit.hip_backend -> fp8_soak_hip.hipjit.ml)
    (-> fp8_soak_hip.missing.ml)))
  (foreign_stubs
   (language c)

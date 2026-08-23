@@ -109,6 +109,19 @@ let arch_policy : arch_policy ref = ref `Device
 (* Must be called before the first sweep: the module is compiled once, on first use. *)
 let set_arch_policy p = arch_policy := p
 
+(* CUDA has one narrowing spelling and it is the platform's own cast: [Cuda_backend] emits
+   [(__nv_fp8_e5m2)x] with nothing wrapped around it, because nothing on this platform needs
+   guarding — gh-ocannl-647's defect is ROCm's, and the HIP arm is where a second, guarded spelling
+   exists to be swept. *)
+let spellings () = [ `Raw ]
+
+let spelling_label = function
+  | `Raw -> "(__nv_fp8_e5m2)x"
+  | `Guarded ->
+      (* Unreachable through [spellings], and named rather than [assert false] so that a future
+         guard on this platform fails to compile here instead of mislabelling a sweep. *)
+      "no guarded spelling on CUDA"
+
 let state = ref None
 
 (* Whether this BOX can run the arm, not whether the build has it: an opam switch with both
@@ -232,7 +245,12 @@ let fetch st ptr (out : bytes_buf) count =
     ~src:ptr st.stream;
   Cu.Stream.synchronize st.stream
 
-let narrow_f32 ~base ~count (out : bytes_buf) =
+(* [~spelling] is the arms' shared shape; CUDA offers only [`Raw], and [fp8_soak.ml] never asks an
+   arm for a spelling outside its own [spellings ()]. *)
+let narrow_f32 ~spelling ~base ~count (out : bytes_buf) =
+  (match spelling with
+  | `Raw -> ()
+  | `Guarded -> invalid_arg "fp8_soak: the cuda arm has no guarded narrowing spelling");
   let st = init () in
   let ptr = device_buffer st count in
   Cu.Stream.launch_kernel st.narrow_f32 ~grid_dim_x:(grid_dim st) ~block_dim_x:block_dim
@@ -240,7 +258,10 @@ let narrow_f32 ~base ~count (out : bytes_buf) =
     [ Cu.Stream.Size_t (Unsigned.Size_t.of_int base); Cu.Stream.Size_t (Unsigned.Size_t.of_int count); Cu.Stream.Tensor ptr ];
   fetch st ptr out count
 
-let narrow_f64 ~base ~count ~lows (out : bytes_buf) =
+let narrow_f64 ~spelling ~base ~count ~lows (out : bytes_buf) =
+  (match spelling with
+  | `Raw -> ()
+  | `Guarded -> invalid_arg "fp8_soak: the cuda arm has no guarded narrowing spelling");
   let st = init () in
   let bytes = 4 * count in
   let ptr = device_buffer st bytes in

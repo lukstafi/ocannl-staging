@@ -1,17 +1,24 @@
-(* The HIP arm of the fp8 soak (gh-ocannl-657): the same sweep against [__hip_fp8_e5m2].
+(* The HIP arm of the fp8 soak (gh-ocannl-657, brought to real hardware by gh-ocannl-757): the same
+   sweep against [__hip_fp8_e5m2], plus the one thing the CUDA arm has no counterpart for — a second
+   pair of kernels calling the GUARDED helpers the HIP backend actually emits.
 
-   UNVERIFIED. Written on the CUDA box, where the `select` in tools/dune resolves to
-   fp8_soak_hip.missing.ml, so this file has never been compiled: hipjit was not installed there.
-   It is a mechanical mirror of fp8_soak_cuda.cudajit.ml against the hipjit API as
-   arrayjit/lib/hip_backend.ml uses it, and the first ROCm box to build it should expect to fix
-   names rather than to write the sweep. See the follow-up issue linked from gh-ocannl-657.
+   Two spellings, because on ROCm they are not the same conversion:
 
-   This arm is also what re-localizes gh-ocannl-647: ROCm miscompiles [(__hip_fp8_e5m2)(float)] for
-   magnitudes around 4e-25 to 3.3e-24, returning up to 2^-14 where every other implementation
-   returns zero, and the exhaustive sweep is what narrowed that to exactly four f32 exponents. So a
-   clean run here is NOT expected on an affected ROCm: the disagreement list is the finding. Adding
-   a second pair of kernels that call [ocannl_single_to_fp8_uniform] /
-   [ocannl_double_to_fp8_uniform] (Builtins_hip) would then show the guard closing the window. *)
+   - [`Raw] is [(__hip_fp8_e5m2)x], the platform's own cast. It is BROKEN for tiny magnitudes
+     (gh-ocannl-647): an out-of-range shift in [hip/amd_detail/amd_hip_fp8.h]'s [cast_to_f8] returns
+     values as large as 2^-14 where every other implementation returns a signed zero. Sweeping it is
+     what localizes the defect to an exponent window, and a count of 0 here is the trigger to remove
+     the guard (https://github.com/ROCm/rocm-systems/issues/10591).
+   - [`Guarded] is [ocannl_single_to_fp8_uniform] / [ocannl_double_to_fp8_uniform] from
+     {!Builtins_hip} — the source text, fetched from the backend rather than transcribed, exactly as
+     the host side of this soak is the shipped [builtins.c] object code reached by [extern]. This is
+     what an OCANNL HIP kernel narrows with, unconditionally since gh-ocannl-647, so it is what
+     "does our codec still agree with what our kernels produce" really asks here. It is the default,
+     and the pass/fail gate: 0 disagreements expected on every ROCm.
+
+   Compiled WITHOUT [-ffast-math], which the backend does pass: fast math is about arithmetic and
+   this program does none — the conversion is the whole kernel. The guard's own [fabsf]/[copysignf]
+   comparison is fast-math-invariant on finite inputs, which is the class the claims are about. *)
 
 open Base
 module H = Hip
@@ -23,9 +30,36 @@ type bytes_buf =
   (int, Stdlib.Bigarray.int8_unsigned_elt, Stdlib.Bigarray.c_layout) Stdlib.Bigarray.Array1.t
 
 (* hiprtc ships HIP's own headers, and targets the current default device when given no
-   [--offload-arch] -- the same reliance hip_backend.ml's [compile] has. *)
-let source =
+   [--offload-arch] -- the same reliance hip_backend.ml's [compile] has. <hip/hip_fp8.h> is included
+   unconditionally, where [Hip_backend.hip_includes] guards it with [__has_include] because a
+   non-fp8 kernel must still compile on a pre-6.2 SDK: here the fp8 type IS the program, so a
+   missing header should be a compile error naming the header rather than one naming the type. *)
+let source () =
   {|
+#include <hip/hip_fp8.h>
+
+|}
+  ^ Hip_backend.fp8_guard_source ()
+  ^ {|
+
+/* Which side of amd_hip_fp8.h's compile-time split the conversions above were built on, asked of
+   the COMPILED KERNEL rather than inferred from the device name we happen to know. The header
+   defines HIP_FP8_CVT_FAST_PATH to 1 on gfx942/950/1200/1201/1250 under device compilation and to 0
+   everywhere else; at 1 the cast is a hardware instruction, at 0 it is the header's own software
+   [cast_to_f8] -- which is where gh-ocannl-647's defect lives. A sweep that silently took the fast
+   path would report the bug fixed, so the answer goes into every claim's label (the same lesson the
+   CUDA arm learned about __CUDA_ARCH__ >= 890, PR #463 round 4). HIP_FP8_TYPE_OCP rides along
+   because it selects which fp8 INTERPRETATION the type has; e5m2 is the OCP one. */
+extern "C" __global__ void ocannl_report_fp8_path(unsigned int *out) {
+#if defined(HIP_FP8_CVT_FAST_PATH)
+  out[0] = (unsigned int)HIP_FP8_CVT_FAST_PATH;
+  out[1] = (unsigned int)HIP_FP8_TYPE_OCP;
+#else
+  out[0] = 2u; /* the header did not define it: not a split this build knows about */
+  out[1] = 2u;
+#endif
+}
+
 extern "C" __global__ void ocannl_vendor_narrow_f32(unsigned long long base,
                                                     unsigned long long count,
                                                     unsigned char *out) {
@@ -57,6 +91,42 @@ extern "C" __global__ void ocannl_vendor_narrow_f64(unsigned long long base,
     }
   }
 }
+
+/* The same two sweeps through the guarded helpers above -- i.e. through what Hip_backend's
+   [fp8_from_prec_fn] funnel emits for every narrowing site, conversions and operator bridges
+   alike. Separate kernels rather than a runtime flag so that neither spelling can perturb the
+   other's code generation. */
+extern "C" __global__ void ocannl_guarded_narrow_f32(unsigned long long base,
+                                                     unsigned long long count,
+                                                     unsigned char *out) {
+  unsigned long long stride = (unsigned long long)gridDim.x * blockDim.x;
+  for (unsigned long long i = blockIdx.x * (unsigned long long)blockDim.x + threadIdx.x;
+       i < count; i += stride) {
+    unsigned int u = (unsigned int)(base + i);
+    float x = __uint_as_float(u);
+    __hip_fp8_e5m2 v = ocannl_single_to_fp8_uniform(x);
+    out[i] = (unsigned char)v.__x;
+  }
+}
+
+extern "C" __global__ void ocannl_guarded_narrow_f64(unsigned long long base,
+                                                     unsigned long long count,
+                                                     unsigned int l0, unsigned int l1,
+                                                     unsigned int l2, unsigned int l3,
+                                                     unsigned char *out) {
+  unsigned int lows[4] = {l0, l1, l2, l3};
+  unsigned long long stride = (unsigned long long)gridDim.x * blockDim.x;
+  for (unsigned long long i = blockIdx.x * (unsigned long long)blockDim.x + threadIdx.x;
+       i < count; i += stride) {
+    unsigned long long hi = base + i;
+    for (int k = 0; k < 4; ++k) {
+      unsigned long long u = (hi << 32) | (unsigned long long)lows[k];
+      double d = __longlong_as_double((long long)u);
+      __hip_fp8_e5m2 v = ocannl_double_to_fp8_uniform(d);
+      out[(4 * i) + k] = (unsigned char)v.__x;
+    }
+  }
+}
 |}
 
 (* [context] and [kernel_module] are held for the same reason the CUDA arm holds them: a primary
@@ -68,18 +138,32 @@ type state = {
   stream : H.Stream.t;
   narrow_f32 : H.Module.func;
   narrow_f64 : H.Module.func;
+  guarded_f32 : H.Module.func;
+  guarded_f64 : H.Module.func;
+  fast_path : int; (* HIP_FP8_CVT_FAST_PATH as the compiled kernel itself reports it; 2 = absent *)
+  ocp : int; (* HIP_FP8_TYPE_OCP likewise *)
+  options : string list; (* what hiprtc was given, so a run record says what it compiled *)
   mutable buffer : (H.Deviceptr.t * int) option;
 }
 
-(* Present so the arms share one signature. hiprtc targets the current default device when given no
-   [--offload-arch], and ROCm's fp8 conversion has no `__CUDA_ARCH__`-style compile-time split
-   between a hardware and a software path, so there is nothing here for the policy to select
-   between: both settings compile the same kernel for this device. Kept rather than dropped because
-   the driver sets it uniformly, and because a future ROCm that does split should have somewhere
-   obvious to put the distinction. *)
+(* Present so the arms share one signature, and it genuinely has nothing to select between here.
+   ROCm's split IS compile-time -- [HIP_FP8_CVT_FAST_PATH] -- but it is keyed off the TARGET
+   ARCHITECTURE MACRO (__gfx942__ and four others), not off a numeric threshold an option could be
+   dialled below the device's own capability the way [--gpu-architecture=compute_XX] can be on
+   CUDA. hiprtc compiles for the current default device, so [`Device] and [`Backend] are the same
+   compilation, and which side of the split it landed on is REPORTED by {!conversion_path} rather
+   than chosen here. *)
 type arch_policy = [ `Device | `Backend ]
 
 let set_arch_policy (_ : arch_policy) = ()
+
+(* The raw cast and the guarded helpers are different conversions on ROCm, so the sweep has to say
+   which one it swept. [`Guarded] first: it is what OCANNL emits, hence the default. *)
+let spellings () = [ `Guarded; `Raw ]
+
+let spelling_label = function
+  | `Raw -> "(__hip_fp8_e5m2)x"
+  | `Guarded -> "ocannl_{single,double}_to_fp8_uniform"
 
 let state = ref None
 
@@ -101,28 +185,62 @@ let init () =
       let device = H.Device.get ~ordinal:0 in
       let ctx = H.Context.get_primary device in
       H.Context.set_current ctx;
+      (* From [Hip_backend], not from a local guess: on Windows hiprtc does not find
+         <hip/hip_fp16.h> without an include path, and a soak disagreeing with the backend about
+         where the SDK is would probe "ready" and then fail to compile. *)
+      let options = Hip_backend.hip_include_options () in
       let code =
-        Hiprtc.compile_to_code ~hip_src:source ~name:"ocannl_fp8_soak.hip" ~options:[]
+        Hiprtc.compile_to_code ~hip_src:(source ()) ~name:"ocannl_fp8_soak.hip" ~options
           ~with_debug:false
       in
       let kernel_module = H.Module.load_data_ex code [] in
+      let stream = H.Stream.create () in
+      (* Ask the compiled module which side of the header's split it got, before anything is
+         swept. *)
+      let path_out = H.Deviceptr.mem_alloc ~size_in_bytes:8 in
+      H.Stream.launch_kernel
+        (H.Module.get_function kernel_module ~name:"ocannl_report_fp8_path")
+        ~grid_dim_x:1 ~block_dim_x:1 ~shared_mem_bytes:0 stream
+        [ H.Stream.Tensor path_out ];
+      let path_host =
+        Stdlib.Bigarray.Array1.create Stdlib.Bigarray.int32 Stdlib.Bigarray.c_layout 2
+      in
+      H.Stream.memcpy_D_to_H ~length:2
+        ~dst:(Stdlib.Bigarray.genarray_of_array1 path_host)
+        ~src:path_out stream;
+      H.Stream.synchronize stream;
+      H.Deviceptr.mem_free path_out;
       let st =
         {
           context = ctx;
           kernel_module;
           attrs = H.Device.get_attributes device;
-          stream = H.Stream.create ();
+          stream;
           narrow_f32 = H.Module.get_function kernel_module ~name:"ocannl_vendor_narrow_f32";
           narrow_f64 = H.Module.get_function kernel_module ~name:"ocannl_vendor_narrow_f64";
+          guarded_f32 = H.Module.get_function kernel_module ~name:"ocannl_guarded_narrow_f32";
+          guarded_f64 = H.Module.get_function kernel_module ~name:"ocannl_guarded_narrow_f64";
+          fast_path = Int32.to_int_exn path_host.{0};
+          ocp = Int32.to_int_exn path_host.{1};
+          options;
           buffer = None;
         }
       in
       state := Some st;
       st
 
+(* Which fp8 INTERPRETATIONS the header enabled for this target: e5m2 is the OCP one, and a build
+   where only FNUZ is available would be narrowing to a different format entirely. Reported rather
+   than assumed, for the same reason the fast-path macro is. *)
+let interpretation () =
+  let st = init () in
+  match st.ocp with 1 -> "OCP" | 0 -> "FNUZ only" | _ -> "unknown"
+
 let describe () =
   let st = init () in
-  Printf.sprintf "%s (%s)" st.attrs.name st.attrs.gcn_arch_name
+  Printf.sprintf "%s (%s, fp8 interpretation %s); hiprtc options: %s" st.attrs.name
+    st.attrs.gcn_arch_name (interpretation ())
+    (if List.is_empty st.options then "(none)" else String.concat ~sep:" " st.options)
 
 let device_buffer st bytes =
   match st.buffer with
@@ -133,11 +251,21 @@ let device_buffer st bytes =
       st.buffer <- Some (ptr, bytes);
       ptr
 
-(* ROCm's fp8 conversion has no __CUDA_ARCH__-style compile-time split between a hardware and a
-   software path, so there is one path and this names it. The gcn arch is what identifies it. *)
+(* [amd_hip_fp8.h]: `#if (defined(__gfx942__) || __gfx1200__ || __gfx1201__ || __gfx950__ ||
+   __gfx1250__) && __HIP_DEVICE_COMPILE__` sets HIP_FP8_CVT_FAST_PATH to 1, and every conversion
+   entry point below branches on it; at 0 the header's own software [cast_to_f8] runs, which is the
+   function gh-ocannl-647 is about. The gcn arch travels with the answer because it is what SELECTS
+   the side, but the value reported is the macro the kernel compiled with, not a name matched
+   against a list here. *)
 let conversion_path () =
   let st = init () in
-  Printf.sprintf "device cast (%s)" st.attrs.gcn_arch_name
+  match st.fast_path with
+  | 1 -> Printf.sprintf "hardware cvt (HIP_FP8_CVT_FAST_PATH = 1 on %s)" st.attrs.gcn_arch_name
+  | 0 ->
+      Printf.sprintf "header software cast_to_f8 (HIP_FP8_CVT_FAST_PATH = 0 on %s)"
+        st.attrs.gcn_arch_name
+  | _ ->
+      Printf.sprintf "unknown (HIP_FP8_CVT_FAST_PATH undefined, on %s)" st.attrs.gcn_arch_name
 
 let block_dim = 256
 let grid_dim = 4096
@@ -148,11 +276,12 @@ let fetch st ptr (out : bytes_buf) count =
     ~src:ptr st.stream;
   H.Stream.synchronize st.stream
 
-let narrow_f32 ~base ~count (out : bytes_buf) =
+let narrow_f32 ~spelling ~base ~count (out : bytes_buf) =
   let st = init () in
   let ptr = device_buffer st count in
-  H.Stream.launch_kernel st.narrow_f32 ~grid_dim_x:grid_dim ~block_dim_x:block_dim
-    ~shared_mem_bytes:0 st.stream
+  H.Stream.launch_kernel
+    (match spelling with `Raw -> st.narrow_f32 | `Guarded -> st.guarded_f32)
+    ~grid_dim_x:grid_dim ~block_dim_x:block_dim ~shared_mem_bytes:0 st.stream
     [
       H.Stream.Size_t (Unsigned.Size_t.of_int base);
       H.Stream.Size_t (Unsigned.Size_t.of_int count);
@@ -160,12 +289,13 @@ let narrow_f32 ~base ~count (out : bytes_buf) =
     ];
   fetch st ptr out count
 
-let narrow_f64 ~base ~count ~lows (out : bytes_buf) =
+let narrow_f64 ~spelling ~base ~count ~lows (out : bytes_buf) =
   let st = init () in
   let bytes = 4 * count in
   let ptr = device_buffer st bytes in
-  H.Stream.launch_kernel st.narrow_f64 ~grid_dim_x:grid_dim ~block_dim_x:block_dim
-    ~shared_mem_bytes:0 st.stream
+  H.Stream.launch_kernel
+    (match spelling with `Raw -> st.narrow_f64 | `Guarded -> st.guarded_f64)
+    ~grid_dim_x:grid_dim ~block_dim_x:block_dim ~shared_mem_bytes:0 st.stream
     [
       H.Stream.Size_t (Unsigned.Size_t.of_int base);
       H.Stream.Size_t (Unsigned.Size_t.of_int count);

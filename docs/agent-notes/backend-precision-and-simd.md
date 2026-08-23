@@ -79,17 +79,32 @@ files.
   is a signed zero, for magnitudes around 4e-25 to 3.3e-24 — an out-of-range shift in
   `hip/amd_detail/amd_hip_fp8.h`'s `cast_to_f8` (`exponent_diff` reaches 85 for f32; both
   `mantissa >>= exponent_diff` and the `midpoint` mask shift a 64-bit value by ≥ 64, and the shift
-  is taken mod 64). Exhaustive gfx1151 sweeps, ROCm 7.14.60850: 67108862 of 2^32 float patterns
-  wrong, confined to f32 exponent fields 46–49; `(__hip_fp8_e5m2)(double)` adds 478 more, the
-  f32-subnormal magnitudes ~4.5e-44 to 1.8e-43. It reproduces on the HOST too (the header's
+  is taken mod 64). **The mod-64 is visible in the data**: the defect recurs with PERIOD 64 in the
+  input's binary exponent, four adjacent exponents at a time. Exhaustive gfx1151 sweeps, ROCm
+  7.14.60850, now reproducible in a minute with `tools/fp8_soak.exe --arm=hip --spelling=raw`:
+  67108862 of 2^32 float patterns wrong, confined to f32 exponent fields 46–49 (2^-81..2^-77 —
+  the only member of the family an f32 can represent); over 17.2e9 doubles, 503316450 wrong on 60
+  exponent fields, which are fifteen groups of four spaced exactly 64 apart, from 2^-81..2^-77 down
+  to 2^-977..2^-973. The "478 more from the double path, the f32-subnormal magnitudes ~4.5e-44 to
+  1.8e-43" recorded here before gh-ocannl-757 was the SECOND member seen through an f32-exact-double
+  sweep, not a separate phenomenon. The one-line invariant: a magnitude 2^m is affected iff
+  `m <= -78 && (-78 - m) mod 64 < 4`. It reproduces on the HOST too (the header's
   software path is what any arch without `HIP_FP8_CVT_FAST_PATH` uses, i.e. everything but
-  gfx942/950/1200/1201/1250). CUDA is correct there, and so is our software codec. So HIP's ONLY
+  gfx942/950/1200/1201/1250 — the soak asks the compiled kernel for that macro and prints it, so a
+  run on one of those five says which side it swept). CUDA is correct there, and so is our software
+  codec. So HIP's ONLY
   float-to-fp8 spelling is `ocannl_single_to_fp8_uniform` / `ocannl_double_to_fp8_uniform`, which
   pre-round everything below half the smallest subnormal to a signed zero — exact, since those
-  magnitudes round to zero anyway: the same sweeps report 0 disagreements guarded. Reported
+  magnitudes round to zero anyway: the same sweeps report 0 disagreements guarded, on both the f32
+  and the f64 entry point. Reported
   upstream at https://github.com/ROCm/rocm-systems/issues/10591 (with a verified two-line clamp),
   which is the guard's removal trigger; there is no ROCm-version predicate because no released
-  version is known correct. The guard covers both narrowing sites — the conversions AND the
+  version is known correct. **The removal check is in the repository**: `tools/fp8_soak.exe
+  --arm=hip --spelling=raw` prints the disagreement count descriptively, and that count reaching 0
+  is what says a ROCm release has fixed it and the two helpers plus the `fp8_from_prec_fn` funnel
+  can go. Its two claims are localization, not agreement — every disagreement is one the guard
+  closes (|x| < 2^-17), and all of them sit in the residue class above — so the tool passes on
+  affected hardware instead of failing by design, and both claims stay true, vacuously, afterwards. The guard covers both narrowing sites — the conversions AND the
   operator bridges, which narrow an f32 result back to fp8 — through one funnel
   (`fp8_from_prec_fn`); guarding only the conversions was the first version, and a review caught
   it. `test_fp8_codec_parity`'s two underflow legs are therefore unconditional assertions, on HIP
@@ -108,14 +123,18 @@ files.
     format's decode table plus "a code owns the interval between the midpoints to its neighbours,
     ties to the even code", which makes correct rounding a LOCAL property and therefore cheap enough
     to evaluate 21 billion times. Saturation is the one asymmetry: code 0x7B has no upper midpoint.
-  - `dune exec tools/fp8_soak.exe` (`--arm=cuda|hip`, `--sweep=f32|f64|both`, `--arch=device|backend`) — needs the hardware,
+  - `dune exec tools/fp8_soak.exe` (`--arm=cuda|hip`, `--sweep=f32|f64|both`,
+    `--spelling=default|raw|guarded|both`, `--arch=device|backend`) — needs the hardware,
     and answers the one question the CPU half cannot: whether the codec still agrees with the vendor
     type a kernel casts to. The host side is the shipped object code (`builtins.c`, reached from
     `fp8_soak_stubs.c` by `extern`, not transcribed); the device side is `(__nv_fp8_e5m2)x` exactly
     as `Cuda_backend.convert_precision` emits it. RTX 5070 Ti Laptop, CUDA 13.3, 2026-08-23: 6.1 s
     for the f32 sweep (2^32 inputs), 29.5 s for the f64 sweep (17.2e9 inputs), zero disagreements on
     every FINITE input of either — which is the claim, together with a non-vacuity one, that the
-    sweep drove the vendor conversion onto all 248 signed finite codes.
+    sweep drove the vendor conversion onto all 248 signed finite codes. Radeon 8060S (gfx1151),
+    ROCm 7.14.60850, 2026-08-23: 7.5 s and 32 s for the same two sweeps, zero disagreements on every
+    finite input of either **with the default spelling**, which on HIP is the guarded one — see the
+    next bullet.
 - **`--arch` decides what the CUDA soak is measuring**, and the default is not the backend's
   setting. `cuda_fp8.hpp` guards its conversions with `#if __CUDA_ARCH__ >= 890`: at or above sm_89
   the cast is the hardware `cvt` instruction, below it the header's own software emulation. The
@@ -139,10 +158,24 @@ files.
   payload bits through, which the float path does not; 4194302 of the 8388606 swept disagree, the
   0x7E/0xFE half. All of them are NaNs on both sides, and the vendor's own two entry points
   disagreeing with each other is why `test_fp8_codec_parity` asserts only NaN-ness there.
+- **WHICH SPELLING the soak sweeps is a question only ROCm makes interesting** (gh-ocannl-757).
+  CUDA has one narrowing, the bare `(__nv_fp8_e5m2)x` the backend emits. HIP has two, because its
+  bare cast is broken (above) and every OCANNL narrowing there goes through a guarded helper. So the
+  DEFAULT is what the backend actually emits — guarded on HIP, the cast elsewhere — and that run is
+  a pass/fail gate on every box, expecting 0. `--spelling=raw` is the opt-in probe, and it claims
+  localization rather than agreement for the reason above. The guarded kernels do not transcribe the
+  helpers: they take the source text from `Hip_backend.fp8_guard_source ()`, i.e. from
+  `Builtins_hip`, which raises if either helper is renamed — the same discipline as the host side
+  reaching `builtins.c` by `extern`. Nothing else in the suite sweeps the guard exhaustively.
 - Adding a vendor to the soak is a module of its `ARM` signature plus one `select` clause in
   `tools/dune` — not a second program, which is how the CUDA and HIP sweeps drifted apart the first
-  time. The HIP arm is written (`tools/fp8_soak_hip.hipjit.ml`) but has never been compiled: hipjit
-  is not installed on the CUDA box, so the `select` there resolves to the stub.
+  time. The HIP arm (`tools/fp8_soak_hip.hipjit.ml`) was written on the CUDA box, where the `select`
+  resolves to the stub, and first compiled on a ROCm box a wave later (gh-ocannl-757): **every name
+  in it resolved unchanged**, which is the mechanical-mirror discipline paying off — what it needed
+  was the things a mirror cannot know, the backend's own hiprtc include options
+  (`Hip_backend.hip_include_options`, lifted out of `Impl` exactly as `cuda_include_options` was)
+  and a kernel that reports `HIP_FP8_CVT_FAST_PATH` so a run says which side of the header's
+  compile-time split it swept.
 
 - A tensor node's precision is its **storage** precision; the precision its arithmetic runs at is a
   separate thing, `C_syntax_config.compute_prec` (gh-ocannl-517). They coincide on the GPU backends
