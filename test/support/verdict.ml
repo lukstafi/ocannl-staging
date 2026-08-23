@@ -74,6 +74,65 @@ let pf fmt = Printf.ksprintf (fun label b -> p label b) fmt
     cannot drift apart. *)
 let claimf fmt = Printf.ksprintf (fun label b -> claim label b) fmt
 
+(** {1 Quantified claims}
+
+    ["every X …"] is TRUE of an empty X, and in a golden that line is byte-identical to one a real
+    population passed (gh-ocannl-729). The hole is invisible by construction, and it opens exactly
+    where the claim is most worth making: quantified over a DERIVED collection — the seeds a family
+    tree yields, the refutations a gate raises, the statements a kernel emits — where the collection
+    being empty is a plausible regression rather than an impossible one. A seeding change that
+    empties a family silently converts several claims from checks into decoration.
+
+    So a quantified claim goes through one of the combinators below rather than through {!p} applied
+    to a [List.for_all]: they carry the non-emptiness guard, which makes the guarded form the
+    shortest one to write. A non-empty collection prints exactly what {!p} prints, so goldens keep
+    their shape; an empty one prints a DISTINCT [<claim> (empty): false], so a reader sees why the
+    line failed without opening the source.
+
+    The collections are lists; an array reaches them through [Array.to_list], which is free at test
+    scale and keeps this library's surface to the four entry points below.
+
+    [?min] raises the floor for a site that knows one — ["every one of the four curated tiles …"] is
+    a different claim from ["every tile …"], and a menu that silently shrank to one member should
+    fail it. Below the floor the line names the shortfall: [<claim> (only 1 of 4): false]. *)
+
+(* The one place the floor is checked, so that every combinator reports a short collection the same
+   way. [holds] is not evaluated when the floor fails: on an empty collection a quantifier answers
+   without looking, and answering is what we are refusing to accept. *)
+let quantified ?(min = 1) name length holds =
+  if length >= min then p name (holds ())
+  else
+    let detail = if length = 0 then "empty" else Printf.sprintf "only %d of %d" length min in
+    Int.incr failures;
+    Stdio.printf "%s (%s): false\n%!" name detail;
+    Stdio.eprintf "FAIL: %s (%s): false\n" name detail
+
+(** [p_all name xs ~f] claims that every element of [xs] satisfies [f], and that there is an element
+    — the guarded form of [p name (List.for_all xs ~f)]. Reach for it wherever the claim reads
+    ["every …"]. *)
+let p_all ?min name xs ~f = quantified ?min name (List.length xs) (fun () -> List.for_all xs ~f)
+
+(** [p_none name xs ~f] claims that no element of [xs] satisfies [f], and that there is an element —
+    the guarded form of [p name (not (List.exists xs ~f))] and of
+    [p name (List.is_empty (List.filter xs ~f))]. The mirror of {!p_all}, and the one the ["no X
+    is …"] claims want: filtering an empty collection also yields nothing, so the unguarded spelling
+    passes on an empty input just as [List.for_all] does. *)
+let p_none ?min name xs ~f = quantified ?min name (List.length xs) (fun () -> not (List.exists xs ~f))
+
+(** [p_empty name ~over xs] claims that the derived collection [xs] is empty, and that the
+    collection it was derived from, [over], is not — the guarded form of [p name (List.is_empty xs)]
+    where [xs] is a precomputed subset (the invalid seeds, the declined candidates, the offending
+    rows) of a population that must itself exist. Prefer {!p_none} where the predicate can simply be
+    passed; this is for the sites that keep the derived list around to report it. *)
+let p_empty ?min name ~over xs =
+  quantified ?min name (List.length over) (fun () -> List.is_empty xs)
+
+(** [p_exists name xs ~f] claims that some element of [xs] satisfies [f]. Unlike its siblings this
+    one cannot be vacuous — nothing satisfies [f] in an empty collection — so it is here for the
+    [?min] floor and for the family to be spelled one way: ["at least two of the seeds pipeline"] is
+    [p_exists ~min:2], and a collection that shrank below the floor says so. *)
+let p_exists ?min name xs ~f = quantified ?min name (List.length xs) (fun () -> List.exists xs ~f)
+
 (** [skipped ~backend name] reports a leg the run's backend cannot evaluate: a GPU intrinsic on a
     CPU backend, a tf32 policy outside CUDA. It prints the same stdout line {!p} would — the
     [.expected] goldens are backend-uniform, and a [(test)] stanza diffs stdout ONLY, so stderr is

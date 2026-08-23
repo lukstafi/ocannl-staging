@@ -313,6 +313,31 @@ that they earn a lookup rather than always-loaded space.
   exempt its own file. Every exemption in the tree is a row whose assertion is claimed separately
   beside it through `Verdict.claim`/`claimf` on the same bound boolean; an exemption without that is
   one that should not have been granted.
+- A quantified claim needs a non-emptiness guard, and the guard has to be the SHORTEST thing to
+  write or it does not get written. `p "every seed spreads j" (List.for_all seeds ~f:…)` is `true`
+  when `seeds` is empty, and the line it prints is byte-identical to one a hundred seeds passed —
+  the gh-ocannl-601 hazard arriving through `Verdict.p` itself, invisible in the golden by
+  construction (gh-ocannl-729). It bites hardest where the claim is worth most: quantified over a
+  DERIVED collection — the seeds a family tree yields, the refutations a gate raises, the
+  candidates that validated — where empty is a plausible regression rather than an impossible
+  state. So `Verdict.p_all name xs ~f`, `p_none name xs ~f` (the mirror: filtering an empty list
+  also yields nothing, so `List.is_empty (List.filter …)` has the same hole), `p_exists`, and
+  `p_empty name ~over:population derived` for the sites that keep the derived subset around to
+  report it. A non-empty collection prints exactly what `p` prints, which is what let ~44 files
+  convert with their goldens unmoved; an empty one prints `<claim> (empty): false`, and `?min:n`
+  prints `<claim> (only 1 of 4): false`. Arrays go through `Array.to_list` rather than growing a
+  second family. What stays on the unguarded spelling is the claim whose passing reading IS
+  emptiness — "no candidate declines", "no key is undocumented", a scan over a tree that is usually
+  clean — and those want a companion claim that the population was there at all, which is what the
+  `p_empty ~over` form is.
+- Guarantees that fire only on an empty collection are never exercised by a green suite, so
+  `verdict_quantified` stages them: the satisfied forms run directly, and each refusal runs as a
+  CHILD process whose streams the parent captures. Capturing is not tidiness — a refusal prints
+  `FAIL:`/`FAILED:`, this repository's failure marker, so an inherited stream puts those words in a
+  green run's log and costs `grep FAIL` its meaning (the same argument `generated_provenance`
+  makes). The second half of that test is the one that makes a wide sweep safe: it runs `p` and
+  `p_all` in two children and requires their stdout to be equal, which is the property "converting
+  a site does not move its golden" stated as a check rather than as a hope.
 - `Ll_test`'s traversal is the one place a new `Ir.Low_level` constructor is handled, and it now
   carries the queries the hand-built-IR tests used to write for themselves. `walk` takes a record of
   hooks: the construct-specific ones, a generic `?on_stmt`/`?on_scalar` for a counter that names its

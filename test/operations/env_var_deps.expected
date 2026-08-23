@@ -100,6 +100,7 @@ Ambient environment gates, by dune file and every alias whose build runs one:
   test/operations/dune                     @runtest-test_where_precision-unoptimized
   test/operations/dune                     @runtest-top_down_prec-extension
   test/operations/dune                     @runtest-top_down_prec-unoptimized
+  test/operations/dune                     @runtest-verdict_quantified
   test/operations/dune                     @runtest-verdict_ratchet
   test/operations/dune                     @runtest-zero_out_local_decl-extension
   test/operations/dune                     @runtest-zero_out_local_decl-unoptimized
