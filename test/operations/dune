@@ -117,7 +117,7 @@
  (name runtest)
  (deps
   (alias runtest-micrograd_demo_logging)
-  (alias runtest-n3_fwd_with_prec)
+  (alias runtest-n3_fwd_with_prec-unoptimized)
   (alias runtest-top_down_prec-unoptimized)
   (alias runtest-top_down_prec-extension)
   (alias runtest-zero_out_local_decl-unoptimized)
@@ -614,7 +614,7 @@
      test_where_precision.extension.actual)))))
 
 (rule
- (alias runtest-n3_fwd_with_prec)
+ (alias runtest-n3_fwd_with_prec-unoptimized)
  (package neural_nets_lib)
  (deps (alias runtest-env_spelling_gate))
  (action

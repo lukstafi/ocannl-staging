@@ -92,7 +92,7 @@ Ambient environment gates, by dune file and every alias whose build runs one:
   test/operations/dune                     @runtest-micrograd_demo_logging
   test/operations/dune                     @runtest-model_default_fallback
   test/operations/dune                     @runtest-model_default_placements
-  test/operations/dune                     @runtest-n3_fwd_with_prec
+  test/operations/dune                     @runtest-n3_fwd_with_prec-unoptimized
   test/operations/dune                     @runtest-placement_surface
   test/operations/dune                     @runtest-test_config_consistency
   test/operations/dune                     @runtest-test_log_stmt_format
