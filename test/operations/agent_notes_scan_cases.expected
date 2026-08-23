@@ -49,6 +49,13 @@ ok: bullets -- a lazy continuation whose first column is inert
 ok: bullets -- a blank line makes the same prose a paragraph
 ok: bullets -- a heading written without a space after the hashes
 ok: bullets -- a comparison at the start of a continuation is not a quote
+ok: bullets -- a comparison against a decimal is not a quote either
+ok: bullets -- a comparison written without its own space is not a quote
+ok: bullets -- a comparison inside the line is not a quote
+ok: bullets -- a comparison inside a code span at the first column is not a quote
+ok: bullets -- a quote written without the space after its marker
+ok: bullets -- a quote written without its space, nested under a bullet
+ok: bullets -- a wrapped comparison against a name reads as a quote
 ok: bullets -- an HTML block at column zero
 ok: bullets -- an angle bracket inside a continuation is ordinary text
 ok: bullets -- a thematic break
