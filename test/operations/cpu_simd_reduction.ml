@@ -160,6 +160,49 @@ let () =
   p "max renders as accumulator chains (CPU) or serially (GPU)"
     (check_generated ~expect_chains:true "red_max_simd");
 
+  (* --- Max/Min over data that is almost all NaN, extent 40 (gh-ocannl-649). The combine is no
+     longer a per-lane [fmaxf] call but a whole-vector compare-and-select (on aarch64, one
+     [FMAXNM]), so its NaN behaviour is this code's responsibility rather than libm's -- and no
+     structural check on the emitted loop can see it, which is why this leg executes.
+
+     A NaN cannot SURVIVE the rendering whatever the combine does: the lane fold and the serial tail
+     both go through the scalar [fmaxf], which drops it. What a wrong combine does is DESTROY the
+     extremum on its way past. [fmax(x, NaN)] is [x], but the obvious [x >= NaN ? x : NaN] is NaN,
+     so a chain or lane holding the maximum is overwritten the first time a NaN arrives as the
+     second operand, and the scalar fold then discards that NaN and answers with whatever was left.
+
+     Hence the data: every element NaN except [sv.(0)], so the extremum is destroyed under a wrong
+     combine no matter how the width ladder picks [lanes] and [chains] on this host -- index 0 is
+     lane 0 of chain 0 under every decomposition, and it is never in the serial tail. The
+     accumulator starts at allocation-zero, so a destroyed extremum reads as 0 and a preserved one
+     as the planted value; both are exact, so [Float.equal], not [approx]. --- *)
+  let q2 = 40 in
+  let nan_reduce ~name ~op ~planted =
+    let sv = Array.create ~len:q2 Float.nan in
+    sv.(0) <- planted;
+    let sn = TDSL.ndarray sv ~label:[ "sn_" ^ name ] ~output_dims:[ q2 ] () in
+    let%op acc = sn @^^ "i=>0" in
+    run ~name
+      ~transform:
+        (reduce_transform ~n:q2 acc.Tensor.value ~body_of:(fun i ->
+             LL.Set
+               {
+                 tn = acc.Tensor.value;
+                 idcs = [| f0 |];
+                 llsc =
+                   Binop
+                     ( op,
+                       (Get (acc.Tensor.value, [| f0 |]), single),
+                       (Get (sn.Tensor.value, [| it i |]), single) );
+                 debug = "";
+               }))
+      acc
+  in
+  p "max keeps the extremum past a NaN operand, as fmax does"
+    (Float.equal (nan_reduce ~name:"red_nanmax_simd" ~op:Ir.Ops.Max ~planted:7.5) 7.5);
+  p "min keeps the extremum past a NaN operand, as fmin does"
+    (Float.equal (nan_reduce ~name:"red_nanmin_simd" ~op:Ir.Ops.Min ~planted:(-9.25)) (-9.25));
+
   (* --- Strided (non-contiguous) accumulation: ineligible for chains, must run as a plain serial
      loop without a vectorization pragma. Sums the even-indexed elements of [u]. --- *)
   let r = 24 in

@@ -546,6 +546,43 @@ files.
   `__builtin_fmaf16`: it always answers yes, and without the ISA feature gcc emits a call to
   `fmaf16()`, a symbol glibc does not necessarily export — verified here as a link error. That one
   is guarded on the feature macro.)
+- **That three-way check is now a test, not a shell loop** (gh-ocannl-650):
+  `test/operations/cc_march_census` compiles the emitted kernel under seven `-march` targets at two
+  optimization levels and three vector widths, and censuses the innermost loop carrying each
+  accumulator update. The generated `.c` includes only libc headers, so the whole matrix needs a
+  toolchain and nothing else; the ARM columns need a cross gcc, pointed at by `AARCH64_CROSS_GCC`
+  and reported through `Verdict.skipped` when absent, so the golden does not depend on the box
+  having one. Two shapes are load-bearing and were each arrived at from their failure. The census
+  picks the SMALLEST-span loop carrying the construct, identified through the `.loc` line numbers
+  `-g` leaves in the assembly rather than guessed from the instruction mix — an outer loop dilutes
+  every ratio, and a surviving serial tail is a smaller loop mentioning the same array, which is why
+  the fixture's extent is a multiple of `chains * lanes` at every width. And it counts vector ops,
+  scalar FP ops and libm calls SEPARATELY, never consulting them to select: scoring only what the
+  good outcome produces made a fully scalarized loop read as "no FMA loop found", a pass arrived at
+  from the failure (gh-ocannl-621). Answering "no loop" is therefore a failure — which is what
+  caught `Asm_census` not knowing that gcc spells the aarch64 conditional branch `bne`, not `b.ne`:
+  72 rows of silent absence across both ARM columns, reported at once.
+- **`Max`/`Min` SIMD reductions were a libm call per lane, on every x86 target** (gh-ocannl-649,
+  fixed). The `Vectorized` accumulation loop rendered them as a fixed-trip per-lane loop calling the
+  scalar `fmaxf`/`fminf`, on the reasoning that the packed-max builtins have the wrong NaN semantics
+  and SLP would reassemble the lanes. SLP never gets the chance: gcc will not contract `fmax` into
+  `maxsd`/`maxss` without `-ffinite-math-only`, so each lane compiled to a library call, at every
+  `-march` from `x86-64` to `x86-64-v4` and both optimization levels — and at `-O3` the loop was
+  fully scalarized besides (x86-64-v3, 64-byte width, f32: 259 instructions, 0 vector ops, 190
+  scalar, 64 libm calls, 126 stack refs, against the FMA loop's 20/16/0/0/0 in the same kernel).
+  The lesson generalizes past this operator: an opaque CALL cannot be vectorized at any grid size or
+  register budget, so the register-pressure reasoning that the comment used to justify per-lane
+  spelling was answering the wrong question. Check for calls before reasoning about allocation.
+  The replacement is `fmax`'s own definition as a mask blend on GNU C vector comparisons (`a >= b`
+  or `b` is NaN selects `a`), which agrees with glibc bitwise over every ordered pair of
+  `{±0, ±1, ±inf, ±NaN, ±denormal}` at f32 and f64 except the two cases C leaves unspecified — which
+  of `±0` a tie returns, which payload a both-NaN pair returns — and both of those a `Vectorized`
+  retype reassociates away regardless. On aarch64 a builtin arm precedes it: gcc's internal NEON
+  `fmax`/`fmin` render as one `FMAXNM`, which is IEEE `maxNum` and so exactly `fmax` (the
+  NaN-propagating `FMAX` is a different builtin, `__builtin_aarch64_fmax_nan*`). That arm is what
+  closes fp16, where gcc scalarizes a 16-bit vector COMPARISON whatever type it is spelled in
+  — `_Float16` and `__fp16` alike, at `-O2` and `-O3` — widening every lane to float: 343
+  instructions and 172 scalar ops become 9 and 0.
 - **"No such hardware" is a claim about a machine, not about the project — so name the machine.**
   The rows above were written from an Arrow Lake-HX box, where AVX-512 is fused off across the
   whole hybrid part, and the note recorded that as if it held everywhere; the machine that actually
