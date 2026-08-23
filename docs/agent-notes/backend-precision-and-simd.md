@@ -409,14 +409,24 @@ files.
   `ocannl_shfl_xor` overload — the two float/double ones remain the whole ask. The gate is on the
   RESIDENCY, not on storage: f16 everywhere, and bf16 on HIP/Metal, still raise (`accumulator
   residency` in the message) rather than gaining an untested narrow-shuffle path, since a plain
-  hardware binding would race the accumulator. One carve-out survives gh-ocannl-517: a contribution
-  mentioning an RNG conversion renders at storage precision and is widened once afterwards, or the
-  residency would change which random bits the draw consumes. Tests: `hardware_warp_shuffle.ml`'s
-  bf16 legs — 32 lanes of `1 + (k mod 7)/128` separate the three candidate renderings as
-  32.75 / 32.5 / 32.25 (once-narrowed f32 tree, tree staged at bf16, per-step read-modify-write),
-  and 128 lanes give 131 / 130 / 128 while also pinning the shared slots' element type — plus its
-  f16 leg for the refusal, and `reduction_forms.ml`'s `retype-workgroup-reduce` member, whose
-  availability now asks `expected_residency` instead of naming f32.
+  hardware binding would race the accumulator. **RNG-bearing contributions are refused too**, but
+  only where the residency is actually wider than storage — and the reason is worth holding onto,
+  because the first cut of gh-ocannl-682 got it wrong (Codex P1 on staging PR #461). It rendered
+  such a contribution at storage precision and widened it once, reasoning that this preserved
+  gh-ocannl-517's draw. It does preserve the draw — but not the *reduction*: the serial rendering of
+  an RNG-bearing update is one `try_localize_serial_reduce` explicitly DECLINES to localize, so it
+  accumulates in the narrow cell and narrows on every iteration, while the shuffle would have
+  accumulated the whole tree wide and narrowed once. That is a change in accumulation WIDTH, not
+  association — precisely the property gh-ocannl-682 exists to preserve. The lesson generalizes past
+  RNG: **the shuffle may widen only where the serial path widens**, so the two renderings consult
+  one shared predicate, `C_syntax.accum_pinned_to_storage_prec`, rather than each deciding for
+  itself. Extend that predicate, not one call site, if another such body class appears. Tests:
+  `hardware_warp_shuffle.ml`'s bf16 legs — 32 lanes of `1 + (k mod 7)/128` separate the three
+  candidate renderings as 32.75 / 32.5 / 32.25 (once-narrowed f32 tree, tree staged at bf16,
+  per-step read-modify-write), and 128 lanes give 131 / 130 / 128 while also pinning the shared
+  slots' element type — plus its f16 leg and its bf16 RNG leg for the two refusals, and
+  `reduction_forms.ml`'s `retype-workgroup-reduce` member, whose availability now asks
+  `expected_residency` instead of naming f32.
 - **A "packmma" timing is not evidence that anything tensorized.** A `Tile_mma` whose register-tile
   preconditions fail renders the scalar fallback and the run still reports under whatever the
   variant was named — the column extent below the compute vector width is the easiest way in (at

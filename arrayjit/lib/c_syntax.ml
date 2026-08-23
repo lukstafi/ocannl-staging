@@ -453,7 +453,9 @@ module type C_syntax_config = sig
       workgroup slot 0 in [hardware_index], and provide [barrier_syntax] plus [shared_decl_prefix]
       (needed by the two-phase multi-warp form). Those two overloads are all the rendering asks
       for at any storage width: the shuffled value resides at [accum_prec] of the storage precision
-      (gh-ocannl-682), and a storage precision whose residency is neither f32 nor f64 is refused.
+      (gh-ocannl-682), and a storage precision whose residency is neither f32 nor f64 is refused —
+      as is an RNG-bearing contribution wherever that residency is wider than storage, since the
+      serial rendering of one keeps a narrow accumulator (see [accum_pinned_to_storage_prec]).
       [0] disables the rendering: [Workgroup_reduce] loops render like [Workgroup] — hardware
       binding, or the serial fallback (which is the correct meaning of a recognized accumulation
       body on CPU backends). *)
@@ -1630,6 +1632,21 @@ module C_syntax (B : C_syntax_config) = struct
     | Local_scope _ | Get _ | Get_local _ | Get_dynamic _ | Get_merge_buffer _ | Constant _
     | Constant_bits _ | Embed_index _ ->
         false
+
+  (* gh-ocannl-682: whether a recognized accumulation's contribution pins its accumulator to the
+     target's STORAGE precision. Both renderings of such a body consult this one predicate, so the
+     two cannot drift apart on which bodies get the wide accumulator.
+
+     An RNG conversion picks both its result type and which random bits it consumes from the
+     precision it renders at (gh-ocannl-517), so [try_localize_serial_reduce] declines to localize
+     an RNG-bearing update: its serial rendering accumulates directly in the narrow cell, narrowing
+     on EVERY iteration. A rendering that instead accumulated the whole reduction at [accum_prec]
+     and narrowed once would therefore change the accumulator's WIDTH, not merely the association
+     -- the exact property gh-ocannl-682 exists to preserve -- so the warp-shuffle rendering refuses
+     such a body wherever the residency is wider than storage. Where the two coincide (f32/f64
+     storage, and every backend that does not widen) there is no divergence to guard against and
+     RNG-bearing reductions render exactly as they did before gh-ocannl-682. *)
+  let accum_pinned_to_storage_prec (llsc : Low_level.scalar_t) = mentions_rng_conversion llsc
 
   (* Whether the value of a [Set] renders directly at the target's storage precision, bypassing
      [comp_prec]. True when the rendering contains no operator, so there is no intermediate to keep
@@ -4086,6 +4103,18 @@ module C_syntax (B : C_syntax_config) = struct
                          "a single- or double-precision accumulator residency (accum_prec resolves \
                           %s storage to %s)"
                          (Ops.prec_string store_prec) (Ops.prec_string prec)));
+                (* Only where the residency is actually wider: at f32/f64 storage the two coincide,
+                   and an RNG-bearing reduction shuffles exactly as it did before gh-ocannl-682. *)
+                if (not (Ops.equal_prec prec store_prec)) && accum_pinned_to_storage_prec contrib
+                then
+                  fail
+                    (Printf.sprintf
+                       "a contribution free of RNG conversions when the accumulator residency (%s) \
+                        is wider than storage (%s): the serial rendering of an RNG-bearing \
+                        accumulation declines localization and narrows its accumulator every \
+                        iteration, so shuffling this one at the residency would change the \
+                        accumulation width rather than only its association"
+                       (Ops.prec_string prec) (Ops.prec_string store_prec));
                 if Utils.debug_log_from_routines () then
                   fail "debug_log_from_routines to be disabled";
                 if extent % warp <> 0 then
@@ -4199,16 +4228,8 @@ module C_syntax (B : C_syntax_config) = struct
                 (* The contribution renders at the residency, deliberately: operand widenings are
                    exact, so a narrow-times-narrow product is exact at [prec] — the same
                    full-precision-product-into-f32 semantics the serial legs and the tensor cores
-                   apply (gh-ocannl-663's note in [Cuda_backend.accum_prec]). The one carve-out is
-                   gh-ocannl-517's: an RNG conversion picks BOTH its result type and which random
-                   bits it consumes from the precision it renders at, so a contribution mentioning
-                   one renders wholly at storage precision and is widened once afterwards — the
-                   draw stays the draw a serial rendering of the same body would make. *)
-                let contrib_prec = if mentions_rng_conversion contrib then store_prec else prec in
-                let local_defs, contrib_doc = pp_scalar contrib_prec contrib in
-                let contrib_doc =
-                  wrap_conversion (B.convert_precision ~from:contrib_prec ~to_:prec) contrib_doc
-                in
+                   apply (gh-ocannl-663's note in [Cuda_backend.accum_prec]). *)
+                let local_defs, contrib_doc = pp_scalar prec contrib in
                 let local_defs = pp_local_defs local_defs in
                 let binding =
                   string ("const " ^ B.loop_index_type)
@@ -4288,7 +4309,10 @@ module C_syntax (B : C_syntax_config) = struct
           else
             let localize (tn, idcs, base, debug, rebuild) =
               match base with
-              | `Update llsc when mentions_rng_conversion llsc -> None
+              (* The narrow-accumulator half of [accum_pinned_to_storage_prec]: declining to
+                 localize leaves the accumulation in the storage cell, narrowing every iteration.
+                 The warp-shuffle rendering refuses the same bodies rather than widening them. *)
+              | `Update llsc when accum_pinned_to_storage_prec llsc -> None
               | _ ->
                   let id, update_code =
                     match base with

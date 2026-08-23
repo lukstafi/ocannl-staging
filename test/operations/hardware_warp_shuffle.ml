@@ -394,3 +394,65 @@ let () =
         p claim_narrow_refused (String.is_substring msg ~substring:"accumulator residency")
     | None -> p claim_narrow_refused false
   else p claim_narrow_refused (approx (run ~name:"f16_wshfl" ~transform hs) expected)
+
+(* gh-ocannl-682 (Codex review, P1): the widening is sound only where the SERIAL rendering widens
+   too, and one class of body it never widens is an RNG-bearing accumulation. An RNG conversion
+   picks both its result type and which random bits it consumes from the precision it renders at
+   (gh-ocannl-517), so [try_localize_serial_reduce] declines to localize such an update and its
+   serial form accumulates in the narrow cell, narrowing on every iteration. Shuffling the same
+   body at the residency would accumulate the whole tree wide and narrow once — a change in the
+   accumulation WIDTH, not merely its association, which is the one property gh-ocannl-682 exists
+   to preserve. So the rendering refuses it wherever the residency is wider than storage.
+
+   At f32/f64 storage the two coincide and nothing is refused, which is why this leg is bf16 and
+   runs only where bf16 actually widens. *)
+let claim_rng_refused =
+  "a bf16 Workgroup_reduce whose contribution mentions an RNG conversion is refused where the \
+   residency is wider than storage (GPU) or runs serially (CPU)"
+
+let () =
+  let n = 32 in
+  (* [Constant_bits] rather than a uint4x32 tensor node: the refusal fires from the contribution's
+     SHAPE at codegen, so the leg needs a well-typed RNG conversion, not a live bit source. *)
+  let rx =
+    NTDSL.init ~l:"wshfl_rng_x" ~prec:bf16 ~o:[ n ] ~f:(fun idcs -> bf16_term idcs.(0)) ()
+  in
+  let%op rs = rx ++ "i=>0" in
+  Tn.update_prec rs.Tensor.value bf16;
+  let transform =
+    reduce_transform ~n rs.Tensor.value ~body_of:(fun i ->
+        LL.Set
+          {
+            tn = rs.Tensor.value;
+            idcs = [| f0 |];
+            llsc =
+              Binop
+                ( Ir.Ops.Add,
+                  (Get (rs.Tensor.value, [| f0 |]), bf16),
+                  ( Binop
+                      ( Ir.Ops.Mul,
+                        (Get (rx.Tensor.value, [| it i |]), bf16),
+                        ( Unop
+                            ( Ir.Ops.Uint4x32_to_prec_uniform1,
+                              (Constant_bits (Int64.of_int 0x9E3779B9), Ir.Ops.uint4x32) ),
+                          bf16 ) ),
+                    bf16 ) );
+            debug = "";
+          })
+  in
+  if widens_bf16 && on_gpu then
+    match
+      try
+        ignore (run ~name:"bf16_rng_wshfl" ~transform rs : float);
+        None
+      with Invalid_argument msg -> Some msg
+    with
+    | Some msg ->
+        p claim_rng_refused (String.is_substring msg ~substring:"free of RNG conversions")
+    | None -> p claim_rng_refused false
+  else if on_cpu then
+    (* [warp_size = 0] on the C backends: the loop is serial, which is its correct meaning, and the
+       refusal has nothing to fire on. Finiteness is all that is claimed — the draw itself is
+       gh-ocannl-517's business, not this test's. *)
+    p claim_rng_refused (Float.is_finite (run ~name:"bf16_rng_wshfl" ~transform rs))
+  else skipped claim_rng_refused
