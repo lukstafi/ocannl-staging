@@ -251,6 +251,18 @@ let residency_name = function
   | At_storage -> "storage width (per-step)"
   | Undecided why -> "undecided: " ^ why
 
+(* Which storage precisions the warp-shuffle rendering of a [Workgroup_reduce] loop accepts on a
+   GPU backend (gh-ocannl-682): it stages the value at the accumulator RESIDENCY, so it takes f32
+   itself and every narrow precision the backend's policy resolves to f32 — bf16 on CUDA. A
+   residency that stays narrow is refused by raising rather than by falling back to a serial loop,
+   so those legs stay unevaluable off the C backends, where [warp_size = 0] serializes them all. *)
+let shuffle_takes prec_name =
+  String.equal prec_name "f32"
+  ||
+  match List.Assoc.find precs ~equal:String.equal prec_name with
+  | Some prec -> ( match expected_residency prec with Wider -> true | _ -> false)
+  | None -> false
+
 (* {1 Program shapes}
 
    Six spellings of one reduction. The guarded ones admit an INTERIOR prefix of the reduction axis
@@ -1089,10 +1101,14 @@ let members =
     member "retype-workgroup-reduce" "Retype the reduction axis to Workgroup_reduce"
       ~expect:(if on_cpu then Localized else Warp)
       ~claimed:"warp-shuffle tree, or the localized scope where no lane index is bound"
-        (* The shuffle tree takes single- or double-precision accumulators only, and refuses
-           anything else by raising rather than by falling back — so off the C backends this member
-           is evaluable at f32 alone. *)
-      ~available:(fun prec_name -> on_cpu || String.equal prec_name "f32")
+        (* The shuffle tree takes accumulators whose RESIDENCY is single or double precision
+           (gh-ocannl-682), and refuses anything else by raising rather than by falling back — so
+           off the C backends this member is evaluable at f32 and at whichever narrow precisions
+           the backend's [accum_prec] widens, which is bf16 on CUDA and nothing elsewhere. Its
+           value claim stays bitwise there: the tree reassociates, but these operands' f32 partial
+           sums are exact whatever the association, and both the shuffle and the localized serial
+           baseline narrow to bf16 exactly once. *)
+      ~available:(fun prec_name -> on_cpu || shuffle_takes prec_name)
       ~expect_axis:LL.Workgroup_reduce
       ~sched:(fun g -> [ Sched.Retype { axis = g.k; ty = LL.Workgroup_reduce } ]);
     (* The plain [Workgroup] arm: a hardware binding where the backend has an index for the slot,
