@@ -268,7 +268,13 @@ let separates ~range ~(concurrent : Idx.symbol -> bool) ~(syms : Idx.symbol list
     A guard symbol that is not loop-bound at all — a static index parameter, gh-490's runtime extent
     — cannot select among any level's iterations and is harmless by construction. Which symbols
     those are is read off the program (the complement of its loop indices) rather than promised by a
-    caller, so no call site can forget to say. *)
+    caller, so no call site can forget to say.
+
+    What the escape deliberately does NOT require is that the cell separate every enclosing symbol,
+    only the ones the guard mentions. Two instances agreeing on those share the guard's truth, so
+    either both accumulate — and if they also share a cell they were racing before the peel, in the
+    program as written — or both merely round-trip the cell through a local, which is idempotent.
+    Requiring more would decline the ordinary shape of an outer serial level the cell is free of. *)
 
 type peel_guard =
   | Confined_to_peel

@@ -146,11 +146,14 @@ let guard_terms = 20
 
 (* The whole-nest reference: open the cell, accumulate wide, narrow once at the store. [~from] is
    what the accumulator loads — the seed for every shape that reads [out], zero for the virtual
-   accumulator, which owns its cell and initializes it from a [Zero_out]. *)
+   accumulator, which owns its cell and initializes it from a [Zero_out]. [~terms] is a function of
+   the ROW rather than a count: {!Mixed_guard}'s predicate mixes the output index into the bound, so
+   its rows admit different prefixes of the reduction axis — which is also what makes a regression
+   that substituted the wrong row into the guard a different number. *)
 let whole_nest_ref ~terms ~from prec =
   Array.init rows ~f:(fun r ->
       let acc = ref (from r) in
-      for k = 0 to terms - 1 do
+      for k = 0 to terms r - 1 do
         acc := !acc +. cell r k
       done;
       round prec !acc)
@@ -161,7 +164,7 @@ let whole_nest_ref ~terms ~from prec =
 let per_step_ref ~terms ~from prec =
   Array.init rows ~f:(fun r ->
       let acc = ref (from r) in
-      for k = 0 to terms - 1 do
+      for k = 0 to terms r - 1 do
         acc := round prec (!acc +. cell r k)
       done;
       !acc)
@@ -275,6 +278,14 @@ type shape =
   | Virtual_acc
       (** The accumulator is a VIRTUAL node the virtualizer inlines at its read site: the
           [Local_scope] with [mint = Inlined_computation], the other producer of the scope form. *)
+  | Mixed_guard
+      (** The gh-ocannl-721 shape: [If (r + k < s)], a guard mixing the PEELED reduction index with
+          the ENCLOSING output loop's, over a cell each of that loop's instances owns ([out[r]]).
+          The mix is what used to stop the peel — [r] selects among enclosing lanes — and the
+          separation of [r] by the cell is what now lets it through: every lane owning a distinct
+          cell makes the hoisted load/store pair private and idempotent. Its rows admit 20, 19 and
+          18 terms, so a regression that dropped the predicate, or substituted the wrong row into
+          it, is a different number in every row. *)
   | Where_scope
       (** Virtualization's guarded-update spelling: an already-scoped nest whose update is
           [Set_local (id, Where (cond, acc + x, Get_local id))] — an expression-spelled guard whose
@@ -282,14 +293,18 @@ type shape =
           through {!Ll_test.optimize_scoped} rather than through [LL.optimize]. Same interior
           runtime extent, so the else-arm is taken on real iterations rather than on none. *)
 
-(* How many terms a shape's reduction admits — which reference its value is judged against. *)
-let terms_of_shape = function
+(* How many terms a shape's reduction admits, PER ROW — which reference its value is judged
+   against. Only {!Mixed_guard} varies with the row; the others admit the same prefix in each. *)
+let terms_of_shape shape r =
+  match shape with
   | Runtime_guard | Data_guard | Where_scope -> guard_terms
+  | Mixed_guard -> guard_terms - r
   | Plain | Side_write | Virtual_acc -> cols
 
 let shape_name = function
   | Plain -> "plain"
   | Runtime_guard -> "runtime-extent guard"
+  | Mixed_guard -> "mixed lane guard"
   | Data_guard -> "data-dependent guard"
   | Side_write -> "sibling statement"
   | Virtual_acc -> "virtual accumulator"
@@ -380,6 +395,23 @@ let make ~(prec : Ops.prec) ~(shape : shape) () : prog =
         LL.Binop
           ( Ops.Cmplt,
             (LL.Embed_index ki, iprec),
+            (LL.Embed_index (Idx.Iterator s.Idx.static_symbol), iprec) )
+      in
+      {
+        base with
+        llc = nest ~body:(LL.If { cond = (cond, iprec); body = plain_body }) ();
+        bindings;
+        bind = (fun lowered -> Idx.find_exn lowered s := guard_terms);
+      }
+  | Mixed_guard ->
+      (* [r + k < s]. [s] is the same launch-bound extent the {!Runtime_guard} shape uses, so the
+         bound is outside every loop and only [r] is an enclosing index — which is the whole of what
+         the peel has to decide. *)
+      let s, bindings = extent_symbol () in
+      let cond =
+        LL.Binop
+          ( Ops.Cmplt,
+            (LL.Embed_index (Idx.Affine { symbols = [ (1, r); (1, k) ]; offset = 0 }), iprec),
             (LL.Embed_index (Idx.Iterator s.Idx.static_symbol), iprec) )
       in
       {
@@ -857,6 +889,11 @@ type reference =
   | Per_step
       (** The host's per-step-narrowed reference over the member's own term count: what a
           read-modify-write form computes, opening from the seeded cell. *)
+  | Mixed_baseline
+      (** The serial rendering of the MIXED-guarded nest, executed at this precision: 20, 19 and 18
+          terms by row. Its own agreement with the policy's host reference is asserted beside the
+          other baselines, and that is the claim gh-ocannl-721 moves — before the localization the
+          run narrowed at every step where the policy asks for a wider accumulator. *)
   | Owned_cell
       (** The host reference the POLICY selects, over the full axis, starting from ZERO: the
           virtual accumulator owns its cell and initializes it from a [Zero_out] rather than
@@ -1078,6 +1115,23 @@ let members =
       ~shape:Runtime_guard ~reference:Guarded_baseline ~sched:(fun g ->
         let pt, _ = Sched.partition ~axis:g.k ~breakpoints:[ 4; 12 ] in
         [ pt ]);
+    (* --- gh-ocannl-721: a guard mixing the enclosing output index with the peeled reduction one.
+       The output loop cannot be peeled here (the cell mentions its index), so the guard's [r] is a
+       genuinely ENCLOSING symbol at the reduction level — and localization turns on whether the
+       cell separates it. Declining leaves one storage read-modify-write per term, which on a
+       backend whose policy widens the accumulator is a different number, not a slower one. --- *)
+    member "mixed-guard" "a guard mixing the enclosing output index with the peeled one"
+      ~shape:Mixed_guard ~reference:Mixed_baseline;
+    (* The same shape with the output axis actually BOUND to hardware, which is the form the issue
+       states it in: [Workgroup r -> Serial k -> If (r + k < s) (out[r] += x[r,k])]. Where the
+       backend binds the dimension this is the lane-private hoist itself — each lane loads and
+       stores only its own [out[r]] — and where it does not, the axis serializes and the reduction
+       level localizes exactly as above. Binding the OUTPUT axis is safe in a way binding the
+       reduction axis is not, which is why this member runs everywhere and [retype-workgroup] does
+       not. *)
+    member "mixed-guard-workgroup" "the same guard with the output axis bound to a workgroup"
+      ~shape:Mixed_guard ~reference:Mixed_baseline ~expect_axis:LL.Workgroup
+      ~sched:(fun g -> [ Sched.Retype { axis = g.r; ty = LL.Workgroup } ]);
     (* --- the OTHER producer of the scope form: virtualization's inline at a read site --- *)
     member "virtual-accumulator" "a virtual accumulator inlined at its read site"
       ~shape:Virtual_acc ~reference:Owned_cell;
@@ -1132,7 +1186,7 @@ let optop_coverage (op : Sched.optop) : coverage =
       Covered
         [
           "retype-vectorized"; "split-then-vectorize-inner"; "split-then-vectorize-narrow";
-          "retype-workgroup-reduce"; "retype-workgroup";
+          "retype-workgroup-reduce"; "retype-workgroup"; "mixed-guard-workgroup";
         ]
   | Sched.Unroll _ -> Covered [ "unroll-annot"; "unroll-mat"; "unroll-outer-mat" ]
   | Sched.Partition _ -> Covered [ "partition"; "partition-then-unroll"; "partition-outer" ]
@@ -1160,7 +1214,7 @@ let axis_coverage (ty : LL.axis_type) : coverage =
   | LL.Vectorized ->
       Covered [ "retype-vectorized"; "split-then-vectorize-inner"; "split-then-vectorize-narrow" ]
   | LL.Workgroup_reduce -> Covered [ "retype-workgroup-reduce" ]
-  | LL.Workgroup -> Covered [ "retype-workgroup" ]
+  | LL.Workgroup -> Covered [ "retype-workgroup"; "mixed-guard-workgroup" ]
   | LL.Grid ->
       Out_of_scope
         "its fallback is the plain serial loop and NOT the localizing one — the one arm that \
@@ -1324,10 +1378,18 @@ let guarded_baselines =
       let values, _, _ = execute ~name:("rf_guarded_baseline_" ^ prec_name) ~prog ~sched:[] in
       (prec_name, values))
 
+let mixed_baselines =
+  List.map precs ~f:(fun (prec_name, prec) ->
+      let prog = make ~prec ~shape:Mixed_guard () in
+      let values, _, _ = execute ~name:("rf_mixed_baseline_" ^ prec_name) ~prog ~sched:[] in
+      (prec_name, values))
+
 let baseline prec_name = List.Assoc.find_exn baselines ~equal:String.equal prec_name
 
 let guarded_baseline prec_name =
   List.Assoc.find_exn guarded_baselines ~equal:String.equal prec_name
+
+let mixed_baseline prec_name = List.Assoc.find_exn mixed_baselines ~equal:String.equal prec_name
 
 let () =
   List.iter precs ~f:(fun (prec_name, prec) ->
@@ -1336,13 +1398,16 @@ let () =
       let refs ?(from = seed_value) terms =
         (whole_nest_ref ~terms ~from prec, per_step_ref ~terms ~from prec)
       in
-      let wide, stepped = refs cols in
+      let full = fun (_ : int) -> cols in
+      let guarded_terms = fun (_ : int) -> guard_terms in
+      let mixed_terms r = guard_terms - r in
+      let wide, stepped = refs full in
       let got = baseline prec_name in
       let differ = not (Array.for_all2_exn wide stepped ~f:Float.equal) in
       (* The discrimination control. Without it every value claim in the table could hold because
          the operands never leave the storage format's exactness range, in which case a form that
          narrowed at every step would be indistinguishable from one that narrows once. *)
-      let g_wide, g_stepped = refs guard_terms in
+      let g_wide, g_stepped = refs guarded_terms in
       let differ_guarded = not (Array.for_all2_exn g_wide g_stepped ~f:Float.equal) in
       if String.equal prec_name "f32" then
         p "at f32 the whole-nest and per-step references coincide (the identity-precision leg)"
@@ -1359,7 +1424,7 @@ let () =
           (differ && differ_guarded);
       (* Which reference the policy selects, and the assertion that the run took THAT one. Not
          "one of the two": see {!expected_residency}. *)
-      let selected ~terms values ~what =
+      let selected ~terms ~terms_desc values ~what =
         let wide, stepped = refs terms in
         let claim =
           Printf.sprintf "the %s %s matches the reference its backend's accumulator policy selects"
@@ -1374,20 +1439,32 @@ let () =
             let want = match residency with Wider -> wide | _ -> stepped in
             let ok = Array.for_all2_exn values want ~f:Float.equal in
             if not ok then
-              Stdio.eprintf "  %s %s over %d terms: got [%s] want [%s] (policy says %s)\n" prec_name
-                what terms (show values) (show want) (residency_name residency);
+              Stdio.eprintf "  %s %s over %s: got [%s] want [%s] (policy says %s)\n" prec_name what
+                terms_desc (show values) (show want) (residency_name residency);
             p claim ok;
             Some residency
       in
-      let residency = selected ~terms:cols got ~what:"serial baseline" in
+      let residency =
+        selected ~terms:full ~terms_desc:"the full axis" got ~what:"serial baseline"
+      in
       let guarded = guarded_baseline prec_name in
-      ignore (selected ~terms:guard_terms guarded ~what:"guarded baseline");
+      ignore
+        (selected ~terms:guarded_terms
+           ~terms_desc:(Printf.sprintf "%d terms" guard_terms)
+           guarded ~what:"guarded baseline");
+      (* The gh-ocannl-721 claim, and the one the localization moves: before it, the mixed-guarded
+         nest fell back to a storage read-modify-write per term, so on a backend whose policy widens
+         the accumulator this read the per-step reference instead of the whole-nest one. *)
+      let mixed = mixed_baseline prec_name in
+      ignore
+        (selected ~terms:mixed_terms ~terms_desc:"20, 19 and 18 terms by row" mixed
+           ~what:"mixed-guard baseline");
       (* And the guards SELECT: without this the guarded members could not fail at all, since a
          mint or a renderer that discarded the predicate would land on the unguarded sum and still
          match. Both references the guarded members use are covered — the executed guarded baseline
          (the localizing members) and the host per-step reference at the guarded term count (the
          data-guarded decline). *)
-      let _, stepped_guarded = refs guard_terms in
+      let _, stepped_guarded = refs guarded_terms in
       p
         (Printf.sprintf
            "the %s guards are load-bearing: %d of %d terms differs from the full axis in both the \
@@ -1395,6 +1472,16 @@ let () =
            prec_name guard_terms cols)
         ((not (Array.for_all2_exn guarded got ~f:Float.equal))
         && not (Array.for_all2_exn stepped_guarded stepped ~f:Float.equal));
+      (* And the mixed guard's ROW DEPENDENCE is load-bearing: its rows must not all admit the same
+         prefix, or a regression that read the guard as [k < s] — dropping the very symbol that made
+         it mixed — would land on the runtime-extent baseline and pass. *)
+      p
+        (Printf.sprintf
+           "the %s mixed guard admits a different prefix in every row: it differs from both the \
+            full-axis and the runtime-extent baselines"
+           prec_name)
+        ((not (Array.for_all2_exn mixed got ~f:Float.equal))
+        && not (Array.for_all2_exn mixed guarded ~f:Float.equal));
       (* Which regime this backend is in, on stderr so the golden stays backend-uniform: whether
          the accumulator resolves wider than storage decides whether the localized and
          read-modify-write forms are also distinguishable BY VALUE here, or only structurally. *)
@@ -1555,13 +1642,15 @@ let () =
                 match m.reference with
                 | Baseline -> baseline prec_name
                 | Guarded_baseline -> guarded_baseline prec_name
+                | Mixed_baseline -> mixed_baseline prec_name
                 | Per_step ->
                     per_step_ref ~terms:(terms_of_shape m.shape) ~from:seed_value prec
                 | Owned_cell -> (
                     let from _ = 0.0 in
+                    let full (_ : int) = cols in
                     match expected_residency prec with
-                    | Wider -> whole_nest_ref ~terms:cols ~from prec
-                    | At_storage | Undecided _ -> per_step_ref ~terms:cols ~from prec)
+                    | Wider -> whole_nest_ref ~terms:full ~from prec
+                    | At_storage | Undecided _ -> per_step_ref ~terms:full ~from prec)
               in
               let ok = agrees got want in
               if not ok then

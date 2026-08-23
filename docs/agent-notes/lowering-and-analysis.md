@@ -199,6 +199,15 @@ files.
   `Rhs` — a later operand's write would pose as prior to an earlier operand's read; Codex P1 on
   PR #297) nor claim cross-operand evaluation order at all (it would silently depend on codegen's
   scope emission order).
+- **`Ir.Affine` owns the peel-guard rule** (gh-ocannl-722), which is the pattern to follow when a
+  legality question starts growing clauses somewhere else: `Affine.separates` is `pair_conflict`
+  applied to one access taken twice (the instance-vs-instance form — two instances of the same
+  statement, iterating `concurrent` symbols independently, can share a cell only if they agree on
+  every symbol of `syms`), and `Affine.peel_guard` is the symbol-set classification that decides
+  when to ask it. `Low_level.peel_accum_nest` is the consumer; `Low_level.loop_bounds` is the box
+  environment both take (do not add a second walker for it — round 7 of gh-693 did, and gh-722
+  removed the duplicate). Soundness direction, as everywhere in the engine: a proven "separated" is
+  proven, and anything it cannot interpret declines.
 - `Ir.Ops.index_prec ()` is SIGNED (int32; int64 under `large_models`): negative index
   intermediates are well-defined; emit guards in natural signed form. Guard shapes are
   canonicalized to ONE shape per role: upper bounds are strict `Cmplt` (`idx < bound`, the natural

@@ -1,7 +1,7 @@
 Schedule.optop coverage:
   Split              covered by split-then-unroll, split-then-swap, split-then-vectorize-inner, split-then-vectorize-narrow
   Swap               covered by split-then-swap
-  Retype             covered by retype-vectorized, split-then-vectorize-inner, split-then-vectorize-narrow, retype-workgroup-reduce, retype-workgroup
+  Retype             covered by retype-vectorized, split-then-vectorize-inner, split-then-vectorize-narrow, retype-workgroup-reduce, retype-workgroup, mixed-guard-workgroup
   Unroll             covered by unroll-annot, unroll-mat, unroll-outer-mat
   Partition          covered by partition, partition-then-unroll, partition-outer
   Pad                covered by pad-then-unroll-mat
@@ -16,13 +16,13 @@ Low_level.axis_type coverage:
   Serial             covered by serial, decline-data-guard, decline-sibling-statement
   Unrolled           covered by unroll-annot, decline-sibling-unrolled
   Vectorized         covered by retype-vectorized, split-then-vectorize-inner, split-then-vectorize-narrow
-  Workgroup          covered by retype-workgroup
+  Workgroup          covered by retype-workgroup, mixed-guard-workgroup
   Workgroup_reduce   covered by retype-workgroup-reduce
   Grid               out of scope: its fallback is the plain serial loop and NOT the localizing one — the one arm that serializes without localizing. No schedule op in the tree produces an unbindable, non-parallel-eligible Grid level over a reduction axis, and one that existed would be a cross-thread race rather than a width question
 every Low_level.axis_type constructor is reached by a member that exists, or exempted with a reason: true
 the coverage samples name distinct constructors: true
 the numerics policy is the default the member table's forms are stated for: true
-reduction: out[3] = sum of 64 terms, hand-built Low_level, 25 members
+reduction: out[3] = sum of 64 terms, hand-built Low_level, 27 members
   01 serial                      [f32 bf16 f16] over plain                 no schedule ops (the reference rendering)                              -> localized scope
   02 unroll-annot                [f32 bf16 f16] over plain                 Unroll (annotated: codegen repeats the body)                           -> localized scope
   03 unroll-mat                  [f32 bf16 f16] over plain                 Unroll ~materialize (the schedule mints the scope)                     -> localized scope
@@ -42,24 +42,32 @@ reduction: out[3] = sum of 64 terms, hand-built Low_level, 25 members
   17 runtime-guard               [f32 bf16 f16] over runtime-extent guard  a runtime-extent guard, unscheduled                                    -> localized scope
   18 runtime-guard-unroll-mat    [f32 bf16 f16] over runtime-extent guard  a runtime-extent guard under Unroll ~materialize                       -> localized scope
   19 runtime-guard-partition     [f32 bf16 f16] over runtime-extent guard  a runtime-extent guard under Partition of the reduction axis           -> localized scope
-  20 virtual-accumulator         [f32 bf16 f16] over virtual accumulator   a virtual accumulator inlined at its read site                         -> localized scope
-  21 where-guarded-update        [f32 bf16 f16] over Where-guarded scope   virtualization's Where-guarded update spelling                         -> localized scope
-  22 decline-data-guard          [f32 bf16 f16] over data-dependent guard  a data-dependent guard (not a pure index guard)                        -> per-step read-modify-write
-  23 decline-sibling-statement   [f32 bf16 f16] over sibling statement     a second statement in the reduction level                              -> per-step read-modify-write
-  24 decline-sibling-unrolled    [f32 bf16 f16] over sibling statement     the same level Unrolled: one read-modify-write per copy                -> per-step read-modify-write
-  25 tile-mma-fallback           [f32 bf16 f16] over small contraction     Tensorize whose emission preconditions fail (transposed-B operands)    -> Tile_mma scalar fallback
+  20 mixed-guard                 [f32 bf16 f16] over mixed lane guard      a guard mixing the enclosing output index with the peeled one          -> localized scope
+  21 mixed-guard-workgroup       [f32 bf16 f16] over mixed lane guard      the same guard with the output axis bound to a workgroup               -> localized scope
+  22 virtual-accumulator         [f32 bf16 f16] over virtual accumulator   a virtual accumulator inlined at its read site                         -> localized scope
+  23 where-guarded-update        [f32 bf16 f16] over Where-guarded scope   virtualization's Where-guarded update spelling                         -> localized scope
+  24 decline-data-guard          [f32 bf16 f16] over data-dependent guard  a data-dependent guard (not a pure index guard)                        -> per-step read-modify-write
+  25 decline-sibling-statement   [f32 bf16 f16] over sibling statement     a second statement in the reduction level                              -> per-step read-modify-write
+  26 decline-sibling-unrolled    [f32 bf16 f16] over sibling statement     the same level Unrolled: one read-modify-write per copy                -> per-step read-modify-write
+  27 tile-mma-fallback           [f32 bf16 f16] over small contraction     Tensorize whose emission preconditions fail (transposed-B operands)    -> Tile_mma scalar fallback
 at f32 the whole-nest and per-step references coincide (the identity-precision leg): true
 the f32 serial baseline matches the reference its backend's accumulator policy selects: true
 the f32 guarded baseline matches the reference its backend's accumulator policy selects: true
+the f32 mixed-guard baseline matches the reference its backend's accumulator policy selects: true
 the f32 guards are load-bearing: 20 of 64 terms differs from the full axis in both the executed baseline and the per-step reference: true
+the f32 mixed guard admits a different prefix in every row: it differs from both the full-axis and the runtime-extent baselines: true
 at bf16 the whole-nest and per-step references differ over the full axis and over the guarded prefix (the operands discriminate accumulator width): true
 the bf16 serial baseline matches the reference its backend's accumulator policy selects: true
 the bf16 guarded baseline matches the reference its backend's accumulator policy selects: true
+the bf16 mixed-guard baseline matches the reference its backend's accumulator policy selects: true
 the bf16 guards are load-bearing: 20 of 64 terms differs from the full axis in both the executed baseline and the per-step reference: true
+the bf16 mixed guard admits a different prefix in every row: it differs from both the full-axis and the runtime-extent baselines: true
 at f16 the whole-nest and per-step references differ over the full axis and over the guarded prefix (the operands discriminate accumulator width): true
 the f16 serial baseline matches the reference its backend's accumulator policy selects: true
 the f16 guarded baseline matches the reference its backend's accumulator policy selects: true
+the f16 mixed-guard baseline matches the reference its backend's accumulator policy selects: true
 the f16 guards are load-bearing: 20 of 64 terms differs from the full axis in both the executed baseline and the per-step reference: true
+the f16 mixed guard admits a different prefix in every row: it differs from both the full-axis and the runtime-extent baselines: true
 serial @ f32: its schedule ops left their mark on the lowered IR: true
 serial @ f32 renders the form its composition claims: true
 serial @ f32 agrees with its reference value: true
@@ -219,6 +227,24 @@ runtime-guard-partition @ bf16 agrees with its reference value: true
 runtime-guard-partition @ f16: its schedule ops left their mark on the lowered IR: true
 runtime-guard-partition @ f16 renders the form its composition claims: true
 runtime-guard-partition @ f16 agrees with its reference value: true
+mixed-guard @ f32: its schedule ops left their mark on the lowered IR: true
+mixed-guard @ f32 renders the form its composition claims: true
+mixed-guard @ f32 agrees with its reference value: true
+mixed-guard @ bf16: its schedule ops left their mark on the lowered IR: true
+mixed-guard @ bf16 renders the form its composition claims: true
+mixed-guard @ bf16 agrees with its reference value: true
+mixed-guard @ f16: its schedule ops left their mark on the lowered IR: true
+mixed-guard @ f16 renders the form its composition claims: true
+mixed-guard @ f16 agrees with its reference value: true
+mixed-guard-workgroup @ f32: its schedule ops left their mark on the lowered IR: true
+mixed-guard-workgroup @ f32 renders the form its composition claims: true
+mixed-guard-workgroup @ f32 agrees with its reference value: true
+mixed-guard-workgroup @ bf16: its schedule ops left their mark on the lowered IR: true
+mixed-guard-workgroup @ bf16 renders the form its composition claims: true
+mixed-guard-workgroup @ bf16 agrees with its reference value: true
+mixed-guard-workgroup @ f16: its schedule ops left their mark on the lowered IR: true
+mixed-guard-workgroup @ f16 renders the form its composition claims: true
+mixed-guard-workgroup @ f16 agrees with its reference value: true
 virtual-accumulator @ f32: its schedule ops left their mark on the lowered IR: true
 virtual-accumulator @ f32 renders the form its composition claims: true
 virtual-accumulator @ f32 agrees with its reference value: true
