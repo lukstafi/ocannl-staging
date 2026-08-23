@@ -5348,14 +5348,21 @@ let peel_accum_nest ?(extra_level = fun _ _ -> false) ~loop_bounds ~free_of body
     in
     go [] llsc
   in
-  (* The deferred half. [concurrent] is every non-peeled loop symbol rather than only the [pending]
-     ones: two instances may differ in ANY of them, and holding one equal would let a cell like
-     [acc[w1 + w2]] "prove" a separation it does not have. *)
-  let cell_admits ~free_of ~pending idcs =
+  (* The deferred half, in two parts. [concurrent] is every non-peeled loop symbol rather than only
+     the [pending] ones: two instances may differ in ANY of them, and holding one equal would let a
+     cell like [acc[w1 + w2]] "prove" a separation it does not have.
+
+     And separation is distinctness, not validity. The guard being hoisted past may be what keeps
+     the cell IN BOUNDS -- with a one-element [acc] and [If (w + k < 1) (acc[w] += ...)], [acc[w]]
+     separates [w] while lanes 1-3 address cells that do not exist -- so the cell must also sit
+     inside the node's box over the enclosing symbols' full ranges, judged without the guard. Only
+     the escape needs this: a confined guard mentions no symbol the cell mentions. *)
+  let cell_admits ~free_of ~pending tn idcs =
     List.is_empty pending
     || Affine.separates ~range
          ~concurrent:(fun s -> loop_bound s && not (peeled ~free_of s))
          ~syms:pending ~idcs
+       && Affine.within_box ~range ~dims:(Lazy.force tn.Tn.dims) idcs
   in
   let cell_invariant ~free_of idcs =
     not (Array.exists idcs ~f:(fun idx -> List.exists free_of ~f:(fun s -> idx_mentions s idx)))
@@ -5402,7 +5409,7 @@ let peel_accum_nest ?(extra_level = fun _ _ -> false) ~loop_bounds ~free_of body
         | Affine.Lane_private_if_separated enclosing ->
             peel ~free_of ~pending:(enclosing @ pending) ~rebuild gbody)
     | [ Set { tn; idcs; llsc = Local_scope { id; body = sbody; orig_indices = _; mint = _ }; debug } ]
-      when cell_invariant ~free_of idcs && cell_admits ~free_of ~pending idcs -> (
+      when cell_invariant ~free_of idcs && cell_admits ~free_of ~pending tn idcs -> (
         match strip (flat_lines [ sbody ]) with
         | Set_local (id', Get (tn', idcs')) :: (_ :: _ as rest)
           when Scope_id.equal id id' && Tn.equal tn tn'
@@ -5414,7 +5421,7 @@ let peel_accum_nest ?(extra_level = fun _ _ -> false) ~loop_bounds ~free_of body
         | _ -> None)
     | [ Set { tn; idcs; llsc; debug } ]
       when cell_invariant ~free_of idcs
-           && cell_admits ~free_of ~pending idcs
+           && cell_admits ~free_of ~pending tn idcs
            && Option.is_some (accum_update_parts ~tn ~idcs llsc) ->
         Some (tn, idcs, `Update llsc, debug, rebuild)
     | _ -> None

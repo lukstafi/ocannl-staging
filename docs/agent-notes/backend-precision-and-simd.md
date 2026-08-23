@@ -246,12 +246,19 @@ files.
   `Workgroup w -> Serial k -> If (w + k < n) (acc[w] += x[w,k])` every lane owns a distinct cell, so
   the invented load/store pair is private to its lane and idempotent and the hoist is race-free —
   which is exactly `Affine.separates` asked of the cell, and why the cell reaches the decision.
-  Two traps in using that query. Its `concurrent` set must cover EVERY symbol whose value may differ
-  between the two instances, not only the ones being told apart: with `acc[w1 + w2]` and
+  Three traps in using that query. Its `concurrent` set must cover EVERY symbol whose value may
+  differ between the two instances, not only the ones being told apart: with `acc[w1 + w2]` and
   `syms = [w1]`, holding `w2` equal "proves" a separation that instances `(0,1)` and `(1,0)` refute.
-  And mentioning a symbol is not separating it — the same `acc[w1 + w2]` mentions both and separates
-  neither. Uninterpretable components (`Sub_axis`, `Concat`, dynamic indices) contribute no
-  information, so they decline rather than separate.
+  Mentioning a symbol is not separating it — the same `acc[w1 + w2]` mentions both and separates
+  neither. And **separation is distinctness, not access validity**: the guard being hoisted past may
+  be what keeps the cell in bounds, so a consumer must ALSO ask `Affine.within_box` of the cell over
+  the enclosing symbols' full ranges, judged without the guard. With a one-element `acc`,
+  `Workgroup w (0..3) -> Serial k -> If (w + k < 1) (acc[w] += ...)` separates `w` perfectly while
+  lanes 1–3 address cells that do not exist (Codex P1 on PR #443). The confined case needs no such
+  check — there the guard mentions only peeled symbols and symbols no loop binds, while the cell is
+  invariant across the peeled levels, so the guard cannot bound anything the cell mentions.
+  Uninterpretable components (`Sub_axis`, `Concat`, dynamic indices) contribute no information to
+  either query, so they decline rather than admit.
 - **The gh-490 runtime-extent guard is NOT constant-bounded** — worth knowing, because assuming it
   was cost a review round: `Assignments.extent_guard` (assignments.ml:225) emits
   `Cmplt (Embed_index (Iterator index), Embed_index (Iterator sym.static_symbol))`, whose bound is a

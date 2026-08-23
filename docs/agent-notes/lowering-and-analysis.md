@@ -204,7 +204,8 @@ files.
   applied to one access taken twice (the instance-vs-instance form — two instances of the same
   statement, iterating `concurrent` symbols independently, can share a cell only if they agree on
   every symbol of `syms`), and `Affine.peel_guard` is the symbol-set classification that decides
-  when to ask it. `Low_level.peel_accum_nest` is the consumer; `Low_level.loop_bounds` is the box
+  when to ask it, with `Affine.within_box` — the interval companion of `covers_box` — answering the
+  access-validity half that separation does not. `Low_level.peel_accum_nest` is the consumer; `Low_level.loop_bounds` is the box
   environment both take (do not add a second walker for it — round 7 of gh-693 did, and gh-722
   removed the duplicate). Soundness direction, as everywhere in the engine: a proven "separated" is
   proven, and anything it cannot interpret declines.

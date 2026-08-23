@@ -95,8 +95,13 @@ let () =
    index: it must still peel, or the refusal has disabled the feature for every padded window rather
    than closing the race. *)
 
-(* A second accumulator, indexed by the enclosing symbol: the lane-private cell. *)
+(* A second accumulator, indexed by the enclosing symbol: the lane-private cell. Four cells for
+   four lanes, so [lanes[w]] is in bounds over the whole of [w]'s range without the guard's help. *)
 let lanes = node ~id:940_100_003 ~label:"pdl_lanes" ~dims:[| 4 |]
+
+(* The same cell over a node too SMALL for the enclosing range: there the guard is what keeps the
+   access in bounds, which is a different question from whether the lanes share a cell. *)
+let narrow = node ~id:940_100_004 ~label:"pdl_narrow" ~dims:[| 1 |]
 
 let guarded_nest ~guard_sym ~cell =
   let k = Idx.get_symbol () in
@@ -112,6 +117,7 @@ let guarded_nest ~guard_sym ~cell =
     match cell with
     | `Shared -> (acc, [| Idx.Fixed_idx 0 |])
     | `Per_lane s -> (lanes, [| Idx.Iterator s |])
+    | `Per_lane_narrow s -> (narrow, [| Idx.Iterator s |])
     | `Lane_sum (s1, s2) ->
         (* Two enclosing lanes collapsing onto one cell: [(0,1)] and [(1,0)] address [lanes[1]], so
            the cell tells neither of them apart even though it mentions both. *)
@@ -173,6 +179,14 @@ let () =
      BOTH enclosing symbols additively still maps [(0,1)] and [(1,0)] to one cell. *)
   Verdict.p "a mixed guard over a cell two enclosing lanes collapse onto is refused"
     (not (peels ~guard_sym:(`Mixed enclosing) ~cell:(`Lane_sum (enclosing, other))));
+  (* Separation is DISTINCTNESS, not access validity, and the escape needs both (Codex P1 on PR
+     #443). Over a one-element node the same [lanes[w]] separates [w] just as well, and every lane
+     but the first addresses a cell that does not exist -- cells the original, which only reaches
+     the accumulation where the guard holds, never touched. The hoist has to be able to prove the
+     cell in bounds WITHOUT the guard it is hoisting past, which is what the node's own extent
+     answers: identical IR to the leg above but for the node, so the two isolate exactly that. *)
+  Verdict.p "a mixed guard over a lane-private cell OUTSIDE the node's extent is refused"
+    (not (peels ~guard_sym:(`Mixed enclosing) ~cell:(`Per_lane_narrow enclosing)));
   (* A lane-private cell does not license a guard with NO peeled symbol either: that one is fixed
      for the whole nest, so the hoist invents both accesses rather than relocating them. *)
   Verdict.p "an enclosing-only guard is refused even over a lane-private cell"

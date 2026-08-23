@@ -709,6 +709,35 @@ let () =
   check_separates ~name:"an opaque component does not separate" ~concurrent:[ w ] ~syms:[ w ]
     [| Idx.Sub_axis |];
 
+  (* {!Aff.within_box}: access validity, the half separation does not answer (Codex P1 on PR #443).
+     No oracle -- an interval containment over a box is decided by the same arithmetic an
+     enumeration would perform -- so these are named cases, each naming which way it must go. *)
+  Stdio.printf "\n=== gh-722: within_box (the validity half) ===\n";
+  let wb name ~dims idcs expected =
+    let got = Aff.within_box ~range:(fun x -> find_range ranges x) ~dims idcs in
+    Stdio.printf "%-52s %b (want %b)\n" name got expected;
+    Verdict.claim name (Bool.equal got expected)
+  in
+  wb "acc[w] fits a 4-cell node" ~dims:[| 4 |] [| Idx.Iterator w |] true;
+  wb "acc[w] does not fit a 1-cell node" ~dims:[| 1 |] [| Idx.Iterator w |] false;
+  wb "acc[w] does not fit a 3-cell node either" ~dims:[| 3 |] [| Idx.Iterator w |] false;
+  wb "acc[w + 1] leaves a 4-cell node at the top" ~dims:[| 4 |]
+    [| aff [ (1, w) ] 1 |] false;
+  wb "acc[w - 1] leaves a 4-cell node at the bottom" ~dims:[| 4 |]
+    [| aff [ (1, w) ] (-1) |] false;
+  wb "acc[4w + w2] fits a 16-cell node" ~dims:[| 16 |] [| aff [ (4, w); (1, w2) ] 0 |] true;
+  wb "acc[w, w2] fits a 4x4 node" ~dims:[| 4; 4 |] [| Idx.Iterator w; Idx.Iterator w2 |] true;
+  wb "acc[w, w2] does not fit a 4x2 node" ~dims:[| 4; 2 |]
+    [| Idx.Iterator w; Idx.Iterator w2 |] false;
+  wb "a fixed index inside the box fits" ~dims:[| 4 |] [| Idx.Fixed_idx 2 |] true;
+  wb "a fixed index outside it does not" ~dims:[| 2 |] [| Idx.Fixed_idx 2 |] false;
+  (* A static parameter's value is not known here, so it cannot be placed inside any box -- the
+     conservative answer, this query being asked only to license moving an access out from under a
+     guard. *)
+  wb "a static index parameter is not placed" ~dims:[| 4 |] [| Idx.Iterator s |] false;
+  wb "an opaque component is not placed" ~dims:[| 4 |] [| Idx.Sub_axis |] false;
+  wb "a rank mismatch is not placed" ~dims:[| 4; 4 |] [| Idx.Iterator w |] false;
+
   Stdio.printf "\n=== gh-722: peel_guard (which guards may join the peeled levels) ===\n";
   let p name b =
     Stdio.printf "%-72s %b\n" name b;

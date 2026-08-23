@@ -7,6 +7,7 @@ a guard invariant across the peeled levels is refused: true
 a mixed guard over a cell the enclosing lanes share is refused: true
 a mixed guard over a lane-private cell peels: true
 a mixed guard over a cell two enclosing lanes collapse onto is refused: true
+a mixed guard over a lane-private cell OUTSIDE the node's extent is refused: true
 an enclosing-only guard is refused even over a lane-private cell: true
 the lane-private shape still peels when its guard bound is bound outside every loop: true
 a runtime-extent guard peels: its bound is bound outside every loop: true

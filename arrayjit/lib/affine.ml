@@ -215,6 +215,14 @@ let pair_conflict ~range ~dup_left ~dup_right ~(pairs : (Idx.symbol * Idx.symbol
            (String.concat_array ~sep:"," (Array.map left ~f:axis_index_to_string))
            (String.concat_array ~sep:"," (Array.map right ~f:axis_index_to_string)))
 
+(* Linear view of one axis component: terms plus offset, [None] for uninterpretable ones. *)
+let linear_terms (idx : Idx.axis_index) : ((int * Idx.symbol) list * int) option =
+  match idx with
+  | Idx.Fixed_idx c -> Some ([], c)
+  | Idx.Iterator s -> Some ([ (1, s) ], 0)
+  | Idx.Affine { symbols; offset } -> Some (Idx.coalesce_affine_terms symbols, offset)
+  | Idx.Sub_axis | Idx.Concat _ -> None
+
 (** {2 The separation query}
 
     Does an index vector tell apart the iterations of a set of loop symbols? Where
@@ -238,6 +246,31 @@ let separates ~range ~(concurrent : Idx.symbol -> bool) ~(syms : Idx.symbol list
   with
   | Disjoint | Same_thread -> true
   | Cross_thread _ -> false
+
+(** [within_box ~range ~dims idcs]: does the index vector address a cell INSIDE the [dims] box for
+    every valuation of its symbols within their ranges? The interval companion of {!covers_box},
+    which asks about a bijection onto the box; this asks only that nothing leaves it.
+
+    Access validity, as distinct from the distinctness {!separates} proves. A symbol with no range
+    (a static index parameter) and a component the engine cannot interpret both answer [false]: an
+    unknown value can be anywhere, and this query is only ever used to license moving an access to
+    where a guard no longer covers it. *)
+let within_box ~range ~(dims : int array) (idcs : Idx.axis_index array) : bool =
+  Array.length idcs = Array.length dims
+  && Array.for_alli idcs ~f:(fun ax idx ->
+         match linear_terms idx with
+         | None -> false
+         | Some (terms, offset) -> (
+             let bounds =
+               List.fold terms
+                 ~init:(Some (offset, offset))
+                 ~f:(fun acc (c, s) ->
+                   match (acc, range s) with
+                   | Some (lo, hi), Some (slo, shi) ->
+                       Some (lo + min (c * slo) (c * shi), hi + max (c * slo) (c * shi))
+                   | _ -> None)
+             in
+             match bounds with Some (lo, hi) -> lo >= 0 && hi < dims.(ax) | None -> false))
 
 (** {2 The peel-guard legality query}
 
@@ -269,6 +302,16 @@ let separates ~range ~(concurrent : Idx.symbol -> bool) ~(syms : Idx.symbol list
     — cannot select among any level's iterations and is harmless by construction. Which symbols
     those are is read off the program (the complement of its loop indices) rather than promised by a
     caller, so no call site can forget to say.
+
+    Separation is distinctness, not validity, and the escape needs both. A guard mentioning an
+    enclosing symbol may be the very thing that keeps the cell IN BOUNDS: with a one-element [acc],
+    [w] over [0..3] and [If (w + k < 1) (acc[w] += ...)], [acc[w]] separates [w] while lanes 1-3
+    address cells that do not exist, and the original program never reached them. So a consumer
+    admitting a [Lane_private_if_separated] guard must also ask {!within_box} of the cell over the
+    enclosing symbols' full ranges — independently of the guard, which is what it is about to hoist
+    the accesses out of. The confined case needs no such check: there the guard mentions only peeled
+    symbols and symbols no loop binds, while the cell is invariant across the peeled levels, so the
+    guard cannot bound anything the cell mentions.
 
     What the escape deliberately does NOT require is that the cell separate every enclosing symbol,
     only the ones the guard mentions. Two instances agreeing on those share the guard's truth, so
@@ -782,14 +825,6 @@ let ap_covered_chunk r w : (int * int) option =
     in
     if k_lo <= k_hi then Some (k_lo, k_hi) else None
   else None
-
-(* Linear view of one axis component: terms plus offset, [None] for uninterpretable ones. *)
-let linear_terms (idx : Idx.axis_index) : ((int * Idx.symbol) list * int) option =
-  match idx with
-  | Idx.Fixed_idx c -> Some ([], c)
-  | Idx.Iterator s -> Some ([ (1, s) ], 0)
-  | Idx.Affine { symbols; offset } -> Some (Idx.coalesce_affine_terms symbols, offset)
-  | Idx.Sub_axis | Idx.Concat _ -> None
 
 (** Whether the runs of a vectorized access ([a_vec_last]) are pairwise disjoint in the node's flat
     cell space — the access then touches exactly [base image * a_vec_len] distinct cells

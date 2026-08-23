@@ -84,6 +84,21 @@ acc[w + s] separates w (s static)              query true   oracle true
 an empty symbol set is separated               query true   oracle true  
 an opaque component does not separate          query false  oracle true  
 
+=== gh-722: within_box (the validity half) ===
+acc[w] fits a 4-cell node                            true (want true)
+acc[w] does not fit a 1-cell node                    false (want false)
+acc[w] does not fit a 3-cell node either             false (want false)
+acc[w + 1] leaves a 4-cell node at the top           false (want false)
+acc[w - 1] leaves a 4-cell node at the bottom        false (want false)
+acc[4w + w2] fits a 16-cell node                     true (want true)
+acc[w, w2] fits a 4x4 node                           true (want true)
+acc[w, w2] does not fit a 4x2 node                   false (want false)
+a fixed index inside the box fits                    true (want true)
+a fixed index outside it does not                    false (want false)
+a static index parameter is not placed               false (want false)
+an opaque component is not placed                    false (want false)
+a rank mismatch is not placed                        false (want false)
+
 === gh-722: peel_guard (which guards may join the peeled levels) ===
 a guard over the peeled index alone is confined                          true
 a guard over the peeled index and a static bound is confined             true
