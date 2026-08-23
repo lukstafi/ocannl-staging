@@ -86,7 +86,23 @@ type kernel_loop = {
   what : string;  (** how the census table names the row *)
 }
 
-let mkdir_p dir = ignore (Stdlib.Sys.command (Printf.sprintf "mkdir -p %s" (Stdlib.Filename.quote dir)))
+(* Directory handling through the OCaml stdlib rather than [Sys.command "mkdir -p"] /
+   [Sys.command "rm -rf"]: those are POSIX shell spellings, and this test has to work on the native
+   Windows environment AGENTS.md supports, where neither exists. Same reasoning as the null device
+   in {!Test_utils.Asm_census.accepts}. *)
+let rec mkdir_p dir =
+  if not (Stdlib.Sys.file_exists dir) then (
+    let parent = Stdlib.Filename.dirname dir in
+    if not (String.equal parent dir) then mkdir_p parent;
+    try Stdlib.Sys.mkdir dir 0o755 with Sys_error _ -> ())
+
+let rec rm_rf path =
+  if Stdlib.Sys.file_exists path then
+    if Stdlib.Sys.is_directory path then (
+      Array.iter (Stdlib.Sys.readdir path) ~f:(fun e ->
+          rm_rf (Stdlib.Filename.concat path e));
+      try Stdlib.Sys.rmdir path with Sys_error _ -> ())
+    else try Stdlib.Sys.remove path with Sys_error _ -> ()
 
 let build (emit_dir : string) =
   Utils.settings.output_debug_files_in_build_directory <- true;
@@ -111,39 +127,52 @@ let build (emit_dir : string) =
   let llc =
     [ ("f32", Ir.Ops.single); ("f64", Ir.Ops.double); ("f16", Ir.Ops.half) ]
     |> List.map ~f:(fun (tag, prec) ->
-           let src = mk ~prec ~dims:[| extent |] ("mxs_" ^ tag) in
-           let acc = mk ~prec ~dims:[| 1 |] ("mxa_" ^ tag) in
            let da = mk ~prec ~dims:[| extent |] ("dta_" ^ tag) in
            let db = mk ~prec ~dims:[| extent |] ("dtb_" ^ tag) in
            let dacc = mk ~prec ~dims:[| 1 |] ("dtc_" ^ tag) in
-           let i = Idx.get_symbol () and j = Idx.get_symbol () in
            let cell tn = LL.Get (tn, [| Idx.Fixed_idx 0 |]) in
            let at tn s = LL.Get (tn, [| Idx.Iterator s |]) in
-           let vloop index body =
-             LL.For_loop { index; from_ = 0; to_ = extent - 1; axis = LL.Vectorized; body }
+           let vloop body =
+             let index = Idx.get_symbol () in
+             LL.For_loop
+               { index; from_ = 0; to_ = extent - 1; axis = LL.Vectorized; body = body index }
            in
-           loops :=
-             { anchor = "mxs_" ^ tag; op_class = Census.Max_min; what = "max/" ^ tag }
-             :: { anchor = "dta_" ^ tag; op_class = Census.Fma; what = "dot/" ^ tag }
-             :: !loops;
-           LL.Seq
-             ( vloop i
-                 (LL.Set
-                    {
-                      tn = acc;
-                      idcs = [| Idx.Fixed_idx 0 |];
-                      llsc = LL.Binop (Ir.Ops.Max, (cell acc, prec), (at src i, prec));
-                      debug = "";
-                    }),
-               vloop j
-                 (LL.Set
-                    {
-                      tn = dacc;
-                      idcs = [| Idx.Fixed_idx 0 |];
-                      llsc =
-                        LL.Ternop (Ir.Ops.FMA, (at da j, prec), (at db j, prec), (cell dacc, prec));
-                      debug = "";
-                    }) ))
+           (* [Max] AND [Min], each at each precision. Emitting only [Max] would leave
+              [__builtin_aarch64_fminv4sf]/[fminv2df]/[fminv8hf] in no generated source at all, so
+              the whole point of the matrix -- catching a missing builtin, a wrong signature or a
+              broken guard in an arm no local hardware selects -- would not reach the [Min] half of
+              {!C_syntax.vec_minmax_builtin}. The host runtime test cannot cover them either: it
+              preprocesses those arms away. *)
+           let minmax op name =
+             let src = mk ~prec ~dims:[| extent |] (name ^ "s_" ^ tag) in
+             let acc = mk ~prec ~dims:[| 1 |] (name ^ "a_" ^ tag) in
+             loops :=
+               { anchor = name ^ "s_" ^ tag; op_class = Census.Max_min; what = name ^ "/" ^ tag }
+               :: !loops;
+             vloop (fun i ->
+                 LL.Set
+                   {
+                     tn = acc;
+                     idcs = [| Idx.Fixed_idx 0 |];
+                     llsc = LL.Binop (op, (cell acc, prec), (at src i, prec));
+                     debug = "";
+                   })
+           in
+           let max_loop = minmax Ir.Ops.Max "max" in
+           let min_loop = minmax Ir.Ops.Min "min" in
+           loops := { anchor = "dta_" ^ tag; op_class = Census.Fma; what = "dot/" ^ tag } :: !loops;
+           let dot_loop =
+             vloop (fun j ->
+                 LL.Set
+                   {
+                     tn = dacc;
+                     idcs = [| Idx.Fixed_idx 0 |];
+                     llsc =
+                       LL.Ternop (Ir.Ops.FMA, (at da j, prec), (at db j, prec), (cell dacc, prec));
+                     debug = "";
+                   })
+           in
+           LL.Seq (max_loop, LL.Seq (min_loop, dot_loop)))
     |> List.reduce_exn ~f:(fun a b -> LL.Seq (a, b))
   in
   (* [optimize_scoped] injects the nest AS WRITTEN past [LL.optimize], which is what keeps the
@@ -309,7 +338,7 @@ let () =
   | None ->
       let exe = Stdlib.Sys.executable_name in
       let root = Stdlib.Filename.concat (Stdlib.Sys.getcwd ()) "cc_march_census_kernels" in
-      ignore (Stdlib.Sys.command (Printf.sprintf "rm -rf %s" (Stdlib.Filename.quote root)));
+      rm_rf root;
       mkdir_p root;
       let emitted = emit_all ~exe ~root in
       Verdict.p_all "every requested vector width emitted a kernel" widths ~f:(fun w ->

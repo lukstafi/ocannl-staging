@@ -85,12 +85,21 @@ let run_capture cmdline =
     is indistinguishable from a passing one. *)
 let accepts t =
   let src = Stdlib.Filename.temp_file "ocannl_census_probe_" ".c" in
+  (* A temp file, NOT [-o /dev/null]: [Sys.command] hands the line to the platform shell, and on
+     native Windows there is no [/dev/null] to hand it -- every probe would fail, every column would
+     report itself [Verdict.skipped], and the golden would be green having compiled nothing. That is
+     the exact failure this module's "a missing column is not a passing one" rule exists to prevent,
+     so it must not be reintroduced by the probe that decides which columns exist (AGENTS.md names
+     Windows a supported environment). Writing real assembly costs a few kilobytes and is portable. *)
+  let out = Stdlib.Filename.temp_file "ocannl_census_probe_" ".s" in
   Stdio.Out_channel.write_all src ~data:"int ocannl_census_probe(void) { return 0; }\n";
   let rc, _ =
     run_capture
-      (Printf.sprintf "%s %s -S -o /dev/null %s" t.command (flags t) (Stdlib.Filename.quote src))
+      (Printf.sprintf "%s %s -S -o %s %s" t.command (flags t) (Stdlib.Filename.quote out)
+         (Stdlib.Filename.quote src))
   in
   (try Stdlib.Sys.remove src with _ -> ());
+  (try Stdlib.Sys.remove out with _ -> ());
   rc = 0
 
 (** [compile t ~opt_level ~src_path ~asm_path] compiles [src_path] to assembly, with [-g] so that
@@ -281,13 +290,17 @@ let is_branch ~mnemonic =
   || is_cond mnemonic ~prefix:"b"
   || List.mem [ "cbz"; "cbnz"; "tbz"; "tbnz" ] mnemonic ~equal:String.equal
 
+(* The branch's label operand is its last one ([b .L3], [cbnz w0, .L5], [jne .L2]). It is returned
+   UNFILTERED and {!backward_edges} decides whether it names a label, rather than being screened
+   here for a leading [.]: that prefix is an ELF-assembler convention, and Apple's assembler spells
+   its compiler-local labels [LBB0_9] with no dot at all. Screening on it rejected every branch
+   target on Darwin, which does not read as "this ISA is unsupported" -- it reads as a file with no
+   loops in it, i.e. every anchor missing at once, on a platform AGENTS.md supports and CI builds.
+   The label table is the honest filter: an operand that is not a label is not in it. *)
 let branch_target ~rest =
-  let last =
-    String.split_on_chars rest ~on:[ ','; ' '; '\t' ]
-    |> List.filter ~f:(fun w -> not (String.is_empty w))
-    |> List.last
-  in
-  match last with Some t when String.is_prefix t ~prefix:"." -> Some t | _ -> None
+  String.split_on_chars rest ~on:[ ','; ' '; '\t' ]
+  |> List.filter ~f:(fun w -> not (String.is_empty w))
+  |> List.last
 
 (** {1 Source anchoring} *)
 

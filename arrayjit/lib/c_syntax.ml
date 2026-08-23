@@ -2196,12 +2196,24 @@ module C_syntax (B : C_syntax_config) = struct
      specifies of [fmax]/[fmin]: the larger (smaller) operand, the non-NaN one when exactly one is
      NaN, a NaN when both are. Compared against glibc over every ordered pair of {0, -0, +-1,
      +-inf, +-NaN, +-denormal, ...} at f32 and f64, the two agree bitwise everywhere except the two
-     cases C leaves UNSPECIFIED -- which of [+0]/[-0] a tie returns, and which payload a both-NaN
-     pair returns -- plus a signaling NaN, which libm quiets and this returns unchanged, and which
-     cannot reach a kernel anyway since host values cross as OCaml doubles. Both unspecified cases
-     are order-dependent under a [Vectorized] retype regardless: splitting the fold into [chains *
-     lanes] independent chains already changes which of several equal-comparing operands reaches the
-     final combine.
+     cases C leaves UNSPECIFIED: which of [+0]/[-0] a tie returns, and which payload a both-NaN pair
+     returns. Both are order-dependent under a [Vectorized] retype regardless -- splitting the fold
+     into [chains * lanes] independent chains already changes which of several equal-comparing
+     operands reaches the final combine -- so neither is a behaviour this could preserve if it tried.
+
+     Two deviations that ARE real, and are accepted rather than unnoticed. A SIGNALING NaN differs
+     in both value and flag: glibc's [fmax] propagates it, this selects the numeric operand. It is
+     reachable, contrary to what this comment claimed until gh-ocannl-649 review round 1 -- an OCaml
+     float carries whatever payload it was built with and [Ndarray.set_from_float] stores it into a
+     [Float64] bigarray unnarrowed, so no conversion quiets it on the way to an f64 kernel. And
+     [>=]/[<=] are SIGNALING comparisons (C's relational operators are, unlike [!=]), so a quiet NaN
+     raises [FE_INVALID] here where [fmax] would not. Neither is chased because GNU C has no quiet
+     whole-vector comparison to chase them with -- x86's quiet predicate is reachable only through
+     per-width [__builtin_ia32_cmp*] arms carrying an [_CMP_*_OQ] immediate, and the aarch64 arm
+     above sidesteps the question entirely since [FMAXNM] does not signal -- and because a kernel
+     runs with FP traps disabled, where a raised flag nothing reads costs nothing. A build that
+     enables invalid-operation trapping and feeds NaNs to a [Max] reduction is the case this would
+     hurt; it does not exist here, and this note is what makes it findable if it comes to.
 
      Only float precisions reach here at all ([vector_prec_ok]: f32, f64, and fp16 where the target
      has native 16-bit arithmetic), so the blend never has to mean anything on an integer vector.
