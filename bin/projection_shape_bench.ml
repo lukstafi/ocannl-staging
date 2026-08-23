@@ -42,6 +42,14 @@
    sync (what a kernel sustains inside a step, and the summary's statistic, taken at the MEDIAN
    batch), and the tuner's own one-dispatch-one-sync minimum, which reads up to 2.6x higher.
 
+   Which of the three numbers on a line to believe depends on what the noise is. The median is the
+   right summary when the noise is symmetric, which is why it is the summary. On a CONTENDED box it
+   is not: interference only ever makes a batch slower, so the median wanders (20% between the two
+   arms of a duplicated site on one measured run) while the two minima stay put (5% and 0.5% across
+   every arm of the same geometry in that same run). The duplicated sites are the arbiter — when
+   they disagree by more than the effect under test, the effect is not resolvable in that run,
+   whichever statistic is read.
+
    Every candidate's whole output is compared cell by cell against a host-computed oracle -- built
    straight from the input formulas, so it is independent of the compiler under test -- and the
    inputs are chosen so that f32 and f64 accumulation agree exactly whatever order either uses.
