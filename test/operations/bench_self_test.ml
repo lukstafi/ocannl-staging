@@ -41,9 +41,16 @@ let () =
      diffed. It is echoed rather than dropped so a failing run is diagnosable from the log. *)
   let line = H.run_self_test ~out:Stdio.stderr () in
   let protocol = H.self_test_protocol in
-  match (try Some (Yojson.Safe.from_string line) with _ -> None) with
-  | Some (`Assoc _ as j) ->
-      Verdict.p "the emitted result line parses as one JSON object" true;
+  let parsed =
+    match (try Some (Yojson.Safe.from_string line) with _ -> None) with
+    | Some (`Assoc _ as j) -> Some j
+    | Some _ | None -> None
+  in
+  (* Claimed before the match, so the claim is decided by the parse rather than by which branch we
+     are standing in: inside the successful branch it could only ever have been [true]. *)
+  Verdict.p "the emitted result line parses as one JSON object" (Option.is_some parsed);
+  match parsed with
+  | Some j ->
       Verdict.p "framework is ocannl" (is_str j "framework" "ocannl");
       Verdict.p "backend names the backend the cell ran on"
         (Option.value_map (string_field j "backend") ~default:false ~f:(Fn.non String.is_empty));
@@ -78,5 +85,6 @@ let () =
       Verdict.p "every parity checksum is a finite number"
         (List.for_all losses ~f:(function `Float _ | `Int _ -> true | _ -> false)
         && not (List.is_empty losses))
-  | Some _ -> Verdict.fail "the emitted result line is a JSON value other than an object"
-  | None -> Verdict.fail "the emitted result line does not parse as JSON"
+  | None ->
+      (* The claim above has already failed the run; naming the line is what makes it diagnosable. *)
+      Verdict.fail ("the emitted result line is not a JSON object: " ^ line)
