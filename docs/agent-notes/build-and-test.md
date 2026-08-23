@@ -142,9 +142,28 @@ that they earn a lookup rather than always-loaded space.
   ("declares neither +floor" versus the same line without it): the pairing is what makes a false
   green visible as a golden line rather than as an absence.
   The
-  sibling checks are worth a glance when touching this genre and were both fine: `env_var_deps` lists
+  sibling checks are worth a glance when touching this genre: `env_var_deps` lists
   names only, and `digest_completeness`'s key count moves only alongside its own enumerated key list
-  — a number in the same commit as the change it describes costs nothing.
+  — a number in the same commit as the change it describes costs nothing. Its count of SOURCE files
+  was a different matter, and the bullet below is what became of it.
+- The same genre had a second instance in the two CONFIGURATION scanners, `test_config_consistency`
+  and `digest_completeness` (gh-ocannl-701): their goldens pinned the size of the globbed corpus
+  (`Sources scanned: 89 -- arrayjit/lib 47, …`), so every PR adding a source file anywhere under the
+  six library directories owed a promote round it had no other reason to make. Note which way round
+  the danger ran, because it is the opposite of the noise: two branches adding files in DIFFERENT
+  directories write different text on that one line and conflict, which is loud and mechanical,
+  while two adding files in the SAME directory write identical text, merge cleanly, and leave the
+  total wrong by one for the next unrelated PR to inherit as a red test it did not cause. What
+  replaced it is `Config_key_scan.scan_root_floors`, a hand-written lower bound per globbed ROOT,
+  asserted through `Verdict` and itemised on failure so the message names the root standing on
+  nothing; the goldens keep the root NAMES, since the globs' reach is a fact about the repository
+  and a new or vanished root still reads as a diff, and the counts go to stderr.
+  Set such a floor well below the day's count and leave it there — the number to raise it to is
+  never "today's count", which is the tally coming back in a slower form. Bucket by the configured
+  ROOT rather than by a path's own dirname, which is the trap a per-directory tally sets for its
+  replacement: these rules glob with `glob_files_rec`, so a source in a subdirectory would otherwise
+  open a bucket of its own — a new golden line, which is the promote round being removed, and under
+  no floor at all.
 - Where a check needs an EXEMPTION per site, prefer an in-place marker comment to a central list,
   and give it a grammar rigid enough to be wrong out loud (gh-ocannl-659, the XOR between
   `(env_var OCANNL_BACKEND)` and `; ocannl-backend: <word> -- <reason>`). Two reasons, and the

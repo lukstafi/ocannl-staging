@@ -283,6 +283,15 @@ let () =
          "exempted functions that no longer forward a config key -- drop them from the exemption \
           list: %s"
          (String.concat ~sep:", " @@ Set.to_list stale));
+  (* What the census covers, as a floor per scan root rather than as an exact count: the count was a
+     tally of the repository, and every correct addition anywhere under the globbed directories owed
+     a promote round for it (gh-ocannl-701). A floor keeps what the count was for -- a glob that
+     stops matching goes to zero -- and the exact numbers go to stderr, which a `(test)` stanza's
+     golden does not see. *)
+  Config_key_scan.report_counts source_files;
+  let floor_violations = Config_key_scan.floor_violations source_files in
+  List.iter floor_violations ~f:fail;
+  Verdict.p "every scanned root meets its source-count floor" (List.is_empty floor_violations);
   if not (Verdict.any_failed ()) then (
     printf
       "OK: %d call-site keys, all in reference file and registry; registry and reference agree on \
@@ -294,9 +303,13 @@ let () =
       @@ List.map payload_keys ~f:(fun (name, keys) ->
           Printf.sprintf "%s (%d keys)" name (Set.length keys)));
     printf
-      "OK: %d files spell every config key as a string literal, outside %d forwarding functions: %s.\n"
-      (List.length source_files) (Set.length exempted_sites)
+      "OK: every scanned file spells every config key as a string literal, outside %d forwarding \
+       functions: %s.\n"
+      (Set.length exempted_sites)
       (String.concat ~sep:", " @@ Set.to_list exempted_sites);
     (* Which directories the census came from, so that the globs' reach is reviewable rather than
-       implicit -- see Config_key_scan.by_directory. *)
-    printf "OK: scanned %s.\n" (Config_key_scan.by_directory source_files))
+       implicit -- by name, since how many files each holds is a tally of the repository rather than
+       a fact about it (gh-ocannl-701). The counts are on stderr, and the floors under them are
+       asserted above. *)
+    printf "OK: scanned %s.\n"
+      (String.concat ~sep:", " (Config_key_scan.scan_roots source_files)))

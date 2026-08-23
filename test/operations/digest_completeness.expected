@@ -1,4 +1,4 @@
-Sources scanned: 89 -- arrayjit/lib 47, benchmarks/runners/ocannl 9, bin 7, lib 9, tensor 14, tools 3
+Sources scanned: arrayjit/lib, benchmarks/runners/ocannl, bin, lib, tensor, tools
 Cache-key components (Schedule_cache.key_components): digest, backend, numerics, codegen, pool
 Keys read at codegen (c_syntax.ml, cc_backend.ml, cuda_backend.ml, hip_backend.ml, metal_backend.ml, schedule_cache.ml): 29
 
@@ -157,4 +157,5 @@ execution-neutral -- host-side execution mechanics: where buffers sit, how many 
 execution-neutral -- memoization of toolchain probes: it changes how long resolving a setting takes, not what it resolves to -- and the resolved values are what the codegen tag records
   cc_backend_probe_cache [read at codegen]
 
+every scanned root meets its source-count floor: true
 OK: 113 config keys classified against 5 cache-key components.
