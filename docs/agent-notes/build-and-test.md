@@ -424,7 +424,7 @@ that they earn a lookup rather than always-loaded space.
 - `timeout(1)` is not a portable group-killing bound, and the failure is silent in both directions.
   macOS ships none at all, which is why the repo reaches for `perl -e 'alarm N; exec @ARGV'`; and
   where one exists it is not necessarily GNU's — uutils coreutils (Rust, Ubuntu's default since
-  25.10, and what `rog-nv-wsl` runs as 0.8.0) accepts `-k` and delivers the TERM phase to the
+  25.10, and what BOTH GPU sweep boxes run as 0.8.0) accepts `-k` and delivers the TERM phase to the
   process group, but escalates the KILL to the DIRECT CHILD only. A descendant that ignores or
   outlives TERM is reparented and keeps running while `timeout` cheerfully reports 137. Measured
   there: `timeout -k 2 1 sh -c 'trap "" TERM; sleep 987654'` returns 137 and leaves the `sleep`
