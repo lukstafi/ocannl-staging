@@ -302,6 +302,175 @@ tree leaves = flat enumeration: true
 -- excluded --
   fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest: a hoistable operand exists: the hoisted shapes cover the one-dispatch role without per-chunk re-packing
 lifted-lattice search over the refuted family: 2 expanded, 0 scored, 3 refuted
+== out-projection cpu: 7 seeds ==
+ 0  gpu:false mma:true simd:0  bm:64  bn:0   bk:64  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 1  gpu:false mma:true simd:0  bm:64  bn:0   bk:256 tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 2  gpu:false mma:true simd:0  bm:128 bn:128 bk:128 tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 3  gpu:false mma:true simd:0  bm:64  bn:128 bk:256 tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 4  gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 5  gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:false grid:true packrest:true epi:false swz:- depth:1
+ 6  gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:false grid:true packrest:false epi:false swz:- depth:1
+== out-projection gpu staged+depth: 12 seeds ==
+ 0  gpu:true mma:true simd:32 bm:16  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 1  gpu:true mma:true simd:32 bm:16  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
+ 2  gpu:true mma:true simd:32 bm:32  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 3  gpu:true mma:true simd:32 bm:32  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
+ 4  gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 5  gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
+ 6  gpu:true mma:true simd:32 bm:16  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 7  gpu:true mma:true simd:32 bm:16  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
+ 8  gpu:true mma:true simd:32 bm:32  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 9  gpu:true mma:true simd:32 bm:32  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
+10  gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+11  gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
+== out-projection cpu tree: 9 choice nodes, depth 5 ==
+fusion = unfused
+  pipeline = blocktile
+    packing = in-kernel
+      geometry = b16  [refuted: b=16 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)]
+      geometry = b8  [refuted: b=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)]
+    packing = hoisted  [refuted: hoisted packing needs a host-init-backed constant operand; neither operand is one]
+  pipeline = tensorized
+    tensorized-form = whole-triple  [refuted: stored B is transposed: whole-triple reads B in place, which the register tiling statically declines]
+    tensorized-form = packed
+      packing-shape = serial
+        geometry = bm64 bn0 bk64
+          * gpu:false mma:true simd:0  bm:64  bn:0   bk:64  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+        geometry = bm64 bn0 bk256
+          * gpu:false mma:true simd:0  bm:64  bn:0   bk:256 tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+        geometry = bm128 bn128 bk128
+          * gpu:false mma:true simd:0  bm:128 bn:128 bk:128 tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+        geometry = bm64 bn128 bk256
+          * gpu:false mma:true simd:0  bm:64  bn:128 bk:256 tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+        geometry = bm16 bn0 bk16
+          * gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+      packing-shape = hoisted  [refuted: no host-init-backed constant operand to pack at link time]
+      packing-shape = hoisted-grid  [refuted: no host-init-backed constant operand to pack at link time]
+      packing-shape = hoisted-grid-pack-rest  [refuted: no host-init-backed constant operand to pack at link time]
+      packing-shape = grid-pack-rest
+        geometry = bm64 bn0 bk64  [refuted: bm=64 gives 1 row block(s); a Grid split needs at least 2]
+        geometry = bm64 bn0 bk256  [refuted: bm=64 gives 1 row block(s); a Grid split needs at least 2]
+        geometry = bm128 bn128 bk128  [refuted: bm=128 gives 1 row block(s); a Grid split needs at least 2]
+        geometry = bm64 bn128 bk256  [refuted: bm=64 gives 1 row block(s); a Grid split needs at least 2]
+        geometry = bm16 bn0 bk16
+          * gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:false grid:true packrest:true epi:false swz:- depth:1
+      packing-shape = grid
+        geometry = bm64 bn0 bk64  [refuted: bm=64 gives 1 row block(s); a Grid split needs at least 2]
+        geometry = bm64 bn0 bk256  [refuted: bm=64 gives 1 row block(s); a Grid split needs at least 2]
+        geometry = bm128 bn128 bk128  [refuted: bm=128 gives 1 row block(s); a Grid split needs at least 2]
+        geometry = bm64 bn128 bk256  [refuted: bm=64 gives 1 row block(s); a Grid split needs at least 2]
+        geometry = bm16 bn0 bk16
+          * gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:false grid:true packrest:false epi:false swz:- depth:1
+fusion = fused  [refuted: Schedule.Fuse_epilogue: no statement follows the reduction over oproj]
+last leaf's decision path: fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm16 bn0 bk16
+tree leaves = flat enumeration: true
+== out-projection gpu staged+depth tree: 14 choice nodes, depth 5 ==
+fusion = unfused
+  pipeline = blocktile
+    batch = batch-serial
+      geometry = bm64 bn64 bk8 tm4 tn4  [refuted: bk=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)]
+      geometry = bm32 bn32 bk8 tm4 tn4  [refuted: bk=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)]
+      geometry = bm16 bn16 bk8 tm4 tn4  [refuted: bk=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)]
+      geometry = bm32 bn32 bk16 tm2 tn2  [refuted: bk=16 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)]
+      geometry = bm16 bn16 bk8 tm2 tn2  [refuted: bk=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)]
+    batch = batch-grid
+      geometry = bm64 bn64 bk8 tm4 tn4  [refuted: bk=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)]
+      geometry = bm32 bn32 bk8 tm4 tn4  [refuted: bk=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)]
+      geometry = bm16 bn16 bk8 tm4 tn4  [refuted: bk=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)]
+      geometry = bm32 bn32 bk16 tm2 tn2  [refuted: bk=16 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)]
+      geometry = bm16 bn16 bk8 tm2 tn2  [refuted: bk=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)]
+  pipeline = tensorized
+    batch = batch-serial
+      geometry = bm16 bn32 bk0  [refuted: unstaged full-K block: innermost contraction extent k=12 (of K=48 over 2 loops) is not a multiple of the intrinsic tile k=8]
+      geometry = bm32 bn32 bk0  [refuted: unstaged full-K block: innermost contraction extent k=12 (of K=48 over 2 loops) is not a multiple of the intrinsic tile k=8]
+      geometry = bm16 bn32 bk32
+        twin = plain
+          * gpu:true mma:true simd:32 bm:16  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+        twin = swizzled
+          * gpu:true mma:true simd:32 bm:16  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
+        twin = depth2  [excluded: pad-masked site: Tensorize stays on the barrier-bracketed arm, so the twin could only pay the doubled shared-memory footprint (Codex P2 on PR #303)]
+      geometry = bm32 bn32 bk32
+        twin = plain
+          * gpu:true mma:true simd:32 bm:32  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+        twin = swizzled
+          * gpu:true mma:true simd:32 bm:32  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
+        twin = depth2  [excluded: pad-masked site: Tensorize stays on the barrier-bracketed arm, so the twin could only pay the doubled shared-memory footprint (Codex P2 on PR #303)]
+      geometry = bm32 bn32 bk16
+        twin = plain
+          * gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+        twin = swizzled
+          * gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
+        twin = depth2  [excluded: pad-masked site: Tensorize stays on the barrier-bracketed arm, so the twin could only pay the doubled shared-memory footprint (Codex P2 on PR #303)]
+      geometry = lattice  [excluded: beyond the curated menu (search economy): the staged tile-size lattice; config model_default_geometry_lattice lifts it for the model-argmin search]
+    batch = batch-grid
+      geometry = bm16 bn32 bk0  [refuted: unstaged full-K block: innermost contraction extent k=12 (of K=48 over 2 loops) is not a multiple of the intrinsic tile k=8]
+      geometry = bm32 bn32 bk0  [refuted: unstaged full-K block: innermost contraction extent k=12 (of K=48 over 2 loops) is not a multiple of the intrinsic tile k=8]
+      geometry = bm16 bn32 bk32
+        twin = plain
+          * gpu:true mma:true simd:32 bm:16  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+        twin = swizzled
+          * gpu:true mma:true simd:32 bm:16  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
+        twin = depth2  [excluded: pad-masked site: Tensorize stays on the barrier-bracketed arm, so the twin could only pay the doubled shared-memory footprint (Codex P2 on PR #303)]
+      geometry = bm32 bn32 bk32
+        twin = plain
+          * gpu:true mma:true simd:32 bm:32  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+        twin = swizzled
+          * gpu:true mma:true simd:32 bm:32  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
+        twin = depth2  [excluded: pad-masked site: Tensorize stays on the barrier-bracketed arm, so the twin could only pay the doubled shared-memory footprint (Codex P2 on PR #303)]
+      geometry = bm32 bn32 bk16
+        twin = plain
+          * gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+        twin = swizzled
+          * gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
+        twin = depth2  [excluded: pad-masked site: Tensorize stays on the barrier-bracketed arm, so the twin could only pay the doubled shared-memory footprint (Codex P2 on PR #303)]
+      geometry = lattice  [excluded: beyond the curated menu (search economy): the staged tile-size lattice; config model_default_geometry_lattice lifts it for the model-argmin search]
+fusion = fused  [refuted: Schedule.Fuse_epilogue: no statement follows the reduction over oproj]
+last leaf's decision path: fusion=unfused > pipeline=tensorized > batch=batch-grid > geometry=bm32 bn32 bk16 > twin=swizzled
+tree leaves = flat enumeration: true
+== out-projection cpu verdicts ==
+-- refuted --
+  fusion=unfused > pipeline=blocktile > packing=in-kernel > geometry=b16: b=16 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)
+  fusion=unfused > pipeline=blocktile > packing=in-kernel > geometry=b8: b=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)
+  fusion=unfused > pipeline=blocktile > packing=hoisted: hoisted packing needs a host-init-backed constant operand; neither operand is one
+  fusion=unfused > pipeline=tensorized > tensorized-form=whole-triple: stored B is transposed: whole-triple reads B in place, which the register tiling statically declines
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted: no host-init-backed constant operand to pack at link time
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid: no host-init-backed constant operand to pack at link time
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=hoisted-grid-pack-rest: no host-init-backed constant operand to pack at link time
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn0 bk64: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn0 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm128 bn128 bk128: bm=128 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid-pack-rest > geometry=bm64 bn128 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk64: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn0 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm128 bn128 bk128: bm=128 gives 1 row block(s); a Grid split needs at least 2
+  fusion=unfused > pipeline=tensorized > tensorized-form=packed > packing-shape=grid > geometry=bm64 bn128 bk256: bm=64 gives 1 row block(s); a Grid split needs at least 2
+  fusion=fused: Schedule.Fuse_epilogue: no statement follows the reduction over oproj
+== out-projection gpu staged+depth verdicts ==
+-- refuted --
+  fusion=unfused > pipeline=blocktile > batch=batch-serial > geometry=bm64 bn64 bk8 tm4 tn4: bk=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)
+  fusion=unfused > pipeline=blocktile > batch=batch-serial > geometry=bm32 bn32 bk8 tm4 tn4: bk=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)
+  fusion=unfused > pipeline=blocktile > batch=batch-serial > geometry=bm16 bn16 bk8 tm4 tn4: bk=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)
+  fusion=unfused > pipeline=blocktile > batch=batch-serial > geometry=bm32 bn32 bk16 tm2 tn2: bk=16 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)
+  fusion=unfused > pipeline=blocktile > batch=batch-serial > geometry=bm16 bn16 bk8 tm2 tn2: bk=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)
+  fusion=unfused > pipeline=blocktile > batch=batch-grid > geometry=bm64 bn64 bk8 tm4 tn4: bk=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)
+  fusion=unfused > pipeline=blocktile > batch=batch-grid > geometry=bm32 bn32 bk8 tm4 tn4: bk=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)
+  fusion=unfused > pipeline=blocktile > batch=batch-grid > geometry=bm16 bn16 bk8 tm4 tn4: bk=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)
+  fusion=unfused > pipeline=blocktile > batch=batch-grid > geometry=bm32 bn32 bk16 tm2 tn2: bk=16 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)
+  fusion=unfused > pipeline=blocktile > batch=batch-grid > geometry=bm16 bn16 bk8 tm2 tn2: bk=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)
+  fusion=unfused > pipeline=tensorized > batch=batch-serial > geometry=bm16 bn32 bk0: unstaged full-K block: innermost contraction extent k=12 (of K=48 over 2 loops) is not a multiple of the intrinsic tile k=8
+  fusion=unfused > pipeline=tensorized > batch=batch-serial > geometry=bm32 bn32 bk0: unstaged full-K block: innermost contraction extent k=12 (of K=48 over 2 loops) is not a multiple of the intrinsic tile k=8
+  fusion=unfused > pipeline=tensorized > batch=batch-grid > geometry=bm16 bn32 bk0: unstaged full-K block: innermost contraction extent k=12 (of K=48 over 2 loops) is not a multiple of the intrinsic tile k=8
+  fusion=unfused > pipeline=tensorized > batch=batch-grid > geometry=bm32 bn32 bk0: unstaged full-K block: innermost contraction extent k=12 (of K=48 over 2 loops) is not a multiple of the intrinsic tile k=8
+  fusion=fused: Schedule.Fuse_epilogue: no statement follows the reduction over oproj
+-- excluded --
+  fusion=unfused > pipeline=tensorized > batch=batch-serial > geometry=bm16 bn32 bk32 > twin=depth2: pad-masked site: Tensorize stays on the barrier-bracketed arm, so the twin could only pay the doubled shared-memory footprint (Codex P2 on PR #303)
+  fusion=unfused > pipeline=tensorized > batch=batch-serial > geometry=bm32 bn32 bk32 > twin=depth2: pad-masked site: Tensorize stays on the barrier-bracketed arm, so the twin could only pay the doubled shared-memory footprint (Codex P2 on PR #303)
+  fusion=unfused > pipeline=tensorized > batch=batch-serial > geometry=bm32 bn32 bk16 > twin=depth2: pad-masked site: Tensorize stays on the barrier-bracketed arm, so the twin could only pay the doubled shared-memory footprint (Codex P2 on PR #303)
+  fusion=unfused > pipeline=tensorized > batch=batch-serial > geometry=lattice: beyond the curated menu (search economy): the staged tile-size lattice; config model_default_geometry_lattice lifts it for the model-argmin search
+  fusion=unfused > pipeline=tensorized > batch=batch-grid > geometry=bm16 bn32 bk32 > twin=depth2: pad-masked site: Tensorize stays on the barrier-bracketed arm, so the twin could only pay the doubled shared-memory footprint (Codex P2 on PR #303)
+  fusion=unfused > pipeline=tensorized > batch=batch-grid > geometry=bm32 bn32 bk32 > twin=depth2: pad-masked site: Tensorize stays on the barrier-bracketed arm, so the twin could only pay the doubled shared-memory footprint (Codex P2 on PR #303)
+  fusion=unfused > pipeline=tensorized > batch=batch-grid > geometry=bm32 bn32 bk16 > twin=depth2: pad-masked site: Tensorize stays on the barrier-bracketed arm, so the twin could only pay the doubled shared-memory footprint (Codex P2 on PR #303)
+  fusion=unfused > pipeline=tensorized > batch=batch-grid > geometry=lattice: beyond the curated menu (search economy): the staged tile-size lattice; config model_default_geometry_lattice lifts it for the model-argmin search
 == fusable tail gpu: 32 seeds (16 unfused + 16 fused), 17 choice nodes, depth 4 ==
 fusion = unfused
 fusion = fused
