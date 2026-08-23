@@ -58,6 +58,7 @@ test/operations/accum_width.ml
 test/operations/canonical_render.ml [renders generated text in memory]
     "?"
     "s0"
+test/operations/cc_march_census.ml
 test/operations/cpu_parallel.ml
     "#pragma omp parallel for"
     "Pool-backed Grid rendering"
