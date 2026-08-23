@@ -171,16 +171,23 @@ let () =
     @ [ stage mb.Tensor.value [ k_i; j ]; stage ma.Tensor.value [ i_i; k_i ] ]
     @ [ tz ]
   in
-  (* The FIRST variant to complete is the reference every later one is compared against, cell by
-     cell (gh-ocannl-711 review): the checksum is a linear functional of the output, so a row
-     permutation survives it whenever the value difference is orthogonal to the weight difference,
-     and an elementwise comparison has nothing to cancel. Exact equality is the right comparison
-     wherever the note below says the legs are comparable; where it says they are not — a
-     narrow-storage run past the extent at which the block partials stay exact — a DIFFERS line is
-     legitimate, and the note is what says so. *)
-  let reference = ref None in
+  (* Every variant is compared against another one CELL BY CELL, and each call site says which and
+     whether the equality is required (gh-ocannl-711 review). The checksum cannot carry this: it is
+     a linear functional of the output, so a row permutation survives it whenever the value
+     difference is orthogonal to the weight difference, and an elementwise comparison has nothing to
+     cancel.
+
+     Which comparison is REQUIRED is what the comparability note below is about, and it is not
+     uniform across the legs. naive narrows once per cell while the packed variants narrow once per
+     k block, so past the extent at which the block partials stay storage-exact a naive-vs-packed
+     difference is legitimate. The two packed variants share their reduction structure exactly, so
+     their equality is required at EVERY extent — which is why packmma_par is compared against
+     packmma rather than against naive. Folding it into the naive comparison would mix a
+     packmma_par-only defect in with expected block-boundary rounding and leave the one equality
+     that still holds unchecked. *)
   let disagreements = ref 0 in
-  let bench ~variant ~schedule () =
+  let expected_differences = ref 0 in
+  let bench ~variant ~schedule ~against () =
     let%op mc = ma * mb in
     Ir.Tnode.update_prec mc.Tensor.value prec;
     let comp = named ("ngb_" ^ variant) (Train.forward mc) in
@@ -258,14 +265,13 @@ let () =
        narrowing did. Both checks are outside the timed region. *)
     let checksum = Bench_checksum.whole_output ~row_stride:n values in
     let agreement =
-      match !reference with
-      | None ->
-          reference := Some values;
-          "reference"
-      | Some r ->
+      match against with
+      | None -> "reference"
+      | Some (name, r, required) ->
           let d = Bench_checksum.first_difference ~reference:r values in
-          if Option.is_some d then Int.incr disagreements;
-          Bench_checksum.render_agreement d
+          if Option.is_some d then
+            Int.incr (if required then disagreements else expected_differences);
+          Bench_checksum.render_agreement ~name d
     in
     let spot = Int.min (n + 1) (Array.length values - 1) in
     let secs = Float.of_int63 Int63.(stop - start) /. 1e9 /. Float.of_int repeats in
@@ -277,7 +283,7 @@ let () =
       spot values.(spot)
       (Bench_checksum.render checksum) agreement
       (Ir.C_syntax.mma_summary_string mma);
-    (secs, mma)
+    (secs, mma, values)
   in
   let ctx0 = Context.auto () in
   let limits = Context.hardware_limits ctx0 in
@@ -295,8 +301,13 @@ let () =
      long as the per-k-block partial sums stay storage-exact, which for these operands is measured
      through n = 512 at bf16 (max |partial| 31, multiples of 1/8); beyond that an inexact block
      partial can legitimately split naive from packed. *)
+  (* One predicate, used by the note AND by the exit status below, so what the run SAYS about
+     comparability and what it ENFORCES cannot drift apart. It governs the naive-vs-packed
+     comparison only: the two packed variants share a reduction structure, so their equality is
+     required at every extent. *)
+  let naive_comparable = Option.is_none tile_prec || n <= 512 in
   if Option.is_some tile_prec then
-    if n <= 512 then
+    if naive_comparable then
       p
         "note: all variants accumulate in %s (gh-ocannl-639): naive narrows to %s once per cell,\n\
         \      packed variants once per k block — at this extent every such rounding is exact for\n\
@@ -309,18 +320,28 @@ let () =
         \      partial can legitimately split naive from packed; the packed variants remain\n\
         \      comparable with each other, and an f32 run is the cross-variant oracle.\n"
         (Ir.Ops.prec_string cprec) (Ir.Ops.prec_string prec) n;
-  let t_naive, _ = bench ~variant:"naive" ~schedule:None () in
+  let t_naive, _, v_naive = bench ~variant:"naive" ~schedule:None ~against:None () in
   match unschedulable with
   | _ :: _ ->
       p "skipping the packed variants — this n is not schedulable with this blocking:\n";
       List.iter unschedulable ~f:(fun reason -> p "  %s\n" reason);
       if n >= 2 then p "pass a compatible blocking, e.g. --bm=<f> --bk=<f> with f dividing %d.\n" n
   | [] ->
-      let t_pack, r_pack =
-        bench ~variant:"packmma" ~schedule:(Some (packed_schedule ~grid:false ~tile_prec)) ()
+      let t_pack, r_pack, v_pack =
+        bench ~variant:"packmma"
+          ~schedule:(Some (packed_schedule ~grid:false ~tile_prec))
+          ~against:(Some ("naive", v_naive, naive_comparable))
+          ()
       in
-      let t_par, r_par =
-        bench ~variant:"packmma_par" ~schedule:(Some (packed_schedule ~grid:true ~tile_prec)) ()
+      (* Against packmma, not naive, and REQUIRED at every extent: the two packed variants narrow at
+         the same k-block boundaries, so nothing the comparability note excuses can separate them —
+         and comparing par against naive instead would bury a par-only defect in the same expected
+         DIFFERS output as block-boundary rounding. *)
+      let t_par, r_par, _ =
+        bench ~variant:"packmma_par"
+          ~schedule:(Some (packed_schedule ~grid:true ~tile_prec))
+          ~against:(Some ("packmma", v_pack, true))
+          ()
       in
       p "speedups vs naive: packmma %.1fx, packmma_par %.1fx\n" (t_naive /. t_pack)
         (t_naive /. t_par);
@@ -336,13 +357,24 @@ let () =
            above) — these are NOT register-tiled timings. Re-run with\n\
            --ocannl_schedule_log_declines=true for the per-rule reason.\n"
           declined all.Ir.C_syntax.statements;
-      (* A variant that computed something ELSE, which the checksum can miss and this cannot. In an
-         f32 run, and in a narrow-storage run at an extent the note above calls comparable, every
-         leg's reduction is exact whatever order it sums in, so a difference is a wrong result
-         rather than rounding; past that extent the note is what says a DIFFERS line is expected. *)
-      if !disagreements > 0 then
+      (* A variant that computed something ELSE, which the checksum can miss and this cannot. Where
+         the comparison was REQUIRED — every extent for the two packed variants against each other,
+         and the naive comparison wherever the note above calls the legs comparable — every leg's
+         reduction is exact whatever order it sums in, so a difference is a wrong result and not
+         rounding. It therefore EXITS NONZERO, after every variant has been reported: a guard that
+         only prints leaves an automated run free to keep the speedup of a kernel already known to
+         be wrong. A difference the note calls legitimate is counted separately and stays
+         non-fatal. *)
+      if !expected_differences > 0 then
         p
-          "WARNING: %d variant(s) did not reproduce the reference variant's output cell for\n\
-           cell — the DIFFERS lines above name the first cell and both values. Read them\n\
-           against the comparability note printed at the top of this run.\n"
-          !disagreements
+          "note: %d naive-vs-packed difference(s), which this run's comparability note says are\n\
+           legitimate at this extent and storage precision. The packed variants are still\n\
+           required to agree with each other, and were checked.\n"
+          !expected_differences;
+      if !disagreements > 0 then (
+        p
+          "WRONG RESULT: %d required comparison(s) failed — the DIFFERS lines above name the\n\
+           first cell and both values. At these operands the compared legs round identically, so\n\
+           this is not rounding.\n"
+          !disagreements;
+        Stdlib.exit 1)

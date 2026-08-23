@@ -165,12 +165,14 @@ let first_difference ~reference values =
     |> Option.map ~f:(fun (at, got) -> Cell { at; reference = reference.(at); got })
 
 (** How a bench renders {!first_difference} on its timing line: short enough to sit beside the
-    timings, specific enough to start a diagnosis from. *)
-let render_agreement = function
-  | None -> "= ref"
-  | Some (Length { reference; got }) -> Printf.sprintf "SIZE %d vs ref %d" got reference
+    timings, specific enough to start a diagnosis from. [name] is the variant compared against — a
+    bench with more than one legitimate comparand must say which one a line is about, or a
+    difference cannot be read. *)
+let render_agreement ~name = function
+  | None -> Printf.sprintf "= %s" name
+  | Some (Length { reference; got }) -> Printf.sprintf "SIZE %d vs %s %d" got name reference
   | Some (Cell { at; reference; got }) ->
-      Printf.sprintf "DIFFERS at [%d]: %.10g vs ref %.10g" at got reference
+      Printf.sprintf "DIFFERS from %s at [%d]: %.10g vs %.10g" name at got reference
 
 (** The degenerate flat-offset weight this module exists to replace, kept so the discrimination test
     can carry it as a NEGATIVE CONTROL: a check that the new form passes is evidence only once the

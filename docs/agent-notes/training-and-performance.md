@@ -160,7 +160,15 @@ files.
   the two coincide while the naive leg runs and diverge exactly where it matters — under
   `schedule_bench`'s `naive_repeats = 0` the naive leg is skipped, and the first scheduled variant
   would then be labelled the oracle without anything having validated it. Skipping an expensive
-  reference TIMING should cost the timing only; materialize the oracle with one untimed run.
+  reference TIMING should cost the timing only; materialize the oracle with one untimed run. And
+  make a failed comparison EXIT NONZERO once every variant has been reported: a guard that only
+  prints leaves an automated run free to keep the speedup of a kernel already known to be wrong —
+  the same hazard `Verdict` exists for on the test side. Where a bench has legs that may
+  legitimately round differently, put the predicate saying so in ONE binding used by both the
+  runtime note and the exit status, and point the comparisons that stay required at each other
+  rather than at the leg the note excuses (in `narrow_gebp_bench`, `packmma_par` is compared against
+  `packmma` — they narrow at the same k-block boundaries, so nothing the note excuses can separate
+  them, and comparing both against naive would bury a par-only defect in expected rounding).
 - Two data-side blindnesses sit behind that guard, where no output check can help. A producer value
   that can BE the accumulator's init hides a dropped producer: a mixed operand row is all-zero with
   probability `levels ^ -row_stride`, likely at narrow extents, which a flat form's marching values

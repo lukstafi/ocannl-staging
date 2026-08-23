@@ -568,7 +568,7 @@ let () =
       else begin
         let d = Bench_checksum.first_difference ~reference:r values in
         if Option.is_some d then Int.incr disagreements;
-        Bench_checksum.render_agreement d
+        Bench_checksum.render_agreement ~name:"reference" d
       end
     in
     let spot = Int.min (n + 1) (Array.length values - 1) in
@@ -717,18 +717,19 @@ let () =
        per-rule reason (at these extents, most likely n below the compute vector width).\n"
       declined all.Ir.C_syntax.statements;
   (* A variant that computed something ELSE is the failure this bench's guard exists for, and it is
-     worse than one that failed to compile: a wrong result under a fast timing is what a report
-     would carry forward. Announced rather than made fatal, in the same shape as the census verdict
-     above — every variant's operands here are exact in binary and their products are small
-     multiples of 1/4, so every leg's reduction is exact whatever order it sums in and a difference
-     is never rounding. *)
+     worse than one that failed to compile: a compile failure is loud, whereas a wrong result under
+     a fast timing is exactly what a report carries forward. So it EXITS NONZERO, after every
+     variant has been reported — a guard that only prints leaves an automated run free to keep the
+     speedup of a kernel already known to be wrong, which is the same hazard `Verdict` exists for on
+     the test side. There is no rounding to excuse it: ma and mb are exact in binary with at most
+     four mantissa bits each, so every product is exact (in tf32 and f16 as well as f32) and every
+     leg's reduction is exact whatever order it sums in, at any extent this bench runs. *)
   if !disagreements > 0 then
     p
-      "WARNING: %d variant(s) did not reproduce the reference variant's output cell for cell — the \
+      "WRONG RESULT: %d variant(s) did not reproduce the reference output cell for cell — the \
        DIFFERS lines above name the first cell and both values. At these operands every variant's \
-       reduction is exact whatever order it sums in, so a difference is a WRONG RESULT, not \
-       rounding.\n"
+       reduction is exact whatever order it sums in, so this is not rounding.\n"
       !disagreements;
-  if !failures > 0 then (
+  if !failures > 0 then
     p "%d variant(s) failed at m=%d n=%d k=%d — see the FAILED lines above.\n" !failures m n k;
-    Stdlib.exit 1)
+  if !failures > 0 || !disagreements > 0 then Stdlib.exit 1
