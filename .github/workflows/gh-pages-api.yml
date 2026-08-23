@@ -13,6 +13,14 @@ jobs:
     # Avoid Ubuntu 24.04, see: https://github.com/ocaml/opam/issues/5968
     runs-on: ubuntu-22.04
     steps:
+      # Refresh the apt index: the runner image's package lists go stale, making
+      # opam's depext step 404 on superseded package versions. `ci.yml` carries
+      # the same step for the same reason; without it the `Deps` step below dies
+      # on `libcurl4-gnutls-dev` 404 and this workflow never publishes (gh-ocannl-698).
+      # No `runner.os` guard: `runs-on` above is pinned to ubuntu.
+      - name: Update apt package index
+        run: sudo apt-get update
+
       - uses: actions/checkout@v7
 
       - name: Cache opam
