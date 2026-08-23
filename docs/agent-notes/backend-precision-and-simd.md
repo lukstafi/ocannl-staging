@@ -96,6 +96,40 @@ files.
   as everywhere else. It was opt-in under `prefer_backend_uniformity` first, and that flag no
   longer has an fp8 clause (nor a `/fp8-guard` component in HIP's `codegen_tag`): a
   twenty-order-of-magnitude silent error is not a uniformity preference.
+- **Both those sweeps are now in the repository** (gh-ocannl-657), because every defect the three
+  bullets above name lived in the tails — the negative-NaN sign, the NaN payload, the subnormal
+  boundary, the tie-to-even carry, ROCm's four broken exponents — and sampling would have shipped
+  all of them. Two programs, split by what they need:
+  - `dune build @test/operations/slow-fp8_codec_exhaustive` — no GPU, ~8 s wall (8 domains, ~38 s
+    of single-core work). `single_to_fp8` over all 2^32 f32 bit patterns and `double_to_fp8` over
+    17.2e9 doubles (every top half crossed with four low halves, the mantissa's midpoint bit among
+    them) against a rounding ORACLE; `double_to_fp8` against `single_to_fp8` over all 2^32 f32-exact
+    doubles; `fp8_to_single` over all 256 codes. The oracle is not a second codec — it is the
+    format's decode table plus "a code owns the interval between the midpoints to its neighbours,
+    ties to the even code", which makes correct rounding a LOCAL property and therefore cheap enough
+    to evaluate 21 billion times. Saturation is the one asymmetry: code 0x7B has no upper midpoint.
+  - `dune exec tools/fp8_soak.exe` (`--arm=cuda|hip`, `--sweep=f32|f64|both`) — needs the hardware,
+    and answers the one question the CPU half cannot: whether the codec still agrees with the vendor
+    type a kernel casts to. The host side is the shipped object code (`builtins.c`, reached from
+    `fp8_soak_stubs.c` by `extern`, not transcribed); the device side is `(__nv_fp8_e5m2)x` exactly
+    as `Cuda_backend.convert_precision` emits it. RTX 5070 Ti Laptop, CUDA 13.3, 2026-08-23: **6.1 s
+    for the f32 sweep (2^32 inputs), 29.5 s for the f64 sweep (17.2e9 inputs)**, zero disagreements
+    on every FINITE input of either. The non-finite disagreements are permanent and the tool prints
+    them rather than hiding them, because only the finite class is a claim:
+    - ±inf → CUDA saturates to 0x7B/0xFB, our codec keeps 0x7C/0xFC. 2 inputs in each sweep.
+    - a NaN f32 → CUDA answers 0x7F whatever the sign, our codec keeps the sign: 8388607 of the
+      16777214 NaN patterns disagree, i.e. exactly the negative ones.
+    - a NaN f64 → CUDA answers 0x7E/0x7F/0xFE/0xFF, so from a DOUBLE it keeps the sign and lets two
+      payload bits through, which the float path does not. 4194302 of 8388606 disagree, i.e. the
+      0x7E/0xFE half, our codec always emitting 0x7F. Both sides are NaNs either way; that this
+      differs between the vendor's own two entry points is why the codecs assert only NaN-ness.
+    The claims are the finite agreement and a non-vacuity one — that the sweep drove the vendor
+    conversion onto all 248 signed finite codes, which a kernel that silently wrote nothing could
+    not.
+  Adding a vendor is a module of the `ARM` signature plus one `select` clause in `tools/dune` — not
+  a second program, which is how the CUDA and HIP sweeps drifted apart the first time. The HIP arm
+  is written (`tools/fp8_soak_hip.hipjit.ml`) but has never been compiled: hipjit is not installed
+  on the CUDA box, so the `select` there resolves to the stub.
 
 - A tensor node's precision is its **storage** precision; the precision its arithmetic runs at is a
   separate thing, `C_syntax_config.compute_prec` (gh-ocannl-517). They coincide on the GPU backends

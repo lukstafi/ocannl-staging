@@ -159,8 +159,8 @@ let () =
   let expected_reachable c = c land 0x7F <> 0x7D && c land 0x7F <> 0x7E in
   let n_reached = List.count (List.range 0 256) ~f:is_reached in
   Stdio.printf "  distinct e5m2 codes produced by narrowing: %d\n" n_reached;
-  Verdict.p "narrowing f32 reaches every e5m2 code but the non-canonical NaN payloads 0x7D/0x7E"
-    (List.for_all (List.range 0 256) ~f:(fun c -> Bool.equal (is_reached c) (expected_reachable c)));
+  Verdict.p_all "narrowing f32 reaches every e5m2 code but the non-canonical NaN payloads 0x7D/0x7E"
+    (List.range 0 256) ~min:256 ~f:(fun c -> Bool.equal (is_reached c) (expected_reachable c));
 
   (* All 256 codes, widened. The reference decode is the format read off its fields, computed in the
      stub next to the oracle -- so this is also what licenses the oracle's use of midpoints. *)
@@ -172,22 +172,21 @@ let () =
     else if m = 0x7C then Float.equal widened.(c) (signed Float.infinity)
     else Float.is_nan widened.(c)
   in
-  Verdict.p "fp8_to_single decodes all 256 codes to their exact e5m2 values, signed zero included"
-    (List.for_all (List.range 0 256) ~f:decode_ok);
-  Verdict.p "fp8_to_single is strictly increasing over the 124 non-negative finite codes"
-    (List.for_all (List.range 0 0x7B) ~f:(fun c -> Float.( < ) widened.(c) widened.(c + 1)));
-  Verdict.p "every non-NaN code survives a widen-and-narrow round trip through both codecs"
-    (List.for_all (List.range 0 256) ~f:(fun c ->
-         let m = c land 0x7F in
-         m >= 0x7D
-         || (Ir.Ops.single_to_fp8 widened.(c) = c && Ir.Ops.double_to_fp8 widened.(c) = c)));
-  Verdict.p "every NaN code widens to a NaN and narrows back to the canonical NaN code"
-    (List.for_all (List.range 0 256) ~f:(fun c ->
-         let m = c land 0x7F in
-         m < 0x7D
-         || Float.is_nan widened.(c)
-            && Ir.Ops.single_to_fp8 widened.(c) land 0x7F = 0x7F
-            && Ir.Ops.double_to_fp8 widened.(c) land 0x7F = 0x7F));
+  Verdict.p_all "fp8_to_single decodes all 256 codes to their exact e5m2 values, signed zero included"
+    (List.range 0 256) ~min:256 ~f:decode_ok;
+  Verdict.p_all "fp8_to_single is strictly increasing over the 124 non-negative finite codes"
+    (List.range 0 0x7B) ~min:0x7B ~f:(fun c -> Float.( < ) widened.(c) widened.(c + 1));
+  Verdict.p_all "every non-NaN code survives a widen-and-narrow round trip through both codecs"
+    (List.range 0 256) ~min:256 ~f:(fun c ->
+      let m = c land 0x7F in
+      m >= 0x7D || (Ir.Ops.single_to_fp8 widened.(c) = c && Ir.Ops.double_to_fp8 widened.(c) = c));
+  Verdict.p_all "every NaN code widens to a NaN and narrows back to the canonical NaN code"
+    (List.range 0 256) ~min:256 ~f:(fun c ->
+      let m = c land 0x7F in
+      m < 0x7D
+      || Float.is_nan widened.(c)
+         && Ir.Ops.single_to_fp8 widened.(c) land 0x7F = 0x7F
+         && Ir.Ops.double_to_fp8 widened.(c) land 0x7F = 0x7F);
 
   (* The format's landmarks, as hex floats so the golden is platform-independent: what the codes at
      the boundaries the tails live on actually mean. *)

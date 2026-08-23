@@ -186,8 +186,10 @@ let report (module A : ARM) ~sweep ~inputs (counts, seconds) =
     sweep
     (get counts s_finite = 0);
   let produced = code_set counts s_all_codes in
-  Verdict.pf "the %s %s sweep produced every signed finite e5m2 code" vendor sweep
-    (List.for_all all_finite_codes ~f:(fun c -> List.mem produced c ~equal:Int.equal))
+  Verdict.p_all
+    (Printf.sprintf "the %s %s sweep produced every signed finite e5m2 code" vendor sweep)
+    all_finite_codes ~min:248
+    ~f:(fun c -> List.mem produced c ~equal:Int.equal)
 
 let usage () =
   Stdio.printf
