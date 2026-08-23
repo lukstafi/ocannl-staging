@@ -26,10 +26,7 @@ let p = Verdict.p
 let approx a b = Float.(abs (a - b) < 1e-4)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 
-let on_gpu =
-  String.is_substring backend_name ~substring:"metal"
-  || String.is_substring backend_name ~substring:"cuda"
-  || String.is_substring backend_name ~substring:"hip"
+let on_gpu = Sched.backend_is_gpu backend_name
 
 module Generated = Test_utils.Generated
 

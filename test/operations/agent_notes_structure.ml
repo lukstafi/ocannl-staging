@@ -97,7 +97,9 @@ let () =
      never writes the redirected stdout of such a process -- stderr is the channel on which the
      message survives to be read. Keeping them off stdout also keeps them out of the golden, so a
      real defect cannot be `dune promote`d into the expected output. *)
+  let reported = ref [] in
   let report rule claim =
+    reported := rule :: !reported;
     let found = of_rule rule in
     List.iter found ~f:(fun f ->
         eprintf "  %s: %s: %s\n" f.Notes.rule f.Notes.where f.Notes.message);
@@ -109,6 +111,27 @@ let () =
   report Notes.rule_table_shape "every table is a table, row by row";
   report Notes.rule_reachability "every notes file is reachable from the index, and links back";
   report Notes.rule_no_repetition "no bullet is repeated across the notes";
+  (* The relationship the five calls above rest on, and nothing used to state (gh-ocannl-706): a
+     rule this file does not report is a rule whose findings the live tree never shows, and the
+     omission is silent -- the scan computes them, [of_rule] is never asked for them, and the golden
+     is five green lines either way. Sorted lists rather than sets, so a rule reported twice (two
+     verdicts over one set of findings, one of them dead) is a mismatch as well; a bare boolean, so
+     the golden stays fixed as rules come and go and only the stderr line moves. *)
+  let sorted l = List.sort l ~compare:String.compare in
+  let reported = sorted !reported and named = sorted Notes.rules in
+  let all_reported = List.equal String.equal reported named in
+  if not all_reported then
+    eprintf "  this file reports [%s]; the scan names [%s]\n"
+      (String.concat ~sep:"; " reported)
+      (String.concat ~sep:"; " named);
+  Verdict.p "every rule the scan names is reported over the live tree" all_reported;
+  (* The other direction: a finding tagged with a rule [Notes.rules] does not name. Such a finding
+     is kept, at the end of the report, precisely so that this can fail. *)
+  let unnamed = Notes.unnamed_rule_findings findings in
+  List.iter unnamed ~f:(fun f ->
+      eprintf "  %s: %s: a finding tagged with a rule the scan does not name\n" f.Notes.rule
+        f.Notes.where);
+  Verdict.p "every finding carries one of the rules the scan names" (List.is_empty unnamed);
   (* An exemption is a claim about a specific bullet; one that matches nothing has stopped being
      one, and left behind a hole the next edit falls into. *)
   (* An exemption key is the whole normalized bullet, so two bullets cannot share one. That is a

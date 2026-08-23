@@ -31,10 +31,7 @@ let approx a b = Float.(abs (a - b) < 1e-3)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let skipped = Verdict.skipped ~backend:backend_name
 
-let has_barriers =
-  String.is_substring backend_name ~substring:"metal"
-  || String.is_substring backend_name ~substring:"cuda"
-  || String.is_substring backend_name ~substring:"hip"
+let has_barriers = Ir.Schedule.backend_is_gpu backend_name
 
 module Generated = Test_utils.Generated
 

@@ -30,7 +30,7 @@ let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
 let approx a b = Float.(abs (a - b) < 1e-3)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-let on_cpu = String.is_substring backend_name ~substring:"cc"
+let on_cpu = Sched.backend_is_cpu backend_name
 let single = Ir.Ops.single
 
 module Generated = Test_utils.Generated

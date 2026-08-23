@@ -44,9 +44,8 @@ module Asgns = Ir.Assignments
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-let on_metal = String.is_substring backend_name ~substring:"metal"
 let on_cuda = String.is_substring backend_name ~substring:"cuda"
-let on_gpu = on_metal || on_cuda || String.is_substring backend_name ~substring:"hip"
+let on_gpu = Sched.backend_is_gpu backend_name
 
 module Generated = Test_utils.Generated
 

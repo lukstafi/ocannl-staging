@@ -1632,7 +1632,7 @@
  (package neural_nets_lib)
  (deps ocannl_config)
  (modules marker_backend_vocabulary)
- (libraries base stdio arrayjit.context test_utils arrayjit.verdict))
+ (libraries base stdio arrayjit.ir arrayjit.context test_utils arrayjit.verdict))
 
 (executable
  (name digest_completeness)

@@ -58,10 +58,7 @@ let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~d
 let skipped = Verdict.skipped ~backend:backend_name
 let on_metal = String.is_substring backend_name ~substring:"metal"
 
-let on_gpu =
-  on_metal
-  || String.is_substring backend_name ~substring:"cuda"
-  || String.is_substring backend_name ~substring:"hip"
+let on_gpu = Sched.backend_is_gpu backend_name
 
 module Generated = Test_utils.Generated
 

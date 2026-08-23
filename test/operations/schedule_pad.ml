@@ -49,12 +49,9 @@ let approx a b = Float.(abs (a - b) < 1e-2)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let skipped = Verdict.skipped ~backend:backend_name
 let on_metal = String.is_substring backend_name ~substring:"metal"
-let on_cpu = String.is_substring backend_name ~substring:"cc"
+let on_cpu = Sched.backend_is_cpu backend_name
 
-let on_gpu =
-  on_metal
-  || String.is_substring backend_name ~substring:"cuda"
-  || String.is_substring backend_name ~substring:"hip"
+let on_gpu = Sched.backend_is_gpu backend_name
 
 module Generated = Test_utils.Generated
 
