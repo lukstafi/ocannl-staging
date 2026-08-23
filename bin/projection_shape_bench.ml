@@ -306,7 +306,13 @@ let () =
           (String.concat ~sep:"x" (List.map s.ns ~f:Int.to_string))
           (String.concat ~sep:"x" (List.map s.ks ~f:Int.to_string))
           (fl /. 1e6);
-        let opt = capture (named (s.tag ^ "_probe") (Train.forward (build s))) in
+        (* One [build] per SITE, and the lowering probe uses THAT graph: a second [build] would
+           mint a second pair of host-initialized operands, and those enter the per-device constant
+           buffer cache which [Context.release] cannot reach, so a discarded probe graph would
+           retain its operands for the rest of the run. *)
+        let d = build s in
+        let fwd = named (s.tag ^ "_t") (Train.forward d) in
+        let opt = capture fwd in
         (match Autotune.detect_matmul opt.LL.llc with
         | None -> fail "%s: NOT DETECTED as a matmul site" s.tag
         | Some site ->
@@ -323,14 +329,8 @@ let () =
           |> List.filter ~f:(fun (q : Autotune.sketch_params) ->
                  (not q.sk_epilogue) && not q.sk_mma)
         in
-        (* One [build] per SITE, not per candidate: [NTDSL.init] mints host-initialized operand
-           nodes, and those enter the backend's per-device constant buffer cache, which is keyed by
-           tnode identity and is exactly what [Context.release] cannot free
-           (docs/agent-notes/backend-memory.md). Rebuilding per candidate would accumulate a full
-           operand pair per compile for the whole run. The comp is compiled repeatedly, which is
-           what the sketch suites do too. *)
-        let d = build s in
-        (s, fl, seeds, lazy (oracle s), d, named (s.tag ^ "_t") (Train.forward d)))
+        (* The same comp is compiled for every candidate, which is what the sketch suites do too. *)
+        (s, fl, seeds, lazy (oracle s), d, fwd))
   in
   (* Compile one candidate and check its parity. The routine name carries a run-wide counter so
      that under [output_debug_files_in_build_directory] each candidate's .cd/.ll/backend source
@@ -466,7 +466,15 @@ let () =
       lv.lv_launch;
     g median
   in
-  let release lv = release_quietly !(lv.lv_ctx) in
+  (* On the success path a release failure is a failed cell, not something to swallow: the arm's
+     slabs stay in the pool tables and every later round is then timed under that growth.
+     [release_quietly] stays for paths that are already reporting a failure. *)
+  let release lv =
+    try Context.release !(lv.lv_ctx)
+    with e when not (is_fatal e) ->
+      fail "%s / %s: releasing the measured arm failed: %s" lv.lv_tag lv.lv_label
+        (List.hd_exn (String.split_lines (Exn.to_string e)))
+  in
   let results : (string, (string * float) list) Hashtbl.t = Hashtbl.create (module String) in
   let record_result lv g =
     Hashtbl.update results lv.lv_tag ~f:(function
@@ -529,10 +537,21 @@ let () =
   let tn_beam = 2 and tn_rounds = 2 and tn_repeats = 3 and tn_keep = 1.0 and tn_split = 8 in
   let tuned = Hashtbl.create (module String) in
   if do_tune then begin
+    (* The four pinned arguments are not the whole treatment: [Autotune.tune] also consults gates
+       that have no parameter -- the bound-pruning gate and the two roofline constants it prices
+       candidates against -- so two identical invocations can publish differently pruned searches
+       under one label. They cannot be pinned from here, so they are REPORTED, and a tune run is
+       reproducible only against the line below. *)
+    let shown = function "" -> "(unset)" | v -> v in
     p
       "\n-- searches: beam_width %d, rounds %d, repeats %d, keep_fraction %.2f, \
-       split_reduce_max_sites %d, cache disabled\n"
-      tn_beam tn_rounds tn_repeats tn_keep tn_split;
+       split_reduce_max_sites %d, cache disabled\n\
+       -- ambient search gates: autotune_bound_pruning=%s model_peak_flops=%s \
+       model_peak_memory_bandwidth=%s\n"
+      tn_beam tn_rounds tn_repeats tn_keep tn_split
+      (Utils.get_global_arg ~arg_name:"autotune_bound_pruning" ~default:"false")
+      (shown (Utils.get_global_arg ~arg_name:"model_peak_flops" ~default:""))
+      (shown (Utils.get_global_arg ~arg_name:"model_peak_memory_bandwidth" ~default:""));
     let winners =
       List.filter_map prepared ~f:(fun ((s, _, _, _, _, _) as pr) ->
           let lbl = ref "" and ms = ref Float.nan and outcome = ref None in
