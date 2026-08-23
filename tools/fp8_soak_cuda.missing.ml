@@ -5,6 +5,9 @@ type bytes_buf = (int, Stdlib.Bigarray.int8_unsigned_elt, Stdlib.Bigarray.c_layo
 
 let name = "cuda"
 let vendor_type = "__nv_fp8_e5m2"
+type arch_policy = [ `Device | `Backend ]
+
+let set_arch_policy (_ : arch_policy) = ()
 let probe () = Error "not built: the cuda arm needs the cudajit library"
 let unavailable () = failwith "fp8_soak: the cuda arm needs the cudajit library"
 let describe () : string = unavailable ()

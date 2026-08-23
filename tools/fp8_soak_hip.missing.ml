@@ -5,6 +5,9 @@ type bytes_buf =
 
 let name = "hip"
 let vendor_type = "__hip_fp8_e5m2"
+type arch_policy = [ `Device | `Backend ]
+
+let set_arch_policy (_ : arch_policy) = ()
 let probe () = Error "not built: the hip arm needs the hipjit library"
 let unavailable () = failwith "fp8_soak: the hip arm needs the hipjit library"
 let describe () : string = unavailable ()

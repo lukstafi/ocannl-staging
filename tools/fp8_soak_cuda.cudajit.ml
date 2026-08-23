@@ -69,8 +69,31 @@ type state = {
   stream : Cu.Stream.t;
   narrow_f32 : Cu.Module.func;
   narrow_f64 : Cu.Module.func;
+  options : string list; (* what nvrtc was given, so a run record says what it compiled *)
   mutable buffer : (Cu.Deviceptr.t * int) option; (* pointer and its size in bytes *)
 }
+
+(* Which [--gpu-architecture] the kernel is built for, which decides WHAT IS BEING MEASURED.
+   [cuda_fp8.hpp] guards its conversions with `#if __CUDA_ARCH__ >= 890`: at or above sm_89 the cast
+   becomes the hardware `cvt` instruction, below it the header's own software emulation. So the two
+   policies sweep two different things, and both are worth having:
+
+   - [`Device] targets this GPU's own compute capability, which is what "verify the codec against
+     the HARDWARE" means -- gh-ocannl-646's lesson, and the only setting that exercises the
+     instruction a kernel actually runs.
+   - [`Backend] takes [Cuda_backend.gpu_arch_options], the repo's marker-driven policy, which for a
+     source with no arch markers (like this one) passes NO architecture at all and so gets nvrtc's
+     default target -- below 890, hence the software path. That is what an OCANNL fp8 kernel without
+     tensor-core markers is compiled with today, so it is the honest answer to "does the codec agree
+     with what the backend emits".
+
+   Default [`Device]: the issue this program exists for asks about the hardware. *)
+type arch_policy = [ `Device | `Backend ]
+
+let arch_policy : arch_policy ref = ref `Device
+
+(* Must be called before the first sweep: the module is compiled once, on first use. *)
+let set_arch_policy p = arch_policy := p
 
 let state = ref None
 
@@ -96,18 +119,25 @@ let init () =
       let ctx = Cu.Context.get_primary device in
       Cu.Context.set_current ctx;
       let attrs = Cu.Device.get_attributes device in
-      let arch =
-        Printf.sprintf "--gpu-architecture=compute_%d%d" attrs.compute_capability_major
-          attrs.compute_capability_minor
+      (* Both option groups come from [Cuda_backend], not from a local guess. The include discovery
+         especially: this kernel `#include`s <cuda_fp8.h>, and a soak that looked only in
+         /usr/local/cuda would probe "ready" and then fail to compile on every Windows installation
+         and every Linux one outside that prefix (Codex P2 on PR #463). The arch policy is shared
+         for the same reason -- one nvrtc caller disagreeing with the backend about which
+         [--gpu-architecture] a source needs is how a soak comes to measure something the backend
+         never emits. *)
+      let device_cc =
+        (attrs.compute_capability_major * 10) + attrs.compute_capability_minor
       in
-      let includes =
-        if Stdlib.Sys.file_exists "/usr/local/cuda/include" then [ "-I/usr/local/cuda/include" ]
-        else []
+      let options =
+        Cuda_backend.cuda_include_options ()
+        @
+        match !arch_policy with
+        | `Device -> [ Printf.sprintf "--gpu-architecture=compute_%d" device_cc ]
+        | `Backend -> Cuda_backend.gpu_arch_options ~device_cc source
       in
       let ptx =
-        Nvrtc.compile_to_ptx ~cu_src:source ~name:"ocannl_fp8_soak.cu"
-          ~options:(includes @ [ arch ])
-          ~with_debug:false
+        Nvrtc.compile_to_ptx ~cu_src:source ~name:"ocannl_fp8_soak.cu" ~options ~with_debug:false
       in
       let kernel_module = Cu.Module.load_data_ex ptx [] in
       let st =
@@ -115,6 +145,7 @@ let init () =
           context = ctx;
           kernel_module;
           attrs;
+          options;
           stream = Cu.Stream.create ();
           narrow_f32 = Cu.Module.get_function kernel_module ~name:"ocannl_vendor_narrow_f32";
           narrow_f64 = Cu.Module.get_function kernel_module ~name:"ocannl_vendor_narrow_f64";
@@ -126,9 +157,15 @@ let init () =
 
 let describe () =
   let st = init () in
-  Printf.sprintf "%s (compute capability %d.%d, %d SMs)" st.attrs.name
+  (* The nvrtc options are part of the answer, not decoration: which [--gpu-architecture] the kernel
+     was built for decides whether [(__nv_fp8_e5m2)x] became a hardware conversion or the header's
+     software fallback, and a soak whose record does not say which was measured is asking to be
+     re-derived later. They come from [Cuda_backend], so what is printed is also what the backend
+     would use for a source with these markers. *)
+  Printf.sprintf "%s (compute capability %d.%d, %d SMs); nvrtc options: %s" st.attrs.name
     st.attrs.compute_capability_major st.attrs.compute_capability_minor
     st.attrs.multiprocessor_count
+    (if List.is_empty st.options then "(none)" else String.concat ~sep:" " st.options)
 
 (* One allocation, grown on demand and reused across chunks: 64 chunk-sized [cuMemAlloc]s in a row
    is a way to run into fragmentation on a GPU another process is also using. *)

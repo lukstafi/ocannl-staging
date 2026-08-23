@@ -108,7 +108,7 @@ files.
     format's decode table plus "a code owns the interval between the midpoints to its neighbours,
     ties to the even code", which makes correct rounding a LOCAL property and therefore cheap enough
     to evaluate 21 billion times. Saturation is the one asymmetry: code 0x7B has no upper midpoint.
-  - `dune exec tools/fp8_soak.exe` (`--arm=cuda|hip`, `--sweep=f32|f64|both`) — needs the hardware,
+  - `dune exec tools/fp8_soak.exe` (`--arm=cuda|hip`, `--sweep=f32|f64|both`, `--arch=device|backend`) — needs the hardware,
     and answers the one question the CPU half cannot: whether the codec still agrees with the vendor
     type a kernel casts to. The host side is the shipped object code (`builtins.c`, reached from
     `fp8_soak_stubs.c` by `extern`, not transcribed); the device side is `(__nv_fp8_e5m2)x` exactly
@@ -116,6 +116,18 @@ files.
     for the f32 sweep (2^32 inputs), 29.5 s for the f64 sweep (17.2e9 inputs), zero disagreements on
     every FINITE input of either — which is the claim, together with a non-vacuity one, that the
     sweep drove the vendor conversion onto all 248 signed finite codes.
+- **`--arch` decides what the CUDA soak is measuring**, and the default is not the backend's
+  setting. `cuda_fp8.hpp` guards its conversions with `#if __CUDA_ARCH__ >= 890`: at or above sm_89
+  the cast is the hardware `cvt` instruction, below it the header's own software emulation. The
+  repo's arch policy (`Cuda_backend.gpu_arch_options`) is MARKER-driven — a source with no
+  tensor-core markers gets no `--gpu-architecture` at all, so nvrtc's default target applies and the
+  conversion is the software one. That is the honest answer to "does the codec agree with what the
+  backend emits" (`--arch=backend`), but it is not the hardware check gh-ocannl-646's lesson asks
+  for, so the default is `--arch=device`, this GPU's own capability. The soak prints its nvrtc
+  options in the run header, because a record that does not say which path it swept is one that has
+  to be re-derived. **The two agree bit-for-bit** on all 21.5e9 inputs on compute_120 / CUDA 13.3,
+  NaN and infinity classes included — which is worth knowing, and is not something to assume of the
+  next toolkit.
 - The soak's NON-finite disagreements are permanent, and it prints them rather than hiding them.
   `±inf` narrows to 0x7B/0xFB under CUDA (saturating) where our codec keeps 0x7C/0xFC: 2 inputs in
   each sweep. A NaN f32 narrows to 0x7F whatever its sign, so 8388607 of the 16777214 NaN patterns

@@ -40,6 +40,16 @@ module type ARM = sig
   val name : string
   val vendor_type : string
 
+  val set_arch_policy : [ `Device | `Backend ] -> unit
+  (** Which architecture the vendor kernel is compiled for, and therefore WHAT IS MEASURED.
+      [cuda_fp8.hpp] guards its conversions with [#if __CUDA_ARCH__ >= 890]: at or above sm_89 the
+      cast is the hardware conversion instruction, below it the header's software emulation. So
+      [`Device] — this GPU's own capability — is the setting that verifies the codec against the
+      HARDWARE, which is what gh-ocannl-646 established the codec's rules against, while [`Backend]
+      reproduces [Cuda_backend]'s marker-driven policy, which for a source with no tensor-core
+      markers passes no architecture at all and lands on the software path. Both are real questions;
+      the default is [`Device]. Must be called before the arm's first sweep. *)
+
   val probe : unit -> (unit, string) Result.t
   (** Whether THIS BOX can run the arm — the vendor's jit library linked AND its driver reporting a
       device — with the reason when it cannot. "Compiled in" is not the same question: a switch
@@ -204,16 +214,23 @@ let usage () =
   Stdio.printf
     "fp8_soak: sweep OCANNL's e5m2 codec against a GPU vendor's fp8 type.\n\
        --arm=cuda|hip   which vendor (default: every arm this build has)\n\
-       --sweep=f32|f64|both   which input set (default: both)\n"
+       --sweep=f32|f64|both   which input set (default: both)\n\
+    \  --arch=device|backend  device: this GPU's own capability, so the vendor cast is the\n\
+    \                         hardware instruction (default, and what verifies the codec against\n\
+    \                         the hardware); backend: the repo's marker-driven arch policy, which\n\
+    \                         for a marker-free source lands on the header's software path\n"
 
 let () =
   let arm_filter = ref None in
   let sweep = ref "both" in
+  let arch = ref `Device in
   Array.iteri (Stdlib.Sys.argv) ~f:(fun i s ->
       if i > 0 then
         match String.lsplit2 s ~on:'=' with
         | Some ("--arm", v) -> arm_filter := Some (String.lowercase v)
         | Some ("--sweep", v) -> sweep := String.lowercase v
+        | Some ("--arch", "device") -> arch := `Device
+        | Some ("--arch", "backend") -> arch := `Backend
         | _ ->
             usage ();
             Stdlib.exit (if String.equal s "--help" then 0 else 2));
@@ -252,6 +269,7 @@ let () =
       Verdict.fail "at least one GPU arm can run on this box"
   | _ -> ());
   List.iter selected ~f:(fun ((module A : ARM) as arm) ->
+      A.set_arch_policy !arch;
       (* Flushed, so the arm header cannot land after a skip notice on the other stream. *)
       Stdio.printf "%s arm: %s\n%!" A.name (A.describe ());
       Stdio.printf "  codec: builtins.c single_to_fp8 / double_to_fp8 (%s); vendor: %s\n"

@@ -71,6 +71,16 @@ type state = {
   mutable buffer : (H.Deviceptr.t * int) option;
 }
 
+(* Present so the arms share one signature. hiprtc targets the current default device when given no
+   [--offload-arch], and ROCm's fp8 conversion has no `__CUDA_ARCH__`-style compile-time split
+   between a hardware and a software path, so there is nothing here for the policy to select
+   between: both settings compile the same kernel for this device. Kept rather than dropped because
+   the driver sets it uniformly, and because a future ROCm that does split should have somewhere
+   obvious to put the distinction. *)
+type arch_policy = [ `Device | `Backend ]
+
+let set_arch_policy (_ : arch_policy) = ()
+
 let state = ref None
 
 (* Whether this box has an AMD device, not merely whether hipjit is linked. See the CUDA arm. *)
