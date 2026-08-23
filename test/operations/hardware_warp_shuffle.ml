@@ -14,7 +14,14 @@
    Covered: a 4-warp sum (two-phase, with the shared per-warp staging), a single-warp FMA
    dot-product (pure shuffles, no staging), a 2-warp max-reduce (non-Add combine), and the clean
    rejection of a recognized accumulation whose extent does not cover whole warps (GPU) vs. its
-   serial execution (CPU). *)
+   serial execution (CPU).
+
+   Narrow accumulators (gh-ocannl-682) are covered at the end: the shuffle stages the value at the
+   backend's accumulator RESIDENCY ([C_syntax_config.accum_prec], gh-ocannl-663) rather than at the
+   node's storage precision, so a bf16 reduction on a backend that widens bf16 shuffles f32 and
+   narrows once into the cell — the same width its serial rendering accumulates at. Where the
+   residency stays narrow (f16 everywhere; bf16 on HIP and Metal) there is nothing wider to shuffle
+   and the rendering keeps refusing loudly. *)
 
 open Base
 open Ocannl
@@ -34,7 +41,20 @@ let on_gpu =
   || String.is_substring backend_name ~substring:"cuda"
   || String.is_substring backend_name ~substring:"hip"
 
+let on_cpu = String.is_substring backend_name ~substring:"cc"
 let single = Ir.Ops.single
+let bf16 = Ir.Ops.bfloat16
+let half = Ir.Ops.half
+let skipped = Verdict.skipped ~backend:backend_name
+
+(* Which backends resolve a bf16 accumulator ABOVE its storage width (gh-ocannl-663), restated here
+   rather than derived from the backend so a regression in it is detectable: the CPU backends
+   compute narrow floats in f32, and CUDA mirrors its bf16 mma legs, whose f32 per-lane registers
+   the hardware gives it no bf16 alternative to. HIP's and Metal's tensor units accumulate in bf16
+   fragments, so their serial AND shuffle renderings keep bf16 residency — which for the shuffle
+   means the loud refusal, since a bf16 [ocannl_shfl_xor] overload is not something this rendering
+   asks backends for. *)
+let widens_bf16 = on_cpu || String.equal backend_name "cuda"
 
 module Generated = Test_utils.Generated
 
@@ -267,3 +287,110 @@ let () =
   else
     p "guarded smaller-extent accumulation rejected (GPU) or runs serially (CPU)"
       (approx (run ~name:"guarded_extent_wshfl" ~transform:sibling_transform z1) expected_partial)
+
+(* --- gh-ocannl-682: narrow accumulators. The shuffle stages the value at the backend's
+   accumulator RESIDENCY rather than at the node's storage precision, so a bf16 reduction on a
+   widening backend computes the same number its serial rendering does, and a residency that stays
+   narrow is refused rather than shuffled at a width no builtin overload covers.
+
+   The terms [1 + (k mod 7)/128] are each exact in bf16 and discriminate all three renderings: over
+   32 lanes the exact f32 total 32.703125 narrows once to 32.75, while a tree staged at bf16 gives
+   32.5 and a per-step read-modify-write of the bf16 cell gives 32.25. Every f32 partial sum here
+   is a multiple of 1/128 below 2^15, so the tree's reassociation costs nothing and the claim is
+   bitwise rather than approximate. The 128-lane version repeats the pattern — exact total
+   130.9609375, narrowed once 131.0, against 130.0 for a bf16 tree and 128.0 for per-step narrowing
+   — and it is the one that also stages per-warp partials, so it pins the shared slots' element
+   type too. *)
+
+let bf16_term k = 1.0 +. (Float.of_int (k % 7) /. 128.0)
+
+let bf16_sum ~name ~n =
+  let x = NTDSL.init ~l:(name ^ "_x") ~prec:bf16 ~o:[ n ] ~f:(fun idcs -> bf16_term idcs.(0)) () in
+  let%op s = x ++ "i=>0" in
+  Tn.update_prec s.Tensor.value bf16;
+  run ~name
+    ~transform:
+      (reduce_transform ~n s.Tensor.value ~body_of:(fun i ->
+           LL.Set
+             {
+               tn = s.Tensor.value;
+               idcs = [| f0 |];
+               llsc =
+                 Binop
+                   ( Ir.Ops.Add,
+                     (Get (s.Tensor.value, [| f0 |]), bf16),
+                     (Get (x.Tensor.value, [| it i |]), bf16) );
+               debug = "";
+             }))
+    s
+
+let claim_bf16_1w =
+  "a bf16 single-warp Workgroup_reduce accumulates at the widened residency (32 terms narrow once \
+   to 32.75, not the 32.5 a bf16-staged tree or the 32.25 a per-step narrowing gives)"
+
+let claim_bf16_4w =
+  "a bf16 four-warp Workgroup_reduce stages its per-warp partials at the widened residency (128 \
+   terms narrow once to 131, not the 130 a bf16-staged tree or the 128 a per-step narrowing gives)"
+
+let claim_bf16_types =
+  "the emitted shuffle declares its staging register and its per-warp slots at the residency type, \
+   never at bf16 storage"
+
+let claim_narrow_refused =
+  "an f16 accumulator, whose residency no GPU backend widens, is refused by the warp-shuffle \
+   rendering (GPU) or runs serially (CPU)"
+
+let () =
+  if widens_bf16 then begin
+    p claim_bf16_1w (Float.equal (bf16_sum ~name:"bf16_1warp_wshfl" ~n:32) 32.75);
+    p claim_bf16_4w (Float.equal (bf16_sum ~name:"bf16_4warp_wshfl" ~n:128) 131.0)
+  end
+  else begin
+    skipped claim_bf16_1w;
+    skipped claim_bf16_4w
+  end;
+  if on_gpu && widens_bf16 then begin
+    let src = Generated.read "bf16_4warp_wshfl" in
+    let has sub = String.is_substring src ~substring:sub in
+    p claim_bf16_types
+      (has "float wred_v_" && has "float wred_partials_"
+      && (not (has "__nv_bfloat16 wred_v_"))
+      && not (has "__nv_bfloat16 wred_partials_"))
+  end
+  else skipped claim_bf16_types;
+  (* The other half of the gate: f16 resolves to itself on every GPU backend (CUDA's seeded wmma
+     triple accumulates f16 natively, RDNA has genuine f16 accumulator variants, MSL's [half] is a
+     native scalar), so there is no wider value to shuffle and the rendering must keep refusing —
+     loudly, since binding the index like a plain [Workgroup] axis would race the accumulator. On
+     the C backends [warp_size = 0] and the loop is simply serial, which is its correct meaning. *)
+  let n = 32 in
+  let hv = Array.init n ~f:(fun k -> Float.of_int (k % 5) *. 0.5) in
+  let expected = Array.fold hv ~init:0. ~f:( +. ) in
+  let hx = NTDSL.init ~l:"wshfl_hx" ~prec:half ~o:[ n ] ~f:(fun idcs -> hv.(idcs.(0))) () in
+  let%op hs = hx ++ "i=>0" in
+  Tn.update_prec hs.Tensor.value half;
+  let transform =
+    reduce_transform ~n hs.Tensor.value ~body_of:(fun i ->
+        LL.Set
+          {
+            tn = hs.Tensor.value;
+            idcs = [| f0 |];
+            llsc =
+              Binop
+                ( Ir.Ops.Add,
+                  (Get (hs.Tensor.value, [| f0 |]), half),
+                  (Get (hx.Tensor.value, [| it i |]), half) );
+            debug = "";
+          })
+  in
+  if on_gpu then
+    match
+      try
+        ignore (run ~name:"f16_wshfl" ~transform hs : float);
+        None
+      with Invalid_argument msg -> Some msg
+    with
+    | Some msg ->
+        p claim_narrow_refused (String.is_substring msg ~substring:"accumulator residency")
+    | None -> p claim_narrow_refused false
+  else p claim_narrow_refused (approx (run ~name:"f16_wshfl" ~transform hs) expected)

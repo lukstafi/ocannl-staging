@@ -451,7 +451,9 @@ module type C_syntax_config = sig
       nonzero power of two must define [ocannl_shfl_xor(value, lane_mask)] overloads in their
       builtins for the supported accumulator precisions (single, and double where it exists), bind
       workgroup slot 0 in [hardware_index], and provide [barrier_syntax] plus [shared_decl_prefix]
-      (needed by the two-phase multi-warp form). [0] disables the rendering: [Workgroup_reduce]
+      (needed by the two-phase multi-warp form). Those two overloads are all the rendering asks
+      for at any storage width: the shuffled value resides at [accum_prec] of the storage precision
+      (gh-ocannl-682), and a storage precision whose residency is neither f32 nor f64 is refused. [0] disables the rendering: [Workgroup_reduce]
       loops render like [Workgroup] — hardware binding, or the serial fallback (which is the correct
       meaning of a recognized accumulation body on CPU backends). *)
 
@@ -4062,10 +4064,27 @@ module C_syntax (B : C_syntax_config) = struct
                 let warp = B.warp_size in
                 assert (warp > 1 && Int.is_pow2 warp);
                 let extent = to_ - from_ + 1 in
-                let prec = Lazy.force tn.Tn.storage_prec in
+                (* gh-ocannl-682: the shuffle stages the accumulator at the backend's accumulator
+                   RESIDENCY ([acc_prec], gh-ocannl-663), not at the node's storage precision — the
+                   same residency every serial-rendered form of a recognized accumulation holds
+                   (gh-ocannl-639), so a [Workgroup_reduce] retype does not change the width a
+                   reduction accumulates at. [vname], the per-warp staging slots and the shuffle
+                   stages all live at [prec]; the narrow cell is read widened and written narrowed
+                   once, in [fold_total]. The gate is on the RESIDENCY, not on storage: where a
+                   backend's accumulators stay narrow (bf16/f16 on HIP and Metal, f16 on CUDA)
+                   there is no wider value to shuffle and no [ocannl_shfl_xor] overload to shuffle
+                   it with, so those keep the loud refusal rather than gaining an untested
+                   narrow-shuffle path. *)
+                let store_prec = Lazy.force tn.Tn.storage_prec in
+                let prec = acc_prec store_prec in
                 (match prec with
                 | Ops.Single_prec _ | Ops.Double_prec _ -> ()
-                | _ -> fail "a single- or double-precision accumulator");
+                | _ ->
+                    fail
+                      (Printf.sprintf
+                         "a single- or double-precision accumulator residency (accum_prec resolves \
+                          %s storage to %s)"
+                         (Ops.prec_string store_prec) (Ops.prec_string prec)));
                 if Utils.debug_log_from_routines () then
                   fail "debug_log_from_routines to be disabled";
                 if extent % warp <> 0 then
@@ -4131,12 +4150,19 @@ module C_syntax (B : C_syntax_config) = struct
                 let acc_doc =
                   string (get_ident tn) ^^ brackets (pp_array_offset (idcs, Lazy.force tn.Tn.dims))
                 in
+                (* The cell keeps its storage precision (a declaration or a buffer element type is
+                   never [acc_prec]'d), so the one place the residency meets storage is this fold:
+                   read widened, combined at [prec], narrowed once. Empty spellings where the two
+                   coincide, which is every backend at f32/f64 storage. *)
+                let widen = B.convert_precision ~from:store_prec ~to_:prec in
+                let narrow = B.convert_precision ~from:prec ~to_:store_prec in
                 let fold_total =
                   group
                     (string "if (" ^^ pp_symbol i ^^ string " == 0) " ^^ lbrace
                     ^^ nest 2
                          (hardline ^^ acc_doc ^^ string " = "
-                         ^^ combine acc_doc (string vname)
+                         ^^ wrap_conversion narrow
+                              (combine (wrap_conversion widen acc_doc) (string vname))
                          ^^ semi)
                     ^^ hardline ^^ rbrace)
                 in
@@ -4169,7 +4195,19 @@ module C_syntax (B : C_syntax_config) = struct
                          ^^ hardline ^^ rbrace)
                     ^^ hardline ^^ barrier
                 in
-                let local_defs, contrib_doc = pp_scalar prec contrib in
+                (* The contribution renders at the residency, deliberately: operand widenings are
+                   exact, so a narrow-times-narrow product is exact at [prec] — the same
+                   full-precision-product-into-f32 semantics the serial legs and the tensor cores
+                   apply (gh-ocannl-663's note in [Cuda_backend.accum_prec]). The one carve-out is
+                   gh-ocannl-517's: an RNG conversion picks BOTH its result type and which random
+                   bits it consumes from the precision it renders at, so a contribution mentioning
+                   one renders wholly at storage precision and is widened once afterwards — the
+                   draw stays the draw a serial rendering of the same body would make. *)
+                let contrib_prec = if mentions_rng_conversion contrib then store_prec else prec in
+                let local_defs, contrib_doc = pp_scalar contrib_prec contrib in
+                let contrib_doc =
+                  wrap_conversion (B.convert_precision ~from:contrib_prec ~to_:prec) contrib_doc
+                in
                 let local_defs = pp_local_defs local_defs in
                 let binding =
                   string ("const " ^ B.loop_index_type)
