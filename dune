@@ -1,0 +1,14 @@
+; Dune's default source-tree scan skips every directory whose name starts with a dot, and
+; `test/operations/shell_scripts_parse` discovers the repository's shell scripts through a
+; `(glob_files_rec ../../*.sh)` dependency -- so a tracked script under `.github/` was invisible to
+; it, and the check's floor did not notice because the twelve visible scripts kept it satisfied
+; (Codex review round 3 on PR #454). Naming `.github` here puts it in the scan, which is what makes
+; "a new script is covered the day it lands" true rather than nearly true.
+;
+; `:standard` first, so this ADDS to the default rather than replacing it. Only `.github` is named:
+; `.claude/worktrees/` holds entire checkouts of this repository -- dune would descend into them and
+; build a second copy of the tree -- and no other dot-directory here holds anything dune should read.
+; `.github` itself contains only workflows and issue templates, no dune file, so nothing new is
+; built; it becomes visible, not compiled.
+
+(dirs :standard .github)

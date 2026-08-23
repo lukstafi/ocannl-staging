@@ -1,24 +1,24 @@
-shebang "#!/usr/bin/env -S -u FOO bash" reads as `bash`: true
-shebang "#!/usr/bin/env -S bash -O extglob" reads as `bash -O extglob`: true
-shebang "#!/bin/dash" reads as `dash`: true
 shebang "#!/bin/bash" reads as `bash`: true
 shebang "#!/usr/bin/env bash" reads as `bash`: true
 shebang "#!/bin/sh" reads as `sh`: true
+shebang "#!/bin/dash" reads as `dash`: true
 shebang "" reads as `sourced`: true
-shebang "#!/usr/bin/env -S FOO=bar bash" reads as `bash`: true
-shebang "#!/usr/bin/env -u FOO bash" reads as `bash`: true
-shebang "#!/usr/bin/env -uFOO bash" reads as `bash`: true
-shebang "#!/usr/bin/env --unset=FOO bash" reads as `bash`: true
-shebang "#!/usr/bin/env -C /tmp bash" reads as `bash`: true
-shebang "#!/usr/bin/env -i bash" reads as `bash`: true
-shebang "#!/usr/bin/env -- bash" reads as `bash`: true
-shebang "#!/usr/bin/env --split-string=bash -o posix" reads as `bash -o posix`: true
-shebang "#!/bin/bash --posix" reads as `bash --posix`: true
+shebang "#!/usr/bin/env -u FOO bash" reads as `refused (the kernel passes `-u FOO bash` to `env` as ONE argument -- no command or option there; use `env -S`)`: true
+shebang "#!/bin/bash -O extglob" reads as `refused (the kernel passes `-O extglob` to `bash` as ONE argument -- no command or option there; use `env -S`)`: true
 shebang "#!/bin/bash -eu" reads as `bash`: true
-shebang "#!/bin/bash -O extglob -e" reads as `bash -O extglob`: true
+shebang "#!/bin/bash --posix" reads as `bash --posix`: true
+shebang "#!/usr/bin/env -S -u FOO bash" reads as `bash`: true
+shebang "#!/usr/bin/env -S bash -O extglob" reads as `bash -O extglob`: true
+shebang "#!/usr/bin/env -S FOO=bar bash" reads as `bash`: true
+shebang "#!/usr/bin/env -S -uFOO bash" reads as `bash`: true
+shebang "#!/usr/bin/env -S --unset=FOO bash" reads as `bash`: true
+shebang "#!/usr/bin/env -S -C /tmp bash" reads as `bash`: true
+shebang "#!/usr/bin/env -S -i bash" reads as `bash`: true
+shebang "#!/usr/bin/env -S -- bash" reads as `bash`: true
+shebang "#!/usr/bin/env --split-string=bash -o posix" reads as `bash -o posix`: true
 shebang "#!/usr/bin/env python3" reads as `refused (interpreter whose `-n` this check cannot vouch for: python3)`: true
-shebang "#!/bin/bash -c true" reads as `refused (interpreter option this check does not know: -c)`: true
-shebang "#!/usr/bin/env -Z bash" reads as `refused (`env` option this check does not know: -Z)`: true
+shebang "#!/bin/bash -c" reads as `refused (interpreter option this check does not know: -c)`: true
+shebang "#!/usr/bin/env -S -Z bash" reads as `refused (`env` option this check does not know: -Z)`: true
 benchmarks/gh514_cells.sh parses: true
 benchmarks/gh612_cells.sh parses: true
 benchmarks/gh612v_session.sh parses: true

@@ -26,11 +26,15 @@
    repository keeps rediscovering. (`(universe)` would force the reruns, at the price of running
    every check on every dune invocation; the glob gets both properties for free.)
 
-   The glob is over dune's view of the source tree, which skips dot-directories and `_build`. It
-   therefore also reaches scripts git does not track -- deliberately: a scratch harness that keeps
-   generating invalid shell is exactly the case PR #438 hit, and one that lives in `tools/` for an
-   afternoon is worth the same parse. What it cannot see is a tracked script under a dot-directory
-   (`.github/`); the floor below is what keeps a scan that has gone blind from passing quietly.
+   The glob is over dune's view of the source tree, which also reaches scripts git does not track --
+   deliberately: a scratch harness that keeps generating invalid shell is exactly the case PR #438
+   hit, and one that lives in `tools/` for an afternoon is worth the same parse.
+
+   Dune's scan skips dot-directories, which used to leave `.github/scripts/*.sh` uncovered, and the
+   floor below did NOT catch that -- the twelve visible scripts keep it satisfied however many
+   hidden ones are broken (Codex review round 3). The root `dune` names `.github` into the scan
+   instead, and says there why it names that one and not `.claude/`. The floor is still worth having
+   for what it does cover: a directory that drops out of the scan entirely.
 
    {1 The shebang is a command line, not a name}
 
@@ -42,14 +46,22 @@
    `#!/bin/dash` collapsed to `sh` is checked by whatever the host calls `sh`, which on macOS is
    bash -- so `function f() { :; }`, which dash rejects, would be reported as parsing.
 
-   So {!Shebang.parse} reads the line as the command line it is: `env`'s own options, operands and
-   `NAME=VALUE` assignments are consumed, the interpreter is whatever `env` would exec, and the
-   interpreter's own options are carried into the check. What it will not do is guess. An
-   interpreter outside {!parse_only_shells} is refused rather than run, because `-n` means "parse
-   only" for shells and something else entirely for a `python3` that a `.sh` file might name; an
-   option outside {!carried_options}/{!dropped_options} is refused too, because `-c` and `-s` make
-   the shell read its program from somewhere other than the file, which would turn this check into
-   an execution. Refused means a failing verdict naming the token, not a silent pass.
+   So {!Shebang.parse} reads the line as the command line it is -- but as the KERNEL builds it, which
+   is the correction of round 3: everything after the interpreter path is ONE argument, not a word
+   list. Only `env`'s `-S`/`--split-string` splits it, which is what that option exists for. The
+   difference is not academic in either direction. `#!/usr/bin/env -u FOO bash` hands env the single
+   argument `-u FOO bash`, so env unsets a variable named " FOO bash" and execs the script itself --
+   measured here, it does not reach bash, it HANGS (the kernel re-enters the same shebang until it
+   gives up). And `#!/bin/bash -O extglob` hands bash the single argument `-O extglob`, which bash
+   rejects with "invalid option". Reading either as a word list made this check pin a broken script
+   as valid; both are now refused, naming the kernel semantics and pointing at `-S`.
+
+   Beyond that, what the parser will not do is guess. An interpreter outside {!parse_only_shells} is
+   refused rather than run, because `-n` means "parse only" for shells and something else entirely
+   for a `python3` that a `.sh` file might name -- `perl -n` wraps the program in a read loop and
+   RUNS it. An option outside {!carried_options}/{!dropped_options} is refused too, because `-c` and
+   `-s` make the shell read its program from somewhere other than the file, which would turn this
+   check into an execution. Refused means a failing verdict naming the token, not a silent pass.
 
    {!shebang_cases} pins that parser on synthetic lines -- the three above among them -- since the
    repository's own scripts exercise two shapes of the grammar and would not notice the rest
@@ -127,9 +139,10 @@ module Shebang = struct
       its options, and any number of `NAME=VALUE` assignments before the command. Only the last of
       those was handled before, which is the whole of the first review finding.
 
-      `-S`'s payload arrives already split here, because a shebang is one argument to the kernel and
-      this reads the line by whitespace either way; quoting inside `-S` is therefore not honoured,
-      which is noted rather than fixed since no shebang in this repository uses it. *)
+      This runs only over an argument list `-S` produced, since without `-S` the kernel hands env a
+      single argument and {!parse} refuses that shape before getting here. Quoting inside `-S` is not
+      honoured -- the payload is split on whitespace -- which is noted rather than fixed, since no
+      shebang in this repository uses `-S` at all. *)
   let rec skip_env_arguments = function
     | [] -> Error "`env` with no command"
     | "--" :: rest -> (
@@ -180,16 +193,39 @@ module Shebang = struct
               classify_options acc rest
             else Error (Printf.sprintf "interpreter option this check does not know: %s" token))
 
+  (* The message both kernel-semantics refusals share: the shape is wrong on the shebang line
+     itself, so naming the offending text and the remedy is more use than naming a token. *)
+  let one_argument_error who arg =
+    Printf.sprintf
+      "the kernel passes `%s` to %s as ONE argument -- no command or option there; use `env -S`"
+      arg who
+
   let parse first_line =
     match String.chop_prefix (String.strip first_line) ~prefix:"#!" with
     | None -> Ok Sourced
     | Some rest -> (
+        (* The kernel splits a shebang in exactly one place: the interpreter path, then the whole
+           remainder as a single argument. Everything below follows from that. *)
+        let rest = String.strip rest in
         match words rest with
         | [] -> Ok Sourced
-        | first :: args ->
+        | first :: _ ->
+            let argument = String.strip (String.drop_prefix rest (String.length first)) in
             let resolved =
-              if String.equal (basename first) "env" then skip_env_arguments args
-              else Ok (first, args)
+              if String.equal (basename first) "env" then
+                match argument with
+                | "" -> Error "`env` with no command"
+                | arg
+                  when String.is_prefix arg ~prefix:"-S "
+                       || String.is_prefix arg ~prefix:"--split-string=" ->
+                    (* The one option that turns the single argument into a word list. *)
+                    skip_env_arguments (words arg)
+                | arg when String.exists arg ~f:Char.is_whitespace ->
+                    Error (one_argument_error "`env`" arg)
+                | arg -> skip_env_arguments [ arg ]
+              else if String.exists argument ~f:Char.is_whitespace then
+                Error (one_argument_error ("`" ^ basename first ^ "`") argument)
+              else Ok (first, if String.is_empty argument then [] else [ argument ])
             in
             Result.bind resolved ~f:(fun (cmd, args) ->
                 let shell = basename cmd in
@@ -216,33 +252,44 @@ module Shebang = struct
       interpreter whose `-n` is not a parse, and an option that would redirect what is read. *)
   let shebang_cases =
     [
-      (* The three findings. *)
-      ("#!/usr/bin/env -S -u FOO bash", "bash");
-      ("#!/usr/bin/env -S bash -O extglob", "bash -O extglob");
-      ("#!/bin/dash", "dash");
       (* The shapes this repository's own scripts use. *)
       ("#!/bin/bash", "bash");
       ("#!/usr/bin/env bash", "bash");
       ("#!/bin/sh", "sh");
+      ("#!/bin/dash", "dash");
       ("", "sourced");
-      (* The rest of `env`'s argument grammar. *)
-      ("#!/usr/bin/env -S FOO=bar bash", "bash");
-      ("#!/usr/bin/env -u FOO bash", "bash");
-      ("#!/usr/bin/env -uFOO bash", "bash");
-      ("#!/usr/bin/env --unset=FOO bash", "bash");
-      ("#!/usr/bin/env -C /tmp bash", "bash");
-      ("#!/usr/bin/env -i bash", "bash");
-      ("#!/usr/bin/env -- bash", "bash");
-      ("#!/usr/bin/env --split-string=bash -o posix", "bash -o posix");
-      (* Interpreter options: carried when they reach the grammar, dropped when they cannot. *)
-      ("#!/bin/bash --posix", "bash --posix");
+      (* Kernel semantics: everything after the interpreter path is ONE argument. Both of these
+         were asserted to read as `bash` before round 3, and both are broken shebangs -- the first
+         measurably HANGS (env execs the script, which re-enters the same shebang), the second dies
+         with bash's "invalid option". Pinning them as valid is what the review caught. *)
+      ("#!/usr/bin/env -u FOO bash",
+       "refused (the kernel passes `-u FOO bash` to `env` as ONE argument -- no command or option \
+        there; use `env -S`)");
+      ("#!/bin/bash -O extglob",
+       "refused (the kernel passes `-O extglob` to `bash` as ONE argument -- no command or option \
+        there; use `env -S`)");
+      (* A single argument is fine when it really is one token, which is why `-eu` works in a
+         shebang and `-O extglob` cannot. *)
       ("#!/bin/bash -eu", "bash");
-      ("#!/bin/bash -O extglob -e", "bash -O extglob");
-      (* Refusals. Both would otherwise be silent: the first parses a Python file with a shell's
-         grammar, the second makes `-n` a parse of the command line rather than of the file. *)
-      ("#!/usr/bin/env python3", "refused (interpreter whose `-n` this check cannot vouch for: python3)");
-      ("#!/bin/bash -c true", "refused (interpreter option this check does not know: -c)");
-      ("#!/usr/bin/env -Z bash", "refused (`env` option this check does not know: -Z)");
+      ("#!/bin/bash --posix", "bash --posix");
+      (* `env -S` is the mechanism that DOES produce a word list, so env's own grammar is reachable
+         only inside it. The first entry is the review finding of round 2 verbatim. *)
+      ("#!/usr/bin/env -S -u FOO bash", "bash");
+      ("#!/usr/bin/env -S bash -O extglob", "bash -O extglob");
+      ("#!/usr/bin/env -S FOO=bar bash", "bash");
+      ("#!/usr/bin/env -S -uFOO bash", "bash");
+      ("#!/usr/bin/env -S --unset=FOO bash", "bash");
+      ("#!/usr/bin/env -S -C /tmp bash", "bash");
+      ("#!/usr/bin/env -S -i bash", "bash");
+      ("#!/usr/bin/env -S -- bash", "bash");
+      ("#!/usr/bin/env --split-string=bash -o posix", "bash -o posix");
+      (* Refusals. Each would otherwise be silent: the first parses a Python file with a shell's
+         grammar, the second makes `-n` a parse of the command line rather than of the file, the
+         third is an `env` option whose operand rule this check does not know. *)
+      ("#!/usr/bin/env python3",
+       "refused (interpreter whose `-n` this check cannot vouch for: python3)");
+      ("#!/bin/bash -c", "refused (interpreter option this check does not know: -c)");
+      ("#!/usr/bin/env -S -Z bash", "refused (`env` option this check does not know: -Z)");
     ]
 end
 
