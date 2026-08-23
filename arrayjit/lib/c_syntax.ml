@@ -2178,20 +2178,23 @@ module C_syntax (B : C_syntax_config) = struct
      be a fixed-trip per-lane loop calling the scalar [fmaxf]/[fminf], relying on SLP to reassemble
      it. gh-ocannl-649 measured that, and SLP never gets the chance: gcc will not contract
      [fmax]/[fmaxf] into [maxsd]/[maxss] without [-ffinite-math-only] (those instructions have the
-     wrong NaN behaviour), so with the default numerics each lane compiled to a LIBRARY CALL. On the
-     40-element f32 reduction of [test/operations/cpu_simd_reduction] that is 12 calls at -O2 and 40
-     at -O3, at every [-march] from [x86-64] to [x86-64-v4]; on a long f64 x 2 chain fold, 8 calls
-     per iteration of the main loop and not one vector instruction. The failure is worse than the
-     scalarization gh-ocannl-614/gh-ocannl-621 found for the FMA update (which at least stayed in
-     registers), and the register-pressure argument this comment used to make against it was beside
-     the point: an opaque call cannot be vectorized at any grid size.
+     wrong NaN behaviour), so with the default numerics each lane compiled to a LIBRARY CALL --- at
+     every [-march] from [x86-64] to [x86-64-v4] and at both optimization levels, as
+     [test/operations/cc_march_census] measures. At -O3 the loop was not merely calling out but
+     fully scalarized besides: at [x86-64-v3], 64-byte width, f32, its innermost loop censused 259
+     instructions, 0 vector operations, 190 scalar ones, 64 libm calls and 126 stack references,
+     against the FMA accumulator loop's 20 / 16 / 0 / 0 / 0 in the same kernel. That is worse than
+     the scalarization gh-ocannl-614/gh-ocannl-621 found for the FMA update (which at least stayed
+     in registers), and the register-pressure argument this comment used to make against a
+     whole-vector form was beside the point: an opaque call cannot be vectorized at any grid size,
+     so look for CALLS before reasoning about allocation.
 
      The faithful whole-vector form is the C definition of [fmax] written out: [fmax(a, b)] is [a]
      when [a >= b] or when [b] is NaN, and [b] otherwise. GNU C vector comparisons yield an
      all-ones/all-zeros integer vector of the element width, so the select is a mask blend, spelled
-     through [__typeof__] so that no auxiliary typedef has to be registered. That is bitwise
-     what C specifies of [fmax]/[fmin]: the larger (smaller) operand, the non-NaN one when exactly
-     one is NaN, a NaN when both are. Compared against glibc over every ordered pair of {0, -0, +-1,
+     through [__typeof__] so that no auxiliary typedef has to be registered. It implements what C
+     specifies of [fmax]/[fmin]: the larger (smaller) operand, the non-NaN one when exactly one is
+     NaN, a NaN when both are. Compared against glibc over every ordered pair of {0, -0, +-1,
      +-inf, +-NaN, +-denormal, ...} at f32 and f64, the two agree bitwise everywhere except the two
      cases C leaves UNSPECIFIED -- which of [+0]/[-0] a tie returns, and which payload a both-NaN
      pair returns -- plus a signaling NaN, which libm quiets and this returns unchanged, and which
@@ -2200,9 +2203,10 @@ module C_syntax (B : C_syntax_config) = struct
      lanes] independent chains already changes which of several equal-comparing operands reaches the
      final combine.
 
-     Integer precisions get the same rendering, and it is a fix for them too: [Ops.binop_c_syntax]
-     spells an integer [Max] as [fmax], and [s != s] is constantly false on an integer vector, so the
-     mask degenerates to the plain [a >= b ? a : b] the operator means. *)
+     Only float precisions reach here at all ([vector_prec_ok]: f32, f64, and fp16 where the target
+     has native 16-bit arithmetic), so the blend never has to mean anything on an integer vector.
+     [test/operations/cpu_simd_reduction] executes the NaN case, which no structural check can
+     see. *)
   (* The target builtins spelling a WHOLE-VECTOR [fmax]/[fmin] for this (compute precision, lane
      count), in the shape and with the guard discipline of {!vec_fma_builtin} next door: an arm here
      is preferred over the portable mask blend below, and a compiler that spells it differently
