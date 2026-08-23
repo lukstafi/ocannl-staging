@@ -442,7 +442,10 @@ that they earn a lookup rather than always-loaded space.
     the GOLDEN rather than the stanza: `runtest-zero_out_local_decl-unoptimized` beside the
     `zero_out_local_decl` test, `runtest-test_ppx_op-ppx` beside `test_ppx_op`. Adding an action to a
     generated alias is legal, and the per-directory `runtest-env_spelling_gate` rule does exactly
-    that so every per-test rule can depend on the ambient gate.
+    that so every per-test rule can depend on the ambient gate. `env_var_deps` compares the two
+    literally: the alias must begin with the golden's name, since what a reader has in hand when
+    they reach for the alias is the golden that just failed, and an alias that renames it is one
+    they construct empty.
 - A record with `[@@deriving sexp]` makes every `.expected` file that prints the parent a hidden
   consumer of its FIELD NAMES, and `rg "\.field_name"` over sources is vacuous against that (sexp
   prints `(field_name value)`, not member access). Before claiming a rename has no serialization

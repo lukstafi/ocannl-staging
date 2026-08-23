@@ -270,6 +270,35 @@ let rec is_diff_action = function
   | Sexp.List l -> List.exists l ~f:is_diff_action
   | Sexp.Atom _ -> false
 
+(* The golden a diff rule holds a run's output against: the first operand of its `diff`. What the
+   alias is checked against below -- an alias whose name has nothing to do with its golden is an
+   entry point nobody constructs, since what a reader has in hand is the golden that just failed
+   (Codex P2, round 3, after `runtest-n3_fwd_with_prec` had shortened away the `-unoptimized` its
+   golden carries). *)
+let rec goldens_in = function
+  | Sexp.List (Sexp.Atom ("diff" | "diff?") :: Sexp.Atom golden :: _) -> [ golden ]
+  | Sexp.List l -> List.concat_map l ~f:goldens_in
+  | Sexp.Atom _ -> []
+
+(* The part of a golden's name a reader would type: everything before the first dune pform or
+   extension, less a trailing `_expected` and any separator left dangling. So
+   `verdict_ratchet.expected` is `verdict_ratchet`, `n3_fwd_with_prec-unoptimized.ll.expected` is
+   `n3_fwd_with_prec-unoptimized`, `top_down_prec.%{read:…}.expected` is `top_down_prec`,
+   `micrograd_demo_logging-%{read:…}-0-0.log.expected` is `micrograd_demo_logging`, and the ppx
+   convention's `test_ppx_op_expected.ml` is `test_ppx_op`. The alias may go on to say WHICH golden
+   of a subject it checks -- `-extension`, `-unoptimized`, `-ppx` -- which is why the relation
+   asked for is a prefix rather than equality: one run can write several goldens, and each needs an
+   alias of its own. *)
+let golden_stem golden =
+  let cut_at s ~on =
+    match String.substr_index s ~pattern:on with None -> s | Some i -> String.prefix s i
+  in
+  (* The pform goes first: a `%{read:config/…}` carries a path, and taking the basename before
+     cutting it would leave the CONFIG file's name as the stem. *)
+  let stem = cut_at (Stdlib.Filename.basename (cut_at golden ~on:"%{")) ~on:"." in
+  let stem = Option.value (String.chop_suffix stem ~suffix:"_expected") ~default:stem in
+  String.rstrip stem ~drop:(fun c -> Char.equal c '-' || Char.equal c '_')
+
 let is_golden_diff stanza =
   match stanza with
   | Sexp.List (Sexp.Atom "rule" :: _) ->
@@ -604,14 +633,33 @@ let () =
                rule with no alias at all, or with an alias of its own invention, has neither the
                targeted entry point nor a place in a suite -- and its golden stops being checked
                without anything saying so. *)
-            | [ alias ] when List.exists suites ~f:(fun suite -> member_of suite alias) -> ()
+            | [ alias ]
+              when List.exists suites ~f:(fun suite -> member_of suite alias)
+                   && List.for_all (goldens_in stanza) ~f:(fun golden ->
+                          let suffix =
+                            List.find_map suites ~f:(fun suite ->
+                                String.chop_prefix alias ~prefix:(suite ^ "-"))
+                            |> Option.value ~default:alias
+                          in
+                          String.is_prefix suffix ~prefix:(golden_stem golden)) ->
+                ()
             | aliases ->
                 let what =
                   match aliases with
                   | [] -> "attaches a golden diff to no alias at all"
-                  | [ alias ] ->
+                  | [ alias ] when not (List.exists suites ~f:(fun s -> member_of s alias)) ->
                       Printf.sprintf "attaches a golden diff to `%s`, which is no suite's member"
                         alias
+                  | [ alias ] ->
+                      Printf.sprintf
+                        "attaches `%s` to a golden its name does not name: the goldens are %s, so \
+                         the alias should begin `<suite>-%s`. A reader reaches for the alias with \
+                         the failing GOLDEN in hand, and an alias that renames it is one they \
+                         construct empty"
+                        alias
+                        (String.concat ~sep:", " (goldens_in stanza))
+                        (String.concat ~sep:"` or `<suite>-"
+                           (List.map (goldens_in stanza) ~f:golden_stem))
                   | aliases ->
                       Printf.sprintf
                         "attaches a golden diff to %d aliases (%s) -- and a rule on two aliases \
