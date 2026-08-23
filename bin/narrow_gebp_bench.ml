@@ -53,18 +53,12 @@ let named name (comp : Asgns.comp) : Asgns.comp =
 
 let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; inner })
 
-(* An aperiodic mix of the two indices, used to mint the operand values below. Aperiodic is the
-   point: any value drawn from [index mod p] repeats under [k -> k + p], so if both operands share
-   that period every packed K panel is identical and a staging bug that substitutes or repeats the
-   wrong panel is invisible — and [bk] is a user argument, so no fixed period can be assumed to be
-   coprime to it. Mixing has no shift symmetry at all, which removes the class rather than dodging
-   it. Every intermediate is masked below 2^54, so nothing overflows a 63-bit int and the sequence
-   is reproducible by an external oracle. *)
-let mix ~salt a b =
-  let x = a * 73856093 lxor (b * 19349663) lxor salt in
-  let x = x lxor (x lsr 13) land 0xFFFFFF in
-  let x = x * 1274126177 land 0xFFFFFF in
-  x lxor (x lsr 7)
+(* The aperiodic mix used to mint the operand values below, and the whole-output checksum further
+   down, both come from [Bench_checksum] (gh-ocannl-711) — shared with [schedule_bench], which had
+   the pre-fix flat-offset forms of both. Why aperiodic and why keyed on the (row, column) pair is
+   documented there; the short version is that a residue of a flattened offset loses its row
+   dependence exactly when the modulus divides the row stride, and that a per-axis residue leaves a
+   shift period that a user-chosen [bk] can hit. *)
 
 let () =
   (* Positional geometry beside the [--ocannl_*] config flags, split by [Bench_args]
@@ -98,18 +92,18 @@ let () =
             Some (Printf.sprintf "%s = %d does not divide n = %d (remainder %d)" name f n (n % f)))
   in
   let flops = 2.0 *. Float.of_int n *. Float.of_int n *. Float.of_int n in
-  (* Operand values that vary with EVERY index at every n, drawn through [mix] so that no shift of
-     any index is a symmetry, and exactly representable at every storage precision (the parity-test
-     recipes). Two traps sit behind this, both of which cost a wrong version to find. The value must
-     not be a modulus of the FLATTENED offset [(i * n + j) % p] — that loses its row dependence
-     exactly when p divides n, which made an earlier ma constant along i at 3 | n and an earlier mb
-     constant along k at 5 | n, with n = 960 collapsing both; a transform substituting the wrong row
-     of a collapsed operand then computes the correct output, which no whole-output check can see.
-     And reducing each index separately fixes that but leaves the period: with both operands drawn
-     mod 5 in k, every packed K panel repeats under [k -> k + 5], so a run with [bk = 5] hides a
-     panel-substitution bug just as thoroughly. [mix] has no shift symmetry at any lag, so neither
-     survives — measured over n = 2..2000 for the collapse, over lags 1..256 for the shift, and as
-     zero duplicate full B~ panels at every bk from 1 to 64.
+  (* Operand values that vary with EVERY index at every n, drawn through [Bench_checksum.mix] so
+     that no shift of any index is a symmetry, and exactly representable at every storage precision
+     (the parity-test recipes). Two traps sit behind this, both of which cost a wrong version to
+     find. The value must not be a modulus of the FLATTENED offset [(i * n + j) % p] — that loses
+     its row dependence exactly when p divides n, which made an earlier ma constant along i at 3 | n
+     and an earlier mb constant along k at 5 | n, with n = 960 collapsing both; a transform
+     substituting the wrong row of a collapsed operand then computes the correct output, which no
+     whole-output check can see. And reducing each index separately fixes that but leaves the
+     period: with both operands drawn mod 5 in k, every packed K panel repeats under [k -> k + 5],
+     so a run with [bk = 5] hides a panel-substitution bug just as thoroughly. The mix has no shift
+     symmetry at any lag, so neither survives — measured over n = 2..2000 for the collapse, over
+     lags 1..256 for the shift, and as zero duplicate full B~ panels at every bk from 1 to 64.
 
      The value SETS are the original ones — ma in {0.25, 0.5, 0.75}, mb in {-1, -0.5, 0, 0.5, 1} —
      because the resulting 1/8 product granularity is load-bearing in a narrow-storage run (see the
@@ -120,12 +114,14 @@ let () =
      pairing produced. *)
   let ma =
     NTDSL.init ~l:"ma" ~prec ~i:[ n ] ~o:[ n ]
-      ~f:(fun idcs -> Float.of_int (1 + (mix ~salt:0x5A17 idcs.(0) idcs.(1) % 3)) *. 0.25)
+      ~f:(fun idcs ->
+        Float.of_int (1 + (Bench_checksum.mix ~salt:0x5A17 idcs.(0) idcs.(1) % 3)) *. 0.25)
       ()
   in
   let mb =
     NTDSL.init ~l:"mb" ~prec ~i:[ n ] ~o:[ n ]
-      ~f:(fun idcs -> Float.of_int ((mix ~salt:0x3C6E idcs.(0) idcs.(1) % 5) - 2) *. 0.5)
+      ~f:(fun idcs ->
+        Float.of_int ((Bench_checksum.mix ~salt:0x3C6E idcs.(0) idcs.(1) % 5) - 2) *. 0.5)
       ()
   in
   let packed_schedule ~grid ~tile_prec ~mc (opt : LL.optimized) : Sched.schedule =
@@ -227,13 +223,13 @@ let () =
        right values at the wrong offsets leaves the multiset intact, and the multiset is all a plain
        sum reads — and a misplaced edge is exactly what the peel risks.
 
-       The weight runs through [mix] on the (row, column) pair for the same reason the operands do,
-       and the flat-offset form is the trap it avoids: a weight of [1 + (t mod 251)] over the flat
-       offset t = i*n + j collapses to [1 + j] whenever 251 divides n, giving every row identical
-       weights, so at n = 251 (or 502, 753, ...) a row permutation was invisible to the checksum AND
-       to the spot cell at once. Same degeneracy as the operands', one line away, and it came in
-       with the port. Weights stay capped at 251 so that products of these exact-in-binary operands
-       stay exact in the double accumulator.
+       [Bench_checksum.whole_output] runs the weight through the same mix on the (row, column) pair
+       for the same reason the operands do, and the flat-offset form is the trap it avoids: a weight
+       of [1 + (t mod 251)] over the flat offset t = i*n + j collapses to [1 + j] when 251 divides
+       n, giving every row identical weights, so at n = 251 (or 502, 753, ...) a row permutation was
+       invisible to the checksum AND to the spot cell at once. Same degeneracy as the operands', one
+       line away, and it came in with the port. Weights stay capped at 251 so that products of these
+       exact-in-binary operands stay exact in the double accumulator.
 
        Cross-variant equality is EXACT in an f32 run, at every extent: the products are multiples of
        1/8 bounded by 0.75n, so the whole reduction is exact in the f32 accumulator and independent
@@ -249,11 +245,7 @@ let () =
        variant performs is exact and the checksums agree bitwise; well beyond that extent an inexact
        block-boundary partial could split naive from packed again, far more rarely than the per-step
        narrowing did. Both checks are outside the timed region. *)
-    let checksum =
-      Array.foldi values ~init:0.0 ~f:(fun t acc v ->
-          let w = 1 + (mix ~salt:0x7E51 (t / n) (t % n) % 251) in
-          acc +. (v *. Float.of_int w))
-    in
+    let checksum = Bench_checksum.whole_output ~row_stride:n values in
     let spot = Int.min (n + 1) (Array.length values - 1) in
     let secs = Float.of_int63 Int63.(stop - start) /. 1e9 /. Float.of_int repeats in
     (* Printed on EVERY timing line, untensorized variants included: an absent suffix is one a

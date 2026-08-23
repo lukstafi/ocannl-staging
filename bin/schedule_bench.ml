@@ -122,8 +122,24 @@ let () =
             (Printf.sprintf "%s = %d does not divide %s = %d (remainder %d)" fname f ename e (e % f)))
     |> List.dedup_and_sort ~compare:String.compare
   in
-  let mav = Array.init (m * k) ~f:(fun i -> Float.of_int (i % 13) *. 0.25) in
-  let mbv = Array.init (k * n) ~f:(fun i -> Float.of_int (i % 17) -. 8.) in
+  (* Operand values that vary with EVERY index at every extent, drawn through [Bench_checksum]'s
+     (row, column) mix rather than a residue of the FLATTENED offset (gh-ocannl-711). The flat form
+     is degenerate exactly where this bench runs: [(t mod 17) - 8] over the k x n mb gives every row
+     of mb the identical values whenever 17 divides n (and [(t mod 13)] the same for ma whenever 13
+     divides k), and a schedule that substitutes the wrong row of a collapsed operand then computes
+     the correct output, which no whole-output check can see. Keying on the (row, column) pair
+     removes the class: the row index enters the value in its own right, so no divisibility relation
+     between a modulus and a stride can erase it. The value SETS are unchanged — ma in multiples of
+     0.25 up to 3, mb the integers -8..8 — so the products stay exact in binary and the checksum's
+     exactness argument is the one it was. *)
+  let mav =
+    Array.init (m * k) ~f:(fun t ->
+        Float.of_int (Bench_checksum.residue ~salt:0x5A17 ~row_stride:k ~modulus:13 t) *. 0.25)
+  in
+  let mbv =
+    Array.init (k * n) ~f:(fun t ->
+        Float.of_int (Bench_checksum.residue ~salt:0x3C6E ~row_stride:n ~modulus:17 t) -. 8.)
+  in
   let ma = TDSL.ndarray mav ~label:[ "ma" ] ~input_dims:[ k ] ~output_dims:[ m ] () in
   let mb = TDSL.ndarray mbv ~label:[ "mb" ] ~input_dims:[ n ] ~output_dims:[ k ] () in
   let flops = 2.0 *. Float.of_int m *. Float.of_int n *. Float.of_int k in
@@ -479,18 +495,24 @@ let () =
     let stop = Time_now.nanoseconds_since_unix_epoch () in
     let secs = Float.of_int63 Int63.(stop - start) /. 1e9 /. Float.of_int repeats in
     (* Element [1][1] of the m x n result — an interior cell, away from the corners — except where
-       the output is too small to have one; print which cell was checked. One interior cell cannot
-       see the remainder region an arbitrary extent creates, and a [Sched.split] whose factor does
-       not divide its extent puts the last partial block exactly there, so the whole output is
+       the output is too small to have one; print which cell was checked. One interior cell cannot see
+       the remainder region an arbitrary extent creates, and a [Sched.split] whose factor does not
+       divide its extent puts the last partial block exactly there, so the whole output is
        checksummed too: every correct variant prints the identical value, and one that drops or
-       repeats tail work does not. Position-weighted, because a plain sum of THIS data is 0 whenever
-       17 divides n (each mb row spans a full cycle of its 17 values, and the total factors as sum_k
-       (sum_i a) (sum_j b)) — exactly the arbitrary-extent regime the checksum is for. The weight is
-       capped so that products of these exact-in-binary operands stay exact in the double
-       accumulator. Both checks are outside the timed region. *)
-    let checksum =
-      Array.foldi values ~init:0.0 ~f:(fun i acc v -> acc +. (v *. Float.of_int (1 + (i % 251))))
-    in
+       repeats tail work does not.
+
+       Position-weighted through [Bench_checksum.whole_output], for two reasons. A plain sum of THIS
+       data is 0 whenever 17 divides n (each mb row spans a full cycle of its 17 values, and the
+       total factors as sum_k (sum_i a) (sum_j b)) — exactly the arbitrary-extent regime the
+       checksum is for. And a plain sum reads only the multiset, so it cannot see a PERMUTATION,
+       which is what a misplaced row-edge peel produces. The weight is keyed on the (row, column)
+       pair rather than on the flat offset t = i*n + j, because [1 + (t mod 251)] collapses to
+       [1 + j] whenever 251 divides n — every row then carries the identical weight vector, a row
+       permutation is invisible, and the spot cell at [1][1] is blind to other rows at the same
+       time, so both halves of the check fail together at n = 251, 502, 753, … (gh-ocannl-711).
+       Weights stay capped at 251 so that products of these exact-in-binary operands stay exact in
+       the double accumulator. Both checks are outside the timed region. *)
+    let checksum = Bench_checksum.whole_output ~row_stride:n values in
     let spot = Int.min (n + 1) (Array.length values - 1) in
     (* The label is printed on EVERY timing line, including the untensorized variants: a suffix
        that appears only when there is something to say is a suffix a table reader does not miss
