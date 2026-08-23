@@ -231,7 +231,7 @@ type row = {
   width : int;
   opt : int;
   what : string;
-  counts : Census.counts option;  (** [None]: no loop carried the anchor *)
+  profile : Census.t option;  (** [None]: no loop carried the anchor *)
 }
 
 let emit_all ~exe ~root =
@@ -267,15 +267,41 @@ let emit_all ~exe ~root =
 
 (* {2 What each target's ISA can be held to}
 
-   A claim of "not scalarized" is only meaningful where the ISA has the packed operation. The
-   [Max]/[Min] combine is a packed compare, a packed bitwise select and nothing else, so every x86
-   target from SSE2 up can do it at f32 and f64, and every aarch64 target can at 128 bits. 16-bit
-   arithmetic is the exception on both: it needs AVX512-FP16 or ARMv8.2-FP16, and elsewhere gcc
-   widens each lane to float, which is scalar work by construction and not a codegen defect. *)
-let packed_at ~target ~what =
+   A claim about an accumulator loop is only meaningful where the ISA has the operation the loop
+   wants, so each row is asked of its own target:
+
+   - the [Max]/[Min] combine is a packed compare, a packed bitwise select and nothing else, which
+     every x86 target from SSE2 up and every aarch64 target has;
+   - the FMA update needs a fused multiply-add INSTRUCTION, which on x86 arrives with
+     [x86-64-v3] and on aarch64 is baseline NEON ([fmla]). Below that the emission falls back to
+     per-lane [fmaf] -- a libm call, and deliberately so: an FMA rounds once, so on a machine
+     without the instruction the library call is what preserves the rounding the scalar path has,
+     and substituting [a * b + c] would make the vectorized and serial paths disagree. That
+     fallback is a cost of correctness, not a defect, so the libm claim excludes it and says so;
+   - 16-bit arithmetic is the exception under both headings: it needs AVX512-FP16 or ARMv8.2-FP16,
+     and elsewhere gcc widens every lane to float, which is scalar work by construction;
+   - and the requested WIDTH has to fit the target's registers. A 32- or 64-byte GNU C vector on an
+     SSE2-only target is emulated -- gcc splits it into 16-byte pieces and spills the rest -- which
+     is why the same [Max] loop that is 49 instructions with 42 vector operations and no stack
+     traffic at [cc_vector_bytes=16] is 677 instructions with 128 scalar ones and 238 stack
+     references at 32. That is the configuration being wrong for the machine, not the emission being
+     wrong: [cc_vector_bytes] is auto-probed from the host when unset, and the widths here are
+     forced precisely so that every arm of the builtin table gets compiled. *)
+
+let is_fma_row what = String.is_prefix what ~prefix:"dot/"
+
+(* The widest vector register the target actually has. *)
+let target_vector_bytes ~target =
+  let has s = String.is_substring target ~substring:s in
+  if has "sapphirerapids" || has "v4" then 64 else if has "v3" then 32 else (* SSE2/SSE4, NEON *) 16
+
+let isa_has ~target ~what ~width =
   let has s = String.is_substring target ~substring:s in
   let fp16_native = has "sapphirerapids" || has "+fp16" in
-  if String.is_suffix what ~suffix:"/f16" then fp16_native else true
+  if width > target_vector_bytes ~target then false
+  else if String.is_suffix what ~suffix:"/f16" && not fp16_native then false
+  else if is_fma_row what then has "v3" || has "v4" || has "sapphirerapids" || has "armv8"
+  else true
 
 let () =
   match Stdlib.Sys.getenv_opt "CC_MARCH_CENSUS_EMIT" with
@@ -290,13 +316,10 @@ let () =
           List.exists emitted ~f:(fun e -> e.width = w));
       let all = toolchains () in
       let available = List.filter all ~f:Census.accepts in
-      List.iter all ~f:(fun t ->
-          if not (List.mem available t ~equal:phys_equal) then
-            Verdict.skipped ~backend:(t.Census.label ^ " (" ^ t.Census.note ^ ")")
-              "the -march column compiles clean and its accumulator loops are censused");
       Stdio.eprintf "\n=== cc kernel census (not part of the golden) ===\n";
       Stdio.eprintf "host toolchain: %s\n" (Cc_backend.compiler_command ());
       let failed_compiles = ref [] in
+      let edges = ref [] in
       let rows =
         List.concat_map available ~f:(fun t ->
             List.concat_map emitted ~f:(fun e ->
@@ -322,6 +345,13 @@ let () =
                         []
                     | Ok () ->
                         let asm = Stdio.In_channel.read_all asm_path in
+                        (* Recorded before any anchor is looked for: an ISA whose branch spelling
+                           {!Census.is_branch} does not know reports every anchor missing at once,
+                           which is a defect in the census and not a finding about the kernel. *)
+                        edges :=
+                          (Printf.sprintf "%s w%d -O%d" t.Census.label e.width opt,
+                           Census.loop_edges ~asm)
+                          :: !edges;
                         List.map e.loops ~f:(fun { anchor; op_class; what } ->
                             let c =
                               Census.census op_class ~asm ~source_basename:(routine ^ ".c")
@@ -341,27 +371,67 @@ let () =
                               width = e.width;
                               opt;
                               what;
-                              counts = Option.map c ~f:(fun c -> c.Census.counts);
+                              profile = c;
                             }))))
       in
       Stdio.eprintf "=== end census ===\n\n";
       let describe r = Printf.sprintf "%s w%d -O%d %s" r.toolchain r.width r.opt r.what in
+      (* One line per COLUMN, always -- printed by {!Verdict.skipped} where the toolchain is absent,
+         which prints exactly the line the verified case prints. Without this the golden would have
+         a line count that depended on whether the box has a cross gcc: [skipped] emits a stdout
+         line of its own, so reporting only the absent columns would make a machine WITH the cross
+         compiler and a machine without disagree about the expected output. Here the count is fixed
+         at one per toolchain and it is the run's stderr that says which were really evaluated. *)
+      List.iter all ~f:(fun t ->
+          let name =
+            Printf.sprintf "%s: the -march column compiles clean and its loops are censused"
+              t.Census.label
+          in
+          if List.mem available t ~equal:phys_equal then
+            let mine = List.filter rows ~f:(fun r -> String.equal r.toolchain t.Census.label) in
+            Verdict.p name
+              ((not (List.is_empty mine)) && List.for_all mine ~f:(fun r -> Option.is_some r.profile))
+          else Verdict.skipped ~backend:(t.Census.label ^ ", " ^ t.Census.note) name);
       Verdict.p_empty "every emitted kernel compiles clean at -O2 and -O3 under every accepted -march"
         ~over:rows !failed_compiles;
+      Verdict.p_all "every compiled kernel has recognizable loop edges" !edges ~f:(fun (_, n) ->
+          n > 0);
       Verdict.p_all "every accumulator loop is found by the census" rows ~f:(fun r ->
-          Option.is_some r.counts);
-      Verdict.p_none "no accumulator loop calls libm max/min/fma" rows ~f:(fun r ->
-          match r.counts with Some c -> c.Census.libm_calls > 0 | None -> false);
-      Verdict.p_none "no accumulator loop is scalarized on a target whose ISA has the packed form"
-        (List.filter rows ~f:(fun r -> packed_at ~target:r.target ~what:r.what))
-        ~f:(fun r ->
-          match r.counts with
-          | Some c -> c.Census.scalar_fp_ops > 0 || c.Census.vector_ops = 0
-          | None -> false);
-      if Verdict.any_failed () then
-        List.iter rows ~f:(fun r ->
-            match r.counts with
-            | Some c when c.Census.libm_calls > 0 || c.Census.scalar_fp_ops > 0 ->
-                Stdio.eprintf "  offending row: %s -> %d libm calls, %d scalar fp ops\n" (describe r)
-                  c.Census.libm_calls c.Census.scalar_fp_ops
-            | _ -> ())
+          Option.is_some r.profile);
+      let counts r = Option.map r.profile ~f:(fun p -> p.Census.counts) in
+      let libm r = match counts r with Some c -> c.Census.libm_calls > 0 | None -> false in
+      let scalarized r =
+        match counts r with
+        | Some c -> c.Census.scalar_fp_ops > 0 || c.Census.vector_ops = 0
+        | None -> false
+      in
+      (* Each claim's population is named once and used twice: for the claim, and for the report of
+         what violated it. Only a claim's OWN population is reported -- the populations exclude
+         configurations the target cannot serve, and printing those too buries the handful of real
+         offenders in a page of expected ones. *)
+      let report label population ~f =
+        let bad = List.filter population ~f in
+        if not (List.is_empty bad) then (
+          Stdio.eprintf "  %d row(s) violating %S (not part of the golden):\n" (List.length bad)
+            label;
+          List.iter bad ~f:(fun r ->
+              Stdio.eprintf "    %s -> %s\n" (describe r)
+                (match r.profile with Some p -> Census.to_line p | None -> "no loop")))
+      in
+      let claim_none label population ~f =
+        Verdict.p_none label population ~f;
+        report label population ~f
+      in
+      let served = List.filter rows ~f:(fun r -> isa_has ~target:r.target ~what:r.what ~width:r.width) in
+      (* The gh-ocannl-649 claim proper. Unconditional across the matrix, unlike the two below:
+         [Max]/[Min] have a whole-vector spelling on every target here at every width -- an emulated
+         wide vector still compiles to packed compares and selects, just more of them -- so a libm
+         call in one of these loops is a defect wherever it appears. *)
+      claim_none "no Max/Min accumulator loop calls libm"
+        (List.filter rows ~f:(fun r -> not (is_fma_row r.what)))
+        ~f:libm;
+      claim_none "no FMA accumulator loop calls libm where the ISA has a fused multiply-add"
+        (List.filter served ~f:(fun r -> is_fma_row r.what))
+        ~f:libm;
+      claim_none "no accumulator loop is scalarized where the ISA has the operation it wants" served
+        ~f:scalarized

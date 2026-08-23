@@ -2170,26 +2170,114 @@ module C_syntax (B : C_syntax_config) = struct
         Array.init cols ~f:(fun c -> Printf.sprintf "%s_%d_%d__" prefix r c))
 
   (* [dst = op(dst, src)] on whole vector registers ([src] must also name a register): vector infix
-     arithmetic for the ring operators, a fixed-trip per-lane loop for [Max]/[Min] (which have no
-     vector infix, and whose builtins do not share [fmaxf]/[fminf]'s NaN semantics, so the scalar
-     path's spelling is the only faithful one). The per-lane form relies on SLP to reassemble it,
-     which is the shape gh-ocannl-614 found gcc -O3 mis-allocating for the FMA update; the
-     accumulator grids reached here are 1xN rather than RMxRN, so the register pressure that turned
-     into spills there is not present, but a wide [Max] reduction benching ~10x off would be
-     this. *)
+     arithmetic for the ring operators, a COMPARE-AND-SELECT for [Max]/[Min].
+
+     [Max]/[Min] have no vector infix and no builtin with the right semantics -- the ISA's
+     [__builtin_ia32_maxps] family and clang's [__builtin_elementwise_max] return their second
+     operand when either is NaN, where [fmaxf] returns the non-NaN one -- so the rendering used to
+     be a fixed-trip per-lane loop calling the scalar [fmaxf]/[fminf], relying on SLP to reassemble
+     it. gh-ocannl-649 measured that, and SLP never gets the chance: gcc will not contract
+     [fmax]/[fmaxf] into [maxsd]/[maxss] without [-ffinite-math-only] (those instructions have the
+     wrong NaN behaviour), so with the default numerics each lane compiled to a LIBRARY CALL. On the
+     40-element f32 reduction of [test/operations/cpu_simd_reduction] that is 12 calls at -O2 and 40
+     at -O3, at every [-march] from [x86-64] to [x86-64-v4]; on a long f64 x 2 chain fold, 8 calls
+     per iteration of the main loop and not one vector instruction. The failure is worse than the
+     scalarization gh-ocannl-614/gh-ocannl-621 found for the FMA update (which at least stayed in
+     registers), and the register-pressure argument this comment used to make against it was beside
+     the point: an opaque call cannot be vectorized at any grid size.
+
+     The faithful whole-vector form is the C definition of [fmax] written out: [fmax(a, b)] is [a]
+     when [a >= b] or when [b] is NaN, and [b] otherwise. GNU C vector comparisons yield an
+     all-ones/all-zeros integer vector of the element width, so the select is a mask blend, spelled
+     through [__typeof__] so that no auxiliary typedef has to be registered. That is bitwise
+     what C specifies of [fmax]/[fmin]: the larger (smaller) operand, the non-NaN one when exactly
+     one is NaN, a NaN when both are. Compared against glibc over every ordered pair of {0, -0, +-1,
+     +-inf, +-NaN, +-denormal, ...} at f32 and f64, the two agree bitwise everywhere except the two
+     cases C leaves UNSPECIFIED -- which of [+0]/[-0] a tie returns, and which payload a both-NaN
+     pair returns -- plus a signaling NaN, which libm quiets and this returns unchanged, and which
+     cannot reach a kernel anyway since host values cross as OCaml doubles. Both unspecified cases
+     are order-dependent under a [Vectorized] retype regardless: splitting the fold into [chains *
+     lanes] independent chains already changes which of several equal-comparing operands reaches the
+     final combine.
+
+     Integer precisions get the same rendering, and it is a fix for them too: [Ops.binop_c_syntax]
+     spells an integer [Max] as [fmax], and [s != s] is constantly false on an integer vector, so the
+     mask degenerates to the plain [a >= b ? a : b] the operator means. *)
+  (* The target builtins spelling a WHOLE-VECTOR [fmax]/[fmin] for this (compute precision, lane
+     count), in the shape and with the guard discipline of {!vec_fma_builtin} next door: an arm here
+     is preferred over the portable mask blend below, and a compiler that spells it differently
+     falls through to that blend rather than failing to compile.
+
+     Only aarch64 has one. gcc's internal NEON [fmax]/[fmin] builtins render as a single [FMAXNM] /
+     [FMINNM], which is IEEE 754 [maxNum]/[minNum] and therefore exactly C's [fmax]/[fmin] --
+     [fmaxnm v0.4s, v0.4s, v1.4s] against the blend's compare, or and bit-select. gcc's NaN-
+     propagating [FMAX] is a DIFFERENT builtin ([__builtin_aarch64_fmax_nan*]), so the naming does
+     not silently hand back the wrong one. x86 has no counterpart worth an arm: the
+     [__builtin_ia32_maxps] family and clang's [__builtin_elementwise_max] both return their second
+     operand when either is NaN, which is not what [fmax] means, and the blend already compiles to
+     the two packed instructions those would be.
+
+     The fp16 arm exists at every [-march]: [__has_builtin(__builtin_aarch64_fmaxv8hf)] is 1 even
+     under plain [armv8-a], where the instruction is unavailable, so it takes the same
+     [__ARM_FEATURE_FP16_VECTOR_ARITHMETIC] guard the fp16 FMA arm does. It is also the arm that
+     MATTERS: gcc scalarizes a 16-bit vector COMPARISON on aarch64 whatever type it is spelled in
+     ([_Float16] and [__fp16] alike, at -O2 and -O3), widening every lane to float, so the blend
+     that costs three vector instructions at f32/f64 costs 172 scalar ones at fp16 -- which is the
+     one cell of [test/operations/cc_march_census]'s matrix this arm exists to close. *)
+  let vec_minmax_builtin ~prec ~lanes ~op : (string * (dst:string -> src:string -> string)) list =
+    let name = match op with Ops.Max -> "fmax" | _ -> "fmin" in
+    let builtin suffix = Printf.sprintf "__builtin_aarch64_%s%s" name suffix in
+    let neon suffix =
+      ( Printf.sprintf "defined(__aarch64__) && __has_builtin(%s)" (builtin suffix),
+        fun ~dst ~src -> Printf.sprintf "%s = %s(%s, %s);" dst (builtin suffix) dst src )
+    in
+    (* Typed in [__fp16], a distinct type from the [_Float16] the emitted vectors carry, so the arm
+       casts both ways through a block-local typedef -- the same shape [neon_half_render] uses for
+       the fp16 FMA builtin, and for the same reason (gh-ocannl-621). *)
+    let neon_half suffix ~bytes =
+      ( Printf.sprintf
+          "HAS_NATIVE_FLOAT16 && defined(__ARM_FEATURE_FP16_VECTOR_ARITHMETIC) && __has_builtin(%s)"
+          (builtin suffix),
+        fun ~dst ~src ->
+          Printf.sprintf
+            "{ typedef __fp16 ocannl_hfv__ __attribute__((vector_size(%d))); %s = \
+             (__typeof__(%s))%s((ocannl_hfv__)%s, (ocannl_hfv__)%s); }"
+            bytes dst dst (builtin suffix) dst src )
+    in
+    match (prec, lanes) with
+    | Ops.Single_prec _, 4 -> [ neon "v4sf" ]
+    | Ops.Double_prec _, 2 -> [ neon "v2df" ]
+    | Ops.Half_prec _, 8 -> [ neon_half "v8hf" ~bytes:16 ]
+    | _ -> []
+
   let vec_acc_combine ~prec ~lanes ~op ~dst ~src =
-    let open PPrint in
     match op with
     | Ops.Add | Ops.Sub | Ops.Mul | Ops.Div ->
         let inf = match op with Ops.Add -> " + " | Sub -> " - " | Mul -> " * " | _ -> " / " in
-        string (Printf.sprintf "%s = %s%s%s;" dst dst inf src)
+        PPrint.string (Printf.sprintf "%s = %s%s%s;" dst dst inf src)
     | Ops.Max | Ops.Min ->
-        let lane v = string (v ^ "[ocannl_l__]") in
-        string
-          (Printf.sprintf
-             "for (int ocannl_l__ = 0; ocannl_l__ < %d; ++ocannl_l__) %s[ocannl_l__] = " lanes dst)
-        ^^ B.binop_syntax prec op (lane dst) (lane src)
-        ^^ semi
+        let open PPrint in
+        let cmp = match op with Ops.Max -> ">=" | _ -> "<=" in
+        let blend =
+          string
+            (Printf.sprintf
+               "{ __typeof__(%s %s %s) ocannl_m__ = (%s %s %s) | (%s != %s); %s = \
+                (__typeof__(%s))((ocannl_m__ & (__typeof__(ocannl_m__))%s) | (~ocannl_m__ & \
+                (__typeof__(ocannl_m__))%s)); }"
+               dst cmp src dst cmp src src src dst dst dst src)
+        in
+        (match vec_minmax_builtin ~prec ~lanes ~op with
+        | [] -> blend
+        | arms ->
+            let first = ref true in
+            let chain =
+              List.map arms ~f:(fun (guard, render) ->
+                  let kw = if !first then "#if " else "#elif " in
+                  first := false;
+                  string (kw ^ guard) ^^ hardline ^^ string (render ~dst ~src) ^^ hardline)
+              |> concat
+            in
+            chain ^^ string "#else" ^^ hardline ^^ blend ^^ hardline ^^ string "#endif")
     | _ -> invalid_arg "C_syntax.vec_acc_combine: not an accumulation operator"
 
   (* The target builtins spelling a WHOLE-VECTOR fused multiply-add for this (compute precision,
