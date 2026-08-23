@@ -442,7 +442,8 @@ that they earn a lookup rather than always-loaded space.
     the GOLDEN rather than the stanza: `runtest-zero_out_local_decl-unoptimized` beside the
     `zero_out_local_decl` test, `runtest-test_ppx_op-ppx` beside `test_ppx_op`. Adding an action to a
     generated alias is legal, and the per-directory `runtest-env_spelling_gate` rule does exactly
-    that so every per-test rule can depend on the ambient gate. `env_var_deps` compares the two
+    that so every per-test rule can depend on the ambient gate -- and is the one rule `env_var_deps`
+    lets share such a name, recognized by its `(universe)` dependency rather than by name. `env_var_deps` compares the two
     literally: the alias must begin with the golden's name, since what a reader has in hand when
     they reach for the alias is the golden that just failed, and an alias that renames it is one
     they construct empty.

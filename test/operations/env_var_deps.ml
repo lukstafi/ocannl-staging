@@ -327,6 +327,23 @@ let is_golden_diff stanza =
           List.exists args ~f:is_diff_action)
   | _ -> false
 
+(* The names dune generates a `runtest-<name>` alias for by itself (>= 3.20): every `(test)`/
+   `(tests)` stanza name, and every inline-test library's name. A hand-written alias must not reuse
+   one (Codex P2, round 5): the two aliases MERGE, so the targeted entry point runs that test as
+   well as the rule, which is the isolation this whole arrangement is for -- and once the rule also
+   names `runtest`, dune calls the pair a dependency cycle. The `runtest-env_spelling_gate` rule is
+   the deliberate exception, and is recognized structurally rather than by name: it is the ambient
+   gate, whose whole purpose is to run the same binary the `(test)` stanza does. *)
+let generated_runtest_names stanzas =
+  List.concat_map stanzas ~f:(fun stanza ->
+      match stanza with
+      | Sexp.List (Sexp.Atom ("test" | "tests") :: _) -> Scan.names_of stanza
+      | Sexp.List (Sexp.Atom "library" :: _) when Option.is_some (Scan.field stanza "inline_tests")
+        ->
+          Scan.names_of stanza
+      | _ -> [])
+  |> Set.of_list (module String)
+
 (* The prefix `Utils.classify_env_var` reports for a per-module tracing gate. *)
 let gate_prefix = "ocannl_log_level_"
 
@@ -659,6 +676,27 @@ let () =
                        dune_file target scans_suite
                        (Stdlib.Filename.dirname dune_file)
                        scans_suite scans_suite)));
+      (* A hand-written per-test alias must not reuse a name dune generates one for: the aliases
+         merge, and the targeted run stops being one test (Codex P2, round 5). Asked of every rule
+         in the file rather than of the golden diffs alone, since any rule can be given such an
+         alias; the ambient gate is the one rule that means to share it. *)
+      let generated = generated_runtest_names stanzas in
+      List.iter stanzas ~f:(fun stanza ->
+          if not (is_gate stanza) then
+            List.iter (aliases_of stanza) ~f:(fun alias ->
+                match String.chop_prefix alias ~prefix:"runtest-" with
+                | Some name when Set.mem generated name ->
+                    fail
+                      (Printf.sprintf
+                         "%s attaches a rule to `%s`, the alias dune generates for the `%s` \
+                          stanza in this directory -- the two merge, so `dune build @%s/%s` would \
+                          run that test as well as this rule, and naming `runtest` beside it is a \
+                          dependency cycle. Name the alias after the GOLDEN this rule checks, \
+                          qualified where a run writes several"
+                         dune_file alias name
+                         (Stdlib.Filename.dirname dune_file)
+                         alias)
+                | _ -> ()));
       (* Every golden diff sits on a per-test alias, and on that alias ALONE (gh-ocannl-726). Dune
          generates `runtest-<name>` for `(test)`/`(tests)` stanzas and inline-test libraries and for
          nothing else, so a rule that diffs a golden and names `runtest` itself can only be run by
