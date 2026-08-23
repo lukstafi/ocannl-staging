@@ -705,7 +705,7 @@ let tensorize_llc ~(zero_fringe : Tn.t -> bool) ~i ~j ~k ~lane ~simd_width (llc 
   in
   (llc, !out_masks)
 
-(* The accumulation mints below forward [Low_level.loop_indices llc] to
+(* The accumulation mints below forward [Low_level.loop_bounds llc] to
    [Low_level.peel_accum_nest], so a runtime-extent guard ([i < s], gh-490) does not stop them:
    [s] is bound outside every loop and cannot select among enclosing iterations. Derived here rather
    than certified by [apply]'s caller, because declining is NOT neutral for these mints the way it
@@ -714,7 +714,7 @@ let tensorize_llc ~(zero_fringe : Tn.t -> bool) ~i ~j ~k ~lane ~simd_width (llc 
    narrow storage the candidate stops agreeing with the serial baseline, which is the very
    invariant they exist to keep (gh-ocannl-693 review rounds 6-7). *)
 let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
-  let loop_syms = lazy (Low_level.loop_indices llc) in
+  let loop_ranges = lazy (Low_level.loop_bounds llc) in
   let open Low_level in
   match op with
   | Stage _ | Privatize _ | Fuse_epilogue _ | Tensorize _ | Split_reduce _ ->
@@ -808,7 +808,7 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
                candidates still agree — both per-step. *)
             if Utils.debug_log_from_routines () then None
             else
-              Low_level.peel_accum_nest ~loop_syms:(Lazy.force loop_syms)
+              Low_level.peel_accum_nest ~loop_bounds:(Lazy.force loop_ranges)
                 ~free_of:[ axis ] fc.body
           in
           match mint with
@@ -935,7 +935,7 @@ let apply_op (llc : Low_level.t) (op : optop) : Low_level.t =
           let mint =
             if Utils.debug_log_from_routines () then None
             else
-              Low_level.peel_accum_nest ~loop_syms:(Lazy.force loop_syms)
+              Low_level.peel_accum_nest ~loop_bounds:(Lazy.force loop_ranges)
                 ~free_of:[ axis ] fc.body
           in
           match mint with

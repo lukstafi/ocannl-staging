@@ -224,28 +224,51 @@ files.
   exactly a dead level's access-free meaning. That abort was reachable before gh-ocannl-693 for a
   dead `Unrolled` level whose body is not a recognized accumulation; refusing to peel the
   accumulating ones widened its reach, which is how it surfaced.
-- **A peeled guard must be CONFINED to the levels being peeled** — every symbol it mentions is
-  one of them, and it mentions at least one. `rebuild` keeps a guard around the
-  accumulating update only, so the localized form performs its opening load and closing store
-  OUTSIDE it — right when the guard's truth is not fixed for the whole nest, wrong when it is.
-  A guard invariant across the peeled levels is fixed for the whole nest, so hoisting the accesses
-  out of it turns "this instance performs no access" into a load and a store; across an enclosing
-  HARDWARE axis that is a data race, not merely wasted work. For
+- **Peel-guard legality belongs to `Ir.Affine`, not to `peel_accum_nest`** (gh-ocannl-722). Five
+  review rounds of gh-693 re-derived it as an ad hoc predicate before it moved; if you find yourself
+  writing a sixth clause, add it to the engine. Two queries state the whole rule:
+  `Affine.peel_guard ~loop_bound ~peeled ~guard_syms` answers `Confined_to_peel`,
+  `Not_peelable why`, or `Lane_private_if_separated syms`; `Affine.separates ~range ~concurrent
+  ~syms ~idcs` then decides the third against the accumulated cell. `peel_accum_nest` asks the first
+  at each guard (what a guard mentions is known on the way down) and defers the second to the base,
+  where the cell is finally in hand.
+  WHY the rule is what it is: `rebuild` keeps a guard around the accumulating update only, so the
+  localized form performs its opening load and closing store OUTSIDE it — right when the guard's
+  truth is not fixed for the whole nest, wrong when it is. A guard mentioning no peeled symbol is
+  fixed for the whole nest, so hoisting turns "this instance performs no access" into a load and a
+  store. A guard mentioning an ENCLOSING loop symbol selects among that level's iterations: for
   `Workgroup w -> Serial k -> If (w < 1) (acc[0] += x[k])` every lane would load `acc[0]` and write
   its unchanged local back, so a lane reading before lane 0's store and writing after it silently
   discards the reduction — the same 1/N fingerprint as the Metal RMW miscompile, from a different
-  cause. "Varies with a peeled symbol" is NOT the right predicate: a MIXED guard like `w + k <= 0`
-  varies with the peeled `k` and still selects among lanes. Nor is an empty symbol set safe — a
-  guard mentioning no peeled symbol is fixed for the whole nest. **The gh-490 runtime-extent guard
-  is NOT constant-bounded** — worth knowing, because assuming it was cost a review round:
-  `Assignments.extent_guard` (assignments.ml:225) emits
+  cause. "Varies with a peeled symbol" is NOT the predicate: a MIXED guard like `w + k <= 0` varies
+  with the peeled `k` and still selects among lanes.
+- **What decides the enclosing case is a SHARED CELL, not a mixed guard** (gh-ocannl-721). Under
+  `Workgroup w -> Serial k -> If (w + k < n) (acc[w] += x[w,k])` every lane owns a distinct cell, so
+  the invented load/store pair is private to its lane and idempotent and the hoist is race-free —
+  which is exactly `Affine.separates` asked of the cell, and why the cell reaches the decision.
+  Three traps in using that query. Its `concurrent` set must cover EVERY symbol whose value may
+  differ between the two instances, not only the ones being told apart: with `acc[w1 + w2]` and
+  `syms = [w1]`, holding `w2` equal "proves" a separation that instances `(0,1)` and `(1,0)` refute.
+  Mentioning a symbol is not separating it — the same `acc[w1 + w2]` mentions both and separates
+  neither. And **separation is distinctness, not access validity**: the guard being hoisted past may
+  be what keeps the cell in bounds, so a consumer must ALSO ask `Affine.within_box` of the cell over
+  the enclosing symbols' full ranges, judged without the guard. With a one-element `acc`,
+  `Workgroup w (0..3) -> Serial k -> If (w + k < 1) (acc[w] += ...)` separates `w` perfectly while
+  lanes 1–3 address cells that do not exist (Codex P1 on PR #443). The confined case needs no such
+  check — there the guard mentions only peeled symbols and symbols no loop binds, while the cell is
+  invariant across the peeled levels, so the guard cannot bound anything the cell mentions.
+  Uninterpretable components (`Sub_axis`, `Concat`, dynamic indices) contribute no information to
+  either query, so they decline rather than admit.
+- **The gh-490 runtime-extent guard is NOT constant-bounded** — worth knowing, because assuming it
+  was cost a review round: `Assignments.extent_guard` (assignments.ml:225) emits
   `Cmplt (Embed_index (Iterator index), Embed_index (Iterator sym.static_symbol))`, whose bound is a
   STATIC symbol, a kernel parameter bound at launch. (`Schedule`'s Pad guards ARE constant-bounded;
   the two shapes are easy to conflate.) A static symbol cannot select among enclosing loop
-  iterations, but the peel cannot tell it from a loop index on its own, so the caller certifies via
-  the REQUIRED `~loop_syms`, which is `Low_level.loop_indices` of the enclosing program: a guard
-  symbol in it that is not peeled selects among an enclosing level's iterations, and one outside it
-  is bound outside every loop — a static index parameter or a runtime extent — hence harmless.
+  iterations, but the peel cannot tell it from a loop index on its own, so it reads the
+  classification off the program: the REQUIRED `~loop_bounds` is `Low_level.loop_bounds` of the
+  enclosing code — the same "box environment for Affine queries" the engine's other consumers pass,
+  which also supplies the iteration ranges `separates` needs. A guard symbol in it that is not
+  peeled is an enclosing level's index; one outside it is bound outside every loop and is harmless.
   Derived from the program, not certified by the caller, and required rather than defaulted, because
   **declining is not neutral for the schedule mints**: a refused mint makes `Unroll
   ~materialize:true` round-trip the accumulator per copy and `Partition` turn its segment seams into
@@ -253,13 +276,17 @@ files.
   baseline — the invariant those mints exist to hold ("candidates compete on speed, never
   numerics"). A defaulted certification is exactly the kind a call site forgets; three review rounds
   went into finding that out.
-  `peel_dead_level.ml` carries all five guard shapes at the peel, and `reduction_forms.ml` carries
-  the executed narrow-precision consequence (gh-ocannl-715): a bf16 and f16 reduction under a
-  runtime-extent guard, scheduled with a materializing `Unroll` and with a `Partition`, compared
-  bitwise against its serial baseline — the sixteen guarded copies update ONE widened local and
-  store once, where a refused mint would round-trip per copy. Keeping such a guard
-  around the whole scope instead of declining would also be sound and would localize more; it needs
-  the peel to report its outer guards separately, which is wider than the correctness fix.
+  `peel_dead_level.ml` carries the guard shapes at the peel (including the lane-private ones and the
+  two-lanes-collapsing counterexample), `affine_legality.ml` pins both queries directly —
+  `separates` against the same brute-force oracle `pair_conflict` is checked with — and
+  `reduction_forms.ml` carries the executed consequences: `runtime-guard*` for gh-ocannl-715 (a bf16
+  and f16 reduction under a runtime-extent guard, scheduled with a materializing `Unroll` and with a
+  `Partition`, bitwise against its serial baseline) and `mixed-guard` / `mixed-guard-workgroup` for
+  gh-ocannl-721. Note where the mixed shape is discriminating: the OUTPUT loop must not be peelable
+  too, or the whole nest localizes at that level and the enclosing case never arises — in
+  `reduction_forms` the cell `out[r]` mentions the output index, which is what stops the outer peel.
+  Keeping an outer guard around the whole scope instead of declining would localize more still; it
+  needs the peel to report its outer guards separately, which is wider than any of this.
 - The interaction with Metal's `volatile_scalar_rmw` needs no special case, and that is worth
   knowing before adding one: the shadow keys on the emitted `Set` reading its own node at a cell
   invariant across an enclosing SERIAL loop, and localization lifts the `Set` out of exactly those

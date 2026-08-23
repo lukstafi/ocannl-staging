@@ -74,4 +74,39 @@ program order: cond read before the guarded body's write         true
 program order: a statement's rhs before its own write            true
 program order: an inlined scope body's read before the enclosing write true
 
+=== gh-722: separates (the peel's lane-private escape) ===
+acc[w] separates w                             query true   oracle true  
+acc[0] does not separate w                     query false  oracle false 
+acc[w + w2] separates neither                  query false  oracle false 
+acc[4w + w2] separates w and w2                query true   oracle true  
+acc[w, w2] separates both                      query true   oracle true  
+acc[w + s] separates w (s static)              query true   oracle true  
+an empty symbol set is separated               query true   oracle true  
+an opaque component does not separate          query false  oracle true  
+
+=== gh-722: within_box (the validity half) ===
+acc[w] fits a 4-cell node                            true (want true)
+acc[w] does not fit a 1-cell node                    false (want false)
+acc[w] does not fit a 3-cell node either             false (want false)
+acc[w + 1] leaves a 4-cell node at the top           false (want false)
+acc[w - 1] leaves a 4-cell node at the bottom        false (want false)
+acc[4w + w2] fits a 16-cell node                     true (want true)
+acc[w, w2] fits a 4x4 node                           true (want true)
+acc[w, w2] does not fit a 4x2 node                   false (want false)
+a fixed index inside the box fits                    true (want true)
+a fixed index outside it does not                    false (want false)
+a static index parameter is not placed               false (want false)
+an opaque component is not placed                    false (want false)
+a rank mismatch is not placed                        false (want false)
+
+=== gh-722: peel_guard (which guards may join the peeled levels) ===
+a guard over the peeled index alone is confined                          true
+a guard over the peeled index and a static bound is confined             true
+a guard mentioning no index at all is refused                            true
+a guard over an enclosing index alone is refused                         true
+a guard over a static bound alone is refused                             true
+a mixed guard defers to the cell, naming the enclosing symbol            true
+a mixed guard names every enclosing symbol it mentions, once             true
+a mixed guard's static bound is not something the cell must separate     true
+
 unsound cases: 0
