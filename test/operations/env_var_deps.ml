@@ -690,7 +690,12 @@ let () =
       let scans_reaches = aliases_reached_from stanzas scans_suite in
       List.iter stanzas ~f:(fun producer ->
           if is_repo_wide_scan producer then
-            if List.is_empty (targets_of producer) then
+            (* A producer the family already aggregates directly needs no separate checker at all:
+               declaring a target says where its diagnostics go, not that a second rule judges them
+               -- a scan can assert by exit status and still write one (Codex P2, round 8). Asked
+               before the target hunt, so both shapes are accepted the same way. *)
+            if List.exists (aliases_of producer) ~f:(Set.mem scans_reaches) then ()
+            else if List.is_empty (targets_of producer) then
               (* A scan that declares no target writes and checks in one action -- the `no-infer`
                  shape this repository uses elsewhere, or an assertion by exit status. There is no
                  second rule to look for, so the family has to aggregate THIS rule's own alias;
@@ -740,11 +745,23 @@ let () =
       List.iter stanzas ~f:(fun stanza ->
           List.iter (aliases_of stanza) ~f:(fun alias ->
               match String.chop_prefix alias ~prefix:"runtest-" with
-              (* The one deliberate collision: the ambient gate rule sharing the alias dune
-                 generates for the ambient gate TEST. Both sides have to be the gate -- a rule that
-                 merely depends on `(universe)`, golden diff or not, is not it (Codex P2, rounds 6
-                 and 7). *)
-              | Some name when is_gate stanza && Set.mem gate_names name -> ()
+              (* The one deliberate collision: a rule sharing the alias dune generates for a
+                 `(test)` stanza BECAUSE IT RUNS THE SAME BINARY -- the ambient gate, whose rule
+                 exists so that every per-test alias can depend on it. Three things have to hold,
+                 and the third is what the earlier rounds were missing: the rule is a gate, the
+                 name belongs to a gate `(test)` stanza, and the rule's action runs that stanza's
+                 executable, so the merged alias runs one program either way (Codex P2, rounds 6 to
+                 8). *)
+              | Some name
+                when is_gate stanza && Set.mem gate_names name
+                     && List.exists (Scan.executables_run stanza) ~f:(fun (_cwd, command) ->
+                            match command with
+                            | Scan.Runs path ->
+                                String.equal
+                                  (Stdlib.Filename.basename path)
+                                  (name ^ ".exe")
+                            | _ -> false) ->
+                  ()
               | Some name when Set.mem generated name ->
                     fail
                       (Printf.sprintf
@@ -763,14 +780,20 @@ let () =
          `runtest-foo-extension` (Codex P2, round 7). A producer rule sharing its checker's alias
          is a different thing and stays allowed: it is what MAKES the output the checker reads. *)
       List.iter
-        (List.concat_map stanzas ~f:(fun s -> if is_golden_diff s then aliases_of s else [])
+        (List.concat_map stanzas ~f:(fun s ->
+             (* One entry per GOLDEN, not per rule: a single rule whose `progn` diffs two goldens
+                puts two checks behind one alias just as two rules would (Codex P2, round 8). *)
+             if is_golden_diff s then
+               List.concat_map (aliases_of s) ~f:(fun alias ->
+                   List.map (goldens_in s) ~f:(fun _ -> alias))
+             else [])
         |> List.sort ~compare:String.compare
         |> List.group ~break:(fun a b -> not (String.equal a b))
         |> List.filter ~f:(fun group -> List.length group > 1))
         ~f:(fun group ->
           fail
             (Printf.sprintf
-               "%s has %d golden diffs on the alias `%s` -- `dune build @%s/%s` would run them \
+               "%s checks %d goldens on the alias `%s` -- `dune build @%s/%s` would run them \
                 all, so the alias no longer names one test. Give each its own, named after the \
                 golden it checks"
                dune_file (List.length group)
@@ -802,7 +825,13 @@ let () =
                             |> Option.value ~default:alias
                           in
                           let stem = golden_stem ~named:(named_deps stanza) golden in
-                          (not (String.is_empty stem)) && String.is_prefix suffix ~prefix:stem) ->
+                          (* The stem itself, or the stem and then a qualifier saying WHICH golden
+                             of the run this is. A bare prefix would accept `runtest-foobar` for
+                             `foo.expected`, leaving the alias a reader constructs empty (Codex P2,
+                             round 8). *)
+                          (not (String.is_empty stem))
+                          && (String.equal suffix stem
+                             || String.is_prefix suffix ~prefix:(stem ^ "-"))) ->
                 ()
             | aliases ->
                 let what =
