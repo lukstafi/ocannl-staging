@@ -1,0 +1,13 @@
+extents swept: 2..800, row pairs per extent: 4
+extents where the flat-offset weight missed a row swap: 29, 251, 502, 753
+the shared checksum sees every row swap at every extent swept: true
+the flat-offset weight misses a row swap at every multiple of 251 (negative control): true
+the shared checksum sees a row swap at those same multiples of 251: true
+an unweighted sum misses every row swap at every extent (negative control): true
+mixed ma rows stay pairwise distinct at every row stride 13 divides: true
+flat-offset ma rows are all identical at every row stride 13 divides (negative control): true
+mixed mb rows stay pairwise distinct at every row stride 17 divides: true
+flat-offset mb rows are all identical at every row stride 17 divides (negative control): true
+every residue lands in [0, modulus): true
+residue refuses a non-positive row stride: true
+residue refuses a non-positive modulus: true
