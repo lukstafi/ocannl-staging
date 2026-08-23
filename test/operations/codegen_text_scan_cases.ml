@@ -237,6 +237,34 @@ let () =
     ( "the qualified Utils.build_file is a read of the artifact directory",
       {ocaml|let () = p "wrote" (Stdlib.Sys.file_exists (Utils.build_file "k.c"))|ocaml},
       "+direct" );
+    (* Module aliases. A conventional short alias is ordinary OCaml, and a scan matching the
+       literal component would not merely mis-attribute such a file -- it would drop it from the
+       inventory entirely, which is the silent direction (Codex P2, round 1). *)
+    ( "a module alias of the reader is the reader",
+      {ocaml|module G = Test_utils.Generated
+let () = G.assert_emits ~routine:"r" ~contains:"__syncthreads()" "synced"|ocaml},
+      {|"__syncthreads()"|} );
+    ( "an alias of an alias is an alias",
+      {ocaml|module G = Test_utils.Generated
+module H = G
+let () =
+  let src = H.read "r" in
+  p "shared" (String.is_substring src ~substring:"__shared__")|ocaml},
+      {|"__shared__"|} );
+    ( "an alias bound in expression position counts too",
+      {ocaml|let go () =
+  let module G = Test_utils.Generated in
+  let src = G.read "r" in
+  String.is_substring src ~substring:"threadgroup float"|ocaml},
+      {|"threadgroup float"|} );
+    ( "an alias of Utils is a direct artifact read",
+      {ocaml|module U = Utils
+let () = p "wrote" (Stdlib.Sys.file_exists (U.build_file "k.c"))|ocaml},
+      "+direct" );
+    ( "an unqualified read is not the reader, which is what the qualifier is for",
+      {ocaml|let read routine = Stdio.In_channel.read_all routine
+let () = p "loaded" (String.is_substring (read "fixture.txt") ~substring:"(float)(0.0)")|ocaml},
+      "none" );
     ( "a test that reads no generated source is not a member",
       {ocaml|let () = p "shapes agree" (String.is_substring rendered ~substring:"3x5")|ocaml},
       "none" );

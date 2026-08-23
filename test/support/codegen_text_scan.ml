@@ -9,7 +9,7 @@
       went red: three [arrayjit/test] goldens quote emitted constants and no [test/*] glob sees
       them.
     - {b test sources}, which assert on emitted text from a string literal in the [.ml] rather than
-      from a golden -- [Generated.assert_emits ~contains:"…"], or [Generated.read] followed by a
+      from a golden -- [Generated.assert_emits ~contains:"..."], or [Generated.read] followed by a
       substring test. No [.expected] scan of any thoroughness finds these, and because they are
       {!Verdict} claims they exit nonzero, so they fail a plain [dune build] rather than only
       [dune runtest]. That is what CI actually tripped on.
@@ -232,10 +232,14 @@ let classify_golden ~path ~contents =
 let string_literal expr =
   match expr.pexp_desc with Pexp_constant (Pconst_string (value, _, _)) -> Some value | _ -> None
 
+(* [Longident.flatten_exn] fatal-errors on a functor application, which cannot arise where it is
+   used here: in EXPRESSION position OCaml gives no [Pexp_ident] an applied path, and a MODULE
+   expression reaches it only through [Pmod_ident], which is a plain path by construction. The same
+   reasoning [Config_key_scan]'s header sets out at length. *)
+let flatten_longident = Longident.flatten_exn
+
 let longident_of expr =
-  match expr.pexp_desc with
-  | Pexp_ident { txt; _ } -> Some (Longident.flatten_exn txt)
-  | _ -> None
+  match expr.pexp_desc with Pexp_ident { txt; _ } -> Some (flatten_longident txt) | _ -> None
 
 (** Raises if [content] does not parse: a scan that cannot read its input must say so rather than
     report an empty census. *)
@@ -260,35 +264,73 @@ let idents_in expr =
   iterator#expression expr;
   !found
 
-(** Whether [expr] names any of [names] as the last component of a path qualified by [qualifier].
 
-    The qualifier is required, and that is the whole point: [build_file] is an ordinary name a test
-    may bind for itself ([test_safetensors] writes safetensors fixtures through one), while
-    [Utils.build_file] is a read of the artifact directory. Keying on the last component alone read
-    the first as the second. *)
-let names_qualified expr ~qualifier ~names =
-  let found = ref false in
+(** The module a qualified path calls into: the component before the last. [Generated.read] and
+    [Test_utils.Generated.read] both answer ["Generated"], [G.read] answers ["G"], and an
+    unqualified [read] answers nothing -- which is what keeps a test's own local [read] from being
+    taken for the artifact reader. *)
+let qualifier_of path =
+  match List.rev path with _last :: qualifier :: _ -> Some qualifier | _ -> None
+
+(** The names [target] goes by in this file: itself, plus every module alias that resolves to it.
+
+    Resolved rather than assumed, because [module G = Test_utils.Generated] followed by [G.read "r"]
+    is ordinary OCaml, and a scan matching the literal component [Generated] would not merely
+    mis-attribute such a file -- it would drop it from the inventory entirely, which is the silent
+    direction (Codex P2, round 1). An alias of an alias is an alias, and structure items are visited
+    in order, so a name already recognised is available to the binding that borrows it. The
+    expression-position spelling ([let module G = ... in]) is matched on ppxlib's tree, where 5.4's
+    [Pexp_letmodule] and 5.5's structure-item-inside-an-expression have the one spelling.
+
+    What this does NOT reach is an alias in another FILE: this scan decides one source at a time, so
+    a wrapper module that some other file defines around the reader would leave its callers
+    unrecognised. Nothing in the tree does that today -- the one wrapper, [Test_utils.Generated],
+    IS the target -- and a scan of one file cannot see it; a shared helper of that shape would have
+    to be added to the seeds here. *)
+let module_aliases ~target structure =
+  let aliases = Hash_set.of_list (module String) [ target ] in
+  let resolves path =
+    match List.last (flatten_longident path) with
+    | Some last -> Hash_set.mem aliases last
+    | None -> false
+  in
   let iterator =
     object
       inherit Ast_traverse.iter as super
 
-      method! expression e =
-        (match longident_of e with
-        | Some path
-          when List.exists names ~f:(fun n -> path_ends path ~name:n)
-               && List.exists path ~f:(String.equal qualifier) ->
-            found := true
+      method! structure_item item =
+        (match item.pstr_desc with
+        | Pstr_module
+            {
+              pmb_name = { txt = Some alias; _ };
+              pmb_expr = { pmod_desc = Pmod_ident { txt; _ }; _ };
+              _;
+            }
+          when resolves txt ->
+            Hash_set.add aliases alias
         | _ -> ());
-        super#expression e
+        super#structure_item item
+
+      method! expression expr =
+        (match expr.pexp_desc with
+        | Pexp_letmodule ({ txt = Some alias; _ }, { pmod_desc = Pmod_ident { txt; _ }; _ }, _)
+          when resolves txt ->
+            Hash_set.add aliases alias
+        | _ -> ());
+        super#expression expr
     end
   in
-  iterator#expression expr;
-  !found
+  iterator#structure structure;
+  aliases
 
-(** The reader that hands a test its generated source. [Generated.read] under any prefix
-    ([Test_utils.Generated.read] included); the module qualifier is required, so a local [read] is
-    not mistaken for it. *)
-let mentions_generated_read expr =
+(** Whether the path calls [name] on a module [aliases] recognises. *)
+let calls ~aliases path ~name =
+  path_ends path ~name
+  && Option.value_map (qualifier_of path) ~default:false ~f:(Hash_set.mem aliases)
+
+(** The reader that hands a test its generated source: [read] on {!Test_utils.Generated} under any
+    prefix or alias. *)
+let mentions_generated_read ~generated expr =
   let found = ref false in
   let iterator =
     object
@@ -296,10 +338,7 @@ let mentions_generated_read expr =
 
       method! expression e =
         (match longident_of e with
-        | Some path
-          when path_ends path ~name:"read"
-               && List.exists path ~f:(String.equal "Generated") ->
-            found := true
+        | Some path when calls ~aliases:generated path ~name:"read" -> found := true
         | _ -> ());
         super#expression e
     end
@@ -308,13 +347,33 @@ let mentions_generated_read expr =
   !found
 
 (** Reads of [build_files/] that do not go through {!Test_utils.Generated}, and so are unchecked for
-    freshness: [Utils.build_files_dir], [Utils.build_file]. *)
+    freshness: [Utils.build_files_dir], [Utils.build_file].
+
+    The module qualifier is required, and that is the whole point: [build_file] is an ordinary name
+    a test may bind for itself ([test_safetensors] writes its safetensors fixtures through one),
+    while [Utils.build_file] is a read of the artifact directory. Keying on the last component alone
+    read the first as the second. Aliases of [Utils] resolve like aliases of [Generated]. *)
 let direct_artifact_names = [ "build_files_dir"; "build_file" ]
 
-let direct_artifact_qualifier = "Utils"
+let direct_artifact_module = "Utils"
 
-let reads_artifacts_directly expr =
-  names_qualified expr ~qualifier:direct_artifact_qualifier ~names:direct_artifact_names
+let reads_artifacts_directly ~utils expr =
+  let found = ref false in
+  let iterator =
+    object
+      inherit Ast_traverse.iter as super
+
+      method! expression e =
+        (match longident_of e with
+        | Some path
+          when List.exists direct_artifact_names ~f:(fun n -> calls ~aliases:utils path ~name:n) ->
+            found := true
+        | _ -> ());
+        super#expression e
+    end
+  in
+  iterator#expression expr;
+  !found
 
 (** The unlabelled arguments of an application, in order. *)
 let positional args =
@@ -336,7 +395,7 @@ type text_test = {
           remaining positional argument is the claim, not the haystack. *)
 }
 
-let text_test expr =
+let text_test ~generated expr =
   match expr.pexp_desc with
   | Pexp_apply (callee, args) -> (
       match
@@ -350,7 +409,8 @@ let text_test expr =
           let inherent =
             match longident_of callee with
             | Some path ->
-                path_ends path ~name:"assert_emits" || path_ends path ~name:"assert_omits"
+                List.exists [ "assert_emits"; "assert_omits" ] ~f:(fun name ->
+                    calls ~aliases:generated path ~name)
             | None -> false
           in
           Some { text; tested = (if inherent then None else List.hd (positional args)); inherent })
@@ -432,9 +492,11 @@ let bindings_in_expression expr = bindings_of (fun it -> it#expression expr)
     Scope is deliberately ignored -- a name is tainted for the whole file. A scan that itemises what
     a file pins does not need to know which [let] shadowed which; over-reach costs an extra
     inventory line, under-reach costs a missed pin. *)
-let tainted_names bindings =
+let tainted_names ~generated ~utils bindings =
   let tainted = ref (Set.empty (module String)) in
-  let seeded body = mentions_generated_read body || reads_artifacts_directly body in
+  let seeded body =
+    mentions_generated_read ~generated body || reads_artifacts_directly ~utils body
+  in
   let changed = ref true in
   while !changed do
     changed := false;
@@ -494,14 +556,14 @@ let params_derived_in ~params body =
 
 (** Predicates whose literal argument IS a pinned fragment: the [let has s = String.is_substring src
     ~substring:s] idiom and its variants -- one that takes the source as a parameter ([let src_has
-    src s = …]), one that reaches it through a local binding, one that counts occurrences with
+    src s = ...]), one that reaches it through a local binding, one that counts occurrences with
     [~pattern].
 
     Also returns the source ranges of the text arguments inside those definitions. Those sites test
     a PARAMETER, not a fragment, and reading them as pins would mark every file using the idiom as
     pinning text the scan cannot name. Skipped by range at the pin walk rather than by skipping the
     whole binding, so a literal a predicate's body pins alongside its parameter still counts. *)
-let predicates ~tainted bindings =
+let predicates ~generated ~tainted bindings =
   let consumed = ref [] in
   let predicates =
     List.filter_map bindings ~f:(fun { names; params; body } ->
@@ -549,7 +611,7 @@ let predicates ~tainted bindings =
                 inherit Ast_traverse.iter as super
 
                 method! expression e =
-                  (match text_test e with Some t -> consider t | None -> ());
+                  (match text_test ~generated e with Some t -> consider t | None -> ());
                   super#expression e
               end
             in
@@ -611,6 +673,8 @@ let render_pin = function
     Raises if [contents] does not parse. *)
 let classify_source ~path ~contents =
   let structure = structure_of contents in
+  let generated = module_aliases ~target:"Generated" structure in
+  let utils = module_aliases ~target:direct_artifact_module structure in
   let reads_generated = ref false in
   let reads_direct = ref false in
   let scan_reads =
@@ -620,13 +684,12 @@ let classify_source ~path ~contents =
       method! expression e =
         (match longident_of e with
         | Some p
-          when (path_ends p ~name:"read" || path_ends p ~name:"assert_emits"
-              || path_ends p ~name:"assert_omits")
-               && List.exists p ~f:(String.equal "Generated") ->
+          when List.exists [ "read"; "assert_emits"; "assert_omits" ] ~f:(fun name ->
+                   calls ~aliases:generated p ~name) ->
             reads_generated := true
         | Some p
-          when List.exists direct_artifact_names ~f:(fun n -> path_ends p ~name:n)
-               && List.exists p ~f:(String.equal direct_artifact_qualifier) ->
+          when List.exists direct_artifact_names ~f:(fun name ->
+                   calls ~aliases:utils p ~name) ->
             reads_direct := true
         | _ -> ());
         super#expression e
@@ -636,8 +699,8 @@ let classify_source ~path ~contents =
   if not (!reads_generated || !reads_direct) then None
   else
     let bindings = bindings_in_structure structure in
-    let tainted = tainted_names bindings in
-    let predicates, consumed = predicates ~tainted bindings in
+    let tainted = tainted_names ~generated ~utils bindings in
+    let predicates, consumed = predicates ~generated ~tainted bindings in
     (* A predicate's source parameter IS generated source, inside that predicate's body. Adding the
        name to the tainted set is how the literals a helper tests against it -- the banner it slices
        on, a second fragment it checks alongside its own argument -- become pins rather than being
@@ -654,14 +717,15 @@ let classify_source ~path ~contents =
     in
     let record text = if not (is_consumed text) then pins := pin_of_expr text :: !pins in
     let mentions_tainted e =
-      List.exists (idents_in e) ~f:(fun i -> Set.mem tainted i) || mentions_generated_read e
+      List.exists (idents_in e) ~f:(fun i -> Set.mem tainted i)
+      || mentions_generated_read ~generated e
     in
     let iterator =
       object
         inherit Ast_traverse.iter as super
 
         method! expression e =
-          (match text_test e with
+          (match text_test ~generated e with
           | Some { text; tested; inherent } ->
               if inherent || Option.value_map tested ~default:false ~f:mentions_tainted then
                 record text
