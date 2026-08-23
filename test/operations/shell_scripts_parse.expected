@@ -16,7 +16,20 @@ shebang "#!/bin/bash -O extglob" reads as `refused (`bash` is given -O extglob, 
 shebang "#!/usr/bin/env -u FOO bash" reads as `refused (the kernel passes `-u FOO bash` to `env` as ONE argument -- there is no command by that name; use `env -S`)`: true
 shebang "#!/usr/bin/env -S PATH=/missing bash" reads as `refused (`env` assignment `PATH=/missing`: the command is looked up, and parses, in an environment this check cannot reproduce)`: true
 shebang "#!/usr/bin/env -S -i bash" reads as `refused (`env` option this check cannot vouch for: -i -- it builds an environment the command's parsing depends on)`: true
+shebang "#!/opt/custom/env bash" reads as `refused (interpreter whose `-n` this check cannot vouch for: env)`: true
+shebang "#!/bin/env bash" reads as `bash`: true
 shebang "#!/usr/bin/env python3" reads as `refused (interpreter whose `-n` this check cannot vouch for: python3)`: true
+shebang "#!/bin/bash" is a shell script this check reports on: true
+shebang "#!/usr/bin/env bash" is a shell script this check reports on: true
+shebang "#!/usr/bin/env -Sbash" is a shell script this check reports on: true
+shebang "#!/usr/bin/env -S bash" is a shell script this check reports on: true
+shebang "#!/usr/bin/env --split-string=bash" is a shell script this check reports on: true
+shebang "#!/bin/bash -c" is a shell script this check reports on: true
+shebang "#!/usr/bin/env -S bash helper.sh" is a shell script this check reports on: true
+shebang "#!/usr/bin/env python3" is outside this check's scope: true
+shebang "#!/usr/bin/perl" is outside this check's scope: true
+shebang "" is outside this check's scope: true
+shebang " #!/bin/bash" is outside this check's scope: true
 benchmarks/gh514_cells.sh parses: true
 benchmarks/gh612_cells.sh parses: true
 benchmarks/gh612v_session.sh parses: true

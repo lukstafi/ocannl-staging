@@ -164,6 +164,14 @@ module Shebang = struct
 
   let basename p = List.last_exn (String.split_on_chars p ~on:[ '/'; '\\' ])
 
+  (** The interpreter paths that get `env` semantics. A basename test is not enough (round 8):
+      `#!/opt/custom/env bash` was handed env's meaning and resolved `bash` on PATH, while the kernel
+      would have tried to exec `/opt/custom/env` -- a path that may not exist, and if it does is not
+      necessarily GNU env. These two are what every `env` shebang in the wild names; anything else
+      basenamed `env` falls through to the direct-interpreter path, where it is refused for not
+      being a shell. *)
+  let env_paths = [ "/usr/bin/env"; "/bin/env" ]
+
   let words line =
     List.filter (String.split_on_chars line ~on:[ ' '; '\t' ]) ~f:(Fn.non String.is_empty)
 
@@ -247,9 +255,18 @@ module Shebang = struct
             let body = String.strip body in
             let argument = String.strip (String.drop_prefix body (String.length first)) in
             let resolved =
-              if String.equal (basename first) "env" then
+              if List.mem env_paths first ~equal:String.equal then
                 if String.is_empty argument then Error "`env` with no command"
                 else env_command argument
+              else if
+                (* Whitelist first on this branch, so that a path this check gives no special
+                   meaning to -- `/opt/custom/env`, a `python3` -- is refused for WHAT IT IS rather
+                   than for the arguments it happens to carry. *)
+                not (List.mem parse_only_shells (basename first) ~equal:String.equal)
+              then
+                Error
+                  (Printf.sprintf "interpreter whose `-n` this check cannot vouch for: %s"
+                     (basename first))
               else if String.is_empty argument then Ok (Path first)
               else Error (no_arguments (Printf.sprintf "`%s`" (basename first)) [ argument ])
             in
@@ -270,9 +287,43 @@ module Shebang = struct
       the check. Mentioning a shell anywhere in the line is deliberately generous: over-including
       costs a refusal that names the file, while under-including costs silence. *)
   let mentions_a_shell first_line =
+    (* A word can carry the shell attached to `env`'s split-string option, and both spellings are
+       forms {!parse} accepts -- so a predicate that only basenamed the raw word filtered
+       `#!/usr/bin/env -Sbash` out of the scan entirely, before anything could report on it
+       (round 8). Stripping those prefixes here keeps the two in step. *)
+    let shell_of word =
+      let word = String.strip word in
+      let word =
+        match String.chop_prefix word ~prefix:"--split-string=" with
+        | Some rest -> rest
+        | None -> ( match String.chop_prefix word ~prefix:"-S" with Some rest -> rest | None -> word)
+      in
+      basename word
+    in
     String.is_prefix first_line ~prefix:"#!"
     && List.exists (words (String.drop_prefix first_line 2)) ~f:(fun word ->
-           List.mem parse_only_shells (basename (String.strip word)) ~equal:String.equal)
+           List.mem parse_only_shells (shell_of word) ~equal:String.equal)
+
+  (** Lines whose SCOPE must hold whatever {!parse} makes of them, pinned separately because the two
+      questions come apart: round 7 found scope keyed off a successful parse, which dropped the
+      broken files this check exists for, and round 8 found the looser predicate blind to two
+      spellings `parse` accepts. Neither bug is visible in the parse table. *)
+  let scope_cases =
+    [
+      ("#!/bin/bash", true);
+      ("#!/usr/bin/env bash", true);
+      ("#!/usr/bin/env -Sbash", true);
+      ("#!/usr/bin/env -S bash", true);
+      ("#!/usr/bin/env --split-string=bash", true);
+      (* In scope precisely BECAUSE parse refuses them: these are the files that must be reported. *)
+      ("#!/bin/bash -c", true);
+      ("#!/usr/bin/env -S bash helper.sh", true);
+      (* Not shell scripts, and not this check's business. *)
+      ("#!/usr/bin/env python3", false);
+      ("#!/usr/bin/perl", false);
+      ("", false);
+      (" #!/bin/bash", false);
+    ]
 
   let launched = function Path p -> p | Name n -> n
 
@@ -344,6 +395,12 @@ module Shebang = struct
       ("#!/usr/bin/env -S -i bash",
        "refused (`env` option this check cannot vouch for: -i -- it builds an environment the \
         command's parsing depends on)");
+      (* `env` semantics belong to the canonical paths, not to every basename `env` (round 8): the
+         kernel would try to exec `/opt/custom/env`, which may not exist and need not be GNU env,
+         while this check was resolving `bash` on PATH and passing the file. *)
+      ("#!/opt/custom/env bash",
+       "refused (interpreter whose `-n` this check cannot vouch for: env)");
+      ("#!/bin/env bash", "bash");
       (* An interpreter whose `-n` is not a parse at all. *)
       ("#!/usr/bin/env python3",
        "refused (interpreter whose `-n` this check cannot vouch for: python3)");
@@ -500,6 +557,15 @@ let () =
       if not (String.equal actual expected) then
         eprintf "shebang %S read as `%s`\n" line actual;
       Verdict.pf "shebang %S reads as `%s`" line expected (String.equal actual expected));
+  (* The scope predicate, pinned separately from the parse table: a line can be one this check must
+     report on precisely BECAUSE its arguments are refused, so the two questions do not answer each
+     other. Phrased so that `true` is the passing reading either way. *)
+  List.iter Shebang.scope_cases ~f:(fun (line, expected) ->
+      let actual = Shebang.mentions_a_shell line in
+      Verdict.pf "shebang %S is %s" line
+        (if expected then "a shell script this check reports on"
+         else "outside this check's scope")
+        (Bool.equal actual expected));
   let base = base_dir Stdlib.Sys.argv.(1) in
   (* Reported repository-relative, opened as dune handed them over: the working directory is deep in
      the build tree and the paths arrive relative to it. *)
