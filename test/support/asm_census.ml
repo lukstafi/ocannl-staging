@@ -1,0 +1,471 @@
+(** Static census of a generated kernel's innermost loops, and the [-march] compile matrix that
+    feeds it (gh-ocannl-650).
+
+    Two questions about an emitted kernel are answerable without owning the hardware it targets, and
+    neither was answerable by anything in the repository until this module:
+
+    - {b does the guarded arm even compile where its guard is true?} Every [#elif] for a foreign
+      target ({!C_syntax.vec_fma_builtin}'s AVX-512, AVX512-FP16 and NEON rows) is emitted
+      unconditionally and preprocessed away on the build host, so a syntax error, a wrong arity or a
+      type mismatch inside one ships silently. gh-ocannl-621 caught exactly that -- gcc's aarch64
+      fp16 vector builtin is typed in [__fp16], not the [_Float16] the emission carries -- by
+      compiling [build_files/*.c] under seven [-march] flags in a scratch directory that died with
+      the session.
+    - {b does it compile WELL?} The same sweep was gh-ocannl-621's actual measurement: instructions,
+      vector and scalar arithmetic, and stack references in the innermost loop that carries the
+      accumulator update. That is a compile-time property, so it needs no hardware either, and it is
+      what separates "gcc accepted the arm" from "gcc kept it in registers as one vector operation".
+
+    {1 The two false readings this module is shaped around}
+
+    Re-deriving the census by hand cost gh-ocannl-621 three iterations and two wrong answers, both of
+    which a naive implementation reproduces:
+
+    - {b selecting an outer loop.} A reduction kernel nests: the accumulator update sits in the
+      innermost loop, and counting an enclosing one dilutes every ratio. {!census} therefore selects
+      the {e smallest-span} loop whose body carries the construct being censused, and it identifies
+      that construct through DWARF line numbers ([-g] puts [.loc] directives in the assembly) rather
+      than by guessing from the instruction mix. The caller names the construct by source substring;
+      a loop is a candidate only if its body's [.loc] set meets the source lines that match.
+    - {b counting only the instructions the good outcome produces.} Scoring vector FMAs alone makes
+      a fully scalarized loop read as "no FMA loop found" -- a pass, from the failure. So the counts
+      are separated ({!counts.vector_ops} against {!counts.scalar_fp_ops} against
+      {!counts.libm_calls}) and the SELECTION never consults them: it is anchored on the source, so
+      a loop whose combine compiled to nothing but library calls is still found and still censused.
+      {!census} answering [None] means the anchor was not reached at all, which callers report as a
+      failure rather than as an absence of findings.
+
+    {1 What the counts mean}
+
+    Classification is by mnemonic, from GAS output for x86-64 and aarch64:
+
+    - {b vector_ops}: packed-SIMD instructions -- an x86 mnemonic ending in [ps]/[pd]/[ph], a packed
+      integer mnemonic, an operand naming [%ymm]/[%zmm], or an aarch64 operand in vector-lane form
+      ([v0.2d], [q0]).
+    - {b scalar_fp_ops}: an x86 mnemonic ending in [ss]/[sd]/[sh], or an aarch64 [f...] instruction
+      on a scalar FP register. This is the count that gives away SLP scalarization, which leaves no
+      stack traffic behind.
+    - {b libm_calls}: a call to the censused class's library function ([fmax]/[fmin] and friends,
+      [fma]/[fmaf]). One of these inside a vector loop is the worst outcome of all: an opaque call
+      cannot be vectorized at any optimization level or grid size.
+    - {b stack_refs}: instructions addressing through the stack or frame pointer -- the spill signal
+      gh-ocannl-614 measured.
+
+    Moves are the fuzzy edge (an [%xmm] operand does not by itself say whether a [movq] moved a lane
+    or a vector), so the mnemonic rule below is deliberately narrow and the counts are reported as a
+    profile rather than compared against fitted thresholds. Every claim built on them is an
+    inequality that a wrong classification of a move cannot flip. *)
+
+open Base
+
+(** {1 Toolchains} *)
+
+type toolchain = {
+  label : string;  (** how the census table names this column, e.g. ["x86-64-v3"] *)
+  command : string;  (** the compiler command, possibly a cross compiler *)
+  march : string;  (** the [-march=] value, or [""] for the compiler's default target *)
+  note : string;  (** what this column is here to exercise, for the skip line *)
+}
+
+let flags t = if String.is_empty t.march then "" else "-march=" ^ t.march
+
+(* Compiler invocations go through the shell with output captured to a file, the way
+   [Cc_backend]'s own probes do: the exit status is what decides, and the output is only wanted when
+   it is nonzero. Paths are quoted -- these sit under the build directory or the system temp
+   directory, either of which can contain whitespace. *)
+let run_capture cmdline =
+  let log = Stdlib.Filename.temp_file "ocannl_census_" ".log" in
+  let rc = Stdlib.Sys.command (Printf.sprintf "%s > %s 2>&1" cmdline (Stdlib.Filename.quote log)) in
+  let out = try Stdio.In_channel.read_all log with _ -> "(unable to read compiler output)" in
+  (try Stdlib.Sys.remove log with _ -> ());
+  (rc, out)
+
+(** [accepts t] is whether this toolchain exists and accepts its [-march]. A column that answers
+    [false] must be reported (see [Verdict.skipped]) rather than dropped: a silently missing column
+    is indistinguishable from a passing one. *)
+let accepts t =
+  let src = Stdlib.Filename.temp_file "ocannl_census_probe_" ".c" in
+  (* A temp file, NOT [-o /dev/null]: [Sys.command] hands the line to the platform shell, and on
+     native Windows there is no [/dev/null] to hand it -- every probe would fail, every column would
+     report itself [Verdict.skipped], and the golden would be green having compiled nothing. That is
+     the exact failure this module's "a missing column is not a passing one" rule exists to prevent,
+     so it must not be reintroduced by the probe that decides which columns exist (AGENTS.md names
+     Windows a supported environment). Writing real assembly costs a few kilobytes and is portable. *)
+  let out = Stdlib.Filename.temp_file "ocannl_census_probe_" ".s" in
+  Stdio.Out_channel.write_all src ~data:"int ocannl_census_probe(void) { return 0; }\n";
+  let rc, _ =
+    run_capture
+      (Printf.sprintf "%s %s -S -o %s %s" t.command (flags t) (Stdlib.Filename.quote out)
+         (Stdlib.Filename.quote src))
+  in
+  (try Stdlib.Sys.remove src with _ -> ());
+  (try Stdlib.Sys.remove out with _ -> ());
+  rc = 0
+
+(** [defines t] is the set of preprocessor macro NAMES this toolchain predefines for its target.
+
+    This is how a column whose ISA its label does not spell out -- the host's own default target,
+    which is whatever machine the run landed on -- can still be held to an ISA-scoped claim: the
+    compiler is asked what it targets, instead of a hard-coded table asserting what a [-march]
+    string implies. It answers for the named columns too, which is strictly better than the table
+    was: [-march=x86-64-v3] implying [__FMA__] is gcc's fact to state, not this module's. *)
+let defines t =
+  let src = Stdlib.Filename.temp_file "ocannl_census_macros_" ".c" in
+  Stdio.Out_channel.write_all src ~data:"";
+  let _, out =
+    run_capture
+      (Printf.sprintf "%s %s -dM -E %s" t.command (flags t) (Stdlib.Filename.quote src))
+  in
+  (try Stdlib.Sys.remove src with _ -> ());
+  String.split_lines out
+  |> List.filter_map ~f:(fun l ->
+         match String.split_on_chars (String.strip l) ~on:[ ' '; '\t' ] with
+         | "#define" :: name :: _ ->
+             (* A function-like macro's name ends at its parenthesis. *)
+             Some (match String.lsplit2 name ~on:'(' with Some (n, _) -> n | None -> name)
+         | _ -> None)
+  |> Set.of_list (module String)
+
+(** [compile t ~opt_level ~src_path ~asm_path] compiles [src_path] to assembly, with [-g] so that
+    {!census} can anchor on source lines. [Error output] carries the compiler's diagnostics.
+
+    Assembly rather than an object file: [-S] runs the whole front end and code generator, which is
+    everything a generated kernel can trip, and it produces the census input in the same
+    invocation. *)
+let compile t ~opt_level ~src_path ~asm_path =
+  let rc, out =
+    run_capture
+      (Printf.sprintf "%s %s -O%d -g -S -o %s %s" t.command (flags t) opt_level
+         (Stdlib.Filename.quote asm_path)
+         (Stdlib.Filename.quote src_path))
+  in
+  if rc = 0 then Ok () else Error out
+
+(** {1 Counting} *)
+
+type op_class = Fma | Max_min
+
+type counts = {
+  instructions : int;
+  vector_ops : int;
+  scalar_fp_ops : int;
+  libm_calls : int;
+  stack_refs : int;
+}
+
+type t = { loop_label : string; span : int; counts : counts }
+
+let libm_names = function
+  | Fma -> [ "fma"; "fmaf"; "fmal"; "fmaf16" ]
+  | Max_min ->
+      [ "fmax"; "fmaxf"; "fmaxl"; "fmaxf16"; "fmin"; "fminf"; "fminl"; "fminf16"; "fdim" ]
+
+(* A GAS line, already stripped of its trailing comment. *)
+type line = Label of string | Directive of string list | Insn of { mnemonic : string; rest : string }
+
+let strip_comment s =
+  (* x86 GAS comments start with '#', aarch64 GAS with "//", and Apple's arm64 assembler with ';'.
+     None appears inside the operand syntaxes we look at, and compiler-generated assembly writes one
+     instruction per line, so ';' is never the statement separator GAS also allows it to be.
+
+     The ';' case is not cosmetic: Apple clang annotates loop headers as
+     [LBB0_7: ; =>This Inner Loop Header: Depth=1], and a line that does not END in ':' is not
+     classified as a label, so every backward branch to it is discarded and macOS reports no
+     recognizable loops -- the third distinct Mach-O detail to silence this census wholesale, after
+     the dot-less labels and the checksummed [.file]. *)
+  let s = match String.substr_index s ~pattern:"//" with Some i -> String.prefix s i | None -> s in
+  let s = match String.index s ';' with Some i -> String.prefix s i | None -> s in
+  match String.index s '#' with Some i -> String.prefix s i | None -> s
+
+let classify_line raw =
+  let s = strip_comment raw in
+  let trimmed = String.strip s in
+  if String.is_empty trimmed then None
+  else if
+    (not (Char.is_whitespace raw.[0]))
+    && String.is_suffix trimmed ~suffix:":"
+    (* A label, including the compiler-internal [.L]/[.LVL]/[.LBB] ones, is written at column 0;
+       directives and instructions are indented. *)
+  then Some (Label (String.drop_suffix trimmed 1))
+  else if String.is_prefix trimmed ~prefix:"." then
+    Some
+      (Directive
+         (String.split_on_chars trimmed ~on:[ ' '; '\t' ]
+         |> List.filter ~f:(fun w -> not (String.is_empty w))))
+  else
+    match String.lsplit2 trimmed ~on:'\t' with
+    | Some (m, rest) -> Some (Insn { mnemonic = String.strip m; rest = String.strip rest })
+    | None -> (
+        match String.lsplit2 trimmed ~on:' ' with
+        | Some (m, rest) -> Some (Insn { mnemonic = String.strip m; rest = String.strip rest })
+        | None -> Some (Insn { mnemonic = trimmed; rest = "" }))
+
+(* {2 Mnemonic classification}
+
+   [v]-prefixed VEX/EVEX forms are stripped once, and an EVEX mask suffix ([{%k1}], [{z}]) lives in
+   the operands rather than the mnemonic, so the suffix test below is on the plain mnemonic. *)
+
+let x86_fp_suffix m =
+  let m = if String.is_prefix m ~prefix:"v" then String.drop_prefix m 1 else m in
+  (* [push]/[pop] would otherwise read as scalar-single-precision by their last two characters. *)
+  if String.is_prefix m ~prefix:"push" || String.is_prefix m ~prefix:"pop" then None
+  else if String.length m < 3 then None
+  else
+    match String.suffix m 2 with
+    | ("ps" | "pd" | "ph") as s -> Some (`Packed, s)
+    | ("ss" | "sd" | "sh") as s -> Some (`Scalar, s)
+    | _ -> None
+
+let packed_integer_mnemonic m =
+  let m = if String.is_prefix m ~prefix:"v" then String.drop_prefix m 1 else m in
+  String.is_prefix m ~prefix:"movdq"
+  || List.exists
+       [ "pand"; "pandn"; "por"; "pxor"; "pcmp"; "punpck"; "pblend"; "pshuf"; "pinsr"; "pextr" ]
+       ~f:(fun p -> String.is_prefix m ~prefix:p)
+
+let has_substr s ~sub = String.is_substring s ~substring:sub
+
+(* An aarch64 operand in vector-lane form ([v3.2d], [v10.16b]) or a full 128-bit register ([q7]).
+   Written as a scan rather than a regex to keep this module's dependencies at [base]. *)
+let aarch64_vector_operand rest =
+  let n = String.length rest in
+  let rec scan i =
+    if i >= n then false
+    else if Char.equal rest.[i] 'v' && i + 1 < n && Char.is_digit rest.[i + 1] then
+      (* v<digits>.<digits><lane letter> *)
+      let rec digits j = if j < n && Char.is_digit rest.[j] then digits (j + 1) else j in
+      let j = digits (i + 1) in
+      if j < n && Char.equal rest.[j] '.' then true else scan j
+    else if
+      Char.equal rest.[i] 'q'
+      && i + 1 < n
+      && Char.is_digit rest.[i + 1]
+      && (i = 0 || not (Char.is_alphanum rest.[i - 1]))
+    then true
+    else scan (i + 1)
+  in
+  scan 0
+
+let aarch64_scalar_fp rest =
+  let n = String.length rest in
+  let rec scan i =
+    if i >= n then false
+    else
+      let c = rest.[i] in
+      if
+        (Char.equal c 's' || Char.equal c 'd' || Char.equal c 'h')
+        && i + 1 < n
+        && Char.is_digit rest.[i + 1]
+        && (i = 0 || not (Char.is_alphanum rest.[i - 1]))
+      then true
+      else scan (i + 1)
+  in
+  scan 0
+
+let is_vector_insn ~mnemonic ~rest =
+  match x86_fp_suffix mnemonic with
+  | Some (`Packed, _) -> true
+  | Some (`Scalar, _) -> false
+  | None ->
+      packed_integer_mnemonic mnemonic
+      || has_substr rest ~sub:"%ymm" || has_substr rest ~sub:"%zmm"
+      || aarch64_vector_operand rest
+
+let is_scalar_fp_insn ~mnemonic ~rest =
+  match x86_fp_suffix mnemonic with
+  | Some (`Scalar, _) -> true
+  | Some (`Packed, _) -> false
+  | None ->
+      (* aarch64: an [f...] instruction whose operands are scalar FP registers. [fcmp s0, s0] and
+         [fcsel s1, s2, s3, ne] are what a scalarized lane loop leaves behind. *)
+      String.is_prefix mnemonic ~prefix:"f"
+      && (not (aarch64_vector_operand rest))
+      && aarch64_scalar_fp rest
+
+let is_stack_ref ~rest =
+  List.exists [ "%rsp"; "%rbp"; "%esp"; "%ebp"; "[sp"; "[x29"; "sp,"; "x29," ] ~f:(fun p ->
+      has_substr rest ~sub:p)
+
+let call_target ~mnemonic ~rest =
+  if String.equal mnemonic "call" || String.equal mnemonic "callq" || String.equal mnemonic "bl" then
+    let target = String.strip rest in
+    let target =
+      match String.substr_index target ~pattern:"@" with
+      | Some i -> String.prefix target i
+      | None -> target
+    in
+    let target = String.strip target in
+    (* Mach-O prefixes every C symbol with an underscore, so a libm call Apple clang leaves in an
+       accumulator loop is [callq _fmaxf] and would not match [libm_names]' [fmaxf]. Left
+       unstripped, the macOS column reports ZERO libm calls and passes the central gh-ocannl-649
+       claim while containing exactly the regression it exists to catch -- a green that checked
+       nothing, which is the failure mode this whole test is shaped against. *)
+    Some (String.chop_prefix_if_exists target ~prefix:"_")
+  else None
+
+(* The aarch64 condition codes, as an explicit list rather than a prefix test, because the
+   mnemonics a prefix test would sweep in are the ones that must NOT count: [bl] and [blr] are
+   calls, [br] is an indirect jump with no label operand. GNU as accepts both [b.ne] and [bne] and
+   gcc emits the SECOND -- which is how this started out recognizing no loop at all on either
+   aarch64 column, every anchor reported missing across three widths and two optimization levels
+   (the "no loop carried the anchor" reading is a failure precisely so that a gap like this one
+   surfaces as a red run rather than as a quiet column of absences). *)
+let aarch64_conds =
+  [ "eq"; "ne"; "cs"; "hs"; "cc"; "lo"; "mi"; "pl"; "vs"; "vc"; "hi"; "ls"; "ge"; "lt"; "gt"; "le";
+    "al" ]
+
+let is_cond mnemonic ~prefix =
+  match String.chop_prefix mnemonic ~prefix with
+  | Some c -> List.mem aarch64_conds c ~equal:String.equal
+  | None -> false
+
+let is_branch ~mnemonic =
+  (* x86 conditional and unconditional jumps; aarch64 [b], [b<cc>]/[b.<cc>] and the
+     compare-and-branch forms. *)
+  String.is_prefix mnemonic ~prefix:"j"
+  || String.equal mnemonic "b"
+  || is_cond mnemonic ~prefix:"b."
+  || is_cond mnemonic ~prefix:"b"
+  || List.mem [ "cbz"; "cbnz"; "tbz"; "tbnz" ] mnemonic ~equal:String.equal
+
+(* The branch's label operand is its last one ([b .L3], [cbnz w0, .L5], [jne .L2]). It is returned
+   UNFILTERED and {!backward_edges} decides whether it names a label, rather than being screened
+   here for a leading [.]: that prefix is an ELF-assembler convention, and Apple's assembler spells
+   its compiler-local labels [LBB0_9] with no dot at all. Screening on it rejected every branch
+   target on Darwin, which does not read as "this ISA is unsupported" -- it reads as a file with no
+   loops in it, i.e. every anchor missing at once, on a platform AGENTS.md supports and CI builds.
+   The label table is the honest filter: an operand that is not a label is not in it. *)
+let branch_target ~rest =
+  String.split_on_chars rest ~on:[ ','; ' '; '\t' ]
+  |> List.filter ~f:(fun w -> not (String.is_empty w))
+  |> List.last
+
+(** {1 Source anchoring} *)
+
+(** [anchor_lines ~source ~patterns] is the set of 1-based line numbers of [source] containing any
+    of [patterns]. This is how a caller names the construct to census -- the accumulator combine,
+    the FMA update -- without depending on which preprocessor arm the target selected: list a
+    substring of every arm and the one that survived is the one whose lines the assembly mentions.
+*)
+let anchor_lines ~source ~patterns =
+  String.split_lines source
+  |> List.filter_mapi ~f:(fun i l ->
+         if List.exists patterns ~f:(fun p -> has_substr l ~sub:p) then Some (i + 1) else None)
+  |> Set.of_list (module Int)
+
+(** {1 The census itself} *)
+
+(* The DWARF file number standing for [basename]: [.file N "path"] entries name every header the
+   kernel included, and an inline function from [math.h] would otherwise contribute anchor lines
+   that collide with the kernel's own numbering. *)
+let source_file_numbers lines ~basename =
+  List.filter_map lines ~f:(function
+    | Some (Directive (".file" :: num :: rest)) -> (
+        match Int.of_string_opt num with
+        | None -> None
+        | Some n ->
+            (* Every QUOTED field is a candidate path, and any one of them ending in the basename
+               settles it. Not [List.last_exn rest]: a [.file] directive has three shapes here --
+               [.file N "path"], gcc's two-field [.file 0 "dir" "path"], and clang's
+               [.file 0 "dir" "path" md5 0x<digest>] -- and taking the last token reads the DIGEST
+               as the path on the third, leaving no file number recognized, hence no anchor line
+               matched, hence [census] answering [None] for every row on any clang-based host.
+               Filtering on the quote is what tells a path field from the trailing metadata; the
+               checksum and the [md5] keyword are unquoted. (A directory containing a space splits
+               into tokens that no longer parse as quoted, which costs nothing: the FILENAME field
+               is the one the basename test needs, and it is a separate field in every shape.) *)
+            let quoted =
+              List.filter_map rest ~f:(fun tok ->
+                  if String.is_prefix tok ~prefix:"\"" then
+                    Some (String.strip tok ~drop:(fun c -> Char.equal c '"'))
+                  else None)
+            in
+            if List.exists quoted ~f:(fun path -> String.is_suffix path ~suffix:basename) then
+              Some n
+            else None)
+    | _ -> None)
+  |> Set.of_list (module Int)
+
+(** [census op_class ~asm ~source_basename ~anchor] is the innermost loop of [asm] whose body
+    carries a source line in [anchor], with that loop's instruction profile.
+
+    [None] means no loop carried the anchor -- the construct was hoisted, folded away, or never
+    emitted. That is a finding, not an absence of one: report it as a failure. *)
+let classify_asm asm = String.split_lines asm |> List.map ~f:classify_line |> Array.of_list
+
+(* Every backward branch is a loop edge; its body is the span from the target label to the branch.
+   Nested loops both span an anchor, so the smallest span is the innermost. *)
+let backward_edges lines =
+  let label_at = Hashtbl.create (module String) in
+  Array.iteri lines ~f:(fun i -> function
+    | Some (Label l) -> Hashtbl.set label_at ~key:l ~data:i | _ -> ());
+  Array.foldi lines ~init:[] ~f:(fun i acc -> function
+    | Some (Insn { mnemonic; rest }) when is_branch ~mnemonic -> (
+        match branch_target ~rest with
+        | Some t -> (
+            match Hashtbl.find label_at t with Some j when j < i -> (t, j, i) :: acc | _ -> acc)
+        | None -> acc)
+    | _ -> acc)
+
+(** [loop_edges ~asm] is how many loop edges the branch vocabulary recognized in [asm] at all,
+    which is what separates the two readings of a {!census} answering [None]: this construct was
+    hoisted or folded away (some other loop was still found), or {!is_branch} does not know this
+    ISA's spelling and no loop in the file was found. The second is a defect in this module and
+    reports every anchor missing at once, so it is worth a claim of its own. *)
+let loop_edges ~asm = List.length (backward_edges (classify_asm asm))
+
+let census op_class ~asm ~source_basename ~anchor =
+  let lines = classify_asm asm in
+  let files = source_file_numbers (Array.to_list lines) ~basename:source_basename in
+  let loops = backward_edges lines in
+  let carries (_, j, i) =
+    let rec go k =
+      if k > i then false
+      else
+        match lines.(k) with
+        | Some (Directive (".loc" :: fno :: lno :: _)) -> (
+            match (Int.of_string_opt fno, Int.of_string_opt lno) with
+            | Some f, Some l when Set.mem files f && Set.mem anchor l -> true
+            | _ -> go (k + 1))
+        | _ -> go (k + 1)
+    in
+    go j
+  in
+  let candidates = List.filter loops ~f:carries in
+  let best =
+    List.min_elt candidates ~compare:(fun (_, j1, i1) (_, j2, i2) ->
+        Int.compare (i1 - j1) (i2 - j2))
+  in
+  Option.map best ~f:(fun (label, j, i) ->
+      let libm = libm_names op_class in
+      let counts = ref { instructions = 0; vector_ops = 0; scalar_fp_ops = 0; libm_calls = 0; stack_refs = 0 } in
+      for k = j to i do
+        match lines.(k) with
+        | Some (Insn { mnemonic; rest }) ->
+            let c = !counts in
+            let c = { c with instructions = c.instructions + 1 } in
+            let c =
+              if is_vector_insn ~mnemonic ~rest then { c with vector_ops = c.vector_ops + 1 } else c
+            in
+            let c =
+              if is_scalar_fp_insn ~mnemonic ~rest then
+                { c with scalar_fp_ops = c.scalar_fp_ops + 1 }
+              else c
+            in
+            let c =
+              match call_target ~mnemonic ~rest with
+              | Some t when List.mem libm t ~equal:String.equal ->
+                  { c with libm_calls = c.libm_calls + 1 }
+              | _ -> c
+            in
+            let c = if is_stack_ref ~rest then { c with stack_refs = c.stack_refs + 1 } else c in
+            counts := c
+        | _ -> ()
+      done;
+      { loop_label = label; span = i - j; counts = !counts })
+
+(** A one-line profile, for the stderr table a census run prints. *)
+let to_line { loop_label; span; counts = { instructions; vector_ops; scalar_fp_ops; libm_calls; stack_refs } }
+    =
+  Printf.sprintf "%s span=%d insns=%d vector=%d scalar_fp=%d libm_calls=%d stack=%d" loop_label span
+    instructions vector_ops scalar_fp_ops libm_calls stack_refs

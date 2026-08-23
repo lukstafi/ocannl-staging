@@ -5,5 +5,7 @@ vectorized fma dot parity: true
 dot renders as accumulator chains (CPU) or serially (GPU): true
 vectorized max parity: true
 max renders as accumulator chains (CPU) or serially (GPU): true
+max keeps the extremum past a NaN operand, as fmax does: true
+min keeps the extremum past a NaN operand, as fmin does: true
 strided accumulation parity (serial fallback): true
 strided accumulation declines chains and emits no pragma: true

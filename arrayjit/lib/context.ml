@@ -5,6 +5,7 @@ module Nd = Ir.Ndarray
 module Idx = Ir.Indexing
 module BI = Ir.Backend_intf
 module Backends_deprecated = Backends
+module Cc_backend = Cc_backend
 
 (* The backend context rides in [Backends.wrapped_context] -- a closed disjunction over the backend
    singletons' context types (no existential): [Backends.query]/[Backends.with_backend] dispatch

@@ -2153,6 +2153,22 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ ; ocannl-backend: cc -- censuses the cc backend's C emission and compiles it under foreign
+ ; -march flags; the emit children are spawned with OCANNL_BACKEND=cc forced, and the driver
+ ; itself never creates a context, so there is nothing here for an ambient backend to select.
+ (name cc_march_census)
+ (package neural_nets_lib)
+ (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
+  (env_var OCANNL_CC_BACKEND_COMPILER_COMMAND)
+  (env_var AARCH64_CROSS_GCC)
+  ocannl_config)
+ (modules cc_march_census)
+ (libraries base ocannl stdio unix arrayjit.verdict ll_test test_utils)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  (name cpu_simd_reduction)
  (package neural_nets_lib)
  (deps
