@@ -1,0 +1,36 @@
+ok: golden -- a C kernel is a member by its markers, under any name
+ok: golden -- a CUDA kernel names the launch vocabulary
+ok: golden -- a Metal kernel names its address spaces
+ok: golden -- a low-level IR dump is a member by its loop headers and assignments
+ok: golden -- a routine log carries both the IR line and the C rendering
+ok: golden -- a snapshot is a member by its extension whatever it holds
+ok: golden -- a declaring extension names the substrate; markers stay as evidence
+ok: golden -- HIP spells CUDA's launch vocabulary, and is still HIP
+ok: golden -- a .hip snapshot is its own family, not CUDA's
+ok: golden -- an .ll snapshot is declared even when the dump is empty
+ok: golden -- a verdict quoting the kernel's vocabulary is prose, not Metal
+ok: golden -- a claim about how a constant is spelled is not a constant
+ok: golden -- a PASS column is a verdict however it reads
+ok: golden -- a memory-mode table is not device code
+ok: golden -- a numeric table of shapes is not a loop nest
+ok: golden -- a failure line is a verdict too
+ok: source -- assert_emits pins its contains argument
+ok: source -- assert_omits pins the fragment that must be absent
+ok: source -- the has idiom: a predicate closing over the source
+ok: source -- a predicate taking the source as a parameter pins at a tainted call site
+ok: source -- the same predicate over text that is not generated source pins nothing
+ok: source -- a substring test straight against the read is a pin
+ok: source -- a sprintf format is a pinned fragment with a hole in it
+ok: source -- text the scan cannot name marks the itemisation partial, without losing the file
+ok: source -- taint reaches through a helper that returns the source
+ok: source -- a routine name is not a pinned fragment
+ok: source -- a test opening build_files/ itself is a member, and is told apart
+ok: source -- counting occurrences with ~pattern pins the fragment counted
+ok: source -- a concatenation with a literal part is a fragment with a hole in it
+ok: source -- the haystack may reach the test through a local binding
+ok: source -- a predicate over the backend's NAME pins nothing, however it is spelled
+ok: source -- a source reached through a tuple pattern is still a source
+ok: source -- a test binding its own build_file is not reading the artifact directory
+ok: source -- the qualified Utils.build_file is a read of the artifact directory
+ok: source -- a test that reads no generated source is not a member
+ok: source -- naming the reader in a comment is not reading it

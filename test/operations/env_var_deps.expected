@@ -79,6 +79,7 @@ Ambient environment gates, by dune file and every alias whose build runs one:
   test/operations/dune                     @runtest-autotune_routine_name
   test/operations/dune                     @runtest-bandwidth_calibration
   test/operations/dune                     @runtest-cache_dir_ignores
+  test/operations/dune                     @runtest-codegen_text_inventory
   test/operations/dune                     @runtest-config_dep_completeness
   test/operations/dune                     @runtest-config_var_fatal_spelling
   test/operations/dune                     @runtest-config_var_spellings
