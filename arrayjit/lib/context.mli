@@ -230,7 +230,11 @@ val static_properties : t -> Sexp.t
     {!hardware_limits} derives from. Not redundant with {!hardware_limits}: what a gate compares
     against may be a device query on one backend and an architectural constant on another, so the
     raw props do not tell you what the gate uses and the derived limits do not tell you whether the
-    underlying query answered. Printed together by [bin/device_props.ml] (gh-ocannl-684). *)
+    underlying query answered. Printed together by [bin/device_props.ml] (gh-ocannl-684).
+
+    One [Sexp.message]-shaped [device] entry per device under a group atom, the same shape on every
+    backend: see {!Ir.Backend_intf.parse_static_properties}, which states the contract and is the
+    single reader of it (gh-ocannl-710). *)
 
 val hardware_limits : t -> Ir.Backend_intf.hardware_limits
 (** The backend's conservative per-workgroup device limits (all-[None] on backends that do not bind

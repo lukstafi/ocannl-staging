@@ -306,19 +306,20 @@ module Sync (Backend : For_add_scheduler) = struct
   let is_idle _device = true
   let await _device = ()
 
+  (* The single CPU device, [Sexp.message]-shaped like every other backend's entry
+     (gh-ocannl-710): the pairs used to sit one nesting level deeper, wrapped in a list of their
+     own. See [Backend_intf.parse_static_properties] for the contract. *)
   let static_properties () =
     Sexp.List
       [
-        Sexp.Atom "cc_devices";
-        Sexp.List
+        Sexp.Atom (name ^ "_devices");
+        Sexp.message "device"
           [
-            Sexp.Atom "device";
-            Sexp.List
-              [
-                Sexp.List [ Sexp.Atom "device_name"; Sexp.Atom "CPU" ];
-                Sexp.List [ Sexp.Atom "device_ordinal"; Sexp.Atom "0" ];
-                Sexp.List [ Sexp.Atom "threads"; Sexp.Atom "1" ];
-              ];
+            ("device_name", Sexp.Atom "CPU");
+            ("device_ordinal", [%sexp_of: int] 0);
+            (* Tasks run synchronously on the calling thread; see the [Multidev] note on why this
+               is not the kernel-level width. *)
+            ("threads", [%sexp_of: int] 1);
           ];
       ]
 
