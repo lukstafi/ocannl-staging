@@ -146,10 +146,19 @@ let seed_singleton_preserved () : bool =
 let () =
   let p1 = run ~n_shards:1 in
   let p2 = run ~n_shards:2 in
-  Stdio.printf "w after 1-shard step  = [%s]\n"
-    (String.concat ~sep:" " (Array.to_list (Array.map p1 ~f:(Printf.sprintf "%.6f"))));
-  Stdio.printf "w after 2-shard step  = [%s]\n"
-    (String.concat ~sep:" " (Array.to_list (Array.map p2 ~f:(Printf.sprintf "%.6f"))));
+  (* Exact parameter digits to stderr (gh-ocannl-725): the two runs reach w by summing the same
+     gradient terms in DIFFERENT orders -- that is the whole point of the comparison -- so the last
+     of six printed decimals of a single-precision value near 5.0 is within one ulp of flipping.
+     stdout keeps the tolerance claim below, which is what the two lines were there to show. *)
+  let show p = String.concat ~sep:" " (Array.to_list (Array.map p ~f:(Printf.sprintf "%.6f"))) in
+  Stdio.eprintf "w after 1-shard step  = [%s] (not part of the golden)\n%!" (show p1);
+  Stdio.eprintf "w after 2-shard step  = [%s] (not part of the golden)\n%!" (show p2);
+  (* An absolute pin to go with the parity claim, so the pair cannot both hold on a broken run that
+     computes the same wrong thing twice: one step of lr=0.05 on w=0.5 against the closed-form
+     gradient -sum 2*(w*x-y)*x = -90 lands w on 0.5 + 4.5. *)
+  let expected_w = 5.0 in
+  Verdict.pf "1-shard step lands w on the closed-form %g (within 1e-4)" expected_w
+    (Array.length p1 = 1 && Float.(abs (p1.(0) - expected_w) < 1e-4));
   let close = Array.for_all2_exn p1 p2 ~f:(fun a b -> Float.(abs (a - b) < 1e-4)) in
   Verdict.p "data-parallel parity with single-shard baseline" close;
   Verdict.p "driver routes per-shard seed into RNG" (driver_routes_seed_into_shards ());

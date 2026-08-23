@@ -196,6 +196,14 @@ let () =
      BatchNorm + Kaiming-normal init trade peak convergence for training
      stability — losses here plateau ~2.71 vs ~2.32 in mlp_names.ml. *)
   let epoch_loss_limit epoch = if epoch = 0 then 5.0 else if epoch < 5 then 3.0 else 2.8 in
+  (* Two-sided, because every relocated claim here is an upper bound and an upper bound is
+     one-sided: a dropped negation or a backend sign error yields a FINITE NEGATIVE cross-entropy
+     that clears every threshold below, and only the digits this commit moved to stderr would have
+     caught it (Codex round 1, P2). Cross-entropy is -log p >= 0 by construction; the tolerance is
+     for accumulated rounding at exactly zero. Accumulated across the epochs and the three
+     evaluation means, and claimed once after them. *)
+  let valid_loss x = Float.(is_finite x && x >= -1e-3) in
+  let all_valid = ref true in
   for epoch = 0 to epochs - 1 do
     let epoch_loss = ref 0. in
     for batch = 0 to n_batches - 1 do
@@ -210,8 +218,13 @@ let () =
     done;
     let mean_loss = !epoch_loss /. Float.of_int n_batches in
     let limit = epoch_loss_limit epoch in
-    Verdict.pf "Epoch %d, mean train loss=%.4f below %g" epoch mean_loss limit
-      Float.(mean_loss < limit)
+    (* Exact digits to stderr, threshold claim on stdout (gh-ocannl-725): a trained mean arrives
+       through a long floating-point reduction, so its low decimals depend on reduction order --
+       backend, SIMD width, worker count -- and NO fixed print precision is portable. The property
+       the number was there to show is the bound, and that is what the golden keeps. *)
+    if not (valid_loss mean_loss) then all_valid := false;
+    eprintf "Epoch %d, mean train loss=%.4f (not part of the golden)\n%!" epoch mean_loss;
+    Verdict.pf "Epoch %d, mean train loss below %g" epoch limit Float.(mean_loss < limit)
   done;
 
   (* === Evaluation on train/dev/test === Build a separate forward-only subgraph with fresh
@@ -275,9 +288,15 @@ let () =
   let train_below = 2.8 in
   let dev_below = 2.8 in
   let test_below = 2.8 in
-  Verdict.pf "Final train loss=%.4f train_below" final_train Float.(final_train < train_below);
-  Verdict.pf "Final dev   loss=%.4f dev_below" final_dev Float.(final_dev < dev_below);
-  Verdict.pf "Final test  loss=%.4f test_below" final_test Float.(final_test < test_below);
+  (* Digits to stderr, bounds on stdout -- see the epoch loop above (gh-ocannl-725). *)
+  eprintf "Final losses (not part of the golden): train=%.4f dev=%.4f test=%.4f\n%!" final_train
+    final_dev final_test;
+  Verdict.pf "Final train loss below %g" train_below Float.(final_train < train_below);
+  Verdict.pf "Final dev   loss below %g" dev_below Float.(final_dev < dev_below);
+  Verdict.pf "Final test  loss below %g" test_below Float.(final_test < test_below);
+  List.iter [ final_train; final_dev; final_test ] ~f:(fun l ->
+      if not (valid_loss l) then all_valid := false);
+  Verdict.p "every epoch and evaluation mean is a finite, nonnegative cross-entropy" !all_valid;
 
   (* === Generation === Autoregressive sampling from a rolling [block_size] context. *)
   let infer_input =
@@ -384,20 +403,50 @@ let () =
   let in_alphabet = Array.for_all names ~f:(String.for_all ~f:Char.is_alpha) in
   Verdict.pf "Generated %d names, all chars in alphabet" (Array.length names) in_alphabet;
 
-  (* Head of the learned next-character distribution at the start context. Between the two builds
-     that disagree on the sampled text, these probabilities drift by ~3e-4, against gaps of ~0.08
-     between the top three characters — so two printed decimals carry the signal with ~20x
-     margin. *)
+  (* Head of the learned next-character distribution at the start context. The probabilities
+     themselves drift by ~3e-4 between builds that disagree on the sampled text, and a fixed print
+     precision only moves the boundary at which that drift shows: two decimals of 0.2749 and 0.2750
+     differ (gh-ocannl-725). What is robust here is the RANKING and its margins — the gaps between
+     the top three characters are ~0.08, some 200x the drift — so the digits go to stderr and stdout
+     keeps the ordered letters plus the separation that makes the order meaningful. Both claims
+     discriminate: a model that failed to learn the letter-frequency head would rank differently, and
+     a collapsed (near-uniform) distribution would fail the margin. *)
   set_ctx_one_hot (Array.create ~len:block_size dot_idx);
   let start_probs, _dice = next_probs () in
   let ranked =
     Array.mapi start_probs ~f:(fun i p -> (p, i))
     |> Array.sorted_copy ~compare:(fun (p1, _) (p2, _) -> Float.descending p1 p2)
   in
-  let top3 =
-    Array.sub ranked ~pos:0 ~len:3
-    |> Array.map ~f:(fun (p, i) ->
-        Printf.sprintf "%c=%.2f" (List.nth_exn Dataprep.Names.letters_with_dot i) p)
-    |> String.concat_array ~sep:" "
+  let top3 = Array.sub ranked ~pos:0 ~len:3 in
+  let letter_of i = List.nth_exn Dataprep.Names.letters_with_dot i in
+  eprintf "Start-context top-3 next chars (not part of the golden): %s\n%!"
+    (top3
+    |> Array.map ~f:(fun (p, i) -> Printf.sprintf "%c=%.2f" (letter_of i) p)
+    |> String.concat_array ~sep:" ");
+  let letters =
+    top3 |> Array.map ~f:(fun (_, i) -> String.of_char (letter_of i)) |> String.concat_array ~sep:" "
   in
-  printf "Start-context top-3 next chars: %s\n%!" top3
+  Verdict.p "Start-context top-3 next chars are a, e, i in that order" (String.equal letters "a e i");
+  let min_gap = 0.05 in
+  let gaps_wide =
+    Array.for_alli top3 ~f:(fun k (p, _) ->
+        k = 0
+        ||
+        let prev = fst top3.(k - 1) in
+        Float.(prev -. p > min_gap))
+  in
+  Verdict.pf "Start-context top-3 probabilities are separated by more than %g" min_gap gaps_wide;
+  (* Ranking and separation are both SHAPE claims: a head of 0.70 / 0.20 / 0.08 satisfies each of
+     them while being severely distorted, and the two printed decimals used to rule that out (Codex
+     round 1, P2). So keep a magnitude check too, as coarse per-rank bands -- each is roughly a
+     factor of two wide around the observed 0.28 / 0.17 / 0.10, some hundreds of times the ~3e-4
+     cross-build drift, so it is portable while still rejecting a collapsed or a spiked head. *)
+  let bands = [| (0.15, 0.45); (0.08, 0.30); (0.04, 0.20) |] in
+  let in_bands =
+    Array.for_alli top3 ~f:(fun k (p, _) ->
+        let lo, hi = bands.(k) in
+        Float.(p >= lo && p < hi))
+  in
+  Verdict.p
+    "Start-context top-3 probabilities lie in their coarse bands (0.15-0.45, 0.08-0.30, 0.04-0.20)"
+    in_bands

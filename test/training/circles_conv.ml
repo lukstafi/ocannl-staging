@@ -133,6 +133,13 @@ let () =
 
   printf "\nStarting training for %d epochs (%d steps)...\n%!" epochs total_steps;
 
+  let logged_losses = ref [] in
+  let final_avg = ref Float.infinity in
+  (* Two-sided, because an upper bound alone is one-sided: if `neg (log correct_prob)` lost its
+     negation, or a backend emitted the wrong sign, the trajectory would still fall and still land
+     under 0.3, and only the digits this commit removed would have caught it (Codex round 1, P2).
+     Checked on EVERY epoch, not just the logged ones -- the golden used to show a tenth of them. *)
+  let all_valid = ref true in
   for epoch = 1 to epochs do
     Train.sequential_loop sgd_routine.Context.bindings ~f:(fun () ->
         Train.run ctx sgd_routine;
@@ -140,14 +147,25 @@ let () =
     (* The only device sync of the epoch: read the accumulated loss sum, then reset it. *)
     let epoch_loss = ref (Context.get_values ctx loss_accum.Tensor.value).(0) in
     ignore (Context.set_values ctx loss_accum.Tensor.value [| 0. |] : Context.t);
-    (* One decimal: cross-backend float drift over thousands of steps can flip the second decimal at
-       a rounding boundary (cc vs metal differed at 0.215+-drift), and the expected output must stay
-       byte-identical across backends. *)
-    if epoch % 10 = 0 && (epoch <= 100 || epochs - epoch <= 100) then
-      printf "Epoch %d: avg loss = %.1f\n%!" epoch (!epoch_loss /. Float.of_int n_batches);
-    if epoch = epochs then
-      Verdict.p "Final avg loss below threshold"
-        Float.(!epoch_loss /. Float.of_int n_batches < 0.3)
+    (* Exact trajectory digits to stderr (gh-ocannl-725): cross-backend float drift over thousands
+       of steps reaches whatever decimal a fixed precision prints, and lowering the precision only
+       relocates the tie -- cifar_conv's %.1f epoch-30 mean landed on one (1.04 on cc, 1.05 on cuda)
+       and no promotion could serve both backends. The portable stdout record is the pair of claims
+       below: the loss fell across the logged epochs, and the final mean is under threshold. *)
+    let avg = !epoch_loss /. Float.of_int n_batches in
+    if not Float.(is_finite avg && avg >= -1e-3) then all_valid := false;
+    if epoch % 10 = 0 && (epoch <= 100 || epochs - epoch <= 100) then (
+      logged_losses := (epoch, avg) :: !logged_losses;
+      eprintf "Epoch %d: avg loss = %.2f (not part of the golden)\n%!" epoch avg);
+    if epoch = epochs then final_avg := avg
   done;
+  (match List.rev !logged_losses with
+  | [] -> ()
+  | (first_epoch, first_loss) :: _ as logged ->
+      let last_epoch, last_loss = List.last_exn logged in
+      Verdict.pf "avg loss fell from epoch %d to epoch %d" first_epoch last_epoch
+        Float.(last_loss < first_loss));
+  Verdict.p "every epoch's avg loss is a finite, nonnegative cross-entropy" !all_valid;
+  Verdict.p "Final avg loss below threshold" Float.(!final_avg < 0.3);
 
   printf "\nTraining complete!\n%!"
