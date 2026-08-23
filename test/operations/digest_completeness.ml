@@ -140,12 +140,12 @@ let () =
      quietly smaller census (gh-ocannl-592). By NAME: the file count was a tally of the repository,
      so every correct addition under these directories owed a promote round for it, and two branches
      adding a file to the same directory merged cleanly to a wrong total (gh-ocannl-701). What the
-     count was for is kept by a floor per directory, asserted below; the exact numbers go to stderr,
+     count was for is kept by a floor per scan root, asserted below; the exact numbers go to stderr,
      which a `(test)` stanza's golden does not see. *)
   Config_key_scan.report_counts source_files;
   let floor_violations = Config_key_scan.floor_violations source_files in
   List.iter floor_violations ~f:fail;
-  printf "Sources scanned: %s\n" (String.concat ~sep:", " (Config_key_scan.directories source_files));
+  printf "Sources scanned: %s\n" (String.concat ~sep:", " (Config_key_scan.scan_roots source_files));
   (* The reviewable part: the classification itself, and which keys the scan found at codegen. The
      census counts both spellings of a read, [get_global_arg] call sites and [Utils.settings]
      fields, so a settings-borne key cannot slip past check 3 (Codex P2 on PR #337). *)
@@ -159,7 +159,7 @@ let () =
       List.iter (List.sort keys ~compare:String.compare) ~f:(fun key ->
           printf "  %s%s\n" key (if Set.mem codegen_read key then " [read at codegen]" else "")));
   printf "\n";
-  Verdict.p "every scanned directory meets its source-count floor" (List.is_empty floor_violations);
+  Verdict.p "every scanned root meets its source-count floor" (List.is_empty floor_violations);
   if not (Verdict.any_failed ()) then
     printf "OK: %d config keys classified against %d cache-key components.\n"
       (Set.length classified) (List.length SC.key_components)

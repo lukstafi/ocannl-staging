@@ -283,7 +283,7 @@ let () =
          "exempted functions that no longer forward a config key -- drop them from the exemption \
           list: %s"
          (String.concat ~sep:", " @@ Set.to_list stale));
-  (* What the census covers, as a floor per directory rather than as an exact count: the count was a
+  (* What the census covers, as a floor per scan root rather than as an exact count: the count was a
      tally of the repository, and every correct addition anywhere under the globbed directories owed
      a promote round for it (gh-ocannl-701). A floor keeps what the count was for -- a glob that
      stops matching goes to zero -- and the exact numbers go to stderr, which a `(test)` stanza's
@@ -291,7 +291,7 @@ let () =
   Config_key_scan.report_counts source_files;
   let floor_violations = Config_key_scan.floor_violations source_files in
   List.iter floor_violations ~f:fail;
-  Verdict.p "every scanned directory meets its source-count floor" (List.is_empty floor_violations);
+  Verdict.p "every scanned root meets its source-count floor" (List.is_empty floor_violations);
   if not (Verdict.any_failed ()) then (
     printf
       "OK: %d call-site keys, all in reference file and registry; registry and reference agree on \
@@ -312,4 +312,4 @@ let () =
        a fact about it (gh-ocannl-701). The counts are on stderr, and the floors under them are
        asserted above. *)
     printf "OK: scanned %s.\n"
-      (String.concat ~sep:", " (Config_key_scan.directories source_files)))
+      (String.concat ~sep:", " (Config_key_scan.scan_roots source_files)))

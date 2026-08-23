@@ -124,12 +124,16 @@ that they earn a lookup rather than always-loaded space.
   directories write different text on that one line and conflict, which is loud and mechanical,
   while two adding files in the SAME directory write identical text, merge cleanly, and leave the
   total wrong by one for the next unrelated PR to inherit as a red test it did not cause. What
-  replaced it is `Config_key_scan.directory_floors`, a hand-written lower bound per globbed
-  directory, asserted through `Verdict` and itemised on failure so the message names the directory
-  standing on nothing; the goldens keep the directory NAMES, since the globs' reach is a fact about
-  the repository and a new or vanished directory still reads as a diff, and the counts go to stderr.
+  replaced it is `Config_key_scan.scan_root_floors`, a hand-written lower bound per globbed ROOT,
+  asserted through `Verdict` and itemised on failure so the message names the root standing on
+  nothing; the goldens keep the root NAMES, since the globs' reach is a fact about the repository
+  and a new or vanished root still reads as a diff, and the counts go to stderr.
   Set such a floor well below the day's count and leave it there — the number to raise it to is
-  never "today's count", which is the tally coming back in a slower form.
+  never "today's count", which is the tally coming back in a slower form. Bucket by the configured
+  ROOT rather than by a path's own dirname, which is the trap a per-directory tally sets for its
+  replacement: these rules glob with `glob_files_rec`, so a source in a subdirectory would otherwise
+  open a bucket of its own — a new golden line, which is the promote round being removed, and under
+  no floor at all.
 - Where a check needs an EXEMPTION per site, prefer an in-place marker comment to a central list,
   and give it a grammar rigid enough to be wrong out loud (gh-ocannl-659, the XOR between
   `(env_var OCANNL_BACKEND)` and `; ocannl-backend: <word> -- <reason>`). Two reasons, and the

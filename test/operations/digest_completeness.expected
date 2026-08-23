@@ -157,5 +157,5 @@ execution-neutral -- host-side execution mechanics: where buffers sit, how many 
 execution-neutral -- memoization of toolchain probes: it changes how long resolving a setting takes, not what it resolves to -- and the resolved values are what the codegen tag records
   cc_backend_probe_cache [read at codegen]
 
-every scanned directory meets its source-count floor: true
+every scanned root meets its source-count floor: true
 OK: 113 config keys classified against 5 cache-key components.
