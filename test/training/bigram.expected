@@ -1,6 +1,6 @@
 bigrams: 228146
 input_size: 229000
-every batch and epoch loss is finite: true
+every batch and epoch loss is a finite, nonnegative cross-entropy: true
 epoch loss fell from epoch 0 to epoch 10: true
 final epoch loss below 600: true
 aimamiena

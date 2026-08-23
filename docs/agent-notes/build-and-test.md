@@ -507,3 +507,14 @@ that they earn a lookup rather than always-loaded space.
   with one that a wrong number fails. Nothing lints this — a `%.Nf` scan's false-positive rate on
   constants and dataset sizes did not justify another exemption list — so it is an audit rule for
   whoever adds the next training golden.
+- Two details of that conversion are what the digits were quietly doing, and both are easy to drop
+  (Codex found all seven instances of them in one round on PR #447). First: a pinned number is a
+  TWO-SIDED constraint, and the claim that replaces it usually is not. Every loss bound in the
+  makemore and conv tests was an upper bound, so a dropped negation or a backend sign error — a
+  finite NEGATIVE cross-entropy — cleared all of them while the trajectory still fell; cross-entropy
+  is `-log p >= 0` by construction, so each of those tests now claims validity over the whole
+  trajectory beside the thresholds. The same applies to a claim about SHAPE: `mlp_bn_names`' top-3
+  ranking and separation both hold for a head of 0.70 / 0.20 / 0.08, so coarse magnitude bands went
+  in alongside them. Ask what range the removed digits excluded, and claim that range. Second: mark
+  every relocated line `(not part of the golden)` — stderr and stdout interleave in a terminal, and
+  without the tag a reader cannot tell an informational number from an asserted one.

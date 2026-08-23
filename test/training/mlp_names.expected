@@ -18,6 +18,7 @@ Epoch 14, mean train loss below 2.55: true
 Final train loss below 2.5: true
 Final dev   loss below 2.55: true
 Final test  loss below 2.55: true
+every epoch and evaluation mean is a finite, nonnegative cross-entropy: true
 haderganoth
 kimon
 lenghpillah

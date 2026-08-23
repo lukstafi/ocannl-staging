@@ -91,7 +91,13 @@ let () =
      epoch sum falls across training, and it lands under a threshold well inside the trained regime
      (a bigram model that learned nothing sits at 229000/1000 * ln 27 ~ 754). *)
   let epoch_losses = ref [] in
-  let all_finite = ref true in
+  (* Two-sided, because an upper bound alone is one-sided: a dropped negation or a backend sign
+     error yields a FINITE NEGATIVE cross-entropy that falls, stays under any threshold, and would
+     have been caught only by the digits this commit removed (Codex round 1, P2). Cross-entropy is
+     -log p >= 0 by construction, so a materially negative value is invalid whatever its magnitude;
+     the tolerance is for accumulated rounding at exactly zero, nothing more. *)
+  let valid_loss x = Float.(is_finite x && x >= -1e-3) in
+  let all_valid = ref true in
   for epoch = 0 to epochs do
     let epoch_loss = ref 0. in
     for batch = 0 to n_batches - 1 do
@@ -99,15 +105,16 @@ let () =
       Train.run ctx sgd_step;
       let loss = (ctx, batch_loss).@[0] in
       epoch_loss := !epoch_loss +. loss;
-      if not (Float.is_finite loss) then all_finite := false;
-      if batch % 100 = 0 then Stdio.eprintf "Epoch %d, batch %d, loss=%.4g\n%!" epoch batch loss
+      if not (valid_loss loss) then all_valid := false;
+      if batch % 100 = 0 then
+        Stdio.eprintf "Epoch %d, batch %d, loss=%.4g (not part of the golden)\n%!" epoch batch loss
     done;
-    if not (Float.is_finite !epoch_loss) then all_finite := false;
+    if not (valid_loss !epoch_loss) then all_valid := false;
     epoch_losses := !epoch_loss :: !epoch_losses;
-    Stdio.eprintf "Epoch %d, epoch loss=%.4g\n%!" epoch !epoch_loss
+    Stdio.eprintf "Epoch %d, epoch loss=%.4g (not part of the golden)\n%!" epoch !epoch_loss
   done;
   let epoch_losses = Array.of_list_rev !epoch_losses in
-  Verdict.p "every batch and epoch loss is finite" !all_finite;
+  Verdict.p "every batch and epoch loss is a finite, nonnegative cross-entropy" !all_valid;
   let first_loss = epoch_losses.(0) and last_loss = epoch_losses.(epochs) in
   Verdict.pf "epoch loss fell from epoch 0 to epoch %d" epochs Float.(last_loss < first_loss);
   let epoch_below = 600. in

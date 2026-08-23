@@ -135,6 +135,11 @@ let () =
 
   let logged_losses = ref [] in
   let final_avg = ref Float.infinity in
+  (* Two-sided, because an upper bound alone is one-sided: if `neg (log correct_prob)` lost its
+     negation, or a backend emitted the wrong sign, the trajectory would still fall and still land
+     under 0.3, and only the digits this commit removed would have caught it (Codex round 1, P2).
+     Checked on EVERY epoch, not just the logged ones -- the golden used to show a tenth of them. *)
+  let all_valid = ref true in
   for epoch = 1 to epochs do
     Train.sequential_loop sgd_routine.Context.bindings ~f:(fun () ->
         Train.run ctx sgd_routine;
@@ -148,9 +153,10 @@ let () =
        and no promotion could serve both backends. The portable stdout record is the pair of claims
        below: the loss fell across the logged epochs, and the final mean is under threshold. *)
     let avg = !epoch_loss /. Float.of_int n_batches in
+    if not Float.(is_finite avg && avg >= -1e-3) then all_valid := false;
     if epoch % 10 = 0 && (epoch <= 100 || epochs - epoch <= 100) then (
       logged_losses := (epoch, avg) :: !logged_losses;
-      eprintf "Epoch %d: avg loss = %.2f\n%!" epoch avg);
+      eprintf "Epoch %d: avg loss = %.2f (not part of the golden)\n%!" epoch avg);
     if epoch = epochs then final_avg := avg
   done;
   (match List.rev !logged_losses with
@@ -159,6 +165,7 @@ let () =
       let last_epoch, last_loss = List.last_exn logged in
       Verdict.pf "avg loss fell from epoch %d to epoch %d" first_epoch last_epoch
         Float.(last_loss < first_loss));
+  Verdict.p "every epoch's avg loss is a finite, nonnegative cross-entropy" !all_valid;
   Verdict.p "Final avg loss below threshold" Float.(!final_avg < 0.3);
 
   printf "\nTraining complete!\n%!"

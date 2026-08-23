@@ -192,6 +192,14 @@ let () =
   let epoch_loss_limit epoch =
     if epoch = 0 then 4.0 else if epoch < 5 then 3.0 else if epoch < 10 then 2.6 else 2.55
   in
+  (* Two-sided, because every relocated claim here is an upper bound and an upper bound is
+     one-sided: a dropped negation or a backend sign error yields a FINITE NEGATIVE cross-entropy
+     that clears every threshold below, and only the digits this commit moved to stderr would have
+     caught it (Codex round 1, P2). Cross-entropy is -log p >= 0 by construction; the tolerance is
+     for accumulated rounding at exactly zero. Accumulated across the epochs and the three
+     evaluation means, and claimed once after them. *)
+  let valid_loss x = Float.(is_finite x && x >= -1e-3) in
+  let all_valid = ref true in
   for epoch = 0 to epochs - 1 do
     let epoch_loss = ref 0. in
     for batch = 0 to n_batches - 1 do
@@ -210,6 +218,7 @@ let () =
        through a long floating-point reduction, so its low decimals depend on reduction order --
        backend, SIMD width, worker count -- and NO fixed print precision is portable. The property
        the number was there to show is the bound, and that is what the golden keeps. *)
+    if not (valid_loss mean_loss) then all_valid := false;
     eprintf "Epoch %d, mean train loss=%.4f (not part of the golden)\n%!" epoch mean_loss;
     Verdict.pf "Epoch %d, mean train loss below %g" epoch limit Float.(mean_loss < limit)
   done;
@@ -282,6 +291,9 @@ let () =
   Verdict.pf "Final train loss below %g" train_below Float.(final_train < train_below);
   Verdict.pf "Final dev   loss below %g" dev_below Float.(final_dev < dev_below);
   Verdict.pf "Final test  loss below %g" test_below Float.(final_test < test_below);
+  List.iter [ final_train; final_dev; final_test ] ~f:(fun l ->
+      if not (valid_loss l) then all_valid := false);
+  Verdict.p "every epoch and evaluation mean is a finite, nonnegative cross-entropy" !all_valid;
 
   (* === Generation === Autoregressive sampling from a rolling [block_size] context. *)
   let infer_input =

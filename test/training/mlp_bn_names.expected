@@ -18,6 +18,8 @@ Epoch 14, mean train loss below 2.8: true
 Final train loss below 2.8: true
 Final dev   loss below 2.8: true
 Final test  loss below 2.8: true
+every epoch and evaluation mean is a finite, nonnegative cross-entropy: true
 Generated 3 names, all chars in alphabet: true
 Start-context top-3 next chars are a, e, i in that order: true
 Start-context top-3 probabilities are separated by more than 0.05: true
+Start-context top-3 probabilities lie in their coarse bands (0.15-0.45, 0.08-0.30, 0.04-0.20): true
