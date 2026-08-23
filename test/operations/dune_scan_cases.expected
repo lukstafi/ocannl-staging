@@ -122,6 +122,12 @@ ok: raw stanzas -- a rule running a dep pform
 ok: raw stanzas -- a bare path
 ok: raw stanzas -- an extensionless explicit path
 ok: raw stanzas -- but a bare word is a tool on PATH
+ok: raw stanzas -- but handed a file this workspace builds, it is one both readers see
+ok: raw stanzas -- and a launcher pointed elsewhere counts for the same reason
+ok: raw stanzas -- a tool only reading them is the same text
+ok: raw stanzas -- a toolchain pform handed to one is not a workspace file
+ok: raw stanzas -- nor is an absolute path
+ok: raw stanzas -- one under an unresolvable chdir keeps both readings
 ok: raw stanzas -- a path elsewhere keeps its path
 ok: raw stanzas -- a comma in the path is part of it
 ok: raw stanzas -- several in one stanza
@@ -175,7 +181,7 @@ ok: raw stanzas -- but a named executable under one is still a run
 ok: raw stanzas -- two bare ones are two, and repeats collapse
 ok: raw stanzas -- a shell line alongside one is a different thing
 ok: raw stanzas -- a chdir under one still names where it runs
-ok: raw stanzas -- a binding resolving to no executable stays declined
+ok: raw stanzas -- a binding resolving to no executable stays unnamed, and the stanza still floored
 ok: raw stanzas -- a toolchain pform is not ours
 ok: raw stanzas -- an executable only depended on
 ok: raw stanzas -- one named in a comment
@@ -240,6 +246,10 @@ ok: backend rule -- a PATH tool under an unresolvable chdir is counted by neithe
 ok: backend rule -- a bare command under a rewritten PATH and an unresolvable chdir keeps its floor
 ok: backend rule -- nor is a shell line where no stanza runs anything
 ok: backend rule -- a marker on a library that runs nothing is still misplaced
+ok: backend rule -- an external command handed a workspace file is reported, with a floor under it
+ok: backend rule -- and passes with a marker, still floored
+ok: backend rule -- the same tool handed nothing of ours is counted by neither reader
+ok: backend rule -- a launcher pointed at a sibling directory keeps its floor
 ok: backend marker sentinel -- in a comment
 ok: backend marker sentinel -- inside a quoted argument, where it declares nothing
 ok: backend marker sentinel -- none at all

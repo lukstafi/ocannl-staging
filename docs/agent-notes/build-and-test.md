@@ -85,13 +85,16 @@ that they earn a lookup rather than always-loaded space.
   down too), and the exact numbers on STDERR, which a `(test)` stanza does not diff. Assert the floor through `Verdict`
   rather than as a golden line, so a scan that goes blind cannot be promoted back to green. And
   compare the floor to the walk STANZA BY STANZA, never as two totals over a file: the second reader
-  recognises fewer shapes than the walk — today an external command handed something the workspace
-  builds (`(run python3 %{dep:x.py})`) — so every stanza the walk places and the floor misses is a
+  recognises fewer shapes than the walk — today an action head nobody has classified — so every
+  stanza the walk places and the floor misses is a
   unit of SLACK that can absorb a different stanza silently dropping out of enforcement. Not
   theoretical — the tree stood at 296 placed against a floor of 295, one whole stanza of cover.
   Print the gap ITEMISED rather than as arithmetic: "one short" does not say which stanza is
   standing on the walk alone, and the class it belongs to is what decides whether closing it is
-  worth the loss of independence. Asked per stanza
+  worth the loss of independence. Once it IS closed, pin the relationship as the two sorted lists of
+  stanza IDENTITIES being equal, not as `placed >= floor`: identities say which stanza either reader
+  is alone on, both lists move together when a test is added anywhere, and the inequality passes on
+  any amount of slack (gh-ocannl-708). Asked per stanza
   the two answers are about the same stanza and cannot be traded against a third, and the narrower
   vocabulary degrades to a weaker floor just where it is narrow instead of to a hole elsewhere. Note
   what this licenses: once the comparison is per stanza, the two readers may share the TRAVERSAL
@@ -105,6 +108,17 @@ that they earn a lookup rather than always-loaded space.
   Each was either a false failure or silent under-coverage, and the module's own opening line had
   already said why — an approximation of a grammar has no natural stopping point. Rewriting the
   floor on `Sexplib` dissolved four findings at once and shrank it.
+  What the two readers may share when a gap IS worth closing is DATA, never machinery: the pform
+  lists (`toolchain_pforms`, and the `%{dep:…}`/`%{bin:…}` prefixes) say which spellings mean what
+  and decide nothing, and both readers reading one list is what lets the floor see an external
+  command handed a file this workspace builds — `(run python3 %{dep:orchestrate.py})`, whose only
+  evidence is in its ARGUMENT. Re-deriving the walk's `classify_command` on the raw side instead
+  would make the second opinion a copy of the first, which is the one property a floor exists to
+  have. What the raw side then builds on the shared list stays its own and stays COARSER: it may
+  under-claim, which weakens the floor for that one stanza, and may never over-claim, which fails a
+  correct scan. Resist closing such a gap from the other end by narrowing the walk instead: `(run
+  python3 %{dep:x.py})` and `env -C ../sibling ./probe.exe` are the same text, and the second
+  launches something of ours somewhere the scan cannot establish (gh-ocannl-708).
   What the second reader still must agree about is SCOPE, and getting it wrong fails correct scans
   rather than blind ones: (a) STANZA POSITION — only top level and inside `subdir`, else `(env (test
   (flags …)))` reads as a test stanza when it names a build profile; (b) WHAT RUNS THINGS — only
