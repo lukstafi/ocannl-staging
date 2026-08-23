@@ -99,12 +99,11 @@ let () =
     Stdio.printf "\n"
   done;
   let row_sum s = List.sum (module Float) (List.init n ~f:(fun t -> p.((s * n) + t))) ~f:Fn.id in
-  Verdict.p "rows sum to 1 (within half's resolution)"
-    (List.for_all (List.init n ~f:Fn.id) ~f:(fun s -> Float.(abs (row_sum s - 1.) < 0.01)));
-  Verdict.p "masked-out entries are exactly zero"
-    (List.for_all (List.init n ~f:Fn.id) ~f:(fun s ->
-         List.for_all (List.init n ~f:Fn.id) ~f:(fun t -> s >= t || Float.equal p.((s * n) + t) 0.)));
-  Verdict.p "all entries finite" (Array.for_all p ~f:Float.is_finite);
+  Verdict.p_all "rows sum to 1 (within half's resolution)" (List.init n
+    ~f:Fn.id) ~f:(fun s -> Float.(abs (row_sum s - 1.) < 0.01));
+  Verdict.p_all "masked-out entries are exactly zero" (List.init n ~f:Fn.id) ~f:(fun s ->
+         List.for_all (List.init n ~f:Fn.id) ~f:(fun t -> s >= t || Float.equal p.((s * n) + t) 0.));
+  Verdict.p_all "all entries finite" (Array.to_list p) ~f:Float.is_finite;
   (* Tolerance against the same softmax evaluated in double. Half's resolution below 1 is ~1e-3, so
      5e-4 admits the ulp of backend [exp] disagreement and nothing looser -- a saturated sentinel or
      a lost max-subtraction moves these by far more. *)

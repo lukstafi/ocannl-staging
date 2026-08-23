@@ -109,16 +109,16 @@ let () =
     (String.concat ~sep:", " (List.map flat_missed ~f:Int.to_string));
   (* Named with its row count: over four rows this sweep cannot reach the weight-collision class
      below, and a claim of "every row swap at every extent" would be an over-reading of it. *)
-  Verdict.p "the shared checksum sees every 4-row swap at every extent swept"
-    (List.is_empty !missed_mixed);
+  Verdict.p_empty "the shared checksum sees every 4-row swap at every extent swept" ~over:extents
+    !missed_mixed;
   (* The multiples of 251 in range are where the flat form is degenerate BY CONSTRUCTION (rather
      than by an accidental weight collision), and it must miss the swap at every row pair there. *)
   let degenerate = List.filter extents ~f:(fun n -> n % Bc.weight_cap = 0) in
-  Verdict.p "the flat-offset weight misses a row swap at every multiple of 251 (negative control)"
-    (List.for_all degenerate ~f:(fun n ->
-         List.length (List.filter !missed_flat ~f:(fun m -> m = n)) = List.length row_pairs));
-  Verdict.p "the shared checksum sees a 4-row swap at those same multiples of 251"
-    (List.for_all degenerate ~f:(fun n -> not (List.mem !missed_mixed n ~equal:Int.equal)));
+  Verdict.p_all "the flat-offset weight misses a row swap at every multiple of 251 (negative control)"
+    degenerate ~f:(fun n ->
+         List.length (List.filter !missed_flat ~f:(fun m -> m = n)) = List.length row_pairs);
+  Verdict.p_all "the shared checksum sees a 4-row swap at those same multiples of 251" degenerate
+    ~f:(fun n -> not (List.mem !missed_mixed n ~equal:Int.equal));
   (* Why the guard is WEIGHTED at all: a permutation preserves the multiset, and a plain sum reads
      nothing else. *)
   Verdict.p "an unweighted sum misses every 4-row swap at every extent (negative control)"
@@ -179,8 +179,8 @@ let () =
     (String.concat ~sep:", "
        (List.map primary_collisions ~f:(fun (stride, a, b) ->
             Printf.sprintf "row stride %d rows %d/%d" stride a b)));
-  Verdict.p "no two rows share a weight vector across both streams, at any row stride swept"
-    (List.is_empty both_collisions);
+  Verdict.p_empty "no two rows share a weight vector across both streams, at any row stride swept"
+    ~over:sweep_strides both_collisions;
   Verdict.p "a single weight stream does collide there, so the sweep can fail (negative control)"
     (not (List.is_empty primary_collisions));
   (* And the collision the single stream has is a swap it really cannot see: same weights, different
@@ -223,13 +223,12 @@ let () =
             Bc.residue ~salt:0x5A17 ~row_stride ~modulus:13 ((r * row_stride) + c) = 0))
   in
   let ma_strides = List.range 1 9 in
-  Verdict.p "every ma value is strictly positive, so no ma row can be all-zero"
-    (List.for_all ma_strides ~f:(fun row_stride ->
+  Verdict.p_all "every ma value is strictly positive, so no ma row can be all-zero" ma_strides
+    ~f:(fun row_stride ->
          List.for_all (List.range 0 (600 * row_stride)) ~f:(fun t ->
-             Float.( > ) (ma_value ~row_stride t) 0.0)));
-  Verdict.p "no ma row is all-zero at any row stride swept"
-    (List.for_all ma_strides ~f:(fun row_stride ->
-         ma_rows_with_zero ~row_stride ~rows:600 = 0));
+             Float.( > ) (ma_value ~row_stride t) 0.0));
+  Verdict.p_all "no ma row is all-zero at any row stride swept" ma_strides ~f:(fun row_stride ->
+         ma_rows_with_zero ~row_stride ~rows:600 = 0);
   Verdict.p
     "a residue admitting zero does produce an all-zero ma row at row stride 2 (negative control)"
     (zeroing_rows ~row_stride:2 ~rows:600 > 0);
@@ -294,17 +293,16 @@ let () =
      (negative control)"
     (List.length cancel_cases = 2);
   (* Confirm through the guard itself, not only through the difference form it was found with. *)
-  Verdict.p "those swaps really do leave every printed checksum stream unchanged"
-    (List.for_all cancel_cases ~f:(fun (_, n, _, a, b, v) ->
+  Verdict.p_all "those swaps really do leave every printed checksum stream unchanged" cancel_cases
+    ~f:(fun (_, n, _, a, b, v) ->
          let w = swap_rows ~n v ~r1:a ~r2:b in
          (not (Array.equal Float.equal v w))
          && List.equal Float.equal
               (Bc.whole_output ~row_stride:n v)
-              (Bc.whole_output ~row_stride:n w)));
-  Verdict.p "the elementwise guard sees those swaps"
-    (List.for_all cancel_cases ~f:(fun (_, n, _, a, b, v) ->
+              (Bc.whole_output ~row_stride:n w));
+  Verdict.p_all "the elementwise guard sees those swaps" cancel_cases ~f:(fun (_, n, _, a, b, v) ->
          let w = swap_rows ~n v ~r1:a ~r2:b in
-         Option.is_some (Bc.first_difference ~reference:v w)));
+         Option.is_some (Bc.first_difference ~reference:v w));
   (* And it sees the whole class the weighted sums were swept for, at every extent, without a
      collision argument: it compares what was computed. *)
   let elementwise_missed =
@@ -314,8 +312,8 @@ let () =
             let w = swap_rows ~n v ~r1 ~r2 in
             if Option.is_none (Bc.first_difference ~reference:v w) then Some n else None))
   in
-  Verdict.p "the elementwise guard sees every row swap at every extent swept"
-    (List.is_empty elementwise_missed);
+  Verdict.p_empty "the elementwise guard sees every row swap at every extent swept" ~over:extents
+    elementwise_missed;
   Verdict.p "the elementwise guard reports a length mismatch too"
     (Option.is_some (Bc.first_difference ~reference:[| 1.0; 2.0 |] [| 1.0 |]));
 
@@ -334,14 +332,12 @@ let () =
   let rows_identical mix ~salt a b ~columns =
     List.for_all (List.range 0 columns) ~f:(fun c -> mix ~salt a c = mix ~salt b c)
   in
-  Verdict.p
-    "the pre-fix fold made rows 5977 and 10232 identical at every column of every salt (negative \
+  Verdict.p_all "the pre-fix fold made rows 5977 and 10232 identical at every column of every salt (negative \
      control)"
-    (List.for_all mix_salts ~f:(fun salt ->
-         rows_identical pre_fix_mix ~salt 5977 10232 ~columns:64));
-  Verdict.p "the mix keeps those two rows apart"
-    (List.for_all mix_salts ~f:(fun salt ->
-         not (rows_identical Bc.mix ~salt 5977 10232 ~columns:64)));
+    mix_salts ~f:(fun salt ->
+         rows_identical pre_fix_mix ~salt 5977 10232 ~columns:64);
+  Verdict.p_all "the mix keeps those two rows apart" mix_salts ~f:(fun salt ->
+         not (rows_identical Bc.mix ~salt 5977 10232 ~columns:64));
   let first_value_collision mix ~salt ~column ~rows =
     let seen = Hashtbl.create (module Int) in
     List.find_map (List.range 0 rows) ~f:(fun r ->
@@ -352,10 +348,10 @@ let () =
             Hashtbl.set seen ~key:v ~data:r;
             None)
   in
-  Verdict.p "no two rows below 100000 share a mix value in a column, at any salt or column swept"
-    (List.for_all mix_salts ~f:(fun salt ->
+  Verdict.p_all "no two rows below 100000 share a mix value in a column, at any salt or column swept"
+    mix_salts ~f:(fun salt ->
          List.for_all [ 0; 1; 7; 63 ] ~f:(fun column ->
-             Option.is_none (first_value_collision Bc.mix ~salt ~column ~rows:100_000))));
+             Option.is_none (first_value_collision Bc.mix ~salt ~column ~rows:100_000)));
   Verdict.p "the pre-fix fold did collide there, so that sweep can fail (negative control)"
     (List.exists mix_salts ~f:(fun salt ->
          List.exists [ 0; 1; 7; 63 ] ~f:(fun column ->

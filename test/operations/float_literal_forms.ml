@@ -53,6 +53,7 @@ module Generated = Test_utils.Generated
 let () = Generated.init ~backend_name
 
 let p = Verdict.p
+let p_empty = Verdict.p_empty
 let skipped = Verdict.skipped ~backend:backend_name
 
 (* On the bits, because the whole point is values a tolerance — or [Float.equal], which reports
@@ -187,10 +188,10 @@ let () =
         if has ("(float)(" ^ spelling ^ ")") then None else Some spelling)
   in
   List.iter missing ~f:(fun s -> Stdio.eprintf "  not emitted as (float)(%s)\n" s);
-  p "every constant is emitted as the intended floating literal" (List.is_empty missing);
+  p_empty "every constant is emitted as the intended floating literal" ~over:cases missing;
   let surviving =
     List.filter_map cases ~f:(fun { was; _ } ->
         Option.bind was ~f:(fun w -> if has ("(float)(" ^ w ^ ")") then Some w else None))
   in
   List.iter surviving ~f:(fun s -> Stdio.eprintf "  still emitted as (float)(%s)\n" s);
-  p "no constant is emitted as an integer literal" (List.is_empty surviving)
+  p_empty "no constant is emitted as an integer literal" ~over:cases surviving

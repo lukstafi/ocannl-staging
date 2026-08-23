@@ -15,10 +15,12 @@ module Asgns = Ir.Assignments
 
 let p = Verdict.p
 
+let p_all = Verdict.p_all
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
+let skipped = Verdict.skipped ~backend:backend_name
 let is_gpu = Sched.backend_is_gpu backend_name
 
 let clean_cache dir =
@@ -72,15 +74,16 @@ let () =
     in
     List.length !captured
   in
-  (* Vacuous where the backend advertises no mma format tile for f32 — CUDA/HIP need the tf32 arm
-     (config [tf32_matmuls]) for an f32 site, Metal's simdgroup matrices take f32 directly. Say so
-     on stderr so a vacuous pass is not mistaken for coverage; the golden stays
-     backend-independent. *)
-  if is_gpu && n_seeds = 0 then
-    Stdio.eprintf "mc: no GPU tensorized seed for this site on %s — the checks below are vacuous\n"
-      backend_name;
-  p "mc: every unfused GPU tensorized seed compiles and computes correctly"
-    (List.for_all (List.init n_seeds ~f:Fn.id) ~f:(fun k ->
+  (* Vacuous where the backend seeds no unfused GPU tensorized candidate: cc has none by
+     construction (the filter asks for [sk_gpu]), and CUDA/HIP need the tf32 arm (config
+     [tf32_matmuls]) for an f32 site while Metal's simdgroup matrices take f32 directly. Reported
+     through [Verdict.skipped] rather than as a bare passing line (gh-ocannl-729): a quantifier over
+     an empty seed list used to print the same `true` a hundred verified seeds print, so on cc this
+     claim announced coverage it never had. The golden stays backend-independent either way. *)
+  let claim = "mc: every unfused GPU tensorized seed compiles and computes correctly" in
+  if n_seeds = 0 then skipped claim
+  else
+    p_all claim (List.init n_seeds ~f:Fn.id) ~f:(fun k ->
          let transform opt =
            let p = List.nth_exn (seeds_of opt) k in
            Sched.apply (Autotune.sketch_schedule ~p opt) opt
@@ -95,7 +98,7 @@ let () =
          | got -> Array.for_all2_exn got expected ~f:(fun a b -> Float.(abs (a - b) < 1e-3))
          | exception exn ->
              Stdio.eprintf "mc: GPU tensorized seed %d FAILED %s\n" k (Exn.to_string exn);
-             false));
+             false);
 
   let reports = ref [] in
   let ctx = Context.auto () in

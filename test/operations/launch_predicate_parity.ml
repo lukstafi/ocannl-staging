@@ -41,6 +41,7 @@ module Asgns = Ir.Assignments
 
 let p = Verdict.p
 
+let p_empty = Verdict.p_empty
 let named name (comp : Asgns.comp) : Asgns.comp =
   { comp with asgns = Asgns.Block_comment (name, comp.asgns) }
 
@@ -190,8 +191,8 @@ let () =
             Stdio.eprintf "prediction: schedule FAILED: %s\n" (Exn.to_string exn);
             true)
   in
-  p "prediction: every GPU seed launches with exactly the geometry the seeder predicted"
-    (List.is_empty unfaithful);
+  p_empty "prediction: every GPU seed launches with exactly the geometry the seeder predicted"
+    ~over:all_gpu unfaithful;
 
   (* === Parity, dimension by dimension, on one real seed ===
 

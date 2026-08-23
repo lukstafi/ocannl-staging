@@ -22,6 +22,7 @@ module Sched = Ir.Schedule
 
 let p = Verdict.p
 
+let p_all = Verdict.p_all
 let fresh_tn =
   let c = ref 960_000_000 in
   fun label dims ->
@@ -136,12 +137,10 @@ let () =
     let hw = hardware_syms sched in
     let mem s = List.mem hw s ~equal:Idx.equal_symbol in
     p (name ^ ": schedule is nonempty") (not (List.is_empty sched));
-    p (name ^ ": outer chain loops stay parallel") (List.for_all outer ~f:mem);
+    p_all (name ^ ": outer chain loops stay parallel") outer ~f:mem;
     if expect_serial then
-      p
-        (name ^ ": value-feeding chain loops are serialized")
-        (List.for_all inner ~f:(fun s -> not (mem s)))
-    else p (name ^ ": full two-loop chains kept") (List.for_all inner ~f:mem)
+      p_all (name ^ ": value-feeding chain loops are serialized") inner ~f:(fun s -> not (mem s))
+    else p_all (name ^ ": full two-loop chains kept") inner ~f:mem
   in
   check "variant scratch" `Direct ~expect_serial:true;
   check "variant via scalar local" `Via_local ~expect_serial:true;

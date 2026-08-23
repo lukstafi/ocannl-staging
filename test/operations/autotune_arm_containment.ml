@@ -27,6 +27,8 @@ module SO = Ir.Schedule_outcome
 
 let p = Verdict.p
 
+let p_all = Verdict.p_all
+
 (* The report's outcome as the questions this test asks of it (gh-ocannl-677): the outcome is a
    variant naming one of five mutually exclusive states, so each claim below names the state it
    means — and the two ways an arm can die, mid-search and before the search exists, are told apart
@@ -376,8 +378,8 @@ let () =
       Array.for_all2_exn (Context.get_values ctx_n t2.Tensor.value) expected ~f:approx )
   in
   let control_reports, control_ships = negative_control () in
-  p "control: an uninjected search declines nothing at pre-dispatch validation"
-    (List.for_all control_reports ~f:(fun r -> List.is_empty (preflight_declines r)));
+  p_all "control: an uninjected search declines nothing at pre-dispatch validation" control_reports
+    ~f:(fun r -> List.is_empty (preflight_declines r));
   p "control: an uninjected search completes and ships"
     (control_ships && List.for_all control_reports ~f:completed);
 
@@ -400,7 +402,7 @@ let () =
   p "an unsatisfied dependency reached a candidate's timing run" (preflights_d >= 2);
   p "it is a decline in the census, at the pre-dispatch phase"
     (declined_with reports_d ~substring:"unexecuted dependencies");
-  p "the search that declined it completed" (List.for_all reports_d ~f:completed);
+  p_all "the search that declined it completed" reports_d ~f:completed;
   p "and did not condemn the lineage" (Option.is_none (Context.poisoned_failure ctx_d));
   let ctx_d' = Context.run ctx_d' routine_d in
   p "a winner still ships and computes the right values"
@@ -424,7 +426,7 @@ let () =
   p "an out-of-range static binding reached a candidate's timing run" (preflights_b >= 2);
   p "it too is a decline in the census, at the pre-dispatch phase"
     (declined_with reports_b ~substring:"exceeds its declared range");
-  p "the search that declined it completed" (List.for_all reports_b ~f:completed);
+  p_all "the search that declined it completed" reports_b ~f:completed;
   p "and did not condemn the lineage" (Option.is_none (Context.poisoned_failure ctx_b));
   let ctx_b' = Context.run ctx_b' routine_b in
   p "a winner still ships and computes the right values"

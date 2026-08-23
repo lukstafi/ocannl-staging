@@ -143,7 +143,8 @@
   (alias runtest-flip_bound_pruning)
   (alias runtest-model_default_placements)
   (alias runtest-agent_notes_structure)
-  (alias runtest-generated_provenance)))
+  (alias runtest-generated_provenance)
+  (alias runtest-verdict_quantified)))
 
 (test
  ; ocannl-backend: none -- links no backend: it reads synthetic Benchmark records through PrintBox_utils.table as text.
@@ -3428,6 +3429,32 @@
     ; both the exit status `with-accepted-exit-codes` used to state and the specific refusal
     ; message, which no exit status can tell apart from any other way of failing.
     (run ./generated_provenance.exe refusals)))))
+
+; The non-emptiness guarantee of the quantified claims (gh-ocannl-729). Same construction as
+; `generated_provenance` above and for the same reason: every guarantee here fires only on an empty
+; collection, which a green suite never produces, so the refusals are staged deliberately -- as
+; child processes whose streams the parent captures, since a refusal prints this repository's
+; failure marker and a green run's log must not carry it. The `holds` mode runs first and directly,
+; so a module that refused everything could not pass.
+
+(executable
+ (name verdict_quantified)
+ (modules verdict_quantified)
+ (libraries base stdio unix arrayjit.verdict))
+
+(rule
+ ; ocannl-backend: none -- links `arrayjit.verdict` and `unix` alone, compiles nothing and runs on
+ ; three integers: what is under test is what a claim prints and what status it exits with.
+ (alias runtest-verdict_quantified)
+ (package neural_nets_lib)
+ (deps
+  (alias runtest-env_spelling_gate)
+  ocannl_config
+  %{dep:verdict_quantified.exe})
+ (action
+  (progn
+   (run ./verdict_quantified.exe holds)
+   (run ./verdict_quantified.exe refusals))))
 
 ; The uint4x32 FFI stubs read four lanes out of an [int array], a type that carries no length, so
 ; the C helper has to check the arity rather than assume it (gh-ocannl-688). Links arrayjit.ir

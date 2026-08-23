@@ -64,8 +64,8 @@ let%expect_test "uint4x32_to_prec_uniform different precisions" =
     let result = Context.get_values !ctx uniform.value in
     Stdio.printf "%s precision - first value: %.4g, second value: %.4g\n" prec_name result.(0)
       result.(1);
-    Verdict.p "All values in [0, 1) range"
-      (Array.for_all result ~f:(fun x -> Float.(x >= 0.0 && x < 1.0)))
+    Verdict.p_all "All values in [0, 1) range" (Array.to_list result)
+      ~f:(fun x -> Float.(x >= 0.0 && x < 1.0))
   in
 
   test_precision Ir.Ops.single "Single";

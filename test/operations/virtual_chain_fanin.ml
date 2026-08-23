@@ -123,8 +123,8 @@ let phase1 () =
   LL.virtualize_settings.max_inline_fanin <- -1;
   let o_off = optimize ~name:"vcf_chain_off" llc in
   LL.virtualize_settings.max_inline_fanin <- 8;
-  p "cap disabled: whole chain virtual (the pre-fix behavior)"
-    (Array.for_all c.xs ~f:(known_virtual o_off));
+  p_all "cap disabled: whole chain virtual (the pre-fix behavior)" (Array.to_list c.xs)
+    ~f:(known_virtual o_off);
   let got_off = execute ~name:"vcf_chain_off" o_off ~seed ~read in
   p "cap disabled: executed values agree with the capped arm" (same got got_off)
 
@@ -321,8 +321,8 @@ let phase2 () =
   p "pipeline: x9 and x10 virtual again past the reset"
     (Tn.Placements.known_virtual plc_default (value 9 xs_default)
     && Tn.Placements.known_virtual plc_default (value 10 xs_default));
-  p "pipeline, cap disabled: whole chain virtual"
-    (List.for_all xs_off ~f:(fun x -> Tn.Placements.known_virtual plc_off x.Tensor.value));
+  p_all "pipeline, cap disabled: whole chain virtual" xs_off
+    ~f:(fun x -> Tn.Placements.known_virtual plc_off x.Tensor.value);
   let expected =
     Array.init dim ~f:(fun i ->
         List.fold

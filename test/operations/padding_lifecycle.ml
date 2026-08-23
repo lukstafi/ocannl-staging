@@ -17,6 +17,7 @@ module LL = Ir.Low_level
 module Asgns = Ir.Assignments
 
 let p = Verdict.p
+let p_all = Verdict.p_all
 let pr fmt = Stdio.printf fmt
 
 let named name (comp : Asgns.comp) : Asgns.comp =
@@ -86,11 +87,10 @@ let () =
   (match site with
   | None -> p "fresh: conv site detected" false
   | Some s ->
-      p "fresh: lowered conv is offset-free in buffer space"
-        (List.for_all s.Autotune.c_axes ~f:(fun cx -> cx.Autotune.cx_offset = 0));
-      p "fresh: window and stride detected"
-        (List.for_all s.Autotune.c_axes ~f:(fun cx ->
-             cx.Autotune.cx_stride = 1 && cx.Autotune.cx_nk = 3)));
+      p_all "fresh: lowered conv is offset-free in buffer space" s.Autotune.c_axes
+        ~f:(fun cx -> cx.Autotune.cx_offset = 0);
+      p_all "fresh: window and stride detected" s.Autotune.c_axes ~f:(fun cx ->
+             cx.Autotune.cx_stride = 1 && cx.Autotune.cx_nk = 3));
   (* === Compatible late demand on the now-committed operand is accepted === *)
   (match compile_conv ~ctx "fresh_again" x2 with
   | exception Row.Shape_error (msg, _) ->
@@ -131,7 +131,8 @@ let () =
       pr "wrapped_zero: unexpected rejection: %s\n" (String.prefix msg 60)
   | _, site ->
       p "wrapped_zero: conv on matching committed neutral accepted" true;
-      p "wrapped_zero: offset-free in buffer space"
-        (match site with
-        | Some s -> List.for_all s.Autotune.c_axes ~f:(fun cx -> cx.Autotune.cx_offset = 0)
-        | None -> false)
+      (match site with
+      | Some s ->
+          p_all "wrapped_zero: offset-free in buffer space" s.Autotune.c_axes
+            ~f:(fun cx -> cx.Autotune.cx_offset = 0)
+      | None -> p "wrapped_zero: offset-free in buffer space" false)

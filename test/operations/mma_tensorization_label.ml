@@ -34,6 +34,7 @@ module Asgns = Ir.Assignments
 module Cs = Ir.C_syntax
 
 let p = Verdict.p
+let p_all = Verdict.p_all
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 
 (* The register-tiled rendering is the C backends'; "cc" also matches "multidev_cc". *)
@@ -172,9 +173,8 @@ let () =
     (match derived [] with Cs.Not_requested, 0, 0 -> true | _ -> false);
   p "all statements declined is scalar-fallback"
     (match derived [ fb; fb ] with Cs.Scalar_fallback, 2, 2 -> true | _ -> false);
-  p "every non-fallback rendering counts as tensorized"
-    (List.for_all [ rt; ix; ld ] ~f:(fun r ->
-         match derived [ r ] with Cs.Tensorized, 1, 0 -> true | _ -> false));
+  p_all "every non-fallback rendering counts as tensorized" [ rt; ix; ld ] ~f:(fun r ->
+         match derived [ r ] with Cs.Tensorized, 1, 0 -> true | _ -> false);
   (* Mixed: some honoured, some declined. The label answers "did any tensor-core emission happen",
      the counts answer "how much of what was asked for" — a mixed routine is tensorized AND carries
      a nonzero fallback count, and a reader gets both. *)

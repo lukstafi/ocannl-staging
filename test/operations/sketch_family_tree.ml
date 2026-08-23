@@ -192,24 +192,21 @@ let traffic_pins name ~limits ~elt_bytes ~n_extent tree opt =
   Stdio.printf "  levels on the leaf paths: %s\n" (String.concat ~sep:", " levels);
   Stdio.printf "  priced above the schedule-invariant floor: %d; max increment %d bytes\n" priced
     (List.fold paths ~init:0 ~f:(fun acc (path, _) -> max acc (inc path)));
-  Verdict.p
-    (name ^ ": every leaf's increment is the traffic its own parameters imply")
-    (List.for_all paths ~f:(fun (path, p) ->
-         inc path = expected_inc ~elt_bytes ~n_extent p));
-  Verdict.p
-    (name ^ ": the increment is monotone along every path's prefixes")
-    (List.for_all paths ~f:(fun (path, _) ->
+  Verdict.p_all (name ^ ": every leaf's increment is the traffic its own parameters imply") paths
+    ~f:(fun (path, p) ->
+         inc path = expected_inc ~elt_bytes ~n_extent p);
+  Verdict.p_all (name ^ ": the increment is monotone along every path's prefixes") paths
+    ~f:(fun (path, _) ->
          let incs = 0 :: List.map (prefixes path) ~f:inc in
-         List.is_sorted incs ~compare:Int.compare));
+         List.is_sorted incs ~compare:Int.compare);
   Verdict.p
     (name ^ ": the staging commitments price above the floor")
     (priced > 0
     && priced = List.count paths ~f:(fun (_, p) -> expected_inc ~elt_bytes ~n_extent p > 0));
-  Verdict.p
-    (name ^ ": every leaf path commits its pipeline's shape level")
-    (List.for_all paths ~f:(fun (path, _) ->
+  Verdict.p_all (name ^ ": every leaf path commits its pipeline's shape level") paths
+    ~f:(fun (path, _) ->
          List.exists path ~f:(fun (_, d) ->
-             match d with FD.Geometry _ | FD.Row_block _ -> true | _ -> false)));
+             match d with FD.Geometry _ | FD.Row_block _ -> true | _ -> false));
   (* One representative path per pricing regime, walked out of the tree and rendered here (the
      rendering is all that a label reword can move). *)
   let sample what f =

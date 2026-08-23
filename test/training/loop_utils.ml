@@ -45,22 +45,21 @@ let schedules () =
   let lin_s = show "linear" Train.Lr_schedule.Linear in
   let wsd_s = show "wsd" (Train.Lr_schedule.Wsd { decay_frac = 0.2 }) in
   let lr sched step = Train.Lr_schedule.learning_rate sched ~step in
-  Verdict.p "warmup applies to every kind, constant included"
-    (List.for_all [ con_s; cos_s; lin_s; wsd_s ] ~f:(fun s -> Float.(abs (lr s 0 -. 0.2) < 1e-12)));
-  Verdict.p "constant holds base_lr after warmup"
-    (List.for_all [ 5; 15; 30 ] ~f:(fun s -> Float.(abs (lr con_s s -. 1.0) < 1e-12)));
+  Verdict.p_all "warmup applies to every kind, constant included" [ con_s; cos_s; lin_s; wsd_s ]
+    ~f:(fun s -> Float.(abs (lr s 0 -. 0.2) < 1e-12));
+  Verdict.p_all "constant holds base_lr after warmup" [ 5; 15; 30 ]
+    ~f:(fun s -> Float.(abs (lr con_s s -. 1.0) < 1e-12));
   Verdict.p "warmup starts at base_lr/warmup_steps" Float.(abs (lr cos_s 0 -. 0.2) < 1e-12);
   Verdict.p "warmup reaches base_lr on its last step" Float.(abs (lr cos_s 4 -. 1.0) < 1e-12);
   Verdict.p "cosine reaches final_frac * base_lr past total_steps"
     Float.(abs (lr cos_s 30 -. 0.1) < 1e-12);
   Verdict.p "linear reaches final_frac * base_lr past total_steps"
     Float.(abs (lr lin_s 30 -. 0.1) < 1e-12);
-  Verdict.p "wsd holds base_lr between warmup and the decay point"
-    (List.for_all [ 5; 12; 19 ] ~f:(fun s -> Float.(abs (lr wsd_s s -. 1.0) < 1e-12)));
+  Verdict.p_all "wsd holds base_lr between warmup and the decay point" [ 5; 12; 19 ]
+    ~f:(fun s -> Float.(abs (lr wsd_s s -. 1.0) < 1e-12));
   Verdict.p "wsd decays below base_lr after the decay point" Float.(lr wsd_s 21 < 1.0);
-  Verdict.p "cosine decay is nonincreasing"
-    (List.for_all (List.range 5 30) ~f:(fun s ->
-         Float.(lr cos_s Int.(s + 1) <= lr cos_s s +. 1e-12)));
+  Verdict.p_all "cosine decay is nonincreasing" (List.range 5 30) ~f:(fun s ->
+         Float.(lr cos_s Int.(s + 1) <= lr cos_s s +. 1e-12));
   (* Degenerate config: a warmup longer than the horizon must not keep ramping past it. *)
   let over =
     {
@@ -408,7 +407,7 @@ let paramless_guard () =
 let outlier_detector () =
   let det = Train.Outlier_detector.create ~window_size:4 () in
   let zs = List.map [ 1.0; 1.1; 0.9; 1.0 ] ~f:(Train.Outlier_detector.update det) in
-  Verdict.p "z-score is nan while the window fills" (List.for_all zs ~f:Float.is_nan);
+  Verdict.p_all "z-score is nan while the window fills" zs ~f:Float.is_nan;
   let z_ordinary = Train.Outlier_detector.update det 1.05 in
   let z_nan = Train.Outlier_detector.update det Float.nan in
   let z_spike = Train.Outlier_detector.update det 10.0 in

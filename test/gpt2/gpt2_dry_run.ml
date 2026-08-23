@@ -22,7 +22,7 @@ let () =
     (String.concat ~sep:"x" (Array.to_list (Array.map dims ~f:Int.to_string)));
   let vals = Context.get_values ctx logits.Tensor.value in
   printf "logits count: %d\n" (Array.length vals);
-  Verdict.p "all finite" (Array.for_all vals ~f:Float.is_finite);
+  Verdict.p_all "all finite" (Array.to_list vals) ~f:Float.is_finite;
   (* Positions must produce different distributions (the model is not collapsing). *)
   let row p = Array.sub vals ~pos:(p * config.vocab_size) ~len:config.vocab_size in
   let first = row 0 and last = row (seq_len - 1) in

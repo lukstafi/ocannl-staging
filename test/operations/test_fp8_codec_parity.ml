@@ -25,6 +25,7 @@ open Ocannl
 open Ocannl.Operation.DSL_modules
 
 let p = Verdict.p
+let p_all = Verdict.p_all
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_metal = String.is_substring backend_name ~substring:"metal"
 
@@ -209,5 +210,5 @@ let () =
   let arith_claim = "an fp8 operator's underflowing result narrows to zero too" in
   let tiny = [| 4.1359e-25; 8.27e-25; 1.65e-24; 3.31e-24; -4.1359e-25 |] in
   let tdev = narrow_on_device tiny in
-  p claim (Array.for_all tdev ~f:(fun x -> Float.(x = 0.)));
+  p_all claim (Array.to_list tdev) ~f:(fun x -> Float.(x = 0.));
   p arith_claim Float.(pow_narrowed = 0.)

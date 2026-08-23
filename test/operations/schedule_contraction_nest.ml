@@ -50,6 +50,9 @@ module Tn = Ir.Tnode
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
+let p_all = Verdict.p_all
+let p_none = Verdict.p_none
+let p_empty = Verdict.p_empty
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let skipped = Verdict.skipped ~backend:backend_name
 
@@ -203,13 +206,12 @@ let leg ~tag ~ko_extents ~nk ?(companion = false) ~build () =
     unfused_seeds ~is_gpu:true ~is_cpu:false ~limits:Ir.Backend_intf.no_hardware_limits opt
   in
   let _, gpu_invalid = constructs_and_validates ~tag ~what:"GPU blocktile" gpu_seeds opt in
-  p (tag ^ ": every GPU blocktile seed validates") (List.is_empty gpu_invalid);
+  p_empty (tag ^ ": every GPU blocktile seed validates") ~over:gpu_seeds gpu_invalid;
   (* The geometry the untiled kernel never had: every seed tiles the output across a workgroup,
      and the batch-grid twins spread the batch across blocks (a 64x64 block tile of a 64x64 site is
      one block, legitimately). *)
-  p
-    (tag ^ ": every GPU blocktile seed binds a multi-thread workgroup")
-    (List.for_all gpu_seeds ~f:(fun q -> snd (binds_hardware q opt) > 1));
+  p_all (tag ^ ": every GPU blocktile seed binds a multi-thread workgroup") gpu_seeds
+    ~f:(fun q -> snd (binds_hardware q opt) > 1);
   p
     (tag ^ ": every GPU batch-grid twin launches more than one block")
     (List.exists gpu_seeds ~f:(fun q -> q.Autotune.sk_batch_grid)
@@ -220,7 +222,7 @@ let leg ~tag ~ko_extents ~nk ?(companion = false) ~build () =
     |> List.filter ~f:(fun q -> q.Autotune.sk_mma)
   in
   let _, mma_invalid = constructs_and_validates ~tag ~what:"GPU tensorized" mma_seeds opt in
-  p (tag ^ ": every GPU tensorized seed validates") (List.is_empty mma_invalid);
+  p_empty (tag ^ ": every GPU tensorized seed validates") ~over:mma_seeds mma_invalid;
   p
     (tag ^ ": the tensorized seeds include unstaged, staged and pipelined-staged geometries")
     (List.exists mma_seeds ~f:(fun q -> q.Autotune.sk_bk = 0)
@@ -237,10 +239,15 @@ let leg ~tag ~ko_extents ~nk ?(companion = false) ~build () =
      pipelines only), so on a site with a companion nest the pool-parallel CPU shapes -- the ones
      binding a Grid dimension -- decline at validation and are skipped, exactly as on a
      single-axis site; the all-serial shapes validate. *)
-  p
-    (tag ^ ": every CPU seed binding no hardware dimension validates")
-    (List.for_all cpu_invalid ~f:(fun q -> fst (binds_hardware q opt) > 1));
-  if not companion then p (tag ^ ": every CPU seed validates") (List.is_empty cpu_invalid)
+  (* Quantified over the whole CPU family rather than over the declines (gh-ocannl-729): on a leg
+     with no companion nest nothing declines, and "every decline binds a Grid dimension" is then a
+     claim about an empty set -- a golden line byte-identical to a checked one. Over [cpu_seeds] it
+     says the same thing and is evaluated on every leg. The membership test comes first so that
+     [binds_hardware], which re-applies the schedule, still runs only on the declines. *)
+  p_none (tag ^ ": every CPU seed binding no hardware dimension validates") cpu_seeds
+    ~f:(fun q -> List.mem cpu_invalid q ~equal:phys_equal && fst (binds_hardware q opt) = 1);
+  if not companion then
+    p_empty (tag ^ ": every CPU seed validates") ~over:cpu_seeds cpu_invalid
   else if on_gpu then
     (* Built under no-limits here, the CPU family has no Grid shapes to decline. *)
     skipped (tag ^ ": the Grid-bound CPU shapes decline on the uncovered companion")
@@ -425,14 +432,13 @@ let padded_leg ~tag ~nk ~build () =
   in
   p (tag ^ ": the GPU blocktile family is seeded at an extent no menu bk divides")
     (not (List.is_empty seeds));
-  p
-    (tag ^ ": every seeded geometry pads rather than gating on the contraction extent")
-    (List.for_all seeds ~f:(fun q ->
+  p_all (tag ^ ": every seeded geometry pads rather than gating on the contraction extent") seeds
+    ~f:(fun q ->
          List.exists (Autotune.sketch_schedule ~p:q opt) ~f:(function
            | Sched.Pad _ -> true
-           | _ -> false)));
+           | _ -> false));
   let _, invalid = constructs_and_validates ~tag ~what:"padded GPU blocktile" seeds opt in
-  p (tag ^ ": every padded GPU blocktile seed validates") (List.is_empty invalid);
+  p_empty (tag ^ ": every padded GPU blocktile seed validates") ~over:seeds invalid;
   if on_gpu then begin
     let n_ran, n_match =
       execute_seeds ~tag ~routine:(tag ^ "_sched") ~fwd ~outs:[ cand ] ~wants:[ want ]
@@ -522,14 +528,12 @@ let () =
   in
   p "out_proj: the CPU k gate refutes on the site whose innermost extent it does not divide"
     (not (List.is_empty multi));
-  p "out_proj: a refuted k-extent names the innermost contraction extent, not the site's whole K"
-    (List.for_all multi ~f:(fun wit ->
+  p_all "out_proj: a refuted k-extent names the innermost contraction extent, not the site's whole K"
+    multi ~f:(fun wit ->
          String.is_substring wit
-           ~substring:"does not divide innermost contraction extent k=12 (of K=48 over 2 loops)"));
-  p "single-axis: the same refuted k-extent keeps the bare k= witness"
-    ((not (List.is_empty single))
-    && List.for_all single ~f:(fun wit ->
-           String.is_suffix wit ~suffix:"does not divide k=12"));
+           ~substring:"does not divide innermost contraction extent k=12 (of K=48 over 2 loops)");
+  p_all "single-axis: the same refuted k-extent keeps the bare k= witness" single ~f:(fun wit ->
+           String.is_suffix wit ~suffix:"does not divide k=12");
   (* gh-ocannl-730: the GPU blocktile family stages both operands, so its k-extent pads and the
      gate that used to delete the whole family here produces no witness at all. *)
   p "out_proj: the GPU blocktile family raises no bk-divisibility refutation on the awkward extent"

@@ -34,6 +34,8 @@ let () = Utils.settings.output_debug_files_in_build_directory <- true
 let () = Numerics.set_policy { (Numerics.get ()) with tf32_matmuls = false }
 let p = Verdict.p
 
+let p_all = Verdict.p_all
+
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
    that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
    parity check between two zero arrays passes while covering nothing (gh-ocannl-481 item 3). Every
@@ -850,10 +852,8 @@ let () =
        and f32 holds 24 — but checked rather than asserted: were the products exactly representable
        this leg would silently duplicate the first one, which cannot see a rounding difference. *)
     let inexact_in_f32 x = Float.(Int32.float_of_bits (Int32.bits_of_float x) <> x) in
-    p "full-mantissa products are inexact in f32"
-      (List.for_all
-         (List.range 0 (fi * fk))
-         ~f:(fun x -> inexact_in_f32 (fav.(x) *. fbv.(x % (fk * fj)))));
+    p_all "full-mantissa products are inexact in f32" (List.range 0 (fi * fk))
+      ~f:(fun x -> inexact_in_f32 (fav.(x) *. fbv.(x % (fk * fj))));
     p "full-mantissa tensorized matmul matches the serial twin bitwise"
       (Array.for_all2_exn got_fused want_fused ~f:Float.equal);
     let src = Generated.read "mm_fused_mma" in

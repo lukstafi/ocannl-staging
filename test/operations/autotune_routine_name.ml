@@ -27,6 +27,7 @@ module Asgns = Ir.Assignments
 module Cal = Ir.Cost_model.Calibration
 
 let p = Verdict.p
+let p_all = Verdict.p_all
 let approx a b = Float.(abs (a - b) < 1e-4)
 
 (* Small, but wide enough that the preset candidates bind a hardware dimension and are therefore
@@ -128,6 +129,6 @@ let () =
   (* The discriminating claim: re-deriving the column would have named the block comment here. *)
   p "no calibration row names the block comment the search overrode"
     (not (List.exists rows ~f:(fun row -> String.equal row.Cal.routine block_name)));
-  p "every calibration row names one of the searches by the name it was given"
-    (List.for_all rows ~f:(fun row ->
-         String.equal row.Cal.routine tuned_name || String.equal row.Cal.routine passed_name))
+  p_all "every calibration row names one of the searches by the name it was given" rows
+    ~f:(fun row ->
+         String.equal row.Cal.routine tuned_name || String.equal row.Cal.routine passed_name)
