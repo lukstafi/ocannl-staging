@@ -102,6 +102,30 @@ let accepts t =
   (try Stdlib.Sys.remove out with _ -> ());
   rc = 0
 
+(** [defines t] is the set of preprocessor macro NAMES this toolchain predefines for its target.
+
+    This is how a column whose ISA its label does not spell out -- the host's own default target,
+    which is whatever machine the run landed on -- can still be held to an ISA-scoped claim: the
+    compiler is asked what it targets, instead of a hard-coded table asserting what a [-march]
+    string implies. It answers for the named columns too, which is strictly better than the table
+    was: [-march=x86-64-v3] implying [__FMA__] is gcc's fact to state, not this module's. *)
+let defines t =
+  let src = Stdlib.Filename.temp_file "ocannl_census_macros_" ".c" in
+  Stdio.Out_channel.write_all src ~data:"";
+  let _, out =
+    run_capture
+      (Printf.sprintf "%s %s -dM -E %s" t.command (flags t) (Stdlib.Filename.quote src))
+  in
+  (try Stdlib.Sys.remove src with _ -> ());
+  String.split_lines out
+  |> List.filter_map ~f:(fun l ->
+         match String.split_on_chars (String.strip l) ~on:[ ' '; '\t' ] with
+         | "#define" :: name :: _ ->
+             (* A function-like macro's name ends at its parenthesis. *)
+             Some (match String.lsplit2 name ~on:'(' with Some (n, _) -> n | None -> name)
+         | _ -> None)
+  |> Set.of_list (module String)
+
 (** [compile t ~opt_level ~src_path ~asm_path] compiles [src_path] to assembly, with [-g] so that
     {!census} can anchor on source lines. [Error output] carries the compiler's diagnostics.
 

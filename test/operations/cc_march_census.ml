@@ -205,6 +205,14 @@ let toolchains () =
   in
   let t label command march note = { Census.label; command; march; note } in
   [
+    (* The host's own default target, with no [-march] at all: the one column every toolchain
+       accepts, and therefore the one that keeps the matrix from being VACUOUS. Without it, a run on
+       a host whose compiler accepts none of the named targets -- Apple clang on Apple Silicon
+       rejects every x86 [-march] here, which is what CI's macos-latest is -- produces no rows, and
+       the aggregate claims fail on emptiness having tested nothing. That failure is honest (the
+       non-emptiness guards did their job) but useless: the fix is to give that host a column it can
+       actually compile, not to let the claims pass empty. *)
+    t "native" host "" "the host's own default target: the column that cannot be skipped";
     t "x86-64" host "x86-64" "SSE2 baseline: no FMA arm, no AVX";
     t "x86-64-v2" host "x86-64-v2" "SSE4.2: packed compares, still no FMA arm";
     t "x86-64-v3" host "x86-64-v3" "AVX2 + FMA: the shipped, hardware-measured x86 rows";
@@ -252,11 +260,40 @@ let spawn_emit ~exe ~width ~dir =
   | Unix.WEXITED 0 -> Ok ()
   | _ -> Error (try Stdio.In_channel.read_all log with _ -> "(no output)")
 
+let is_fma_row what = String.is_prefix what ~prefix:"dot/"
+
+type caps = {
+  vector_bytes : int;  (** the widest vector register the target has *)
+  has_fma : bool;
+  fp16_vector : bool;
+  named : bool;  (** a column whose [-march] this test chose, as opposed to the host's default *)
+}
+
+(* Read off the compiler's own predefined macros rather than pattern-matched from the label: what
+   [-march=x86-64-v3] implies is gcc's fact to state, and the [native] column has no label to
+   match in the first place. *)
+let caps_of t =
+  let d = Census.defines t in
+  let has m = Set.mem d m in
+  {
+    vector_bytes =
+      (if has "__AVX512F__" then 64 else if has "__AVX2__" || has "__AVX__" then 32 else 16);
+    has_fma = has "__FMA__" || has "__ARM_FEATURE_FMA";
+    fp16_vector = has "__AVX512FP16__" || has "__ARM_FEATURE_FP16_VECTOR_ARITHMETIC";
+    named = not (String.is_empty t.Census.march);
+  }
+
+let isa_has ~caps ~what ~width =
+  if width > caps.vector_bytes then false
+  else if String.is_suffix what ~suffix:"/f16" && not caps.fp16_vector then false
+  else if is_fma_row what then caps.has_fma
+  else true
+
 type emitted = { width : int; src_path : string; source : string; loops : kernel_loop list }
 
 type row = {
   toolchain : string;
-  target : string;  (** the [-march] value, for the ISA-capability questions below *)
+  caps : caps;  (** this column's ISA facts, read from its own compiler *)
   width : int;
   opt : int;
   what : string;
@@ -317,21 +354,6 @@ let emit_all ~exe ~root =
      wrong: [cc_vector_bytes] is auto-probed from the host when unset, and the widths here are
      forced precisely so that every arm of the builtin table gets compiled. *)
 
-let is_fma_row what = String.is_prefix what ~prefix:"dot/"
-
-(* The widest vector register the target actually has. *)
-let target_vector_bytes ~target =
-  let has s = String.is_substring target ~substring:s in
-  if has "sapphirerapids" || has "v4" then 64 else if has "v3" then 32 else (* SSE2/SSE4, NEON *) 16
-
-let isa_has ~target ~what ~width =
-  let has s = String.is_substring target ~substring:s in
-  let fp16_native = has "sapphirerapids" || has "+fp16" in
-  if width > target_vector_bytes ~target then false
-  else if String.is_suffix what ~suffix:"/f16" && not fp16_native then false
-  else if is_fma_row what then has "v3" || has "v4" || has "sapphirerapids" || has "armv8"
-  else true
-
 (* {2 Assembler dialects this host cannot produce}
 
    Two review findings in a row were about assembly shapes a Linux/gcc box never emits, each of
@@ -362,8 +384,7 @@ let dialect_probes () =
         "_f:"; "LBB0_1:"; "\t.loc\t1 3 12"; "\taddps\t%xmm1, %xmm0"; "\tjne\tLBB0_1"; "\tretq" ]
   in
   let found asm =
-    Option.is_some
-      (Census.census Census.Max_min ~asm ~source_basename:(routine ^ ".c") ~anchor)
+    Option.is_some (Census.census Census.Max_min ~asm ~source_basename:(routine ^ ".c") ~anchor)
   in
   Verdict.p_all "the census reads both assembler dialects, not only this host's"
     [ ("gnu/elf", elf); ("apple-clang", darwin_clang) ]
@@ -434,7 +455,7 @@ let () =
                                   t.Census.label e.width opt what);
                             {
                               toolchain = t.Census.label;
-                              target = t.Census.march;
+                              caps = caps_of t;
                               width = e.width;
                               opt;
                               what;
@@ -489,7 +510,16 @@ let () =
         Verdict.p_none label population ~f;
         report label population ~f
       in
-      let served = List.filter rows ~f:(fun r -> isa_has ~target:r.target ~what:r.what ~width:r.width) in
+      (* The scalarization claim is held only over columns whose [-march] this test named -- it is a
+         claim about how gcc vectorizes a known target, and the [native] column is whatever compiler
+         the run landed on (Apple clang on macOS CI), whose vectorizer this test does not model. The
+         other two claims DO cover it: "compiles clean" and "no libm call in a Max/Min loop" hold by
+         construction of the emission, whatever the host compiler does with it, which is what keeps
+         a macOS run from verifying nothing. *)
+      let served =
+        List.filter rows ~f:(fun r -> isa_has ~caps:r.caps ~what:r.what ~width:r.width)
+      in
+      let served_named = List.filter served ~f:(fun r -> r.caps.named) in
       (* The gh-ocannl-649 claim proper. Unconditional across the matrix, unlike the two below:
          [Max]/[Min] have a whole-vector spelling on every target here at every width -- an emulated
          wide vector still compiles to packed compares and selects, just more of them -- so a libm
@@ -500,5 +530,16 @@ let () =
       claim_none "no FMA accumulator loop calls libm where the ISA has a fused multiply-add"
         (List.filter served ~f:(fun r -> is_fma_row r.what))
         ~f:libm;
-      claim_none "no accumulator loop is scalarized where the ISA has the operation it wants" served
-        ~f:scalarized
+      let scalarization_claim =
+        "no accumulator loop is scalarized where a named target's ISA has the operation"
+      in
+      (* On a host whose compiler accepts none of the named [-march] targets -- Apple clang on Apple
+         Silicon, which is CI's macos-latest -- only the [native] column survives, and this claim's
+         population is empty. Reported as SKIPPED rather than left to fail on emptiness: the claim
+         genuinely was not evaluated there, and [Verdict.skipped] is the channel that says so while
+         keeping the golden one line per claim on every host. The two claims above still cover that
+         run. *)
+      if List.is_empty served_named then
+        Verdict.skipped ~backend:"no named -march target accepted by this host's toolchain"
+          scalarization_claim
+      else claim_none scalarization_claim served_named ~f:scalarized
