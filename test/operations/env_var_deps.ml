@@ -581,9 +581,10 @@ let () =
                     (Printf.sprintf
                        "%s globs the repository to produce `%s` -- a repo-wide scan -- and no rule \
                         the `%s` alias aggregates diffs it against its golden: `dune build \
-                        @%s/%s` would skip it silently. Give the diff rule a per-test alias with \
-                        `(aliases runtest runtest-<name>)` and list `(alias runtest-<name>)` in \
-                        the `(alias (name %s) (deps …))` stanza"
+                        @%s/%s` would skip it silently. Give the diff rule `(alias \
+                        runtest-<name>)` -- that alias and no other -- and list `(alias \
+                        runtest-<name>)` in BOTH the `(alias (name runtest) (deps …))` and the \
+                        `(alias (name %s) (deps …))` stanzas"
                        dune_file target scans_suite
                        (Stdlib.Filename.dirname dune_file)
                        scans_suite scans_suite)));
@@ -596,16 +597,37 @@ let () =
          either one build both, so the per-test alias would drag the directory in behind it, and
          where the name is one dune generates the pair is a dependency cycle outright. *)
       List.iter stanzas ~f:(fun stanza ->
-          if is_golden_diff stanza && List.mem (aliases_of stanza) "runtest" ~equal:String.equal
-          then
-            fail
-              (Printf.sprintf
-                 "%s attaches a golden diff to `runtest` itself -- give it `(alias \
-                  runtest-<name>)` and nothing else, and list `(alias runtest-<name>)` in this \
-                  file's `(alias (name runtest) (deps …))` stanza. <name> is the golden the rule \
-                  checks, and must not be the name of a `(test)` stanza in this directory, since \
-                  dune generates `runtest-<name>` for those"
-                 dune_file));
+          if is_golden_diff stanza then
+            match aliases_of stanza with
+            (* One alias, and it names a member of a suite: that is the whole convention. Asked of
+               the alias SET rather than of the name `runtest` alone (Codex P2, round 1), since a
+               rule with no alias at all, or with an alias of its own invention, has neither the
+               targeted entry point nor a place in a suite -- and its golden stops being checked
+               without anything saying so. *)
+            | [ alias ] when List.exists suites ~f:(fun suite -> member_of suite alias) -> ()
+            | aliases ->
+                let what =
+                  match aliases with
+                  | [] -> "attaches a golden diff to no alias at all"
+                  | [ alias ] ->
+                      Printf.sprintf "attaches a golden diff to `%s`, which is no suite's member"
+                        alias
+                  | aliases ->
+                      Printf.sprintf
+                        "attaches a golden diff to %d aliases (%s) -- and a rule on two aliases \
+                         makes building either one build both"
+                        (List.length aliases)
+                        (String.concat ~sep:", " aliases)
+                in
+                fail
+                  (Printf.sprintf
+                     "%s %s. Give it `(alias <suite>-<name>)` -- that alias and no other, with \
+                      <suite> one of %s -- and list it in this file's `(alias (name <suite>) (deps \
+                      …))` stanza, which is what runs it as part of the suite. <name> is the \
+                      golden the rule checks, and for `runtest` must not be the name of a `(test)` \
+                      stanza in this directory, since dune generates `runtest-<name>` for those"
+                     dune_file what
+                     (String.concat ~sep:", " suites)));
       let fields = List.concat_map stanzas ~f:dep_fields in
       let declared =
         List.concat_map fields ~f:(fun (_, args) -> List.concat_map args ~f:env_vars_in)
