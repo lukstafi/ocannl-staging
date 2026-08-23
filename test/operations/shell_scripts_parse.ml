@@ -99,55 +99,79 @@ let script_floor = 12
 let must_be_scanned = [ "scripts/setup-ocaml-env.sh"; "tools/test-run.sh" ]
 
 module Shebang = struct
-  (** What a script's first line says about how to parse it. *)
+  (** What a script's first line says about how to parse it.
+
+      {1 Why this grammar is narrow}
+
+      Rounds 2 to 5 of the review on PR #454 each found a case where reconstructing what the kernel,
+      `env` and the shell would do got it wrong, and round 5's answer -- carry every option through
+      and let the shell be the authority -- turned out to be the worst of them: a shebang with a
+      positional operand, `#!/usr/bin/env -S bash helper.sh`, produced the invocation
+      `bash helper.sh -n target`, and a shell stops processing options at the first operand. So `-n`
+      became an argument and bash EXECUTED helper.sh. Measured, with a marker file. That is the one
+      thing this check promises never to do.
+
+      The lesson is not that the emulation needed another patch. Every capability added to it has
+      cost a defect, the repository has no script that uses any of them, and the ambiguity at the
+      centre is not resolvable without each shell's option-arity table: given `-O extglob`, nothing
+      short of bash's own tables says whether `extglob` is an operand of `-O` or the script to run.
+
+      So the accepted grammar is now the small sound core, and everything else is REFUSED -- a
+      failing verdict naming what it could not vouch for, never a silent pass:
+
+      - no shebang: the file is sourced, checked under both `sh` and `bash`;
+      - [#!<path>] and [#!/usr/bin/env <shell>], optionally [-S<shell>] / [-S <shell>] /
+        [--split-string=<shell>], where <shell> is in {!parse_only_shells};
+      - shebang options are allowed only when every token begins with `-`, none is the `--`
+        terminator, and none carries a letter or long spelling that would stop `-n` from being a
+        parse of this file ({!refused_short}, {!refused_long}). A bare word is refused outright,
+        because that is exactly the operand-or-option-argument ambiguity above;
+      - any other `env` option, and any `NAME=VALUE` assignment, is refused: they change the
+        environment the lookup and the shell's own startup happen in, which this check cannot
+        reproduce (see the `BASH_ENV` handling in {!parse_check}).
+
+      Two independent guards keep the promise, rather than one. This grammar is the first;
+      {!parse_check} placing `-n` immediately after the program, before anything from the shebang,
+      is the second -- with `-n` already set, even a token this parser wrongly admitted would be
+      PARSED as a script rather than run. *)
   type t =
     | Sourced
         (** No shebang: the file is sourced rather than run, so it has no interpreter of its own and
             must parse under whichever shell sources it. *)
     | Interp of launch * string list
-        (** The interpreter the kernel (or `env`) would exec, and the options that have to be given
-            to it for the file to parse as written. *)
+        (** The interpreter the kernel (or `env`) would exec, and the options -- all of them
+            option-shaped, see above -- that have to be given to it for the file to parse. *)
 
   (** How the interpreter is found, which is not the same question for the two shebang forms and
-      cannot be flattened to a name (Codex review round 4).
+      cannot be flattened to a name (round 4).
 
       A direct `#!/bin/bash` names a FILE, and the kernel execs that file; resolving `bash` on PATH
       instead can run a different build entirely -- on macOS `/bin/bash` is 3.2 while a Homebrew
       `bash` 5 sits earlier on PATH, and 5 accepts `declare -A` and `${v^^}` that 3.2 rejects, so a
       script the kernel-selected shell would refuse passes. That skew is on this repository's own
-      macOS CI leg, not hypothetical. A shebang going through `env`, by contrast, is a PATH lookup
-      by definition -- that is what `env` is for -- so resolving the name is the faithful thing
-      there. *)
+      macOS CI leg. A shebang going through `env`, by contrast, is a PATH lookup by definition. *)
   and launch =
     | Path of string  (** A direct shebang: exec this exact file, as the kernel would. *)
     | Name of string  (** Selected through `env`: resolve on PATH, as `env` would. *)
 
-  (** Shells whose `-n` parses without executing. The list is a whitelist rather than a fallthrough
-      because `-n` is not a shared convention outside this family -- `python3 -n` is an error and
-      `perl -n` wraps the program in a read loop and RUNS it -- and a `.sh` file is free to name one
-      of those. *)
+  (** Shells whose `-n` parses without executing. A whitelist rather than a fallthrough because `-n`
+      is not a shared convention outside this family -- `python3 -n` is an error and `perl -n` wraps
+      the program in a read loop and RUNS it -- and a `.sh` file is free to name one of those. *)
   let parse_only_shells = [ "sh"; "bash"; "dash"; "ash"; "ksh"; "mksh"; "zsh" ]
 
   (** POSIX shells that can stand in for one another when the named one is not installed. A stand-in
-      is a weaker check, never a wrong one: these accept a subset of what bash does, so a script
-      written for one of them and parsed by another in the family is being held to about the same
-      grammar. bash is deliberately absent -- see [stand_ins]. *)
+      is a weaker check, never a wrong one: these accept a subset of what bash does. bash is
+      deliberately absent -- see [stand_ins]. *)
   let posix_family = [ "sh"; "dash"; "ash" ]
 
-  (** Interpreter options that would make `-n` a parse of something other than this file, so a
-      shebang carrying one is refused rather than checked. `-c` takes the program from the command
-      line and `-s` from stdin; `--version`/`--help` exit before reading anything, which would make
-      an unparsable script pass with status 0.
+  (** Short options that stop `-n` from being a parse of this whole file. `-c` takes the program
+      from the command line and `-s` from stdin, so `-n` would parse something else; `-t` makes the
+      shell stop after one command, and `bash -t -n` exits 0 on a file whose second line is a syntax
+      error (measured) -- a silent pass, which is the worst failure this check has. *)
+  let refused_short = [ 'c'; 's'; 't' ]
 
-      Everything else is carried through verbatim, which is round 5's correction. The previous
-      version dropped a fixed list of "runtime-only" flags as harmless, and that list was universal
-      while the shells are not: `#!/bin/dash -B` had its `-B` dropped and was checked as plain
-      `dash -n`, where the real invocation exits 2 with "Illegal option -B". Encoding each shell's
-      option table here would be the same guess one level down, so the shell is left to be the
-      authority on its own options -- with `-n` in play the carried flags cannot execute anything,
-      so there is nothing to be gained by filtering them. *)
-  let refused_short = [ 'c'; 's' ]
-
+  (** Long options that exit before reading the file, so an unparsable script would pass with status
+      0. *)
   let refused_long = [ "--version"; "--help" ]
 
   let basename p = List.last_exn (String.split_on_chars p ~on:[ '/'; '\\' ])
@@ -155,85 +179,105 @@ module Shebang = struct
   let words line =
     List.filter (String.split_on_chars line ~on:[ ' '; '\t' ]) ~f:(Fn.non String.is_empty)
 
-  (** Consume `env`'s own arguments and return what it would exec. GNU `env` takes `-i`/`-0` and
-      friends without an operand, `-u NAME` and `-C DIR` with one (attached, separate, or as
-      `--unset=NAME`), `-S`/`--split-string` whose payload is the command line itself, `--` to end
-      its options, and any number of `NAME=VALUE` assignments before the command. Only the last of
-      those was handled before, which is the whole of the first review finding.
+  (** Accept a shebang's interpreter options, or say why not.
 
-      This runs only over an argument list `-S` produced, since without `-S` the kernel hands env a
-      single argument and {!parse} refuses that shape before getting here. Quoting inside `-S` is not
-      honoured -- the payload is split on whitespace -- which is noted rather than fixed, since no
-      shebang in this repository uses `-S` at all. *)
-  let rec skip_env_arguments = function
-    | [] -> Error "`env` with no command"
-    | "--" :: rest -> (
-        match rest with [] -> Error "`env --` with no command" | cmd :: args -> Ok (Name cmd, args))
-    | ("-S" | "--split-string") :: rest -> skip_env_arguments rest
-    | (("-0" | "--null") as token) :: _ ->
-        (* `env` refuses this with a command -- "cannot specify --null (-0) with command", exit
-           125 -- so a shebang carrying it launches nothing. *)
-        Error (Printf.sprintf "`env %s` cannot be combined with a command (env exits 125)" token)
-    | ("-i" | "--ignore-environment" | "-v" | "--debug") :: rest -> skip_env_arguments rest
-    | ("-u" | "--unset" | "-C" | "--chdir") :: rest -> (
-        (* Operand in the next word. *)
-        match rest with [] -> Error "`env` option with no operand" | _ :: rest -> skip_env_arguments rest)
-    | token :: rest when String.is_prefix token ~prefix:"--split-string=" -> (
-        match words (String.drop_prefix token (String.length "--split-string=")) @ rest with
-        | [] -> Error "`env --split-string=` with no command"
-        | split -> skip_env_arguments split)
-    | token :: rest
-      when List.exists [ "--unset="; "--chdir=" ] ~f:(fun p -> String.is_prefix token ~prefix:p)
-           || (String.is_prefix token ~prefix:"-"
-              && (not (String.is_prefix token ~prefix:"--"))
-              && String.length token > 2
-              && List.mem [ 'u'; 'C' ] token.[1] ~equal:Char.equal) ->
-        (* `--unset=NAME`, `--chdir=DIR`, `-uNAME`, `-CDIR`: operand attached. *)
-        skip_env_arguments rest
-    | token :: _ when String.contains token '=' && not (String.is_prefix token ~prefix:"-") ->
-        (* A `NAME=VALUE` assignment. `env` applies it BEFORE looking the command up, so
-           `#!/usr/bin/env -S PATH=/definitely/missing bash` exits 127 having found no bash at all --
-           measured. Skipping the assignment and then resolving the command on the scan's own PATH
-           passes a shebang that cannot launch. Reproducing env's environment here is not something
-           this check can do honestly (PATH decides the lookup, and ENV/BASH_ENV/SHELLOPTS reach the
-           shell's own startup), so an assignment is refused instead. *)
-        Error
-          (Printf.sprintf
-             "`env` assignment `%s`: the command is looked up in an environment this check cannot \
-              reproduce"
-             token)
-    | token :: _ when String.is_prefix token ~prefix:"-" ->
-        Error (Printf.sprintf "`env` option this check does not know: %s" token)
-    | cmd :: args -> Ok (Name cmd, args)
-
-  (** Refuse the options above; carry the rest, operands included, in the order written. *)
+      Every token must be option-shaped. A bare word is refused rather than guessed at: it is either
+      an operand of the option before it or the script the shell would run instead of this one, and
+      telling those apart needs the shell's own option-arity tables. The `--` terminator is refused
+      for the same reason -- everything after it is positional, and `bash -- -n path` makes `-n` the
+      filename (bash 5.2 exits 127, measured). *)
   let check_options args =
-    let refused token =
-      if String.is_prefix token ~prefix:"--" then List.mem refused_long token ~equal:String.equal
-      else if String.is_prefix token ~prefix:"-" && String.length token > 1 then
+    let refusal token =
+      if String.equal token "--" then
+        Some "the `--` terminator makes everything after it positional"
+      else if not (String.is_prefix token ~prefix:"-") then
+        Some
+          "a bare word is either an option's operand or the script the shell would run instead of \
+           this one, and this check cannot tell which"
+      else if String.is_prefix token ~prefix:"--" then
+        if List.mem refused_long token ~equal:String.equal then
+          Some "this option exits before reading the file"
+        else None
+      else if
         String.exists (String.drop_prefix token 1) ~f:(fun c ->
             List.mem refused_short c ~equal:Char.equal)
-      else false
+      then Some "this option stops `-n` from being a parse of the whole file"
+      else None
     in
-    match List.find args ~f:refused with
-    | Some token ->
-        Error (Printf.sprintf "interpreter option that would not parse this file: %s" token)
+    match List.find_map args ~f:(fun t -> Option.map (refusal t) ~f:(fun why -> (t, why))) with
+    | Some (token, why) ->
+        Error (Printf.sprintf "shebang option this check cannot vouch for: %s -- %s" token why)
     | None -> Ok args
 
-  (* The message both kernel-semantics refusals share: the shape is wrong on the shebang line
+  (* The message the kernel-semantics refusals share: the shape is wrong on the shebang line
      itself, so naming the offending text and the remedy is more use than naming a token. *)
   let one_argument_error who arg =
     Printf.sprintf
-      "the kernel passes `%s` to %s as ONE argument -- no command or option there; use `env -S`"
-      arg who
+      "the kernel passes `%s` to %s as ONE argument -- no command or option there; use `env -S`" arg
+      who
+
+  (** What `env` would exec, from the single argument the kernel hands it.
+
+      Only `-S`/`--split-string` is accepted, in its three spellings, because that is the option
+      whose whole purpose is to make a shebang carry a word list. Every other `env` option and every
+      `NAME=VALUE` assignment is refused: they build an environment for the command, and the
+      command's parsing depends on that environment in ways this check cannot reproduce -- `PATH`
+      decides which binary is found at all (`env -S PATH=/definitely/missing bash` exits 127,
+      measured), and `BASH_ENV`/`ENV` are parsed by the shell before the script (measured: a broken
+      `BASH_ENV` makes `bash -n` fail a valid file). *)
+  let env_command argument =
+    let payload =
+      if String.is_prefix argument ~prefix:"-S " then
+        Some (String.drop_prefix argument (String.length "-S "))
+      else if String.is_prefix argument ~prefix:"--split-string=" then
+        Some (String.drop_prefix argument (String.length "--split-string="))
+      else if String.is_prefix argument ~prefix:"-S" then
+        (* `-Sbash`: GNU env accepts the payload attached to the short option. *)
+        Some (String.drop_prefix argument 2)
+      else None
+    in
+    match payload with
+    | Some payload -> (
+        match words payload with
+        | [] -> Error "`env -S` with no command"
+        | cmd :: args ->
+            (* Inside `-S` the payload really is a word list, so env's own options and assignments
+               are reachable here -- and refused here, for the reason below. *)
+            if String.is_prefix cmd ~prefix:"-" then
+              Error
+                (Printf.sprintf
+                   "`env` option this check cannot vouch for: %s -- it builds an environment the \
+                    command's parsing depends on"
+                   cmd)
+            else if String.contains cmd '=' then
+              Error
+                (Printf.sprintf
+                   "`env` assignment `%s`: the command is looked up, and parses, in an environment \
+                    this check cannot reproduce"
+                   cmd)
+            else Ok (Name cmd, args))
+    | None ->
+        if String.exists argument ~f:Char.is_whitespace then
+          Error (one_argument_error "`env`" argument)
+        else if String.is_prefix argument ~prefix:"-" then
+          Error
+            (Printf.sprintf
+               "`env` option this check cannot vouch for: %s -- it builds an environment the \
+                command's parsing depends on"
+               argument)
+        else if String.contains argument '=' then
+          Error
+            (Printf.sprintf
+               "`env` assignment `%s`: the command is looked up, and parses, in an environment this \
+                check cannot reproduce"
+               argument)
+        else Ok (Name argument, [])
 
   let parse first_line =
     (* `#!` must be the file's first two BYTES: the kernel does not look past anything, so
        ` #!/bin/bash` is not a shebang -- exec fails with ENOEXEC and the caller's shell runs the
-       file with `sh` instead (measured: such a file executes, under sh, not bash). Stripping the
-       line before testing the prefix classified it as a bash script and skipped the no-shebang
-       checks, so a bash-only construct in it would pass here and fail for a real launcher. Only the
-       tail is stripped, which is where a CRLF checkout's `\r` would sit. *)
+       file with `sh` instead (measured: such a file executes, under sh, not bash). Only the tail is
+       stripped, which is where a CRLF checkout's `\r` would sit. *)
     match
       if String.is_prefix first_line ~prefix:"#!" then
         Some (String.strip (String.drop_prefix first_line 2))
@@ -241,30 +285,19 @@ module Shebang = struct
     with
     | None -> Ok Sourced
     | Some rest -> (
-        (* The kernel splits a shebang in exactly one place: the interpreter path, then the whole
-           remainder as a single argument. Everything below follows from that. *)
-        let rest = String.strip rest in
         match words rest with
         | [] -> Ok Sourced
         | first :: _ ->
+            (* The kernel splits a shebang in exactly one place: the interpreter path, then the
+               whole remainder as a single argument. *)
             let argument = String.strip (String.drop_prefix rest (String.length first)) in
             let resolved =
               if String.equal (basename first) "env" then
-                match argument with
-                | "" -> Error "`env` with no command"
-                | arg
-                  when String.is_prefix arg ~prefix:"-S "
-                       || String.is_prefix arg ~prefix:"--split-string=" ->
-                    (* The one option that turns the single argument into a word list. *)
-                    skip_env_arguments (words arg)
-                | arg when String.exists arg ~f:Char.is_whitespace ->
-                    Error (one_argument_error "`env`" arg)
-                | arg -> skip_env_arguments [ arg ]
+                if String.is_empty argument then Error "`env` with no command"
+                else env_command argument
               else if String.exists argument ~f:Char.is_whitespace then
                 Error (one_argument_error ("`" ^ basename first ^ "`") argument)
-              else
-                (* A direct shebang: the kernel execs this path, so keep it. *)
-                Ok (Path first, if String.is_empty argument then [] else [ argument ])
+              else Ok (Path first, if String.is_empty argument then [] else [ argument ])
             in
             Result.bind resolved ~f:(fun (launch, args) ->
                 let shell = basename (match launch with Path p -> p | Name n -> n) in
@@ -273,86 +306,121 @@ module Shebang = struct
                     (Printf.sprintf "interpreter whose `-n` this check cannot vouch for: %s" shell)
                 else Result.map (check_options args) ~f:(fun opts -> Interp (launch, opts))))
 
-  (** How a parse reads in a verdict label, so that the golden is a table of what the parser does
-      rather than a column of booleans. *)
   let launched = function Path p -> p | Name n -> n
 
+  (** How a parse reads in a verdict label, so that the golden is a table of what the parser does
+      rather than a column of booleans. *)
   let render = function
     | Ok Sourced -> "sourced"
     | Ok (Interp (launch, opts)) -> String.concat ~sep:" " (launched launch :: opts)
     | Error reason -> "refused (" ^ reason ^ ")"
 
-  (** The grammar, as a table of lines and what {!parse} must make of them -- rendered by
-      {!render}, so a case reads as the specification rather than as a boolean.
-
-      The first three entries are the review findings of PR #454 verbatim. The rest cover what
-      those three imply: every `env` option form (attached operand, separate operand, long
-      `--unset=`, `--` terminator, `-S` with an assignment), the interpreter options carried and
-      dropped, and the two refusals that keep this check from ever executing a script -- an
-      interpreter whose `-n` is not a parse, and an option that would redirect what is read. *)
+  (** The grammar, as a table of lines and what {!parse} must make of them -- rendered by {!render},
+      so a case reads as the specification rather than as a boolean. The repository's own scripts
+      exercise two shapes of it; everything else here comes from a review round that found the
+      parser wrong about it, and is kept so the same case cannot regress quietly. *)
   let shebang_cases =
     [
       (* The shapes this repository's own scripts use. A direct shebang renders as the PATH it
-         names and an `env` one as a bare name, which is the round-4 distinction: the kernel execs
-         the file `#!/bin/bash` names, while `env` performs a PATH lookup. Flattening both to
-         "bash" is what let a macOS `/bin/bash` 3.2 script be accepted by a Homebrew bash 5. *)
+         names and an `env` one as a bare name (round 4): the kernel execs the file `#!/bin/bash`
+         names, while `env` performs a PATH lookup. Flattening both to "bash" let a macOS
+         `/bin/bash` 3.2 script be accepted by a Homebrew bash 5. *)
       ("#!/bin/bash", "/bin/bash");
       ("#!/usr/bin/env bash", "bash");
       ("#!/bin/sh", "/bin/sh");
       ("#!/bin/dash", "/bin/dash");
       ("", "sourced");
-      (* Kernel semantics: everything after the interpreter path is ONE argument. Both of these
-         were asserted to read as `bash` before round 3, and both are broken shebangs -- the first
+      (* Not a shebang: `#!` must be the first two bytes, so the file is run by the caller's shell
+         and gets the no-shebang treatment (round 5). *)
+      (" #!/bin/bash", "sourced");
+      (* Kernel semantics (round 3): everything after the interpreter path is ONE argument. Both of
+         these were asserted to read as `bash` before; both are broken shebangs -- the first
          measurably HANGS (env execs the script, which re-enters the same shebang), the second dies
-         with bash's "invalid option". Pinning them as valid is what the review caught. *)
+         with bash's "invalid option". *)
       ("#!/usr/bin/env -u FOO bash",
        "refused (the kernel passes `-u FOO bash` to `env` as ONE argument -- no command or option \
         there; use `env -S`)");
       ("#!/bin/bash -O extglob",
        "refused (the kernel passes `-O extglob` to `bash` as ONE argument -- no command or option \
         there; use `env -S`)");
-      (* A single argument is fine when it really is one token, which is why `-eu` works in a
-         shebang and `-O extglob` cannot. *)
+      (* A single option-shaped token is fine, which is why `-eu` works in a shebang where
+         `-O extglob` cannot. *)
       ("#!/bin/bash -eu", "/bin/bash -eu");
-      (* Carried, not dropped: the shell is the authority on its own options, and a universal
-         "harmless" list was wrong here -- `dash -B -n` exits 2 with "Illegal option -B", so the
-         real invocation fails and the check must too. *)
-      ("#!/bin/dash -B", "/bin/dash -B");
       ("#!/bin/bash --posix", "/bin/bash --posix");
-      (* `env -S` is the mechanism that DOES produce a word list, so env's own grammar is reachable
-         only inside it. The first entry is the review finding of round 2 verbatim. *)
-      ("#!/usr/bin/env -S -u FOO bash", "bash");
-      ("#!/usr/bin/env -S bash -O extglob", "bash -O extglob");
-      ("#!/usr/bin/env -S FOO=bar bash",
-       "refused (`env` assignment `FOO=bar`: the command is looked up in an environment this \
-        check cannot reproduce)");
-      ("#!/usr/bin/env -S -0 bash",
-       "refused (`env -0` cannot be combined with a command (env exits 125))");
-      ("#!/usr/bin/env -S -uFOO bash", "bash");
-      ("#!/usr/bin/env -S --unset=FOO bash", "bash");
-      ("#!/usr/bin/env -S -C /tmp bash", "bash");
-      ("#!/usr/bin/env -S -i bash", "bash");
-      ("#!/usr/bin/env -S -- bash", "bash");
-      ("#!/usr/bin/env --split-string=bash -o posix", "bash -o posix");
-      (* Refusals. Each would otherwise be silent: the first parses a Python file with a shell's
-         grammar, the second makes `-n` a parse of the command line rather than of the file, the
-         third is an `env` option whose operand rule this check does not know. *)
+      (* `env -S` is the mechanism that produces a word list, in all three spellings -- the attached
+         form is round 6's. *)
+      ("#!/usr/bin/env -S bash", "bash");
+      ("#!/usr/bin/env -Sbash", "bash");
+      ("#!/usr/bin/env --split-string=bash --posix", "bash --posix");
+      (* The P1 of round 6, and the reason the grammar is narrow: a positional operand makes the
+         shell stop processing options, so the constructed `bash helper.sh -n target` EXECUTED
+         helper.sh. Measured, with a marker file. *)
+      ("#!/usr/bin/env -S bash helper.sh",
+       "refused (shebang option this check cannot vouch for: helper.sh -- a bare word is either an \
+        option's operand or the script the shell would run instead of this one, and this check \
+        cannot tell which)");
+      ("#!/usr/bin/env -S bash -O extglob",
+       "refused (shebang option this check cannot vouch for: extglob -- a bare word is either an \
+        option's operand or the script the shell would run instead of this one, and this check \
+        cannot tell which)");
+      (* Options that would make `-n` mean something other than "parse this whole file". `-t` exits
+         after one command (`bash -t -n` returns 0 on a file whose second line is a syntax error);
+         `--` makes `-n` positional (bash 5.2: "-n: No such file or directory", 127). *)
+      ("#!/bin/bash -t",
+       "refused (shebang option this check cannot vouch for: -t -- this option stops `-n` from \
+        being a parse of the whole file)");
+      ("#!/bin/bash -c",
+       "refused (shebang option this check cannot vouch for: -c -- this option stops `-n` from \
+        being a parse of the whole file)");
+      ("#!/bin/bash --",
+       "refused (shebang option this check cannot vouch for: -- -- the `--` terminator makes \
+        everything after it positional)");
+      ("#!/bin/bash --version",
+       "refused (shebang option this check cannot vouch for: --version -- this option exits before \
+        reading the file)");
+      (* `env` builds an environment, and both the lookup and the shell's own startup depend on it
+         (rounds 5 and 6). Refused rather than emulated. *)
+      ("#!/usr/bin/env -S PATH=/missing bash",
+       "refused (`env` assignment `PATH=/missing`: the command is looked up, and parses, in an \
+        environment this check cannot reproduce)");
+      ("#!/usr/bin/env -S -i bash",
+       "refused (`env` option this check cannot vouch for: -i -- it builds an environment the \
+        command's parsing depends on)");
+      (* An interpreter whose `-n` is not a parse at all. *)
       ("#!/usr/bin/env python3",
        "refused (interpreter whose `-n` this check cannot vouch for: python3)");
-      ("#!/bin/bash -c", "refused (interpreter option that would not parse this file: -c)");
-      ("#!/bin/bash --version",
-       "refused (interpreter option that would not parse this file: --version)");
-      (* Not a shebang: `#!` must be the first two bytes, so this file is run by the caller's
-         shell and gets the no-shebang treatment. *)
-      (" #!/bin/bash", "sourced");
-      ("#!/usr/bin/env -S -Z bash", "refused (`env` option this check does not know: -Z)");
     ]
 end
 
-(** Run [prog args… -n path] with stdin closed and both output streams captured, and return the exit
-    status together with what the shell said. A missing [prog] arrives as exit 127 on Unix (the
-    forked child cannot exec and exits with it) and as [Unix_error] on Windows; both mean the same
-    thing here, so both become [None]. *)
+
+(** Variables that make a shell parse something other than -- or in addition to -- the file it is
+    handed, cleared for the child. `BASH_ENV` is the sharp one: bash expands and PARSES it before a
+    non-interactive script, so an exported `BASH_ENV` pointing at a file with a syntax error makes
+    `bash -n` fail every valid script in the repository (measured). `ENV` is its POSIX-shell
+    counterpart, and `SHELLOPTS`/`BASHOPTS` set shell options at startup, which can reach the
+    grammar. Clearing them is better than declaring them as dune dependencies: the check should not
+    depend on the ambient environment at all, and a variable that cannot influence the run needs no
+    dependency edge (Codex review round 6). *)
+let cleared_variables = [ "BASH_ENV"; "ENV"; "SHELLOPTS"; "BASHOPTS" ]
+
+let isolated_environment =
+  lazy
+    (Array.filter (Unix.environment ()) ~f:(fun binding ->
+         let name = List.hd_exn (String.split binding ~on:'=') in
+         not (List.mem cleared_variables name ~equal:String.equal)))
+
+(** Run [prog -n args… path] with stdin closed, an isolated environment, and both output streams
+    captured; return the exit status together with what the shell said.
+
+    `-n` goes FIRST, before anything the shebang carried. That is the second of the two guards on
+    this check's promise to execute nothing (the first being {!Shebang}'s grammar): a shell stops
+    processing options at its first operand, so a token this parser wrongly admitted as an option
+    could otherwise become the script and be RUN -- which is exactly what happened before round 6,
+    where `bash helper.sh -n target` executed helper.sh. With `-n` already set, the same mistake
+    parses the wrong file instead of running it: still a bug, no longer an execution.
+
+    A missing [prog] arrives as exit 127 on Unix (the forked child cannot exec and exits with it)
+    and as [Unix_error] on Windows; both mean the same thing here, so both become [None]. *)
 let parse_check prog args path =
   let tmp = Stdlib.Filename.temp_file "ocannl_shell_parse" ".log" in
   let devnull = if Stdlib.Sys.win32 then "NUL" else "/dev/null" in
@@ -361,14 +429,16 @@ let parse_check prog args path =
     ~f:(fun () ->
       let out = Unix.openfile tmp [ Unix.O_WRONLY; Unix.O_TRUNC ] 0o600 in
       let inp = Unix.openfile devnull [ Unix.O_RDONLY ] 0o400 in
-      let argv = Array.of_list ((prog :: args) @ [ "-n"; path ]) in
+      let argv = Array.of_list ((prog :: "-n" :: args) @ [ path ]) in
       let status =
         Exn.protect
           ~finally:(fun () ->
             Unix.close out;
             Unix.close inp)
           ~f:(fun () ->
-            match Unix.create_process prog argv inp out out with
+            match
+              Unix.create_process_env prog argv (force isolated_environment) inp out out
+            with
             | pid -> Some (snd (Unix.waitpid [] pid))
             | exception Unix.Unix_error _ -> None)
       in
@@ -414,20 +484,26 @@ let stand_ins shell =
 
 (** Resolve one wanted interpreter to something that exists here, announcing any substitution.
 
-    A [Path] is tried as written first, which is the whole point of keeping it: the kernel would exec
-    that file, and a same-named binary earlier on PATH can be a different major version accepting a
-    different grammar. Its fallback is the basename on PATH, because a direct shebang's path is a
-    Unix path and Windows has no `/bin/bash` to exec -- under Git Bash `bash` resolves and the
-    literal path does not, so refusing there would fail every `#!/bin/sh` script in this repository
-    for a reason that is about the host rather than about the script. Announced, like every other
-    substitution here. *)
+    A [Path] is tried as written, which is the whole point of keeping it: the kernel would exec that
+    file, and a same-named binary earlier on PATH can be a different major version accepting a
+    different grammar.
+
+    When that path is absent, the two platforms differ and so does the answer (round 6). On Unix an
+    absent path means the kernel could not launch this script AT ALL, so resolving the basename on
+    PATH would report success for something unrunnable -- it is a failure, and reported as one.
+    Windows has no `/bin/sh` to exec in the first place: under Git Bash the shebang is honoured by
+    the shell rather than the kernel, and the name resolves where the literal path never will, so
+    the fallback there is the faithful reading rather than a papering-over. Hence the platform test,
+    which the earlier unconditional fallback lacked while claiming this same rationale. *)
 let rec resolve ~rel = function
   | Shebang.Path path ->
       if available path then Some path
-      else
+      else if Stdlib.Sys.win32 then (
         let name = Shebang.basename path in
-        eprintf "%s: no `%s` on this host, resolving `%s` on PATH instead\n" rel path name;
-        resolve ~rel (Shebang.Name name)
+        eprintf "%s: no `%s` on this host (Windows resolves the shebang itself), using `%s`\n" rel
+          path name;
+        resolve ~rel (Shebang.Name name))
+      else None
   | Shebang.Name shell -> (
       if available shell then Some shell
       else
@@ -436,6 +512,11 @@ let rec resolve ~rel = function
             eprintf "%s: no `%s` on this host, parsing with `%s` instead\n" rel shell substitute;
             Some substitute
         | None -> None)
+
+(** The first line of a file, or [None] if it cannot be read as text at all. Binary files reach
+    here through the directory globs, so a failure to read one is "not a script", not an error. *)
+let first_line_of path =
+  try In_channel.with_file path ~f:In_channel.input_line with _ -> None
 
 let () =
   if Array.length Stdlib.Sys.argv < 2 then (
@@ -452,17 +533,28 @@ let () =
   let base = base_dir Stdlib.Sys.argv.(1) in
   (* Reported repository-relative, opened as dune handed them over: the working directory is deep in
      the build tree and the paths arrive relative to it. *)
+  (* A `.sh` file is in scope by its name; anything else the globs hand over is in scope only if it
+     actually starts with a shell shebang, which is how `tools/run-tests` gets covered without the
+     rule depending on every file in the repository (round 6). Reading two bytes off each candidate
+     is the price, over the few hundred files in `tools/` and `scripts/`. *)
+  let in_scope path =
+    String.is_suffix path ~suffix:".sh"
+    ||
+    match Shebang.parse (Option.value ~default:"" (first_line_of path)) with
+    | Ok (Shebang.Interp _) -> true
+    | Ok Shebang.Sourced | Error _ -> false
+  in
   let scripts =
     Array.to_list Stdlib.Sys.argv
     |> Fn.flip List.drop 2
-    |> List.filter ~f:(fun path -> String.is_suffix path ~suffix:".sh")
+    |> List.filter ~f:(fun path -> (not (Stdlib.Sys.is_directory path)) && in_scope path)
     |> List.map ~f:(fun path -> (repo_relative base path, path))
-    |> List.sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
+    (* The `*.sh` glob and the two directory globs overlap, so the same script arrives twice; one
+       entry per repository-relative path, which is also what the golden is keyed by. *)
+    |> List.dedup_and_sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
   in
   List.iter scripts ~f:(fun (rel, path) ->
-      let first_line =
-        In_channel.with_file path ~f:In_channel.input_line |> Option.value ~default:""
-      in
+      let first_line = Option.value (first_line_of path) ~default:"" in
       match Shebang.parse first_line with
       | Error reason -> Verdict.fail (Printf.sprintf "%s: %s" rel reason)
       | Ok parsed ->

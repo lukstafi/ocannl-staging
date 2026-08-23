@@ -3748,11 +3748,23 @@
  (deps
   ocannl_config
   (glob_files_rec ../../*.sh)
+  ; A shell script need not be named `*.sh` -- `tools/run-tests` with a `#!/bin/bash` would have
+  ; slipped through the suffix glob, and the floor would not have noticed since the twelve suffixed
+  ; ones keep it satisfied (Codex review round 6). These two globs hand over EVERY file in the two
+  ; directories that hold this repository's tooling; the scanner picks out the ones whose first two
+  ; bytes are `#!` and whose interpreter is a shell, and ignores the rest. Bounded on purpose:
+  ; globbing the whole repository would make this rule depend on every source file in it and rerun
+  ; on every commit, for a case that only arises where executables live.
+  (glob_files_rec ../../tools/*)
+  (glob_files_rec ../../scripts/*)
   ; PATH decides WHICH shell each name resolves to, so it decides what grammar a script was held
   ; to -- a host whose `sh` is dash and one whose `sh` is bash are running different checks, and a
   ; missing `dash` changes whether a stand-in was substituted at all. Undeclared, dune would serve
   ; the previous PATH's result unchanged (Codex review round 3 on PR #454; the same rule CLAUDE.md
   ; states for OCANNL_* spellings applies to any variable a run reads).
+  ;
+  ; BASH_ENV and friends are deliberately NOT declared: the executable clears them for the child
+  ; instead, so they cannot influence the run and need no dependency edge (round 6).
   (env_var PATH))
  (action
   (with-stdout-to
