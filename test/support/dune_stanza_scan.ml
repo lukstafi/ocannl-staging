@@ -1638,16 +1638,26 @@ type artifact_subject = {
     module name's source calls the initializer. A stanza with no caller among its modules and no
     declaration of its own is not a subject and is not reported. *)
 let artifact_subjects stanzas ~calls =
-  let runners_of names =
-    List.filter stanzas ~f:(fun s ->
-        List.exists (executables_run s) ~f:(fun (_cwd, command) ->
-            match command with
-            | Runs path ->
-                List.exists names ~f:(fun name ->
-                    String.equal (Stdlib.Filename.basename path) (name ^ ".exe"))
-            | _ -> false))
+  let exes_run stanza =
+    List.filter_map (executables_run stanza) ~f:(fun (_cwd, command) ->
+        match command with Runs path -> Some (Stdlib.Filename.basename path) | _ -> None)
+    |> List.dedup_and_sort ~compare:String.compare
   in
-  List.filter_map stanzas ~f:(fun stanza ->
+  let runners_of names =
+    let wanted = List.map names ~f:(fun name -> name ^ ".exe") in
+    List.filter stanzas ~f:(fun s ->
+        List.exists (exes_run s) ~f:(List.mem wanted ~equal:String.equal))
+  in
+  (* Whether a stanza RUNS something, in the widest sense {!executables_run} admits -- a named
+     executable, a command it could not place, a program under an unresolvable `chdir`. That is what
+     decides whether the converse question below is this stanza's to answer: a stanza that runs an
+     executable of this file is judged through that executable's own verdict, and one that runs
+     something this scan cannot name is not judged at all, since the modules behind it are not
+     visible from here. What is left -- a stanza that declares the variable and runs nothing
+     whatever -- has nothing behind its declaration by construction. *)
+  let runs_something stanza = not (List.is_empty (executables_run stanza)) in
+  let module_subjects =
+    List.filter_map stanzas ~f:(fun stanza -> 
       match head stanza with
       | Some h when List.mem module_bearing_heads h ~equal:String.equal ->
           let callers = List.filter (modules_of stanza) ~f:calls in
@@ -1698,6 +1708,36 @@ let artifact_subjects stanzas ~calls =
               let declared = declares (field stanza "deps") in
               decide ~all:declared ~any:declared "its `(deps …)`")
       | _ -> None)
+  in
+  (* The converse over the stanzas the question above does not reach. A `(rule …)` names no modules,
+     so it is a subject only through the executable it runs -- and a rule that declares the variable
+     and runs nothing at all was outside the check entirely, which is the copied declaration the
+     converse direction exists to catch (Codex P2, round 1). Heads that DO name modules are excluded
+     here, having been decided above, so nothing is reported twice. *)
+  let stale_subjects =
+    List.filter_map stanzas ~f:(fun stanza ->
+        match head stanza with
+        | Some h
+          when (not (List.mem module_bearing_heads h ~equal:String.equal))
+               && declares_env_var (field stanza "deps") artifact_env_var
+               && not (runs_something stanza) ->
+            let name =
+              match (names_of stanza, exes_run stanza) with
+              | name :: _, _ -> name
+              | [], [] -> "<unnamed>"
+              | [], exes -> "running " ^ String.concat ~sep:", " exes
+            in
+            Some
+              {
+                artifact_head = h;
+                artifact_name = name;
+                artifact_callers = [];
+                artifact_deps_site = "its `(deps …)`";
+                artifact_verdict = Artifact_stale_declaration;
+              }
+        | _ -> None)
+  in
+  module_subjects @ stale_subjects
 
 (** The verdict in one word, for a check's tables and a cases test's expectations. *)
 let artifact_verdict_name = function

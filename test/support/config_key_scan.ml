@@ -164,9 +164,13 @@ let receiver_is_generated txt =
     them is a matter of taste and the rule built on this is not:
     [Test_utils.Generated.init] written out, [Generated.init] through a [module Generated =
     Test_utils.Generated] alias (which is what most tests here do), and a bare [init] under an
-    [open] of the module. The alias may be spelled anything, so the aliases and opens are collected
-    in a first pass and the call sites matched against them in a second — OCaml lets neither be used
-    before it is bound, so two passes cost nothing and save the walk from depending on that.
+    [open] or [include] of the module. Each of those has an expression spelling too
+    ([let module G = … in], [let open … in]), and both are collected: the difference between them is
+    a matter of taste as well. The alias may be spelled anything, so the aliases and opens are
+    collected in a first pass and the call sites matched against them in a second — OCaml lets
+    neither be used before it is bound, so two passes cost nothing and save the walk from depending
+    on that. An [open] is taken to reach the whole file rather than its own scope, which is the
+    over-reading direction and the safe one (see below).
 
     Parsed rather than grepped, for the reason the rest of this module is: [test/support/generated.ml]
     names its own [Generated.init] in half a dozen doc comments and error messages, and
@@ -180,19 +184,40 @@ let receiver_is_generated txt =
 let generated_init_calls_in_source content =
   let structure = structure_of content in
   let aliases = ref [] and opened = ref false in
+  (* Every way the module's contents can be given a local name, in BOTH the structure and the
+     expression grammar. OCaml spells each of binding, opening and including twice -- `module G = M`
+     against `let module G = M in …`, `open M` against `let open M in …`, `include M` against
+     nothing -- and a pass that knew only the structure spellings would read
+     `let open Test_utils.Generated in init ~backend_name` as a call to somebody else's `init`
+     (Codex P2, round 1). Which is the shape a scan must not get wrong quietly: an unrecognised
+     caller is a stanza the rule stops applying to, and looks exactly like a stanza with nothing to
+     declare. *)
+  let bind_module_expr alias module_expr =
+    match module_expr.pmod_desc with
+    | Pmod_ident { txt; _ } when receiver_is_generated txt -> (
+        match alias with Some alias -> aliases := alias :: !aliases | None -> opened := true)
+    | _ -> ()
+  in
   let binders =
     object
       inherit Ast_traverse.iter as super
 
       method! structure_item item =
         (match item.pstr_desc with
-        | Pstr_module { pmb_name = { txt = Some alias; _ }; pmb_expr = { pmod_desc = Pmod_ident { txt; _ }; _ }; _ }
-          when receiver_is_generated txt ->
-            aliases := alias :: !aliases
-        | Pstr_open { popen_expr = { pmod_desc = Pmod_ident { txt; _ }; _ }; _ } when receiver_is_generated txt ->
-            opened := true
+        | Pstr_module { pmb_name = { txt = alias; _ }; pmb_expr; _ } -> bind_module_expr alias pmb_expr
+        | Pstr_open { popen_expr; _ } -> bind_module_expr None popen_expr
+        (* `include Test_utils.Generated` puts `init` in scope under no name of its own, which is
+           the same situation an `open` leaves. *)
+        | Pstr_include { pincl_mod; _ } -> bind_module_expr None pincl_mod
         | _ -> ());
         super#structure_item item
+
+      method! expression expr =
+        (match expr.pexp_desc with
+        | Pexp_letmodule ({ txt = alias; _ }, module_expr, _) -> bind_module_expr alias module_expr
+        | Pexp_open ({ popen_expr; _ }, _) -> bind_module_expr None popen_expr
+        | _ -> ());
+        super#expression expr
     end
   in
   binders#structure structure;

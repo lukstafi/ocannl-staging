@@ -56,6 +56,9 @@ ok: Generated.init -- written out
 ok: Generated.init -- through the module alias the tests use
 ok: Generated.init -- through an alias of any other name
 ok: Generated.init -- under an open of the module
+ok: Generated.init -- under an expression-scoped open
+ok: Generated.init -- through a locally bound module
+ok: Generated.init -- under an include, which puts init in scope under no name of its own
 ok: Generated.init -- a bare init without the open is somebody else's function
 ok: Generated.init -- a module called Generated is read by its name, whatever it was bound to
 ok: Generated.init -- a doc comment naming it is not a call

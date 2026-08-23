@@ -79,6 +79,12 @@ ok: artifact declaration -- an executable whose runner declares it
 ok: artifact declaration -- an executable whose runner does not
 ok: artifact declaration -- a declaration elsewhere in the file does not answer for the runner
 ok: artifact declaration -- one of two runners declaring it is not enough
+ok: artifact declaration -- a rule declaring it and running nothing at all
+ok: artifact declaration -- a rule declaring it and running an executable with no caller
+ok: artifact declaration -- and the same rule once its executable does call the initializer
+ok: artifact declaration -- a rule running an executable built elsewhere is not judged
+ok: artifact declaration -- nor is one whose command this scan cannot place
+ok: artifact declaration -- an alias stanza aggregating with a declaration behind nothing
 ok: artifact declaration -- an executable nothing in the file runs has no deps field to answer for it
 ok: artifact declaration -- an inline-test library declaring it in its own field
 ok: artifact declaration -- a library's own deps are not the inline tests' deps

@@ -283,6 +283,19 @@ let () = G.init ~backend_name|ocaml},
       {ocaml|open Test_utils.Generated
 let () = init ~backend_name|ocaml},
       [ "init" ] );
+    (* Each of those has an expression spelling, and a pass that knew only the structure ones read
+       the bare `init` below as somebody else's function -- an unrecognised caller, which looks
+       exactly like a stanza with nothing to declare (Codex P2, round 1). *)
+    ( "under an expression-scoped open",
+      {ocaml|let () = let open Test_utils.Generated in init ~backend_name|ocaml},
+      [ "init" ] );
+    ( "through a locally bound module",
+      {ocaml|let () = let module G = Test_utils.Generated in G.init ~backend_name|ocaml},
+      [ "G.init" ] );
+    ( "under an include, which puts init in scope under no name of its own",
+      {ocaml|include Test_utils.Generated
+let () = init ~backend_name|ocaml},
+      [ "init" ] );
     (* A bare `init` is one only under that open: nothing else makes it this function, and reading
        it as one would make a caller of every module with an initializer. *)
     ( "a bare init without the open is somebody else's function",

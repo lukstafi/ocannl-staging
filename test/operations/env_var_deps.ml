@@ -760,9 +760,7 @@ let main () =
                     `(env_var %s)` requirement on every stanza that links the library, where \
                     nothing follows it"
                    where callers Scan.artifact_env_var));
-      artifact_by_file :=
-        (dune_file, List.filter subjects ~f:(fun s -> not (List.is_empty s.Scan.artifact_callers)))
-        :: !artifact_by_file;
+      artifact_by_file := (dune_file, subjects) :: !artifact_by_file;
       (* The ambient gate, per directory AND per alias (gh-ocannl-652). *)
       let gated_here = gated_aliases stanzas in
       let entry_points = entry_points stanzas in

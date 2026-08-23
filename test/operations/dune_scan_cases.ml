@@ -1050,6 +1050,41 @@ let artifact_cases =
 (rule (alias b) (deps ocannl_config) (action (run %{dep:probe.exe})))|dune},
       [ "probe" ],
       [ "executable probe: undeclared (probe)" ] );
+    (* The converse over a stanza that names no modules. A `(rule …)` is a subject only through the
+       executable it runs, so one that declares the variable and runs nothing that calls the
+       initializer was outside the check entirely -- which is exactly the copied declaration the
+       converse direction exists to catch (Codex P2, round 1). *)
+    ( "a rule declaring it and running nothing at all",
+      {dune|(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (copy a b)))|dune},
+      [],
+      [ "rule <unnamed>: stale declaration" ] );
+    (* A rule that RUNS an executable is judged through that executable's own verdict, so the same
+       fact is reported once and by the stanza whose modules settle it. *)
+    ( "a rule declaring it and running an executable with no caller",
+      {dune|(executable (name probe) (modules probe))
+(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (run %{dep:probe.exe})))|dune},
+      [],
+      [ "executable probe: stale declaration" ] );
+    ( "and the same rule once its executable does call the initializer",
+      {dune|(executable (name probe) (modules probe))
+(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (run %{dep:probe.exe})))|dune},
+      [ "probe" ],
+      [ "executable probe: declared (probe)" ] );
+    (* An executable this file does not declare is one whose modules this scan cannot see, so its
+       runner's declaration is not something the scan may call stale. Same for a command the scan
+       cannot place at all. *)
+    ( "a rule running an executable built elsewhere is not judged",
+      {dune|(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (run ../support/probe.exe)))|dune},
+      [],
+      [] );
+    ( "nor is one whose command this scan cannot place",
+      {dune|(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (bash "./probe.exe")))|dune},
+      [],
+      [] );
+    ( "an alias stanza aggregating with a declaration behind nothing",
+      {dune|(alias (name a) (deps (env_var OCANNL_BUILD_FILES_PREFIX)))|dune},
+      [],
+      [ "alias a: stale declaration" ] );
     ( "an executable nothing in the file runs has no deps field to answer for it",
       {dune|(executable (name probe) (modules probe))|dune},
       [ "probe" ],
