@@ -1,7 +1,7 @@
 (* Autotune (docs/proposals/schedule-ir-optops.md, the search-harness half of the OptOps port):
    canonical schedule identities and the empirical schedule search.
 
-   Covered here, backend-independent (all printed booleans hold on every backend):
+   Covered here, backend-independent (every printed verdict holds on every backend):
 
    - Canonical digests are process-stable across sibling compiles of the same computation (each
    backend [compile] re-lowers with fresh symbols), and distinguish different computations. - A
@@ -267,21 +267,52 @@ let () =
   let tensorized_schedule (r : Autotune.report) =
     List.exists r.Autotune.best_schedule ~f:(function SC.Tensorize _ -> true | _ -> false)
   in
-  let winner_contract (r : Autotune.report) =
-    (* Labeled exactly when something was timed; the flag agrees with the schedule it describes
-       (never with the winning spec's label promise); the best tensorized candidate can never beat
-       the overall winner, and a search whose winner tensorizes must have timed it — the invariant
-       that fails if [mma_best_ms] is keyed on labels, since a beam-appended [Tensorize] promises
-       nothing in its label. Excluded on a cache hit, which times nothing in this process. *)
-    Bool.equal (String.is_empty r.Autotune.best_label) (Float.is_inf r.Autotune.best_ms)
-    && Bool.equal r.Autotune.best_tensorized (tensorized_schedule r)
-    && Float.(r.Autotune.mma_best_ms >= r.Autotune.best_ms)
-    && ((not r.Autotune.best_tensorized) || replayed r
-       || Float.(r.Autotune.mma_best_ms = r.Autotune.best_ms))
-    && r.Autotune.best_mma_scalar_fallbacks <= r.Autotune.best_mma_statements
+  let winner_contract ~which (r : Autotune.report) =
+    let d fmt = Printf.ksprintf (fun s () -> s) fmt in
+    let ms f = if Float.is_inf f then "inf" else Printf.sprintf "%.6f" f in
+    Verdict.pass_fail
+      (which ^ " labels a winner exactly when it has a winning time")
+      (Bool.equal (String.is_empty r.Autotune.best_label) (Float.is_inf r.Autotune.best_ms))
+      ~detail:(d "label=%S best_ms=%s" r.Autotune.best_label (ms r.Autotune.best_ms));
+    (* The flag agrees with the SCHEDULE it describes, never with the winning spec's label promise:
+       a beam-appended [Tensorize] on a saved incumbent promises nothing in its label (gh-ocannl-545
+       / 546). Both fields are read off the winner's applied schedule today, so this holds by
+       construction — which is the point: it fails the day either one is re-derived from a label or
+       from [mma_timed]. *)
+    Verdict.pass_fail
+      (which ^ "'s tensorized flag agrees with the schedule it carries")
+      (Bool.equal r.Autotune.best_tensorized (tensorized_schedule r))
+      ~detail:
+        (d "flag=%b, best_schedule carries %d Tensorize op(s)" r.Autotune.best_tensorized
+           (List.count r.Autotune.best_schedule ~f:(function
+             | SC.Tensorize _ -> true
+             | _ -> false)));
+    Verdict.pass_fail
+      (which ^ "'s scalar fallbacks do not exceed its Tile_mma statements")
+      (r.Autotune.best_mma_scalar_fallbacks <= r.Autotune.best_mma_statements)
+      ~detail:
+        (d "%d scalar of %d statements" r.Autotune.best_mma_scalar_fallbacks
+           r.Autotune.best_mma_statements);
+    (* The best timed tensorized candidate is drawn from the timed population the overall winner
+       minimizes over, so it cannot beat the winner. *)
+    Verdict.pass_fail
+      (which ^ "'s best tensorized time does not beat the winner's")
+      Float.(r.Autotune.mma_best_ms >= r.Autotune.best_ms)
+      ~detail:(d "mma_best_ms=%s best_ms=%s" (ms r.Autotune.mma_best_ms) (ms r.Autotune.best_ms));
+    (* A search whose winner tensorizes must have timed it — the claim that fails if [mma_best_ms]
+       is keyed on labels, since a beam-appended [Tensorize] promises nothing in its label. Excluded
+       on a cache hit, which times nothing in this process. *)
+    Verdict.pass_fail
+      (which ^ "'s tensorizing winner was itself timed in the tensorized family")
+      ((not r.Autotune.best_tensorized)
+      || replayed r
+      || Float.(r.Autotune.mma_best_ms = r.Autotune.best_ms))
+      ~detail:
+        (d "tensorized=%b mma_best_ms=%s best_ms=%s" r.Autotune.best_tensorized
+           (ms r.Autotune.mma_best_ms) (ms r.Autotune.best_ms))
   in
-  p "searched report's winner fields are self-consistent" (winner_contract r1);
-  p "cache-hit report's winner fields are self-consistent" (winner_contract r2);
+  winner_contract ~which:"searched report" r1;
+  winner_contract ~which:"cache-hit report" r2;
   p "cache-hit report names the replayed winner" (not (String.is_empty r2.Autotune.best_label));
   p "cached schedule replays to correct values"
     (Array.for_all2_exn got2 expected_c ~f:approx

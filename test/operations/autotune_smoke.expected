@@ -14,8 +14,16 @@ a completed search carries no terminal failure: true
 decline census sums to candidates_failed: true
 second tune call hits the schedule cache: true
 cache-hit report has no declines: true
-searched report's winner fields are self-consistent: true
-cache-hit report's winner fields are self-consistent: true
+searched report labels a winner exactly when it has a winning time: PASS
+searched report's tensorized flag agrees with the schedule it carries: PASS
+searched report's scalar fallbacks do not exceed its Tile_mma statements: PASS
+searched report's best tensorized time does not beat the winner's: PASS
+searched report's tensorizing winner was itself timed in the tensorized family: PASS
+cache-hit report labels a winner exactly when it has a winning time: PASS
+cache-hit report's tensorized flag agrees with the schedule it carries: PASS
+cache-hit report's scalar fallbacks do not exceed its Tile_mma statements: PASS
+cache-hit report's best tensorized time does not beat the winner's: PASS
+cache-hit report's tensorizing winner was itself timed in the tensorized family: PASS
 cache-hit report names the replayed winner: true
 cached schedule replays to correct values: true
 search off without a cache times nothing: true
