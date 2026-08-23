@@ -148,7 +148,16 @@ files.
   by `schedule_bench` and `narrow_gebp_bench` precisely because the fixed copy and the degenerate one
   had sat one file apart. Keep the weights capped below 256 so the products of exact-in-binary
   operands stay exact in the accumulator and variants summing in different orders compare BITWISE;
-  and keep the checksum outside the timed region.
+  and keep the checksum outside the timed region. Two further blindnesses survive keying on the
+  pair, and neither is a hypothetical (both were review findings on that fix). A capped weight puts
+  a row's weight vector in `cap ^ row_stride` values, so at a NARROW stride two rows collide by
+  birthday — at stride 2 rows 9 and 363 do — and no weighting of that one stream can see them
+  swapped; the answer is more streams (`Bench_checksum.weight_salts` accumulates one exact sum per
+  salt, squaring the space per stream), never a bigger cap. And a producer value that can BE the
+  accumulator's init hides a dropped producer: a mixed operand row is all-zero with probability
+  `levels ^ -row_stride`, likely at narrow extents, which the flat form's marching values could not
+  do — so the multiplicand whose row spans the reduction is minted strictly positive
+  (`Bench_checksum.positive_level`).
 
 - A benchmark leg belongs to a WORKLOAD, not to a runner (gh-ocannl-551). `BENCH_STATIC_SCALE` /
   `BENCH_GATE_INTERVAL` lived in `bench_mlp` alone, so the gate-cost contract silently had no

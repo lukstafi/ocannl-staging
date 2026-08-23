@@ -1,13 +1,21 @@
 extents swept: 2..800, row pairs per extent: 4
 extents where the flat-offset weight missed a row swap: 29, 251, 502, 753
-the shared checksum sees every row swap at every extent swept: true
+the shared checksum sees every 4-row swap at every extent swept: true
 the flat-offset weight misses a row swap at every multiple of 251 (negative control): true
-the shared checksum sees a row swap at those same multiples of 251: true
-an unweighted sum misses every row swap at every extent (negative control): true
-mixed ma rows stay pairwise distinct at every row stride 13 divides: true
-flat-offset ma rows are all identical at every row stride 13 divides (negative control): true
+the shared checksum sees a 4-row swap at those same multiples of 251: true
+an unweighted sum misses every 4-row swap at every extent (negative control): true
+mixed ma rows stay pairwise distinct at every row stride 12 divides: true
+flat-offset ma rows are all identical at every row stride 12 divides (negative control): true
 mixed mb rows stay pairwise distinct at every row stride 17 divides: true
 flat-offset mb rows are all identical at every row stride 17 divides (negative control): true
+row strides swept for weight collisions: 2..64 plus 251, 502, 753, over 512 rows
+single-stream weight collisions found: row stride 2 rows 9/363
+no two rows share a weight vector across both streams, at any row stride swept: true
+a single weight stream does collide there, so the sweep can fail (negative control): true
+the swap that single stream is blind to changes the data and is seen by both streams together: true
+every ma value is strictly positive, so no ma row can be all-zero: true
+no ma row is all-zero at any row stride swept: true
+a residue admitting zero does produce an all-zero ma row at row stride 2 (negative control): true
 every residue lands in [0, modulus): true
 residue refuses a non-positive row stride: true
 residue refuses a non-positive modulus: true

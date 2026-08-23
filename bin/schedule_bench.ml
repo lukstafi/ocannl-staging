@@ -129,12 +129,22 @@ let () =
      divides k), and a schedule that substitutes the wrong row of a collapsed operand then computes
      the correct output, which no whole-output check can see. Keying on the (row, column) pair
      removes the class: the row index enters the value in its own right, so no divisibility relation
-     between a modulus and a stride can erase it. The value SETS are unchanged — ma in multiples of
-     0.25 up to 3, mb the integers -8..8 — so the products stay exact in binary and the checksum's
-     exactness argument is the one it was. *)
+     between a modulus and a stride can erase it. The value RANGES are unchanged — ma in multiples
+     of 0.25 up to 3, mb the integers -8..8 — so the products stay exact in binary and the
+     checksum's exactness argument is the one it was.
+
+     ma drops the zero from its set ([Bench_checksum.positive_level], 12 levels rather than 13),
+     which the flat form did not need and the mixed one does: ma's row spans the reduction, so an
+     all-zero ma row zeroes the whole output row, which against a zero-initialized destination is
+     indistinguishable from a schedule that dropped that row. Under the flat form no ma row could be
+     all-zero for k >= 2 (its values marched with the column); under the mix each entry is
+     independent, so a row of k of them is all-zero with probability 13^-k — at k = 2 that is one
+     row in 169, and m = 465 has one. mb keeps its zero: with ma strictly positive no output row is
+     systematically zero, and mb's near-mean-zero set is what keeps the partial sums random-walking
+     rather than growing with k. *)
   let mav =
-    Array.init (m * k) ~f:(fun t ->
-        Float.of_int (Bench_checksum.residue ~salt:0x5A17 ~row_stride:k ~modulus:13 t) *. 0.25)
+    Array.init (m * k)
+      ~f:(Bench_checksum.positive_level ~salt:0x5A17 ~row_stride:k ~levels:12 ~scale:0.25)
   in
   let mbv =
     Array.init (k * n) ~f:(fun t ->
@@ -495,8 +505,8 @@ let () =
     let stop = Time_now.nanoseconds_since_unix_epoch () in
     let secs = Float.of_int63 Int63.(stop - start) /. 1e9 /. Float.of_int repeats in
     (* Element [1][1] of the m x n result — an interior cell, away from the corners — except where
-       the output is too small to have one; print which cell was checked. One interior cell cannot see
-       the remainder region an arbitrary extent creates, and a [Sched.split] whose factor does not
+       the output is too small to have one; print which cell was checked. One interior cell cannot
+       see the remainder region an arbitrary extent creates, and a [Sched.split] whose factor does not
        divide its extent puts the last partial block exactly there, so the whole output is
        checksummed too: every correct variant prints the identical value, and one that drops or
        repeats tail work does not.
@@ -511,15 +521,18 @@ let () =
        permutation is invisible, and the spot cell at [1][1] is blind to other rows at the same
        time, so both halves of the check fail together at n = 251, 502, 753, … (gh-ocannl-711).
        Weights stay capped at 251 so that products of these exact-in-binary operands stay exact in
-       the double accumulator. Both checks are outside the timed region. *)
+       the double accumulator, and the printed [chk a/b] is one sum per weight stream: at a narrow
+       n a single capped stream runs out of distinct row weight vectors and two rows collide, whose
+       swap no weighting of that stream can see. Both checks are outside the timed region. *)
     let checksum = Bench_checksum.whole_output ~row_stride:n values in
     let spot = Int.min (n + 1) (Array.length values - 1) in
     (* The label is printed on EVERY timing line, including the untensorized variants: a suffix
        that appears only when there is something to say is a suffix a table reader does not miss
        when it is absent (gh-ocannl-626). *)
-    p "%-10s %8.3f ms  %8.2f GFLOP/s  (spot [%d] %.1f, chk %.10g)  [%s]\n" variant (secs *. 1e3)
+    p "%-10s %8.3f ms  %8.2f GFLOP/s  (spot [%d] %.1f, chk %s)  [%s]\n" variant (secs *. 1e3)
       (flops /. secs /. 1e9)
-      spot values.(spot) checksum
+      spot values.(spot)
+      (Bench_checksum.render checksum)
       (Ir.C_syntax.mma_summary_string mma);
     (secs, mma)
   in

@@ -229,7 +229,9 @@ let () =
        n, giving every row identical weights, so at n = 251 (or 502, 753, ...) a row permutation was
        invisible to the checksum AND to the spot cell at once. Same degeneracy as the operands', one
        line away, and it came in with the port. Weights stay capped at 251 so that products of these
-       exact-in-binary operands stay exact in the double accumulator.
+       exact-in-binary operands stay exact in the double accumulator, and the printed [chk a/b] is
+       one sum per weight stream: at a narrow n a single capped stream runs out of distinct row
+       weight vectors and two rows collide, whose swap no weighting of that stream can see.
 
        Cross-variant equality is EXACT in an f32 run, at every extent: the products are multiples of
        1/8 bounded by 0.75n, so the whole reduction is exact in the f32 accumulator and independent
@@ -250,10 +252,11 @@ let () =
     let secs = Float.of_int63 Int63.(stop - start) /. 1e9 /. Float.of_int repeats in
     (* Printed on EVERY timing line, untensorized variants included: an absent suffix is one a
        table reader does not notice (gh-ocannl-626). *)
-    p "%-12s %8.3f ms  %8.2f GFLOP/s  (spot check [%d] %.2f, chk %.10g)  [%s]\n" variant
+    p "%-12s %8.3f ms  %8.2f GFLOP/s  (spot check [%d] %.2f, chk %s)  [%s]\n" variant
       (secs *. 1e3)
       (flops /. secs /. 1e9)
-      spot values.(spot) checksum
+      spot values.(spot)
+      (Bench_checksum.render checksum)
       (Ir.C_syntax.mma_summary_string mma);
     (secs, mma)
   in
