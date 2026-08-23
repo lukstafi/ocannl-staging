@@ -112,24 +112,22 @@ files.
     and answers the one question the CPU half cannot: whether the codec still agrees with the vendor
     type a kernel casts to. The host side is the shipped object code (`builtins.c`, reached from
     `fp8_soak_stubs.c` by `extern`, not transcribed); the device side is `(__nv_fp8_e5m2)x` exactly
-    as `Cuda_backend.convert_precision` emits it. RTX 5070 Ti Laptop, CUDA 13.3, 2026-08-23: **6.1 s
-    for the f32 sweep (2^32 inputs), 29.5 s for the f64 sweep (17.2e9 inputs)**, zero disagreements
-    on every FINITE input of either. The non-finite disagreements are permanent and the tool prints
-    them rather than hiding them, because only the finite class is a claim:
-    - ±inf → CUDA saturates to 0x7B/0xFB, our codec keeps 0x7C/0xFC. 2 inputs in each sweep.
-    - a NaN f32 → CUDA answers 0x7F whatever the sign, our codec keeps the sign: 8388607 of the
-      16777214 NaN patterns disagree, i.e. exactly the negative ones.
-    - a NaN f64 → CUDA answers 0x7E/0x7F/0xFE/0xFF, so from a DOUBLE it keeps the sign and lets two
-      payload bits through, which the float path does not. 4194302 of 8388606 disagree, i.e. the
-      0x7E/0xFE half, our codec always emitting 0x7F. Both sides are NaNs either way; that this
-      differs between the vendor's own two entry points is why the codecs assert only NaN-ness.
-    The claims are the finite agreement and a non-vacuity one — that the sweep drove the vendor
-    conversion onto all 248 signed finite codes, which a kernel that silently wrote nothing could
-    not.
-  Adding a vendor is a module of the `ARM` signature plus one `select` clause in `tools/dune` — not
-  a second program, which is how the CUDA and HIP sweeps drifted apart the first time. The HIP arm
-  is written (`tools/fp8_soak_hip.hipjit.ml`) but has never been compiled: hipjit is not installed
-  on the CUDA box, so the `select` there resolves to the stub.
+    as `Cuda_backend.convert_precision` emits it. RTX 5070 Ti Laptop, CUDA 13.3, 2026-08-23: 6.1 s
+    for the f32 sweep (2^32 inputs), 29.5 s for the f64 sweep (17.2e9 inputs), zero disagreements on
+    every FINITE input of either — which is the claim, together with a non-vacuity one, that the
+    sweep drove the vendor conversion onto all 248 signed finite codes.
+- The soak's NON-finite disagreements are permanent, and it prints them rather than hiding them.
+  `±inf` narrows to 0x7B/0xFB under CUDA (saturating) where our codec keeps 0x7C/0xFC: 2 inputs in
+  each sweep. A NaN f32 narrows to 0x7F whatever its sign, so 8388607 of the 16777214 NaN patterns
+  — exactly the negative ones — disagree with our sign-keeping codec. A NaN f64 is the surprise:
+  `(__nv_fp8_e5m2)` of a NaN DOUBLE answers 0x7E/0x7F/0xFE/0xFF, keeping the sign and letting two
+  payload bits through, which the float path does not; 4194302 of the 8388606 swept disagree, the
+  0x7E/0xFE half. All of them are NaNs on both sides, and the vendor's own two entry points
+  disagreeing with each other is why `test_fp8_codec_parity` asserts only NaN-ness there.
+- Adding a vendor to the soak is a module of its `ARM` signature plus one `select` clause in
+  `tools/dune` — not a second program, which is how the CUDA and HIP sweeps drifted apart the first
+  time. The HIP arm is written (`tools/fp8_soak_hip.hipjit.ml`) but has never been compiled: hipjit
+  is not installed on the CUDA box, so the `select` there resolves to the stub.
 
 - A tensor node's precision is its **storage** precision; the precision its arithmetic runs at is a
   separate thing, `C_syntax_config.compute_prec` (gh-ocannl-517). They coincide on the GPU backends

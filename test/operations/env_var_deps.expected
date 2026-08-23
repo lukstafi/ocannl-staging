@@ -109,6 +109,7 @@ Ambient environment gates, by dune file and every alias whose build runs one:
   test/operations/dune                     @scans
   test/operations/dune                     @slow
   test/operations/dune                     @slow-env_spelling_gate
+  test/operations/dune                     @slow-fp8_codec_exhaustive
   test/operations/dune                     @slow-hip_scratch_budget
   test/operations/dune                     @slow-hip_scratch_tune_survives
   test/operations/profiles/dune            @runtest
