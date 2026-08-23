@@ -369,6 +369,27 @@ that they earn a lookup rather than always-loaded space.
   created from the MAIN checkout's HEAD, whose `master` only moves when someone fast-forwards it
   after a merge, so a new worktree can start dozens of commits stale (79 on 2026-08-22) and a
   full suite run then tests old code. Read the checklist before the first build.
+  That section has a hand-runnable harness, `scripts/test-setup-ocaml-env.sh` — run it after
+  editing the section; it is on no dune alias, since its `bounded` legs sit out watchdog timeouts.
+  It copies the WORKING-TREE hook into throwaway clones under a `mktemp -d` (never touching this
+  repository's refs or config) and covers the watchdog (TERM at the bound, KILL 5s later, the
+  process GROUP, rc preservation, no orphans), the counting wording and its two recovery commands,
+  the offline `skip` with the count taken as of the last successful fetch, a branch and a tag both
+  named `origin/master` not displacing the tracking ref, `FETCH_HEAD` left byte-identical, and
+  which SSH launcher git ends up invoking with or without the appended OpenSSH options. Both
+  harness bugs it exists to prevent were live during PR #430's review rounds: a throwaway clone
+  that silently tested the COMMITTED script, and a `run` helper that executed its label as a
+  command. When adding a leg, add the negative control too — mutate the hook and check that leg,
+  and only that leg, goes red. The harness found one bug on its first outing: `bounded` decided
+  whether to wait for its watchdog with a `kill -0` on the command's process group, and `kill -0`
+  counts a ZOMBIE as present — git's ssh child is one, reparented when git exits and not yet
+  reaped — so a fetch that had already failed in milliseconds read as still running and sat out the
+  whole 30s bound, on every session start with an unreachable ssh remote. Emptiness is therefore
+  not a signal question: `group_alive` reads process STATES, from `/proc` where there is one and
+  from `ps -A -o pgid=,stat=` otherwise, and only a non-zombie member counts as work. Where the
+  reaper is a PID 1 that does not reap — the ordinary container case — the zombie is PERMANENT, so
+  the first attempt at this, a short retry loop around the same `kill -0`, would not have helped;
+  that is the shape to keep in mind before reaching for a timing fix here again.
 - Dune tracks an environment variable only where a stanza declares it, and the tracking reaches
   further than the stanza: `dune rules test/operations/<name>.exe.output` shows the `(Env
   OCANNL_BACKEND)` dependency travelling from the `(test)` stanza's `(deps ...)` into the
