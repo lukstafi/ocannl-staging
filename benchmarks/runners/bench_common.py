@@ -73,11 +73,19 @@ def instrument_tinygrad_beam():
     CACHELEVEL=0 or IGNORE_BEAM_CACHE a search runs and neither reads nor writes, which cache
     counting alone reports as "cannot tell".
     """
-    try:
-        from tinygrad.engine import search
-    except Exception:
-        return None
-    if not (hasattr(search, "diskcache_get") and hasattr(search, "diskcache_put")):
+    # tinygrad moved the beam search out of `tinygrad.engine.search` into
+    # `tinygrad.codegen.opt.search` (0.13); try both, newest first, so the probe answers on
+    # either. A layout it does not know still answers None rather than guessing.
+    search = None
+    for mod in ("tinygrad.codegen.opt.search", "tinygrad.engine.search"):
+        try:
+            search = __import__(mod, fromlist=["_"])
+        except Exception:
+            continue
+        if hasattr(search, "diskcache_get") and hasattr(search, "diskcache_put"):
+            break
+        search = None
+    if search is None:
         return None
     counts = {"call": 0, "hit": 0, "put": 0}
     get, put = search.diskcache_get, search.diskcache_put

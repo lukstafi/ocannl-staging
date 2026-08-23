@@ -39,7 +39,8 @@ from tinygrad.nn.optim import SGD
 # sys.path an `import tinygrad` scan would first hit it as a namespace-package portion —
 # which shadows editable (finder-based) tinygrad installs, whose MetaPath finder is only
 # consulted when the path scan finds nothing.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+_RUNNERS = str(Path(__file__).resolve().parent.parent)
+sys.path.insert(0, _RUNNERS)
 from bench_common import (
     emit,
     instrument_tinygrad_beam,
@@ -47,6 +48,15 @@ from bench_common import (
     read_st_metadata,
     tinygrad_searched,
 )
+
+# ...and off again. tinygrad's beam search runs its candidate compiles in a `spawn` pool, and a
+# spawned worker re-executes THIS module top-level with the parent's sys.path — where the
+# `import tinygrad` above happens before the insert. With runners/ still on the path the scan
+# finds runners/tinygrad/ as a namespace portion first, the editable install's meta-path finder
+# (appended after PathFinder) never gets a look, and every worker dies with `cannot import name
+# 'Tensor' from 'tinygrad' (unknown location)`. The pool respawns them forever, so the search
+# wedges instead of failing (gh-ocannl-675 CUDA leg).
+sys.path.remove(_RUNNERS)
 
 
 def param(arr):
