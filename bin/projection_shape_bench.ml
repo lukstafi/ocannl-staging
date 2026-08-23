@@ -205,6 +205,13 @@ let () =
   (* Even by default: the per-batch reversal below alternates every pair's order, so an even
      number of batches balances every pair exactly. *)
   let nbatches = Bench_args.int args 1 ~name:"batches" ~default:6 in
+  (* Odd counts are refused rather than rounded: the visiting order mirrors in adjacent PAIRS of
+     batches, so an unpaired final batch gives every arm one extra measurement in one visit order
+     only -- exactly the asymmetry the mirroring exists to remove. *)
+  if nbatches % 2 = 1 then
+    invalid_arg
+      (Printf.sprintf "batches must be even (got %d): each batch is mirrored by its partner"
+         nbatches);
   let group = String.lowercase (Bench_args.string args 2 ~default:"all") in
   (* [fwd]/[rev] reverses the rotation the interleaved rounds start from, so a residual
      first-arm-is-cold bias can be shown not to carry the conclusion. *)
@@ -477,8 +484,8 @@ let () =
   (* Round 0: the untuned shipped default, one arm per site. *)
   run_round ~label:"default (untuned)"
     (List.filter_map prepared ~f:(fun pr ->
-         arm pr ~label:"default (untuned)" ~compile:(fun ~record:_ ~name:_ fwd ->
-             Context.compile (Context.auto ()) fwd Ir.Indexing.Empty)));
+         arm pr ~label:"default (untuned)" ~compile:(fun ~record:_ ~name fwd ->
+             Context.compile ~name (Context.auto ()) fwd Ir.Indexing.Empty)));
   (* One round per geometry, over the sites whose seed list offers it: that is the comparison the
      experiment makes, so that is the set that has to be interleaved. Menu order is preserved. *)
   if do_seeds then begin
@@ -497,8 +504,8 @@ let () =
           List.concat_map prepared ~f:(fun ((_, _, seeds, _, _, _) as pr) ->
               List.filter seeds ~f:(fun q -> String.equal (base_geom (geom_label q)) g)
               |> List.filter_map ~f:(fun q ->
-                     arm pr ~label:(geom_label q) ~compile:(fun ~record ~name:_ fwd ->
-                         Context.compile
+                     arm pr ~label:(geom_label q) ~compile:(fun ~record ~name fwd ->
+                         Context.compile ~name
                            ~lowered_transform:(fun o ->
                              record (Sched.apply (Autotune.sketch_schedule ~p:q o) o))
                            (Context.auto ()) fwd Ir.Indexing.Empty)))
@@ -519,11 +526,13 @@ let () =
      candidate declines, the outcome is still [Searched] while [best_ms] is infinite and the
      returned routine is the untuned default, so a finite time and a non-empty winner are required
      before the arm is admitted. *)
-  let tn_beam = 2 and tn_rounds = 2 and tn_repeats = 3 and tn_keep = 1.0 in
+  let tn_beam = 2 and tn_rounds = 2 and tn_repeats = 3 and tn_keep = 1.0 and tn_split = 8 in
   let tuned = Hashtbl.create (module String) in
   if do_tune then begin
-    p "\n-- searches: beam_width %d, rounds %d, repeats %d, keep_fraction %.2f, cache disabled\n"
-      tn_beam tn_rounds tn_repeats tn_keep;
+    p
+      "\n-- searches: beam_width %d, rounds %d, repeats %d, keep_fraction %.2f, \
+       split_reduce_max_sites %d, cache disabled\n"
+      tn_beam tn_rounds tn_repeats tn_keep tn_split;
     let winners =
       List.filter_map prepared ~f:(fun ((s, _, _, _, _, _) as pr) ->
           let lbl = ref "" and ms = ref Float.nan and outcome = ref None in
@@ -531,6 +540,7 @@ let () =
             arm pr ~label:"TUNED (full search)" ~compile:(fun ~record:_ ~name fwd ->
                 Autotune.tune ~name ~search:true ~cache_dir:"" ~beam_width:tn_beam
                   ~rounds:tn_rounds ~repeats:tn_repeats ~keep_fraction:tn_keep
+                  ~max_split_reduce_sites:tn_split
                   ~report:(fun (r : Autotune.report) ->
                     lbl := r.Autotune.best_label;
                     ms := r.Autotune.best_ms;
