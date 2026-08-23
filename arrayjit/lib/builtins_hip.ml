@@ -592,13 +592,20 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
     return arrayjit_threefry4x32_light(key, counter);
 }|},
       [ "uint4x32_t"; "arrayjit_threefry4x32_light" ] );
-    (* Emitted in place of a bare cast under [prefer_backend_uniformity] (gh-ocannl-647): ROCm's
-       float-to-e5m2 conversion returns values as large as 2^-14 for magnitudes around 4e-25 to
-       3.3e-24, where every other implementation returns zero — an out-of-range shift, confined to
-       four f32 exponents. Everything below half the smallest subnormal (2^-17) rounds to a signed
-       zero anyway, so pre-rounding that range here is exact, not an approximation: outside the
-       broken window the guard changes nothing at all. [copysignf] rather than [0.0f] because the
-       sign of the zero is part of what the conversion is supposed to preserve. *)
+    (* Emitted in place of a bare cast, unconditionally (gh-ocannl-647): ROCm's float-to-e5m2
+       conversion returns values as large as 2^-14 for magnitudes around 4e-25 to 3.3e-24, where
+       every other implementation returns zero — an out-of-range shift in
+       [hip/amd_detail/amd_hip_fp8.h]'s [cast_to_f8], confined to four f32 exponents. Everything
+       below half the smallest subnormal (2^-17) rounds to a signed zero anyway, so pre-rounding
+       that range here is exact, not an approximation: outside the broken window the guard changes
+       nothing at all — verified by sweeping all 2^32 float bit patterns against [single_to_fp8]
+       on a gfx1151 (0 disagreements guarded, 67108862 unguarded). [copysignf] rather than [0.0f]
+       because the sign of the zero is part of what the conversion is supposed to preserve.
+
+       REMOVAL TRIGGER: https://github.com/ROCm/rocm-systems/issues/10591. When a ROCm release
+       ships the fix, these two helpers and the [fp8_from_prec_fn] funnel in {!Hip_backend} can go
+       back to the platform's own cast. There is deliberately no ROCm-version predicate here: no
+       released version is known to be correct, so there would be nothing to name. *)
     ( "ocannl_single_to_fp8_uniform",
       {|__device__ __hip_fp8_e5m2 ocannl_single_to_fp8_uniform(float x) {
     float y = (fabsf(x) < 7.62939453125e-6f) ? copysignf(0.0f, x) : x;
@@ -608,7 +615,9 @@ __device__ __forceinline__ double ocannl_shfl_xor(double v, int lane_mask) {
     (* The f64 source needs its own helper, not the one above: passing a double to a float parameter
        narrows at the call, and narrowing twice breaks ties the platform's own one-step cast gets
        right (gh-ocannl-648). The guard is otherwise identical — it must be semantics-preserving
-       everywhere except ROCm's broken window. *)
+       everywhere except ROCm's broken window, which for a double source is wider: the same sweep
+       found 478 further inputs wrong, all of them f32-subnormal magnitudes (~4.5e-44 to 1.8e-43),
+       and this guard covers those too. *)
     ( "ocannl_double_to_fp8_uniform",
       {|__device__ __hip_fp8_e5m2 ocannl_double_to_fp8_uniform(double x) {
     double y = (fabs(x) < 7.62939453125e-6) ? copysign(0.0, x) : x;

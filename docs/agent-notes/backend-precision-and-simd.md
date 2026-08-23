@@ -74,19 +74,28 @@ files.
   was double-rounding. Verified against `__nv_fp8_e5m2` over 17.2 billion finite doubles (all 2^32
   top-halves crossed with four low-half patterns, ties included) and against the f32 codec over all
   2^32 f32-exact doubles. Metal needs none of it: its `double` is `float`.
-- ROCm miscompiles `(__hip_fp8_e5m2)(float)` for magnitudes around 4e-25 to 3.3e-24, returning up
-  to 2^-14 where the answer is zero (gh-ocannl-647) — an out-of-range shift, `shift mod 32` landing
-  back in range; the exhaustive sweep localizes it to exactly four f32 exponents. CUDA is correct
-  there, and so is our software codec. It IS guarded, but opt-in: under
-  `prefer_backend_uniformity` HIP's float-to-fp8 narrowings route through
-  `ocannl_single_to_fp8_uniform`, which pre-rounds everything below half the smallest subnormal to
-  a signed zero — exact, since those magnitudes round to zero anyway, so outside ROCm's window it
-  changes nothing. The default still emits the platform's own cast (working around a vendor bug in
-  our codegen means carrying it until someone remembers to remove it). `test/config/ocannl_config`
-  sets the flag, so `test_fp8_codec_parity`'s two underflow legs are REAL assertions in the suite,
-  announced as `SKIPPED on hip` only in a flag-off run. The guard covers both narrowing sites — the
-  conversions AND the operator bridges, which narrow an f32 result back to fp8 — through one funnel
-  (`fp8_from_float`); guarding only the conversions was the first version, and a review caught it.
+- ROCm's fp8 narrowing is broken for tiny magnitudes and the HIP backend guards it
+  UNCONDITIONALLY (gh-ocannl-647). `(__hip_fp8_e5m2)(float)` returns up to 2^-14 where the answer
+  is a signed zero, for magnitudes around 4e-25 to 3.3e-24 — an out-of-range shift in
+  `hip/amd_detail/amd_hip_fp8.h`'s `cast_to_f8` (`exponent_diff` reaches 85 for f32; both
+  `mantissa >>= exponent_diff` and the `midpoint` mask shift a 64-bit value by ≥ 64, and the shift
+  is taken mod 64). Exhaustive gfx1151 sweeps, ROCm 7.14.60850: 67108862 of 2^32 float patterns
+  wrong, confined to f32 exponent fields 46–49; `(__hip_fp8_e5m2)(double)` adds 478 more, the
+  f32-subnormal magnitudes ~4.5e-44 to 1.8e-43. It reproduces on the HOST too (the header's
+  software path is what any arch without `HIP_FP8_CVT_FAST_PATH` uses, i.e. everything but
+  gfx942/950/1200/1201/1250). CUDA is correct there, and so is our software codec. So HIP's ONLY
+  float-to-fp8 spelling is `ocannl_single_to_fp8_uniform` / `ocannl_double_to_fp8_uniform`, which
+  pre-round everything below half the smallest subnormal to a signed zero — exact, since those
+  magnitudes round to zero anyway: the same sweeps report 0 disagreements guarded. Reported
+  upstream at https://github.com/ROCm/rocm-systems/issues/10591 (with a verified two-line clamp),
+  which is the guard's removal trigger; there is no ROCm-version predicate because no released
+  version is known correct. The guard covers both narrowing sites — the conversions AND the
+  operator bridges, which narrow an f32 result back to fp8 — through one funnel
+  (`fp8_from_prec_fn`); guarding only the conversions was the first version, and a review caught
+  it. `test_fp8_codec_parity`'s two underflow legs are therefore unconditional assertions, on HIP
+  as everywhere else. It was opt-in under `prefer_backend_uniformity` first, and that flag no
+  longer has an fp8 clause (nor a `/fp8-guard` component in HIP's `codegen_tag`): a
+  twenty-order-of-magnitude silent error is not a uniformity preference.
 
 - A tensor node's precision is its **storage** precision; the precision its arithmetic runs at is a
   separate thing, `C_syntax_config.compute_prec` (gh-ocannl-517). They coincide on the GPU backends

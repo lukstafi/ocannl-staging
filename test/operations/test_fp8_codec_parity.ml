@@ -3,9 +3,10 @@
 
    A tensor's fp8 cells get written from two places: the host, through [Ndarray]'s
    [Ops.single_to_fp8] (the C stub compiled from builtins.c), and a kernel, through whatever the
-   backend emits — the same software codec on cc and Metal, the native [__nv_fp8_e5m2] /
-   [__hip_fp8_e5m2] cast on CUDA and HIP. Nothing makes those agree by construction, so this
-   compares them directly: the same values narrowed each way, read back and compared.
+   backend emits — the same software codec on cc and Metal, the native [__nv_fp8_e5m2] cast on
+   CUDA, and on HIP [__hip_fp8_e5m2] behind a guard that pre-rounds the underflow window ROCm gets
+   wrong (gh-ocannl-647). Nothing makes those agree by construction, so this compares them
+   directly: the same values narrowed each way, read back and compared.
 
    The values are the ones where a codec has a decision to make, because everywhere else agreement
    is uninformative — ties in both directions (round-to-nearest-EVEN, not away from zero), the
@@ -25,13 +26,8 @@ open Ocannl.Operation.DSL_modules
 
 let p = Verdict.p
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-let on_hip = String.is_substring backend_name ~substring:"hip"
 let on_metal = String.is_substring backend_name ~substring:"metal"
 
-(* On HIP the underflow leg below is only a claim about OCANNL when the guarded conversion is
-   emitted; with the platform's own cast it is a claim about ROCm, which fails it (gh-ocannl-647).
-   The test configuration turns this on, so the leg is genuinely checked in the suite. *)
-let fp8_guarded = Utils.get_global_flag ~default:false ~arg_name:"prefer_backend_uniformity"
 let skipped = Verdict.skipped ~backend:backend_name
 
 (* Narrow on the DEVICE. [*. 1.] is the exact identity on every value below — signed zeros,
@@ -203,18 +199,15 @@ let () =
   in
   Stdio.printf "fp8 arithmetic underflow: (2^-16) ** 5 -> %h\n" pow_narrowed;
 
-  (* Magnitudes far below the smallest subnormal must vanish. HIP miscompiles exactly this range
-     (gh-ocannl-647: an out-of-range shift returns values as large as 2^-14), so on HIP this holds
-     only when [prefer_backend_uniformity] routes the conversion through the guarded helper — which
-     is what the test configuration does, so this is a real check here rather than a skip. Left
-     skipped, loudly, in the configuration that asks for the platform's own cast. *)
+  (* Magnitudes far below the smallest subnormal must vanish. This is an unconditional claim on
+     every backend, HIP included: ROCm's own float-to-fp8 conversion fails it (gh-ocannl-647, an
+     out-of-range shift returning values as large as 2^-14, reported upstream as
+     https://github.com/ROCm/rocm-systems/issues/10591), which is exactly why the HIP backend
+     narrows through a guarded helper rather than the platform's cast. Nothing configurable is left
+     here to skip on -- the leg failing on HIP means the guard stopped being emitted. *)
   let claim = "magnitudes far below the smallest subnormal narrow to zero" in
   let arith_claim = "an fp8 operator's underflowing result narrows to zero too" in
-  if on_hip && not fp8_guarded then (
-    skipped claim;
-    skipped arith_claim)
-  else
-    let tiny = [| 4.1359e-25; 8.27e-25; 1.65e-24; 3.31e-24; -4.1359e-25 |] in
-    let tdev = narrow_on_device tiny in
-    p claim (Array.for_all tdev ~f:(fun x -> Float.(x = 0.)));
-    p arith_claim Float.(pow_narrowed = 0.)
+  let tiny = [| 4.1359e-25; 8.27e-25; 1.65e-24; 3.31e-24; -4.1359e-25 |] in
+  let tdev = narrow_on_device tiny in
+  p claim (Array.for_all tdev ~f:(fun x -> Float.(x = 0.)));
+  p arith_claim Float.(pow_narrowed = 0.)
