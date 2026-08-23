@@ -465,9 +465,16 @@ that they earn a lookup rather than always-loaded space.
   `test-run.sh` now points `last` with a plain file holding the path (written through a temporary
   and renamed, so still atomic), which needs no symlink privilege on any platform. Reach for a
   pointer file, not a symlink, in anything that must work from Git Bash.
-- `tools/sweep.sh` is the GPU-backend coverage: cc and metal locally, cuda on `rog-nv-wsl`, hip on
-  `minix-amd-wsl`, all pinned to ONE resolved commit so a mid-sweep merge cannot leave the machines
-  testing different trees. It records a row per unit in `~/.ocannl-sweep/history.tsv` and never
+- `tools/sweep.sh` is the coverage for every backend CI does not run: cc, multidev_cc and metal
+  locally, cuda on `rog-nv-wsl`, hip on `minix-amd-wsl`, all pinned to ONE resolved commit so a
+  mid-sweep merge cannot leave the machines testing different trees. multidev_cc needs no hardware
+  and is there anyway: it keeps its own `micrograd_demo_logging` debug-log golden, which
+  `dune runtest` diffs only under `OCANNL_BACKEND=multidev_cc` — a spelling neither test/config's
+  pinned `backend=cc` nor CI ever sets. gh-ocannl-700 is the cost of that gap: `eefa827e`
+  (gh-ocannl-461) reordered backprop fragments, re-promoted the cc golden, and left multidev's
+  stale and master red under that backend for six weeks. **A backend with its own goldens and no
+  leg here is a silent regression channel, hardware or not** — add the leg when you add the
+  goldens. It records a row per unit in `~/.ocannl-sweep/history.tsv` and never
   exits non-zero for test failures — its exit code is not a verdict, the history file is. A daily
   scheduled task drives it.
 - `timeout(1)` is not a portable group-killing bound, and the failure is silent in both directions.

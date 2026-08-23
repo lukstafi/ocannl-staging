@@ -4,8 +4,9 @@
 # failure fingerprint for each.
 #
 # This exists because GitHub CI covers exactly one backend: test/config's
-# ocannl_config pins `backend=cc`, and the runners have no GPU. Metal, CUDA and
-# HIP have no automated coverage at all without this.
+# ocannl_config pins `backend=cc`, and the runners have no GPU. Metal, CUDA, HIP
+# and multidev_cc have no automated coverage at all without this -- the last of
+# those despite needing no hardware, since only OCANNL_BACKEND selects it.
 #
 # The GPU boxes are usually powered off, so unreachable is the NORMAL case, not
 # an error -- a skipped machine is recorded as `skip` and the caller is expected
@@ -16,7 +17,7 @@
 # harness failure (no local repo, etc.) aborts.
 #
 # Usage:
-#   tools/sweep.sh                     # cc + metal locally, cuda/hip if up
+#   tools/sweep.sh                     # cc + multidev_cc + metal locally, cuda/hip if up
 #   tools/sweep.sh --slow              # also `dune build @slow`
 #   tools/sweep.sh --only metal        # one backend (repeatable)
 #   tools/sweep.sh --target test/einsum  # narrower dune target, for smoke-testing
@@ -56,8 +57,20 @@ done
 # (machine, backend, ssh-host) -- ssh-host empty means run locally.
 # The WSL sides of the GPU boxes, not the native-Windows ones: plain Linux
 # toolchain, and Windows portability is covered by the scheduled CI job.
+#
+# multidev_cc is local and needs no GPU, but it is here for the same reason the
+# GPU boxes are: nothing else runs it. It keeps its OWN debug-log golden --
+# `test/operations/micrograd_demo_logging-multidev_cc-0-0.log.expected`, whose
+# statement order the scheduler is free to differ on -- and `dune runtest`
+# exercises that golden only when OCANNL_BACKEND says so, which the pinned
+# `backend=cc` in test/config's ocannl_config and CI never do. gh-ocannl-700 is
+# what that costs: an ordering change landed, the cc golden was re-promoted with
+# it, and the multidev leg stayed red on master for six weeks with nothing to
+# notice. A backend with its own goldens and no leg here is a silent regression
+# channel whether or not it needs hardware.
 UNITS=(
   "local:cc:"
+  "local:multidev_cc:"
   "local:metal:"
   "rog:cuda:rog-nv-wsl"
   "minix:hip:minix-amd-wsl"
@@ -273,7 +286,7 @@ remote_lock_cmd() {
 # `perl -e 'alarm N; exec ...'` is not enough on its own: alarm survives exec, so
 # SIGALRM reaches only the immediate child while dune and every compiler it
 # spawned keep running -- holding _build locks that the NEXT unit on this machine
-# (cc and metal share one worktree) would then contend with, turning one timeout
+# (the local backends share one worktree) would then contend with, turning one timeout
 # into a cascade. Exits 142 on expiry, matching the outcome mapping below.
 #
 # INT, TERM and HUP are forwarded to that group and REAPED before this exits.
