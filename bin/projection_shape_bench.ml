@@ -67,7 +67,13 @@
      OCANNL_BACKEND=hip _build/default/bin/projection_shape_bench.exe \
        [repeats] [batches] [group] [order] [mode]
    Defaults 50 repeats, 6 timing batches, group "all" (a/b/c/d/e/p/abd/abde/all), order fwd (or
-   rev), mode seeds (or tune, or both). *)
+   rev, which reverses the rotation each round starts from), mode seeds (or tune, or both). The
+   batch count must be EVEN -- the visiting order mirrors in adjacent pairs -- so the measurement
+   this bench was written for reads, in full:
+
+     OCANNL_BACKEND=hip _build/default/bin/projection_shape_bench.exe 200 8 abde fwd seeds
+
+   run from a directory that holds an ocannl_config (benchmarks/ does). *)
 
 open Base
 open Ocannl
