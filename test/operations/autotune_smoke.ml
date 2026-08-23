@@ -267,9 +267,41 @@ let () =
   let tensorized_schedule (r : Autotune.report) =
     List.exists r.Autotune.best_schedule ~f:(function SC.Tensorize _ -> true | _ -> false)
   in
+  (* Why [mma_best_ms >= best_ms] is not an invariant, which is what flaked on macOS CI
+     (gh-ocannl-716). The beam accepts a round only when it improves on the incumbent by at least
+     [Autotune.min_progress] (0.01, private). A round that improves by LESS is rejected and the
+     incumbent stays crowned — but its candidates were timed, and a tensorized one among them has
+     already lowered [mma_best_ms]. So [mma_best_ms] can sit strictly below [best_ms], by less than
+     that band: not a report-assembly fault, just what "the winner is the incumbent" means.
+
+     Whether the band is REACHABLE is a property of the clock against the workload, which is why
+     repeats on a quiet machine do not reproduce it. Times land on the platform's timer ticks
+     (41.7 ns on Apple silicon's 24 MHz mach timebase), so the half-open interval
+     [0.99 * best_ms, best_ms) contains a representable time only once [best_ms] exceeds ~100 ticks,
+     i.e. ~4 us. On [cc] here these kernels time at ~0.25 us — 6 ticks — and the interval is empty,
+     which is why 23 forced repeats could not flip the conjunct; on [metal] the same computation
+     times at ~0.23 ms, where the band spans ~57 ticks and is wide open, and a contended CI runner
+     inflates the [cc] times the same way.
+
+     The other three conjuncts below are decided by the winner's schedule and its rendering census,
+     not by measured times, and cannot flip on a repeat. So the two timing-dependent ones state
+     their precondition instead: the band here, and [<=] rather than [=] below. *)
+  let beam_min_progress = 0.01 in
   let winner_contract ~which (r : Autotune.report) =
     let d fmt = Printf.ksprintf (fun s () -> s) fmt in
     let ms f = if Float.is_inf f then "inf" else Printf.sprintf "%.6f" f in
+    (* Timing-dependent, so it stays OFF stdout: a golden that pinned these numbers — or any
+       boolean derived from them — would flake exactly where the conjunction did. Printed
+       unconditionally, so the next investigation reads the winner off a passing run's stderr.
+       [mma-best] is the signed margin whose SIGN the old conjunction asserted: negative is a
+       tensorized round candidate that undercut the crowned incumbent sub-threshold, which the band
+       above says is legal. *)
+    Stdio.eprintf "%s: label=%S best_ms=%s mma_best_ms=%s mma-best=%+.6f tensorized=%b mma=%d/%d \
+                   scalar\n%!"
+      which r.Autotune.best_label (ms r.Autotune.best_ms) (ms r.Autotune.mma_best_ms)
+      (r.Autotune.mma_best_ms -. r.Autotune.best_ms)
+      r.Autotune.best_tensorized r.Autotune.best_mma_scalar_fallbacks
+      r.Autotune.best_mma_statements;
     Verdict.pass_fail
       (which ^ " labels a winner exactly when it has a winning time")
       (Bool.equal (String.is_empty r.Autotune.best_label) (Float.is_inf r.Autotune.best_ms))
@@ -293,20 +325,28 @@ let () =
       ~detail:
         (d "%d scalar of %d statements" r.Autotune.best_mma_scalar_fallbacks
            r.Autotune.best_mma_statements);
-    (* The best timed tensorized candidate is drawn from the timed population the overall winner
-       minimizes over, so it cannot beat the winner. *)
+    (* The best timed tensorized candidate cannot beat the crowned winner outright — only undercut
+       it inside the progress band above, which is the precondition the bare inequality was missing.
+       [infinity >= infinity *. 0.99] holds, so a search that timed nothing passes; a finite
+       [mma_best_ms] under an infinite [best_ms] would not, and should not. *)
     Verdict.pass_fail
-      (which ^ "'s best tensorized time does not beat the winner's")
-      Float.(r.Autotune.mma_best_ms >= r.Autotune.best_ms)
-      ~detail:(d "mma_best_ms=%s best_ms=%s" (ms r.Autotune.mma_best_ms) (ms r.Autotune.best_ms));
-    (* A search whose winner tensorizes must have timed it — the claim that fails if [mma_best_ms]
-       is keyed on labels, since a beam-appended [Tensorize] promises nothing in its label. Excluded
-       on a cache hit, which times nothing in this process. *)
+      (which ^ "'s best tensorized time undercuts the winner only inside the beam's progress band")
+      Float.(r.Autotune.mma_best_ms >= r.Autotune.best_ms *. (1. -. beam_min_progress))
+      ~detail:
+        (d "mma_best_ms=%s best_ms=%s (band %.0f%%)" (ms r.Autotune.mma_best_ms)
+           (ms r.Autotune.best_ms)
+           (beam_min_progress *. 100.));
+    (* A winner that tensorizes was itself timed as a tensorized candidate, so it is a member of the
+       population [mma_best_ms] minimizes over: [<=], not [=] — a sub-threshold round candidate may
+       hold the minimum, which is the same band as above and equally not a fault. Keyed on labels
+       instead, [mma_best_ms] would stay [infinity] for a beam-appended [Tensorize] winner and this
+       would fail, which is the regression it is here to catch. Excluded on a cache hit, which times
+       nothing in this process. *)
     Verdict.pass_fail
       (which ^ "'s tensorizing winner was itself timed in the tensorized family")
       ((not r.Autotune.best_tensorized)
       || replayed r
-      || Float.(r.Autotune.mma_best_ms = r.Autotune.best_ms))
+      || Float.(r.Autotune.mma_best_ms <= r.Autotune.best_ms))
       ~detail:
         (d "tensorized=%b mma_best_ms=%s best_ms=%s" r.Autotune.best_tensorized
            (ms r.Autotune.mma_best_ms) (ms r.Autotune.best_ms))
