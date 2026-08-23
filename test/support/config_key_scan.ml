@@ -139,6 +139,145 @@ let tracing_gates_in_source content =
           | _ -> None)
       | _ -> None)
 
+(** {1 The artifact-freshness initializer (gh-ocannl-723)} *)
+
+(** The module that owns the freshness-checked reads of [build_files/], and the function of it that
+    a test must call before its first compile. *)
+let generated_module = "Generated"
+
+let generated_init = "init"
+
+(* A path is flattened defensively here, unlike {!longident_of}: this one runs over MODULE paths,
+   where a functor application is a shape the language admits, and a scan that raised on one would
+   refuse a file for containing an unrelated [module M = F (X)]. *)
+let flatten_module_path txt = try Some (flatten_longident txt) with _ -> None
+
+let receiver_is_generated txt =
+  match flatten_module_path txt with
+  | Some path -> ( match List.last path with Some m -> String.equal m generated_module | None -> false)
+  | None -> false
+
+(** Every spelling of a [Test_utils.Generated.init] call in [content], deduplicated and in the order
+    they first appear; empty when the source does not call it.
+
+    Three spellings reach the same function and all three are read, because the difference between
+    them is a matter of taste and the rule built on this is not:
+    [Test_utils.Generated.init] written out, [Generated.init] through a [module Generated =
+    Test_utils.Generated] alias (which is what most tests here do), and a bare [init] under an
+    [open] or [include] of the module. Each of those has an expression spelling too
+    ([let module G = … in], [let open … in]), and both are collected: the difference between them is
+    a matter of taste as well. The alias may be spelled anything, so the aliases and opens are
+    collected in a first pass and the call sites matched against them in a second — OCaml lets
+    neither be used before it is bound, so two passes cost nothing and save the walk from depending
+    on that. An [open] is taken to reach the whole file rather than its own scope, which is the
+    over-reading direction and the safe one (see below).
+
+    Parsed rather than grepped, for the reason the rest of this module is: [test/support/generated.ml]
+    names its own [Generated.init] in half a dozen doc comments and error messages, and
+    [generated_provenance.ml] quotes one of them in a string literal it asserts on. A text scan would
+    read every one of those as a call.
+
+    The receiver is matched by NAME, so a module bound to [Generated] that is not this one is read as
+    if it were. That is the safe direction of the two, and deliberately so: a declaration too many
+    makes dune rerun a stanza that need not have been rerun, while one too few is the stale run the
+    rule built on this exists to prevent. *)
+let generated_init_calls_in_source content =
+  let structure = structure_of content in
+  let aliases = ref [] and opened = ref false in
+  (* Every way the module's contents can be given a local name, in BOTH the structure and the
+     expression grammar. OCaml spells each of binding, opening and including twice -- `module G = M`
+     against `let module G = M in …`, `open M` against `let open M in …`, `include M` against
+     nothing -- and a pass that knew only the structure spellings would read
+     `let open Test_utils.Generated in init ~backend_name` as a call to somebody else's `init`
+     (Codex P2, round 1). Which is the shape a scan must not get wrong quietly: an unrecognised
+     caller is a stanza the rule stops applying to, and looks exactly like a stanza with nothing to
+     declare. *)
+  let bind_module_expr alias module_expr =
+    let names_it txt =
+      receiver_is_generated txt
+      ||
+      (* An alias of an alias: `module H = G` where `G` was bound to the module. The binders run in
+         source order and OCaml lets neither be used before it is bound, so consulting what is
+         already recorded is all a chain needs (Codex P2, round 2). *)
+      match flatten_module_path txt with
+      | Some path -> (
+          match List.last path with
+          | Some m -> List.mem !aliases m ~equal:String.equal
+          | None -> false)
+      | None -> false
+    in
+    (* A signature constraint wraps the path without changing which module it names, so
+       `module G : module type of Test_utils.Generated = Test_utils.Generated` binds `G` as surely
+       as the bare form does. Unwrapped recursively rather than one level: nesting them is legal and
+       a scan that stopped at one would be the same defect one layer down (Codex P2, round 4). *)
+    let rec unwrap module_expr =
+      match module_expr.pmod_desc with
+      | Pmod_constraint (inner, _) -> unwrap inner
+      | _ -> module_expr
+    in
+    match (unwrap module_expr).pmod_desc with
+    | Pmod_ident { txt; _ } when names_it txt -> (
+        match alias with Some alias -> aliases := alias :: !aliases | None -> opened := true)
+    | _ -> ()
+  in
+  let binders =
+    object
+      inherit Ast_traverse.iter as super
+
+      method! structure_item item =
+        (match item.pstr_desc with
+        | Pstr_module { pmb_name = { txt = alias; _ }; pmb_expr; _ } -> bind_module_expr alias pmb_expr
+        | Pstr_open { popen_expr; _ } -> bind_module_expr None popen_expr
+        (* `include Test_utils.Generated` puts `init` in scope under no name of its own, which is
+           the same situation an `open` leaves. *)
+        | Pstr_include { pincl_mod; _ } -> bind_module_expr None pincl_mod
+        | _ -> ());
+        super#structure_item item
+
+      method! expression expr =
+        (match expr.pexp_desc with
+        | Pexp_letmodule ({ txt = alias; _ }, module_expr, _) -> bind_module_expr alias module_expr
+        | Pexp_open ({ popen_expr; _ }, _) -> bind_module_expr None popen_expr
+        | _ -> ());
+        super#expression expr
+    end
+  in
+  binders#structure structure;
+  let names_the_module receiver =
+    String.equal receiver generated_module || List.mem !aliases receiver ~equal:String.equal
+  in
+  let is_the_call path =
+    match List.rev path with
+    | last :: receivers when String.equal last generated_init -> (
+        match receivers with
+        | [] -> !opened
+        | receiver :: _ -> names_the_module receiver)
+    | _ -> false
+  in
+  let found = ref [] in
+  let calls =
+    object
+      inherit Ast_traverse.iter as super
+
+      method! expression expr =
+        (match longident_of expr with
+        | Some path when is_the_call path ->
+            let spelling = String.concat ~sep:"." path in
+            if not (List.mem !found spelling ~equal:String.equal) then found := spelling :: !found
+        | _ -> ());
+        super#expression expr
+    end
+  in
+  calls#structure structure;
+  List.rev !found
+
+(** Whether [content] could possibly call the initializer: the module has to be NAMED for any of the
+    three spellings to reach it, alias and [open] included, so the substring is a necessary
+    condition and skipping a file without it skips no call. Only a narrowing filter — what decides is
+    {!generated_init_calls_in_source} — but it keeps a repository-wide census from parsing every
+    source in the tree. *)
+let could_call_generated_init content = String.is_substring content ~substring:generated_module
+
 type label_use = { key : string option; offset : int }
 (** Every place the [arg_name] label names a configuration key, and what it names it with. [key] is
     [Some k] when the argument is a string literal — the convention both consistency tests rely on
@@ -585,3 +724,14 @@ let keys_by_file files =
       let content = Stdio.In_channel.read_all fname in
       ( Stdlib.Filename.basename fname,
         Set.of_list (module String) (keys_in_source content @ settings_keys_in_source content) ))
+
+(** Whether [content] reads configuration key [key] by name, through either spelling this module
+    recognises: an [~arg_name:"key"] call site, or a field of the startup-resolved [Utils.settings].
+
+    What it is for: a stanza declaring [OCANNL_<KEY>] is justified by SOME read of that key among its
+    modules, and calling the initializer is only one of them. A converse check that knew only the
+    initializer would report a test reading the key directly as carrying a stale declaration, and so
+    would make the documented way of pinning a key unusable for it (Codex P2, round 2). *)
+let source_reads_key content ~key =
+  let has keys = List.mem keys key ~equal:String.equal in
+  has (keys_in_source content) || has (settings_keys_in_source content)

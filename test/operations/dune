@@ -97,6 +97,7 @@
   (alias runtest-digest_completeness)
   (alias runtest-config_dep_completeness)
   (alias runtest-env_var_deps)
+  (alias runtest-env_var_deps_control)
   (alias runtest-cache_dir_ignores)
   (alias runtest-verdict_ratchet)
   (alias runtest-agent_notes_structure)))
@@ -131,6 +132,7 @@
   (alias runtest-test_config_consistency)
   (alias runtest-digest_completeness)
   (alias runtest-env_var_deps)
+  (alias runtest-env_var_deps_control)
   (alias runtest-cache_dir_ignores)
   (alias runtest-config_dep_completeness)
   (alias runtest-verdict_ratchet)
@@ -1681,7 +1683,7 @@
 (executable
  (name env_var_deps)
  (modules env_var_deps)
- (libraries base stdio arrayjit.utils test_utils arrayjit.verdict))
+ (libraries base stdio unix arrayjit.utils test_utils arrayjit.verdict))
 
 (rule
  ; ocannl-backend: none -- links no backend: it reads dune files and OCaml sources as text.
@@ -1712,6 +1714,32 @@
  (deps (alias runtest-env_spelling_gate))
  (action
   (diff env_var_deps.expected env_var_deps.actual)))
+
+; gh-ocannl-723: the negative control for the rule above that requires
+; `(env_var OCANNL_BUILD_FILES_PREFIX)` of every stanza whose modules call
+; `Test_utils.Generated.init`. Every such stanza in this repository declares it, so a control
+; written from today's corpus would encode the absence of the violating shape rather than the
+; rule's teeth. `--control` builds a synthetic tree that contains one, hands it to
+; `env_var_deps.exe` in a child process, and claims on what the child said and how it exited --
+; once without the declaration and once with it, nothing else differing.
+
+(rule
+ ; ocannl-backend: none -- it runs env_var_deps.exe over a synthetic tree of dune files and one
+ ; OCaml source, which links no backend and compiles nothing.
+ (target env_var_deps_control.actual)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:env_var_deps.exe} --control))))
+
+(rule
+ (alias runtest-env_var_deps_control)
+ (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
+ (action
+  (diff env_var_deps_control.expected env_var_deps_control.actual)))
 
 ; The prefix that lets one `.gitignore` glob cover every autotune schedule cache directory, held
 ; over the sources that name them. Reads the same source set as env_var_deps above -- the library
@@ -2568,6 +2596,7 @@
  (name reduction_accumulator_residency)
  (package neural_nets_lib)
  (deps
+  (env_var OCANNL_BUILD_FILES_PREFIX)
   ocannl_config
   (env_var OCANNL_BACKEND))
  (modules reduction_accumulator_residency)

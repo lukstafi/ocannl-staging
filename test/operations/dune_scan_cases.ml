@@ -972,6 +972,274 @@ let sentinel_counting_cases =
     ("none at all", {dune|(test (name t) (deps ocannl_config))|dune}, (0, 0));
   ]
 
+(* gh-ocannl-723: which stanzas must declare `(env_var OCANNL_BUILD_FILES_PREFIX)`, put to
+   stanza/source pairs this repository does not contain.
+
+   Every stanza here that calls `Test_utils.Generated.init` declares it, so a control drawn from the
+   corpus would only record the ABSENCE of the violating shape -- which a rule that decided nothing
+   would satisfy just as well. The cases below carry the violating shape and the legitimate one that
+   is nearest to it, so each verdict is pinned against its neighbour rather than against silence.
+   The third argument is which modules call the initializer, which is what the source side of the
+   relationship answers. *)
+let render_artifact (s : Scan.artifact_subject) =
+  Printf.sprintf "%s %s: %s%s%s" s.Scan.artifact_head s.Scan.artifact_name
+    (Scan.artifact_verdict_name s.Scan.artifact_verdict)
+    (match s.Scan.artifact_callers with
+    | [] -> ""
+    | callers -> " (" ^ String.concat ~sep:", " callers ^ ")")
+    (match s.Scan.artifact_readers with
+    | [] -> ""
+    | readers -> " [reads " ^ String.concat ~sep:", " readers ^ "]")
+
+let artifact_cases =
+  [
+    (* The violating shape, and the one thing that fixes it. *)
+    ( "a test whose module calls the initializer and does not declare the variable",
+      {dune|(test (name t) (modules t) (deps ocannl_config (env_var OCANNL_BACKEND)))|dune},
+      [ "t" ],
+      [ "test t: undeclared (t)" ] );
+    ( "the same test with the declaration added",
+      {dune|(test (name t) (modules t)
+ (deps ocannl_config (env_var OCANNL_BACKEND) (env_var OCANNL_BUILD_FILES_PREFIX)))|dune},
+      [ "t" ],
+      [ "test t: declared (t)" ] );
+    (* A spelling no run consults invalidates nothing, which is gh-ocannl-652's lesson applied one
+       key over: it has to read as a missing declaration, not as a present one. *)
+    ( "the lowercase spelling declares nothing",
+      {dune|(test (name t) (modules t) (deps (env_var ocannl_build_files_prefix)))|dune},
+      [ "t" ],
+      [ "test t: undeclared (t)" ] );
+    (* The other direction. A declaration with no caller behind it is the restatement this check
+       replaces -- and it is what a copied stanza leaves behind when the test it was copied from
+       stops asserting on generated code. *)
+    ( "a declaration no module of the stanza calls for",
+      {dune|(test (name t) (modules t) (deps (env_var OCANNL_BUILD_FILES_PREFIX)))|dune},
+      [],
+      [ "test t: stale declaration" ] );
+    ( "a test that neither calls nor declares is not a subject",
+      {dune|(test (name t) (modules t) (deps ocannl_config))|dune},
+      [],
+      [] );
+    (* Attribution is per stanza: a caller in the same directory that this stanza does not name is
+       not this stanza's caller. *)
+    ( "a sibling module's call is not this stanza's",
+      {dune|(test (name t) (modules t) (deps ocannl_config))|dune},
+      [ "other" ],
+      [] );
+    (* An `(executable)` has no `deps` field, so the declaration goes on the rule that runs it --
+       the same placement as the ocannl_config dep and the backend marker. *)
+    ( "an executable whose runner declares it",
+      {dune|(executable (name probe) (modules probe))
+(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (run %{dep:probe.exe})))|dune},
+      [ "probe" ],
+      [ "executable probe: declared (probe)" ] );
+    ( "an executable whose runner does not",
+      {dune|(executable (name probe) (modules probe))
+(rule (deps ocannl_config) (action (run %{dep:probe.exe})))|dune},
+      [ "probe" ],
+      [ "executable probe: undeclared (probe)" ] );
+    (* And the declaration has to be on THAT rule. A neighbour declaring it reruns the neighbour. *)
+    ( "a declaration elsewhere in the file does not answer for the runner",
+      {dune|(executable (name probe) (modules probe))
+(rule (deps ocannl_config) (action (run %{dep:probe.exe})))
+(test (name t) (modules t) (deps (env_var OCANNL_BUILD_FILES_PREFIX)))|dune},
+      [ "probe"; "t" ],
+      [ "executable probe: undeclared (probe)"; "test t: declared (t)" ] );
+    (* Two rules run it, and dune invalidates each on its own deps: the undeclared one would serve
+       its previous result whatever the other says. *)
+    ( "one of two runners declaring it is not enough",
+      {dune|(executable (name probe) (modules probe))
+(rule (alias a) (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (run %{dep:probe.exe})))
+(rule (alias b) (deps ocannl_config) (action (run %{dep:probe.exe})))|dune},
+      [ "probe" ],
+      [ "executable probe: undeclared (probe)" ] );
+    (* The converse over a stanza that names no modules. A `(rule …)` is a subject only through the
+       executable it runs, so one that declares the variable and runs nothing that calls the
+       initializer was outside the check entirely -- which is exactly the copied declaration the
+       converse direction exists to catch (Codex P2, round 1). *)
+    ( "a rule declaring it and running nothing at all",
+      {dune|(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (copy a b)))|dune},
+      [],
+      [ "rule <unnamed>: stale declaration" ] );
+    (* A rule that RUNS an executable is judged through that executable's own verdict, so the same
+       fact is reported once and by the stanza whose modules settle it. *)
+    ( "a rule declaring it and running an executable with no caller",
+      {dune|(executable (name probe) (modules probe))
+(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (run %{dep:probe.exe})))|dune},
+      [],
+      [ "executable probe: stale declaration" ] );
+    ( "and the same rule once its executable does call the initializer",
+      {dune|(executable (name probe) (modules probe))
+(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (run %{dep:probe.exe})))|dune},
+      [ "probe" ],
+      [ "executable probe: declared (probe)" ] );
+    (* The path AS WRITTEN is the executable's identity: reducing it to a basename made a rule
+       running `../support/probe.exe` count as the runner of a local `probe`, crediting it with a
+       declaration made elsewhere and hiding that nothing here runs it (Codex P2, round 2). *)
+    ( "a rule running a same-named executable elsewhere does not run the local one",
+      {dune|(executable (name probe) (modules probe))
+(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (run ../support/probe.exe)))|dune},
+      [ "probe" ],
+      [ "executable probe: unrun (probe)" ] );
+    (* An executable this file does not declare is one whose modules this scan cannot see, so its
+       runner's declaration is not something the scan may call stale. Same for a command the scan
+       cannot place at all. *)
+    ( "a rule running an executable built elsewhere is not judged",
+      {dune|(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (run ../support/probe.exe)))|dune},
+      [],
+      [] );
+    ( "nor is one whose command this scan cannot place",
+      {dune|(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (bash "./probe.exe")))|dune},
+      [],
+      [] );
+    ( "an alias stanza aggregating with a declaration behind nothing",
+      {dune|(alias (name a) (deps (env_var OCANNL_BUILD_FILES_PREFIX)))|dune},
+      [],
+      [ "alias a: stale declaration" ] );
+    (* An executable can be run under its public name as readily as under `<name>.exe`, and
+       `classify_command` already records `%{bin:pkg.probe}` as `Runs "pkg.probe"` -- so a runner
+       named that way has to be recognised, or its executable reads as one nothing runs (Codex P2,
+       round 3). *)
+    ( "a runner naming the executable's public name is its runner",
+      {dune|(executable (name probe) (public_name pkg.probe) (modules probe))
+(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (run %{bin:pkg.probe})))|dune},
+      [ "probe" ],
+      [ "executable probe: declared (probe)" ] );
+    ( "an executable nothing in the file runs has no deps field to answer for it",
+      {dune|(executable (name probe) (modules probe))|dune},
+      [ "probe" ],
+      [ "executable probe: unrun (probe)" ] );
+    (* A plain library is not run at all: the initializer empties the artifact directory of the
+       process that owns it, so a library module calling it puts the requirement on every stanza
+       that links the library -- a relationship nothing follows. *)
+    ( "a plain library module calling the initializer is reported as such",
+      {dune|(library (name l) (modules l) (libraries base))|dune},
+      [ "l" ],
+      [ "library l: in a library (l)" ] );
+    (* And inline tests do not make it test-only: an `(inline_tests (deps …))` declaration
+       invalidates the inline-test runner alone, not the other executables that link the library and
+       initialize through it (Codex P2, round 4). *)
+    ( "adding inline tests does not license a library initializer",
+      {dune|(library (name l) (modules l)
+ (inline_tests (deps (env_var OCANNL_BUILD_FILES_PREFIX))))|dune},
+      [ "l" ],
+      [ "library l: in a library (l)" ] );
+
+    ( "and a library that does not call it is not a subject",
+      {dune|(library (name l) (modules l) (libraries base))|dune},
+      [],
+      [] );
+  ]
+
+(* A rule OUTSIDE a `(subdir …)` runs the executable declared inside it under the qualified path,
+   and that relationship has to survive the grouping that descending into the wrapper creates --
+   descending found both stanzas and then discarded the relation between them (Codex P2, round 4).
+   The third element is the subdirectory the executable's group sits in. *)
+let artifact_subdir_cases =
+  [
+    ( "a top-level rule is the runner of a nested executable",
+      {dune|(subdir gen (executable (name probe) (modules probe)))
+(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (run gen/probe.exe)))|dune},
+      "gen",
+      [ "probe" ],
+      [ "executable probe: declared (probe)" ] );
+    ( "and the same rule without the declaration is reported, not taken for absent",
+      {dune|(subdir gen (executable (name probe) (modules probe)))
+(rule (deps ocannl_config) (action (run gen/probe.exe)))|dune},
+      "gen",
+      [ "probe" ],
+      [ "executable probe: undeclared (probe)" ] );
+  ]
+
+(* Dune's default module set, which a stanza reaches for by omitting `(modules …)` or by naming
+   `:standard` (Codex P2, round 2). Reading either as "this stanza names no modules" made the stanza
+   own nothing, so a required declaration came out stale and the source came out unclaimed. The
+   third element is what the directory holds. *)
+let artifact_default_modules_cases =
+  [
+    ( "a single-module test with no modules field owns its own source",
+      {dune|(test (name t) (deps (env_var OCANNL_BUILD_FILES_PREFIX)))|dune},
+      [ "t" ],
+      [ "t" ],
+      [ "test t: declared (t)" ] );
+    ( "and is reported when it does not declare",
+      {dune|(test (name t) (deps ocannl_config))|dune},
+      [ "t" ],
+      [ "t" ],
+      [ "test t: undeclared (t)" ] );
+    ( ":standard is the same default written down",
+      {dune|(test (name t) (modules :standard) (deps ocannl_config))|dune},
+      [ "t" ],
+      [ "t" ],
+      [ "test t: undeclared (t)" ] );
+    ( "a set difference over :standard is still the default set",
+      {dune|(test (name t) (modules (:standard \ helper)) (deps ocannl_config))|dune},
+      [ "t"; "helper" ],
+      [ "t" ],
+      [ "test t: undeclared (t)" ] );
+    (* And the subtraction is resolved, not discarded: a module the stanza EXCLUDES is one it never
+       links, so demanding a declaration of it would be a demand about a module the test does not
+       build (Codex P2, round 3). *)
+    ( "a module subtracted from :standard is not the stanza's",
+      {dune|(test (name t) (modules (:standard \ helper)) (deps ocannl_config))|dune},
+      [ "t"; "helper" ],
+      [ "helper" ],
+      [] );
+    (* And the default narrows: what another stanza names explicitly is not in it, which is dune's
+       own rule and what keeps a caller attributed to one stanza. *)
+    ( "a module another stanza names explicitly is not in the default set",
+      {dune|(test (name t) (deps ocannl_config))
+(test (name u) (modules u) (deps (env_var OCANNL_BUILD_FILES_PREFIX)))|dune},
+      [ "t"; "u" ],
+      [ "u" ],
+      [ "test u: declared (u)" ] );
+  ]
+
+(* Calling the initializer is the usual reason a stanza needs the variable tracked, not the only
+   one: a test reading `build_files_prefix` by name needs it just as much, and a converse check that
+   knew only the initializer would make the documented way of pinning the key unusable for it
+   (Codex P2, round 2). The third element is which modules read it directly. *)
+let artifact_reader_cases =
+  [
+    ( "a declaration behind a direct read of the key is not stale",
+      {dune|(test (name t) (modules t) (deps (env_var OCANNL_BUILD_FILES_PREFIX)))|dune},
+      [ "t" ],
+      [ "test t: declared for a direct read [reads t]" ] );
+    (* And required, not merely permitted: a direct reader needs the variable tracked for exactly
+       the reason a caller does, so a rule that only PERMITTED the declaration would leave the stale
+       run it exists to prevent (Codex P2, round 3). *)
+    ( "a direct reader that does not declare is reported like any other",
+      {dune|(test (name t) (modules t) (deps ocannl_config))|dune},
+      [ "t" ],
+      [ "test t: undeclared [reads t]" ] );
+    ( "and the same stanza whose module reads nothing is",
+      {dune|(test (name t) (modules t) (deps (env_var OCANNL_BUILD_FILES_PREFIX)))|dune},
+      [],
+      [ "test t: stale declaration" ] );
+    (* An inline-test library runs under its own field, not under the library's deps -- the
+       distinction gh-ocannl-628 found for the backend variable, which is the same one here. Asked
+       of a READER, since a library module that CALLS the initializer is prohibited outright. *)
+    ( "an inline-test library declaring it in its own field",
+      {dune|(library (name l) (modules l)
+ (inline_tests (deps (env_var OCANNL_BUILD_FILES_PREFIX))))|dune},
+      [ "l" ],
+      [ "library l: declared for a direct read [reads l]" ] );
+    ( "a library's own deps are not the inline tests' deps",
+      {dune|(library (name l) (modules l) (deps (env_var OCANNL_BUILD_FILES_PREFIX))
+ (inline_tests (deps ocannl_config)))|dune},
+      [ "l" ],
+      [ "library l: undeclared [reads l]" ] );
+    ( "a library with no tests of its own is not judged for reading a key",
+      {dune|(library (name l) (modules l) (libraries base))|dune},
+      [ "l" ],
+      [] );
+    ( "a rule that SETS the variable is acting on it, whatever it runs",
+      {dune|(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX))
+ (action (setenv OCANNL_BUILD_FILES_PREFIX "" (copy a b))))|dune},
+      [],
+      [] );
+  ]
+
 let () =
   let check name expected found =
     if List.equal String.equal found expected then printf "ok: %s\n" name
@@ -988,6 +1256,37 @@ let () =
           []
       in
       check name expected found);
+  let artifact_check ?(label = "artifact declaration") ?(directory_modules = []) ?(readers = [])
+      ?(subdir = "") name source callers expected =
+    let calls module_name = List.mem callers module_name ~equal:String.equal in
+    let reads_prefix module_name = List.mem readers module_name ~equal:String.equal in
+    let found =
+      try
+        (* The whole file is both the group and the runner population here; [env_var_deps] splits
+           the two when a `(subdir …)` puts stanzas in different directories. *)
+        let stanzas = Scan.walk "" (Scan.stanzas source) ~f:(fun _ stanza -> [ stanza ]) in
+        List.map
+          (Scan.artifact_subjects ~directory_modules ~subdir ~runner_stanzas:stanzas stanzas ~calls
+             ~reads_prefix)
+          ~f:render_artifact
+      with exn ->
+        fail "%s -- %s: the scan raised: %s" label name (Exn.to_string exn);
+        []
+    in
+    check (label ^ " -- " ^ name) expected found
+  in
+  List.iter artifact_cases ~f:(fun (name, source, callers, expected) ->
+      artifact_check ~directory_modules:callers name source callers expected);
+  List.iter artifact_subdir_cases ~f:(fun (name, source, subdir, callers, expected) ->
+      artifact_check ~label:"artifact across subdirs" ~subdir ~directory_modules:callers name source
+        callers expected);
+  List.iter artifact_default_modules_cases
+    ~f:(fun (name, source, directory_modules, callers, expected) ->
+      artifact_check ~label:"artifact default modules" ~directory_modules name source callers
+        expected);
+  List.iter artifact_reader_cases ~f:(fun (name, source, readers, expected) ->
+      artifact_check ~label:"artifact other reader" ~directory_modules:readers ~readers name source
+        [] expected);
   List.iter raw_stanza_cases ~f:(fun (name, source, expected) ->
       check ("raw stanzas -- " ^ name) expected (List.map (Scan.raw_stanzas source) ~f:render_raw));
   List.iter path_rewriting_cases ~f:(fun (name, source, expected) ->

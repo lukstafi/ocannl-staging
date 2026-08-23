@@ -138,7 +138,60 @@ that they earn a lookup rather than always-loaded space.
   its main loop, so "a rule running its test through `bash` is subject to the rule" could be argued
   and not asserted; `Scan.backend_rule_of` is that decision alone, with the diagnostics and tallies
   left in the check that owns their wording, and `dune_scan_cases` states the rule over stanzas the
-  repository does not contain. Render the floor's answer ALONGSIDE the verdict in such cases
+  repository does not contain.
+  gh-ocannl-723 is the pattern's second instance and shows what a scanner rule costs once the seam
+  exists: the rule is `Scan.artifact_subjects`, `dune_scan_cases` puts it to fifteen stanza/source
+  pairs the repository has no member of, and `config_scan_lexing` does the same for the source side
+  — where the hostile input is the repository's own, since `test/support/generated.ml` names
+  `Generated.init` in half a dozen doc comments and `generated_provenance.ml` asserts on a string
+  literal quoting one, so a text scan would read the module that DEFINES the initializer as its
+  heaviest caller. Two lessons beyond the pattern. First, a decision-table control still leaves the
+  wiring from decision to failure unexercised, and `env_var_deps --control` closes it: it builds a
+  synthetic tree containing the violating pair, hands it to `env_var_deps.exe` as a CHILD, and
+  claims that the child names the stanza and exits 1 without the declaration and exits 0 with it —
+  the `generated_provenance` capture pattern, and worth the fixture because the tree is DERIVED from
+  the check's own exemption and gateless lists and so cannot drift from them. Second, a vacuity
+  floor over a repository census cannot be asked of an arbitrary tree: the artifact caller floor
+  applies only when `Config_key_scan.floor_violations` says the run was handed the repository's scan
+  roots, and WHICH mode the run was in goes into the golden, so a glob that breaks flips that line
+  rather than quietly retiring the floor.
+  Four shapes such a scan gets wrong quietly, all found in review, and each is a member of a genre
+  rather than a one-off. **Identifiers**: a scan that matches a function through the module it
+  belongs to must collect the module's local names from BOTH grammars — OCaml spells binding,
+  opening and including twice (`module G = M` / `let module G = M in …`, `open M` /
+  `let open M in …`, plus `include M`) — and must consult what it has already recorded, since
+  `module H = G` names the module as surely as `module G = Test_utils.Generated` does.
+  **Ownership**: a converse check ("this declaration has nothing behind it") must say which stanza
+  owns each verdict, or the same fact is reported twice — a rule that runs an executable is judged
+  through that executable, one that runs something unnameable is not judged at all, and only a
+  stanza that runs nothing whatever answers for its own declaration. **Path identity**: match a
+  runner to an executable by the path AS WRITTEN, never by basename, or a rule running
+  `../support/probe.exe` credits a local `probe` with a declaration made elsewhere — the same
+  collapse the config scanner's duplicate-basename check exists to prevent. **Dune's defaults**: a
+  stanza with no `(modules …)` field, or one naming `:standard`, owns the directory less what other
+  stanzas claim; reading either as "names no modules" makes a required declaration come out stale.
+  **Dune's identities**: an executable is run under `<name>.exe` and under its `public_name` via
+  `%{bin:…}`, and a runner named the second way is still its runner. **Subdirectories**: ask the
+  question per `(subdir …)` group, not per dune file — the stanzas inside one name modules that live
+  there, and a walk that stays at the top level reports a nested source as claimed by nobody.
+  **Wrappers over paths**: a signature constraint (`module G : module type of M = M`) wraps the path
+  without changing what it names, so unwrap `Pmod_constraint` recursively before resolving an alias.
+  **Cross-group relations**: descending into `(subdir …)` is only half of it — a rule outside the
+  wrapper runs the executable inside it under the qualified path, so match runners over the whole
+  file while resolving modules per group, or descending finds both stanzas and then discards the
+  relation between them.
+  Two more, about the rule rather than the scan. A declaration is justified by ANY read of the key it
+  tracks, so phrase the rule over the key (`Config_key_scan.source_reads_key`) and not over the one
+  function that prompted the check — otherwise the documented way of pinning a key becomes unusable
+  for that key. And having widened it that far, widen it in BOTH directions: permitting a
+  declaration for a direct reader while requiring one only of the function's callers leaves exactly
+  the stale run the check exists to prevent. A third: `inline_tests` on a library does not make its
+  modules test-only, so a rule that is about what a module DOES when linked (here, emptying the
+  artifact directory) must not accept a declaration that invalidates the inline-test runner alone.
+  One more trap that costs a debugging round: dune's `glob_files_rec` runs over the BUILD tree,
+  where a `<name>.pp.ml` sits beside every ppx-using `<name>.ml` — and a `.pp.ml` is not input the
+  compiler's own parser accepts. A scan that parses everything it is handed (rather than only the
+  modules a stanza names) must filter through `Config_key_scan.sources_among` first. Render the floor's answer ALONGSIDE the verdict in such cases
   ("declares neither +floor" versus the same line without it): the pairing is what makes a false
   green visible as a golden line rather than as an absence.
   The
@@ -296,6 +349,16 @@ that they earn a lookup rather than always-loaded space.
   routine twice across changed contents is otherwise reported as an unattributed overwrite. Corollary
   for a leg this backend cannot evaluate: gate it and report `Verdict.skipped` rather than letting it
   reach the read, because an absent artifact is a failure here by design.
+  The dune side of that: `init` READS `build_files_prefix`, so the stanza dune runs the test under
+  must declare `(env_var OCANNL_BUILD_FILES_PREFIX)` — otherwise dune serves the previous run's
+  result when the variable changes, which is gh-ocannl-628's hole one key over. `env_var_deps`
+  requires it of every stanza whose `(modules …)` name a source that calls the initializer, and
+  reports a declaration with no caller behind it as well (gh-ocannl-723). Where the declaration goes
+  is dune's semantics and not one rule: a `(test)` runs under its own `(deps …)`, an inline-test
+  library under `(inline_tests (deps …))`, and an `(executable)` has no `deps` field at all, so it is
+  the rule that RUNS it that carries the declaration — the same placement as the `ocannl_config` dep
+  and the backend marker, and checked as such (a declaration on a NEIGHBOUR of that rule reruns the
+  neighbour, so it does not count).
 - `Verdict` gates a claim by exit status, and a claim whose LABEL is computed needed an entry point of
   its own: `Verdict.pf fmt … b` is `p` with the label rendered from arguments
   (`Verdict.pf "%s gradients match the oracle" leg ok`), and `Verdict.claimf` is `claim` the same

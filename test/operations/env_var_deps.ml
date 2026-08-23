@@ -402,10 +402,23 @@ let generated_runtest_names stanzas =
 (* The prefix `Utils.classify_env_var` reports for a per-module tracing gate. *)
 let gate_prefix = "ocannl_log_level_"
 
+(* A lower bound on how many sources call `Test_utils.Generated.init` (gh-ocannl-723). The rule
+   below is a relationship between two answers, and if the source-side answer silently became "none"
+   -- a ppxlib upgrade, a rename of the module, a glob that stopped reaching the test sources -- the
+   relationship would hold vacuously over an empty set and the check would go green having stopped
+   checking. A floor rather than a count, for the reason gh-ocannl-665 took the counts out of the
+   sibling goldens: it must not move when a test is added or removed. There were 37 on
+   2026-08-23. *)
+let artifact_caller_floor = 20
+
+(* The configuration key `OCANNL_BUILD_FILES_PREFIX` addresses, which is what a module reading it by
+   name reads. *)
+let artifact_config_key = "build_files_prefix"
+
 (* The stanza kinds that name their own modules, and so can be asked what those modules read. *)
 let module_stanzas = [ "library"; "test"; "tests"; "executable"; "executables" ]
 
-let () =
+let main () =
   if Array.length Stdlib.Sys.argv < 2 then (
     eprintf "Usage: %s <workspace_root> <dune file or .ml source...>\n" Stdlib.Sys.argv.(0);
     Stdlib.exit 1);
@@ -418,10 +431,17 @@ let () =
   let dune_files =
     List.filter paths ~f:(fun (path, _) -> String.equal (Stdlib.Filename.basename path) "dune")
   in
-  let sources =
-    List.filter paths ~f:(fun (path, _) -> String.is_suffix path ~suffix:".ml")
-    |> List.map ~f:(fun (path, on_disk) -> (String.lowercase path, on_disk))
+  (* Through `Sources.sources_among`, the same filter the sibling scans apply: dune's globs run over
+     the BUILD tree, where a preprocessed `<name>.pp.ml` sits beside every ppx-using `<name>.ml`.
+     Reading both would double the census, and a `.pp.ml` is not OCaml the compiler's own parser
+     accepts -- it carries the ppx's output verbatim -- so the pair has to be resolved to the
+     source, not merely deduplicated. *)
+  let source_files =
+    let all = List.filter paths ~f:(fun (path, _) -> String.is_suffix path ~suffix:".ml") in
+    let kept = Set.of_list (module String) (Sources.sources_among (List.map all ~f:fst)) in
+    List.filter all ~f:(fun (path, _) -> Set.mem kept path)
   in
+  let sources = List.map source_files ~f:(fun (path, on_disk) -> (String.lowercase path, on_disk)) in
   if List.is_empty dune_files || List.is_empty sources then (
     Verdict.fail "no dune files or no sources among the arguments -- the rule's globs match nothing";
     Stdlib.exit 1);
@@ -435,6 +455,48 @@ let () =
     List.Assoc.find sources ~equal:String.equal
       (String.lowercase (Scan.in_subdir dir (module_name ^ ".ml")))
   in
+  (* gh-ocannl-723: every source that calls `Test_utils.Generated.init`, keyed the way `source_of`
+     looks a module up, so that a stanza's `(modules …)` field answers for its own sources. Narrowed
+     textually before parsing -- the module has to be NAMED for any spelling of the call to reach it
+     -- so the census costs a substring search over the repository and a parse of the few dozen
+     files that could contain one. *)
+  let artifact_callers =
+    List.filter_map source_files ~f:(fun (path, on_disk) ->
+        let content = In_channel.read_all on_disk in
+        if not (Sources.could_call_generated_init content) then None
+        else
+          match Sources.generated_init_calls_in_source content with
+          | [] -> None
+          | _ :: _ -> Some path
+          | exception exn ->
+              (* A source this scan cannot read is one it cannot answer for, and answering "no
+                 calls" for it would be the silent failure the whole check is against. *)
+              Verdict.fail
+                (Printf.sprintf
+                   "%s names `Test_utils.Generated` and does not parse, so whether it calls the \
+                    initializer cannot be established: %s"
+                   path (Exn.to_string exn));
+              None)
+  in
+  let artifact_caller_keys =
+    Set.of_list (module String) (List.map artifact_callers ~f:String.lowercase)
+  in
+  (* Whether this run was handed the repository, established the way the sibling scans establish it:
+     every scan root the globs are written for contributed its floor of sources. The relationship
+     below is about whatever tree is in front of the scan and is checked either way; the CENSUS
+     floor is a statement about the repository, so it is asked only of a run that has it. Which mode
+     a run was in goes into the golden, so a glob that breaks flips that line rather than quietly
+     retiring the floor. *)
+  let repository_census =
+    List.is_empty (Sources.floor_violations (List.map source_files ~f:fst))
+  in
+  let artifact_claimed = ref (Set.empty (module String)) in
+  let artifact_violations = ref 0 in
+  (* One line per subject for stderr, and per dune file for the golden: what the golden holds is
+     that a file still declares the variable where its modules call the initializer, not how many
+     stanzas do -- the gh-ocannl-665 argument, since a count moves whenever a test is added. *)
+  let artifact_table = ref [] in
+  let artifact_by_file = ref [] in
   let fail = Verdict.fail in
   let exemptions = Map.of_alist_exn (module String) exempt_declarations in
   let exemptions_used = ref (Set.empty (module String)) in
@@ -640,6 +702,126 @@ let () =
             | [] -> []
             | words -> [ "markers: " ^ String.concat ~sep:", " words ]) )
         :: !by_file;
+      (* gh-ocannl-723: the artifact-directory declaration, against the modules that read the key
+         needing it. Both directions, since a declaration nothing reads for is the restatement this
+         replaces rather than the relationship.
+
+         Per SUBDIRECTORY, not per dune file (Codex P2, round 3). `(subdir gen …)` applies its
+         stanzas to another directory, so the modules they name live there and the executables they
+         run are theirs -- and a walk that only saw the top level reported a nested stanza's source
+         as claimed by nobody. `Scan.walk` is the same descent the marker and site scans make. *)
+      let artifact_groups =
+        Scan.walk "" stanzas ~f:(fun subdir stanza -> [ (subdir, stanza) ])
+        |> List.stable_sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
+        |> List.group ~break:(fun (a, _) (b, _) -> not (String.equal a b))
+        |> List.map ~f:(fun group ->
+            let subdir = fst (List.hd_exn group) in
+            (subdir, Scan.in_subdir dir subdir, List.map group ~f:snd))
+      in
+      (* Runner identities are written relative to the DUNE FILE, so the raw `(subdir …)` path is
+         what qualifies them -- not the repository-relative directory the modules are looked up in. *)
+      let all_group_stanzas = List.concat_map artifact_groups ~f:(fun (_, _, group) -> group) in
+      let subjects =
+        List.concat_map artifact_groups ~f:(fun (subdir, here, group) ->
+            let key module_name = String.lowercase (Scan.in_subdir here (module_name ^ ".ml")) in
+            let calls module_name = Set.mem artifact_caller_keys (key module_name) in
+            (* A module that reads `build_files_prefix` some other way needs the variable tracked for
+               the same reason a caller does, and is subject to the same rule (Codex P2, rounds 2 and
+               3). Narrowed textually first, the way the caller census is: the key has to be SPELLED
+               for either spelling of a read to name it, so only the sources that mention it are
+               parsed. *)
+            let reads_prefix module_name =
+              match List.Assoc.find sources ~equal:String.equal (key module_name) with
+              | None -> false
+              | Some on_disk -> (
+                  let content = In_channel.read_all on_disk in
+                  String.is_substring content ~substring:artifact_config_key
+                  &&
+                  try Sources.source_reads_key content ~key:artifact_config_key with _ -> false)
+            in
+            (* Dune's default module set is the directory less what other stanzas claim, so the scan
+               needs to know what the directory holds -- a `(test (name t))` with no `(modules …)`
+               builds `t.ml` (Codex P2, round 2). Only the sources this scan was handed, which is
+               what it can answer for; the census check below is what catches a caller no stanza
+               claims either way. *)
+            let directory = if String.is_empty here then "." else here in
+            let directory_modules =
+              List.filter_map source_files ~f:(fun (path, _) ->
+                  if String.equal (Stdlib.Filename.dirname path) directory then
+                    Some (Stdlib.Filename.remove_extension (Stdlib.Filename.basename path))
+                  else None)
+            in
+            List.map
+              (Scan.artifact_subjects ~directory_modules ~subdir
+                 ~runner_stanzas:all_group_stanzas group ~calls ~reads_prefix)
+              ~f:(fun subject -> (here, subject)))
+      in
+      List.iter subjects ~f:(fun (here, subject) ->
+          let where =
+            Printf.sprintf "%s, the %s %s" dune_file subject.Scan.artifact_head
+              subject.Scan.artifact_name
+          in
+          let needs = subject.Scan.artifact_callers @ subject.Scan.artifact_readers in
+          let what =
+            match (subject.Scan.artifact_callers, subject.Scan.artifact_readers) with
+            | [], readers ->
+                String.concat ~sep:", " readers ^ " reads `" ^ artifact_config_key ^ "` by name"
+            | callers, [] ->
+                String.concat ~sep:", " callers ^ " calls `Test_utils.Generated.init`"
+            | callers, readers ->
+                String.concat ~sep:", " callers ^ " calls `Test_utils.Generated.init` and "
+                ^ String.concat ~sep:", " readers ^ " reads `" ^ artifact_config_key
+                ^ "` by name"
+          in
+          List.iter needs ~f:(fun m ->
+              artifact_claimed :=
+                Set.add !artifact_claimed (String.lowercase (Scan.in_subdir here (m ^ ".ml"))));
+          artifact_table :=
+            Printf.sprintf "  %-58s %s (%s)" where
+              (Scan.artifact_verdict_name subject.Scan.artifact_verdict)
+              (if List.is_empty needs then subject.Scan.artifact_deps_site
+               else String.concat ~sep:", " needs)
+            :: !artifact_table;
+          match subject.Scan.artifact_verdict with
+          | Scan.Artifact_declared | Scan.Artifact_other_reader -> ()
+          | Scan.Artifact_undeclared ->
+              Int.incr artifact_violations;
+              fail
+                (Printf.sprintf
+                   "%s: %s -- `%s` decides which directory the run's generated artifacts are read \
+                    from, and %s does not declare `(env_var %s)`, so dune serves the previous run's \
+                    result across a change of it. Add the declaration there"
+                   where what artifact_config_key subject.Scan.artifact_deps_site
+                   Scan.artifact_env_var)
+          | Scan.Artifact_stale_declaration ->
+              Int.incr artifact_violations;
+              fail
+                (Printf.sprintf
+                   "%s declares `(env_var %s)` in %s and no module of it reads `%s` at all -- \
+                    neither through `Test_utils.Generated.init` nor by name. A declaration with \
+                    nothing behind it is a restatement, not a relationship, and the next author \
+                    copies it. Drop it, or read the generated artifacts through \
+                    `Test_utils.Generated`, which is the one supported way to read them"
+                   where Scan.artifact_env_var subject.Scan.artifact_deps_site artifact_config_key)
+          | Scan.Artifact_unrun ->
+              Int.incr artifact_violations;
+              fail
+                (Printf.sprintf
+                   "%s: %s, and no stanza in this file runs the executable -- an `(executable)` has \
+                    no `deps` field, so the `(env_var %s)` declaration goes on the rule that RUNS \
+                    it, the same placement as the `%s` dep and the backend marker. This scan can \
+                    find neither"
+                   where what Scan.artifact_env_var Scan.config_file)
+          | Scan.Artifact_in_library ->
+              Int.incr artifact_violations;
+              fail
+                (Printf.sprintf
+                   "%s: %s, from a library module -- the initializer empties the artifact directory \
+                    of the process that owns it, so it belongs to an executable's own modules. \
+                    Called through a library it puts the `(env_var %s)` requirement on every stanza \
+                    that links the library, where nothing follows it"
+                   where what Scan.artifact_env_var));
+      artifact_by_file := (dune_file, List.map subjects ~f:snd) :: !artifact_by_file;
       (* The ambient gate, per directory AND per alias (gh-ocannl-652). *)
       let gated_here = gated_aliases stanzas in
       let entry_points = entry_points stanzas in
@@ -1044,6 +1226,30 @@ let () =
   List.iter gateless_dirs ~f:(fun (dir, why) -> printf "  %s -- no gate: %s\n" dir why);
   printf "\nDeclarations of a name OCANNL does not read as a configuration key, exempt by design:\n";
   List.iter exempt_declarations ~f:(fun (key, why) -> printf "  %s -- %s\n" key why);
+  printf
+    "\n\
+     Artifact-directory declarations, by dune file. A stanza whose modules call\n\
+     `Test_utils.Generated.init` declares `(env_var %s)`\n\
+     where dune runs it -- in its own `(deps ...)`, or, for an `(executable)` which has none, in\n\
+     the rule that runs it (gh-ocannl-723). What is held here is which VERDICTS a file's stanzas\n\
+     draw, not how many draw each: a tally would move whenever a test is added, and the per-stanza\n\
+     table goes to stderr.\n"
+    Scan.artifact_env_var;
+  printf "  %s\n"
+    (if repository_census then
+       Printf.sprintf
+         "the census covers every scan root, so the floor of %d callers applies to it"
+         artifact_caller_floor
+     else
+       "the census does not cover the repository's scan roots, so only the relationship is asked \
+        of it");
+  List.sort !artifact_by_file ~compare:(fun (a, _) (b, _) -> String.compare a b)
+  |> List.iter ~f:(fun (dune_file, subjects) ->
+      if not (List.is_empty subjects) then
+        printf "  %s: %s\n" dune_file
+          (List.map subjects ~f:(fun s -> Scan.artifact_verdict_name s.Scan.artifact_verdict)
+          |> List.dedup_and_sort ~compare:String.compare
+          |> String.concat ~sep:", "));
   (* gh-ocannl-659. The golden holds which backend WORDS a dune file's markers use, not how many
      stanzas carry each: a tally there would move on every test added anywhere in the repository,
      which is the churn gh-ocannl-665 took out of `config_dep_completeness` for the same reason. The
@@ -1090,9 +1296,241 @@ let () =
     "every marker the text spells was read as one, and the walk places at least as many stanzas as \
      a second reader finds"
     (!marker_holes = 0 && !placed_subjects >= !subject_floor && !subject_floor > 0);
+  eprintf
+    "Artifact-directory verdict of every stanza whose modules call Test_utils.Generated.init, or \
+     which declares %s without one (not diffed -- see gh-ocannl-665):\n\
+     %s\n"
+    Scan.artifact_env_var
+    (String.concat ~sep:"\n" (List.rev !artifact_table));
+  let unclaimed =
+    List.filter artifact_callers ~f:(fun path -> not (Set.mem !artifact_claimed (String.lowercase path)))
+  in
+  List.iter unclaimed ~f:(fun path ->
+      fail
+        (Printf.sprintf
+           "%s calls `Test_utils.Generated.init` and no stanza's `(modules ...)` claims it -- the \
+            rule that would require `(env_var %s)` of it never reaches it. Name the module in the \
+            stanza that builds it, or hand this scan that directory's dune file"
+           path Scan.artifact_env_var));
+  let floor_met = (not repository_census) || List.length artifact_callers >= artifact_caller_floor in
+  if not floor_met then
+    fail
+      (Printf.sprintf
+         "the repository's census finds %d source%s calling `Test_utils.Generated.init`, against a \
+          floor of %d -- the census has stopped finding them, and a relationship checked over an \
+          empty set holds for nothing"
+         (List.length artifact_callers)
+         (if List.length artifact_callers = 1 then "" else "s")
+         artifact_caller_floor);
+  eprintf "Sources calling Test_utils.Generated.init: %d, against a floor of %d.\n"
+    (List.length artifact_callers) artifact_caller_floor;
+  Verdict.p
+    "every source that calls Test_utils.Generated.init is claimed by some stanza's modules, and a \
+     repository-wide census finds enough of them for the rule to be about something"
+    (List.is_empty unclaimed && floor_met);
+  Verdict.p
+    "every stanza whose modules call Test_utils.Generated.init declares OCANNL_BUILD_FILES_PREFIX \
+     where dune runs it, and every declaration of it has a caller behind it"
+    (!artifact_violations = 0);
   if not (Verdict.any_failed ()) then
     printf
       "\n\
        OK: every `(env_var ...)` addressed to OCANNL names a spelling a run reads, every test \
        directory carries the ambient gate, and every per-module tracing gate is declared by the \
        library whose modules read it.\n"
+
+(* gh-ocannl-723's negative control, and why it runs the checker rather than inspecting it.
+
+   A control written from today's corpus encodes the ABSENCE of the shape it is about: every stanza
+   in this repository that calls `Test_utils.Generated.init` declares the variable, so a check that
+   reported nothing and a check that decided nothing would both pass over it, and the second is what
+   an unexercised rule quietly becomes. So the rule is put to a stanza/source pair the repository
+   does not contain: a synthetic tree of four dune files and one source, handed to THIS executable in
+   a child process, once with the declaration and once without.
+
+   Everything but the one declaration is held fixed between the two runs, so the difference in
+   verdict is the rule's and nothing else's. The tree is built to satisfy the file's other rules --
+   the fixtures for the exemption and gateless lists are DERIVED from those lists, so they cannot
+   drift from them -- which buys the sharper claim: the violating tree exits 1 and names the stanza,
+   and the legitimate one exits 0. *)
+
+let control_root_paths = [ "t/dune"; "t/probe.ml"; "t/nested/probe2.ml" ]
+let control_probe = "let () = Test_utils.Generated.init ~backend_name:\"cc\"\n"
+
+(* The subject: an `(executable)` whose one module calls the initializer, plus the rule that runs it
+   -- an executable has no `deps` field, so the rule is where the declaration has to go, and putting
+   the pair in the control is what keeps that placement checked. *)
+let control_subject ~declares =
+  Printf.sprintf
+    {dune|(executable
+ (name probe)
+ (modules probe)
+ (libraries test_utils))
+
+(rule
+ ; ocannl-backend: none -- a synthetic control fixture, which runs on no device at all.
+ (target probe.actual)
+ (deps
+  ocannl_config
+%s  %%{dep:probe.exe})
+ (action
+  (with-stdout-to
+   %%{target}
+   (run ./probe.exe))))
+
+; A second, always-correct pair inside a `(subdir …)`. It is not the pair under control -- it
+; declares in both runs -- but it is what makes the LEGITIMATE run's exit status depend on the walk
+; descending: a scan that only read the top level would leave `nested/probe2.ml` claimed by nobody,
+; which the census check reports (Codex P2, round 3).
+(subdir
+ nested
+ (executable
+  (name probe2)
+  (modules probe2)
+  (libraries test_utils))
+ (rule
+  ; ocannl-backend: none -- the same fixture, one directory down.
+  (target probe2.actual)
+  (deps
+   ocannl_config
+   (env_var %s)
+   %%{dep:probe2.exe})
+  (action
+   (with-stdout-to
+    %%{target}
+    (run ./probe2.exe)))))
+|dune}
+    (if declares then Printf.sprintf "  (env_var %s)\n" Scan.artifact_env_var else "")
+    Scan.artifact_env_var
+
+(* The rest of the tree exists only so that the two runs differ in ONE verdict. Both lists below are
+   checked for staleness against the files that make them necessary, so a tree without those files
+   fails for reasons that have nothing to do with the rule under control. *)
+let control_context () =
+  let by_file =
+    List.map exempt_declarations ~f:(fun (key, _) ->
+        match String.lsplit2 key ~on:':' with
+        | Some (file, name) -> (file, name)
+        | None -> (key, key))
+    |> Map.of_alist_multi (module String)
+  in
+  let exempt_files =
+    List.map (Map.to_alist by_file) ~f:(fun (file, names) ->
+        let declarations =
+          String.concat ~sep:"" (List.map names ~f:(Printf.sprintf "  (env_var %s)\n"))
+        in
+        ( file,
+          "(rule\n (target exempt.fixture)\n (deps\n" ^ declarations
+          ^ " )\n (action\n  (with-stdout-to\n   %{target}\n   (echo \"\"))))\n" ))
+  in
+  let gateless_files =
+    List.map gateless_dirs ~f:(fun (file, _) ->
+        ( file,
+          Printf.sprintf "(test\n (name gateless)\n (deps\n  (env_var %s))\n (modules gateless))\n"
+            Scan.backend_env_var ))
+  in
+  exempt_files @ gateless_files
+
+let write_file path data =
+  let dir = Stdlib.Filename.dirname path in
+  let rec mkdirs dir =
+    if not (String.equal dir Stdlib.Filename.current_dir_name || Stdlib.Sys.file_exists dir) then (
+      mkdirs (Stdlib.Filename.dirname dir);
+      try Unix.mkdir dir 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ())
+  in
+  mkdirs dir;
+  Out_channel.write_all path ~data
+
+(* The tree is this process's to remove: it was made by `Filename.temp_dir`, which creates a fresh
+   directory nothing else holds. Removal is best effort -- a control that failed to tidy up is not a
+   control that decided wrongly, and the temporary directory is the operating system's to reclaim
+   either way. *)
+let rec remove_tree path =
+  match Unix.lstat path with
+  | { Unix.st_kind = Unix.S_DIR; _ } ->
+      Array.iter (Stdlib.Sys.readdir path) ~f:(fun entry ->
+          remove_tree (Stdlib.Filename.concat path entry));
+      Unix.rmdir path
+  | _ -> Unix.unlink path
+  | exception Unix.Unix_error _ -> ()
+
+let describe_status = function
+  | Unix.WEXITED n -> Printf.sprintf "exited %d" n
+  | Unix.WSIGNALED n -> Printf.sprintf "was killed by signal %d" n
+  | Unix.WSTOPPED n -> Printf.sprintf "was stopped by signal %d" n
+
+(* Through temporary FILES rather than pipes, for the reason `generated_provenance` gives: the child
+   writes to both streams, and reading two pipes in sequence deadlocks as soon as the one not being
+   read fills its buffer. *)
+let run_checker ~root ~exe args =
+  let capture suffix = Stdlib.Filename.temp_file "evd_control" suffix in
+  let out_path = capture ".out" and err_path = capture ".err" in
+  let open_capture p = Unix.openfile p [ Unix.O_WRONLY; Unix.O_TRUNC ] 0o600 in
+  let out = open_capture out_path and err = open_capture err_path in
+  let here = Stdlib.Sys.getcwd () in
+  Stdlib.Sys.chdir root;
+  let pid = Unix.create_process exe (Array.of_list (exe :: args)) Unix.stdin out err in
+  let _, status = Unix.waitpid [] pid in
+  Stdlib.Sys.chdir here;
+  Unix.close out;
+  Unix.close err;
+  let text = In_channel.read_all out_path ^ In_channel.read_all err_path in
+  (try Unix.unlink out_path with Unix.Unix_error _ -> ());
+  (try Unix.unlink err_path with Unix.Unix_error _ -> ());
+  (status, text)
+
+let control () =
+  (* Absolute before the chdir: `Sys.executable_name` resolves the name this process was started
+     with, and a relative one would name nothing from inside the temporary tree. *)
+  let exe =
+    let name = Stdlib.Sys.executable_name in
+    if Stdlib.Filename.is_relative name then
+      Stdlib.Filename.concat (Stdlib.Sys.getcwd ()) name
+    else name
+  in
+  let root = Stdlib.Filename.temp_dir "evd_control" "" in
+  let context = control_context () in
+  List.iter context ~f:(fun (file, content) ->
+      write_file (Stdlib.Filename.concat root file) content);
+  write_file (Stdlib.Filename.concat root "t/probe.ml") control_probe;
+  write_file (Stdlib.Filename.concat root "t/nested/probe2.ml") control_probe;
+  let paths = control_root_paths @ List.map context ~f:fst in
+  let run ~declares =
+    write_file (Stdlib.Filename.concat root "t/dune") (control_subject ~declares);
+    run_checker ~root ~exe ("." :: paths)
+  in
+  (* The exact sentence the rule produces, so that the control observes THIS rule failing and not
+     merely the child's misfortune -- the argument gh-ocannl-692 made for `generated_provenance`. *)
+  let diagnostic = "calls `Test_utils.Generated.init`" in
+  let report label (status, text) =
+    eprintf "the control's %s run %s. Its captured output:\n%s\n" label (describe_status status) text
+  in
+  let violating = run ~declares:false in
+  let legitimate = run ~declares:true in
+  let violating_reported =
+    (match fst violating with Unix.WEXITED 1 -> true | _ -> false)
+    && String.is_substring (snd violating) ~substring:diagnostic
+    && String.is_substring (snd violating) ~substring:Scan.artifact_env_var
+  in
+  let legitimate_passed =
+    (match fst legitimate with Unix.WEXITED 0 -> true | _ -> false)
+    && not (String.is_substring (snd legitimate) ~substring:diagnostic)
+  in
+  if not violating_reported then report "violating" violating;
+  if not legitimate_passed then report "legitimate" legitimate;
+  printf
+    "The rule is put to a stanza this repository does not contain: an `(executable)` whose one\n\
+     module calls `Test_utils.Generated.init`, run by a rule that does or does not declare\n\
+     `(env_var %s)`. Nothing else differs between the two runs.\n\n"
+    Scan.artifact_env_var;
+  Verdict.p
+    "the checker reports the stanza and exits 1 when the rule running it omits the declaration"
+    violating_reported;
+  Verdict.p "the same tree with the declaration added passes and says nothing about it"
+    legitimate_passed;
+  (try remove_tree root with Unix.Unix_error _ -> ())
+
+let () =
+  match Array.to_list Stdlib.Sys.argv with
+  | _ :: [ "--control" ] -> control ()
+  | _ -> main ()
