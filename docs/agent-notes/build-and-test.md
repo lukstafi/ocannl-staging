@@ -41,6 +41,35 @@ that they earn a lookup rather than always-loaded space.
   bullets that merely open with the same few words. The second half is not decoration: a rule that
   fires on ordinary writing gets switched off rather than obeyed, so every rule owes a demonstration
   that it does not.
+- GitHub builds a pull request's MERGE COMMIT, so a repository-wide scan that is green on your
+  branch is not evidence about the tree CI will scan. `agent_notes_structure` (gh-ocannl-691,
+  staging#413) survived nine review rounds, `dune build @check`, its targeted aliases and a
+  deliberately corrupted copy of the notes, and the merge gate then refused it on nine defects in
+  `docs/agent-notes/scheduling-and-autotune.md` — a correctly written note that landed on master
+  while the PR was in review, so it existed only in the merged tree (187 bullets against the
+  branch's 179). Nothing runnable locally sees that tree unless you bring the base in yourself. This
+  matters more for a scan than for an ordinary test, and the difference is the blast radius: a unit
+  test fails when its own subject regresses, and its subject is in the diff, whereas a scan fails
+  when anyone, anywhere, writes something it did not anticipate — and the population it scans keeps
+  growing under it for as long as the PR is open. So `git fetch origin && git rebase origin/master`
+  (`git merge origin/master` where the branch is shared, as #413 did) and re-run the scan BEFORE
+  opening such a PR and again before merging it; where a rebase is unwelcome, build the merge
+  commit on a scratch branch and run it there. What the omission buys is a false failure on a
+  colleague's correct work, which is the outcome that gets a check disabled rather than fixed.
+- A negative control written FROM the corpus can encode the ABSENCE of a shape rather than a rule
+  about it, and that is the more expensive half of the same story. #413's fixtures came from a
+  survey of the notes as they stood; the survey found no bullet continued after a blank line, so
+  that shape reached no fixture, and the control that came nearest — `- A finished fact.`, a blank
+  line, then an indented line — asserted a finding, because a finding is what the scanner gave. In
+  Markdown that is a second PARAGRAPH of the same bullet and is correct, which is precisely the
+  writing the merge commit failed. A control that asserts the buggy reading is worse than no control
+  at all: it makes the wrong behaviour look deliberate, and the next reviewer reads it as the
+  specification. So write controls from the RULE, not from the tree — state what the format admits,
+  SYNTHESIZE the violating text and the nearest legitimate text beside it, and check the reading
+  against the format rather than against what the code answers today. A shape the corpus does not
+  contain is the one most in need of a fixture, since nothing in the tree will contradict the
+  implementation's guess about it; a survey reporting zero of something is a hole in the fixtures,
+  not permission to leave that case undefined.
 - The `.expected` golden of such a repository-wide check should hold what is TRUE of the repository,
   not how much of it there is. A tally — "170 tests in this directory", "241 test stanzas declare
   the config" — moves on every correct addition anywhere, so every unrelated contributor has to
