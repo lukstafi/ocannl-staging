@@ -42,7 +42,19 @@ module H = Bench_harness
 
 let cross_entropy_loss = Nn_blocks.cross_entropy_loss
 
+(* `bench_mlp --self-test` (gh-ocannl-702): the fixture-free smoke run of the measurement path. It
+   fabricates a tiny model in memory, so it needs neither benchmarks/fixtures/ — empty in a fresh
+   checkout — nor the Python environment that fills it, and it prints a real result line for a
+   workload named [selftest-tiny], which is deliberately NOT a comparable cell. The mode lives in
+   Bench_harness, so #720's legs can offer it from any runner; it is wired up here alone for now,
+   and test/operations/bench_self_test is what runs it in CI. *)
+let self_test_requested () =
+  Array.exists Stdlib.Sys.argv ~f:(String.equal "--self-test")
+
 let () =
+  if self_test_requested () then (
+    ignore (H.run_self_test () : string);
+    Stdlib.exit 0);
   let fixture = Stdlib.Sys.getenv "BENCH_FIXTURE" in
   let tune = H.env_flag "BENCH_TUNE" in
   let st = St.read fixture in

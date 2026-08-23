@@ -9,6 +9,19 @@
  (modules bench_json)
  (libraries base))
 
+; The measurement protocol and everything the runners share, likewise a library rather than a
+; module of the executables (gh-ocannl-702): test/operations/bench_self_test drives
+; `Bench_harness.run_self_test` — the fixture-free smoke run of `measure_and_emit` — and a module
+; of an `(executables)` stanza cannot be linked from a test. Same package, for the same reason as
+; bench_json above.
+(library
+ (name bench_harness)
+ (package neural_nets_lib)
+ (modules bench_harness)
+ (libraries base bench_json ocannl stdio unix mtime mtime.clock.os)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
 (executables
  (names
   bench_mlp
@@ -23,9 +36,8 @@
   bench_gpt
   bench_gpt_diag
   bench_conv_diag
-  bench_min_repro
-  bench_harness)
- (libraries base bench_json ocannl stdio unix mtime mtime.clock.os)
+  bench_min_repro)
+ (libraries base bench_harness bench_json ocannl stdio unix mtime mtime.clock.os)
  (preprocess
   (pps ppx_here ppx_ocannl))
  (modes exe))

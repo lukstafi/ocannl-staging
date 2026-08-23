@@ -1,0 +1,15 @@
+the emitted result line parses as one JSON object: true
+framework is ocannl: true
+backend names the backend the cell ran on: true
+workload names the self-test model, not a benchmark cell: true
+variant names the self-test: true
+precision is f32: true
+compile_s is a non-negative number: true
+searched is false in an untuned cell: true
+step_ms carries all three percentiles: true
+every reported percentile is a positive time: true
+the percentiles are emitted in order p10 <= p50 <= p90: true
+queued_step_ms is a positive time: true
+timed_steps is the count the protocol asked for: true
+losses carries one parity checksum per parity step: true
+every parity checksum is a finite number: true

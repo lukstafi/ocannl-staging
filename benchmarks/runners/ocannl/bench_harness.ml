@@ -768,3 +768,115 @@ let measure_and_emit ~protocol ~backend ~variant ?(precision = "f32") ~compile_s
   Stdio.Out_channel.output_string out (line ^ "\n");
   Stdio.Out_channel.flush out;
   line
+
+(** {1 Fixture-free self-test of the measurement path (gh-ocannl-702)}
+
+    [benchmarks/fixtures/] is empty in a fresh checkout and the runners are dispatched through
+    [benchmarks/.venv], so without a provisioned Python ML environment no benchmark cell can be run
+    at all — including the OCANNL ones, which need nothing from torch but the bytes. That left
+    {!measure_and_emit} — the emitter every OCANNL benchmark cell's result flows through — with no
+    executable guard anywhere: a break in it would first show up as a wrong number on a GPU box,
+    days later.
+
+    {!run_self_test} closes that with a run that needs no file on disk. It is deliberately {e not} a
+    comparable measurement: its model is fabricated in this process, so its bytes are not the
+    byte-identical fixture the cross-framework parity gate is built on, and its workload name says
+    so. It sidesteps the fixture contract rather than weakening it. *)
+
+(** The self-test's protocol. [selftest-tiny] is not a benchmark cell and its numbers compare to
+    nothing — see above. The step counts keep the whole run to seconds on any backend while leaving
+    [timed_steps] large enough that {!percentile} lands the three reported percentiles on three
+    different samples: a swap of [~p10] and [~p90] then emits a line whose percentiles are out of
+    order, and that argument mapping into [Bench_json.result_line] is the one link between the
+    protocol and the wire format that no unit test of either half can reach. *)
+let self_test_protocol =
+  { workload = "selftest-tiny"; parity_steps = 2; warmup_steps = 1; timed_steps = 5 }
+
+(** The f32 leg, built rather than parsed. {!precision_leg} reads [BENCH_PRECISION] and friends from
+    the environment, which is right for a runner and wrong here: the self-test's emitted record is
+    diffed against a golden, so an ambient [BENCH_PRECISION] must not be able to change what it
+    reports. *)
+let self_test_leg =
+  {
+    label = "f32";
+    base = "f32";
+    prec = None;
+    static_scale = false;
+    gate_interval = None;
+    init_scale = 65536.;
+  }
+
+(** Trains a tiny MLP over data fabricated in memory, through the same step machinery every runner
+    uses ({!train_step_parts}, {!compile_train_step}, {!run_train_step}), drives the full
+    measurement protocol, and returns the emitted result line. [out] is where the line is emitted
+    (default [stdout], as for a real cell).
+
+    Not a benchmark, and not comparable to one: see {!self_test_protocol}. The backend is chosen the
+    usual OCANNL way, so the same call smoke-tests the measurement path on whatever backend the
+    caller is configured for. *)
+let run_self_test ?(out = Stdio.stdout) () =
+  let module TDSL = Operation.DSL_modules.TDSL in
+  let module IDX = Train.IDX in
+  let n_samples = 8 and n_features = 4 and n_hidden = 5 and n_classes = 3 in
+  (* Deterministic and RNG-free: what the self-test asserts on is the SHAPE of the emitted record,
+     and a model that varied per run would turn a divergence to nan into a flake rather than a
+     failure. *)
+  let wave k = Float.of_int ((k * 37 % 19) - 9) /. 10. in
+  let nd debug dims f = Ir.Ndarray.init_array ~debug Ir.Ops.single ~dims ~padding:None ~f in
+  let x_nd =
+    nd "selftest_x" [| n_samples; n_features |] (fun i -> wave ((i.(0) * n_features) + i.(1)))
+  in
+  let y_nd =
+    nd "selftest_y" [| n_samples; n_classes |] (fun i ->
+        if i.(1) = i.(0) % n_classes then 1. else 0.)
+  in
+  let w_nd name ~dout ~din = nd name [| dout; din |] (fun i -> wave (3 + (i.(0) * din) + i.(1))) in
+  let b_nd name ~dout = nd name [| dout |] (fun _ -> 0.) in
+  let xs = TDSL.rebatch ~l:"xs" x_nd () in
+  let ys = TDSL.rebatch ~l:"ys" y_nd () in
+  let w1 =
+    TDSL.wrap_param ~l:"w1" ~i:[ n_features ] ~o:[ n_hidden ]
+      (w_nd "w1" ~dout:n_hidden ~din:n_features)
+      ()
+  in
+  let b1 = TDSL.wrap_param ~l:"b1" ~o:[ n_hidden ] (b_nd "b1" ~dout:n_hidden) () in
+  let w2 =
+    TDSL.wrap_param ~l:"w2" ~i:[ n_hidden ] ~o:[ n_classes ]
+      (w_nd "w2" ~dout:n_classes ~din:n_hidden)
+      ()
+  in
+  let b2 = TDSL.wrap_param ~l:"b2" ~o:[ n_classes ] (b_nd "b2" ~dout:n_classes) () in
+  let logits =
+    let open TDSL.O in
+    b2 + (w2 * relu (b1 + (w1 * xs)))
+  in
+  let%op loss =
+    Nn_blocks.cross_entropy_loss ~spec:"...|v" ~normalize_by:!..n_samples () ~logits ~targets:ys
+  in
+  let learning_rate = TDSL.O.( !. ) 0.01 in
+  let parts = train_step_parts ~leg:self_test_leg ~learning_rate loss in
+  let ctx = Context.auto () in
+  let backend = Context.backend_name ctx in
+  let bindings = IDX.empty in
+  let ctx = Train.init_params ctx bindings loss in
+  let t0 = Unix.gettimeofday () in
+  let ctx, routines =
+    compile_train_step ~tune:false
+      ~tuned:(fun _ _ -> failwith "bench self-test: the self-test does not autotune")
+      ctx bindings parts
+  in
+  let compile_s = Unix.gettimeofday () -. t0 in
+  let ctx_ref = ref ctx in
+  let step_count = ref 0 in
+  let run_step () =
+    run_train_step routines ctx_ref ~step:!step_count;
+    Int.incr step_count
+  in
+  let open Operation.At in
+  (* No [~tune]: an untuned cell, so the line's [searched] is false and it carries no [tune]
+     object. What the self-test guards is the protocol and the emitter, not the search. *)
+  measure_and_emit ~protocol:self_test_protocol ~backend ~variant:"self-test" ~compile_s ~out
+    ~run_step
+    ~read_loss:(fun () -> (!ctx_ref, loss).@[0])
+    ~sync:(fun () -> Context.sync !ctx_ref)
+    ()
