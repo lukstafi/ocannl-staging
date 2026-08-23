@@ -92,6 +92,10 @@ test/operations/hardware_axes_parity.ml
     "lid.x"
     "threadIdx.x"
 test/operations/hardware_warp_shuffle.ml
+    "__nv_bfloat16 wred_partials_"
+    "__nv_bfloat16 wred_v_"
+    "float wred_partials_"
+    "float wred_v_"
     "ocannl_shfl_xor"
     "wred_partials_"
 test/operations/hardware_workgroup_reduce.ml
