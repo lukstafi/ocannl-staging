@@ -157,6 +157,22 @@ files.
   `(1024 1024 1024)`, i.e. `max_grid_yz = 65535` and a `max_workgroup_dims` that equals the product
   cap — that device cannot exercise the per-dimension cliff; CUDA's `.z` of 64 is the one that
   can.
+- **`static_properties` has one shape across the backends, and it is a contract**
+  (gh-ocannl-710): `(<backend>_devices (device (key value) ...) (device ...) ...)` — a group atom
+  naming the dump, then exactly one `Sexp.message`-shaped entry per device, in ordinal order, each
+  carrying at least `device_name` and `device_ordinal`, all carrying the same keys. The device
+  COUNT is never a child of its own — it is the number of entries — and neither is any other
+  backend-level fact; a backend with no devices to describe (an unlinked one,
+  `lowered_backend_missing`) names its group something that does not end in `_devices`, so a reader
+  tells the two apart without guessing. `Backend_intf.parse_static_properties` is the single reader
+  of the contract: `bin/device_props` and `test/operations/static_properties_contract` both go
+  through it, so the tool and the test cannot drift apart about what a device entry is. The test's
+  negative controls are the shapes this replaced — Multidev dumped
+  `(multidev_cc_devices (device_name CPU) (num_devices 16))`, no device entries at all, which a
+  generic reader indexed as two devices that do not exist, on the one backend whose whole purpose
+  is multi-device debugging; Metal and cc wrapped their pairs one nesting level deeper than
+  CUDA/HIP. To surface a new per-device fact, add a key to every entry of that backend's dump; do
+  not add a backend-level child, and do not restate anything the entries already determine.
 - "`Tile_mma` is a barrier" is only half true, and the half that fails is the one barrier elision
   wants. Every rendering form ENDS the intrinsic block with a workgroup barrier, so a staging
   barrier that follows one is always redundant (`Schedule.elide_staged_barriers` drops it, and the

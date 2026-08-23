@@ -275,74 +275,48 @@ module Impl = struct
   (* --- Configuration and Info --- *)
   let get_used_memory _device = Atomic.get allocated_memory
 
+  (* [Sexp.message]-shaped device entries, like every other backend's (gh-ocannl-710): the pairs
+     used to sit one nesting level deeper, wrapped in a list of their own, which is the same
+     information at a path no other backend's reader knows. See
+     [Backend_intf.parse_static_properties] for the contract. *)
   let static_properties () =
     let device_properties =
       Array.mapi (Lazy.force metal_devices) ~f:(fun ordinal device ->
           let attributes = Me.Device.get_attributes device in
-          Sexp.List
+          Sexp.message "device"
             [
-              Sexp.Atom "device";
-              Sexp.List
-                [
-                  Sexp.List [ Sexp.Atom "device_name"; Sexp.Atom attributes.name ];
-                  Sexp.List [ Sexp.Atom "device_ordinal"; Sexp.Atom (Int.to_string ordinal) ];
-                  Sexp.List
-                    [
-                      Sexp.Atom "registry_id";
-                      Sexp.Atom (Unsigned.ULLong.to_string attributes.registry_id);
-                    ];
-                  Sexp.List
-                    [
-                      Sexp.Atom "max_buffer_length";
-                      Sexp.Atom (Unsigned.ULong.to_string attributes.max_buffer_length);
-                    ];
-                  Sexp.List
-                    [
-                      Sexp.Atom "max_threadgroup_memory_length";
-                      Sexp.Atom (Unsigned.ULong.to_string attributes.max_threadgroup_memory_length);
-                    ];
-                  (* The launch-dimension limit the schedule layer gates against: all three
-                     components, not just [width]. [width] alone feeds
-                     [hardware_limits.max_threads_per_workgroup] (the thread product), while the
-                     triple feeds [max_workgroup_dims] (per-dimension, gh-ocannl-679). Surfaced so
-                     a run on hardware can read back what the gates compare against --
-                     [bin/device_props.ml] prints exactly this (gh-ocannl-684). *)
-                  Sexp.List
-                    [
-                      Sexp.Atom "max_threads_per_threadgroup";
-                      [%sexp_of: int * int * int]
-                        ( attributes.max_threads_per_threadgroup.width,
-                          attributes.max_threads_per_threadgroup.height,
-                          attributes.max_threads_per_threadgroup.depth );
-                    ];
-                  Sexp.List
-                    [
-                      Sexp.Atom "recommended_max_working_set_size";
-                      Sexp.Atom
-                        (Unsigned.ULLong.to_string attributes.recommended_max_working_set_size);
-                    ];
-                  Sexp.List
-                    [ Sexp.Atom "is_low_power"; Sexp.Atom (Bool.to_string attributes.is_low_power) ];
-                  Sexp.List
-                    [ Sexp.Atom "is_headless"; Sexp.Atom (Bool.to_string attributes.is_headless) ];
-                  Sexp.List
-                    [
-                      Sexp.Atom "has_unified_memory";
-                      Sexp.Atom (Bool.to_string attributes.has_unified_memory);
-                    ];
-                  Sexp.List
-                    [
-                      Sexp.Atom "total_memory";
-                      Sexp.Atom (Int.to_string (Atomic.get allocated_memory));
-                    ];
-                  Sexp.List
-                    [
-                      Sexp.Atom "supported_gpu_families";
-                      Sexp.List
-                        (List.map attributes.supported_gpu_families ~f:(fun gpu_family ->
-                             Me.Device.GPUFamily.sexp_of_t gpu_family));
-                    ];
-                ];
+              ("device_name", Sexp.Atom attributes.name);
+              ("device_ordinal", [%sexp_of: int] ordinal);
+              ("registry_id", Sexp.Atom (Unsigned.ULLong.to_string attributes.registry_id));
+              ( "max_buffer_length",
+                Sexp.Atom (Unsigned.ULong.to_string attributes.max_buffer_length) );
+              ( "max_threadgroup_memory_length",
+                Sexp.Atom (Unsigned.ULong.to_string attributes.max_threadgroup_memory_length) );
+              (* The launch-dimension limit the schedule layer gates against: all three components,
+                 not just [width]. [width] alone feeds
+                 [hardware_limits.max_threads_per_workgroup] (the thread product), while the triple
+                 feeds [max_workgroup_dims] (per-dimension, gh-ocannl-679). Surfaced so a run on
+                 hardware can read back what the gates compare against -- [bin/device_props.ml]
+                 prints exactly this (gh-ocannl-684). *)
+              ( "max_threads_per_threadgroup",
+                [%sexp_of: int * int * int]
+                  ( attributes.max_threads_per_threadgroup.width,
+                    attributes.max_threads_per_threadgroup.height,
+                    attributes.max_threads_per_threadgroup.depth ) );
+              ( "recommended_max_working_set_size",
+                Sexp.Atom (Unsigned.ULLong.to_string attributes.recommended_max_working_set_size) );
+              ("is_low_power", [%sexp_of: bool] attributes.is_low_power);
+              ("is_headless", [%sexp_of: bool] attributes.is_headless);
+              ("has_unified_memory", [%sexp_of: bool] attributes.has_unified_memory);
+              (* Backend-global, not per-device: the allocation counter this backend maintains
+                 across its devices. Kept on the entry (rather than promoted to a backend-level
+                 child, which the dump's shape does not have) because a single-GPU Mac is the only
+                 configuration where the two readings differ at all. *)
+              ("total_memory", [%sexp_of: int] (Atomic.get allocated_memory));
+              ( "supported_gpu_families",
+                Sexp.List
+                  (List.map attributes.supported_gpu_families ~f:(fun gpu_family ->
+                       Me.Device.GPUFamily.sexp_of_t gpu_family)) );
             ])
     in
     Sexp.List (Sexp.Atom "metal_devices" :: Array.to_list device_properties)

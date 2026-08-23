@@ -233,6 +233,53 @@ let no_hardware_limits =
     codegen_tag = None;
   }
 
+type device_dump = {
+  group : string;  (** The group atom naming the dump, e.g. ["cuda_devices"]. *)
+  devices : (string * Sexp.t) list list;
+      (** One [(key, value)] assoc per device, in ordinal order. *)
+}
+[@@deriving sexp_of]
+(** A parsed {!Backend_device_common.static_properties} dump: see {!parse_static_properties}. *)
+
+(** Reads a {!Backend_device_common.static_properties} dump per its contract (gh-ocannl-710), or
+    answers [None] when the sexp is not a device dump at all.
+
+    The contract, which every backend that enumerates devices honors and this function is the single
+    reader of:
+
+    - The dump is [(<group> <entry> ...)]: an atom naming the group, then the entries. [<group>] ends
+      in ["_devices"] -- and is [<backend name>_devices] -- exactly when the dump enumerates devices,
+      so a dump that describes something else (an unlinked backend's
+      [(<backend>_missing (error ...))], see [Lowered_backend_missing]) is distinguishable without
+      guessing.
+    - Every entry of a [_devices] dump is a device, and is [Sexp.message]-shaped: the atom [device]
+      followed by [(key value)] pairs, ONE nesting level -- no list-of-pairs wrapper around the
+      pairs. There is one entry per device, in ordinal order.
+    - Every device carries at least [device_name] and [device_ordinal], and all the devices of one
+      dump carry the same keys, so an entry indexes uniformly and two machines' dumps diff line by
+      line.
+    - The device COUNT is not a child of its own: it is the number of entries. Neither is any other
+      backend-level fact -- a child that is not a device is what made a generic reader reproduce the
+      backend's [num_devices] as a second, fictitious device (gh-ocannl-710).
+
+    A dump violating the shape answers [None] rather than a partial reading: a reader that invents
+    structure is worse than one that says it does not recognize the shape. Uniform keys and the
+    ordinal sequence are contract too, but are not enforced here -- they are what
+    [test/operations/static_properties_contract.ml] checks against each backend's real dump. *)
+let parse_static_properties (props : Sexp.t) : device_dump option =
+  let entry = function
+    | Sexp.List (Sexp.Atom "device" :: (_ :: _ as fields)) ->
+        List.map fields ~f:(function
+          | Sexp.List [ Sexp.Atom key; value ] -> Some (key, value)
+          | _ -> None)
+        |> Option.all
+    | _ -> None
+  in
+  match props with
+  | Sexp.List (Sexp.Atom group :: entries) when String.is_suffix group ~suffix:"_devices" ->
+      Option.map (Option.all (List.map entries ~f:entry)) ~f:(fun devices -> { group; devices })
+  | _ -> None
+
 let simd_lane_ladder ~vector_bytes ~elt_bytes =
   if elt_bytes <= 0 || vector_bytes < 8 then []
   else
@@ -499,10 +546,15 @@ module type Backend_device_common = sig
       be called internally when necessary. *)
 
   val static_properties : unit -> Sexp.t
-  (** Returns a sexp description of the properties of all devices. A function so that computing it
-      (device enumeration) does not run at backend-module initialization: singleton backends
-      instantiate eagerly at program startup, where touching a driver could fail runs that never use
-      the backend. *)
+  (** Returns a sexp description of the properties of all devices, in the shape {!device_dump}
+      documents and {!parse_static_properties} reads:
+      [(<backend>_devices (device (key value) ...) (device (key value) ...) ...)] -- a group atom
+      naming the dump, then exactly one [Sexp.message]-shaped entry per device, in ordinal order.
+      See {!parse_static_properties} for the full contract (gh-ocannl-710).
+
+      A function so that computing it (device enumeration) does not run at backend-module
+      initialization: singleton backends instantiate eagerly at program startup, where touching a
+      driver could fail runs that never use the backend. *)
 
   val hardware_limits : unit -> hardware_limits
   (** Conservative per-workgroup device limits: on multi-device backends the minimum across the

@@ -1,0 +1,17 @@
+a dump whose children are backend-level pairs is not read as devices: true
+a dump whose device pairs are one nesting level deeper is not read as devices: true
+a dump whose group atom does not name devices is not read as devices: true
+selected backend: group atom is the backend name plus _devices: true
+selected backend: dump is a device dump (message-shaped device entries under the group atom): true
+selected backend: at least one device is enumerated: true
+selected backend: keys within a device entry are distinct: true
+selected backend: all device entries carry the same keys in the same order: true
+selected backend: every device entry carries device_name and device_ordinal: true
+selected backend: device ordinals are 0..n-1 in entry order: true
+multidev_cc: group atom is the backend name plus _devices: true
+multidev_cc: dump is a device dump (message-shaped device entries under the group atom): true
+multidev_cc: at least one device is enumerated: true
+multidev_cc: keys within a device entry are distinct: true
+multidev_cc: all device entries carry the same keys in the same order: true
+multidev_cc: every device entry carries device_name and device_ordinal: true
+multidev_cc: device ordinals are 0..n-1 in entry order: true

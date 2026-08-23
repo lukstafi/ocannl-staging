@@ -69,6 +69,9 @@ struct
   let get_global_debug_info () =
     failwith @@ "Backend " ^ Config.name ^ " missing -- install the corresponding library"
 
+  (* The deliberate non-enumerating dump of [Backend_intf.parse_static_properties]' contract
+     (gh-ocannl-710): the group atom does NOT end in ["_devices"], so a reader can tell this is not
+     a list of devices without having to guess from an unfamiliar child. *)
   let static_properties () =
     Sexp.List
       [

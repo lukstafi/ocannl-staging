@@ -77,31 +77,28 @@ let rec emit prefix (sexp : Sexp.t) =
           emit path (pair_value item))
   | Sexp.List items -> List.iteri items ~f:(fun i item -> emit (Printf.sprintf "%s[%d]" prefix i) item)
 
-(* Most backends wrap their per-device entries in a group atom ([metal_devices], [cuda_devices],
-   ...) with each entry labelled [device]. Indexing the entries explicitly, rather than letting
-   [emit] infer it, keeps a one-device machine's paths identical to a four-device one's -- the whole
-   point of a format meant to be diffed across boxes.
+(* The per-device entries are read through [Backend_intf.parse_static_properties], the single
+   reader of the [static_properties] contract (gh-ocannl-710), so this tool and
+   [test/operations/static_properties_contract.ml] cannot drift apart about what a device entry is.
+   Indexing the entries explicitly, rather than letting [emit] infer structure, keeps a one-device
+   machine's paths identical to a four-device one's -- the whole point of a format meant to be
+   diffed across boxes.
 
-   The [device]-label test has to be strict, and every child has to pass it: the [Multidev]
-   scheduler's dump is a group atom followed by ordinary [(key value)] pairs and no [device] entry
-   at all, so a branch that merely counted the children reported [device_name] and [num_devices] as
-   two devices. A readback tool inventing structure is worse than one printing a shape it does not
-   recognize, so anything else falls through to the generic flattening, which loses nothing. *)
+   A dump the contract does not cover -- an unlinked backend's [(<name>_missing (error ...))], or a
+   future shape -- falls through to the generic flattening, which loses nothing. A readback tool
+   inventing structure is worse than one printing a shape it does not recognize: this tool's first
+   version accepted any group atom followed by children, and duly reported the [Multidev]
+   scheduler's backend-level [(device_name CPU) (num_devices 16)] pairs as two devices, neither of
+   which existed. *)
 let emit_static (props : Sexp.t) =
-  let is_device = function Sexp.List (Sexp.Atom "device" :: _ :: _) -> true | _ -> false in
-  let body (d : Sexp.t) : Sexp.t =
-    match d with
-    | Sexp.List [ Sexp.Atom "device"; v ] -> v
-    | Sexp.List (Sexp.Atom "device" :: rest) -> Sexp.List rest
-    | other -> other
-  in
-  match props with
-  | Sexp.List (Sexp.Atom group :: devices)
-    when (not (List.is_empty devices)) && List.for_all devices ~f:is_device ->
+  match Ir.Backend_intf.parse_static_properties props with
+  | Some { Ir.Backend_intf.group; devices } ->
       p "static.group = %s\n" group;
       p "static.device_count = %d\n" (List.length devices);
-      List.iteri devices ~f:(fun i d -> emit (Printf.sprintf "static.device[%d]" i) (body d))
-  | other -> emit "static" other
+      List.iteri devices ~f:(fun i fields ->
+          List.iter fields ~f:(fun (key, value) ->
+              emit (Printf.sprintf "static.device[%d].%s" i key) value))
+  | None -> emit "static" props
 
 let () =
   let ctx = Context.auto () in
