@@ -233,6 +233,43 @@ let structure_cases =
       [] );
     ("a thematic break", "# Title\n\n- A fact.\n\n---\n\n- Another fact.\n",
       [ "bullet-integrity @ f.md:5" ] );
+    (* A setext underline needs ONE marker, not the three a thematic break needs, so "--" and "=="
+       used to fall through to prose while a renderer made the line above them a heading -- an
+       anchor the heading rules never see (gh-ocannl-714). What makes it a heading is the paragraph
+       ABOVE it, and each of the four things that is not a paragraph gets its own control below. *)
+    ( "a setext underline at column zero",
+      "# Title\n\nAn abstract paragraph.\n--\n",
+      [ "bullet-integrity @ f.md:4" ] );
+    ( "a setext underline written with equals signs",
+      "# Title\n\nAn abstract paragraph.\n==\n",
+      [ "bullet-integrity @ f.md:4" ] );
+    ( "a setext underline of a single marker",
+      "# Title\n\nAn abstract paragraph.\n=\n",
+      [ "bullet-integrity @ f.md:4" ] );
+    ( "a setext underline nested under a bullet",
+      "# Title\n\n- A fact:\n  --\n  More.\n",
+      [ "bullet-integrity @ f.md:4"; "bullet-integrity @ f.md:5" ] );
+    (* The nearest legitimate text, and the one the notes actually contain: a wrapped line opening
+       with the ASCII dash this project writes for an em-dash. It is not a line of markers, so it
+       is not an underline. *)
+    ( "a dash opening a continuation line is not an underline",
+      "# Title\n\n- A fact\n  -- and its aside -- carries on here.\n",
+      [] );
+    ( "a flag opening a continuation line inside a code span is not an underline",
+      "# Title\n\n- A fact about `git fetch\n  --prune origin`, which cleans up.\n",
+      [] );
+    ( "two hyphens under a blank line are a paragraph, not an underline",
+      "# Title\n\n- A fact.\n\n--\n\n- Another fact.\n",
+      [] );
+    ( "two hyphens under a heading are not an underline",
+      "# Title\n\n## Section\n--\n",
+      [] );
+    ( "two hyphens under a table row are not an underline",
+      "# Title\n\n| File | Covers |\n| --- | --- |\n| a | b |\n--\n",
+      [] );
+    ( "two hyphens under a closing fence are not an underline",
+      "# Title\n\n- A fact.\n\n```\ncode\n```\n--\n",
+      [ "bullet-integrity @ f.md:5" ] );
     ( "a third nesting level",
       "# Title\n\n- A fact with parts:\n  - the first part, itself with parts:\n    - a third        level.\n",
       [ "bullet-integrity @ f.md:5" ] );

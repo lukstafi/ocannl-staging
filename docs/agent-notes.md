@@ -17,12 +17,15 @@ spaces in, every row of the table is one physical line, every backticked hook oc
 row links, and every file under `docs/agent-notes/` is linked from exactly one row — so a new file
 does need its row the day it appears. The dialect it reads is deliberately small: headings, prose
 paragraphs, `- ` bullets one level deep, and the table above. Anything else — a fenced block, an
-ordered or `*` item, a block quote whether or not its marker carries a space, an HTML comment — is
-REPORTED rather than guessed at, because a construct the scan cannot read is text no rule checks.
-One of those readings is Markdown's rather than the obvious one, so write around it: a line whose
-first visible column is `>=` is a quote to a renderer, and stays prose here only when a number
-follows the operator, so put the number straight after it or the whole comparison inside a code
-span. That is the contract to argue with if you want one of them: teach the scan what its lines mean, and it becomes part of the dialect.
+ordered or `*` item, a block quote whether or not its marker carries a space, an HTML comment, a
+heading underlined instead of written with hashes — is REPORTED rather than guessed at, because a
+construct the scan cannot read is text no rule checks. Two of those readings are Markdown's rather
+than the obvious one, so write around them: a line whose first visible column is `>=` is a quote to
+a renderer, and stays prose here only when a number follows the operator, so put the number straight
+after it or the whole comparison inside a code span; and a line of nothing but `-` or `=` directly
+below a paragraph underlines it into a heading, however short the run. That is the contract to argue
+with if you want one of them: teach the scan what its lines mean, and it becomes part of the
+dialect.
 
 | File | What it covers |
 | --- | --- |

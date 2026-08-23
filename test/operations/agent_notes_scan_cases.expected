@@ -59,6 +59,16 @@ ok: bullets -- a wrapped comparison against a name reads as a quote
 ok: bullets -- an HTML block at column zero
 ok: bullets -- an angle bracket inside a continuation is ordinary text
 ok: bullets -- a thematic break
+ok: bullets -- a setext underline at column zero
+ok: bullets -- a setext underline written with equals signs
+ok: bullets -- a setext underline of a single marker
+ok: bullets -- a setext underline nested under a bullet
+ok: bullets -- a dash opening a continuation line is not an underline
+ok: bullets -- a flag opening a continuation line inside a code span is not an underline
+ok: bullets -- two hyphens under a blank line are a paragraph, not an underline
+ok: bullets -- two hyphens under a heading are not an underline
+ok: bullets -- two hyphens under a table row are not an underline
+ok: bullets -- two hyphens under a closing fence are not an underline
 ok: bullets -- a third nesting level
 ok: bullets -- prose at column zero between lists
 ok: bullets -- a heading closes the list above it
