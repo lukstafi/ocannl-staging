@@ -389,6 +389,23 @@ let line_is_inert ~spans line =
   && String.foldi line ~init:true ~f:(fun i acc c ->
          acc && (Char.equal c ' ' || Char.equal c '\t' || in_any_span spans i))
 
+(** Whether a line's FIRST VISIBLE COLUMN is real text — the one question every marker test has to
+    ask before it classifies a line. A ['>'], ['#'], ['|'], ['<'] or ['-'] sitting inside a code
+    span is not a marker, and the line carrying it is ordinary text: it renders, and it belongs to
+    whatever paragraph or bullet encloses it.
+
+    Distinct from {!line_is_inert}, and the difference is where every miss has come from: a line
+    that OPENS or CLOSES a multiline span is not wholly inert, so the inert test passes it through
+    and whatever raw column it happens to start with then gets classified. Three readers asked the
+    question separately, two of them by the wrong test, so it is asked once here (Codex P2,
+    gh-ocannl-714 round 2).
+
+    Gating the marker rather than masking the inert text, because masking moves the indentation and
+    the indentation is load-bearing: the notes contain a continuation line whose first seventeen
+    characters close a code span and whose remainder is prose, and it is a continuation at depth two
+    however much of its left edge is code. *)
+let marker_is_text ~spans line = not (in_any_span spans (indent_of line))
+
 (** Markdown's whitespace after a list marker: a tab is as good as a space, so ["1.\tFact"] is an
     ordered item and ["*\tFact"] a bulleted one. Requiring a literal space let both fall through as
     prose, which is the omission the foreign-marker check exists to prevent (Codex P2, round 5). *)
@@ -531,7 +548,7 @@ let looks_like_heading line = String.is_prefix (String.strip line) ~prefix:"#"
 let headings contents =
   let map = (inert_by_line contents).ranges in
   List.filter_map (lines contents) ~f:(fun (lineno, line) ->
-      if line_is_inert ~spans:(spans_at map lineno) line then None else atx_heading line)
+      if marker_is_text ~spans:(spans_at map lineno) line then atx_heading line else None)
 
 (** {2 The closed dialect}
 
@@ -658,24 +675,28 @@ let setext_underline ~under_paragraph stripped =
     above it. Computed over the whole file rather than threaded through {!parse_file}'s dispatch, so
     that every branch of it reads the same answer off the same test.
 
-    A blank line, a heading, a table line, a fence and its contents, a comment and the block
-    constructs reported in their own right are all NOT paragraph content: an underline under any of
-    them underlines nothing. A line inside a code span is, because it renders as part of the
-    paragraph carrying it. *)
-let paragraph_lines ~fences_at ~comments_at contents =
+    A blank line, a fence and its contents, a comment and any line that OPENS a block of its own are
+    NOT paragraph content: an underline under any of them underlines nothing. A line inside a code
+    span is, because it renders as part of the paragraph carrying it.
+
+    What decides "opens a block" is the same gate {!parse_file} puts on every other marker test:
+    a marker whose first visible column is inert is not a marker. Classifying the raw column instead
+    dropped a bullet's closing code-span line — one beginning [`> example.`], [`| a | b |`] or
+    [`## Section`] inside the span — out of the paragraph set, and the underline below it went
+    unreported while a renderer made the line a heading (Codex P2, round 2). *)
+let paragraph_lines ~inert ~fences_at ~comments_at contents =
   List.filter_map (lines contents) ~f:(fun (lineno, line) ->
       let stripped = String.strip line in
+      let opens_a_block =
+        marker_is_text ~spans:(spans_at inert lineno) line
+        && (looks_like_heading line || is_table_line line || html_block_opener stripped
+           || Option.is_some (block_quote_marker stripped)
+           || Option.is_some (thematic_break stripped))
+      in
       let in_fence = not (List.is_empty (spans_at fences_at lineno)) in
       let in_comment = line_is_inert ~spans:(spans_at comments_at lineno) line in
-      if
-        (not (is_blank line))
-        && (not in_fence) && (not in_comment)
-        && (not (looks_like_heading line))
-        && (not (is_table_line line))
-        && (not (html_block_opener stripped))
-        && Option.is_none (block_quote_marker stripped)
-        && Option.is_none (thematic_break stripped)
-      then Some lineno
+      if (not (is_blank line)) && (not in_fence) && (not in_comment) && not opens_a_block then
+        Some lineno
       else None)
   |> Set.of_list (module Int)
 
@@ -737,7 +758,7 @@ let parse_file ~file contents =
   let inert = scan.ranges in
   let comments_at = scan.comment_ranges in
   let fences_at = scan.fence_ranges in
-  let paragraphs = paragraph_lines ~fences_at ~comments_at contents in
+  let paragraphs = paragraph_lines ~inert ~fences_at ~comments_at contents in
   List.iter (lines contents) ~f:(fun (lineno, line) ->
       let stripped = String.strip line in
       (* A line wholly inside a code span or an HTML comment is somebody's example. Parsing it as
@@ -747,13 +768,9 @@ let parse_file ~file contents =
       let spans = spans_at inert lineno in
       (* Whether this line's FIRST VISIBLE COLUMN is real text. A marker sitting inside a code span
          is not a marker: "- sample`" on the line that closes a span is code, and reading it as a
-         bullet invented one out of somebody's example (Codex P2, round 7).
-
-         Gating the marker tests rather than masking the inert text, because masking moves the
-         indentation and the indentation is load-bearing: the notes contain a continuation line
-         whose first seventeen characters close a code span and whose remainder is prose, and it is
-         a continuation at depth two however much of its left edge is code. *)
-      let marker_is_text = not (in_any_span spans (indent_of line)) in
+         bullet invented one out of somebody's example (Codex P2, round 7). Why it is a gate rather
+         than a mask is at [marker_is_text]. *)
+      let marker_is_text = marker_is_text ~spans line in
       (* Read once and cleared here, so every branch below sees the same answer and no branch has to
          remember to reset it. *)
       let after_blank = !blank_seen in
@@ -1004,7 +1021,7 @@ let tables contents =
            it as a block started one whose cells then parsed as inert, so a correct note carrying a
            table example FAILED table-shape (Codex P2, round 5) -- a false failure, the direction
            that gets a check switched off. *)
-        if line_is_inert ~spans:(spans_at map lineno) line then
+        if not (marker_is_text ~spans:(spans_at map lineno) line) then
           let acc = match current with None -> acc | Some t -> t :: acc in
           go acc None rest
         else if is_table_line line then

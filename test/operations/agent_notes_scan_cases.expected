@@ -68,6 +68,9 @@ ok: bullets -- two hyphens under a blank line are a paragraph, not an underline
 ok: bullets -- two hyphens under a heading are not an underline
 ok: bullets -- two hyphens under a table row are not an underline
 ok: bullets -- two hyphens under a closing fence are not an underline
+ok: bullets -- an underline below a line whose inert first column looks like a quote
+ok: bullets -- an underline below a line whose inert first column looks like a table
+ok: bullets -- an underline below a line whose inert first column looks like a heading
 ok: bullets -- a third nesting level
 ok: bullets -- prose at column zero between lists
 ok: bullets -- a heading closes the list above it
@@ -79,6 +82,7 @@ ok: tables -- a row with a cell too many
 ok: tables -- a header with no delimiter row
 ok: tables -- a header and a delimiter and no rows
 ok: tables -- a pipe inside a code span is not a cell separator
+ok: tables -- a pipe-led line whose leading pipe is inert opens no table
 ok: tables -- a pipe inside a code span below a table
 ok: tables -- an escaped pipe is not a cell separator either
 ok: tables -- a table indented three spaces is still a table

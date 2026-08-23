@@ -267,6 +267,18 @@ let structure_cases =
     ( "two hyphens under a closing fence are not an underline",
       "# Title\n\n- A fact.\n\n```\ncode\n```\n--\n",
       [ "bullet-integrity @ f.md:5" ] );
+    (* A marker whose first visible column is inert is not a marker, and the line carrying it is
+       ordinary paragraph text -- it renders. Classifying the raw column instead dropped such a line
+       out of the paragraph set, and the underline below it went unreported (Codex P2, round 2). *)
+    ( "an underline below a line whose inert first column looks like a quote",
+      "# Title\n\n- A fact showing `\n  > example.` in passing:\n  --\n  More.\n",
+      [ "bullet-integrity @ f.md:5"; "bullet-integrity @ f.md:6" ] );
+    ( "an underline below a line whose inert first column looks like a table",
+      "# Title\n\n- A fact showing `\n  | a | b |` in passing:\n  --\n  More.\n",
+      [ "bullet-integrity @ f.md:5"; "bullet-integrity @ f.md:6" ] );
+    ( "an underline below a line whose inert first column looks like a heading",
+      "# Title\n\n- A fact showing `\n  ## Section` in passing:\n  --\n  More.\n",
+      [ "bullet-integrity @ f.md:5"; "bullet-integrity @ f.md:6" ] );
     ( "a third nesting level",
       "# Title\n\n- A fact with parts:\n  - the first part, itself with parts:\n    - a third        level.\n",
       [ "bullet-integrity @ f.md:5" ] );
@@ -312,6 +324,12 @@ let table_cases =
        separator -- a rule that thought otherwise would fire on a dozen real bullets. *)
     ( "a pipe inside a code span is not a cell separator",
       "# Title\n\n- The vocabulary is closed (`none|cc|metal`).\n",
+      [] );
+    (* The same gate one level up: a pipe-led line whose leading pipe is INERT is not a table line,
+       and reading the raw column opened a one-row table out of a bullet's closing code-span line --
+       a false failure on correct text, which is the direction that gets a check switched off. *)
+    ( "a pipe-led line whose leading pipe is inert opens no table",
+      "# Title\n\n- A fact showing `\n  | a | b |` in passing.\n",
       [] );
     ( "a pipe inside a code span below a table",
       "# Title\n\n| File | Covers |\n| --- | --- |\n| a | b |\n\n- The spelling is `a|b`.\n",
