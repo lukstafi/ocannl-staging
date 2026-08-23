@@ -3,6 +3,15 @@
 open Base
 module Backends_deprecated = Backends
 
+module Cc_backend = Cc_backend
+(** The cc backend's own module, re-exported because the library's interface module is this one and
+    a test outside [arrayjit] can otherwise not name it. What needs naming is
+    {!Cc_backend.compiler_command}: the generated-kernel census
+    ([test/operations/cc_march_census.ml], gh-ocannl-650) compiles emitted sources under foreign
+    [-march] flags, and it must do so with the SAME toolchain that builds them for real -- a census
+    against a different compiler would describe guarded arms nothing here selects. The interface is
+    [cc_backend.mli]'s, so this exposes no more than that file already publishes. *)
+
 type t [@@deriving sexp_of]
 (** Execution context managing device, compilation, and buffers *)
 

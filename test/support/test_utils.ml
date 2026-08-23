@@ -42,6 +42,12 @@ module Generated = Generated
     emitted code. Artifacts outlive the run that wrote them, so a read that does not establish
     provenance can keep asserting on a kernel that is no longer emitted at all. *)
 
+module Asm_census = Asm_census
+(** The [-march] compile matrix and the innermost-loop instruction census (gh-ocannl-650): compiling
+    an emitted kernel under a target the build host cannot run is what makes a guarded arm checkable
+    at all, and counting its innermost loop is what separates "gcc accepted the arm" from "gcc kept
+    it in registers as one vector operation". *)
+
 (** [concise_float ~prec v] formats [v] with [prec] decimals, normalizing exponent digits portably.
     Re-export of [Ir.Ndarray.concise_float]. *)
 let concise_float = Ir.Ndarray.concise_float
