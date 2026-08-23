@@ -269,9 +269,9 @@ let config_key_classification : (config_key_class * string * string list) list =
        since no other compiler reads it. That is also why log_level belongs here, without an \
        ordinary verbosity bump churning cache keys. prefer_backend_uniformity does not pick a \
        backend: it picks how the C-family backends spell their logging expressions, so it is \
-       hashed here only once logging actually reaches the kernel -- its other effect, routing \
-       HIP's float-to-fp8 conversions through the guarded helper (gh-ocannl-647), is unconditional \
-       and is hashed in that backend's own codegen tag instead",
+       hashed here only once logging actually reaches the kernel -- that is its only effect on \
+       emitted code, since gh-ocannl-647 made HIP's guarded float-to-fp8 conversion unconditional \
+       rather than a thing this flag chooses",
       [
         "large_models";
         "big_models";

@@ -923,34 +923,34 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
           | _ -> None)
 
     (* THE float-to-fp8 narrowing this backend emits — the three operator bridges below, which
-       compute in float and narrow the result, and [convert_precision]'s conversions. Under
-       [prefer_backend_uniformity] it is the guarded helper (gh-ocannl-647), otherwise the
-       platform's own cast; the two spellings are both [NAME(expr)], so one string serves.
+       compute in float and narrow the result, and [convert_precision]'s conversions. It is ALWAYS
+       the guarded helper, never the platform's own cast: ROCm's software float-to-e5m2 conversion
+       shifts out of range for magnitudes around 4e-25 to 3.3e-24 and returns codes as large as
+       2^-14 where the answer is a signed zero (gh-ocannl-647, filed upstream as
+       https://github.com/ROCm/rocm-systems/issues/10591 — that fix landing is what retires this
+       helper). The guard pre-rounds only that range, which rounds to zero anyway, so it is exact
+       everywhere, and this backend's fp8 output matches CUDA, cc, Metal and the host codec on
+       every input.
 
        One funnel rather than four call sites, because the first version of this guarded
        [convert_precision] alone and left fp8 ARITHMETIC results narrowing through bare casts — an
-       fp8 [**.] whose f32 result lands in ROCm's broken window still produced a spurious value with
-       uniformity on (Codex P2 on PR #372). A fifth narrowing site cannot repeat that without going
-       through here. *)
-    let fp8_uniform_guard () =
-      Utils.get_global_flag ~default:false ~arg_name:"prefer_backend_uniformity"
+       fp8 [**.] whose f32 result lands in ROCm's broken window still produced a spurious value
+       (Codex P2 on PR #372). A fifth narrowing site cannot repeat that without going through here.
 
-    (* Which spelling narrows a value of precision [from] to fp8. The guarded helpers are
-       per-source-width on purpose: a double handed to the float helper would narrow at the call and
-       round twice (gh-ocannl-648), which the platform's own cast does not do. *)
+       Which spelling narrows a value of precision [from]: the helpers are per-source-width on
+       purpose, since a double handed to the float helper would narrow at the call and round twice
+       (gh-ocannl-648), which the platform's own cast does not do. *)
     let fp8_from_prec_fn from =
-      if not (fp8_uniform_guard ()) then "(__hip_fp8_e5m2)"
-      else
-        match from with
-        | Ops.Double_prec _ -> "ocannl_double_to_fp8_uniform"
-        | _ -> "ocannl_single_to_fp8_uniform"
+      match from with
+      | Ops.Double_prec _ -> "ocannl_double_to_fp8_uniform"
+      | _ -> "ocannl_single_to_fp8_uniform"
 
     (* The operator bridges below compute in float, whatever the operands were stored at. *)
-    let fp8_from_float_fn () = fp8_from_prec_fn Ops.single
+    let fp8_from_float_fn = fp8_from_prec_fn Ops.single
 
     let fp8_from_float doc =
       let open PPrint in
-      group (string (fp8_from_float_fn ()) ^^ parens doc)
+      group (string fp8_from_float_fn ^^ parens doc)
 
     let rec binop_syntax prec v =
       (* The match stays exhaustive over (op, prec) -- that is what catches a newly added operator
@@ -2018,16 +2018,11 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
          && not (Utils.debug_log_from_routines ())
        then "graph-capture"
        else "no-graph-capture")
-      ^ (if Utils.with_runtime_debug () then "/device-debug" else "/no-device-debug")
-      (* The fp8 conversion guard (gh-ocannl-647) changes emitted code, so the regimes must not
-         share a cache entry. It sits in this backend's own tag rather than the shared codegen
-         gates, like [with_runtime_debug] above and for the same reason: no other backend reads it
-         this way. It does re-key HIP kernels that emit no fp8 conversion at all — the same
-         over-approximation the debug tag makes, and a constant one. *)
-      ^
-      if Utils.get_global_flag ~default:false ~arg_name:"prefer_backend_uniformity" then
-        "/fp8-guard"
-      else "/fp8-native"
+      (* No fp8 component here any more (gh-ocannl-647): the float-to-fp8 guard used to be
+         configurable, so the two regimes needed distinct cache entries; it is now unconditional,
+         and a constant contributes nothing to a tag. Restore a component here if the guard ever
+         becomes conditional again — say on a ROCm version predicate, once upstream fixes it. *)
+      ^ if Utils.with_runtime_debug () then "/device-debug" else "/no-device-debug"
     in
     fun () -> { (Lazy.force limits) with Backend_intf.codegen_tag = Some (codegen_tag ()) }
 
