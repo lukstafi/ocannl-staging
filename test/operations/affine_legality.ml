@@ -644,6 +644,101 @@ let () =
   let scope_body_read = [ Aff.Stmt 3; Aff.Rhs; Aff.Stmt 0; Aff.Rhs ] in
   let enclosing_write = [ Aff.Stmt 3; Aff.Write ] in
   p "program order: an inlined scope body's read before the enclosing write"
-    (List.compare Aff.compare_path_comp scope_body_read enclosing_write < 0);
+    (List.compare Aff.compare_path_comp scope_body_read enclosing_write < 0)
 
-  Stdio.printf "\nunsound cases: %d\n" !unsound_count
+
+(* gh-ocannl-722 / gh-ocannl-721: the peel-guard legality queries.
+
+   [separates] is the instance-vs-instance form of [pair_conflict] — one access taken twice — so it
+   is checked against the same enumeration oracle, and its soundness direction is the same: an
+   answer of "separated" must agree with the enumeration, while a conservative "not separated" over
+   a cell the oracle finds injective is a precision gap and is printed rather than failed.
+
+   [peel_guard] is pure symbol-set classification, so it has no oracle: what its cases assert is
+   which of the three answers each shape earns, the third being the one that hands the question on
+   to [separates]. *)
+let () =
+  Stdio.printf "\n=== gh-722: separates (the peel's lane-private escape) ===\n";
+  let w = sym () and w2 = sym () and k = sym () and s = sym () in
+  let ranges = [ (w, (0, 3)); (w2, (0, 3)); (k, (0, 3)) ] in
+  (* [s] is a STATIC symbol: the query has no range for it (it is bound outside every loop, so
+     [range] answers [None] and the engine keeps it shared between the two instances), while the
+     enumeration still has to give it values. *)
+  let oracle_ranges = (s, (0, 1)) :: ranges in
+  let concurrent_of syms sm = List.mem syms sm ~equal:Idx.equal_symbol in
+  let check_separates ~name ~concurrent ~syms idcs =
+    let range x = find_range ranges x in
+    let conc = concurrent_of concurrent in
+    let query = Aff.separates ~range ~concurrent:conc ~syms ~idcs in
+    let oracle =
+      match
+        oracle_conflict ~oracle_ranges ~dup_left:conc ~dup_right:conc
+          ~pairs:(List.map syms ~f:(fun x -> (x, x)))
+          ~left:idcs ~right:idcs
+      with
+      | `Disjoint | `Same_thread -> true
+      | `Cross_thread -> false
+      | `Opaque -> true
+    in
+    let ok = (not query) || oracle in
+    if not ok then unsound name;
+    Stdio.printf "%-46s query %-6b oracle %-6b%s\n" name query oracle (if ok then "" else "  UNSOUND")
+  in
+  (* The shape gh-ocannl-721 is about: [acc[w]] under [Workgroup w], every lane its own cell. *)
+  check_separates ~name:"acc[w] separates w" ~concurrent:[ w ] ~syms:[ w ] [| Idx.Iterator w |];
+  (* The round-3 race: one cell for every lane. *)
+  check_separates ~name:"acc[0] does not separate w" ~concurrent:[ w ] ~syms:[ w ]
+    [| Idx.Fixed_idx 0 |];
+  (* Mentioning the symbol is not separating it: [(0,1)] and [(1,0)] address the same cell. *)
+  check_separates ~name:"acc[w + w2] separates neither" ~concurrent:[ w; w2 ] ~syms:[ w ]
+    [| aff [ (1, w); (1, w2) ] 0 |];
+  (* A mixed-radix cell does separate both, and that is exactly the criterion [forced_pairs] uses. *)
+  check_separates ~name:"acc[4w + w2] separates w and w2" ~concurrent:[ w; w2 ] ~syms:[ w; w2 ]
+    [| aff [ (4, w); (1, w2) ] 0 |];
+  (* Two axes, one per lane symbol. *)
+  check_separates ~name:"acc[w, w2] separates both" ~concurrent:[ w; w2 ] ~syms:[ w; w2 ]
+    [| Idx.Iterator w; Idx.Iterator w2 |];
+  (* A static offset is shared between the two instances, so it cancels rather than blurring. *)
+  check_separates ~name:"acc[w + s] separates w (s static)" ~concurrent:[ w ] ~syms:[ w ]
+    [| aff [ (1, w); (1, s) ] 0 |];
+  (* Nothing to tell apart is separated vacuously — the peel's "no enclosing symbol" case. *)
+  check_separates ~name:"an empty symbol set is separated" ~concurrent:[ w ] ~syms:[]
+    [| Idx.Fixed_idx 0 |];
+  (* An index component the engine cannot interpret contributes no information, so the answer is
+     the conservative one rather than an unsound "separated". *)
+  check_separates ~name:"an opaque component does not separate" ~concurrent:[ w ] ~syms:[ w ]
+    [| Idx.Sub_axis |];
+
+  Stdio.printf "\n=== gh-722: peel_guard (which guards may join the peeled levels) ===\n";
+  let p name b =
+    Stdio.printf "%-72s %b\n" name b;
+    Verdict.claim name b
+  in
+  let loop_bound x = List.mem [ w; w2; k ] x ~equal:Idx.equal_symbol in
+  let peeled x = Idx.equal_symbol x k in
+  let verdict guard_syms = Aff.peel_guard ~loop_bound ~peeled ~guard_syms in
+  let is_confined g = match verdict g with Aff.Confined_to_peel -> true | _ -> false in
+  let is_rejected g = match verdict g with Aff.Not_peelable _ -> true | _ -> false in
+  let pending g =
+    match verdict g with Aff.Lane_private_if_separated syms -> Some syms | _ -> None
+  in
+  p "a guard over the peeled index alone is confined" (is_confined [ k ]);
+  p "a guard over the peeled index and a static bound is confined" (is_confined [ k; s ]);
+  p "a guard mentioning no index at all is refused" (is_rejected []);
+  p "a guard over an enclosing index alone is refused" (is_rejected [ w ]);
+  p "a guard over a static bound alone is refused" (is_rejected [ s ]);
+  p "a mixed guard defers to the cell, naming the enclosing symbol"
+    (match pending [ w; k ] with Some [ x ] -> Idx.equal_symbol x w | _ -> false);
+  p "a mixed guard names every enclosing symbol it mentions, once"
+    (match pending [ w; k; w2; w ] with
+    | Some syms ->
+        List.length syms = 2
+        && List.mem syms w ~equal:Idx.equal_symbol
+        && List.mem syms w2 ~equal:Idx.equal_symbol
+    | _ -> false);
+  p "a mixed guard's static bound is not something the cell must separate"
+    (match pending [ w; k; s ] with Some [ x ] -> Idx.equal_symbol x w | _ -> false)
+
+(* The tally, last: every section above has run by now, so a case any of them found unsound is
+   counted here as well as failing its own claim. *)
+let () = Stdio.printf "\nunsound cases: %d\n" !unsound_count

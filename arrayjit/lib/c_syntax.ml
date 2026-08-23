@@ -2351,11 +2351,13 @@ module C_syntax (B : C_syntax_config) = struct
      render hardware index bindings. *)
   let current_hardware_axes : Low_level.hardware_axis_info list ref = ref []
 
-  (* Every symbol bound by a loop in the routine. The accumulator peel needs the COMPLEMENT: a
-     guard symbol outside this set is bound outside every loop -- a static index parameter, a
-     runtime extent -- so it cannot select among an enclosing level's iterations, which is what
-     keeps gh-490's runtime-extent guard ([i < s]) peelable. *)
-  let current_loop_syms : Indexing.symbol list ref = ref []
+  (* Every symbol bound by a loop in the routine, with its iteration range. The accumulator peel
+     needs the COMPLEMENT: a guard symbol outside this set is bound outside every loop -- a static
+     index parameter, a runtime extent -- so it cannot select among an enclosing level's
+     iterations, which is what keeps gh-490's runtime-extent guard ([i < s]) peelable. The ranges
+     are what lets it ask whether the accumulated cell tells two enclosing instances apart
+     ([Affine.separates], gh-ocannl-721). *)
+  let current_loop_bounds : (Indexing.symbol * (int * int)) list ref = ref []
 
   (* Set by [compile_proc]: nodes placed in workgroup-shared memory. Their declarations carry
      [shared_decl_prefix] and cannot use [= {0}] (not allowed for [__shared__]/[threadgroup]), so
@@ -4313,7 +4315,7 @@ module C_syntax (B : C_syntax_config) = struct
             in
             Option.bind
               (Low_level.peel_accum_nest ~extra_level:serialized_hardware
-                 ~loop_syms:!current_loop_syms ~free_of:[ i ] body)
+                 ~loop_bounds:!current_loop_bounds ~free_of:[ i ] body)
               ~f:localize
         in
         let localize_or_serial () =
@@ -5729,7 +5731,7 @@ module C_syntax (B : C_syntax_config) = struct
     in
     let launch = Low_level.launch_dims llc in
     current_hardware_axes := Low_level.hardware_axes llc;
-    current_loop_syms := Low_level.loop_indices llc;
+    current_loop_bounds := Low_level.loop_bounds llc;
     (let parallel_grid, grid_private, local_ptr_alias = collect_parallel_grid llc in
      current_parallel_grid := parallel_grid;
      current_grid_private := grid_private;

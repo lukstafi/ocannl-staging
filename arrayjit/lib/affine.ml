@@ -215,6 +215,86 @@ let pair_conflict ~range ~dup_left ~dup_right ~(pairs : (Idx.symbol * Idx.symbol
            (String.concat_array ~sep:"," (Array.map left ~f:axis_index_to_string))
            (String.concat_array ~sep:"," (Array.map right ~f:axis_index_to_string)))
 
+(** {2 The separation query}
+
+    Does an index vector tell apart the iterations of a set of loop symbols? Where
+    {!pair_conflict} asks whether two accesses of DIFFERENT program positions can collide, this asks
+    the same engine about ONE access taken twice — the instance-vs-instance form of the question:
+    two instances of the same statement, iterating [concurrent] symbols independently, can address
+    a common cell of [idcs] only if they agree on every symbol of [syms].
+
+    [concurrent] must cover every symbol whose value may differ between the two instances, not only
+    those of [syms]: with [idcs = acc[w1 + w2]] and [syms = \[w1\]], holding [w2] equal would
+    "prove" that a common cell forces [w1] equal, while instances [(0, 1)] and [(1, 0)] share
+    [acc\[1\]]. [syms] is then the subset the caller needs told apart. *)
+let separates ~range ~(concurrent : Idx.symbol -> bool) ~(syms : Idx.symbol list)
+    ~(idcs : Idx.axis_index array) : bool =
+  List.is_empty syms
+  ||
+  match
+    pair_conflict ~range ~dup_left:concurrent ~dup_right:concurrent
+      ~pairs:(List.map syms ~f:(fun s -> (s, s)))
+      ~left:idcs ~right:idcs
+  with
+  | Disjoint | Same_thread -> true
+  | Cross_thread _ -> false
+
+(** {2 The peel-guard legality query}
+
+    Peeling a reduction nest down to its accumulation base ([Low_level.peel_accum_nest]) licenses a
+    form that opens the accumulated cell and closes it OUTSIDE the peeled levels — every guard among
+    them keeps its place around the accumulating update only. That matches the original program
+    exactly when the guard's truth is not fixed for the whole nest instance; where it is fixed and
+    false, the localized form turns "this instance performs no access" into a load and a store.
+
+    Two hazards follow, and this is the one place they are decided (gh-ocannl-722; before it the
+    rule was re-derived as an ad hoc predicate over five review rounds of gh-ocannl-693):
+
+    - A guard mentioning NO peeled symbol is fixed for the entire nest, so the hoist invents both
+      accesses where the original made none — the dead-level hazard arriving through a guard.
+    - A guard mentioning an ENCLOSING loop symbol selects among that level's iterations. For
+      [Workgroup w -> Serial k -> If (w < 1) (acc[0] += x[k])] every lane would load [acc[0]] and
+      write its unchanged local back, so a lane reading before lane 0's store and writing after it
+      silently discards the reduction.
+
+    The second hazard is about lanes SHARING a cell, not about the guard being mixed. When the
+    accumulated cell separates the enclosing symbols the guard mentions — [acc[w]] under
+    [If (w + k < n)], every lane owning a distinct cell — the invented load/store pair is private to
+    its own instance and idempotent, so the hoist is race-free and the localization is legal
+    (gh-ocannl-721). That is exactly {!separates}, asked of the cell; the peel collects the symbols
+    it must tell apart here and asks once it has reached the base (the cell is not known on the way
+    down).
+
+    A guard symbol that is not loop-bound at all — a static index parameter, gh-490's runtime extent
+    — cannot select among any level's iterations and is harmless by construction. Which symbols
+    those are is read off the program (the complement of its loop indices) rather than promised by a
+    caller, so no call site can forget to say. *)
+
+type peel_guard =
+  | Confined_to_peel
+      (** Every symbol the guard mentions is peeled or bound outside every loop. *)
+  | Lane_private_if_separated of Idx.symbol list
+      (** Legal exactly if the accumulated cell {!separates} these enclosing loop symbols. *)
+  | Not_peelable of string  (** With the reason, for a decline log. *)
+
+let peel_guard ~(loop_bound : Idx.symbol -> bool) ~(peeled : Idx.symbol -> bool)
+    ~(guard_syms : Idx.symbol list) : peel_guard =
+  if not (List.exists guard_syms ~f:peeled) then
+    Not_peelable
+      (if List.is_empty guard_syms then
+         "the guard mentions no index at all: its truth is fixed for the whole nest"
+       else
+         Printf.sprintf
+           "the guard mentions no peeled level (%s): its truth is fixed for the whole nest"
+           (String.concat ~sep:"," (List.map guard_syms ~f:Idx.symbol_ident)))
+  else
+    match
+      List.dedup_and_sort ~compare:Idx.compare_symbol
+        (List.filter guard_syms ~f:(fun s -> loop_bound s && not (peeled s)))
+    with
+    | [] -> Confined_to_peel
+    | enclosing -> Lane_private_if_separated enclosing
+
 (** {2 The covering query} *)
 
 (** [covers_box ~range ~dims idcs]: whether the index vector [idcs], as its symbols range over their
