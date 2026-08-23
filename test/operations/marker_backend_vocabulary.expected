@@ -1,1 +1,5 @@
 the ocannl-backend marker vocabulary is exactly OCANNL's backends plus none: true
+every backend OCANNL has is classified CPU or GPU, by exactly one of the predicates: true
+a name neither predicate knows is undecided: true
+a name both predicates claim is undecided too: true
+and a backend name proper is decided: true

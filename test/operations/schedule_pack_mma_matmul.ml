@@ -69,7 +69,7 @@ let nonzero name (a : float array) =
   a
 
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
-let on_cpu = String.is_substring backend_name ~substring:"cc"
+let on_cpu = Sched.backend_is_cpu backend_name
 
 module Generated = Test_utils.Generated
 

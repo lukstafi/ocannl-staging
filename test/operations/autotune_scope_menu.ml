@@ -36,7 +36,7 @@ let p = Verdict.p
 let p_all = Verdict.p_all
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let skipped = Verdict.skipped ~backend:backend_name
-let on_cpu = String.is_substring backend_name ~substring:"cc"
+let on_cpu = Sched.backend_is_cpu backend_name
 let cc_only claim leg = if on_cpu then leg () else skipped claim
 
 let named name (comp : Asgns.comp) : Asgns.comp =

@@ -626,8 +626,13 @@ val log_launches : bool Lazy.t
     identical code actually emit. *)
 
 val backend_is_gpu : string -> bool
-(** Whether the named backend binds hardware indices (currently: name contains ["cuda"] or
-    ["metal"]). *)
+(** Whether the named backend binds hardware indices (currently: name contains ["cuda"], ["hip"] or
+    ["metal"]).
+
+    This and {!backend_is_cpu} are what a test asks to decide whether it may evaluate a GPU-only or
+    CPU-only leg, so [test/operations/marker_backend_vocabulary] holds them to covering
+    [Backends.all_of_backend] by exactly one each: a backend neither knows would read as CPU at
+    every caller phrased [if backend_is_gpu ... else ...]. *)
 
 val backend_is_cpu : string -> bool
 (** Whether the named backend renders [Grid] loops on the CPU pool (currently: name contains
