@@ -702,7 +702,24 @@ type report = {
       (** The best {e timed} tensorized candidate's time, [infinity] when none was timed
           (gh-ocannl-546). Against [best_ms] this is the margin by which tensorization won or lost
           this search, which is the difference between "the tensorized pipeline is uncompetitive
-          here" and "it lost inside measurement noise"; [best_tensorized] implies the two are equal.
+          here" and "it lost inside measurement noise". Where this field carries a measurement at
+          all — [Float.is_finite mma_best_ms], the only state in which comparing it to [best_ms] is
+          meaningful — [best_tensorized] implies [mma_best_ms <= best_ms], the winner being a member
+          of the population it minimizes over. An infinite [mma_best_ms] is the absence of a
+          measurement and stands under any [best_tensorized]: a replay of an entry written before
+          the field existed (see the cache paragraph below) reports a tensorized winner with a
+          finite [best_ms] and no family time at all, and asserting the implication unconditionally
+          would call that legacy replay inconsistent.
+
+          It does {e not} imply equality, and neither does [not best_tensorized] imply
+          [mma_best_ms >= best_ms] (gh-ocannl-716). A beam round is accepted only when it improves
+          on the incumbent by at least [min_progress] (1%); a round that improves by less is
+          rejected with the incumbent still crowned, yet its candidates were timed, so a tensorized
+          one among them can have lowered [mma_best_ms] below [best_ms] by up to that band. Callers
+          reading the margin as a profitability ratio ({!family_profit_of_report}) are unaffected —
+          a ratio just under 1.0 means the family tied the winner inside the beam's own tolerance —
+          but a caller asserting the strict inequality is asserting a coin toss, which is how it
+          reached a CI failure.
 
           Its population is {e structural} — timed candidates whose schedule contains a
           [Schedule.Tensorize] — and therefore differs from [mma_timed]'s label-promised one, in
