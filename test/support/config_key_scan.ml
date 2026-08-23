@@ -206,7 +206,16 @@ let generated_init_calls_in_source content =
           | None -> false)
       | None -> false
     in
-    match module_expr.pmod_desc with
+    (* A signature constraint wraps the path without changing which module it names, so
+       `module G : module type of Test_utils.Generated = Test_utils.Generated` binds `G` as surely
+       as the bare form does. Unwrapped recursively rather than one level: nesting them is legal and
+       a scan that stopped at one would be the same defect one layer down (Codex P2, round 4). *)
+    let rec unwrap module_expr =
+      match module_expr.pmod_desc with
+      | Pmod_constraint (inner, _) -> unwrap inner
+      | _ -> module_expr
+    in
+    match (unwrap module_expr).pmod_desc with
     | Pmod_ident { txt; _ } when names_it txt -> (
         match alias with Some alias -> aliases := alias :: !aliases | None -> opened := true)
     | _ -> ()

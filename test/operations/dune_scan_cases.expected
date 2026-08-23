@@ -88,10 +88,11 @@ ok: artifact declaration -- nor is one whose command this scan cannot place
 ok: artifact declaration -- an alias stanza aggregating with a declaration behind nothing
 ok: artifact declaration -- a runner naming the executable's public name is its runner
 ok: artifact declaration -- an executable nothing in the file runs has no deps field to answer for it
-ok: artifact declaration -- an inline-test library declaring it in its own field
-ok: artifact declaration -- a library's own deps are not the inline tests' deps
 ok: artifact declaration -- a plain library module calling the initializer is reported as such
+ok: artifact declaration -- adding inline tests does not license a library initializer
 ok: artifact declaration -- and a library that does not call it is not a subject
+ok: artifact across subdirs -- a top-level rule is the runner of a nested executable
+ok: artifact across subdirs -- and the same rule without the declaration is reported, not taken for absent
 ok: artifact default modules -- a single-module test with no modules field owns its own source
 ok: artifact default modules -- and is reported when it does not declare
 ok: artifact default modules -- :standard is the same default written down
@@ -101,6 +102,9 @@ ok: artifact default modules -- a module another stanza names explicitly is not 
 ok: artifact other reader -- a declaration behind a direct read of the key is not stale
 ok: artifact other reader -- a direct reader that does not declare is reported like any other
 ok: artifact other reader -- and the same stanza whose module reads nothing is
+ok: artifact other reader -- an inline-test library declaring it in its own field
+ok: artifact other reader -- a library's own deps are not the inline tests' deps
+ok: artifact other reader -- a library with no tests of its own is not judged for reading a key
 ok: artifact other reader -- a rule that SETS the variable is acting on it, whatever it runs
 ok: raw stanzas -- a test stanza
 ok: raw stanzas -- two of them

@@ -318,6 +318,12 @@ let () = Generated.init ~backend_name|ocaml},
 module H = G
 let () = H.init ~backend_name|ocaml},
       [ "H.init" ] );
+    (* A signature constraint wraps the path without changing which module it names (Codex P2,
+       round 4). *)
+    ( "through an alias carrying a signature constraint",
+      {ocaml|module G : module type of Test_utils.Generated = Test_utils.Generated
+let () = G.init ~backend_name|ocaml},
+      [ "G.init" ] );
     ( "a doc comment naming it is not a call",
       {ocaml|(** [Test_utils.Generated.init] must be called before any compile. *)
 let uninitialized () = ()|ocaml},

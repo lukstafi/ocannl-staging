@@ -1687,7 +1687,8 @@ type artifact_subject = {
 (** Every stanza in [stanzas] the rule has an opinion about, given [calls], which answers whether one
     module name's source calls the initializer. A stanza with no caller among its modules and no
     declaration of its own is not a subject and is not reported. *)
-let artifact_subjects ?(directory_modules = []) stanzas ~calls ~reads_prefix =
+let artifact_subjects ?(directory_modules = []) ?(subdir = "") ?runner_stanzas stanzas ~calls
+    ~reads_prefix =
   (* The path AS WRITTEN, which is the executable's identity here for the reason {!program_path}
      gives: `../support/probe.exe` and a local `probe.exe` are different programs, and reducing both
      to a basename made a rule running the first count as the runner of the second -- crediting a
@@ -1702,8 +1703,15 @@ let artifact_subjects ?(directory_modules = []) stanzas ~calls ~reads_prefix =
      the public name a `%{bin:pkg.probe}` resolves to, which `classify_command` already records as
      `Runs "pkg.probe"`. Searching only for the first left a public-name runner unrecognised, and
      its executable reported as though nothing ran it (Codex P2, round 3). *)
+  (* A rule OUTSIDE a `(subdir gen …)` runs the executable declared inside it as `gen/probe.exe`,
+     so the executable answers to both spellings and the search for its runners covers the whole
+     file rather than its own group -- otherwise descending into the wrapper found both stanzas and
+     then discarded the relationship between them (Codex P2, round 4). *)
+  let runner_stanzas = Option.value runner_stanzas ~default:stanzas in
   let identities stanza =
-    List.map (names_of stanza) ~f:(fun name -> name ^ ".exe")
+    List.concat_map (names_of stanza) ~f:(fun name ->
+        let local = name ^ ".exe" in
+        if String.is_empty subdir then [ local ] else [ local; in_subdir subdir local ])
     @ (match field stanza "public_name" with
       | Some [ Sexp.Atom public ] -> [ public ]
       | _ -> [])
@@ -1714,7 +1722,7 @@ let artifact_subjects ?(directory_modules = []) stanzas ~calls ~reads_prefix =
   in
   let runners_of stanza =
     let wanted = identities stanza in
-    List.filter stanzas ~f:(fun s ->
+    List.filter runner_stanzas ~f:(fun s ->
         List.exists (exes_run s) ~f:(List.mem wanted ~equal:String.equal))
   in
   (* Whether a stanza RUNS something, in the widest sense {!executables_run} admits -- a named
@@ -1776,12 +1784,21 @@ let artifact_subjects ?(directory_modules = []) stanzas ~calls ~reads_prefix =
           in
           let declares args = declares_env_var args artifact_env_var in
           (match h with
-          | "library" -> (
-              match field stanza "inline_tests" with
-              | None -> if List.is_empty callers then None else subject Artifact_in_library "-"
-              | Some inline ->
-                  let declared = declares (field_in inline "deps") in
-                  decide ~all:declared ~any:declared "its `(inline_tests (deps …))`")
+          | "library" ->
+              (* A library module CALLING the initializer is prohibited whether or not the library
+                 also has inline tests: `init` empties the artifact directory of whatever process
+                 links the module, and an `(inline_tests (deps …))` declaration invalidates the
+                 inline-test runner alone -- not the other executables that link the same library
+                 and initialize through it (Codex P2, round 4). Reading the key by NAME is an
+                 ordinary thing for a library module to do, so a reader is judged where the library's
+                 own tests run, and not judged at all where it has none. *)
+              if not (List.is_empty callers) then subject Artifact_in_library "-"
+              else (
+                match field stanza "inline_tests" with
+                | None -> None
+                | Some inline ->
+                    let declared = declares (field_in inline "deps") in
+                    decide ~all:declared ~any:declared "its `(inline_tests (deps …))`")
           | "executable" | "executables" -> (
               let names = names_of stanza in
               match runners_of stanza with

@@ -1109,19 +1109,6 @@ let artifact_cases =
       {dune|(executable (name probe) (modules probe))|dune},
       [ "probe" ],
       [ "executable probe: unrun (probe)" ] );
-    (* An inline-test library runs under its own field, not under the library's deps -- the
-       distinction gh-ocannl-628 found for the backend variable, which is the same distinction
-       here. *)
-    ( "an inline-test library declaring it in its own field",
-      {dune|(library (name l) (modules l)
- (inline_tests (deps (env_var OCANNL_BUILD_FILES_PREFIX))))|dune},
-      [ "l" ],
-      [ "library l: declared (l)" ] );
-    ( "a library's own deps are not the inline tests' deps",
-      {dune|(library (name l) (modules l) (deps (env_var OCANNL_BUILD_FILES_PREFIX))
- (inline_tests (deps ocannl_config)))|dune},
-      [ "l" ],
-      [ "library l: undeclared (l)" ] );
     (* A plain library is not run at all: the initializer empties the artifact directory of the
        process that owns it, so a library module calling it puts the requirement on every stanza
        that links the library -- a relationship nothing follows. *)
@@ -1129,10 +1116,39 @@ let artifact_cases =
       {dune|(library (name l) (modules l) (libraries base))|dune},
       [ "l" ],
       [ "library l: in a library (l)" ] );
+    (* And inline tests do not make it test-only: an `(inline_tests (deps …))` declaration
+       invalidates the inline-test runner alone, not the other executables that link the library and
+       initialize through it (Codex P2, round 4). *)
+    ( "adding inline tests does not license a library initializer",
+      {dune|(library (name l) (modules l)
+ (inline_tests (deps (env_var OCANNL_BUILD_FILES_PREFIX))))|dune},
+      [ "l" ],
+      [ "library l: in a library (l)" ] );
+
     ( "and a library that does not call it is not a subject",
       {dune|(library (name l) (modules l) (libraries base))|dune},
       [],
       [] );
+  ]
+
+(* A rule OUTSIDE a `(subdir …)` runs the executable declared inside it under the qualified path,
+   and that relationship has to survive the grouping that descending into the wrapper creates --
+   descending found both stanzas and then discarded the relation between them (Codex P2, round 4).
+   The third element is the subdirectory the executable's group sits in. *)
+let artifact_subdir_cases =
+  [
+    ( "a top-level rule is the runner of a nested executable",
+      {dune|(subdir gen (executable (name probe) (modules probe)))
+(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (run gen/probe.exe)))|dune},
+      "gen",
+      [ "probe" ],
+      [ "executable probe: declared (probe)" ] );
+    ( "and the same rule without the declaration is reported, not taken for absent",
+      {dune|(subdir gen (executable (name probe) (modules probe)))
+(rule (deps ocannl_config) (action (run gen/probe.exe)))|dune},
+      "gen",
+      [ "probe" ],
+      [ "executable probe: undeclared (probe)" ] );
   ]
 
 (* Dune's default module set, which a stanza reaches for by omitting `(modules …)` or by naming
@@ -1200,6 +1216,23 @@ let artifact_reader_cases =
       {dune|(test (name t) (modules t) (deps (env_var OCANNL_BUILD_FILES_PREFIX)))|dune},
       [],
       [ "test t: stale declaration" ] );
+    (* An inline-test library runs under its own field, not under the library's deps -- the
+       distinction gh-ocannl-628 found for the backend variable, which is the same one here. Asked
+       of a READER, since a library module that CALLS the initializer is prohibited outright. *)
+    ( "an inline-test library declaring it in its own field",
+      {dune|(library (name l) (modules l)
+ (inline_tests (deps (env_var OCANNL_BUILD_FILES_PREFIX))))|dune},
+      [ "l" ],
+      [ "library l: declared for a direct read [reads l]" ] );
+    ( "a library's own deps are not the inline tests' deps",
+      {dune|(library (name l) (modules l) (deps (env_var OCANNL_BUILD_FILES_PREFIX))
+ (inline_tests (deps ocannl_config)))|dune},
+      [ "l" ],
+      [ "library l: undeclared [reads l]" ] );
+    ( "a library with no tests of its own is not judged for reading a key",
+      {dune|(library (name l) (modules l) (libraries base))|dune},
+      [ "l" ],
+      [] );
     ( "a rule that SETS the variable is acting on it, whatever it runs",
       {dune|(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX))
  (action (setenv OCANNL_BUILD_FILES_PREFIX "" (copy a b))))|dune},
@@ -1224,13 +1257,17 @@ let () =
       in
       check name expected found);
   let artifact_check ?(label = "artifact declaration") ?(directory_modules = []) ?(readers = [])
-      name source callers expected =
+      ?(subdir = "") name source callers expected =
     let calls module_name = List.mem callers module_name ~equal:String.equal in
     let reads_prefix module_name = List.mem readers module_name ~equal:String.equal in
     let found =
       try
+        (* The whole file is both the group and the runner population here; [env_var_deps] splits
+           the two when a `(subdir …)` puts stanzas in different directories. *)
+        let stanzas = Scan.walk "" (Scan.stanzas source) ~f:(fun _ stanza -> [ stanza ]) in
         List.map
-          (Scan.artifact_subjects ~directory_modules (Scan.stanzas source) ~calls ~reads_prefix)
+          (Scan.artifact_subjects ~directory_modules ~subdir ~runner_stanzas:stanzas stanzas ~calls
+             ~reads_prefix)
           ~f:render_artifact
       with exn ->
         fail "%s -- %s: the scan raised: %s" label name (Exn.to_string exn);
@@ -1240,6 +1277,9 @@ let () =
   in
   List.iter artifact_cases ~f:(fun (name, source, callers, expected) ->
       artifact_check ~directory_modules:callers name source callers expected);
+  List.iter artifact_subdir_cases ~f:(fun (name, source, subdir, callers, expected) ->
+      artifact_check ~label:"artifact across subdirs" ~subdir ~directory_modules:callers name source
+        callers expected);
   List.iter artifact_default_modules_cases
     ~f:(fun (name, source, directory_modules, callers, expected) ->
       artifact_check ~label:"artifact default modules" ~directory_modules name source callers

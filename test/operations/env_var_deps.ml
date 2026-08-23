@@ -715,10 +715,14 @@ let main () =
         |> List.stable_sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
         |> List.group ~break:(fun (a, _) (b, _) -> not (String.equal a b))
         |> List.map ~f:(fun group ->
-            (Scan.in_subdir dir (fst (List.hd_exn group)), List.map group ~f:snd))
+            let subdir = fst (List.hd_exn group) in
+            (subdir, Scan.in_subdir dir subdir, List.map group ~f:snd))
       in
+      (* Runner identities are written relative to the DUNE FILE, so the raw `(subdir …)` path is
+         what qualifies them -- not the repository-relative directory the modules are looked up in. *)
+      let all_group_stanzas = List.concat_map artifact_groups ~f:(fun (_, _, group) -> group) in
       let subjects =
-        List.concat_map artifact_groups ~f:(fun (here, group) ->
+        List.concat_map artifact_groups ~f:(fun (subdir, here, group) ->
             let key module_name = String.lowercase (Scan.in_subdir here (module_name ^ ".ml")) in
             let calls module_name = Set.mem artifact_caller_keys (key module_name) in
             (* A module that reads `build_files_prefix` some other way needs the variable tracked for
@@ -748,7 +752,8 @@ let main () =
                   else None)
             in
             List.map
-              (Scan.artifact_subjects ~directory_modules group ~calls ~reads_prefix)
+              (Scan.artifact_subjects ~directory_modules ~subdir
+                 ~runner_stanzas:all_group_stanzas group ~calls ~reads_prefix)
               ~f:(fun subject -> (here, subject)))
       in
       List.iter subjects ~f:(fun (here, subject) ->

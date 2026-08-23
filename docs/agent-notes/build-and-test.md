@@ -174,12 +174,20 @@ that they earn a lookup rather than always-loaded space.
   `%{bin:…}`, and a runner named the second way is still its runner. **Subdirectories**: ask the
   question per `(subdir …)` group, not per dune file — the stanzas inside one name modules that live
   there, and a walk that stays at the top level reports a nested source as claimed by nobody.
+  **Wrappers over paths**: a signature constraint (`module G : module type of M = M`) wraps the path
+  without changing what it names, so unwrap `Pmod_constraint` recursively before resolving an alias.
+  **Cross-group relations**: descending into `(subdir …)` is only half of it — a rule outside the
+  wrapper runs the executable inside it under the qualified path, so match runners over the whole
+  file while resolving modules per group, or descending finds both stanzas and then discards the
+  relation between them.
   Two more, about the rule rather than the scan. A declaration is justified by ANY read of the key it
   tracks, so phrase the rule over the key (`Config_key_scan.source_reads_key`) and not over the one
   function that prompted the check — otherwise the documented way of pinning a key becomes unusable
   for that key. And having widened it that far, widen it in BOTH directions: permitting a
   declaration for a direct reader while requiring one only of the function's callers leaves exactly
-  the stale run the check exists to prevent.
+  the stale run the check exists to prevent. A third: `inline_tests` on a library does not make its
+  modules test-only, so a rule that is about what a module DOES when linked (here, emptying the
+  artifact directory) must not accept a declaration that invalidates the inline-test runner alone.
   One more trap that costs a debugging round: dune's `glob_files_rec` runs over the BUILD tree,
   where a `<name>.pp.ml` sits beside every ppx-using `<name>.ml` — and a `.pp.ml` is not input the
   compiler's own parser accepts. A scan that parses everything it is handed (rather than only the
