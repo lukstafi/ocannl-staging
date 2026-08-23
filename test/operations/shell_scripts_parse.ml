@@ -99,9 +99,23 @@ module Shebang = struct
     | Sourced
         (** No shebang: the file is sourced rather than run, so it has no interpreter of its own and
             must parse under whichever shell sources it. *)
-    | Interp of string * string list
+    | Interp of launch * string list
         (** The interpreter the kernel (or `env`) would exec, and the options that have to be given
             to it for the file to parse as written. *)
+
+  (** How the interpreter is found, which is not the same question for the two shebang forms and
+      cannot be flattened to a name (Codex review round 4).
+
+      A direct `#!/bin/bash` names a FILE, and the kernel execs that file; resolving `bash` on PATH
+      instead can run a different build entirely -- on macOS `/bin/bash` is 3.2 while a Homebrew
+      `bash` 5 sits earlier on PATH, and 5 accepts `declare -A` and `${v^^}` that 3.2 rejects, so a
+      script the kernel-selected shell would refuse passes. That skew is on this repository's own
+      macOS CI leg, not hypothetical. A shebang going through `env`, by contrast, is a PATH lookup
+      by definition -- that is what `env` is for -- so resolving the name is the faithful thing
+      there. *)
+  and launch =
+    | Path of string  (** A direct shebang: exec this exact file, as the kernel would. *)
+    | Name of string  (** Selected through `env`: resolve on PATH, as `env` would. *)
 
   (** Shells whose `-n` parses without executing. The list is a whitelist rather than a fallthrough
       because `-n` is not a shared convention outside this family -- `python3 -n` is an error and
@@ -146,7 +160,7 @@ module Shebang = struct
   let rec skip_env_arguments = function
     | [] -> Error "`env` with no command"
     | "--" :: rest -> (
-        match rest with [] -> Error "`env --` with no command" | cmd :: args -> Ok (cmd, args))
+        match rest with [] -> Error "`env --` with no command" | cmd :: args -> Ok (Name cmd, args))
     | ("-S" | "--split-string") :: rest -> skip_env_arguments rest
     | ("-i" | "--ignore-environment" | "-0" | "--null" | "-v" | "--debug") :: rest ->
         skip_env_arguments rest
@@ -170,7 +184,7 @@ module Shebang = struct
         skip_env_arguments rest
     | token :: _ when String.is_prefix token ~prefix:"-" ->
         Error (Printf.sprintf "`env` option this check does not know: %s" token)
-    | cmd :: args -> Ok (cmd, args)
+    | cmd :: args -> Ok (Name cmd, args)
 
   (** Classify one interpreter option: carried through, dropped, or refused. *)
   let rec classify_options acc = function
@@ -225,21 +239,24 @@ module Shebang = struct
                 | arg -> skip_env_arguments [ arg ]
               else if String.exists argument ~f:Char.is_whitespace then
                 Error (one_argument_error ("`" ^ basename first ^ "`") argument)
-              else Ok (first, if String.is_empty argument then [] else [ argument ])
+              else
+                (* A direct shebang: the kernel execs this path, so keep it. *)
+                Ok (Path first, if String.is_empty argument then [] else [ argument ])
             in
-            Result.bind resolved ~f:(fun (cmd, args) ->
-                let shell = basename cmd in
+            Result.bind resolved ~f:(fun (launch, args) ->
+                let shell = basename (match launch with Path p -> p | Name n -> n) in
                 if not (List.mem parse_only_shells shell ~equal:String.equal) then
                   Error
                     (Printf.sprintf "interpreter whose `-n` this check cannot vouch for: %s" shell)
-                else Result.map (classify_options [] args) ~f:(fun opts -> Interp (shell, opts))))
+                else Result.map (classify_options [] args) ~f:(fun opts -> Interp (launch, opts))))
 
   (** How a parse reads in a verdict label, so that the golden is a table of what the parser does
       rather than a column of booleans. *)
+  let launched = function Path p -> p | Name n -> n
+
   let render = function
     | Ok Sourced -> "sourced"
-    | Ok (Interp (shell, [])) -> shell
-    | Ok (Interp (shell, opts)) -> String.concat ~sep:" " (shell :: opts)
+    | Ok (Interp (launch, opts)) -> String.concat ~sep:" " (launched launch :: opts)
     | Error reason -> "refused (" ^ reason ^ ")"
 
   (** The grammar, as a table of lines and what {!parse} must make of them -- rendered by
@@ -252,11 +269,14 @@ module Shebang = struct
       interpreter whose `-n` is not a parse, and an option that would redirect what is read. *)
   let shebang_cases =
     [
-      (* The shapes this repository's own scripts use. *)
-      ("#!/bin/bash", "bash");
+      (* The shapes this repository's own scripts use. A direct shebang renders as the PATH it
+         names and an `env` one as a bare name, which is the round-4 distinction: the kernel execs
+         the file `#!/bin/bash` names, while `env` performs a PATH lookup. Flattening both to
+         "bash" is what let a macOS `/bin/bash` 3.2 script be accepted by a Homebrew bash 5. *)
+      ("#!/bin/bash", "/bin/bash");
       ("#!/usr/bin/env bash", "bash");
-      ("#!/bin/sh", "sh");
-      ("#!/bin/dash", "dash");
+      ("#!/bin/sh", "/bin/sh");
+      ("#!/bin/dash", "/bin/dash");
       ("", "sourced");
       (* Kernel semantics: everything after the interpreter path is ONE argument. Both of these
          were asserted to read as `bash` before round 3, and both are broken shebangs -- the first
@@ -270,8 +290,8 @@ module Shebang = struct
         there; use `env -S`)");
       (* A single argument is fine when it really is one token, which is why `-eu` works in a
          shebang and `-O extglob` cannot. *)
-      ("#!/bin/bash -eu", "bash");
-      ("#!/bin/bash --posix", "bash --posix");
+      ("#!/bin/bash -eu", "/bin/bash");
+      ("#!/bin/bash --posix", "/bin/bash --posix");
       (* `env -S` is the mechanism that DOES produce a word list, so env's own grammar is reachable
          only inside it. The first entry is the review finding of round 2 verbatim. *)
       ("#!/usr/bin/env -S -u FOO bash", "bash");
@@ -320,8 +340,17 @@ let parse_check prog args path =
       | None | Some (Unix.WEXITED 127) -> None
       | Some status -> Some (status, String.strip (In_channel.read_all tmp)))
 
-(** Whether [prog] can be used as a parse checker at all, decided by handing it a file that is a
-    valid script in every shell there is. Probed once per shell name. *)
+(** Whether [prog] exists here and can be executed, probed once per name by handing it a file that
+    is a valid script in every shell there is.
+
+    "Exists" is the question, deliberately, and it is not the same as "passed the probe". An earlier
+    version answered false whenever the probe exited nonzero, which quietly conflated a missing
+    binary with a present one that rejected `:` -- and since a false answer sends [resolve] to a
+    substitute, a broken or non-shell interpreter would have been swapped out and the script judged
+    by a DIFFERENT shell than its shebang names, silently. That is the same class of defect as the
+    stand-in the round-2 review caught. So only a failure to exec at all (see [parse_check]) counts
+    as absent; anything that ran keeps its verdict, and a `bash` on PATH that cannot parse `:` is a
+    reported failure rather than a reason to consult another shell. *)
 let available =
   let cache = Hashtbl.create (module String) in
   fun prog ->
@@ -331,7 +360,7 @@ let available =
           ~finally:(fun () -> try Stdlib.Sys.remove tmp with _ -> ())
           ~f:(fun () ->
             Out_channel.write_all tmp ~data:":\n";
-            match parse_check prog [] tmp with Some (Unix.WEXITED 0, _) -> true | _ -> false))
+            Option.is_some (parse_check prog [] tmp)))
 
 (** The shells that may stand in for [shell] when it is not installed, in preference order.
 
@@ -347,15 +376,30 @@ let stand_ins shell =
     List.filter Shebang.posix_family ~f:(Fn.non (String.equal shell))
   else []
 
-(** Resolve one wanted shell to one that exists here, announcing any substitution. *)
-let resolve ~rel shell =
-  if available shell then Some shell
-  else
-    match List.find (stand_ins shell) ~f:available with
-    | Some substitute ->
-        eprintf "%s: no `%s` on this host, parsing with `%s` instead\n" rel shell substitute;
-        Some substitute
-    | None -> None
+(** Resolve one wanted interpreter to something that exists here, announcing any substitution.
+
+    A [Path] is tried as written first, which is the whole point of keeping it: the kernel would exec
+    that file, and a same-named binary earlier on PATH can be a different major version accepting a
+    different grammar. Its fallback is the basename on PATH, because a direct shebang's path is a
+    Unix path and Windows has no `/bin/bash` to exec -- under Git Bash `bash` resolves and the
+    literal path does not, so refusing there would fail every `#!/bin/sh` script in this repository
+    for a reason that is about the host rather than about the script. Announced, like every other
+    substitution here. *)
+let rec resolve ~rel = function
+  | Shebang.Path path ->
+      if available path then Some path
+      else
+        let name = Shebang.basename path in
+        eprintf "%s: no `%s` on this host, resolving `%s` on PATH instead\n" rel path name;
+        resolve ~rel (Shebang.Name name)
+  | Shebang.Name shell -> (
+      if available shell then Some shell
+      else
+        match List.find (stand_ins shell) ~f:available with
+        | Some substitute ->
+            eprintf "%s: no `%s` on this host, parsing with `%s` instead\n" rel shell substitute;
+            Some substitute
+        | None -> None)
 
 let () =
   if Array.length Stdlib.Sys.argv < 2 then (
@@ -388,17 +432,18 @@ let () =
       | Ok parsed ->
           let wanted =
             match parsed with
-            | Shebang.Sourced -> [ ("sh", []); ("bash", []) ]
-            | Shebang.Interp (shell, opts) -> [ (shell, opts) ]
+            | Shebang.Sourced -> [ (Shebang.Name "sh", []); (Shebang.Name "bash", []) ]
+            | Shebang.Interp (launch, opts) -> [ (launch, opts) ]
           in
           let usable =
-            List.filter_map wanted ~f:(fun (shell, opts) ->
-                Option.map (resolve ~rel shell) ~f:(fun shell -> (shell, opts)))
+            List.filter_map wanted ~f:(fun (launch, opts) ->
+                Option.map (resolve ~rel launch) ~f:(fun prog -> (prog, opts)))
           in
           if List.is_empty usable then
             Verdict.fail
               (Printf.sprintf "no shell on this host can parse %s (wanted %s)" rel
-                 (String.concat ~sep:", " (List.map wanted ~f:fst)))
+                 (String.concat ~sep:", "
+                    (List.map wanted ~f:(fun (l, _) -> Shebang.launched l))))
           else
             let complaints =
               List.filter_map usable ~f:(fun (prog, opts) ->

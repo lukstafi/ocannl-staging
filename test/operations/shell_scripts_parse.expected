@@ -1,12 +1,12 @@
-shebang "#!/bin/bash" reads as `bash`: true
+shebang "#!/bin/bash" reads as `/bin/bash`: true
 shebang "#!/usr/bin/env bash" reads as `bash`: true
-shebang "#!/bin/sh" reads as `sh`: true
-shebang "#!/bin/dash" reads as `dash`: true
+shebang "#!/bin/sh" reads as `/bin/sh`: true
+shebang "#!/bin/dash" reads as `/bin/dash`: true
 shebang "" reads as `sourced`: true
 shebang "#!/usr/bin/env -u FOO bash" reads as `refused (the kernel passes `-u FOO bash` to `env` as ONE argument -- no command or option there; use `env -S`)`: true
 shebang "#!/bin/bash -O extglob" reads as `refused (the kernel passes `-O extglob` to `bash` as ONE argument -- no command or option there; use `env -S`)`: true
-shebang "#!/bin/bash -eu" reads as `bash`: true
-shebang "#!/bin/bash --posix" reads as `bash --posix`: true
+shebang "#!/bin/bash -eu" reads as `/bin/bash`: true
+shebang "#!/bin/bash --posix" reads as `/bin/bash --posix`: true
 shebang "#!/usr/bin/env -S -u FOO bash" reads as `bash`: true
 shebang "#!/usr/bin/env -S bash -O extglob" reads as `bash -O extglob`: true
 shebang "#!/usr/bin/env -S FOO=bar bash" reads as `bash`: true
