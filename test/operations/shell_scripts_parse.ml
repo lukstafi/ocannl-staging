@@ -189,52 +189,43 @@ module Shebang = struct
 
   (** What `env` would exec, from the single argument the kernel hands it.
 
-      Only `-S`/`--split-string` is accepted, in its three spellings, since that is the option whose
-      purpose is to let a shebang carry a word list. Every other `env` option and every assignment is
-      refused: they build an environment that both the lookup and the shell's own startup depend on,
-      which this check cannot reproduce -- `env -S PATH=/definitely/missing bash` exits 127, and a
-      broken `BASH_ENV` makes `bash -n` fail a valid file (both measured). *)
+      That argument must be a bare command name. Nothing else is accepted, and `-S`/`--split-string`
+      is the notable removal (round 10): whether an `env` implementation supports it is a property of
+      the BINARY, not of its path -- BSD env and coreutils before 8.30 have no `-S` -- so accepting
+      it meant either probing the feature or passing a shebang that fails before the shell starts.
+      Neither was necessary, because since round 7 removed shell arguments the payload can only ever
+      be a bare command name, which plain `env` resolves without `-S`. The option had become pure
+      surface, so it is gone and `#!/usr/bin/env -S bash` is refused pointing at the plain spelling.
+
+      `env` options and `NAME=VALUE` assignments are refused for the older reason: they build an
+      environment that both the lookup and the shell's own startup depend on, which this check cannot
+      reproduce -- `env -S PATH=/definitely/missing bash` exits 127, and a broken `BASH_ENV` makes
+      `bash -n` fail a valid file (both measured). *)
   let env_command env_path argument =
-    let via command = Via_env { env_path; command } in
-    let payload =
-      if String.is_prefix argument ~prefix:"-S " then
-        Some (String.drop_prefix argument (String.length "-S "))
-      else if String.is_prefix argument ~prefix:"--split-string=" then
-        Some (String.drop_prefix argument (String.length "--split-string="))
-      else if String.is_prefix argument ~prefix:"-S" then Some (String.drop_prefix argument 2)
-      else None
-    in
-    let option_refusal token =
-      Printf.sprintf
-        "`env` option this check cannot vouch for: %s -- it builds an environment the command's \
-         parsing depends on"
-        token
-    in
-    let assignment_refusal token =
-      Printf.sprintf
-        "`env` assignment `%s`: the command is looked up, and parses, in an environment this check \
-         cannot reproduce"
-        token
-    in
-    match payload with
-    | Some payload -> (
-        match words payload with
-        | [] -> Error "`env -S` with no command"
-        | cmd :: extra ->
-            if String.is_prefix cmd ~prefix:"-" then Error (option_refusal cmd)
-            else if String.contains cmd '=' then Error (assignment_refusal cmd)
-            else if List.is_empty extra then Ok (via cmd)
-            else Error (no_arguments (Printf.sprintf "`%s`" (basename cmd)) extra))
-    | None ->
-        if String.exists argument ~f:Char.is_whitespace then
-          Error
-            (Printf.sprintf
-               "the kernel passes `%s` to `env` as ONE argument -- there is no command by that \
-                name; use `env -S`"
-               argument)
-        else if String.is_prefix argument ~prefix:"-" then Error (option_refusal argument)
-        else if String.contains argument '=' then Error (assignment_refusal argument)
-        else Ok (via argument)
+    if
+      String.is_prefix argument ~prefix:"-S" || String.is_prefix argument ~prefix:"--split-string"
+    then
+      Error
+        "`env -S` support is a property of the env binary, not its path, and buys nothing here \
+         since no shell arguments are accepted -- write `#!/usr/bin/env <shell>`"
+    else if String.exists argument ~f:Char.is_whitespace then
+      Error
+        (Printf.sprintf
+           "the kernel passes `%s` to `env` as ONE argument -- there is no command by that name"
+           argument)
+    else if String.is_prefix argument ~prefix:"-" then
+      Error
+        (Printf.sprintf
+           "`env` option this check cannot vouch for: %s -- it builds an environment the command's \
+            parsing depends on"
+           argument)
+    else if String.contains argument '=' then
+      Error
+        (Printf.sprintf
+           "`env` assignment `%s`: the command is looked up, and parses, in an environment this \
+            check cannot reproduce"
+           argument)
+    else Ok (Via_env { env_path; command = argument })
 
   let parse first_line =
     (* `#!` must be the file's first two BYTES: the kernel does not look past anything, so
@@ -357,9 +348,15 @@ module Shebang = struct
       ("#!/bin/dash", "/bin/dash");
       ("", "sourced");
       (* `env -S`, all three spellings (the attached one is round 6's). *)
-      ("#!/usr/bin/env -S bash", "bash via /usr/bin/env");
-      ("#!/usr/bin/env -Sbash", "bash via /usr/bin/env");
-      ("#!/usr/bin/env --split-string=bash", "bash via /usr/bin/env");
+      ("#!/usr/bin/env -S bash",
+       "refused (`env -S` support is a property of the env binary, not its path, and buys nothing \
+        here since no shell arguments are accepted -- write `#!/usr/bin/env <shell>`)");
+      ("#!/usr/bin/env -Sbash",
+       "refused (`env -S` support is a property of the env binary, not its path, and buys nothing \
+        here since no shell arguments are accepted -- write `#!/usr/bin/env <shell>`)");
+      ("#!/usr/bin/env --split-string=bash",
+       "refused (`env -S` support is a property of the env binary, not its path, and buys nothing \
+        here since no shell arguments are accepted -- write `#!/usr/bin/env <shell>`)");
       (* Not a shebang: `#!` must be the first two bytes, so the file is run by the caller's shell
          and gets the no-shebang treatment (round 5). *)
       (" #!/bin/bash", "sourced");
@@ -374,10 +371,10 @@ module Shebang = struct
          is a syntax error, `--` makes `-n` the filename (127), and `bash -n --posix` is itself
          rejected (2) because bash wants long options first. No placement of `-n` is safe among
          them, so none of them is accepted. *)
-      ("#!/usr/bin/env -S bash helper.sh",
+      ("#!/bin/bash helper.sh",
        "refused (`bash` is given helper.sh, and this check runs `<shell> -n <file>` and nothing \
         else -- no placement of `-n` is safe among shell options)");
-      ("#!/usr/bin/env -S zsh --exec",
+      ("#!/bin/zsh --exec",
        "refused (`zsh` is given --exec, and this check runs `<shell> -n <file>` and nothing else -- \
         no placement of `-n` is safe among shell options)");
       ("#!/bin/bash --posix",
@@ -394,13 +391,13 @@ module Shebang = struct
          script, which re-enters the same shebang. *)
       ("#!/usr/bin/env -u FOO bash",
        "refused (the kernel passes `-u FOO bash` to `env` as ONE argument -- there is no command by \
-        that name; use `env -S`)");
+        that name)");
       (* `env` builds an environment, and both the lookup and the shell's startup depend on it
          (rounds 5 and 6). Refused rather than emulated. *)
-      ("#!/usr/bin/env -S PATH=/missing bash",
+      ("#!/usr/bin/env PATH=/missing",
        "refused (`env` assignment `PATH=/missing`: the command is looked up, and parses, in an \
         environment this check cannot reproduce)");
-      ("#!/usr/bin/env -S -i bash",
+      ("#!/usr/bin/env -i",
        "refused (`env` option this check cannot vouch for: -i -- it builds an environment the \
         command's parsing depends on)");
       (* `env` semantics belong to the canonical paths, not to every basename `env` (round 8): the
@@ -623,7 +620,12 @@ let () =
           in
           let resolutions = List.map wanted ~f:(resolve ~rel ~ours) in
           let usable = List.filter_map resolutions ~f:Result.ok in
-          if List.is_empty usable then
+          (* EVERY wanted checker has to resolve, not merely one of them (round 10). A sourced file
+             is required to parse under both `sh` and `bash`, and reporting only when the whole list
+             failed meant that a host missing `sh` and its stand-ins checked `tools/opam-env.sh`
+             under bash alone -- silently, since the surviving checker kept `usable` non-empty and
+             the golden line still read `parses: true`. A skipped grammar is not a passing one. *)
+          if List.exists resolutions ~f:Result.is_error then
             List.iter resolutions ~f:(function
               | Error reason -> Verdict.fail (Printf.sprintf "%s: %s" rel reason)
               | Ok _ -> ())
