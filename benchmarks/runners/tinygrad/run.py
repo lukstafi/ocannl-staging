@@ -23,6 +23,10 @@ ap.add_argument("--fixture", required=True)
 ap.add_argument("--device", default="CPU", choices=["CPU", "METAL", "CUDA", "AMD", "CL", "HIP"])
 ap.add_argument("--jit", type=int, default=1)
 ap.add_argument("--beam", type=int, default=0, help="BEAM search width (0 = off); implies --jit")
+# gh-ocannl-675 probe: time a SECOND block of timed_steps inside the same process, after the
+# queued block, to separate "a process that searched is slower per launch" from first-block
+# warmup. Off by default; the published cell shape is unchanged.
+ap.add_argument("--retime", action="store_true", help="time a second block of steps (gh-675)")
 args = ap.parse_args()
 os.environ["DEV"] = args.device
 if args.beam:
@@ -299,6 +303,16 @@ def main():
             k += 1
         sync()
         queued = (time.perf_counter() - t0) / timed_steps * 1e3
+        retimed = None
+        if args.retime:
+            sync()
+            retimed = []
+            for _ in range(timed_steps):
+                t0 = time.perf_counter()
+                step(k)
+                k += 1
+                sync()
+                retimed.append((time.perf_counter() - t0) * 1e3)
 
     result = {
         "framework": "tinygrad",
@@ -313,6 +327,8 @@ def main():
         "losses": losses,
         "version": pkg_version("tinygrad"),
     }
+    if retimed:
+        result["retime_step_ms"] = percentiles(retimed)
     if tokens_per_step:
         result["tokens_per_step"] = tokens_per_step
     emit(result)
