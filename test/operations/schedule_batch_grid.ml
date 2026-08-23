@@ -373,15 +373,21 @@ let () =
      [grid.(1)] is a blocktiled matmul's row-block count, which grows with the site's m-extent alone
      (at [bm = 16] an m-extent past ~1M rows is already over the 65535 cap). A serial-batch seed
      isolates it: its [.z] extent is 1, so only the [.y] check can fire, and the typed resource says
-     which dimension asked too much. *)
-  let serial_seed =
-    List.find_exn (blocktile_seeds opt) ~f:(fun q -> not q.Autotune.sk_batch_grid)
+     which dimension asked too much. The seed is SELECTED for a row-block count above 1 rather than
+     taken first: since gh-ocannl-730 the padded geometries include block tiles as wide as the whole
+     site, and such a seed's single row block would leave the [.y] gate with nothing to compare. *)
+  let y_ref =
+    List.find_map (blocktile_seeds opt) ~f:(fun q ->
+        if q.Autotune.sk_batch_grid then None
+        else
+          let os = Sched.apply (Autotune.sketch_schedule ~p:q opt) opt in
+          let d = LL.launch_dims os.LL.llc in
+          if d.LL.grid.(2) = 1 && d.LL.grid.(1) > 1 then Some (os, d) else None)
   in
-  let os = Sched.apply (Autotune.sketch_schedule ~p:serial_seed opt) opt in
-  let sdims = LL.launch_dims os.LL.llc in
-  let grid_y = sdims.LL.grid.(1) in
   p "limit gate: the .y reference isolates the row blocks — its .z extent is 1 and its .y exceeds 1"
-    (sdims.LL.grid.(2) = 1 && grid_y > 1);
+    (Option.is_some y_ref);
+  let os, sdims = Option.value_exn ~here:[%here] y_ref in
+  let grid_y = sdims.LL.grid.(1) in
   p "limit gate: a .y grid extent at the device limit passes"
     (match Sched.check_hardware_limits_classified ~name:"qkv_y" ~limits:(limits_yz grid_y) os with
     | () -> true

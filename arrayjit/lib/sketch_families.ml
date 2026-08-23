@@ -589,6 +589,31 @@ let sink sym below = List.map below ~f:(fun inner -> Sched.Swap { outer = sym; i
 let pad_to ~axis ~extent f =
   if f > 0 && extent % f <> 0 then [ Sched.Pad { axis; to_multiple_of = f } ] else []
 
+(* gh-ocannl-485 (PADTO) / gh-ocannl-730: may a pipeline PAD a non-multiple extent to its block
+   size, rather than refute the geometry on divisibility?
+
+   Yes exactly when every operand the padded axes reach is read through a zero-fringe staged tile.
+   [Sched.Stage]'s per-axis edge guards store 0 into the out-of-range slots of an edge tile, so a
+   padded iteration reads exact zeros: a scalar add-reduction gains nothing from it, and the
+   tensorized pipelines discharge the reduction mask against the very same tiles while [Tensorize]
+   moves the row/column masks onto the fragment transfers. An operand read in place cannot absorb a
+   pad — its fringe is whatever the buffer holds — so those geometries keep the full divisibility
+   gates.
+
+   What the pad leaves behind in a SCALAR pipeline is an [If] on the accumulation leaf, which
+   [Sched.Privatize] classifies rather than rejects: a reduction-axis mask fires within one thread's
+   own accumulation, and a row/column mask is literally the target's own index compared against its
+   dimension — the same predicate the private tile's transfers already carry.
+
+   [n_staged] of the site's [n_operands] are staged at this geometry. Both GPU matmul pipelines
+   stage both operands exactly when their k-block is staged ([sk_bk > 0]): the tensorized family's
+   unstaged whole-K form reads the operands in place, and so would a blocktile geometry with no
+   k-split. The CPU packed-tensorized pipeline stages per operand, so its grid-outermost shape
+   qualifies only when every operand packs. Both the seeding gates and the pipelines' [pad_to]
+   triples consult this, so a gate and its pads cannot drift apart; the conv pipelines
+   (gh-ocannl-697) stage through the same [Stage] decomposition and judge composition here too. *)
+let pad_composition_ok ~n_staged ~n_operands = n_operands > 0 && n_staged = n_operands
+
 (* Blocks of size [b] covering a possibly padded extent [n]. *)
 let blocks_of n b = (n + b - 1) / b
 
@@ -1408,7 +1433,19 @@ let gpu_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
   let sp_k, k_o, k_i = Sched.split ~axis:site.m_k ~factor:bk ~outer:LL.Serial ~inner:LL.Serial in
   let kb = k_blocks site [ k_o ] in
   let swaps = sink i_t ([ j_o; j_w; j_t ] @ kb @ [ k_i ]) @ sink j_t (kb @ [ k_i ]) in
-  batch_hoist_swaps site @ zops
+  (* Pad composition (gh-ocannl-485, gh-ocannl-730): this pipeline stages BOTH operands through
+     zero-fringe workgroup tiles at every geometry, so non-multiple extents pad to the block sizes
+     instead of refuting — the same argument the tensorized family has used since gh-ocannl-485,
+     with the leaf guards discharged by [Privatize]'s mask classification rather than by
+     [Tensorize]. Identity pads are omitted, so a dividing site keeps a byte-identical schedule. *)
+  let pads =
+    if not (pad_composition_ok ~n_staged:(if bk > 0 then 2 else 0) ~n_operands:2) then []
+    else
+      pad_to ~axis:site.m_i ~extent:site.m_ni bm
+      @ pad_to ~axis:site.m_j ~extent:site.m_nj bn
+      @ pad_to ~axis:site.m_k ~extent:site.m_nk bk
+  in
+  batch_hoist_swaps site @ pads @ zops
   @ [ sp_i; sp_i2; sp_j; sp_j2; sp_k ]
   @ swaps
   @ [
@@ -1566,11 +1603,15 @@ let gpu_mma_sketch_schedule ~(opt : LL.optimized) (site : matmul_site)
        cooperative tiles, non-multiple extents pad to the block sizes — the guards land on the leaf
        accumulation, [Tensorize] moves the row/column masks to the fragment transfers and discharges
        the reduction mask against the staged tiles. *)
-    batch_hoist_swaps site
-    @ pad_to ~axis:site.m_i ~extent:site.m_ni bm
-    @ pad_to ~axis:site.m_j ~extent:site.m_nj bn
-    @ pad_to ~axis:site.m_k ~extent:site.m_nk bk
-    @ zops @ [ sp_i; sp_j; sp_k ] @ sink i_i [ j_o ] @ sink j_i kb @ sink i_i kb
+    let pads =
+      if not (pad_composition_ok ~n_staged:(if bk > 0 then 2 else 0) ~n_operands:2) then []
+      else
+        pad_to ~axis:site.m_i ~extent:site.m_ni bm
+        @ pad_to ~axis:site.m_j ~extent:site.m_nj bn
+        @ pad_to ~axis:site.m_k ~extent:site.m_nk bk
+    in
+    batch_hoist_swaps site @ pads @ zops @ [ sp_i; sp_j; sp_k ] @ sink i_i [ j_o ] @ sink j_i kb
+    @ sink i_i kb
     @ [
         (* The swizzled twin (gh-ocannl-481 item 3, D3) marks BOTH operand tiles: the tile sizes and
            the whole rest of the pipeline are identical to its plain sibling, so a timing difference
@@ -1719,7 +1760,7 @@ let cpu_mma_pack_sketch_schedule (site : matmul_site)
      zero-fills its pad slots, so it qualifies): non-multiple extents pad to the block sizes and
      [Tensorize] masks the fragment transfers. An in-place operand read cannot absorb a pad, so the
      grid-outermost hoisted-only shape pads only if every operand packs. *)
-  let both_staged = List.length stages = 2 in
+  let both_staged = pad_composition_ok ~n_staged:(List.length stages) ~n_operands:2 in
   let pads =
     if not both_staged then []
     else
@@ -2603,13 +2644,20 @@ let matmul_flavor_tree ~is_gpu ~is_cpu ~(limits : Ir.Backend_intf.hardware_limit
                  ( Family_decision.Geometry
                      (Gpu_blocktile { g_bm = bm; g_bn = bn; g_bk = bk; g_tm = tm; g_tn = tn }),
                    refute_unless
-                     ([
-                        ndiv "bm" bm ~into:"m" site.m_ni;
-                        ndiv "bn" bn ~into:"n" site.m_nj;
-                        ndiv_k "bk" bk;
-                        ndiv "tm" tm ~into:"bm" bm;
-                        ndiv "tn" tn ~into:"bn" bn;
-                      ]
+                     ((* Pad composition (gh-ocannl-730): [gpu_sketch_schedule] stages both
+                         operands through zero-fringe workgroup tiles at every geometry, so the
+                         block extents pad rather than gate — the tensorized family's
+                         gh-ocannl-485 argument, measured on this pipeline. The REGISTER split is
+                         not padded: [tm]/[tn] still divide their block tiles. *)
+                      (if pad_composition_ok ~n_staged:(if bk > 0 then 2 else 0) ~n_operands:2 then
+                         []
+                       else
+                         [
+                           ndiv "bm" bm ~into:"m" site.m_ni;
+                           ndiv "bn" bn ~into:"n" site.m_nj;
+                           ndiv_k "bk" bk;
+                         ])
+                     @ [ ndiv "tm" tm ~into:"bm" bm; ndiv "tn" tn ~into:"bn" bn ]
                      (* The launch size is statically known — two Workgroup dimensions of [bm/tm]
                         and [bn/tn] threads — so a known thread cap refutes pre-compile what
                         [Schedule.check_hardware_limits_classified] would reject per candidate;

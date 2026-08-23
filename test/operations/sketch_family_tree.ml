@@ -288,8 +288,11 @@ let () =
   tree_section "cpu simd32" ~is_gpu:false ~is_cpu:true ~limits:cpu_limits opt cpu_seeds;
   tree_section "gpu staged+depth" ~is_gpu:true ~is_cpu:false ~limits:gpu_full_limits opt gpu_seeds;
   (* --- Awkward sites: witnesses for what is NOT proposed --- *)
-  (* 20^3: no curated blocktile geometry divides it; unstaged mma is refuted while padded staged
-     mma survives (gh-ocannl-485 zero-fringe pads); CPU Grid shapes at bm=64 lack row blocks. *)
+  (* 20^3: no curated geometry divides it, so the pad composition decides which pipeline survives.
+     Both GPU pipelines stage both operands and pad past 20 (gh-ocannl-485, gh-ocannl-730) — the
+     blocktile family whole, the tensorized one at its staged geometries; the unstaged mma form
+     reads its operands in place and is still refuted, as is the CPU blocktile pipeline, which packs
+     into stack scratch outside that composition. CPU Grid shapes at bm=64 lack row blocks. *)
   let wa =
     NTDSL.init ~l:"wa" ~prec:Ir.Ops.single ~o:[ 20; 20 ]
       ~f:(fun idcs -> Float.of_int (((idcs.(0) * 20) + idcs.(1)) % 7) *. 0.5)
@@ -382,12 +385,15 @@ let () =
      the latter's extent ([m_nk]) is what the tile gates judge. Every site above contracts over a
      single axis, where a tile's k-extent and the site's whole K coincide; here they do not, and a
      refutation says which one it means ([Sketch_families.k_extent_label]) — head_dim 12 divides
-     neither blocktile menu's k-extents (GPU 8 and 16, CPU 16 and 8), so the k gate refutes at
-     every geometry and its witness names "innermost contraction extent k=12 (of K=48 over 2
-     loops)" rather than a bare "k=12" that reads as the site's contraction. The staged tensorized
-     geometries pad past the same 12 and survive, so the tree still reaches the lattice — and the
-     batch axes give the GPU pipelines the batch-grid level ([sk_batch_grid], gh-ocannl-528) that
-     the rank-2 sites above never show. *)
+     neither blocktile menu's k-extents (GPU 8 and 16, CPU 16 and 8), and where the gate still
+     applies its witness names "innermost contraction extent k=12 (of K=48 over 2 loops)" rather
+     than a bare "k=12" that reads as the site's contraction. Where it applies is now the CPU
+     blocktile pipeline alone: since gh-ocannl-730 the GPU blocktile family stages both operands
+     like the tensorized one and PADS past the same 12, so both GPU pipelines enumerate here in
+     full — the ten k-gate refutations this golden used to record are ten leaves. The unstaged
+     tensorized form reads its operands in place and keeps the intrinsic-tile gate. The batch axes
+     give the GPU pipelines the batch-grid level ([sk_batch_grid], gh-ocannl-528) that the rank-2
+     sites above never show. *)
   let bb = 2 and ss = 64 and jj = 64 and hh = 4 and ee = 12 in
   let ov =
     NTDSL.init ~l:"ov" ~prec:Ir.Ops.single ~o:[ jj ] ~i:[ hh; ee ]

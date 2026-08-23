@@ -20,6 +20,13 @@
    projection at bf16, the one operand format every wmma backend and Metal advertise, so the
    tensorized pipelines execute through the real mma hook rather than only constructing.
 
+   The odd-extent section (gh-ocannl-730) runs the same out projection at head_dim 12, which
+   neither curated blocktile [bk] divides: the GPU family stages both operands through zero-fringe
+   workgroup tiles, so the extent PADS to the block size and every geometry is seeded and executed
+   there, where the k gate used to delete the family wholesale. The CPU blocktile pipeline packs
+   outside that composition and keeps the gate, so it is where the gh-ocannl-683 extent label is
+   read off.
+
    Executed assertions compare every candidate against a serial reference computed from the same
    discriminating inputs. For the f32 legs the values vary with every index and keep all partial
    sums exactly representable, so bitwise equality is required regardless of the accumulation
@@ -370,21 +377,78 @@ let bf16_leg ~tag ~build =
 (* What a tile-geometry refutation calls the extent it judged (gh-ocannl-683). The divisibility
    gates compare a tile's k-extent against the INNERMOST contraction loop's extent [m_nk] alone --
    the outer contraction loops are k-block loops every pipeline inherits already split -- so on a
-   multi-axis site a bare "bk=8 does not divide k=12" names a number that is not the site's K (48
+   multi-axis site a bare "b=16 does not divide k=12" names a number that is not the site's K (48
    here), misleading whoever reads a refutation log or [Ir.Schedule_space.refutations]. The
    witnesses are collected off the real family tree, never from literals; single-axis sites must
-   keep the bare "k=%d" text the sketch-family goldens quote, which the control leg pins. *)
-let bk_witnesses ~name build =
+   keep the bare "k=%d" text the sketch-family goldens quote, which the control leg pins.
+
+   Read off the CPU blocktile pipeline: since gh-ocannl-730 the GPU blocktile family PADS its
+   k-extent instead of gating on it (both operands are staged through zero-fringe workgroup tiles),
+   so it no longer produces a k-divisibility witness at all -- which the padded leg below asserts.
+   The CPU blocktile pipeline packs into stack scratch outside that composition and keeps the
+   gate, so its witnesses are where the label is still rendered. *)
+let k_witnesses ~name ~is_gpu ~prefix build =
   let opt = capture (named name (Train.forward (build ()))) in
   match
-    Autotune.matmul_sketch_tree ~is_gpu:true ~is_cpu:false
+    Autotune.matmul_sketch_tree ~is_gpu ~is_cpu:(not is_gpu)
       ~limits:Ir.Backend_intf.no_hardware_limits opt
   with
   | None -> []
   | Some tree ->
-      Sspace.refutations tree
-      |> List.map ~f:snd
-      |> List.filter ~f:(String.is_prefix ~prefix:"bk=")
+      Sspace.refutations tree |> List.map ~f:snd |> List.filter ~f:(String.is_prefix ~prefix)
+
+(* The padded GPU blocktile family at an awkward contraction extent (gh-ocannl-730): head_dim 12,
+   which neither curated [bk] (8, 16) divides. The pipeline stages BOTH operands through zero-fringe
+   workgroup tiles, so the extent pads to the block size and the family is seeded where it used to
+   refute wholesale; the leaf guards the pad leaves behind are what [Schedule.Privatize] classifies
+   as an iteration mask. Structure everywhere; executed against the serial reference on GPU, where
+   every compared cell must agree bitwise -- the padded k slots contribute exact zeros, so a padded
+   candidate is not merely close to the serial twin, it is equal to it. *)
+let padded_leg ~tag ~nk ~build () =
+  let ref_t = build () in
+  let want =
+    List.hd_exn (run_serial ~name:(tag ^ "_serial") (Train.forward ref_t) [ ref_t ])
+    |> nonzero (tag ^ "_serial")
+  in
+  let cand = build () in
+  let fwd = named (tag ^ "_sched") (Train.forward cand) in
+  let opt = capture fwd in
+  (match Autotune.detect_matmul opt.LL.llc with
+  | None -> p (tag ^ ": the awkward-extent site is detected with the expected innermost extent") false
+  | Some site ->
+      p
+        (tag ^ ": the awkward-extent site is detected with the expected innermost extent")
+        (site.Autotune.m_nk = nk));
+  let seeds =
+    unfused_seeds ~is_gpu:true ~is_cpu:false ~limits:Ir.Backend_intf.no_hardware_limits opt
+    |> List.filter ~f:(fun q -> not q.Autotune.sk_mma)
+  in
+  p (tag ^ ": the GPU blocktile family is seeded at an extent no menu bk divides")
+    (not (List.is_empty seeds));
+  p
+    (tag ^ ": every seeded geometry pads rather than gating on the contraction extent")
+    (List.for_all seeds ~f:(fun q ->
+         List.exists (Autotune.sketch_schedule ~p:q opt) ~f:(function
+           | Sched.Pad _ -> true
+           | _ -> false)));
+  let _, invalid = constructs_and_validates ~tag ~what:"padded GPU blocktile" seeds opt in
+  p (tag ^ ": every padded GPU blocktile seed validates") (List.is_empty invalid);
+  if on_gpu then begin
+    let n_ran, n_match =
+      execute_seeds ~tag ~routine:(tag ^ "_sched") ~fwd ~outs:[ cand ] ~wants:[ want ]
+        ~close:Float.equal seeds
+    in
+    p
+      (tag ^ ": every padded GPU blocktile seed compiles and runs")
+      (n_ran = List.length seeds && n_ran > 0);
+    p (tag ^ ": every padded candidate matches the serial reference bitwise") (n_ran = n_match)
+  end
+  else begin
+    Stdio.eprintf "%s: %s cannot execute workgroup-shared staging -- padded execution legs skipped\n"
+      tag backend_name;
+    skipped (tag ^ ": every padded GPU blocktile seed compiles and runs");
+    skipped (tag ^ ": every padded candidate matches the serial reference bitwise")
+  end
 
 (* [offset + stride * (flat index mod modulus)] over row-major [dims]: varies along every axis
    whose extent is not a multiple of [modulus]. *)
@@ -430,13 +494,19 @@ let () =
       ()
   in
   let multi =
-    bk_witnesses ~name:"out_proj_witness" (fun () ->
+    k_witnesses ~name:"out_proj_witness" ~is_gpu:false ~prefix:"b=" (fun () ->
+        let wv = w_odd () and av = att_odd () in
+        let%op out = wv * av in
+        out)
+  in
+  let gpu_bk =
+    k_witnesses ~name:"out_proj_gpu_witness" ~is_gpu:true ~prefix:"bk=" (fun () ->
         let wv = w_odd () and av = att_odd () in
         let%op out = wv * av in
         out)
   in
   let single =
-    bk_witnesses ~name:"single_axis_witness" (fun () ->
+    k_witnesses ~name:"single_axis_witness" ~is_gpu:false ~prefix:"b=" (fun () ->
         let wv =
           NTDSL.init ~l:"cn_w1" ~prec:Ir.Ops.single ~o:[ jj ] ~i:[ ee_odd ]
             ~f:(cycle ~dims:[| jj; ee_odd |] ~modulus:11 ~offset:(-5.5) ~stride:0.5)
@@ -450,16 +520,26 @@ let () =
         let%op out = wv * av in
         out)
   in
-  p "out_proj: the bk gate refutes on the site whose innermost extent it does not divide"
+  p "out_proj: the CPU k gate refutes on the site whose innermost extent it does not divide"
     (not (List.is_empty multi));
-  p "out_proj: a refuted bk names the innermost contraction extent, not the site's whole K"
+  p "out_proj: a refuted k-extent names the innermost contraction extent, not the site's whole K"
     (List.for_all multi ~f:(fun wit ->
          String.is_substring wit
            ~substring:"does not divide innermost contraction extent k=12 (of K=48 over 2 loops)"));
-  p "single-axis: the same refuted bk keeps the bare k= witness"
+  p "single-axis: the same refuted k-extent keeps the bare k= witness"
     ((not (List.is_empty single))
     && List.for_all single ~f:(fun wit ->
            String.is_suffix wit ~suffix:"does not divide k=12"));
+  (* gh-ocannl-730: the GPU blocktile family stages both operands, so its k-extent pads and the
+     gate that used to delete the whole family here produces no witness at all. *)
+  p "out_proj: the GPU blocktile family raises no bk-divisibility refutation on the awkward extent"
+    (List.is_empty gpu_bk);
+  padded_leg ~tag:"out_proj_odd" ~nk:ee_odd
+    ~build:(fun () ->
+      let wv = w_odd () and av = att_odd () in
+      let%op out = wv * av in
+      out)
+    ();
 
   (* --- A three-axis contraction with a materialized output feeding a bias+relu companion. --- *)
   let bb2 = 2 and ss2 = 32 and jj2 = 64 and gg = 2 and hh2 = 2 and ee2 = 16 in

@@ -159,14 +159,9 @@ fusion = unfused
 fusion = fused  [refuted: Schedule.Fuse_epilogue: no statement follows the reduction over mm]
 last leaf's decision path: fusion=unfused > pipeline=tensorized > geometry=bm32 bn32 bk16 > twin=depth2
 tree leaves = flat enumeration: true
-== awkward 20^3 gpu: 6 seeds ==
+== awkward 20^3 gpu: 11 seeds ==
 tree leaves = flat enumeration: true
 -- refuted --
-  fusion=unfused > pipeline=blocktile > geometry=bm64 bn64 bk8 tm4 tn4: bm=64 does not divide m=20
-  fusion=unfused > pipeline=blocktile > geometry=bm32 bn32 bk8 tm4 tn4: bm=32 does not divide m=20
-  fusion=unfused > pipeline=blocktile > geometry=bm16 bn16 bk8 tm4 tn4: bm=16 does not divide m=20
-  fusion=unfused > pipeline=blocktile > geometry=bm32 bn32 bk16 tm2 tn2: bm=32 does not divide m=20
-  fusion=unfused > pipeline=blocktile > geometry=bm16 bn16 bk8 tm2 tn2: bm=16 does not divide m=20
   fusion=unfused > pipeline=tensorized > geometry=bm16 bn32 bk0: bm=16 does not divide m=20
   fusion=unfused > pipeline=tensorized > geometry=bm32 bn32 bk0: bm=32 does not divide m=20
   fusion=fused: Schedule.Fuse_epilogue: no statement follows the reduction over awk
@@ -310,19 +305,29 @@ lifted-lattice search over the refuted family: 2 expanded, 0 scored, 3 refuted
  4  gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
  5  gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:false grid:true packrest:true epi:false swz:- depth:1
  6  gpu:false mma:true simd:0  bm:16  bn:0   bk:16  tm:0 tn:0 hoist:false grid:true packrest:false epi:false swz:- depth:1
-== out-projection gpu staged+depth: 12 seeds ==
- 0  gpu:true mma:true simd:32 bm:16  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
- 1  gpu:true mma:true simd:32 bm:16  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
- 2  gpu:true mma:true simd:32 bm:32  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
- 3  gpu:true mma:true simd:32 bm:32  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
- 4  gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
- 5  gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
- 6  gpu:true mma:true simd:32 bm:16  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
- 7  gpu:true mma:true simd:32 bm:16  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
- 8  gpu:true mma:true simd:32 bm:32  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
- 9  gpu:true mma:true simd:32 bm:32  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
-10  gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
-11  gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
+== out-projection gpu staged+depth: 22 seeds ==
+ 0  gpu:true mma:false simd:0  bm:64  bn:64  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 1  gpu:true mma:false simd:0  bm:32  bn:32  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 2  gpu:true mma:false simd:0  bm:16  bn:16  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 3  gpu:true mma:false simd:0  bm:32  bn:32  bk:16  tm:2 tn:2 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 4  gpu:true mma:false simd:0  bm:16  bn:16  bk:8   tm:2 tn:2 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 5  gpu:true mma:false simd:0  bm:64  bn:64  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 6  gpu:true mma:false simd:0  bm:32  bn:32  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 7  gpu:true mma:false simd:0  bm:16  bn:16  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 8  gpu:true mma:false simd:0  bm:32  bn:32  bk:16  tm:2 tn:2 hoist:false grid:false packrest:false epi:false swz:- depth:1
+ 9  gpu:true mma:false simd:0  bm:16  bn:16  bk:8   tm:2 tn:2 hoist:false grid:false packrest:false epi:false swz:- depth:1
+10  gpu:true mma:true simd:32 bm:16  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+11  gpu:true mma:true simd:32 bm:16  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
+12  gpu:true mma:true simd:32 bm:32  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+13  gpu:true mma:true simd:32 bm:32  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
+14  gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+15  gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
+16  gpu:true mma:true simd:32 bm:16  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+17  gpu:true mma:true simd:32 bm:16  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
+18  gpu:true mma:true simd:32 bm:32  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+19  gpu:true mma:true simd:32 bm:32  bn:32  bk:32  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
+20  gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:- depth:1
+21  gpu:true mma:true simd:32 bm:32  bn:32  bk:16  tm:0 tn:0 hoist:false grid:false packrest:false epi:false swz:b128 depth:1
 == out-projection cpu tree: 9 choice nodes, depth 5 ==
 fusion = unfused
   pipeline = blocktile
@@ -368,17 +373,27 @@ tree leaves = flat enumeration: true
 fusion = unfused
   pipeline = blocktile
     batch = batch-serial
-      geometry = bm64 bn64 bk8 tm4 tn4  [refuted: bk=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)]
-      geometry = bm32 bn32 bk8 tm4 tn4  [refuted: bk=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)]
-      geometry = bm16 bn16 bk8 tm4 tn4  [refuted: bk=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)]
-      geometry = bm32 bn32 bk16 tm2 tn2  [refuted: bk=16 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)]
-      geometry = bm16 bn16 bk8 tm2 tn2  [refuted: bk=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)]
+      geometry = bm64 bn64 bk8 tm4 tn4
+        * gpu:true mma:false simd:0  bm:64  bn:64  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
+      geometry = bm32 bn32 bk8 tm4 tn4
+        * gpu:true mma:false simd:0  bm:32  bn:32  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
+      geometry = bm16 bn16 bk8 tm4 tn4
+        * gpu:true mma:false simd:0  bm:16  bn:16  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
+      geometry = bm32 bn32 bk16 tm2 tn2
+        * gpu:true mma:false simd:0  bm:32  bn:32  bk:16  tm:2 tn:2 hoist:false grid:false packrest:false epi:false swz:- depth:1
+      geometry = bm16 bn16 bk8 tm2 tn2
+        * gpu:true mma:false simd:0  bm:16  bn:16  bk:8   tm:2 tn:2 hoist:false grid:false packrest:false epi:false swz:- depth:1
     batch = batch-grid
-      geometry = bm64 bn64 bk8 tm4 tn4  [refuted: bk=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)]
-      geometry = bm32 bn32 bk8 tm4 tn4  [refuted: bk=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)]
-      geometry = bm16 bn16 bk8 tm4 tn4  [refuted: bk=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)]
-      geometry = bm32 bn32 bk16 tm2 tn2  [refuted: bk=16 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)]
-      geometry = bm16 bn16 bk8 tm2 tn2  [refuted: bk=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)]
+      geometry = bm64 bn64 bk8 tm4 tn4
+        * gpu:true mma:false simd:0  bm:64  bn:64  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
+      geometry = bm32 bn32 bk8 tm4 tn4
+        * gpu:true mma:false simd:0  bm:32  bn:32  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
+      geometry = bm16 bn16 bk8 tm4 tn4
+        * gpu:true mma:false simd:0  bm:16  bn:16  bk:8   tm:4 tn:4 hoist:false grid:false packrest:false epi:false swz:- depth:1
+      geometry = bm32 bn32 bk16 tm2 tn2
+        * gpu:true mma:false simd:0  bm:32  bn:32  bk:16  tm:2 tn:2 hoist:false grid:false packrest:false epi:false swz:- depth:1
+      geometry = bm16 bn16 bk8 tm2 tn2
+        * gpu:true mma:false simd:0  bm:16  bn:16  bk:8   tm:2 tn:2 hoist:false grid:false packrest:false epi:false swz:- depth:1
   pipeline = tensorized
     batch = batch-serial
       geometry = bm16 bn32 bk0  [refuted: unstaged full-K block: innermost contraction extent k=12 (of K=48 over 2 loops) is not a multiple of the intrinsic tile k=8]
@@ -447,16 +462,6 @@ tree leaves = flat enumeration: true
   fusion=fused: Schedule.Fuse_epilogue: no statement follows the reduction over oproj
 == out-projection gpu staged+depth verdicts ==
 -- refuted --
-  fusion=unfused > pipeline=blocktile > batch=batch-serial > geometry=bm64 bn64 bk8 tm4 tn4: bk=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)
-  fusion=unfused > pipeline=blocktile > batch=batch-serial > geometry=bm32 bn32 bk8 tm4 tn4: bk=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)
-  fusion=unfused > pipeline=blocktile > batch=batch-serial > geometry=bm16 bn16 bk8 tm4 tn4: bk=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)
-  fusion=unfused > pipeline=blocktile > batch=batch-serial > geometry=bm32 bn32 bk16 tm2 tn2: bk=16 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)
-  fusion=unfused > pipeline=blocktile > batch=batch-serial > geometry=bm16 bn16 bk8 tm2 tn2: bk=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)
-  fusion=unfused > pipeline=blocktile > batch=batch-grid > geometry=bm64 bn64 bk8 tm4 tn4: bk=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)
-  fusion=unfused > pipeline=blocktile > batch=batch-grid > geometry=bm32 bn32 bk8 tm4 tn4: bk=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)
-  fusion=unfused > pipeline=blocktile > batch=batch-grid > geometry=bm16 bn16 bk8 tm4 tn4: bk=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)
-  fusion=unfused > pipeline=blocktile > batch=batch-grid > geometry=bm32 bn32 bk16 tm2 tn2: bk=16 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)
-  fusion=unfused > pipeline=blocktile > batch=batch-grid > geometry=bm16 bn16 bk8 tm2 tn2: bk=8 does not divide innermost contraction extent k=12 (of K=48 over 2 loops)
   fusion=unfused > pipeline=tensorized > batch=batch-serial > geometry=bm16 bn32 bk0: unstaged full-K block: innermost contraction extent k=12 (of K=48 over 2 loops) is not a multiple of the intrinsic tile k=8
   fusion=unfused > pipeline=tensorized > batch=batch-serial > geometry=bm32 bn32 bk0: unstaged full-K block: innermost contraction extent k=12 (of K=48 over 2 loops) is not a multiple of the intrinsic tile k=8
   fusion=unfused > pipeline=tensorized > batch=batch-grid > geometry=bm16 bn32 bk0: unstaged full-K block: innermost contraction extent k=12 (of K=48 over 2 loops) is not a multiple of the intrinsic tile k=8
