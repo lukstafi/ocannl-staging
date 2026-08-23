@@ -64,16 +64,25 @@
    caller asked for is a failed experiment, not a missing number.
 
    Usage (bin/ cwd trap: pin the backend, and run from a directory holding an ocannl_config):
-     OCANNL_BACKEND=hip _build/default/bin/projection_shape_bench.exe \
+     OCANNL_BACKEND=hip <path to>/projection_shape_bench.exe \
        [repeats] [batches] [group] [order] [mode]
    Defaults 50 repeats, 6 timing batches, group "all" (a/b/c/d/e/p/abd/abde/all), order fwd (or
    rev, which reverses the rotation each round starts from), mode seeds (or tune, or both). The
    batch count must be EVEN -- the visiting order mirrors in adjacent pairs -- so the measurement
    this bench was written for reads, in full:
 
-     OCANNL_BACKEND=hip _build/default/bin/projection_shape_bench.exe 200 8 abde fwd seeds
+     cd benchmarks   # the nearest ocannl_config, and bin/ has the cwd trap
+     OCANNL_BACKEND=hip ../_build/default/bin/projection_shape_bench.exe 200 8 abde fwd seeds
 
-   run from a directory that holds an ocannl_config (benchmarks/ does). *)
+   Three things the output does NOT claim. The launch dimensions are printed only for the arms
+   whose lowering this bench transforms itself; the untuned default and a crowned search compile
+   their own, so those rows say so rather than reporting a geometry nobody verified. The
+   [bestseed] column ranks arms measured in DIFFERENT rounds, so unlike every per-geometry
+   comparison it is exposed to drift between rounds -- read it as indicative and the round lines
+   as the measurement. And on the C backends the hoisted seeds mint packed-constant nodes per
+   candidate, which land in the device-wide constant cache that [Context.release] cannot reclaim,
+   so a long CPU run grows by one packed pool per hoisted candidate; the bench says so when it
+   times them rather than pretending its cleanup covers that class. *)
 
 open Base
 open Ocannl
@@ -379,7 +388,7 @@ let () =
       in
       let launch =
         match !dims with
-        | None -> "(default annotators)"
+        | None -> "(geometry not captured -- this arm compiles its own lowering)"
         | Some dm ->
             let pr a = String.concat ~sep:"x" (Array.to_list (Array.map a ~f:Int.to_string)) in
             Printf.sprintf "grid %s block %s" (pr dm.LL.grid) (pr dm.LL.block)
@@ -535,6 +544,15 @@ let () =
           List.map seeds ~f:(fun q -> base_geom (geom_label q)))
       |> List.dedup_and_sort ~compare:String.compare
     in
+    (* The hoisted CPU seeds mint packed-constant nodes per candidate; those land in the
+       device-wide constant cache that [Context.release] cannot reclaim, so this branch grows by
+       one packed pool per such candidate. Said out loud rather than papered over -- the alternative
+       is to drop the family, and a measurement is worth more than a tidy footprint here. *)
+    if (not on_gpu) && List.exists geometries ~f:(fun g -> String.is_substring g ~substring:"hoist")
+    then
+      p
+        "   note: the hoisted CPU seeds each mint a packed constant pool that Context.release \
+         cannot reclaim; this run's device footprint grows with them\n";
     List.iter geometries ~f:(fun g ->
         let lives =
           List.concat_map prepared ~f:(fun ((_, _, seeds, _, _, _) as pr) ->
@@ -649,6 +667,9 @@ let () =
     |> String.split ~on:'/' |> List.hd_exn
   in
   p "\n\n== summary (GFLOP/s, median timing batch) ==\n";
+  p
+    "   the named-geometry columns compare arms measured in ONE interleaved round; bestseed ranks \
+     across rounds and is indicative\n";
   p "%-22s %9s  %8s  %8s  %8s  %8s  %8s  %s\n" "site" "MFLOP" "untuned"
     (short_col col_a) (short_col col_b) "bestseed" "tuned" "winner";
   List.iter sites ~f:(fun s ->
