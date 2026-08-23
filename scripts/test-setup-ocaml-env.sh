@@ -76,25 +76,51 @@ fi
 # TMPDIR missing, unwritable, full — would leave TMP empty and every path below
 # would resolve against the ROOT: `$TMP/bin` becomes /bin, and the symlink
 # farm would be installed there. Refuse rather than continue.
+zparent=""   # leg (f)'s self-stopping zombie maker; cleanup must resume it
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/setup-ocaml-env-test.XXXXXX" 2>/dev/null)" || TMP=""
 if [ -z "$TMP" ] || [ ! -d "$TMP" ]; then
   echo "could not create a temporary directory under ${TMPDIR:-/tmp}" >&2
   exit 2
 fi
 cleanup() {
+  # Leg (f)'s zombie maker STOPS ITSELF and is resumed at the end of the leg.
+  # Interrupted in between, nothing else would ever resume it: it would be
+  # reparented to PID 1 still stopped, still holding its zombie child. Killing
+  # it is not the answer either — that orphans the zombie. Resume it so it reaps
+  # its own child, and only insist if it will not go.
+  local waited
+  if [ -n "${zparent:-}" ] && kill -0 "$zparent" 2>/dev/null; then
+    kill -CONT "$zparent" 2>/dev/null
+    for waited in 1 2 3 4 5 6 7 8 9 10; do
+      kill -0 "$zparent" 2>/dev/null || break
+      sleep 0.2
+    done
+    kill -KILL "$zparent" 2>/dev/null
+    wait "$zparent" 2>/dev/null
+  fi
   # A hook broken in the way leg 1 probes for can leave orphans behind. They
   # carry this run's pid in their duration (see D_* below), so they are
   # unambiguously ours to reap and no concurrent run is disturbed.
-  local orphans
-  orphans="$(ps -A -o pid=,args= 2>/dev/null | awk -v p="$$" '
-    NF == 3 {
-      cmd = $2; sub(/^.*\//, "", cmd)
-      if (cmd == "sleep" && $3 ~ ("^[0-9]+[.]" p "$")) print $1
-    }')"
+  # Everything below is written to survive running BEFORE leg 1 defined any of
+  # it: an EXIT trap that itself fails under `set -u` is the worst place to
+  # learn about ordering.
+  local orphans d
+  orphans=""
+  if command -v sleep_pids >/dev/null 2>&1; then
+    for d in "${D_TERM:-}" "${D_IGN_CHILD:-}" "${D_IGN_PARENT:-}" "${D_IGN_ALL:-}" \
+             "${D_DAEMON:-}" "${D_WATCHDOG:-}" "${D_SELFTEST:-}" "${D_PROBE:-}"; do
+      [ -n "$d" ] || continue
+      orphans="$orphans $(sleep_pids "$d")"
+    done
+  fi
   # shellcheck disable=SC2086
-  [ -n "$orphans" ] && kill -KILL $orphans 2>/dev/null
+  [ -n "${orphans// /}" ] && kill -KILL $orphans 2>/dev/null
   # Belt and braces on the same hazard: never hand `rm -rf` anything but the
   # directory this run actually made.
+  if [ -n "${LAUNCH_ROOT:-}" ] && [ "${LAUNCH_ROOT#"${TMP:-/nonexistent}"}" = "$LAUNCH_ROOT" ] \
+     && [ -d "$LAUNCH_ROOT" ] && [ "$KEEP" != 1 ]; then
+    rm -rf "$LAUNCH_ROOT"     # only when it was made outside TMP
+  fi
   if [ "$KEEP" = 1 ]; then
     echo "kept $TMP"
   elif [ -n "$TMP" ] && [ -d "$TMP" ] && [ "$TMP" != "/" ]; then
@@ -103,6 +129,11 @@ cleanup() {
   return 0
 }
 trap cleanup EXIT
+# Without these, a TERM or a Ctrl-C kills the shell outright and the EXIT trap
+# never runs — which is how an interrupted run left a stopped zombie maker
+# behind. Exiting from the handler is what gets EXIT to fire.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ---------------------------------------------------------------------------
 # Leg 1: bounded
@@ -131,12 +162,18 @@ fi
 # run's pid, so a second copy of this script (or a leftover from a crashed one)
 # cannot be miscounted as this run's orphan.
 #
-# Listed with `ps -A -o pid=,args=` rather than `pgrep -a`: `-a` is not the same
-# option on both platforms — procps prints the command line, while on macOS it
-# means "include process ancestors in the match list" and prints no arguments at
-# all. A counter that finds no duration to match reports zero forever, and every
-# no-orphan assertion below then passes without testing anything, which is why
-# the prerequisite check makes the counter count something known before use.
+# Not listed with `pgrep -a`: `-a` is not the same option on both platforms —
+# procps prints the command line, while on macOS it means "include process
+# ancestors in the match list" and prints no arguments at all. A counter that
+# finds no duration to match reports zero forever, and every no-orphan assertion
+# below then passes without testing anything, which is why the prerequisite
+# check makes the counter count something known before use.
+#
+# /proc is tried first and `ps -A -o pid=,args=` second, in that order because
+# Cygwin has the former but a `ps` without `-o`: a ps-only lister leaves the
+# harness skipping every bounded leg on a shell the hook explicitly supports.
+# The /proc read is also fork-free — `read -d ""` per NUL-separated argument
+# rather than a `tr` per process.
 D_TERM="91.$$"      # (a) honours TERM
 D_IGN_CHILD="92.$$" # (b) the child that ignores TERM
 D_IGN_PARENT="93.$$" # (b) the parent that does not
@@ -144,10 +181,25 @@ D_IGN_ALL="94.$$"   # (c) everything ignores TERM
 D_DAEMON="95.$$"    # (d) the daemon left behind by an exit-0 command
 D_WATCHDOG="97.$$"  # (e) the bound, i.e. the watchdog's own sleep
 D_SELFTEST="96.$$"  # the prerequisite check's own known-live sleep
+D_PROBE="98.$$"     # the job-control probe's sleep
 sleep_pids() { # sleep_pids DURATION -> pids of live `sleep DURATION`
-  ps -A -o pid=,args= 2>/dev/null | awk -v d="$1" '
+  local d="$1" f pid a0 a1 a2
+  if [ -r /proc/self/cmdline ]; then
+    for f in /proc/[0-9]*/cmdline; do
+      a0=""; a1=""; a2=""
+      { IFS= read -r -d '' a0; IFS= read -r -d '' a1; IFS= read -r -d '' a2; } \
+        <"$f" 2>/dev/null
+      [ "${a0##*/}" = sleep ] || continue   # argv[0] may carry a directory
+      [ "$a1" = "$d" ] || continue
+      [ -z "$a2" ] || continue              # exactly one argument
+      pid="${f#/proc/}"
+      printf '%s\n' "${pid%/cmdline}"
+    done
+    return 0
+  fi
+  ps -A -o pid=,args= 2>/dev/null | awk -v d="$d" '
     NF == 3 {
-      cmd = $2; sub(/^.*\//, "", cmd)     # argv[0] may carry a directory
+      cmd = $2; sub(/^.*\//, "", cmd)
       if (cmd == "sleep" && $3 == d) print $1
     }'
 }
@@ -185,7 +237,7 @@ else
   # this harness. Check before running any of them.
   self_pgid="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')"
   set -m
-  sleep 98.$$ >/dev/null 2>&1 </dev/null & probe=$!
+  sleep "$D_PROBE" >/dev/null 2>&1 </dev/null & probe=$!
   set +m
   probe_pgid="$(ps -o pgid= -p "$probe" 2>/dev/null | tr -d ' ')"
   if [ -n "$self_pgid" ] && [ "$self_pgid" = "$probe_pgid" ]; then
@@ -389,16 +441,17 @@ has() { grep -qF -- "$2" "$1"; }
 # clone below, and a global `core.hooksPath` could reject or rewrite the
 # synthetic commits — either way the harness would fail somewhere upstream of
 # the thing it is testing, and say so misleadingly.
-# Config files are only half of it. GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE and
-# their kin point git at a repository REGARDLESS of `-C` — verified: with GIT_DIR
-# exported, `git -C other config user.name X` writes into the GIT_DIR repo, not
-# into `other`. A harness launched from a git hook, or from a shell that exports
-# them, would therefore configure and commit into the developer's real
-# repository while claiming to work in a throwaway clone. The list is taken from
-# git itself rather than hand-written, so it cannot drift as git adds variables.
-GIT_LOCAL_UNSET=()
-for v in $(git rev-parse --local-env-vars 2>/dev/null); do GIT_LOCAL_UNSET+=(-u "$v"); done
-git_q() { env ${GIT_LOCAL_UNSET[@]+"${GIT_LOCAL_UNSET[@]}"} \
+# The setup commands run in a CLEAN environment, the same way the hook runs do,
+# rather than with known-bad variables subtracted one at a time. Subtraction was
+# tried twice and was wrong twice: first the config files alone, which left
+# GIT_DIR and its kin pointing git at a real repository REGARDLESS of `-C`
+# (verified: with GIT_DIR exported, `git -C other config user.name X` writes
+# into the GIT_DIR repo); then `git rev-parse --local-env-vars`, which does not
+# list GIT_ALLOW_PROTOCOL, so an inherited transport policy without `file` still
+# failed every local clone below. The set of variables git reads is not a list
+# this harness can keep, so it keeps none of them: `env -i`, plus exactly what
+# the commands need. PATH must survive for `env` to find git at all.
+git_q() { env -i PATH="$PATH" HOME="$FAKEHOME" TMPDIR="$TMP" \
               GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
           git -c advice.detachedHead=false -c init.defaultBranch=master \
               -c user.name=test -c user.email=test@example.invalid \
@@ -564,6 +617,30 @@ else
     "hook has: $(grep -n 'ssh_opts=' "$HOOK_SRC" | tr -d '\n')"
 fi
 
+# The fake launchers must sit at a path with NO whitespace. GIT_SSH_COMMAND and
+# core.sshCommand are shell COMMAND STRINGS, so git splits them on whitespace,
+# and the hook reads the first word to decide whether the program is OpenSSH.
+# Quoting the path would satisfy git and defeat that read — the hook would see
+# `'"'"'/tmp/ocannl` and decline to append, which is its documented, deliberate
+# behaviour for a launcher it cannot identify, not something for the harness to
+# work around. So with a TMPDIR containing spaces the fakes go somewhere else,
+# and if there is nowhere, these legs say so once instead of failing fifteen
+# times over while appearing to test launcher gating.
+LAUNCH_ROOT="$TMP/launchers"
+case "$TMP" in
+  *[[:space:]]*)
+    LAUNCH_ROOT="$(mktemp -d /tmp/ocannl-ssh-launchers.XXXXXX 2>/dev/null)" || LAUNCH_ROOT=""
+    case "$LAUNCH_ROOT" in *[[:space:]]*) LAUNCH_ROOT="" ;; esac
+    ;;
+esac
+if [ -z "$LAUNCH_ROOT" ]; then
+  SKIP_SSH=1
+  report 1 "ssh: the launcher-gating legs need a whitespace-free directory for the fakes" \
+    "TMPDIR holds whitespace and /tmp is unusable; these legs did not run"
+else
+  SKIP_SSH=0
+fi
+
 SSH_BASE="$TMP/ssh-base"
 mkdir -p "$SSH_BASE/scripts"
 git_q -C "$SSH_BASE" init -q
@@ -572,28 +649,34 @@ git_q -C "$SSH_BASE" remote add origin ssh://git@example.invalid/x.git
 
 CASEDIR=""; CASELOG=""; LAUNCHER=""
 ssh_prepare() { # ssh_prepare SLUG LAUNCHER_BASENAME -- sets CASEDIR/CASELOG/LAUNCHER
+  [ "$SKIP_SSH" = 0 ] || return 0
   CASEDIR="$TMP/ssh-$1"
   CASELOG="$TMP/ssh-$1.log"
   rm -rf "$CASEDIR"
   cp -r "$SSH_BASE" "$CASEDIR"
   cp "$HOOK_SRC" "$CASEDIR/scripts/setup-ocaml-env.sh"
   : >"$CASELOG"
-  mkdir -p "$TMP/launchers/$1"
+  mkdir -p "$LAUNCH_ROOT/$1"
   LAUNCHER="$(ssh_launcher "$1" "$2")"
 }
 
 ssh_launcher() { # ssh_launcher SLUG BASENAME -> path of a fake logging into that case's log
-  local p="$TMP/launchers/$1/$2"
+  local p="$LAUNCH_ROOT/$1/$2"
+  # Program and arguments are logged as two TAB-separated fields, not as one
+  # space-joined line: a TMPDIR containing whitespace makes "$0 $*" ambiguous,
+  # and the reader would take the first word of the PATH as the program.
   { printf '#!/bin/sh\n'
-    printf 'echo "$0 $*" >> "%s"\n' "$TMP/ssh-$1.log"
+    printf 'printf "%%s\\t%%s\\n" "$0" "$*" >> "%s"\n' "$TMP/ssh-$1.log"
     printf 'exit 255\n'
   } >"$p"
   chmod +x "$p"
   printf '%s\n' "$p"
 }
 
+
 SSH_SLUGS=(); SSH_LABELS=(); SSH_PROGS=(); SSH_OPTS=()
 ssh_launch() { # ssh_launch SLUG LABEL EXPECTED_PROGRAM_BASENAME yes|no
+  if [ "$SKIP_SSH" != 0 ]; then RUN_ENV=(); RUN_PATH="$BIN"; return 0; fi
   SSH_SLUGS+=("$1"); SSH_LABELS+=("$2"); SSH_PROGS+=("$3"); SSH_OPTS+=("$4")
   local clone="$TMP/ssh-$1"
   ( cd "$clone" && env -i \
@@ -617,7 +700,7 @@ ssh_launch cfg-ssh "ssh (2): core.sshCommand named ssh -> options appended" ssh 
 
 # Options appended: nothing configured, so git's default `ssh` off PATH.
 ssh_prepare path-ssh ssh
-RUN_PATH="$TMP/launchers/path-ssh:$BIN"
+RUN_PATH="$LAUNCH_ROOT/path-ssh:$BIN"
 ssh_launch path-ssh "ssh (3): PATH default ssh -> options appended" ssh yes
 
 # Options appended: an `ssh.exe` basename is OpenSSH too (Git for Windows).
@@ -695,12 +778,14 @@ while [ "$i" -lt "${#SSH_SLUGS[@]}" ]; do
   fi
   # Git probes an unrecognised launcher with `-G` to detect its variant; that
   # line is not the fetch invocation, so it is filtered out.
-  line="$(grep -vE '(^| )-G( |$)' "$log" | head -n1)"
+  line="$(grep -vE '(^|[ 	])-G([ 	]|$)' "$log" | head -n1)"
   if [ -z "$line" ]; then
     report 1 "$label" "no ssh launcher invocation logged (raw log: $(tr '\n' '|' <"$log"))"
     continue
   fi
-  prog="$(basename "${line%% *}")"
+  prog="${line%%	*}"          # first TAB-separated field: the program
+  prog="$(basename "$prog")"
+  line="${line#*	}"             # the rest: the arguments as git passed them
   # Classified on the WHOLE bundle, not on BatchMode alone: an option silently
   # dropped from the hook, or one leaking onto a launcher that must not get it,
   # is exactly the regression that puts the long startup stalls back.
@@ -734,6 +819,7 @@ done
 # is not evidence the group check is sound; a failure is evidence it is not, and
 # on a PID 1 that does not reap — where the misreading is permanent rather than
 # raced — this is the leg that reports the 30s stall as a stall.
+if [ "$SKIP_SSH" = 0 ]; then
 ssh_prepare timing ssh
 RUN_ENV=(GIT_SSH_COMMAND="$LAUNCHER")
 t0=$SECONDS
@@ -744,6 +830,7 @@ if [ "$el" -le 10 ]; then
 else
   report 1 "ssh (15): a failing ssh fetch returns well inside the 30s bound" \
     "took ${el}s — the group check is counting the ssh child's zombie as work again"
+fi
 fi
 
 # ---------------------------------------------------------------------------
