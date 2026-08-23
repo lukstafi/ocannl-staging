@@ -27,7 +27,7 @@ the pre-fix fold made rows 5977 and 10232 identical at every column of every sal
 the mix keeps those two rows apart: true
 no two rows below 100000 share a mix value in a column, at any salt or column swept: true
 the pre-fix fold did collide there, so that sweep can fail (negative control): true
-row at which operand rows first repeat, by reduction extent (mixed vs flat):
+row at which ma rows first repeat, by k (mixed over 12 levels vs flat mod 13):
   k = 1   mixed 3                  flat 13
   k = 2   mixed 11                 flat 13
   k = 3   mixed 22                 flat 13
@@ -36,8 +36,19 @@ row at which operand rows first repeat, by reduction extent (mixed vs flat):
   k = 8   mixed 406                flat 13
   k = 12  mixed 11499              flat 13
   k = 16  mixed none below 20000   flat 13
-the mixed operand keeps rows distinct at least as far as the flat form, at every reduction extent above 2: true
-at the two narrowest reductions both forms are exhausted within sixteen rows, which the levels^k bound of 144 leaves no room to improve (and k = 1 is degenerate for the bench anyway): true
+the mixed ma keeps rows distinct at least as far as the flat form, at every k above 2: true
+at k <= 2 both forms are exhausted within twenty rows, against a levels^k space bound of 144 that leaves no room to improve: true
+row at which mb rows first repeat, by n (mixed over 17 levels vs flat mod 17):
+  n = 1   mixed 4                  flat 17
+  n = 2   mixed 13                 flat 17
+  n = 3   mixed 23                 flat 17
+  n = 4   mixed 206                flat 17
+  n = 6   mixed 2320               flat 17
+  n = 8   mixed none below 20000   flat 17
+  n = 12  mixed none below 20000   flat 17
+  n = 16  mixed none below 20000   flat 17
+the mixed mb keeps rows distinct at least as far as the flat form, at every n above 2: true
+at n <= 2 both forms are exhausted within twenty rows, against a levels^n space bound of 289 that leaves no room to improve: true
 every residue lands in [0, modulus): true
 residue refuses a non-positive row stride: true
 residue refuses a non-positive modulus: true

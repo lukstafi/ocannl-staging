@@ -472,15 +472,40 @@ let () =
     [ ez; sp_zi; sp_i; sp_k ] @ sink j [ k_o ] @ sink i_i [ k_o ] @ stage_b @ stage_a @ [ tz ]
   in
 
-  (* The FIRST variant to complete is the reference every later one is compared against, cell by
-     cell (gh-ocannl-711 review). That comparison, not the checksum, is what decides whether a
-     variant computed the right thing: a checksum is a linear functional of the output, so a row
-     permutation survives it whenever the value difference is orthogonal to the weight difference —
-     by the weights colliding, or by plain cancellation, both of which are reachable at the narrow
-     extents this bench accepts. An elementwise comparison has nothing to cancel. The checksum is
-     still printed: one number per line fingerprints a run and travels into a report. *)
+  (* What every variant is compared against, cell by cell (gh-ocannl-711 review). That comparison,
+     not the checksum, is what decides whether a variant computed the right thing: a checksum is a
+     linear functional of the output, so a row permutation survives it whenever the value difference
+     is orthogonal to the weight difference — by the weights colliding, or by plain cancellation,
+     both of which are reachable at the narrow extents this bench accepts. An elementwise comparison
+     has nothing to cancel. The checksum is still printed: one number per line fingerprints a run
+     and travels into a report.
+
+     The reference is the UNSCHEDULED computation, not "whichever variant completed first". Those
+     coincide while the naive leg runs, and diverge exactly where it matters: under
+     [naive_repeats = 0] the naive leg is skipped, and taking the first scheduled variant instead
+     would label an unvalidated output "reference" — with a single schedulable variant, comparing it
+     against nothing at all, and with several, hiding any defect they share. So skipping the
+     expensive naive TIMING costs the timing only: the oracle is materialized by one untimed run of
+     the same unscheduled kernel, on demand and once. When the naive leg does run, its own output is
+     that oracle and no extra run happens. *)
   let reference = ref None in
   let disagreements = ref 0 in
+  let unscheduled_output () =
+    let%op mc = ma * mb in
+    let comp = named "mm_reference" (Train.forward mc) in
+    let ctx = Context.auto () in
+    let ctx, routine = Context.compile ctx comp Ir.Indexing.Empty in
+    let ctx = Context.run ctx routine in
+    Context.get_values ctx mc.Tensor.value
+  in
+  let reference_output () =
+    match !reference with
+    | Some r -> r
+    | None ->
+        let r = unscheduled_output () in
+        reference := Some r;
+        r
+  in
   let bench ?(repeats = repeats) ~variant ~schedule () =
     let%op mc = ma * mb in
     let comp = named ("mm_" ^ variant) (Train.forward mc) in
@@ -534,15 +559,17 @@ let () =
        n a single capped stream runs out of distinct row weight vectors and two rows collide, whose
        swap no weighting of that stream can see. Both checks are outside the timed region. *)
     let checksum = Bench_checksum.whole_output ~row_stride:n values in
+    (* The unscheduled leg, when it runs, IS the oracle — same kernel, so re-running it would only
+       burn time. Any other variant is compared against it. *)
+    if Option.is_none schedule && Option.is_none !reference then reference := Some values;
     let agreement =
-      match !reference with
-      | None ->
-          reference := Some values;
-          "reference"
-      | Some r ->
-          let d = Bench_checksum.first_difference ~reference:r values in
-          if Option.is_some d then Int.incr disagreements;
-          Bench_checksum.render_agreement d
+      let r = reference_output () in
+      if phys_equal r values then "reference"
+      else begin
+        let d = Bench_checksum.first_difference ~reference:r values in
+        if Option.is_some d then Int.incr disagreements;
+        Bench_checksum.render_agreement d
+      end
     in
     let spot = Int.min (n + 1) (Array.length values - 1) in
     (* The label is printed on EVERY timing line, including the untensorized variants: a suffix

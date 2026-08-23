@@ -156,7 +156,11 @@ files.
   bounded-weight scalar escapes that class, and more streams only shrink it. What decides is
   `Bench_checksum.first_difference`, an elementwise comparison against the first variant to
   complete; the checksum is what the line PRINTS, a fingerprint for reading a table and comparing
-  runs.
+  runs. Make that reference the UNSCHEDULED computation rather than "whichever variant ran first":
+  the two coincide while the naive leg runs and diverge exactly where it matters — under
+  `schedule_bench`'s `naive_repeats = 0` the naive leg is skipped, and the first scheduled variant
+  would then be labelled the oracle without anything having validated it. Skipping an expensive
+  reference TIMING should cost the timing only; materialize the oracle with one untimed run.
 - Two data-side blindnesses sit behind that guard, where no output check can help. A producer value
   that can BE the accumulator's init hides a dropped producer: a mixed operand row is all-zero with
   probability `levels ^ -row_stride`, likely at narrow extents, which a flat form's marching values

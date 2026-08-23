@@ -379,36 +379,53 @@ let () =
             None)
   in
   let narrow_strides = [ 1; 2; 3; 4; 6; 8; 12; 16 ] in
-  let mixed_at stride =
+  (* Both of [schedule_bench]'s operands, because the class is the generator's, not one operand's:
+     ma is m x k so its rows repeat along the OUTPUT extent m, and mb is k x n so its rows repeat
+     along the REDUCTION extent k — a wrong-row read there is a staging or tensorization bug, and
+     equally invisible. Each is swept against the form it replaced. *)
+  let mixed_at ~salt ~levels stride =
     first_row_collision (fun r ->
         List.init stride ~f:(fun c ->
-            Bc.residue ~salt:0x5A17 ~row_stride:stride ~modulus:12 ((r * stride) + c)))
+            Bc.residue ~salt ~row_stride:stride ~modulus:levels ((r * stride) + c)))
   in
-  let flat_at stride =
-    first_row_collision (fun r -> List.init stride ~f:(fun c -> ((r * stride) + c) % 13))
+  let flat_at ~modulus stride =
+    first_row_collision (fun r -> List.init stride ~f:(fun c -> ((r * stride) + c) % modulus))
   in
   let render_row = function None -> "none below 20000" | Some r -> Int.to_string r in
-  p "row at which operand rows first repeat, by reduction extent (mixed vs flat):\n";
-  List.iter narrow_strides ~f:(fun stride ->
-      p "  k = %-3d mixed %-18s flat %s\n" stride (render_row (mixed_at stride))
-        (render_row (flat_at stride)));
-  Verdict.p
-    "the mixed operand keeps rows distinct at least as far as the flat form, at every reduction \
-     extent above 2"
-    (List.for_all
-       (List.filter narrow_strides ~f:(fun stride -> stride > 2))
-       ~f:(fun stride ->
-         match (mixed_at stride, flat_at stride) with
-         | None, _ -> true
-         | Some _, None -> false
-         | Some m, Some f -> m >= f));
-  Verdict.p
-    "at the two narrowest reductions both forms are exhausted within sixteen rows, which the \
-     levels^k bound of 144 leaves no room to improve (and k = 1 is degenerate for the bench anyway)"
-    (List.for_all [ 1; 2 ] ~f:(fun stride ->
-         match (mixed_at stride, flat_at stride) with
-         | Some m, Some f -> m <= 16 && f <= 16
-         | _ -> false));
+  let operands =
+    [ ("ma", 0x5A17, 12, 13, "k", 2); ("mb", 0x3C6E, 17, 17, "n", 2) ]
+  in
+  List.iter operands ~f:(fun (name, salt, levels, modulus, axis, crossover) ->
+      p "row at which %s rows first repeat, by %s (mixed over %d levels vs flat mod %d):\n" name
+        axis levels modulus;
+      List.iter narrow_strides ~f:(fun stride ->
+          p "  %s = %-3d mixed %-18s flat %s\n" axis stride
+            (render_row (mixed_at ~salt ~levels stride))
+            (render_row (flat_at ~modulus stride)));
+      (* The flat form's bound is not a birthday: its rows repeat with the modulus's period at
+         EVERY stride, 13 or 17 rows in. The mixed form is birthday-limited in a space of
+         levels^stride, so it is behind only where that space is itself too small to matter. *)
+      Verdict.pf
+        "the mixed %s keeps rows distinct at least as far as the flat form, at every %s above %d"
+        name axis crossover
+        (List.for_all
+           (List.filter narrow_strides ~f:(fun stride -> stride > crossover))
+           ~f:(fun stride ->
+             match (mixed_at ~salt ~levels stride, flat_at ~modulus stride) with
+             | None, _ -> true
+             | Some _, None -> false
+             | Some m, Some f -> m >= f));
+      Verdict.pf
+        "at %s <= %d both forms are exhausted within twenty rows, against a levels^%s space bound \
+         of %d that leaves no room to improve"
+        axis crossover axis
+        (Int.pow levels crossover)
+        (List.for_all
+           (List.range 1 (crossover + 1))
+           ~f:(fun stride ->
+             match (mixed_at ~salt ~levels stride, flat_at ~modulus stride) with
+             | Some m, Some f -> m <= 20 && f <= 20
+             | _ -> false)));
 
   (* The arithmetic the weights' exactness argument rests on: a residue is a residue (non-negative,
      below its modulus), so a weight is in [1, 251] and products of the benches' exact-in-binary
