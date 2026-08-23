@@ -1607,23 +1607,43 @@ let module_bearing_heads = [ "test"; "tests"; "executable"; "executables"; "libr
     at all is the common shape of it — dune builds [t.ml] — and [(modules :standard \ helper)] is
     the same default written down (Codex P2, round 2). Treating either as "names no modules" made a
     stanza own nothing, which turned a required declaration into a stale one. *)
+type module_set =
+  | Named of string list  (** the field lists them, and no default is involved *)
+  | Default_less of string list
+      (** the default set, less the modules subtracted from it. [(modules :standard \ helper)] is
+          this with [helper] subtracted, and an absent field is this with nothing subtracted.
+          Resolving the subtraction matters as much as resolving the default: a stanza that
+          EXCLUDES a module does not link it, so demanding a declaration of it would be a demand
+          about a module the test never builds (Codex P2, round 3). *)
+
 let explicit_modules stanza =
   match field stanza "modules" with
-  | None -> None
+  | None -> Default_less []
   | Some args ->
-      if List.mem (List.concat_map args ~f:atoms) ":standard" ~equal:String.equal then None
-      else Some (List.filter_map args ~f:(function Sexp.Atom m -> Some m | _ -> None))
+      let flat = List.concat_map args ~f:atoms in
+      if not (List.mem flat ":standard" ~equal:String.equal) then
+        Named (List.filter_map args ~f:(function Sexp.Atom m -> Some m | _ -> None))
+      else
+        (* Everything after a subtraction operator is subtracted. Dune's ordered-set language nests,
+           so the atoms are read flat and the FIRST `\` divides them: over-subtracting narrows this
+           stanza's claim, and what falls out of one stanza's claim is caught by the census check
+           over sources no stanza claims -- whereas over-claiming would demand a declaration of a
+           module the stanza does not build. *)
+        match List.split_while flat ~f:(fun a -> not (String.equal a "\\")) with
+        | _, [] -> Default_less []
+        | _, _ :: excluded -> Default_less excluded
 
 (** The modules a stanza owns, given every module the directory holds. Dune's default set is the
     directory less what other stanzas claim, which is what makes an explicit list elsewhere in the
-    file narrow this one. *)
+    file narrow this one — and less whatever this stanza itself subtracts. *)
 let modules_of ?(directory_modules = []) stanzas stanza =
   match explicit_modules stanza with
-  | Some modules -> modules
-  | None ->
+  | Named modules -> modules
+  | Default_less excluded ->
       let claimed =
         List.concat_map stanzas ~f:(fun other ->
-            match explicit_modules other with Some modules -> modules | None -> [])
+            match explicit_modules other with Named modules -> modules | Default_less _ -> [])
+        @ excluded
         |> List.map ~f:String.lowercase
         |> Set.of_list (module String)
       in
@@ -1653,6 +1673,11 @@ type artifact_subject = {
   artifact_name : string;
   artifact_callers : string list;
       (** the stanza's modules that call the initializer, in the order [(modules …)] lists them *)
+  artifact_readers : string list;
+      (** its modules that read [build_files_prefix] by name and do NOT call the initializer. They
+          need the variable tracked for the same reason and are subject to the same rule: the
+          initializer is the usual way to read the key, not the only one (Codex P2, rounds 2 and
+          3). *)
   artifact_deps_site : string;
       (** where the declaration was looked for, in words a diagnostic can use: the stanza's own
           dependency field, or the rules that run its executable *)
@@ -1673,8 +1698,22 @@ let artifact_subjects ?(directory_modules = []) stanzas ~calls ~reads_prefix =
         match command with Runs path -> Some path | _ -> None)
     |> List.dedup_and_sort ~compare:String.compare
   in
-  let runners_of names =
-    let wanted = List.map names ~f:(fun name -> name ^ ".exe") in
+  (* Both identities an executable can be run under: the local `probe.exe` a `%{dep:…}` names, and
+     the public name a `%{bin:pkg.probe}` resolves to, which `classify_command` already records as
+     `Runs "pkg.probe"`. Searching only for the first left a public-name runner unrecognised, and
+     its executable reported as though nothing ran it (Codex P2, round 3). *)
+  let identities stanza =
+    List.map (names_of stanza) ~f:(fun name -> name ^ ".exe")
+    @ (match field stanza "public_name" with
+      | Some [ Sexp.Atom public ] -> [ public ]
+      | _ -> [])
+    @
+    match field stanza "public_names" with
+    | Some args -> List.filter_map args ~f:(function Sexp.Atom p -> Some p | _ -> None)
+    | None -> []
+  in
+  let runners_of stanza =
+    let wanted = identities stanza in
     List.filter stanzas ~f:(fun s ->
         List.exists (exes_run s) ~f:(List.mem wanted ~equal:String.equal))
   in
@@ -1703,6 +1742,9 @@ let artifact_subjects ?(directory_modules = []) stanzas ~calls ~reads_prefix =
       | Some h when List.mem module_bearing_heads h ~equal:String.equal ->
           let modules = modules_of ~directory_modules stanzas stanza in
           let callers = List.filter modules ~f:calls in
+          let readers =
+            List.filter modules ~f:(fun m -> (not (calls m)) && reads_prefix m)
+          in
           let name = match names_of stanza with n :: _ -> n | [] -> "<unnamed>" in
           let subject artifact_verdict artifact_deps_site =
             Some
@@ -1710,6 +1752,7 @@ let artifact_subjects ?(directory_modules = []) stanzas ~calls ~reads_prefix =
                 artifact_head = h;
                 artifact_name = name;
                 artifact_callers = callers;
+                artifact_readers = readers;
                 artifact_deps_site;
                 artifact_verdict;
               }
@@ -1718,17 +1761,18 @@ let artifact_subjects ?(directory_modules = []) stanzas ~calls ~reads_prefix =
              second rule running the same executable without the declaration leaves that run stale.
              [any] is what makes a declaration present at all, and so what a stale one is judged
              by. The two coincide for everything dune runs itself. *)
+          (* What makes the stanza subject to the rule is that some module of it READS the key --
+             through the initializer or by name. Asking only about the initializer permitted a
+             declaration for a direct reader without ever requiring one, which leaves exactly the
+             stale run this check is about (Codex P2, round 3). Which of the two it is decides only
+             the wording of the verdict. *)
           let decide ~all ~any site =
-            match (callers, all, any) with
-            | [], _, false -> None
-            (* A declaration with no call behind it is not automatically a restatement: reading the
-               key directly is another reason to need the variable tracked, and it is checked before
-               the stanza is told to drop the declaration (Codex P2, round 2). *)
-            | [], _, true ->
-                if List.exists modules ~f:reads_prefix then subject Artifact_other_reader site
-                else subject Artifact_stale_declaration site
-            | _ :: _, true, _ -> subject Artifact_declared site
-            | _ :: _, false, _ -> subject Artifact_undeclared site
+            match (callers, readers, all, any) with
+            | [], [], _, false -> None
+            | [], [], _, true -> subject Artifact_stale_declaration site
+            | [], _ :: _, true, _ -> subject Artifact_other_reader site
+            | _ :: _, _, true, _ -> subject Artifact_declared site
+            | _, _, false, _ -> subject Artifact_undeclared site
           in
           let declares args = declares_env_var args artifact_env_var in
           (match h with
@@ -1740,8 +1784,10 @@ let artifact_subjects ?(directory_modules = []) stanzas ~calls ~reads_prefix =
                   decide ~all:declared ~any:declared "its `(inline_tests (deps …))`")
           | "executable" | "executables" -> (
               let names = names_of stanza in
-              match runners_of names with
-              | [] -> if List.is_empty callers then None else subject Artifact_unrun "-"
+              match runners_of stanza with
+              | [] ->
+                  if List.is_empty callers && List.is_empty readers then None
+                  else subject Artifact_unrun "-"
               | runners ->
                   let declared = List.map runners ~f:(fun r -> declares (field r "deps")) in
                   decide
@@ -1780,6 +1826,7 @@ let artifact_subjects ?(directory_modules = []) stanzas ~calls ~reads_prefix =
                 artifact_head = h;
                 artifact_name = name;
                 artifact_callers = [];
+                artifact_readers = [];
                 artifact_deps_site = "its `(deps …)`";
                 artifact_verdict = Artifact_stale_declaration;
               }

@@ -170,10 +170,16 @@ that they earn a lookup rather than always-loaded space.
   collapse the config scanner's duplicate-basename check exists to prevent. **Dune's defaults**: a
   stanza with no `(modules …)` field, or one naming `:standard`, owns the directory less what other
   stanzas claim; reading either as "names no modules" makes a required declaration come out stale.
-  A fifth, about the rule rather than the scan: a declaration is justified by ANY read of the key it
-  tracks, so phrase the converse over the key (`Config_key_scan.source_reads_key`) and not over the
-  one function that prompted the check — otherwise the documented way of pinning a key becomes
-  unusable for that key.
+  **Dune's identities**: an executable is run under `<name>.exe` and under its `public_name` via
+  `%{bin:…}`, and a runner named the second way is still its runner. **Subdirectories**: ask the
+  question per `(subdir …)` group, not per dune file — the stanzas inside one name modules that live
+  there, and a walk that stays at the top level reports a nested source as claimed by nobody.
+  Two more, about the rule rather than the scan. A declaration is justified by ANY read of the key it
+  tracks, so phrase the rule over the key (`Config_key_scan.source_reads_key`) and not over the one
+  function that prompted the check — otherwise the documented way of pinning a key becomes unusable
+  for that key. And having widened it that far, widen it in BOTH directions: permitting a
+  declaration for a direct reader while requiring one only of the function's callers leaves exactly
+  the stale run the check exists to prevent.
   One more trap that costs a debugging round: dune's `glob_files_rec` runs over the BUILD tree,
   where a `<name>.pp.ml` sits beside every ppx-using `<name>.ml` — and a `.pp.ml` is not input the
   compiler's own parser accepts. A scan that parses everything it is handed (rather than only the

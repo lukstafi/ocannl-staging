@@ -702,47 +702,80 @@ let main () =
             | [] -> []
             | words -> [ "markers: " ^ String.concat ~sep:", " words ]) )
         :: !by_file;
-      (* gh-ocannl-723: the artifact-directory declaration, against the modules that call the
-         initializer needing it. Both directions, since a declaration nothing calls for is the
-         restatement this replaces rather than the relationship. *)
-      let key module_name = String.lowercase (Scan.in_subdir dir (module_name ^ ".ml")) in
-      let calls module_name = Set.mem artifact_caller_keys (key module_name) in
-      (* A module that reads `build_files_prefix` some other way justifies the declaration just as a
-         call to the initializer does, so the converse direction asks before telling a stanza to drop
-         one (Codex P2, round 2). Read on demand: it is asked only of a stanza that declares the
-         variable and calls nothing, which is a handful of sources at most. *)
-      let reads_prefix module_name =
-        match List.Assoc.find sources ~equal:String.equal (key module_name) with
-        | None -> false
-        | Some on_disk -> (
-            try
-              Sources.source_reads_key (In_channel.read_all on_disk) ~key:artifact_config_key
-            with _ -> false)
+      (* gh-ocannl-723: the artifact-directory declaration, against the modules that read the key
+         needing it. Both directions, since a declaration nothing reads for is the restatement this
+         replaces rather than the relationship.
+
+         Per SUBDIRECTORY, not per dune file (Codex P2, round 3). `(subdir gen …)` applies its
+         stanzas to another directory, so the modules they name live there and the executables they
+         run are theirs -- and a walk that only saw the top level reported a nested stanza's source
+         as claimed by nobody. `Scan.walk` is the same descent the marker and site scans make. *)
+      let artifact_groups =
+        Scan.walk "" stanzas ~f:(fun subdir stanza -> [ (subdir, stanza) ])
+        |> List.stable_sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
+        |> List.group ~break:(fun (a, _) (b, _) -> not (String.equal a b))
+        |> List.map ~f:(fun group ->
+            (Scan.in_subdir dir (fst (List.hd_exn group)), List.map group ~f:snd))
       in
-      (* Dune's default module set is the directory less what other stanzas claim, so the scan needs
-         to know what the directory holds -- a `(test (name t))` with no `(modules …)` builds `t.ml`
-         (Codex P2, round 2). Only the sources this scan was handed, which is what it can answer
-         for; the census check below is what catches a caller no stanza claims either way. *)
-      let directory_modules =
-        List.filter_map source_files ~f:(fun (path, _) ->
-            if String.equal (Stdlib.Filename.dirname path) (if String.is_empty dir then "." else dir)
-            then Some (Stdlib.Filename.remove_extension (Stdlib.Filename.basename path))
-            else None)
+      let subjects =
+        List.concat_map artifact_groups ~f:(fun (here, group) ->
+            let key module_name = String.lowercase (Scan.in_subdir here (module_name ^ ".ml")) in
+            let calls module_name = Set.mem artifact_caller_keys (key module_name) in
+            (* A module that reads `build_files_prefix` some other way needs the variable tracked for
+               the same reason a caller does, and is subject to the same rule (Codex P2, rounds 2 and
+               3). Narrowed textually first, the way the caller census is: the key has to be SPELLED
+               for either spelling of a read to name it, so only the sources that mention it are
+               parsed. *)
+            let reads_prefix module_name =
+              match List.Assoc.find sources ~equal:String.equal (key module_name) with
+              | None -> false
+              | Some on_disk -> (
+                  let content = In_channel.read_all on_disk in
+                  String.is_substring content ~substring:artifact_config_key
+                  &&
+                  try Sources.source_reads_key content ~key:artifact_config_key with _ -> false)
+            in
+            (* Dune's default module set is the directory less what other stanzas claim, so the scan
+               needs to know what the directory holds -- a `(test (name t))` with no `(modules …)`
+               builds `t.ml` (Codex P2, round 2). Only the sources this scan was handed, which is
+               what it can answer for; the census check below is what catches a caller no stanza
+               claims either way. *)
+            let directory = if String.is_empty here then "." else here in
+            let directory_modules =
+              List.filter_map source_files ~f:(fun (path, _) ->
+                  if String.equal (Stdlib.Filename.dirname path) directory then
+                    Some (Stdlib.Filename.remove_extension (Stdlib.Filename.basename path))
+                  else None)
+            in
+            List.map
+              (Scan.artifact_subjects ~directory_modules group ~calls ~reads_prefix)
+              ~f:(fun subject -> (here, subject)))
       in
-      let subjects = Scan.artifact_subjects ~directory_modules stanzas ~calls ~reads_prefix in
-      List.iter subjects ~f:(fun subject ->
+      List.iter subjects ~f:(fun (here, subject) ->
           let where =
             Printf.sprintf "%s, the %s %s" dune_file subject.Scan.artifact_head
               subject.Scan.artifact_name
           in
-          let callers = String.concat ~sep:", " subject.Scan.artifact_callers in
-          List.iter subject.Scan.artifact_callers ~f:(fun m ->
+          let needs = subject.Scan.artifact_callers @ subject.Scan.artifact_readers in
+          let what =
+            match (subject.Scan.artifact_callers, subject.Scan.artifact_readers) with
+            | [], readers ->
+                String.concat ~sep:", " readers ^ " reads `" ^ artifact_config_key ^ "` by name"
+            | callers, [] ->
+                String.concat ~sep:", " callers ^ " calls `Test_utils.Generated.init`"
+            | callers, readers ->
+                String.concat ~sep:", " callers ^ " calls `Test_utils.Generated.init` and "
+                ^ String.concat ~sep:", " readers ^ " reads `" ^ artifact_config_key
+                ^ "` by name"
+          in
+          List.iter needs ~f:(fun m ->
               artifact_claimed :=
-                Set.add !artifact_claimed (String.lowercase (Scan.in_subdir dir (m ^ ".ml"))));
+                Set.add !artifact_claimed (String.lowercase (Scan.in_subdir here (m ^ ".ml"))));
           artifact_table :=
             Printf.sprintf "  %-58s %s (%s)" where
               (Scan.artifact_verdict_name subject.Scan.artifact_verdict)
-              (if String.is_empty callers then subject.Scan.artifact_deps_site else callers)
+              (if List.is_empty needs then subject.Scan.artifact_deps_site
+               else String.concat ~sep:", " needs)
             :: !artifact_table;
           match subject.Scan.artifact_verdict with
           | Scan.Artifact_declared | Scan.Artifact_other_reader -> ()
@@ -750,12 +783,11 @@ let main () =
               Int.incr artifact_violations;
               fail
                 (Printf.sprintf
-                   "%s: %s calls `Test_utils.Generated.init`, which reads `build_files_prefix` to \
-                    decide whether the artifact directory is this run's to empty, and %s does not \
-                    declare `(env_var %s)` -- dune then serves the previous run's result across a \
-                    change of the variable that decides which directory the run reads. Add the \
-                    declaration there"
-                   where callers subject.Scan.artifact_deps_site Scan.artifact_env_var)
+                   "%s: %s -- `%s` decides which directory the run's generated artifacts are read \
+                    from, and %s does not declare `(env_var %s)`, so dune serves the previous run's \
+                    result across a change of it. Add the declaration there"
+                   where what artifact_config_key subject.Scan.artifact_deps_site
+                   Scan.artifact_env_var)
           | Scan.Artifact_stale_declaration ->
               Int.incr artifact_violations;
               fail
@@ -770,22 +802,21 @@ let main () =
               Int.incr artifact_violations;
               fail
                 (Printf.sprintf
-                   "%s: %s calls `Test_utils.Generated.init` and no stanza in this file runs the \
-                    executable -- an `(executable)` has no `deps` field, so the `(env_var %s)` \
-                    declaration goes on the rule that RUNS it, the same placement as the `%s` dep \
-                    and the backend marker. This scan can find neither"
-                   where callers Scan.artifact_env_var Scan.config_file)
+                   "%s: %s, and no stanza in this file runs the executable -- an `(executable)` has \
+                    no `deps` field, so the `(env_var %s)` declaration goes on the rule that RUNS \
+                    it, the same placement as the `%s` dep and the backend marker. This scan can \
+                    find neither"
+                   where what Scan.artifact_env_var Scan.config_file)
           | Scan.Artifact_in_library ->
               Int.incr artifact_violations;
               fail
                 (Printf.sprintf
-                   "%s: %s calls `Test_utils.Generated.init` from a library module -- the \
-                    initializer empties the artifact directory of the process that owns it, so it \
-                    belongs to an executable's own modules. Called through a library it puts the \
-                    `(env_var %s)` requirement on every stanza that links the library, where \
-                    nothing follows it"
-                   where callers Scan.artifact_env_var));
-      artifact_by_file := (dune_file, subjects) :: !artifact_by_file;
+                   "%s: %s, from a library module -- the initializer empties the artifact directory \
+                    of the process that owns it, so it belongs to an executable's own modules. \
+                    Called through a library it puts the `(env_var %s)` requirement on every stanza \
+                    that links the library, where nothing follows it"
+                   where what Scan.artifact_env_var));
+      artifact_by_file := (dune_file, List.map subjects ~f:snd) :: !artifact_by_file;
       (* The ambient gate, per directory AND per alias (gh-ocannl-652). *)
       let gated_here = gated_aliases stanzas in
       let entry_points = entry_points stanzas in
@@ -1318,7 +1349,7 @@ let main () =
    drift from them -- which buys the sharper claim: the violating tree exits 1 and names the stanza,
    and the legitimate one exits 0. *)
 
-let control_root_paths = [ "t/dune"; "t/probe.ml" ]
+let control_root_paths = [ "t/dune"; "t/probe.ml"; "t/nested/probe2.ml" ]
 let control_probe = "let () = Test_utils.Generated.init ~backend_name:\"cc\"\n"
 
 (* The subject: an `(executable)` whose one module calls the initializer, plus the rule that runs it
@@ -1341,8 +1372,31 @@ let control_subject ~declares =
   (with-stdout-to
    %%{target}
    (run ./probe.exe))))
+
+; A second, always-correct pair inside a `(subdir …)`. It is not the pair under control -- it
+; declares in both runs -- but it is what makes the LEGITIMATE run's exit status depend on the walk
+; descending: a scan that only read the top level would leave `nested/probe2.ml` claimed by nobody,
+; which the census check reports (Codex P2, round 3).
+(subdir
+ nested
+ (executable
+  (name probe2)
+  (modules probe2)
+  (libraries test_utils))
+ (rule
+  ; ocannl-backend: none -- the same fixture, one directory down.
+  (target probe2.actual)
+  (deps
+   ocannl_config
+   (env_var %s)
+   %%{dep:probe2.exe})
+  (action
+   (with-stdout-to
+    %%{target}
+    (run ./probe2.exe)))))
 |dune}
     (if declares then Printf.sprintf "  (env_var %s)\n" Scan.artifact_env_var else "")
+    Scan.artifact_env_var
 
 (* The rest of the tree exists only so that the two runs differ in ONE verdict. Both lists below are
    checked for staleness against the files that make them necessary, so a tree without those files
@@ -1434,6 +1488,7 @@ let control () =
   List.iter context ~f:(fun (file, content) ->
       write_file (Stdlib.Filename.concat root file) content);
   write_file (Stdlib.Filename.concat root "t/probe.ml") control_probe;
+  write_file (Stdlib.Filename.concat root "t/nested/probe2.ml") control_probe;
   let paths = control_root_paths @ List.map context ~f:fst in
   let run ~declares =
     write_file (Stdlib.Filename.concat root "t/dune") (control_subject ~declares);

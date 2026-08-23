@@ -982,11 +982,14 @@ let sentinel_counting_cases =
    The third argument is which modules call the initializer, which is what the source side of the
    relationship answers. *)
 let render_artifact (s : Scan.artifact_subject) =
-  Printf.sprintf "%s %s: %s%s" s.Scan.artifact_head s.Scan.artifact_name
+  Printf.sprintf "%s %s: %s%s%s" s.Scan.artifact_head s.Scan.artifact_name
     (Scan.artifact_verdict_name s.Scan.artifact_verdict)
     (match s.Scan.artifact_callers with
     | [] -> ""
     | callers -> " (" ^ String.concat ~sep:", " callers ^ ")")
+    (match s.Scan.artifact_readers with
+    | [] -> ""
+    | readers -> " [reads " ^ String.concat ~sep:", " readers ^ "]")
 
 let artifact_cases =
   [
@@ -1093,6 +1096,15 @@ let artifact_cases =
       {dune|(alias (name a) (deps (env_var OCANNL_BUILD_FILES_PREFIX)))|dune},
       [],
       [ "alias a: stale declaration" ] );
+    (* An executable can be run under its public name as readily as under `<name>.exe`, and
+       `classify_command` already records `%{bin:pkg.probe}` as `Runs "pkg.probe"` -- so a runner
+       named that way has to be recognised, or its executable reads as one nothing runs (Codex P2,
+       round 3). *)
+    ( "a runner naming the executable's public name is its runner",
+      {dune|(executable (name probe) (public_name pkg.probe) (modules probe))
+(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (run %{bin:pkg.probe})))|dune},
+      [ "probe" ],
+      [ "executable probe: declared (probe)" ] );
     ( "an executable nothing in the file runs has no deps field to answer for it",
       {dune|(executable (name probe) (modules probe))|dune},
       [ "probe" ],
@@ -1149,6 +1161,14 @@ let artifact_default_modules_cases =
       [ "t"; "helper" ],
       [ "t" ],
       [ "test t: undeclared (t)" ] );
+    (* And the subtraction is resolved, not discarded: a module the stanza EXCLUDES is one it never
+       links, so demanding a declaration of it would be a demand about a module the test does not
+       build (Codex P2, round 3). *)
+    ( "a module subtracted from :standard is not the stanza's",
+      {dune|(test (name t) (modules (:standard \ helper)) (deps ocannl_config))|dune},
+      [ "t"; "helper" ],
+      [ "helper" ],
+      [] );
     (* And the default narrows: what another stanza names explicitly is not in it, which is dune's
        own rule and what keeps a caller attributed to one stanza. *)
     ( "a module another stanza names explicitly is not in the default set",
@@ -1168,7 +1188,14 @@ let artifact_reader_cases =
     ( "a declaration behind a direct read of the key is not stale",
       {dune|(test (name t) (modules t) (deps (env_var OCANNL_BUILD_FILES_PREFIX)))|dune},
       [ "t" ],
-      [ "test t: declared for a direct read" ] );
+      [ "test t: declared for a direct read [reads t]" ] );
+    (* And required, not merely permitted: a direct reader needs the variable tracked for exactly
+       the reason a caller does, so a rule that only PERMITTED the declaration would leave the stale
+       run it exists to prevent (Codex P2, round 3). *)
+    ( "a direct reader that does not declare is reported like any other",
+      {dune|(test (name t) (modules t) (deps ocannl_config))|dune},
+      [ "t" ],
+      [ "test t: undeclared [reads t]" ] );
     ( "and the same stanza whose module reads nothing is",
       {dune|(test (name t) (modules t) (deps (env_var OCANNL_BUILD_FILES_PREFIX)))|dune},
       [],
