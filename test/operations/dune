@@ -3408,3 +3408,17 @@
  (libraries base ocannl stdio arrayjit.verdict test_utils)
  (preprocess
   (pps ppx_here ppx_ocannl)))
+
+; The executable smoke test of the OCANNL benchmark measurement path (gh-ocannl-702). No fixture and
+; no Python: `Bench_harness.run_self_test` fabricates a tiny model in memory and drives the whole of
+; `measure_and_emit`, so a refactor of the emitter fails here rather than as a wrong benchmark
+; number on a GPU box days later. Runs training steps, so it takes the shared training lock: its
+; process-local OpenMP pool must not overlap another training test's.
+
+(test
+ (name bench_self_test)
+ (package neural_nets_lib)
+ (locks ocannl_training_test)
+ (deps ocannl_config (env_var OCANNL_BACKEND))
+ (modules bench_self_test)
+ (libraries base stdio yojson bench_harness arrayjit.verdict))

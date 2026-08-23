@@ -42,7 +42,19 @@ module H = Bench_harness
 
 let cross_entropy_loss = Nn_blocks.cross_entropy_loss
 
+(* `bench_mlp --self-test` (gh-ocannl-702): the fixture-free smoke run of the measurement path. It
+   fabricates a tiny model in memory, so it needs neither benchmarks/fixtures/ — empty in a fresh
+   checkout — nor the Python environment that fills it, and it prints a real result line for a
+   workload named [selftest-tiny], which is deliberately NOT a comparable cell. The mode lives in
+   Bench_harness, so #720's legs can offer it from any runner; it is wired up here alone for now,
+   and test/operations/bench_self_test is what runs it in CI. *)
+let self_test_requested () =
+  Array.exists Stdlib.Sys.argv ~f:(String.equal "--self-test")
+
 let () =
+  if self_test_requested () then (
+    ignore (H.run_self_test () : string);
+    Stdlib.exit 0);
   let fixture = Stdlib.Sys.getenv "BENCH_FIXTURE" in
   let tune = H.env_flag "BENCH_TUNE" in
   let st = St.read fixture in
@@ -313,13 +325,15 @@ let () =
         done;
         Stdio.printf "\n");
     Stdlib.exit 0);
-  H.measure_and_emit ~st ~backend
-    ~variant:
-      (* Scheduling variant only: the storage precision is the "precision" field's business
-         (gh-ocannl-539). They are independent axes, and folding a reduced precision into the
-         variant made a tuned bf16 cell unnameable. *)
-      (if tune then "tuned" else if materialize then "materialized" else "default")
-    ~precision:leg.H.label ~compile_s ~tune:arms ~run_step
-    ~read_loss:(fun () -> (!ctx_ref, batch_loss).@[0])
-    ~sync:(fun () -> Context.sync !ctx_ref)
-    ()
+  ignore
+    (H.measure_and_emit ~protocol:(H.protocol_of_st st) ~backend
+       ~variant:
+         (* Scheduling variant only: the storage precision is the "precision" field's business
+            (gh-ocannl-539). They are independent axes, and folding a reduced precision into the
+            variant made a tuned bf16 cell unnameable. *)
+         (if tune then "tuned" else if materialize then "materialized" else "default")
+       ~precision:leg.H.label ~compile_s ~tune:arms ~run_step
+       ~read_loss:(fun () -> (!ctx_ref, batch_loss).@[0])
+       ~sync:(fun () -> Context.sync !ctx_ref)
+       ()
+      : string)

@@ -281,13 +281,15 @@ let () =
     Int.incr step_count
   in
   let open Operation.At in
-  H.measure_and_emit ~st ~backend
-    ~variant:
-      (* Mirror bench_mlp: the scheduling variant alone. orchestrate renders precision as its own
-         report column and composes the two axes itself (gh-ocannl-539), so a reduced-precision cell
-         is distinguished by the precision field rather than by overloading this one. *)
-      (if tune then "tuned" else if materialize then "materialized" else "default")
-    ~precision:leg.H.label ~compile_s ~tokens_per_step:(batch_size * seq) ~tune:arms ~run_step
-    ~read_loss:(fun () -> (!ctx_ref, batch_loss).@[0])
-    ~sync:(fun () -> Context.sync !ctx_ref)
-    ()
+  ignore
+    (H.measure_and_emit ~protocol:(H.protocol_of_st st) ~backend
+       ~variant:
+         (* Mirror bench_mlp: the scheduling variant alone. orchestrate renders precision as its own
+            report column and composes the two axes itself (gh-ocannl-539), so a reduced-precision
+            cell is distinguished by the precision field rather than by overloading this one. *)
+         (if tune then "tuned" else if materialize then "materialized" else "default")
+       ~precision:leg.H.label ~compile_s ~tokens_per_step:(batch_size * seq) ~tune:arms ~run_step
+       ~read_loss:(fun () -> (!ctx_ref, batch_loss).@[0])
+       ~sync:(fun () -> Context.sync !ctx_ref)
+       ()
+      : string)

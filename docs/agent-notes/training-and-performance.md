@@ -118,6 +118,14 @@ files.
   counter reads zero, which looks exactly like "the problem went away". Fixtures are also not in a
   fresh checkout (`benchmarks/fixtures/*.safetensors` is generated); `gen_fixtures.py` recreates
   them, and they are only valid while `gen_fixtures.py` and `benchmarks/workloads/` are unchanged.
+- Because of that, no *comparable* cell runs without a Python ML venv -- but the MEASUREMENT path
+  does: `bench_mlp --self-test` / `Bench_harness.run_self_test` fabricates a tiny model in memory
+  and drives the whole protocol and emitter (gh-ocannl-702), and `test/operations/bench_self_test`
+  runs it in CI on `OCANNL_BACKEND`'s backend. Reach for it when changing `measure_and_emit`,
+  `Bench_json.result_line` or the step machinery in `Bench_harness`, and when bringing up a new
+  backend -- the alternative first signal is a wrong number in a report from a GPU box, days later.
+  It sidesteps the fixture contract rather than weakening it: `selftest-tiny` is not a workload,
+  its numbers compare to nothing, and the emitted record's `workload`/`variant` say so.
 - A benchmark cell reports what it measured through ONE JSON line, so anything that line cannot
   express is a measurement thrown away (gh-ocannl-676). Non-finite numbers are the whole class:
   OCaml's `%g` spells them `nan`/`inf`, `json.dumps` writes `NaN`, JSON has neither, and
