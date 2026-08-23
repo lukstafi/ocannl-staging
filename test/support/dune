@@ -38,7 +38,8 @@
   scan_floors
   dune_stanza_scan
   verdict_scan
-  generated)
+  generated
+  asm_census)
  (libraries
   base
   stdio
