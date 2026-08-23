@@ -36,6 +36,8 @@ module Asgns = Ir.Assignments
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
+let p_none = Verdict.p_none
+let p_all = Verdict.p_all
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let skipped = Verdict.skipped ~backend:backend_name
 
@@ -324,8 +326,8 @@ let () =
         q.Autotune.sk_mma && q.Autotune.sk_batch_grid && not q.Autotune.sk_epilogue)
   in
   p "qkv_mma: tensorized batch-grid twins are seeded" (not (List.is_empty mma_grid_seeds));
-  p "qkv_mma: every tensorized batch-grid twin constructs, validates, and folds the batch onto .z"
-    (List.for_all mma_grid_seeds ~f:(fun q ->
+  p_all "qkv_mma: every tensorized batch-grid twin constructs, validates, and folds the batch onto .z"
+    mma_grid_seeds ~f:(fun q ->
          match Sched.apply (Autotune.sketch_schedule ~p:q opt) opt with
          | o -> (
              match LL.validate_parallel o.LL.optimize_ctx.LL.placements o.LL.llc with
@@ -335,7 +337,7 @@ let () =
                  false)
          | exception exn ->
              Stdio.eprintf "qkv_mma: construct FAILED: %s\n" (Exn.to_string exn);
-             false));
+             false);
 
   (* --- The pre-driver gate for the launch dimensions: [validate_parallel] deliberately accepts any
      grid geometry (it is backend-independent), so [Schedule.check_hardware_limits_classified] is
@@ -365,9 +367,9 @@ let () =
               { resource = Ir.Schedule_outcome.Grid_z_extent; _ } ) ->
         true
     | exception _ -> false);
-  p "limit gate: a max_grid_yz below the batch product stops the twins at seeding"
-    (Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false ~limits:(limits_yz ((bb * hh) - 1)) opt
-    |> List.for_all ~f:(fun q -> not q.Autotune.sk_batch_grid));
+  p_none "limit gate: a max_grid_yz below the batch product stops the twins at seeding"
+    (Autotune.sketch_seed_params ~is_gpu:true ~is_cpu:false ~limits:(limits_yz ((bb * hh) - 1)) opt)
+    ~f:(fun q -> q.Autotune.sk_batch_grid);
 
   (* The [.y] gate is the same check one dimension over, and has nothing to do with the fold:
      [grid.(1)] is a blocktiled matmul's row-block count, which grows with the site's m-extent alone

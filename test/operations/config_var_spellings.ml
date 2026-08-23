@@ -175,9 +175,8 @@ let () =
 let () =
   printf "\n";
   List.iter [ "OCANNL-BACKEND"; "ocannl-backend"; "OCANNL-LOG_LEVEL" ] ~f:(fun name ->
-      Verdict.p
-        (Printf.sprintf "%S is an unread spelling under both case sensitivities" name)
-        (List.for_all [ false; true ] ~f:(fun case_insensitive ->
+      Verdict.p_all (Printf.sprintf "%S is an unread spelling under both case sensitivities" name)
+        [ false; true ] ~f:(fun case_insensitive ->
              match Utils.classify_env_var ~case_insensitive name with
              | Utils.Env_unread_spelling _ -> true
-             | _ -> false)))
+             | _ -> false))

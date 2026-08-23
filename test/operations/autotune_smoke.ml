@@ -22,6 +22,8 @@ module Asgns = Ir.Assignments
 
 let p = Verdict.p
 
+let p_all = Verdict.p_all
+
 (* The report's outcome as the questions this test asks of it (gh-ocannl-677): the outcome is a
    variant naming one of five mutually exclusive states, so a claim names the state it means. In
    particular [not (replayed r)] is NOT "a search ran" — that mis-derivation is what the variant
@@ -408,12 +410,11 @@ let () =
     (List.equal String.equal
        (List.map named_states ~f:(fun (_, r) -> Autotune.outcome_name r.Autotune.outcome))
        [ "searched"; "cache-replay"; "search-disabled"; "cache-replay" ]);
-  p "a report that neither searched nor replayed timed nothing"
-    (List.for_all named_states ~f:(fun (_, r) ->
+  p_all "a report that neither searched nor replayed timed nothing" named_states ~f:(fun (_, r) ->
          match r.Autotune.outcome with
          | Autotune.Searched | Autotune.Search_died _ | Autotune.Cache_replay -> true
          | Autotune.Search_disabled | Autotune.Pre_search_failure _ ->
-             r.Autotune.candidates_timed = 0));
+             r.Autotune.candidates_timed = 0);
   (* Only a CHOSEN cache replays (Codex P2 on PR #291): the SAME directory is replayed or ignored
      depending on whether someone asked for it. A search with no [cache_dir] populates the built-in
      default directory; a search-less call that likewise names no directory must not pick that entry

@@ -82,9 +82,8 @@ let () =
       let losses = match field j "losses" with Some (`List l) -> l | _ -> [] in
       Verdict.p "losses carries one parity checksum per parity step"
         (List.length losses = protocol.H.parity_steps);
-      Verdict.p "every parity checksum is a finite number"
-        (List.for_all losses ~f:(function `Float _ | `Int _ -> true | _ -> false)
-        && not (List.is_empty losses))
+      Verdict.p_all "every parity checksum is a finite number" losses
+        ~f:(function `Float _ | `Int _ -> true | _ -> false)
   | None ->
       (* The claim above has already failed the run; naming the line is what makes it diagnosable. *)
       Verdict.fail ("the emitted result line is not a JSON object: " ^ line)

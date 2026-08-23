@@ -408,6 +408,15 @@ let same ?tol got expected = List.for_all2_exn got expected ~f:(close ?tol)
     a fact whose desired value is [false] gets renamed, not recorded (gh-ocannl-601). *)
 let p = Verdict.p
 
+(** The quantified claims, re-exported for the same reason {!p} is: a hand-built-IR test says
+    "every statement …" of a collection it derived from the walk, and over an empty one that reads
+    as a pass while checking nothing (gh-ocannl-729). {!Verdict.p_all} fails there instead. *)
+let p_all = Verdict.p_all
+
+let p_none = Verdict.p_none
+let p_exists = Verdict.p_exists
+let p_empty = Verdict.p_empty
+
 (** {1 Structural probes}
 
     One exhaustive pair of traversals over [Low_level.t] / [scalar_t], from which every counter

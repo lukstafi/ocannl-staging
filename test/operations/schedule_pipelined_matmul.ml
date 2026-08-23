@@ -51,6 +51,8 @@ let () = Utils.settings.output_debug_files_in_build_directory <- true
 let () = Numerics.set_policy { (Numerics.get ()) with tf32_matmuls = false }
 let p = Verdict.p
 
+let p_all = Verdict.p_all
+
 (* Zeros compare equal to zeros. A fragment mapping that reads outside the staged block, a kernel
    that never ran, or a reference whose own setup silently collapsed all yield all-zeros, and a
    parity check between two zero arrays passes while covering nothing (gh-ocannl-481 item 3). Every
@@ -269,8 +271,8 @@ let () =
      let got_ref = List.Assoc.find_exn results 0 ~equal:Int.equal in
      let got_d1 = List.Assoc.find_exn results 1 ~equal:Int.equal in
      let got_d2 = List.Assoc.find_exn results 2 ~equal:Int.equal in
-     p "staged depths approximate the serial twin (GPU) or clean rejection (CPU)"
-       (List.for_all results ~f:(fun (_, got) -> Array.for_all2_exn got got_serial ~f:approx));
+     p_all "staged depths approximate the serial twin (GPU) or clean rejection (CPU)" results
+       ~f:(fun (_, got) -> Array.for_all2_exn got got_serial ~f:approx);
      (* The invariant: pipelining is a pure prefetch-timing transform. *)
      p "depth 2 matches depth 1 BITWISE" (Array.for_all2_exn got_d2 got_d1 ~f:Float.equal);
      (* The gh-567 invariant: grouping and eliding barriers is a pure synchronization transform. *)
@@ -333,8 +335,8 @@ let () =
          false
        with Invalid_argument msg -> String.is_substring msg ~substring:"not supported"
      in
-     p "staged depths approximate the serial twin (GPU) or clean rejection (CPU)"
-       (List.for_all legs ~f:rejects);
+     p_all "staged depths approximate the serial twin (GPU) or clean rejection (CPU)" legs
+       ~f:rejects;
      skipped "depth 2 matches depth 1 BITWISE";
      skipped "depth 1 matches the un-elided barrier structure BITWISE";
      skipped "depth 2 rotates the buffers the depth-1 kernel does not";

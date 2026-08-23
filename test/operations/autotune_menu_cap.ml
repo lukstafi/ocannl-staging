@@ -25,6 +25,8 @@ module SC = Ir.Schedule_cache
 module V = Verdict
 
 let p = V.p
+let p_empty = V.p_empty
+let p_all = V.p_all
 let cap = 48
 
 (* Category sizes: one overflowing category, one comfortably small, one empty, and two in
@@ -40,8 +42,7 @@ let represented kept name = List.exists kept ~f:(fun (c, _) -> String.equal c na
 let () =
   let kept, dropped = Autotune.share_cap ~cap categories in
   p "the overflowing menu is capped to exactly the budget" (List.length kept = cap);
-  p "every non-empty category is represented under the cap"
-    (List.for_all non_empty ~f:(represented kept));
+  p_all "every non-empty category is represented under the cap" non_empty ~f:(represented kept);
   p "an empty category is not conjured into the menu" (not (represented kept "swap"));
   (* Remainder spill: with 4 non-empty categories an equal share is 12, so the two categories
      smaller than that keep everything and their unused share goes to the larger ones. *)
@@ -51,8 +52,8 @@ let () =
     (kept_of "vectorize" = 5);
   p "the spilled remainder goes to the categories that still have proposals"
     (kept_of "tensorize" + kept_of "unroll" = cap - 6 - 5);
-  p "no category is starved to zero while it has proposals and budget remains"
-    (List.for_all non_empty ~f:(fun name -> kept_of name > 0));
+  p_all "no category is starved to zero while it has proposals and budget remains" non_empty
+    ~f:(fun name -> kept_of name > 0);
   (* Survivors keep their category order and their within-category order, so the fix is invisible
      to anything downstream that fits under the cap. *)
   p "survivors stay in category order and in each category's own order"
@@ -64,9 +65,9 @@ let () =
   (* What the cap dropped is reported, per category, rather than what it was offered. *)
   p "the drop report accounts for every withheld proposal"
     (List.sum (module Int) dropped ~f:snd = total - cap);
-  p "the drop report names only categories that actually lost proposals"
-    (List.for_all dropped ~f:(fun (name, d) ->
-         d > 0 && d = List.Assoc.find_exn sizes name ~equal:String.equal - kept_of name));
+  p_all "the drop report names only categories that actually lost proposals" dropped
+    ~f:(fun (name, d) ->
+         d > 0 && d = List.Assoc.find_exn sizes name ~equal:String.equal - kept_of name);
   (* An under-full menu is returned untouched, with nothing reported dropped. *)
   let small = List.map sizes ~f:(fun (name, n) -> (name, List.init (min n 3) ~f:(fun i -> (name, i)))) in
   let small_kept, small_dropped = Autotune.share_cap ~cap small in
@@ -75,13 +76,13 @@ let () =
        (fun (a, i) (b, j) -> String.equal a b && i = j)
        small_kept
        (List.concat_map small ~f:snd));
-  p "a menu that fits under the cap reports no drops" (List.is_empty small_dropped);
+  p_empty "a menu that fits under the cap reports no drops" ~over:small small_dropped;
   (* The negative control, stated as a claim: on this very input the plain prefix the cap used to
      be represents the first category and nothing else. *)
   let prefix = List.take (List.concat_map categories ~f:snd) cap in
-  p "the plain prefix this replaces would have starved every category after the first"
-    (List.for_all non_empty ~f:(fun name ->
-         String.equal name "tensorize" || not (represented prefix name)));
+  p_all "the plain prefix this replaces would have starved every category after the first" non_empty
+    ~f:(fun name ->
+         String.equal name "tensorize" || not (represented prefix name));
   Stdio.printf "\n%!"
 
 (* === the cap's altitude (PR #424 review, P2): [Autotune.menu]'s [admits] runs BEFORE the cap ===
@@ -127,8 +128,7 @@ let () =
   let full = build () in
   let unrolls_only = build ~admits:is_unroll () in
   p "the probe unit really does overflow the per-unit cap" (List.length full = cap);
-  p "admitting one category yields only that category"
-    (List.for_all unrolls_only ~f:is_unroll && not (List.is_empty unrolls_only));
+  p_all "admitting one category yields only that category" unrolls_only ~f:is_unroll;
   p "the admitted category is not itself capped (so it is the complete admitted set)"
     (List.length unrolls_only < cap);
   (* The discriminator. Were [admits] applied to the capped menu, this count could only ever be the

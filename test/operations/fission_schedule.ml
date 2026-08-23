@@ -32,6 +32,7 @@ module IDX = Train.IDX
 
 let () = Utils.settings.output_debug_files_in_build_directory <- true
 let p = Verdict.p
+let p_all = Verdict.p_all
 let approx a b = Float.(abs (a - b) < 1e-4)
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let on_cpu = String.is_substring backend_name ~substring:"cc"
@@ -107,7 +108,7 @@ let () =
   let opt = Option.value_exn ~here:[%here] !stash in
   let segs = Sched.maybe_default_schedules ~backend_name:"metal" ~static_indices:[] opt in
   p "capture: one aligned segment" (List.length segs = 1);
-  p "capture: the merged segment is hardware-annotated" (List.for_all segs ~f:annotated);
+  p_all "capture: the merged segment is hardware-annotated" segs ~f:annotated;
   (match segs with
   | [ seg0 ] ->
       let mem seg tn = Hashtbl.mem seg.LL.traced_store tn in
@@ -199,7 +200,7 @@ let () =
   in
   let segs = Sched.maybe_default_schedules ~backend_name:"metal" ~static_indices:[] opt in
   p "replication: two segments" (List.length segs = 2);
-  p "replication: both segments annotated" (List.for_all segs ~f:annotated);
+  p_all "replication: both segments annotated" segs ~f:annotated;
   p "replication: consumer segment carries a replica of the local's definition"
     (match segs with [ _; seg1 ] -> has_declare_local seg1.LL.llc | _ -> false);
 

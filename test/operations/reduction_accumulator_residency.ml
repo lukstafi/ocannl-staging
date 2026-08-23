@@ -170,9 +170,8 @@ let () =
         (* The read-modify-write shape is one statement reading and writing the node. Its absence
            is what localization buys; the [Zero_out] statement reaches the node once and is not
            it. *)
-        Verdict.p
-          (label ^ ": no statement both reads and writes the node")
-          (List.for_all statements ~f:(fun st -> node_accesses st <= 1));
+        Verdict.p_all (label ^ ": no statement both reads and writes the node") statements
+          ~f:(fun st -> node_accesses st <= 1);
         Verdict.p
           (label ^ ": the node is stored exactly once, from the local")
           (1

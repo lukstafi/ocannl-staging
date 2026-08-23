@@ -33,6 +33,7 @@ module SC = Ir.Schedule_cache
 module Asgns = Ir.Assignments
 
 let p = Verdict.p
+let p_all = Verdict.p_all
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let skipped = Verdict.skipped ~backend:backend_name
 let on_cpu = String.is_substring backend_name ~substring:"cc"
@@ -138,8 +139,8 @@ let () =
     | SC.Swap { outer; inner } -> SC.equal_sym_ref outer rf || SC.equal_sym_ref inner rf
     | _ -> false
   in
-  p "scope-nested loops are enumerated (each inner reduction loop draws a proposal)"
-    (List.for_all [ rr; rs; rt ] ~f:(fun rf -> List.exists menu ~f:(targets rf)))
+  p_all "scope-nested loops are enumerated (each inner reduction loop draws a proposal)"
+    [ rr; rs; rt ] ~f:(fun rf -> List.exists menu ~f:(targets rf))
   ;
   p "a dividing Split of the scope-nested innermost loop is proposed"
     (List.exists menu ~f:(fun op ->

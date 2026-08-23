@@ -23,6 +23,10 @@ module Asgns = Ir.Assignments
 
 let p = Verdict.p
 
+let p_empty = Verdict.p_empty
+let p_all = Verdict.p_all
+let p_none = Verdict.p_none
+
 (* The report's outcome as the questions this test asks of it (gh-ocannl-677): the outcome is a
    variant naming one of five mutually exclusive states, so a claim names the state it means
    instead of combining flags — [not (replayed r)] in particular does NOT say a search ran. *)
@@ -121,7 +125,7 @@ let () =
   let declines =
     List.filter_map constructed ~f:(function Either.Second e -> Some e | _ -> None)
   in
-  p "bc: no seed declines on companion coverage" (List.is_empty declines);
+  p_empty "bc: no seed declines on companion coverage" ~over:constructed declines;
   List.iter declines ~f:(fun e -> Stdio.eprintf "bc decline: %s\n" e);
   (* The point of the fix is reach: the minor output axis (j) must actually carry [Grid] blocks in
      the constructed schedule, not merely survive construction. A schedule constructed under the old
@@ -168,8 +172,8 @@ let () =
     && (not (List.is_empty built))
     && List.for_all built ~f:(fun (_, sched) -> blocks_j bounds sched));
   let narrower = List.filter built ~f:(fun (sp, _) -> sp.Autotune.sk_bn < m) in
-  p "bc: the minor output axis carries block-level parallelism wherever the geometry allows"
-    ((not (List.is_empty narrower)) && List.for_all narrower ~f:(fun (_, s) -> spreads_j s));
+  p_all "bc: the minor output axis carries block-level parallelism wherever the geometry allows"
+    narrower ~f:(fun (_, s) -> spreads_j s);
   (* Negative control: the detector has teeth. The CPU pipelines block the ROW axis (under
      [sk_grid]) and never j, so [blocks_j] must reject every CPU-seeded schedule — if it answered
      true there it would be matching any Grid split at all, and both claims above would hold for a
@@ -184,9 +188,8 @@ let () =
         | sched -> Some sched
         | exception _ -> None)
   in
-  p "bc: the j-blocking detector rejects the CPU pipelines, which block the row axis instead"
-    ((not (List.is_empty cpu_scheds))
-    && List.for_all cpu_scheds ~f:(fun s -> not (blocks_j bounds s)));
+  p_none "bc: the j-blocking detector rejects the CPU pipelines, which block the row axis instead"
+    cpu_scheds ~f:(fun s -> blocks_j bounds s);
 
   (* Executable parity, seed by seed, on backends that can run shared staging. Vacuous on cc —
      announced on stderr so it is not mistaken for coverage; the golden stays
