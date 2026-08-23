@@ -1,23 +1,23 @@
 Names loaded: 32033
 train/dev/test examples (after batch truncation): 182000/22000/22000
-Epoch 0, mean train loss=2.6843 below 4: true
-Epoch 1, mean train loss=2.4751 below 3: true
-Epoch 2, mean train loss=2.4125 below 3: true
-Epoch 3, mean train loss=2.3829 below 3: true
-Epoch 4, mean train loss=2.3663 below 3: true
-Epoch 5, mean train loss=2.3554 below 2.6: true
-Epoch 6, mean train loss=2.3477 below 2.6: true
-Epoch 7, mean train loss=2.3419 below 2.6: true
-Epoch 8, mean train loss=2.3375 below 2.6: true
-Epoch 9, mean train loss=2.3339 below 2.6: true
-Epoch 10, mean train loss=2.3309 below 2.55: true
-Epoch 11, mean train loss=2.3284 below 2.55: true
-Epoch 12, mean train loss=2.3263 below 2.55: true
-Epoch 13, mean train loss=2.3245 below 2.55: true
-Epoch 14, mean train loss=2.3229 below 2.55: true
-Final train loss=2.3215 train_below: true
-Final dev   loss=2.3180 dev_below: true
-Final test  loss=2.3210 test_below: true
+Epoch 0, mean train loss below 4: true
+Epoch 1, mean train loss below 3: true
+Epoch 2, mean train loss below 3: true
+Epoch 3, mean train loss below 3: true
+Epoch 4, mean train loss below 3: true
+Epoch 5, mean train loss below 2.6: true
+Epoch 6, mean train loss below 2.6: true
+Epoch 7, mean train loss below 2.6: true
+Epoch 8, mean train loss below 2.6: true
+Epoch 9, mean train loss below 2.6: true
+Epoch 10, mean train loss below 2.55: true
+Epoch 11, mean train loss below 2.55: true
+Epoch 12, mean train loss below 2.55: true
+Epoch 13, mean train loss below 2.55: true
+Epoch 14, mean train loss below 2.55: true
+Final train loss below 2.5: true
+Final dev   loss below 2.55: true
+Final test  loss below 2.55: true
 haderganoth
 kimon
 lenghpillah
