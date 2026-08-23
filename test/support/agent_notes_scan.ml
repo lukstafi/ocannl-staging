@@ -581,36 +581,28 @@ let foreign_list_marker stripped =
 let fence_marker stripped =
   List.find [ "```"; "~~~" ] ~f:(fun m -> String.is_prefix stripped ~prefix:m)
 
-(** Whether what follows a [">="] reads as the right-hand side of a comparison: a number, possibly
-    behind spaces. That is what these notes write ([">= 8"], [">= 3.20"]), and it is the whole of
-    what keeps such a wrapped line out of {!block_quote_marker}'s hands. A comparison against
-    anything else — a name, a code span — has to be rewrapped or code-spanned, which the finding
-    says. *)
-let comparison_operand rest =
-  let rest = String.lstrip rest in
-  (not (String.is_empty rest)) && Char.is_digit rest.[0]
-
 (** A block quote marker, which Markdown honours at EVERY depth: nested under a bullet, [`  > …`]
     is a quote inside the list item, not part of the bullet's prose. Wiring this to column zero only
     let a nested quote fold into its parent's text unchecked (Codex P2, round 2).
 
-    CommonMark makes the space after [>] optional, so [">= 8"] at a line's first visible column is a
-    quote to a renderer whatever it reads like to a person — and these notes do compare numbers in
-    prose ([`  <= 8 and Retype-…`] is a real continuation line). Excluding every [">="] under-read
-    the marker, which is the one thing this dialect promises not to do (gh-ocannl-714). The split is
-    drawn on what FOLLOWS the operator rather than on the marker alone: a number is the comparison
-    the notes actually write and stays prose, anything else is a quote written without its space and
-    is reported. So [">= 8 lanes"] passes and [">=Quoted guidance."] does not. *)
+    The space after [>] is OPTIONAL, and nothing further along the line changes that: block
+    structure is settled before any of it is read as arithmetic, so a line whose first visible
+    column is [">= 8"] is a quote whatever the operand's type. Excluding [">="] under-read the
+    marker, which is the one thing this dialect promises not to do; and so did the first attempt at
+    fixing it, which excused a [">="] followed by a NUMBER and would have folded a quote whose text
+    happens to open with a digit into the bullet above it (Codex P2, gh-ocannl-714).
+
+    These notes do compare numbers in prose ([`  <= 8 and Retype-…`] is a real continuation line),
+    so the requirement lands on the prose rather than on the marker: a comparison keeps its operator
+    off the line's first visible column, or inside a code span, where this test never sees it. The
+    finding says both. *)
 let block_quote_marker stripped =
   if not (String.is_prefix stripped ~prefix:">") then None
   else if String.is_prefix stripped ~prefix:">=" then
-    if comparison_operand (String.drop_prefix stripped 2) then None
-    else
-      Some
-        "a block quote written \">=\": Markdown's quote marker does not need a space after it, so \
-         this line renders as a quote rather than as the comparison it reads like -- if a \
-         comparison is what it is, put the number straight after the operator, or the whole of it \
-         inside a code span"
+    Some
+      "a block quote: Markdown's quote marker does not need a space after it, so a line whose first \
+       visible column is \">=\" renders as a quote and not as the comparison it reads like -- rewrap \
+       so the operator is not first on the line, or write the comparison inside a code span"
   else Some "a block quote, whose text belongs to no bullet and which this scan does not read"
 
 (** A thematic break or a setext heading underline: a line of nothing but one repeated marker. It

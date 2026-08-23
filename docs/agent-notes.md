@@ -20,10 +20,10 @@ paragraphs, `- ` bullets one level deep, and the table above. Anything else — 
 ordered or `*` item, a block quote whether or not its marker carries a space, an HTML comment, a
 heading underlined instead of written with hashes — is REPORTED rather than guessed at, because a
 construct the scan cannot read is text no rule checks. Two of those readings are Markdown's rather
-than the obvious one, so write around them: a line whose first visible column is `>=` is a quote to
-a renderer, and stays prose here only when a number follows the operator, so put the number straight
-after it or the whole comparison inside a code span; and a line of nothing but `-` or `=` directly
-below a paragraph underlines it into a heading, however short the run. That is the contract to argue
+than the obvious one, so write around them: a quote marker does not need its space, so a line whose
+first visible column is `>=` is a quote however arithmetic it reads — rewrap the comparison to keep
+its operator off the first column, or write it inside a code span; and a line of nothing but `-` or
+`=` directly below a paragraph underlines it into a heading, however short the run. That is the contract to argue
 with if you want one of them: teach the scan what its lines mean, and it becomes part of the
 dialect.
 

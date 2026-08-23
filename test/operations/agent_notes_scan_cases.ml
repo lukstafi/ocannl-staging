@@ -194,37 +194,34 @@ let structure_cases =
     ( "a heading written without a space after the hashes",
       "# Title\n\n##ident_blacklist\n\n- A fact.\n",
       [ "bullet-integrity @ f.md:3" ] );
-    (* The block-quote marker's space is OPTIONAL in Markdown, so ">=" at a line's first visible
-       column renders as a quote whatever it reads like -- and these notes wrap comparisons onto
-       such a column. What tells the two apart is the OPERAND, so both sides of that split are
-       pinned here rather than the shape's absence from today's notes (gh-ocannl-714). *)
-    ( "a comparison at the start of a continuation is not a quote",
-      "# Title\n\n- A fact about widths\n  >= 8, and about `dune build`.\n",
-      [] );
-    ( "a comparison against a decimal is not a quote either",
-      "# Title\n\n- A fact about dune\n  >= 3.20, which generates the alias.\n",
-      [] );
-    ( "a comparison written without its own space is not a quote",
-      "# Title\n\n- A fact about widths\n  >=8 lanes, and about `dune build`.\n",
-      [] );
-    ( "a comparison inside the line is not a quote",
-      "# Title\n\n- A fact about widths that are >= 8 lanes.\n",
-      [] );
-    ( "a comparison inside a code span at the first column is not a quote",
-      "# Title\n\n- A fact about widths\n  `>= 8` lanes, stated in passing.\n",
-      [] );
+    (* The block-quote marker's space is OPTIONAL, and block structure is settled before any of the
+       line reads as arithmetic -- so a comparison wrapped onto a line's first visible column is a
+       quote whatever follows the operator. The requirement therefore lands on the PROSE, and what
+       the controls pin is that rule: reported wherever the operator opens the line, silent wherever
+       the note keeps it off the first visible column (gh-ocannl-714). *)
+    ( "a comparison wrapped onto a continuation's first column is a quote",
+      "# Title\n\n- A fact about widths:\n  >= 8, and about `dune build`.\n",
+      [ "bullet-integrity @ f.md:4" ] );
+    ( "a comparison written without its own space is a quote too",
+      "# Title\n\n- A fact about dune:\n  >=3.20, which generates the alias.\n",
+      [ "bullet-integrity @ f.md:4" ] );
     ( "a quote written without the space after its marker",
       "# Title\n\n>=Quoted prose.\n",
       [ "bullet-integrity @ f.md:3" ] );
     ( "a quote written without its space, nested under a bullet",
       "# Title\n\n- A fact:\n  >= Quoted guidance.\n",
       [ "bullet-integrity @ f.md:4" ] );
-    (* The residual, stated rather than hidden: a comparison whose right-hand side is a NAME is
-       indistinguishable from a quote written without its space, and this reports it. The finding
-       says what to do about it -- rewrap, or write the comparison inside a code span. *)
-    ( "a wrapped comparison against a name reads as a quote",
-      "# Title\n\n- A fact about widths:\n  >= the pool's width, and about `dune build`.\n",
-      [ "bullet-integrity @ f.md:4" ] );
+    (* The nearest legitimate text: the same comparison written the two ways that keep the operator
+       out of the marker position, which is what the finding above asks its author to do. *)
+    ( "a comparison inside the line is not a quote",
+      "# Title\n\n- A fact about widths that are >= 8 lanes.\n",
+      [] );
+    ( "a comparison rewrapped to keep its operator off the first column",
+      "# Title\n\n- A fact about widths that\n  are >= 8 lanes, and about `dune build`.\n",
+      [] );
+    ( "a comparison inside a code span at the first column is not a quote",
+      "# Title\n\n- A fact about widths\n  `>= 8` lanes, stated in passing.\n",
+      [] );
     ( "an HTML block at column zero",
       "# Title\n\n<details><summary>x</summary>\n",
       [ "bullet-integrity @ f.md:3" ] );
