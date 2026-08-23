@@ -137,7 +137,9 @@ let () =
      anti-regression invariant proper and runs over ALL seeds: j is Grid-typed in every constructed
      schedule, never left serial. The second keeps [for_all] strength over exactly the geometries
      the property can speak about — those whose column block is narrower than j — and requires that
-     set to be non-empty, so it cannot pass by going vacuous. *)
+     set to be non-empty, so it cannot pass by going vacuous. Both are stated over the resulting
+     BLOCK COUNT rather than over the split factor (gh-ocannl-744), so neither pins the provenance
+     of the geometry that produced it. *)
   let bounds = LL.loop_bounds opt.LL.llc in
   let j_grid_factors bounds sched =
     List.filter_map sched ~f:(function
@@ -147,8 +149,15 @@ let () =
           | _ -> None)
       | _ -> None)
   in
-  let blocks_j bounds sched = not (List.is_empty (j_grid_factors bounds sched)) in
-  let spreads_j sched = List.exists (j_grid_factors bounds sched) ~f:(fun f -> f < m) in
+  (* Stated as a BLOCK COUNT, not as a comparison of the split factor against the extent
+     (gh-ocannl-744): what the leg is about is that the minor output axis carries block-level
+     parallelism, and any factor yielding more than one block delivers that, whatever geometry
+     produced it. *)
+  let j_block_counts bounds sched =
+    List.map (j_grid_factors bounds sched) ~f:(fun f -> (m + f - 1) / f)
+  in
+  let blocks_j bounds sched = not (List.is_empty (j_block_counts bounds sched)) in
+  let spreads_j sched = List.exists (j_block_counts bounds sched) ~f:(fun c -> c > 1) in
   let built =
     List.filter_map (List.zip_exn seeds constructed) ~f:(function
       | sp, Either.First sched -> Some (sp, sched)
@@ -159,7 +168,7 @@ let () =
     && (not (List.is_empty built))
     && List.for_all built ~f:(fun (_, sched) -> blocks_j bounds sched));
   let narrower = List.filter built ~f:(fun (sp, _) -> sp.Autotune.sk_bn < m) in
-  p "bc: constructed schedules spread the minor output axis across Grid blocks"
+  p "bc: the minor output axis carries block-level parallelism wherever the geometry allows"
     ((not (List.is_empty narrower)) && List.for_all narrower ~f:(fun (_, s) -> spreads_j s));
   (* Negative control: the detector has teeth. The CPU pipelines block the ROW axis (under
      [sk_grid]) and never j, so [blocks_j] must reject every CPU-seeded schedule — if it answered
@@ -375,8 +384,11 @@ let () =
           | _ -> None)
       | _ -> None)
   in
-  let blocks_j seg sched = not (List.is_empty (j_grid_factors seg sched)) in
-  let spreads_j seg sched = List.exists (j_grid_factors seg sched) ~f:(fun f -> f < m) in
+  let j_block_counts seg sched =
+    List.map (j_grid_factors seg sched) ~f:(fun f -> (m + f - 1) / f)
+  in
+  let blocks_j seg sched = not (List.is_empty (j_block_counts seg sched)) in
+  let spreads_j seg sched = List.exists (j_block_counts seg sched) ~f:(fun c -> c > 1) in
   let fine_gemm_seg tuples =
     List.find (normals tuples) ~f:(fun seg -> not (List.is_empty (gpu_seeds seg)))
   in
@@ -403,7 +415,7 @@ let () =
     | None -> false
     | Some (seg, built) ->
         (not (List.is_empty built)) && List.for_all built ~f:(fun (_, s) -> blocks_j seg s));
-  p "lm: arity_cuts fission frees the GEMM and its seeds spread j across Grid blocks"
+  p "lm: the freed GEMM's seeds carry block-level parallelism on j wherever the geometry allows"
     (match fine_built with
     | None -> false
     | Some (seg, built) ->

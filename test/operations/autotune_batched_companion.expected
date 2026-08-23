@@ -1,7 +1,7 @@
 bc: scalar GPU seeds exist for the batched site: true
 bc: no seed declines on companion coverage: true
 bc: every constructed schedule Grid-blocks the minor output axis, never leaving it serial: true
-bc: constructed schedules spread the minor output axis across Grid blocks: true
+bc: the minor output axis carries block-level parallelism wherever the geometry allows: true
 bc: the j-blocking detector rejects the CPU pipelines, which block the row axis instead: true
 bc: every unfused GPU seed compiles and computes correctly: true
 bc: tuned batched head matches the reference: true
@@ -10,7 +10,7 @@ bc: reduction-over-j companion refutes the GPU family pre-proposal: true
 bc: a foreign seed replayed against the companion routine still raises the decline: true
 lm: coarse fission keeps the row-max companion in the GEMM's segment: true
 lm: arity_cuts fission frees the GEMM and its seeds Grid-block j: true
-lm: arity_cuts fission frees the GEMM and its seeds spread j across Grid blocks: true
+lm: the freed GEMM's seeds carry block-level parallelism on j wherever the geometry allows: true
 lm: the finer fissioned form executes correctly: true
 lm: every fine GPU seed compiles and computes correctly: true
 lm: tuned head matches the reference: true
