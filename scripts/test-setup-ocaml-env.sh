@@ -203,6 +203,22 @@ sleep_pids() { # sleep_pids DURATION -> pids of live `sleep DURATION`
       if (cmd == "sleep" && $3 == d) print $1
     }'
 }
+pgid_of() { # pgid_of PID -> its process group id, or nothing if unreadable
+  # Same /proc-then-ps ladder as the survivor lister, for the same reason: a
+  # `ps` without `-o` (Cygwin) answers nothing, and what this value guards is
+  # too important to guess at.
+  local pid="$1" line
+  if [ -r "/proc/$pid/stat" ]; then
+    read -r line <"/proc/$pid/stat" 2>/dev/null || return 0
+    line="${line##*) }"                 # comm may itself hold ") "
+    # shellcheck disable=SC2086
+    set -- $line                        # $1 state, $2 ppid, $3 pgrp
+    printf '%s\n' "${3:-}"
+    return 0
+  fi
+  ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' '
+}
+
 survivors() { # survivors DURATION -> count of live `sleep DURATION`
   sleep_pids "$1" | awk 'END { print NR + 0 }'
 }
@@ -235,12 +251,21 @@ else
   # Guard: `bounded` signals the process GROUP. If `set -m` did not give the
   # child a group of its own, that group is OURS and the first leg would kill
   # this harness. Check before running any of them.
-  self_pgid="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')"
+  self_pgid="$(pgid_of $$)"
   set -m
   sleep "$D_PROBE" >/dev/null 2>&1 </dev/null & probe=$!
   set +m
-  probe_pgid="$(ps -o pgid= -p "$probe" 2>/dev/null | tr -d ' ')"
-  if [ -n "$self_pgid" ] && [ "$self_pgid" = "$probe_pgid" ]; then
+  probe_pgid="$(pgid_of "$probe")"
+  # Fails CLOSED. This guard is the only thing standing between a broken
+  # `set -m` and a `kill -- -PGID` aimed at this shell's own group, so "could
+  # not tell" must not take the same branch as "told, and they differ" — which
+  # is what an `[ -n "$self_pgid" ] &&` test did when BOTH were empty.
+  if [ -z "$self_pgid" ] || [ -z "$probe_pgid" ]; then
+    kill -KILL "$probe" 2>/dev/null
+    wait "$probe" 2>/dev/null
+    report 1 "bounded: job control gives the child its own process group" \
+      "process group ids are unreadable here (self='$self_pgid' probe='$probe_pgid'); refusing to run legs that signal process groups"
+  elif [ "$self_pgid" = "$probe_pgid" ]; then
     kill "$probe" 2>/dev/null
     report 1 "bounded: job control gives the child its own process group" \
       "pgid $probe_pgid == harness pgid; skipping the bounded legs rather than killing this shell"
@@ -400,14 +425,20 @@ fi
 # A PATH with no opam on it: the hook then stops right after the section under
 # test ("=== stopped: opam required ==="), so no run of it can pin packages or
 # otherwise disturb this machine's opam state.
+# Everything the hook can REACH before that stop, not merely enough to get it
+# started: `group_alive` shells out to `ps` and `awk` wherever there is no
+# /proc, so a farm without them would send every hook run on this PATH down the
+# bare-signal fallback and quietly stop exercising the code this change adds.
+# A missing tool is fatal rather than skipped, for the same reason.
 BIN="$TMP/bin"
 mkdir -p "$BIN"
-for tool in git env sh sleep basename dirname tr grep sed cat; do
-  p="$(command -v "$tool" 2>/dev/null)" || continue
+missing_tools=""
+for tool in git env sh sleep basename dirname tr grep sed cat ps awk; do
+  p="$(command -v "$tool" 2>/dev/null)" || { missing_tools="$missing_tools $tool"; continue; }
   ln -sf "$p" "$BIN/$tool"
 done
-if [ ! -e "$BIN/git" ]; then
-  echo "git is required" >&2; exit 2
+if [ -n "$missing_tools" ]; then
+  echo "these tools the hook can reach are not on PATH:$missing_tools" >&2; exit 2
 fi
 if PATH="$BIN" command -v opam >/dev/null 2>&1; then
   echo "sanitised PATH still resolves opam; refusing to run the hook" >&2; exit 2
@@ -617,7 +648,8 @@ else
     "hook has: $(grep -n 'ssh_opts=' "$HOOK_SRC" | tr -d '\n')"
 fi
 
-# The fake launchers must sit at a path with NO whitespace. GIT_SSH_COMMAND and
+# The fake launchers must sit at a SHELL-SAFE path — no whitespace, and nothing
+# a shell would rewrite ($ ` \ ' " ; & | etc). GIT_SSH_COMMAND and
 # core.sshCommand are shell COMMAND STRINGS, so git splits them on whitespace,
 # and the hook reads the first word to decide whether the program is OpenSSH.
 # Quoting the path would satisfy git and defeat that read — the hook would see
@@ -626,17 +658,25 @@ fi
 # work around. So with a TMPDIR containing spaces the fakes go somewhere else,
 # and if there is nowhere, these legs say so once instead of failing fifteen
 # times over while appearing to test launcher gating.
+# Whitespace was only the first way this bites: TMPDIR='/tmp/ocannl-$x' has none
+# and still breaks, because `$x` is expanded by the shell git runs the launcher
+# through. So the test is a WHITELIST of characters that survive a shell
+# unchanged, not a blacklist of the ones already seen to fail.
+shell_safe_path() { # shell_safe_path PATH -> 0 if a shell leaves it alone
+  case "$1" in
+    ""|*[!A-Za-z0-9._/+-]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
 LAUNCH_ROOT="$TMP/launchers"
-case "$TMP" in
-  *[[:space:]]*)
-    LAUNCH_ROOT="$(mktemp -d /tmp/ocannl-ssh-launchers.XXXXXX 2>/dev/null)" || LAUNCH_ROOT=""
-    case "$LAUNCH_ROOT" in *[[:space:]]*) LAUNCH_ROOT="" ;; esac
-    ;;
-esac
+if ! shell_safe_path "$LAUNCH_ROOT"; then
+  LAUNCH_ROOT="$(mktemp -d /tmp/ocannl-ssh-launchers.XXXXXX 2>/dev/null)" || LAUNCH_ROOT=""
+  shell_safe_path "$LAUNCH_ROOT" || LAUNCH_ROOT=""
+fi
 if [ -z "$LAUNCH_ROOT" ]; then
   SKIP_SSH=1
-  report 1 "ssh: the launcher-gating legs need a whitespace-free directory for the fakes" \
-    "TMPDIR holds whitespace and /tmp is unusable; these legs did not run"
+  report 1 "ssh: the launcher-gating legs need a shell-safe directory for the fakes" \
+    "TMPDIR holds characters a shell would rewrite and /tmp is unusable; these legs did not run"
 else
   SKIP_SSH=0
 fi
@@ -660,13 +700,26 @@ ssh_prepare() { # ssh_prepare SLUG LAUNCHER_BASENAME -- sets CASEDIR/CASELOG/LAU
   LAUNCHER="$(ssh_launcher "$1" "$2")"
 }
 
+sq() { # sq WORD -> WORD as a single-quoted shell literal, safe to embed in source
+  local w="$1"
+  w="${w//\'/\'\\\'\'}"
+  printf "'%s'" "$w"
+}
+
 ssh_launcher() { # ssh_launcher SLUG BASENAME -> path of a fake logging into that case's log
   local p="$LAUNCH_ROOT/$1/$2"
   # Program and arguments are logged as two TAB-separated fields, not as one
   # space-joined line: a TMPDIR containing whitespace makes "$0 $*" ambiguous,
   # and the reader would take the first word of the PATH as the program.
+  #
+  # The log path is embedded as a single-quoted shell LITERAL, not interpolated
+  # into double quotes: this is generated shell source, so a `$` or a backtick
+  # in TMPDIR would otherwise be expanded when the launcher runs and every log
+  # would come out empty. (The launcher's own path cannot be quoted the same
+  # way — see the LAUNCH_ROOT note above for why that one is solved by choosing
+  # a safe path instead.)
   { printf '#!/bin/sh\n'
-    printf 'printf "%%s\\t%%s\\n" "$0" "$*" >> "%s"\n' "$TMP/ssh-$1.log"
+    printf 'printf "%%s\\t%%s\\n" "$0" "$*" >> %s\n' "$(sq "$TMP/ssh-$1.log")"
     printf 'exit 255\n'
   } >"$p"
   chmod +x "$p"
