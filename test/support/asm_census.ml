@@ -256,12 +256,29 @@ let call_target ~mnemonic ~rest =
     Some (String.strip target)
   else None
 
+(* The aarch64 condition codes, as an explicit list rather than a prefix test, because the
+   mnemonics a prefix test would sweep in are the ones that must NOT count: [bl] and [blr] are
+   calls, [br] is an indirect jump with no label operand. GNU as accepts both [b.ne] and [bne] and
+   gcc emits the SECOND -- which is how this started out recognizing no loop at all on either
+   aarch64 column, every anchor reported missing across three widths and two optimization levels
+   (the "no loop carried the anchor" reading is a failure precisely so that a gap like this one
+   surfaces as a red run rather than as a quiet column of absences). *)
+let aarch64_conds =
+  [ "eq"; "ne"; "cs"; "hs"; "cc"; "lo"; "mi"; "pl"; "vs"; "vc"; "hi"; "ls"; "ge"; "lt"; "gt"; "le";
+    "al" ]
+
+let is_cond mnemonic ~prefix =
+  match String.chop_prefix mnemonic ~prefix with
+  | Some c -> List.mem aarch64_conds c ~equal:String.equal
+  | None -> false
+
 let is_branch ~mnemonic =
-  (* x86 conditional and unconditional jumps; aarch64 [b], [b.<cc>] and the compare-and-branch
-     forms. Not [bl]: a call is not a loop edge. *)
+  (* x86 conditional and unconditional jumps; aarch64 [b], [b<cc>]/[b.<cc>] and the
+     compare-and-branch forms. *)
   String.is_prefix mnemonic ~prefix:"j"
   || String.equal mnemonic "b"
-  || String.is_prefix mnemonic ~prefix:"b."
+  || is_cond mnemonic ~prefix:"b."
+  || is_cond mnemonic ~prefix:"b"
   || List.mem [ "cbz"; "cbnz"; "tbz"; "tbnz" ] mnemonic ~equal:String.equal
 
 let branch_target ~rest =
@@ -307,26 +324,33 @@ let source_file_numbers lines ~basename =
 
     [None] means no loop carried the anchor -- the construct was hoisted, folded away, or never
     emitted. That is a finding, not an absence of one: report it as a failure. *)
-let census op_class ~asm ~source_basename ~anchor =
-  let raw = String.split_lines asm in
-  let lines = List.map raw ~f:classify_line |> Array.of_list in
-  let files = source_file_numbers (Array.to_list lines) ~basename:source_basename in
+let classify_asm asm = String.split_lines asm |> List.map ~f:classify_line |> Array.of_list
+
+(* Every backward branch is a loop edge; its body is the span from the target label to the branch.
+   Nested loops both span an anchor, so the smallest span is the innermost. *)
+let backward_edges lines =
   let label_at = Hashtbl.create (module String) in
   Array.iteri lines ~f:(fun i -> function
     | Some (Label l) -> Hashtbl.set label_at ~key:l ~data:i | _ -> ());
-  (* Every backward branch is a loop edge; its body is the span from the target label to the branch.
-     Nested loops both span the anchor, so the smallest span is the innermost. *)
-  let loops =
-    Array.foldi lines ~init:[] ~f:(fun i acc -> function
-      | Some (Insn { mnemonic; rest }) when is_branch ~mnemonic -> (
-          match branch_target ~rest with
-          | Some t -> (
-              match Hashtbl.find label_at t with
-              | Some j when j < i -> (t, j, i) :: acc
-              | _ -> acc)
-          | None -> acc)
-      | _ -> acc)
-  in
+  Array.foldi lines ~init:[] ~f:(fun i acc -> function
+    | Some (Insn { mnemonic; rest }) when is_branch ~mnemonic -> (
+        match branch_target ~rest with
+        | Some t -> (
+            match Hashtbl.find label_at t with Some j when j < i -> (t, j, i) :: acc | _ -> acc)
+        | None -> acc)
+    | _ -> acc)
+
+(** [loop_edges ~asm] is how many loop edges the branch vocabulary recognized in [asm] at all,
+    which is what separates the two readings of a {!census} answering [None]: this construct was
+    hoisted or folded away (some other loop was still found), or {!is_branch} does not know this
+    ISA's spelling and no loop in the file was found. The second is a defect in this module and
+    reports every anchor missing at once, so it is worth a claim of its own. *)
+let loop_edges ~asm = List.length (backward_edges (classify_asm asm))
+
+let census op_class ~asm ~source_basename ~anchor =
+  let lines = classify_asm asm in
+  let files = source_file_numbers (Array.to_list lines) ~basename:source_basename in
+  let loops = backward_edges lines in
   let carries (_, j, i) =
     let rec go k =
       if k > i then false
