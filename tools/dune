@@ -12,3 +12,36 @@
  (name calibrate_bandwidth)
  (modules calibrate_bandwidth)
  (libraries base stdio utils ir context ocannl))
+
+; gh-ocannl-657: the GPU half of the e5m2 codec verification. A tool rather than a test because it
+; needs a GPU and sweeps 2^32 float patterns plus 17.2e9 doubles; the CPU half is
+; test/operations/fp8_codec_exhaustive.ml on the `slow` alias. `@check` compiles it, so it cannot
+; bit-rot with the codec it verifies.
+;
+; One program, one arm per vendor: each `select` picks a real arm where the vendor's jit library is
+; installed and a stub that says so where it is not, so a CUDA box builds the CUDA arm, a ROCm box
+; the HIP arm, and a laptop neither -- without either arm becoming a separate program that can drift
+; from the other.
+
+(executable
+ (name fp8_soak)
+ (modules fp8_soak fp8_soak_cuda fp8_soak_hip)
+ (libraries
+  base
+  stdio
+  unix
+  arrayjit.ir
+  arrayjit.verdict
+  (select
+   fp8_soak_cuda.ml
+   from
+   (cudajit.cuda cudajit.nvrtc arrayjit.cuda_backend -> fp8_soak_cuda.cudajit.ml)
+   (-> fp8_soak_cuda.missing.ml))
+  (select
+   fp8_soak_hip.ml
+   from
+   (hipjit.hip hipjit.hiprtc -> fp8_soak_hip.hipjit.ml)
+   (-> fp8_soak_hip.missing.ml)))
+ (foreign_stubs
+  (language c)
+  (names fp8_soak_stubs)))

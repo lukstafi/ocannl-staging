@@ -201,6 +201,42 @@ let%diagn_sexp gpu_arch_options ~device_cc cu_src : string list =
         [ Printf.sprintf "--gpu-architecture=compute_%d" arch ]
     | None -> []
 
+(* The [-I] nvrtc needs to find <cuda_fp8.h> and friends, discovered from the environment: CUDA_PATH
+   where it is set, the no-spaces junction ocaml-cudajit creates on Windows (whose SDK path
+   otherwise contains spaces), and /usr/local/cuda as the Linux fallback. Separated out of the
+   compile path for the same reason [gpu_arch_options] is: it is a policy other nvrtc callers need
+   to agree with, and tools/fp8_soak.ml is one -- a soak that looked only in /usr/local/cuda would
+   report the CUDA arm ready and then fail to compile its kernel on every Windows installation and
+   every Linux one outside that prefix (Codex P2 on PR #463). *)
+let cuda_include_options () =
+  (* On Windows, check for the no-spaces junction created by ocaml-cudajit *)
+  let cuda_path =
+    if String.(Stdlib.Sys.os_type = "Win32" || Stdlib.Sys.os_type = "Cygwin") then
+      let junction_path =
+        match Sys.getenv "LOCALAPPDATA" with
+        | Some local_appdata -> local_appdata ^ "/cuda_path_link"
+        | None -> ( match Sys.getenv "CUDA_PATH" with Some p -> p | None -> "")
+      in
+      if Stdlib.Sys.file_exists (junction_path ^ "/include") then Some junction_path
+      else Sys.getenv "CUDA_PATH"
+    else Sys.getenv "CUDA_PATH"
+  in
+  match cuda_path with
+  | Some cuda_path ->
+      (* Normalize path separators for Windows *)
+      let include_path =
+        if String.(Stdlib.Sys.os_type = "Win32" || Stdlib.Sys.os_type = "Cygwin") then
+          String.map ~f:(fun c -> if Char.(c = '\\') then '/' else c) (cuda_path ^ "/include")
+        else cuda_path ^ "/include"
+      in
+      [ "-I" ^ include_path ]
+  | None ->
+      if
+        (* Fallback to common location if CUDA_PATH is not set *)
+        Stdlib.Sys.file_exists "/usr/local/cuda/include"
+      then [ "-I/usr/local/cuda/include" ]
+      else []
+
 module Impl : Ir.Backend_impl.Lowered_backend = struct
   include Backend_impl.Device (Device_stream) (Slab)
 
@@ -299,35 +335,7 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
        nothing here consults (gh-ocannl-595). Kernel debug codegen is separate: it comes from
        [Utils.with_runtime_debug ()] via [--device-debug] below. *)
     let with_debug = Utils.settings.output_debug_files_in_build_directory in
-    let cuda_include_opt =
-      (* On Windows, check for the no-spaces junction created by ocaml-cudajit *)
-      let cuda_path =
-        if String.(Stdlib.Sys.os_type = "Win32" || Stdlib.Sys.os_type = "Cygwin") then
-          let junction_path =
-            match Sys.getenv "LOCALAPPDATA" with
-            | Some local_appdata -> local_appdata ^ "/cuda_path_link"
-            | None -> ( match Sys.getenv "CUDA_PATH" with Some p -> p | None -> "")
-          in
-          if Stdlib.Sys.file_exists (junction_path ^ "/include") then Some junction_path
-          else Sys.getenv "CUDA_PATH"
-        else Sys.getenv "CUDA_PATH"
-      in
-      match cuda_path with
-      | Some cuda_path ->
-          (* Normalize path separators for Windows *)
-          let include_path =
-            if String.(Stdlib.Sys.os_type = "Win32" || Stdlib.Sys.os_type = "Cygwin") then
-              String.map ~f:(fun c -> if Char.(c = '\\') then '/' else c) (cuda_path ^ "/include")
-            else cuda_path ^ "/include"
-          in
-          [ "-I" ^ include_path ]
-      | None ->
-          if
-            (* Fallback to common location if CUDA_PATH is not set *)
-            Stdlib.Sys.file_exists "/usr/local/cuda/include"
-          then [ "-I/usr/local/cuda/include" ]
-          else []
-    in
+    let cuda_include_opt = cuda_include_options () in
     let options =
       cuda_include_opt @ arch_opts
       @ ("--use_fast_math" :: (if Utils.with_runtime_debug () then [ "--device-debug" ] else []))
