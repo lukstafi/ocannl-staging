@@ -1,0 +1,36 @@
+.x workgroup extent: a geometry exactly at the cap passes the predicate: true
+.x workgroup extent: one over the cap is refused as its own typed resource: true
+.y workgroup extent: a geometry exactly at the cap passes the predicate: true
+.y workgroup extent: one over the cap is refused as its own typed resource: true
+.z workgroup extent: a geometry exactly at the cap passes the predicate: true
+.z workgroup extent: one over the cap is refused as its own typed resource: true
+.y grid extent: a geometry exactly at the cap passes the predicate: true
+.y grid extent: one over the cap is refused as its own typed resource: true
+.z grid fold: a geometry exactly at the cap passes the predicate: true
+.z grid fold: one over the cap is refused as its own typed resource: true
+the CUDA cliff: a 2 x 2 x 128 workgroup is refused on a (1024, 1024, 64) device: true
+an unpredicted dimension is exempt rather than refused: true
+absent caps gate nothing: true
+prediction: the site seeds GPU candidates of both pipelines: true
+prediction: every GPU seed launches with exactly the geometry the seeder predicted: true
+parity premise: the reference seed launches 8 x 8 workgroups over a .y grid of 2, its twin folding 8 onto .z: true
+seed .x workgroup extent: at the cap the candidate is still seeded: true
+seed .x workgroup extent: at the cap the gate accepts it: true
+seed .x workgroup extent: over the cap it is not seeded at all: true
+seed .x workgroup extent: over the cap the gate refuses it as its own typed resource: true
+seed .x workgroup extent: seeding and the gate refuse it with the same sentence: true
+seed .y workgroup extent: at the cap the candidate is still seeded: true
+seed .y workgroup extent: at the cap the gate accepts it: true
+seed .y workgroup extent: over the cap it is not seeded at all: true
+seed .y workgroup extent: over the cap the gate refuses it as its own typed resource: true
+seed .y workgroup extent: seeding and the gate refuse it with the same sentence: true
+seed .y grid extent: at the cap the candidate is still seeded: true
+seed .y grid extent: at the cap the gate accepts it: true
+seed .y grid extent: over the cap it is not seeded at all: true
+seed .y grid extent: over the cap the gate refuses it as its own typed resource: true
+seed .y grid extent: seeding and the gate refuse it with the same sentence: true
+seed .z grid fold: at the cap the candidate is still seeded: true
+seed .z grid fold: at the cap the gate accepts it: true
+seed .z grid fold: over the cap it is not seeded at all: true
+seed .z grid fold: over the cap the gate refuses it as its own typed resource: true
+seed .z grid fold: seeding and the gate refuse it with the same sentence: true

@@ -2212,6 +2212,15 @@
   (pps ppx_here ppx_ocannl)))
 
 (test
+ (name launch_predicate_parity)
+ (package neural_nets_lib)
+ (deps ocannl_config (env_var OCANNL_BACKEND))
+ (modules launch_predicate_parity)
+ (libraries base ocannl stdio arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
+(test
  ; ocannl-backend: none -- builds Ir.Low_level by hand and judges the launch gate against MOCKED
  ; hardware_limits records; nothing is compiled and no device is touched.
  (name launch_dim_gate)

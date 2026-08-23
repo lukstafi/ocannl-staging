@@ -228,6 +228,17 @@ val detect_conv : Ir.Low_level.t -> conv_site option
     op-legality oracle also consumes); under config [legality_crosscheck] the retained procedural
     matcher runs alongside and any divergence raises. Exposed for tests. *)
 
+val matmul_launch_geometry : matmul_site -> sketch_params -> Ir.Schedule.launch_geometry
+(** The launch geometry a GPU matmul seed will have, predicted from the parameters alone
+    (gh-ocannl-709) — the grid's row-block [.y] extent and folded batch [.z] product, and the
+    workgroup's register-split extents — so seeding can consult the same
+    {!Ir.Schedule.launch_geometry_excess} the pre-driver gate does and never propose a candidate the
+    device would refuse. {!Ir.Schedule.unknown_launch_geometry} for parameters that name no block
+    geometry (every CPU pipeline: the C backends render annotated loops serially). Exposed for
+    tests, which cross-check the prediction against an applied schedule's
+    {!Ir.Low_level.launch_dims} — a prediction that drifted from what the builders emit would
+    withhold legal candidates. *)
+
 val sketch_seed_params :
   is_gpu:bool ->
   is_cpu:bool ->
