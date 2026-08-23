@@ -838,7 +838,15 @@ val sink_zero_outs : t -> t
     accessing the node; it never crosses such an access, a [Staged_compilation], or a
     [Workgroup_barrier]. Apply to whole-routine code BEFORE scheduling/fission. *)
 
-(** {2 Printing} *)
+(** {2 Printing}
+
+    Both dumps render a [Constant] through {!Utils.decimal_float_literal}: a floating literal that
+    parses back to exactly the double it names, so the dump distinguishes [-0.0] from [+0.0] and a
+    constant whose 17th significant digit matters from one whose does not (gh-ocannl-713). The
+    dumps are the surface a constant bug is chased on, so normalizing the values away there costs a
+    session before anyone suspects the view. The C-dialect spellings — [INFINITY], the hexadecimal
+    literal for an f32 tie — belong to {!C_syntax.c_float_literal} and are deliberately not carried
+    here: a dump is not C. *)
 
 val code_hum_margin : int ref
 

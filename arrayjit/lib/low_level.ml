@@ -6901,7 +6901,7 @@ let to_doc_cstyle ?name ?static_indices () llc =
           ^^ brackets (pp_indices idcs)
           ^^ string (Printf.sprintf "@dyn[%d]=" dyn_axis)
           ^^ parens (doc_of_float vprec v))
-    | Constant c -> string (Printf.sprintf "%.16g" c)
+    | Constant c -> string (Utils.decimal_float_literal c)
     | Constant_bits i -> string (Printf.sprintf "0x%LX" i)
     | Embed_index idx ->
         let idx_doc = pp_axis_index idx in
@@ -7034,7 +7034,7 @@ let to_doc ?name ?static_indices () llc =
           ^^ brackets (pp_indices idcs)
           ^^ string (Printf.sprintf "@dyn[%d]=" dyn_axis)
           ^^ parens (doc_of_float v))
-    | Constant c -> string (Printf.sprintf "%.16g" c)
+    | Constant c -> string (Utils.decimal_float_literal c)
     | Constant_bits i -> string (Printf.sprintf "0x%LX" i)
     | Embed_index idx ->
         let idx_doc = pp_axis_index idx in

@@ -1,0 +1,18 @@
+exact value                %cd dump                   C-style dump
+0x0p+0                     0.0                        0.0
+-0x0p+0                    -0.0                       -0.0
+0x1p+1                     2.0                        2.0
+-0x1p+2                    -4.0                       -4.0
+0x1.999999999999ap-4       0.1                        0.1
+0x1.3333333333334p-2       0.30000000000000004        0.30000000000000004
+0x1.3333333333333p-2       0.3                        0.3
+0x1.5af1d78b58c4p+66       1e+20                      1e+20
+0x1.56e1fc2f8f359p-997     1e-300                     1e-300
+0x1.fffffffffffffp+1023    1.7976931348623157e+308    1.7976931348623157e+308
+infinity                   inf                        inf
+-infinity                  -inf                       -inf
+nan                        nan                        nan
+every dumped constant parses back to the double it names: true
+every finite constant is dumped as a floating literal, with a radix point or an exponent: true
+the two zeros are dumped differently: true
+a constant needing a 17th digit is dumped differently from its 16-digit neighbour: true

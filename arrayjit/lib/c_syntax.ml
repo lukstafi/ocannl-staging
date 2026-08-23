@@ -545,24 +545,25 @@ end
 (** A C source literal for the floating-point constant [c], as a {e double}-typed floating literal
     that parses back to exactly [c] on every C-family backend.
 
-    Three properties, each of which [%.16g] alone gets wrong (gh-ocannl-623):
+    Three properties, each of which [%.16g] alone gets wrong (gh-ocannl-623). Two of them are not
+    C's alone — a debug dump wants a floating literal that round-trips for the same reasons a
+    kernel does — so they live in {!Utils.decimal_float_literal}, which the IR printers share
+    (gh-ocannl-713):
 
-    - {b It is a floating literal, not an integer one.} [%.16g] of a value with no fractional part
-      has no radix point, so [2.] came out as the C integer literal [2]. Value-preserving in the
-      cast contexts the constants happen to sit in today — but [-0.] came out as ["-0"], the
-      integer zero, hence [+0.0] once cast: a [-0.0] in host data silently reached kernels as
-      [+0.0] wherever the constant fill inlines as scalar stores (gh-ocannl-615 fixed that one
-      value). The rest of the class is latent rather than inert: an integer literal divides as an
-      integer against another one, promotes as an integer, and would overflow its type once the
-      digits outgrow [long long]. Forcing the radix point closes all of it at once, and subsumes
-      the [-0.] special case.
-    - {b It round-trips.} [%.16g] is not enough digits to recover every double: [0.1 +. 0.2] prints
-      as ["0.3"], which is a {e different} double. That reaches emitted code for real — hosted
-      constant inits (gh-ocannl-633) inline arbitrary host values as scalar stores — so the
-      rendering retries at [%.17g], the width IEEE-754 guarantees, whenever 16 digits do not parse
-      back to [c]. Values that already round-trip at 16 digits keep their exact previous spelling,
-      which is why no codegen golden moves except by the appended [.0].
-    - {b The specials are spelled, not printed.} [%.16g] cannot spell them at all. [INFINITY] and
+    - {b It is a floating literal, not an integer one.} In C the consequence is direct: [2.] came
+      out as the integer literal [2], value-preserving in the cast contexts the constants happen to
+      sit in today — but [-0.] came out as ["-0"], the integer zero, hence [+0.0] once cast, so
+      a [-0.0] in host data silently reached kernels as [+0.0] wherever the constant fill inlines
+      as scalar stores (gh-ocannl-615 fixed that one value). The rest of the class is latent rather
+      than inert: an integer literal divides as an integer against another one, promotes as an
+      integer, and would overflow its type once the digits outgrow [long long].
+    - {b It round-trips.} That reaches emitted code for real: hosted constant inits (gh-ocannl-633)
+      inline arbitrary host values as scalar stores, and [0.1 +. 0.2] at 16 digits is a {e
+      different} double. Values that already round-trip at 16 digits keep their exact previous
+      spelling, which is why no codegen golden moves except by the appended [.0].
+    - {b The specials are spelled, not printed.} This one is C's own, and is why the shared
+      rendering is called only after they are ruled out: it leaves them as [%.16g]'s words
+      ([inf], [nan]), which no C dialect parses. [INFINITY] and
       [NAN] are C99 [math.h] macros that MSL also provides; the CUDA and HIP preludes define them
       under [#ifndef] since nvrtc/hiprtc supply no standard headers. [(-INFINITY)] is parenthesized
       so it cannot glue into [--INFINITY] beside a subtraction. A NaN's payload and sign do not
@@ -620,46 +621,12 @@ let is_f32_tie c =
      let g = Int32.float_of_bits step in
      Float.is_finite g && Float.(abs (c - f) = abs (g - c)))
 
-(** [s] with any exponent's leading zeros removed, so that the emitted literal does not depend on
-    which C runtime formatted it.
-
-    OCaml's [%g] goes through the platform's [snprintf], and the Windows runtimes pad the exponent
-    to three digits ([1e+020] where glibc writes [1e+20]) -- which would make generated kernels, and
-    any golden quoting one, differ by platform. Both spellings denote the same number, so this is
-    about the artifact being reproducible rather than about the value. Digits that are not padding
-    are kept: [1e-300] stays itself. *)
-let normalize_exponent s =
-  match String.findi s ~f:(fun _ ch -> Char.(ch = 'e' || ch = 'E')) with
-  | None -> s
-  | Some (i, _) ->
-      let mantissa = String.prefix s i and exp = String.drop_prefix s (i + 1) in
-      let sign, digits =
-        match String.chop_prefix exp ~prefix:"+" with
-        | Some d -> ("+", d)
-        | None -> (
-            match String.chop_prefix exp ~prefix:"-" with Some d -> ("-", d) | None -> ("", exp))
-      in
-      if String.is_empty digits || not (String.for_all digits ~f:Char.is_digit) then s
-      else
-        let stripped = String.lstrip digits ~drop:(Char.equal '0') in
-        let stripped = if String.is_empty stripped then "0" else stripped in
-        mantissa ^ "e" ^ sign ^ stripped
-
 let c_float_literal c =
   if Float.(c = infinity) then "INFINITY"
   else if Float.(c = neg_infinity) then "(-INFINITY)"
   else if Float.is_nan c then "NAN"
   else if is_f32_tie c then Printf.sprintf "%h" c
-  else
-    let s =
-      let s16 = Printf.sprintf "%.16g" c in
-      if Float.equal (Float.of_string s16) c then s16 else Printf.sprintf "%.17g" c
-    in
-    (* [%g] emits a radix point or an exponent for everything else, and either one makes the token
-       a floating literal. *)
-    if String.exists s ~f:(function '.' | 'e' | 'E' -> true | _ -> false) then
-      normalize_exponent s
-    else s ^ ".0"
+  else Utils.decimal_float_literal c
 
 (** The C-family rendering of a binary operation, from {!Ops.binop_c_syntax}: prefix, first operand,
     infix, second operand (breaking after the operator), suffix.

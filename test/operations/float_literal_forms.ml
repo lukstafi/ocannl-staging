@@ -31,6 +31,11 @@
    disagrees for a value on a float tie. The f32 and f16 legs are what pin that the cast is really
    there and really does the narrowing: their oracles are the host's own conversions.
 
+   The twin of this test is [ll_printer_constants], which asks the same two portable questions of
+   the IR DUMPS — the [.ll] and [.cd] text a constant bug is actually chased on. Both renderings
+   now come out of one helper, [Utils.decimal_float_literal] (gh-ocannl-713); what stays here is
+   what only C needs, the specials and the tie's hexadecimal spelling.
+
    The IR is hand-built so that each constant is stored, untouched, into its own cell of a
    materialized node: through the [Assignments] pipeline a bare constant fill is the backend's
    business to inline or upload, and only an inlined one is about this printer. *)
