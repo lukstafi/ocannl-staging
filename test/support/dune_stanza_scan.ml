@@ -400,8 +400,24 @@ type command =
       (** a shell command line: not only is the program unreadable, the directory it runs in is too,
           because [cd] inside the line moves it without dune knowing (Codex P2, round 8) *)
 
-(** Pforms naming a program that is part of the toolchain rather than of this repository. *)
+(** Pforms naming a program that is part of the toolchain rather than of this repository.
+
+    DATA both readers consult, not machinery either of them owns. The raw-text floor has to know
+    which pforms name something this workspace provides in order to see [(run python3
+    %{dep:orchestrate.py})] at all: an external command handed a file we build, whose only evidence
+    is in its ARGUMENT. What it must NOT do is re-derive {!classify_command} to find out — a second
+    reader that runs the first reader's classifier is a copy, and the floor exists to be a second
+    opinion. A list is inert: it says which spellings mean what, and leaves each reader to decide
+    what to do about it (gh-ocannl-708). *)
 let toolchain_pforms = [ "ocaml"; "ocamlc"; "ocamlopt"; "cc"; "cxx"; "make" ]
+
+(** Pform prefixes that expand to the PATH of something dune builds or knows about in this
+    workspace: [%{dep:x}] and its synonyms. Shared for the reason above. *)
+let path_pforms = [ "dep"; "exe"; "path"; "file" ]
+
+(** The pform that names a PUBLIC executable of this workspace by name rather than by path. Dune
+    resolves it here before it looks at PATH, which is why it counts as ours. *)
+let binary_pform = "bin"
 
 (** How a [(test)] stanza's custom action names the test binary. *)
 let test_pform = "%{test}"
@@ -433,9 +449,9 @@ let classify_command ~named_deps cmd =
   | [ Literal path ] -> if is_executable path || explicit then Runs path else External
   | [ Pform pform ] -> (
       match String.lsplit2 pform ~on:':' with
-      | Some (("dep" | "exe" | "path" | "file"), path) ->
+      | Some (prefix, path) when List.mem path_pforms prefix ~equal:String.equal ->
           if is_executable path then Runs (program_path path) else Unrecognized cmd
-      | Some ("bin", name) -> Runs name
+      | Some (prefix, name) when String.equal prefix binary_pform -> Runs name
       | Some _ -> Unrecognized cmd
       | None -> (
           if String.equal pform "test" then Runs test_pform
@@ -801,11 +817,13 @@ type raw_stanza = {
           for every other head. *)
   raw_opaque : string list;
       (** what the stanza demonstrably runs and this reader will not name: the command line of a
-          [(bash …)] or [(system …)] action, which it does not parse, and a command sitting under a
-          [(chdir %{…} …)] whose destination it cannot resolve. Recorded rather than dropped — THAT
-          something runs is the whole of what gh-ocannl-659's per-stanza floor asks, and neither
-          shape can be placed any further without parsing shell or resolving a pform
-          (gh-ocannl-690).
+          [(bash …)] or [(system …)] action, which it does not parse; a command sitting under a
+          [(chdir %{…} …)] whose destination it cannot resolve; and a command it cannot name handed
+          something this workspace provides, which the walk reads as a program that may run
+          somewhere it cannot establish (gh-ocannl-708). Recorded rather than dropped — THAT
+          something runs is the whole of what gh-ocannl-659's per-stanza floor asks, and none of
+          the three can be placed any further without parsing shell, resolving a pform, or deciding
+          which of `env probe.exe` and `diff old.exe new.exe` is a launcher (gh-ocannl-690).
 
           Carried without a directory, deliberately. {!sites} places each of these as an
           [Unreadable_directory] site precisely BECAUSE the directory is unknown, so a
@@ -821,6 +839,11 @@ type raw_ran =
   | Raw_command of {
       cwd : string;  (** where the process ends up, when that is knowable *)
       token : string;  (** the command position, as written *)
+      args : string list;
+          (** the atoms the command was handed, as written. A command this reader cannot name is
+              not the end of the story while one of them names something this workspace provides:
+              [(run python3 %{dep:orchestrate.py})] runs a file we build, and the walk places a
+              site for exactly that reading (gh-ocannl-708). *)
       under_path : bool;  (** whether a [(setenv PATH …)] encloses it *)
       unresolved : string option;
           (** [Some dir] when a [(chdir dir …)] whose destination holds a pform encloses it, which
@@ -872,12 +895,12 @@ type raw_ran =
     - IDENTITY. Commands are recognised as {!classify_command} recognises them, [(:name …)]
       bindings included, and normalised to the same string.
 
-    What it still declines to NAME is a [(bash …)] or [(system …)] command line and a pform naming
-    nothing the stanza binds: the text does not say what those run. The first is recorded as running
-    something unnamed, which is what the per-stanza floor needs of it; the second, and an external
-    command handed a workspace file, are passed over entirely. Those under-report, which is the safe
-    direction for a floor — blindness makes things DISAPPEAR, so a floor that under-counts still
-    fails on it and never fails on a correct scan. *)
+    What it still declines to NAME is a [(bash …)] or [(system …)] command line, and an external
+    command handed something this workspace provides: the text does not say what those run. Both are
+    recorded as running something unnamed, which is the whole of what the per-stanza floor asks of
+    them. Where it under-reports it does so knowingly: a floor may under-claim, and then holds a
+    weaker statement about that one stanza, but may never over-claim, which would report a hole in a
+    correct scan. *)
 (* The raw reading of ONE stanza, lifted out of {!raw_stanzas} so that a caller holding a stanza can
    ask this reader about THAT stanza rather than about a whole file. {!raw_stanzas} is this over a
    document; gh-ocannl-659's floor pairs it with the walk stanza by stanza, which needs both
@@ -934,9 +957,9 @@ let raw_stanza_of =
         | None -> None
         | Some inner -> (
             match String.lsplit2 inner ~on:':' with
-            | Some (("dep" | "exe" | "path" | "file"), path) ->
+            | Some (prefix, path) when List.mem path_pforms prefix ~equal:String.equal ->
                 if is_executable path then Some (program_path path) else None
-            | Some ("bin", name) -> Some name
+            | Some (prefix, name) when String.equal prefix binary_pform -> Some name
             | Some _ -> None
             | None -> List.Assoc.find bindings inner ~equal:String.equal))
   in
@@ -948,6 +971,29 @@ let raw_stanza_of =
     (not (String.is_substring cmd ~substring:"%{"))
     && (not (is_executable cmd))
     && not (is_explicit_path cmd)
+  in
+  (* Whether a command-line word names something this workspace provides, as far as the RAW TEXT
+     can tell: a `.exe`, an explicit relative path, or a pform that is not one of the toolchain's.
+
+     This is what lets the floor see a command it cannot NAME running something of ours -- `(run
+     python3 %{dep:orchestrate.py})`, and `env -C ../sibling ./probe.exe` in the same shape. The
+     walk reaches the same stanzas by asking {!classify_command} about every argument; this asks a
+     coarser question of the text, and shares only the LISTS the answer is written in
+     ({!toolchain_pforms} first among them, which is what keeps `(run tool %{ocaml})` invisible to
+     both). Coarser is the safe direction: a floor may under-claim -- it then holds a weaker
+     statement about that one stanza -- and may not over-claim, which would report a hole in a
+     correct scan. The `%{…}` boundaries are dune's own delimiters and are read with {!pieces},
+     the way {!is_explicit_path} and {!is_executable} are already read from one place: what stays
+     apart between the two readers is the judgement, not the lexing. *)
+  let names_workspace_file arg =
+    is_executable arg || is_explicit_path arg
+    || List.exists (pieces arg) ~f:(function
+         | Literal _ -> false
+         | Pform pform ->
+             let head =
+               match String.lsplit2 pform ~on:':' with Some (head, _) -> head | None -> pform
+             in
+             not (List.mem toolchain_pforms head ~equal:String.equal))
   in
   (* Every command the stanza runs, with the directory it runs in. Its own traversal, deliberately:
      this is the question [executables_run] answers, and answering it twice is the point. *)
@@ -975,8 +1021,9 @@ let raw_stanza_of =
           | _ -> None)
     (* Kept whatever encloses it: what an unresolvable `chdir` costs is the DIRECTORY, and
        [of_stanza] is where that decides which list the command lands in. *)
-    | Sexp.List (Sexp.Atom ("run" | "dynamic-run") :: Sexp.Atom cmd :: _) ->
-        [ Raw_command { cwd; token = cmd; under_path; unresolved } ]
+    | Sexp.List (Sexp.Atom ("run" | "dynamic-run") :: Sexp.Atom cmd :: args) ->
+        let args = List.filter_map args ~f:(function Sexp.Atom a -> Some a | _ -> None) in
+        [ Raw_command { cwd; token = cmd; args; under_path; unresolved } ]
     | Sexp.List l -> List.concat_map l ~f:(commands ~cwd ~unresolved ~under_path)
   in
   let of_stanza ~subdir sexp =
@@ -1000,7 +1047,7 @@ let raw_stanza_of =
            floors `config_dep_completeness` builds out of [raw_runs] and [raw_unnameable]. *)
         let placed =
           List.filter_map ran ~f:(function
-            | Raw_command { cwd; token; under_path; unresolved = None } ->
+            | Raw_command { cwd; token; under_path; unresolved = None; _ } ->
                 Some (cwd, token, under_path)
             | Raw_command _ | Raw_opaque _ -> None)
         in
@@ -1040,28 +1087,60 @@ let raw_stanza_of =
               |> List.dedup_and_sort ~compare:Poly.compare
               |> List.map ~f:fst;
             raw_opaque =
-              List.filter_map ran ~f:(function
-                | Raw_opaque what -> Some what
-                (* Under an unresolvable `chdir` what is lost is the DIRECTORY, not the evidence
-                   that something runs -- and evidence from two enclosing forms must not cancel out.
-                   Two things can still supply it: a command this reader could otherwise name, and a
-                   bare name under a rewritten PATH, which the walk places a site for precisely
-                   because PATH may point it at a workspace executable. Reading only the first left
-                   a command enclosed by BOTH with no floor under it, in either nesting order (Codex
-                   P2, round 1 of PR #422). *)
-                | Raw_command { token; unresolved = Some dir; under_path; _ } -> (
-                    match program ~bindings token with
-                    | Some exe -> Some (Printf.sprintf "%s, under `(chdir %s ...)`" exe dir)
-                    | None ->
-                        if under_path && is_bare_name token then
-                          Some
-                            (Printf.sprintf "%s, under `(setenv PATH ...)` and `(chdir %s ...)`"
-                               token dir)
-                        else None)
-                (* A PATH tool under nothing but a `chdir` is external wherever that sends it: the
-                   walk places no site, so claiming one here would turn the floor from a lower bound
-                   into a false alarm. *)
-                | Raw_command _ -> None)
+              (* An unresolvable `chdir` costs the DIRECTORY and nothing else, so it tags whatever
+                 it encloses rather than replacing it. *)
+              (let where unresolved what =
+                 match unresolved with
+                 | None -> what
+                 | Some dir -> Printf.sprintf "%s, under `(chdir %s ...)`" what dir
+               in
+               List.filter_map ran ~f:(function
+                 | Raw_opaque what -> Some what
+                 (* Under an unresolvable `chdir` what is lost is the DIRECTORY, not the evidence
+                    that something runs -- and evidence from two enclosing forms must not cancel
+                    out. Several things can supply it: a command this reader could otherwise name, a
+                    bare name under a rewritten PATH, which the walk places a site for precisely
+                    because PATH may point it at a workspace executable, and a command handed
+                    something of ours. Reading only the first left a command enclosed by BOTH with
+                    no floor under it, in either nesting order (Codex P2, round 1 of PR #422). *)
+                 | Raw_command { token; args; unresolved; under_path; _ } -> (
+                     match program ~bindings token with
+                     (* A named command is already in [raw_runs] where its directory is known; only
+                        an unresolvable `chdir` moves it here. *)
+                     | Some exe -> Option.map unresolved ~f:(fun dir -> where (Some dir) exe)
+                     (* The test binary is the stanza's own, and [raw_test_cwds] is where it is
+                        floored -- with the directory it runs in, which is more than this list can
+                        carry. *)
+                     | None when String.equal (program_path token) test_pform -> None
+                     | None ->
+                         if under_path && is_bare_name token then
+                           (* Likewise [raw_unnameable], which carries the directory when there is
+                              one. *)
+                           Option.map unresolved ~f:(fun dir ->
+                               Printf.sprintf "%s, under `(setenv PATH ...)` and `(chdir %s ...)`"
+                                 token dir)
+                         else
+                           (* gh-ocannl-708: a command this reader cannot name, handed something
+                              this workspace provides. The walk reads that as a program that may
+                              run, in a directory it cannot establish -- `env -C ../sibling
+                              ./probe.exe` is the shape that makes it more than a tool reading our
+                              files -- and places a site accordingly. A PATH tool handed nothing of
+                              ours stays invisible to both readers. *)
+                           match List.filter args ~f:names_workspace_file with
+                           | handed when not (List.is_empty handed) ->
+                               Some
+                                 (where unresolved
+                                    (Printf.sprintf "%s, handed %s" token
+                                       (String.concat ~sep:", " handed)))
+                           (* Or spelled, in command position, as something out of this workspace
+                              that this reader cannot resolve to a program: `%{dep:x.py}` names a
+                              file we build without naming an executable. *)
+                           | _ ->
+                               if names_workspace_file token then
+                                 Some
+                                   (where unresolved
+                                      (Printf.sprintf "%s, itself named out of this workspace" token))
+                               else None)))
               |> List.dedup_and_sort ~compare:String.compare;
           };
         ]
@@ -1077,11 +1156,10 @@ let raw_stanza_of =
     {!raw_stanza.raw_opaque}, and that is enough, because the question here is whether the stanza is
     subject to the rule and not which program answers for it (gh-ocannl-690).
 
-    What still passes it by is a command it cannot recognise at ALL: {!sites_of_stanza} places an
-    {!Unreadable_command} or {!Unclassified_action} site where this reader sees nothing, and so does
-    an external command handed something this workspace builds — [(run python3 %{dep:x.py})] is one
-    such stanza in this repository today. Those gaps are harmless exactly as long as the comparison
-    is made STANZA BY STANZA: under-claiming for one stanza weakens the floor for that stanza alone.
+    What still passes it by is an action head nobody has classified and which encloses no [(run
+    …)]: {!sites_of_stanza} places an {!Unclassified_action} site where this reader, which knows
+    [run] and the shell actions by name, sees nothing at all. Under-claiming is harmless exactly as
+    long as the comparison is made STANZA BY STANZA: it weakens the floor for that stanza alone.
     Compared in aggregate it is not harmless at all — a stanza the walk counts and this reader does
     not contributes slack that hides a DIFFERENT stanza dropping out of enforcement (Codex P2,
     round 2). *)

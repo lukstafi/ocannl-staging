@@ -517,7 +517,46 @@ let raw_stanza_cases =
     (* An explicit relative path names something this repository built whatever its extension --
        `classify_command` treats `./probe` as a site, so the floor must too. *)
     ("an extensionless explicit path", {dune|(rule (action (run ./probe)))|dune}, [ "rule{probe}" ]);
+    (* A bare word is a tool on PATH, and while it is handed nothing this workspace provides it is
+       the end of the story for BOTH readers -- `sites` places no site for it either. This is the
+       negative control the rule below is written against: what makes the difference is the
+       ARGUMENT, not the command. *)
     ("but a bare word is a tool on PATH", {dune|(rule (action (run python3 x.py)))|dune}, [ "rule{}" ]);
+    (* Handed a file this workspace builds, the same tool is a stanza both readers see. The walk
+       reads it as a program that may run in a directory it cannot establish -- dune's grammar does
+       not say whether `python3 %{dep:orchestrate.py}` runs our file or merely reads it -- and until
+       gh-ocannl-708 the floor named nothing here, leaving this one stanza in `benchmarks/dune`
+       standing on the walk alone. *)
+    ( "but handed a file this workspace builds, it is one both readers see",
+      {dune|(rule (action (run python3 %{dep:orchestrate.py})))|dune},
+      [ "rule{?python3, handed %{dep:orchestrate.py}}" ] );
+    (* The counter-example that rules out narrowing the walk instead: `env -C ../sibling probe.exe`
+       is the same shape -- an external command handed workspace paths -- and it does launch
+       something of ours, somewhere else. Both paths are named, since either could be the program.
+       *)
+    ( "and a launcher pointed elsewhere counts for the same reason",
+      {dune|(rule (action (run env -C ../sibling ./probe.exe)))|dune},
+      [ "rule{?env, handed ../sibling, ./probe.exe}" ] );
+    (* A tool merely READING our executables is the same text, and neither reader guesses which it
+       is: the walk reports the pair and the check settles it, so the floor must name the stanza
+       too. *)
+    ( "a tool only reading them is the same text",
+      {dune|(rule (action (run diff old.exe new.exe)))|dune},
+      [ "rule{?diff, handed old.exe, new.exe}" ] );
+    (* But an argument out of the TOOLCHAIN is not out of this workspace, which is the whole use of
+       sharing `Scan.toolchain_pforms` as data: without the exclusion this line would claim a stanza
+       the walk places nothing for, turning the floor from a lower bound into a false alarm. *)
+    ( "a toolchain pform handed to one is not a workspace file",
+      {dune|(rule (action (run ocamlfind %{ocaml} -version)))|dune},
+      [ "rule{}" ] );
+    (* Nor is an absolute path, or a plain word: they name what the system provides. *)
+    ( "nor is an absolute path",
+      {dune|(rule (action (run cp /usr/bin/probe.copy dest)))|dune},
+      [ "rule{}" ] );
+    (* The lost directory tags what it encloses here as everywhere else. *)
+    ( "one under an unresolvable chdir keeps both readings",
+      {dune|(rule (action (chdir %{root} (run python3 %{dep:orchestrate.py}))))|dune},
+      [ "rule{?python3, handed %{dep:orchestrate.py}, under `(chdir %{root} ...)`}" ] );
     ( "a path elsewhere keeps its path",
       {dune|(rule (action (run %{dep:../../tools/minised.exe})))|dune},
       [ "rule{../../tools/minised.exe}" ] );
@@ -679,11 +718,16 @@ let raw_stanza_cases =
     ( "a binding written after the action",
       {dune|(rule (action (run ./%{pp})) (deps (:pp pp.exe)))|dune},
       [ "rule{pp.exe}" ] );
-    (* Each stanza has its own bindings: one rule's does not resolve another's pform. *)
+    (* Each stanza has its own bindings: one rule's does not resolve another's pform. The second
+       rule's command is still SOMETHING out of this workspace -- the walk reports it as a command
+       it cannot read and places a site -- so the floor names the stanza while declining to name the
+       program (gh-ocannl-708). Which list the entry lands in is the difference: `pp.exe` is an
+       identity `config_dep_completeness` matches against the walk's, and `?…` says only that the
+       stanza runs something. *)
     ( "a binding does not leak to the next stanza",
       {dune|(rule (deps (:pp pp.exe)) (action (run %{pp})))
 (rule (action (run %{pp})))|dune},
-      [ "rule{pp.exe}"; "rule{}" ] );
+      [ "rule{pp.exe}"; "rule{?%{pp}, itself named out of this workspace}" ] );
     (* A binding's paths are the atoms and the forms that CARRY paths -- an `(alias …)` names
        something dune does not run, so an `.exe`-looking atom inside one is not the binding's value.
        *)
@@ -692,10 +736,10 @@ let raw_stanza_cases =
       [ "rule{real.exe}" ] );
     ( "and a binding of only a non-path form resolves to nothing",
       {dune|(rule (deps (:runner (alias fake.exe))) (action (run %{runner})))|dune},
-      [ "rule{}" ] );
+      [ "rule{?%{runner}, itself named out of this workspace}" ] );
     ( "a binding outside the deps field is not a binding",
       {dune|(rule (action (progn (:pp pp.exe) (run %{pp}))))|dune},
-      [ "rule{}" ] );
+      [ "rule{?%{pp}, itself named out of this workspace}" ] );
     (* `(setenv PATH …)` changes what a bare name resolves to, so the walk stops vouching for the
        program -- and the floor records that it must have said so. A command the text CAN name
        stays an ordinary run even there, because the walk still names it. *)
@@ -717,9 +761,13 @@ let raw_stanza_cases =
     ( "a chdir under one still names where it runs",
       {dune|(rule (action (setenv PATH . (chdir sub (run %{dep:a.exe})))))|dune},
       [ "rule{sub:a.exe}" ] );
-    ( "a binding resolving to no executable stays declined",
+    ( "a binding resolving to no executable stays unnamed, and the stanza still floored",
       {dune|(rule (deps (:script run.sh)) (action (run %{script})))|dune},
-      [ "rule{}" ] );
+      [ "rule{?%{script}, itself named out of this workspace}" ] );
+    (* And the exclusion that keeps the two readers apart from a compiler: `%{ocamlc}` runs the
+       toolchain, `-c` and `x.ml` name nothing dune resolves out of this workspace, so neither
+       reader sees a stanza here. The list saying so is `Scan.toolchain_pforms`, read by both
+       (gh-ocannl-708). *)
     ( "a toolchain pform is not ours",
       {dune|(rule (action (run %{ocamlc} -c x.ml)))|dune},
       [ "rule{}" ] );
@@ -956,6 +1004,29 @@ let backend_rule_cases =
  ; ocannl-backend: none -- links no backend
  (preprocess (action (bash "./pp.exe"))))|dune},
       [ "library a marker on a stanza that runs nothing" ] );
+    (* gh-ocannl-708, as the rule sees it. `benchmarks/dune` runs its orchestrator this way, and it
+       was the last stanza in the repository the walk placed a site for and the floor named nothing
+       for: the rule applied to it, and nothing independent vouched for that. *)
+    ( "an external command handed a workspace file is reported, with a floor under it",
+      {dune|(rule (deps ocannl_config) (action (run python3 %{dep:orchestrate.py})))|dune},
+      [ "rule REPORTED: declares neither +floor" ] );
+    ( "and passes with a marker, still floored",
+      {dune|(rule
+ ; ocannl-backend: none -- hands a script to python3, which links no backend
+ (deps ocannl_config)
+ (action (run python3 %{dep:orchestrate.py})))|dune},
+      [ "rule names none +floor" ] );
+    (* The negative control for it: the same tool handed nothing this workspace provides is a
+       stanza NEITHER reader sees, so the rule does not apply and no floor claims it does.
+       Over-claiming here would fail a correct scan. *)
+    ( "the same tool handed nothing of ours is counted by neither reader",
+      {dune|(rule (action (run python3 x.py)))|dune},
+      [ "rule runs nothing" ] );
+    (* And the counter-example that kept the walk as it is: `env -C ../sibling ./probe.exe` wears
+       the same clothes and does launch something of ours. *)
+    ( "a launcher pointed at a sibling directory keeps its floor",
+      {dune|(rule (deps ocannl_config) (action (run env -C ../sibling ./probe.exe)))|dune},
+      [ "rule REPORTED: declares neither +floor" ] );
   ]
 
 (* The dumb reading against the placed one. A marker written where the comment lexer does not look
