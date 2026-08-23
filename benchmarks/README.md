@@ -95,6 +95,18 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   shape on the fixture's `mode`, like the Python runners: forward-only for `gpt2_mini`,
   backprop plus SGD for `gpt2_mini_train`.
 
+  `bench_mlp --self-test` (gh-ocannl-702) runs the measurement path with **no fixture and no
+  Python**: `Bench_harness.run_self_test` fabricates a tiny model in memory, drives the whole
+  protocol -- parity window, warmup, per-step-synced percentiles, queued mean -- and prints a real
+  result line, on whatever backend the usual `--ocannl_backend=` selects. It is deliberately *not*
+  a comparable cell: its bytes are not the byte-identical fixture the parity gate is built on, and
+  the emitted record says so (`"workload":"selftest-tiny"`, `"variant":"self-test"`). Use it to
+  smoke a fresh checkout or a new backend before provisioning `benchmarks/.venv`, and to see what a
+  result line looks like. `test/operations/bench_self_test` runs the same mode in CI and asserts
+  that the emitted record is well-formed, so the emitter every benchmark number flows through has
+  an executable guard that needs no fixtures. The mode lives in `Bench_harness`, so a second runner
+  can offer it in one line.
+
   **Which precision legs a workload has is a property of the workload, not of the flag**
   (gh-ocannl-551), and the shared flag parsing lives in `Bench_harness` so a new flag cannot
   quietly apply to one runner only:
