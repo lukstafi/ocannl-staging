@@ -509,11 +509,15 @@ let main () =
   let by_file = ref [] in
   let placed_subjects = ref 0 in
   let subject_floor = ref 0 in
-  (* The stanzas the walk places and the second reader names nothing for -- the gap between the two
-     totals, itemised. The floor is a lower bound by design (see `Scan.raw_runs_something`), but a
-     bare "one short" says nothing about WHICH stanza is standing on the walk alone, and the class
-     it belongs to is what decides whether the gap is worth closing (gh-ocannl-690). *)
-  let unfloored = ref [] in
+  (* The two readers' POPULATIONS, each stanza by the file and line it opens at, so that the
+     relationship checked below is "the same stanzas" and not "as many stanzas". Two totals compared
+     as numbers say nothing about WHICH stanza either reader is alone on, and a gap of one absorbs a
+     different stanza dropping out of enforcement (Codex P2, round 2), which is why gh-ocannl-690
+     itemised the gap on stderr rather than leaving it as arithmetic. Identities rather than
+     counts is also what keeps this off the churn treadmill gh-ocannl-701 took the scans off: a test
+     added anywhere moves both lists together. *)
+  let walk_places = ref [] in
+  let floor_names = ref [] in
   (* Kept apart on purpose: a stanza declaring neither is the hole gh-ocannl-659 is about, while a
      marker the scan could not place is the scan going blind to it -- and a claim that conflated the
      two would pass while the second was true. *)
@@ -677,24 +681,30 @@ let main () =
          traded against a third; and the raw reader's narrower vocabulary degrades to a weaker floor
          for the stanzas it cannot see, rather than to a hole somewhere else in the file. *)
       List.iter marked ~f:(fun stanza ->
+          let identity =
+            Printf.sprintf "%s:%d, the %s %s" dune_file stanza.Scan.marked_line
+              stanza.Scan.marked_head
+              (if String.is_empty stanza.Scan.marked_name then "<unnamed>"
+               else stanza.Scan.marked_name)
+          in
           if stanza.Scan.marked_raw_subject && List.is_empty stanza.Scan.marked_sites then (
             Int.incr marker_holes;
             fail
               (Printf.sprintf
-                 "%s:%d, the %s %s: the raw text shows it running an executable and the walk placed \
-                  no site for it -- it is reading the file with a hole in it, and a stanza it stops \
-                  seeing is one this rule stops applying to"
-                 dune_file stanza.Scan.marked_line stanza.Scan.marked_head
-                 (if String.is_empty stanza.Scan.marked_name then "<unnamed>"
-                  else stanza.Scan.marked_name)));
-          if stanza.Scan.marked_raw_subject then Int.incr subject_floor
-          else if not (List.is_empty stanza.Scan.marked_sites) then
-            unfloored :=
-              Printf.sprintf "  %s:%d, the %s running %s" dune_file stanza.Scan.marked_line
-                stanza.Scan.marked_head
-                (String.concat ~sep:", "
-                   (List.map stanza.Scan.marked_sites ~f:(fun s -> s.Scan.name)))
-              :: !unfloored);
+                 "%s: the raw text shows it running an executable and the walk placed no site for \
+                  it -- it is reading the file with a hole in it, and a stanza it stops seeing is \
+                  one this rule stops applying to"
+                 identity));
+          if stanza.Scan.marked_raw_subject then (
+            Int.incr subject_floor;
+            floor_names := identity :: !floor_names);
+          if not (List.is_empty stanza.Scan.marked_sites) then
+            walk_places :=
+              ( identity,
+                Printf.sprintf "%s running %s" identity
+                  (String.concat ~sep:", "
+                     (List.map stanza.Scan.marked_sites ~f:(fun s -> s.Scan.name))) )
+              :: !walk_places);
       by_file :=
         ( dune_file,
           (if !any_declared then [ "declares " ^ Scan.backend_env_var ] else [])
@@ -1278,24 +1288,77 @@ let main () =
     (String.concat ~sep:"\n" (List.rev !classification));
   eprintf "Totals: %d such stanzas, against a raw-text floor of %d.\n" !placed_subjects
     !subject_floor;
-  (match List.rev !unfloored with
+  (* The two populations, compared as SORTED LISTS OF STANZAS rather than as totals. A number would
+     say "one short" and leave which stanza to arithmetic; these say which file and line each reader
+     is alone on, and the claim below is about the stanzas themselves (gh-ocannl-708). Both
+     directions, because they fail differently: a stanza only the floor names is the walk going
+     blind, and one only the walk places is a stanza whose enforcement nothing independent vouches
+     for. *)
+  let placed_identities = List.sort (List.map !walk_places ~f:fst) ~compare:String.compare in
+  let floored_identities = List.sort !floor_names ~compare:String.compare in
+  let detail = Map.of_alist_multi (module String) !walk_places in
+  let describe identity =
+    match Map.find detail identity with Some (what :: _) -> what | _ -> identity
+  in
+  (* As MULTISETS, not sets. Two stanzas opening on the same line of the same file share an
+     identity, and comparing deduplicated lists would let the floored one answer for the other --
+     the collapse `config_dep_completeness` compares (directory, executable) pairs with
+     multiplicity to avoid (Codex P2, rounds 2 and 3 of PR #343). *)
+  let counts identities =
+    List.fold identities ~init:(Map.empty (module String)) ~f:(fun tally identity ->
+        Map.update tally identity ~f:(fun n -> 1 + Option.value n ~default:0))
+  in
+  let excess these those =
+    let those = counts those in
+    Map.to_alist (counts these)
+    |> List.concat_map ~f:(fun (identity, mine) ->
+        let theirs = Option.value (Map.find those identity) ~default:0 in
+        List.init (Int.max 0 (mine - theirs)) ~f:(fun _ -> identity))
+  in
+  let walk_only = excess placed_identities floored_identities in
+  let floor_only = excess floored_identities placed_identities in
+  (* The claim is quantified over the UNION, through `Verdict.p_all`, which carries the
+     non-emptiness guard with it: a scan that stopped reading dune files altogether would leave two
+     empty populations, and "the same stanzas" holds vacuously of nothing (gh-ocannl-729). *)
+  let population =
+    List.dedup_and_sort (placed_identities @ floored_identities) ~compare:String.compare
+  in
+  let placed_counts = counts placed_identities and floored_counts = counts floored_identities in
+  let named_by_both identity =
+    Option.value (Map.find placed_counts identity) ~default:0
+    = Option.value (Map.find floored_counts identity) ~default:0
+  in
+  (match walk_only with
   | [] -> eprintf "Every one of them has a second reader's floor under it.\n"
-  | unfloored ->
+  | walk_only ->
       eprintf
         "The %d standing on the walk alone -- a site is placed and the raw reader names nothing \
-         there:\n\
+         there. Teach `Scan.raw_stanza_of` the shape, or the rule applies to a stanza nothing \
+         independent vouches for:\n\
          %s\n"
-        (List.length unfloored)
-        (String.concat ~sep:"\n" unfloored));
+        (List.length walk_only)
+        (String.concat ~sep:"\n" (List.map walk_only ~f:(fun i -> "  " ^ describe i))));
+  (match floor_only with
+  | [] -> ()
+  | floor_only ->
+      eprintf
+        "And the %d the raw reader names with no site placed -- the walk reading the file with a \
+         hole in it:\n\
+         %s\n"
+        (List.length floor_only)
+        (String.concat ~sep:"\n" (List.map floor_only ~f:(fun i -> "  " ^ i))));
   printf "\n";
   Verdict.p
     "every stanza that runs an executable either declares the backend variable or says in place \
      why it does not"
     (!xor_violations = 0);
   Verdict.p
-    "every marker the text spells was read as one, and the walk places at least as many stanzas as \
-     a second reader finds"
-    (!marker_holes = 0 && !placed_subjects >= !subject_floor && !subject_floor > 0);
+    "every marker the text spells was read as one, and every stanza the raw text shows running an \
+     executable has a site placed for it"
+    (!marker_holes = 0);
+  Verdict.p_all
+    "every stanza either reader names as running an executable is named by the other too"
+    population ~f:named_by_both;
   eprintf
     "Artifact-directory verdict of every stanza whose modules call Test_utils.Generated.init, or \
      which declares %s without one (not diffed -- see gh-ocannl-665):\n\
@@ -1530,7 +1593,106 @@ let control () =
     legitimate_passed;
   (try remove_tree root with Unix.Unix_error _ -> ())
 
+(* gh-ocannl-708's control, and why it is a second tree rather than a stanza added to the one
+   above.
+
+   The rule under control here is the RELATIONSHIP between the two readers: a stanza the walk places
+   a site for is a stanza the raw-text floor names. This repository contains exactly one stanza of
+   the shape that used to break it -- `benchmarks/dune` running its orchestrator as `(run python3
+   %{dep:test_orchestrate.py})` -- so a control read off today's corpus would pass whether the floor
+   learned the shape or the shape left the repository. Put to a tree of its own, the claim is about
+   the rule: the same tool handed a file this workspace builds is seen by both readers, and handed
+   nothing of ours is seen by neither. *)
+
+let floor_subject ~handed ~declares =
+  Printf.sprintf
+    {dune|(rule
+%s (target orchestrated.actual)
+ (deps ocannl_config %s)
+ (action
+  (with-stdout-to
+   %%{target}
+   (run python3 %s))))
+|dune}
+    (if declares then
+       " ; ocannl-backend: none -- hands a script to python3, which links no backend.\n"
+     else "")
+    (if handed then "%{dep:orchestrate.py}" else "orchestrate.py")
+    (if handed then "%{dep:orchestrate.py}" else "orchestrate.py")
+
+let floor_control () =
+  let exe =
+    let name = Stdlib.Sys.executable_name in
+    if Stdlib.Filename.is_relative name then Stdlib.Filename.concat (Stdlib.Sys.getcwd ()) name
+    else name
+  in
+  let root = Stdlib.Filename.temp_dir "evd_floor" "" in
+  let context = control_context () in
+  List.iter context ~f:(fun (file, content) ->
+      write_file (Stdlib.Filename.concat root file) content);
+  (* One source, so that the run is handed both a dune file and a source: the checker refuses a
+     tree with neither, since its globs matching nothing is the failure it reports first. It calls
+     nothing and reads no configuration key, which keeps the tree's only subject the rule above. *)
+  write_file (Stdlib.Filename.concat root "t/noop.ml") "let () = ()\n";
+  let paths = "t/dune" :: "t/noop.ml" :: List.map context ~f:fst in
+  let run ~handed ~declares =
+    write_file (Stdlib.Filename.concat root "t/dune") (floor_subject ~handed ~declares);
+    run_checker ~root ~exe ("." :: paths)
+  in
+  let report label (status, text) =
+    eprintf "the floor control's %s run %s. Its captured output:\n%s\n" label
+      (describe_status status) text
+  in
+  let exited n (status, _) = match status with Unix.WEXITED m -> m = n | _ -> false in
+  (* The rule reaches the stanza at all: without a marker or a declaration, the checker reports it
+     by name. That is the walk's half. *)
+  let reported = run ~handed:true ~declares:false in
+  (* And the floor's half: with the marker, the run passes AND says every stanza it placed has a
+     second reader's floor under it -- the sentence that named this stanza as the exception before
+     the two readers shared the pform lists. *)
+  let floored = run ~handed:true ~declares:true in
+  (* The negative control. The same command handed nothing this workspace provides is a stanza
+     NEITHER reader sees, so the rule does not apply and no marker is asked for. A floor that
+     over-claimed here would fail this correct tree. *)
+  let invisible = run ~handed:false ~declares:false in
+  let unfloored_sentence = "standing on the walk alone" in
+  let floored_sentence = "second reader's floor under it" in
+  let reported_ok =
+    exited 1 reported
+    && String.is_substring (snd reported) ~substring:"runs an executable and declares neither"
+    && String.is_substring (snd reported) ~substring:"t/dune"
+  in
+  let floored_ok =
+    exited 0 floored
+    && String.is_substring (snd floored) ~substring:floored_sentence
+    && not (String.is_substring (snd floored) ~substring:unfloored_sentence)
+  in
+  let invisible_ok =
+    exited 0 invisible
+    && (not (String.is_substring (snd invisible) ~substring:"runs an executable and declares neither"))
+    && not (String.is_substring (snd invisible) ~substring:unfloored_sentence)
+  in
+  if not reported_ok then report "reported" reported;
+  if not floored_ok then report "floored" floored;
+  if not invisible_ok then report "invisible" invisible;
+  printf
+    "\n\
+     The relationship is put to a tree of one rule, which runs `python3` on a file that is or is\n\
+     not one this workspace builds. Nothing else differs between the three runs.\n\n";
+  Verdict.p
+    "an external command handed a file this workspace builds is a stanza the rule reaches, \
+     reported by name when it declares neither"
+    reported_ok;
+  Verdict.p
+    "the same stanza, declaring its backend, passes with the raw-text floor naming it too"
+    floored_ok;
+  Verdict.p "the same command handed nothing of this workspace is a stanza neither reader sees"
+    invisible_ok;
+  (try remove_tree root with Unix.Unix_error _ -> ())
+
 let () =
   match Array.to_list Stdlib.Sys.argv with
-  | _ :: [ "--control" ] -> control ()
+  | _ :: [ "--control" ] ->
+      control ();
+      floor_control ()
   | _ -> main ()
