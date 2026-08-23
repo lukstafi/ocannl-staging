@@ -154,7 +154,8 @@ let () =
    walk, and both rejection families -- store time ([check_and_store_virtual]) and consumption time
    ([inline_computation]) -- can be triggered by a statement the walk reaches AFTER a read that has
    already minted. Nothing re-visits the minted scope in between, so cleanup meets it over a node
-   that is now materialized. The two legs below are one witness from each family.
+   that is now materialized. The two witnesses below are one from each family; with the exemption
+   removed, both are refused, which is the point: the branch is not dead code.
 
    Both are hand-built, which is the honest standing of the exemption: it is not conservatism about
    a hypothetical, it is what keeps [LL.optimize] from refusing IR it produced itself -- but no
@@ -162,14 +163,58 @@ let () =
    build of the gh-ocannl-681 PR found hits only on out-of-contract INPUT scopes, and one repeated
    here over the targeted virtualization tests found none at all). *)
 
+(* Both witnesses are about LEGALITY, and every heuristic cap in [decide_placements] runs BEFORE
+   any legality question is asked -- so an ambient policy setting can materialize either node ahead
+   of the refusal under test (provenance 1, 39 or 41 instead of 142 or 13) and leave the legs
+   asserting about a program the virtualizer never entered. The read-modify-write exemption matters
+   the same way: with [inline_complex_computations] off, witness 1's accumulating producer counts
+   its own self-read as a visit and trips the visit cap. So EVERY field of [virtualize_settings] is
+   pinned for the duration and restored, rather than the one field a particular default happens to
+   make load-bearing. Pinning at runtime is also what keeps this test independent of the
+   configuration it runs under: no [OCANNL_VIRTUALIZE_*] override can change its reading, so the
+   stanza has no virtualization env keys to declare. *)
+let with_virtualize_settings ~max_visits f =
+  let s = LL.virtualize_settings in
+  let saved =
+    ( s.LL.enable_device_only,
+      s.LL.max_visits,
+      s.LL.max_inline_reduction,
+      s.LL.max_inline_fanin,
+      s.LL.inline_scalar_constexprs,
+      s.LL.inline_simple_computations,
+      s.LL.inline_complex_computations )
+  in
+  s.LL.enable_device_only <- true;
+  s.LL.max_visits <- max_visits;
+  (* The two chain caps disabled outright: neither witness is about recompute cost, and a strict
+     ambient value would materialize the producer before the refusal under test. *)
+  s.LL.max_inline_reduction <- -1;
+  s.LL.max_inline_fanin <- -1;
+  s.LL.inline_scalar_constexprs <- true;
+  (* Off, so the visit cap is always consulted: the [max_visits] pinned above is then the whole
+     policy story, with no bypass deciding a leg behind its back. *)
+  s.LL.inline_simple_computations <- false;
+  s.LL.inline_complex_computations <- true;
+  Exn.protect ~f ~finally:(fun () ->
+      let edo, mv, mir, mif, isc, isi, ici = saved in
+      s.LL.enable_device_only <- edo;
+      s.LL.max_visits <- mv;
+      s.LL.max_inline_reduction <- mir;
+      s.LL.max_inline_fanin <- mif;
+      s.LL.inline_scalar_constexprs <- isc;
+      s.LL.inline_simple_computations <- isi;
+      s.LL.inline_complex_computations <- ici)
+
 let () =
-  let node = Ll_test.node_factory ~first_id:9850 ~dims:[| 4 |] () in
   (* Witness 1, store time. [v] is produced, read, and only THEN conditionally overwritten. The
      guarded setter is rejected as [Non_virtual 142] (gh-ocannl-651: a candidate whose nest sits
      under an [If] would replay unguarded at every read site), which materializes [v] -- after the
      consumer's read has been inlined into a minted scope. The producer writes [1 + i], so a
      replayed, dropped or reordered iteration changes the reading, and no cell can be confused with
-     the zero-init or the sentinel. *)
+     the zero-init or the sentinel. Each cell is read once, so the pinned [max_visits = 1] (the
+     default) is what the shape needs. *)
+  with_virtualize_settings ~max_visits:1 @@ fun () ->
+  let node = Ll_test.node_factory ~first_id:9850 ~dims:[| 4 |] () in
   let v = node "smr_v" in
   let out = node "smr_out" in
   let flag = node ~dims:[| 1 |] "smr_flag" in
@@ -185,8 +230,7 @@ let () =
   in
   let consumer =
     let k = Ll_test.sym () in
-    Ll_test.loop_n k 4
-      (Ll_test.set out [| Ll_test.iter k |] (Ll_test.get v [| Ll_test.iter k |]))
+    Ll_test.loop_n k 4 (Ll_test.set out [| Ll_test.iter k |] (Ll_test.get v [| Ll_test.iter k |]))
   in
   let overwrite =
     let i = Ll_test.sym () in
@@ -214,36 +258,33 @@ let () =
   p "the pass retracts the scope it minted rather than refusing its own program"
     (Ll_test.count_scopes retracted.LL.llc = 0 && Ll_test.count_get retracted v > 0);
   (* Executed parity against the materialized reading of the same program: [v] declared
-     materialized up front, so no scope is ever minted and the consumer reads the buffer all
-     along. *)
+     materialized up front, so no scope is ever minted and the consumer reads the buffer all along.
+     Every execution gets a routine name of its own -- a second compile under one name overwrites
+     the first's debug artifacts, so a failing leg would otherwise be debugged against another
+     leg's IR. *)
   let reference =
     Ll_test.optimize
       ~materialized:[ out; flag; v ]
       ~name:"smr_reference"
       (Ll_test.seq producer (Ll_test.seq consumer overwrite))
   in
-  let read_out o name f =
-    List.hd_exn
-      (Ll_test.execute ~name o ~seed:[ (out, Ll_test.blank 4); (flag, [| f |]) ] ~read:[ out ])
+  let run_at o name f reads =
+    Ll_test.execute ~name o ~seed:[ (out, Ll_test.blank 4); (flag, [| f |]) ] ~read:reads
   in
   let produced = [| 1.; 2.; 3.; 4. |] in
+  let retracted_off = List.hd_exn (run_at retracted "smr_retract_guard_off" 0.0 [ out ]) in
+  let retracted_on = List.hd_exn (run_at retracted "smr_retract_guard_on" 1.0 [ out ]) in
+  let reference_off = List.hd_exn (run_at reference "smr_reference_guard_off" 0.0 [ out ]) in
+  (* [v] is readable only in the reference arm -- the retracted arm places it [Local]. *)
+  let reference_on = run_at reference "smr_reference_guard_on" 1.0 [ out; v ] in
   p "with the guard off, the retracted read agrees with the materialized reading"
-    (Ll_test.close (read_out retracted "smr_retract" 0.0) produced
-    && Ll_test.close (read_out reference "smr_reference" 0.0) produced);
+    (Ll_test.close retracted_off produced && Ll_test.close reference_off produced);
   p "with the guard on, the retracted read agrees with the materialized reading"
-    (Ll_test.close (read_out retracted "smr_retract" 1.0) produced
-    && Ll_test.close (read_out reference "smr_reference" 1.0) produced);
-  (* ... and the guard is not vacuous: in the reference arm [v] is readable, and the overwrite
-     really lands -- after the consumer, which is why both readings above are the produced values
-     rather than nines. *)
+    (Ll_test.close retracted_on produced && Ll_test.close (List.hd_exn reference_on) produced);
+  (* ... and the guard is not vacuous: the overwrite really lands, after the consumer, which is why
+     both readings above are the produced values rather than nines. *)
   p "the guarded setter does run when the flag is on"
-    (Ll_test.close
-       (List.nth_exn
-          (Ll_test.execute ~name:"smr_reference" reference
-             ~seed:[ (out, Ll_test.blank 4); (flag, [| 1.0 |]) ]
-             ~read:[ out; v ])
-          1)
-       [| 9.; 9.; 9.; 9. |]);
+    (Ll_test.close (List.nth_exn reference_on 1) [| 9.; 9.; 9.; 9. |]);
   (* The exemption keys on which SIDE of this [optimize] call a scope came from, not on its shape:
      spell the consumer's read as an equivalent [Local_scope] with the honest
      [Inlined_computation] mint, and the same program is rejected, because [input_scope_ids]
@@ -273,8 +314,7 @@ let () =
   p "an equivalent scope HANDED to the same optimize call is still rejected"
     (match Ll_test.optimize ~materialized:[ out; flag ] ~name:"smr_handed" handed with
     | (_ : LL.optimized) -> false
-    | exception Invalid_argument msg ->
-        String.is_substring msg ~substring:(Tn.debug_name v))
+    | exception Invalid_argument msg -> String.is_substring msg ~substring:(Tn.debug_name v))
 
 let () =
   (* Witness 2, consumption time. The other rejection family reaches the same branch: a producer
@@ -284,69 +324,61 @@ let () =
      first and the mismatching one second, and the second read materializes a node the first has
      already inlined into a minted scope.
 
-     [max_visits] is raised for this case alone, and restored: the shape needs the SAME cell read
-     twice, which the default cap of 1 refuses before any legality question is asked (the cap is a
-     policy prior, not the mechanism under test). *)
-  let saved = LL.virtualize_settings.max_visits in
-  LL.virtualize_settings.max_visits <- 2;
-  Exn.protect
-    ~finally:(fun () -> LL.virtualize_settings.max_visits <- saved)
-    ~f:(fun () ->
-      let node = Ll_test.node_factory ~first_id:9880 ~dims:[| 2 |] () in
-      let w = node "smr2_w" in
-      let src = node "smr2_src" in
-      let oa = node "smr2_oa" in
-      let ob = node "smr2_ob" in
-      List.iter [ src; oa; ob ] ~f:Ll_test.materialize;
-      (* [3 + 10*4 = 43] identifies both source cells, so a producer inlined against the wrong
-         operand, or a read served from an uninitialized buffer, cannot reproduce it. *)
-      let src_values = [| 3.; 4. |] in
-      let produced = 43. in
-      let producer =
-        Ll_test.set w
-          [| Ll_test.fixed 0 |]
-          (Ll_test.add
-             (Ll_test.get src [| Ll_test.fixed 0 |])
-             (Ll_test.mul (Ll_test.c 10.) (Ll_test.get src [| Ll_test.fixed 1 |])))
-      in
-      let matching_read =
-        Ll_test.set oa [| Ll_test.fixed 0 |] (Ll_test.get w [| Ll_test.fixed 0 |])
-      in
-      let iterator_read =
-        let j = Ll_test.sym () in
-        Ll_test.loop_n j 1
-          (Ll_test.set ob [| Ll_test.fixed 0 |] (Ll_test.get w [| Ll_test.iter j |]))
-      in
-      let control =
-        Ll_test.optimize
-          ~materialized:[ src; oa; ob ]
-          ~name:"smr2_control"
-          (Ll_test.seq producer matching_read)
-      in
-      p "the matching read alone inlines the fixed-cell producer"
-        (Ll_test.known_virtual control w && Ll_test.count_get control w = 0);
-      let retracted =
-        Ll_test.optimize
-          ~materialized:[ src; oa; ob ]
-          ~name:"smr2_retract"
-          (Ll_test.seq producer (Ll_test.seq matching_read iterator_read))
-      in
-      p "a later unservable read commits the already-inlined node Never_virtual"
-        (Option.equal Int.equal (Ll_test.rejection_code retracted w) (Some 13));
-      p "consumption-time refusal retracts the minted scope too, rather than refusing the program"
-        (Ll_test.count_scopes retracted.LL.llc = 0 && Ll_test.count_get retracted w > 0);
-      let reference =
-        Ll_test.optimize
-          ~materialized:[ src; oa; ob; w ]
-          ~name:"smr2_reference"
-          (Ll_test.seq producer (Ll_test.seq matching_read iterator_read))
-      in
-      let read_both o name =
-        Ll_test.execute ~name o
-          ~seed:[ (src, src_values); (oa, Ll_test.blank 2); (ob, Ll_test.blank 2) ]
-          ~read:[ oa; ob ]
-      in
-      let both_cells vals = List.for_all vals ~f:(fun a -> Float.equal a.(0) produced) in
-      p "the retracted read and the materialized reading deliver the same value to both consumers"
-        (both_cells (read_both retracted "smr2_retract")
-        && both_cells (read_both reference "smr2_reference")))
+     The shape needs the SAME cell read twice, so [max_visits] is pinned to 2 here: the cap is a
+     policy prior decided before any legality question, not the mechanism under test. *)
+  with_virtualize_settings ~max_visits:2 @@ fun () ->
+  let node = Ll_test.node_factory ~first_id:9880 ~dims:[| 2 |] () in
+  let w = node "smr2_w" in
+  let src = node "smr2_src" in
+  let oa = node "smr2_oa" in
+  let ob = node "smr2_ob" in
+  List.iter [ src; oa; ob ] ~f:Ll_test.materialize;
+  (* [3 + 10*4 = 43] identifies both source cells, so a producer inlined against the wrong operand,
+     or a read served from an uninitialized buffer, cannot reproduce it. *)
+  let src_values = [| 3.; 4. |] in
+  let produced = 43. in
+  let producer =
+    Ll_test.set w
+      [| Ll_test.fixed 0 |]
+      (Ll_test.add
+         (Ll_test.get src [| Ll_test.fixed 0 |])
+         (Ll_test.mul (Ll_test.c 10.) (Ll_test.get src [| Ll_test.fixed 1 |])))
+  in
+  let matching_read = Ll_test.set oa [| Ll_test.fixed 0 |] (Ll_test.get w [| Ll_test.fixed 0 |]) in
+  let iterator_read =
+    let j = Ll_test.sym () in
+    Ll_test.loop_n j 1 (Ll_test.set ob [| Ll_test.fixed 0 |] (Ll_test.get w [| Ll_test.iter j |]))
+  in
+  let control =
+    Ll_test.optimize
+      ~materialized:[ src; oa; ob ]
+      ~name:"smr2_control"
+      (Ll_test.seq producer matching_read)
+  in
+  p "the matching read alone inlines the fixed-cell producer"
+    (Ll_test.known_virtual control w && Ll_test.count_get control w = 0);
+  let retracted =
+    Ll_test.optimize
+      ~materialized:[ src; oa; ob ]
+      ~name:"smr2_retract"
+      (Ll_test.seq producer (Ll_test.seq matching_read iterator_read))
+  in
+  p "a later unservable read commits the already-inlined node Never_virtual"
+    (Option.equal Int.equal (Ll_test.rejection_code retracted w) (Some 13));
+  p "consumption-time refusal retracts the minted scope too, rather than refusing the program"
+    (Ll_test.count_scopes retracted.LL.llc = 0 && Ll_test.count_get retracted w > 0);
+  let reference =
+    Ll_test.optimize
+      ~materialized:[ src; oa; ob; w ]
+      ~name:"smr2_reference"
+      (Ll_test.seq producer (Ll_test.seq matching_read iterator_read))
+  in
+  let read_both o name =
+    Ll_test.execute ~name o
+      ~seed:[ (src, src_values); (oa, Ll_test.blank 2); (ob, Ll_test.blank 2) ]
+      ~read:[ oa; ob ]
+  in
+  let both_cells vals = List.for_all vals ~f:(fun a -> Float.equal a.(0) produced) in
+  p "the retracted read and the materialized reading deliver the same value to both consumers"
+    (both_cells (read_both retracted "smr2_retract_run")
+    && both_cells (read_both reference "smr2_reference_run"))
