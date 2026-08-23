@@ -51,9 +51,10 @@ that they earn a lookup rather than always-loaded space.
   matters more for a scan than for an ordinary test, and the difference is the blast radius: a unit
   test fails when its own subject regresses, and its subject is in the diff, whereas a scan fails
   when anyone, anywhere, writes something it did not anticipate — and the population it scans keeps
-  growing under it for as long as the PR is open. So `git fetch origin && git rebase origin/master`
-  (`git merge origin/master` where the branch is shared, as #413 did) and re-run the scan BEFORE
-  opening such a PR and again before merging it; where a rebase is unwelcome, build the merge
+  growing under it for as long as the PR is open. So fetch the STAGING remote — whose name is local
+  and need not be `origin` (CLAUDE.md, Pull Requests) — rebase onto its `master`, or merge it in
+  where the branch is shared and rewriting is not yours to do (as #413 did), and re-run the scan
+  BEFORE opening such a PR and again before merging it; where neither is welcome, build the merge
   commit on a scratch branch and run it there. What the omission buys is a false failure on a
   colleague's correct work, which is the outcome that gets a check disabled rather than fixed.
 - A negative control written FROM the corpus can encode the ABSENCE of a shape rather than a rule
