@@ -61,6 +61,14 @@ module type ARM = sig
 
   val describe : unit -> string
 
+  val conversion_path : unit -> string
+  (** Which conversion the vendor kernel actually got, as the COMPILED KERNEL reports it rather than
+      as the options we passed imply — CUDA's [cuda_fp8.hpp] is the hardware instruction at
+      [__CUDA_ARCH__ >= 890] and its own software emulation below, and a device whose capability is
+      under sm_89 lands on the software path however honestly [--arch=device] asked for its own
+      architecture. It goes into every claim's label, so no run can be mistaken for the other kind
+      afterwards (Codex P2 round 4 on PR #463). *)
+
   val narrow_f32 : base:int -> count:int -> bytes_buf -> unit
   (** Fills [out.{i}] with the vendor's e5m2 code for the f32 whose bit pattern is [base + i]. *)
 
@@ -189,6 +197,7 @@ let all_finite_codes =
 
 let report (module A : ARM) ~sweep ~inputs (counts, seconds) =
   let vendor = A.vendor_type in
+  let path = A.conversion_path () in
   Stdio.printf "\n%s %s sweep: %d inputs, %.1fs\n" A.name sweep inputs seconds;
   Stdio.printf "  non-finite inputs: %d infinite, %d NaN\n" (get counts s_inf_seen)
     (get counts s_nan_seen);
@@ -201,12 +210,13 @@ let report (module A : ARM) ~sweep ~inputs (counts, seconds) =
   Stdio.printf "  distinct %s codes produced overall: %d\n" vendor
     (List.length (code_set counts s_all_codes));
   report_records counts ~arm:A.name ~vendor;
-  Verdict.pf "the software codec and %s agree on every finite %s input the sweep covers" vendor
-    sweep
+  Verdict.pf "the software codec and %s agree on every finite %s input the sweep covers, via the %s"
+    vendor sweep path
     (get counts s_finite = 0);
   let produced = code_set counts s_all_codes in
   Verdict.p_all
-    (Printf.sprintf "the %s %s sweep produced every signed finite e5m2 code" vendor sweep)
+    (Printf.sprintf "the %s %s sweep produced every signed finite e5m2 code, via the %s" vendor sweep
+       path)
     all_finite_codes ~min:248
     ~f:(fun c -> List.mem produced c ~equal:Int.equal)
 
@@ -274,6 +284,10 @@ let () =
       Stdio.printf "%s arm: %s\n%!" A.name (A.describe ());
       Stdio.printf "  codec: builtins.c single_to_fp8 / double_to_fp8 (%s); vendor: %s\n"
         (codec_landmarks ()) A.vendor_type;
+      (* Printed before any sweep, and repeated inside every claim: an [--arch=device] run on a
+         pre-sm_89 GPU asks honestly for the device's own architecture and still gets the header's
+         software conversion, so "device mode" is not by itself a statement about hardware. *)
+      Stdio.printf "  conversion swept: %s\n%!" (A.conversion_path ());
       if String.(!sweep = "f32" || !sweep = "both") then
         report arm ~sweep:"f32" ~inputs:two_pow_32 (run_f32 arm);
       if String.(!sweep = "f64" || !sweep = "both") then

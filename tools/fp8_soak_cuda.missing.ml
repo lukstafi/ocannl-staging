@@ -11,5 +11,6 @@ let set_arch_policy (_ : arch_policy) = ()
 let probe () = Error "not built: the cuda arm needs the cudajit library"
 let unavailable () = failwith "fp8_soak: the cuda arm needs the cudajit library"
 let describe () : string = unavailable ()
+let conversion_path () : string = unavailable ()
 let narrow_f32 ~base:_ ~count:_ (_ : bytes_buf) : unit = unavailable ()
 let narrow_f64 ~base:_ ~count:_ ~lows:_ (_ : bytes_buf) : unit = unavailable ()

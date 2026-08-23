@@ -120,14 +120,17 @@ files.
   setting. `cuda_fp8.hpp` guards its conversions with `#if __CUDA_ARCH__ >= 890`: at or above sm_89
   the cast is the hardware `cvt` instruction, below it the header's own software emulation. The
   repo's arch policy (`Cuda_backend.gpu_arch_options`) is MARKER-driven — a source with no
-  tensor-core markers gets no `--gpu-architecture` at all, so nvrtc's default target applies and the
-  conversion is the software one. That is the honest answer to "does the codec agree with what the
-  backend emits" (`--arch=backend`), but it is not the hardware check gh-ocannl-646's lesson asks
-  for, so the default is `--arch=device`, this GPU's own capability. The soak prints its nvrtc
-  options in the run header, because a record that does not say which path it swept is one that has
-  to be re-derived. **The two agree bit-for-bit** on all 21.5e9 inputs on compute_120 / CUDA 13.3,
-  NaN and infinity classes included — which is worth knowing, and is not something to assume of the
-  next toolkit.
+  tensor-core markers gets no `--gpu-architecture` at all, so nvrtc's default target applies:
+  measured as `__CUDA_ARCH__ = 750` under CUDA 13.3, hence the software path. That is the honest
+  answer to "does the codec agree with what the backend emits" (`--arch=backend`), but it is not the
+  hardware check gh-ocannl-646's lesson asks for, so the default is `--arch=device`, this GPU's own
+  capability. **The two agree bit-for-bit** on all 21.5e9 inputs on compute_120 / CUDA 13.3, NaN and
+  infinity classes included — worth knowing, and not something to assume of the next toolkit.
+  Which path a run swept is never inferred from the options passed: a `ocannl_report_arch` kernel
+  hands back its own `__CUDA_ARCH__`, and that value is printed in the header AND carried in every
+  claim's label ("… via the hardware cvt (__CUDA_ARCH__ = 1200)"). That matters below sm_89, where
+  `--arch=device` asks honestly for the device's own architecture and still gets the software
+  conversion: the run says so rather than reading as a hardware check (Codex P2, round 4).
 - The soak's NON-finite disagreements are permanent, and it prints them rather than hiding them.
   `±inf` narrows to 0x7B/0xFB under CUDA (saturating) where our codec keeps 0x7C/0xFC: 2 inputs in
   each sweep. A NaN f32 narrows to 0x7F whatever its sign, so 8388607 of the 16777214 NaN patterns

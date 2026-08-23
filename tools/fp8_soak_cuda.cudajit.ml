@@ -21,6 +21,19 @@ let source =
   {|
 #include <cuda_fp8.h>
 
+/* What __CUDA_ARCH__ the kernels above were actually built with, asked of the DEVICE rather than
+   inferred from the options we think we passed -- nvrtc's default target when no
+   --gpu-architecture is given is a toolkit detail, and this program's whole subject is not
+   assuming things about vendor conversions. cuda_fp8.hpp's conversions are hardware at >= 890 and
+   the header's own software emulation below, so this value is what says which was swept. */
+extern "C" __global__ void ocannl_report_arch(unsigned int *out) {
+#if defined(__CUDA_ARCH__)
+  out[0] = (unsigned int)__CUDA_ARCH__;
+#else
+  out[0] = 0u;
+#endif
+}
+
 extern "C" __global__ void ocannl_vendor_narrow_f32(unsigned long long base,
                                                     unsigned long long count,
                                                     unsigned char *out) {
@@ -69,6 +82,7 @@ type state = {
   stream : Cu.Stream.t;
   narrow_f32 : Cu.Module.func;
   narrow_f64 : Cu.Module.func;
+  cuda_arch : int; (* __CUDA_ARCH__ as the compiled kernel itself reports it *)
   options : string list; (* what nvrtc was given, so a run record says what it compiled *)
   mutable buffer : (Cu.Deviceptr.t * int) option; (* pointer and its size in bytes *)
 }
@@ -140,13 +154,30 @@ let init () =
         Nvrtc.compile_to_ptx ~cu_src:source ~name:"ocannl_fp8_soak.cu" ~options ~with_debug:false
       in
       let kernel_module = Cu.Module.load_data_ex ptx [] in
+      (* Ask the compiled module which arch it got, before anything is swept. *)
+      let arch_out = Cu.Deviceptr.mem_alloc ~size_in_bytes:4 in
+      let stream = Cu.Stream.create () in
+      Cu.Stream.launch_kernel
+        (Cu.Module.get_function kernel_module ~name:"ocannl_report_arch")
+        ~grid_dim_x:1 ~block_dim_x:1 ~shared_mem_bytes:0 stream
+        [ Cu.Stream.Tensor arch_out ];
+      let arch_host =
+        Stdlib.Bigarray.Array1.create Stdlib.Bigarray.int32 Stdlib.Bigarray.c_layout 1
+      in
+      Cu.Stream.memcpy_D_to_H ~length:1
+        ~dst:(Stdlib.Bigarray.genarray_of_array1 arch_host)
+        ~src:arch_out stream;
+      Cu.Stream.synchronize stream;
+      Cu.Deviceptr.mem_free arch_out;
+      let cuda_arch = Int32.to_int_exn arch_host.{0} in
       let st =
         {
           context = ctx;
           kernel_module;
           attrs;
+          cuda_arch;
           options;
-          stream = Cu.Stream.create ();
+          stream;
           narrow_f32 = Cu.Module.get_function kernel_module ~name:"ocannl_vendor_narrow_f32";
           narrow_f64 = Cu.Module.get_function kernel_module ~name:"ocannl_vendor_narrow_f64";
           buffer = None;
@@ -177,6 +208,17 @@ let device_buffer st bytes =
       let ptr = Cu.Deviceptr.mem_alloc ~size_in_bytes:bytes in
       st.buffer <- Some (ptr, bytes);
       ptr
+
+(* cuda_fp8.hpp: `#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)` selects the hardware
+   conversion; below it the header emulates in software. *)
+let fp8_hardware_arch = 890
+
+let conversion_path () =
+  let st = init () in
+  if st.cuda_arch >= fp8_hardware_arch then
+    Printf.sprintf "hardware cvt (__CUDA_ARCH__ = %d)" st.cuda_arch
+  else if st.cuda_arch = 0 then "unknown (__CUDA_ARCH__ undefined)"
+  else Printf.sprintf "header software path (__CUDA_ARCH__ = %d < %d)" st.cuda_arch fp8_hardware_arch
 
 let block_dim = 256
 

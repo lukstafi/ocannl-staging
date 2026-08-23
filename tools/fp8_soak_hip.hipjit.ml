@@ -133,6 +133,12 @@ let device_buffer st bytes =
       st.buffer <- Some (ptr, bytes);
       ptr
 
+(* ROCm's fp8 conversion has no __CUDA_ARCH__-style compile-time split between a hardware and a
+   software path, so there is one path and this names it. The gcn arch is what identifies it. *)
+let conversion_path () =
+  let st = init () in
+  Printf.sprintf "device cast (%s)" st.attrs.gcn_arch_name
+
 let block_dim = 256
 let grid_dim = 4096
 
