@@ -164,10 +164,20 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   "it ranked below `tune_inline_flips`" (gh-ocannl-558,
   [report-gh558-hip-flips.md](report-gh558-hip-flips.md)).
 - `runners/pytorch/run.py` — flags: `--device cpu|mps|cuda`, `--compile` (torch.compile
-  variant, which reports whether inductor's codegen ran here or came from its cache).
+  variant, which reports whether inductor's codegen ran here or came from its cache),
+  `--compile-mode MODE` (a `torch.compile` mode such as `max-autotune` — the honest analogue of a
+  tuned cell, since it benchmarks kernels; measured for gh-ocannl-675 but not a matrix cell) and
+  `--retime` (time a second block of `timed_steps` in the same process, which is what separates
+  "a process that searched is slower per launch" from first-block warmup).
 - `runners/tinygrad/run.py` — flags: `--device CPU|METAL|CUDA|AMD|CL|HIP`, `--jit 0|1`, `--beam N`
   (BEAM=N kernel search, implies jit; the search cost lands in `compile_s`, and the result line
-  reports whether the beam actually searched or replayed `~/.cache/tinygrad`).
+  reports whether the beam actually searched or replayed `~/.cache/tinygrad`), `--retime` (as
+  above). Redirect the kernel cache per run with `CACHEDB=<path>` when its warmth is the
+  experiment. On every device whose beam search parallelises, the search runs its candidate
+  compiles in a `spawn` pool whose workers re-execute this module top-level, so the runner drops
+  `runners/` from `sys.path` again right after importing `bench_common`: left there, the worker's
+  own `import tinygrad` resolves `runners/tinygrad/` as a namespace package, every worker dies,
+  the pool respawns them forever, and the search hangs rather than failing (gh-ocannl-675).
 - `orchestrate.py` — runs the matrix (dispatching the OCANNL executable on the fixture's
   `model`), enforces the parity gate, writes `results/results.jsonl` and
   `results/report.md`. Flags: `--workloads mlp_small ...`, `--tuned`, `--materialized`,
@@ -234,6 +244,12 @@ nested-division rewrite; regression test `test/training/virtual_grads_parity.ml`
   within noise of an f32 schedule with none — and the reference for two facts that outlive it,
   that gfx1151's WMMA is not exactly-rounded in any format combination, and that `taskset -c 0-15`
   on that box is 8 SMT-shared cores rather than 16 private ones),
+  [report-gh675-cuda.md](report-gh675-cuda.md) (WSL2/CUDA on an RTX 5070 Ti — gh-ocannl-675's
+  NVIDIA leg: what a searching process actually costs per launch, per cell, against non-searching
+  controls and a sign test over paired repeats; the reference for why every non-OCANNL searching
+  cell stays single-pass, for the fact that the 2.5–3.5x this file used to quote does not
+  reproduce, and for two tinygrad traps — the `sys.path` leak that wedges a parallel beam search
+  and the driver JIT cache that makes a second "from-scratch" CUDA search several times cheaper),
   [report-gh569-hip.md](report-gh569-hip.md) (WSL2/HIP on gfx1151 — the cross-backend test of
   gh-ocannl-569's companion-coverage blocker: the same rule declines the same sites at the same
   `8x128x1024` geometry, and the same five kernels dominate in the same naive scalar form at the
@@ -394,9 +410,38 @@ than the driver (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION` at module load), run it wi
   `autotune_cache/` (its `compile_s` — the search cost — is what gets reported), then a fresh
   pass-2 process replays the cached winner and provides the step timings. Rationale: the search
   leaves its own process measurably slower (extra per-launch overhead from accumulated
-  modules/buffers; 2.5–3.5x on small CUDA kernels), which would penalize the tuned artifact for
-  the one-time search it already paid for in `compile_s`. Wipe `autotune_cache/` before a run
-  whose `compile_s` should reflect a from-scratch search.
+  modules/buffers), which would penalize the tuned artifact for the one-time search it already
+  paid for in `compile_s`. Wipe `autotune_cache/` before a run whose `compile_s` should reflect a
+  from-scratch search — and note that on CUDA the driver's own JIT cache (`~/.nv/ComputeCache`)
+  survives that wipe, so a second from-scratch search on the same box is several times cheaper
+  than the first.
+
+  **How large that penalty is, per cell and per box, is measured** (gh-ocannl-675;
+  [report-gh675-cuda.md](report-gh675-cuda.md) and the ROCm table in the issue). Each searching
+  cell was timed twice — once in the process that searched, once in a fresh process replaying its
+  cache — with the non-searching cells run as the same pair for a spread control. Reading X as
+  (pass-1 step p50)/(pass-2 step p50) − 1, median over paired repeats, on `mlp_small` /
+  `gpt2_mini`:
+
+  | cell | RTX 5070 Ti (CUDA 13.3) | Radeon 8060S / gfx1151 (ROCm 7.14) |
+  |---|---|---|
+  | OCANNL `tuned` | +10.3% behind a 16 s search, ≈0% behind a 4 s one; +0.5% on gpt2_mini | −0.2% / −0.1% |
+  | tinygrad `--beam 2` | +6.4% / +2.3% (positive in 9/9 and 4/4 paired repeats) | +14.9% / +9.0% |
+  | `torch.compile` (default) | **−12.0% / −4.0%** — the searching process is the *faster* one | +7.2% / +21.2% |
+  | `torch.compile mode="max-autotune"` | −2.0% / −1.1% | +12.3% / +33.9% |
+  | *controls* (eager, warm jit, cold-compile jit) | \|X\| ≤ 2.5%, sign a coin flip | \|X\| ≤ 1.7% |
+
+  Three things follow, and the matrix is built on them. **(a)** The 2.5–3.5x this file used to
+  quote for small CUDA kernels does not reproduce on either box; the largest residue measured is
+  +10.3%, so the protocol is kept for a measured ≤10.3%, not for a factor of three. **(b)** The
+  residue is a property of *how expensive the search was on that device*, not of the framework:
+  it appears wherever a long search precedes the timing (OCANNL behind 16 s on CUDA, the beam on
+  both boxes, `max-autotune` on ROCm) and vanishes when the search is cheap. **(c)** No searching
+  cell clears a ~10% line on both boxes, and `torch.compile`'s residue does not even keep its
+  sign across them, so **the other cells stay single pass** — at ≤6.4% (beam) and a *negative*
+  −12.0% (`torch.compile`) on the box whose hardware this rationale names. Splitting them would
+  double their wall clock, break comparability with every published report, and — for the torch
+  cells here — move the number the wrong way.
 
   **The result line says which pass produced it** (gh-ocannl-644): `"searched": true|false` is
   whether *this process* ran a search, and the `tune` object breaks it down per arm (each arm's
@@ -426,8 +471,9 @@ than the driver (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION` at module load), run it wi
   their rows read `same-process` — or `cached`, when the beam result came from
   `~/.cache/tinygrad` or the graph from inductor's cache, in which case their `compile_s` is a
   replay cost too. Whether those frameworks pay for searching in the timing process the way
-  OCANNL does is **unmeasured** (gh-ocannl-675); saying so in the report is the point, since
-  silence there reads as though the question applied to OCANNL alone. The two probes read
+  OCANNL does is **measured, and the answer is per-box** (gh-ocannl-675 — the table above);
+  reporting it is the point, since silence there reads as though the question applied to OCANNL
+  alone. The two probes read
   framework internals (tinygrad's beam disk cache, torch's FX-graph cache counters) and answer
   `null` — reported as `?` — when they cannot tell, rather than guessing a `false` that would be
   exactly the silent claim this field exists to prevent.
