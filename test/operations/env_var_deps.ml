@@ -411,6 +411,10 @@ let gate_prefix = "ocannl_log_level_"
    2026-08-23. *)
 let artifact_caller_floor = 20
 
+(* The configuration key `OCANNL_BUILD_FILES_PREFIX` addresses, which is what a module reading it by
+   name reads. *)
+let artifact_config_key = "build_files_prefix"
+
 (* The stanza kinds that name their own modules, and so can be asked what those modules read. *)
 let module_stanzas = [ "library"; "test"; "tests"; "executable"; "executables" ]
 
@@ -701,10 +705,31 @@ let main () =
       (* gh-ocannl-723: the artifact-directory declaration, against the modules that call the
          initializer needing it. Both directions, since a declaration nothing calls for is the
          restatement this replaces rather than the relationship. *)
-      let calls module_name =
-        Set.mem artifact_caller_keys (String.lowercase (Scan.in_subdir dir (module_name ^ ".ml")))
+      let key module_name = String.lowercase (Scan.in_subdir dir (module_name ^ ".ml")) in
+      let calls module_name = Set.mem artifact_caller_keys (key module_name) in
+      (* A module that reads `build_files_prefix` some other way justifies the declaration just as a
+         call to the initializer does, so the converse direction asks before telling a stanza to drop
+         one (Codex P2, round 2). Read on demand: it is asked only of a stanza that declares the
+         variable and calls nothing, which is a handful of sources at most. *)
+      let reads_prefix module_name =
+        match List.Assoc.find sources ~equal:String.equal (key module_name) with
+        | None -> false
+        | Some on_disk -> (
+            try
+              Sources.source_reads_key (In_channel.read_all on_disk) ~key:artifact_config_key
+            with _ -> false)
       in
-      let subjects = Scan.artifact_subjects stanzas ~calls in
+      (* Dune's default module set is the directory less what other stanzas claim, so the scan needs
+         to know what the directory holds -- a `(test (name t))` with no `(modules …)` builds `t.ml`
+         (Codex P2, round 2). Only the sources this scan was handed, which is what it can answer
+         for; the census check below is what catches a caller no stanza claims either way. *)
+      let directory_modules =
+        List.filter_map source_files ~f:(fun (path, _) ->
+            if String.equal (Stdlib.Filename.dirname path) (if String.is_empty dir then "." else dir)
+            then Some (Stdlib.Filename.remove_extension (Stdlib.Filename.basename path))
+            else None)
+      in
+      let subjects = Scan.artifact_subjects ~directory_modules stanzas ~calls ~reads_prefix in
       List.iter subjects ~f:(fun subject ->
           let where =
             Printf.sprintf "%s, the %s %s" dune_file subject.Scan.artifact_head
@@ -720,7 +745,7 @@ let main () =
               (if String.is_empty callers then subject.Scan.artifact_deps_site else callers)
             :: !artifact_table;
           match subject.Scan.artifact_verdict with
-          | Scan.Artifact_declared -> ()
+          | Scan.Artifact_declared | Scan.Artifact_other_reader -> ()
           | Scan.Artifact_undeclared ->
               Int.incr artifact_violations;
               fail
@@ -735,12 +760,12 @@ let main () =
               Int.incr artifact_violations;
               fail
                 (Printf.sprintf
-                   "%s declares `(env_var %s)` in %s and none of its modules calls \
-                    `Test_utils.Generated.init` -- a declaration with nothing behind it is a \
-                    restatement, not a relationship, and the next author copies it. Drop it, or \
-                    read the generated artifacts through `Test_utils.Generated`, which is the one \
-                    supported way to read them"
-                   where Scan.artifact_env_var subject.Scan.artifact_deps_site)
+                   "%s declares `(env_var %s)` in %s and no module of it reads `%s` at all -- \
+                    neither through `Test_utils.Generated.init` nor by name. A declaration with \
+                    nothing behind it is a restatement, not a relationship, and the next author \
+                    copies it. Drop it, or read the generated artifacts through \
+                    `Test_utils.Generated`, which is the one supported way to read them"
+                   where Scan.artifact_env_var subject.Scan.artifact_deps_site artifact_config_key)
           | Scan.Artifact_unrun ->
               Int.incr artifact_violations;
               fail

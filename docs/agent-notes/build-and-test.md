@@ -155,15 +155,25 @@ that they earn a lookup rather than always-loaded space.
   applies only when `Config_key_scan.floor_violations` says the run was handed the repository's scan
   roots, and WHICH mode the run was in goes into the golden, so a glob that breaks flips that line
   rather than quietly retiring the floor.
-  Two shapes such a scan gets wrong quietly, both found in review. A scan that matches a function
-  through the module it belongs to must collect the module's local names from BOTH grammars — OCaml
-  spells binding, opening and including twice (`module G = M` / `let module G = M in …`, `open M` /
-  `let open M in …`, `include M`), and knowing only the structure spellings reads
-  `let open Test_utils.Generated in init …` as somebody else's `init`. And a converse check ("this
-  declaration has nothing behind it") must say which stanza OWNS each verdict, or the same fact is
-  reported twice: a rule that runs an executable is judged through that executable, one that runs
-  something unnameable is not judged at all, and only a stanza that runs nothing whatever answers
-  for its own declaration.
+  Four shapes such a scan gets wrong quietly, all found in review, and each is a member of a genre
+  rather than a one-off. **Identifiers**: a scan that matches a function through the module it
+  belongs to must collect the module's local names from BOTH grammars — OCaml spells binding,
+  opening and including twice (`module G = M` / `let module G = M in …`, `open M` /
+  `let open M in …`, plus `include M`) — and must consult what it has already recorded, since
+  `module H = G` names the module as surely as `module G = Test_utils.Generated` does.
+  **Ownership**: a converse check ("this declaration has nothing behind it") must say which stanza
+  owns each verdict, or the same fact is reported twice — a rule that runs an executable is judged
+  through that executable, one that runs something unnameable is not judged at all, and only a
+  stanza that runs nothing whatever answers for its own declaration. **Path identity**: match a
+  runner to an executable by the path AS WRITTEN, never by basename, or a rule running
+  `../support/probe.exe` credits a local `probe` with a declaration made elsewhere — the same
+  collapse the config scanner's duplicate-basename check exists to prevent. **Dune's defaults**: a
+  stanza with no `(modules …)` field, or one naming `:standard`, owns the directory less what other
+  stanzas claim; reading either as "names no modules" makes a required declaration come out stale.
+  A fifth, about the rule rather than the scan: a declaration is justified by ANY read of the key it
+  tracks, so phrase the converse over the key (`Config_key_scan.source_reads_key`) and not over the
+  one function that prompted the check — otherwise the documented way of pinning a key becomes
+  unusable for that key.
   One more trap that costs a debugging round: dune's `glob_files_rec` runs over the BUILD tree,
   where a `<name>.pp.ml` sits beside every ppx-using `<name>.ml` — and a `.pp.ml` is not input the
   compiler's own parser accepts. A scan that parses everything it is handed (rather than only the

@@ -1599,21 +1599,46 @@ let artifact_env_var = "OCANNL_BUILD_FILES_PREFIX"
 (** The stanza heads that name their own modules, and so can be asked what those modules call. *)
 let module_bearing_heads = [ "test"; "tests"; "executable"; "executables"; "library" ]
 
-(** The module names a [(modules …)] field lists. Dune's set language admits [:standard] and set
-    difference here; those arrive as atoms that name no module and are simply not callers, which is
-    safe only because the caller also checks the other direction — that every source calling the
-    initializer was claimed by some stanza (see [env_var_deps]). *)
-let modules_of stanza =
+(** The module names a [(modules …)] field lists EXPLICITLY, or [None] where the field is absent or
+    reaches for dune's default set.
+
+    Both of those mean the same thing to a reader of the file alone: the stanza's modules are
+    whatever the directory holds and no other stanza claims. [(test (name t))] with no [(modules …)]
+    at all is the common shape of it — dune builds [t.ml] — and [(modules :standard \ helper)] is
+    the same default written down (Codex P2, round 2). Treating either as "names no modules" made a
+    stanza own nothing, which turned a required declaration into a stale one. *)
+let explicit_modules stanza =
   match field stanza "modules" with
-  | None -> []
-  | Some args -> List.filter_map args ~f:(function Sexp.Atom m -> Some m | _ -> None)
+  | None -> None
+  | Some args ->
+      if List.mem (List.concat_map args ~f:atoms) ":standard" ~equal:String.equal then None
+      else Some (List.filter_map args ~f:(function Sexp.Atom m -> Some m | _ -> None))
+
+(** The modules a stanza owns, given every module the directory holds. Dune's default set is the
+    directory less what other stanzas claim, which is what makes an explicit list elsewhere in the
+    file narrow this one. *)
+let modules_of ?(directory_modules = []) stanzas stanza =
+  match explicit_modules stanza with
+  | Some modules -> modules
+  | None ->
+      let claimed =
+        List.concat_map stanzas ~f:(fun other ->
+            match explicit_modules other with Some modules -> modules | None -> [])
+        |> List.map ~f:String.lowercase
+        |> Set.of_list (module String)
+      in
+      List.filter directory_modules ~f:(fun m -> not (Set.mem claimed (String.lowercase m)))
 
 type artifact_verdict =
   | Artifact_declared  (** the deps this stanza's run happens under name the variable *)
   | Artifact_undeclared  (** they do not, which is the hole *)
   | Artifact_stale_declaration
-      (** they do, and no module of this stanza calls the initializer: a declaration with nothing
-          behind it, which is the restatement this check exists to replace *)
+      (** they do, and no module of this stanza reads [build_files_prefix] at all: a declaration with
+          nothing behind it, which is the restatement this check exists to replace *)
+  | Artifact_other_reader
+      (** they do, no module calls the initializer, and one reads the key directly — a declaration
+          this check has no business removing. Calling the initializer is the usual reason to need
+          the variable tracked, not the only one (Codex P2, round 2). *)
   | Artifact_unrun
       (** an [(executable)] whose modules call the initializer and which no stanza in this dune file
           runs — so there is no [deps] field anywhere that answers for it *)
@@ -1637,10 +1662,15 @@ type artifact_subject = {
 (** Every stanza in [stanzas] the rule has an opinion about, given [calls], which answers whether one
     module name's source calls the initializer. A stanza with no caller among its modules and no
     declaration of its own is not a subject and is not reported. *)
-let artifact_subjects stanzas ~calls =
+let artifact_subjects ?(directory_modules = []) stanzas ~calls ~reads_prefix =
+  (* The path AS WRITTEN, which is the executable's identity here for the reason {!program_path}
+     gives: `../support/probe.exe` and a local `probe.exe` are different programs, and reducing both
+     to a basename made a rule running the first count as the runner of the second -- crediting a
+     local executable with a declaration made elsewhere, and hiding that nothing runs it (Codex P2,
+     round 2). *)
   let exes_run stanza =
     List.filter_map (executables_run stanza) ~f:(fun (_cwd, command) ->
-        match command with Runs path -> Some (Stdlib.Filename.basename path) | _ -> None)
+        match command with Runs path -> Some path | _ -> None)
     |> List.dedup_and_sort ~compare:String.compare
   in
   let runners_of names =
@@ -1656,11 +1686,23 @@ let artifact_subjects stanzas ~calls =
      visible from here. What is left -- a stanza that declares the variable and runs nothing
      whatever -- has nothing behind its declaration by construction. *)
   let runs_something stanza = not (List.is_empty (executables_run stanza)) in
+  (* And a stanza that names the variable somewhere OTHER than its dependency field is acting on it
+     -- `(setenv OCANNL_BUILD_FILES_PREFIX "" …)` is how `generated_provenance`'s rule pins the
+     default -- so its declaration answers for something this scan can see, whatever it runs. *)
+  let acts_on_the_variable stanza =
+    match stanza with
+    | Sexp.List (_ :: fields) ->
+        List.exists fields ~f:(function
+          | Sexp.List (Sexp.Atom "deps" :: _) -> false
+          | field -> List.mem (atoms field) artifact_env_var ~equal:String.equal)
+    | Sexp.List [] | Sexp.Atom _ -> false
+  in
   let module_subjects =
     List.filter_map stanzas ~f:(fun stanza -> 
       match head stanza with
       | Some h when List.mem module_bearing_heads h ~equal:String.equal ->
-          let callers = List.filter (modules_of stanza) ~f:calls in
+          let modules = modules_of ~directory_modules stanzas stanza in
+          let callers = List.filter modules ~f:calls in
           let name = match names_of stanza with n :: _ -> n | [] -> "<unnamed>" in
           let subject artifact_verdict artifact_deps_site =
             Some
@@ -1679,7 +1721,12 @@ let artifact_subjects stanzas ~calls =
           let decide ~all ~any site =
             match (callers, all, any) with
             | [], _, false -> None
-            | [], _, true -> subject Artifact_stale_declaration site
+            (* A declaration with no call behind it is not automatically a restatement: reading the
+               key directly is another reason to need the variable tracked, and it is checked before
+               the stanza is told to drop the declaration (Codex P2, round 2). *)
+            | [], _, true ->
+                if List.exists modules ~f:reads_prefix then subject Artifact_other_reader site
+                else subject Artifact_stale_declaration site
             | _ :: _, true, _ -> subject Artifact_declared site
             | _ :: _, false, _ -> subject Artifact_undeclared site
           in
@@ -1720,7 +1767,8 @@ let artifact_subjects stanzas ~calls =
         | Some h
           when (not (List.mem module_bearing_heads h ~equal:String.equal))
                && declares_env_var (field stanza "deps") artifact_env_var
-               && not (runs_something stanza) ->
+               && (not (runs_something stanza))
+               && not (acts_on_the_variable stanza) ->
             let name =
               match (names_of stanza, exes_run stanza) with
               | name :: _, _ -> name
@@ -1744,5 +1792,6 @@ let artifact_verdict_name = function
   | Artifact_declared -> "declared"
   | Artifact_undeclared -> "undeclared"
   | Artifact_stale_declaration -> "stale declaration"
+  | Artifact_other_reader -> "declared for a direct read"
   | Artifact_unrun -> "unrun"
   | Artifact_in_library -> "in a library"

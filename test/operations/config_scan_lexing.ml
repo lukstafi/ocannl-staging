@@ -311,6 +311,13 @@ let () = Generated.init ~backend_name|ocaml},
       [ "Generated.init" ] );
     (* The one this check exists for: the module that defines the initializer names it in prose and
        in the message it raises, and calls it nowhere. *)
+    (* An alias of an alias reaches the same function, and a first pass that recorded `G` without
+       consulting what it had recorded read `H.init` as somebody else's (Codex P2, round 2). *)
+    ( "through a chain of aliases",
+      {ocaml|module G = Test_utils.Generated
+module H = G
+let () = H.init ~backend_name|ocaml},
+      [ "H.init" ] );
     ( "a doc comment naming it is not a call",
       {ocaml|(** [Test_utils.Generated.init] must be called before any compile. *)
 let uninitialized () = ()|ocaml},

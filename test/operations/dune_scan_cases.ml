@@ -1070,6 +1070,14 @@ let artifact_cases =
 (rule (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (run %{dep:probe.exe})))|dune},
       [ "probe" ],
       [ "executable probe: declared (probe)" ] );
+    (* The path AS WRITTEN is the executable's identity: reducing it to a basename made a rule
+       running `../support/probe.exe` count as the runner of a local `probe`, crediting it with a
+       declaration made elsewhere and hiding that nothing here runs it (Codex P2, round 2). *)
+    ( "a rule running a same-named executable elsewhere does not run the local one",
+      {dune|(executable (name probe) (modules probe))
+(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX)) (action (run ../support/probe.exe)))|dune},
+      [ "probe" ],
+      [ "executable probe: unrun (probe)" ] );
     (* An executable this file does not declare is one whose modules this scan cannot see, so its
        runner's declaration is not something the scan may call stale. Same for a command the scan
        cannot place at all. *)
@@ -1115,6 +1123,63 @@ let artifact_cases =
       [] );
   ]
 
+(* Dune's default module set, which a stanza reaches for by omitting `(modules …)` or by naming
+   `:standard` (Codex P2, round 2). Reading either as "this stanza names no modules" made the stanza
+   own nothing, so a required declaration came out stale and the source came out unclaimed. The
+   third element is what the directory holds. *)
+let artifact_default_modules_cases =
+  [
+    ( "a single-module test with no modules field owns its own source",
+      {dune|(test (name t) (deps (env_var OCANNL_BUILD_FILES_PREFIX)))|dune},
+      [ "t" ],
+      [ "t" ],
+      [ "test t: declared (t)" ] );
+    ( "and is reported when it does not declare",
+      {dune|(test (name t) (deps ocannl_config))|dune},
+      [ "t" ],
+      [ "t" ],
+      [ "test t: undeclared (t)" ] );
+    ( ":standard is the same default written down",
+      {dune|(test (name t) (modules :standard) (deps ocannl_config))|dune},
+      [ "t" ],
+      [ "t" ],
+      [ "test t: undeclared (t)" ] );
+    ( "a set difference over :standard is still the default set",
+      {dune|(test (name t) (modules (:standard \ helper)) (deps ocannl_config))|dune},
+      [ "t"; "helper" ],
+      [ "t" ],
+      [ "test t: undeclared (t)" ] );
+    (* And the default narrows: what another stanza names explicitly is not in it, which is dune's
+       own rule and what keeps a caller attributed to one stanza. *)
+    ( "a module another stanza names explicitly is not in the default set",
+      {dune|(test (name t) (deps ocannl_config))
+(test (name u) (modules u) (deps (env_var OCANNL_BUILD_FILES_PREFIX)))|dune},
+      [ "t"; "u" ],
+      [ "u" ],
+      [ "test u: declared (u)" ] );
+  ]
+
+(* Calling the initializer is the usual reason a stanza needs the variable tracked, not the only
+   one: a test reading `build_files_prefix` by name needs it just as much, and a converse check that
+   knew only the initializer would make the documented way of pinning the key unusable for it
+   (Codex P2, round 2). The third element is which modules read it directly. *)
+let artifact_reader_cases =
+  [
+    ( "a declaration behind a direct read of the key is not stale",
+      {dune|(test (name t) (modules t) (deps (env_var OCANNL_BUILD_FILES_PREFIX)))|dune},
+      [ "t" ],
+      [ "test t: declared for a direct read" ] );
+    ( "and the same stanza whose module reads nothing is",
+      {dune|(test (name t) (modules t) (deps (env_var OCANNL_BUILD_FILES_PREFIX)))|dune},
+      [],
+      [ "test t: stale declaration" ] );
+    ( "a rule that SETS the variable is acting on it, whatever it runs",
+      {dune|(rule (deps (env_var OCANNL_BUILD_FILES_PREFIX))
+ (action (setenv OCANNL_BUILD_FILES_PREFIX "" (copy a b))))|dune},
+      [],
+      [] );
+  ]
+
 let () =
   let check name expected found =
     if List.equal String.equal found expected then printf "ok: %s\n" name
@@ -1131,15 +1196,30 @@ let () =
           []
       in
       check name expected found);
+  let artifact_check ?(label = "artifact declaration") ?(directory_modules = []) ?(readers = [])
+      name source callers expected =
+    let calls module_name = List.mem callers module_name ~equal:String.equal in
+    let reads_prefix module_name = List.mem readers module_name ~equal:String.equal in
+    let found =
+      try
+        List.map
+          (Scan.artifact_subjects ~directory_modules (Scan.stanzas source) ~calls ~reads_prefix)
+          ~f:render_artifact
+      with exn ->
+        fail "%s -- %s: the scan raised: %s" label name (Exn.to_string exn);
+        []
+    in
+    check (label ^ " -- " ^ name) expected found
+  in
   List.iter artifact_cases ~f:(fun (name, source, callers, expected) ->
-      let calls module_name = List.mem callers module_name ~equal:String.equal in
-      let found =
-        try List.map (Scan.artifact_subjects (Scan.stanzas source) ~calls) ~f:render_artifact
-        with exn ->
-          fail "artifact declaration -- %s: the scan raised: %s" name (Exn.to_string exn);
-          []
-      in
-      check ("artifact declaration -- " ^ name) expected found);
+      artifact_check ~directory_modules:callers name source callers expected);
+  List.iter artifact_default_modules_cases
+    ~f:(fun (name, source, directory_modules, callers, expected) ->
+      artifact_check ~label:"artifact default modules" ~directory_modules name source callers
+        expected);
+  List.iter artifact_reader_cases ~f:(fun (name, source, readers, expected) ->
+      artifact_check ~label:"artifact other reader" ~directory_modules:readers ~readers name source
+        [] expected);
   List.iter raw_stanza_cases ~f:(fun (name, source, expected) ->
       check ("raw stanzas -- " ^ name) expected (List.map (Scan.raw_stanzas source) ~f:render_raw));
   List.iter path_rewriting_cases ~f:(fun (name, source, expected) ->

@@ -193,8 +193,21 @@ let generated_init_calls_in_source content =
      caller is a stanza the rule stops applying to, and looks exactly like a stanza with nothing to
      declare. *)
   let bind_module_expr alias module_expr =
+    let names_it txt =
+      receiver_is_generated txt
+      ||
+      (* An alias of an alias: `module H = G` where `G` was bound to the module. The binders run in
+         source order and OCaml lets neither be used before it is bound, so consulting what is
+         already recorded is all a chain needs (Codex P2, round 2). *)
+      match flatten_module_path txt with
+      | Some path -> (
+          match List.last path with
+          | Some m -> List.mem !aliases m ~equal:String.equal
+          | None -> false)
+      | None -> false
+    in
     match module_expr.pmod_desc with
-    | Pmod_ident { txt; _ } when receiver_is_generated txt -> (
+    | Pmod_ident { txt; _ } when names_it txt -> (
         match alias with Some alias -> aliases := alias :: !aliases | None -> opened := true)
     | _ -> ()
   in
@@ -702,3 +715,14 @@ let keys_by_file files =
       let content = Stdio.In_channel.read_all fname in
       ( Stdlib.Filename.basename fname,
         Set.of_list (module String) (keys_in_source content @ settings_keys_in_source content) ))
+
+(** Whether [content] reads configuration key [key] by name, through either spelling this module
+    recognises: an [~arg_name:"key"] call site, or a field of the startup-resolved [Utils.settings].
+
+    What it is for: a stanza declaring [OCANNL_<KEY>] is justified by SOME read of that key among its
+    modules, and calling the initializer is only one of them. A converse check that knew only the
+    initializer would report a test reading the key directly as carrying a stale declaration, and so
+    would make the documented way of pinning a key unusable for it (Codex P2, round 2). *)
+let source_reads_key content ~key =
+  let has keys = List.mem keys key ~equal:String.equal in
+  has (keys_in_source content) || has (settings_keys_in_source content)
