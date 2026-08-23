@@ -150,7 +150,7 @@ let () =
   let _ctx_a, _loss_a, _y_a, losses_a =
     run_plain base_ctx ~input_l:"xa" ~build:make_model ~prepare:(fun _ -> ()) ~w_vals
   in
-  Verdict.p "oracle losses finite" (Array.for_all losses_a ~f:Float.is_finite);
+  Verdict.p_all "oracle losses finite" (Array.to_list losses_a) ~f:Float.is_finite;
   (* Every leg below is held to "trajectory parity within 0.1" against this oracle. A tolerance
      cannot reject an input-independent forward, or a step that never updates weights, if the
      reference itself does not move: all legs would sit at one constant and every parity line would
@@ -202,7 +202,7 @@ let () =
   Stdio.printf "f16 leg twin of w1: %s\n" (prec_str twin_c.Tensor.value);
   Stdio.printf "f16 leg twin of w1 grad: %s\n"
     (prec_str (Option.value_exn twin_c.Tensor.diff).Tensor.grad);
-  Verdict.p "f16 leg all steps ran" (List.for_all stepped_c ~f:Fn.id);
+  Verdict.p_all "f16 leg all steps ran" stepped_c ~f:Fn.id;
   Verdict.p "f16 leg loss trajectory parity within 0.1" Float.(max_abs_diff losses_a losses_c < 0.1);
 
   (* Leg D: the dynamic-scale backoff/growth cycle. The b2 twin gradient is exactly the scale, so
@@ -257,7 +257,7 @@ let () =
   let losses_e1, finite_e1, _scales_e1, _moved_e1 =
     run_gated ~input_l:"xe" ~scaler:scaler_e1 ~check_interval:1
   in
-  Verdict.p "gated leg all windows finite" (List.for_all finite_e1 ~f:Fn.id);
+  Verdict.p_all "gated leg all windows finite" finite_e1 ~f:Fn.id;
   Verdict.p "gated leg loss trajectory parity within 0.1"
     Float.(max_abs_diff losses_a losses_e1 < 0.1);
   let scaler_e2 =

@@ -32,7 +32,7 @@ let () =
     (String.concat ~sep:"x" (Array.to_list (Array.map dims ~f:Int.to_string)));
   let vals = Context.get_values ctx logits.Tensor.value in
   printf "logits count: %d\n" (Array.length vals);
-  Verdict.p "all finite" (Array.for_all vals ~f:Float.is_finite);
+  Verdict.p_all "all finite" (Array.to_list vals) ~f:Float.is_finite;
   (* All-zeros logits are finite, so "all finite" alone would pass an Embed_dim fetch that read the
      wrong node, or any collapse to a constant. Positions must produce different distributions, the
      same guard the full-size gpt2_dry_run carries. *)

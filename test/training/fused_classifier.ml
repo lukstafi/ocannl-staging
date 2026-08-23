@@ -102,11 +102,11 @@ let () =
     List.filter big_non_virtual ~f:(fun tn ->
         not (List.mem allowed tn ~equal:(fun a b -> Tn.equal a b)))
   in
-  Verdict.p "probabilities and other [batch, vocab] intermediates stay virtual"
-    (List.is_empty unexpected);
+  Verdict.p_empty "probabilities and other [batch, vocab] intermediates stay virtual"
+    ~over:big_nodes unexpected;
   List.iter unexpected ~f:(fun tn -> printf "  unexpectedly materialized: %s\n" (Tn.debug_name tn));
-  Verdict.p "logits value and gradient are materialized"
-    (List.for_all allowed ~f:(fun tn -> not (Tn.Placements.known_virtual plc tn)));
+  Verdict.p_all "logits value and gradient are materialized" allowed
+    ~f:(fun tn -> not (Tn.Placements.known_virtual plc tn));
 
   (* 4. Kernel-fission segment census (structural, using the metal analysis on the captured lowered
      code; runs identically under every configured backend). *)
