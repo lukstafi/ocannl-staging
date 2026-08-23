@@ -313,13 +313,15 @@ let () =
         done;
         Stdio.printf "\n");
     Stdlib.exit 0);
-  H.measure_and_emit ~st ~backend
-    ~variant:
-      (* Scheduling variant only: the storage precision is the "precision" field's business
-         (gh-ocannl-539). They are independent axes, and folding a reduced precision into the
-         variant made a tuned bf16 cell unnameable. *)
-      (if tune then "tuned" else if materialize then "materialized" else "default")
-    ~precision:leg.H.label ~compile_s ~tune:arms ~run_step
-    ~read_loss:(fun () -> (!ctx_ref, batch_loss).@[0])
-    ~sync:(fun () -> Context.sync !ctx_ref)
-    ()
+  ignore
+    (H.measure_and_emit ~protocol:(H.protocol_of_st st) ~backend
+       ~variant:
+         (* Scheduling variant only: the storage precision is the "precision" field's business
+            (gh-ocannl-539). They are independent axes, and folding a reduced precision into the
+            variant made a tuned bf16 cell unnameable. *)
+         (if tune then "tuned" else if materialize then "materialized" else "default")
+       ~precision:leg.H.label ~compile_s ~tune:arms ~run_step
+       ~read_loss:(fun () -> (!ctx_ref, batch_loss).@[0])
+       ~sync:(fun () -> Context.sync !ctx_ref)
+       ()
+      : string)
