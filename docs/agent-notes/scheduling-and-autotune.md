@@ -527,3 +527,31 @@ files.
   fragment is loaded and stored once per outer-contraction iteration there. Pinned by
   `test/operations/schedule_contraction_nest.ml` (detection, every family's construction, GPU
   blocktile execution, CPU-family execution on cc).
+- Non-multiple extents PAD in both GPU matmul pipelines, not only the tensorized one
+  (gh-ocannl-730). `Sketch_families.pad_composition_ok` is the shared judgment both consult, from
+  their seeding gate and from their `pad_to` triple alike: a geometry may replace a divisibility
+  gate with a pad exactly when every operand is read through a zero-fringe staged tile (`Stage`'s
+  per-axis `Where` guards store 0 out of range), which both GPU pipelines satisfy whenever their
+  k-block is staged. What made the blocktile family look different was never the staging — it
+  stages both operands at every geometry — but what a pad leaves BEHIND: with no `Tensorize` to
+  absorb the masks the leaf keeps its `If`, and `Schedule.Privatize` used to reject any guard
+  mentioning a symbol bound inside the accumulation loop, so a padded candidate died at
+  construction with "varies across the accumulation" rather than at the gate. Privatize now
+  classifies: an iteration-invariant condition still gates the init-load and store-back (PR #91's
+  lane-restriction rule, unchanged); a condition free of hardware-typed loop symbols is an
+  iteration mask over one thread's own accumulator, kept on the update alone; and a condition that
+  IS the target's own index compared against a bound no larger than that axis's dimension is a
+  row/column pad mask whose transfers already carry the identical edge guard. Everything else is
+  still rejected, and that line is load-bearing: a guard mixing a thread-selecting symbol into a
+  varying condition would leave non-updating lanes storing back a stale accumulator.
+  Measured on Metal (M4 Max, f32, attention out projection at head_dim 12, `b=8 s=512 j=768`,
+  `bk` 8 and 16 both padding 12 to 16): all ten padded candidates match the serial reference
+  BITWISE — the padded k slots contribute exact zeros, so a pad is not an approximation — and the
+  best costs 13.15 ms against 12.84 ms for the same geometry at head_dim 16, i.e. the pad costs
+  the padded arithmetic plus ~2% and no new class of overhead, replacing a 1615 ms untiled kernel.
+  Two pieces of residue. Nothing prunes a wasteful pad: a 20-row site now seeds a 64-row block
+  tile whose padded work is 3x the real work, and only the tuner's timing rejects it (the
+  tensorized family has always behaved this way). And the CPU blocktile and packed-scalar
+  pipelines stage into stack scratch, so the same argument would let them pad, but they keep the
+  gate — which is what still renders the gh-ocannl-683 k-extent label, and where
+  `schedule_contraction_nest` reads it off.

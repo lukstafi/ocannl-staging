@@ -83,7 +83,10 @@ type optop =
           their fringe (see {!constructor-Stage}), and {!constructor-Tensorize} recognizes the
           guards as pad masks — moving row/column masks to the accumulator transfers and
           discharging reduction masks against zero-filled staged operands — so tensorized paths
-          cover arbitrary extents. The surviving guards are exactly the flip points
+          cover arbitrary extents. A SCALAR pipeline keeps the leaf guards instead, and
+          {!constructor-Privatize} classifies them rather than rejecting them (gh-ocannl-730), which
+          is what lets the register-blocktiled GPU family pad too. The surviving guards are exactly
+          the flip points
           {!partition_breakpoints} detects: a later {!constructor-Partition} of an enclosing block
           loop at the last fully valid block specializes them away in the interior segments. *)
   | Stage of {
@@ -254,11 +257,20 @@ type optop =
           target axis, the index terms over loops nested inside [over] (required [Serial] with
           [from_ = 0]); no such terms yields a scalar accumulator. All accesses of [target] under
           [over] must use one index vector, which must not mention [over] itself, and must sit under
-          one [If] guard chain, which must be iteration-invariant (no memory reads, no symbols bound
-          inside [over]'s subtree) — the same predicate then gates the init-load and store-back, so
-          lane-restricted accumulations (e.g. [w == 0]) privatize correctly; per-iteration guards
-          are rejected. A [Zero_out] of [target] elsewhere is left in place — the init-load observes
-          it, so semantics are preserved without a surjectivity analysis. Compose as: [Split]s →
+          one [If] guard chain, whose conditions are classified (gh-ocannl-730). An
+          iteration-INVARIANT condition (no memory reads, no symbols bound inside [over]'s subtree)
+          also gates the init-load and store-back, so lane-restricted accumulations (e.g. [w == 0])
+          privatize correctly. A condition that varies is kept on the update alone, and only in the
+          two shapes that provably cannot select threads: one mentioning no hardware-typed loop
+          symbol at all (a mask over one thread's own iterations — what a reduction-axis
+          {!constructor-Pad} leaves behind), and one that is literally [target]'s own index on some
+          axis compared against a bound no larger than that axis's dimension (a row/column pad mask;
+          the transfers already carry that same edge guard). Any other varying condition — data
+          dependent, or mixing a hardware symbol into a comparison that is not [target]'s index — is
+          rejected, since it could restrict which threads accumulate while the transfers write back
+          an accumulator that never received the update. A [Zero_out] of [target] elsewhere is left
+          in place — the init-load observes it, so semantics are preserved without a surjectivity
+          analysis. Compose as: [Split]s →
           [Stage]s → [Privatize] → materializing [Unroll]s (the unrolls then turn the tile accesses
           into constant-indexed, register-allocatable form). *)
   | Expand_zero of { tn : Tn.t; indices : Indexing.symbol list }

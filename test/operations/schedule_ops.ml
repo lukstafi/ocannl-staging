@@ -197,11 +197,14 @@ let () =
   p "default annotator matmul values match the serial twin"
     (Array.for_all2_exn mm_sched mm_serial ~f:approx);
 
-  (* --- Privatize under If guards (PR #91 review): a lane-guarded accumulation [if (w == 0) c +=
-     va[k]] must carry the guard onto the synthesized init-load and store-back (stale lanes would
-     otherwise clobber the result); a per-iteration guard (mentioning a symbol bound inside the
-     accumulation loop) must be rejected. Structural checks on hand-built IR, backend-independent.
-     --- *)
+  (* --- Privatize under If guards (PR #91 review; gh-ocannl-730): a lane-guarded accumulation
+     [if (w == 0) c += va[k]] must carry the guard onto the synthesized init-load and store-back
+     (stale lanes would otherwise clobber the result). A guard that VARIES across the accumulation
+     is classified instead of rejected: one free of hardware-typed loop symbols masks iterations of
+     one thread's own accumulator, so it stays on the update and off the transfers (this is what a
+     reduction-axis [Pad] leaves behind, and what lets the GPU blocktile family pad); one that mixes
+     a thread-selecting symbol into a comparison that is not the target's own index is still
+     rejected. Structural checks on hand-built IR, backend-independent. --- *)
   let cacc = TDSL.ndarray [| 0. |] ~label:[ "cacc" ] ~output_dims:[ 1 ] () in
   let va = TDSL.ndarray [| 1.; 2.; 3.; 4. |] ~label:[ "va" ] ~output_dims:[ 4 ] () in
   let single = Ir.Ops.single in
@@ -280,18 +283,43 @@ let () =
         LL.Binop
           (Ir.Ops.Cmplt, (LL.Embed_index (Ir.Indexing.Iterator k), iprec), (LL.Constant 3., iprec)))
   in
-  p "per-iteration guard rejected by privatize"
+  let iter_res =
+    Sched.apply [ Sched.Privatize { target = cacc.Tensor.value; over = iter_k } ] (fake iter_llc)
+  in
+  let iter_src = doc_to_str (LL.to_doc () iter_res.LL.llc) in
+  (* The mask fires within one thread's own accumulation: it stays on the update (one [if]) and the
+     init-load and store-back run unguarded, so the slots it skips round-trip unchanged. *)
+  p "iteration mask stays on the update and off privatize's transfers"
+    (String.substr_index_all iter_src ~may_overlap:false ~pattern:"if " |> List.length |> ( = ) 1);
+  (* Mixing the thread-selecting symbol into the same varying condition is still rejected: it would
+     leave non-updating lanes storing back a stale accumulator. *)
+  let mixed_llc, mixed_k =
+    guarded_accum ~cond_of:(fun ~w ~k ->
+        LL.Binop
+          ( Ir.Ops.Mul,
+            ( LL.Binop
+                ( Ir.Ops.Cmplt,
+                  (LL.Embed_index (Ir.Indexing.Iterator k), iprec),
+                  (LL.Constant 3., iprec) ),
+              iprec ),
+            ( LL.Binop
+                ( Ir.Ops.Cmpeq,
+                  (LL.Embed_index (Ir.Indexing.Iterator w), iprec),
+                  (LL.Constant 0., iprec) ),
+              iprec ) ))
+  in
+  p "thread-selecting varying guard rejected by privatize"
     (match
        try
          ignore
            (Sched.apply
-              [ Sched.Privatize { target = cacc.Tensor.value; over = iter_k } ]
-              (fake iter_llc)
+              [ Sched.Privatize { target = cacc.Tensor.value; over = mixed_k } ]
+              (fake mixed_llc)
              : LL.optimized);
          None
        with Invalid_argument msg -> Some msg
      with
-    | Some msg -> String.is_substring msg ~substring:"varies across the accumulation"
+    | Some msg -> String.is_substring msg ~substring:"mask on one thread's own iterations"
     | None -> false);
 
   (* --- Device-limit-aware tile sizes: the annotator clamps the (configured) block size to the

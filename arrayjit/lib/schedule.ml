@@ -2045,6 +2045,49 @@ let apply_privatize ~target ~over (opt : Low_level.optimized) : Low_level.optimi
   let open Low_level in
   let iprec = Ops.index_prec () in
   let tgt_dims = Lazy.force target.Tn.dims in
+  (* Every loop of the routine by index symbol, with its axis type. Guard classification below needs
+     the axis type of symbols bound OUTSIDE [over] too (a lane restriction is the whole point of the
+     rule), and the [rewrite_loop] callback only sees the subtree. *)
+  let loop_axes =
+    let tbl = ref (Map.empty (module Indexing.Symbol)) in
+    let rec go llc =
+      match llc with
+      | For_loop { index; axis; body; _ } ->
+          tbl := Map.set !tbl ~key:index ~data:axis;
+          go body
+      | Seq (a, b) ->
+          go a;
+          go b
+      | If { cond = c, _; body } ->
+          go_scalar c;
+          go body
+      | Set { llsc; _ } | Set_local (_, llsc) -> go_scalar llsc
+      | Set_dynamic { dyn_value = v, _; llsc; _ } ->
+          go_scalar v;
+          go_scalar llsc
+      | Set_from_vec { arg = a, _; _ } -> go_scalar a
+      | Tile_mma { fallback; _ } -> go fallback
+      | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _ | Workgroup_barrier
+        ->
+          ()
+    and go_scalar (llsc : scalar_t) =
+      match llsc with
+      | Local_scope { body; _ } -> go body
+      | Get_dynamic { dyn_value = v, _; _ } -> go_scalar v
+      | Ternop (_, (a, _), (b, _), (c, _)) ->
+          go_scalar a;
+          go_scalar b;
+          go_scalar c
+      | Binop (_, (a, _), (b, _)) ->
+          go_scalar a;
+          go_scalar b
+      | Unop (_, (a, _)) -> go_scalar a
+      | Get_local _ | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _ ->
+          ()
+    in
+    go opt.llc;
+    !tbl
+  in
   rewrite_loop ~what:"Schedule.Privatize" ~sym:over opt.llc ~f:(fun fc ->
       if not (equal_axis_type fc.axis Serial) then
         invalid_arg "Schedule.Privatize: the accumulation loop must be Serial";
@@ -2121,77 +2164,120 @@ let apply_privatize ~target ~over (opt : Low_level.optimized) : Low_level.optimi
             invalid_arg
               ("Schedule.Privatize: v1 requires all accesses of " ^ Tn.debug_name target
              ^ " under the loop to use identical index vectors"));
-      (* Guard chains must agree across accesses, and must be iteration-invariant — free of memory
-         reads and of symbols bound by [over] or any loop inside its subtree — so the same predicate
-         can gate the init-load and store-back. A per-iteration (data- or index-dependent) guard
-         cannot be contracted: rejected. *)
+      (* Guard chains must agree across accesses; each condition is then classified for what it may
+         do to the accumulator's lifecycle (PR #91 review; gh-ocannl-730). Three admissible kinds:
+
+         - {e Invariant}: free of memory reads and of symbols bound by [over] or any loop inside its
+           subtree. A thread-identifying guard (a [lane == 0] restriction) is of this kind, and it
+           means only some threads update their private accumulator — so the init-load and the
+           store-back must run under the {e same} predicate, or stale lanes clobber the result.
+         - {e Iteration mask}: hardware-free (every symbol it mentions is bound by a [Serial] or
+           [Unrolled] loop, or by no loop at all — a launch-uniform binding), mentioning at least one
+           symbol bound inside. It selects which iterations of one thread's own accumulation fire; it
+           cannot select threads. It stays on the update alone: a tile slot it never updates is
+           init-loaded from [target] and stored back unchanged, and every slot belongs to the one
+           thread that transfers it. A reduction-axis pad mask (gh-ocannl-485) is of this kind.
+         - {e Output mask}: literally [target]'s own index on some axis, compared against a bound no
+           larger than that axis's dimension — the shape a row/column pad mask takes once the block
+           and register [Split]s have substituted their hardware symbols into it. The transfers
+           already carry the per-axis edge guard [src_idcs.(a) < tgt_dims.(a)] over that same
+           expression, so they transfer every slot the mask updates and no update is lost; a slot
+           the mask skips round-trips through the accumulator unchanged. It too stays on the update
+           alone.
+
+         Anything else — a data-dependent guard, or one mixing a hardware symbol into a comparison
+         that is not [target]'s own index — is rejected: it can restrict which threads accumulate
+         while leaving the transfers to write back an accumulator that never received the update. *)
       let conds0 = match !accesses with (_, _, conds) :: _ -> conds | [] -> [] in
       List.iter !accesses ~f:(fun (_, _, conds) ->
           if not (List.equal equal_scalar_arg conds conds0) then
             invalid_arg
               ("Schedule.Privatize: accesses of " ^ Tn.debug_name target
              ^ " sit under differing If guards"));
-      (if not (List.is_empty conds0) then
-         let bound_inside =
-           let acc = ref [ over ] in
-           let rec go llc =
-             match llc with
-             | For_loop { index; body; _ } ->
-                 acc := index :: !acc;
-                 go body
-             | Seq (a, b) ->
-                 go a;
-                 go b
-             | If { body; _ } -> go body
-             | Set { llsc; _ } | Set_local (_, llsc) -> go_scalar llsc
-             | Set_dynamic { dyn_value = v, _; llsc; _ } ->
-                 go_scalar v;
-                 go_scalar llsc
-             | Set_from_vec { arg = a, _; _ } -> go_scalar a
-             | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _
-             | Workgroup_barrier | Tile_mma _ ->
-                 ()
-           and go_scalar (llsc : scalar_t) =
-             match llsc with
-             | Local_scope { body; _ } -> go body
-             | Get_dynamic { dyn_value = v, _; _ } -> go_scalar v
-             | Ternop (_, (a, _), (b, _), (c, _)) ->
-                 go_scalar a;
-                 go_scalar b;
-                 go_scalar c
-             | Binop (_, (a, _), (b, _)) ->
-                 go_scalar a;
-                 go_scalar b
-             | Unop (_, (a, _)) -> go_scalar a
-             | Get_local _ | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _
-             | Embed_index _ ->
-                 ()
-           in
-           go fc.body;
-           !acc
-         in
-         let sym_free s = not (List.mem bound_inside s ~equal:Indexing.equal_symbol) in
-         let idx_invariant = function
-           | Indexing.Fixed_idx _ | Indexing.Sub_axis -> true
-           | Indexing.Iterator s -> sym_free s
-           | Indexing.Affine { symbols; _ } -> List.for_all symbols ~f:(fun (_, s) -> sym_free s)
-           | Indexing.Concat _ -> false
-         in
-         let rec invariant (llsc : scalar_t) =
-           match llsc with
-           | Constant _ | Constant_bits _ -> true
-           | Embed_index idx -> idx_invariant idx
-           | Ternop (_, (a, _), (b, _), (c, _)) -> invariant a && invariant b && invariant c
-           | Binop (_, (a, _), (b, _)) -> invariant a && invariant b
-           | Unop (_, (a, _)) -> invariant a
-           | Get _ | Get_local _ | Get_dynamic _ | Get_merge_buffer _ | Local_scope _ -> false
-         in
-         List.iter conds0 ~f:(fun (c, _) ->
-             if not (invariant c) then
-               invalid_arg
-                 ("Schedule.Privatize: accesses of " ^ Tn.debug_name target
-                ^ " sit under an If guard that varies across the accumulation (mentions memory or \
-                   a symbol bound inside the loop); cannot gate the init/store-back with it")));
+      let bound_inside =
+        let acc = ref [ over ] in
+        let rec go llc =
+          match llc with
+          | For_loop { index; body; _ } ->
+              acc := index :: !acc;
+              go body
+          | Seq (a, b) ->
+              go a;
+              go b
+          | If { body; _ } -> go body
+          | Set { llsc; _ } | Set_local (_, llsc) -> go_scalar llsc
+          | Set_dynamic { dyn_value = v, _; llsc; _ } ->
+              go_scalar v;
+              go_scalar llsc
+          | Set_from_vec { arg = a, _; _ } -> go_scalar a
+          | Noop | Comment _ | Staged_compilation _ | Zero_out _ | Declare_local _
+          | Workgroup_barrier | Tile_mma _ ->
+              ()
+        and go_scalar (llsc : scalar_t) =
+          match llsc with
+          | Local_scope { body; _ } -> go body
+          | Get_dynamic { dyn_value = v, _; _ } -> go_scalar v
+          | Ternop (_, (a, _), (b, _), (c, _)) ->
+              go_scalar a;
+              go_scalar b;
+              go_scalar c
+          | Binop (_, (a, _), (b, _)) ->
+              go_scalar a;
+              go_scalar b
+          | Unop (_, (a, _)) -> go_scalar a
+          | Get_local _ | Get _ | Get_merge_buffer _ | Constant _ | Constant_bits _ | Embed_index _
+            ->
+              ()
+        in
+        go fc.body;
+        !acc
+      in
+      let sym_free s = not (List.mem bound_inside s ~equal:Indexing.equal_symbol) in
+      (* The symbols a condition mentions, or [None] when it reads memory (or a [Concat] index,
+         whose components this classification does not decompose). *)
+      let idx_syms = function
+        | Indexing.Fixed_idx _ | Indexing.Sub_axis -> Some []
+        | Indexing.Iterator s -> Some [ s ]
+        | Indexing.Affine { symbols; _ } -> Some (List.map symbols ~f:snd)
+        | Indexing.Concat _ -> None
+      in
+      let union a b = match (a, b) with Some x, Some y -> Some (x @ y) | _ -> None in
+      let rec cond_syms (llsc : scalar_t) =
+        match llsc with
+        | Constant _ | Constant_bits _ -> Some []
+        | Embed_index idx -> idx_syms idx
+        | Ternop (_, (a, _), (b, _), (c, _)) ->
+            union (cond_syms a) (union (cond_syms b) (cond_syms c))
+        | Binop (_, (a, _), (b, _)) -> union (cond_syms a) (cond_syms b)
+        | Unop (_, (a, _)) -> cond_syms a
+        | Get _ | Get_local _ | Get_dynamic _ | Get_merge_buffer _ | Local_scope _ -> None
+      in
+      let hardware_free syms =
+        List.for_all syms ~f:(fun s ->
+            match Map.find loop_axes s with
+            | None | Some Serial | Some Unrolled -> true
+            | Some (Grid | Workgroup | Workgroup_reduce | Vectorized) -> false)
+      in
+      let output_mask (c : scalar_t) =
+        match c with
+        | Binop (Ops.Cmplt, (Embed_index e, _), (Constant n, _)) ->
+            Array.existsi idcs0 ~f:(fun a idx ->
+                Indexing.equal_axis_index idx e && Float.(n <= of_int tgt_dims.(a)))
+        | _ -> false
+      in
+      (* Only the invariant conditions gate the transfers; the masks stay where they are. *)
+      let transfer_conds =
+        List.filter conds0 ~f:(fun (c, _) ->
+            match cond_syms c with
+            | Some syms when List.for_all syms ~f:sym_free -> true
+            | Some syms when hardware_free syms || output_mask c -> false
+            | _ ->
+                invalid_arg
+                  ("Schedule.Privatize: accesses of " ^ Tn.debug_name target
+                 ^ " sit under an If guard that is neither invariant across the accumulation nor a \
+                    mask on one thread's own iterations (it reads memory, or restricts threads); \
+                    cannot gate the init/store-back with it"))
+      in
       (* Loops bound inside the subtree, by index symbol (union over access paths). *)
       let inner_loop s =
         List.find_map !accesses ~f:(fun (_, stack, _) ->
@@ -2293,10 +2379,10 @@ let apply_privatize ~target ~over (opt : Low_level.optimized) : Low_level.optimi
           Map.fold fresh_syms ~init:stmt ~f:(fun ~key:s ~data:s' body ->
               For_loop { index = s'; from_ = 0; to_ = extent s - 1; body; axis = Serial })
         in
-        (* Carry the accesses' (uniform, iteration-invariant) guard chain onto the transfers: only
-           the lanes that update their private accumulator may load and store it back (PR #91
-           review). *)
-        List.fold conds0 ~init:nest ~f:(fun body cond -> If { cond; body })
+        (* Carry the invariant part of the accesses' guard chain onto the transfers: only the
+           lanes that update their private accumulator may load and store it back (PR #91 review).
+           The iteration and output masks are deliberately absent — see the classification above. *)
+        List.fold transfer_conds ~init:nest ~f:(fun body cond -> If { cond; body })
       in
       let remapped =
         remap_reads ~writes:true ~source:target ~from_idcs:idcs0 ~tile ~tile_idcs:tile_read_idcs
