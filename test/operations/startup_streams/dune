@@ -18,6 +18,42 @@
  (modules env_spelling_gate)
  (libraries base stdio arrayjit.utils arrayjit.verdict))
 
+; The same gate for the per-test `runtest-<name>` aliases (gh-ocannl-703, gh-ocannl-726). Every rule
+; that diffs a golden sits on an alias of its own, so that ONE of them can be rerun targeted --
+; `dune build @test/operations/startup_streams/runtest-stdout_clean` -- and a per-test alias is a
+; build entry point like any other, so the ambient gate has to reach it. It sits on an alias of its
+; own that every such rule DEPENDS on, which runs the gate BEFORE the diff -- the same shape the
+; slow rules use. The name is the one dune >= 3.20 generates for the `env_spelling_gate` `(test)`
+; stanza above: a rule may add an action to a generated per-test alias, and this one runs the same
+; gate binary, so the alias means the same thing whichever dune is building.
+
+(rule
+ ; ocannl-backend: none -- links arrayjit.utils alone and only classifies variable NAMES;
+ ; its `(universe)` dependency reruns it whatever any variable is set to.
+ (alias runtest-env_spelling_gate)
+ (package neural_nets_lib)
+ (deps ocannl_config (universe))
+ (action
+  (run %{dep:env_spelling_gate.exe})))
+
+; This directory's golden-diff rules, aggregated back onto `runtest` (gh-ocannl-726). Each of them
+; attaches to its own `runtest-<name>` alias and to NOTHING else, so that `dune build
+; @test/operations/startup_streams/runtest-stdout_clean` runs that one test and applies its diff;
+; this stanza is what keeps `dune runtest` running all of them. Attaching such a rule to `runtest`
+; as well would defeat the point: a rule on two aliases makes building either alias build both, so a
+; per-test alias that also named `runtest` would pull the whole directory in behind it -- and where
+; the name is one dune generates for a `(test)` stanza, dune rejects the pair outright as a
+; dependency cycle. Hence the naming: `<name>` is the golden the rule checks, and never a `(test)`
+; stanza's name in this directory. A `runtest-<name>` rule missing from this list is one plain `dune
+; runtest` skips silently, which `test/operations/env_var_deps` checks -- the same check it makes of
+; the `slow` suite.
+
+(alias
+ (name runtest)
+ (deps
+  (alias runtest-stdout_clean)
+  (alias runtest-default_stderr)))
+
 ; gh-ocannl-593 / gh-ocannl-595: the two streams an OCANNL-linked executable writes at startup.
 ; The local ocannl_config (not the shared test/config one -- the config search stops at the first
 ; file walking up from the working directory) is deliberately a DEFAULT configuration carrying an
@@ -50,8 +86,9 @@
     --ocannl_log_level=1))))
 
 (rule
- (alias runtest)
+ (alias runtest-stdout_clean)
  (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
  (action
   (diff stdout_clean.expected stdout_clean.actual)))
 
@@ -108,7 +145,8 @@
      --ocannl_suppress_welcome_message=true)))))
 
 (rule
- (alias runtest)
+ (alias runtest-default_stderr)
  (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
  (action
   (diff default_stderr.expected default_stderr.actual)))
