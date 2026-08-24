@@ -10,6 +10,7 @@ type point =
   | Link_after_delta
   | Transfer_pool_allocated
   | From_host_before_copy
+  | From_host_before_await
   | To_host_before_copy
   | Finalize_before_await
   | Finalize_before_free

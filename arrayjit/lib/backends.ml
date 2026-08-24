@@ -410,6 +410,13 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
             Resource_fault_injection.hit From_host_before_copy;
             Backend.from_host ~dst:ctx ~dst_loc:dst hosted;
             update_writer_event ctx @@ Node tn;
+            (* The upload may be asynchronous. Keep the fresh allocation inside the unwind guard
+               until the stream has reported its result: otherwise an error first observed here
+               escapes [Context.from_host] before the updated context is returned, and no caller
+               can ever release [dst]. The outer Context-level await remains necessary for the
+               existing-buffer branch. *)
+            Resource_fault_injection.hit From_host_before_await;
+            Backend.await ctx.device;
             { ctx with ctx_buffers = Map.add_exn ctx.ctx_buffers ~key:tn ~data:dst })
     | Some _ ->
         raise

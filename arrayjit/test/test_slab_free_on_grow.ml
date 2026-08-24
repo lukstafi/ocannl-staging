@@ -93,11 +93,13 @@ let () =
   Verdict.p "grow freed the old pool" (List.mem !Mock_raw.freed p1 ~equal:Int.equal);
   Verdict.p "grow installed a new pool" (not (p1 = p2));
   Stdio.printf "freed count after grow = %d\n" (List.length !Mock_raw.freed);
-  (* Failure control for the same seam: the replacement allocation is fallible. It must happen
-     before freeing/overwriting the old entry, so a failed grow leaves the old pool resolvable and
-     does not report it freed. Before the commit-order fix, [p2] was freed first and the table kept
-     pointing at that released resource. *)
+  (* Failure control for the same seam: growing must not require old+new bytes to coexist. The old
+     slab is released first, but its table entry and device capacity claim must be invalidated
+     before any fallible action. Thus a failed replacement leaves an honestly absent merge pool,
+     rather than the old bug's table entry pointing at released memory. *)
   let frees_before_failed_grow = List.length !Mock_raw.freed in
+  device.merge_buffer := Some (loc 0);
+  device.merge_buffer_capacity <- 32;
   Mock_raw.fail_next_alloc := true;
   let grow_failed =
     match Mock_slab.alloc_pool device ~pool_id:0 ~size_in_bytes:64 ~alignment:1 with
@@ -105,10 +107,21 @@ let () =
     | exception Failure msg -> String.is_substring msg ~substring:"injected"
   in
   Verdict.p "injected grow failure fired" grow_failed;
-  Verdict.p "failed grow preserved the old pool"
-    (Mock_slab.resolve_pool device (loc 0) = p2
-    && List.length !Mock_raw.freed = frees_before_failed_grow
-    && not (List.mem !Mock_raw.freed p2 ~equal:Int.equal));
+  let old_pool_absent =
+    match Mock_slab.resolve_pool device (loc 0) with
+    | _ -> false
+    | exception _ -> true
+  in
+  Verdict.p "failed grow invalidated the released pool and capacity"
+    (old_pool_absent
+    && List.length !Mock_raw.freed = frees_before_failed_grow + 1
+    && List.mem !Mock_raw.freed p2 ~equal:Int.equal
+    && Option.is_none !(device.merge_buffer)
+    && device.merge_buffer_capacity = 0);
+  Mock_slab.alloc_pool device ~pool_id:0 ~size_in_bytes:64 ~alignment:1;
+  let p3 = Mock_slab.resolve_pool device (loc 0) in
+  Verdict.p "grow retry installs a fresh pool without another free"
+    (not (p2 = p3) && List.length !Mock_raw.freed = frees_before_failed_grow + 1);
   (* A unique tnode pool id never pre-exists, so allocating it frees nothing. *)
   Mock_slab.alloc_pool device ~pool_id:1 ~size_in_bytes:16 ~alignment:1;
   Stdio.printf "freed count after unique-id alloc = %d\n" (List.length !Mock_raw.freed);

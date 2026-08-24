@@ -11,6 +11,8 @@ transfer control copies the requested values: true
 transfer control releases its destination exactly once: true
 from-host copy injection fired: true
 from-host copy failure freed the fresh pool: true
+from-host await injection fired after queuing the upload: true
+from-host await failure freed the unreachable fresh pool: true
 existing from-host copy injection fired: true
 existing from-host failure retains the destination for retry: true
 existing from-host control retries in place: true

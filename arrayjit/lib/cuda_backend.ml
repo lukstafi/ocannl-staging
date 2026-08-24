@@ -69,15 +69,16 @@ module Slab = struct
     set_ctx device.dev.primary_context;
     let key = (device.device_id, pool_id) in
     let size_in_bytes = max 1 size_in_bytes in
+    (* Free-first replacement avoids requiring both merge slabs to fit. Invalidate every software
+       ownership claim before the fallible free/allocation sequence, so an error leaves no freed
+       pointer or stale capacity reachable. [opt_alloc_merge_buffer] recommits after success. *)
+    Option.iter (Hashtbl.find pools key) ~f:(fun (old, _) ->
+        Hashtbl.remove pools key;
+        if Int.equal pool_id merge_buffer_pool_id then (
+          device.merge_buffer := None;
+          device.merge_buffer_capacity <- 0);
+        Cu.Deviceptr.mem_free old);
     let ptr = Cu.Deviceptr.mem_alloc ~size_in_bytes in
-    (* Commit only after the growth allocation succeeds: on OOM the reserved merge-pool entry must
-       keep resolving to its old live slab. *)
-    (match Option.iter (Hashtbl.find pools key) ~f:(fun (old, _) -> Cu.Deviceptr.mem_free old) with
-    | () -> ()
-    | exception exn ->
-        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-        (try Cu.Deviceptr.mem_free ptr with _ -> ());
-        Stdlib.Printexc.raise_with_backtrace exn backtrace);
     Hashtbl.set pools ~key ~data:(ptr, size_in_bytes)
 
   let free_pool =

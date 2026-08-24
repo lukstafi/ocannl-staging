@@ -169,6 +169,21 @@ let () =
     (working_allocated before after = 1
     && pools_freed before after = 1
     && live_working_delta before after = 0);
+  (* Shared/GPU uploads may report their error only when the stream is synchronized. The fresh
+     pool must remain guarded through that await because no updated context reaches the caller when
+     it raises. The callback models the first await reporting that queued failure; cleanup's retry
+     await then succeeds and permits the exact free. *)
+  let before = AC.snapshot () in
+  let raised, hits =
+    injected FI.From_host_before_await (fun () ->
+        Context.from_host (Context.cpu ()) x.Tensor.value nd)
+  in
+  let after = AC.snapshot () in
+  p "from-host await injection fired after queuing the upload" (raised && hits = 1);
+  p "from-host await failure freed the unreachable fresh pool"
+    (working_allocated before after = 1
+    && pools_freed before after = 1
+    && live_working_delta before after = 0);
   let read_ctx = Context.from_host (Context.cpu ()) x.Tensor.value nd in
   let held = AC.snapshot () in
   let raised, hits =
