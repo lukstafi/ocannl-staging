@@ -34,7 +34,7 @@ Nothing this driver writes touches the checkout: caches, records and the tuned c
 
 See benchmarks/report-gh675-cuda.md for what it measured.
 """
-import argparse, hashlib, json, os, shutil, subprocess, sys, time
+import argparse, hashlib, json, os, shutil, signal, subprocess, sys, time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -42,7 +42,10 @@ HERE = ROOT / "benchmarks"
 VENV = HERE / ".venv/bin/python"
 # Everything this driver writes -- the per-run records and the per-arm caches whose warmth IS the
 # experiment -- goes outside the checkout, under $GH675_OUT (default: a tmp dir).
-SP = Path(os.environ.get("GH675_OUT", "/tmp/gh675"))
+# Resolved, not as given: the children run with `cwd=benchmarks/`, so a RELATIVE GH675_OUT would
+# name one directory to the driver and a different one to every runner -- the driver verifying an
+# empty cache here while a child quietly reuses a stale one under benchmarks/.
+SP = Path(os.environ.get("GH675_OUT", "/tmp/gh675")).resolve()
 RECORDS = SP / "records.jsonl"
 CACHES = SP / "caches"
 NVSMI = "/usr/lib/wsl/lib/nvidia-smi"
@@ -50,6 +53,8 @@ TASKSET = ["taskset", "-c", "0-15"]
 
 FIXTURE = {w: str(HERE / f"fixtures/{w}.safetensors") for w in ("mlp_small", "gpt2_mini")}
 DIGESTS = {}  # filled at startup; stamped on every record
+PREWARMED = set()  # workloads whose warm-cache control has been prewarmed IN THIS INVOCATION
+ATTEMPTS = {}  # (arm, workload, repeat) -> prior rows, so a --rerun row says which attempt it is
 
 # Every variable that is a TREATMENT in this experiment rather than part of the box. A child
 # inherits the driver's environment, so one of these exported in the operator's shell silently
@@ -134,15 +139,60 @@ def gate():
     return False
 
 
+def kill_group(proc):
+    """Take down the whole process group and confirm it is gone.
+
+    TERM first so a runner can flush, then KILL. Nothing after this may assume the box is quiet
+    until the group is reaped -- which is the entire point of killing the group rather than the
+    process.
+    """
+    try:
+        pgid = os.getpgid(proc.pid)
+    except ProcessLookupError:
+        return
+    for sig, grace in ((signal.SIGTERM, 5), (signal.SIGKILL, 5)):
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            break
+        try:
+            proc.communicate(timeout=grace)
+            break
+        except subprocess.TimeoutExpired:
+            continue
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(pgid, 0)  # 0 tests for survivors without signalling them
+        except ProcessLookupError:
+            return
+        time.sleep(0.5)
+    print(f"WARNING: process group {pgid} survived SIGKILL -- later pairs may be contaminated",
+          file=sys.stderr, flush=True)
+
+
 def run(cmd, env=None, cwd=None, timeout=None):
     e = base_env()
     if env:
         e.update(env)
     gate_ok = gate()
     t0 = time.monotonic()
-    p = subprocess.run(TASKSET + cmd, env=e, cwd=cwd or str(HERE), capture_output=True, text=True,
-                       timeout=timeout)
+    # Its own session, so a timeout can reach the DESCENDANTS. `subprocess.run(timeout=...)` kills
+    # the runner only, and tinygrad's beam search farms its candidate compiles out to a spawn pool:
+    # the orphaned workers survive on the same pinned cores and GPU, and the sweep moves straight
+    # on to the next pair with nothing in its record to show it was measured against them. That is
+    # not hypothetical -- it happened while taking these numbers, and a CPU reference taken over
+    # the survivors read 340 ms against 0.13 ms once the box was clean.
+    proc = subprocess.Popen(TASKSET + cmd, env=e, cwd=cwd or str(HERE),
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            start_new_session=True)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        kill_group(proc)
+        raise
     wall = time.monotonic() - t0
+    p = subprocess.CompletedProcess(cmd, proc.returncode, out, err)
     line = None
     for ln in reversed(p.stdout.strip().splitlines()):
         ln = ln.strip()
@@ -296,11 +346,32 @@ def timed_run(cmd, env, timeout):
         return {"__failed__": True, "timeout_s": timeout, "timeout": str(ex)}
 
 
+def existing_keys():
+    """`(arm, workload, repeat)` already in the records file."""
+    keys = {}
+    if not RECORDS.exists():
+        return keys
+    with open(RECORDS) as f:
+        for ln in f:
+            try:
+                r = json.loads(ln)
+            except Exception:
+                continue
+            k = (r.get("arm"), r.get("workload"), r.get("repeat"))
+            keys[k] = keys.get(k, 0) + 1
+    return keys
+
+
 def record(arm, workload, repeat, **fields):
     """The one record shape every arm emits -- REF_cpu included, so nothing lands unstamped."""
-    return {"arm": arm, "workload": workload, "repeat": repeat,
-            "fixture_sha256": DIGESTS.get(workload),
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"), **fields}
+    rec = {"arm": arm, "workload": workload, "repeat": repeat,
+           "fixture_sha256": DIGESTS.get(workload),
+           "ts": time.strftime("%Y-%m-%dT%H:%M:%S"), **fields}
+    prior = ATTEMPTS.get((arm, workload, repeat), 0)
+    if prior:
+        # Only under --rerun; the identity is otherwise refused before the sweep starts.
+        rec["attempt"] = prior + 1
+    return rec
 
 
 def do_pair(arm, workload, repeat, mk1, mk2, pre1=None, pre2=None, timeout=None):
@@ -381,8 +452,13 @@ def c_jit_cold(w, rep):
 def c_jit_warm(w, rep):
     db = CACHES / f"tiny_jitwarm_{w}"
     db.mkdir(parents=True, exist_ok=True)
-    marker = db / "prewarmed.ok"
-    if not marker.exists():
+    # Once per DRIVER INVOCATION rather than once per output directory. A marker that persists
+    # across invocations cannot know that the tinygrad version, the CUDA toolchain or the workload
+    # geometry changed under it, and a cache with no entries for the current kernels makes pass 1
+    # compile what pass 2 replays -- a cold-vs-warm pair wearing the warm-vs-warm label, since
+    # both passes still report `searched: false`. One extra ~20 s run per invocation buys the
+    # whole question away; fingerprinting the environment would only approximate it.
+    if w not in PREWARMED:
         # This arm's claim is warm-vs-warm: it is the control that says a pair of processes doing
         # no compilation and no search differ by ~nothing. Against an empty cache its first pair
         # would be cold-vs-warm instead -- a compile control, and one whose X would be read as
@@ -402,7 +478,7 @@ def c_jit_warm(w, rep):
             raise PreconditionFailed(
                 f"prewarm of {db} failed (rc={pre.get('rc')}, timeout={pre.get('timeout_s')}); "
                 "its partial cache was removed")
-        marker.write_text(f"prewarmed {time.strftime('%Y-%m-%dT%H:%M:%S')}\n")
+        PREWARMED.add(w)
     do_pair("C_jit_warm", w, rep,
             lambda: tiny(w, cachedb=db / "cache.db"),
             lambda: tiny(w, cachedb=db / "cache.db"), timeout=1200)
@@ -455,6 +531,9 @@ if __name__ == "__main__":
     ap.add_argument("--workloads", nargs="+", default=["mlp_small"])
     ap.add_argument("--repeats", type=int, default=1)
     ap.add_argument("--start-repeat", type=int, default=1)
+    ap.add_argument("--rerun", action="store_true",
+                    help="record another attempt at an already-recorded (arm, workload, repeat) "
+                         "instead of refusing; each extra row is stamped with `attempt`")
     ap.add_argument("--expect-digest", nargs="*", metavar="WORKLOAD=SHA256",
                     help="refuse to run unless the fixture's bytes hash to this -- what makes a "
                          "resumed run the same experiment as the one it resumes")
@@ -477,6 +556,20 @@ if __name__ == "__main__":
         if wrong:
             sys.exit(f"fixture digest mismatch (pinned vs actual): {pinned} vs {wrong} -- these "
                      "are different workload bytes under the same names; regenerate or re-pin")
+    # A resumed sweep whose --start-repeat overlaps what is already recorded would append a second
+    # row under the same identity, and the analysis pairs and weights BY that identity: one repeat
+    # silently counted twice, or its two passes taken from different attempts.
+    seen = existing_keys()
+    ATTEMPTS.update(seen)
+    planned = [(a, w, rep)
+               for rep in range(args.start_repeat, args.start_repeat + args.repeats)
+               for w in args.workloads for a in args.arms]
+    clash = [k for k in planned if k in seen]
+    if clash and not args.rerun:
+        sys.exit(f"{len(clash)} (arm, workload, repeat) already in {RECORDS}: "
+                 f"{clash[:5]}{' ...' if len(clash) > 5 else ''} -- pick a --start-repeat past "
+                 "them, or pass --rerun to record another attempt (each stamped with `attempt`)")
+
     for rep in range(args.start_repeat, args.start_repeat + args.repeats):
         for w in args.workloads:
             for a in args.arms:
