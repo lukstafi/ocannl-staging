@@ -157,6 +157,10 @@ files.
   every pure input (uncovered reads), and demanding those broke ndarray-literal flows. The merge SOURCE never gets an ordinary traced
   entry (the merge buffer is the parameter; a source entry would double the transfer buffer's
   allocation).
+  Post-finalization lineage tests use `Ll_test.optimize_in` over one optimize context, then
+  `Ll_test.link_finalized` on the producer: real backend codegen resolves retained
+  `Never_virtual` entries, and `Ll_test.known_local` proves the follow-on guard saw `Local` rather
+  than the broader `known_not_materialized` class (gh-ocannl-631).
   Corollary (gh-ocannl-611): a routine whose every statement virtualizes away is LEGAL —
   cleanup's top-level elision degenerates to `Noop`, with an EMPTY interface — its stored
   computations persist in the lineage for later consumers, so "compile a deferral-only routine"

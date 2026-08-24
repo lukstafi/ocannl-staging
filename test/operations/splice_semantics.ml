@@ -248,10 +248,12 @@ let phase1 () =
   (* Row sums: 20*10*(s+1) + 210; even cells accumulate over the seed, odd cells pass through. *)
   p "cap-selected accumulator: accumulates over the incoming values"
     (same got_cap [ [| 481.; 72.; 683.; 74. |] ]);
-  (* Inherited-Local rejection (review round 4): an earlier routine of the lineage commits tmp as
-     routine-local scratch; a later routine's in-place update consumes entry values a scratch buffer
-     does not carry, so the promotion is rejected with the materialize-before-first-use error -- a
-     User_error, not an internal placement-transition failure. *)
+  (* Inherited-Local rejection (gh-631): an earlier routine of the lineage commits tmp as
+     routine-local scratch. [link_finalized] takes that producer through real backend finalization,
+     and [known_local] excludes the Virtual arm that [known_not_materialized] would also accept. A
+     later routine's in-place update then consumes entry values a scratch buffer does not carry, so
+     the guard is executed and rejects it with the materialize-before-first-use User_error -- not an
+     internal placement-transition failure. *)
   let ctx4 = LL.empty_optimize_ctx () in
   let tmp = mk "tmp" in
   let a4 = mk "a4" in
@@ -268,13 +270,15 @@ let phase1 () =
             (add (get tmp [| aff [ (1, t) ] 1 |]) (get tmp [| aff [ (1, t) ] 1 |]))))
   in
   let o_a4 =
-    LL.optimize ctx4 ~unoptim_ll_source:None ~ll_source:None ~name:"ssem_scratch_a" [] llc_a4
+    optimize_in ctx4 ~name:"ssem_scratch_a" llc_a4
   in
   let a4_vals = Array.init dim ~f:(fun i -> 81. +. Float.of_int i) in
   let cctx4 = Context.auto () in
-  let _cctx4 = run ~ctx:cctx4 ~name:"ssem_scratch_a" o_a4 ~seed:[ (a4, a4_vals) ] in
-  p "scratch producer: tmp resolved to routine-local scratch"
-    (Tn.Placements.known_not_materialized ctx4.LL.placements tmp);
+  let linked_a4 =
+    link_finalized ~ctx:cctx4 ~placements:[ tmp ] ~name:"ssem_scratch_a" o_a4
+  in
+  let _cctx4 = run_linked linked_a4 ~seed:[ (a4, a4_vals) ] in
+  p "scratch producer: tmp resolved to routine-local scratch" (known_local o_a4 tmp);
   let b4 = mk "b4" in
   materialize b4;
   let llc_b4 =
@@ -284,10 +288,11 @@ let phase1 () =
   let rejected_scratch =
     try
       ignore
-        (LL.optimize ctx4 ~unoptim_ll_source:None ~ll_source:None ~name:"ssem_scratch_b" [] llc_b4
-          : LL.optimized);
+        (optimize_in ctx4 ~name:"ssem_scratch_b" llc_b4 : LL.optimized);
       false
-    with Utils.User_error msg -> String.is_substring msg ~substring:"materialized"
+    with Utils.User_error msg ->
+      String.is_substring msg ~substring:"routine-local scratch"
+      && String.is_substring msg ~substring:"materialized"
   in
   p "in-place update of an earlier routine's Local scratch: materialize-first User_error"
     rejected_scratch
