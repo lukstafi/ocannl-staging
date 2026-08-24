@@ -34,6 +34,20 @@ if args.beam:
     os.environ["BEAM"] = str(args.beam)
     args.jit = 1
 
+# BEFORE importing tinygrad: this file lives in runners/tinygrad, so any `runners/` entry on
+# sys.path -- including one inherited from PYTHONPATH, which nothing here put there -- makes the
+# scan resolve `tinygrad` to THIS directory as a namespace-package portion and the import fails
+# outright with `cannot import name 'Tensor' from 'tinygrad' (unknown location)`. Purge every
+# equivalent entry first; the block after the imports puts one back briefly for `bench_common`.
+_RUNNERS = str(Path(__file__).resolve().parent.parent)
+
+
+def _drop_runners_from_path():
+    sys.path[:] = [q for q in sys.path if not q or Path(q).resolve() != Path(_RUNNERS)]
+
+
+_drop_runners_from_path()
+
 import numpy as np
 from safetensors.numpy import load_file
 from tinygrad import Tensor, TinyJit
@@ -43,7 +57,6 @@ from tinygrad.nn.optim import SGD
 # sys.path an `import tinygrad` scan would first hit it as a namespace-package portion —
 # which shadows editable (finder-based) tinygrad installs, whose MetaPath finder is only
 # consulted when the path scan finds nothing.
-_RUNNERS = str(Path(__file__).resolve().parent.parent)
 sys.path.insert(0, _RUNNERS)
 from bench_common import (
     emit,
@@ -53,14 +66,17 @@ from bench_common import (
     tinygrad_searched,
 )
 
-# ...and off again. tinygrad's beam search runs its candidate compiles in a `spawn` pool, and a
+# ...and off again -- EVERY equivalent entry, not just the one inserted above: the runner can
+# be launched with `benchmarks/runners` already on PYTHONPATH, and removing a single copy
+# would leave the inherited one behind, which is enough to reproduce the whole failure.
+# tinygrad's beam search runs its candidate compiles in a `spawn` pool, and a
 # spawned worker re-executes THIS module top-level with the parent's sys.path — where the
 # `import tinygrad` above happens before the insert. With runners/ still on the path the scan
 # finds runners/tinygrad/ as a namespace portion first, the editable install's meta-path finder
 # (appended after PathFinder) never gets a look, and every worker dies with `cannot import name
 # 'Tensor' from 'tinygrad' (unknown location)`. The pool respawns them forever, so the search
 # wedges instead of failing (gh-ocannl-675 CUDA leg).
-sys.path.remove(_RUNNERS)
+_drop_runners_from_path()
 
 
 def param(arr):

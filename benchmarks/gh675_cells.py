@@ -73,11 +73,17 @@ TREATMENT_PREFIXES = ("BENCH_", "OCANNL_")
 
 
 def base_env():
-    """The inherited environment with every treatment variable removed."""
+    """The inherited environment with every treatment variable removed.
+
+    The OCANNL namespaces are matched case-INSENSITIVELY. gh-ocannl-652 dropped the lowercase
+    `ocannl_<key>` spelling and made setting it a fatal startup error, so a shell still carrying a
+    legacy `ocannl_backend=cuda` would kill the tuned arm -- hours into a sweep, and only that arm.
+    """
+    lower = tuple(pre.lower() for pre in TREATMENT_PREFIXES)
     return {
         k: v
         for k, v in os.environ.items()
-        if k not in TREATMENT_VARS and not k.startswith(TREATMENT_PREFIXES)
+        if k not in TREATMENT_VARS and not k.lower().startswith(lower)
     }
 
 

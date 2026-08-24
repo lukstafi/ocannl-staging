@@ -51,9 +51,12 @@ against it.
 - **X is the median of the paired per-repeat ratios** (pass-1 `step_ms` p50 over pass-2 `step_ms`
   p50, minus 1), not a ratio of arm-level medians. Repeat 0 of every arm is a discarded warm-up.
 - Caches whose warmth *is* the experiment: tinygrad's kernel cache is redirected per arm with
-  `CACHEDB=` and deleted before each pass 1; inductor gets a fresh `TORCHINDUCTOR_CACHE_DIR` per
-  repeat with `TORCHINDUCTOR_FX_GRAPH_CACHE=1`; OCANNL's `autotune_cache/` is wiped before each
-  pass 1.
+  `CACHEDB=`, and deleted before each pass 1 of the COLD arms (both beam widths and the
+  cold-compile control) -- but deliberately NOT for the warm/warm control, whose claim is that both
+  its passes replay: that arm is prewarmed once per invocation and its cache is preserved across
+  the pair. Inductor gets a fresh `TORCHINDUCTOR_CACHE_DIR` per repeat with
+  `TORCHINDUCTOR_FX_GRAPH_CACHE=1`; OCANNL's autotune cache (kept under `$GH675_OUT`, not in the
+  checkout) is wiped before each pass 1.
 - Provenance is verified, not assumed, and the expectation differs by arm. For the SEARCHING arms
   (both beam widths, both torch.compile modes, the OCANNL tuned cell) every pass-1 row reports
   `searched: true` and every pass-2 row `searched: false`. For the three CONTROLS -- whose whole
@@ -68,25 +71,26 @@ against it.
 
 `X` = (pass-1 step p50) / (pass-2 step p50) - 1, median over paired repeats. `pos/n` is how many
 of those paired ratios were positive -- the statistic that separates a small real effect from
-noise. `blk2/p2` is the retime control (see below). Step times are the sync-after-every-step
-`step_ms` p50, i.e. the number the report publishes.
+noise. `blk2` is the retime control: pass-1's SECOND timed block over pass-2's SECOND timed block
+(see below -- matched block positions, so only the process differs). Step times are the
+sync-after-every-step `step_ms` p50, i.e. the number the report publishes.
 
-| workload | cell | pass-1 p50 (ms) | pass-2 p50 (ms) | n | **X** | pos/n | X IQR | `blk2/p2` | pass-1 `compile_s` |
+| workload | cell | pass-1 p50 (ms) | pass-2 p50 (ms) | n | **X** | pos/n | X IQR | `blk2` | pass-1 `compile_s` |
 |---|---|---|---|---|---|---|---|---|---|
-| mlp_small | tinygrad/CUDA/beam, BEAM=2 | 0.1138 | 0.1047 | 9 | **+6.4%** | 9/9 | +4.4 .. +8.8 | 1.06 | 13.5-20.8 |
-| mlp_small | tinygrad/CUDA/beam, BEAM=8 | 0.1116 | 0.1030 | 2 | **+8.3%** | 2/2 | +7.8 .. +8.9 | 1.07 | 53.0-57.1 |
-| mlp_small | pytorch/cuda/compiled (default) | 0.5455 | 0.6154 | 9 | **-12.0%** | 1/9 | -17.6 .. -5.1 | 0.91 | 1.9-2.6 |
-| mlp_small | pytorch/cuda/compiled, `max-autotune` | 0.4398 | 0.4657 | 9 | **-2.0%** | 1/9 | -9.4 .. -0.6 | 0.96 | 4.0-4.4 |
-| mlp_small | *control* tinygrad/CUDA/jit, warm both passes | 0.1217 | 0.1217 | 9 | **-1.5%** | 3/9 | -6.9 .. +0.8 | 0.98 | 0.5 |
-| mlp_small | *control* tinygrad/CUDA/jit, **cold compile, no search** | 0.1206 | 0.1208 | 9 | **-0.1%** | 4/9 | -0.8 .. +2.3 | 0.98 | 0.6-1.2 |
-| mlp_small | *control* pytorch/cuda/eager | 0.5811 | 0.6030 | 9 | **-1.6%** | 3/9 | -3.9 .. +3.2 | 0.97 | 0.2 |
+| mlp_small | tinygrad/CUDA/beam, BEAM=2 | 0.1138 | 0.1047 | 9 | **+6.4%** | 9/9 | +4.4 .. +8.8 | 1.07 | 13.5-20.8 |
+| mlp_small | tinygrad/CUDA/beam, BEAM=8 | 0.1116 | 0.1030 | 2 | **+8.3%** | 2/2 | +7.8 .. +8.9 | 1.11 | 53.0-57.1 |
+| mlp_small | pytorch/cuda/compiled (default) | 0.5455 | 0.6154 | 9 | **-12.0%** | 1/9 | -17.6 .. -5.1 | 0.83 | 1.9-2.6 |
+| mlp_small | pytorch/cuda/compiled, `max-autotune` | 0.4398 | 0.4657 | 9 | **-2.0%** | 1/9 | -9.4 .. -0.6 | 0.92 | 4.0-4.4 |
+| mlp_small | *control* tinygrad/CUDA/jit, warm both passes | 0.1217 | 0.1217 | 9 | **-1.5%** | 3/9 | -6.9 .. +0.8 | 1.00 | 0.5 |
+| mlp_small | *control* tinygrad/CUDA/jit, **cold compile, no search** | 0.1206 | 0.1208 | 9 | **-0.1%** | 4/9 | -0.8 .. +2.3 | 0.99 | 0.6-1.2 |
+| mlp_small | *control* pytorch/cuda/eager | 0.5811 | 0.6030 | 9 | **-1.6%** | 3/9 | -3.9 .. +3.2 | 0.99 | 0.2 |
 | mlp_small | *anchor* ocannl/cuda/tuned | 0.0501 | 0.0501 | 9 | **-0.0%** | 4/9 | -3.9 .. +2.3 | -- | 3.6-16.4 |
-| gpt2_mini | tinygrad/CUDA/beam, BEAM=2 | 1.5989 | 1.5446 | 4 | **+2.3%** | 4/4 | +2.0 .. +5.1 | 1.03 | 58.6-68.4 |
-| gpt2_mini | pytorch/cuda/compiled (default) | 1.1461 | 1.1855 | 5 | **-4.0%** | 0/5 | -4.0 .. -0.8 | 1.00 | 3.7-4.6 |
-| gpt2_mini | pytorch/cuda/compiled, `max-autotune` | 1.4710 | 1.4873 | 3 | **-1.1%** | 1/3 | -5.6 .. +2.2 | 1.00 | 10.0-11.4 |
+| gpt2_mini | tinygrad/CUDA/beam, BEAM=2 | 1.5989 | 1.5446 | 4 | **+2.3%** | 4/4 | +2.0 .. +5.1 | 1.02 | 58.6-68.4 |
+| gpt2_mini | pytorch/cuda/compiled (default) | 1.1461 | 1.1855 | 5 | **-4.0%** | 0/5 | -4.0 .. -0.8 | 0.99 | 3.7-4.6 |
+| gpt2_mini | pytorch/cuda/compiled, `max-autotune` | 1.4710 | 1.4873 | 3 | **-1.1%** | 1/3 | -5.6 .. +2.2 | 1.03 | 10.0-11.4 |
 | gpt2_mini | *control* tinygrad/CUDA/jit, warm both passes | 5.3569 | 5.4764 | 3 | **-2.5%** | 1/3 | -2.7 .. +0.5 | 1.00 | 1.0-1.1 |
-| gpt2_mini | *control* tinygrad/CUDA/jit, **cold compile, no search** | 5.4763 | 5.3677 | 3 | **+0.1%** | 2/3 | -0.2 .. +2.6 | 1.02 | 1.1-1.8 |
-| gpt2_mini | *control* pytorch/cuda/eager | 2.3969 | 2.3914 | 5 | **+0.6%** | 3/5 | -0.0 .. +1.9 | 1.02 | 0.2 |
+| gpt2_mini | *control* tinygrad/CUDA/jit, **cold compile, no search** | 5.4763 | 5.3677 | 3 | **+0.1%** | 2/3 | -0.2 .. +2.6 | 1.00 | 1.1-1.8 |
+| gpt2_mini | *control* pytorch/cuda/eager | 2.3969 | 2.3914 | 5 | **+0.6%** | 3/5 | -0.0 .. +1.9 | 0.99 | 0.2 |
 | gpt2_mini | *anchor* ocannl/cuda/tuned | 9.6509 | 7.4012 | 3 | **+0.5%** | 2/3 | -0.4 .. +47.7 | -- | 206-613 |
 
 **Per-cell X on this hardware:** tinygrad `beam` **+6.4%** (mlp_small) / **+2.3%** (gpt2_mini);
@@ -104,10 +108,15 @@ OCANNL `tuned` **-0.0%** / **+0.5%** pooled (but see the anchor section -- pooli
    warm replay, 4/9 and 2/3 positive. The only difference between that control and the beam arm is
    `BEAM=N`.
 3. **It is not first-block warmup.** A `--retime` flag (added for this probe) times a *second*
-   block of `timed_steps` inside the same process, ~400 steps in. The searching process stays slow:
-   block-2 / pass-2 = **1.06** (mlp_small BEAM=2), **1.07** (BEAM=8), **1.03** (gpt2_mini), against
-   0.97-0.98 for the controls and 0.91 for `torch.compile`, whose block 2 confirms it is genuinely
-   the *faster* process.
+   block of `timed_steps` inside the same process, ~400 steps in -- and BOTH passes record one, so
+   the comparison is pass-1 block 2 over pass-2 block 2: same block position, same step index, same
+   elapsed process lifetime, only the process differs. The searching process stays slow:
+   **1.07** (mlp_small BEAM=2), **1.11** (BEAM=8), **1.02** (gpt2_mini), against 0.99-1.00 for the
+   three controls and 0.83 for `torch.compile`, whose block 2 confirms it is genuinely the *faster*
+   process. (An earlier revision of this report divided pass-1's second block by pass-2's FIRST
+   one, which left block position confounded with process identity; the matched comparison is the
+   one tabulated, and it separates the beam cell from the controls more sharply than the
+   confounded one did -- 1.07 vs 0.99-1.00, where the confounded numbers were 1.055 vs 0.97-0.98.)
 4. **Beam width is a weak dose-response knob.** BEAM=8 costs 3.4x the search (55 s vs 16 s) and
    moves X from +6.4% to +8.3% -- present, but far from proportional.
 5. **The effect is small and one-sided, not large and noisy.** 9/9 + 4/4 + 2/2 positive paired
