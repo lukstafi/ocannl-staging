@@ -23,10 +23,15 @@ module Mock_raw = struct
   let get_used_memory () = 0
   let next = ref 0
   let freed : int list ref = ref []
+  let fail_next_alloc = ref false
 
   let alloc_pool_raw ~size_in_bytes:_ =
-    Int.incr next;
-    !next
+    if !fail_next_alloc then (
+      fail_next_alloc := false;
+      failwith "injected merge-pool allocation failure")
+    else (
+      Int.incr next;
+      !next)
 
   let free_pool_raw = Some (fun ptr -> freed := ptr :: !freed)
   let memset_zero_raw _ptr ~offset:_ ~size_in_bytes:_ = ()
@@ -88,6 +93,22 @@ let () =
   Verdict.p "grow freed the old pool" (List.mem !Mock_raw.freed p1 ~equal:Int.equal);
   Verdict.p "grow installed a new pool" (not (p1 = p2));
   Stdio.printf "freed count after grow = %d\n" (List.length !Mock_raw.freed);
+  (* Failure control for the same seam: the replacement allocation is fallible. It must happen
+     before freeing/overwriting the old entry, so a failed grow leaves the old pool resolvable and
+     does not report it freed. Before the commit-order fix, [p2] was freed first and the table kept
+     pointing at that released resource. *)
+  let frees_before_failed_grow = List.length !Mock_raw.freed in
+  Mock_raw.fail_next_alloc := true;
+  let grow_failed =
+    match Mock_slab.alloc_pool device ~pool_id:0 ~size_in_bytes:64 ~alignment:1 with
+    | () -> false
+    | exception Failure msg -> String.is_substring msg ~substring:"injected"
+  in
+  Verdict.p "injected grow failure fired" grow_failed;
+  Verdict.p "failed grow preserved the old pool"
+    (Mock_slab.resolve_pool device (loc 0) = p2
+    && List.length !Mock_raw.freed = frees_before_failed_grow
+    && not (List.mem !Mock_raw.freed p2 ~equal:Int.equal));
   (* A unique tnode pool id never pre-exists, so allocating it frees nothing. *)
   Mock_slab.alloc_pool device ~pool_id:1 ~size_in_bytes:16 ~alignment:1;
   Stdio.printf "freed count after unique-id alloc = %d\n" (List.length !Mock_raw.freed);

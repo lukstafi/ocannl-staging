@@ -156,13 +156,19 @@ module Make_slab (Device_types : Device_types) (Raw : No_device_buffer_and_copyi
   let alloc_pool ?mode:_ device ~pool_id ~size_in_bytes ~alignment:_ =
     let key = (device.device_id, pool_id) in
     with_pools (fun () ->
-        (* Free any prior allocation under this key before replacing it (only the reserved merge
-           pool is ever re-allocated; unique tnode pool ids never pre-exist). Backends whose
-           [free_pool_raw] is [None] rely on GC and the dropped table entry, so this is a no-op for
-           them. *)
-        Option.iter Raw.free_pool_raw ~f:(fun memfree ->
-            Option.iter (Hashtbl.find pools key) ~f:memfree);
+        (* Allocate before touching the old entry. Only the reserved merge pool is reallocated in
+           place; if its growth allocation fails, the smaller slab remains a valid, resolvable
+           resource rather than a table entry pointing at memory we already freed. *)
         let ptr = Raw.alloc_pool_raw ~size_in_bytes in
+        Option.iter Raw.free_pool_raw ~f:(fun memfree ->
+            match Option.iter (Hashtbl.find pools key) ~f:memfree with
+            | () -> ()
+            | exception exn ->
+                let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+                (* The replacement never became reachable. Give it back without replacing the
+                   old deallocation failure that tells the caller ownership did not commit. *)
+                (try memfree ptr with _ -> ());
+                Stdlib.Printexc.raise_with_backtrace exn backtrace);
         Hashtbl.set pools ~key ~data:ptr)
 
   (* Always [Some]: even backends whose raw allocations are reclaimed by GC ([free_pool_raw = None])
@@ -225,6 +231,7 @@ struct
       parent = None;
       ctx_buffers;
       finalized = Atomic.make false;
+      released_pool_ids = Set.empty (module Int);
       optimize_ctx;
       merge_buffer_node = None;
     }
@@ -239,6 +246,7 @@ struct
       parent = Some parent;
       ctx_buffers;
       finalized = Atomic.make false;
+      released_pool_ids = Set.empty (module Int);
       optimize_ctx;
       merge_buffer_node;
     }

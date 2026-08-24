@@ -1,0 +1,32 @@
+allocate-delta injection fired: true
+allocate-delta failure freed its one partial working pool: true
+allocate-delta control commits then releases exactly one working pool: true
+post-allocation link injection fired: true
+link failure freed the unowned delta exactly once: true
+link control runs and computes the reference: true
+link control releases its committed pool exactly once: true
+transfer-allocation injection fired: true
+failed transfer freed its fresh destination pool exactly once: true
+transfer control copies the requested values: true
+transfer control releases its destination exactly once: true
+from-host copy injection fired: true
+from-host copy failure freed the fresh pool: true
+existing from-host copy injection fired: true
+existing from-host failure retains the destination for retry: true
+existing from-host control retries in place: true
+to-host copy injection fired: true
+to-host failure retained the source for retry: true
+finalize-await injection fired: true
+failed finalize await commits no cleanup state: true
+finalize-await control retry releases exactly once: true
+finalize injection fired after one successful free: true
+failed finalize reports no release and records its one completed free: true
+finalize retry calls free only for the unreleased pool: true
+finalize control is idempotent after success: true
+cache-store control commits a readable entry: true
+cache-store injection fired: true
+failed cache commit preserves the old entry and removes its staging file: true
+cache-store retry commits the replacement: true
+cache-replay injection becomes an honest miss: true
+cache-replay control reads the committed replacement: true
+corrupt cache replay is an honest miss: true

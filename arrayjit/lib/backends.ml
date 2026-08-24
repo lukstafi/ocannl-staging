@@ -350,6 +350,7 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
         (* No cross-stream writer synchronization needed: multi-streaming was removed
            (gh-ocannl-341). Only one stream exists per device, so there are no concurrent
            cross-stream writes to wait for before this device-to-host copy. *)
+        Resource_fault_injection.hit To_host_before_copy;
         Backend.to_host ~src:ctx ~src_loc:loc hosted;
         true
     | None -> false
@@ -374,6 +375,7 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
            (gh-ocannl-341). Only one stream exists per device, so there are no concurrent
            cross-stream readers to wait for before this host-to-device upload. *)
         [%log "copying", Tn.debug_name tn, "to", (dst : Backend_intf.buffer_loc), "from host"];
+        Resource_fault_injection.hit From_host_before_copy;
         Backend.from_host ~dst:ctx ~dst_loc:dst hosted;
         update_writer_event ctx @@ Node tn;
         true
@@ -403,7 +405,9 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
         (* No zero-init: we are immediately copying from host. *)
         let dst = allocate ctx.device tn ~zero_init:false in
         with_transfer_pool ctx.device dst ~f:(fun () ->
+            Resource_fault_injection.hit Transfer_pool_allocated;
             [%log "copying", Tn.debug_name tn, "to", (dst : Backend_intf.buffer_loc), "from host"];
+            Resource_fault_injection.hit From_host_before_copy;
             Backend.from_host ~dst:ctx ~dst_loc:dst hosted;
             update_writer_event ctx @@ Node tn;
             { ctx with ctx_buffers = Map.add_exn ctx.ctx_buffers ~key:tn ~data:dst })
@@ -513,6 +517,7 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
             (* No zero-init: we are immediately copying from another device. *)
             let d_loc = allocate dst.device tn ~zero_init:false in
             with_transfer_pool dst.device d_loc ~f:(fun () ->
+                Resource_fault_injection.hit Transfer_pool_allocated;
                 Backend.(
                   device_to_device tn ~into_merge_buffer:No ~dst_loc:(Some d_loc) ~dst
                     ~src_loc:s_loc ~src);
@@ -1050,7 +1055,8 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
     let alloc_pool_counted ~constant device ~pool_id ~size_in_bytes ~alignment =
       alloc_pool device ~pool_id ~size_in_bytes ~alignment;
       minted := pool_id :: !minted;
-      Alloc_census.record_pool ~device_id:device.device_id ~pool_id ~constant ~size_in_bytes
+      Alloc_census.record_pool ~device_id:device.device_id ~pool_id ~constant ~size_in_bytes;
+      Resource_fault_injection.hit Delta_pool_allocated
     in
     let unwind_partial_delta () =
       (* The uploads scheduled above are asynchronous, so the pools must not be freed under them. *)
@@ -1215,7 +1221,10 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
           ~f:(fun ~key ~data:(loc : buffer_loc) freed ->
             if
               (not (Map.mem context.ctx_buffers key))
-              && (not (Hashtbl.mem context.device.constant_buffer_cache key))
+              && not
+                   (Option.exists
+                      (Hashtbl.find context.device.constant_buffer_cache key)
+                      ~f:(equal_buffer_loc loc))
               && not (Set.mem freed loc.pool_id)
             then (
               free_pool context.device ~pool_id:loc.pool_id;
@@ -1228,7 +1237,10 @@ module Raise_backend (Device : Lowered_backend) : Backend = struct
      allocation belongs inside: a failure past [make_child] discards the child too, so its pools are
      just as unreachable as if the child had never existed. *)
   let with_delta context ctx_buffers ~f =
-    match f () with
+    match
+      Resource_fault_injection.hit Link_after_delta;
+      f ()
+    with
     | result -> result
     | exception exn ->
         let backtrace = Stdlib.Printexc.get_raw_backtrace () in
@@ -1391,12 +1403,12 @@ let finalize (type dev runner event)
      reporting an asynchronous error, or a dead worker domain. Left set, every later release of this
      context would be a silent no-op and its pools would stay rooted for the process — restoring
      exactly the unbounded growth this exists to end, and on the failure paths where it matters
-     most, since the tuner catches a failed release and carries on with the next candidate or arm. A
-     retry is safe: freeing is idempotent per [pool_id] on every backend (the table entry is gone
-     after the first success, and [Alloc_census.forget_pool] ignores an absent key), so a cleanup
-     that got part way through does not double-free on the next attempt. *)
+     most, since the tuner catches a failed release and carries on with the next candidate or arm.
+     A retry skips the pool ids whose frees already returned successfully; backend frees are
+     idempotent too, but relying on that would still call a raw deallocator twice. *)
   let cleanup () =
     Option.iter Backend.free_pool ~f:(fun free_pool ->
+        Resource_fault_injection.hit Finalize_before_await;
         Backend.await ctx.device;
         (* One pool holds several nodes (gh-ocannl-344 bump packing / gh-ocannl-489 arenas), so the
            same [pool_id] is reached through several keys; dedup before freeing, or the second visit
@@ -1407,10 +1419,20 @@ let finalize (type dev runner event)
           ~f:(fun ~key ~data:(loc : Ir.Backend_intf.buffer_loc) freed ->
             if
               (not (Option.exists ctx.parent ~f:(fun pc -> Map.mem pc.ctx_buffers key)))
-              && (not (Hashtbl.mem ctx.device.constant_buffer_cache key))
+              (* A host upload may give a tnode a context-owned working location even when an
+                 earlier compile cached a CONSTANT location for the same key. Compare locations,
+                 not key presence: otherwise finalize mistakes the working pool for that constant
+                 and leaks it (gh-ocannl-571's transfer negative control). *)
+              && not
+                   (Option.exists
+                      (Hashtbl.find ctx.device.constant_buffer_cache key)
+                      ~f:(equal_buffer_loc loc))
+              && not (Set.mem ctx.released_pool_ids loc.pool_id)
               && not (Set.mem freed loc.pool_id)
             then (
+              Resource_fault_injection.hit Finalize_before_free;
               free_pool ctx.device ~pool_id:loc.pool_id;
+              ctx.released_pool_ids <- Set.add ctx.released_pool_ids loc.pool_id;
               Alloc_census.forget_pool ~device_id:ctx.device.device_id ~pool_id:loc.pool_id;
               Set.add freed loc.pool_id)
             else freed)

@@ -3302,6 +3302,19 @@
  (preprocess
   (pps ppx_here ppx_ocannl)))
 
+; gh-ocannl-571: GPU-free fault injection for resource-owning seams. It constructs [Context.cpu]
+; explicitly so this remains a cc lifecycle test even when a sweep selects another backend.
+
+(test
+ ; ocannl-backend: cc -- explicitly constructs Context.cpu and tests shared resource cleanup
+ (name resource_fault_injection)
+ (package neural_nets_lib)
+ (deps ocannl_config)
+ (modules resource_fault_injection)
+ (libraries base ocannl stdio arrayjit.verdict)
+ (preprocess
+  (pps ppx_here ppx_ocannl)))
+
 (test
  ; ocannl-backend: none -- parses fabricated topology strings and decides pool uniformity on them.
  ; It IS ambient-sensitive, to OCANNL_TOOL_TEST_RESTRICT_MASK, which it declares below.

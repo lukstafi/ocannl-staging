@@ -1,6 +1,8 @@
 grow freed the old pool: true
 grow installed a new pool: true
 freed count after grow = 1
+injected grow failure fired: true
+failed grow preserved the old pool: true
 freed count after unique-id alloc = 1
 resolve_pool offset 0 = base: true
 resolve_pool offset 8 = base + 8: true
