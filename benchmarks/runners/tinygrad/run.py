@@ -23,12 +23,30 @@ ap.add_argument("--fixture", required=True)
 ap.add_argument("--device", default="CPU", choices=["CPU", "METAL", "CUDA", "AMD", "CL", "HIP"])
 ap.add_argument("--jit", type=int, default=1)
 ap.add_argument("--beam", type=int, default=0, help="BEAM search width (0 = off); implies --jit")
+# gh-ocannl-675 probe: time a SECOND block of timed_steps inside the same process, after the
+# queued block, to separate "a process that searched is slower per launch" from first-block
+# warmup. Off by default; the published cell shape is unchanged.
+ap.add_argument("--retime", action="store_true", help="time a second block of steps (gh-675)")
 args = ap.parse_args()
 os.environ["DEV"] = args.device
 if args.beam:
     # Must be set before the tinygrad import: BEAM is read into a ContextVar at import time.
     os.environ["BEAM"] = str(args.beam)
     args.jit = 1
+
+# BEFORE importing tinygrad: this file lives in runners/tinygrad, so any `runners/` entry on
+# sys.path -- including one inherited from PYTHONPATH, which nothing here put there -- makes the
+# scan resolve `tinygrad` to THIS directory as a namespace-package portion and the import fails
+# outright with `cannot import name 'Tensor' from 'tinygrad' (unknown location)`. Purge every
+# equivalent entry first; the block after the imports puts one back briefly for `bench_common`.
+_RUNNERS = str(Path(__file__).resolve().parent.parent)
+
+
+def _drop_runners_from_path():
+    sys.path[:] = [q for q in sys.path if not q or Path(q).resolve() != Path(_RUNNERS)]
+
+
+_drop_runners_from_path()
 
 import numpy as np
 from safetensors.numpy import load_file
@@ -39,7 +57,7 @@ from tinygrad.nn.optim import SGD
 # sys.path an `import tinygrad` scan would first hit it as a namespace-package portion —
 # which shadows editable (finder-based) tinygrad installs, whose MetaPath finder is only
 # consulted when the path scan finds nothing.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, _RUNNERS)
 from bench_common import (
     emit,
     instrument_tinygrad_beam,
@@ -47,6 +65,18 @@ from bench_common import (
     read_st_metadata,
     tinygrad_searched,
 )
+
+# ...and off again -- EVERY equivalent entry, not just the one inserted above: the runner can
+# be launched with `benchmarks/runners` already on PYTHONPATH, and removing a single copy
+# would leave the inherited one behind, which is enough to reproduce the whole failure.
+# tinygrad's beam search runs its candidate compiles in a `spawn` pool, and a
+# spawned worker re-executes THIS module top-level with the parent's sys.path — where the
+# `import tinygrad` above happens before the insert. With runners/ still on the path the scan
+# finds runners/tinygrad/ as a namespace portion first, the editable install's meta-path finder
+# (appended after PathFinder) never gets a look, and every worker dies with `cannot import name
+# 'Tensor' from 'tinygrad' (unknown location)`. The pool respawns them forever, so the search
+# wedges instead of failing (gh-ocannl-675 CUDA leg).
+_drop_runners_from_path()
 
 
 def param(arr):
@@ -289,6 +319,16 @@ def main():
             k += 1
         sync()
         queued = (time.perf_counter() - t0) / timed_steps * 1e3
+        retimed = None
+        if args.retime:
+            sync()
+            retimed = []
+            for _ in range(timed_steps):
+                t0 = time.perf_counter()
+                step(k)
+                k += 1
+                sync()
+                retimed.append((time.perf_counter() - t0) * 1e3)
 
     result = {
         "framework": "tinygrad",
@@ -303,6 +343,8 @@ def main():
         "losses": losses,
         "version": pkg_version("tinygrad"),
     }
+    if retimed:
+        result["retime_step_ms"] = percentiles(retimed)
     if tokens_per_step:
         result["tokens_per_step"] = tokens_per_step
     emit(result)

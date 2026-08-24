@@ -189,7 +189,17 @@ def main():
     ap.add_argument("--fixture", required=True)
     ap.add_argument("--device", default="cpu", choices=["cpu", "mps", "cuda"])
     ap.add_argument("--compile", action="store_true")
+    # gh-ocannl-675: max-autotune is the honest analogue of a tuned cell (it benchmarks kernels).
+    # A separate variant, not a change to the `compiled` cell.
+    ap.add_argument("--compile-mode", default=None,
+                    help="torch.compile mode, e.g. max-autotune; implies --compile (gh-675 probe)")
+    ap.add_argument("--retime", action="store_true", help="time a second block of steps (gh-675)")
     args = ap.parse_args()
+    # A mode is a torch.compile setting and means nothing without it: taking it alone would run
+    # EAGER while stamping the result line with a `compile_mode`, i.e. a measurement labelled as
+    # something it is not.
+    if args.compile_mode:
+        args.compile = True
 
     meta = read_st_metadata(args.fixture)
     model = meta.get("model", "mlp")
@@ -212,7 +222,11 @@ def main():
     ]
 
     if args.compile:
-        loss_fn = torch.compile(loss_fn)
+        loss_fn = (
+            torch.compile(loss_fn, mode=args.compile_mode)
+            if args.compile_mode
+            else torch.compile(loss_fn)
+        )
 
     if mode == "train":
 
@@ -268,6 +282,16 @@ def main():
         k += 1
     sync()
     queued = (time.perf_counter() - t0) / timed_steps * 1e3
+    retimed = None
+    if args.retime:
+        sync()
+        retimed = []
+        for _ in range(timed_steps):
+            t0 = time.perf_counter()
+            step(k)
+            k += 1
+            sync()
+            retimed.append((time.perf_counter() - t0) * 1e3)
 
     # ROCm builds alias HIP onto torch's "cuda" device; label the report row honestly.
     backend = "cuda(hip)" if args.device == "cuda" and torch.version.hip else args.device
@@ -287,6 +311,10 @@ def main():
         "losses": losses,
         "version": torch.__version__,
     }
+    if args.compile_mode:
+        result["compile_mode"] = args.compile_mode
+    if retimed:
+        result["retime_step_ms"] = percentiles(retimed)
     if tokens_per_step:
         result["tokens_per_step"] = tokens_per_step
     emit(result)

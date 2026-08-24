@@ -51,10 +51,10 @@ def emit(result):
 #
 # Whether THIS process ran its own kernel search / codegen or replayed a cache. OCANNL's tuned
 # cell splits the two into separate processes, because a searching process is measurably slower
-# per launch; tinygrad's BEAM cell and torch.compile search in the process that then times
-# steps. Whether that costs them anything is unmeasured (gh-ocannl-675); until it is, every
-# runner at least SAYS which it did, so the report does not imply the question applies to
-# OCANNL alone.
+# per launch on small kernels; tinygrad's BEAM cell and torch.compile search in the process that
+# then times steps. What that costs THEM is measured and is per box (gh-ocannl-675): beam
+# +6.4% on CUDA and +14.9% on ROCm, torch.compile -12.0% and +7.2% -- so they stay single pass.
+# Every runner SAYS which it did, which is what made that measurable at all.
 #
 # Both probes read framework internals, so they answer None ("cannot tell", reported as UNKNOWN)
 # rather than guess. A wrong False is exactly the silent claim the field exists to prevent, so
@@ -73,11 +73,19 @@ def instrument_tinygrad_beam():
     CACHELEVEL=0 or IGNORE_BEAM_CACHE a search runs and neither reads nor writes, which cache
     counting alone reports as "cannot tell".
     """
-    try:
-        from tinygrad.engine import search
-    except Exception:
-        return None
-    if not (hasattr(search, "diskcache_get") and hasattr(search, "diskcache_put")):
+    # tinygrad moved the beam search out of `tinygrad.engine.search` into
+    # `tinygrad.codegen.opt.search` (0.13); try both, newest first, so the probe answers on
+    # either. A layout it does not know still answers None rather than guessing.
+    search = None
+    for mod in ("tinygrad.codegen.opt.search", "tinygrad.engine.search"):
+        try:
+            search = __import__(mod, fromlist=["_"])
+        except Exception:
+            continue
+        if hasattr(search, "diskcache_get") and hasattr(search, "diskcache_put"):
+            break
+        search = None
+    if search is None:
         return None
     counts = {"call": 0, "hit": 0, "put": 0}
     get, put = search.diskcache_get, search.diskcache_put
