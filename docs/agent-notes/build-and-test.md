@@ -720,10 +720,11 @@ that they earn a lookup rather than always-loaded space.
   is an unknown mixture of tests executed because their dependency cone changed and tests served
   from Dune's cache. Its history row says `execution=incremental`, so it is useful evidence about
   the changed cone but must not refresh the age of full backend coverage. `tools/sweep.sh --force`
-  passes Dune's alias-action `--force` flag to both `runtest` and `@slow`; only a successful forced
-  unit records `pass` and `execution=forced`. This is the safe cold-equivalent check: it re-executes
-  test actions without deleting the shared `_build`, and a unit that cannot finish inside the cap
-  records an honest `timeout`. The weekly full check is therefore
+  runs `dune clean` under the per-worktree lock, then passes Dune's alias-action `--force` flag to
+  both `runtest` and `@slow`; only a successful cold unit records `pass` and
+  `execution=forced`. The clean is necessary because alias forcing does not reliably rerun inline
+  expectations. A unit that cannot rebuild and finish inside the cap records an honest `timeout`.
+  The weekly full check is therefore
   `tools/sweep.sh --slow --force` (raise `OCANNL_TOOL_SWEEP_CAP` where a backend cannot fit the
   default 90 minutes).
   When the execution column was introduced, existing `pass` rows became `legacy-pass` with
@@ -738,8 +739,8 @@ that they earn a lookup rather than always-loaded space.
   run's can be diffed against it.
 - The per-machine worktrees are reused, not recreated, so a sweep is incremental against an
   existing `_build` — seconds rather than minutes when little changed. That is what makes a daily
-  cadence affordable. `--force` re-executes the test aliases while retaining compiled artifacts;
-  a genuine from-scratch compilation check still wants `dune clean` or a fresh CI run.
+  cadence affordable. `--force` is the explicit from-scratch unit; a fresh CI run is the other
+  path to a clean compilation check.
 - A golden line printed at a FIXED decimal precision is not made portable by lowering the
   precision: it only moves the boundary. `cifar_conv`'s epoch-30 mean loss sat at ~1.05, so its
   `%.1f` print — introduced to absorb reduction-order drift — read `1.0` on cc and `1.1` on cuda at
