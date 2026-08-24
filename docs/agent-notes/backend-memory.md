@@ -5,6 +5,11 @@ Pools, release, graph capture, hardware resource budgets, and the footprint plan
 Part of the agent notes; the [index](../agent-notes.md) carries the scope discipline and the other
 files.
 
+- The resource-seam acceptance map is `docs/resource-fault-injection-inventory.md` (gh-ocannl-571).
+  A release change is not accepted by a flat memory curve: inject after allocation, before and
+  during cleanup, and at persistence commit/replay; pair every failure with an uninjected control
+  and assert exact ownership (one free, no rooted table entry, retry state honest).
+
 - **Device buffers are not GC-reclaimable, and the reason is a table, not GC pressure**
   (gh-ocannl-550). Each backend's private `Slab.pools` (`(device_id, pool_id) -> base`) holds a
   strong reference to every slab it allocated, so no finalizer on a pool can ever run; the one
