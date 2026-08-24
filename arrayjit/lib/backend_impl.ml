@@ -164,7 +164,8 @@ module Make_slab (Device_types : Device_types) (Raw : No_device_buffer_and_copyi
             Hashtbl.remove pools key;
             if Int.equal pool_id merge_buffer_pool_id then (
               device.merge_buffer := None;
-              device.merge_buffer_capacity <- 0);
+              device.merge_buffer_capacity <- 0;
+              device.updating_for_merge_buffer <- None);
             Option.iter Raw.free_pool_raw ~f:(fun memfree -> memfree old));
         let ptr = Raw.alloc_pool_raw ~size_in_bytes in
         Hashtbl.set pools ~key ~data:ptr)

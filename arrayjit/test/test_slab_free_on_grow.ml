@@ -13,6 +13,7 @@
 open Base
 module Backend_impl = Ir.Backend_impl
 module Backend_intf = Ir.Backend_intf
+module Tn = Ir.Tnode
 
 (* A raw backend whose "pointers" are integer ids and whose [free_pool_raw] records frees --
    standing in for a backend (like CUDA) that owns explicitly-released device pointers. *)
@@ -98,8 +99,13 @@ let () =
      before any fallible action. Thus a failed replacement leaves an honestly absent merge pool,
      rather than the old bug's table entry pointing at released memory. *)
   let frees_before_failed_grow = List.length !Mock_raw.freed in
+  let stale_writer =
+    Tn.create (Tn.Default Ir.Ops.single) ~id:571 ~label:[ "stale merge writer" ]
+      ~unpadded_dims:(lazy [| 1 |]) ~padding:(lazy None) ()
+  in
   device.merge_buffer := Some (loc 0);
   device.merge_buffer_capacity <- 32;
+  device.updating_for_merge_buffer <- Some (stale_writer, None);
   Mock_raw.fail_next_alloc := true;
   let grow_failed =
     match Mock_slab.alloc_pool device ~pool_id:0 ~size_in_bytes:64 ~alignment:1 with
@@ -112,12 +118,13 @@ let () =
     | _ -> false
     | exception _ -> true
   in
-  Verdict.p "failed grow invalidated the released pool and capacity"
+  Verdict.p "failed grow invalidated the released pool, capacity, and writer"
     (old_pool_absent
     && List.length !Mock_raw.freed = frees_before_failed_grow + 1
     && List.mem !Mock_raw.freed p2 ~equal:Int.equal
     && Option.is_none !(device.merge_buffer)
-    && device.merge_buffer_capacity = 0);
+    && device.merge_buffer_capacity = 0
+    && Option.is_none device.updating_for_merge_buffer);
   Mock_slab.alloc_pool device ~pool_id:0 ~size_in_bytes:64 ~alignment:1;
   let p3 = Mock_slab.resolve_pool device (loc 0) in
   Verdict.p "grow retry installs a fresh pool without another free"

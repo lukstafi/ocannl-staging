@@ -79,7 +79,8 @@ module Slab = struct
         Hashtbl.remove pools key;
         if Int.equal pool_id merge_buffer_pool_id then (
           device.merge_buffer := None;
-          device.merge_buffer_capacity <- 0);
+          device.merge_buffer_capacity <- 0;
+          device.updating_for_merge_buffer <- None);
         H.Deviceptr.mem_free old);
     let ptr = H.Deviceptr.mem_alloc ~size_in_bytes in
     Hashtbl.set pools ~key ~data:(ptr, size_in_bytes)
