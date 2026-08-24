@@ -436,12 +436,21 @@ than the driver (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION` at module load), run it wi
   measured — which is what that figure was about — is +10.3%, so the protocol is kept for a
   measured ≤10.3% rather than for a factor of three. (Two *other* cells do exceed it on ROCm,
   +21.2% and +33.9%; that is the asymmetry this table exists to state, and it is handled in (c),
-  not by the OCANNL bound.) **(b)** The residue is a property of *how expensive the search was on that device*, not of the framework:
-  it appears wherever a long search precedes the timing (OCANNL behind 16 s on CUDA, the beam on
-  both boxes, `max-autotune` on ROCm) and vanishes when the search is cheap. **(c)** No searching
+  not by the OCANNL bound.) **(b)** The residue
+  needs TWO conditions, not one — the CUDA leg contains the counterexample to the simpler claim:
+  OCANNL on `gpt2_mini` searched for 206–613 s, the most expensive search measured anywhere, and
+  shows +0.5%. It appears where an expensive search precedes the timing *and* the step is short
+  enough for a per-launch cost to be a visible fraction of it. Every positive row is on `mlp_small`
+  (steps 0.05–0.6 ms); every ~0 row behind a long search is on `gpt2_mini` (steps 1.1–9.7 ms) —
+  the same shape as this file's own "on small CUDA kernels" qualifier. **(c)** No searching
   cell clears a ~10% line on both boxes, and `torch.compile`'s residue does not even keep its
   sign across them, so **the other cells stay single pass** — at ≤6.4% (beam) and a *negative*
-  −12.0% (`torch.compile`) on the box whose hardware this rationale names. Splitting them would
+  −12.0% (`torch.compile`) on the box whose hardware this rationale names. "On both boxes" is a
+  decision the measurement brief did not specify and the two legs forced: the protocol is a
+  property of this MATRIX rather than of a machine, and a cell that is two-pass on one box and
+  single-pass on another yields two numbers that cannot be compared with each other — the exact
+  harm it exists to prevent. Applied per box instead, the beam cell and `max-autotune` would split
+  on ROCm (+14.9%, +12.3%) and neither on CUDA; the numbers are the same either way. Splitting them would
   double their wall clock, break comparability with every published report, and — for the torch
   cells here — move the number the wrong way.
 

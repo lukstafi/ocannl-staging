@@ -714,8 +714,9 @@ let protocol_of_st st =
     The line's [searched] field states whether {e this process} ran a schedule search
     (gh-ocannl-644). A tuned cell is measured by a two-pass protocol — pass 1 searches and populates
     [autotune_cache/], a fresh pass 2 replays the cached winner and provides the step times, because
-    a searching process is measurably slower per launch (accumulated modules and buffers; 2.5-3.5x
-    on small CUDA kernels). Both passes emit the same [framework]/[backend]/[variant]/[precision],
+    a searching process is measurably slower per launch (accumulated modules and buffers; measured
+    at +10.3% on small CUDA kernels behind a 16 s search, and ~0 behind a cheap one or where a step
+    is milliseconds rather than microseconds -- gh-ocannl-675). Both passes emit the same [framework]/[backend]/[variant]/[precision],
     so without this field a report can quote pass-1 timings as protocol-compliant ones indefinitely,
     and nothing in the artifact contradicts it — which is what [report-gh612-hip.md] did for fifteen
     revisions. [searched] is [false] for an untuned cell too: it says no search ran in this process,

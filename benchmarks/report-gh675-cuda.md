@@ -66,6 +66,14 @@ against it.
   way").
 - Parity is the orchestrator's gate recomputed offline against `pytorch/cpu/eager`, tolerance
   2e-3: **every cell passes**, worst 8.7e-07, so all rows are comparable.
+- **Known limitation of THIS run's data.** Arms alternated within each repeat but in a FIXED
+  order, so every arm sat at the same position in every repeat. Since the process-wide CUDA JIT
+  cache warms across a session -- documented below, and worth 16 s vs 4 s of OCANNL search time --
+  arm identity is partly confounded with accumulated compiler state. X itself is a within-pair
+  ratio between two adjacent processes, which is what makes it robust to that drift; what the
+  confound can reach is the comparison BETWEEN arms, and the anchor's two regimes in particular.
+  The driver now rotates the arm order per repeat (`gh675_cells.py`), which the numbers below
+  predate.
 
 ## Results
 
@@ -157,7 +165,20 @@ reproduction.
 ## The call: keep every cell single-pass
 
 Reading both legs against the brief's rule (split a searching cell whose `mlp_small` X exceeds
-~10%):
+~10%) -- and stating up front the one thing the brief did not specify, since two boxes now
+disagree: **the threshold has to be cleared on every measured box, not on any one of them.** That
+is a decision, made here and defensible on its own terms rather than derived from the rule, so it
+is worth the argument: the two-pass protocol is a property of the published MATRIX, not of a
+machine. Reports are read across boxes -- this file's whole reason for existing is that the ROCm
+leg's table and this one are compared -- and a cell that is two-pass on gfx1151 and single-pass on
+an RTX 5070 Ti produces two numbers that are not comparable with each other, which is the exact
+harm the protocol exists to prevent. The alternative, a per-box protocol, was rejected on that
+ground and not on the results.
+
+Applied per-box instead, the verdicts would be: tinygrad beam SPLITS on ROCm (+14.9%) and not on
+CUDA (+6.4%); `max-autotune` SPLITS on ROCm (+12.3%) and not on CUDA (-2.0%); `torch.compile`
+splits on neither by the mlp_small rule. A reader who prefers per-box protocols should take that
+reading -- the numbers are the same either way, and both are in the table below.
 
 | cell | CUDA (this leg) | ROCm (gfx1151) | verdict |
 |---|---|---|---|
@@ -167,10 +188,19 @@ Reading both legs against the brief's rule (split a searching cell whose `mlp_sm
 | OCANNL `tuned` (anchor) | +10.3% behind a 16 s search, ~0 behind a 4 s one | -0.2% / -0.1% | protocol kept, rationale re-stated |
 
 No cell clears the line on both boxes, and no cell clears it on the box whose hardware the
-README's own rationale names. What the numbers do establish is that the *residue is a property of
-the search's cost on that device*, not of the framework: it appears wherever a long search
-precedes the timing (OCANNL behind 16 s of search on CUDA, tinygrad's beam on both boxes, torch's
-max-autotune on ROCm) and vanishes when the search is cheap. So the honest matrix rule is
+README's own rationale names. What the numbers establish about the mechanism needs stating
+carefully, because this report contains its own counterexample to the simple version: OCANNL on
+`gpt2_mini` searched for **206-613 s** -- by far the most expensive search measured anywhere here
+-- and shows **+0.5%**. So "a long search leaves a residue" is false as stated.
+
+Both conditions are needed, and the second is what the counterexample supplies: a residue appears
+where an expensive search precedes the timing **and the step is short enough for a per-launch cost
+to be a visible fraction of it**. Every positive row is on `mlp_small`, whose steps are 0.05-0.6 ms
+(OCANNL +10.3% behind 16 s; beam +6.4%; BEAM=8 +8.3%), and every ~0 row behind a long search is on
+`gpt2_mini`, whose steps are 1.1-9.7 ms (OCANNL +0.5% behind 206-613 s; beam +2.3%). That is the
+same shape as the README's own "on small CUDA kernels" qualifier, and it is why the cheap-search
+regime and the big-kernel regime both come out at zero: in one there is little residue to carry, in
+the other it is swamped. So the honest matrix rule is
 "single pass, measured at <=X% per cell per box", with X recorded -- which is a result, and it is
 what makes the asymmetry defensible instead of merely documented.
 

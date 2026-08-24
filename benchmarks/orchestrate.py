@@ -62,9 +62,11 @@ REFERENCE = ("pytorch", "cpu", "eager")
 # artifact's. These are the only cells a searching process is a violation for.
 TWO_PASS_CELLS = {("ocannl", "tuned")}
 # Cells that search or compile in the process that then times steps — by protocol, not by
-# mistake. Whether that costs them anything is unmeasured (gh-ocannl-675), so they are stated in
-# the report and never gated; the alternative, saying nothing, reads as though the question
-# applied to OCANNL alone.
+# mistake. What that costs them is MEASURED (gh-ocannl-675, benchmarks/report-gh675-cuda.md and
+# the ROCm table in the issue): per box, tinygrad's beam +6.4%/+14.9% on mlp_small (CUDA/ROCm) and
+# `torch.compile` −12.0%/+7.2% — which does not even keep its sign across the two. No cell clears
+# a ~10% line on both boxes, so they stay single pass and are stated rather than gated; saying
+# nothing would read as though the question applied to OCANNL alone.
 SAME_PROCESS_CELLS = {("tinygrad", "beam"), ("pytorch", "compiled")}
 # How a cell's measurement pass is rendered in the report's `pass` column (gh-ocannl-644). A
 # runner predating the `searched` field, or one whose probe could not read its framework's
@@ -903,8 +905,10 @@ def main():
                         ident = {"variant": variant, "precision": precision}
                         if variant == "tuned":
                             # Two-pass protocol: the search leaves the process slower (extra
-                            # per-launch overhead from accumulated modules/buffers — measured
-                            # 2.5-3.5x on small CUDA kernels), so pass 1 runs the search and
+                            # per-launch overhead from accumulated modules/buffers — measured at
+                            # +10.3% on small CUDA kernels behind a 16 s search, and ~0 behind a
+                            # 4 s one or on a workload whose steps are milliseconds;
+                            # gh-ocannl-675), so pass 1 runs the search and
                             # populates autotune_cache (its compile_s is the search cost), and a
                             # fresh pass-2 process replays the cached winner for the step timings.
                             pass1 = run_cell(f"{label} (search pass)", cmd, env=env, cwd=HERE)

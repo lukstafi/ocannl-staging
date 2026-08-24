@@ -230,6 +230,14 @@ def run(cmd, env=None, cwd=None, timeout=None):
         # proc.pid IS the group id: `start_new_session=True` makes the child a session leader.
         kill_group(proc, proc.pid)
         raise
+    except BaseException:
+        # Ctrl-C included, which is the likely one: the same `start_new_session=True` that lets a
+        # timeout reach the descendants also detaches them from the terminal, so SIGINT reaches
+        # THIS driver and not the beam pool. Without this the operator interrupts a long search,
+        # the driver exits, and the workers keep the GPU and the pinned cores -- contaminating
+        # whatever is run next, including the resumed sweep.
+        kill_group(proc, proc.pid)
+        raise
     wall = time.monotonic() - t0
     p = subprocess.CompletedProcess(cmd, proc.returncode, out, err)
     line = None
@@ -630,7 +638,13 @@ if __name__ == "__main__":
 
     for rep in range(args.start_repeat, args.start_repeat + args.repeats):
         for w in args.workloads:
-            for a in args.arms:
+            # Rotated by repeat: traversing the same order every time pins each arm to a fixed
+            # position in the session, and the process-wide CUDA JIT cache (`~/.nv/ComputeCache`,
+            # which no per-arm wipe touches) is warmer at the end of a repeat than at its start --
+            # measurably so: it is what takes OCANNL's search from 16 s to 4 s over this sweep. A
+            # fixed order confounds arm identity with accumulated compiler state; rotation spreads
+            # each arm over all positions instead.
+            for a in args.arms[rep % len(args.arms):] + args.arms[:rep % len(args.arms)]:
                 print(f"== rep{rep} {w} {a}", flush=True)
                 try:
                     ARMS[a](w, rep)
