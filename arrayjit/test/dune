@@ -100,9 +100,9 @@
 
 (test
  ; ocannl-backend: none -- tests a pure compiler-option helper and selects no runtime backend.
- (name test_clang_fast_math_options)
+ (name test_hip_compile_options)
  (package arrayjit)
- (modules test_clang_fast_math_options)
+ (modules test_hip_compile_options)
  (deps ocannl_config)
  (libraries base arrayjit.ir arrayjit.verdict))
 

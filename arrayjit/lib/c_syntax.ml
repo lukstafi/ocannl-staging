@@ -239,13 +239,6 @@ type async_copy_syntax = {
 (** gh-ocannl-487 phase 2: asynchronous staging copies for software-pipelined tiles (see
     {!C_syntax_config.async_copy}). *)
 
-(* Clang processes floating-point switches left-to-right. Keep the disabling override adjacent to
-   the umbrella flag so a backend cannot accidentally put it first and let [-ffast-math] silently
-   re-enable reassociation (gh-ocannl-735). Exposed through [Ir.C_syntax] so the option contract can
-   be tested without the optional CUDA/HIP compiler libraries or a GPU. *)
-let clang_fast_math_options ~reassociate =
-  [ "-ffast-math" ] @ if reassociate then [] else [ "-fno-associative-math" ]
-
 module type C_syntax_config = sig
   val procs : Low_level.optimized array
   (** The low-level prcedure to compile, and the arrays of the context it will be linked to if not
