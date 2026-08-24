@@ -392,8 +392,14 @@ module Add_buffer_retrieval_and_syncing (Backend : No_buffer_retrieval_or_syncin
     | result -> result
     | exception exn ->
         let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+        (* Synchronize best-effort, but do not let a sticky worker/stream error suppress the only
+           owner capable of releasing this unreachable fresh pool. Multidev keeps [dev_error]
+           after reporting it, so retrying await can deterministically re-raise. *)
         (try
-           Backend.await device;
+           Resource_fault_injection.hit Transfer_cleanup_before_await;
+           Backend.await device
+         with _ -> ());
+        (try
            Option.iter Backend.free_pool ~f:(fun free -> free device ~pool_id:loc.pool_id);
            Alloc_census.forget_pool ~device_id:device.device_id ~pool_id:loc.pool_id
          with _ -> ());

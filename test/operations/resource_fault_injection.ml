@@ -174,13 +174,27 @@ let () =
      it raises. The callback models the first await reporting that queued failure; cleanup's retry
      await then succeeds and permits the exact free. *)
   let before = AC.snapshot () in
-  let raised, hits =
-    injected FI.From_host_before_await (fun () ->
-        Context.from_host (Context.cpu ()) x.Tensor.value nd)
+  let upload_await_hits = ref 0 in
+  let cleanup_await_hits = ref 0 in
+  let raised =
+    match
+      FI.with_callback
+        (fun point ->
+          if FI.equal_point point FI.From_host_before_await then (
+            Int.incr upload_await_hits;
+            failwith "gh571 injected persistent upload await failure")
+          else if FI.equal_point point FI.Transfer_cleanup_before_await then (
+            Int.incr cleanup_await_hits;
+            failwith "gh571 injected persistent cleanup await failure"))
+        ~f:(fun () -> Context.from_host (Context.cpu ()) x.Tensor.value nd)
+    with
+    | _ -> false
+    | exception Failure msg -> String.is_substring msg ~substring:"gh571 injected persistent"
   in
   let after = AC.snapshot () in
-  p "from-host await injection fired after queuing the upload" (raised && hits = 1);
-  p "from-host await failure freed the unreachable fresh pool"
+  p "persistent from-host await injection fired for upload and cleanup"
+    (raised && !upload_await_hits = 1 && !cleanup_await_hits = 1);
+  p "persistent from-host await failure freed the unreachable fresh pool"
     (working_allocated before after = 1
     && pools_freed before after = 1
     && live_working_delta before after = 0);
