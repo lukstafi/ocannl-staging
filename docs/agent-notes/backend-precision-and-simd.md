@@ -376,14 +376,16 @@ files.
   `reduction_forms` the cell `out[r]` mentions the output index, which is what stops the outer peel.
   Keeping an outer guard around the whole scope instead of declining would localize more still; it
   needs the peel to report its outer guards separately, which is wider than any of this.
-- The interaction with Metal's `volatile_scalar_rmw` needs no special case, and that is worth
-  knowing before adding one: the shadow keys on the emitted `Set` reading its own node at a cell
-  invariant across an enclosing SERIAL loop, and localization lifts the `Set` out of exactly those
-  loops (`peel_accum_nest` runs outermost-first, since `pp_ll` recurses top-down), so at a fully
-  localized site the predicate is already false. Where the peel was blocked at an outer level — a
-  sibling statement, a data-dependent guard — the store stays inside an invariant-address loop and
-  the shadow still fires, correctly: the per-iteration read-modify-write is genuinely still there at
-  that level. It joins virtual scopes,
+- Metal's `volatile_scalar_rmw` has TWO localization interactions (gh-ocannl-731). The pointer
+  shadow keys on an emitted `Set` reading its own node at a cell invariant across an enclosing
+  SERIAL loop, and localization lifts that `Set` out of exactly those loops
+  (`peel_accum_nest` runs outermost-first, since `pp_ll` recurses top-down), so at a fully localized
+  site the shadow predicate is false. But the Metal compiler can also corrupt the replacement
+  scope-local accumulator when its contribution reads through the pooled slot table; therefore
+  `scope_decl_type` qualifies every reduction-shaped scope local as `volatile` on Metal. Where the
+  peel was blocked at an outer level — a sibling statement, a data-dependent guard — the store
+  stays inside an invariant-address loop and the POINTER shadow still fires, correctly: the
+  per-iteration device-memory RMW genuinely remains. Localization joins virtual scopes,
   `try_vectorize_reduce`'s epilogue and `try_register_tile`'s C-tile. The peel accepts
   Serial/`Unrolled`/`Vectorized` levels (autotune proposes `Unroll` over any Serial loop of extent
   <= 8 and Retype-`Vectorized` over reductions; a `Vectorized` level rides into the scope and

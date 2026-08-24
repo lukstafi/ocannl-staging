@@ -53,3 +53,34 @@ let () =
   let ctx = Context.run ctx routine in
   let got2 = (Context.get_values ctx batch_loss.Tensor.value).(0) in
   Verdict.p "rerun stable" Float.(abs (got2 - got) < 1e-6)
+
+(* The compiler workaround is also required after the serial reduction localizer moves the
+   accumulator out of device memory. Metal can miscompile the resulting scope local when its loop
+   reads a buffer through the pooled slot table; shader validation happens to hide the bug. Keep a
+   device-produced, fully materialized input between the producer and reduction so this leg
+   exercises the same kernel shape as a virtual residual plus attention output (gh-ocannl-731),
+   and make every input cell distinct so a dropped or replayed iteration cannot hide. *)
+let () =
+  Tensor.unsafe_reinitialize ();
+  let seq_len = 4 and width = 16 in
+  let values = Array.init (seq_len * width) ~f:(fun i -> 1. +. (Float.of_int i *. 0.125)) in
+  let source =
+    TDSL.ndarray values ~label:[ "localized_source" ] ~batch_dims:[ 1; seq_len ]
+      ~output_dims:[ width ] ()
+  in
+  let%op produced = (source *. !.1.25) - !.0.5 in
+  Train.set_materialized produced.value;
+  let indices =
+    TDSL.range_of_shape ~label:[ "localized_indices" ] ~batch_dims:[ 1; seq_len ] ~input_dims:[]
+      ~output_dims:[ width ] ()
+  in
+  let%op total = (indices + produced) ++ "...|... => |->0" in
+  let ctx = Context.auto () in
+  let ctx, routine = Context.compile ctx (Train.forward total) Ir.Indexing.Empty in
+  let ctx = Context.run ctx routine in
+  let got = (Context.get_values ctx total.value).(0) in
+  let expected =
+    Array.foldi values ~init:0. ~f:(fun i acc value ->
+        acc +. Float.of_int i +. ((value *. 1.25) -. 0.5))
+  in
+  Verdict.p "localized scalar accumulation matches oracle" Float.(abs (got - expected) < 1e-4)
