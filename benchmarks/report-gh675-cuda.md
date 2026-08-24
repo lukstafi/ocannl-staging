@@ -109,8 +109,14 @@ OCANNL `tuned` **-0.0%** / **+0.5%** pooled (but see the anchor section -- pooli
    `BEAM=N`.
 3. **It is not first-block warmup.** A `--retime` flag (added for this probe) times a *second*
    block of `timed_steps` inside the same process, ~400 steps in -- and BOTH passes record one, so
-   the comparison is pass-1 block 2 over pass-2 block 2: same block position, same step index, same
-   elapsed process lifetime, only the process differs. The searching process stays slow:
+   the comparison is pass-1 block 2 over pass-2 block 2: same block position, same step index. What
+   it does NOT match is elapsed process lifetime -- pass 1 reaches its blocks after 13.5-68.4 s of
+   searching, pass 2 after a replay of a second or two -- and that cannot be matched, because it is
+   the treatment: a pass 2 aged equivalently would have had to do something equally expensive, at
+   which point it is not a replay. So this control excludes block position and step index as the
+   explanation, and does not separate "slower because it searched" from "slower because it is an
+   older, fuller process that searched" -- which is the same claim the README's stated mechanism
+   makes (accumulated modules and buffers), not a competing one. The searching process stays slow:
    **1.07** (mlp_small BEAM=2), **1.11** (BEAM=8), **1.02** (gpt2_mini), against 0.99-1.00 for the
    three controls and 0.83 for `torch.compile`, whose block 2 confirms it is genuinely the *faster*
    process. (An earlier revision of this report divided pass-1's second block by pass-2's FIRST
