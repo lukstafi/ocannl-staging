@@ -302,4 +302,3 @@ tile-mma-fallback @ bf16 renders the form its composition claims: true
 tile-mma-fallback @ bf16 agrees with its reference value: true
 tile-mma-fallback @ f16 renders the form its composition claims: true
 tile-mma-fallback @ f16 agrees with its reference value: true
-every emitted HIP reduction kernel disables compiler-invented floating-point reassociation: true

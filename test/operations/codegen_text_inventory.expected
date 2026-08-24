@@ -40,7 +40,6 @@ test/operations/zero_out_local_decl.metal.expected [metal] extension .metal.expe
 == test sources pinning emitted text ==
 roots scanned: arrayjit/test, test
 arrayjit/test/test_cross_cse.ml [renders generated text in memory]
-arrayjit/test/test_kernel_prep_line.ml [renders generated text in memory]
 arrayjit/test/test_local_scope_init.ml [renders generated text in memory]
 arrayjit/test/test_stage_b_where_debug.ml [renders generated text in memory]
     "(!("
@@ -130,7 +129,6 @@ test/operations/reduction_forms.ml [also pins text this scan cannot name]
     " = "
     "Vectorized reduction rendering"
     "] = "
-    "_Pragma(\"clang fp reassociate(off)\")"
     "ocannl_shfl_xor"
     ... ^ "["
 test/operations/reserved_routine_names.ml

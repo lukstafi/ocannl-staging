@@ -317,7 +317,14 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     let options =
       hip_include_opt @ rocwmma_include_opt
       @ (if uses_rocwmma then [ "-std=c++17" ] else [])
-      @ ("-ffast-math" :: (if Utils.with_runtime_debug () then [ "-g" ] else []))
+      (* gh-ocannl-735: hiprtc otherwise reassociates ordinary scalar bf16/f16 recurrences
+         differently across loop, repeated-statement and scope-local spellings. The override must
+         follow [-ffast-math] and live at compiler-option scope: bf16's infix operators are parsed
+         in the HIP headers before a kernel-body pragma, and retain the flags active there after
+         inlining. Keep the rest of fast math; explicit schedule forms that license reassociation
+         already encode their changed expression graph in generated source. *)
+      @ C_syntax.clang_fast_math_options ~reassociate:false
+      @ (if Utils.with_runtime_debug () then [ "-g" ] else [])
     in
     let code = Hiprtc.compile_to_code ~hip_src ~name:name_hip ~options ~with_debug in
     if Utils.settings.output_debug_files_in_build_directory then (
@@ -502,17 +509,9 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
 
     let main_kernel_prefix = "extern \"C\" __global__"
 
-    (* hiprtc is invoked with [-ffast-math], whose reassociation license is wider than OCANNL's:
-       clang may reassociate an ordinary Serial __half/__hip_bfloat16 recurrence, and observed ROCm
-       output then varied with whether schedule lowering had spelled the same recurrence as a loop,
-       repeated statements, or nested scopes (gh-ocannl-735). That defeats [accum_prec]'s narrow
-       residency contract: assignment to the 16-bit local is supposed to be the rounding boundary
-       on every source update. Disable only clang's implicit reassociation for the kernel body;
-       explicit Vectorized/Workgroup_reduce/Tensorize renderings still carry the reassociation their
-       IR annotations license in the generated expression graph, while the other fast-math
-       assumptions and intrinsics remain enabled. [_Pragma] is the statement-position spelling
-       accepted by [C_syntax.kernel_prep_line], which appends its semicolon. *)
-    let kernel_prep_line = "_Pragma(\"clang fp reassociate(off)\")"
+    (* An all-Serial kernel launches 1x1x1, so no single-thread guard is needed; annotated kernels
+       need every thread (axis-types proposal §4). *)
+    let kernel_prep_line = ""
 
     (* Use native types for loop indices and arguments instead of stdint.h types. Signed index
        arithmetic (docs/proposals/signed-index-precision.md). *)
