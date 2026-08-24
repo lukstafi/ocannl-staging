@@ -35,6 +35,7 @@ Nothing this driver writes touches the checkout: caches, records and the tuned c
 See benchmarks/report-gh675-cuda.md for what it measured.
 """
 import argparse, hashlib, json, os, shutil, signal, subprocess, sys, time
+from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -139,17 +140,19 @@ def gate():
     return False
 
 
-def kill_group(proc):
+def kill_group(proc, pgid):
     """Take down the whole process group and confirm it is gone.
 
     TERM first so a runner can flush, then KILL. Nothing after this may assume the box is quiet
     until the group is reaped -- which is the entire point of killing the group rather than the
     process.
+
+    `pgid` is passed in rather than looked up here. `start_new_session=True` makes the runner's own
+    pid the group id, and by the time a timeout is being handled the runner may already have exited
+    (descendants can hold its pipes open, or it can exit between the timeout and this call) -- at
+    which point `os.getpgid` raises and a lookup here would return without ever signalling a group
+    that is still very much alive.
     """
-    try:
-        pgid = os.getpgid(proc.pid)
-    except ProcessLookupError:
-        return
 
     def group_alive():
         # Signal 0 tests for members without signalling them. The direct child counts while it is
@@ -213,7 +216,8 @@ def run(cmd, env=None, cwd=None, timeout=None):
     try:
         out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        kill_group(proc)
+        # proc.pid IS the group id: `start_new_session=True` makes the child a session leader.
+        kill_group(proc, proc.pid)
         raise
     wall = time.monotonic() - t0
     p = subprocess.CompletedProcess(cmd, proc.returncode, out, err)
@@ -391,10 +395,14 @@ def record(arm, workload, repeat, **fields):
     rec = {"arm": arm, "workload": workload, "repeat": repeat,
            "fixture_sha256": DIGESTS.get(workload),
            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"), **fields}
-    prior = ATTEMPTS.get((arm, workload, repeat), 0)
+    key = (arm, workload, repeat)
+    prior = ATTEMPTS.get(key, 0)
     if prior:
         # Only under --rerun; the identity is otherwise refused before the sweep starts.
         rec["attempt"] = prior + 1
+    # Counted as it runs, so a second row for one identity WITHIN this sweep is numbered too --
+    # seeding this from the records file alone would leave in-sweep repeats indistinguishable.
+    ATTEMPTS[key] = prior + 1
     return rec
 
 
@@ -562,6 +570,14 @@ if __name__ == "__main__":
                     help="refuse to run unless the fixture's bytes hash to this -- what makes a "
                          "resumed run the same experiment as the one it resumes")
     args = ap.parse_args()
+    # Before any directory is made or any child is launched: a typo AFTER a valid entry would
+    # otherwise be discovered hours in, by a KeyError, with the preceding cells already recorded
+    # and colliding on the restart.
+    bad_arms = [a for a in args.arms if a not in ARMS]
+    bad_workloads = [w for w in args.workloads if w not in FIXTURE]
+    if bad_arms or bad_workloads:
+        sys.exit(f"unknown arm(s) {bad_arms} / workload(s) {bad_workloads}; "
+                 f"arms are {sorted(ARMS)}, workloads are {sorted(FIXTURE)}")
     CACHES.mkdir(parents=True, exist_ok=True)
     DIGESTS.update(digests(args.workloads))
     print(f"records: {RECORDS}", flush=True)
@@ -588,6 +604,13 @@ if __name__ == "__main__":
     planned = [(a, w, rep)
                for rep in range(args.start_repeat, args.start_repeat + args.repeats)
                for w in args.workloads for a in args.arms]
+    within = [k for k, c in Counter(planned).items() if c > 1]
+    if within and not args.rerun:
+        # `--arms A_beam2 A_beam2`, or a repeated workload: two rows under one identity, neither
+        # distinguishable from the other, without ever touching the records file.
+        sys.exit(f"{len(within)} (arm, workload, repeat) requested more than once in this "
+                 f"invocation: {within[:5]}{' ...' if len(within) > 5 else ''} -- drop the "
+                 "duplicates, or pass --rerun to record them as numbered attempts")
     clash = [k for k in planned if k in seen]
     if clash and not args.rerun:
         sys.exit(f"{len(clash)} (arm, workload, repeat) already in {RECORDS}: "
