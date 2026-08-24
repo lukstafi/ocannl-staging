@@ -24,7 +24,11 @@ assumes -- each of them a way a pair can look valid and not be:
   * the FIXTURE is identified by sha256 on every record, and `--expect-digest` refuses a run whose
     bytes are not the ones being resumed;
   * a WEDGE is recorded against the pass that wedged, so a searching-process hang and a replaying
-    -process hang stay distinguishable.
+    -process hang stay distinguishable;
+  * and every PRECONDITION those rest on is established rather than attempted: a wipe that left
+    residue, a prewarm that failed, a child that exited nonzero after printing a result, and an
+    idle gate that gave up all mark the pair `valid: false` (loudly) instead of yielding a record
+    that looks like any other. Read `valid` before using a pair; `analysis` should filter on it.
 Nothing this driver writes touches the checkout: caches, records and the tuned cell's
 `autotune_cache_dir` all live under $GH675_OUT.
 
@@ -71,7 +75,7 @@ def base_env():
     }
 
 
-def digests():
+def digests(workloads=None):
     """sha256 of each fixture, stamped onto every record.
 
     The fixtures are gitignored and regenerable, and `gen_fixtures.py` does not promise stable
@@ -81,6 +85,10 @@ def digests():
     """
     out = {}
     for w, path in FIXTURE.items():
+        if workloads is not None and w not in workloads:
+            # Hashing every known fixture would make an unrelated, un-generated one
+            # (gen_fixtures.py can produce a single workload) a hard error for a run not using it.
+            continue
         h = hashlib.sha256()
         with open(path, "rb") as f:
             for chunk in iter(lambda: f.read(1 << 20), b""):
@@ -90,7 +98,12 @@ def digests():
 
 
 def gate():
-    """Wait until the box is quiet enough to time on."""
+    """Wait until the box is quiet enough to time on; False if it never got there.
+
+    Returning the verdict rather than printing it is the point: a run that started on a busy box
+    is exactly the contended measurement this protocol claims to exclude, and a record of it must
+    not be indistinguishable from an idle-gated one.
+    """
     for _ in range(24):
         load = float(open("/proc/loadavg").read().split()[0])
         try:
@@ -103,16 +116,18 @@ def gate():
         # instantaneous gate; the GPU is the resource under measurement. Wait for both, but do
         # not stall the sweep on a stale load figure.
         if load < 8.0 and util < 10:
-            return
+            return True
         time.sleep(5)
-    print("gate: giving up waiting for idle", file=sys.stderr)
+    print("gate: giving up waiting for idle -- measurement will be stamped gate_ok: false",
+          file=sys.stderr, flush=True)
+    return False
 
 
 def run(cmd, env=None, cwd=None, timeout=None):
     e = base_env()
     if env:
         e.update(env)
-    gate()
+    gate_ok = gate()
     t0 = time.monotonic()
     p = subprocess.run(TASKSET + cmd, env=e, cwd=cwd or str(HERE), capture_output=True, text=True,
                        timeout=timeout)
@@ -126,11 +141,20 @@ def run(cmd, env=None, cwd=None, timeout=None):
                 break
             except Exception:
                 pass
-    if line is None:
-        return {"__failed__": True, "rc": p.returncode, "wall_s": wall,
-                "stdout_tail": p.stdout[-3000:], "stderr_tail": p.stderr[-3000:]}
+    if line is None or p.returncode != 0:
+        # A nonzero exit invalidates the run even when a well-formed result line was printed
+        # first: whatever raised after `emit` (framework teardown, an interpreter-shutdown error)
+        # ran with the measurement's own resources still live, and this driver cannot show that it
+        # did not touch the numbers. Cheaper to drop the pair than to publish an unexplained one.
+        rec = {"__failed__": True, "rc": p.returncode, "wall_s": round(wall, 2),
+               "gate_ok": gate_ok, "stdout_tail": p.stdout[-3000:],
+               "stderr_tail": p.stderr[-3000:]}
+        if line is not None:
+            rec["result_despite_nonzero_exit"] = line
+        return rec
     line["wall_s"] = round(wall, 2)
     line["rc"] = p.returncode
+    line["gate_ok"] = gate_ok
     return line
 
 
@@ -184,11 +208,26 @@ def ocannl(workload):
     return cmd, env
 
 
+class PreconditionFailed(Exception):
+    """A condition the pair's meaning depends on did not hold, so no pair is measured."""
+
+
 def wipe(p):
+    """Empty a cache directory, and establish that it IS empty.
+
+    `ignore_errors=True` alone can leave an old or half-deleted cache in place, and a searching
+    arm over a mixed cache still reports `searched: true` in pass 1 (something was generated) and
+    `false` in pass 2 -- which passes the provenance check while pass 1 was never cold. So the
+    failure has to be raised here, where it is still about a precondition rather than about a
+    number.
+    """
     p = Path(p)
     if p.exists():
         shutil.rmtree(p, ignore_errors=True)
     p.mkdir(parents=True, exist_ok=True)
+    residue = sorted(x.name for x in p.iterdir())
+    if residue:
+        raise PreconditionFailed(f"cache {p} still holds {residue[:5]} after wipe")
 
 
 # What each arm's two passes MUST report for `searched`. A searching arm whose pass 1 comes back
@@ -246,24 +285,47 @@ def timed_run(cmd, env, timeout):
         return {"__failed__": True, "timeout_s": timeout, "timeout": str(ex)}
 
 
+def record(arm, workload, repeat, **fields):
+    """The one record shape every arm emits -- REF_cpu included, so nothing lands unstamped."""
+    return {"arm": arm, "workload": workload, "repeat": repeat,
+            "fixture_sha256": DIGESTS.get(workload),
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"), **fields}
+
+
 def do_pair(arm, workload, repeat, mk1, mk2, pre1=None, pre2=None, timeout=None):
-    if pre1:
-        pre1()
-    c, e = mk1()
-    p1 = timed_run(c, e, timeout)
-    if pre2:
-        pre2()
-    c, e = mk2()
-    p2 = timed_run(c, e, timeout)
-    rec = {"arm": arm, "workload": workload, "repeat": repeat, "pass1": p1, "pass2": p2,
-           "fixture_sha256": DIGESTS.get(workload), "ts": time.strftime("%Y-%m-%dT%H:%M:%S")}
-    if not (p1.get("__failed__") or p2.get("__failed__")):
+    try:
+        if pre1:
+            pre1()
+        c, e = mk1()
+        p1 = timed_run(c, e, timeout)
+        if pre2:
+            pre2()
+        c, e = mk2()
+        p2 = timed_run(c, e, timeout)
+    except PreconditionFailed as ex:
+        # Not a measurement that came out badly -- a measurement that was never set up. Recorded
+        # so the gap is visible in the raw data, and loud so a sweep is not left to discover it.
+        print(f"  !! {arm} {workload} rep{repeat}: PRECONDITION {ex} -- no pair measured",
+              file=sys.stderr, flush=True)
+        emit(record(arm, workload, repeat, pass1={"__failed__": True, "precondition": str(ex)},
+                    pass2={}, valid=False))
+        return
+    rec = record(arm, workload, repeat, pass1=p1, pass2=p2)
+    failed = p1.get("__failed__") or p2.get("__failed__")
+    if not failed:
         bad = check_provenance(arm, p1, p2)
         rec["provenance_ok"] = not bad
         if bad:
             rec["provenance"] = bad
             print(f"  !! {arm} {workload} rep{repeat}: PROVENANCE {'; '.join(bad)} "
                   f"-- pair recorded as invalid, exclude it", file=sys.stderr, flush=True)
+        gated = p1.get("gate_ok") is not False and p2.get("gate_ok") is not False
+        if not gated:
+            print(f"  !! {arm} {workload} rep{repeat}: ran on a busy box (gate gave up) "
+                  f"-- pair recorded as invalid, exclude it", file=sys.stderr, flush=True)
+        rec["valid"] = bool(not bad and gated)
+    else:
+        rec["valid"] = False
     emit(rec)
 
 
@@ -316,7 +378,12 @@ def c_jit_warm(w, rep):
         # run (and discarded) a repeat 0.
         print(f"  prewarming {db} (unrecorded)", flush=True)
         c, e = tiny(w, cachedb=db / "cache.db", retime=False)
-        timed_run(c, e, 1200)
+        pre = timed_run(c, e, 1200)
+        if pre.get("__failed__") or not (db / "cache.db").exists():
+            # A discarded prewarm failure is the subtlest way to get a cold-vs-warm pair labelled
+            # as the warm-vs-warm control: both passes still report `searched: false`.
+            raise PreconditionFailed(
+                f"prewarm of {db} failed (rc={pre.get('rc')}, timeout={pre.get('timeout_s')})")
     do_pair("C_jit_warm", w, rep,
             lambda: tiny(w, cachedb=db / "cache.db"),
             lambda: tiny(w, cachedb=db / "cache.db"), timeout=1200)
@@ -358,9 +425,9 @@ def d_ocannl(w, rep):
 @arm("REF_cpu")
 def ref_cpu(w, rep):
     cmd = [str(VENV), str(HERE / "runners/pytorch/run.py"), "--fixture", FIXTURE[w], "--device", "cpu"]
-    r = run(cmd, {}, timeout=3600)
-    emit({"arm": "REF_cpu", "workload": w, "repeat": rep, "pass1": r, "pass2": {},
-          "ts": time.strftime("%Y-%m-%dT%H:%M:%S")})
+    r = timed_run(cmd, {}, 3600)
+    emit(record("REF_cpu", w, rep, pass1=r, pass2={},
+                valid=not r.get("__failed__") and r.get("gate_ok") is not False))
 
 
 if __name__ == "__main__":
@@ -374,7 +441,7 @@ if __name__ == "__main__":
                          "resumed run the same experiment as the one it resumes")
     args = ap.parse_args()
     CACHES.mkdir(parents=True, exist_ok=True)
-    DIGESTS.update(digests())
+    DIGESTS.update(digests(args.workloads))
     print(f"records: {RECORDS}", flush=True)
     for w, d in sorted(DIGESTS.items()):
         print(f"fixture {w}: sha256 {d}", flush=True)
