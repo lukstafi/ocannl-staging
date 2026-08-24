@@ -4,9 +4,11 @@
 (gfx1151) is the comment on gh-ocannl-675 dated 2026-08-23; this file is the NVIDIA half and the
 one that settles the split/no-split call, because it ran second.
 
-**Headline.** On this GPU the *only* searching cell whose timing process is measurably slower is
-tinygrad's `--beam N` -- by **+6.4%** on `mlp_small` and **+2.3%** on `gpt2_mini`, small but
-carried by *every* paired repeat (9/9 and 4/4). `torch.compile` goes the other way: its
+**Headline.** On this GPU the only *non-OCANNL* searching cell whose timing process is measurably
+slower is tinygrad's `--beam N` -- by **+6.4%** on `mlp_small` and **+2.3%** on `gpt2_mini`, small
+but carried by *every* paired repeat (9/9 and 4/4). (OCANNL's own tuned cell is slower too behind
+a long search, +10.3%; it is stated separately just below because it is the anchor this whole
+question is asked against, not because it is exempt.) `torch.compile` goes the other way: its
 searching process is **faster** than the fresh process that replays inductor's cache
 (-12.0% / -4.0%), so splitting its passes would penalise it, not credit it. OCANNL's own tuned
 cell -- the one the two-pass protocol exists for -- shows a residue only after a *long* search
@@ -24,7 +26,14 @@ names.**
 | tinygrad | 0.13.0, editable install from `~/tinygrad` at `62273d50f`, device **`CUDA`** (the system nvrtc works here; the README's `LD_LIBRARY_PATH` caveat applies only to a driver older than the toolkit, which this box no longer has) |
 | other | python 3.12.13, numpy 2.5.1, safetensors 0.8.0 |
 | ocannl | worktree of `origin/master` `7014dc44`, backend `cuda`, `BENCH_PRECISION=f32` |
-| fixtures | `mlp_small.safetensors` sha256 `f09de950...298c44ca` (51384 B), `gpt2_mini.safetensors` sha256 `043c1ea8...7ca2009e` (13871360 B) |
+| fixtures | `mlp_small.safetensors` (51384 B) sha256 `f09de9504262eb184672c9f58da821c47e0ee9f6311bd69207700c33298c44ca`; `gpt2_mini.safetensors` (13871360 B) sha256 `043c1ea8b42817fca8b713ac0eadae6e8b7b7326cb5ff7ea0fd527487ca2009e` |
+
+Those are written in full deliberately: the raw records live on the measurement box, so this
+checked-in file is the only place a reader can check whether a regenerated fixture is still the
+workload these numbers are about. `fixtures/DIGESTS.txt` is NOT the place for them -- it carries no
+entries for these fixtures, and adding this box's would break the ROCm leg, whose bytes differ (see
+next paragraph); which of the two becomes canonical is a decision for the suite, not for one leg's
+report.
 
 The fixture digests differ from the ROCm leg's for the same workload names (same sizes, different
 bytes: `gen_fixtures.py` draws from a numpy version that does not promise stream stability).

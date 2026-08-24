@@ -104,14 +104,25 @@ def gate():
     is exactly the contended measurement this protocol claims to exclude, and a record of it must
     not be indistinguishable from an idle-gated one.
     """
+    warned = False
     for _ in range(24):
         load = float(open("/proc/loadavg").read().split()[0])
         try:
             util = subprocess.run([NVSMI, "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
                                   capture_output=True, text=True, timeout=30).stdout.strip().splitlines()[0]
             util = int(util)
-        except Exception:
-            util = 0
+        except Exception as ex:
+            # An unreadable GPU is not an idle GPU. Absent `nvidia-smi`, a timeout or malformed
+            # output used to become `util = 0`, which a quiet load average then turned into a
+            # PASSING gate -- the measurement's central precondition established by a failure.
+            if not warned:  # once, not once per poll: a repeated line hides the others
+                print(f"gate: GPU utilization unreadable ({type(ex).__name__}: {ex}) -- "
+                      "not treating that as idle", file=sys.stderr, flush=True)
+                warned = True
+            util = None
+        if util is None:
+            time.sleep(5)
+            continue
         # WSL's load average decays slowly and counts uninterruptible tasks, so it is a poor
         # instantaneous gate; the GPU is the resource under measurement. Wait for both, but do
         # not stall the sweep on a stale load figure.
@@ -370,7 +381,8 @@ def c_jit_cold(w, rep):
 def c_jit_warm(w, rep):
     db = CACHES / f"tiny_jitwarm_{w}"
     db.mkdir(parents=True, exist_ok=True)
-    if not (db / "cache.db").exists():
+    marker = db / "prewarmed.ok"
+    if not marker.exists():
         # This arm's claim is warm-vs-warm: it is the control that says a pair of processes doing
         # no compilation and no search differ by ~nothing. Against an empty cache its first pair
         # would be cold-vs-warm instead -- a compile control, and one whose X would be read as
@@ -381,9 +393,16 @@ def c_jit_warm(w, rep):
         pre = timed_run(c, e, 1200)
         if pre.get("__failed__") or not (db / "cache.db").exists():
             # A discarded prewarm failure is the subtlest way to get a cold-vs-warm pair labelled
-            # as the warm-vs-warm control: both passes still report `searched: false`.
+            # as the warm-vs-warm control: both passes still report `searched: false`. And a
+            # crashed prewarm can leave a PARTIAL `cache.db` behind, so its existence proves
+            # nothing -- the next invocation would skip prewarming and pass 1 would compile the
+            # kernels pass 2 then replays. Hence: drop whatever it left, and let only a completed
+            # prewarm write the marker this test actually reads.
+            shutil.rmtree(db, ignore_errors=True)
             raise PreconditionFailed(
-                f"prewarm of {db} failed (rc={pre.get('rc')}, timeout={pre.get('timeout_s')})")
+                f"prewarm of {db} failed (rc={pre.get('rc')}, timeout={pre.get('timeout_s')}); "
+                "its partial cache was removed")
+        marker.write_text(f"prewarmed {time.strftime('%Y-%m-%dT%H:%M:%S')}\n")
     do_pair("C_jit_warm", w, rep,
             lambda: tiny(w, cachedb=db / "cache.db"),
             lambda: tiny(w, cachedb=db / "cache.db"), timeout=1200)
@@ -447,7 +466,14 @@ if __name__ == "__main__":
         print(f"fixture {w}: sha256 {d}", flush=True)
     if args.expect_digest:
         pinned = dict(x.split("=", 1) for x in args.expect_digest)
-        wrong = {w: DIGESTS[w] for w, d in pinned.items() if DIGESTS.get(w) != d}
+        # A pin set is meant to be reusable across runs that select different workloads, so a pin
+        # for a workload this run does not touch is skipped -- but said out loud, because silently
+        # ignoring a pin is the same class of silence the rest of this driver exists to remove.
+        skipped = sorted(w for w in pinned if w not in DIGESTS)
+        if skipped:
+            print(f"digest pins not checked (workload not selected): {', '.join(skipped)}",
+                  flush=True)
+        wrong = {w: DIGESTS[w] for w, d in pinned.items() if w in DIGESTS and DIGESTS[w] != d}
         if wrong:
             sys.exit(f"fixture digest mismatch (pinned vs actual): {pinned} vs {wrong} -- these "
                      "are different workload bytes under the same names; regenerate or re-pin")
@@ -458,6 +484,13 @@ if __name__ == "__main__":
                 try:
                     ARMS[a](w, rep)
                 except subprocess.TimeoutExpired as ex:
-                    emit({"arm": a, "workload": w, "repeat": rep,
-                          "pass1": {"__failed__": True, "timeout": str(ex)}, "pass2": {},
-                          "ts": time.strftime("%Y-%m-%dT%H:%M:%S")})
+                    emit(record(a, w, rep, pass1={"__failed__": True, "timeout": str(ex)},
+                                pass2={}, valid=False))
+                except PreconditionFailed as ex:
+                    # An arm can fail a precondition in its own setup, outside `do_pair` -- the
+                    # warm control's prewarm is the case. That invalidates ONE pair; letting it
+                    # reach the top level would abort a sweep that has hours of good arms left.
+                    print(f"  !! {a} {w} rep{rep}: PRECONDITION {ex} -- no pair measured",
+                          file=sys.stderr, flush=True)
+                    emit(record(a, w, rep, pass1={"__failed__": True, "precondition": str(ex)},
+                                pass2={}, valid=False))
