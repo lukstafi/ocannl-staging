@@ -19,6 +19,7 @@ extern "C" __global__ void where_fwd(
     __hip_bfloat16 *__restrict__ b_else_val,
     float *__restrict__ where,
     unsigned char *__restrict__ cond_condition) {
+  _Pragma("clang fp reassociate(off)");
 
   /* Local declarations and initialization. */
 

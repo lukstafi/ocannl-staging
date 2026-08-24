@@ -19,6 +19,7 @@ extern "C" __global__ void d_fwd(
     __half *__restrict__ b,
     __hip_bfloat16 *__restrict__ c,
     __hip_bfloat16 *__restrict__ d) {
+  _Pragma("clang fp reassociate(off)");
 
   /* Local declarations and initialization. */
 

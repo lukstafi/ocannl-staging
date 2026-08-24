@@ -16,6 +16,7 @@
 #endif
 extern "C" __global__ void out_fwd(
     float *__restrict__ out) {
+  _Pragma("clang fp reassociate(off)");
 
   /* Local declarations and initialization. */
   float sparse[12] = {0};
