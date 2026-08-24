@@ -99,6 +99,14 @@
  (libraries base stdio arrayjit.ir))
 
 (test
+ ; ocannl-backend: none -- renders a synthetic Pure_C_config and selects no runtime backend.
+ (name test_kernel_prep_line)
+ (package arrayjit)
+ (modules test_kernel_prep_line)
+ (deps ocannl_config)
+ (libraries base ctypes pprint arrayjit.ir arrayjit.verdict))
+
+(test
  (name test_aligned_alloc)
  (package arrayjit)
  (modules test_aligned_alloc)

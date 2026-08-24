@@ -719,7 +719,12 @@ files.
   separate await is needed.
 
 - **Every GPU backend compiles with fast math**: CUDA passes `--use_fast_math`, HIP `-ffast-math`,
-  and MSL defaults it on — `cc` is the exception (opt-in `cc_backend_fast_math`). So a device-side
+  and MSL defaults it on — `cc` is the exception (opt-in `cc_backend_fast_math`). HIP additionally
+  opens every kernel with `_Pragma("clang fp reassociate(off)")`: fast math had let hiprtc reorder
+  ordinary scalar bf16/f16 recurrences differently across loop, unrolled and scope-local spellings,
+  defeating `accum_prec`'s promised per-update storage rounding (gh-ocannl-735). Schedule forms that
+  license reassociation still spell it explicitly; the pragma only prevents the compiler inventing
+  another one. So a device-side
   non-finiteness test must be a RANGE COMPARE of a runtime value (`-3e38 < x && x < 3e38`); `x <> x`
   and `x - x = 0` fold to a constant, silently disabling an overflow gate (the shape
   `Mixed_prec.gated_scaled_update` needs). It is the same reason `Builtins_metal`'s fp8 codec is

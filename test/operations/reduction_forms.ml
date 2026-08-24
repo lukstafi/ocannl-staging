@@ -68,6 +68,7 @@ let () = Utils.settings.output_debug_files_in_build_directory <- true
 let backend_name = String.lowercase (Utils.get_global_arg ~arg_name:"backend" ~default:"cc")
 let () = Generated.init ~backend_name
 let on_cpu = Sched.backend_is_cpu backend_name
+let on_hip = String.is_substring backend_name ~substring:"hip"
 let p = Verdict.p
 let skipped = Verdict.skipped ~backend:backend_name
 
@@ -800,6 +801,11 @@ let form_of reading =
 
 (* {1 Executing a member} *)
 
+(* Every successfully compiled hand-built reduction routine, including the three unscheduled
+   baselines. The HIP-only source ratchet at the end reads this population rather than transcribing
+   the member names, so adding another executed form automatically adds it to the pragma coverage. *)
+let compiled_reduction_routines = ref []
+
 let execute ~name ~(prog : prog) ~(sched : Sched.schedule) =
   (* The launch parameters have to reach BOTH halves: [LL.optimize]'s walk asserts that every
      symbol it meets is in scope (a runtime-extent guard mentions one that no loop binds), and
@@ -849,6 +855,7 @@ let execute ~name ~(prog : prog) ~(sched : Sched.schedule) =
         result)
       (Lazy.force base_ctx) Ir.Assignments.empty_comp prog.bindings
   in
+  compiled_reduction_routines := name :: !compiled_reduction_routines;
   prog.bind routine.Context.bindings;
   let ctx =
     List.fold prog.seed ~init:ctx ~f:(fun ctx (tn, vs) -> Context.set_values ctx tn vs)
@@ -1830,3 +1837,25 @@ let () =
             (show want);
         p value_claim ok
       end)
+
+(* gh-ocannl-735: a narrow C++ local does not by itself constrain hiprtc under [-ffast-math]. The
+   pragma is part of the emitted kernel, not a restatement of [Hip_backend.accum_prec], and this
+   aggregate covers every compiled scalar/scope/RMW schedule form above. The executed, bitwise host
+   references are the other half of the guard on a HIP runner: a comment or misspelled pragma can
+   satisfy this source claim but cannot make those numeric claims pass. *)
+let () =
+  let claim =
+    "every emitted HIP reduction kernel disables compiler-invented floating-point reassociation"
+  in
+  if not on_hip then skipped claim
+  else
+    let missing =
+      List.filter !compiled_reduction_routines ~f:(fun routine ->
+          not
+            (String.is_substring (Generated.read routine)
+               ~substring:"_Pragma(\"clang fp reassociate(off)\")"))
+    in
+    if not (List.is_empty missing) then
+      Stdio.eprintf "  HIP kernels missing the reassociation pragma: %s\n%!"
+        (String.concat ~sep:", " (List.rev missing));
+    p claim (List.is_empty missing)

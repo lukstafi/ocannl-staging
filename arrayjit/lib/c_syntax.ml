@@ -248,6 +248,9 @@ module type C_syntax_config = sig
 
   val main_kernel_prefix : string
   val kernel_prep_line : string
+  (** A statement emitted first in every kernel body, or the empty string. Backends use this for
+      kernel-body policy that must override their compiler flags; the renderer appends the
+      terminating semicolon, so a preprocessor pragma belongs here in its [_Pragma("...")] form. *)
   val buffer_prefix : string
   val buffer_suffix : pos:int -> string
   val arg_int_prefix : string

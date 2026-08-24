@@ -502,9 +502,17 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
 
     let main_kernel_prefix = "extern \"C\" __global__"
 
-    (* An all-Serial kernel launches 1x1x1, so no single-thread guard is needed; annotated kernels
-       need every thread (axis-types proposal §4). *)
-    let kernel_prep_line = ""
+    (* hiprtc is invoked with [-ffast-math], whose reassociation license is wider than OCANNL's:
+       clang may reassociate an ordinary Serial __half/__hip_bfloat16 recurrence, and observed ROCm
+       output then varied with whether schedule lowering had spelled the same recurrence as a loop,
+       repeated statements, or nested scopes (gh-ocannl-735). That defeats [accum_prec]'s narrow
+       residency contract: assignment to the 16-bit local is supposed to be the rounding boundary
+       on every source update. Disable only clang's implicit reassociation for the kernel body;
+       explicit Vectorized/Workgroup_reduce/Tensorize renderings still carry the reassociation their
+       IR annotations license in the generated expression graph, while the other fast-math
+       assumptions and intrinsics remain enabled. [_Pragma] is the statement-position spelling
+       accepted by [C_syntax.kernel_prep_line], which appends its semicolon. *)
+    let kernel_prep_line = "_Pragma(\"clang fp reassociate(off)\")"
 
     (* Use native types for loop indices and arguments instead of stdint.h types. Signed index
        arithmetic (docs/proposals/signed-index-precision.md). *)
