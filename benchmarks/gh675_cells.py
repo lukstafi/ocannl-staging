@@ -150,25 +150,49 @@ def kill_group(proc):
         pgid = os.getpgid(proc.pid)
     except ProcessLookupError:
         return
-    for sig, grace in ((signal.SIGTERM, 5), (signal.SIGKILL, 5)):
+
+    def group_alive():
+        # Signal 0 tests for members without signalling them. The direct child counts while it is
+        # still an unreaped zombie, which is why each poll also tries to reap it.
+        try:
+            os.killpg(pgid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+
+    reaped = False
+
+    def reap(timeout):
+        nonlocal reaped
+        if reaped:
+            return
+        try:
+            proc.communicate(timeout=timeout)
+            reaped = True
+        except subprocess.TimeoutExpired:
+            pass
+        except ValueError:  # pipes already closed by an earlier communicate
+            reaped = True
+
+    # Escalation is decided by the GROUP, never by the runner's pipes. A descendant that ignores
+    # TERM and does not hold those pipes lets `communicate` return promptly -- so keying the
+    # SIGKILL on the pipe closing skips it exactly when it is needed, and the survivor keeps the
+    # GPU and the pinned cores while the sweep walks into the next pair.
+    for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
             os.killpg(pgid, sig)
         except ProcessLookupError:
-            break
-        try:
-            proc.communicate(timeout=grace)
-            break
-        except subprocess.TimeoutExpired:
-            continue
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
-        try:
-            os.killpg(pgid, 0)  # 0 tests for survivors without signalling them
-        except ProcessLookupError:
             return
-        time.sleep(0.5)
-    print(f"WARNING: process group {pgid} survived SIGKILL -- later pairs may be contaminated",
-          file=sys.stderr, flush=True)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            reap(0.5)
+            if not group_alive():
+                return
+            time.sleep(0.2)
+    reap(1)
+    if group_alive():
+        print(f"WARNING: process group {pgid} survived SIGKILL -- later pairs may be contaminated",
+              file=sys.stderr, flush=True)
 
 
 def run(cmd, env=None, cwd=None, timeout=None):

@@ -54,8 +54,13 @@ against it.
   `CACHEDB=` and deleted before each pass 1; inductor gets a fresh `TORCHINDUCTOR_CACHE_DIR` per
   repeat with `TORCHINDUCTOR_FX_GRAPH_CACHE=1`; OCANNL's `autotune_cache/` is wiped before each
   pass 1.
-- Provenance is verified, not assumed: every pass-1 row reports `searched: true` and every pass-2
-  row `searched: false`. That needed the gh-ocannl-751 patch (see "Two things found on the way").
+- Provenance is verified, not assumed, and the expectation differs by arm. For the SEARCHING arms
+  (both beam widths, both torch.compile modes, the OCANNL tuned cell) every pass-1 row reports
+  `searched: true` and every pass-2 row `searched: false`. For the three CONTROLS -- whose whole
+  claim is that they do not search -- both passes report `searched: false`, which is equally part
+  of what makes them controls. The driver states the expectation per arm and rejects a pair that
+  violates it. Reading it at all needed the gh-ocannl-751 patch (see "Two things found on the
+  way").
 - Parity is the orchestrator's gate recomputed offline against `pytorch/cpu/eager`, tolerance
   2e-3: **every cell passes**, worst 8.7e-07, so all rows are comparable.
 
