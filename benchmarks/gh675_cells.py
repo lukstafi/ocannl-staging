@@ -200,8 +200,13 @@ def kill_group(proc, pgid):
             time.sleep(0.2)
     reap(1)
     if group_alive():
-        print(f"WARNING: process group {pgid} survived SIGKILL -- later pairs may be contaminated",
-              file=sys.stderr, flush=True)
+        # Nothing downstream can be trusted after this. A process that outlives SIGKILL is stuck in
+        # the kernel (uninterruptible I/O, a wedged driver ioctl), it still holds the pinned cores
+        # or the GPU, and every later pair would be measured against it and stamped valid. A
+        # warning is not an action; the sweep stops here and says why.
+        sys.exit(f"process group {pgid} survived SIGKILL and still holds the pinned CPUs or the "
+                 "GPU -- every later pair would be measured against it. Stopping the sweep: clear "
+                 "the survivors, then resume with a --start-repeat past what is recorded.")
 
 
 def run(cmd, env=None, cwd=None, timeout=None):

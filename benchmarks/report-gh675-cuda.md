@@ -99,7 +99,7 @@ OCANNL `tuned` **-0.0%** / **+0.5%** pooled (but see the anchor section -- pooli
 
 ## What the controls say
 
-1. **Process-to-process spread.** The three non-searching, non-compiling controls sit at |X| <= 2.5%
+1. **Process-to-process spread.** The three non-searching controls sit at |X| <= 2.5%
    at the median, and their paired ratios are a coin flip (3/9, 4/9, 3/9 positive on `mlp_small`).
    A single repeat of the 0.1 ms cell still swings +/-10%, which is why the beam row is n=9 and why
    the sign count, not the range, is the statistic.
