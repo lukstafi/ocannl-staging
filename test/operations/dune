@@ -102,7 +102,8 @@
   (alias runtest-cache_dir_ignores)
   (alias runtest-verdict_ratchet)
   (alias runtest-codegen_text_inventory)
-  (alias runtest-agent_notes_structure)))
+  (alias runtest-agent_notes_structure)
+  (alias runtest-shell_scripts_parse)))
 
 ; This directory's golden-diff rules, aggregated back onto `runtest` (gh-ocannl-726). Each of them
 ; attaches to its own `runtest-<name>` alias and to NOTHING else, so that `dune build
@@ -148,6 +149,7 @@
   (alias runtest-model_default_placements)
   (alias runtest-agent_notes_structure)
   (alias runtest-codegen_text_inventory)
+  (alias runtest-shell_scripts_parse)
   (alias runtest-generated_provenance)
   (alias runtest-verdict_quantified)))
 
@@ -3722,3 +3724,56 @@
      fp8_codec_exhaustive.actual
      (run %{dep:fp8_codec_exhaustive.exe}))
     (diff fp8_codec_exhaustive.expected fp8_codec_exhaustive.actual)))))
+
+; gh-ocannl-438 follow-up: the repository's shell scripts parse. Neither `dune build @check` nor
+; `dune runtest` looks at shell otherwise, while `scripts/setup-ocaml-env.sh` is the SessionStart
+; hook and `tools/test-run.sh` fronts every suite run -- so a syntax error in either is discovered
+; by a broken session or a broken suite run rather than by a test. `bash -n` / `sh -n` parse and
+; execute nothing.
+;
+; `(glob_files_rec ../../*.sh)` is both the discovery mechanism and the reason dune reruns this when
+; a script changes; `%{deps}` hands the whole set to the exe, which keeps the .sh files among them.
+; A `(rule)` rather than a `(test)` because the glob has to be a dependency of the action that runs
+; the executable, and the marker comment and `ocannl_config` go with it.
+
+(executable
+ (name shell_scripts_parse)
+ (modules shell_scripts_parse)
+ (libraries base stdio unix test_utils arrayjit.verdict))
+
+(rule
+ ; ocannl-backend: none -- links no backend: it hands shell scripts to `bash -n`/`sh -n` and runs no kernels.
+ (target shell_scripts_parse.actual)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  (glob_files_rec ../../*.sh)
+  ; A shell script need not be named `*.sh` -- `tools/run-tests` with a `#!/bin/bash` would have
+  ; slipped through the suffix glob, and the floor would not have noticed since the twelve suffixed
+  ; ones keep it satisfied (Codex review round 6). These two globs hand over EVERY file in the two
+  ; directories that hold this repository's tooling; the scanner picks out the ones whose first two
+  ; bytes are `#!` and whose interpreter is a shell, and ignores the rest. Bounded on purpose:
+  ; globbing the whole repository would make this rule depend on every source file in it and rerun
+  ; on every commit, for a case that only arises where executables live.
+  (glob_files_rec ../../tools/*)
+  (glob_files_rec ../../scripts/*)
+  ; PATH decides WHICH shell each name resolves to, so it decides what grammar a script was held
+  ; to -- a host whose `sh` is dash and one whose `sh` is bash are running different checks, and a
+  ; missing `dash` changes whether a stand-in was substituted at all. Undeclared, dune would serve
+  ; the previous PATH's result unchanged (Codex review round 3 on PR #454; the same rule CLAUDE.md
+  ; states for OCANNL_* spellings applies to any variable a run reads).
+  ;
+  ; BASH_ENV and friends are deliberately NOT declared: the executable clears them for the child
+  ; instead, so they cannot influence the run and need no dependency edge (round 6).
+  (env_var PATH))
+ (action
+  (with-stdout-to
+   %{target}
+   (run %{dep:shell_scripts_parse.exe} %{workspace_root} %{deps}))))
+
+(rule
+ (alias runtest-shell_scripts_parse)
+ (package neural_nets_lib)
+ (deps (alias runtest-env_spelling_gate))
+ (action
+  (diff shell_scripts_parse.expected shell_scripts_parse.actual)))

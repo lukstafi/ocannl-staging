@@ -96,6 +96,7 @@ Ambient environment gates, by dune file and every alias whose build runs one:
   test/operations/dune                     @runtest-model_default_placements
   test/operations/dune                     @runtest-n3_fwd_with_prec-unoptimized
   test/operations/dune                     @runtest-placement_surface
+  test/operations/dune                     @runtest-shell_scripts_parse
   test/operations/dune                     @runtest-test_config_consistency
   test/operations/dune                     @runtest-test_log_stmt_format
   test/operations/dune                     @runtest-test_where_precision-extension
@@ -163,6 +164,7 @@ will copy them from, and the tallies go to stderr (gh-ocannl-659, gh-ocannl-665)
   benchmarks/dune: markers: none
   benchmarks/runners/ocannl/dune: nothing that runs a test executable
   bin/dune: nothing that runs a test executable
+  dune: nothing that runs a test executable
   lib/dune: nothing that runs a test executable
   tensor/dune: nothing that runs a test executable
   test/einsum/dune: declares OCANNL_BACKEND; markers: none
