@@ -432,9 +432,11 @@ than the driver (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION` at module load), run it wi
   | *controls* (eager, warm jit, cold-compile jit) | \|X\| ≤ 2.5%, sign a coin flip | \|X\| ≤ 1.7% |
 
   Three things follow, and the matrix is built on them. **(a)** The 2.5–3.5x this file used to
-  quote for small CUDA kernels does not reproduce on either box; the largest residue measured is
-  +10.3%, so the protocol is kept for a measured ≤10.3%, not for a factor of three. **(b)** The
-  residue is a property of *how expensive the search was on that device*, not of the framework:
+  quote for small CUDA kernels does not reproduce on either box: the largest OCANNL residue
+  measured — which is what that figure was about — is +10.3%, so the protocol is kept for a
+  measured ≤10.3% rather than for a factor of three. (Two *other* cells do exceed it on ROCm,
+  +21.2% and +33.9%; that is the asymmetry this table exists to state, and it is handled in (c),
+  not by the OCANNL bound.) **(b)** The residue is a property of *how expensive the search was on that device*, not of the framework:
   it appears wherever a long search precedes the timing (OCANNL behind 16 s on CUDA, the beam on
   both boxes, `max-autotune` on ROCm) and vanishes when the search is cheap. **(c)** No searching
   cell clears a ~10% line on both boxes, and `torch.compile`'s residue does not even keep its

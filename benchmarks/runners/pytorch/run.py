@@ -191,9 +191,15 @@ def main():
     ap.add_argument("--compile", action="store_true")
     # gh-ocannl-675: max-autotune is the honest analogue of a tuned cell (it benchmarks kernels).
     # A separate variant, not a change to the `compiled` cell.
-    ap.add_argument("--compile-mode", default=None, help="torch.compile mode (gh-675 probe)")
+    ap.add_argument("--compile-mode", default=None,
+                    help="torch.compile mode, e.g. max-autotune; implies --compile (gh-675 probe)")
     ap.add_argument("--retime", action="store_true", help="time a second block of steps (gh-675)")
     args = ap.parse_args()
+    # A mode is a torch.compile setting and means nothing without it: taking it alone would run
+    # EAGER while stamping the result line with a `compile_mode`, i.e. a measurement labelled as
+    # something it is not.
+    if args.compile_mode:
+        args.compile = True
 
     meta = read_st_metadata(args.fixture)
     model = meta.get("model", "mlp")

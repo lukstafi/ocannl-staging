@@ -120,7 +120,8 @@ accumulates modules and buffers) — and it means **`compile_s` in any published
 warm-JIT number unless `~/.nv/ComputeCache` was cleared too.**
 
 Either way the headline number in `README.md` does not survive: the largest OCANNL residue
-measured here is **+10.3%** on the smallest kernels, against a documented **2.5–3.5x**; on
+measured here — and OCANNL's tuned cell is what that figure describes — is **+10.3%** on the
+smallest kernels, against a documented **2.5–3.5x**; on
 `gpt2_mini` it is +0.5%; and the ROCm leg measured −0.2% / −0.1%. Two boxes, two backends, no
 reproduction.
 
