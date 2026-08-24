@@ -53,7 +53,7 @@ def emit(result):
 # cell splits the two into separate processes, because a searching process is measurably slower
 # per launch on small kernels; tinygrad's BEAM cell and torch.compile search in the process that
 # then times steps. What that costs THEM is measured and is per box (gh-ocannl-675): beam
-# +6.4% on CUDA and +14.9% on ROCm, torch.compile −12.0% and +7.2% -- so they stay single pass.
+# +6.4% on CUDA and +14.9% on ROCm, torch.compile -12.0% and +7.2% -- so they stay single pass.
 # Every runner SAYS which it did, which is what made that measurable at all.
 #
 # Both probes read framework internals, so they answer None ("cannot tell", reported as UNKNOWN)

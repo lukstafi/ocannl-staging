@@ -162,7 +162,7 @@ smallest kernels, against a documented **2.5-3.5x**; on
 `gpt2_mini` it is +0.5%; and the ROCm leg measured -0.2% / -0.1%. Two boxes, two backends, no
 reproduction.
 
-## The call: keep every cell single-pass
+## The call: keep every NON-OCANNL cell single-pass
 
 Reading both legs against the brief's rule (split a searching cell whose `mlp_small` X exceeds
 ~10%) -- and stating up front the one thing the brief did not specify, since two boxes now
@@ -188,19 +188,26 @@ reading -- the numbers are the same either way, and both are in the table below.
 | OCANNL `tuned` (anchor) | +10.3% behind a 16 s search, ~0 behind a 4 s one | -0.2% / -0.1% | protocol kept, rationale re-stated |
 
 No cell clears the line on both boxes, and no cell clears it on the box whose hardware the
-README's own rationale names. What the numbers establish about the mechanism needs stating
-carefully, because this report contains its own counterexample to the simple version: OCANNL on
-`gpt2_mini` searched for **206-613 s** -- by far the most expensive search measured anywhere here
--- and shows **+0.5%**. So "a long search leaves a residue" is false as stated.
+README's own rationale names.
 
-Both conditions are needed, and the second is what the counterexample supplies: a residue appears
-where an expensive search precedes the timing **and the step is short enough for a per-launch cost
-to be a visible fraction of it**. Every positive row is on `mlp_small`, whose steps are 0.05-0.6 ms
-(OCANNL +10.3% behind 16 s; beam +6.4%; BEAM=8 +8.3%), and every ~0 row behind a long search is on
-`gpt2_mini`, whose steps are 1.1-9.7 ms (OCANNL +0.5% behind 206-613 s; beam +2.3%). That is the
-same shape as the README's own "on small CUDA kernels" qualifier, and it is why the cheap-search
-regime and the big-kernel regime both come out at zero: in one there is little residue to carry, in
-the other it is swamped. So the honest matrix rule is
+**No mechanism is established by these two legs, and this report should not be read as offering
+one.** Two candidate stories both fail against the measured rows, which is worth recording because
+each is the obvious thing to conclude from one leg alone:
+
+- *"An expensive search leaves a residue."* Falsified here: OCANNL on `gpt2_mini` searched
+  **206-613 s**, by far the most expensive search measured in either leg, and shows **+0.5%**.
+- *"...and only where the step is short enough for a per-launch cost to show."* That fits this
+  leg -- every CUDA cell's residue is larger on `mlp_small` (0.05-0.6 ms steps) than on
+  `gpt2_mini` (1.1-9.7 ms) -- and is falsified by the ROCm leg, where the two torch cells run the
+  other way round: **+21.2%** and **+33.9%** on `gpt2_mini` against +7.2% and +12.3% on
+  `mlp_small`. Big steps do not swamp the residue there.
+
+What survives is narrower and per-cell: OCANNL's own residue on this box tracks the cost of the
+search that preceded it *within one workload* (+10.3% behind 16 s, ~0 behind 4 s on `mlp_small`),
+and every positive CUDA cell is larger on the small-step workload. Those are observations about
+this leg, not a law -- and the matrix rule below does not rest on one. It rests on the measured X
+per cell per box, which is what the issue asked for; explaining WHY a given framework's process
+carries a cost would need per-framework instrumentation neither leg ran. So the honest matrix rule is
 "single pass, measured at <=X% per cell per box", with X recorded -- which is a result, and it is
 what makes the asymmetry defensible instead of merely documented.
 

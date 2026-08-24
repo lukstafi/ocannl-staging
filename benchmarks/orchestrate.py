@@ -64,7 +64,7 @@ TWO_PASS_CELLS = {("ocannl", "tuned")}
 # Cells that search or compile in the process that then times steps — by protocol, not by
 # mistake. What that costs them is MEASURED (gh-ocannl-675, benchmarks/report-gh675-cuda.md and
 # the ROCm table in the issue): per box, tinygrad's beam +6.4%/+14.9% on mlp_small (CUDA/ROCm) and
-# `torch.compile` −12.0%/+7.2% — which does not even keep its sign across the two. No cell clears
+# `torch.compile` -12.0%/+7.2% — which does not even keep its sign across the two. No cell clears
 # a ~10% line on both boxes, so they stay single pass and are stated rather than gated; saying
 # nothing would read as though the question applied to OCANNL alone.
 SAME_PROCESS_CELLS = {("tinygrad", "beam"), ("pytorch", "compiled")}

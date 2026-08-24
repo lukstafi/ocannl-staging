@@ -436,13 +436,14 @@ than the driver (`CUDA_ERROR_UNSUPPORTED_PTX_VERSION` at module load), run it wi
   measured — which is what that figure was about — is +10.3%, so the protocol is kept for a
   measured ≤10.3% rather than for a factor of three. (Two *other* cells do exceed it on ROCm,
   +21.2% and +33.9%; that is the asymmetry this table exists to state, and it is handled in (c),
-  not by the OCANNL bound.) **(b)** The residue
-  needs TWO conditions, not one — the CUDA leg contains the counterexample to the simpler claim:
-  OCANNL on `gpt2_mini` searched for 206–613 s, the most expensive search measured anywhere, and
-  shows +0.5%. It appears where an expensive search precedes the timing *and* the step is short
-  enough for a per-launch cost to be a visible fraction of it. Every positive row is on `mlp_small`
-  (steps 0.05–0.6 ms); every ~0 row behind a long search is on `gpt2_mini` (steps 1.1–9.7 ms) —
-  the same shape as this file's own "on small CUDA kernels" qualifier. **(c)** No searching
+  not by the OCANNL bound.) **(b)** No mechanism is
+  established, and the table should not be read as offering one — both obvious readings die on
+  measured rows. "An expensive search leaves a residue" fails on OCANNL/`gpt2_mini`, which searched
+  206–613 s (the costliest search in either leg) for +0.5%; "…and only where steps are short enough
+  for a per-launch cost to show" fits every CUDA cell and fails on ROCm, where the two torch cells
+  are *larger* on `gpt2_mini` (+21.2%, +33.9%) than on `mlp_small`. Explaining why a given
+  framework's process carries a cost would need per-framework instrumentation neither leg ran; the
+  rule below rests on the measured X per cell per box, which is what the issue asked for. **(c)** No searching
   cell clears a ~10% line on both boxes, and `torch.compile`'s residue does not even keep its
   sign across them, so **the other cells stay single pass** — at ≤6.4% (beam) and a *negative*
   −12.0% (`torch.compile`) on the box whose hardware this rationale names. "On both boxes" is a
