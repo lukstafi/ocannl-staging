@@ -71,10 +71,14 @@ which loop nests exist at all, and part of the program identity schedules are ke
 mapping of the code a placement produced. The contract between them: **the schedule layer
 may create memory — the tile-namespace nodes it mints, staged tiles, split-reduction
 partials, privatized scratch — but never re-decides the placement of a node it did not
-mint**; the single sanctioned exception is kernel fission promoting a `Local` whose live
-range crosses a cut to `On_device`, a legality patch rather than an optimization. (Under
-this reading `Privatize` is not a placement decision: the node stays `On_device`; the
-schedule adds a caching access pattern for it.) Search reaches both layers, but
+mint**; the single sanctioned exception is the `Local`-to-`On_device` promotion
+(`Placements.promote_local_to_device`), which fission uses both reactively — a live range
+crossing a kernel cut must be promoted for the program to stay correct — and proactively
+on GPU paths (`promote_locals:true` promotes statement-crossing `Local`s before
+segmentation, so better cuts and hardware annotations become discoverable). Either way it
+is the one door, a single named upward-only move. (Under this reading `Privatize` is not a
+placement decision at all: it preserves the target's placement, `On_device` or `Local`,
+and adds a caching access pattern for it.) Search reaches both layers, but
 hierarchically — placement A/B and flip refinement outside, schedule search within each
 candidate — because their invalidation costs differ by orders of magnitude: a placement
 flip changes the digest and replays specialization, a schedule candidate transforms its
