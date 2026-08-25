@@ -6,13 +6,17 @@ backend config functor binds its overrides.
 Part of the agent notes; the [index](../agent-notes.md) carries the scope discipline and the other
 files.
 
-- Metal shader compiler miscompiles serial `acc[k] = acc[k] + f(i)` loops when pointers derive
-  from dynamically-loaded offsets (the pooled `__pool_slots` binding): result = last iteration
-  only; hides under API validation (`MTL_SHADER_VALIDATION=1` makes it vanish). Fingerprint:
-  loss ≈ correct/batch_size. Workaround shipped as `volatile_scalar_rmw` in
-  `arrayjit/lib/c_syntax.ml` (metal config sets it); standalone repro
-  `benchmarks/runners/ocannl/bench_metal_bug.ml`, guard `scalar_rmw_accumulation.ml`. Suspect
-  this class first for any new metal-only numeric bug with the 1/batch smell.
+- Metal shader compiler miscompiles serial accumulations when pointers derive from
+  dynamically-loaded offsets (the pooled `__pool_slots` binding), and API validation hides it
+  (`MTL_SHADER_VALIDATION=1` makes it vanish). Two spellings are affected: the original
+  `acc[k] = acc[k] + f(i)` device-memory RMW can leave only the last iteration (fingerprint: loss
+  ≈ correct/batch_size), and gh-ocannl-731 showed that codegen's replacement scope-local
+  accumulator can instead produce a large unrelated divergence while reading a pooled pointer.
+  `volatile_scalar_rmw` in `arrayjit/lib/c_syntax.ml` (Metal sets it) therefore qualifies both the
+  RMW pointer shadow and reduction-shaped scope locals. Standalone original repro:
+  `benchmarks/runners/ocannl/bench_metal_bug.ml`; executed guards:
+  `scalar_rmw_accumulation.ml`, `reduction_accumulator_residency.ml`, and `rope_test.ml`. Suspect
+  this class first for a Metal-only accumulation bug that disappears under shader validation.
 - Metal `Where` must stay a short-circuiting ternary: MSL `select` is a function call that
   evaluates BOTH branches, so any range guard's deliberately out-of-range read (clamped windows,
   inlined-concat component guards) would still be evaluated. Codegen pins:

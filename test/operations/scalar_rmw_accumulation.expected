@@ -1,2 +1,3 @@
 scalar rmw accumulation matches oracle: true
 rerun stable: true
+localized scalar accumulation matches oracle: true

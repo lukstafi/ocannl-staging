@@ -397,8 +397,10 @@ module type C_syntax_config = sig
       in byte-alike others — so the rule keys on the pass's precondition: when [true], [Set]
       statements that read the written node at an index invariant across at least one enclosing
       serial [for] loop render both accesses through a [volatile]-qualified shadow pointer, pinning
-      the per-iteration read-modify-write. This covers reduction accumulators (address invariant
-      across the reduction loop); pointwise updates stay unqualified. *)
+      the per-iteration read-modify-write. The same compiler pass also miscompiles the equivalent
+      localized form — a reduction-shaped scope local updated from a pooled-pointer read
+      (gh-ocannl-731) — so such locals are [volatile] too. This covers reduction accumulators;
+      pointwise updates and non-accumulator locals stay unqualified. *)
 
   val restrict_keyword : string option
   (** No-alias qualifier for kernel pointer parameters and, in the pooled style, for the derived
@@ -1829,6 +1831,17 @@ module C_syntax (B : C_syntax_config) = struct
     if Hash_set.mem rng_scope_ids id.Low_level.scope_id then p
     else if Hash_set.mem accum_scope_ids id.scope_id then acc_prec p
     else comp_prec p
+
+  (* Metal's pooled-pointer compiler bug also reaches the localized spelling of a scalar
+     accumulation (gh-ocannl-731): instead of a device-memory RMW, the loop updates a scope local
+     and reads its contribution through a pointer derived from [__pool_slots]. Shader validation
+     hides both manifestations. Keep every reduction-shaped scope local volatile on the backend
+     that requests the workaround; ordinary locals and every other backend stay byte-identical. *)
+  let scope_decl_type (id : Low_level.scope_id) =
+    let qualifier =
+      if B.volatile_scalar_rmw && Hash_set.mem accum_scope_ids id.scope_id then "volatile " else ""
+    in
+    qualifier ^ B.typ_of_prec (scope_prec_of id)
 
   let wrap_conversion (pre, post) doc =
     let open PPrint in
@@ -4397,14 +4410,13 @@ module C_syntax (B : C_syntax_config) = struct
            carve-out, [renders_at_store_prec]), so rendering it inside a scope's precision would
            change the draw, not just move it.
 
-           Interaction with [volatile_scalar_rmw] (Metal): none is needed, and that is a property of
-           WHERE the rewrite puts the store rather than of the shadow's predicate. The shadow keys on
-           the emitted [Set] reading its own node at a cell invariant across an enclosing serial
-           loop; localization lifts the [Set] out of exactly those loops, so at a fully localized
-           site the predicate is already false and no [volatile] alias is emitted. Where the peel was
-           blocked at an outer level (a sibling statement, a data-dependent guard) the store stays
-           inside an invariant-address loop — and there the per-iteration read-modify-write is
-           genuinely still present at that level, so the shadow must and does still fire. *)
+           Interaction with [volatile_scalar_rmw] (Metal) has two forms. Localization lifts the
+           node [Set] out of exactly the invariant-address loops, so the volatile POINTER shadow's
+           predicate is false at a fully localized site. But gh-ocannl-731 showed the same shader
+           compiler pass corrupting the replacement scope-local accumulation when its contribution
+           reads through a pooled pointer; [scope_decl_type] therefore makes that accumulator local
+           volatile. Where the peel is blocked at an outer level, the device-memory RMW remains and
+           the original pointer shadow still fires. *)
         let try_localize_serial_reduce () : PPrint.document option =
           (* A dead level ([to_ < from_]) performs no accesses; see [peel_accum_nest]'s refusal,
              which covers the levels BELOW this one. This is the same refusal for the level being
@@ -4994,7 +5006,7 @@ module C_syntax (B : C_syntax_config) = struct
           lbrace ^^ nest 2 (hardline ^^ block_content) ^^ hardline ^^ rbrace
     | Declare_local { id = { tn = { storage_prec = _; _ }; _ } as id; needs_init } ->
         let scope_prec = scope_prec_of id in
-        let num_typ = string (B.typ_of_prec scope_prec) in
+        let num_typ = string (scope_decl_type id) in
         let init_zero =
           (* Runtime instrumentation prints both the old and new values for [Set_local]. Even when
              the computation itself writes this local before reading it ([needs_init = false]), the
@@ -5517,7 +5529,7 @@ module C_syntax (B : C_syntax_config) = struct
         { id = { tn = { storage_prec = _; _ }; scope_id } as id; body; orig_indices = _; mint = _ }
       ->
         let scope_prec = scope_prec_of id in
-        let num_typ = string (B.typ_of_prec scope_prec) in
+        let num_typ = string (scope_decl_type id) in
         let init_zero =
           if Low_level.reads_scope_before_set id body then
             let prefix, postfix = B.convert_precision ~from:Ops.int32 ~to_:scope_prec in

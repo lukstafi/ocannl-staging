@@ -13,10 +13,10 @@
 
    - the emitted f32 kernel opens the accumulator into a local, updates the local inside the
      reduction loop, and writes the node once — no [acc[k] = ... acc[k] ...] inside the loop;
-   - on Metal the localized kernel carries no [volatile] alias, because the read-modify-write the
-     shadow pins is gone. That is a property of WHERE the rewrite puts the store, not of the
-     shadow's predicate: localization lifts the [Set] out of the very loops across which the cell
-     was invariant, so the predicate is already false. (Nothing to evaluate on a backend whose
+   - on Metal the localized accumulator itself is [volatile] (gh-ocannl-731), because the same
+     shader-compiler pass can corrupt this replacement form when its contribution reads through a
+     pooled pointer. The kernel carries no volatile POINTER shadow: localization lifted the
+     device-memory RMW that shadow pins. (Nothing to evaluate on a backend whose
      [volatile_scalar_rmw] is [false] — reported as skipped rather than as a vacuous pass.)
    - the values match a host reference computed in the same summation order. The producers
      discriminate: every element is [1 + 10*i + j], so it varies with BOTH loop symbols and is
@@ -139,8 +139,9 @@ let () =
             else None)
   in
   let check_localized routine label =
+    let source = Test_utils.Generated.read routine in
     let statements =
-      List.map (String.split (Test_utils.Generated.read routine) ~on:';') ~f:normalize
+      List.map (String.split source ~on:';') ~f:normalize
     in
     let fail_all () =
       List.iter
@@ -149,7 +150,7 @@ let () =
           "the reduction updates the local, not the node";
           "no statement both reads and writes the node";
           "the node is stored exactly once, from the local";
-          "no volatile shadow on the localized store";
+          "Metal accumulator local is volatile, without a pointer shadow";
         ]
         ~f:(fun c -> Verdict.p (label ^ ": " ^ c) false)
     in
@@ -178,11 +179,13 @@ let () =
           = List.count statements ~f:(fun st ->
                 node_accesses st = 1 && String.is_substring st ~substring:("] = " ^ local)));
         if has_volatile_shadow then
-          Test_utils.Generated.assert_omits ~routine ~contains:"volatile"
-            (label ^ ": no volatile shadow on the localized store")
+          Verdict.p
+            (label ^ ": Metal accumulator local is volatile, without a pointer shadow")
+            (String.is_substring source ~substring:("volatile float " ^ local)
+            && not (String.is_substring source ~substring:"device volatile float*"))
         else
           Verdict.skipped ~backend:backend_name
-            (label ^ ": no volatile shadow on the localized store")
+            (label ^ ": Metal accumulator local is volatile, without a pointer shadow")
   in
   check_localized "res_total" "scalar reduction";
   check_localized "res_per_col" "row reduction"
