@@ -115,7 +115,9 @@ Two routines get compiled: `init_params_for_loss` (parameter initialization; see
 `Train.init_params` below) and `loss_forward_and_gradient_update` — the training step, our
 protagonist. One detail worth savoring before we start: the same program run with
 `OCANNL_BACKEND=metal` prints the same `loss = 0.6590` — bitwise determinism across backends
-is a design invariant (see the [manifesto](compilation_manifesto.md), §4), not luck.
+is the default contract, not luck (see the [manifesto](compilation_manifesto.md), §4:
+numerics relaxations are named, opt-in policies — the `approximate` profile planned for
+v1.2, gh-719, will be the packaged one).
 
 ## Stage 0: tensors carry their code
 
@@ -491,8 +493,12 @@ kernel fission:
   (every materialized write covered by the loop index; conservative race analysis, backed by
   the `Ir.Affine` relational queries), retype loops to hardware axes — `Grid` and
   `Workgroup` on GPU, an outer `Grid` loop rendered onto a thread pool on CPU. Reduction
-  loops stay serial: OCANNL's determinism contract forbids atomics, so parallel reductions
-  happen only via the explicit `Split_reduce` two-pass transform.
+  loops stay serial: under the deterministic regime — the default, and today the only one —
+  atomics are forbidden, so parallel reductions happen only via the explicit `Split_reduce`
+  two-pass transform (a fixed combine tree, bitwise-reproducible per schedule). This rule is
+  profile-conditional by design: the `approximate` profile planned for v1.2 (gh-719) will
+  admit numerics-relaxing parallelizations as a named policy beside the deterministic
+  default.
 - **Kernel fission** (`Schedule.fission_scheduled`): the whole-step program is cut into
   segments at materialized producer→consumer edges that cannot share a grid launch; each
   segment compiles as its own kernel, chained by device events. This is the fission-not-fusion
