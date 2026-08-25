@@ -300,6 +300,18 @@ This representation is also why OCANNL has no layout/reshape subsystem: every ac
 pattern — transposes, broadcasts, convolutions, slicing — is index arithmetic in
 `project_*`, and einsum projections are the sole loop-nest generator.
 
+An aside on broadcasting, because it is a *constraint-generation* choice, not a projections
+feature: operations with implicit semantics — pointwise ops, and compose (`*`, the `"@"`
+logic) — emit subtyping constraints (`Row_ineq` in `Shape.get_inequalities`: the result's
+rows broadcast-cover each operand's), which is what lets a scalar add to a matrix with no
+spec written anywhere. Explicit einsum specs instead emit equations (`Row_eq`, via
+`einsum_n_constraints`): the rows the spec names unify exactly, and any broadcasting
+flexibility must be written into the spec itself as row variables (`...`, `..v..`). This is
+a design choice — the specs could generate subtyping constraints on the spec-to-LHS side —
+but equations propagate information in both directions, so relaxing them would make
+inference both weaker (an einsum would no longer pin its operands' shapes) and more complex,
+in exchange for implicit behavior the row-variable syntax already expresses explicitly.
+
 Because the whole training step lowers at once, one `finish_inference` serves all
 assignments; einsum specs, convolution strides (`Affine` indices with
 `stride·i + dilation·j − padding` symbol combinations), and broadcast row variables have all
