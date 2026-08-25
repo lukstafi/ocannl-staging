@@ -19,6 +19,7 @@
 # Usage:
 #   tools/sweep.sh                     # cc + multidev_cc + metal locally, cuda/hip if up
 #   tools/sweep.sh --slow              # also `dune build @slow`
+#   tools/sweep.sh --force             # cold rebuild and re-execute every test alias
 #   tools/sweep.sh --only metal        # one backend (repeatable)
 #   tools/sweep.sh --target test/einsum  # narrower dune target, for smoke-testing
 #   tools/sweep.sh --ref origin/master   # what to test (default: origin/master)
@@ -37,6 +38,7 @@ MAIN=${OCANNL_TOOL_SWEEP_REPO:-$HOME/ocannl-staging}
 REF=origin/master
 TARGET=
 SLOW=0
+FORCE=0
 ONLY=()
 # Per-unit wall-clock cap, enforced by the perl supervisor below on both the
 # local and the remote side: macOS has no timeout(1) at all, and where timeout(1)
@@ -46,6 +48,7 @@ CAP=${OCANNL_TOOL_SWEEP_CAP:-5400}
 while [ $# -gt 0 ]; do
   case $1 in
     --slow) SLOW=1 ;;
+    --force) FORCE=1 ;;
     --only) ONLY+=("$2"); shift ;;
     --target) TARGET=$2; shift ;;
     --ref) REF=$2; shift ;;
@@ -89,20 +92,12 @@ die() { echo "sweep: $*" >&2; exit 2; }
 # exactly as a full suite would, certifying coverage that never ran. `slow` is
 # separate for the same reason: a weekday sweep must not make Sunday's slow
 # coverage look current.
-header_line() { printf 'when\tmachine\tbackend\tref\toutcome\tseconds\ttarget\tslow\tlog\n'; }
+header_line() {
+  printf 'when\tmachine\tbackend\tref\toutcome\tseconds\ttarget\tslow\tlog\texecution\n'
+}
+old_header_line() { printf 'when\tmachine\tbackend\tref\toutcome\tseconds\ttarget\tslow\tlog\n'; }
 
 mkdir -p "$LOGS" || die "cannot create $LOGS"
-if [ -f "$HISTORY" ]; then
-  # A file written by an older schema would be silently mis-columned by the
-  # consumer, which is worse than refusing to append to it.
-  [ "$(head -1 "$HISTORY")" = "$(header_line)" ] ||
-    die "$HISTORY has a different schema; archive it and let this run start a new one"
-else
-  header_line >"$HISTORY" || die "cannot write $HISTORY"
-fi
-# Probe once up front, so a read-only or full state filesystem is reported here
-# with a clear message rather than as a run whose rows silently went nowhere.
-printf '' >>"$HISTORY" || die "cannot append to $HISTORY"
 
 # Ask git rather than inspecting `.git`'s file type: in a linked worktree -- a
 # layout this project uses constantly -- `.git` is a regular file, and a -d test
@@ -160,6 +155,35 @@ mkdir -p "$(dirname "$LOCK")" || die "cannot create $(dirname "$LOCK")"
 exec 9>"$LOCK" || die "cannot open $LOCK"
 perl -e 'use Fcntl ":flock"; exit(flock(STDIN, LOCK_EX | LOCK_NB) ? 0 : 1)' <&9 ||
   die "another sweep is running; refusing to share the worktree"
+
+# History validation and migration belong under the same run-wide lock as the
+# rows themselves. Otherwise two launches can both observe the old header: one
+# replaces it while the other is reading, and the loser can publish an
+# eleven-column body under the ten-column header before it is refused below.
+if [ -f "$HISTORY" ]; then
+  # The one supported migration is exact and append-only: preserving the first
+  # nine columns keeps positional consumers working, while `unknown` refuses to
+  # pretend that a historical pass proves execution we did not measure. Write a
+  # sibling and rename it, so an interrupted migration leaves the old file whole.
+  if [ "$(head -1 "$HISTORY")" = "$(old_header_line)" ]; then
+    migrated=$HISTORY.migrate.$$
+    {
+      header_line
+      tail -n +2 "$HISTORY" |
+        awk -F '\t' 'BEGIN { OFS="\t" } { if ($5 == "pass") $5="legacy-pass"; print $0, "unknown" }'
+    } >"$migrated" && mv "$migrated" "$HISTORY" ||
+      die "cannot migrate $HISTORY to the execution-aware schema"
+  fi
+  # A file written by an older schema would be silently mis-columned by the
+  # consumer, which is worse than refusing to append to it.
+  [ "$(head -1 "$HISTORY")" = "$(header_line)" ] ||
+    die "$HISTORY has a different schema; archive it and let this run start a new one"
+else
+  header_line >"$HISTORY" || die "cannot write $HISTORY"
+fi
+# Probe once up front, so a read-only or full state filesystem is reported here
+# with a clear message rather than as a run whose rows silently went nowhere.
+printf '' >>"$HISTORY" || die "cannot append to $HISTORY"
 
 # Signals aimed at THIS pid rather than at the process group -- `kill $pid` from a
 # supervisor, or the scheduler cancelling the task -- never reach the capped
@@ -246,13 +270,23 @@ wanted() {
 # arithmetic survive into the shell that finally runs them. The result is spliced
 # into the remote string via command substitution, which bash does not rescan.
 test_cmd() {
-  local backend=$1 wt=$2
+  local backend=$1 wt=$2 force_arg=
+  [ "$FORCE" = 1 ] && force_arg=--force
   # 127, not a generic failure: a worktree that is not there means nothing ran,
   # which the outcome mapping treats as non-coverage rather than a red suite.
   printf 'cd "%s" || exit 127; ' "$wt"
-  printf 'OCANNL_BACKEND=%s opam exec -- dune runtest %s; rc1=$?; ' "$backend" "$TARGET"
+  # Dune's alias --force does not reliably invalidate ppx_expect inline tests.
+  # A forced pass therefore starts from an empty build tree, under the worktree
+  # lock already held on both local and remote paths. Failure to establish that
+  # precondition is harness non-coverage, not a red suite.
+  if [ "$FORCE" = 1 ]; then
+    printf 'opam exec -- dune clean; clean_rc=$?; [ $clean_rc -eq 0 ] || exit 126; '
+  fi
+  printf 'OCANNL_BACKEND=%s opam exec -- dune runtest %s %s; rc1=$?; ' \
+    "$backend" "$force_arg" "$TARGET"
   if [ "$SLOW" = 1 ]; then
-    printf 'OCANNL_BACKEND=%s opam exec -- dune build @slow; rc2=$?; ' "$backend"
+    printf 'OCANNL_BACKEND=%s opam exec -- dune build %s @slow; rc2=$?; ' \
+      "$backend" "$force_arg"
   else
     printf 'rc2=0; '
   fi
@@ -392,8 +426,9 @@ prep_cmd() {
 # ran. Better to abort mid-sweep, loudly, than to hand the consumer a partial
 # history it will read as coverage.
 record() {
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$stamp" "$1" "$2" "$run_sha" "$3" "$4" "${TARGET:-<all>}" "$SLOW" "${5:--}" >>"$HISTORY" ||
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$stamp" "$1" "$2" "$run_sha" "$3" "$4" "${TARGET:-<all>}" "$SLOW" \
+    "${5:--}" "${6:-none}" >>"$HISTORY" ||
     die "cannot record $1/$2 outcome in $HISTORY"
 }
 
@@ -407,7 +442,13 @@ fingerprint() {
   } 2>/dev/null | sort -u | head -60
 }
 
-echo "sweep $stamp  ref=$REF ($run_sha)  slow=$SLOW  target=${TARGET:-<all>}"
+if [ "$FORCE" = 1 ]; then
+  execution=forced
+else
+  execution=incremental
+fi
+
+echo "sweep $stamp  ref=$REF ($run_sha)  slow=$SLOW  target=${TARGET:-<all>}  execution=$execution"
 echo
 
 for unit in "${UNITS[@]}"; do
@@ -534,17 +575,21 @@ for unit in "${UNITS[@]}"; do
   # that is non-coverage, not a red suite -- a distinction that matters most on a
   # GPU box used rarely enough for its switch to rot unnoticed.
   case $rc in
-    0) outcome=pass ;;
+    # `pass` is reserved for the mode that makes Dune re-execute every action
+    # attached to the selected aliases. An incremental success is useful, but
+    # is an unknown mixture of execution and cache hits, so it must not refresh
+    # a consumer that ages actual backend coverage by the latest `pass` row.
+    0) [ "$FORCE" = 1 ] && outcome=pass || outcome=incremental-pass ;;
     124 | 137 | 142) outcome=timeout ;;
     126 | 127) outcome=error ;;
     255) [ -n "$host" ] && outcome=error || outcome=fail ;;
     *) outcome=fail ;;
   esac
-  echo "  $machine/$backend: $outcome (${elapsed}s)"
-  record "$machine" "$backend" "$outcome" "$elapsed" "$log"
-  if [ "$outcome" != pass ]; then
-    fingerprint "$log" >"${log%.log}.fingerprint"
-  fi
+  echo "  $machine/$backend: $outcome (${elapsed}s; execution=$execution)"
+  record "$machine" "$backend" "$outcome" "$elapsed" "$log" "$execution"
+  case $outcome in
+    fail | timeout | error) fingerprint "$log" >"${log%.log}.fingerprint" ;;
+  esac
 done
 
 echo

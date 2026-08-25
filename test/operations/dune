@@ -3777,3 +3777,24 @@
  (deps (alias runtest-env_spelling_gate))
  (action
   (diff shell_scripts_parse.expected shell_scripts_parse.actual)))
+; tools/sweep.sh's incremental/forced distinction (gh-ocannl-737). This invokes
+; the harness through a fake opam, so no backend or OCANNL executable is reached.
+
+(executable
+ (name sweep_harness_driver)
+ (modules sweep_harness_driver)
+ (libraries unix))
+
+(rule
+ ; ocannl-backend: none -- the driver invokes a shell harness through fake opam and links no backend.
+ (alias runtest)
+ (package neural_nets_lib)
+ (deps
+  ocannl_config
+  ../../tools/sweep.sh
+  sweep_harness.sh)
+ (action
+  (run
+   %{dep:sweep_harness_driver.exe}
+   %{dep:sweep_harness.sh}
+   %{dep:../../tools/sweep.sh})))

@@ -2,6 +2,15 @@
 
 ### Changed
 
+- **A green GPU sweep row now says whether tests actually had to run** (gh-ocannl-737). The reused
+  `_build` makes the daily sweep affordable, but it also lets Dune serve unchanged backend tests
+  from cache. Normal successes therefore record `incremental-pass` and `execution=incremental`,
+  while `tools/sweep.sh --force` cleans the locked worktree before forcing the selected aliases,
+  including inline expectations; only its complete success records `pass` and `execution=forced`.
+  Existing history is migrated conservatively (`legacy-pass`, `execution=unknown`) under the same
+  run lock that protects new rows, and a cold unit that exceeds its backend's cap remains an honest
+  `timeout`.
+
 - **Each `@slow` test has its own `slow-<name>` alias**, so one slow test reruns alone after a
   change -- `OCANNL_BACKEND=cc dune build @test/training/slow-mlp_names` -- instead of the whole
   suite (~30 min on CUDA, longer on cc) or a hand-run of the exe with a manual diff, which fixing

@@ -36,6 +36,7 @@ benchmarks/gh612v_session.sh parses: true
 docs/latex/gen-workshop-tex.sh parses: true
 scripts/setup-ocaml-env.sh parses: true
 scripts/test-setup-ocaml-env.sh parses: true
+test/operations/sweep_harness.sh parses: true
 tools/dune-quiet.sh parses: true
 tools/format-sweep.sh parses: true
 tools/opam-env.sh parses: true
