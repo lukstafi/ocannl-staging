@@ -50,8 +50,9 @@ August 2026; regenerate them with the companion program below if they drift.
               │
               ▼
  6.  Codegen: C_syntax renders each kernel as C /          arrayjit/lib/c_syntax.ml,
-     CUDA C++ / MSL; backend compiles it           cc_backend.ml, cuda_backend.ml,
-     (cc → dlopen, nvrtc → PTX, MSL → metallib)    metal_backend.ml  [.c/.cu/.metal]
+     CUDA C++ / HIP / MSL; backend compiles it     cc_backend.ml, cuda_backend.ml,
+     (cc → dlopen, nvrtc/hiprtc, MSL at link)      hip_backend.ml, metal_backend.ml
+                                                   [.c/.cu/.hip/.metal]
               │
               ▼
  7.  Link and run: buffers allocated into a child          arrayjit/lib/backends.ml,
@@ -109,7 +110,7 @@ per compiled routine — the artifacts quoted throughout this tutorial:
 | `<routine>.cd` | 1 | the `Assignments.comp`, printed in `%cd` syntax |
 | `<routine>-unoptimized.ll` | 3 | the freshly lowered `Low_level.t` |
 | `<routine>.ll` | 4 | the optimized `Low_level.t` |
-| `<routine>.c` / `.cu` / `.metal` | 6 | the generated backend source |
+| `<routine>.c` / `.cu` / `.hip` / `.metal` | 6 | the generated backend source |
 
 Two routines get compiled: `init_params_for_loss` (parameter initialization; see
 `Train.init_params` below) and `loss_forward_and_gradient_update` — the training step, our
@@ -416,7 +417,8 @@ cache keyed by a structural digest), while placement decisions replay cheaply pe
 The **default state of a computed tensor node is `Virtual`** — no bytes anywhere, consumers
 recompute the defining expression inline. More precisely: nodes start *undecided*; a node
 the routine only reads resolves `On_device` (it must be an input buffer), explicit intent
-(parameters, `Train.set_materialized`, the loss's observability) wins outright, and it is
+(parameters, `Train.set_materialized` — which `Train.grad_update` applies to the loss's
+value, which is why our loss has storage) wins outright, and it is
 the written-and-still-undecided nodes that default to `Virtual` at cleanup. Materialization
 of those must be earned (visit-count and recompute-cost caps) or forced by user intent. Observability —
 a declared intent to read the node's values, `Tnode.set_observable` — deliberately does
@@ -524,8 +526,10 @@ kernel fission:
   the `Ir.Affine` relational queries), retype loops to hardware axes — `Grid` and
   `Workgroup` on GPU, an outer `Grid` loop rendered onto a thread pool on CPU. Reduction
   loops stay serial: under the deterministic regime — the default, and today the only one —
-  atomics are forbidden, so parallel reductions happen only via the explicit `Split_reduce`
-  two-pass transform (a fixed combine tree, bitwise-reproducible per schedule). This rule is
+  atomics are forbidden, so an ordinary loop reduction parallelizes only via the explicit
+  `Split_reduce` two-pass transform (a fixed combine tree, bitwise-reproducible per
+  schedule); the other atomics-free mechanism is a tensorized contraction, where an
+  accepted `Tile_mma` intrinsic rendering executes the tile's reduction cooperatively. This rule is
   profile-conditional by design: the `approximate` profile planned for v1.2 (gh-719) will
   admit numerics-relaxing parallelizations as a named policy beside the deterministic
   default.
@@ -545,10 +549,12 @@ when `model_default_schedule=true` (off by default; plain `Context.compile` neve
 this) — as a model-ranked pick among the default-schedule flavors with zero timing runs.
 Transform *application* is strict: an invalid composition (a missing loop symbol, a
 non-positive split factor, an illegal interchange) fails loudly at apply time rather than
-falling back. What is total is the *rendering* of an applied schedule: on every backend it
-renders correctly, declining gracefully to fallbacks (the scalar `Tile_mma` arm, serial
-loops) where the hardware or shape does not cooperate — performance, never correctness, is
-what's being searched.
+falling back. Rendering an applied schedule then never produces *wrong* code, and for the
+constructs that carry fallbacks — `Tile_mma`'s decline ladder down to the scalar arm,
+hardware-axis loops serializing where the backend has no binding — it degrades gracefully;
+a few schedule-minted constructs without a fallback (e.g. a pipelined tile read outside its
+rotor loop) instead decline with a classified `Backend_codegen` error, which the autotuner
+treats as a candidate decline. Performance, never correctness, is what's being searched.
 
 ## Stage 6: code generation
 
@@ -645,7 +651,8 @@ Then each backend turns text into an executable object — how much of that happ
 file, invokes the configured C compiler into a shared object, and `dlopen`s it (CPU code
 can load eagerly; there is one program memory); `cuda_backend` compiles through NVRTC to
 PTX at compile time but defers module loading to link time (`cuModuleLoadDataEx` loads into
-a device-specific context); `metal_backend` defers even source compilation to link time,
+a device-specific context), and `hip_backend` mirrors this through HIPRTC (`.hip` source to
+a code object); `metal_backend` defers even source compilation to link time,
 compiling the MSL per device (`Me.Library.on_device`) and validating the launch against the
 device's limits there. This is why the backend interface distinguishes `compile` (produce
 the artifact) from `link` (bind it to a device context) — and batches both
@@ -680,7 +687,9 @@ pipeline, `Raise_backend.link`:
 
 Back in `context.ml`, the routine is registered in the lineage's execution ledger, and its
 `execution_deps` are derived from read/write hazards against previously compiled routines.
-`Context.run` then validates (dependencies satisfied, inputs initialized, bindings in range)
+`Context.run` then validates — execution dependencies satisfied, input buffers present and
+framework-initialized (a buffer-availability check, not a data check: an input you forgot
+to fill can still run with the allocator's zeros), bindings in range —
 and dispatches the task onto the device's stream — a FIFO queue with events; on the default
 `cc` backend the "stream" degenerates to synchronous execution, on `multidev_cc` it is a
 worker domain, on GPUs a real device stream. Runtime-varying integers enter through the
