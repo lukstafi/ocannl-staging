@@ -583,18 +583,37 @@ let rec ensure_dir dir =
 
 let cache_file ~dir ~key = Stdlib.Filename.concat dir (sanitize key ^ ".sexp")
 
+let next_tmp_id : Utils.atomic_int = Atomic.make 0
+
 let store ~dir ~key entry =
   ensure_dir dir;
   let file = cache_file ~dir ~key in
-  let tmp = file ^ ".tmp" in
-  Stdio.Out_channel.write_all tmp ~data:(Sexp.to_string_hum (sexp_of_entry entry));
-  try Stdlib.Sys.rename tmp file with Stdlib.Sys_error _ -> ()
+  (* A fixed [file.tmp] lets concurrent writers overwrite or rename one another's staging file.
+     Give each attempt its own artifact, and remove it on every failure path: the committed entry is
+     either the old complete file or the new complete file, never an intention left in [.tmp]. *)
+  let tmp =
+    Printf.sprintf "%s.tmp.%d.%d" file (Unix.getpid ()) (Atomic.fetch_and_add next_tmp_id 1)
+  in
+  let cleanup_tmp () =
+    if Stdlib.Sys.file_exists tmp then try Stdlib.Sys.remove tmp with _ -> ()
+  in
+  match
+    Stdio.Out_channel.write_all tmp ~data:(Sexp.to_string_hum (sexp_of_entry entry));
+    Resource_fault_injection.hit Schedule_cache_before_commit;
+    try Stdlib.Sys.rename tmp file with Stdlib.Sys_error _ -> cleanup_tmp ()
+  with
+  | () -> ()
+  | exception exn ->
+      let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+      cleanup_tmp ();
+      Stdlib.Printexc.raise_with_backtrace exn backtrace
 
 let lookup ~dir ~key =
   let file = cache_file ~dir ~key in
   if not (Stdlib.Sys.file_exists file) then None
   else
     try
+      Resource_fault_injection.hit Schedule_cache_before_replay;
       let entry = entry_of_sexp (Sexplib.Sexp.load_sexp file) in
       if entry.version = entry_version then Some entry else None
     with _ -> None

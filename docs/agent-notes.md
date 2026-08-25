@@ -7,6 +7,11 @@ facts (which backends are installed, local paths, remote-benchmarking setups) de
 the primary docs, those win; treat entries as leads, and verify the named symbols still exist.
 Workflow rules live in CLAUDE.md; these files are subsystem lore.
 
+Cross-subsystem review checklist: release, cleanup and decline code is accepted by fault-injected
+error paths, with a negative control and exact ownership assertions; happy-path evidence is only
+supporting evidence. Labels and reports must be derived from the artifacts actually emitted,
+timed, shipped or released, never from the transform or branch that intended to create them.
+
 **This file is an index.** The notes live in `docs/agent-notes/`, one file per subsystem, so that
 looking one trap up costs one file rather than all of them. Read the line below that matches what
 you are about to touch, then open that file. When promoting new knowledge, append to the matching

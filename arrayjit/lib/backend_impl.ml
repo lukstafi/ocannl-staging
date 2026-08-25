@@ -156,12 +156,17 @@ module Make_slab (Device_types : Device_types) (Raw : No_device_buffer_and_copyi
   let alloc_pool ?mode:_ device ~pool_id ~size_in_bytes ~alignment:_ =
     let key = (device.device_id, pool_id) in
     with_pools (fun () ->
-        (* Free any prior allocation under this key before replacing it (only the reserved merge
-           pool is ever re-allocated; unique tnode pool ids never pre-exist). Backends whose
-           [free_pool_raw] is [None] rely on GC and the dropped table entry, so this is a no-op for
-           them. *)
-        Option.iter Raw.free_pool_raw ~f:(fun memfree ->
-            Option.iter (Hashtbl.find pools key) ~f:memfree);
+        (* The reserved merge pool is the only id replaced in place. Drop its table/capacity claim
+           before freeing and allocating the replacement: growth must not require old+new bytes to
+           fit simultaneously, and a failed replacement must not leave a freed pointer or stale
+           capacity reachable. The caller restores the merge metadata only after this succeeds. *)
+        Option.iter (Hashtbl.find pools key) ~f:(fun old ->
+            Hashtbl.remove pools key;
+            if Int.equal pool_id merge_buffer_pool_id then (
+              device.merge_buffer := None;
+              device.merge_buffer_capacity <- 0;
+              device.updating_for_merge_buffer <- None);
+            Option.iter Raw.free_pool_raw ~f:(fun memfree -> memfree old));
         let ptr = Raw.alloc_pool_raw ~size_in_bytes in
         Hashtbl.set pools ~key ~data:ptr)
 
@@ -225,6 +230,7 @@ struct
       parent = None;
       ctx_buffers;
       finalized = Atomic.make false;
+      released_pool_ids = Set.empty (module Int);
       optimize_ctx;
       merge_buffer_node = None;
     }
@@ -239,6 +245,7 @@ struct
       parent = Some parent;
       ctx_buffers;
       finalized = Atomic.make false;
+      released_pool_ids = Set.empty (module Int);
       optimize_ctx;
       merge_buffer_node;
     }

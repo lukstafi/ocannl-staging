@@ -70,6 +70,7 @@
   ops
   interval
   numerics
+  resource_fault_injection
   alloc_census
   ndarray
   indexing

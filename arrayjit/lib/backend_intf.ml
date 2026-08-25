@@ -472,6 +472,9 @@ type ('dev, 'runner, 'event) context = {
       (** This map contains the deterministic buffer locations used in this context or an ancestor
           context. *)
   finalized : Utils.atomic_bool;
+  mutable released_pool_ids : Set.M(Int).t;
+      (** Pools this context has already released. Retained across a failed-finalize retry so a
+          cleanup that freed some pools before raising never calls the backend free twice. *)
   optimize_ctx : Low_level.optimize_ctx;
       (** The optimization context threaded through compilation: all OCANNL backends compile through
           the {!Low_level} IR, so this is concretely {!Low_level.optimize_ctx} (the abstraction for

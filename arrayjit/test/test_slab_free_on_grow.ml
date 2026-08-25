@@ -13,6 +13,7 @@
 open Base
 module Backend_impl = Ir.Backend_impl
 module Backend_intf = Ir.Backend_intf
+module Tn = Ir.Tnode
 
 (* A raw backend whose "pointers" are integer ids and whose [free_pool_raw] records frees --
    standing in for a backend (like CUDA) that owns explicitly-released device pointers. *)
@@ -23,10 +24,15 @@ module Mock_raw = struct
   let get_used_memory () = 0
   let next = ref 0
   let freed : int list ref = ref []
+  let fail_next_alloc = ref false
 
   let alloc_pool_raw ~size_in_bytes:_ =
-    Int.incr next;
-    !next
+    if !fail_next_alloc then (
+      fail_next_alloc := false;
+      failwith "injected merge-pool allocation failure")
+    else (
+      Int.incr next;
+      !next)
 
   let free_pool_raw = Some (fun ptr -> freed := ptr :: !freed)
   let memset_zero_raw _ptr ~offset:_ ~size_in_bytes:_ = ()
@@ -88,6 +94,41 @@ let () =
   Verdict.p "grow freed the old pool" (List.mem !Mock_raw.freed p1 ~equal:Int.equal);
   Verdict.p "grow installed a new pool" (not (p1 = p2));
   Stdio.printf "freed count after grow = %d\n" (List.length !Mock_raw.freed);
+  (* Failure control for the same seam: growing must not require old+new bytes to coexist. The old
+     slab is released first, but its table entry and device capacity claim must be invalidated
+     before any fallible action. Thus a failed replacement leaves an honestly absent merge pool,
+     rather than the old bug's table entry pointing at released memory. *)
+  let frees_before_failed_grow = List.length !Mock_raw.freed in
+  let stale_writer =
+    Tn.create (Tn.Default Ir.Ops.single) ~id:571 ~label:[ "stale merge writer" ]
+      ~unpadded_dims:(lazy [| 1 |]) ~padding:(lazy None) ()
+  in
+  device.merge_buffer := Some (loc 0);
+  device.merge_buffer_capacity <- 32;
+  device.updating_for_merge_buffer <- Some (stale_writer, None);
+  Mock_raw.fail_next_alloc := true;
+  let grow_failed =
+    match Mock_slab.alloc_pool device ~pool_id:0 ~size_in_bytes:64 ~alignment:1 with
+    | () -> false
+    | exception Failure msg -> String.is_substring msg ~substring:"injected"
+  in
+  Verdict.p "injected grow failure fired" grow_failed;
+  let old_pool_absent =
+    match Mock_slab.resolve_pool device (loc 0) with
+    | _ -> false
+    | exception _ -> true
+  in
+  Verdict.p "failed grow invalidated the released pool, capacity, and writer"
+    (old_pool_absent
+    && List.length !Mock_raw.freed = frees_before_failed_grow + 1
+    && List.mem !Mock_raw.freed p2 ~equal:Int.equal
+    && Option.is_none !(device.merge_buffer)
+    && device.merge_buffer_capacity = 0
+    && Option.is_none device.updating_for_merge_buffer);
+  Mock_slab.alloc_pool device ~pool_id:0 ~size_in_bytes:64 ~alignment:1;
+  let p3 = Mock_slab.resolve_pool device (loc 0) in
+  Verdict.p "grow retry installs a fresh pool without another free"
+    (not (p2 = p3) && List.length !Mock_raw.freed = frees_before_failed_grow + 1);
   (* A unique tnode pool id never pre-exists, so allocating it frees nothing. *)
   Mock_slab.alloc_pool device ~pool_id:1 ~size_in_bytes:16 ~alignment:1;
   Stdio.printf "freed count after unique-id alloc = %d\n" (List.length !Mock_raw.freed);

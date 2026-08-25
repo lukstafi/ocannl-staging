@@ -70,7 +70,8 @@ val finalize :
   unit
 (** Frees the pools that are specific to the context -- not contained in the parent context, and not
     per-device constants. Idempotent (guarded by the context's [finalized] flag), and freeing is
-    per-[pool_id] rather than per-node: one pool holds several nodes.
+    per-[pool_id] rather than per-node: one pool holds several nodes. If cleanup raises after a
+    strict prefix of pools, retry skips that prefix and frees only the remainder.
 
     This is NOT optional if the memory matters (gh-ocannl-550, correcting the note that used to
     stand here). A pool's backend buffer is never garbage-collected, because the backend's private

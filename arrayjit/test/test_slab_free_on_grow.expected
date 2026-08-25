@@ -1,7 +1,10 @@
 grow freed the old pool: true
 grow installed a new pool: true
 freed count after grow = 1
-freed count after unique-id alloc = 1
+injected grow failure fired: true
+failed grow invalidated the released pool, capacity, and writer: true
+grow retry installs a fresh pool without another free: true
+freed count after unique-id alloc = 2
 resolve_pool offset 0 = base: true
 resolve_pool offset 8 = base + 8: true
 gc backend exposes free_pool (not None): true

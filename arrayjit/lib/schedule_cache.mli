@@ -245,7 +245,8 @@ val cache_key : limits:Backend_intf.hardware_limits -> canonical -> backend:stri
 
 val store : dir:string -> key:string -> entry -> unit
 (** Writes the entry to [dir]/[key].sexp, creating [dir] (and parents) if missing. Tolerates
-    concurrent writers (last write wins; writes go through a temp file + rename). *)
+    concurrent writers (last write wins; each writer uses a unique temp file + rename). A failed
+    write/commit removes its temp artifact and leaves an earlier complete entry intact. *)
 
 val lookup : dir:string -> key:string -> entry option
 (** [None] on missing file, unparsable content, or version/digest mismatch. *)
