@@ -718,7 +718,7 @@ line.
 | see the high-level code of a routine | `.cd` artifact; `Assignments.to_doc`; `Train.to_routine ~output_cd_file:true` |
 | see loop nests before/after optimization | `-unoptimized.ll` / `.ll` artifacts (`Low_level.to_doc`) |
 | understand why a node materialized | `Tnode.debug_memory_mode`, provenance codes in [lowering_and_inlining.md](lowering_and_inlining.md) |
-| see the kernel source | `.c`/`.cu`/`.metal` artifacts (config `output_debug_files_in_build_directory=true`) |
+| see the kernel source | `.c`/`.cu`/`.hip`/`.metal` artifacts (config `output_debug_files_in_build_directory=true`) |
 | see what a kernel computed at runtime | config `debug_log_from_routines=true` (see the debug-tracing skill / docs) |
 | trace scheduling decisions | `schedule_log_declines`, `schedule_log_launches`; `routine.mma` |
 | understand compile failures by phase | `Schedule_outcome` classification (`Transform` / `Hardware_limits` / `Backend_codegen` / `Backend_compile` / `Backend_link`, plus `Launch` / `Sync` at run time) |
