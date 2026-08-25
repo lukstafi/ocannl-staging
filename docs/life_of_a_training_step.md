@@ -85,7 +85,7 @@ let () =
   in
   (* One dense layer with a relu, and a sum-everything loss. *)
   let%op y = relu (({ w; o = [ 2 ] }) * x + { b }) in
-  let%op loss = y ++ "...|... => 0" in
+  let%op loss = y ++ "...|... => |->0" in
   (* Build the forward + backprop assignments, then compile them as one routine. *)
   let update = Train.grad_update loss in
   let ctx = Train.init_params ctx IDX.empty loss in
@@ -101,7 +101,7 @@ Build it against the `ocannl` library and run it with debug artifacts enabled:
 OCANNL_BACKEND=cc OCANNL_OUTPUT_DEBUG_FILES_IN_BUILD_DIRECTORY=true ./tutorial_example.exe
 ```
 
-The run prints `loss = 0.6590` and leaves, under `build_files/tutorial_example/`, four files
+The run prints `loss = 1.6019` and leaves, under `build_files/tutorial_example/`, four files
 per compiled routine — the artifacts quoted throughout this tutorial:
 
 | file | stage | contents |
@@ -114,10 +114,14 @@ per compiled routine — the artifacts quoted throughout this tutorial:
 Two routines get compiled: `init_params_for_loss` (parameter initialization; see
 `Train.init_params` below) and `loss_forward_and_gradient_update` — the training step, our
 protagonist. One detail worth savoring before we start: the same program run with
-`OCANNL_BACKEND=metal` prints the same `loss = 0.6590` — bitwise determinism across backends
-is the default contract, not luck (see the [manifesto](compilation_manifesto.md), §4:
-numerics relaxations are named, opt-in policies — the `approximate` profile planned for
-v1.2, gh-719, will be the packaged one).
+`OCANNL_BACKEND=metal` prints the same `loss = 1.6019`. That is not luck, but it is also not
+an unconditional cross-backend invariant: here both backends run the same serial default
+schedule, and it is the *schedule* that pins the numerics — a reduction-reassociating
+schedule (split reductions, tensorized paths) makes the computed bits a function of the
+schedule, so results are bitwise-reproducible as long as the same schedule replays, and
+every relaxation beyond that is a named, opt-in policy (see the
+[manifesto](compilation_manifesto.md), §4; the `approximate` profile planned for v1.2,
+gh-719, will be the packaged one).
 
 ## Stage 0: tensors carry their code
 
@@ -142,9 +146,10 @@ let%cd grad_asn ~t:_ ~g ~t1 ~t2 ~projections = g1 =+ g; g2 =+ g in
 ```
 
 `op_asn` emits the forward assignment, `grad_asn` the gradient accumulations. `Tensor.op`
-sequences the operands' `forward` comps followed by this operation's `op_asn` (an
-`Assignments.sequence`), and prepends this operation's `grad_asn` to the operands' backprop
-comps — backprop code accumulates in reverse construction order, with a topological
+sequences the forward comps of the operands that are still *forward roots* — a shared
+operand already consumed by an earlier-constructed consumer is not re-spliced — followed by
+this operation's `op_asn` (an `Assignments.sequence`), and prepends this operation's
+`grad_asn` to the operands' backprop comps — backprop code accumulates in reverse construction order, with a topological
 re-ordering pass (gh-461) making sure a fragment that accumulates into a gradient runs before
 the fragment that embeds that node's backprop code.
 
@@ -156,10 +161,13 @@ Two bookkeeping devices matter downstream:
   `consume_backprop_code` are the explicit consumption points used by `Train`.
 - **Embedded nodes.** `Assignments.comp` is not bare code: it pairs `asgns : Assignments.t`
   with `embedded_nodes : Set.M(Tnode).t` — the nodes this comp *owns* (creates and computes).
-  Any node mentioned by the code but not embedded must already exist in the context the comp
-  is compiled against. This ownership set is what later lets the compile step distinguish
-  "allocate this here" from "expect this from a parent context" (`from_prior_context` in
-  `arrayjit/lib/backends.ml`).
+  A node mentioned by the code but not embedded is expected from the context the comp is
+  compiled against — with two exemptions applied at link time: a node with registered
+  host-init data self-initializes from `Ir.Host_inits`, and a node an earlier routine in the
+  lineage committed `Virtual` is served by splicing its stored computation, no buffer
+  needed. This ownership set is what lets the compile step distinguish "allocate this here"
+  from "expect this from a parent context" (`from_prior_context` in
+  `arrayjit/lib/backends.ml`, with exactly those exemptions in `verify_prior_context`).
 
 The `Assignments.t` type itself (`arrayjit/lib/assignments.ml`) is a short imperative
 language of *accumulating assignments*:
@@ -205,7 +213,7 @@ loss_forward_and_gradient_update (): # "loss forward and gradient update";
   n22 =:+ w * x ~logic:"@";
   n24 =:+ n22 + b;
   relu_y =:+ relu n24;
-  loss =:+ relu_y ~logic:"...|... => 0";
+  loss =:+ relu_y ~logic:"...|... => |->0";
   # "loss zero grads and backprop";
   b.grad =: 0.;
   w.grad =: 0.;
@@ -215,7 +223,7 @@ loss_forward_and_gradient_update (): # "loss forward and gradient update";
   loss.grad =: 0.;
   _1 =: 1.;
   loss.grad =: _1;
-  relu_y.grad =+ loss.grad ~logic:"...|... => 0 [lhs←rhs1, rhs1←lhs]";
+  relu_y.grad =+ loss.grad ~logic:"...|... => |->0 [lhs←rhs1, rhs1←lhs]";
   n24.grad =+ n24 -?/ relu_y.grad ~logic:". [lhs←rhs1, rhs2←lhs]";
   n22.grad =+ n24.grad ~logic:". [lhs←rhs1, rhs1←lhs]";
   b.grad =+ n24.grad ~logic:". [lhs←rhs2, rhs1←lhs]";
@@ -224,7 +232,8 @@ loss_forward_and_gradient_update (): # "loss forward and gradient update";
 
 Reading it: `n22`, `n24`, `relu_y` are the anonymous intermediates (`w * x`, `+ b`, the
 relu); `~logic` records each assignment's projection spec — `"@"` is matrix multiply,
-`"...|... => 0"` the sum-reduce einsum from the source, `.` pointwise; the bracketed suffixes
+`"...|... => |->0"` the sum-everything einsum from the source (the bare `|->` closes the
+result's batch and input rows, so nothing broadcasts through), `.` pointwise; the bracketed suffixes
 on backprop assignments record how the gradient projection was derived from the forward one
 (swap lhs with the rhs being differentiated). `-?/` is `relu_gate`. Note what is *absent*:
 shapes. Nothing here has committed to dimensions yet.
@@ -249,14 +258,17 @@ While tensors were being constructed, each operation eagerly registered its shap
 the cheap first solver stage. But nothing forced final answers: the `projections` field of
 every `Accum_op` is a `lazy` closing over that operation's `Shape.update_step`.
 
-The forcing happens when compilation begins. `Assignments.to_low_level` does
-`Lazy.force projections` on the first `Accum_op` it lowers; the lazy calls
-`Shape.get_projections`, which calls `Shape.finish_inference` — and *that* runs the
-remaining solver stages over all constraints registered so far, resolves every remaining row
-and dimension variable (unsolved ones become an error or default per the solver's rules),
-then calls `Shape.derive_projections` for each pending update step. This is what "shape
-inference completion is forced by lowering" means concretely; you can watch it in any
-backtrace of a shape error raised from inside `Context.compile` — the frames run from
+The forcing happens the first time *anything* demands a final answer: `Assignments.to_low_level`
+forces a `Fetch`'s lazy `dims` or an `Accum_op`'s lazy `projections`, either of which calls
+into `Shape.finish_inference` (via `Shape.to_dims` / `Shape.get_projections`) — and *that*
+runs the remaining solver stages over all constraints registered so far, resolves every
+remaining row and dimension variable (unsolved ones become an error or default per the
+solver's rules), then calls `Shape.derive_projections` for each pending update step.
+Completion is global and one-shot per batch of registered steps, so in the companion program
+it actually happens inside the *earlier* `init_params_for_loss` compile; by the time the
+training step lowers, the answers are already there. This is what "shape inference
+completion is forced by lowering" means concretely; you can watch it in any backtrace of a
+shape error raised from inside `Context.compile` — the frames run from
 `Assignments.to_low_level` through `CamlinternalLazy.force` into `Shape.finish_inference`
 and `Row.solve_inequalities`.
 
@@ -334,8 +346,9 @@ of nested `For_loop`s over scalar `Set`/`Get` operations (the full grammar is at
    (product iterators may be shared between operations, so lowering α-renames; the
    substitution also rewrites symbols inside `Affine` indices);
 2. the loop body is a `Set` of `lhs` at `project_lhs`, whose right-hand side combines
-   `accum` with the `Get`s of the rhs buffers at their `project_rhs` indices — unless the
-   projection is provably injective (`Affine.is_injective`), in which case the
+   `accum` with the `Get`s of the rhs buffers at their `project_rhs` indices — unless
+   `initialize_neutral` holds *and* the projection is provably injective
+   (`Affine.is_injective`), in which case there is nothing to accumulate with and the
    read-modify-write collapses to a plain store;
 3. if `initialize_neutral` is set and the projection isn't surjective-and-injective, a
    `Zero_out` (or neutral-element fill) precedes the nest;
@@ -349,21 +362,26 @@ The `-unoptimized.ll` artifact for our example (excerpt):
   ...
   x[1, 2] := 6.0;
   zero_out n22;
-  for i32 = 0 to 1 {
-    for i33 = 0 to 1 {
-      for i34 = 0 to 2 {
-        n22[i32, i33] := (n22[i32, i33] + (w[i33, i34] * x[i32, i34]));
+  for i31 = 0 to 1 {
+    for i32 = 0 to 1 {
+      for i33 = 0 to 2 {
+        n22[i31, i32] := (n22[i31, i32] + (w[i32, i33] * x[i31, i33]));
       }
     }
   }
-  for i35 = 0 to 1 {
-    for i36 = 0 to 1 { n24[i35, i36] := (n22[i35, i36] + b[i36]); }
+  for i34 = 0 to 1 {
+    for i35 = 0 to 1 { n24[i34, i35] := (n22[i34, i35] + b[i35]); }
   }
   ...
-  for i50 = 0 to 1 {
-    for i51 = 0 to 1 {
-      for i52 = 0 to 2 {
-        w.grad[i51, i52] := (w.grad[i51, i52] + (n22.grad[i50, i51] * x[i50, i52]));
+  zero_out loss;
+  for i38 = 0 to 1 {
+    for i39 = 0 to 1 { loss[0] := (loss[0] + relu_y[i38, i39]); }
+  }
+  ...
+  for i48 = 0 to 1 {
+    for i49 = 0 to 1 {
+      for i50 = 0 to 2 {
+        w.grad[i49, i50] := (w.grad[i49, i50] + (n22.grad[i48, i49] * x[i48, i50]));
       }
     }
   }
@@ -383,7 +401,7 @@ per-pass detail is [lowering_and_inlining.md](lowering_and_inlining.md).*
 
 ```
 analyze_proc:      trace_node_facts   (structural facts per tensor node)
-                   affine access metrics (exact read-multiplicity/coverage queries)
+                   affine access metrics (exact-or-upper read-multiplicity/coverage queries)
 specialize_proc:   decide_placements  (virtual? local? on-device? — per compile lineage)
                    virtual_llc + inline_computation   (inlining, with legality checks)
                    cleanup_virtual_llc  (drop dead materialized writes)
@@ -395,9 +413,12 @@ specialize_proc:   decide_placements  (virtual? local? on-device? — per compil
 The analysis/specialization split (gh-555) is what makes search affordable: the expensive
 decision-independent analysis is computed once per routine (and memoized in a process-global
 cache keyed by a structural digest), while placement decisions replay cheaply per candidate.
-The **default state of every tensor node is `Virtual`** — no bytes anywhere, consumers
-recompute the defining expression inline — and materialization must be earned (visit-count
-and recompute-cost caps) or forced by user intent (`Train.set_materialized`). Observability —
+The **default state of a computed tensor node is `Virtual`** — no bytes anywhere, consumers
+recompute the defining expression inline. More precisely: nodes start *undecided*; a node
+the routine only reads resolves `On_device` (it must be an input buffer), explicit intent
+(parameters, `Train.set_materialized`, the loss's observability) wins outright, and it is
+the written-and-still-undecided nodes that default to `Virtual` at cleanup. Materialization
+of those must be earned (visit-count and recompute-cost caps) or forced by user intent. Observability —
 a declared intent to read the node's values, `Tnode.set_observable` — deliberately does
 *not* force materialization: a virtual node stays observable by recomputation. It only
 steers placement away from `Local`, the sole unobservable class (routine-scoped scratch
@@ -418,24 +439,24 @@ The optimized `.ll` for our example repays close reading:
 
 ```
   zero_out loss;
-  for i39 = 0 to 1 {
-    for i40 = 0 to 1 {
-      loss[i39, 0] := (loss[i39, 0] + relu((v27_n22 {
+  for i38 = 0 to 1 {
+    for i39 = 0 to 1 {
+      loss[0] := (loss[0] + relu((v27_n22 {
         v27_n22 := 0.0;
-        for i57 = 0 to 2 {
-          v27_n22 := fma(w[i40, i57], x[i39, i57], v27_n22);
+        for i55 = 0 to 2 {
+          v27_n22 := fma(w[i39, i55], x[i38, i55], v27_n22);
         }
-      } + b[i40])));
+      } + b[i39])));
     }
   }
   /* loss zero grads and backprop */
   zero_out b.grad;
   zero_out w.grad;
   zero_out n22.grad;
-  for i46 = 0 to 1 {
-    for i47 = 0 to 1 {
-      n22.grad[i46, i47] := (n22.grad[i46, i47] + relu_gate((v27_n22 { ... }
-        + b[i47]), 1.0));
+  for i44 = 0 to 1 {
+    for i45 = 0 to 1 {
+      n22.grad[i44, i45] := (n22.grad[i44, i45] + relu_gate((v27_n22 { ... }
+        + b[i45]), 1.0));
     }
   }
   ...
@@ -452,7 +473,9 @@ What happened, pass by pass:
   the constant `1.0` inside `relu_gate(..., 1.0)` — constant propagation through the
   virtualized seed (`loss.grad =: _1; _1 =: 1.`). Only `n22.grad` survives as storage. Why it
   and nothing else: the visit cap (`virtualize_max_visits`, default 1) counts *per-cell read
-  multiplicity*, computed exactly from the affine access relations, and a read at its own
+  multiplicity*, computed from the affine access relations as an exact-or-upper bound
+  (where disjointness cannot be proven, sites are conservatively summed — erring toward
+  materialization), and a read at its own
   statement's write position (accumulation-style read-modify-write) is exempt. Every other
   intermediate is read once per cell, or only at its own write position, or is a scalar
   constant expression (the seed `_1`, `loss.grad`), which inlines regardless; but the `w.grad`
@@ -462,12 +485,14 @@ What happened, pass by pass:
 - **`x`'s six stores vanished** — but differently: `x` is materialized (it's read
   everywhere), and a materialized node whose only writes are literal constants registered
   with `Host_inits` has its in-kernel initialization *moved to link time*
-  (`hosted_constant_inits_to_link_time`, gh-633): the values upload once into each context's
-  buffer instead of re-executing on every step.
+  (`hosted_constant_inits_to_link_time`, gh-633): the values upload at the first allocation
+  on a device — read-only constants dedup through the per-device `constant_buffer_cache`,
+  so later contexts on that device reuse the buffer — instead of re-executing on every step.
 - **FMA formation** (`simplify_llc`): the multiply-accumulate became `fma(...)`.
-- **Zeroing survives only where storage survives**: `zero_out` of `loss`, `b.grad`,
-  `w.grad`, `n22.grad` — the other five zero-grad statements from the `.cd` died with their
-  arrays.
+- **Zeroing survives only where storage survives**: of the six zero-grad statements in the
+  `.cd`, three remain (`b.grad`, `w.grad`, `n22.grad`) and three died with their arrays
+  (`n24.grad`, `relu_y.grad`, `loss.grad`). The surviving `zero_out loss` is not one of
+  them — it is the forward accumulation's neutral init.
 
 The result record, `Low_level.optimized`, carries more than the code `llc`: the
 `traced_store` of per-node facts (which stage 6 uses to derive kernel parameters), the
@@ -482,10 +507,15 @@ placement became a searchable schedule dimension rather than a fixed heuristic (
 [schedules_and_autotuning.md](schedules_and_autotuning.md).*
 
 Everything so far decided *what* to compute and *where values live*; nothing yet decided how
-loops map onto hardware. That is the schedule layer, a pure
+loops map onto hardware. That is the schedule layer, a
 `Low_level.optimized -> Low_level.optimized` transformation applied at the
 `?lowered_transform` seam of backend `compile` (reachable from user code via
-`Context.compile ~lowered_transform`). When no explicit transform is given —
+`Context.compile ~lowered_transform`). The separation is not absolute: virtualization
+decisions are never re-run, but schedule transforms do adjust memory in schedule-owned
+ways — staging and split reductions mint fresh scratch/partials nodes (populating
+`workgroup_shared`, `simdgroup_fragments`), and fission promotes a `Local` node whose live
+range crosses a kernel cut to `On_device` (`Placements.promote_local_to_device`, the one
+sanctioned placement override). When no explicit transform is given —
 our example's case — `Schedule.maybe_default_schedules` applies the default annotators plus
 kernel fission:
 
@@ -510,9 +540,15 @@ In our toy example every extent is below `gpu_schedule_min_parallel`/
 whole step ships as one kernel even on Metal. On real models this stage is where the
 matmul-tiling, staging, tensorization, and split-reduction transforms apply, either as
 autotuner-searched compositions (`Autotune.tune`, with winners persisted in a schedule cache
-keyed by a structural digest of the optimized code) or as the model-ranked default. The
-transforms are *total*: any schedule on any backend renders correctly, with graceful decline
-to scalar fallbacks — performance, never correctness, is what's being searched.
+keyed by a structural digest of the optimized code) or — for `Train`'s convenience wrappers,
+when `model_default_schedule=true` (off by default; plain `Context.compile` never does
+this) — as a model-ranked pick among the default-schedule flavors with zero timing runs.
+Transform *application* is strict: an invalid composition (a missing loop symbol, a
+non-positive split factor, an illegal interchange) fails loudly at apply time rather than
+falling back. What is total is the *rendering* of an applied schedule: on every backend it
+renders correctly, declining gracefully to fallbacks (the scalar `Tile_mma` arm, serial
+loops) where the hardware or shape does not cooperate — performance, never correctness, is
+what's being searched.
 
 ## Stage 6: code generation
 
@@ -555,22 +591,23 @@ void loss_forward_and_gradient_update(
   /* Local declarations and initialization. */
   float n22_grad[4] __attribute__((aligned(32))) = {0};
 
-  for (int32_t i39 = 0; i39 <= 1; ++i39) {
-    {
-      float v43_loss;
-      v43_loss = loss[(i39) * 1 + 0];
-      for (int32_t i40 = 0; i40 <= 1; ++i40) {
+  loss[0] = (float)(0.0);
+  {
+    float v42_loss;
+    v42_loss = loss[0];
+    for (int32_t i38 = 0; i38 <= 1; ++i38) {
+      for (int32_t i39 = 0; i39 <= 1; ++i39) {
         {
           float v27_n22;
           v27_n22 = (float)(0.0);
-          for (int32_t i57 = 0; i57 <= 2; ++i57) {
-            v27_n22 = fmaf(w[(i40) * 3 + i57], x[(i39) * 3 + i57], v27_n22);
+          for (int32_t i55 = 0; i55 <= 2; ++i55) {
+            v27_n22 = fmaf(w[(i39) * 3 + i55], x[(i38) * 3 + i55], v27_n22);
           }
-          v43_loss = (v43_loss + fmaxf(0.0, (v27_n22 + b[i40])));
+          v42_loss = (v42_loss + fmaxf(0.0, (v27_n22 + b[i39])));
         }
       }
-      loss[(i39) * 1 + 0] = v43_loss;
     }
+    loss[0] = v42_loss;
   }
   ...
 }
@@ -578,30 +615,40 @@ void loss_forward_and_gradient_update(
 
 Observations that generalize:
 
-- **Parameters are exactly the materialized context nodes** (derived from the
-  `traced_store`): `b`, `w`, `x`, `loss`, and the two surviving gradients. Virtual nodes
+- **The buffer parameters are exactly the materialized context nodes** (derived from the
+  `traced_store`): `b`, `w`, `x`, `loss`, and the two surviving gradients. (The full ABI can
+  hold more than buffers: one `int` parameter per static-index binding, a merge-buffer
+  pointer when the routine reads one, and a log parameter under routine logging — our
+  example has none of these.) Virtual nodes
   never appear; `n22_grad` resolved to `Local` — routine-scoped scratch, here a stack array
   inside the function (a node over `stack_threshold_in_bytes` resolves `On_device`
   instead). Kernels
   are context-independent: the same compiled function can link against different contexts'
   buffers.
-- **`Local_scope`s became scoped local variables** (`v27_n22`, `v43_loss` — the latter a
-  read-modify-write contraction of the `loss` accumulation).
-- **Multi-dimensional indices flattened to row-major arithmetic** (`(i40) * 3 + i57`).
+- **`Local_scope`s became scoped local variables** (`v27_n22`, and `v42_loss` — the latter a
+  read-modify-write contraction of the `loss` accumulation, hoisted around both loops).
+- **Multi-dimensional indices flattened to row-major arithmetic** (`(i39) * 3 + i55`).
 - On Metal the same body appears inside a `kernel void ... [[buffer(n)]]` function whose
-  parameters are *memory pools plus a slot table* rather than one buffer per node — GPU
-  backends pack node buffers into pooled device allocations and pass base+offset pairs.
+  parameters are *memory pools plus a slot table* rather than one buffer per node — Metal's
+  argument-binding limit forces the pooled ABI (`ptr_param_style = Pooled`). CUDA and HIP
+  also pool device allocations internally, but keep the per-node-pointer ABI: their linkers
+  resolve each node's pool base + offset to an individual kernel argument before launch.
 - Numeric builtins that C lacks (`relu_gate` variants, precision conversions, the
-  `threefry4x32` PRNG, bf16/fp8 arithmetic) come from `builtins.c` (textually prepended for
-  C backends) or `builtins_cuda.ml`/`builtins_metal.ml` (per-dialect strings).
+  `threefry4x32` PRNG, bf16/fp8 arithmetic) come from the per-backend builtins tables —
+  `builtins_cc.ml`, `builtins_cuda.ml`, `builtins_hip.ml`, `builtins_metal.ml` — whose
+  definitions are token-matched against the kernel and prepended to its source. `builtins.c`
+  is the *host-side* twin, compiled into the OCaml binary for `Ops`/`Ndarray`, kept
+  numerically in sync with the kernel-side tables.
 
-Then each backend turns text into an executable object, in its `compile`/`compile_batch`:
-`cc_backend` writes the `.c` file, invokes the configured C compiler into a shared object,
-and `dlopen`s it (CPU code can load at compile time — there is one program memory);
-`cuda_backend` compiles through NVRTC to PTX but must defer module loading to link time
-(`cuModuleLoadDataEx` loads into a device-specific context); `metal_backend` compiles MSL to
-a `metallib` similarly. This is why the backend interface distinguishes `compile` (make the
-artifact) from `link` (bind it to a device context) — and batches both
+Then each backend turns text into an executable object — how much of that happens in
+`compile` vs. `link` differs: `cc_backend` does it all at compile time — writes the `.c`
+file, invokes the configured C compiler into a shared object, and `dlopen`s it (CPU code
+can load eagerly; there is one program memory); `cuda_backend` compiles through NVRTC to
+PTX at compile time but defers module loading to link time (`cuModuleLoadDataEx` loads into
+a device-specific context); `metal_backend` defers even source compilation to link time,
+compiling the MSL per device (`Me.Library.on_device`) and validating the launch against the
+device's limits there. This is why the backend interface distinguishes `compile` (produce
+the artifact) from `link` (bind it to a device context) — and batches both
 (`compile_batch`/`link_batch`) so many routines share one compiler invocation and one loaded
 module.
 
@@ -636,14 +683,21 @@ Back in `context.ml`, the routine is registered in the lineage's execution ledge
 `Context.run` then validates (dependencies satisfied, inputs initialized, bindings in range)
 and dispatches the task onto the device's stream — a FIFO queue with events; on the default
 `cc` backend the "stream" degenerates to synchronous execution, on `multidev_cc` it is a
-worker domain, on GPUs a real device stream. Dynamic loop bounds — minibatch position, etc. —
-enter through the `bindings` (`Train.IDX.get_static_symbol`): they lower to kernel
-parameters, so re-running with a new index value is just writing an `int ref`, no
-recompilation.
+worker domain, on GPUs a real device stream. Runtime-varying integers enter through the
+`bindings` (`Train.IDX.get_static_symbol`): each static symbol lowers to an `int` kernel
+parameter, so re-running with a new value is just writing an `int ref`, no recompilation.
+The symbol's role varies: a minibatch position (the `@|` slice) is an index selector — it
+picks which batch row the projections read; an embedded step counter is just a scalar value;
+and only a symbol used as a *symbolic extent* (`used_as_extent`, gh-490) changes an
+iteration range — rendered as a maximum-extent loop whose body is guarded by
+`i < the bound value`.
 
 Reading results back is explicit and context-mediated: `Context.get_values ctx tn` performs
-an on-demand device-to-host transfer (there are no host-resident tensor copies at all,
-gh-333). Which is where our program prints its `loss = 0.6590` — the end of the line.
+an on-demand device-to-host transfer into a fresh temporary host buffer. What gh-333
+removed is the *persistent* host mirror tensors used to carry — nothing keeps host copies in
+sync anymore, and a literal's registered `Host_inits` data can serve a read without touching
+the device at all. Which is where our program prints its `loss = 1.6019` — the end of the
+line.
 
 ## Recap: where to look when
 
@@ -655,7 +709,7 @@ gh-333). Which is where our program prints its `loss = 0.6590` — the end of th
 | see the kernel source | `.c`/`.cu`/`.metal` artifacts (config `output_debug_files_in_build_directory=true`) |
 | see what a kernel computed at runtime | config `debug_log_from_routines=true` (see the debug-tracing skill / docs) |
 | trace scheduling decisions | `schedule_log_declines`, `schedule_log_launches`; `routine.mma` |
-| understand compile failures by phase | `Schedule_outcome` classification (`Transform` / `Backend_compile` / `Backend_link`) |
+| understand compile failures by phase | `Schedule_outcome` classification (`Transform` / `Hardware_limits` / `Backend_codegen` / `Backend_compile` / `Backend_link`, plus `Launch` / `Sync` at run time) |
 
 And the one-sentence summary of the whole pipeline: **tensors carry `%cd` code; `Train`
 sequences a whole step of it; lowering forces shape inference and mints loop nests from
