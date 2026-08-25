@@ -395,7 +395,15 @@ decision-independent analysis is computed once per routine (and memoized in a pr
 cache keyed by a structural digest), while placement decisions replay cheaply per candidate.
 The **default state of every tensor node is `Virtual`** — no bytes anywhere, consumers
 recompute the defining expression inline — and materialization must be earned (visit-count
-and recompute-cost caps) or forced (user intent, observability). Decisions land in
+and recompute-cost caps) or forced by user intent (`Train.set_materialized`). Observability —
+a declared intent to read the node's values, `Tnode.set_observable` — deliberately does
+*not* force materialization: a virtual node stays observable by recomputation. It only
+steers placement away from `Local`, the sole unobservable class (routine-scoped scratch
+whose computation is not tracked): an observable node resolves `On_device` where an
+unobservable one would default to `Local`, and an observable node still *undecided* at a
+forcing point materializes only because nothing was stored to recompute it from. What
+actually breaks observation is a recomputation that transitively depends on a `Local` node
+with no materialized node shielding the dependency. Decisions land in
 `Placements` on the `optimize_ctx`, which is *forked per compile* (`copy_optimize_ctx` in
 `Backends.lower_assignments`): the same tensor can be virtual in one routine and on-device in
 another.
