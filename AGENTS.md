@@ -156,7 +156,6 @@ Testing notes:
 ## Coding Conventions
 - Prefer small, composable functions; avoid unneeded global state.
 - snake_case for files and functions; modules and constructors are capitalized by OCaml.
-- Default to ASCII; don’t introduce Unicode unless file already uses it.
 
 ## DSL Usage (%op and %cd)
 For code outside the core implementation (tests/examples/user code), start with:

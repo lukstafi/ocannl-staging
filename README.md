@@ -47,9 +47,10 @@ A possible route to learning OCANNL:
 10. Improve your understanding by reading or skimming the framework internals: [tensor/shape.mli](tensor/shape.mli), [tensor/tensor.mli](tensor/tensor.mli), [tensor/operation.ml](tensor/operation.ml), [arrayjit/lib/context.mli](arrayjit/lib/context.mli).
 11. Read the implementation overview:
    1. The various tests.
-   2. Shape inference details [docs/shape_inference.md](docs/shape_inference.md).
-   3. Backend-independent optimizations [docs/lowering_and_inlining.md](docs/lowering_and_inlining.md) -- _lowering_ means translating (compiling) from the high-level representation (as assignments) to the low-level representation.
-   4. Schedules and autotuning [docs/schedules_and_autotuning.md](docs/schedules_and_autotuning.md) -- the loop-nest transform layer (parallelization, tiling, staging, tensor cores) and the empirical search over it.
+   2. The end-to-end compilation walkthrough [docs/life_of_a_training_step.md](docs/life_of_a_training_step.md) -- one small program traced through every stage from `%op` code to device execution; the map to the deeper documents below.
+   3. Shape inference details [docs/shape_inference.md](docs/shape_inference.md).
+   4. Backend-independent optimizations [docs/lowering_and_inlining.md](docs/lowering_and_inlining.md) -- _lowering_ means translating (compiling) from the high-level representation (as assignments) to the low-level representation.
+   5. Schedules and autotuning [docs/schedules_and_autotuning.md](docs/schedules_and_autotuning.md) -- the loop-nest transform layer (parallelization, tiling, staging, tensor cores) and the empirical search over it.
 
 ### Using the tracing debugger with CUDA and HIP computations
 
