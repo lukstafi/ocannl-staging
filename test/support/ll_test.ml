@@ -271,9 +271,11 @@ let drift ~dims = cycle ~dims ~modulus:13 ~offset:20. ~stride:0.015625
 
 (** {1 Optimization} *)
 
-(** [optimize ~name llc] runs the backends' own pipeline ([analyze_proc] -> [specialize_proc]:
+(** [optimize_in ctx ~name llc] runs the backends' own pipeline ([analyze_proc] -> [specialize_proc]:
     structural facts -> placements -> [virtual_llc] -> cleanup -> simplify -> CSE -> hoist) over
-    hand-built code.
+    hand-built code, retaining its decisions and stored computations in [ctx] for a follow-on
+    routine. This is the cross-routine counterpart of {!optimize}: use it when the case under test
+    is a lineage transition rather than one isolated routine.
 
     [~materialized] pre-decides those nodes' placement in the lineage state the optimization reads,
     which is what {!Context.decide_materialized} does for the [Assignments] pipeline — and the only
@@ -289,10 +291,14 @@ let drift ~dims = cycle ~dims ~modulus:13 ~offset:20. ~stride:0.015625
     the virtualization walk asserts that every [Embed_index (Iterator s)] it meets is in scope, and
     a launch parameter is in scope only because the caller declared it. Empty by default, which is
     right for every nest whose indices are all loop indices. *)
-let optimize ?(materialized = []) ?(static_indices = []) ~name llc : LL.optimized =
-  let ctx : LL.optimize_ctx = LL.empty_optimize_ctx () in
+let optimize_in ?(materialized = []) ?(static_indices = []) (ctx : LL.optimize_ctx) ~name llc :
+    LL.optimized =
   LL.decide_materialized ~provenance:589 ctx materialized;
   LL.optimize ctx ~unoptim_ll_source:None ~ll_source:None ~name static_indices llc
+
+(** [optimize ~name llc] is {!optimize_in} in a fresh lineage. *)
+let optimize ?materialized ?static_indices ~name llc =
+  optimize_in ?materialized ?static_indices (LL.empty_optimize_ctx ()) ~name llc
 
 (** [optimize_scoped ~name ~raw scoped] is the supported route for hand-built IR in the
     POST-optimize [Local_scope] form — a scope over a MATERIALIZED node, which
@@ -317,6 +323,14 @@ let known_virtual (o : LL.optimized) tn =
 
 let known_non_virtual (o : LL.optimized) tn =
   Tn.Placements.known_non_virtual o.LL.optimize_ctx.placements tn
+
+(** Whether backend compilation finalized [tn] to routine-scoped [Local] scratch. Unlike
+    {!Ir.Tnode.Placements.known_not_materialized}, this excludes [Virtual], so a post-finalization
+    test cannot accidentally pin the wrong arm of a guard shared by both placements. *)
+let known_local (o : LL.optimized) tn =
+  match Tn.Placements.raw_entry o.LL.optimize_ctx.placements tn with
+  | Some (Local, _) -> true
+  | _ -> false
 
 (** The [Non_virtual] code the virtualizer recorded for [tn], as the leading factor of its
     placement's provenance.
@@ -352,6 +366,25 @@ let link ?ctx ~name (o : LL.optimized) =
   Context.compile ~name ~prelowered:o
     ~lowered_transform:(fun x -> x)
     ctx Ir.Assignments.empty_comp Idx.Empty
+
+(** [link_finalized ~placements ~name o] links through the real backend, then checks that every
+    requested node has left the undecided placement classes. Backend code generation is the
+    supported finalization step: it resolves a retained [Never_virtual] computation to [Local] (or
+    [On_device]) in [o]'s shared lineage, making that settled decision visible to a later
+    {!optimize_in} call. The returned pair can be passed to {!run_linked} when the producer itself
+    also needs an executed leg.
+
+    This deliberately does not seed the placements table by hand: overwriting a committed entry
+    would bypass the provenance/conflict checks whose behavior the lineage test is meant to cover. *)
+let link_finalized ?ctx ~placements ~name (o : LL.optimized) =
+  let linked = link ?ctx ~name o in
+  List.iter placements ~f:(fun tn ->
+      if Tn.Placements.mode_is_unspecified o.LL.optimize_ctx.placements tn then
+        raise
+          (Invalid_argument
+             (Printf.sprintf "Ll_test.link_finalized: backend compile left %s undecided"
+                (Tn.debug_name tn))));
+  linked
 
 (** [run_linked (ctx, routine) ~seed] drives the executed leg of an ALREADY-LINKED pair: uploads
     [seed], runs, and returns the context the values can be read from. It is the half of {!run} that
