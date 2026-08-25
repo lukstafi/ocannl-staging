@@ -320,12 +320,18 @@ feature: operations with implicit semantics — pointwise ops, and compose (`*`,
 logic) — emit subtyping constraints (`Row_ineq` in `Shape.get_inequalities`: the result's
 rows broadcast-cover each operand's), which is what lets a scalar add to a matrix with no
 spec written anywhere. Explicit einsum specs instead emit equations (`Row_eq`, via
-`einsum_n_constraints`): the rows the spec names unify exactly, and any broadcasting
-flexibility must be written into the spec itself as row variables (`...`, `..v..`). This is
-a design choice — the specs could generate subtyping constraints on the spec-to-LHS side —
-but equations propagate information in both directions, so relaxing them would make
-inference both weaker (an einsum would no longer pin its operands' shapes) and more complex,
-in exchange for implicit behavior the row-variable syntax already expresses explicitly.
+`einsum_n_constraints`): what the spec *names* unifies exactly, and all flexibility flows
+through row variables — written explicitly (`...`, `..v..`), or created implicitly for the
+rows a terse spec leaves open (an omitted row kind reads as the context ellipsis shared
+between argument and result, and an axis sequence still admits untracked axes to its left),
+so `ijk => kji` broadcasts batch axes through without anyone writing `...`. Two consequences
+follow: a shared row variable forces the rows it appears in *equal* (not merely compatible —
+`ij;jk=>ik` pairs the operands' batch rows), and *closing* a row is what must be said
+explicitly (the `|->` in our loss spec — omit it and the batch row flows through, quietly
+turning the "scalar" loss into a per-example one). This is a design choice — the specs could generate subtyping
+constraints on the spec-to-LHS side — but equations propagate information in both
+directions, so relaxing them would make inference both weaker (an einsum would no longer
+pin its operands' shapes) and more complex.
 
 Because the whole training step lowers at once, one `finish_inference` serves all
 assignments; einsum specs, convolution strides (`Affine` indices with
