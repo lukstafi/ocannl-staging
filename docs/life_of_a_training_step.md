@@ -679,7 +679,10 @@ pipeline, `Raise_backend.link`:
    `init_params_for_loss` routine already computed them on-device, in this same lineage.)
 3. **Bind the kernel** to the buffers and to the static-index bindings, producing a
    `Task.t` — a plain thunk wrapper. Fissioned segments become one task chained by device
-   events (or a CUDA graph / single Metal command buffer, per backend).
+   events; per backend, `sequence_segments` can do better — CUDA *and* HIP capture the
+   segment launches into a graph replayed as one unit (when `gpu_graph_capture=true` and
+   routine logging is off; ordinary chained launches otherwise), Metal encodes them into a
+   single command buffer.
 4. **Make a child context**: contexts form a lineage; the routine's context extends its
    parent with the new buffers and the forked `optimize_ctx` (so a node this compile decided
    to keep virtual stays virtual for every later compile in this lineage, and its stored
