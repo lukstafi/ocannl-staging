@@ -320,10 +320,14 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
       if not uses_rocwmma then []
       else match Lazy.force rocwmma_include_dir with Some d -> [ "-I" ^ d ] | None -> []
     in
+    (* gh-ocannl-735: hiprtc otherwise reassociates ordinary scalar bf16/f16 recurrences differently
+       across loop, repeated-statement and scope-local spellings. [Compiler_options.hiprtc] keeps
+       the narrow override after fast math at compiler scope, covering operators parsed in the HIP
+       headers; its complete option matrix is tested without hipjit in arrayjit/test. *)
     let options =
-      hip_include_opt @ rocwmma_include_opt
-      @ (if uses_rocwmma then [ "-std=c++17" ] else [])
-      @ ("-ffast-math" :: (if Utils.with_runtime_debug () then [ "-g" ] else []))
+      Compiler_options.hiprtc ~hip_include_options:hip_include_opt
+        ~rocwmma_include_options:rocwmma_include_opt ~uses_rocwmma
+        ~with_debug:(Utils.with_runtime_debug ())
     in
     let code = Hiprtc.compile_to_code ~hip_src ~name:name_hip ~options ~with_debug in
     if Utils.settings.output_debug_files_in_build_directory then (

@@ -87,6 +87,7 @@
   task
   backend_intf
   backend_impl
+  compiler_options
   c_syntax)
  (modes best))
 

@@ -99,6 +99,14 @@
  (libraries base stdio arrayjit.ir))
 
 (test
+ ; ocannl-backend: none -- tests a pure compiler-option helper and selects no runtime backend.
+ (name test_hip_compile_options)
+ (package arrayjit)
+ (modules test_hip_compile_options)
+ (deps ocannl_config)
+ (libraries base arrayjit.ir arrayjit.verdict))
+
+(test
  (name test_aligned_alloc)
  (package arrayjit)
  (modules test_aligned_alloc)
