@@ -55,7 +55,7 @@ OCANNL uses three distinct label-like mechanisms in its shape system. It is impo
 
 2. **Einsum pseudo-labels**: the single- or multi-character identifiers used in einsum notation (e.g., `i`, `j`, `k` in `"ij;jk=>ik"`). These are local to the notation -- they identify which axes correspond to each other within a single einsum spec but do not persist on the resulting tensor. See `Einsum_types.axis_spec` in `tensor/einsum_types.ml`.
 
-3. **Axis labels (planned, v1.1+)**: persistent names for axis *positions* within a row, stored as `axis_labels : string option list` on `Row.t`. Unlike dimension basis which annotates what a dimension measures (its unit), axis labels name the role the axis plays (e.g., `"seq_len"`, `"hidden"`). Axis labels are unique within a row, propagated during row unification, and checked for conflicts. They are strictly optional and do not change inference outcomes. See the design proposal in `docs/proposals/axis-labels.md`.
+3. **Axis labels (planned, unscheduled)**: persistent names for axis *positions* within a row, stored as `axis_labels : string option list` on `Row.t`. Unlike dimension basis which annotates what a dimension measures (its unit), axis labels name the role the axis plays (e.g., `"seq_len"`, `"hidden"`). Axis labels are unique within a row, propagated during row unification, and checked for conflicts. They are strictly optional and do not change inference outcomes. See the design proposal in `docs/proposals/axis-labels.md`.
 
 ### Affine indexing and convolutions
 
