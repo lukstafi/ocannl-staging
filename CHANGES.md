@@ -17,8 +17,9 @@
 > performance fixes: precision-neutral accumulator localization took the Metal `gpt2_mini` forward
 > step p50 from 367.1 to 93.9 ms (−74.4%, gh-ocannl-693); batch-grid twins took the HIP step 1.72x
 > (gh-ocannl-643); finer fission took the tuned CUDA step 1.43x (1.56x at tf32, gh-ocannl-574);
-> and whole-vector FMA with auto-resolved AVX-512 widths took packed f32 GEBP from 12.6 to 225.7
-> GFLOP/s on a Zen 5 (gh-ocannl-614, gh-ocannl-621, gh-ocannl-648).
+> and on CPU, whole-vector FMA took packed f32 GEBP from 12.6 to 127.2 GFLOP/s at the default
+> flags (gh-ocannl-614), with the auto-resolved AVX-512 width then worth 130.5 → 225.7 GFLOP/s on
+> a Zen 5 (gh-ocannl-621, gh-ocannl-648).
 >
 > Honest nulls, recorded as such: the two-pass benchmark protocol stays OCANNL-only — no other
 > framework's searching cell clears ~10% on either GPU box, and the old 2.5–3.5x rationale is
@@ -503,9 +504,9 @@
   `compute_prec`), and the resolution reaches every rendering, schedule-minted scopes included. The
   warp-shuffle `Workgroup_reduce` rendering stages at the same residency instead of hard-erroring
   on narrow storage (gh-ocannl-682). The serial-rendered forms of one reduction are no longer an
-  implicitly-defined set: `test/operations/reduction_forms` executes a 25-member × 3-precision
-  table of schedule compositions over one row sum, each member naming the form it claims
-  (gh-ocannl-664). On HIP the compile flags append `-fno-associative-math` and
+  implicitly-defined set: `test/operations/reduction_forms` executes a 27-member table of schedule
+  compositions over one row sum — 25 of them at all three storage precisions, `split`+`swap` and
+  `split_reduce` at f32 — each member naming the form it claims (gh-ocannl-664). On HIP the compile flags append `-fno-associative-math` and
   `-fhonor-infinities`, so bf16/f16 serial reductions match the declared residency and the
   `(-INFINITY)` mask sentinel survives fast math by construction (gh-ocannl-735).
 - **The q/k/v projections spread batch and head across the grid** (gh-ocannl-643): `sk_batch_grid`
@@ -529,7 +530,7 @@
   components of builder-settled rules — companion coverage, the zero-expansion row-axis rule — are
   lifted into tree verdicts, so a refuted family fathoms at the root instead of dying
   candidate-by-candidate (the gh-ocannl-514 evaluation's 241-of-255 lattice completions dying at
-  candidate build now read 1 expanded / 0 scored / 2 refuted); epilogue fusion is a root-level
+  candidate build now read 2 expanded / 0 scored / 3 refuted); epilogue fusion is a root-level
   `Choice` of the tree, the fused flavor refuted by the recognizer's own witness, dissolving the
   double tree build and the flag-flipped twins; and decision labels are typed data
   (`Autotune.Family_decision.t`) rather than a stringly protocol a reword could silently zero.
@@ -692,9 +693,9 @@
   negation allowlist; scan goldens pin per-root floors and root names with exact counts on stderr,
   so adding a test or a source file owes no promote round and two same-directory PRs cannot merge
   cleanly to a wrong total; every `(executable)`-plus-diff-rule test carries its own
-  `runtest-<name>` alias and the seven repo-wide scans share `dune build @test/operations/scans`;
-  and `runtest-codegen_text_inventory` enumerates every file that pins emitted-kernel text — 34
-  goldens across two trees and 44 source sites, each tagged with the backend family that must
+  `runtest-<name>` alias and the repo-wide scans share `dune build @test/operations/scans`;
+  and `runtest-codegen_text_inventory` enumerates every file that pins emitted-kernel text — 31
+  goldens across two trees and 46 source sites, each tagged with the backend family that must
   re-record it — so a codegen change finds its blast radius mechanically. The general habit — pin
   the relationship, not the restatement, deriving sets from their owners and comparing sorted
   identity lists — is recorded in the agent notes and swept across the test tree, as is validating
@@ -725,8 +726,9 @@
 - **The agent notes' structure is checked** (gh-ocannl-691, gh-ocannl-714):
   `agent_notes_structure` parses the index table and every note — orphan-freeness, split bullets,
   global near-duplicate detection — and reports constructs outside the deliberately small dialect
-  rather than misreading them (unspaced block-quote markers, setext underlines), with 45 synthetic
-  fixtures pinning each rule against both a violation and its nearest legitimate text.
+  rather than misreading them (unspaced block-quote markers, setext underlines), with 177
+  synthetic fixture cases pinning each rule against both a violation and its nearest legitimate
+  text.
 - **Sweep and CI hygiene** (gh-ocannl-700, gh-ocannl-756, gh-ocannl-727, gh-ocannl-698,
   gh-ocannl-694): the stale `multidev_cc` micrograd golden — wrong on master for six weeks,
   because nothing anywhere set that backend — was re-recorded with its provenance established
