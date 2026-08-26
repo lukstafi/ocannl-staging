@@ -1,4 +1,32 @@
-## [Unreleased]
+## [1.0.1] -- 2026-08-26
+
+> Release note: theme — consolidation after 1.0: making a green result mean what it says. This is
+> the release previously planned as v1.1, renumbered because version-number depth tracks release
+> scope in this project (as in the 0.6.x line): the ladder is now
+> `1.0 → 1.0.1 → 1.0.2 → 1.1 → 1.1.1 → 1.2` (see ROADMAP.md). Its ~90 closed issues were mostly
+> filed by PR review cycles, and their common shape is trust: a failing check that cannot be
+> `dune promote`d into a golden, an environment variable that cannot be mistyped silently, an
+> inlined computation that cannot lose its guard or its repetition loop, a reduction whose result
+> cannot depend on which schedule won, and benchmark rows that say which pass produced them and
+> which fixture bytes they measured. The training-loop mechanics land here too: LR schedules,
+> global-norm clipping, gradient accumulation, mmap-backed checkpoint loading with a
+> measured-not-asserted Windows arm, and `trainable_params` as distinct from "needs
+> initialization".
+>
+> Consolidation still moved the performance needle, because several soundness fixes were
+> performance fixes: precision-neutral accumulator localization took the Metal `gpt2_mini` forward
+> step from 365 to 94 ms (−74%, gh-ocannl-693); batch-grid twins took the HIP step 1.72x
+> (gh-ocannl-643); finer fission took the tuned CUDA step 1.43x (1.56x at tf32, gh-ocannl-574);
+> and whole-vector FMA with auto-resolved AVX-512 widths took packed f32 GEBP from 12.6 to 225.7
+> GFLOP/s on a Zen 5 (gh-ocannl-614, gh-ocannl-621, gh-ocannl-648).
+>
+> Honest nulls, recorded as such: the two-pass benchmark protocol stays OCANNL-only — no other
+> framework's searching cell clears ~10% on either GPU box, and the old 2.5–3.5x rationale is
+> superseded by a measured ≤10.3% (gh-ocannl-675); the menu's descent into virtualization-inlined
+> scopes measured zero loops reached across the whole suite, so the provenance restriction is
+> insurance rather than a measured save (gh-ocannl-687); and the gh-573/gh-574 HIP ratios were
+> re-verified end to end after the first session's arm A routines turned out profiled-but-never-
+> executed in three of four cells (gh-ocannl-612).
 
 ### Changed
 
@@ -454,6 +482,294 @@
   size, mtime) of the compiler executable the probes will run: the fp16 probe compiles under those
   flags, and an in-place toolchain upgrade leaves command, flags and `PATH` unchanged — so either
   could be served another configuration's, or an older compiler's, answer.
+
+### Added
+
+- **Reduction accumulators are localized without a widening request** (gh-ocannl-693):
+  `try_widen_serial_reduce`'s identity-precision gate is gone — renamed `try_localize_serial_reduce`,
+  residency now the primary property and gh-ocannl-639's widening the special case — so an f32
+  reduction no schedule op reaches accumulates in a local scope instead of one global-memory
+  read-modify-write per step. Measured on Metal (`gpt2_mini` forward, M4 Max, default schedule):
+  whole step 365.1 → 93.7 ms (−74.3%), lm_head −80.3%, the fused kernel's 124 `device volatile`
+  RMW shadows → 0, with 7 of 8 batch losses bitwise identical and the eighth one ULP of FMA
+  reassociation away. The decline for lane-private accumulators under a mixed guard is conditional
+  on the accumulated cell rather than blanket (gh-ocannl-721), with peel-guard legality owned by
+  two `Ir.Affine` queries — `separates` and `peel_guard` — instead of a bespoke predicate that five
+  review rounds had re-derived (gh-ocannl-722).
+- **Accumulator width is policy, not schedule** (gh-ocannl-639, gh-ocannl-663): on the CPU backends
+  every serial-rendered form of a reduction holds its accumulator at `Numerics.cpu_compute_prec`
+  and narrows once; on GPU, `C_syntax_config.accum_prec` names the residency per backend, mirroring
+  its tensor units (CUDA widens bf16→f32 structurally, HIP widens only fp8, Metal and cc restate
+  `compute_prec`), and the resolution reaches every rendering, schedule-minted scopes included. The
+  warp-shuffle `Workgroup_reduce` rendering stages at the same residency instead of hard-erroring
+  on narrow storage (gh-ocannl-682). The serial-rendered forms of one reduction are no longer an
+  implicitly-defined set: `test/operations/reduction_forms` executes a 25-member × 3-precision
+  table of schedule compositions over one row sum, each member naming the form it claims
+  (gh-ocannl-664). On HIP the compile flags append `-fno-associative-math` and
+  `-fhonor-infinities`, so bf16/f16 serial reductions match the declared residency and the
+  `(-INFINITY)` mask sentinel survives fast math by construction (gh-ocannl-735).
+- **The q/k/v projections spread batch and head across the grid** (gh-ocannl-643): `sk_batch_grid`
+  twins bind the batch/head product to `blockIdx.z`, taking the rank-4 sites from 4 resident
+  blocks at 10% of `sgemm` peak (36.7% of the `gpt2_mini` step on HIP) to 256–1024 blocks at
+  44.4% — **1.72x on the whole step**, with attn·V, the FFN down-projection and QKᵀ batched too.
+  The attention out projection — the next dominant line item, a site whose contraction spans
+  multiple loops — is matched by the matmul family, with the k-block witness naming the innermost
+  contraction extent (gh-ocannl-683); and the GPU blocktile family pads awkward contraction extents
+  through the shared `pad_composition_ok` gate instead of refuting wholesale (gh-ocannl-730).
+- **Finer fission** (gh-ocannl-574): `Schedule.fission_scheduled ?arity_cuts` additionally requires
+  merged materialized-writing nests to share one extent list, so the lm_head GEMM ships apart from
+  its `max_logits` row-max and its output axis can spread. A candidate-generation mode: the untuned
+  pipeline is byte-for-byte unchanged and fine candidates are timed against coarse ones. Measured
+  on CUDA: tuned `gpt2_mini` step 51.40 → 36.00 ms scalar (**1.43x**), 43.37 → 27.87 ms at tf32
+  (**1.56x**) — larger than predicted, because the finer cuts also freed the four attention QKᵀ
+  sites. The HIP leg was folded into the gh-ocannl-612 verification session (entry above).
+- **The sketch families are a module, and their trees judge what seeding owns** (gh-ocannl-580,
+  gh-ocannl-577, gh-ocannl-613, gh-ocannl-591): the family construction moved out of the
+  5,700-line `autotune.ml` into `arrayjit/lib/sketch_families.ml`; the statically-decidable
+  components of builder-settled rules — companion coverage, the zero-expansion row-axis rule — are
+  lifted into tree verdicts, so a refuted family fathoms at the root instead of dying
+  candidate-by-candidate (the gh-ocannl-514 evaluation's 241-of-255 lattice completions dying at
+  candidate build now read 1 expanded / 0 scored / 2 refuted); epilogue fusion is a root-level
+  `Choice` of the tree, the fused flavor refuted by the recognizer's own witness, dissolving the
+  double tree build and the flag-flipped twins; and decision labels are typed data
+  (`Autotune.Family_decision.t`) rather than a stringly protocol a reword could silently zero.
+- **The autotuner's enumeration and menu keep up with what the schedule ops mint** (gh-ocannl-666,
+  gh-ocannl-687, gh-ocannl-685, gh-ocannl-709): `collect_loops` descends into the `Local_scope`s
+  that accumulation mints create, so the loops they move stay schedulable — with
+  `Low_level.scope_mint` provenance distinguishing schedule mints from virtualization inlines,
+  whose loops draw only the `Vectorized` retype (measured latent: zero such loops reached across
+  the suite); the per-unit action cap is spent round-robin across categories behind the beam's own
+  dispatchability filter, so a tensorize-rich unit no longer starves every other action; and
+  seeding pre-filters all five launch dimensions through `Schedule.launch_geometry_excess`, the
+  same predicate the pre-driver gate checks, so a search learns a hardware cap from a refutation
+  witness instead of one compile at a time.
+- **`Autotune.report` states its outcome as a variant** (gh-ocannl-677): `Searched` /
+  `Search_died` / `Cache_replay` / `Search_disabled` / `Pre_search_failure`, replacing four
+  independent booleans every consumer re-derived (two got it wrong in one PR); the Python layer
+  reads `arms[].state` rather than recovering the state from zero counters. `autotune_smoke`'s
+  winner contract is five separately named claims, the timing-dependent conjuncts stating the
+  progress-band precondition they were missing — the macOS flake was the beam's 1% `min_progress`
+  band, empty on sub-microsecond cc timings and wide open on a loaded runner (gh-ocannl-716).
+- **CPU SIMD: whole-vector FMA, and the widths to use it at** (gh-ocannl-614, gh-ocannl-621,
+  gh-ocannl-648, gh-ocannl-649, gh-ocannl-615, gh-ocannl-650): gcc has no generic vector fma
+  builtin, and the per-lane loop that forced was register-allocated catastrophically at `-O3`
+  (the register C-tile spilled per unrolled step). `C_syntax.vec_fma_builtin` renders whole-vector
+  target FMA — packed f32 GEBP **12.6 → 127.2 GFLOP/s** at the default flags — with AVX-512 arms
+  and `cc_vector_bytes` auto-resolving to 64 where the target asserts AVX-512 F/BW/VL (Zen 5: f32
+  225.7 vs 130.5 GFLOP/s), the width ranked per extent since an accumulating loop pays a
+  horizontal fold as long as its lane count. `Max`/`Min` reductions leave the per-lane loop too —
+  the scalar spelling was a libm call per lane, not the register-pressure trade the comment
+  claimed — rendered as `fmax`'s own compare-and-select definition, verified bitwise against glibc
+  (one hot loop: 259 instructions / 64 libm calls / 126 stack references → 9 / 0 / 0). The
+  register-tile A-splat is an arithmetic-free initializer, so `-0.0` and signaling-NaN bit
+  patterns survive into the FMA unconditionally (gh-ocannl-615). And
+  `test/operations/cc_march_census` compiles 7 `-march` targets × 3 vector widths × 2 optimization
+  levels on every run, so an arm guarded for hardware the build host lacks is at least known to
+  compile — it caught gcc/aarch64 typing its fp16 vector builtin `__fp16` on its first
+  cross-compiled run (gh-ocannl-650).
+- **fp8 everywhere it was almost** (gh-ocannl-632, gh-ocannl-647, gh-ocannl-657): Metal stores
+  e5m2 as a byte and computes f32 through a `Builtins_metal` codec bit-identical to `builtins.c`
+  over all 2^32 floats — the "fp8 mma crash" was Metal having no fp8 at all — re-enabling
+  `test_fp8_roundtrip` and `test_uniform_vec_prec` there. HIP's guarded pre-round is the backend's
+  only float→fp8 narrowing: the vendor's `(__hip_fp8_e5m2)` returns spurious nonzero for
+  magnitudes ~20 orders below the smallest subnormal (67,108,862 disagreements over the f32 space
+  on gfx1151; the guard measures 0). The codecs' exhaustive verification lives in-tree rather than
+  in a scratch directory: `@test/operations/slow-fp8_codec_exhaustive` sweeps all 2^32 f32
+  patterns and 17.2e9 doubles against a rounding oracle in ~8 s on 8 domains, with
+  `tools/fp8_soak.exe` as the per-vendor GPU arm.
+- **Cross-routine splices are reconciled, and deferred computations have stated semantics**
+  (gh-ocannl-610, gh-ocannl-611, gh-ocannl-617, gh-ocannl-618): the traced store is the routine's
+  single node registry and `specialize_proc` reconciles it with the final optimized code — fresh
+  entries for spliced-in leaf reads (which used to generate kernels with undeclared identifiers),
+  `read_before_write` flips judged by per-cell definite-write coverage, phantom-input pruning and
+  merge-node reconciliation — while a routine that optimizes to nothing is a legal empty result
+  rather than an anonymous `Option.value_exn`. Recompute-at-read is the documented semantics of
+  virtual nodes (a virtual node is a named computation, not a snapshot;
+  `docs/lowering_and_inlining.md`), and the read-modify-write exemption is split by consumer:
+  placement heuristics keep the tracer-mirroring lenient reading, while the routine-interface
+  classification judges the raw verdict as a closing pass over settled placements, promoting
+  entry-consuming nodes `On_device`.
+- **`Local_scope` has a contract, enforced at both ends of the pipeline** (gh-ocannl-584,
+  gh-ocannl-681, gh-ocannl-704): a scope body's only effect is on the locals it owns — validated
+  by `Low_level.validate_scope_bodies` at `optimize_proc` and again at `C_syntax.compile_proc`,
+  with no catch-all arm, which is what makes `Affine.path_before`'s refusal to order sibling
+  operands sound rather than merely cautious. Two live miscompiles fell out (`hoist_shared_locals`
+  tracked only tensor nodes; the same pass could launder an impure body out of its scope). A
+  `Local_scope` over a materialized node is rejected by name instead of silently collapsing to a
+  `Get` — a collapse that had made two `accum_width` legs and an `affine_extraction` probe
+  green-by-collapse — with the optimizer's own mint-and-retract path kept as the one exemption and
+  pinned reachable by witness tests.
+- **Hand-built IR is executed, not only analyzed — the seam arc** (gh-ocannl-589, gh-ocannl-599,
+  gh-ocannl-600, gh-ocannl-608, gh-ocannl-631, gh-ocannl-590): the three virtualization tests
+  execute the very `optimized` record they assert on, every candidate checked cell-for-cell
+  against a materialized re-specialization, with producers writing values that name their
+  iteration (`1 + 10*outer + inner`) so a wrong substitution or a dropped iteration cannot pass;
+  `Context.get_values` on a `Local`-placed node is honest rather than returning the uploaded copy;
+  the copy-pasted harness became `test/support/ll_test` — node/index/statement builders, one
+  hooks-based exhaustive traversal replacing seven private walkers, and the `?prelowered`
+  optimize/run/execute harness — with post-finalization lineage seams (`optimize_in`,
+  `link_finalized`, `known_local`); and `Context.routine` is a private record whose
+  `inputs`/`outputs` a test asserts on directly, pinning the classification the link actually
+  used.
+- **Operand-evaluation conditionality is encoded once** (gh-ocannl-582):
+  `Ops.binop_conditionality` / `ternop_conditionality` decide which operands evaluate, next to the
+  op definitions, consumed by `affine_accesses` and the cost model's walks; the renderers are
+  checked against the classifier at functor application (`operand_conditionality_violations`
+  renders every pair over distinguishable placeholders), which is what forbids spelling `Where` as
+  MSL `select` or `Max` as `?:`. A fourth instance of the drift it ends was found and fixed on the
+  way — the cost model charging a projection's discarded operand.
+- **Frozen parameters are not trained, and an empty optimizer is an error** (gh-ocannl-673,
+  gh-ocannl-670): `loss.params` keeps its union semantics as the state set (initialization,
+  checkpointing), while `Train.trainable_params` derives the trained subset from the backprop code
+  and the optimizer-side helpers operate on it (`?params` to override) — a frozen parameter's
+  non-movement under `~weight_decay` is pinned bitwise. Params-driven helpers over a loss that
+  trains no registered parameters raise `Session_error` at construction instead of compiling empty
+  routines whose executed parity passes vacuously; the guard's first suite run caught exactly that
+  latent in-tree.
+- **A fault-injection inventory for resource-owning seams** (gh-ocannl-571):
+  `docs/resource-fault-injection-inventory.md` enumerates seam × failure mode, with a GPU-free
+  harness holding exact allocation/free/live-count contracts over finalize/release, pool-entry
+  removal, merge-pool lifecycle, host transfers, compile-failure cleanup and schedule-cache
+  store/replay. The inventory paid for itself before the harness was done — a real `from_host`
+  constant-location leak, and merge-pool growth hardened to free-first with ownership invalidated
+  before any fallible action. The hardware-gated legs are follow-up work.
+- **The envelope's memory leg is fittable** (gh-ocannl-578): `Calibrate.stream` /
+  `tools/calibrate_bandwidth.exe` run STREAM's copy/scale/add/triad past LLC through the ordinary
+  tune path, so bytes-exact calibration rows exist and `model_peak_memory_bandwidth` fits from the
+  first run (351 GB/s cc / 429 GB/s metal demonstrated floors on an M4 Max);
+  `Ir.Cost_model.analyze` counts pairwise provably-disjoint accesses exactly, with
+  conditionally-evaluated reads denying exactness on both legs, and the bandwidth class advisories
+  are ceilings rather than understatements.
+- **`Ndarray.ingest_payload` owns the mappable-or-decode act** (gh-ocannl-667): the decision, both
+  acts (mapping from the reader's own descriptor; decode-and-scatter) and one `mapped`/`decoded`
+  counter pair, shared by `Persistence` and `Safetensors` instead of written twice with private
+  counters that had already drifted once.
+- **`static_properties` has a contract** (gh-ocannl-710):
+  `(<backend>_devices (device (key value) ...) ...)`, one uniformly-keyed entry per device, parsed
+  only through `Backend_intf.parse_static_properties`; Multidev enumerates its worker-domain
+  devices (its dump had no device entries at all), and `bin/device_props` reads the shared parser
+  so the tool and the contract test cannot drift apart.
+- **The benchmark harness cannot mistake one failure mode for another** (gh-ocannl-676,
+  gh-ocannl-675, gh-ocannl-751, gh-ocannl-702, gh-ocannl-711, gh-ocannl-640): a diverged cell
+  emits `null` for non-finite numbers and `orchestrate.py` reports DIVERGED naming the step,
+  rather than losing the cell as a runner failure; whether the tinygrad-BEAM and torch.compile
+  cells need OCANNL's two-pass protocol was measured on both GPU boxes — no cell clears ~10%, so
+  they stay single-pass, and the README's 2.5–3.5x rationale is superseded by a measured ≤10.3%;
+  the tinygrad beam-provenance probe binds tinygrad 0.13's module path, and promptly flagged a
+  contaminated replay; `bench_mlp --self-test` runs the full protocol on a fabricated in-memory
+  MLP, so the measurement path has an executable smoke test in a fresh checkout with no Python
+  venv; the bench checksums are keyed on the (row, column) pair in a shared `bench_checksum`
+  library with its own discrimination test, replacing flat-offset weights that degenerated
+  whenever the modulus divided the extent; and test/bench operands minted from flattened indices
+  go through `Ll_test.cycle_flat`, whose guard raises when a modulus divides an axis stride
+  (78 sites, every rewrite verified bitwise).
+- **The Verdict convention defends itself** (gh-ocannl-601, gh-ocannl-668, gh-ocannl-624,
+  gh-ocannl-729, gh-ocannl-692): `Verdict` (`test/support/verdict.ml`) exits the process 1 from a
+  shared teardown on any failed check, so a regression cannot be `dune promote`d into the golden —
+  the sweep converted every self-decided verdict in the tree and found one blessed-looking stale
+  golden in the wild; `verdict_ratchet` fails on the bare literal-label `printf "<claim>: %b"`
+  shape, so the convention cannot regrow holes (it caught four fresh sites in one post-sweep
+  test); `Verdict.pf`/`claimf` give computed-label claims the same gate, with eleven claims
+  renamed so `true` is the passing reading; quantified claims go through
+  `Verdict.p_all`/`p_none`/`p_exists`/`p_empty`, byte-identical to `p` on a non-empty collection
+  and a distinct `<claim> (empty): false` on an empty one — "every X …" was vacuously true on an
+  empty X (88 sites converted); and a green suite log carries zero `FAIL` lines: expected-to-fail
+  children are captured and required by their message, not by exit status alone.
+- **Generated-kernel assertions establish provenance** (gh-ocannl-655, gh-ocannl-723):
+  `Test_utils.Generated.init` empties this executable's own `build_files/<exe>/` before the first
+  compile, so existence *is* freshness; `read` fails through `Verdict` on a missing artifact
+  instead of answering `None`, `Generated.arm` scopes per-candidate attribution, and the migration
+  of all 29 private copies surfaced five latent bugs in failure arms. The relation "calls
+  `Generated.init` ⇒ declares `(env_var OCANNL_BUILD_FILES_PREFIX)` where dune runs it" is checked
+  by `env_var_deps` in both directions, after review caught the omission twice in one day.
+- **The repository scans check the tree, and the tree can check one scan** (gh-ocannl-586,
+  gh-ocannl-597, gh-ocannl-592, gh-ocannl-598, gh-ocannl-602, gh-ocannl-665, gh-ocannl-701,
+  gh-ocannl-726, gh-ocannl-703, gh-ocannl-712): every `(test)` stanza and exe-running rule
+  declares `ocannl_config`, checked over every dune file by `config_dep_completeness` — which
+  found the eighth omission the day it landed; the config-key scans glob their roots rather than
+  trusting a 19-file hand-maintained list (23 → 69 files scanned, the old list provably complete
+  on its last day); `.gitignore` anchors `/ocannl_config`, so tracked configs stop depending on a
+  negation allowlist; scan goldens pin per-root floors and root names with exact counts on stderr,
+  so adding a test or a source file owes no promote round and two same-directory PRs cannot merge
+  cleanly to a wrong total; every `(executable)`-plus-diff-rule test carries its own
+  `runtest-<name>` alias and the seven repo-wide scans share `dune build @test/operations/scans`;
+  and `runtest-codegen_text_inventory` enumerates every file that pins emitted-kernel text — 34
+  goldens across two trees and 44 source sites, each tagged with the backend family that must
+  re-record it — so a codegen change finds its blast radius mechanically. The general habit — pin
+  the relationship, not the restatement, deriving sets from their owners and comparing sorted
+  identity lists — is recorded in the agent notes and swept across the test tree, as is validating
+  repo-wide scans against the PR's *merge commit* rather than the branch (gh-ocannl-706,
+  gh-ocannl-718).
+- **The environment cannot be misspelled silently, and the scans can vouch for it**
+  (gh-ocannl-628, gh-ocannl-629, gh-ocannl-661, gh-ocannl-662, gh-ocannl-659, gh-ocannl-622,
+  gh-ocannl-689, gh-ocannl-690, gh-ocannl-708): a mistyped `OCANNL_...` variable warns by name,
+  with reserved `OCANNL_TOOL_` / `OCANNL_LOG_LEVEL_<MODULE>` namespaces instead of an exemption
+  list; `Utils.classify_env_var` is shared between the startup warning and `env_var_deps`, so what
+  a rule tracks and what a run warns about cannot be classified two ways — including on Windows,
+  whose environment is case-insensitive but not dash-insensitive. The same sweep found nineteen
+  ppx_minidebug gates declared nowhere (`OCANNL_LOG_LEVEL_ROW=9` used to require touching
+  sources). The documented single-test recipe is `dune build @<dir>/runtest-<name>` — env pinning
+  reaches a run only for variables the stanza declares, and a backend-uniform golden cannot say
+  which backend ran; a stanza that picks no backend carries a checked
+  `; ocannl-backend: <word> -- <reason>` marker whose vocabulary is derived from
+  `Backends.backend` rather than restated; and the scan's independent raw-text floor covers
+  `bash`/`system` actions, `%{}`-chdir wrapping and path-pform arguments, held equal to the walk
+  as sorted stanza identities. CI's Windows smoke is pinned to the Git Bash it was verified on
+  (`uname -o = Msys` asserted), and `test-run.sh` names a missing perl instead of misreading its
+  127 as a lock conflict (gh-ocannl-662).
+- **One argv convention across `bin/`** (gh-ocannl-634): `Bench_args` replaces five hand-rolled
+  spellings of "positionals beside `--ocannl_*` flags", two of them defective (dropping negative
+  integers; shifting later positionals into the wrong slots). Repeated options resolve to the
+  first spelling, matching the library's own reader, and a post-`--` positional that spells a
+  known configuration key is reported as `shadowing_config` rather than silently applied.
+- **The agent notes' structure is checked** (gh-ocannl-691, gh-ocannl-714):
+  `agent_notes_structure` parses the index table and every note — orphan-freeness, split bullets,
+  global near-duplicate detection — and reports constructs outside the deliberately small dialect
+  rather than misreading them (unspaced block-quote markers, setext underlines), with 45 synthetic
+  fixtures pinning each rule against both a violation and its nearest legitimate text.
+- **Sweep and CI hygiene** (gh-ocannl-700, gh-ocannl-756, gh-ocannl-727, gh-ocannl-698,
+  gh-ocannl-694): the stale `multidev_cc` micrograd golden — wrong on master for six weeks,
+  because nothing anywhere set that backend — was re-recorded with its provenance established
+  commit by commit, and the daily sweep runs a full `multidev_cc` unit (the recorded decision:
+  the sweep gates it, not a per-PR CI leg, since it needs no hardware but would roughly double the
+  ubuntu job); the sweep's remote cap runs under the same perl supervisor as the local one, so a
+  hung far-side test dies group-wide on uutils-coreutils hosts too; `gh-pages-api` carries the
+  `apt-get update` its `Deps` step had been dying without on every master push; and the maintainer
+  merge tooling reads the head commit's check runs before merging, after a master that did not
+  compile survived seven merges.
+- **Floats from device reductions stay out of stdout goldens** (gh-ocannl-725): a value a device
+  reduction produced does not belong in a golden at fixed precision — `cifar_conv`'s epoch mean
+  landed on a rounding tie that no promotion could serve on both backends. The genre is swept out
+  of `test/training` and `test/gpt2`: exact digits go to stderr tagged `(not part of the golden)`,
+  with a discriminating two-sided `Verdict` claim in their place; the classification rule is
+  recorded in the agent notes.
+
+### Fixed
+
+- **Intermittent SIGBUS at startup of every arrayjit executable** (gh-ocannl-688): `Ir.Ops`'s
+  link-forcing block called the uint4x32 stubs with one-element arrays and the stubs read four
+  lanes blind, faulting whenever the block landed at the top of a fresh minor heap. The call sites
+  pass full arrays, `ocaml_array_to_uint4x32` checks `Wosize_val` and raises, and the regression
+  test makes the old over-read deterministic (`Gc.minor` + top-of-heap allocation) while asserting
+  the refusal, not the fault.
+- **RoPE attention gradient-flow loss diverged 68% on Metal** (gh-ocannl-731): localized reduction
+  accumulators are `volatile` on Metal — the same pooled-slot compiler-bug family as the
+  pointer-shadow manifestation, confirmed by the shader-validation fingerprint and pinned by a
+  device-producer regression that fails unpatched. The three green sweep days that masked it are
+  what the `incremental-pass` schema (gh-ocannl-737, entry above) makes impossible to misread.
+- **Emitted float constants are floating literals that round-trip** (gh-ocannl-623,
+  gh-ocannl-713): `%.16g` spelled whole numbers without a radix point — a C integer literal the
+  cast converts, inert for every value except `-0.0` — and does not round-trip every double
+  (`0.1 +. 0.2` printed a *different* double, reachable through hosted constant inits).
+  `C_syntax.c_float_literal` forces the radix and retries at `%.17g` only when 16 digits fail to
+  parse back, so the churn was three debug-log goldens; the portable half is
+  `Utils.decimal_float_literal`, shared with both IR debug printers, so a `.ll` dump can show
+  `-0.0` and a 17th digit, with `ll_printer_constants` as the dump-side twin of the emission test.
+- **Routine names cannot crash codegen** (gh-ocannl-686): `C_syntax.kernel_ident` mangles
+  reserved-word and builtin collisions once per compile entry, so the emitted header, the symbol
+  lookup and the artifact agree (`Block_comment "asm"` used to emit `void asm(`); the keyword
+  tables gained C11 and, for the C++-parsed backends, C++ keywords — `not` as a tensor label used
+  to emit an unparseable bare declaration on MSL.
 
 ## [1.0] -- 2026-08-13
 
