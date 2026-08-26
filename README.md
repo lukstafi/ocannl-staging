@@ -136,7 +136,7 @@ For more details, see [CHANGES](CHANGES.md).
   * Test seams that cannot report a false pass: `Verdict` with its ratchet and quantified claims, generated-kernel provenance, per-test aliases with the `@scans` family, one tracked environment spelling with reserved namespaces, complete and floor-checked repository scans.
   * Benchmark trust: result rows carry search provenance and fixture digests, diverged cells report divergence, and the measurement path has a fixture-free smoke test.
   * Training-loop mechanics: LR schedules, global-norm clipping, gradient accumulation, mmap-backed checkpoint loading (Windows arm measured, not asserted), and `trainable_params`.
-  * CPU SIMD: whole-vector FMA (packed f32 GEBP 12.6 → 127.2 GFLOP/s at the default flags), the auto-resolved AVX-512 width (130.5 → 225.7 GFLOP/s on a Zen 5), `Max`/`Min` reductions off the per-lane libm calls, and fp8 codecs exhaustively verified in-tree with Metal and HIP arms.
+  * CPU SIMD: whole-vector FMA (packed f32 GEBP 12.6 → 127.2 GFLOP/s at the default flags), the auto-resolved AVX-512 width (130.5 → 225.7 GFLOP/s on a Zen 5), `Max`/`Min` reductions off the per-lane libm calls, and fp8 codecs exhaustively verified — the host sweep and the CUDA/HIP soak arms in-tree, the Metal codec's bit-identity to `builtins.c` established off-tree.
 * **1.0: Advanced compiler tiers and schedule-quality follow-through.**
   * Schedule inference as branch-and-bound: a refinement tree over *partial* schedules, legality verdicts carrying their witnesses, and admissible cost floors, so a subtree is refuted or priced before any of its members is built.
   * Inlining joined scheduling as a searchable decision surface, once the concrete-index tracer was retired in favor of the affine access relations.

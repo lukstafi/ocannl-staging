@@ -1,3 +1,5 @@
+## [Unreleased]
+
 ## [1.0.1] -- 2026-08-26
 
 > Release note: theme — consolidation after 1.0: making a green result mean what it says. This is
@@ -564,10 +566,11 @@
   (one hot loop: 259 instructions / 64 libm calls / 126 stack references → 9 / 0 / 0). The
   register-tile A-splat is an arithmetic-free initializer, so `-0.0` and signaling-NaN bit
   patterns survive into the FMA unconditionally (gh-ocannl-615). And
-  `test/operations/cc_march_census` compiles 7 `-march` targets × 3 vector widths × 2 optimization
-  levels on every run, so an arm guarded for hardware the build host lacks is at least known to
-  compile — it caught gcc/aarch64 typing its fp16 vector builtin `__fp16` on its first
-  cross-compiled run (gh-ocannl-650).
+  `test/operations/cc_march_census` attempts 7 `-march` targets × 3 vector widths × 2 optimization
+  levels on every run — columns the host toolchain cannot compile report as skipped, and the
+  AArch64 columns need an optional cross gcc — so a guarded arm is known to compile wherever a
+  toolchain for it exists; it caught gcc/aarch64 typing its fp16 vector builtin `__fp16` on its
+  first cross-compiled run (gh-ocannl-650).
 - **fp8 everywhere it was almost** (gh-ocannl-632, gh-ocannl-647, gh-ocannl-657): Metal stores
   e5m2 as a byte and computes f32 through a `Builtins_metal` codec bit-identical to `builtins.c`
   over all 2^32 floats — the "fp8 mma crash" was Metal having no fp8 at all — re-enabling
@@ -577,7 +580,8 @@
   on gfx1151; the guard measures 0). The codecs' exhaustive verification lives in-tree rather than
   in a scratch directory: `@test/operations/slow-fp8_codec_exhaustive` sweeps all 2^32 f32
   patterns and 17.2e9 doubles against a rounding oracle in ~8 s on 8 domains, with
-  `tools/fp8_soak.exe` as the per-vendor GPU arm.
+  `tools/fp8_soak.exe` as the per-vendor GPU arm (CUDA and HIP; the Metal codec's bit-identity
+  was established off-tree).
 - **Cross-routine splices are reconciled, and deferred computations have stated semantics**
   (gh-ocannl-610, gh-ocannl-611, gh-ocannl-617, gh-ocannl-618): the traced store is the routine's
   single node registry and `specialize_proc` reconciles it with the final optimized code — fresh
@@ -661,9 +665,10 @@
   MLP, so the measurement path has an executable smoke test in a fresh checkout with no Python
   venv; the bench checksums are keyed on the (row, column) pair in a shared `bench_checksum`
   library with its own discrimination test, replacing flat-offset weights that degenerated
-  whenever the modulus divided the extent; and test/bench operands minted from flattened indices
-  go through `Ll_test.cycle_flat`, whose guard raises when a modulus divides an axis stride
-  (78 sites, every rewrite verified bitwise).
+  whenever the modulus divided the extent; and test/bench operands minted from flattened or
+  hand-multiplied indices go through `Ll_test.cycle`/`cycle_flat`, whose blind-axis guard raises
+  when a modulus divides an axis stride (78 sites across 19 files, every rewrite verified
+  bitwise).
 - **The Verdict convention defends itself** (gh-ocannl-601, gh-ocannl-668, gh-ocannl-624,
   gh-ocannl-729, gh-ocannl-692): `Verdict` (`test/support/verdict.ml`) exits the process 1 from a
   shared teardown on any failed check, so a regression cannot be `dune promote`d into the golden —
