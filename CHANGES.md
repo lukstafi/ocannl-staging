@@ -3,7 +3,7 @@
 > Release note: theme — consolidation after 1.0: making a green result mean what it says. This is
 > the release previously planned as v1.1, renumbered because version-number depth tracks release
 > scope in this project (as in the 0.6.x line): the ladder is now
-> `1.0 → 1.0.1 → 1.0.2 → 1.1 → 1.1.1 → 1.2` (see ROADMAP.md). Its ~90 closed issues were mostly
+> `1.0 → 1.0.1 → 1.0.2 → 1.1 → 1.1.1 → 1.2` (see ROADMAP.md). Its 135 closed issues were mostly
 > filed by PR review cycles, and their common shape is trust: a failing check that cannot be
 > `dune promote`d into a golden, an environment variable that cannot be mistyped silently, an
 > inlined computation that cannot lose its guard or its repetition loop, a reduction whose result
@@ -15,7 +15,7 @@
 >
 > Consolidation still moved the performance needle, because several soundness fixes were
 > performance fixes: precision-neutral accumulator localization took the Metal `gpt2_mini` forward
-> step from 365 to 94 ms (−74%, gh-ocannl-693); batch-grid twins took the HIP step 1.72x
+> step p50 from 367.1 to 93.9 ms (−74.4%, gh-ocannl-693); batch-grid twins took the HIP step 1.72x
 > (gh-ocannl-643); finer fission took the tuned CUDA step 1.43x (1.56x at tf32, gh-ocannl-574);
 > and whole-vector FMA with auto-resolved AVX-512 widths took packed f32 GEBP from 12.6 to 225.7
 > GFLOP/s on a Zen 5 (gh-ocannl-614, gh-ocannl-621, gh-ocannl-648).
@@ -490,7 +490,7 @@
   residency now the primary property and gh-ocannl-639's widening the special case — so an f32
   reduction no schedule op reaches accumulates in a local scope instead of one global-memory
   read-modify-write per step. Measured on Metal (`gpt2_mini` forward, M4 Max, default schedule):
-  whole step 365.1 → 93.7 ms (−74.3%), lm_head −80.3%, the fused kernel's 124 `device volatile`
+  step p50 367.1 → 93.9 ms (−74.4%), lm_head −80.3%, the fused kernel's 124 `device volatile`
   RMW shadows → 0, with 7 of 8 batch losses bitwise identical and the eighth one ULP of FMA
   reassociation away. The decline for lane-private accumulators under a mixed guard is conditional
   on the accumulated cell rather than blanket (gh-ocannl-721), with peel-guard legality owned by

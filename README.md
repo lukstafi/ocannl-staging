@@ -108,7 +108,7 @@ See [ROADMAP.md](ROADMAP.md) for the detailed schedule. GitHub issue assignments
 * **1.0.1 (Aug 26, 2026, released): Consolidation after v1.0 — search follow-through, inlining and reduction soundness, honest test and benchmark seams, and training-loop mechanics.** (Planned as "v1.1" until the renumbering.)
   - [x] Search follow-through from the v1.0 evaluation: builder preconditions as tree verdicts, a fittable memory leg, profitability in enablement promotion, sketch-family extraction, and narrow-operand tensor-core tiling (#577, #578, #579, #580, #575).
   - [x] The `gpt2_mini` residue: `lm_head` fission, the residual stream's re-summation, rank-4 projection sites, the attention out projection, precision-neutral accumulator localization — −74% on the Metal forward step (#574, #573, #643, #683, #693).
-  - [x] Soundness: inlined computations keep their guards, loops and leaf reads (#651, #674, #610); reduction accumulator width independent of the chosen schedule, on every backend (#639, #663, #693, #735).
+  - [x] Soundness: guarded and looped setters rejected rather than inlined without their `If` or repetition loop, cross-routine splices declaring their leaf reads (#651, #674, #610); reduction accumulator width independent of the chosen schedule, on every backend (#639, #663, #693, #735).
   - [x] Seams that cannot report a false pass: `Verdict` with its ratchet, generated-kernel provenance, one tracked environment spelling, complete config deps, digest completeness, benchmark pass provenance (#601, #668, #655, #628, #652, #586, #597, #572, #644).
   - [x] Training-loop mechanics: LR schedules, global-norm clipping, gradient accumulation, mmap-backed checkpoint loading, and `trainable_params` (#465, #467, #673).
 * **1.0.2 (undated): Robustness pulled forward — the review-filed hygiene, worked before it rots.**
@@ -131,7 +131,7 @@ See [ROADMAP.md](ROADMAP.md) for the detailed schedule. GitHub issue assignments
 For more details, see [CHANGES](CHANGES.md).
 
 * **1.0.1: Consolidation after v1.0 — making a green result mean what it says.**
-  * Soundness of inlining: a guarded setter keeps its `If` and a looped one its repetition loop; cross-routine splices declare their leaf reads and are reconciled into the routine interface; `Local_scope` has an enforced purity contract, and a scope over a materialized node is an error rather than a silent collapse.
+  * Soundness of inlining: a guarded or looped setter is rejected for virtualization rather than replayed without its `If` or its repetition loop; cross-routine splices declare their leaf reads and are reconciled into the routine interface; `Local_scope` has an enforced purity contract, and a scope over a materialized node is an error rather than a silent collapse.
   * Reduction accumulator width is policy, not schedule, on every backend — with precision-neutral localization worth −74% on the Metal `gpt2_mini` forward step, and batch-grid twins worth 1.72x on the HIP step.
   * Test seams that cannot report a false pass: `Verdict` with its ratchet and quantified claims, generated-kernel provenance, per-test aliases with the `@scans` family, one tracked environment spelling with reserved namespaces, complete and floor-checked repository scans.
   * Benchmark trust: result rows carry search provenance and fixture digests, diverged cells report divergence, and the measurement path has a fixture-free smoke test.
