@@ -12,3 +12,24 @@
 ; built; it becomes visible, not compiled.
 
 (dirs :standard .github)
+
+; Warning 50 is ocamlformat's refusal criterion, spelled as a compiler check.
+; ocamlformat declines to format a file whose doc comments the compiler cannot
+; attach ("ignoring <file> (misplaced documentation comments - warning 50)") and
+; exits nonzero, so ONE such file anywhere makes `dune build @fmt` permanently
+; unclean -- and tools/format-sweep.sh, whose convergence test is exactly that,
+; can then only report a fixed point it will never reach. Three files were
+; enough to block every sweep for four days.
+;
+; Enabling the warning moves that from an unattended discovery to a build error
+; at the site, in front of the author, who is the only one who knows which
+; definition an orphaned block was written about -- the judgment call is trivial
+; there and unreviewable anywhere else. Dune's dev `:standard` carries `@49..57`,
+; so `+50` lands as an ERROR under it; the release profile's `:standard` is a
+; bare `-w -40`, where it stays an ordinary warning and cannot fail an opam
+; consumer's build.
+
+(env
+ (_
+  (flags
+   (:standard -w +50))))
