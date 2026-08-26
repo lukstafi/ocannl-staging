@@ -196,15 +196,15 @@ type inert_state = In_text | In_code of int | In_comment | In_fence of char * in
 type inert_scan = {
   ranges : (int * (int * int) list) list;
   comment_ranges : (int * (int * int) list) list;
-  fence_ranges : (int * (int * int) list) list;
-      (** The lines of a fenced block, delimiters included. A fence is a LEAF BLOCK: it ends the
-          paragraph above it, so its lines belong to no bullet and contribute no text -- unlike a
-          code span's lines, which are part of the sentence they sit in. *)
       (** The subset of {!ranges} that is HTML comment. The distinction is not cosmetic: text inside
           a code span RENDERS -- it is part of what a reader sees and part of what a bullet says --
           while text inside a comment does not. Treating both as equally absent made two bullets
           differing only on a code line read as the same bullet, and the repetition rule reported a
           duplicate that a reader can plainly tell apart (Codex P2, round 8). *)
+  fence_ranges : (int * (int * int) list) list;
+      (** The lines of a fenced block, delimiters included. A fence is a LEAF BLOCK: it ends the
+          paragraph above it, so its lines belong to no bullet and contribute no text -- unlike a
+          code span's lines, which are part of the sentence they sit in. *)
   unclosed : inert_state;
   fences : (int * string) list;  (** line, and the marker that opened it *)
   comments : int list;  (** line on which each HTML comment opened *)
@@ -1280,14 +1280,6 @@ let parse_link cell =
           else Some (text, target))
   | _ -> None
 
-(** The index's rows, or the one finding that says its table did not parse at all.
-
-    The distinction is the point. A wrapped row ends the table, which leaves the index looking like
-    TWO tables with most of its rows outside both -- and asking the hook and reachability rules about
-    that produces one spurious "unreachable" line per notes file, burying the single finding that
-    says what actually happened. So a refusal comes back as [Error] and stops those rules, which then
-    report that they could not be evaluated rather than reporting twelve falsehoods. It cannot hide a
-    real defect: the refusal is itself a failure, and the table rule has already named the line. *)
 (** Whether a table block is one: header, delimiter, at least one data row, every line closing with
     a separator, and one width throughout. The same questions {!check_tables} answers with findings,
     asked as a yes or no -- so the two cannot disagree about what parses. *)
@@ -1304,6 +1296,14 @@ let table_parses ~contents t =
            | None -> false)
   | _ -> false
 
+(** The index's rows, or the one finding that says its table did not parse at all.
+
+    The distinction is the point. A wrapped row ends the table, which leaves the index looking like
+    TWO tables with most of its rows outside both -- and asking the hook and reachability rules about
+    that produces one spurious "unreachable" line per notes file, burying the single finding that
+    says what actually happened. So a refusal comes back as [Error] and stops those rules, which then
+    report that they could not be evaluated rather than reporting twelve falsehoods. It cannot hide a
+    real defect: the refusal is itself a failure, and the table rule has already named the line. *)
 let index_rows ~file contents =
   match tables contents with
   | [] -> Error (file_finding ~file ~rule:rule_index_agreement "no table: the index is a table")

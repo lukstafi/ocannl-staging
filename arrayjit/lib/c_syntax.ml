@@ -549,6 +549,38 @@ module type C_syntax_config = sig
         captured_log_prefix) to the format string and arguments. *)
 end
 
+(** Whether [c] lies exactly halfway between two adjacent f32 values, so that narrowing it to f32
+    is a tie that IEEE-754 breaks to even -- and any decimal near but not equal to [c] would instead
+    break by whichever side it fell on.
+
+    Computed against the two neighbours rather than by masking mantissa bits, so that the f32
+    subnormal range (where the retained-bit count shrinks, and a bit mask would need a second case)
+    is covered by the same three lines. Values that overflow f32 have no neighbours to sit between
+    and are not ties. *)
+let is_f32_tie c =
+  Float.is_finite c
+  && (Float.(abs c = 0x1.ffffffp+127)
+     (* The OVERFLOW midpoint, which the neighbour walk below cannot see: halfway between the
+        largest finite f32 and the (unrepresentable) 2^128 that would follow it. IEEE-754 rounds it
+        to even, and the even candidate is the one that overflows, so the host answers an infinity
+        while a decimal spelling of it -- necessarily just under the midpoint, since the midpoint's
+        exact decimal is longer -- answers the largest finite f32. The tie has exactly one
+        magnitude, so naming it is complete rather than a first case of many. *)
+     ||
+     let f = Int32.float_of_bits (Int32.bits_of_float c) in
+     Float.is_finite f && Float.(f <> c)
+     &&
+     let bits = Int32.bits_of_float f in
+     (* One f32 step from [f] towards [c]: away from zero when they share a direction, towards it
+        otherwise, since the bit pattern's order tracks magnitude rather than value. *)
+     let step =
+       if Float.(c > f) then if Float.(f >= 0.) then Int32.(bits + one) else Int32.(bits - one)
+       else if Float.(f > 0.) then Int32.(bits - one)
+       else Int32.(bits + one)
+     in
+     let g = Int32.float_of_bits step in
+     Float.is_finite g && Float.(abs (c - f) = abs (g - c)))
+
 (** A C source literal for the floating-point constant [c], as a {e double}-typed floating literal
     that parses back to exactly [c] on every C-family backend.
 
@@ -596,38 +628,6 @@ end
     is spelled only for ties — a handful of values that were otherwise a coin toss — so the
     ordinary constant keeps its readable decimal, and C99, CUDA, HIP and MSL all accept the
     form. *)
-(** Whether [c] lies exactly halfway between two adjacent f32 values, so that narrowing it to f32
-    is a tie that IEEE-754 breaks to even -- and any decimal near but not equal to [c] would instead
-    break by whichever side it fell on.
-
-    Computed against the two neighbours rather than by masking mantissa bits, so that the f32
-    subnormal range (where the retained-bit count shrinks, and a bit mask would need a second case)
-    is covered by the same three lines. Values that overflow f32 have no neighbours to sit between
-    and are not ties. *)
-let is_f32_tie c =
-  Float.is_finite c
-  && (Float.(abs c = 0x1.ffffffp+127)
-     (* The OVERFLOW midpoint, which the neighbour walk below cannot see: halfway between the
-        largest finite f32 and the (unrepresentable) 2^128 that would follow it. IEEE-754 rounds it
-        to even, and the even candidate is the one that overflows, so the host answers an infinity
-        while a decimal spelling of it -- necessarily just under the midpoint, since the midpoint's
-        exact decimal is longer -- answers the largest finite f32. The tie has exactly one
-        magnitude, so naming it is complete rather than a first case of many. *)
-     ||
-     let f = Int32.float_of_bits (Int32.bits_of_float c) in
-     Float.is_finite f && Float.(f <> c)
-     &&
-     let bits = Int32.bits_of_float f in
-     (* One f32 step from [f] towards [c]: away from zero when they share a direction, towards it
-        otherwise, since the bit pattern's order tracks magnitude rather than value. *)
-     let step =
-       if Float.(c > f) then if Float.(f >= 0.) then Int32.(bits + one) else Int32.(bits - one)
-       else if Float.(f > 0.) then Int32.(bits - one)
-       else Int32.(bits + one)
-     in
-     let g = Int32.float_of_bits step in
-     Float.is_finite g && Float.(abs (c - f) = abs (g - c)))
-
 let c_float_literal c =
   if Float.(c = infinity) then "INFINITY"
   else if Float.(c = neg_infinity) then "(-INFINITY)"

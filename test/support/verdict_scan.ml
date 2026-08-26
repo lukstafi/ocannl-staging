@@ -133,26 +133,6 @@ type kind =
     blind to most of the population. *)
 let separators = [ "->"; ":"; "=" ]
 
-(** [claim_of format] is the label of the claim [format] prints and which kind it is, when it prints
-    one.
-
-    Three things must hold at once:
-
-    - the LAST argument-consuming conversion is a bare [%b] — a width or a flag means the print is
-      laying out a column, which is formatting rather than asserting;
-    - what follows it prints as whitespace, or as nothing: a newline, a blank line, a [%!] flush;
-    - what precedes it ends in one of {!separators}, with a non-empty label before it.
-
-    So ["k-blocks fused: %b\n"] yields [Some ("k-blocks fused", Literal_label)] and
-    ["%s fused: %b\n"] yields [Some ("fused", Computed_label)] — the second's label is what survives
-    rendering the head, which drops the conversions it cannot fill in, so it is a report's hint
-    rather than the site's identity; an exemption for a computed site is keyed by the head.
-
-    A computed label may render to NOTHING and still be a claim: ["%s: %b\n"] is the wrapper the
-    pre-[Verdict] tests defined for themselves, and the whole of its label is the argument. Only a
-    LITERAL label has to be non-empty, because there the residual is all there was.
-    ["fused: %b (expect false)\n"] and ["fused? %b\n"] yield [None]: neither is the bare claim form,
-    and a reader cannot take their boolean at face value. *)
 (** {!claim_of} together with the verbatim head, which is what names a computed site. *)
 let claim_site format =
   let consuming =
@@ -193,7 +173,26 @@ let claim_site format =
                   Some ((if String.is_empty shown then "<computed>" else shown), kind, verbatim))
   | _ -> None
 
-(** The label and kind of the claim [format] prints, when it prints one. *)
+(** [claim_of format] is the label of the claim [format] prints and which kind it is, when it prints
+    one.
+
+    Three things must hold at once:
+
+    - the LAST argument-consuming conversion is a bare [%b] — a width or a flag means the print is
+      laying out a column, which is formatting rather than asserting;
+    - what follows it prints as whitespace, or as nothing: a newline, a blank line, a [%!] flush;
+    - what precedes it ends in one of {!separators}, with a non-empty label before it.
+
+    So ["k-blocks fused: %b\n"] yields [Some ("k-blocks fused", Literal_label)] and
+    ["%s fused: %b\n"] yields [Some ("fused", Computed_label)] — the second's label is what survives
+    rendering the head, which drops the conversions it cannot fill in, so it is a report's hint
+    rather than the site's identity; an exemption for a computed site is keyed by the head.
+
+    A computed label may render to NOTHING and still be a claim: ["%s: %b\n"] is the wrapper the
+    pre-[Verdict] tests defined for themselves, and the whole of its label is the argument. Only a
+    LITERAL label has to be non-empty, because there the residual is all there was.
+    ["fused: %b (expect false)\n"] and ["fused? %b\n"] yield [None]: neither is the bare claim form,
+    and a reader cannot take their boolean at face value. *)
 let claim_of format = Option.map (claim_site format) ~f:(fun (label, kind, _) -> (label, kind))
 
 (** {!claim_of} without the kind, for a caller that only wants to know what the line asserts. *)
