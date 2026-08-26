@@ -700,7 +700,11 @@ that they earn a lookup rather than always-loaded space.
   (gh-ocannl-461) reordered backprop fragments, re-promoted the cc golden, and left multidev's
   stale and master red under that backend for six weeks. **A backend with its own goldens and no
   leg here is a silent regression channel, hardware or not** — add the leg when you add the
-  goldens. It records a row per unit in `~/.ocannl-sweep/history.tsv` and never
+  goldens. That multidev_cc's leg lives here rather than in CI is a decision, recorded at the
+  runtest step in `ci.yml` (gh-ocannl-756): a second per-PR runtest leg would roughly double the
+  ubuntu job's ~28min test time, while the daily sweep gates the backend at a ~30-commit bisect
+  window without taxing any merge. The sweep records a row per unit in
+  `~/.ocannl-sweep/history.tsv` and never
   exits non-zero for test failures — its exit code is not a verdict, the history file is. A daily
   scheduled task drives it.
 - `timeout(1)` is not a portable group-killing bound, and the failure is silent in both directions.

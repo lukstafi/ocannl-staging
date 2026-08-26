@@ -276,6 +276,17 @@ jobs:
       shell: bash
       run: rm -rf _opam/.opam-switch/sources _opam/.opam-switch/build
     - run: opam exec -- dune build
+    # One backend only: test/config pins `backend=cc` and nothing here sets
+    # OCANNL_BACKEND. multidev_cc needs no hardware and COULD run on these
+    # runners, but a second runtest leg under OCANNL_BACKEND=multidev_cc
+    # would roughly double the ubuntu job's ~28min test time on a queue that
+    # is often hours deep, so the decision (gh-ocannl-756) is to gate it with
+    # the DAILY local sweep instead: tools/sweep.sh runs a full
+    # `OCANNL_BACKEND=multidev_cc dune runtest` unit every day and the sweep
+    # routine ages that coverage the way it ages the GPU backends'. If per-PR
+    # gating ever becomes worth the latency, prefer a leg scoped to the
+    # directories that keep multidev goldens (`grep -rl multidev_cc
+    # test/*/dune`) over a full second suite.
     - run: opam exec -- dune runtest
     # `tools/test-run.sh` carries branches that ONLY execute under MSYS: it
     # sources `tools/opam-env.sh` unconditionally and fatally (a dune on PATH
