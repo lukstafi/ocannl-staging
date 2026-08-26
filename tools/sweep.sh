@@ -8,9 +8,13 @@
 # and multidev_cc have no automated coverage at all without this -- the last of
 # those despite needing no hardware, since only OCANNL_BACKEND selects it.
 #
-# The GPU boxes are usually powered off, so unreachable is the NORMAL case, not
-# an error -- a skipped machine is recorded as `skip` and the caller is expected
-# to notice when a backend has been skipped for too long.
+# The GPU boxes are often asleep or powered off, and an unreachable machine is
+# recorded as `skip` rather than an error. They are Wake-on-LAN armed, though,
+# so a skip means nobody woke them -- not that the coverage was unavailable.
+# Wake them before a run that is meant to cover cuda or hip, and kick WSL after
+# waking (it starts on demand or at login, never at boot, so the `-wsl` hosts
+# this sweep addresses lag the box being up). The caller is expected to notice
+# when a backend has been skipped for too long.
 #
 # Deliberately does NOT exit non-zero on test failures: the point is to record
 # every unit's outcome, including the ones after a failing one. Only a usable

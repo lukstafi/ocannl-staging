@@ -729,9 +729,16 @@ that they earn a lookup rather than always-loaded space.
   default 90 minutes).
   When the execution column was introduced, existing `pass` rows became `legacy-pass` with
   `execution=unknown`; old incremental evidence is retained, but cannot masquerade as a forced run.
-- The GPU boxes are usually powered off, so `skip (unreachable)` is the normal outcome and a sweep
-  of skips is not a failure. What IS a failure is silent non-coverage: track the age of the last
-  `pass` per backend, because nothing else in the project tests CUDA or HIP at all.
+- An unreachable machine records `skip (unreachable)`, and a sweep of skips is not a failure. It is
+  not the expected steady state either: both GPU boxes are cabled and Wake-on-LAN armed, and wake
+  over Ethernet from sleep and from full shutdown alike, so a run that is meant to cover CUDA or HIP
+  wakes them first rather than waiting for a day someone left them on. Waking one is not the same as
+  reaching it: the sweep addresses the `-wsl` aliases, and WSL starts on demand or at login, never
+  at boot, so a woken box answers on its Windows alias while `rog-nv-wsl`/`minix-amd-wsl` are still
+  refused. Kick it with `ssh <box>-win 'wsl.exe -d Ubuntu -e true'` and re-probe for a minute or two
+  while tailscaled registers. What IS a failure is silent non-coverage: track the age of the last
+  `pass` per backend, because nothing else in the project tests CUDA or HIP at all — and read a long
+  skip streak as a decision nobody made, not as coverage that was unavailable.
 - Report changes in the failure set, not the presence of failures. A backend's suite goes red in
   bursts and comes back (Metal's `test/operations` was red for a stretch, green again after
   gh-ocannl-632), so a sweep that shouts on every red is one that gets ignored inside a week;
