@@ -18,10 +18,13 @@
 # promotion: with location tokens masked out, promoted files must be unchanged
 # -- anything else (a value regression, platform drift, nondeterminism) aborts
 # rather than being blessed into the sweep commit. Non-convergence aborts too;
-# its one known benign cause is an ocamlformat-hostile golden missing from
+# its known benign cause is an ocamlformat-hostile golden missing from
 # .ocamlformat-ignore (the sweep formats it, its test's promotion reverts it,
 # forever) -- ppx-expectation files (test/ppx/*_expected.ml) must all be listed
-# there. Every formatting round records dune's own output under
+# there. The OTHER shape is a file ocamlformat refuses outright, where nothing
+# is left to promote and @fmt is unclean anyway; the abort names those files,
+# and the root `dune` enables warning 50 so they cannot reach master to begin
+# with. Every formatting round records dune's own output under
 # _build/format-sweep-logs/ (cleared per sweep) and an abort excerpts it, so a
 # round that failed for some OTHER reason -- an ocamlformat error, a
 # concurrent dune instance holding _build/.lock -- says so instead of being
@@ -366,12 +369,34 @@ fmt_log_excerpt() {
   fi
 }
 
+# ocamlformat DECLINES a file whose doc comments the compiler cannot attach
+# (warning 50) and exits nonzero, which makes @fmt permanently unclean however
+# many rounds run -- non-convergence with nothing left to promote. The root
+# `dune` enables that warning so such a file cannot reach master, but an
+# ocamlformat upgrade can always refuse for a reason the compiler does not
+# model, and then the abort message must NAME the file rather than send the
+# reader to .ocamlformat-ignore, which is a different cause entirely.
+fmt_refusals() {
+  sed -n 's/^ocamlformat: ignoring \("[^"]*"\).*/  \1/p' "$1" 2>/dev/null | sort -u
+}
+
+# $1: the log to diagnose. Empty output when ocamlformat refused nothing, so a
+# caller can append this to an abort message unconditionally.
+fmt_refusal_note() {
+  refused=$(fmt_refusals "$1")
+  [ -n "$refused" ] || return 0
+  printf '\nocamlformat REFUSED these files, so @fmt cannot come clean until they are fixed\n'
+  printf '(each has a doc comment the compiler cannot attach -- move it onto what it\n'
+  printf 'documents, or demote it to a plain (* comment *)):\n%s\n' "$refused"
+}
+
 iter=0
 while :; do
   iter=$((iter + 1))
   [ "$iter" -le "$MAX_ITER" ] || abort "no fixed point after $MAX_ITER rounds; \
-likely an ocamlformat-hostile golden missing from .ocamlformat-ignore (see header); \
-the per-round formatting logs are in $FMT_LOGS"
+the usual cause is an ocamlformat-hostile golden missing from .ocamlformat-ignore (see header), \
+which the per-round formatting logs in $FMT_LOGS will show as a file reformatted and reverted \
+every round$(fmt_refusal_note "$FMT_LOGS/round$MAX_ITER-check.log")"
   hold_test_run_lock \
     || abort "a tools/test-run.sh run held its lock past the bound; giving up"
   # The lock wait can be long; a foreign edit made during it must not be
@@ -388,7 +413,8 @@ the per-round formatting logs are in $FMT_LOGS"
     if ! fmt_clean "$FMT_LOGS/round$iter-recheck.log"; then
       fmt_log_excerpt "$FMT_LOGS/round$iter-promote.log"
       fmt_log_excerpt "$FMT_LOGS/round$iter-recheck.log"
-      abort "dune fmt did not converge; see the excerpts above and the full logs in $FMT_LOGS"
+      abort "dune fmt did not converge; see the excerpts above and the full logs in \
+$FMT_LOGS$(fmt_refusal_note "$FMT_LOGS/round$iter-recheck.log")"
     fi
   fi
 
