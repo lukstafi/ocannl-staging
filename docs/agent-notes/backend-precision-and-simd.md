@@ -727,7 +727,13 @@ files.
   defeating `accum_prec`'s promised per-update storage rounding (gh-ocannl-735). This must be a
   compiler option, not a kernel-body pragma, because bf16 operators parsed in the HIP headers retain
   their floating-point flags after inlining. Schedule forms that license reassociation still spell
-  it explicitly; the override only prevents the compiler inventing another one. So a device-side
+  it explicitly; the override only prevents the compiler inventing another one. HIP passes
+  `-fhonor-infinities` after both: this codebase emits `(-INFINITY)` as a VALUE (the `Max` neutral
+  element, `Nn_blocks.default_mask_fill`), and under bare `-ffast-math` that only survived by
+  accident of which optimization hiprtc happened to pick — adding `-fno-associative-math` changed
+  the pick and `half_softmax`'s causally masked rows started reading `exp(0)`/`exp(1)` where the
+  mask demands exact zeros (gh-ocannl-735, found on the ROCm validation run). NaN stays unhonored,
+  because it is only ever tested for, never emitted as a value. So a device-side
   non-finiteness test must be a RANGE COMPARE of a runtime value (`-3e38 < x && x < 3e38`); `x <> x`
   and `x - x = 0` fold to a constant, silently disabling an overflow gate (the shape
   `Mixed_prec.gated_scaled_update` needs). It is the same reason `Builtins_metal`'s fp8 codec is

@@ -320,8 +320,9 @@ module Impl : Ir.Backend_impl.Lowered_backend = struct
     in
     (* gh-ocannl-735: hiprtc otherwise reassociates ordinary scalar bf16/f16 recurrences differently
        across loop, repeated-statement and scope-local spellings. [Compiler_options.hiprtc] keeps
-       the narrow override after fast math at compiler scope, covering operators parsed in the HIP
-       headers; its complete option matrix is tested without hipjit in arrayjit/test. *)
+       the narrow override -- and the infinity sentinels the masked-softmax path emits as values --
+       after fast math at compiler scope, covering operators parsed in the HIP headers; its complete
+       option matrix is tested without hipjit in arrayjit/test. *)
     let options =
       Compiler_options.hiprtc ~hip_include_options:hip_include_opt
         ~rocwmma_include_options:rocwmma_include_opt ~uses_rocwmma
